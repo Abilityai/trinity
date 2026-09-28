@@ -179,7 +179,7 @@ Any `drain-{agent}-{ts}` sentinel in a slots ZSET lives < 10 s. (The drain in `b
 
 **B-02** Queued work is being picked up *(Tier B ≤ 60 s push / ≤ 120 s pull, 🔴)*
 Push agents: if `COUNT(status='queued' AND agent_name=A) > 0`, then either (a) `ZCARD(agent:slots:A) = max_parallel_tasks` or (b) a drain callback/maintenance tick is pending (≤60 s SLA). `drain_orphans_all` is the backstop every 60 s.
-Pull pilots (#2840): the backend never drains them. The oldest queued row is ≤120 s old, OR every worker in the container's pool holds an unexpired lease. A stopped pilot with an aged row is reported at major.
+Pull pilots (#2840): the backend never drains them. For a running pilot in pull mode, the oldest queued row is ≤120 s old, OR every worker in the container's pool holds an unexpired lease. Stopped pilots and containers without pull mode are B-08's.
 Signal: push — queued rows while slots have free space and `canary:drain_tick_at` older than 60 s ⇒ drain callback failed; pull — `MIN(queued_at)` older than 120 s while `COUNT(status='running' AND lease_expires_at > now) <` the container's `TRINITY_MAX_PARALLEL_TASKS`.
 
 **B-03** Claim atomicity *(Tier A, 🔴)*
@@ -198,8 +198,8 @@ If `claim_next_queued` returns a row but the subsequent real `acquire_slot` fail
 After agent delete, `COUNT(status='queued' AND agent_name=A) = 0` (cancelled with reason). See `backlog_service.cancel_all_backlog`.
 
 **B-08** Pull workers alive *(Tier B ≤ 300 s, 🟡)*
-For a running pull pilot: its container runs pull mode (`TRINITY_PULL_MODE=true`), and while any worker is idle a claim attempt arrived within 300 s of now or of the container start (#2840). Separate from B-02 so a long-lived broken pool cannot hold B-02 red.
-Signal: container env lacks `TRINITY_PULL_MODE=true`, or `GET agent:pull_poll:A` (stamped on every `GET /api/internal/next-task`) older than 300 s while `COUNT(status='running' AND lease_expires_at > now) <` the pool size.
+For a pull pilot (#2840): a stopped container has no queued row older than 120 s; a running container runs pull mode (`TRINITY_PULL_MODE=true`), and while any worker is idle a claim attempt arrived within 300 s of now or of the container start. Separate from B-02 so a long-lived pool state cannot hold B-02 red.
+Signal: container not running with `MIN(queued_at)` older than 120 s; container env lacks `TRINITY_PULL_MODE=true`; or `GET agent:pull_poll:A` (stamped on every `GET /api/internal/next-task`) older than 300 s while `COUNT(status='running' AND lease_expires_at > now) <` the pool size.
 
 ---
 
@@ -564,7 +564,7 @@ The first column is the module, on purpose: a table whose first cell is an id is
 
 ## Recommended starting subset
 
-Twelve invariants cover ~80% of orchestration risk:
+Thirteen invariants cover ~80% of orchestration risk:
 
 | ID | Invariant | Why |
 |----|-----------|-----|

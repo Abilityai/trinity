@@ -29,11 +29,11 @@ logger = logging.getLogger(__name__)
 
 
 # Per-agent last worker claim attempt (unix seconds), stamped by
-# `pull_coordination_service.claim_next_task` and read by canary B-02's pull
-# arm (#2840) to tell a dead pool from an idle one. Defined here because this
+# `pull_coordination_service.claim_next_task` and read by canary B-08 (#2840)
+# to tell a dead pool from an idle one. Defined here because this
 # module is the stdlib leaf both sides can import.
 PULL_POLL_KEY_PREFIX = "agent:pull_poll:"
-# Hygiene only: B-02 measures silence from the later of this value and the
+# Hygiene only: B-08 measures silence from the later of this value and the
 # container start, so an expired key cannot fire on its own.
 PULL_POLL_TTL_SECONDS = 86400
 

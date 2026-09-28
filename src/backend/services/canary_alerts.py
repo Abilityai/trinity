@@ -228,13 +228,14 @@ class CanaryAlerts:
             "heartbeat — `CapacityManager.run_maintenance()` stopped firing or "
             "stopped writing `canary:drain_tick_at`; check backend logs for "
             "`[Capacity] maintenance tick failed`. Pull pilots (`mode=pull`, "
-            "#2840): `queued_not_claimed` means a worker sat idle, or the "
-            "container runs no pull workers, while a row waited — "
-            "check B-08 and the agent log for `pull pool started` and claim "
-            "errors; `pilot_stopped` means work is piling up on a stopped agent."
+            "#2840): `queued_not_claimed` means a worker sat idle while a row "
+            "waited over 120s — check the agent log for claim errors and whether "
+            "B-08 is also red."
         ),
         "B-08": (
-            "A running pull pilot's worker pool cannot claim work (#2840). "
+            "A pull pilot's worker pool cannot claim work (#2840). "
+            "`pilot_stopped`: the agent is stopped while work queues for it — "
+            "start it, or remove it from `PULL_MODE_PILOT_AGENTS`. "
             "`workers_missing`: the container predates the pilot flag (no "
             "`TRINITY_PULL_MODE=true`) — recreate the agent. `workers_silent`: "
             "a worker is idle but has not called `/api/internal/next-task` for "
@@ -643,6 +644,13 @@ class CanaryAlerts:
             for v in violations[:5]:
                 obs = v.observed_state or {}
                 agent = _mrkdwn_safe(obs.get("agent_name"))
+                if obs.get("kind") == "pilot_stopped":
+                    oldest = obs.get("oldest_queued_age_seconds")
+                    lines.append(
+                        f"  • *{agent}*: stopped, queued={obs.get('queued_count', '?')}, "
+                        f"oldest {'?' if oldest is None else f'{oldest}s'}"
+                    )
+                    continue
                 if obs.get("kind") == "workers_missing":
                     detail = "container not in pull mode (recreate needed)"
                 else:

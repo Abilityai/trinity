@@ -2358,18 +2358,12 @@ class TestInvariantB02Pull:
         assert self._check(self._snap(queued_ages=[], pull_mode=False)) == []
         assert self._check(self._snap(queued_ages=[], last_poll_age=900)) == []
 
-    def test_aged_row_on_container_without_pull_mode_is_critical(self):
-        v = self._check(self._snap(queued_ages=[400], pull_mode=False))
-        assert [(x.severity, x.observed_state["kind"]) for x in v] == [("critical", "queued_not_claimed")]
-        assert v[0].observed_state["container_pull_mode"] is False
-
-    def test_stopped_pilot_with_aged_row_is_major(self):
-        v = self._check(self._snap(queued_ages=[400], running=False))
-        assert [(x.severity, x.observed_state["kind"]) for x in v] == [("major", "pilot_stopped")]
-
-    def test_stopped_pilot_with_fresh_or_no_row_does_not_fire(self):
-        assert self._check(self._snap(queued_ages=[30], running=False)) == []
-        assert self._check(self._snap(queued_ages=[], running=False)) == []
+    def test_persistent_pilot_states_are_never_b02s_business(self):
+        """A stopped pilot or a container without pull mode stays that way
+        until an operator acts; under B-02 it would mute new push stalls for
+        days. Both are B-08's, even with aged work waiting."""
+        assert self._check(self._snap(queued_ages=[400], pull_mode=False)) == []
+        assert self._check(self._snap(queued_ages=[400], running=False)) == []
 
     def test_docker_unlisted_skips(self):
         assert self._check(self._snap(queued_ages=[900], docker_listed=False)) == []
@@ -4785,10 +4779,23 @@ class TestInvariantB08:
         assert [(x.severity, x.observed_state["kind"]) for x in v] == [("major", "workers_missing")]
         assert v[0].observed_state["pool_size"] == 0
 
+    def test_stopped_pilot_with_aged_row_is_major(self):
+        v = self._check(self._snap(queued_ages=[400], running=False))
+        assert [(x.severity, x.observed_state["kind"]) for x in v] == [("major", "pilot_stopped")]
+
+    def test_stopped_pilot_with_fresh_or_no_row_does_not_fire(self):
+        assert self._check(self._snap(queued_ages=[30], running=False)) == []
+        assert self._check(self._snap(queued_ages=[], running=False)) == []
+
+    def test_aged_row_on_container_without_pull_mode_is_workers_missing(self):
+        v = self._check(self._snap(queued_ages=[400], pull_mode=False))
+        assert [(x.severity, x.observed_state["kind"]) for x in v] == [("major", "workers_missing")]
+        assert v[0].observed_state["queued_count"] == 1
+
     def test_healthy_idle_pool_is_green(self):
         assert self._check(self._snap()) == []
 
-    def test_stopped_or_unseen_container_is_not_b08s_business(self):
+    def test_unseen_container_or_stopped_with_nothing_waiting_is_green(self):
         assert self._check(self._snap(running=False)) == []
         assert self._check(self._snap(docker_listed=False)) == []
         assert self._check(self._snap(env_known=False)) == []
@@ -4910,3 +4917,33 @@ class TestInvariantB02PullEndToEnd:
         _add_agent(canary_db, "a1")
         snap = reload_canary["canary"].collect_snapshot()
         assert [a.is_pull_pilot for a in snap.agents] == [False]
+
+
+def test_pull_pool_defaults_mirror_the_agent_worker():
+    """Invariant #5: the canary copies the agent image's pool clamp rather than
+    importing it. Drift would make B-02/B-08 misjudge how many workers exist."""
+    import re
+    from pathlib import Path
+    from canary import snapshot
+    worker = (
+        Path(__file__).resolve().parents[2]
+        / "docker/base-image/agent_server/services/pull_worker.py"
+    ).read_text()
+    default = int(re.search(r"^_DEFAULT_POOL_SIZE = (\d+)", worker, re.M).group(1))
+    maximum = int(re.search(r"^_MAX_POOL_SIZE = (\d+)", worker, re.M).group(1))
+    assert (snapshot._PULL_POOL_DEFAULT, snapshot._PULL_POOL_MAX) == (default, maximum)
+
+
+def test_unreadable_container_env_is_labelled_not_silent(
+    canary_db, reload_canary, fake_docker, monkeypatch
+):
+    """#2840 review: a running container whose attrs cannot be read makes B-02
+    and B-08 skip that agent; the skip must be visible, and must not use a
+    prefix other invariants gate on."""
+    monkeypatch.setenv("PULL_MODE_PILOT_AGENTS", "p1")
+    _add_agent(canary_db, "p1")
+    fake_docker.add_container("agent-p1")  # no attrs at all
+    snap = reload_canary["canary"].collect_snapshot()
+    assert snap.pull_container_env == {"p1": None}
+    labels = [s for s in snap.sources_unavailable if s.startswith("pull_env[p1]")]
+    assert labels == ["pull_env[p1]: container env unreadable"]

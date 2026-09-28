@@ -356,12 +356,12 @@ class AgentSnapshot:
     # false-fire. None ⇒ fall back to `max_parallel` (test constructors that
     # predate the ceiling).
     effective_max_parallel: Optional[int] = None
-    # B-02 pull arm (#2840): the agent is in `PULL_MODE_PILOT_AGENTS`, read via
+    # B-02 / B-08 (#2840): the agent is in `PULL_MODE_PILOT_AGENTS`, read via
     # `services.pull_pilot` (a stdlib leaf) in the backend process — the same
     # process and env var that decide dispatch, so the canary and dispatch
     # can never disagree about which agents are pilots.
     is_pull_pilot: bool = False
-    # B-02 pull arm (#2840): unix seconds of this agent's last worker claim
+    # B-08 (#2840): unix seconds of this agent's last worker claim
     # attempt (`agent:pull_poll:{name}`, stamped by
     # `pull_coordination_service.claim_next_task`). None when never written,
     # expired, unread (non-pilot) or unreadable (Redis down).
@@ -435,13 +435,13 @@ class Snapshot:
     # rather than on the #407 leak. An agent present in `zombie_counts` is
     # always present here (both are written together).
     zombie_pids: Dict[str, Set[int]] = field(default_factory=dict)
-    # B-02 pull arm (#2840): per RUNNING agent container, the two pull settings
+    # B-02 / B-08 (#2840): per RUNNING agent container, the two pull settings
     # the container was created with — `{"pull_mode": bool, "pool_size": int}`
     # from `TRINITY_PULL_MODE` / `TRINITY_MAX_PARALLEL_TASKS`. The container env
     # also carries credentials, so the collector keeps exactly these two keys
     # and nothing else. `None` means Docker could not be listed this cycle, and
-    # a running agent mapped to `None` had unreadable attrs; B-02's pull arm
-    # skips both.
+    # a running agent mapped to `None` had unreadable attrs; B-02 and B-08
+    # skip both.
     pull_container_env: Optional[Dict[str, Dict[str, Any]]] = None
     # E-06 input: enabled, non-deleted schedules → {schedule_id, agent_name,
     # next_run_at}. The check flags any whose next_run_at is more than the
@@ -476,7 +476,7 @@ class Snapshot:
 # Collector names recorded in `Snapshot.collectors_ran`. These deliberately
 # match the `sources_unavailable` label prefixes so a consumer can pair
 # "did it run?" with "did it fail?" using one string.
-# B-02 pull arm (#2840): `sources_unavailable` label for a failed
+# B-08 (#2840): `sources_unavailable` label for a failed
 # last-poll read, `pull_poll[<agent>]: <error>`.
 PULL_POLL_UNAVAILABLE_PREFIX = "pull_poll["
 
@@ -780,9 +780,14 @@ def _collect_zombie_counts() -> Dict[str, Any]:
         # Record presence FIRST: H-01's evidence must not depend on the exec
         # below succeeding (#1813).
         out["names"].add(agent_name)
-        # B-02 pull arm (#2840): read the pool settings the container was
+        # B-02 / B-08 (#2840): read the pool settings the container was
         # created with. Same attrs, no extra Docker call.
         out["pull_env"][agent_name] = _pull_env_of(container)
+        if out["pull_env"][agent_name] is None:
+            # Labelled so B-02/B-08 skipping this agent is visible, like every
+            # other blind path. Not `docker`-prefixed: other invariants gate
+            # on that prefix and one container must not blind them.
+            out["unavailable"].append(f"pull_env[{agent_name}]: container env unreadable")
         # Read BEFORE the exec and outside its try: the PID-namespace
         # generation is a property of the container, not of the exec, and it
         # must still be recorded when a later per-container failure occurs.
@@ -829,7 +834,7 @@ def _collect_zombie_counts() -> Dict[str, Any]:
 
 
 def _is_pull_pilot(agent_name: str) -> bool:
-    """B-02 pull arm (#2840). `services.pull_pilot` is stdlib-only by
+    """B-02 / B-08 (#2840). `services.pull_pilot` is stdlib-only by
     construction, so importing it does not pull `database` into the canary's
     import graph. Fails closed to the push arm."""
     try:
@@ -1475,7 +1480,7 @@ def collect_snapshot() -> Snapshot:
                 else:
                     engine_qids, queued_via_service = confirm_ids, confirm_count
 
-        # B-02 pull arm (#2840). Only pilots need the poll timestamp.
+        # B-08 (#2840). Only pilots need the poll timestamp.
         is_pilot = _is_pull_pilot(name)
         last_poll: Optional[float] = None
         if is_pilot:

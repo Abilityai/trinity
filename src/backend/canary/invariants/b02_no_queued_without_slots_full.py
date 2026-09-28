@@ -50,22 +50,16 @@ worker, and is it taking the work?*
   claims the oldest queued row for the agent with no trigger filter, so an
   idle worker takes any of them.
 
-Findings:
+Finding: `queued_not_claimed` (critical) — a worker is idle and the oldest
+queued row is older than `PULL_CLAIM_GRACE_SECONDS`.
 
-| kind | severity | condition |
-|---|---|---|
-| `queued_not_claimed` | critical | the oldest queued row is older than `PULL_CLAIM_GRACE_SECONDS` and a worker is idle, or the container runs no pull workers at all |
-| `pilot_stopped` | major | container not running and a queued row older than the claim grace |
-
-A stopped pilot is `major`, not `critical`: nothing can claim until the agent
-starts, and the health monitor already reports stopped agents — the alert is
-that work is piling up behind it. When Docker could not be listed, the pull arm
-skips entirely: it cannot tell a stopped container from an unseen one.
-
-B-02 only reports work that is waiting. Whether a pilot's pool is alive while
-its queue is empty is B-08's question, kept apart on purpose: an alert fires
-only on an invariant's green→red transition, so a pilot that stays broken for
-days would hold B-02 red and silence every new push stall behind it.
+B-02 reports only this live incident, which clears once the pool claims again.
+States that last until an operator acts belong to B-08: a stopped pilot with
+work waiting, a container not in pull mode, and a silent pool. An alert fires
+only on an invariant's green→red transition, so any of those under B-02 would
+hold it red for days and silence every new push stall behind it. When Docker
+could not be listed, or the container's env could not be read, the pull arm
+skips: it cannot tell what is running.
 
 Known ceiling: a worker that has just POSTed a terminal re-claims tens of
 milliseconds later. A snapshot landing exactly in that gap, with a queued row
@@ -230,59 +224,51 @@ def pull_pool_state(
     }
 
 
-def _check_pull(agent: AgentSnapshot, snapshot: Snapshot) -> Optional[ViolationReport]:
-    now = parse_ts(snapshot.snapshot_time)
-    if now is None:
-        return None
-    state = pull_pool_state(agent, snapshot, now)
-    if state is None:
-        return None
-
-    # Oldest queued row. NULL / unparseable `queued_at` is E-04's finding, and
-    # an eid absent from `queued_meta` means the columns do not exist; both
-    # are skipped. A future-dated value floors at age 0.
-    queued = len(agent.queued_exec_ids)
-    queued_times = [
+def oldest_queued_age(agent: AgentSnapshot, now: float) -> Optional[float]:
+    """Seconds the agent's oldest queued row has waited, or None. Shared with
+    B-08. NULL / unparseable `queued_at` is E-04's finding, and an eid absent
+    from `queued_meta` means the columns do not exist; both are skipped. A
+    future-dated value floors at age 0."""
+    times = [
         t
         for eid in agent.queued_exec_ids
         if (t := parse_ts((agent.queued_meta.get(eid) or {}).get("queued_at")))
         is not None
     ]
-    oldest_age = max(0.0, now - min(queued_times)) if queued_times else None
+    return max(0.0, now - min(times)) if times else None
+
+
+def _check_pull(agent: AgentSnapshot, snapshot: Snapshot) -> Optional[ViolationReport]:
+    now = parse_ts(snapshot.snapshot_time)
+    if now is None:
+        return None
+    state = pull_pool_state(agent, snapshot, now)
+    # Stopped, unseen, or no pull workers at all: states that last until an
+    # operator acts, so they are B-08's. B-02 reports only the live incident.
+    if state is None or not state["running"] or state["idle_workers"] <= 0:
+        return None
+    oldest_age = oldest_queued_age(agent, now)
     if oldest_age is None or oldest_age <= PULL_CLAIM_GRACE_SECONDS:
         return None
-
-    observed = {
-        "mode": "pull",
-        "agent_name": agent.name,
-        "queued_count": queued,
-        "oldest_queued_age_seconds": int(oldest_age),
-        "claim_grace_seconds": PULL_CLAIM_GRACE_SECONDS,
-        "snapshot_time": snapshot.snapshot_time,
-    }
-    if not state["running"]:
-        return _pull_report(
-            "major", "pilot_stopped", observed,
-            f"agent {agent.name}: container not running, queued={queued}, "
-            f"oldest {int(oldest_age)}s > {PULL_CLAIM_GRACE_SECONDS}s",
-        )
-    observed.update(
-        container_pull_mode=state["pull_mode"],
-        pool_size=state["pool_size"],
-        busy_workers=state["busy_workers"],
-        idle_workers=state["idle_workers"],
+    queued = len(agent.queued_exec_ids)
+    return _pull_report(
+        "critical", "queued_not_claimed",
+        {
+            "mode": "pull",
+            "agent_name": agent.name,
+            "queued_count": queued,
+            "oldest_queued_age_seconds": int(oldest_age),
+            "claim_grace_seconds": PULL_CLAIM_GRACE_SECONDS,
+            "container_pull_mode": state["pull_mode"],
+            "pool_size": state["pool_size"],
+            "busy_workers": state["busy_workers"],
+            "idle_workers": state["idle_workers"],
+            "snapshot_time": snapshot.snapshot_time,
+        },
+        f"agent {agent.name}: queued={queued}, oldest {int(oldest_age)}s "
+        f"> {PULL_CLAIM_GRACE_SECONDS}s with {state['idle_workers']}/"
+        f"{state['pool_size']} worker(s) idle",
     )
-    # An idle worker should have claimed it; a container with no pull mode
-    # has no worker that ever will.
-    if state["idle_workers"] > 0 or not state["pull_mode"]:
-        return _pull_report(
-            "critical", "queued_not_claimed", observed,
-            f"agent {agent.name}: queued={queued}, oldest {int(oldest_age)}s "
-            f"> {PULL_CLAIM_GRACE_SECONDS}s with {state['idle_workers']}/"
-            f"{state['pool_size']} worker(s) idle"
-            + ("" if state["pull_mode"] else " (container not in pull mode)"),
-        )
-    return None  # every worker is mid-turn; queued is the correct state
 
 
 def _pull_report(severity: str, kind: str, observed: dict, signal: str) -> ViolationReport:

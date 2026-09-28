@@ -81,7 +81,7 @@ CLEARED_KEYSPACES: Tuple[str, ...] = (
 EXEMPT_KEYSPACES: Dict[str, str] = {
     "agent:pull_poll:": (
         "Liveness timestamp of the pull worker pool (#2840), TTL-bounded. Canary "
-        "B-02 measures silence from the later of this value and the container's "
+        "B-08 measures silence from the later of this value and the container's "
         "own start time, so a value left by a previous incarnation of the name "
         "is always older than the new container and cannot fire; clearing it on "
         "a start would only discard a real signal."

@@ -184,7 +184,7 @@ _TASK_OVERRIDE_KEYS = (
 
 
 def record_worker_poll(agent_name: str) -> None:
-    """Stamp the agent's last claim attempt for canary B-02 (#2840).
+    """Stamp the agent's last claim attempt for canary B-08 (#2840).
 
     Called on every claim attempt, empty or not: an idle worker polls at least
     every 15s, so a stale stamp on an agent with idle workers means the pool
