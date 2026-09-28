@@ -6,14 +6,15 @@
     </h3>
 
     <!-- A failed read is named, never rendered as "no sets" (principle 15). -->
-    <p v-if="store.setsError" class="mt-2 text-[12.5px] text-gray-600 dark:text-gray-400" data-testid="sets-error">
-      Skill sets are unavailable — {{ store.setsError }}
-      <button
-        type="button"
-        class="ml-1 text-action-primary-600 dark:text-action-primary-400 hover:underline"
-        @click="store.loadSets()"
-      >retry</button>
-    </p>
+    <LoadFailed
+      v-if="store.setsError"
+      dense
+      class="mt-2"
+      data-testid="sets-error"
+      title="Skill sets are unavailable"
+      :message="store.setsError"
+      @retry="store.loadSets()"
+    />
 
     <p
       v-else-if="store.setsLoaded && !store.sets.length"
@@ -163,6 +164,7 @@ import BaseBadge from '../base/BaseBadge.vue'
 import BaseButton from '../base/BaseButton.vue'
 import BaseSelect from '../base/BaseSelect.vue'
 import InlineError from '../InlineError.vue'
+import LoadFailed from '../LoadFailed.vue'
 
 defineProps({
   canManage: { type: Boolean, default: false },

@@ -10,14 +10,15 @@
     </p>
 
     <!-- Couldn't-find-out is not "no sets" (principle 15). -->
-    <p v-if="store.setsError" class="mt-2 text-[12.5px] text-gray-600 dark:text-gray-400" data-testid="library-sets-error">
-      Skill sets are unavailable — {{ store.setsError }}
-      <button
-        type="button"
-        class="ml-1 text-action-primary-600 dark:text-action-primary-400 hover:underline"
-        @click="store.loadSets()"
-      >retry</button>
-    </p>
+    <LoadFailed
+      v-if="store.setsError"
+      dense
+      class="mt-2"
+      data-testid="library-sets-error"
+      title="Skill sets are unavailable"
+      :message="store.setsError"
+      @retry="store.loadSets()"
+    />
 
     <!-- Bounded: a catalog may declare up to 50 sets per source (principle 28). -->
     <ul v-else class="mt-3 max-h-[32rem] overflow-y-auto space-y-2 pr-1">
@@ -158,6 +159,7 @@ import BaseButton from '../base/BaseButton.vue'
 import BaseCard from '../base/BaseCard.vue'
 import BaseSelect from '../base/BaseSelect.vue'
 import InlineError from '../InlineError.vue'
+import LoadFailed from '../LoadFailed.vue'
 
 const store = useSkillsLibraryStore()
 const open = ref(new Set())

@@ -245,6 +245,10 @@ describe('Library → Skills — sets (ent#530)', () => {
     const w = await mountLibrary()
     expect(w.find('[data-testid="library-sets-error"]').text()).toContain('boom')
     expect(w.text()).toContain('alpha')
+    const before = api.get.mock.calls.filter(([u]) => u === '/api/skills/library/sets').length
+    await w.find('[data-testid="library-sets-error"] button').trigger('click')
+    await flushPromises()
+    expect(api.get.mock.calls.filter(([u]) => u === '/api/skills/library/sets').length).toBe(before + 1)
   })
 })
 
