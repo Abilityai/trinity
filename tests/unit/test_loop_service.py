@@ -23,6 +23,7 @@ from typing import Any, Optional
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from db.write_params import TaskExecutionFields
 
 # Bootstrap src/backend on sys.path (same convention as test_capacity_manager.py).
 _THIS = Path(__file__).resolve()
@@ -256,6 +257,8 @@ class _FakeDB:
 
     # ---- execution rows ----
     def create_task_execution(self, **kwargs):
+        if kwargs.get("fields") is not None:  # #1482: inline the parameter object
+            kwargs.update(vars(kwargs.pop("fields")))
         self._next_exec += 1
         eid = f"exec_{self._next_exec}"
         row = _FakeExecution(eid, kwargs.get("agent_name"), kwargs.get("loop_id"))
@@ -265,7 +268,8 @@ class _FakeDB:
     def get_execution(self, execution_id: str):
         return self.executions.get(execution_id)
 
-    def update_execution_status(self, *, execution_id: str, status, error=None, **_kw):
+    def update_execution_status(self, *, execution_id: str, status, result=None, **_kw):
+        error = result.error if result is not None else None  # #1482
         row = self.executions.get(execution_id)
         if row is None:
             return False
@@ -900,7 +904,7 @@ class TestRestartRecovery:
         ls, db, _ = loop_module
         row = db.create_loop(agent_name="a", message_template="m", max_runs=3)
         db.mark_loop_running(row["id"])
-        execution = db.create_task_execution(agent_name="a", loop_id=row["id"])
+        execution = db.create_task_execution(agent_name="a", fields=TaskExecutionFields(loop_id=row["id"]))
         execution.status = "running"
         db.start_loop_run(row["id"], 1, execution_id=execution.id)
 
@@ -927,7 +931,7 @@ class TestRestartRecovery:
             source_agent_name=None, source_mcp_key_id=None, source_mcp_key_name=None,
         )
         db.mark_loop_running(row["id"])
-        execution = db.create_task_execution(agent_name="a", loop_id=row["id"])
+        execution = db.create_task_execution(agent_name="a", fields=TaskExecutionFields(loop_id=row["id"]))
         execution.status = "failed"
         execution.error = "lost to the restart"
         db.start_loop_run(row["id"], 1, execution_id=execution.id)

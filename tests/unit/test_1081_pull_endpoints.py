@@ -27,6 +27,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
+from db.write_params import ExecutionResult
 
 # ---------------------------------------------------------------------------
 # Bootstrap: make src/backend importable (mirror tests/unit/test_backlog.py).
@@ -216,7 +217,12 @@ class TestDbCasResult:
     def test_correct_token_applies_success_terminal(self, schedule_ops, enqueue):
         eid, token = self._claim(schedule_ops, enqueue)
         assert schedule_ops.update_execution_status(
-            eid, "success", response="done", claim_token=token
+            eid,
+            "success",
+            result=ExecutionResult(
+                response="done",
+            ),
+            claim_token=token,
         ) is True
         row = schedule_ops.get_execution(eid)
         assert row.status == "success"
@@ -225,7 +231,12 @@ class TestDbCasResult:
     def test_wrong_token_is_rejected_no_write(self, schedule_ops, enqueue):
         eid, token = self._claim(schedule_ops, enqueue)
         assert schedule_ops.update_execution_status(
-            eid, "failed", error="boom", claim_token="not-the-token"
+            eid,
+            "failed",
+            result=ExecutionResult(
+                error="boom",
+            ),
+            claim_token="not-the-token",
         ) is False
         # Row untouched — still running.
         assert schedule_ops.get_execution(eid).status == "running"
@@ -234,12 +245,22 @@ class TestDbCasResult:
         eid, token = self._claim(schedule_ops, enqueue)
         # First terminal wins.
         assert schedule_ops.update_execution_status(
-            eid, "failed", error="boom", claim_token=token
+            eid,
+            "failed",
+            result=ExecutionResult(
+                error="boom",
+            ),
+            claim_token=token,
         ) is True
         # A late duplicate (even with the right token) cannot overwrite the
         # already-terminal row — the status precondition blocks it.
         assert schedule_ops.update_execution_status(
-            eid, "failed", error="AGAIN", claim_token=token
+            eid,
+            "failed",
+            result=ExecutionResult(
+                error="AGAIN",
+            ),
+            claim_token=token,
         ) is False
         row = schedule_ops.get_execution(eid)
         assert row.status == "failed"

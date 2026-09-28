@@ -570,7 +570,9 @@ claude --print --output-format stream-json --model {model} "prompt"
 
 **Create Task Execution**:
 ```python
-def create_task_execution(self, agent_name: str, message: str, triggered_by: str = "manual") -> Optional[ScheduleExecution]:
+def create_task_execution(self, agent_name: str, message: str, triggered_by: str = "manual",
+                          fields: Optional[TaskExecutionFields] = None) -> Optional[ScheduleExecution]:
+    # #1482: source_*/fan_out/loop/channel/model columns ride in `fields` (db/write_params.py)
     """Create a new execution record for a manual/API-triggered task (no schedule)."""
     execution_id = self._generate_id()
     now = datetime.utcnow().isoformat()
@@ -596,12 +598,9 @@ def update_execution_status(
     self,
     execution_id: str,
     status: str,
-    response: str = None,
-    error: str = None,
-    context_used: int = None,
-    context_max: int = None,
-    cost: float = None,
-    tool_calls: str = None
+    result: Optional[ExecutionResult] = None,  # #1482: response/error/cost/... (db/write_params.py)
+    *,
+    claim_token: Optional[str] = None,         # CAS precondition, not a recorded value
 ) -> bool:
     # Calculate duration from started_at.
     # #2434: guarded at BOTH ends by one helper, not a bare subtraction —

@@ -33,6 +33,7 @@ range: this is a public repository.
 from __future__ import annotations
 
 import pytest
+from db.write_params import TaskExecutionFields
 
 pytestmark = pytest.mark.unit
 
@@ -129,8 +130,9 @@ def _turn(*, agent=AGENT, client=ADA, channel="portal", chat="sess-ada", **extra
     from database import db as core_db
     return core_db.create_task_execution(
         agent_name=agent, message="hi", triggered_by="public",
-        source_user_email=client, source_channel=channel,
-        source_channel_chat_id=chat, source_channel_client=client, **extra).id
+        fields=TaskExecutionFields(
+            source_user_email=client, source_channel=channel,
+            source_channel_chat_id=chat, source_channel_client=client, **extra)).id
 
 
 def _finish(execution_id):
@@ -365,9 +367,15 @@ async def test_an_unverified_channel_user_is_an_address_not_an_email(share_servi
     that column on a channel turn: the owner's panel shows the channel address."""
     from database import db as core_db
     turn = core_db.create_task_execution(
-        agent_name=AGENT, message="hi", triggered_by="telegram",
-        source_user_email="telegram:9001:424242", source_channel="telegram",
-        source_channel_chat_id="424242").id
+        agent_name=AGENT,
+        message="hi",
+        triggered_by="telegram",
+        fields=TaskExecutionFields(
+            source_user_email="telegram:9001:424242",
+            source_channel="telegram",
+            source_channel_chat_id="424242",
+        ),
+    ).id
 
     result = await share_service.create_share(AGENT, "t.txt", execution_id=turn, actor_is_agent=True)
 
@@ -384,10 +392,16 @@ async def test_a_verified_channel_user_finds_the_file_in_their_tab(share_service
     """AC2 — the file reaches the email the channel binding maps to."""
     from database import db as core_db
     turn = core_db.create_task_execution(
-        agent_name=AGENT, message="hi", triggered_by="whatsapp",
-        source_user_email=ADA, source_channel="whatsapp",
-        source_channel_chat_id=WA_NUMBER,
-        source_channel_client=ADA).id          # the router: a verified speaker, one-to-one
+        agent_name=AGENT,
+        message="hi",
+        triggered_by="whatsapp",
+        fields=TaskExecutionFields(
+            source_user_email=ADA,
+            source_channel="whatsapp",
+            source_channel_chat_id=WA_NUMBER,
+            source_channel_client=ADA,
+        ),
+    ).id          # the router: a verified speaker, one-to-one
 
     result = await share_service.create_share(AGENT, "w.txt", execution_id=turn, actor_is_agent=True)
 
@@ -406,8 +420,9 @@ async def test_a_group_turn_never_lands_in_the_unlockers_files_tab(share_service
     from database import db as core_db
     turn = core_db.create_task_execution(
         agent_name=AGENT, message="can you make the chart?", triggered_by="telegram",
-        source_user_email=ADA,                   # the unlocker — NOT the speaker
-        source_channel="telegram", source_channel_chat_id="-1001234567890").id
+        fields=TaskExecutionFields(
+            source_user_email=ADA,                   # the unlocker — NOT the speaker
+            source_channel="telegram", source_channel_chat_id="-1001234567890")).id
 
     result = await share_service.create_share(AGENT, "chart.png", execution_id=turn, actor_is_agent=True)
 
@@ -552,8 +567,16 @@ async def test_a_person_with_no_tab_is_not_told_the_file_is_in_their_tab(share_s
     than have the agent say "it is in your Files tab"."""
     from database import db as core_db
     turn = core_db.create_task_execution(
-        agent_name=AGENT, message="hi", triggered_by="whatsapp", source_user_email=STRANGER,
-        source_channel="whatsapp", source_channel_chat_id=WA_NUMBER, source_channel_client=STRANGER).id
+        agent_name=AGENT,
+        message="hi",
+        triggered_by="whatsapp",
+        fields=TaskExecutionFields(
+            source_user_email=STRANGER,
+            source_channel="whatsapp",
+            source_channel_chat_id=WA_NUMBER,
+            source_channel_client=STRANGER,
+        ),
+    ).id
 
     result = await share_service.create_share(AGENT, "w.txt", execution_id=turn, actor_is_agent=True)
 
