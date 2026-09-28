@@ -1,5 +1,7 @@
 # Feature: Skills Library Sync
 
+> **2026-09-24 — ent#530 skill sets.** `SkillSourceClone._catalog()` memoises the guarded `catalog.yaml` read (reset after `sync()`), shared by `_declared_root()` and the new `declared_sets()` (`services/skill_sets.parse_catalog_sets` — total, codes only). `skill_set_service.library_sets()` resolves sets across sources with skill precedence, cached by `_library_fingerprint`, served by `GET /api/skills/library/sets`. The fleet re-inject resolves sets once per sweep and `_reinject_agent` reconciles set-derived rows first, then prunes after injection when members were dropped upstream.
+
 ## Overview
 Synchronizes a skills library from a GitHub repository to the local filesystem using git clone/pull operations. Enables platform administrators to maintain a centralized collection of reusable agent skills that can be assigned to agents.
 

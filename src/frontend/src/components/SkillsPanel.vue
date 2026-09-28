@@ -58,6 +58,9 @@
     </template>
 
     <template v-else-if="!store.loading">
+      <!-- ent#530: sets first — they explain why some skills below are present. -->
+      <AgentSkillSets :can-manage="canManage" />
+
       <!-- Assigned, with the honest per-skill outcome of the last sync -->
       <section>
         <h3 class="text-sm font-semibold text-gray-900 dark:text-gray-100">
@@ -81,6 +84,12 @@
                 <div class="flex items-center gap-2 flex-wrap">
                   <span class="text-sm font-medium text-gray-900 dark:text-gray-100">{{ s.name }}</span>
                   <span v-if="s.version" class="text-[11px] font-mono text-gray-400">{{ s.version.slice(0, 7) }}</span>
+                  <!-- ent#530: why the skill is present. -->
+                  <BaseBadge
+                    v-if="store.viaSets(s.name).length"
+                    variant="purple"
+                    :data-testid="`skill-via-${s.name}`"
+                  >via {{ store.viaSets(s.name).join(', ') }}</BaseBadge>
                   <!-- #2914: the durable name-conflict verdict rides the
                        assignment row, so it shows on load — not only after a
                        sync from this screen. It replaces the per-run badge for
@@ -114,7 +123,7 @@
                     directory and sync again to install the library version.
                   </p>
                   <BaseButton
-                    v-if="canManage"
+                    v-if="canManage && !store.setOnlyNames.has(s.name)"
                     variant="secondary"
                     size="sm"
                     class="mt-2"
@@ -163,8 +172,15 @@
 
         <ul class="mt-2 divide-y divide-gray-200 dark:divide-gray-700 rounded-lg border border-gray-200 dark:border-gray-700">
           <li v-for="s in store.library" :key="s.name" class="px-4 py-3">
-            <label class="flex items-start gap-3 cursor-pointer">
-              <input type="checkbox" :value="s.name" v-model="draft"
+            <!-- ent#530: a skill present only through a set is shown ticked and
+                 locked — unticking it cannot remove it while the set is assigned. -->
+            <label class="flex items-start gap-3"
+                   :class="store.setOnlyNames.has(s.name) ? 'cursor-not-allowed' : 'cursor-pointer'"
+                   :title="store.setOnlyNames.has(s.name) ? `Assigned via ${store.viaSets(s.name).join(', ')} — unassign the set to remove it` : undefined">
+              <input v-if="store.setOnlyNames.has(s.name)" type="checkbox" checked disabled
+                     :data-testid="`skill-locked-${s.name}`"
+                     class="mt-1 rounded text-action-primary-600 disabled:opacity-45" />
+              <input v-else type="checkbox" :value="s.name" v-model="draft"
                      class="mt-1 rounded text-action-primary-600 focus:ring-action-primary-500" />
               <div class="min-w-0 flex-1">
                 <div class="flex items-center gap-2 flex-wrap">
@@ -218,6 +234,7 @@ import { useRole } from '../composables/useRole'
 import SkillContractChips from './skills/SkillContractChips.vue'
 import BaseBadge from './base/BaseBadge.vue'
 import BaseButton from './base/BaseButton.vue'
+import AgentSkillSets from './skills/AgentSkillSets.vue'
 import { deps } from './skills/contract'
 
 const props = defineProps({
@@ -250,7 +267,7 @@ function isConflict(name) {
 /** The conflict's first way out: drop the library assignment, keep the agent's own skill. */
 async function onUnassign(name) {
   savedNote.value = ''
-  const next = [...store.assignedNames].filter(n => n !== name)
+  const next = [...store.individualNames].filter(n => n !== name)
   if (await store.saveAssignments(next)) {
     resetDraft()
     savedNote.value = `Unassigned ${name} — the agent's own skill stays.`
@@ -289,14 +306,16 @@ function warningText(w) {
   return w
 }
 
+// ent#530: the draft is the INDIVIDUAL list — what the bulk PUT replaces. A
+// set's members are the set's to add and remove.
 const dirty = computed(() => {
   const a = [...draft.value].sort().join('|')
-  const b = [...store.assignedNames].sort().join('|')
+  const b = [...store.individualNames].sort().join('|')
   return a !== b
 })
 
 function resetDraft() {
-  draft.value = [...store.assignedNames]
+  draft.value = [...store.individualNames]
 }
 
 /**
@@ -347,7 +366,7 @@ async function onSync() {
 // Reset the draft only when the assignment SET changes — not on every refetch
 // of the rows. `inject()` re-reads the rows (#2914: the conflict verdict rides
 // them), and a deep watch on the array would wipe unsaved ticks on every Sync.
-watch(() => [...store.assignedNames].sort().join('|'), resetDraft)
+watch(() => [...store.individualNames].sort().join('|'), resetDraft)
 
 onMounted(async () => {
   await store.load(props.agentName)
