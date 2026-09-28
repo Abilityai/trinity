@@ -15,7 +15,23 @@ It is four windows over rows the Workspace already owns — no table, no store, 
 Requirement: `docs/memory/requirements/core-agent.md` §5.40. Asks honesty (PR A0):
 `requirements/security.md` §26.8. Journeys: J05, J11.
 
-## Flow
+## User Story
+
+As a Workspace user (an external client with a portal token, or a platform user), I want
+one landing view that shows what my agents need from me and what came back since I last
+looked, across every agent, so I can act on it without opening each agent's chat.
+
+## Entry Points
+
+- **UI:** sign-in or reload on bare `/workspace` → `/workspace/inbox` (route `WorkspaceInbox`,
+  `src/frontend/src/router/index.js:263`); the brand mark and the pinned sidebar row
+  (`PortalInboxRow.vue`) link there.
+- **API:** `GET /api/enterprise/client-portal/chat-state?previews=true`
+  (`src/backend/client_portal/router.py:687`); the existing `GET /client-portal/asks`,
+  `POST /client-portal/asks/{id}/answer`, `POST /chat-state/thread/{id}/read`,
+  `GET …/agents/{name}/history` and the deliverables reads. No new endpoint.
+
+## Frontend Layer
 
 ```
 Sign-in / reload on bare /workspace
@@ -56,7 +72,16 @@ Counts (one projection)
   Came back = totalUnread(sidebarThreads)       (= the sidebar's own sum = the tab title's)
   pinned PortalInboxRow in PortalSidebar carries both (sidebar-ask-count, sidebar-unread-count),
   white on a 700 ground, tabular-nums
+```
 
+Key sites: `Portal.vue:2224` (landing target read before the first await),
+`Portal.vue:929` (`inboxBranchVisible`), `portalInbox.js:52` (`inboxLandingTarget`),
+`portalInbox.js:169` (`inboxCounts`), `stores/clientPortal.js:1468` (`fetchChatState`),
+`stores/clientPortal.js:1511` (`markChatReadStrict`).
+
+## Backend Layer
+
+```
 GET /api/enterprise/client-portal/chat-state?previews=true      (only while the Inbox is mounted)
   chat_previews.get_chat_state_with_previews(email, is_platform)
     db.unread_arrivals_with_latest(email)       ONE statement over _UNREAD_ARRIVALS
@@ -74,6 +99,26 @@ Where arrivals come from
   an addressed report                               → report_service.resolve_report_session
                                                        addressee's in-flight chat, else their Main (+ touch, added=0)
 ```
+
+Key sites: `client_portal/db.py:1131` (`_UNREAD_ARRIVALS`), `client_portal/db.py:1224`
+(`unread_arrivals_with_latest`), `client_portal/chat_previews.py:114`
+(`get_chat_state_with_previews`), `chat_previews.py:62` (`_arrival_excerpt`),
+`services/report_service.py:83` (`resolve_report_session`), `report_service.py:147`
+(`touch_report_session`, called after the insert at `routers/reports.py:255`).
+
+Database operations: reads only on the Inbox path (`enterprise_portal_messages`,
+`agent_reports`, `enterprise_portal_sessions`, `enterprise_portal_chat_state`). No new
+table, no migration. The report publish may mint the addressee's Main
+(`ensure_main_session`, race-safe by the partial unique index) and touch it with `added=0`.
+
+## Side Effects
+
+- Opening a chat row advances the existing #557 read cursor (`POST /chat-state/thread/{id}/read`);
+  Mark all read does the same per unread chat.
+- Answering an ask in the pane goes through the one end sink (`asks/router` → `ask_service`),
+  which wakes the parked agent exactly as an answer anywhere else does.
+- The agent's own addressed report publish may mint and touch the addressee's Main, so the
+  sidebar, the tab title and the Inbox count it. No WebSocket event is added.
 
 ## Why it is shaped this way
 
@@ -95,6 +140,39 @@ Where arrivals come from
 - **Honest states.** Asks and threads each carry loaded/failed verdicts; the empty copy is
   shown only after a successful read, a failed first read shows a retry, and a failed
   refresh keeps the list with a stale banner.
+
+## Error Handling
+
+| Case | Behaviour |
+|---|---|
+| Asks read 5xx / network, no data yet | Action shows `LoadFailed` with a retry |
+| Asks read fails after a good load | list kept, stale banner (`staleBannerMessage`) |
+| Asks 404/403 (not served) | `asksAbsent` counts as a verdict, so Action resolves to its empty state instead of a skeleton forever |
+| Sessions or previews read fails, no data yet | Unread/All `LoadFailed` |
+| Sessions or previews read fails after a good load | list kept, stale banner |
+| Roster unreadable during `?previews=true` | 5xx (fail loud), never a 200 with previews dropped |
+| Deliverables read fails in the pane | `LoadFailed` in the pane, never "no deliverables" |
+| Mark all read partly fails | `InlineError` naming the failed count; those rows keep "N new" |
+| First unread message outside the 50-message window | "N earlier arrivals — Open in chat" |
+| `?anchor=` target not found | bottom of the chat + "That message is further up"; key stripped |
+| Roster error / empty roster on `/workspace/inbox` | the existing bare-stage copy, not the Inbox |
+
+## Security Considerations
+
+- **Scoping.** Both arms read only the caller's own rows (`m.client_email = :email`;
+  `s.client_email = :email AND r.addressed_to_email = :email`); previews attach only for
+  agents on `roster_agent_names(email, include_owned=is_platform)`.
+- **No cost, no execution id** in any new projection (`PortalChatArrival` has neither;
+  pinned by a test that walks the payload). The pane renders neither.
+- **Excerpts** are credential-sanitised before markdown stripping and rendered by text
+  interpolation; pane messages go through `PortalMarkdown` (DOMPurify).
+- **Report stamp.** Only the agent's own publish (`current_user.agent_name == name`) may fall
+  back to the addressee's Main; a human sharer's publish stays in the addressee's own
+  in-flight chat or `NULL`, so a sharer cannot push a badge into another person's Inbox. The
+  addressee is roster-validated (`include_owned=False`) and the report route is rate-limited.
+- **URL params.** `?tab=` is allowlisted; `?item=` resolves only against the viewer's loaded
+  items; `?anchor=` compares `dataset` values in JS, never builds a selector.
+- Asks keep the uniform 404 of `answer_ask` (Invariant #8); no new per-item endpoint.
 
 ## Known properties
 
@@ -124,7 +202,23 @@ Where arrivals come from
 | Frontend | `src/frontend/src/components/portal/PortalConversation.vue`, `PortalDeliverables.vue`, `composables/useConversationAnchor.js`, `composables/useStickToBottom.js` | anchors (`data-message-id`, `data-report-id`, `loaded`, `detach()`) |
 | Frontend | `src/frontend/src/stores/clientPortal.js` | `fetchChatState({previews})`, `markChatReadStrict`, `fetchSessionDeliverablesStrict`, `asksAbsent` |
 
-## Tests
+## Testing
+
+**Prerequisites:** backend unit env (real SQLite); `src/frontend` with `npm ci`; for e2e a
+live stack with an admin whose email is on at least one agent's roster.
+
+**Test steps (manual):** sign in → lands on `/workspace/inbox`; the pinned row's two counts
+equal the agent rows; answer an ask in the pane → it stays in place drawn ended, then shows
+in All; open an Unread chat → the pane shows the arrivals, the badge clears in the sidebar
+too; a deliverable renders through `ReportRenderer`; `?agent=X` and `?new=1` still win;
+375 px and both themes.
+
+**Edge cases:** first-ever viewer (no baseline, nothing counts); archived chat with arrivals;
+an ask that ends while selected; a deep-linked `?item=`; previews read failing mid-session.
+
+**Status:** ✅ unit + mount + property tests green; verified in a real browser (both themes,
+1280/375) and on a live stack without an agent container. ⚠️ No real agent turn exercised
+(no LLM key in verification).
 
 | Test | Covers |
 |---|---|
@@ -139,3 +233,11 @@ Where arrivals come from
 | `src/frontend/tests/unit/portalConversationAnchor.mount.spec.js`, `stickToBottom.spec.js` | `?anchor=` found / missing / one-shot, `detach()` |
 | `src/frontend/e2e/workspace-inbox.spec.js` (`@smoke`) | landing, the pinned row, explicit targets still win |
 | `src/frontend/e2e/workspace-rail-reserved.spec.js`, `e2e/contrast-ratchet.spec.js` | retargeted to `?agent=` / `?new=1`; `/workspace/inbox` held at zero contrast failures |
+
+## Related Flows
+
+- Upstream: [workspace-deliverables.md](workspace-deliverables.md) (addressed reports and the
+  Main stamp), [operating-room.md](operating-room.md) (the asks table the Action tab reads).
+- Siblings: [workspace-sidebar-ia.md](workspace-sidebar-ia.md) (the pinned row and the
+  "new" counts), [workspace-agents-at-the-centre.md](workspace-agents-at-the-centre.md)
+  (the landing rule; explicit targets win).
