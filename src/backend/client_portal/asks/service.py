@@ -26,6 +26,15 @@ logger = logging.getLogger(__name__)
 _VISIBLE_KINDS = ("question", "approval", "alert")
 
 
+class AsksUnavailable(Exception):
+    """The asks list could not be READ (trinity-enterprise#610, PR A0).
+
+    Raised instead of returning `[]`: an empty list is a claim ("nothing needs
+    you"), and making it during an outage is the #2915 failure class. The router
+    maps it to 503 `asks_unavailable`; the store keeps its last good list.
+    """
+
+
 class AskError(Exception):
     """A named, actionable refusal — never a bare 422 from a validator."""
 
@@ -155,19 +164,28 @@ def _coarse_sync(item: dict) -> str:
     return "unconfirmed"
 
 
-def _on_roster(agent_name: str, email: str, is_platform: bool) -> bool:
+def _on_roster(agent_name: str, email: str, is_platform: bool,
+               strict: bool = False) -> bool:
     """Read-time roster re-check (ent#364).
 
     Membership at raise time is not a standing grant: a share revoked afterwards
-    must stop showing the ask. Fails CLOSED — an unreadable roster hides the ask
-    rather than showing one we cannot justify.
+    must stop showing the ask. Fails CLOSED — an unreadable roster never shows an
+    ask we cannot justify.
+
+    `strict` is the LIST mode (trinity-enterprise#610, PR A0): there an
+    unreadable roster raises `AsksUnavailable`, because hiding every ask during a
+    roster outage is a silent "nothing needs you". A clean "not on the roster"
+    still returns False in both modes. The answer path stays non-strict, so its
+    refusal is the uniform 404 whatever the cause (Invariant #8).
     """
     try:
         from client_portal.service import agent_on_roster
 
         return bool(agent_on_roster(agent_name, email, include_owned=is_platform))
-    except Exception:  # noqa: BLE001
+    except Exception as e:  # noqa: BLE001
         logger.warning("[WorkspaceAsks] roster re-check failed for %s", agent_name, exc_info=True)
+        if strict:
+            raise AsksUnavailable("roster unreadable") from e
         return False
 
 
@@ -175,7 +193,10 @@ def list_asks(email: str, is_platform: bool, agent_name: Optional[str] = None,
               include_ended: bool = False) -> List[WorkspaceAsk]:
     """Asks addressed to `email`: open ones first, then — with `include_ended` —
     the ones that ended in the last `ENDED_WINDOW_DAYS`, most recent ending
-    first (trinity-enterprise#611). Never raises."""
+    first (trinity-enterprise#611).
+
+    Raises `AsksUnavailable` when the queue or the roster cannot be read
+    (trinity-enterprise#610, PR A0) — an outage is never answered with `[]`."""
     try:
         # The addressee is a SQL condition (ent#428), NOT something filtered out
         # of the result here. `list_items` orders by status, then priority, then
@@ -195,9 +216,9 @@ def list_asks(email: str, is_platform: bool, agent_name: Optional[str] = None,
             addressed_to_email=email,
             limit=200,
         )
-    except Exception:  # noqa: BLE001 — a sidebar badge must not break the Workspace
+    except Exception as e:  # noqa: BLE001 — surfaced as a 503, never as "nothing"
         logger.warning("[WorkspaceAsks] list failed", exc_info=True)
-        return []
+        raise AsksUnavailable("queue unreadable") from e
 
     # Memoized per REQUEST, not cached across them: `agent_on_roster` is
     # `agent_name in roster_agent_names(...)` and that inner call is one-to-two
@@ -215,7 +236,7 @@ def list_asks(email: str, is_platform: bool, agent_name: Optional[str] = None,
 
     def _allowed(agent: str) -> bool:
         if agent not in seen:
-            seen[agent] = _on_roster(agent, email, is_platform)
+            seen[agent] = _on_roster(agent, email, is_platform, strict=True)
         return seen[agent]
 
     out: List[WorkspaceAsk] = []

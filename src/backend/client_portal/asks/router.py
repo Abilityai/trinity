@@ -22,7 +22,7 @@ from dependencies import PERSON_REQUIRED_DETAIL
 
 from . import service
 from .models import WorkspaceAsk, WorkspaceAskAnswer
-from .service import AskError
+from .service import AskError, AsksUnavailable
 
 router = APIRouter(
     prefix="/api/enterprise/client-portal/asks",
@@ -50,9 +50,19 @@ def list_asks(
     stops being true. `include_ended` (trinity-enterprise#611) adds the asks that
     ended in the last 7 days, so a person sees how an ask ended instead of
     watching it vanish; the sidebar count stays pending-only on the client.
+
+    An unreadable queue or roster is **503 `asks_unavailable`**, never `[]`
+    (trinity-enterprise#610, PR A0): an empty list is a claim that nothing is
+    waiting, and the client keeps its last good list on this answer.
     """
-    return service.list_asks(principal.email, principal.is_platform, agent_name,
-                             include_ended=include_ended)
+    try:
+        return service.list_asks(principal.email, principal.is_platform, agent_name,
+                                 include_ended=include_ended)
+    except AsksUnavailable:
+        raise HTTPException(status_code=503, detail={
+            "code": "asks_unavailable",
+            "message": "Couldn't load your asks — try again.",
+        })
 
 
 @router.post("/{item_id}/answer", response_model=WorkspaceAsk)
