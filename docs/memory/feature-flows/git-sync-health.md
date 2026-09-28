@@ -95,7 +95,7 @@ FOREIGN KEY (agent_name) REFERENCES agent_ownership(agent_name)
 ```
 
 The four ent#706 columns come from the SQLite migration
-`agent_sync_state_divergence` and Alembic `0080_agent_sync_state_divergence`.
+`agent_sync_state_divergence` and Alembic `0081_agent_sync_state_divergence`.
 They are nullable with **no backfill**: the clocks cannot be known
 retroactively, so they start at the first poll after upgrade — which is also
 the 24 h soak before any divergence freeze can fire. The upsert takes a `KEEP`
@@ -618,7 +618,7 @@ the data-loss setup.
 | `routers/internal.py` | `GET /api/internal/agents/{name}/sync-health-status` (ent#706: via `sync_view`) |
 | `services/sync_freeze_policy.py` | ent#706: the one rule — `classify`, the constants, `format_age`; stdlib leaf |
 | `services/sync_health_view.py` | ent#706: `sync_view(row, config)` — the backend's single call into the policy |
-| `db/migrations.py`, `migrations/versions/0080_agent_sync_state_divergence.py`, `db/schema.py`, `db/tables.py` | ent#706: the four columns on both tracks |
+| `db/migrations.py`, `migrations/versions/0081_agent_sync_state_divergence.py`, `db/schema.py`, `db/tables.py` | ent#706: the four columns on both tracks |
 | `db/sync_state.py` | ent#706: `KEEP` sentinel, the new upsert kwargs, `list_health_rows` (the shared reader) |
 | `services/operator_queue_service.py` | ent#706: `sync-diverged-` in `_RESERVED_ID_PREFIXES` |
 | `src/scheduler/sync_freeze_policy.py` | ent#706: byte-identical mirror of the policy |
