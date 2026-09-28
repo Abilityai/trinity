@@ -2,7 +2,8 @@
 
 **What changed.** A new `github:` agent created as an *agent* (the default) gets a
 working branch it alone writes, with auto-sync on and schedules paused while sync
-fails. It only gets these when its GitHub token can push to that repository;
+fails. It only gets these when its creator's (or its own) GitHub token can push to
+that repository — the platform-wide token set by an admin never qualifies;
 otherwise it is created pull-only, and the create response's `git_mode` says why.
 A *deployment of a codebase* (`kind: "deployment"`) stays pull-only.
 
