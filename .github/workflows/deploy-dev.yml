@@ -637,7 +637,11 @@ jobs:
 
           The dev instance is **not** running this commit -- or is running its
           platform code on a stale or unmounted enterprise tree (a run that
-          failed after the health check; see check 5). Every merge to
+          failed after the health check; see check 5). A run that failed at
+          \`Health\` or \`Agent seeding check\` got as far as starting the new
+          containers, but the backend was not answering on the host
+          (\`Health\`) or the fleet is incomplete (seeding) -- do not read
+          that as a working deploy of this commit. Every merge to
           \`dev\` from now until this is fixed ships nothing you can trust, and
           no other signal will report that -- CI stays green and PRs merge
           cleanly.
@@ -653,11 +657,17 @@ jobs:
              fleet is incomplete -- see trinity#2215.
           3. If it failed at \`Restart\` with a container-name conflict, the
              reaper should have cleared it; check whether the pattern matched.
-          4. If it failed at \`Health\`, the backend is not becoming healthy.
-             Check \`docker logs trinity-backend\` on the host -- a database
-             that cannot be opened crash-loops every worker before uvicorn
-             binds, and the other services then sit in \`Created\` behind
-             \`depends_on: service_healthy\`.
+          4. A backend that never becomes healthy fails at \`Restart\`:
+             compose waits on \`depends_on: service_healthy\` and exits with
+             \`dependency failed to start: container trinity-backend is
+             unhealthy\`, leaving the other services in \`Created\`. If it
+             failed at \`Health\` instead, compose saw the backend healthy,
+             then the host \`:8000\` probe failed 3 times. Either way, check
+             \`docker logs trinity-backend\` on the host (a database that
+             cannot be opened crash-loops every worker before uvicorn binds)
+             and host-port reachability (\`curl -v http://localhost:8000/health\`
+             on the host). If the \`Health\` failure also printed an enterprise
+             \`STALE\` error, see check 5.
           5. If it failed at \`Enterprise registration\` with \`STALE\` or
              \`OSS-only\`, the enterprise submodule did not sync: the
              \`ENTERPRISE:\` lines above it name the classified cause (host-key,
