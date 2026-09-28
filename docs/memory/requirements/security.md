@@ -613,6 +613,21 @@
 - **Files**: `src/backend/services/ask_service.py` (`raise_ask`), `src/backend/db/operator_queue.py` (`create_native_item`, `create_item_with_outcome`, the file-contract filter), `src/backend/routers/operator_queue.py` (`raise_my_ask`), `src/backend/models.py` (`OperatorAskCreate`), `src/backend/services/assignment_provider.py` (`people_for`), `src/backend/services/operator_queue_service.py` (the poller's side), `src/backend/services/platform_prompt_service.py`, `src/mcp-server/src/tools/operator_queue.ts` (`ask_operator`), `src/frontend/src/utils/operatorQueue.js` (`queueReaskBadges`, `proposalRows`) + `QueueCard.vue` / `ResolvedCard.vue` / `QueueProposal.vue` / `MobileAdmin.vue` / `PortalAsks.vue`, `src/backend/client_portal/asks/` (`WorkspaceAsk.proposal`)
 - **Tests**: `tests/unit/test_ent611_native_ask.py`, `tests/unit/test_ent611_native_ask_pg.py`, `tests/unit/test_1402_prompt_contract.py`, `tests/unit/test_1677_operator_alert_emitters.py` (G3), `src/mcp-server/src/operator_queue.test.ts`, `src/mcp-server/src/access-wiring.test.ts`, `src/frontend/tests/unit/operatorQueueReask.spec.js`, `operatorQueueProposal.spec.js`, `portalAskProposal.spec.js`, `mobileAdminProposal.spec.js`
 
+
+### 26.11 Address by Role — asks, reports, messages (OPS-001-ADDRESS)
+- **Status**: ✅ Implemented (trinity-enterprise#606)
+- **Requirement ID**: OPS-001-ADDRESS
+- **Priority**: P1
+- **Description**: Every outbound object an agent produces for a human — an ask, a report, a message — names **a role, never a person**: `to: primary | approver | viewer | operator`. The platform resolves the person through ONE rule, `services/role_addressing.resolve`, so an ask and a report to the same role reach the same people (`prds/permission-layers.md` §5a).
+  - **Resolution:** a registered assignment provider's `people_for` answers first (an empty answer means nobody fills the role); otherwise the core defaults — `primary` → the agent's owner, `operator` → the operators (no person recorded), `approver` / `viewer` refused. No primary assigned → a `primary` ask goes to the operators.
+  - **Refused by name, never dropped or defaulted:** `invalid_to`, `role_unassigned`; for reports and messages (one reader each) also `role_resolves_to_several` (with `count`), and for reports `role_unreachable` (the person is not on the agent's roster) — all **422**.
+  - **Reports:** `ReportCreate.to`. `operator`, nobody, or the owner → operator-only (the owner reads the operator surface); otherwise the checked audience. `to` with `audience_email` → **422 `addressing_conflict`**. Neither → operator-only, unchanged.
+  - **Messages:** `SendMessageRequest` takes exactly one of `to` (`primary | approver | viewer`) or `recipient_email`; `operator` is not a message recipient (the operators' door is an `ask_operator` alert).
+  - **The agent never sees the person:** the MCP `report` / `send_message` tools echo the role, never the resolved email.
+  - **Compatibility (two releases):** an agent-supplied `audience_email` / `recipient_email` is still honoured and logged as deprecated once per agent and surface.
+- **Files**: `src/backend/services/role_addressing.py`, `src/backend/services/ask_service.py` (`_address`), `src/backend/routers/reports.py` (`_report_audience`), `src/backend/routers/messages.py` (`_recipient`), `src/backend/models.py`, `src/mcp-server/src/tools/{reports,messages}.ts`
+- **Tests**: `tests/unit/test_ent606_role_addressing.py`
+
 ---
 
 ## 28. Agent Guardrails (GUARD-001)

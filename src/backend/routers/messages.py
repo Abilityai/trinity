@@ -18,6 +18,7 @@ from models import (
 from database import db
 from dependencies import get_current_user, AuthorizedAgentByName, assert_agent_owner
 from db_models import User
+from services import role_addressing
 from services.idempotency_service import EffectInProgressError
 from services.proactive_message_service import (
     proactive_message_service,
@@ -52,10 +53,11 @@ async def send_proactive_message(
     Rate limited to 10 messages per recipient per hour.
     """
 
+    recipient = _recipient(agent_name, request)
     try:
         result = await proactive_message_service.send_message(
             agent_name=agent_name,
-            recipient_email=request.recipient_email,
+            recipient_email=recipient,
             text=request.text,
             channel=request.channel,
             reply_to_thread=request.reply_to_thread,
@@ -90,6 +92,35 @@ async def send_proactive_message(
     except Exception as e:
         logger.exception(f"Proactive message failed: {e}")
         raise HTTPException(status_code=500, detail="Internal error sending message")
+
+
+def _recipient(agent_name: str, request: SendMessageRequest) -> str:
+    """The one person this message goes to (ent#606).
+
+    `to` names a role, resolved by the same rule asks and reports use
+    (`services/role_addressing`). A role nobody fills, or that several people
+    fill, is refused by name — a message has one recipient, and silently picking
+    one of several is exactly what the ruling forbids. `recipient_email` still
+    works for two releases and is logged as deprecated.
+    """
+    if not request.to:
+        role_addressing.log_email_addressing(agent_name, "message")
+        return request.recipient_email
+    try:
+        r = role_addressing.resolve(agent_name, request.to)
+    except role_addressing.RoleRefused as e:
+        raise HTTPException(status_code=422, detail={
+            "code": e.code, "role": e.role, "message": e.message + " Message primary instead."})
+    if len(r.people) > 1:
+        raise HTTPException(status_code=422, detail={
+            "code": "role_resolves_to_several", "role": request.to, "count": len(r.people),
+            "message": f"{len(r.people)} people fill the {request.to} role and a message has "
+                       "one recipient — message primary, or raise an ask."})
+    if not r.single:
+        raise HTTPException(status_code=422, detail={
+            "code": "role_unassigned", "role": request.to,
+            "message": f"Nobody fills the {request.to} role for this agent yet."})
+    return r.single
 
 
 @router.put("/{agent_name}/shares/proactive", response_model=dict)

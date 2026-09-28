@@ -62,15 +62,20 @@ export function createMessageTools(
     sendMessage: {
       name: "send_message",
       description:
-        "Send a proactive message to a specific user by their verified email address. " +
+        "Send a proactive message to one person. Name the ROLE with `to` (primary — the person " +
+        "you serve — approver, or viewer); the platform resolves who fills it (ent#606). A role " +
+        "nobody fills, or that several people fill, is refused with a named reason; to reach " +
+        "the operators, raise an ask of type alert instead. " +
         "The recipient must have opted in to receive proactive messages from this agent " +
         "(allow_proactive flag must be set in their sharing record). " +
         "Messages are delivered via Telegram, Slack, or web based on the channel parameter. " +
         "Rate limited to 10 messages per recipient per hour.",
       parameters: z.object({
-        recipient_email: z.string().email()
+        to: z.enum(["primary", "approver", "viewer"]).optional()
+          .describe("The role to message. The platform resolves the person. Use this, not recipient_email."),
+        recipient_email: z.string().email().optional()
           .describe(
-            "The verified email address of the recipient. " +
+            "Deprecated — use `to`. The verified email address of the recipient. " +
             "Must be in agent_sharing with allow_proactive=1, or be the agent owner."
           ),
         text: z.string().min(1).max(4096)
@@ -103,7 +108,8 @@ export function createMessageTools(
       }),
       execute: async (
         params: {
-          recipient_email: string;
+          recipient_email?: string;
+          to?: "primary" | "approver" | "viewer";
           text: string;
           channel?: "auto" | "telegram" | "slack" | "web";
           reply_to_thread?: boolean;
@@ -131,9 +137,15 @@ export function createMessageTools(
           }, null, 2);
         }
 
-        // Validate email format
+        // Exactly one address: a role (ent#606) or, deprecated, an email.
+        if (Boolean(params.to) === Boolean(params.recipient_email)) {
+          return JSON.stringify({
+            success: false,
+            error: "Address the message with exactly one of `to` (a role) or recipient_email",
+          }, null, 2);
+        }
         const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-        if (!emailRegex.test(params.recipient_email)) {
+        if (params.recipient_email && !emailRegex.test(params.recipient_email)) {
           return JSON.stringify({
             success: false,
             error: "Invalid email address format",
@@ -144,12 +156,13 @@ export function createMessageTools(
           const agentName = getAgentName(authContext, params.agent_name);
 
           console.log(
-            `[send_message] Sending to ${params.recipient_email} ` +
+            `[send_message] Sending to ${params.to ? `role ${params.to}` : params.recipient_email} ` +
             `as ${agentName} via ${params.channel || "auto"} (${params.text.length} chars)`
           );
 
           const result = await apiClient.sendUserMessage(agentName, {
             recipient_email: params.recipient_email,
+            to: params.to,
             text: params.text.trim(),
             channel: params.channel || "auto",
             reply_to_thread: params.reply_to_thread || false,
@@ -161,7 +174,8 @@ export function createMessageTools(
             return JSON.stringify({
               success: true,
               agent_name: agentName,
-              recipient_email: params.recipient_email,
+              // A role is echoed as the role — never the person it resolved to.
+              ...(params.to ? { to: params.to } : { recipient_email: params.recipient_email }),
               channel: result.channel,
               message_id: result.message_id,
             }, null, 2);

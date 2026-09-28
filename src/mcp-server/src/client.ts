@@ -2040,6 +2040,7 @@ export class TrinityClient {
       // the backend validates the address against the agent's roster and
       // resolves the chat itself.
       audience_email?: string;
+      to?: "primary" | "approver" | "viewer" | "operator";
       execution_id?: string;
     }
   ): Promise<{
@@ -2421,7 +2422,8 @@ export class TrinityClient {
   async sendUserMessage(
     agentName: string,
     data: {
-      recipient_email: string;
+      recipient_email?: string;
+      to?: "primary" | "approver" | "viewer";
       text: string;
       channel?: "auto" | "telegram" | "slack" | "web";
       reply_to_thread?: boolean;

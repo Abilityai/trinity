@@ -128,6 +128,10 @@ class AgentShare(BaseModel):
     allow_proactive: bool = False  # Can agent send proactive messages to this user
 ```
 
+## Addressed by role (trinity-enterprise#606)
+
+`SendMessageRequest` takes exactly one of `to` (`primary | approver | viewer`) or the deprecated `recipient_email`. `routers/messages._recipient` resolves the role through `services/role_addressing.resolve` (the rule asks and reports share), and the resolved person then goes through the unchanged authorization, rate-limit and channel steps below. A message has one recipient, so a role nobody fills (`role_unassigned`) or several people fill (`role_resolves_to_several`) is a named 422, never a guess. `operator` is not a message recipient — the operators' door is the Operating Room, reached with an `ask_operator` alert. The MCP `send_message` tool echoes the role, never the resolved email.
+
 ## Data Flow
 
 ### 1. Authorization Check
