@@ -336,13 +336,23 @@ export const useSkillsLibraryStore = defineStore('skillsLibrary', () => {
       // The server's own reason, verbatim — "Skill 'x' not found in library"
       // and "Agent not found" are the named failures AC 4 asks for, and
       // inventing our own wording here would drift from them.
-      return e?.response?.data?.detail || 'Could not assign the skill'
+      const d = e?.response?.data?.detail
+      return (d && typeof d === 'object' ? d.message : d) || 'Could not assign the skill'
     }
   }
 
   async function unassignSkill(skillName, agentName) {
     try {
-      await api.delete(`/api/agents/${encodeURIComponent(agentName)}/skills/${encodeURIComponent(skillName)}`)
+      const { data } = await api.delete(
+        `/api/agents/${encodeURIComponent(agentName)}/skills/${encodeURIComponent(skillName)}`,
+      )
+      // ent#530: a skill an assigned set still names stays on the agent (now
+      // set-derived). The agent still holds it, so the chip stays and the
+      // server's sentence says why — dropping it would claim a removal that
+      // did not happen.
+      if (data && data.removed === false && data.retained_via_sets?.length) {
+        return data.message || `Still assigned through set ${data.retained_via_sets.join(', ')}`
+      }
       // An unassign supersedes the last assign's note for this skill.
       if (deliveries.value[skillName]) {
         const map = { ...deliveries.value }; delete map[skillName]; deliveries.value = map
@@ -357,7 +367,10 @@ export const useSkillsLibraryStore = defineStore('skillsLibrary', () => {
       assignments.value = map
       return null
     } catch (e) {
-      return e?.response?.data?.detail || 'Could not unassign the skill'
+      // The 409 `skill_set_unresolved` detail is an object; the caller renders
+      // a string (InlineError), never `[object Object]`.
+      const d = e?.response?.data?.detail
+      return (d && typeof d === 'object' ? d.message : d) || 'Could not unassign the skill'
     }
   }
 
