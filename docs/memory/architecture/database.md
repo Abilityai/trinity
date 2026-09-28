@@ -755,7 +755,7 @@ CREATE TABLE operator_queue (
     disposition_reason TEXT,            -- the operator's optional cancel reason (≤ 500); never in an audit row, never to a Workspace client
     batch_id TEXT,                      -- one uuid per bulk-cancel sweep; its re-select is the sweep's CAS winners
     raised_by TEXT,                     -- agent|gate (PR B); NULL for a legacy row or a platform alarm
-    channel TEXT,                       -- file|mcp; keyword-only on create, never read from the agent's entry
+    channel TEXT,                       -- file|mcp|gate; keyword-only on create, never read from the agent's entry
     to_role TEXT,                       -- PR B: the role an agent-raised ask is addressed to
     resolved_to TEXT,                   -- PR B: JSON list of person refs; withheld from machine keys
     proposal TEXT,                      -- PR B: JSON, the frozen action

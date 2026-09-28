@@ -132,6 +132,11 @@ def register_ending_observer(fn: Callable[[EndingEvent], None]) -> Callable[[End
     broadcast were scheduled — an observer that does real work backgrounds it
     (the default wake uses `spawn_on_loop`). An observer that raises is logged
     and never undoes the ending or starves the next observer. Idempotent.
+
+    Observers run in-process and at most once: nothing retries a call and
+    nothing records a delivery. A consumer that must not miss an ending (the
+    gate's resume, trinity-enterprise#164) keeps its own durable record keyed on
+    the ask id and sweeps the asks that ended without one.
     """
     if fn not in _observers:
         _observers.append(fn)
@@ -273,6 +278,11 @@ class AskRejected(Exception):
 
 ASK_TYPES = ("approval", "question", "alert")
 ASK_ROLES = ("primary", "approver", "viewer", "operator")
+# Who raised a native ask, and the channel its row records. The column also holds
+# `file`, which only the file poller writes (`create_item_with_outcome`), never
+# this sink.
+ASK_RAISERS = ("agent", "gate")
+ASK_CHANNELS = ("mcp", "gate")
 # C5: the soonest an agent-raised ask may expire. An ask that times out before a
 # person could plausibly read it is a spend loop (every expiry can wake the
 # agent), not a question.
@@ -293,8 +303,9 @@ def raise_ask(
     (trinity-enterprise#611).
 
     The seam the agent's MCP tool calls today, and the one a gate calls later
-    with `raised_by="gate"` and a `request_id` derived from the paused call. In
-    order, so each refusal is honest about why:
+    with `raised_by="gate"`, `channel="gate"` and a `request_id` derived from the
+    paused call under the platform-reserved `gate-` prefix (required for a gate
+    raise, refused for an agent's). In order:
 
     1. validate the shape — `AskRejected(422)` with a named code, never a
        silent truncation (that is the file path's compatibility behaviour);
@@ -302,33 +313,43 @@ def raise_ask(
        `status: "replayed"`, plus `differs` (what this call changed). Before
        every time- or state-dependent check, so a retry minutes later gets its
        receipt back rather than a refusal it did not earn the first time;
-    3. the deadline floor (C5), the re-ask link (`supersedes_expired` must name
+    3. the #1632 rate caps — the SAME buckets as the file poller, so the two
+       channels share one budget. Before every check that reads the database,
+       so a refusal below spends a token and cannot be repeated for free (the
+       re-ask scan reads up to `_REASK_SCAN` stored proposals). A gate raise
+       spends the agent's buckets too: an agent that floods its own queue blocks
+       its own gated calls, which fails closed;
+    4. the deadline floor (C5), the re-ask link (`supersedes_expired` must name
        the agent's own expired ask) and its guard (C6), then the role (`to:`)
        resolved to a person;
-    4. the #1632 rate caps — the SAME buckets as the file poller, so the two
-       channels share one budget;
     5. the create: replay, depth cap and insert in one per-agent serialized
        step (`queue_full` → 429);
     6. one audit row (`raised`, ids and enums only) and one thin broadcast.
 
-    The receipt names the ROLE an ask went to, never the resolved email.
+    The receipt names the ROLE an ask went to, never the resolved email, and
+    who raised it. An unknown `raised_by` or `channel` is a programming error
+    (`ValueError`), never a refusal an agent earned.
     """
     from services import operator_queue_service as oqs
 
-    norm = _validated_ask(ask, oqs)
+    if raised_by not in ASK_RAISERS:
+        raise ValueError(f"raise_ask: unknown raised_by {raised_by!r}")
+    if channel not in ASK_CHANNELS:
+        raise ValueError(f"raise_ask: unknown channel {channel!r}")
+    norm = _validated_ask(ask, oqs, raised_by=raised_by)
     existing = db.get_operator_queue_item_for_agent_by_request_id(agent_name, norm["request_id"])
     if existing:
         return _receipt(existing, status="replayed", differs=_differs(existing, norm, oqs))
+
+    if not _rate_allowed(agent_name, oqs):
+        raise AskRejected(429, "rate_limited",
+                          "Too many asks in a short time; try again in a minute.")
 
     deadline = _deadline(norm["expires_at"], floor=True)
     predecessor = _predecessor(agent_name, norm["supersedes_expired"])
     if norm["proposal"] is not None and predecessor is None:
         _refuse_unlinked_reask(agent_name, norm["proposal"])
     people, addressee, resolved = _address(agent_name, norm["to"])
-
-    if not _rate_allowed(agent_name, oqs):
-        raise AskRejected(429, "rate_limited",
-                          "Too many asks in a short time; try again in a minute.")
 
     context = dict(norm["context"])
     if addressee:
@@ -405,9 +426,14 @@ def _too_large(field: str, limit: int, unit: str) -> AskRejected:
                        field=field, limit=limit, unit=unit)
 
 
-def _validated_ask(ask: Any, oqs) -> Dict[str, Any]:
+def _validated_ask(ask: Any, oqs, *, raised_by: str = "agent") -> Dict[str, Any]:
     """The static half of validation — nothing here depends on the clock or
-    the database, so a replay is checked right after it."""
+    the database, so a replay is checked right after it.
+
+    The id namespace depends on who raises: an agent may not use any
+    platform-reserved prefix; a gate raise must use its own, `gate-`, so no
+    agent can pre-create it and `is_platform_minted` keeps the row's endings
+    from waking the agent."""
     if not isinstance(ask, Mapping):
         raise AskRejected(422, "invalid_ask", "The ask must be an object.")
     rid = ask.get("request_id")
@@ -417,9 +443,15 @@ def _validated_ask(ask: Any, oqs) -> Dict[str, Any]:
             422, "invalid_request_id",
             f"request_id must be 1-{oqs.OPERATOR_QUEUE_ID_MAX} characters of letters, "
             "digits, '.', '_', ':' or '-'.")
-    if rid.strip().lower().startswith(oqs._RESERVED_ID_PREFIXES):
+    lowered = rid.strip().lower()
+    if raised_by == "gate":
+        if not lowered.startswith(oqs.GATE_ASK_ID_PREFIX):
+            raise AskRejected(
+                422, "invalid_request_id",
+                f"A gate raise's request_id must start with {oqs.GATE_ASK_ID_PREFIX!r}.")
+    elif lowered.startswith(oqs._RESERVED_ID_PREFIXES):
         raise AskRejected(422, "reserved_request_id",
-                          "That request_id prefix is reserved for the platform's own alerts.")
+                          "That request_id prefix is reserved for the platform's own alerts and asks.")
     kind = ask.get("type") or "question"
     if kind not in ASK_TYPES:
         raise AskRejected(422, "invalid_type", "Unknown ask type.", allowed=list(ASK_TYPES))
@@ -555,10 +587,13 @@ def _address(agent_name: str, role: str) -> Tuple[List[str], Optional[str], bool
     A registered provider answers first (`assignment_provider.people_for`); with
     no answer the core defaults hold: `primary` → the agent's owner (their
     Workspace Main chat); `operator` → the operators, no person recorded;
-    `approver` / `viewer` → refused until someone fills them. An owner with no
-    email makes a `primary` ask an operator ask, and the receipt says so
-    (`resolved: false`). Several people are recorded, but none becomes the
-    single Workspace addressee.
+    `approver` / `viewer` → refused until someone fills them. A provider that
+    answers "nobody" (`[]`) for `primary` sends the ask to the operators — the
+    ent#606 ruling: an ask to primary falls back to operator when no primary is
+    assigned, and the owner stands in only when no provider answers at all. An
+    owner with no email makes a `primary` ask an operator ask too; either way the
+    receipt says so (`resolved: false`). Several people are recorded, but none
+    becomes the single Workspace addressee.
     """
     from services import assignment_provider
 
@@ -566,6 +601,8 @@ def _address(agent_name: str, role: str) -> Tuple[List[str], Optional[str], bool
     if people:
         return people, (people[0] if len(people) == 1 else None), True
     if role == "primary":
+        if people is not None:   # the provider answered: nobody fills primary
+            return [], None, False
         owner = _owner_email(agent_name)
         return ([owner], owner, True) if owner else ([], None, False)
     if role == "operator":
@@ -608,7 +645,10 @@ def _canon(value: Any) -> Optional[str]:
     return None if value is None else json.dumps(value, sort_keys=True, separators=(",", ":"))
 
 
-def _request_id_of(item_id: Optional[str]) -> Optional[str]:
+def request_id_of(item_id: Optional[str]) -> Optional[str]:
+    """The request_id of the row `item_id` names: how an agent refers to its
+    asks. A re-ask's `supersedes_expired` column stores the predecessor's uuid;
+    the receipt and the readback both name it by request_id instead."""
     if not item_id:
         return None
     row = db.get_operator_queue_item(item_id)
@@ -633,7 +673,7 @@ def _differs(row: Dict[str, Any], norm: Dict[str, Any], oqs) -> List[str]:
         "context": (_canon(norm["context"]), _canon(stored_context)),
         "to": (norm["to"], row.get("to_role")),
         "proposal": (_canon(norm["proposal"]), _canon(row.get("proposal"))),
-        "supersedes_expired": (norm["supersedes_expired"], _request_id_of(row.get("supersedes_expired"))),
+        "supersedes_expired": (norm["supersedes_expired"], request_id_of(row.get("supersedes_expired"))),
     }
     return sorted(field for field, (asked, stored) in pairs.items() if asked != stored)
 
@@ -653,11 +693,12 @@ def _receipt(
     if resolved is None:
         resolved = row.get("to_role") == "operator" or bool(row.get("resolved_to"))
     if supersedes_request_id is None:
-        supersedes_request_id = _request_id_of(row.get("supersedes_expired"))
+        supersedes_request_id = request_id_of(row.get("supersedes_expired"))
     receipt = {
         "status": status,
         "id": row["id"],
         "request_id": row["request_id"],
+        "raised_by": row.get("raised_by"),
         "channel": row.get("channel"),
         "type": row.get("type"),
         "to_role": row.get("to_role"),

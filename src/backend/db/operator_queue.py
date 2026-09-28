@@ -287,6 +287,11 @@ class OperatorQueueOperations:
         - `replayed` — `(agent_name, request_id)` exists; `row` is the FIRST
           row, untouched (a retry gets its first receipt, whatever it sends).
           Checked before the cap, so a retry is never refused a slot it holds.
+          Also the answer when a file entry re-using the id lands between that
+          check and the insert: the file poller does not take this lock, so on
+          PostgreSQL it can, and the insert's `ON CONFLICT DO NOTHING` turns
+          what would be a unique-index error (a 500 for the agent) into a
+          replay of the row that won.
         - `queue_full` — `max_pending` of this agent's asks are pending; `row`
           is None and nothing is written.
         - `created` — `row` is the new row.
@@ -325,9 +330,12 @@ class OperatorQueueOperations:
             ).scalar() or 0
             if pending >= max_pending:
                 return {"outcome": "queue_full", "row": None}
-            conn.execute(make_insert(operator_queue).values(**values))
+            inserted = bool(conn.execute(
+                make_insert(operator_queue).values(**values).on_conflict_do_nothing(
+                    index_elements=["agent_name", "request_id"])
+            ).rowcount)
             row = conn.execute(select(*self._SELECT_COLS).where(mine)).mappings().first()
-        return {"outcome": "created", "row": self._row_to_item(row)}
+        return {"outcome": "created" if inserted else "replayed", "row": self._row_to_item(row)}
 
     @staticmethod
     def _lock_agent_for_create(conn, agent_name: str) -> None:

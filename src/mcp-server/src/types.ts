@@ -563,6 +563,7 @@ export interface OperatorAskReceipt {
   status: "created" | "replayed";
   id: string;
   request_id: string;
+  raised_by: "agent" | "gate" | null;   // null: a replay of a row older than the column
   channel: string;
   type: string;
   to_role: string;

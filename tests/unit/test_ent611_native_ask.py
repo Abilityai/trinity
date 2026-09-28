@@ -135,6 +135,42 @@ class TestNativeCreate:
             t.join(30)
         assert sorted(outcomes) == ["created"] + ["queue_full"] * 5
 
+    def test_a_file_row_that_wins_the_race_turns_the_insert_into_a_replay(self, real_db, monkeypatch):
+        """The file poller does not take the per-agent lock, so on PostgreSQL a
+        file entry re-using the id can commit between the native replay check and
+        the native insert. The insert must then be a replay of that row, never a
+        unique-index error (the agent would get a 500). Staged on the native
+        transaction itself: the competing row lands after the replay check found
+        nothing, as the insert is built. The same interleaving on either backend."""
+        import db.operator_queue as dbq
+        from db.operator_queue import OperatorQueueOperations
+        from db.tables import operator_queue
+
+        agent = "agent-611b-lost-race"
+        ops = real_db._operator_queue_ops
+        real_lock, real_insert = OperatorQueueOperations._lock_agent_for_create, dbq.make_insert
+        held = {}
+
+        def lock_and_hold(conn, agent_name):
+            real_lock(conn, agent_name)
+            held["conn"], held["agent"] = conn, agent_name
+
+        def lose_then_insert(table):
+            # Built AFTER the replay check found nothing: the file row lands now.
+            conn = held.pop("conn", None)
+            if conn is not None:
+                _, values = ops._insert_values(
+                    held["agent"], {"id": "lost-1", "type": "question", "title": "t",
+                                      "question": "q", "context": {}}, channel="file", raised_by="agent")
+                conn.execute(real_insert(operator_queue).values(**values))
+            return real_insert(table)
+
+        monkeypatch.setattr(OperatorQueueOperations, "_lock_agent_for_create", staticmethod(lock_and_hold))
+        monkeypatch.setattr(dbq, "make_insert", lose_then_insert)
+        out = _create(real_db, agent, "lost-1")
+        assert out["outcome"] == "replayed"
+        assert (out["row"]["channel"], out["row"]["proposal"]) == ("file", None)  # the row that won
+
     def test_expires_at_is_stored_as_iso_z(self, real_db):
         row = _create(real_db, self.AGENT, "nc-exp", expires_at="2031-01-02T03:04:05+02:00")["row"]
         assert row["expires_at"] == "2031-01-02T01:04:05.000000Z"
@@ -226,9 +262,9 @@ def test_the_facade_signature_matches_the_operation(facade_name, ops_name):
 # ===========================================================================
 
 OWNER = "owner-611b@example.com"
-RECEIPT_KEYS = {"status", "id", "request_id", "channel", "type", "to_role", "resolved",
-                "ask_status", "disposition", "disposed_at", "expires_at", "wakes_on_ending",
-                "supersedes_expired"}
+RECEIPT_KEYS = {"status", "id", "request_id", "raised_by", "channel", "type", "to_role",
+                "resolved", "ask_status", "disposition", "disposed_at", "expires_at",
+                "wakes_on_ending", "supersedes_expired"}
 
 
 def _in(minutes):
@@ -266,6 +302,7 @@ def ask(real_db, monkeypatch):
     from services.rate_limiter import RateLimitResult
 
     audit, sent, state = [], [], {"owner": OWNER, "rate_ok": True, "opted_in": False}
+    real_owner_email = svc._owner_email
 
     class _Audit:
         async def log(self, **kw):
@@ -284,7 +321,8 @@ def ask(real_db, monkeypatch):
     monkeypatch.setattr(oqs.rate_limiter, "check",
                         lambda *a, **k: RateLimitResult(state["rate_ok"], 10, 0, 60))
     assignment_provider.clear_provider()
-    yield SimpleNamespace(svc=svc, audit=audit, sent=sent, state=state, db=real_db)
+    yield SimpleNamespace(svc=svc, audit=audit, sent=sent, state=state, db=real_db,
+                          real_owner_email=real_owner_email)
     assignment_provider.clear_provider()
 
 
@@ -372,6 +410,26 @@ class TestRaiseAsk:
         row = ask.db.get_operator_queue_item(r["id"])
         assert row["resolved_to"] == ["approver@example.com"]
         assert row["addressed_to_email"] == "approver@example.com" and r["resolved"] is True
+
+    def test_a_provider_that_says_nobody_fills_primary_sends_the_ask_to_the_operators(self, ask):
+        """ent#606: an ask to `primary` falls back to `operator` when no primary is
+        assigned; the owner stands in only when no provider answers at all. An
+        empty list IS an answer ("nobody fills it", resolve_role_people)."""
+        from services import assignment_provider
+
+        class _P:
+            def assignment_for(self, agent, trig):
+                return None
+
+            def people_for(self, agent, role):
+                return {"emails": []}
+
+        assignment_provider.register_provider(_P())
+        r = _raise(ask, self.AGENT, _body("ra-nobody"))
+        row = ask.db.get_operator_queue_item(r["id"])
+        assert (r["to_role"], r["resolved"]) == ("primary", False)
+        assert row["addressed_to_email"] is None and row["resolved_to"] is None
+        assert not (row["context"] or {}).get("workspace_session_id")   # nobody's Main chat
 
     def test_several_people_are_recorded_but_none_is_the_single_addressee(self, ask):
         from services import assignment_provider
@@ -563,6 +621,129 @@ class TestCapsAndAnnouncement:
         assert _raise(ask, "agent-611b-wake", _body("wk-1"))["wakes_on_ending"] is True
 
 
+def _seed_owner(db, agent, username, email, **owner_kw):
+    """A real user and ownership row on the per-process SQLite (idempotent)."""
+    from db_models import UserCreate
+    if not db.get_user_by_username(username):
+        db.create_user(UserCreate(username=username, role="user", email=email))
+    if not db.get_agent_owner(agent):
+        db.register_agent_owner(agent, username, **owner_kw)
+
+
+class TestTheRealOwnerLookup:
+    """Every other test stubs `_owner_email`; these run the default `primary`
+    addressing against real users and ownership rows (vybe's review on #3028)."""
+
+    def test_the_default_primary_is_the_owners_real_email(self, ask, monkeypatch):
+        monkeypatch.setattr(ask.svc, "_owner_email", ask.real_owner_email)
+        _seed_owner(ask.db, "agent-611b-own", "owner-611b-real", "Owner.611b@Example.com")
+        r = _raise(ask, "agent-611b-own", _body("own-1"))
+        row = ask.db.get_operator_queue_item(r["id"])
+        assert r["resolved"] is True
+        assert row["addressed_to_email"] == "owner.611b@example.com"
+        assert row["resolved_to"] == ["owner.611b@example.com"]
+
+    def test_an_owner_with_no_email_makes_it_an_operator_ask(self, ask, monkeypatch):
+        monkeypatch.setattr(ask.svc, "_owner_email", ask.real_owner_email)
+        _seed_owner(ask.db, "agent-611b-own-noemail", "owner-611b-noemail", None)
+        r = _raise(ask, "agent-611b-own-noemail", _body("own-2"))
+        row = ask.db.get_operator_queue_item(r["id"])
+        assert r["resolved"] is False and row["addressed_to_email"] is None
+
+
+class TestPlatformRaises:
+    """The gate (trinity-enterprise#164) raises through the same sink with
+    `raised_by="gate"`, under the platform-reserved `gate-` id prefix. An agent
+    therefore cannot pre-create a gate id (and have the gate's raise answered as
+    a replay of the AGENT's proposal), and a gate row never wakes the agent to
+    redo an action the gate resumes itself: `is_platform_minted` keys on the
+    reserved prefixes, and it gates both wakes."""
+    AGENT = "agent-611b-gate"
+
+    def _gate(self, ask, body):
+        return ask.svc.raise_ask(self.AGENT, body, raised_by="gate", channel="gate")
+
+    def test_an_agent_may_not_author_a_gate_id(self, ask):
+        for rid in ("gate-call-abc", "GATE-call-abc"):
+            with _Rejected(ask.svc, 422, "reserved_request_id"):
+                _raise(ask, self.AGENT, _body(rid))
+        assert ask.db.get_operator_queue_item_for_agent_by_request_id(self.AGENT, "gate-call-abc") is None
+
+    def test_the_gate_raises_under_its_own_prefix_and_the_receipt_says_so(self, ask):
+        r = self._gate(ask, _body("gate-call-abc", to="operator"))
+        assert (r["status"], r["raised_by"], r["channel"]) == ("created", "gate", "gate")
+        row = ask.db.get_operator_queue_item(r["id"])
+        assert (row["raised_by"], row["channel"]) == ("gate", "gate")
+        replay = self._gate(ask, _body("gate-call-abc", to="operator"))
+        assert (replay["status"], replay["raised_by"]) == ("replayed", "gate")
+
+    @pytest.mark.parametrize("rid", ["call-abc", "poison-gate-1", "xgate-call"])
+    def test_a_gate_raise_must_carry_the_gate_prefix(self, ask, rid):
+        with _Rejected(ask.svc, 422, "invalid_request_id"):
+            self._gate(ask, _body(rid, to="operator"))
+        assert ask.db.get_operator_queue_item_for_agent_by_request_id(self.AGENT, rid) is None
+
+    def test_an_agents_own_receipt_says_the_agent_raised_it(self, ask):
+        assert _raise(ask, self.AGENT, _body("ag-own"))["raised_by"] == "agent"
+
+    def test_a_gate_row_never_wakes_the_agent(self, ask, monkeypatch):
+        import services.operator_resume_service as ors
+        from services.operator_queue_service import is_platform_minted
+
+        ask.state["opted_in"] = True
+        gate = ask.db.get_operator_queue_item(self._gate(ask, _body("gate-call-wake", to="operator"))["id"])
+        mine = ask.db.get_operator_queue_item(_raise(ask, self.AGENT, _body("agent-call-wake"))["id"])
+        assert is_platform_minted(gate) and not is_platform_minted(mine)
+        woken = []
+        monkeypatch.setattr(ors, "spawn_resume_dispatch",
+                            lambda row, **kw: woken.append(row["request_id"]))
+        ask.svc._wake_filer(ask.svc.EndingEvent(
+            disposition=ask.svc.ANSWERED, rows=(gate, mine), actor_email="person@example.com"))
+        assert woken == ["agent-call-wake"]
+
+    @pytest.mark.parametrize("kw", [{"raised_by": "bot"}, {"channel": "file"}, {"channel": "api"}])
+    def test_an_unknown_raiser_or_channel_is_a_programming_error(self, ask, kw):
+        args = {"raised_by": "agent", "channel": "mcp", **kw}
+        with pytest.raises(ValueError):
+            ask.svc.raise_ask(self.AGENT, _body("pe-1"), **args)
+        assert ask.db.get_operator_queue_item_for_agent_by_request_id(self.AGENT, "pe-1") is None
+
+
+class TestTheRateCheckComesBeforeTheWork:
+    """Every call that is not a replay spends a rate token before the sink reads
+    the database (vybe's review on #3028): the re-ask scan reads up to 200 stored
+    proposals and the addressing reads the owner, so a refusal that came after
+    them could be repeated for free. A replay still costs nothing."""
+    AGENT = "agent-611b-order"
+
+    def test_a_rate_limited_call_reads_no_proposals_and_no_owner(self, ask, monkeypatch):
+        reads = []
+        monkeypatch.setattr(ask.db, "list_expired_operator_queue_proposals",
+                            lambda *a, **k: reads.append("scan") or [])
+        monkeypatch.setattr(ask.svc, "_owner_email", lambda agent: reads.append("owner") or OWNER)
+        ask.state["rate_ok"] = False
+        with _Rejected(ask.svc, 429, "rate_limited"):
+            _raise(ask, self.AGENT, _body("ord-1"))
+        assert reads == []
+
+    def test_a_refused_ask_still_spent_its_token(self, ask, monkeypatch):
+        import services.operator_queue_service as oqs
+        from services.rate_limiter import RateLimitResult
+
+        checks = []
+        monkeypatch.setattr(oqs.rate_limiter, "check",
+                            lambda key, *a, **k: checks.append(key) or RateLimitResult(True, 10, 0, 60))
+        with _Rejected(ask.svc, 422, "invalid_supersedes_expired"):
+            _raise(ask, self.AGENT, _body("ord-2", supersedes_expired="ord-nothing"))
+        assert f"operator_queue_create:{self.AGENT}" in checks
+
+    def test_a_replay_is_answered_even_when_the_rate_is_spent(self, ask):
+        first = _raise(ask, self.AGENT, _body("ord-3"))
+        ask.state["rate_ok"] = False
+        again = _raise(ask, self.AGENT, _body("ord-3"))
+        assert (again["status"], again["id"]) == ("replayed", first["id"])
+
+
 # ===========================================================================
 # 4. The route — POST /api/agents/{name}/operator-queue, the agent as itself
 # ===========================================================================
@@ -710,6 +891,24 @@ class TestRaiseRoute:
         # Nothing agent-authored: only the platform's own Workspace thread key.
         assert set(row["context"]) <= {"workspace_session_id"}
 
+    def test_the_readback_names_the_predecessor_by_request_id_like_the_receipt(self, route):
+        """The receipt's `supersedes_expired` is the predecessor's request_id (the
+        id the agent chose); the row stores its uuid. `get_my_ask` must say the
+        same thing the receipt says (vybe's review on #3028)."""
+        from sqlalchemy import update
+        from db.engine import get_engine
+        from db.tables import operator_queue
+
+        old = self._post(route, _body("rt-old", proposal={"pay": 9})).json()
+        with get_engine().begin() as conn:
+            conn.execute(update(operator_queue).where(operator_queue.c.id == old["id"])
+                         .values(status="expired", disposition="expired", disposed_by="timeout",
+                                 disposed_at="2026-09-25T10:00:00Z"))
+        receipt = self._post(route, _body("rt-new", proposal={"pay": 9}, supersedes_expired="rt-old")).json()
+        got = route.client.get(f"/api/agents/{self.AGENT}/operator-queue/rt-new")
+        assert got.status_code == 200, got.text
+        assert receipt["supersedes_expired"] == got.json()["supersedes_expired"] == "rt-old"
+
     def test_an_unknown_field_is_refused(self, route):
         res = self._post(route, {**_body("rt-extra"), "channel": "file"})
         assert res.status_code == 422
@@ -736,6 +935,59 @@ class TestRaiseRoute:
             actor_user=row.get("actor_user"), actor_agent_name=row["actor_agent_name"],
             mcp_scope=row["mcp_scope"], mcp_key_id=row["mcp_key_id"],
         ) == ("agent", self.AGENT, None)
+
+
+class TestRaiseRouteWithRealKeys:
+    """The route tests above replace `get_current_user`. These present a real
+    minted agent key to an app with no overrides, so key resolution, the
+    self-acting identity check and the ephemeral fence
+    (`dependencies._enforce_ephemeral_key_fence`) run as in production (vybe's
+    review on #3028)."""
+    OWNER_USER = "owner-611b-keys"
+    AGENT = "agent-611b-keys"
+    SIBLING = "agent-611b-keys-sibling"
+    GHOST = "agent-611b-ghost"
+
+    @pytest.fixture
+    def keys(self, ask, monkeypatch):
+        from types import SimpleNamespace
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+        from routers import operator_queue as r
+
+        monkeypatch.setattr(r, "_websocket_manager", None)
+        for agent, extra in ((self.AGENT, {}), (self.SIBLING, {}), (self.GHOST, {"is_ephemeral": True})):
+            _seed_owner(ask.db, agent, self.OWNER_USER, "keys-611b@example.com", **extra)
+        app = FastAPI()
+        app.include_router(r.router)
+        app.include_router(r.agent_router)
+
+        def bearer(agent):
+            key = ask.db.create_agent_mcp_api_key(agent, self.OWNER_USER)
+            return {"Authorization": f"Bearer {key.api_key}"}
+
+        return SimpleNamespace(client=TestClient(app), bearer=bearer, db=ask.db)
+
+    def _post(self, keys, agent, as_agent, rid):
+        return keys.client.post(f"/api/agents/{agent}/operator-queue", json=_body(rid),
+                                headers=keys.bearer(as_agent))
+
+    def test_a_real_agent_key_raises_its_own_ask(self, keys):
+        res = self._post(keys, self.AGENT, self.AGENT, "rk-own")
+        assert res.status_code == 201, res.text
+        row = keys.db.get_operator_queue_item(res.json()["id"])
+        assert (row["agent_name"], row["raised_by"], row["channel"]) == (self.AGENT, "agent", "mcp")
+
+    def test_a_real_key_may_not_raise_for_another_agent(self, keys):
+        res = self._post(keys, self.AGENT, self.SIBLING, "rk-sib")
+        assert res.status_code == 403 and res.json()["detail"]["code"] == "agent_identity_required"
+        assert keys.db.get_operator_queue_item_for_agent_by_request_id(self.AGENT, "rk-sib") is None
+
+    def test_an_ephemeral_agents_own_key_is_fenced_off_the_route(self, keys):
+        res = self._post(keys, self.GHOST, self.GHOST, "rk-ghost")
+        assert res.status_code == 403, res.text
+        assert "Ephemeral agent keys" in res.json()["detail"]
+        assert keys.db.get_operator_queue_item_for_agent_by_request_id(self.GHOST, "rk-ghost") is None
 
 
 # ===========================================================================

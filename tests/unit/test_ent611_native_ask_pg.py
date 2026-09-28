@@ -123,3 +123,41 @@ def test_the_file_create_reports_whether_it_inserted(db_backend):
     assert (first[1], again[1]) == (True, False)
     assert again[0] == first[0]
     assert _rows() == 1
+
+
+def test_a_file_row_that_wins_the_race_turns_the_native_insert_into_a_replay(db_backend, monkeypatch):
+    """The file poller does not take the per-agent lock. On PostgreSQL a file
+    entry re-using the id can commit between the native replay check and the
+    native insert; the insert must then be a replay of that row, never a
+    unique-index error (the agent would get a 500). Staged on the native
+    transaction itself: the competing row lands after the replay check found
+    nothing, as the insert is built — the same interleaving on both backends
+    (Andrii's review on #3028)."""
+    import db.operator_queue as dbq
+    from db.operator_queue import OperatorQueueOperations
+    from db.tables import operator_queue
+
+    ops = _ops()
+    real_lock, real_insert = OperatorQueueOperations._lock_agent_for_create, dbq.make_insert
+    held = {}
+
+    def lock_and_hold(conn, agent_name):
+        real_lock(conn, agent_name)
+        held["conn"], held["agent"] = conn, agent_name
+
+    def lose_then_insert(table):
+        # Built AFTER the replay check found nothing: the file row lands now.
+        conn = held.pop("conn", None)
+        if conn is not None:
+            _, values = ops._insert_values(
+                held["agent"], {"id": "raced", "type": "question", "title": "t",
+                                  "question": "q", "context": {}}, channel="file", raised_by="agent")
+            conn.execute(real_insert(operator_queue).values(**values))
+        return real_insert(table)
+
+    monkeypatch.setattr(OperatorQueueOperations, "_lock_agent_for_create", staticmethod(lock_and_hold))
+    monkeypatch.setattr(dbq, "make_insert", lose_then_insert)
+    out = _create(ops, "raced", cap=25)
+    assert out["outcome"] == "replayed"
+    assert out["row"]["channel"] == "file"   # the row that won, untouched
+    assert _rows() == 1

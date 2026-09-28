@@ -471,4 +471,8 @@ async def get_my_ask(
     item = db.get_operator_queue_item_for_agent_by_request_id(name, request_id)
     if not item:
         raise HTTPException(status_code=404, detail="Ask not found")
-    return {key: item.get(key) for key in _READBACK_FIELDS}
+    readback = {key: item.get(key) for key in _READBACK_FIELDS}
+    # The row stores the predecessor's uuid; the agent knows its asks by the
+    # request_id it chose, and the receipt names the predecessor that way too.
+    readback["supersedes_expired"] = ask_service.request_id_of(item.get("supersedes_expired"))
+    return readback

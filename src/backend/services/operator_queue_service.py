@@ -161,6 +161,15 @@ _VALID_PRIORITIES = {"critical", "high", "medium", "low"}
 # exactly that the emitter is not in this repo.)
 ROLE_DRIFT_ALERT_PREFIX = "role-drift-"
 
+# trinity-enterprise#611 / #164: the id prefix of an ask the PLATFORM raises
+# through `ask_service.raise_ask` (the approval gate, `raised_by="gate"`, which
+# must use it). Reserved below like the alert prefixes. An agent that could
+# author one would pre-create the gate's id and have the gate's raise answered
+# as a replay of the AGENT's proposal; and since `is_platform_minted` keys on the
+# tuple, the reservation is also what keeps a gate row from waking the agent to
+# redo an action the gate resumes itself.
+GATE_ASK_ID_PREFIX = "gate-"
+
 # Platform-reserved id prefixes an agent must NOT author. If it could, it would
 # pre-create — and via create_item's on_conflict_do_nothing, silently suppress —
 # its own flood alarm or the #1402 poison alert (C2). Verified against source
@@ -206,6 +215,7 @@ _RESERVED_ID_PREFIXES = (
                            # the role file lives in the AGENT'S OWN workspace, so
                            # an unreserved prefix would let it pre-create the id
                            # of the alert about its own configuration
+    GATE_ASK_ID_PREFIX,    # platform-raised asks (trinity-enterprise#611 / #164)
 )
 
 # Agent ids must be id-shaped: a create PK can't be safely rewritten, so a
