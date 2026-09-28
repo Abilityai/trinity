@@ -288,6 +288,37 @@ class TestServiceClaim:
 
         assert pcs.claim_next_task("alpha", "w1") is None
 
+    def test_every_claim_attempt_stamps_the_worker_poll(self, seed_agent, monkeypatch):
+        """#2840: canary B-02 tells a dead pool from an idle one by this stamp,
+        so an EMPTY claim must write it too."""
+        seed_agent("alpha")
+        from services import pull_coordination_service as pcs
+        from services import slot_service
+
+        writes = {}
+
+        class _R:
+            def set(self, key, value, ex=None):
+                writes[key] = (value, ex)
+
+        monkeypatch.setattr(slot_service, "get_slot_service", lambda: SimpleNamespace(redis=_R()))
+        assert pcs.claim_next_task("alpha", "w1") is None
+        value, ttl = writes["agent:pull_poll:alpha"]
+        assert float(value) > 0 and ttl == 86400
+
+    def test_poll_stamp_failure_never_blocks_a_claim(self, seed_agent, enqueue, monkeypatch):
+        seed_agent("alpha")
+        eid = enqueue("alpha", message="m")
+        from services import pull_coordination_service as pcs
+        from services import slot_service
+
+        def _boom():
+            raise RuntimeError("redis down")
+
+        monkeypatch.setattr(slot_service, "get_slot_service", _boom)
+        claim = pcs.claim_next_task("alpha", "w1")
+        assert claim is not None and claim["execution_id"] == eid
+
 
 class TestServiceResult:
     def _claim(self, agent="alpha"):

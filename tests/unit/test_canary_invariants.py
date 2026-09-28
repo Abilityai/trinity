@@ -603,10 +603,14 @@ def fake_docker(monkeypatch):
     """
 
     class _FakeContainer:
-        def __init__(self, name, exec_output="0", exec_raises=None):
+        def __init__(self, name, exec_output="0", exec_raises=None, attrs=None):
             self.name = name
             self._exec_output = exec_output
             self._exec_raises = exec_raises
+            # Only set when given: several tests rely on a container with no
+            # `attrs` at all (the sparse-list shape) degrading cleanly.
+            if attrs is not None:
+                self.attrs = attrs
 
         def exec_run(self, cmd):
             if self._exec_raises is not None:
@@ -1454,7 +1458,7 @@ class TestRunner:
             "G-03", "G-04",
             "H-01",
             "L-03",
-            "B-01", "B-02",
+            "B-01", "B-02", "B-08",
             "R-01",
         }
         assert results["S-01"] == []
@@ -2226,6 +2230,190 @@ class TestInvariantS03:
 # ---------------------------------------------------------------------------
 # B-02 — no queued without slots-full
 # ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# B-02 pull arm (#2840) — is a pilot's queued work being picked up?
+# ---------------------------------------------------------------------------
+
+
+_B02_NOW = "2026-09-09T06:07:29Z"
+
+
+def _b02_iso(seconds_before_now):
+    from datetime import datetime, timedelta, timezone
+    base = datetime(2026, 9, 9, 6, 7, 29, tzinfo=timezone.utc)
+    return (base - timedelta(seconds=seconds_before_now)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _b02_unix(seconds_before_now):
+    from datetime import datetime, timezone
+    base = datetime(2026, 9, 9, 6, 7, 29, tzinfo=timezone.utc).timestamp()
+    return base - seconds_before_now
+
+
+class TestInvariantB02Pull:
+    """The pull arm judges a pilot by its own worker pool, never by the
+    backend drain tick or the Redis slot ZSET."""
+
+    @staticmethod
+    def _snap(
+        *,
+        queued_ages=(),
+        leases=(),
+        pull_mode=True,
+        pool_size=3,
+        running=True,
+        env_known=True,
+        docker_listed=True,
+        last_poll_age=5,
+        started_age=3600,
+        drain_tick_at=None,
+        sources_unavailable=(),
+        queued_meta_override=None,
+    ):
+        """`queued_ages` / `leases` are seconds before now (negative = future)."""
+        from canary.snapshot import Snapshot, AgentSnapshot
+        queued_ids = {f"q{i}" for i in range(len(queued_ages))}
+        queued_meta = {
+            f"q{i}": {"queued_at": _b02_iso(age), "backlog_metadata": "{}"}
+            for i, age in enumerate(queued_ages)
+        }
+        if queued_meta_override is not None:
+            queued_meta = queued_meta_override
+        lease_map = {f"r{i}": _b02_iso(age) for i, age in enumerate(leases)}
+        env = None
+        if docker_listed:
+            env = {}
+            if running:
+                env["p1"] = (
+                    {"pull_mode": pull_mode, "pool_size": pool_size} if env_known else None
+                )
+        return Snapshot(
+            snapshot_time=_B02_NOW,
+            drain_tick_at=drain_tick_at,
+            docker_agent_names={"p1"} if (docker_listed and running) else set(),
+            zombie_container_started_at=(
+                {"p1": _b02_iso(started_age)} if started_age is not None else {}
+            ),
+            pull_container_env=env,
+            sources_unavailable=list(sources_unavailable),
+            agents=[
+                AgentSnapshot(
+                    name="p1",
+                    is_system=False,
+                    max_parallel=3,
+                    execution_timeout_seconds=900,
+                    is_pull_pilot=True,
+                    queued_exec_ids=queued_ids,
+                    queued_meta=queued_meta,
+                    running_exec_ids=set(lease_map),
+                    running_lease_expires_at=lease_map,
+                    last_worker_poll_at=(
+                        _b02_unix(last_poll_age) if last_poll_age is not None else None
+                    ),
+                )
+            ],
+        )
+
+    @staticmethod
+    def _check(snap):
+        from canary.invariants import b02_no_queued_without_slots_full as b02
+        return b02.check(snap)
+
+    def test_freshly_queued_row_on_idle_pool_does_not_fire(self):
+        """The eu2 2026-09-09 case: a row caught between enqueue and claim,
+        free slots, stale drain tick. The push rule fired critical here."""
+        assert self._check(self._snap(queued_ages=[10], drain_tick_at=0.0)) == []
+
+    def test_aged_row_with_idle_worker_fires_critical(self):
+        v = self._check(self._snap(queued_ages=[400, 30], leases=[-600]))
+        assert len(v) == 1
+        obs = v[0].observed_state
+        assert v[0].severity == "critical"
+        assert obs["mode"] == "pull"
+        assert obs["kind"] == "queued_not_claimed"
+        assert obs["oldest_queued_age_seconds"] == 400
+        assert (obs["pool_size"], obs["busy_workers"], obs["idle_workers"]) == (3, 1, 2)
+
+    def test_aged_row_with_full_pool_does_not_fire(self):
+        """Every worker mid-turn: queued is the correct state."""
+        assert self._check(self._snap(queued_ages=[900], leases=[-60, -60, -60])) == []
+
+    def test_expired_lease_counts_as_idle(self):
+        """A running row past its lease has no live worker (#2846 clamp), so a
+        dead pool must not read as full."""
+        v = self._check(self._snap(queued_ages=[400], leases=[-60, -60, 30]))
+        assert [x.observed_state["kind"] for x in v] == ["queued_not_claimed"]
+        assert v[0].observed_state["idle_workers"] == 1
+
+    def test_pool_size_comes_from_the_container_not_the_database(self):
+        """Database cap 3, container pool 1 and busy: full, even though the
+        database cap would say two workers are free (#3039)."""
+        assert self._check(self._snap(queued_ages=[900], leases=[-60], pool_size=1)) == []
+
+    def test_empty_queue_is_never_b02s_business(self):
+        """Worker health with nothing waiting belongs to B-08, so a long-broken
+        pilot cannot hold B-02 red and mute new push stalls."""
+        assert self._check(self._snap(queued_ages=[], pull_mode=False)) == []
+        assert self._check(self._snap(queued_ages=[], last_poll_age=900)) == []
+
+    def test_aged_row_on_container_without_pull_mode_is_critical(self):
+        v = self._check(self._snap(queued_ages=[400], pull_mode=False))
+        assert [(x.severity, x.observed_state["kind"]) for x in v] == [("critical", "queued_not_claimed")]
+        assert v[0].observed_state["container_pull_mode"] is False
+
+    def test_stopped_pilot_with_aged_row_is_major(self):
+        v = self._check(self._snap(queued_ages=[400], running=False))
+        assert [(x.severity, x.observed_state["kind"]) for x in v] == [("major", "pilot_stopped")]
+
+    def test_stopped_pilot_with_fresh_or_no_row_does_not_fire(self):
+        assert self._check(self._snap(queued_ages=[30], running=False)) == []
+        assert self._check(self._snap(queued_ages=[], running=False)) == []
+
+    def test_docker_unlisted_skips(self):
+        assert self._check(self._snap(queued_ages=[900], docker_listed=False)) == []
+
+    def test_unreadable_container_env_skips(self):
+        assert self._check(self._snap(queued_ages=[900], env_known=False)) == []
+
+    def test_redis_outage_still_evaluates_the_pull_arm(self):
+        v = self._check(self._snap(queued_ages=[400], sources_unavailable=["redis: down"]))
+        assert [x.observed_state["kind"] for x in v] == ["queued_not_claimed"]
+
+    def test_missing_null_or_garbage_queued_at_does_not_fire(self):
+        for meta in ({}, {"q0": {"queued_at": None}}, {"q0": {"queued_at": "not-a-date"}}):
+            snap = self._snap(queued_ages=[400], queued_meta_override=meta)
+            assert self._check(snap) == [], meta
+
+    def test_future_dated_queued_at_does_not_fire(self):
+        assert self._check(self._snap(queued_ages=[-600])) == []
+
+    def test_naive_and_z_timestamps_both_parse(self):
+        meta = {
+            "q0": {"queued_at": "2026-09-09T06:00:00"},  # naive = UTC, 449s old
+            "q1": {"queued_at": "2026-09-09T06:07:00Z"},
+        }
+        v = self._check(self._snap(queued_ages=[0, 0], queued_meta_override=meta))
+        assert v[0].observed_state["oldest_queued_age_seconds"] == 449
+
+    def test_push_agents_are_untouched_by_the_pilot_flag(self):
+        """A non-pilot beside a pilot keeps the push rule exactly."""
+        import time
+        from canary.snapshot import AgentSnapshot
+        snap = self._snap(queued_ages=[10])
+        snap.drain_tick_at = time.time() - 600
+        snap.agents.append(
+            AgentSnapshot(
+                name="a1", is_system=False, max_parallel=3,
+                execution_timeout_seconds=900, queued_exec_ids={"x"},
+            )
+        )
+        v = self._check(snap)
+        assert [(x.observed_state["agent_name"], x.observed_state["mode"]) for x in v] == [
+            ("a1", "push")
+        ]
+
 
 
 class TestInvariantB02:
@@ -4578,3 +4766,147 @@ class TestInvariantH01EndToEnd:
             snap = canary.collect_snapshot()
             assert snap.known_agents == {"a1"}
             assert canary.run_invariants(snap)["H-01"] == []
+
+
+
+
+class TestInvariantB08:
+    """Pull workers alive: the pool's health while nothing is waiting."""
+
+    _snap = staticmethod(TestInvariantB02Pull._snap)
+
+    @staticmethod
+    def _check(snap):
+        from canary.invariants import b08_pull_workers_alive as b08
+        return b08.check(snap)
+
+    def test_container_without_pull_mode_fires_workers_missing(self):
+        v = self._check(self._snap(queued_ages=[], pull_mode=False))
+        assert [(x.severity, x.observed_state["kind"]) for x in v] == [("major", "workers_missing")]
+        assert v[0].observed_state["pool_size"] == 0
+
+    def test_healthy_idle_pool_is_green(self):
+        assert self._check(self._snap()) == []
+
+    def test_stopped_or_unseen_container_is_not_b08s_business(self):
+        assert self._check(self._snap(running=False)) == []
+        assert self._check(self._snap(docker_listed=False)) == []
+        assert self._check(self._snap(env_known=False)) == []
+
+    def test_non_pilots_are_ignored(self):
+        snap = self._snap(pull_mode=False)
+        snap.agents[0].is_pull_pilot = False
+        assert self._check(snap) == []
+
+    def test_silent_idle_pool_fires_major(self):
+        v = self._check(self._snap(last_poll_age=900))
+        assert [(x.severity, x.observed_state["kind"]) for x in v] == [("major", "workers_silent")]
+        assert v[0].observed_state["poll_silence_seconds"] == 900
+
+    def test_recent_poll_is_healthy(self):
+        assert self._check(self._snap(last_poll_age=20)) == []
+
+    def test_silence_is_measured_from_container_start(self):
+        """No poll recorded yet, container started 60s ago: still booting."""
+        assert self._check(self._snap(last_poll_age=None, started_age=60)) == []
+
+    def test_never_polled_long_running_container_fires(self):
+        v = self._check(self._snap(last_poll_age=None, started_age=3600))
+        assert [x.observed_state["kind"] for x in v] == ["workers_silent"]
+
+    def test_old_poll_from_previous_incarnation_is_ignored(self):
+        """A recycled name's stale key predates the new container."""
+        assert self._check(self._snap(last_poll_age=86000, started_age=30)) == []
+
+    def test_busy_pool_does_not_fire_silence(self):
+        """Busy workers do not poll; silence says nothing when the pool is full."""
+        assert self._check(self._snap(last_poll_age=900, leases=[-60, -60, -60])) == []
+
+    def test_unreadable_poll_never_fires_silence(self):
+        """Redis down, or this pilot's poll read failed: "unknown" must not be
+        read as "never polled" (measured from the container start)."""
+        for src in ("redis: down", "pull_poll[p1]: timeout"):
+            snap = self._snap(last_poll_age=None, sources_unavailable=[src])
+            assert self._check(snap) == [], src
+
+    def test_other_pilots_poll_failure_does_not_blind_this_one(self):
+        snap = self._snap(last_poll_age=900, sources_unavailable=["pull_poll[p9]: x"])
+        assert [x.observed_state["kind"] for x in self._check(snap)] == ["workers_silent"]
+
+    def test_poll_failure_label_does_not_blind_redis_invariants(self):
+        """S-01/S-02/S-03 and the push arm skip on `redis*` labels; a pilot's
+        poll read failure must not trip that gate fleet-wide."""
+        from canary.snapshot import PULL_POLL_UNAVAILABLE_PREFIX
+        assert not PULL_POLL_UNAVAILABLE_PREFIX.startswith("redis")
+
+
+# ---------------------------------------------------------------------------
+# B-02 pull arm (#2840) — end to end through collect_snapshot
+# ---------------------------------------------------------------------------
+
+
+class TestInvariantB02PullEndToEnd:
+    """Drives the real collectors (#1446 lesson: a synthetic-only invariant is
+    untested where it runs): pilot status from `PULL_MODE_PILOT_AGENTS`, pool
+    settings from the container env, last poll from Redis."""
+
+    @staticmethod
+    def _iso_ago(seconds):
+        from datetime import datetime, timedelta, timezone
+        return (datetime.now(timezone.utc) - timedelta(seconds=seconds)).strftime(
+            "%Y-%m-%dT%H:%M:%SZ"
+        )
+
+    def _container(self, fake_docker, name, env):
+        fake_docker.add_container(
+            f"agent-{name}",
+            attrs={
+                "Config": {"Env": env},
+                "State": {"StartedAt": self._iso_ago(3600)},
+            },
+        )
+
+    def test_stuck_pilot_row_fires_and_env_secrets_are_not_kept(
+        self, canary_db, reload_canary, fake_docker, fake_redis, monkeypatch
+    ):
+        import time
+        monkeypatch.setenv("PULL_MODE_PILOT_AGENTS", "p1")
+        _add_agent(canary_db, "p1")
+        _add_agent(canary_db, "a1")
+        _add_execution(canary_db, "q-old", "p1", "queued", queued_at=self._iso_ago(600))
+        self._container(fake_docker, "p1", [
+            "TRINITY_PULL_MODE=true",
+            "TRINITY_MAX_PARALLEL_TASKS=2",
+            "ANTHROPIC_API_KEY=LEAKCANARY-p1",
+        ])
+        self._container(fake_docker, "a1", ["ANTHROPIC_API_KEY=LEAKCANARY-a1"])
+        fake_redis.set("agent:pull_poll:p1", str(time.time() - 5))
+
+        snap = reload_canary["canary"].collect_snapshot()
+
+        by_name = {a.name: a for a in snap.agents}
+        assert by_name["p1"].is_pull_pilot is True
+        assert by_name["a1"].is_pull_pilot is False
+        assert by_name["p1"].last_worker_poll_at is not None
+        assert by_name["a1"].last_worker_poll_at is None
+        assert snap.pull_container_env == {
+            "p1": {"pull_mode": True, "pool_size": 2},
+            "a1": {"pull_mode": False, "pool_size": 3},
+        }
+        assert "LEAKCANARY" not in repr(snap)
+
+        from canary.invariants import b02_no_queued_without_slots_full as b02
+        v = [x for x in b02.check(snap) if x.observed_state["agent_name"] == "p1"]
+        assert [(x.severity, x.observed_state["kind"]) for x in v] == [
+            ("critical", "queued_not_claimed")
+        ]
+        from canary.invariants import b08_pull_workers_alive as b08
+        assert b08.check(snap) == [], "the pool polled 5s ago: alive"
+
+    def test_no_pilots_leaves_every_agent_on_the_push_arm(
+        self, canary_db, reload_canary, fake_docker, monkeypatch
+    ):
+        monkeypatch.delenv("PULL_MODE_PILOT_AGENTS", raising=False)
+        _add_agent(canary_db, "a1")
+        snap = reload_canary["canary"].collect_snapshot()
+        assert [a.is_pull_pilot for a in snap.agents] == [False]

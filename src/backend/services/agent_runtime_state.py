@@ -79,6 +79,13 @@ CLEARED_KEYSPACES: Tuple[str, ...] = (
 # test stays green while keeping every omission a conscious decision rather than
 # an oversight.
 EXEMPT_KEYSPACES: Dict[str, str] = {
+    "agent:pull_poll:": (
+        "Liveness timestamp of the pull worker pool (#2840), TTL-bounded. Canary "
+        "B-02 measures silence from the later of this value and the container's "
+        "own start time, so a value left by a previous incarnation of the name "
+        "is always older than the new container and cannot fire; clearing it on "
+        "a start would only discard a real signal."
+    ),
     "agent:queue:": (
         "Overflow backlog. Draining it is a business operation with side effects "
         "(marks executions cancelled, writes the operator queue), so it runs via "

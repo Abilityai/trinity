@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from dataclasses import dataclass
 from typing import Any, Dict, Optional, Tuple
 
@@ -182,6 +183,25 @@ _TASK_OVERRIDE_KEYS = (
 # ---------------------------------------------------------------------------
 
 
+def record_worker_poll(agent_name: str) -> None:
+    """Stamp the agent's last claim attempt for canary B-02 (#2840).
+
+    Called on every claim attempt, empty or not: an idle worker polls at least
+    every 15s, so a stale stamp on an agent with idle workers means the pool
+    is dead or cannot reach the backend. Best-effort — a Redis failure must
+    never block a claim.
+    """
+    try:
+        from services.pull_pilot import PULL_POLL_KEY_PREFIX, PULL_POLL_TTL_SECONDS
+        from services.slot_service import get_slot_service
+
+        get_slot_service().redis.set(
+            f"{PULL_POLL_KEY_PREFIX}{agent_name}", time.time(), ex=PULL_POLL_TTL_SECONDS
+        )
+    except Exception:  # noqa: BLE001
+        logger.debug("[#2840] could not record pull poll for %s", agent_name, exc_info=True)
+
+
 def claim_next_task(agent_name: str, worker_id: str) -> Optional[Dict[str, Any]]:
     """Atomically claim the oldest queued task for ``agent_name`` on behalf of
     ``worker_id``. Returns the §3.1 claim response, or None when the queue is
@@ -196,6 +216,7 @@ def claim_next_task(agent_name: str, worker_id: str) -> Optional[Dict[str, Any]]
     from being re-delivered while it still runs — the job the (never built)
     lease-renewal heartbeat was specified for.
     """
+    record_worker_poll(agent_name)
     cap = int(db.get_execution_timeout(agent_name))
     row = db.claim_next_queued(agent_name, worker_id=worker_id, lease_seconds=cap + SLOT_TTL_BUFFER)
     if not row:

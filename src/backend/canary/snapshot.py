@@ -356,6 +356,16 @@ class AgentSnapshot:
     # false-fire. None ⇒ fall back to `max_parallel` (test constructors that
     # predate the ceiling).
     effective_max_parallel: Optional[int] = None
+    # B-02 pull arm (#2840): the agent is in `PULL_MODE_PILOT_AGENTS`, read via
+    # `services.pull_pilot` (a stdlib leaf) in the backend process — the same
+    # process and env var that decide dispatch, so the canary and dispatch
+    # can never disagree about which agents are pilots.
+    is_pull_pilot: bool = False
+    # B-02 pull arm (#2840): unix seconds of this agent's last worker claim
+    # attempt (`agent:pull_poll:{name}`, stamped by
+    # `pull_coordination_service.claim_next_task`). None when never written,
+    # expired, unread (non-pilot) or unreadable (Redis down).
+    last_worker_poll_at: Optional[float] = None
 
 
 @dataclass
@@ -425,6 +435,14 @@ class Snapshot:
     # rather than on the #407 leak. An agent present in `zombie_counts` is
     # always present here (both are written together).
     zombie_pids: Dict[str, Set[int]] = field(default_factory=dict)
+    # B-02 pull arm (#2840): per RUNNING agent container, the two pull settings
+    # the container was created with — `{"pull_mode": bool, "pool_size": int}`
+    # from `TRINITY_PULL_MODE` / `TRINITY_MAX_PARALLEL_TASKS`. The container env
+    # also carries credentials, so the collector keeps exactly these two keys
+    # and nothing else. `None` means Docker could not be listed this cycle, and
+    # a running agent mapped to `None` had unreadable attrs; B-02's pull arm
+    # skips both.
+    pull_container_env: Optional[Dict[str, Dict[str, Any]]] = None
     # E-06 input: enabled, non-deleted schedules → {schedule_id, agent_name,
     # next_run_at}. The check flags any whose next_run_at is more than the
     # misfire grace behind the snapshot time (a stale projection the scheduler
@@ -458,6 +476,10 @@ class Snapshot:
 # Collector names recorded in `Snapshot.collectors_ran`. These deliberately
 # match the `sources_unavailable` label prefixes so a consumer can pair
 # "did it run?" with "did it fail?" using one string.
+# B-02 pull arm (#2840): `sources_unavailable` label for a failed
+# last-poll read, `pull_poll[<agent>]: <error>`.
+PULL_POLL_UNAVAILABLE_PREFIX = "pull_poll["
+
 COLLECTOR_DOCKER = "docker"
 COLLECTOR_REDIS = "redis"
 
@@ -592,6 +614,38 @@ def _collect_executions(agent_name: str) -> Dict[str, Any]:
     return out
 
 
+# Mirrors `pull_worker._pool_size()` in the agent image: default 3, clamped
+# to [1, 32]. Duplicated rather than imported — the agent server ships as its
+# own image (Invariant #5).
+_PULL_POOL_DEFAULT = 3
+_PULL_POOL_MAX = 32
+
+
+def _pull_env_of(container: Any) -> Optional[Dict[str, Any]]:
+    """`{"pull_mode", "pool_size"}` from a container's `Config.Env`.
+
+    The env list carries every injected credential, so this reads the two
+    pull keys and returns nothing else — no other value may leave this
+    function. Unreadable attrs return None ("not observed"), never a guess.
+    """
+    wanted: Dict[str, str] = {}
+    try:
+        attrs = container.attrs or {}
+        for item in (attrs.get("Config") or {}).get("Env") or []:
+            key, _, value = str(item).partition("=")
+            if key in ("TRINITY_PULL_MODE", "TRINITY_MAX_PARALLEL_TASKS"):
+                wanted[key] = value
+    except Exception:  # noqa: BLE001 — attrs absent or shaped differently
+        return None
+    pull_mode = wanted.get("TRINITY_PULL_MODE", "false").strip().lower() == "true"
+    try:
+        raw = wanted.get("TRINITY_MAX_PARALLEL_TASKS")
+        size = int(raw) if raw else _PULL_POOL_DEFAULT
+    except ValueError:
+        size = _PULL_POOL_DEFAULT
+    return {"pull_mode": pull_mode, "pool_size": max(1, min(size, _PULL_POOL_MAX))}
+
+
 def _collect_zombie_counts() -> Dict[str, Any]:
     """Per-running-agent zombie `claude` PIDs via Docker exec.
 
@@ -690,6 +744,7 @@ def _collect_zombie_counts() -> Dict[str, Any]:
         "counts": {},
         "names": set(),
         "started_at": {},
+        "pull_env": None,
         "unavailable": [],
     }
     try:
@@ -708,6 +763,7 @@ def _collect_zombie_counts() -> Dict[str, Any]:
     except Exception as exc:
         out["unavailable"].append(f"docker.list: {exc}")
         return out
+    out["pull_env"] = {}
 
     # Field-wise match on STAT and comm; prints one PID per line. See the
     # docstring for why this replaced `grep '^Z.*claude' | wc -l`.
@@ -724,6 +780,9 @@ def _collect_zombie_counts() -> Dict[str, Any]:
         # Record presence FIRST: H-01's evidence must not depend on the exec
         # below succeeding (#1813).
         out["names"].add(agent_name)
+        # B-02 pull arm (#2840): read the pool settings the container was
+        # created with. Same attrs, no extra Docker call.
+        out["pull_env"][agent_name] = _pull_env_of(container)
         # Read BEFORE the exec and outside its try: the PID-namespace
         # generation is a property of the container, not of the exec, and it
         # must still be recorded when a later per-container failure occurs.
@@ -767,6 +826,27 @@ def _collect_zombie_counts() -> Dict[str, Any]:
             out["unavailable"].append(f"docker.exec[{agent_name}]: {exc}")
 
     return out
+
+
+def _is_pull_pilot(agent_name: str) -> bool:
+    """B-02 pull arm (#2840). `services.pull_pilot` is stdlib-only by
+    construction, so importing it does not pull `database` into the canary's
+    import graph. Fails closed to the push arm."""
+    try:
+        from services.pull_pilot import is_pull_pilot_agent
+
+        return bool(is_pull_pilot_agent(agent_name))
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _collect_last_worker_poll(agent_name: str) -> Optional[float]:
+    """Unix seconds of the agent's last worker claim attempt, or None."""
+    from services.pull_pilot import PULL_POLL_KEY_PREFIX
+    from services.slot_service import get_slot_service
+
+    raw = get_slot_service().redis.get(f"{PULL_POLL_KEY_PREFIX}{agent_name}")
+    return float(raw) if raw is not None else None
 
 
 def _collect_queued_count_via_service(agent_name: str) -> Optional[int]:
@@ -1294,6 +1374,7 @@ def collect_snapshot() -> Snapshot:
         snap.zombie_pids = z.get("pids", {})
         snap.zombie_container_started_at = z.get("started_at", {})
         snap.docker_agent_names = z["names"]
+        snap.pull_container_env = z.get("pull_env")
         snap.sources_unavailable.extend(z["unavailable"])
     except Exception as exc:
         logger.exception("canary snapshot: zombie collector raised")
@@ -1394,6 +1475,19 @@ def collect_snapshot() -> Snapshot:
                 else:
                     engine_qids, queued_via_service = confirm_ids, confirm_count
 
+        # B-02 pull arm (#2840). Only pilots need the poll timestamp.
+        is_pilot = _is_pull_pilot(name)
+        last_poll: Optional[float] = None
+        if is_pilot:
+            try:
+                last_poll = _collect_last_worker_poll(name)
+            except Exception as exc:
+                logger.warning("canary snapshot: pull poll read failed for %s: %s", name, exc)
+                # Deliberately NOT `redis`-prefixed: S-01/S-02/S-03 and B-02's
+                # push arm skip on any `redis*` label, and one pilot's poll read
+                # must not blind them fleet-wide. B-02 reads this label itself.
+                snap.sources_unavailable.append(f"{PULL_POLL_UNAVAILABLE_PREFIX}{name}]: {exc}")
+
         stored_max_parallel = int(row["max_parallel_tasks"])
         snap.agents.append(
             AgentSnapshot(
@@ -1415,6 +1509,8 @@ def collect_snapshot() -> Snapshot:
                 queued_meta=execs.get("queued_meta", {}),
                 queued_count_via_service=queued_via_service,
                 queued_ids_via_engine=engine_qids,
+                is_pull_pilot=is_pilot,
+                last_worker_poll_at=last_poll,
             )
         )
 
