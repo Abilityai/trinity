@@ -28,11 +28,12 @@ Related: docs/memory/requirements/auth.md §2.8, feature-flows/autonomy-mode.md.
 
 from __future__ import annotations
 
+import importlib
 import os
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 from typing import Optional
 
 import pytest
@@ -51,9 +52,6 @@ from db_harness import db_backend, run as _hrun  # noqa: E402,F401
 
 import dependencies  # noqa: E402
 import routers.agent_config as _CFG  # noqa: E402
-import services.agent_service.api_key as _APIKEY  # noqa: E402
-import services.agent_service.autonomy as _AUTONOMY  # noqa: E402
-import services.agent_service.read_only as _READONLY  # noqa: E402
 from database import db  # noqa: E402
 from db_models import McpApiKeyCreate, UserCreate  # noqa: E402
 
@@ -86,11 +84,37 @@ class _Principal:
 _STOPPED = SimpleNamespace(status="exited", attrs={"Config": {"Labels": {}}})
 
 
+_READONLY_NAME = "services.agent_service.read_only"
+
+
+def _stub_containers(monkeypatch):
+    """Point every container lookup the routes make at a stopped container —
+    on the module objects the routes will ACTUALLY call, not the ones this file
+    happened to import.
+
+    The router and the autonomy / api-key logic bind at import, so their lookup
+    is patched through the globals of the functions the router holds. The
+    read-only logic is imported lazily inside the route, from `sys.modules`
+    at call time, and sibling unit files evict or stub that entry
+    (`test_validate_runtime.py` pops it at import); so the real module is
+    resolved here, pinned into `sys.modules` for this test, and patched.
+    """
+    stub = lambda _n: _STOPPED  # noqa: E731
+    monkeypatch.setattr(_CFG, "get_agent_container", stub)
+    for fn in (_CFG.set_autonomy_status_logic, _CFG.update_agent_api_key_setting_logic):
+        monkeypatch.setitem(fn.__globals__, "get_agent_container", stub)
+    mod = sys.modules.get(_READONLY_NAME)
+    if not (isinstance(mod, ModuleType) and (getattr(mod, "__file__", "") or "").endswith("read_only.py")):
+        monkeypatch.delitem(sys.modules, _READONLY_NAME, raising=False)
+        mod = importlib.import_module(_READONLY_NAME)
+    monkeypatch.setitem(sys.modules, _READONLY_NAME, mod)
+    monkeypatch.setattr(mod, "get_agent_container", stub)
+
+
 @pytest.fixture
 def world(db_backend, monkeypatch):
     monkeypatch.setattr(dependencies, "get_breaker_redis", lambda: None)
-    for mod in (_CFG, _AUTONOMY, _APIKEY, _READONLY):
-        monkeypatch.setattr(mod, "get_agent_container", lambda _n: _STOPPED)
+    _stub_containers(monkeypatch)
     db.create_user(
         UserCreate(username=OWNER, role="user", email="cfg2996-owner@example.com")
     )
