@@ -405,7 +405,14 @@ jobs:
               fi
               sleep 20
             done
-            SCHED=$(sudo docker inspect trinity-scheduler --format='{{.State.Health.Status}}')
+            # `up -d` only waits on the BACKEND's health; the scheduler was started
+            # a moment ago. The old `sleep 10` above doubled as its grace -- keep
+            # the same <=10 s window, but stop at the first healthy answer.
+            for attempt in 1 2 3; do
+              SCHED=$(sudo docker inspect trinity-scheduler --format='{{.State.Health.Status}}')
+              if [ "$SCHED" = "healthy" ] || [ "$attempt" -eq 3 ]; then break; fi
+              sleep 5
+            done
             echo "Scheduler: $SCHED"
             [ "$SCHED" = "healthy" ] || echo "WARNING: scheduler not healthy yet"
 

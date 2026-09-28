@@ -267,6 +267,29 @@ def test_a_health_failure_prints_filtered_diagnostics_only(shell, tmp_path):
 
 
 @pytest.mark.parametrize("shell", _SHELLS)
+def test_the_scheduler_check_keeps_its_grace_after_recreate(shell, tmp_path):
+    """Review finding: the removed ``sleep 10`` was ALSO the scheduler check's grace.
+    ``up -d`` returns right after starting the scheduler (it waits on the BACKEND's
+    health only), so an immediate inspect reads ``starting`` on every recreate and
+    the warning would print on every healthy deploy (live run 36327494118:
+    scheduler Started 15:01:10.9, ``Scheduler: healthy`` at 15:01:21.2)."""
+    r = _run(shell, _health_slice(), "ok", tmp_path, sched_mode="second")
+    assert r.rc == 0, _explain(r)
+    assert "Scheduler: healthy" in r.stdout, _explain(r)
+    assert "WARNING: scheduler not healthy yet" not in r.stdout, _explain(r)
+
+
+@pytest.mark.parametrize("shell", _SHELLS)
+def test_the_scheduler_check_stays_warn_only_and_bounded(shell, tmp_path):
+    """D-B1: a scheduler that never turns healthy warns; it does not fail the run,
+    and the wait for it is bounded."""
+    r = _run(shell, _health_slice(), "ok", tmp_path, sched_mode="starting")
+    assert r.rc == 0, _explain(r)
+    assert "WARNING: scheduler not healthy yet" in r.stdout, _explain(r)
+    assert r.sleeps <= 3, f"unbounded scheduler wait ({r.sleeps} sleeps)\n" + _explain(r)
+
+
+@pytest.mark.parametrize("shell", _SHELLS)
 def test_pre_fix_lines_go_green_on_a_dead_backend(shell, tmp_path):
     """The control: the origin/dev lines exit 0 against the same never-answering
     stub, i.e. the fixture reproduces #2995 and the tests above can bite."""
