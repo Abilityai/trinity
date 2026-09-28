@@ -261,3 +261,142 @@ class TestAutonomyEveryOtherPrincipal:
         """GET /autonomy is a read at access level — unchanged."""
         res = world.client.get(AUTONOMY, headers=_agent_key())
         assert res.status_code == 200, res.text
+
+
+# ===========================================================================
+# The other eight agent-config writes — same file, same class, same rule
+# ===========================================================================
+
+
+@dataclass(frozen=True)
+class _ConfigWrite:
+    """One owner-config write: how to seed a non-ambient stored value, the body
+    that changes it to a different non-ambient value, and how to read it back."""
+
+    path: str
+    seed: object
+    body: dict
+    read: object
+    expected_after: object
+
+
+_MODEL = "claude-sonnet-4-6"
+
+CONFIG_WRITES = {
+    "api-key-setting": _ConfigWrite(
+        "api-key-setting",
+        seed=lambda: db.set_use_platform_api_key(AGENT, False),
+        body={"use_platform_api_key": True},
+        read=lambda: db.get_use_platform_api_key(AGENT),
+        expected_after=True,
+    ),
+    "read-only": _ConfigWrite(
+        "read-only",
+        seed=lambda: db.set_read_only_mode(AGENT, False, {"blocked_patterns": ["seed/*"], "allowed_patterns": []}),
+        body={"enabled": True, "config": {"blocked_patterns": ["*.md"], "allowed_patterns": []}},
+        read=lambda: db.get_read_only_mode(AGENT)["enabled"],
+        expected_after=True,
+    ),
+    "resources": _ConfigWrite(
+        "resources",
+        seed=lambda: db.set_resource_limits(AGENT, memory="2g", cpu="1"),
+        body={"memory": "8g", "cpu": "4"},
+        read=lambda: db.get_resource_limits(AGENT),
+        expected_after={"memory": "8g", "cpu": "4"},
+    ),
+    "capabilities": _ConfigWrite(
+        "capabilities",
+        seed=lambda: db.set_full_capabilities(AGENT, False),
+        body={"full_capabilities": True},
+        read=lambda: db.get_full_capabilities(AGENT),
+        expected_after=True,
+    ),
+    "capacity": _ConfigWrite(
+        "capacity",
+        seed=lambda: db.set_max_parallel_tasks(AGENT, 2),
+        body={"max_parallel_tasks": 5},
+        read=lambda: db.get_max_parallel_tasks(AGENT),
+        expected_after=5,
+    ),
+    "timeout": _ConfigWrite(
+        "timeout",
+        seed=lambda: db.set_execution_timeout(AGENT, 900),
+        body={"execution_timeout_seconds": 1500},
+        read=lambda: db.get_execution_timeout(AGENT),
+        expected_after=1500,
+    ),
+    "public-channel-model": _ConfigWrite(
+        "public-channel-model",
+        seed=lambda: db.set_public_channel_model(AGENT, "claude-haiku-4-5-20251001"),
+        body={"model": _MODEL},
+        read=lambda: db.get_public_channel_model(AGENT),
+        expected_after=_MODEL,
+    ),
+    "guardrails": _ConfigWrite(
+        "guardrails",
+        seed=lambda: db.set_guardrails_config(AGENT, {"max_turns_chat": 7}),
+        body={"max_turns_chat": 42},
+        read=lambda: db.get_guardrails_config(AGENT),
+        expected_after={"max_turns_chat": 42},
+    ),
+}
+
+WRITE_IDS = sorted(CONFIG_WRITES)
+
+
+def _seeded(name: str):
+    w = CONFIG_WRITES[name]
+    w.seed()
+    before = w.read()
+    assert before != w.expected_after, f"{name}: the seed must differ from the target"
+    return w, before
+
+
+def _put(world, w: _ConfigWrite, headers=None):
+    return world.client.put(f"/api/agents/{AGENT}/{w.path}", json=w.body, headers=headers or {})
+
+
+class TestConfigWritesRealKeys:
+    @pytest.mark.parametrize("name", WRITE_IDS)
+    @pytest.mark.parametrize("headers", [
+        pytest.param(lambda: _agent_key(), id="agent-key-own-agent"),
+        pytest.param(lambda: _system_key(), id="system-key"),
+    ])
+    def test_a_machine_key_is_refused_and_the_value_does_not_move(self, world, name, headers):
+        w, before = _seeded(name)
+        res = _put(world, w, headers())
+        assert _is_human_only_refusal(res), res.text
+        assert w.read() == before
+
+    @pytest.mark.parametrize("name", WRITE_IDS)
+    @pytest.mark.parametrize("headers", [
+        pytest.param(lambda: _jwt(OWNER), id="owner-jwt"),
+        pytest.param(lambda: _owner_user_key(), id="owner-user-key"),
+    ])
+    def test_a_person_changes_the_stored_value(self, world, name, headers):
+        w, before = _seeded(name)
+        res = _put(world, w, headers())
+        assert 200 <= res.status_code < 300, res.text
+        assert w.read() == w.expected_after
+
+
+class TestConfigWritesEveryOtherPrincipal:
+    @pytest.mark.parametrize("name", WRITE_IDS)
+    @pytest.mark.parametrize("principal", OVERRIDE_REFUSED)
+    def test_refused_by_the_route_gate(self, world, name, principal):
+        w, before = _seeded(name)
+        world.as_(**principal)
+        res = _put(world, w)
+        assert _is_human_only_refusal(res), res.text
+        assert w.read() == before
+
+
+def test_every_write_in_the_file_is_person_gated():
+    """The eight writes above plus autonomy are every PUT in agent_config.py —
+    a ninth would need a row here (and the route census names it too)."""
+    puts = sorted(
+        r.path.rsplit("/", 1)[-1]
+        for r in _CFG.router.routes
+        if "PUT" in getattr(r, "methods", set())
+    )
+    assert puts == sorted(WRITE_IDS + ["autonomy"])

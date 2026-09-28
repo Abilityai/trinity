@@ -43,7 +43,7 @@ async def update_agent_api_key_setting(
     agent_name: str,
     request: Request,
     body: dict,
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(require_person)
 ):
     """Update the API key setting for an agent."""
     return await update_agent_api_key_setting_logic(agent_name, body, current_user, request)
@@ -124,7 +124,7 @@ async def get_agent_read_only_status(
 async def set_agent_read_only_status(
     agent_name: str,
     body: dict,
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(require_person)
 ):
     """
     Set the read-only mode status for an agent.
@@ -186,7 +186,7 @@ async def set_agent_resources(
     agent_name: str,
     body: dict,
     request: Request,
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(require_person)
 ):
     """
     Set the resource limits for an agent.
@@ -315,7 +315,7 @@ async def get_agent_capabilities(
 async def set_agent_capabilities(
     agent_name: str,
     body: dict,
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(require_person)
 ):
     """
     Set the capabilities for an agent.
@@ -434,7 +434,7 @@ async def get_agent_capacity(
 async def set_agent_capacity(
     agent_name: str,
     body: AgentCapacityUpdate,
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(require_person)
 ):
     """
     Set the parallel execution capacity for an agent.
@@ -514,7 +514,7 @@ async def get_agent_timeout(
 async def set_agent_timeout(
     agent_name: str,
     body: dict,
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(require_person)
 ):
     """
     Set the execution timeout for an agent.
@@ -622,7 +622,7 @@ async def set_public_channel_model(
     agent_name: str,
     body: PublicChannelModelUpdate,
     request: Request,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_person),
 ):
     """Set or clear the per-agent public-channel model override (owner-only, #894).
 
@@ -756,7 +756,7 @@ async def get_agent_guardrails(
 async def set_agent_guardrails(
     agent_name: str,
     body: dict,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_person),
 ):
     """Set per-agent guardrails overrides. Owner-only. Requires container
     recreation to take effect (the runtime config file is written during
