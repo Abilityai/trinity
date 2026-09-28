@@ -1,6 +1,30 @@
 {
   "test_files": [
     {
+      "file": "unit/test_2996_human_only_routes.py",
+      "feature": "#2996",
+      "added": "2026-09-28",
+      "categories": [
+        "backend",
+        "auth",
+        "security",
+        "guard"
+      ],
+      "description": "Route census (Invariant #8): every OSS HTTP route, every method, resolves to exactly one policy class (interactive / person / admin_widened / admin_tier / portal from code; agent_callable / own_auth / delegated from reviewed tables; or the frozen human_only_route_baseline.json). Ratchet rules: unclassified fails, stale entry fails, gated baseline entry fails, exact FROZEN_BASELINE_COUNT, key in two lists fails, duplicate key fails. Gates count only as Depends or as the handler's first statement on its principal, imported unaliased from dependencies. Websocket routes pinned as a literal set. Self-tests plant sources in a temp tree to show each rule bites. Walker: tests/unit/_route_census.py (pure-stdlib AST, rglob over src/backend minus enterprise/)."
+    },
+    {
+      "file": "unit/test_2996_route_census_runtime.py",
+      "feature": "#2996",
+      "added": "2026-09-28",
+      "categories": [
+        "backend",
+        "auth",
+        "security",
+        "guard"
+      ],
+      "description": "Route census, live side: imports main in a SUBPROCESS and checks every registered non-enterprise APIRoute maps to a key the AST census found, and every stored METHOD /full/path (baseline + reviewed tables) is what the app registers (rule 7). Fails, never skips, on a failed import, unparseable output or zero routes."
+    },
+    {
       "file": "unit/test_human_only_principals.py",
       "feature": "#2996",
       "added": "2026-09-28",
