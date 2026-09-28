@@ -84,6 +84,18 @@
       "description": "Creating an MCP key requires a signed-in session: POST /api/mcp/keys (every scope) and POST /api/mcp/keys/ensure-default through the REAL get_current_user with seeded agent/system/connector/user key rows -> 403 and mcp_api_keys row count unchanged, no key_create audit row; JWT -> 200 with the secret and one key_create audit row (ensure-default included, target = new key id); admin JWT still creates ops/portal_delegate; non-admin JWT portal_delegate still 403; a user-scoped key asking an admin scope 403; existing user key -> ensure-default returns null, creates and audits nothing; the created key validates as its owner."
     },
     {
+      "file": "unit/test_mcp_key_listing_requires_session.py",
+      "feature": "ent#712",
+      "added": "2026-09-28",
+      "categories": [
+        "backend",
+        "auth",
+        "security",
+        "mcp-keys"
+      ],
+      "description": "GET /api/mcp/keys requires a signed-in session (INTERACTIVE, reject_non_interactive_principal as the handler's first statement): agent/system/connector/user keys through the REAL get_current_user with seeded key rows, and ops/portal_delegate/unknown-future-scope/missing-mcp_scope via an explicit principal dataclass -> 403. Signed-in admin -> every key with user_email (never the secret); signed-in user -> own keys only. Every route in routers/mcp_keys.py read off the router object and listed with its rule; a single-key read stays owner-scoped; /validate needs no session."
+    },
+    {
       "file": "unit/test_ent600_telegram_group_context.py",
       "feature": "ent#600",
       "added": "2026-09-11",
