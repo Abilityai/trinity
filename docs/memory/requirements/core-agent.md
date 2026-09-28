@@ -3312,6 +3312,17 @@ to localStorage in the clear.
     shipped", never "by <owner>"; when a seat-delivery schedule exists and readiness is not
     `ready`, the card adds "its scheduled brief is paused until you mark it ready" — for
     platform viewers only, and not when autonomy is off (the autonomy gate stops it first).
+- **The stamp on the agents list and the fleet grid (rider, operator ruling 2026-09-24 —
+  ent#560's closure)**: readiness is a role-companion property, and the owner's stamp is
+  shown beside the agent wherever the operator scans the fleet, not only on the role card.
+  `GET /api/agents` attaches `readiness: {status, changed_at, source}` from ONE batched
+  read (`get_role_readiness_for_agents`, the display-label pattern); an agent with no stamp
+  carries `null` and shows nothing — never a guessed `calibrating`, because whether it is a
+  companion at all is in its template.yaml, which a list never reads. The list says what and
+  when, never who (the role card, owner-scoped, keeps the person). Both surfaces render one
+  predicate (`utils/readinessBadge.js`): the role card's words and variants (`ready` =
+  success, `calibrating` = warning, with a dot), and a tooltip that names a rollout stamp
+  and what calibrating holds back.
 
 ### 5.37 Workspace — the seat-level decision record: why a thing was approved, deferred or killed (trinity-enterprise#638)
 - **Status**: ✅ Implemented (2026-09-22). OSS-core (Workspace).

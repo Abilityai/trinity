@@ -474,7 +474,7 @@
               data-testid="row-secondary-lg"
               class="flex flex-nowrap items-center gap-1 min-w-0 overflow-hidden min-h-[1.375rem] text-gray-500 dark:text-gray-400 list-wide:row-start-2 list-wide:col-start-4 list-wide:col-end-10"
             >
-              <!-- Fixed order: slug · pressure · runtime · tags · +N. The line is
+              <!-- Fixed order: slug · pressure · readiness · runtime · tags · +N. The line is
                    the row's one meta strip and it stays legible only while it has
                    an order and a shrink policy — a future badge goes here, in
                    this order, or it does not go in the row at all. The slug is
@@ -501,6 +501,15 @@
               >
                 {{ pressureBadgeFor(agent.name).text }}
               </span>
+              <!-- ent#527 rider: the owner's readiness stamp (role companions only). -->
+              <BaseBadge
+                v-if="readinessBadge(agent.readiness)"
+                :variant="readinessBadge(agent.readiness).variant"
+                dot
+                class="flex-shrink-0"
+                :title="readinessBadge(agent.readiness).title"
+                data-testid="readiness-badge"
+              >{{ readinessBadge(agent.readiness).label }}</BaseBadge>
               <RuntimeBadge
                 v-if="showsRuntimeBadgeInList(agent)"
                 data-testid="runtime-badge"
@@ -694,6 +703,14 @@
               data-testid="agent-slug-md"
               class="font-mono text-[11px] min-w-0 max-w-[50%] truncate select-all"
             >{{ agentNameParts(agent).secondary }}</code>
+            <BaseBadge
+              v-if="readinessBadge(agent.readiness)"
+              :variant="readinessBadge(agent.readiness).variant"
+              dot
+              class="flex-shrink-0"
+              :title="readinessBadge(agent.readiness).title"
+              data-testid="readiness-badge"
+            >{{ readinessBadge(agent.readiness).label }}</BaseBadge>
             <RuntimeBadge
               v-if="showsRuntimeBadgeInList(agent)"
               data-testid="runtime-badge"
@@ -855,6 +872,8 @@ import { isOrgTag } from '../utils/gridOrg'
 import { sortAgents } from '../utils/agentSort'
 import AgentAvatar from './AgentAvatar.vue'
 import RuntimeBadge from './RuntimeBadge.vue'
+import BaseBadge from './base/BaseBadge.vue'
+import { readinessBadge } from '../utils/readinessBadge'
 import RunningStateToggle from './RunningStateToggle.vue'
 import AutonomyToggle from './AutonomyToggle.vue'
 import ReadOnlyToggle from './ReadOnlyToggle.vue'

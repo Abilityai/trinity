@@ -168,10 +168,15 @@ async def list_agents_endpoint(
     # would be an N+1 on the fleet's hottest endpoint. Agents without a label
     # are absent from the map and render under their slug, as they do today.
     all_labels = db.get_display_labels_for_agents(agent_names)
+    # ent#527 rider (ruling 2026-09-24): the owner's readiness stamp on the list
+    # and the fleet grid — batched for the same reason. Only stamped agents carry
+    # one; `None` means "no stamp", never a guessed `calibrating`.
+    all_readiness = db.get_role_readiness_for_agents(agent_names)
 
     for agent in agents:
         agent["tags"] = all_tags.get(agent.get("name"), [])
         agent["display_label"] = all_labels.get(agent.get("name"))
+        agent["readiness"] = all_readiness.get(agent.get("name"))
 
     return agents
 

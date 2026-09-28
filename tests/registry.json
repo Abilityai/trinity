@@ -3558,6 +3558,16 @@
         "integration"
       ],
       "description": "Journey J13 (suggestions): my agent tells me what I can do with it and what is waiting on me, and only things that are true. A strict=True xfail skeleton — the rules, SQL and doors are unit-proven and the verbs mount-proven; the walk needs a real failing schedule, a shared platform user and a magic-link client on one instance."
+    },
+    {
+      "file": "unit/test_ent527_readiness_on_lists.py",
+      "feature": "abilityai/trinity-enterprise#527",
+      "added": "2026-09-28",
+      "categories": [
+        "backend",
+        "database"
+      ],
+      "description": "ent#527 rider (ruling 2026-09-24): the owner's readiness stamp on the agents list and the fleet grid. One batched read on a real database returns only stamped agents, names a rollout seed as such, never carries who flipped it, skips an unknown state and does not query for an empty list; GET /api/agents attaches it per agent from that one read, None when unstamped."
     }
   ]
 }
