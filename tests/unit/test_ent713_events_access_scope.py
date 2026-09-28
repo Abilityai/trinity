@@ -156,3 +156,85 @@ def test_ent713_db_none_agent_names_is_unrestricted(db_rows):
     )
     assert {e.source_agent for e in events} == {db_rows["mine"], db_rows["unshared"]}
     assert len(events) == 8
+
+
+# ---------------------------------------------------------------------------
+# Router half
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def fleet():
+    db = events_router.db
+    alice = _principal("alice")
+    bob = _principal("bob")
+    admin = _principal("admin", role="admin")
+
+    mine = _agent("mine", alice)
+    shared = _agent("shared", bob)
+    unshared = _agent("unshared", bob)
+    other = _agent("other", bob)
+    ghost = _agent("ghost", bob)
+    assert db.share_agent(shared, bob.username, alice.email)
+    assert db.share_agent(ghost, bob.username, alice.email)
+    assert db.delete_agent_ownership(ghost)  # soft delete; the share row stays
+
+    event_type = _event_type()
+    ids = []
+    for agent in (mine, shared, unshared, other, ghost):
+        ids += _seed_events(agent, event_type, 2)
+    _stamp_in_order(ids)
+
+    # Preconditions that keep the ghost case meaningful: the per-agent access
+    # predicate still admits the stale share, while the roster excludes it.
+    assert db.can_user_access_agent(alice.username, ghost)
+    assert ghost not in db.get_accessible_agent_names(alice.email, is_admin=False)
+
+    return {
+        "alice": alice, "bob": bob, "admin": admin, "event_type": event_type,
+        "mine": mine, "shared": shared, "unshared": unshared, "other": other, "ghost": ghost,
+    }
+
+
+@pytest.mark.asyncio
+async def test_ent713_list_is_limited_to_owned_and_shared_agents(fleet):
+    result = await _list(fleet["alice"], fleet["event_type"])
+    assert {e.source_agent for e in result.events} == {fleet["mine"], fleet["shared"]}
+    assert result.count == 4
+
+
+@pytest.mark.asyncio
+async def test_ent713_admin_list_is_unrestricted(fleet):
+    result = await _list(fleet["admin"], fleet["event_type"])
+    sources = {e.source_agent for e in result.events}
+    assert {fleet["mine"], fleet["shared"], fleet["unshared"], fleet["other"]} <= sources
+    assert fleet["unshared"] in sources
+
+
+@pytest.mark.asyncio
+async def test_ent713_empty_source_agent_keeps_the_roster(fleet):
+    result = await _list(fleet["alice"], fleet["event_type"], source_agent="")
+    assert {e.source_agent for e in result.events} == {fleet["mine"], fleet["shared"]}
+
+
+@pytest.mark.asyncio
+async def test_ent713_source_agent_within_roster_is_narrowed(fleet):
+    result = await _list(fleet["alice"], fleet["event_type"], source_agent=fleet["shared"])
+    assert {e.source_agent for e in result.events} == {fleet["shared"]}
+    assert result.count == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("target", ["unshared", "nonexistent", "ghost"])
+async def test_ent713_source_agent_outside_roster_is_uniform_403(fleet, target):
+    name = f"nonexistent-{_uid()}" if target == "nonexistent" else fleet[target]
+    with pytest.raises(HTTPException) as exc:
+        await _list(fleet["alice"], fleet["event_type"], source_agent=name)
+    assert exc.value.status_code == 403
+    assert exc.value.detail == "Access denied"
+
+
+@pytest.mark.asyncio
+async def test_ent713_admin_targeted_source_agent_is_allowed(fleet):
+    result = await _list(fleet["admin"], fleet["event_type"], source_agent=fleet["unshared"])
+    assert {e.source_agent for e in result.events} == {fleet["unshared"]}
