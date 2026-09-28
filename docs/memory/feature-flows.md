@@ -23,6 +23,7 @@
 
 | Date | ID | Change | Flow |
 |------|-----|--------|------|
+| 2026-09-28 | #2996 | fix(auth): **human-only grant surfaces** — `PUT /autonomy` and the other agent-config writes are person-only (`require_person`); the sign-in email and personal GitHub PAT change only in a signed-in session (`require_interactive`, ent#711); a route census makes every new route choose a policy class | [autonomy-mode.md](feature-flows/autonomy-mode.md) |
 | 2026-09-22 | #2958 | fix(chat): **a `/chat` turn resumes only the agent's own chat session** (`--resume <own id>`, never `--continue`, which took a scheduled run's persisted JSONL and paid its auto-compaction); a model change starts fresh; one cold retry on a reaped JSONL; the id rides a marker file into the reaper's keep set; chat rows now carry `compact_metadata` and `execution.compaction`, and `get_execution_result` returns it | [execution-queue.md](feature-flows/execution-queue.md), [parallel-headless-execution.md](feature-flows/parallel-headless-execution.md), [mcp-orchestration.md](feature-flows/mcp-orchestration.md), [authenticated-chat-tab.md](feature-flows/authenticated-chat-tab.md), [file-sharing-outbound.md](feature-flows/file-sharing-outbound.md), [system-wide-trinity-prompt.md](feature-flows/system-wide-trinity-prompt.md) |
 | 2026-09-16 | ent#625 | feat(workspace): **a theme switch (light / dark / system) at the top right of the central column**. The Workspace followed the global theme with no control (no NavBar), so a platform user could not change it from the Workspace and an external client could not change it at all. One switch, one store: `PortalThemeSwitch` drives the same `useThemeStore`/`trinity-theme` key the NavBar does, shows the RESOLVED state honestly under `system` ("System · dark"), sits in a `#header-end` slot of both column headers, and collapses to an icon below `sm`. The NavBar's inline picker is replaced by the shared `ThemeChoice` primitive (its raw-colour entry shrinks 35 → 23). First MOUNTED component test in the frontend suite (`@vue/test-utils` + per-file jsdom) — the click reaches `setTheme`. | [dark-mode-theme.md](feature-flows/dark-mode-theme.md) |
 | 2026-09-16 | ent#620 | feat(workspace): **the Work card says what the agent is doing — one fixed-height line that slides up, for the chat's own turn AND delegated/scheduled/room runs; the chat scrolls to the card on your own send**. The card's step slot was blank because its handler matched `evt.type === 'tool_use'`, a shape raw stream-json never carries. One vocabulary (`utils/workActivity.js`, shared with the Chat tab and Agent Detail), two feeds: the SSE frames for the own turn, the agent's heartbeat — now carrying a bounded per-execution `executions[]` from a per-execution activity slot — for everything else, folded onto live rostered rows by the Work read through the title sanitiser + roster mask, plus a Redis-only `/work/activity` poll at 2.5 s while live. ≥700 ms per line, bursts collapse, identical lines never re-animate, aged lines drop, terminal clears. Scroll only on the person's own send (#2624 holds). | [workspace-work.md](feature-flows/workspace-work.md) |
@@ -165,7 +166,7 @@
 
 | Flow | Document | Description |
 |------|----------|-------------|
-| Email Authentication | [email-authentication.md](feature-flows/email-authentication.md) | Passwordless email login |
+| Email Authentication | [email-authentication.md](feature-flows/email-authentication.md) | Passwordless email login; binding the sign-in email is signed-in-session only (ent#711) |
 | Admin Login | [admin-login.md](feature-flows/admin-login.md) | Password-based admin auth |
 | First-Time Setup | [first-time-setup.md](feature-flows/first-time-setup.md) | Admin password wizard |
 | First-Run Overlay | [onboarding-wizard.md](feature-flows/onboarding-wizard.md) | The blocking post-login setup sequence — step registry, derived completion, re-run (ent#581; formerly the ent#52 wizard) |
@@ -258,7 +259,7 @@
 | Flow | Document | Description |
 |------|----------|-------------|
 | Public-Channel Model | [public-channel-model.md](feature-flows/public-channel-model.md) | Per-agent model override for public-facing channels (#894) |
-| Autonomy Mode | [autonomy-mode.md](feature-flows/autonomy-mode.md) | Agent autonomous operation toggle |
+| Autonomy Mode | [autonomy-mode.md](feature-flows/autonomy-mode.md) | Agent autonomous operation toggle — person-only (#2996) |
 | AutonomyToggle Component | [autonomy-toggle-component.md](feature-flows/autonomy-toggle-component.md) | Reusable Vue toggle component |
 | Read-Only Mode | [read-only-mode.md](feature-flows/read-only-mode.md) | Code protection via hooks (CFG-007) |
 | Agent Guardrails | [agent-guardrails.md](feature-flows/agent-guardrails.md) | Baseline bash/path deny-lists, credential output scanner, turn/timeout/tool budgets; owner-only narrow overrides (GUARD-001/002/003) |
