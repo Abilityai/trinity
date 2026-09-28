@@ -453,6 +453,9 @@ describe('#2375 — the panel goes through the shared module (source-asserted)',
   })
 
   it('an approval carries an optional note field', () => {
-    expect(sfc).toMatch(/portal-ask-note-\$\{ask\.id\}/)
+    // trinity-enterprise#610: ids are `${tid.prefix}-…` now (default prefix
+    // 'portal-ask', so the rendered id is unchanged — mounted in
+    // portalAsksTestidPrefix.mount.spec.js).
+    expect(sfc).toMatch(/\$\{tid\.prefix\}-note-\$\{ask\.id\}/)
   })
 })

@@ -264,6 +264,30 @@ describe('#2624 late growth is covered by an observer, not by chasing frames', (
     })
   })
 
+  // trinity-enterprise#610: an anchor jump (Inbox "Open in chat") scrolls to an
+  // older message. Without detach() the next size change — markdown settling —
+  // re-pins to the bottom and undoes the jump.
+  it('detach() stops the re-pin without moving the reader', async () => {
+    await withFakeObserver(async (instances) => {
+      const node = markRaw({ scrollHeight: 1000, clientHeight: 400, scrollTop: 600, firstElementChild: markRaw({}) })
+      const s = useStickToBottom(ref(node))
+      await nextTick()
+      expect(s.following.value).toBe(true)
+
+      s.detach()
+      expect(s.following.value).toBe(false)
+      expect(node.scrollTop).toBe(600)       // detaching is not a scroll
+
+      node.scrollTop = 200                   // the anchor's scrollIntoView
+      node.scrollHeight = 1420
+      instances[0].fire()
+      expect(node.scrollTop).toBe(200)       // the observer leaves it there
+
+      await s.pinToBottom()
+      expect(s.following.value).toBe(true)   // the normal rule re-arms it
+    })
+  })
+
   it('works where there is no ResizeObserver at all', async () => {
     // The node test environment, and any browser old enough to lack it: the
     // pin still happens, only the late-growth cover is absent.

@@ -284,6 +284,7 @@
           v-if="item.kind === 'voice-call'"
           class="rounded-xl border border-gray-200 dark:border-gray-800 bg-gray-50 dark:bg-gray-950"
           data-testid="portal-voice-call-block"
+          :data-message-ids="item.turns.map((t) => t.id).filter(Boolean).join(' ') || undefined"
         >
           <summary class="cursor-pointer select-none flex items-center gap-2 px-3 py-2 text-xs text-gray-600 dark:text-gray-300">
             <svg class="w-3.5 h-3.5 shrink-0 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11a7 7 0 01-14 0m7 7v3m0-3a4 4 0 004-4V7a4 4 0 10-8 0v6a4 4 0 004 4z" /></svg>
@@ -295,6 +296,7 @@
               v-for="(t, j) in item.turns"
               :key="t.id || j"
               :class="t.role === 'user' ? 'flex justify-end' : 'flex items-start gap-2.5'"
+              :data-message-id="t.id || undefined"
               data-testid="portal-voice-turn"
             >
               <PortalAvatar v-if="t.role !== 'user'" :name="agent.name" :avatar-url="agent.avatar_url" :size="24" class="mt-0.5" />
@@ -308,7 +310,11 @@
             </div>
           </div>
         </details>
-        <div v-else>
+        <!-- trinity-enterprise#610 (D11): a real DOM target per message, so the
+             Inbox's "Open in chat" anchor can land on the arrival. Rows are
+             keyed by index (and a live row has no id until history reloads),
+             so the id rides as data, never as the key. -->
+        <div v-else :data-message-id="item.message.id || undefined">
         <p
           v-if="item.message.role === 'system'"
           :class="PLATFORM_LINE_CLASS"
@@ -421,10 +427,22 @@
           :agent-name="agent.name"
           :session-id="currentSessionId"
           :refresh-key="deliverableTick"
+          @loaded="anchor.afterDeliverables"
         />
       </div>
       </div>
     </div>
+    <!-- trinity-enterprise#610: an "Open in chat" anchor that pointed further up
+         than the loaded window says so, rather than silently opening at the
+         bottom as if it had found nothing to show. -->
+    <p
+      v-if="anchor.notice.value"
+      class="shrink-0 px-3 sm:px-6"
+      :class="PLATFORM_LINE_CLASS"
+      role="status"
+      aria-live="polite"
+      data-testid="portal-anchor-notice"
+    >{{ anchor.notice.value }}</p>
     <PortalJumpToLatest :show="showJumpToLatest" :count="unreadBelow" @jump="scrollToLatest" />
     </div>
 
@@ -763,6 +781,8 @@ import PortalChatTabs from './PortalChatTabs.vue'
 import { newChatHotkeyLabel, MAIN_TAB_LABEL, composerAvailabilityNotice, assistantRow, replyFromHistory, replyBaseline, readReplyBaseline } from './portalUtils'
 import { usePortalFileDrop, attachmentState } from '@/composables/usePortalFileDrop'
 import { useStickToBottom } from '@/composables/useStickToBottom'
+import { useConversationAnchor } from '@/composables/useConversationAnchor'
+import { useRoute, useRouter } from 'vue-router'
 import { useComposerDraft } from '@/composables/useComposerDraft'
 import { usePortalDraftsStore } from '@/stores/portalDrafts'
 import { draftKeyFor, shouldFocusOnRestore } from './portalDrafts'
@@ -1152,7 +1172,14 @@ const {
   pinToBottom,
   scrollToLatest,
   reset: resetFollowing,
+  detach: detachFollowing,
 } = useStickToBottom(scrollEl)
+// trinity-enterprise#610 (D11): the one-shot `?anchor=m:<id>|d:<id>` the
+// Inbox's "Open in chat" sets. Resolved after the history lands (messages) or
+// when "Delivered here" reports its cards (deliverables); stripped either way.
+const anchor = useConversationAnchor({
+  scrollEl, detach: detachFollowing, pinToBottom, route: useRoute(), router: useRouter(),
+})
 const textarea = ref(null)
 const fileInput = ref(null)
 const pickerRef = ref(null)
@@ -1206,6 +1233,8 @@ async function loadThread(sessionId) {
   // #2624: opening a thread is an intent — it pins and re-arms, so a thread
   // always opens at the bottom however the previous one was left.
   finally { loadingHistory.value = false; historyLoaded.value = true; await pinToBottom() }
+  // trinity-enterprise#610: after the pin, so a found anchor wins over it.
+  await anchor.afterHistory()
 
   // ent#286: a turn was still running when this client loaded — reattach to it
   // rather than showing a thread that looks finished. The user's message is

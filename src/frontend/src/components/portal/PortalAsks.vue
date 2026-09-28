@@ -12,7 +12,7 @@
   empty.
 -->
 <template>
-  <div v-if="visible" class="space-y-2" data-testid="portal-asks">
+  <div v-if="visible" class="space-y-2" :data-testid="tid.root">
     <!-- ent#468: what happened to the answer you just gave. It lives HERE and
          not on the ask row, because answering removes that row — the row is the
          one place this cannot be. On an opt-in agent the answer sets work in
@@ -25,7 +25,7 @@
       class="rounded-xl border border-gray-200 dark:border-gray-700 px-3 py-2 text-sm text-gray-600 dark:text-gray-300"
       role="status"
       aria-live="polite"
-      data-testid="portal-ask-confirmation"
+      :data-testid="tid.confirmation"
     >{{ c.message }}</p>
 
     <div
@@ -35,7 +35,7 @@
       :class="isEnded(ask)
         ? 'border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-800/40'
         : 'border-amber-300 dark:border-amber-700 bg-amber-50 dark:bg-amber-900/20'"
-      :data-testid="`portal-ask-${ask.id}`"
+      :data-testid="`${tid.prefix}-${ask.id}`"
       :data-status="ask.status"
     >
       <div class="flex items-start gap-2">
@@ -52,7 +52,7 @@
           :variant="queueSyncBadge(ask).variant"
           dot
           :title="queueSyncBadge(ask).title"
-          data-testid="queue-sync-badge"
+          :data-testid="tid.syncBadge"
         >{{ queueSyncBadge(ask).label }}</BaseBadge>
       </div>
 
@@ -69,7 +69,7 @@
         v-if="isEnded(ask)"
         class="mt-2 text-xs text-gray-500 dark:text-gray-400"
         :title="endedAtAbsolute(ask) || undefined"
-        data-testid="portal-ask-ending"
+        :data-testid="tid.ending"
       >
         {{ endingLine(ask) }}
       </p>
@@ -83,7 +83,7 @@
         v-if="askThreadLink(ask, currentSessionId)"
         type="button"
         class="mt-1.5 text-xs text-action-primary-600 hover:underline"
-        :data-testid="`portal-ask-open-thread-${ask.id}`"
+        :data-testid="`${tid.prefix}-open-thread-${ask.id}`"
         @click="emit('open-thread', { id: askThreadLink(ask, currentSessionId), agent_name: ask.agent_name })"
       >Open the conversation</button>
 
@@ -104,7 +104,7 @@
                 ? 'bg-action-primary-600 border-action-primary-600 text-white'
                 : 'bg-white dark:bg-gray-900 border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-200 hover:border-action-primary-500'"
               :aria-pressed="picks[ask.id] === opt"
-              :data-testid="`portal-ask-option-${ask.id}`"
+              :data-testid="`${tid.prefix}-option-${ask.id}`"
               @click="picks[ask.id] = picks[ask.id] === opt ? null : opt"
             >{{ opt }}</button>
           </div>
@@ -116,13 +116,13 @@
               :disabled="busyId === ask.id"
               placeholder="Add a note (optional)…"
               class="flex-1 min-w-0 rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-900 px-2.5 py-1.5 text-sm"
-              :data-testid="`portal-ask-note-${ask.id}`"
+              :data-testid="`${tid.prefix}-note-${ask.id}`"
             />
             <button
               type="submit"
               :disabled="busyId === ask.id || !picks[ask.id]"
               class="rounded-lg bg-action-primary-600 hover:bg-action-primary-700 disabled:opacity-50 text-white text-xs font-medium px-2.5 py-1.5"
-              :data-testid="`portal-ask-send-${ask.id}`"
+              :data-testid="`${tid.prefix}-send-${ask.id}`"
             >{{ busyId === ask.id ? 'Sending…' : 'Send' }}</button>
           </form>
         </template>
@@ -133,7 +133,7 @@
           type="button"
           :disabled="busyId === ask.id"
           class="mt-2 rounded-lg bg-action-primary-600 hover:bg-action-primary-700 disabled:opacity-50 text-white text-xs font-medium px-2.5 py-1.5"
-          :data-testid="`portal-ask-ack-${ask.id}`"
+          :data-testid="`${tid.prefix}-ack-${ask.id}`"
           @click="submit(ask)"
         >{{ busyId === ask.id ? 'Sending…' : 'Got it' }}</button>
 
@@ -147,7 +147,7 @@
             :disabled="busyId === ask.id"
             placeholder="Your answer…"
             class="flex-1 min-w-0 rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-900 px-2.5 py-1.5 text-sm"
-            :data-testid="`portal-ask-input-${ask.id}`"
+            :data-testid="`${tid.prefix}-input-${ask.id}`"
           />
           <button
             type="submit"
@@ -176,6 +176,8 @@ import { queueSyncBadge, respondRefusedAsDiverged, QUEUE_RESPONSE_DIVERGED } fro
 import { queueEnding, queueEndingText } from '@/utils/operatorQueue'
 import { formatLocalDateTime, formatRelativeTime } from '@/utils/timestamps'
 
+const DEFAULT_TESTID_PREFIX = 'portal-ask'
+
 const props = defineProps({
   // Omit to render every ask addressed to this user (chat/global); pass a name to
   // render one agent's (the agent page).
@@ -192,6 +194,23 @@ const props = defineProps({
   // The thread on screen, when there is one. Only used to suppress a link that
   // would go where the reader already is (ent#429).
   currentSessionId: { type: String, default: null },
+  // trinity-enterprise#610 (D8): the Inbox pane renders ONE ask through this
+  // same component rather than a second card. `askIds` narrows to those asks
+  // and wins over `pendingOnly`: an ask that ends while it is selected stays
+  // drawn in place, as ended, until the selection changes (principle 5).
+  askIds: { type: Array, default: null },
+  // trinity-enterprise#610 (D8): namespaces EVERY data-testid this component
+  // emits, the static ones included, so two instances rendering the same ask
+  // (the Inbox pane next to the Work tab) never share an address. The rule:
+  //   root          `${prefix}s`              (portal-asks)
+  //   confirmation  `${prefix}-confirmation`  (portal-ask-confirmation)
+  //   per ask       `${prefix}-${id}`, `${prefix}-<part>-${id}`
+  //   ending        `${prefix}-ending`        (portal-ask-ending)
+  //   sync badge    `queue-sync-badge` with the default prefix (the id the
+  //                 #2915 specs address), `${prefix}-sync-badge` otherwise.
+  // With the default every id is byte-identical to what it was before. (The
+  // literal repeats DEFAULT_TESTID_PREFIX: defineProps is hoisted out of setup.)
+  testidPrefix: { type: String, default: 'portal-ask' },
 })
 
 const emit = defineEmits(['open-thread'])
@@ -212,9 +231,24 @@ const allItems = computed(() => {
   }
   return store.asks
 })
-const items = computed(() => (
-  props.pendingOnly ? allItems.value.filter((a) => a.status === 'pending') : allItems.value
-))
+const items = computed(() => {
+  if (Array.isArray(props.askIds)) {
+    const ids = new Set(props.askIds.filter(Boolean))
+    return store.asks.filter((a) => ids.has(a.id))
+  }
+  return props.pendingOnly ? allItems.value.filter((a) => a.status === 'pending') : allItems.value
+})
+
+const tid = computed(() => {
+  const p = props.testidPrefix || DEFAULT_TESTID_PREFIX
+  return {
+    prefix: p,
+    root: `${p}s`,
+    confirmation: `${p}-confirmation`,
+    ending: `${p}-ending`,
+    syncBadge: p === DEFAULT_TESTID_PREFIX ? 'queue-sync-badge' : `${p}-sync-badge`,
+  }
+})
 
 // trinity-enterprise#611 — how an ask ended, from the one rule.
 const isEnded = (ask) => ask.status !== 'pending'
