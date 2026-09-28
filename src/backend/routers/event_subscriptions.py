@@ -464,11 +464,13 @@ async def list_all_events(
     The roster is applied in SQL, so ``limit`` counts accessible events only.
     A ``source_agent`` outside the caller's access returns one uniform 403.
     """
-    roster = (
-        None
-        if current_user.role == "admin"
-        else db.get_accessible_agent_names(current_user.email or "", is_admin=False)
-    )
+    # No email -> empty roster, never a lookup keyed on "" (same as /ws).
+    if current_user.role == "admin":
+        roster = None
+    elif current_user.email:
+        roster = db.get_accessible_agent_names(current_user.email, is_admin=False)
+    else:
+        roster = []
     if source_agent:
         assert_agent_access(current_user, source_agent)
         if roster is not None and source_agent not in roster:

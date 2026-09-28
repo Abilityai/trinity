@@ -238,3 +238,24 @@ async def test_ent713_source_agent_outside_roster_is_uniform_403(fleet, target):
 async def test_ent713_admin_targeted_source_agent_is_allowed(fleet):
     result = await _list(fleet["admin"], fleet["event_type"], source_agent=fleet["unshared"])
     assert {e.source_agent for e in result.events} == {fleet["unshared"]}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("blank", [None, ""])
+async def test_ent713_principal_without_email_sees_nothing(blank):
+    # A non-admin principal with no email has an empty roster, like the /ws
+    # socket (``accessible_agents_for`` returns [] for a falsy email). The
+    # roster must not be resolved against a blank email: another account whose
+    # email is also blank would otherwise hand over its agents' history.
+    db = events_router.db
+    other = _principal("blankowner")
+    db.update_user(other.username, {"email": ""})
+    theirs = _agent("theirs", other)
+    event_type = _event_type()
+    _stamp_in_order(_seed_events(theirs, event_type, 2))
+
+    caller = _principal("noemail")
+    caller = caller.model_copy(update={"email": blank})
+    result = await _list(caller, event_type)
+    assert result.events == []
+    assert result.count == 0
