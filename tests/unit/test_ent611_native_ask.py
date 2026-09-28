@@ -709,6 +709,29 @@ class TestPlatformRaises:
         assert ask.db.get_operator_queue_item_for_agent_by_request_id(self.AGENT, "pe-1") is None
 
 
+class TestTheWorkspaceShowsTheProposal:
+    """The Workspace projection (`WorkspaceAsk`) is an allowlist: a field reaches
+    the person because it is named there. `proposal` is named — it is the exact
+    action the addressee is asked to approve, and an ask to `primary` is decided
+    in the owner's Workspace — while `context` stays off (agent scratch that may
+    hold execution ids or internal paths)."""
+    AGENT = "agent-611b-ws"
+
+    def test_the_proposal_reaches_the_addressee_and_the_context_does_not(self, ask):
+        from client_portal.asks.service import _project
+        r = _raise(ask, self.AGENT, _body("ws-1", context={"internal_path": "/srv/agent-scratch"}))
+        view = _project(ask.db.get_operator_queue_item(r["id"])).model_dump()
+        assert view["proposal"] == {"pay": 500, "to": "vendor-7"}
+        assert "context" not in view and "/srv/agent-scratch" not in repr(view)
+
+    def test_an_ask_without_a_proposal_projects_none(self, ask):
+        from client_portal.asks.service import _project
+        body = _body("ws-2", type="question")
+        body.pop("options"); body.pop("proposal")
+        r = _raise(ask, self.AGENT, body)
+        assert _project(ask.db.get_operator_queue_item(r["id"])).proposal is None
+
+
 class TestTheRateCheckComesBeforeTheWork:
     """Every call that is not a replay spends a rate token before the sink reads
     the database (vybe's review on #3028): the re-ask scan reads up to 200 stored

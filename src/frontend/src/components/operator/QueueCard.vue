@@ -86,6 +86,10 @@
         <div class="prose prose-sm dark:prose-invert max-w-none text-gray-700 dark:text-gray-300" v-html="renderMarkdown(item.question)"></div>
       </div>
 
+      <!-- trinity-enterprise#611: the exact action this approval would run, always
+           shown — it is what the operator is deciding, unlike `context` below. -->
+      <QueueProposal v-if="item.proposal" :proposal="item.proposal" class="px-4 pb-4" />
+
       <!-- Context (collapsible) -->
       <div v-if="item.context && Object.keys(item.context).length > 0" class="px-4 pb-4">
         <button
@@ -207,6 +211,7 @@ import { queueTypeLabel, queueResponseKind, queueSyncBadge, queueReaskBadges } f
 import AgentAvatar from '../AgentAvatar.vue'
 import BaseBadge from '../base/BaseBadge.vue'
 import InlineError from '../InlineError.vue'
+import QueueProposal from './QueueProposal.vue'
 
 const props = defineProps({
   item: { type: Object, required: true }

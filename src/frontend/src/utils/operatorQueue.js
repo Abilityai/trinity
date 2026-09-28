@@ -375,3 +375,23 @@ export function queueReaskBadges(item, items = []) {
   }
   return out
 }
+
+/**
+ * trinity-enterprise#611 — the rows of an ask's `proposal`: the exact action a
+ * person is asked to approve. The prompt tells agents to put it there "so the
+ * operator can verify what they are approving", so every card that offers the
+ * decision renders these rows (components/operator/QueueProposal.vue).
+ *
+ * One row per top-level field, in the order the agent wrote them. Text is shown
+ * verbatim; any other value (a number, a boolean, null, a nested object or
+ * list) as compact JSON, so nothing is summarised away. Anything that is not a
+ * plain object has no rows. Agent-authored: callers render the values as text,
+ * never as markup.
+ */
+export function proposalRows(proposal) {
+  if (!proposal || typeof proposal !== 'object' || Array.isArray(proposal)) return []
+  return Object.entries(proposal).map(([key, value]) => ({
+    key,
+    value: typeof value === 'string' ? value : JSON.stringify(value),
+  }))
+}
