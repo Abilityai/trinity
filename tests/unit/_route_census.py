@@ -798,14 +798,19 @@ def runtime_routes(
 ):
     """Import the real app in a SUBPROCESS and return its routes. Raises
     (never skips) on a failed import, unparseable output or zero routes."""
+    import os
     import subprocess
 
+    # `main` must resolve from `backend` alone: an inherited PYTHONPATH (the
+    # verify-local unit stage sets one) would import some other tree's app.
+    env = {k: v for k, v in os.environ.items() if k != "PYTHONPATH"}
     proc = subprocess.run(
         [python, "-c", RUNTIME_DUMP, str(backend)],
         capture_output=True,
         text=True,
         timeout=timeout,
         cwd=str(REPO),
+        env=env,
     )
     if proc.returncode != 0:
         raise RuntimeError(
