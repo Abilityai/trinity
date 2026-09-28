@@ -4,7 +4,13 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 
 from models import User, AgentCapacityUpdate, PublicChannelModelUpdate
 from database import db
-from dependencies import get_current_user, AuthorizedAgentByName, assert_agent_access, assert_agent_owner
+from dependencies import (
+    get_current_user,
+    AuthorizedAgentByName,
+    assert_agent_access,
+    assert_agent_owner,
+    require_person,
+)
 from services import settings_service
 from services.docker_service import get_agent_container
 from services.agent_service import (
@@ -61,10 +67,14 @@ async def set_agent_autonomy_status(
     agent_name: str,
     body: dict,
     request: Request,
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(require_person)
 ):
     """
     Set the autonomy status for an agent.
+
+    Person-only (#2996): autonomy decides whether the agent's cron schedules
+    fire unattended — a grant, so an agent- or system-scoped key is refused
+    before the owner check, whatever agent it addresses.
 
     Body:
     - enabled: True to enable autonomy, False to disable
