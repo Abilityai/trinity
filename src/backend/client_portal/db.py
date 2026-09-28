@@ -1103,8 +1103,68 @@ def dismissed_file_ids(client_email: str) -> set[str]:
         return {r[0] for r in conn.execute(stmt)}
 
 
+# ent#610 — the ONE definition of an unread arrival. A `UNION ALL` of two arms
+# that share the #557 cursor-or-baseline predicate unchanged:
+#
+#   (i)  an assistant message in the viewer's own chat (ent#359's rule);
+#   (ii) a report ADDRESSED to the viewer and stamped to a session the viewer
+#        OWNS (`s.client_email = :email`) — a deliverable is an arrival too.
+#
+# `count_unread_by_session` groups it and `unread_arrivals_with_latest` windows
+# it, so the count on a row and the preview beside it are read from the same
+# fragment and cannot drift. The audience predicate is PLAIN equality on a bind
+# lowercased in Python, never `lower(column)`: addressees are normalised at the
+# boundary (#2955, `utils/addressee.py`), and `idx_agent_reports_audience`
+# serves only the bare column — `lower()` would scan the fleet's reports on every
+# 20 s poll. Every reader aliases the subquery (PostgreSQL < 16 requires it).
+_UNREAD_CURSOR = (
+    "  AND ("
+    "        (st.last_read_at IS NOT NULL AND {at} > st.last_read_at)"
+    "     OR (st.last_read_at IS NULL AND {at} > ("
+    "           SELECT b.last_read_at FROM enterprise_portal_chat_state b "
+    "           WHERE b.client_email = :email AND b.chat_kind = :bkind "
+    "             AND b.chat_id = :bid"
+    "         ))"
+    "      ) "
+)
+
+_UNREAD_ARRIVALS = (
+    "SELECT m.session_id AS session_id, m.id AS id, m.created_at AS at, "
+    "       'message' AS kind, m.agent_name AS agent_name "
+    "FROM enterprise_portal_messages m "
+    "LEFT JOIN enterprise_portal_chat_state st "
+    "  ON st.client_email = :email AND st.chat_kind = 'thread' "
+    " AND st.chat_id = m.session_id "
+    "WHERE m.client_email = :email "
+    "  AND m.role = 'assistant' "
+    + _UNREAD_CURSOR.format(at="m.created_at")
+    + "UNION ALL "
+    "SELECT r.portal_session_id AS session_id, r.id AS id, r.created_at AS at, "
+    "       'deliverable' AS kind, s.agent_name AS agent_name "
+    "FROM agent_reports r "
+    "JOIN enterprise_portal_sessions s "
+    "  ON s.id = r.portal_session_id AND s.client_email = :email "
+    "LEFT JOIN enterprise_portal_chat_state st "
+    "  ON st.client_email = :email AND st.chat_kind = 'thread' "
+    " AND st.chat_id = r.portal_session_id "
+    "WHERE r.addressed_to_email = :email "
+    + _UNREAD_CURSOR.format(at="r.created_at")
+)
+
+
+def _unread_params(client_email: str) -> dict:
+    return {"email": (client_email or "").lower(),
+            "bkind": BASELINE_KIND, "bid": BASELINE_ID}
+
+
 def count_unread_by_session(client_email: str) -> dict[str, int]:
-    """Per-thread count of agent messages the viewer has not seen.
+    """Per-thread count of arrivals the viewer has not seen.
+
+    **An arrival (ent#610)** is an agent message in the viewer's chat OR a report
+    addressed to them stamped to a chat they own — the two arms of
+    `_UNREAD_ARRIVALS`. Everything below about cursors and the baseline applies
+    to both arms unchanged; what follows was written for messages and still
+    reads true with "arrival" in its place.
 
     Two cases, and the second one is ent#557:
 
@@ -1152,28 +1212,12 @@ def count_unread_by_session(client_email: str) -> dict[str, int]:
     flow's Known Limitations.)
     """
     stmt = text(
-        "SELECT m.session_id AS session_id, COUNT(*) AS n "
-        "FROM enterprise_portal_messages m "
-        "LEFT JOIN enterprise_portal_chat_state st "
-        "  ON st.client_email = :email AND st.chat_kind = 'thread' "
-        " AND st.chat_id = m.session_id "
-        "WHERE m.client_email = :email "
-        "  AND m.role = 'assistant' "
-        "  AND ("
-        "        (st.last_read_at IS NOT NULL AND m.created_at > st.last_read_at)"
-        "     OR (st.last_read_at IS NULL AND m.created_at > ("
-        "           SELECT b.last_read_at FROM enterprise_portal_chat_state b "
-        "           WHERE b.client_email = :email AND b.chat_kind = :bkind "
-        "             AND b.chat_id = :bid"
-        "         ))"
-        "      ) "
-        "GROUP BY m.session_id"
+        "SELECT a.session_id AS session_id, COUNT(*) AS n "
+        "FROM (" + _UNREAD_ARRIVALS + ") AS a "
+        "GROUP BY a.session_id"
     )
     with get_engine().connect() as conn:
-        rows = conn.execute(stmt, {
-            "email": (client_email or "").lower(),
-            "bkind": BASELINE_KIND, "bid": BASELINE_ID,
-        }).mappings()
+        rows = conn.execute(stmt, _unread_params(client_email)).mappings()
         return {r["session_id"]: int(r["n"]) for r in rows if r["session_id"]}
 
 
