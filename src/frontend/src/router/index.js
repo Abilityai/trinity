@@ -253,6 +253,18 @@ export const routes = [
     meta: { title: 'Workspace', hideHelpWidget: true }
   },
   {
+    // trinity-enterprise#610: the Inbox — what needs you and what came back,
+    // across your agents. The same Portal.vue shell renders it as a stage
+    // branch; `bootstrap()` lands a bare `/workspace` here once (D9), while bare
+    // `/workspace` itself stays the new-chat stage. Declared before the
+    // parameterised Workspace routes by convention; it cannot collide with them
+    // (`/c/`, `/r/`, `/a/` are literal prefixes).
+    path: '/workspace/inbox',
+    name: 'WorkspaceInbox',
+    component: () => import('../views/Portal.vue'),
+    meta: { title: 'Workspace · Inbox', hideHelpWidget: true }
+  },
+  {
     // #138: deep-linkable, refresh-safe conversation thread. The same shell as
     // /workspace (new-chat state); the :sessionId opens that thread. Back/forward
     // navigate between new-chat and threads.

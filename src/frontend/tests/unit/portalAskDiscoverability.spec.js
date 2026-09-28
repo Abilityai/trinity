@@ -86,7 +86,8 @@ describe('#2424 part 2 — asks are attributable to an agent', () => {
   it('keeps unread replies as a SEPARATE fact, never summed', () => {
     const t = agentRowTitle({ label: 'a', name: 'a', askCount: 2, unread: 3 })
     expect(t).toMatch(/2 asks/i)
-    expect(t).toMatch(/3 unread/i)
+    // ent#610 (D3): the count is arrivals (messages + deliverables), worded "new".
+    expect(t).toMatch(/3 new/i)
     // "5" would mean the two counts were added — the exact conflation
     // PortalSidebar.vue's own comment forbids.
     expect(t).not.toMatch(/\b5\b/)

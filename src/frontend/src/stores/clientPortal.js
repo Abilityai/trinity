@@ -1445,15 +1445,31 @@ export const useClientPortalStore = defineStore('clientPortal', {
     //
     // Keyed `${kind}:${id}`: the two id spaces are independent, so an id alone
     // is not a key.
-    async fetchChatState() {
+    // trinity-enterprise#610 (D5): called with NO argument it returns the
+    // `kind:id` → entry map, exactly as before — every existing caller keeps
+    // its shape. Called with an options object it returns `{state, previews}`:
+    // `previews` maps `kind:id` → `{latest, first_unread_message_id}` for the
+    // entries the server enriched (only with `previews: true`, only while the
+    // Inbox is mounted). Counts and previews come from one response, so the
+    // row's "N new" and its excerpt cannot drift. An older backend ignores the
+    // flag and `previews` is simply empty.
+    async fetchChatState(opts) {
+      const withPreviews = !!(opts && opts.previews)
       const { data } = await portalHttp.get('/api/enterprise/client-portal/chat-state', {
         headers: this.authHeader,
+        ...(withPreviews ? { params: { previews: true } } : {}),
       })
       const out = {}
+      const previews = {}
       for (const c of data.chats || []) {
-        if (c && c.kind && c.id) out[`${c.kind}:${c.id}`] = c
+        if (!(c && c.kind && c.id)) continue
+        const key = `${c.kind}:${c.id}`
+        out[key] = c
+        if (c.latest || c.first_unread_message_id) {
+          previews[key] = { latest: c.latest || null, first_unread_message_id: c.first_unread_message_id || null }
+        }
       }
-      return out
+      return opts === undefined ? out : { state: out, previews }
     },
 
     async setChatStar(kind, chatId, starred) {
@@ -1474,6 +1490,18 @@ export const useClientPortalStore = defineStore('clientPortal', {
           { headers: this.authHeader },
         )
       } catch { /* stale badge only */ }
+    },
+
+    // trinity-enterprise#610 (D11): the same write, but it RETHROWS. Mark all
+    // read settles many of these and must report how many failed —
+    // `markChatRead` swallows every error by design, so `Promise.allSettled`
+    // over it would report zero failures even if all of them failed.
+    async markChatReadStrict(kind, chatId) {
+      await portalHttp.post(
+        `/api/enterprise/client-portal/chat-state/${kind}/${encodeURIComponent(chatId)}/read`,
+        null,
+        { headers: this.authHeader },
+      )
     },
 
     // `since` is the seq cursor: 0 loads the whole transcript, a later value

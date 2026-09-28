@@ -97,6 +97,15 @@ export function askBadgeTitle(count) {
   return `${n} ${n === 1 ? 'ask is' : 'asks are'} waiting on your answer`
 }
 
+// trinity-enterprise#610 (D3/D13): the unread badge's accessible name. The
+// count is arrivals (agent messages AND deliverables addressed to you), so the
+// noun is "new" — "replies" was true only while messages were the one arm.
+export function unreadBadgeTitle(count) {
+  const n = Number(count) || 0
+  if (n <= 0) return ''
+  return `${n} new you haven't read`
+}
+
 // The agent row's accessible name.
 //
 // #2424: this composed unread replies and the availability chip and never
@@ -110,7 +119,9 @@ export function agentRowTitle({ label, name, unread = 0, askCount = 0, chipTitle
 
   const parts = []
   if (asks > 0) parts.push(`${asks} ${asks === 1 ? 'ask' : 'asks'} waiting on you`)
-  if (reads > 0) parts.push(`${reads} unread ${reads === 1 ? 'reply' : 'replies'}`)
+  // trinity-enterprise#610 (D3): the count is ARRIVALS — agent messages and
+  // deliverables addressed to you — so it says "new", not "replies".
+  if (reads > 0) parts.push(`${reads} new`)
   // trinity-enterprise#657: the Draft mark beside the name, in words too.
   if (hasDraft) parts.push('an unsent draft')
 
@@ -659,6 +670,13 @@ export const STAGE_QUERY_KEYS = ['agent', 'new', 'voice']
 // this surface exists for, and a dead affordance is one of the two failures
 // the brand corner must not have (the other being an unlabelled one).
 export const WORKSPACE_ROOT = '/workspace'
+
+// trinity-enterprise#610 (D9): the Inbox — the Workspace's landing and the brand
+// mark's target. A NEW constant on purpose: `WORKSPACE_ROOT` is also
+// `shouldEscapeStage`'s root and the sign-out destination, and bare `/workspace`
+// keeps its meaning (the new-chat stage). Being a path that is not the root, the
+// Inbox is a stage `shouldEscapeStage` leaves — the fail-closed rule holds.
+export const WORKSPACE_INBOX = '/workspace/inbox'
 
 export function shouldEscapeStage(path, query) {
   if (path && path.replace(/\/+$/, '') !== WORKSPACE_ROOT) return true
