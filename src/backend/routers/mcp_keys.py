@@ -97,14 +97,13 @@ async def create_mcp_api_key_endpoint(
 @router.get("/keys", response_model=List[McpApiKey])
 async def list_mcp_api_keys_endpoint(
     request: Request,
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(require_interactive)
 ):
     """List MCP API keys: the caller's own, or every key for an admin.
 
-    Signed-in session only: the inventory has no machine consumer, so every MCP
-    key (the person's own `user` key included) gets a 403.
+    Signed-in session only, like creating one: the inventory has no machine
+    consumer, so every MCP key (the person's own `user` key included) gets a 403.
     """
-    reject_non_interactive_principal(current_user)
     try:
         if current_user.role == "admin":
             keys = db.list_all_mcp_api_keys()

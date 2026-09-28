@@ -276,20 +276,19 @@ strict as the principal it produces. The UI (`McpKeysTab.vue`) and the CLI
 
 #### List API Keys (GET /api/mcp/keys)
 
-Signed-in session only (trinity-enterprise#712): `reject_non_interactive_principal`
-is the handler's first statement, so every MCP key — the person's own `user` key
+Signed-in session only (trinity-enterprise#712): `Depends(require_interactive)`,
+the same rule as creating a key, so every MCP key — the person's own `user` key
 included — gets a 403. The inventory has no machine consumer; the Settings → MCP
 Keys tab calls it with the JWT. A signed-in admin still gets every key with its
 owner's `user_email` (the tab renders it per row); nothing returns the secret.
 
 ```python
-# mcp_keys.py:93-111
+# mcp_keys.py:97
 @router.get("/keys", response_model=List[McpApiKey])
 async def list_mcp_api_keys_endpoint(
     request: Request,
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(require_interactive)  # JWT session only
 ):
-    reject_non_interactive_principal(current_user)  # JWT session only
     if current_user.role == "admin":
         keys = db.list_all_mcp_api_keys()  # Admin sees all
     else:

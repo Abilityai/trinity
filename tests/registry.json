@@ -93,7 +93,7 @@
         "security",
         "mcp-keys"
       ],
-      "description": "GET /api/mcp/keys requires a signed-in session (INTERACTIVE, reject_non_interactive_principal as the handler's first statement): agent/system/connector/user keys through the REAL get_current_user with seeded key rows, and ops/portal_delegate/unknown-future-scope/missing-mcp_scope via an explicit principal dataclass -> 403. Signed-in admin -> every key with user_email (never the secret); signed-in user -> own keys only. Every route in routers/mcp_keys.py read off the router object and listed with its rule; a single-key read stays owner-scoped; /validate needs no session."
+      "description": "GET /api/mcp/keys requires a signed-in session (INTERACTIVE, Depends(require_interactive)): agent/system/connector/user keys through the REAL get_current_user with seeded key rows, and connector/loopback-JWT/ops/portal_delegate/unknown-future-scope/missing-mcp_scope via an explicit principal dataclass -> 403. Signed-in admin -> every key with user_email (never the secret); signed-in user -> own keys only. Every route in routers/mcp_keys.py read off the router object and listed with its rule; a single-key read stays owner-scoped; /validate needs no session."
     },
     {
       "file": "unit/test_ent600_telegram_group_context.py",

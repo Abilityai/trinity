@@ -2,8 +2,8 @@
 
 `GET /api/mcp/keys` is the key inventory the Settings → MCP Keys tab renders.
 It has no machine consumer (the CLI and the MCP server never call it with a
-key), so it takes the INTERACTIVE rule: `reject_non_interactive_principal` as
-the handler's first statement — a JWT session only. Every MCP key, the person's
+key), so it takes the INTERACTIVE rule, `Depends(require_interactive)` like its
+POST siblings — a JWT session only. Every MCP key, the person's
 own `user` key included, gets a 403. A signed-in admin still sees the full
 listing with each key's `user_email` (the tab renders it on every row); a
 signed-in non-admin sees only their own keys.
@@ -151,6 +151,8 @@ OVERRIDE_KINDS = {
     "connector-principal": lambda: _admin_principal(
         mcp_scope="connector", connector_agent=AGENT
     ),
+    # A JWT that the event loopback vouched for an agent is not a person's session.
+    "loopback-jwt": lambda: _admin_principal(mcp_scope=None, vouched_source_agent=AGENT),
     "ops-key": lambda: _admin_principal(mcp_scope="ops"),
     "portal-delegate-key": lambda: _admin_principal(
         mcp_scope="portal_delegate", portal_delegate=True
@@ -199,9 +201,9 @@ class TestSessionListingUnchanged:
 # to the file fails here until it is listed with the rule it follows and a test
 # that pins that rule.
 MCP_KEY_ROUTES = {
-    ("POST", "/api/mcp/keys"): "create — not changed here",
+    ("POST", "/api/mcp/keys"): "interactive — test_mcp_key_creation_requires_session.py",
     ("GET", "/api/mcp/keys"): "interactive — this file",
-    ("POST", "/api/mcp/keys/ensure-default"): "create — not changed here",
+    ("POST", "/api/mcp/keys/ensure-default"): "interactive — test_mcp_key_creation_requires_session.py",
     ("GET", "/api/mcp/keys/{key_id}"): "owner-scoped read — this file",
     ("POST", "/api/mcp/keys/{key_id}/revoke"): "agent + connector refused — test_1854_agent_mcp_key.py",
     ("DELETE", "/api/mcp/keys/{key_id}"): "agent + connector refused — test_1854_agent_mcp_key.py",
