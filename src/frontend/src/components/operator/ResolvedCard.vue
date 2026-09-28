@@ -34,6 +34,11 @@
 
         <p class="text-sm text-gray-600 dark:text-gray-400">{{ item.title }}</p>
 
+        <!-- trinity-enterprise#611: the action this ask proposed, so the record
+             says what was approved, denied or let expire (the Workspace keeps it
+             on ended asks too). -->
+        <QueueProposal v-if="item.proposal" :proposal="item.proposal" class="mt-2" />
+
         <!-- Response (responded/acknowledged) or terminal status (cancelled/expired, #1017).
              trinity-enterprise#611: who ended it and when, from the endings
              ledger — one rule (utils/operatorQueue.js::queueEnding). -->
@@ -83,6 +88,7 @@ import { queueSyncBadge, queueEnding, queueEndingText, queueReaskBadges } from '
 import { formatLocalDateTime } from '../../utils/timestamps'
 import AgentAvatar from '../AgentAvatar.vue'
 import BaseBadge from '../base/BaseBadge.vue'
+import QueueProposal from './QueueProposal.vue'
 
 const props = defineProps({
   item: { type: Object, required: true }

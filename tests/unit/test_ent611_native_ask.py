@@ -17,7 +17,10 @@ Related flow: docs/memory/feature-flows/operating-room.md (Raising an ask)
 Requirement: docs/memory/requirements/security.md §26.9 (OPS-001-ENDINGS)
 
 Harness: the real per-process SQLite the unit conftest pins; rows are seeded
-under agent names unique to this file and every assertion filters to them.
+under agent names unique to this file and every assertion filters to them. The
+database lives for the whole run and pytest-randomly reorders the tests, so a
+test that asserts a row is ABSENT, or that depends on which asks have expired,
+uses an agent no other test writes to.
 """
 from __future__ import annotations
 
@@ -664,10 +667,14 @@ class TestPlatformRaises:
         return ask.svc.raise_ask(self.AGENT, body, raised_by="gate", channel="gate")
 
     def test_an_agent_may_not_author_a_gate_id(self, ask):
-        for rid in ("gate-call-abc", "GATE-call-abc"):
+        # Its own agent: a sibling test creates `gate-call-abc` on AGENT, and the
+        # database keeps rows between tests (order-dependent on 2 of the 3
+        # nightly seeds before this, review on #3028).
+        squatter = "agent-611b-gate-squatter"
+        for rid in ("gate-agent-squat", "GATE-agent-squat"):
             with _Rejected(ask.svc, 422, "reserved_request_id"):
-                _raise(ask, self.AGENT, _body(rid))
-        assert ask.db.get_operator_queue_item_for_agent_by_request_id(self.AGENT, "gate-call-abc") is None
+                _raise(ask, squatter, _body(rid))
+        assert ask.db.get_operator_queue_item_for_agent_by_request_id(squatter, "gate-agent-squat") is None
 
     def test_the_gate_raises_under_its_own_prefix_and_the_receipt_says_so(self, ask):
         r = self._gate(ask, _body("gate-call-abc", to="operator"))
@@ -701,6 +708,50 @@ class TestPlatformRaises:
             disposition=ask.svc.ANSWERED, rows=(gate, mine), actor_email="person@example.com"))
         assert woken == ["agent-call-wake"]
 
+    def test_a_gate_rows_receipt_never_promises_a_wake(self, ask):
+        """`_wake_filer` skips a platform-minted row, so the receipt of a gate
+        raise must not say an ending will wake the agent, even when the owner
+        opted in (review on #3028)."""
+        ask.state["opted_in"] = True
+        agent = "agent-611b-gate-wakes"
+        first = ask.svc.raise_ask(agent, _body("gate-wk-1", to="operator"), raised_by="gate", channel="gate")
+        again = ask.svc.raise_ask(agent, _body("gate-wk-1", to="operator"), raised_by="gate", channel="gate")
+        assert (first["wakes_on_ending"], again["wakes_on_ending"]) == (False, False)
+        assert _raise(ask, agent, _body("agent-wk-1"))["wakes_on_ending"] is True
+
+    @pytest.mark.parametrize("raised_by, channel", [("gate", "mcp"), ("agent", "gate")])
+    def test_the_gate_channel_goes_with_the_gate_raiser(self, ask, raised_by, channel):
+        agent = f"agent-611b-gate-pin-{raised_by}"
+        rid = "gate-pin-1" if raised_by == "gate" else "pin-1"
+        with pytest.raises(ValueError):
+            ask.svc.raise_ask(agent, _body(rid, to="operator"), raised_by=raised_by, channel=channel)
+        assert ask.db.get_operator_queue_item_for_agent_by_request_id(agent, rid) is None
+
+    def test_a_gate_raise_never_answers_as_a_replay_of_a_row_it_did_not_raise(self, ask):
+        """A file row named `gate-…` written before the prefix was reserved would
+        otherwise come back to the gate as `replayed`, holding the agent's
+        proposal. A 409 makes that impossible rather than merely detectable."""
+        agent = "agent-611b-gate-legacy"
+        legacy = ask.db.create_operator_queue_item(
+            agent, {"id": "gate-legacy-1", "type": "question", "title": "t", "question": "q", "context": {}},
+            channel="file", raised_by="agent")
+        with _Rejected(ask.svc, 409, "request_id_taken"):
+            ask.svc.raise_ask(agent, _body("gate-legacy-1", to="operator"), raised_by="gate", channel="gate")
+        row = ask.db.get_operator_queue_item(legacy)
+        assert (row["raised_by"], row["channel"]) == ("agent", "file")   # untouched
+
+    def test_a_non_gate_row_that_wins_the_create_is_refused_too(self, ask, monkeypatch):
+        """The same rule where the create itself reports a replay (a row that
+        landed between the check and the insert)."""
+        agent = "agent-611b-gate-lost"
+        other = ask.db.get_operator_queue_item(ask.db.create_operator_queue_item(
+            agent, {"id": "gate-lost-other", "type": "question", "title": "t", "question": "q", "context": {}},
+            channel="file", raised_by="agent"))
+        monkeypatch.setattr(ask.db, "create_native_operator_queue_item",
+                            lambda *a, **k: {"outcome": "replayed", "row": other})
+        with _Rejected(ask.svc, 409, "request_id_taken"):
+            ask.svc.raise_ask(agent, _body("gate-lost-1", to="operator"), raised_by="gate", channel="gate")
+
     @pytest.mark.parametrize("kw", [{"raised_by": "bot"}, {"channel": "file"}, {"channel": "api"}])
     def test_an_unknown_raiser_or_channel_is_a_programming_error(self, ask, kw):
         args = {"raised_by": "agent", "channel": "mcp", **kw}
@@ -730,6 +781,78 @@ class TestTheWorkspaceShowsTheProposal:
         body.pop("options"); body.pop("proposal")
         r = _raise(ask, self.AGENT, body)
         assert _project(ask.db.get_operator_queue_item(r["id"])).proposal is None
+
+
+def _expire(uid):
+    from sqlalchemy import update
+    from db.engine import get_engine
+    from db.tables import operator_queue
+    with get_engine().begin() as conn:
+        conn.execute(update(operator_queue).where(operator_queue.c.id == uid)
+                     .values(status="expired", disposition="expired", disposed_by="timeout",
+                             disposed_at="2026-09-25T10:00:00Z"))
+
+
+class TestTheReaskGuardStaysWithItsRaiser:
+    """C6 and the re-ask link compare an ask with the SAME raiser's expired asks
+    (review on #3028). Across raisers they are different actions by different
+    parties: an agent's expired ask must not make the gate's raise 422
+    `reask_requires_link`, and a gate approval must not badge as a re-ask of
+    the agent's own. Each test has its own agent: expiring an ask changes what
+    later raises on that agent are refused."""
+
+    def _gate(self, ask, agent, body):
+        return ask.svc.raise_ask(agent, body, raised_by="gate", channel="gate")
+
+    def test_the_gate_is_not_blocked_by_the_agents_expired_proposal(self, ask):
+        agent = "agent-611b-rr-1"
+        _expire(_raise(ask, agent, _body("rr-agent-old", to="operator", proposal={"deploy": "v2"}))["id"])
+        r = self._gate(ask, agent, _body("gate-rr-1", to="operator", proposal={"deploy": "v2"}))
+        assert r["status"] == "created"
+
+    def test_the_agent_is_not_blocked_by_the_gates_expired_proposal(self, ask):
+        agent = "agent-611b-rr-2"
+        _expire(self._gate(ask, agent, _body("gate-rr-old", to="operator", proposal={"deploy": "v3"}))["id"])
+        assert _raise(ask, agent, _body("rr-agent-new", to="operator", proposal={"deploy": "v3"}))["status"] == "created"
+
+    def test_the_gate_still_needs_the_link_after_its_own_timeout(self, ask):
+        agent = "agent-611b-rr-3"
+        _expire(self._gate(ask, agent, _body("gate-rr-own", to="operator", proposal={"deploy": "v4"}))["id"])
+        with _Rejected(ask.svc, 422, "reask_requires_link") as info:
+            self._gate(ask, agent, _body("gate-rr-own-2", to="operator", proposal={"deploy": "v4"}))
+        assert info.value.extra["expired_request_id"] == "gate-rr-own"
+        linked = self._gate(ask, agent, _body("gate-rr-own-3", to="operator", proposal={"deploy": "v4"},
+                                              supersedes_expired="gate-rr-own"))
+        assert (linked["status"], linked["supersedes_expired"]) == ("created", "gate-rr-own")
+
+    def test_a_link_across_raisers_is_the_uniform_refusal(self, ask):
+        agent = "agent-611b-rr-4"
+        _expire(_raise(ask, agent, _body("rr-agent-old", to="operator", proposal={"deploy": "v5"}))["id"])
+        _expire(self._gate(ask, agent, _body("gate-rr-old", to="operator", proposal={"deploy": "v6"}))["id"])
+        with _Rejected(ask.svc, 422, "invalid_supersedes_expired"):
+            self._gate(ask, agent, _body("gate-rr-x", to="operator", supersedes_expired="rr-agent-old"))
+        with _Rejected(ask.svc, 422, "invalid_supersedes_expired"):
+            _raise(ask, agent, _body("rr-agent-x", to="operator", supersedes_expired="gate-rr-old"))
+        for rid in ("gate-rr-x", "rr-agent-x"):
+            assert ask.db.get_operator_queue_item_for_agent_by_request_id(agent, rid) is None
+
+    def test_an_agent_still_links_its_own_ask_from_before_the_column(self, ask):
+        """A row older than `raised_by` (NULL there) is the agent's own file ask,
+        and an agent's re-ask may link it, as before."""
+        agent = "agent-611b-rr-5"
+        _expire(ask.db.create_operator_queue_item(
+            agent, {"id": "rr-legacy-old", "type": "question", "title": "t", "question": "q", "context": {}}))
+        r = _raise(ask, agent, _body("rr-legacy-new", to="operator", supersedes_expired="rr-legacy-old"))
+        assert (r["status"], r["supersedes_expired"]) == ("created", "rr-legacy-old")
+
+    def test_nobody_links_a_platform_alarm(self, ask):
+        """A platform-minted row (a reserved-prefix alarm, NULL `raised_by`) is
+        not an ask anyone raised, so nothing re-asks it."""
+        agent = "agent-611b-rr-6"
+        _expire(ask.db.create_operator_queue_item(
+            agent, {"id": "queue-flood-rr-6", "type": "alert", "title": "t", "question": "q", "context": {}}))
+        with _Rejected(ask.svc, 422, "invalid_supersedes_expired"):
+            _raise(ask, agent, _body("rr-after-alarm", to="operator", supersedes_expired="queue-flood-rr-6"))
 
 
 class TestTheRateCheckComesBeforeTheWork:

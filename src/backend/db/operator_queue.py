@@ -482,9 +482,13 @@ class OperatorQueueOperations:
             row = conn.execute(stmt).mappings().first()
         return self._row_to_item(row) if row else None
 
-    def list_expired_proposals_for_agent(self, agent_name: str, limit: int) -> List[Dict]:
+    def list_expired_proposals_for_agent(
+        self, agent_name: str, limit: int, raised_by: Optional[str] = None,
+    ) -> List[Dict]:
         """`{request_id, proposal}` of this agent's EXPIRED asks that carried a
-        proposal, most recent ending first (trinity-enterprise#611).
+        proposal, most recent ending first (trinity-enterprise#611). With
+        `raised_by`, only that raiser's: the guard compares an ask with the
+        same raiser's denials, never across raisers.
 
         Read by the native create's re-ask guard: an agent that repeats the exact
         action a timeout already denied must link the expired ask
@@ -492,15 +496,16 @@ class OperatorQueueOperations:
         the proposal is returned parsed so the caller compares values, not the
         stored JSON's key order.
         """
+        conditions = [
+            operator_queue.c.agent_name == agent_name,
+            operator_queue.c.status == "expired",
+            operator_queue.c.proposal.isnot(None),
+        ]
+        if raised_by is not None:
+            conditions.append(operator_queue.c.raised_by == raised_by)
         stmt = (
             select(operator_queue.c.request_id, operator_queue.c.proposal)
-            .where(
-                and_(
-                    operator_queue.c.agent_name == agent_name,
-                    operator_queue.c.status == "expired",
-                    operator_queue.c.proposal.isnot(None),
-                )
-            )
+            .where(and_(*conditions))
             .order_by(func.coalesce(operator_queue.c.disposed_at, operator_queue.c.created_at).desc())
             .limit(limit)
         )

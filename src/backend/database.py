@@ -3702,9 +3702,9 @@ class DatabaseManager:
         # trinity-enterprise#611: the agent's own readback — ignores Clear All.
         return self._operator_queue_ops.get_item_for_agent_by_request_id(agent_name, request_id)
 
-    def list_expired_operator_queue_proposals(self, agent_name, limit):
+    def list_expired_operator_queue_proposals(self, agent_name, limit, raised_by=None):
         # trinity-enterprise#611: the native create's re-ask guard (C6).
-        return self._operator_queue_ops.list_expired_proposals_for_agent(agent_name, limit)
+        return self._operator_queue_ops.list_expired_proposals_for_agent(agent_name, limit, raised_by)
 
     def list_recent_operator_queue_endings(self, agent_name, since, limit,
                                            exclude_request_id_prefixes=None):

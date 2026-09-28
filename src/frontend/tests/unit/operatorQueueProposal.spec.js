@@ -27,6 +27,7 @@ vi.mock('@/api', () => {
 import { proposalRows } from '@/utils/operatorQueue'
 import { useOperatorQueueStore } from '@/stores/operatorQueue'
 import QueueCard from '@/components/operator/QueueCard.vue'
+import ResolvedCard from '@/components/operator/ResolvedCard.vue'
 import QueueProposal from '@/components/operator/QueueProposal.vue'
 
 const PROPOSAL = { action: 'pay_invoice', amount: 500, currency: 'USDC', to: 'vendor-7',
@@ -89,6 +90,29 @@ describe('the Operations card shows the proposal (mounted)', () => {
     await w.find('[data-testid="queue-card"]').trigger('click')
     expect(w.find('[data-testid="queue-card"]').attributes('aria-expanded')).toBe('true')
     expect(w.find('[data-testid="queue-proposal"]').exists()).toBe(false)
+  })
+})
+
+describe('the Resolved card keeps the proposal, so it says what was decided (mounted)', () => {
+  const ENDED = { ...APPROVAL, id: 'uuid-9', status: 'cancelled', disposition: 'cancelled',
+                  disposed_by: 'person', disposed_at: '2026-09-28T11:00:00Z' }
+
+  function mountResolved(item) {
+    const pinia = createPinia()
+    setActivePinia(pinia)
+    useOperatorQueueStore().items = [item]
+    return mount(ResolvedCard, { props: { item }, global: { plugins: [pinia], stubs: { AgentAvatar: true } } })
+  }
+
+  it('shows every field on an ended ask', () => {
+    const block = mountResolved(ENDED).find('[data-testid="queue-proposal"]')
+    expect(block.exists()).toBe(true)
+    expect(block.findAll('[data-testid="queue-proposal-row"]')).toHaveLength(6)
+    expect(block.text()).toContain('vendor-7')
+  })
+
+  it('shows nothing when the ended ask carried no proposal', () => {
+    expect(mountResolved({ ...ENDED, id: 'uuid-10', proposal: null }).find('[data-testid="queue-proposal"]').exists()).toBe(false)
   })
 })
 

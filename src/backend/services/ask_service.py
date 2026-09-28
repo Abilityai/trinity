@@ -336,19 +336,21 @@ def raise_ask(
         raise ValueError(f"raise_ask: unknown raised_by {raised_by!r}")
     if channel not in ASK_CHANNELS:
         raise ValueError(f"raise_ask: unknown channel {channel!r}")
+    if (raised_by == "gate") != (channel == "gate"):
+        raise ValueError(f"raise_ask: channel {channel!r} does not go with raised_by {raised_by!r}")
     norm = _validated_ask(ask, oqs, raised_by=raised_by)
     existing = db.get_operator_queue_item_for_agent_by_request_id(agent_name, norm["request_id"])
     if existing:
-        return _receipt(existing, status="replayed", differs=_differs(existing, norm, oqs))
+        return _replay(existing, norm, oqs, raised_by)
 
     if not _rate_allowed(agent_name, oqs):
         raise AskRejected(429, "rate_limited",
                           "Too many asks in a short time; try again in a minute.")
 
     deadline = _deadline(norm["expires_at"], floor=True)
-    predecessor = _predecessor(agent_name, norm["supersedes_expired"])
+    predecessor = _predecessor(agent_name, norm["supersedes_expired"], raised_by)
     if norm["proposal"] is not None and predecessor is None:
-        _refuse_unlinked_reask(agent_name, norm["proposal"])
+        _refuse_unlinked_reask(agent_name, norm["proposal"], raised_by)
     people, addressee, resolved = _address(agent_name, norm["to"])
 
     context = dict(norm["context"])
@@ -386,7 +388,7 @@ def raise_ask(
                           max_pending=_max_pending())
     row = out["row"]
     if out["outcome"] == "replayed":   # a concurrent call with the same id won
-        return _receipt(row, status="replayed", differs=_differs(row, norm, oqs))
+        return _replay(row, norm, oqs, raised_by)
 
     audit = [{
         "event_action": "raised",
@@ -554,25 +556,53 @@ def _deadline(value: Any, *, floor: bool) -> Optional[datetime]:
     return utc
 
 
-def _predecessor(agent_name: str, request_id: Optional[str]) -> Optional[Dict[str, Any]]:
+def _predecessor(agent_name: str, request_id: Optional[str],
+                 raised_by: str = "agent") -> Optional[Dict[str, Any]]:
     """The agent's OWN expired ask a re-ask links, or None when none is named.
-    One refusal for every other case — missing, pending, answered, cancelled —
-    so the rule reads the same whatever the reason."""
+    It must have been raised by the same raiser: a gate approval is not a
+    re-ask of the agent's own ask, nor the reverse. One refusal for every other
+    case — missing, pending, answered, cancelled, another raiser's — so the rule
+    reads the same whatever the reason."""
     if request_id is None:
         return None
     row = db.get_operator_queue_item_for_agent_by_request_id(agent_name, request_id)
-    if not row or "expired" not in (row.get("disposition"), row.get("status")):
+    if (not row or "expired" not in (row.get("disposition"), row.get("status"))
+            or _raiser_of(row) != raised_by):
         raise AskRejected(422, "invalid_supersedes_expired",
                           "supersedes_expired must name one of your own asks that expired.")
     return row
 
 
-def _refuse_unlinked_reask(agent_name: str, proposal: Dict[str, Any]) -> None:
+def _raiser_of(row: Dict[str, Any]) -> Optional[str]:
+    """Who raised a row: the column when it is set. A row older than the column
+    is the agent's own file ask, unless the platform minted it (a
+    reserved-prefix alarm, raised by nobody an ask can be linked to)."""
+    if row.get("raised_by"):
+        return row["raised_by"]
+    from services.operator_queue_service import is_platform_minted
+    return None if is_platform_minted(row) else "agent"
+
+
+def _replay(row: Dict[str, Any], norm: Dict[str, Any], oqs, raised_by: str) -> Dict[str, Any]:
+    """The first ask's receipt for a retried `request_id`, never across raisers.
+    A gate raise is not answered by a row the gate did not raise — a file row
+    named `gate-…` written before the prefix was reserved would otherwise come
+    back to the gate as `replayed`, holding the agent's proposal. (An agent
+    cannot reach a gate row: its `gate-` ids are refused before the replay.)"""
+    if raised_by == "gate" and row.get("raised_by") != "gate":
+        raise AskRejected(409, "request_id_taken",
+                          "That request_id already names an ask the gate did not raise.")
+    return _receipt(row, status="replayed", differs=_differs(row, norm, oqs))
+
+
+def _refuse_unlinked_reask(agent_name: str, proposal: Dict[str, Any], raised_by: str = "agent") -> None:
     """C6: repeating the exact action a timeout already denied needs the link,
     so the person sees it is being asked again ("denied by timeout; do not
-    re-ask the same action without new information")."""
+    re-ask the same action without new information"). Compared with the SAME
+    raiser's expired asks only: the agent's expired ask is not the gate's
+    denial, nor the reverse."""
     wanted = _canon(proposal)
-    for prior in db.list_expired_operator_queue_proposals(agent_name, _REASK_SCAN):
+    for prior in db.list_expired_operator_queue_proposals(agent_name, _REASK_SCAN, raised_by=raised_by):
         if _canon(prior["proposal"]) == wanted:
             raise AskRejected(
                 422, "reask_requires_link",
@@ -690,6 +720,8 @@ def _receipt(
     (a replay of an ended ask must not wait for a wake that already fired), the
     ROLE it went to — never a person's email — and whether an ending will wake
     the agent at all."""
+    from services.operator_queue_service import is_platform_minted
+
     if resolved is None:
         resolved = row.get("to_role") == "operator" or bool(row.get("resolved_to"))
     if supersedes_request_id is None:
@@ -707,7 +739,9 @@ def _receipt(
         "disposition": row.get("disposition"),
         "disposed_at": row.get("disposed_at"),
         "expires_at": row.get("expires_at"),
-        "wakes_on_ending": _opted_in(row["agent_name"]),
+        # `_wake_filer` skips a platform-minted row (a gate's), so its receipt
+        # never promises a wake, whatever the owner opted in to.
+        "wakes_on_ending": _opted_in(row["agent_name"]) and not is_platform_minted(row),
         "supersedes_expired": supersedes_request_id,
     }
     if differs is not None:
