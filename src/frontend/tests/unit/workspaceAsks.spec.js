@@ -157,7 +157,14 @@ describe('an unentitled build says nothing', () => {
     warn.mockRestore()
   })
 
-  it('a real failure is reported once, and clears the list rather than showing stale asks', async () => {
+  // trinity-enterprise#610 (PR A0) REVERSED this case. It used to pin "a real
+  // failure clears the list rather than showing stale asks" — and with
+  // `asksAvailable=false` that blanked every PortalAsks surface and dropped the
+  // sidebar badge to zero on a 5xx: the Workspace claiming "nothing needs you"
+  // during an outage (#2915). The design-system contract forbids exactly that
+  // ("never overwrite the data with a synthetic empty payload in a catch",
+  // ent#253). A failure now keeps the last good list and SAYS it failed.
+  it('a real failure is reported once, keeps the last good list and says it failed', async () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
     portalHttp.get.mockResolvedValueOnce({ data: [ask('a1')] })
     await store.fetchAsks()
@@ -166,9 +173,61 @@ describe('an unentitled build says nothing', () => {
     await store.fetchAsks()
 
     expect(warn).toHaveBeenCalledTimes(1)
-    expect(store.asks).toEqual([])
-    expect(store.asksAvailable).toBe(false)
+    expect(store.asks.map((a) => a.id)).toEqual(['a1'])
+    expect(store.askCount).toBe(1)
+    expect(store.asksFailed).toBe(true)
+    expect(store.asksLoaded).toBe(true)
+    // Left as it was: flipping it would blank PortalAsks (its render gate).
+    expect(store.asksAvailable).toBe(true)
     warn.mockRestore()
+  })
+
+  it('a 503 asks_unavailable or a network error before any success is a failure, not absence', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    portalHttp.get.mockRejectedValueOnce({
+      response: { status: 503, data: { detail: { code: 'asks_unavailable' } } },
+    })
+    await store.fetchAsks()
+
+    expect(store.asksFailed).toBe(true)
+    expect(store.asksLoaded).toBe(false)
+    expect(store.asks).toEqual([])
+
+    portalHttp.get.mockRejectedValueOnce(new Error('Network Error'))
+    await store.fetchAsks()
+    expect(store.asksFailed).toBe(true)
+    expect(store.asksLoaded).toBe(false)
+    warn.mockRestore()
+  })
+
+  it('a success after a failure clears the failure and stamps the load time', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    portalHttp.get.mockRejectedValueOnce({ response: { status: 500 } })
+    await store.fetchAsks()
+    expect(store.asksFailed).toBe(true)
+    expect(store.asksLoadedAt).toBe(null)
+
+    portalHttp.get.mockResolvedValueOnce({ data: [ask('a2')] })
+    await store.fetchAsks()
+
+    expect(store.asksFailed).toBe(false)
+    expect(store.asksLoaded).toBe(true)
+    expect(store.asksAvailable).toBe(true)
+    expect(typeof store.asksLoadedAt).toBe('number')
+    expect(store.asks.map((a) => a.id)).toEqual(['a2'])
+    warn.mockRestore()
+  })
+
+  it('a 404 after a success is absence again, not a failure', async () => {
+    portalHttp.get.mockResolvedValueOnce({ data: [ask('a1')] })
+    await store.fetchAsks()
+
+    portalHttp.get.mockRejectedValueOnce({ response: { status: 404 } })
+    await store.fetchAsks()
+
+    expect(store.asksAvailable).toBe(false)
+    expect(store.asks).toEqual([])
+    expect(store.asksFailed).toBe(false)
   })
 
   it('does not poll at all when nobody is signed in', async () => {

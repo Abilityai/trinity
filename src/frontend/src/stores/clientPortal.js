@@ -300,6 +300,14 @@ export const useClientPortalStore = defineStore('clientPortal', {
     // sync step, and three separate queries is how that stops being true.
     asks: [],
     asksAvailable: false,   // false when the backend does not serve /asks (404/403)
+    // trinity-enterprise#610 (PR A0): the read's honesty. `asksLoaded` latches on
+    // the first success; `asksFailed` is the LAST read's verdict for anything but
+    // 404/403 (a 5xx, 503 `asks_unavailable`, a network error) — the list keeps
+    // what it last knew, so a surface can say "couldn't refresh" instead of
+    // claiming nothing is waiting. `asksLoadedAt` feeds the stale banner.
+    asksLoaded: false,
+    asksFailed: false,
+    asksLoadedAt: null,
     // Where the user was when it expired, so re-authenticating returns them
     // there instead of the roster root.
     resumePath: null,
@@ -2024,11 +2032,18 @@ export const useClientPortalStore = defineStore('clientPortal', {
     // store onto a dedicated instance so a workspace request can never inherit
     // the platform JWT from `axios.defaults`.
     //
-    // Degrades to silence. Asks are OSS core since ent#428, so a CURRENT backend
-    // always serves this; against an OLDER one — which either predates the
-    // surface or still gates it behind the entitlement it used to carry — the
+    // Absence degrades to silence. Asks are OSS core since ent#428, so a CURRENT
+    // backend always serves this; against an OLDER one — which either predates
+    // the surface or still gates it behind the entitlement it used to carry — the
     // 404/403 is not an error worth showing a client. `asksAvailable` stays
     // false and every surface renders nothing.
+    //
+    // A FAILURE is not absence (trinity-enterprise#610, PR A0). Anything else —
+    // 5xx, 503 `asks_unavailable`, network — sets `asksFailed`, keeps the last
+    // good list and leaves `asksAvailable` alone: clearing either would blank
+    // every PortalAsks surface and zero the badge, i.e. "nothing needs you"
+    // during an outage (#2915; the contract's "never overwrite the data with a
+    // synthetic empty payload in a catch", ent#253).
     async fetchAsks(agentName = null) {
       if (!this.isClientSignedIn) return []
       try {
@@ -2041,14 +2056,20 @@ export const useClientPortalStore = defineStore('clientPortal', {
         })
         this.asks = Array.isArray(data) ? data : []
         this.asksAvailable = true
+        this.asksLoaded = true
+        this.asksFailed = false
+        this.asksLoadedAt = Date.now()
         return this.asks
       } catch (err) {
-        this.asksAvailable = false
-        if (![403, 404].includes(err.response?.status)) {
-          console.warn('[workspace] asks unavailable:', err?.message || err)
+        if ([403, 404].includes(err.response?.status)) {
+          this.asksAvailable = false
+          this.asksFailed = false
+          this.asks = []
+          return []
         }
-        this.asks = []
-        return []
+        console.warn('[workspace] asks unavailable:', err?.message || err)
+        this.asksFailed = true
+        return this.asks
       }
     },
 
