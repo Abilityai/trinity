@@ -3570,6 +3570,17 @@
         "regression"
       ],
       "description": "ent#713 GET /api/events access scoping: the real list_all_events handler with real models.User principals over users, agent_ownership and agent_sharing rows written by the real db writers. Non-admin sees exactly owned + shared agents' events; admin is unrestricted; a targeted source_agent that is inaccessible, nonexistent, or shared-but-soft-deleted returns one uniform 403 'Access denied'; an empty source_agent keeps the roster; a principal with no email sees nothing; the mounted route (real router, only get_current_user overridden) returns the same scoped list and a 403 {\"detail\": \"Access denied\"} over HTTP to a non-admin. DB half runs the production list_events query: agent_names IN filter with LIMIT applied after it, empty list returns [] with no engine call, None unrestricted. Per-test uuid names + event_type and far-future created_at keep it order-independent in the shared per-process DB."
+    },
+    {
+      "file": "unit/test_ent530_skill_sets.py",
+      "feature": "trinity-enterprise#530",
+      "added": "2026-09-24",
+      "categories": [
+        "backend",
+        "skills",
+        "database"
+      ],
+      "description": "Skill sets — a named slice of the library assigned as a unit (ent#530, absorbs ent#342). The catalog parser (both forms, total, every problem a code, partial on a missing member, bounds); plan_member_rows including the FAIL-CLOSED rule (an unresolvable set removes nothing); sets read through the guarded catalog.yaml over a real git repo; materialised rows over a real SQLite file (overlap — each assignment stands on its own, unassign keeps individual and other-set members, upstream add/remove, the legacy bulk-PUT round trip neither drops nor promotes set members); the service (custom-wins precedence, shadowing, member provenance, named 404/422 refusals, the honest per-agent status with prerequisites probed only while running); both migration tracks executed plus the single Alembic head; the CASCADE AgentRef; the routes through a real FastAPI app (static-before-catch-all, retained-via-set answer, a skills-only PUT leaves sets alone); fleet re-inject prunes a member dropped upstream; the CLAUDE.md 'via <set>' annotation. Mutations of the fail-closed rule and the PUT keep-derived rule each red."
     }
   ]
 }

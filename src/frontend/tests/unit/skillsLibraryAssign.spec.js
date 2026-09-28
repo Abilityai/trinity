@@ -206,6 +206,30 @@ describe('ent#386 — unassigning', () => {
     expect(api.delete).toHaveBeenCalledWith('/api/agents/scout/skills/research')
   })
 
+  it('keeps the holder and says why when a set still names the skill (ent#530)', async () => {
+    api.delete.mockResolvedValue({ data: {
+      success: true, removed: false, skill_name: 'research', retained_via_sets: ['dev-backlog'],
+      message: 'Still assigned through set dev-backlog; unassign the set to remove it.',
+    } })
+
+    const err = await store.unassignSkill('research', 'scout')
+
+    expect(err).toBe('Still assigned through set dev-backlog; unassign the set to remove it.')
+    expect(store.agentsFor('research').map((a) => a.name)).toContain('scout')
+  })
+
+  it('an object detail (409 skill_set_unresolved) comes back as its message string', async () => {
+    api.delete.mockRejectedValue({ response: { status: 409, data: { detail: {
+      code: 'skill_set_unresolved', message: "'research' was assigned through a skill set that cannot be read right now",
+    } } } })
+
+    const err = await store.unassignSkill('research', 'scout')
+
+    expect(typeof err).toBe('string')
+    expect(err).toContain('cannot be read right now')
+    expect(store.agentsFor('research').map((a) => a.name)).toContain('scout')
+  })
+
   it('removes only that holder', async () => {
     api.delete.mockResolvedValue({ data: { success: true } })
 
