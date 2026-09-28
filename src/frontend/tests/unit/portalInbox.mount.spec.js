@@ -242,6 +242,29 @@ describe('answering an ask in the pane (D8)', () => {
   })
 })
 
+describe('a selection restored from the URL (D8)', () => {
+  it('a deep-linked ask is held in place once answered, exactly as a clicked one is', async () => {
+    store.asks = [ask('a1', { created_at: iso(1) }), ask('a2', { created_at: iso(20) })]
+    store.asksLoaded = true
+    store.answerAsk = vi.fn(async (id) => {
+      const answered = { ...store.asks.find((a) => a.id === id), status: 'answered', ended_by: 'you', ended_at: new Date().toISOString() }
+      store.asks = store.asks.map((a) => (a.id === id ? answered : a))
+      return answered
+    })
+    // Reload / deep link: the URL names the item, nobody clicked it.
+    const w = await mountInbox({}, { query: { tab: 'action', item: 'ask:a2' } })
+    await w.find('[data-testid="inbox-ask-input-a2"]').setValue('yes')
+    await w.find('[data-testid="inbox-ask-input-a2"]').element.form.dispatchEvent(new Event('submit'))
+    await flushPromises()
+    expect(store.answerAsk).toHaveBeenCalledWith('a2', expect.anything())
+    expect(has(w, 'inbox-row-ask:a2')).toBe(true)
+    expect(has(w, 'inbox-row-ended-ask:a2')).toBe(true)
+    // …and it keeps its place: second, where the reader last saw it.
+    const keys = w.findAll('[data-inbox-row]').map((r) => r.attributes('data-inbox-row'))
+    expect(keys).toEqual(['ask:a1', 'ask:a2'])
+  })
+})
+
 describe('Mark all read (D11)', () => {
   it('settles through markChatReadStrict and names how many failed', async () => {
     store.markChatReadStrict = vi.fn(async (_k, id) => { if (id === 't2') throw new Error('500') })
@@ -271,6 +294,52 @@ describe('phone (D12)', () => {
     await flushPromises()
     expect(router.currentRoute.value.query.item).toBeUndefined()
     expect(document.activeElement?.getAttribute('data-inbox-row')).toBe('thread:t1')
+  })
+
+  // jsdom ignores Tailwind's `hidden`, so "focus landed" is not enough: a real
+  // browser drops focus() on a display:none element. Record, at the moment of
+  // each focus() call, whether the target sat under a `hidden` list column.
+  it('Back focuses the row only once the list column is shown again', async () => {
+    phone = true
+    stubMatchMedia()
+    const calls = []
+    const orig = HTMLElement.prototype.focus
+    const spy = vi.spyOn(HTMLElement.prototype, 'focus').mockImplementation(function (...a) {
+      calls.push({ row: this.getAttribute('data-inbox-row'), hidden: !!this.closest('.hidden') })
+      return orig.apply(this, a)
+    })
+    try {
+      const w = await mountInbox({ threads: [thread('t1', { unread: 2 })] }, { query: { tab: 'unread' } })
+      await w.find('[data-testid="inbox-row-thread:t1"]').trigger('click')
+      await flushPromises()
+      calls.length = 0
+      await w.find('[data-testid="inbox-pane-back"]').trigger('click')
+      await flushPromises()
+      const rowCalls = calls.filter((c) => c.row === 'thread:t1')
+      expect(rowCalls.length).toBeGreaterThan(0)
+      expect(rowCalls.every((c) => !c.hidden)).toBe(true)
+    } finally { spy.mockRestore() }
+  })
+
+  it("Back after reading the chat off Unread focuses the row now in its place, else the list", async () => {
+    phone = true
+    stubMatchMedia()
+    const two = [thread('t1', { unread: 2 }), thread('t2', { unread: 1, last_message_at: iso(9) })]
+    const w = await mountInbox({ threads: two }, { query: { tab: 'unread' } })
+    await w.find('[data-testid="inbox-row-thread:t1"]').trigger('click')
+    await flushPromises()
+    // The shell's read lands: t1 has nothing new any more.
+    await w.setProps({ threads: [thread('t1', { unread: 0 }), two[1]] })
+    await w.find('[data-testid="inbox-pane-back"]').trigger('click')
+    await flushPromises()
+    expect(document.activeElement?.getAttribute('data-inbox-row')).toBe('thread:t2')
+
+    await w.find('[data-testid="inbox-row-thread:t2"]').trigger('click')
+    await flushPromises()
+    await w.setProps({ threads: [thread('t1', { unread: 0 }), thread('t2', { unread: 0, last_message_at: iso(9) })] })
+    await w.find('[data-testid="inbox-pane-back"]').trigger('click')
+    await flushPromises()
+    expect(document.activeElement?.getAttribute('data-testid')).toBe('inbox-list-column')
   })
 
   it('Esc goes back too', async () => {

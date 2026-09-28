@@ -50,8 +50,11 @@
       <!-- The list. Below `sm` it and the pane are successive states of one
            column (D12); from `sm` up they sit side by side. -->
       <div
-        class="min-h-0 flex-col w-full sm:w-80 lg:w-96 shrink-0 sm:border-r border-gray-200 dark:border-gray-750"
+        ref="listColEl"
+        tabindex="-1"
+        class="min-h-0 flex-col w-full sm:w-80 lg:w-96 shrink-0 sm:border-r border-gray-200 dark:border-gray-750 focus:outline-none"
         :class="phone && selectedKey ? 'hidden sm:flex' : 'flex'"
+        data-testid="inbox-list-column"
       >
         <InlineError
           v-if="view.stale"
@@ -200,6 +203,13 @@ const live = {
   ask: (id) => store.asks.find((a) => a.id === id) || null,
 }
 const shownItems = computed(() => holdSelected(baseItems.value, held.value, selectedKey.value, live))
+// A selection restored from the URL (reload, deep link, Back in history) is held
+// exactly as a clicked one is, so answering it keeps its row in place (D8).
+watch([selectedKey, baseItems], ([k, items]) => {
+  if (!k || held.value?.item?.key === k) return
+  const index = items.findIndex((it) => it.key === k)
+  if (index >= 0) held.value = { item: items[index], index }
+}, { immediate: true })
 const total = computed(() => (tab.value === 'all' ? Math.max(all.value.total, shownItems.value.length) : shownItems.value.length))
 
 const selectedItem = computed(() => {
@@ -263,6 +273,7 @@ function retry() {
 // ---- selection ------------------------------------------------------------------
 const paneEl = ref(null)
 const listEl = ref(null)
+const listColEl = ref(null)
 let returnKey = null
 
 function replaceQuery(patch) {
@@ -294,19 +305,24 @@ function onTab(next) {
   replaceQuery({ tab: next, item: undefined })
 }
 
-function back() {
-  held.value = null
-  replaceQuery({ item: undefined })
-  const key = returnKey
+// Back (D12). Focus can only land once the list column is shown again: the
+// navigation is awaited, then a tick, because focus() on a display:none element
+// is a no-op in a real browser. The row may have left the tab (a chat just read
+// off Unread) — then the row now in its place, else the list itself.
+async function back() {
+  const key = returnKey || held.value?.item?.key || selectedKey.value
+  const index = held.value?.index ?? 0
   returnKey = null
-  if (key) {
-    nextTick(() => {
-      const el = typeof document !== 'undefined'
-        ? document.querySelector(`[data-inbox-row="${CSS?.escape ? CSS.escape(key) : key}"]`)
-        : null
-      el?.focus?.()
-    })
-  }
+  held.value = null
+  await replaceQuery({ item: undefined })
+  await nextTick()
+  const col = listColEl.value
+  if (!col) return
+  const rows = [...col.querySelectorAll('[data-inbox-row]')]
+  const el = rows.find((r) => r.getAttribute('data-inbox-row') === key)
+    || rows[Math.min(index, rows.length - 1)]
+    || col
+  el.focus?.()
 }
 function onEsc() { if (phone.value && selectedKey.value) back() }
 
