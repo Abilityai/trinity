@@ -1,6 +1,18 @@
 {
   "test_files": [
     {
+      "file": "unit/test_2996_agent_schedule_tools_unchanged.py",
+      "feature": "#2996",
+      "added": "2026-09-28",
+      "categories": [
+        "backend",
+        "auth",
+        "schedules",
+        "regression"
+      ],
+      "description": "Regression pin for the human-only rule's boundary: an agent's own key, through the REAL get_current_user with a seeded agent key row, still creates (201), disables and enables (200) its own schedule — the MCP create/enable/disable_schedule tools are the agent's use, bounded by the person-only autonomy grant. Asserts the stored schedule state moves on each call."
+    },
+    {
       "file": "unit/test_2996_human_only_routes.py",
       "feature": "#2996",
       "added": "2026-09-28",
