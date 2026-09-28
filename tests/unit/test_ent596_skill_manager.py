@@ -259,13 +259,19 @@ def test_every_route_that_changes_an_agents_skills_takes_the_fence():
     """Read off FastAPI's own dependant graph — what actually runs — so a route
     that forgets the fence fails here, whatever its source looks like."""
     from routers import skills
+    # ent#530 widened the filter from `/skills` to `/skill`, so the skill-SET
+    # writes are held to the same fence. `/skill-manager` is the admin GRANT
+    # route (grant-vs-use), gated by `require_admin`, not by this fence.
     writers = [r for r in skills.router.routes
-               if "/agents/{agent_name}/skills" in r.path and r.methods & {"PUT", "POST", "DELETE"}]
+               if "/agents/{agent_name}/skill" in r.path and "/skill-manager" not in r.path
+               and r.methods & {"PUT", "POST", "DELETE"}]
     assert {(r.path, m) for r in writers for m in r.methods} == {
         ("/api/agents/{agent_name}/skills", "PUT"),
         ("/api/agents/{agent_name}/skills/inject", "POST"),
         ("/api/agents/{agent_name}/skills/{skill_name}", "POST"),
         ("/api/agents/{agent_name}/skills/{skill_name}", "DELETE"),
+        ("/api/agents/{agent_name}/skill-sets/{set_name}", "POST"),
+        ("/api/agents/{agent_name}/skill-sets/{set_name}", "DELETE"),
     }
     for r in writers:
         assert "get_skill_managed_agent_by_name" in _dependency_calls(r), r.path
@@ -292,7 +298,8 @@ def test_a_refused_agent_key_changes_nothing_on_any_of_the_four_routes(grants, a
     from routers import skills
 
     boom = lambda *a, **k: (_ for _ in ()).throw(AssertionError("a refused call reached a write"))
-    for name in ("assign_skill", "set_agent_skills", "unassign_skill", "get_agent_skill_names"):
+    for name in ("assign_skill", "set_agent_skills", "unassign_skill", "get_agent_skill_names",
+                 "assign_skill_set", "unassign_skill_set", "replace_skill_sets", "set_skill_individual"):
         monkeypatch.setattr(skills.db, name, boom)
     monkeypatch.setattr(skills.skill_service, "deliver_assigned", AsyncMock(side_effect=AssertionError("delivered")))
     monkeypatch.setattr(skills.skill_service, "inject_skills", AsyncMock(side_effect=AssertionError("injected")))
@@ -309,6 +316,9 @@ def test_a_refused_agent_key_changes_nothing_on_any_of_the_four_routes(grants, a
         ("POST", f"/api/agents/{HOLDER}/skills/research", None),
         ("DELETE", f"/api/agents/{HOLDER}/skills/research", None),
         ("PUT", f"/api/agents/{SIBLING}/skills", {"skills": ["research"]}),   # itself
+        ("POST", f"/api/agents/{HOLDER}/skill-sets/dev-backlog", None),       # ent#530
+        ("DELETE", f"/api/agents/{HOLDER}/skill-sets/dev-backlog", None),
+        ("PUT", f"/api/agents/{HOLDER}/skills", {"skills": [], "sets": ["dev-backlog"]}),
     ]:
         r = client.request(method, path, json=body)
         assert r.status_code == 403, (method, path, r.status_code, r.text)
