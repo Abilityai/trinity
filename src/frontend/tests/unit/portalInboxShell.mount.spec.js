@@ -179,3 +179,29 @@ describe('D10 — selection scopes the rail, never activeAgentName', () => {
     expect(railVisibleFor({ stageState: 'ready', activeAgent: null })).toBe(false)
   })
 })
+
+describe('D13 twin — a failed previews read is not silent', () => {
+  const inbox = (w) => w.findComponent({ name: 'PortalInbox' })
+
+  it('a first previews read that fails is a load failure, not an empty Inbox', async () => {
+    arm()
+    store.fetchChatState = vi.fn(async () => { throw new Error('503') })
+    const { w } = await boot('/workspace/inbox')
+    expect(inbox(w).props('threadsLoaded')).toBe(false)
+    expect(inbox(w).props('threadsFailed')).toBe(true)
+  })
+
+  it('a failed refresh after a good read raises the stale flag; the next good read clears it', async () => {
+    arm()
+    const { w } = await boot('/workspace/inbox')
+    expect(inbox(w).props('threadsFailed')).toBe(false)
+    const good = store.fetchChatState
+    store.fetchChatState = vi.fn(async () => { throw new Error('503') })
+    inbox(w).vm.$emit('refresh'); await flushPromises()
+    expect(inbox(w).props('threadsLoaded')).toBe(true)
+    expect(inbox(w).props('threadsFailed')).toBe(true)
+    store.fetchChatState = good
+    inbox(w).vm.$emit('refresh'); await flushPromises()
+    expect(inbox(w).props('threadsFailed')).toBe(false)
+  })
+})

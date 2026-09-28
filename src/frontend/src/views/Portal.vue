@@ -330,7 +330,7 @@
           :threads="sidebarThreads"
           :previews="chatPreviews"
           :threads-loaded="threadsLoaded"
-          :threads-failed="store.sessionsFailed"
+          :threads-failed="store.sessionsFailed || previewsFailed"
           :labels="inboxAgentLabels"
           :is-platform="store.isPlatformSession"
           @mark-read="markRead"
@@ -1750,6 +1750,9 @@ const sidebarThreads = computed(() => sidebarThreadsOf(threads.value))
 // good read, so the Inbox's empty copy never stands in for "not loaded yet".
 const chatPreviews = ref({})
 const threadsLoaded = ref(false)
+// A failed previews read on the Inbox is a failed thread read there (the D7
+// twin): stale banner over data, LoadFailed before any — never a silent empty.
+const previewsFailed = ref(false)
 
 // trinity-enterprise#657: `hasDraft` rides the same projection as the star and
 // the unread count — the drafts store's keys are the shell's `chatKey`s, so a
@@ -1781,9 +1784,10 @@ async function refreshThreads() {
     store.fetchAllSessions().catch(() => { listOk = false; return store.lastSessions }),
     (withPreviews ? store.fetchChatState({ previews: true }) : store.fetchChatState()).catch(() => null),
   ])
+  if (withPreviews) previewsFailed.value = !state
   if (state && withPreviews) { chatState.value = state.state || {}; chatPreviews.value = state.previews || {} }
   else if (state) chatState.value = state
-  if (listOk && !store.sessionsFailed) threadsLoaded.value = true
+  if (listOk && !store.sessionsFailed && !(withPreviews && !state)) threadsLoaded.value = true
   threads.value = decorate(list || [])
   // ent#491: rank any agent this session has not ranked yet. Fills only missing
   // keys, so a refresh triggered by an incoming reply cannot walk back a send's
@@ -2291,7 +2295,7 @@ async function onSignOut() {
   try {
     const target = await store.signOutEverywhere()
     threads.value = []; activeAgentName.value = null; pendingSession.value = null
-    threadsLoaded.value = false; chatPreviews.value = {}   // trinity-enterprise#610
+    threadsLoaded.value = false; chatPreviews.value = {}; previewsFailed.value = false   // trinity-enterprise#610
     // #2579: this handler resets state IN PLACE — the OTP form is a branch of
     // this same component, so the view is never remounted. Without clearing
     // these, client B signing in on the same tab inherits client A's resolved
