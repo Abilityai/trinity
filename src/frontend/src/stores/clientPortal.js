@@ -300,6 +300,10 @@ export const useClientPortalStore = defineStore('clientPortal', {
     // sync step, and three separate queries is how that stops being true.
     asks: [],
     asksAvailable: false,   // false when the backend does not serve /asks (404/403)
+    // trinity-enterprise#610: the 404/403 VERDICT, distinct from "not fetched
+    // yet" (both leave `asksAvailable` false). The Inbox's Action tab needs it:
+    // an instance that does not serve asks has an empty Action, not a skeleton.
+    asksAbsent: false,
     // trinity-enterprise#610 (PR A0): the read's honesty. `asksLoaded` latches on
     // the first success; `asksFailed` is the LAST read's verdict for anything but
     // 404/403 (a 5xx, 503 `asks_unavailable`, a network error) — the list keeps
@@ -604,6 +608,7 @@ export const useClientPortalStore = defineStore('clientPortal', {
       // client's first failed read shows them the previous client's asks.
       this.asks = []
       this.asksAvailable = false
+      this.asksAbsent = false
       this.asksLoaded = false
       this.asksFailed = false
       this.asksLoadedAt = null
@@ -938,16 +943,23 @@ export const useClientPortalStore = defineStore('clientPortal', {
     // rather than their deliverables. Fail-soft to [] — a chat that cannot list
     // its deliverables must still be a working chat.
     async fetchSessionDeliverables(agentName, sessionId) {
-      if (!agentName || !sessionId) return []
       try {
-        const { data } = await portalHttp.get(
-          `/api/enterprise/client-portal/agents/${agentName}/reports`,
-          { headers: this.authHeader, params: { session_id: sessionId } },
-        )
-        return data.reports || []
+        return await this.fetchSessionDeliverablesStrict(agentName, sessionId)
       } catch {
         return []
       }
+    },
+
+    // trinity-enterprise#610 (D11): the same read, but it RETHROWS. The Inbox
+    // pane must tell "this chat has no deliverables" from "the list failed" —
+    // the fail-soft twin above cannot, by design.
+    async fetchSessionDeliverablesStrict(agentName, sessionId) {
+      if (!agentName || !sessionId) return []
+      const { data } = await portalHttp.get(
+        `/api/enterprise/client-portal/agents/${agentName}/reports`,
+        { headers: this.authHeader, params: { session_id: sessionId } },
+      )
+      return data.reports || []
     },
 
     // #2162: `rowsLimit` windows a TABULAR payload server-side. Sent on every
@@ -2092,6 +2104,7 @@ export const useClientPortalStore = defineStore('clientPortal', {
         })
         this.asks = Array.isArray(data) ? data : []
         this.asksAvailable = true
+        this.asksAbsent = false
         this.asksLoaded = true
         this.asksFailed = false
         this.asksLoadedAt = Date.now()
@@ -2099,6 +2112,7 @@ export const useClientPortalStore = defineStore('clientPortal', {
       } catch (err) {
         if ([403, 404].includes(err.response?.status)) {
           this.asksAvailable = false
+          this.asksAbsent = true
           this.asksLoaded = false
           this.asksFailed = false
           this.asks = []

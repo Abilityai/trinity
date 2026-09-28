@@ -239,3 +239,95 @@ describe('property: the Inbox and the sidebar never disagree (AC 1, D13)', () =>
     }
   })
 })
+
+// ---- The shell's and the pane's seams (F3) ------------------------------------
+import {
+  isInboxPath, inboxBranchVisible, inboxSelectedAgent, holdSelected,
+  paneWindow, openInChatTarget, agentLabels, PANE_TAIL,
+} from '@/components/portal/portalInbox'
+
+describe('shell seams', () => {
+  it('isInboxPath matches the Inbox route only', () => {
+    expect(isInboxPath('/workspace/inbox')).toBe(true)
+    expect(isInboxPath('/workspace/inbox/')).toBe(true)
+    expect(isInboxPath('/workspace')).toBe(false)
+    expect(isInboxPath('/workspace/c/inbox')).toBe(false)
+  })
+
+  it('the Inbox branch renders only on a READY stage (ent#253)', () => {
+    expect(inboxBranchVisible({ isInboxRoute: true, stageState: 'ready' })).toBe(true)
+    for (const s of ['loading', 'failed', 'empty']) {
+      expect(inboxBranchVisible({ isInboxRoute: true, stageState: s })).toBe(false)
+    }
+    expect(inboxBranchVisible({ isInboxRoute: false, stageState: 'ready' })).toBe(false)
+  })
+
+  it('the selected agent comes from the item, and only from the roster', () => {
+    const agents = [{ name: 'scout' }, { name: 'sage' }]
+    const threads = [{ id: 't1', agent_name: 'scout' }]
+    const asks = [{ id: 'a1', agent_name: 'sage' }, { id: 'a2', agent_name: 'gone' }]
+    expect(inboxSelectedAgent({ item: 'thread:t1', threads, asks, agents })).toEqual({ name: 'scout' })
+    expect(inboxSelectedAgent({ item: 'ask:a1', threads, asks, agents })).toEqual({ name: 'sage' })
+    // Never the agents[0] fallback, and never an off-roster name.
+    expect(inboxSelectedAgent({ item: null, threads, asks, agents })).toBeNull()
+    expect(inboxSelectedAgent({ item: 'ask:a2', threads, asks, agents })).toBeNull()
+    expect(inboxSelectedAgent({ item: 'thread:nope', threads, asks, agents })).toBeNull()
+  })
+
+  it('agentLabels uses the trimmed display label, else the slug', () => {
+    expect(agentLabels([{ name: 'a', display_label: ' Alpha ' }, { name: 'b', display_label: '  ' }, { name: 'c' }]))
+      .toEqual({ a: 'Alpha', b: 'b', c: 'c' })
+  })
+})
+
+describe('holdSelected — the opened row stays in place (principle 5)', () => {
+  const t1 = { key: 'thread:t1', type: 'thread', id: 't1', n: 3 }
+  const t2 = { key: 'thread:t2', type: 'thread', id: 't2', n: 1 }
+  it('re-inserts a read chat at its old index, drawn read', () => {
+    const out = holdSelected([t2], { item: t1, index: 0 }, 'thread:t1', { thread: () => ({ unread: 0 }) })
+    expect(out.map((i) => i.key)).toEqual(['thread:t1', 'thread:t2'])
+    expect(out[0]).toMatchObject({ n: 0, readInPlace: true })
+  })
+  it('draws an ended ask as it is now', () => {
+    const a = { key: 'ask:a1', type: 'ask', id: 'a1', status: 'pending' }
+    const out = holdSelected([], { item: a, index: 3 }, 'ask:a1', { ask: () => ({ id: 'a1', status: 'expired' }) })
+    expect(out).toHaveLength(1)
+    expect(out[0]).toMatchObject({ status: 'expired', endedInPlace: true })
+  })
+  it('does nothing once the selection has moved, or while the row is still a member', () => {
+    expect(holdSelected([t2], { item: t1, index: 0 }, 'thread:t2')).toEqual([t2])
+    expect(holdSelected([t1, t2], { item: t1, index: 0 }, 'thread:t1')).toEqual([t1, t2])
+    expect(holdSelected([t2], null, 'thread:t1')).toEqual([t2])
+  })
+})
+
+describe('the pane window (D11)', () => {
+  const msgs = [
+    { id: 'm1', role: 'user' }, { id: 'm2', role: 'assistant' },
+    { id: 'm3', role: 'user' }, { id: 'm4', role: 'assistant' }, { id: 'm5', role: 'assistant' },
+  ]
+  it('renders from the first unread message, inclusive', () => {
+    expect(paneWindow(msgs, 'm4', 2).shown.map((m) => m.id)).toEqual(['m4', 'm5'])
+    expect(paneWindow(msgs, 'm4', 2).earlier).toBe(0)
+  })
+  it('an id outside the window is said, never silently under-claimed', () => {
+    const w = paneWindow(msgs, 'm0-gone', 9)
+    expect(w.shown.every((m) => m.role === 'assistant')).toBe(true)
+    expect(w.earlier).toBe(9 - w.shown.length)
+    expect(w.earlier).toBeGreaterThan(0)
+  })
+  it('a read chat shows its tail', () => {
+    expect(paneWindow(msgs, null).shown).toHaveLength(Math.min(PANE_TAIL, msgs.length))
+  })
+})
+
+describe('Open in chat (D11)', () => {
+  it('anchors at the first unread message, else the latest deliverable, else the bottom', () => {
+    expect(openInChatTarget({ type: 'thread', id: 's1', first_unread_message_id: 'm9' }))
+      .toBe('/workspace/c/s1?anchor=m%3Am9')
+    expect(openInChatTarget({ type: 'thread', id: 's1', latest: { kind: 'deliverable', id: 'r7' } }))
+      .toBe('/workspace/c/s1?anchor=d%3Ar7')
+    expect(openInChatTarget({ type: 'thread', id: 's1', latest: { kind: 'message', id: 'm1' } })).toBe('/workspace/c/s1')
+    expect(openInChatTarget({ type: 'ask', id: 'a1' })).toBeNull()
+  })
+})

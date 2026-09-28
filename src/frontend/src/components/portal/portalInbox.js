@@ -184,3 +184,103 @@ export function totalLabel(total, shown) {
   const s = Number(shown) || 0
   return t > s ? `${t} · latest ${s} shown` : `${t}`
 }
+
+// ---- The shell's seams (Portal.vue) -------------------------------------------
+//
+// Kept here, pure, so the shell's Inbox decisions are testable without mounting
+// the 2,000-line view: the shell wires them and adds no logic of its own.
+
+export function isInboxPath(path) {
+  return String(path || '').replace(/\/+$/, '') === WORKSPACE_INBOX
+}
+
+// D9 (Stage 2): the Inbox renders only on a READY stage. On `failed` / `empty`
+// the route falls through to the bare-stage block (roster error, "No agents
+// here yet"), whose guard is also true on `/workspace/inbox` — the ent#253
+// lesson that a branch must never render under another's verdict.
+export function inboxBranchVisible({ isInboxRoute = false, stageState = 'loading' } = {}) {
+  return Boolean(isInboxRoute) && stageState === 'ready'
+}
+
+// D10: on the Inbox route the rail follows the SELECTED item's agent — never
+// the `agents[0]` fallback, and never by writing `activeAgentName` (that would
+// mint a Main and retarget the conversation watchers). No selection, or an
+// agent no longer on the roster → null → no rail.
+export function inboxSelectedAgent({ item, threads = [], asks = [], agents = [] } = {}) {
+  const parsed = parseItemKey(item)
+  if (!parsed) return null
+  let name = null
+  if (parsed.type === 'thread') {
+    name = (Array.isArray(threads) ? threads : []).find((t) => threadId(t) === parsed.id)?.agent_name || null
+  } else {
+    name = (Array.isArray(asks) ? asks : []).find((a) => a && a.id === parsed.id)?.agent_name || null
+  }
+  if (!name) return null
+  return (Array.isArray(agents) ? agents : []).find((a) => a && a.name === name) || null
+}
+
+// ---- The list's in-place rule (principle 5) -----------------------------------
+//
+// Reading a chat zeroes its unread, and answering an ask ends it — either would
+// drop the row out of Unread / Action under the reader. The selected row stays
+// where it was, drawn in its NEW state (read, or ended), until the selection
+// changes. `held` is `{item, index}` captured when the row was selected; `live`
+// resolves the current thread / ask so the row is drawn as it is now.
+export function holdSelected(items, held, selectedKey, live = {}) {
+  const list = Array.isArray(items) ? items : []
+  if (!held || !held.item || !selectedKey || held.item.key !== selectedKey) return list
+  if (list.some((it) => it.key === selectedKey)) return list
+  const it = held.item
+  let drawn = it
+  if (it.type === 'thread') {
+    const t = live.thread ? live.thread(it.id) : null
+    drawn = { ...it, n: Number(t?.unread) || 0, readInPlace: true }
+  } else if (it.type === 'ask') {
+    const a = live.ask ? live.ask(it.id) : null
+    drawn = a ? { ...it, status: a.status, ask: a, endedInPlace: a.status !== 'pending' } : { ...it, endedInPlace: true }
+  }
+  const at = Math.max(0, Math.min(Number(held.index) || 0, list.length))
+  return [...list.slice(0, at), drawn, ...list.slice(at)]
+}
+
+// ---- The pane (D11) -------------------------------------------------------------
+
+export const PANE_HISTORY_LIMIT = 50
+// A read chat (All) has no first unread message; the pane shows the tail.
+export const PANE_TAIL = 5
+
+// Which messages the pane renders. History `?limit=N` is the newest N rows of
+// ANY role, so the unread arrivals are found by id, not assumed: from
+// `first_unread_message_id` (inclusive) to the end. An id that fell out of the
+// window is said, never silently under-claimed.
+export function paneWindow(messages, firstUnreadId, n = 0) {
+  const list = Array.isArray(messages) ? messages : []
+  if (!firstUnreadId) return { shown: list.slice(-PANE_TAIL), earlier: 0 }
+  const i = list.findIndex((m) => m && m.id === firstUnreadId)
+  if (i >= 0) return { shown: list.slice(i), earlier: 0 }
+  const arrivals = list.filter((m) => m && m.role === 'assistant')
+  const shown = arrivals.slice(-Math.max(1, Math.min(Number(n) || 1, PANE_TAIL)))
+  return { shown, earlier: Math.max(0, (Number(n) || 0) - shown.length) }
+}
+
+// "Open in chat": the chat, anchored at what the reader was looking at — the
+// first unread message, else the latest deliverable, else the bottom.
+export function openInChatTarget(item) {
+  if (!item || item.type !== 'thread' || !item.id) return null
+  const base = `/workspace/c/${encodeURIComponent(item.id)}`
+  if (item.first_unread_message_id) return `${base}?anchor=${encodeURIComponent(`m:${item.first_unread_message_id}`)}`
+  if (item.latest?.kind === 'deliverable' && item.latest.id) {
+    return `${base}?anchor=${encodeURIComponent(`d:${item.latest.id}`)}`
+  }
+  return base
+}
+
+// agent name → the human-facing label, the sidebar's rule (`display_label`
+// trimmed, else the slug).
+export function agentLabels(agents) {
+  const out = {}
+  for (const a of Array.isArray(agents) ? agents : []) {
+    if (a && a.name) out[a.name] = String(a.display_label || '').trim() || a.name
+  }
+  return out
+}
