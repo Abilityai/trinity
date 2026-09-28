@@ -63,8 +63,8 @@ No dedicated UI components. This feature is consumed entirely through the MCP to
 | DELETE | `/api/event-subscriptions/{id}` | `delete_event_subscription()` | 335 | `get_current_user` + owner check |
 | POST | `/api/events` | `emit_event()` | 366 | `get_current_user` |
 | POST | `/api/agents/{name}/emit-event` | `emit_event_for_agent()` | 418 | `AuthorizedAgent` |
-| GET | `/api/agents/{name}/events` | `list_agent_events()` | 464 | `AuthorizedAgent` |
-| GET | `/api/events` | `list_all_events()` | 474 | `get_current_user` + accessible-agent filter (`db.get_accessible_agent_names`, the `/ws` roster); `?source_agent=` → `assert_agent_access` + roster membership (one uniform 403) |
+| GET | `/api/agents/{name}/events` | `list_agent_events()` | 441 | `AuthorizedAgent` |
+| GET | `/api/events` | `list_all_events()` | 452 | `get_current_user` + accessible-agent filter (`db.get_accessible_agent_names`, the `/ws` roster); `?source_agent=` → `assert_agent_access` + roster membership (one uniform 403) |
 
 ### Access Scoping for Event History (trinity-enterprise#713)
 `GET /api/events` returns only events whose `source_agent` is in the caller's accessible roster.
@@ -190,7 +190,7 @@ No dedicated UI components. This feature is consumed entirely through the MCP to
 | `delete_agent_subscriptions()` (line 174) | DELETE WHERE subscriber OR source = agent |
 | `find_matching_subscriptions()` (line 189) | SELECT WHERE source_agent AND event_type AND enabled=1 |
 | `create_event()` (line 211) | INSERT into `agent_events` |
-| `list_events()` (line 249) | SELECT with optional source/type filters; `agent_names` → `source_agent IN (…)` (`None` = unrestricted, `[]` = no query) |
+| `list_events()` (line 260; facade `database.py:3844`) | SELECT with optional source/type filters; `agent_names` → `source_agent IN (…)` (`None` = unrestricted, `[]` = no query) |
 
 ## Side Effects
 
