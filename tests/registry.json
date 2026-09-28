@@ -2779,6 +2779,18 @@
       "description": "GitHub evaluates a workflow string that contains any ${{ }} as ONE expression and refuses the file at parse time above 21,000 characters (#2625: deploy-dev.yml's ssh script embeds three expressions; the #2578 comments took it from 17,837 to 21,923, the first dev push after #2622 came up as a run named after the file with zero jobs, and the notify-failure job that files the #2204 incident never ran — PyYAML and bash -n accept such a file and a dev-push-only workflow is never parsed before merge). Walks EVERY string in EVERY workflow (.yml and .yaml) and composite-action manifest, measured as the parsed scalar in UTF-8 bytes, and fails any expression-bearing one past 20,000 (1,000 in hand), with a vacuity check that the deploy script is found and carries expressions, mutations proving the guard rejects the deploy script padded back past the cap and an expression-bearing string wherever it sits (run, with-input, env), and that a long string WITHOUT an expression is left alone. Structural fix (no expression in the script at all) is #2626."
     },
     {
+      "file": "unit/test_2995_deploy_health_gate.py",
+      "feature": "#2995",
+      "added": "2026-09-28",
+      "categories": [
+        "ci",
+        "unit",
+        "infrastructure",
+        "deployment"
+      ],
+      "description": "Deploy to Dev's post-deploy backend health check is a gate, not a print (#2995). The === Health === section ran `curl -sf http://localhost:8000/health && echo \"Backend: OK\"` under set -e; the left side of && is exempt from set -e, so a failed probe skipped the echo and the run went green, and notify-failure (#2204) never filed its incident. The fix is a bounded poll (3 probes, --max-time 30 each per #1230, 20 s apart) that prints filtered diagnostics and, since it now pre-empts the #2578 announcement, the enterprise STALE ::error:: before exit 1. The test slices the workflow's OWN Health section out of the parsed YAML (both anchors asserted exactly once and in order, the slice must carry the probe) and runs it verbatim under bash and sh with stub curl/sleep/sudo/docker on PATH: curl's real -f exit 22 (503) and exit 7 (refused) fail the run with ::error:: and no Backend: OK, the stub was actually invoked, and every probe carries --max-time; ENT_STALE=1 also prints the STALE ::error::; a backend answering on the third probe passes and the section carries on to the scheduler line; a healthy backend passes with zero sleeps. Teeth: the pre-fix lines, built from a literal (never a str.replace on the live slice), exit 0 against the same dead-backend stub."
+    },
+    {
       "file": "unit/test_lilu20_claude_install_layer.py",
       "feature": "Abilityai/lilu#20",
       "added": "2026-09-06",
