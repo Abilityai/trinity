@@ -3558,6 +3558,16 @@
         "integration"
       ],
       "description": "Journey J13 (suggestions): my agent tells me what I can do with it and what is waiting on me, and only things that are true. A strict=True xfail skeleton — the rules, SQL and doors are unit-proven and the verbs mount-proven; the walk needs a real failing schedule, a shared platform user and a magic-link client on one instance."
+    },
+    {
+      "file": "unit/test_ent610_asks_unavailable.py",
+      "feature": "trinity-enterprise#610",
+      "added": "2026-09-28",
+      "categories": [
+        "backend",
+        "workspace"
+      ],
+      "description": "Workspace asks read fails loud (ent#610 PR A0): a queue-read fault and an unreadable roster each raise AsksUnavailable and the route answers 503 asks_unavailable (never []); a genuinely off-roster agent is still dropped with a 200; answer_ask stays a uniform 404 on a roster outage (Invariant #8); the suggestions build still degrades to no ask ids through its own attempt(). Mutations: revert the raise to return [] (2 red), make _on_roster swallow again (3 red incl. the reversed test_ent428 case)."
     }
   ]
 }
