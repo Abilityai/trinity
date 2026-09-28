@@ -512,3 +512,294 @@ async def test_the_completion_writer_stamps_its_outcome_marker(inbox_db, monkeyp
     assert [r["source"] for r in rows] == [marker]
     # The wording is decided by the SAME status, so the two cannot disagree.
     assert rows[0]["content"].startswith("**Finished**" if status == "success" else "**Didn't finish**")
+
+
+# ===========================================================================
+# 4. Previews ride the chat-state read (D5): one statement, no cost, roster-scoped
+# ===========================================================================
+#
+# `db.unread_arrivals_with_latest` windows the SAME `_UNREAD_ARRIVALS` fragment
+# the count groups; `client_portal/chat_previews.get_chat_state_with_previews`
+# hands its counts to `service.get_chat_state(unread=...)` and attaches the newest
+# arrival to roster-scoped threads. `GET /chat-state?previews=true` routes there.
+
+@pytest.fixture()
+def roster(monkeypatch):
+    """The caller's roster, controlled per test (default: only AGENT)."""
+    from client_portal import service as portal_service
+    names = {"v": {AGENT}}
+    monkeypatch.setattr(portal_service, "roster_agent_names",
+                        lambda email, include_owned: set(names["v"]))
+    return names
+
+
+def _previews(email=ALICE, is_platform=False):
+    from client_portal import chat_previews
+    return chat_previews.get_chat_state_with_previews(email, is_platform)
+
+
+def _entry(state, sid):
+    return next(c for c in state["chats"] if c["kind"] == "thread" and c["id"] == sid)
+
+
+def _walk_keys(obj):
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            yield k
+            yield from _walk_keys(v)
+    elif isinstance(obj, list):
+        for v in obj:
+            yield from _walk_keys(v)
+
+
+def test_the_latest_arrival_is_the_newest_and_the_first_unread_is_the_earliest_message(inbox_db, roster):
+    _session(inbox_db, "s-a", ALICE)
+    _read(ALICE, "s-a", "2026-09-10T09:00:00Z")
+    m1 = _msg(inbox_db, session_id="s-a", email=ALICE, at="2026-09-10T10:00:00Z", content="first")
+    _msg(inbox_db, session_id="s-a", email=ALICE, at="2026-09-10T11:00:00Z", content="second")
+    rid = _report(inbox_db, session_id="s-a", addressed=ALICE, at="2026-09-10T12:00:00Z",
+                  title="Weekly **leads**", display_hint="table")
+
+    e = _entry(_previews(), "s-a")
+    assert e["unread"] == 3
+    assert e["first_unread_message_id"] == m1
+    assert e["latest"] == {"kind": "deliverable", "id": rid, "at": "2026-09-10T12:00:00Z",
+                           "excerpt": "Weekly leads", "outcome": None,
+                           "title": "Weekly **leads**", "display_hint": "table"}
+
+
+def test_a_chat_whose_only_arrivals_are_deliverables_has_no_first_unread_message(inbox_db, roster):
+    _session(inbox_db, "s-a", ALICE)
+    _read(ALICE, "s-a", "2026-09-10T09:00:00Z")
+    _msg(inbox_db, session_id="s-a", email=ALICE, at="2026-09-10T08:00:00Z")   # read
+    _report(inbox_db, session_id="s-a", addressed=ALICE, at="2026-09-10T10:00:00Z")
+
+    e = _entry(_previews(), "s-a")
+    assert e["unread"] == 1 and e["latest"]["kind"] == "deliverable"
+    assert e["first_unread_message_id"] is None
+
+
+def test_the_excerpt_is_markdown_stripped_single_line_and_bounded(inbox_db, roster):
+    from client_portal.chat_previews import EXCERPT_MAX_CHARS
+    _session(inbox_db, "s-a", ALICE)
+    _read(ALICE, "s-a", "2026-09-10T09:00:00Z")
+    body = "# Heading\n\n**Bold** and [a link](http://x.test) `code`\n> quoted\n- item " + "word " * 80
+    _msg(inbox_db, session_id="s-a", email=ALICE, at="2026-09-10T10:00:00Z", content=body)
+
+    ex = _entry(_previews(), "s-a")["latest"]["excerpt"]
+    assert ex.startswith("Heading Bold and a link code quoted item word")
+    assert len(ex) <= EXCERPT_MAX_CHARS and ex.endswith("…")
+    assert not any(ch in ex for ch in "*#`[]>\n")
+
+
+@pytest.mark.parametrize("text, expected", [
+    (None, None), ("", None), ("```\ncode only\n```", None),
+    ("<b>hi</b>\x00there", "hi there"), ("![alt](img.png) ok", "alt ok"),
+    ("see file_name and *this*", "see file_name and this"),
+])
+def test_the_excerpt_helper_edges(text, expected):
+    from client_portal.chat_previews import _arrival_excerpt
+    assert _arrival_excerpt(text) == expected
+
+
+def test_the_excerpt_redacts_credentials_before_stripping_markdown():
+    from client_portal.chat_previews import _arrival_excerpt
+    key = "sk-ant-" + "a1B2c3D4e5F6g7H8i9J0k1L2"
+    pat = "github_pat_" + "A" * 30
+    ex = _arrival_excerpt(f"Use **{key}** or {pat} with API_KEY=hunter2hunter2")
+    assert key not in ex and pat not in ex and "hunter2" not in ex
+    assert "githubpat" not in ex.lower()   # never mangled into a shape the patterns miss
+    assert "REDACTED" in ex
+
+
+def test_no_cost_key_anywhere_in_the_preview_payload(inbox_db, roster):
+    """AC 7: a portal message carries a `cost` column; no projection #610 adds
+    may emit it (nor an execution id)."""
+    _session(inbox_db, "s-a", ALICE)
+    _read(ALICE, "s-a", "2026-09-10T09:00:00Z")
+    _msg(inbox_db, session_id="s-a", email=ALICE, at="2026-09-10T10:00:00Z", cost=4.2)
+
+    state = _previews()
+    assert _entry(state, "s-a")["latest"]["kind"] == "message"
+    keys = set(_walk_keys(state))
+    assert "cost" not in keys and "execution_id" not in keys, keys
+
+
+def test_an_off_roster_agents_thread_keeps_its_count_but_carries_no_preview(inbox_db, roster):
+    _session(inbox_db, "s-a", ALICE)
+    _session(inbox_db, "s-gone", ALICE, agent="departed")
+    _read(ALICE, "s-a", "2026-09-10T09:00:00Z")
+    _read(ALICE, "s-gone", "2026-09-10T09:00:00Z")
+    _msg(inbox_db, session_id="s-a", email=ALICE, at="2026-09-10T10:00:00Z")
+    _msg(inbox_db, session_id="s-gone", email=ALICE, agent="departed", at="2026-09-10T10:00:00Z")
+
+    state = _previews()
+    assert "latest" in _entry(state, "s-a")
+    gone = _entry(state, "s-gone")
+    assert gone["unread"] == 1                       # the known limitation: counted
+    assert "latest" not in gone and "first_unread_message_id" not in gone
+
+
+def test_the_roster_is_read_with_the_principal_kind(inbox_db, monkeypatch):
+    from client_portal import service as portal_service
+    seen = []
+    monkeypatch.setattr(portal_service, "roster_agent_names",
+                        lambda email, include_owned: seen.append(include_owned) or {AGENT})
+    _previews(is_platform=True)
+    _previews(is_platform=False)
+    assert seen == [True, False]
+
+
+def test_previews_are_bounded_to_the_most_recent_threads(inbox_db, roster, monkeypatch):
+    from client_portal import chat_previews
+    monkeypatch.setattr(chat_previews, "MAX_PREVIEWS", 2)
+    _state(inbox_db, ALICE, "account", "baseline", "2026-09-10T00:00:00Z")
+    for i in range(4):
+        _session(inbox_db, f"s{i}", ALICE)
+        _msg(inbox_db, session_id=f"s{i}", email=ALICE, at=f"2026-09-10T1{i}:00:00Z")
+
+    state = _previews()
+    with_preview = sorted(c["id"] for c in state["chats"] if "latest" in c)
+    assert with_preview == ["s2", "s3"]
+    assert all(c["unread"] == 1 for c in state["chats"] if c["kind"] == "thread")
+
+
+def test_the_counts_come_from_the_same_statement_not_a_second_read(inbox_db, roster, monkeypatch):
+    """The emitted `unread` and the preview are one snapshot: the previews path
+    must hand its counts to `get_chat_state`, never let it re-count."""
+    from client_portal import db as pdb
+    _session(inbox_db, "s-a", ALICE)
+    _read(ALICE, "s-a", "2026-09-10T09:00:00Z")
+    _msg(inbox_db, session_id="s-a", email=ALICE, at="2026-09-10T10:00:00Z")
+
+    def _second_read(email):
+        raise AssertionError("count_unread_by_session must not run on the previews path")
+    monkeypatch.setattr(pdb, "count_unread_by_session", _second_read)
+    assert _entry(_previews(), "s-a")["unread"] == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status, outcome", [
+    ("success", "done"), ("failed", "failed"), ("timeout", "failed"),
+])
+async def test_the_outcome_comes_from_the_real_completion_writers_marker(
+        inbox_db, roster, monkeypatch, status, outcome):
+    from client_portal import service as portal_service
+    monkeypatch.setattr(portal_service, "get_turn_inflight", lambda sid: None)
+    _session(inbox_db, "s-a", ALICE)
+    _read(ALICE, "s-a", "2026-09-10T09:00:00Z")
+
+    await _deliver_completion(status)
+
+    latest = _entry(_previews(), "s-a")["latest"]
+    assert latest["kind"] == "message" and latest["outcome"] == outcome
+
+
+@pytest.mark.parametrize("source", [None, "voice", "completion:bogus"])
+def test_a_message_that_merely_says_finished_has_no_outcome(inbox_db, roster, source):
+    """The pill is platform-written: an agent reply typing "**Finished**" does not
+    make a finished run, and no source other than the two markers maps."""
+    _session(inbox_db, "s-a", ALICE)
+    _read(ALICE, "s-a", "2026-09-10T09:00:00Z")
+    _msg(inbox_db, session_id="s-a", email=ALICE, at="2026-09-10T10:00:00Z",
+         content="**Finished** — all done", source=source)
+
+    latest = _entry(_previews(), "s-a")["latest"]
+    assert latest["kind"] == "message" and latest["outcome"] is None
+
+
+# --- the route ---------------------------------------------------------------
+
+def _chat_state_client(email=ALICE):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from client_portal import router as pr
+    from client_portal.portal_auth import PortalPrincipal, get_portal_principal
+
+    app = FastAPI()
+    app.include_router(pr.router)
+    app.dependency_overrides[get_portal_principal] = (
+        lambda: PortalPrincipal(email=email, is_platform=False))
+    return TestClient(app, raise_server_exceptions=False)
+
+
+def test_without_previews_the_route_answers_the_ent359_shape_unchanged(inbox_db, roster):
+    from client_portal import service as portal_service
+    _session(inbox_db, "s-a", ALICE)
+    _read(ALICE, "s-a", "2026-09-10T09:00:00Z")
+    _msg(inbox_db, session_id="s-a", email=ALICE, at="2026-09-10T10:00:00Z")
+
+    r = _chat_state_client().get("/api/enterprise/client-portal/chat-state")
+    assert r.status_code == 200, r.text
+    assert r.json() == portal_service.get_chat_state(ALICE)
+    assert all(set(c) == {"kind", "id", "starred", "unread"} for c in r.json()["chats"])
+
+
+def test_with_previews_the_route_attaches_the_latest_arrival_and_no_cost(inbox_db, roster):
+    _session(inbox_db, "s-a", ALICE)
+    _read(ALICE, "s-a", "2026-09-10T09:00:00Z")
+    mid = _msg(inbox_db, session_id="s-a", email=ALICE, at="2026-09-10T10:00:00Z",
+               content="Here you go", cost=1.5)
+
+    r = _chat_state_client().get("/api/enterprise/client-portal/chat-state?previews=true")
+    assert r.status_code == 200, r.text
+    e = _entry(r.json(), "s-a")
+    assert e["unread"] == 1 and e["first_unread_message_id"] == mid
+    assert e["latest"] == {"kind": "message", "id": mid, "at": "2026-09-10T10:00:00Z",
+                           "excerpt": "Here you go"}
+    assert "cost" not in set(_walk_keys(r.json()))
+
+
+# --- the property: n == the count, latest is the max, first is the min message -
+
+@st.composite
+def _world_ids(draw):
+    msgs = draw(st.lists(st.tuples(st.sampled_from(_SESSIONS), st.sampled_from(["assistant", "user"]),
+                                   st.sampled_from(_T)), max_size=10))
+    reps = draw(st.lists(st.tuples(st.sampled_from(_SESSIONS), st.sampled_from([ALICE, BOB, None]),
+                                   st.sampled_from(_T)), max_size=10))
+    cursors = draw(st.dictionaries(st.sampled_from(_SESSIONS), st.sampled_from(_T), max_size=3))
+    baseline = draw(st.dictionaries(st.sampled_from(_EMAILS), st.sampled_from(_T), max_size=2))
+    return msgs, reps, cursors, baseline
+
+
+@settings(max_examples=60, deadline=None,
+          suppress_health_check=[HealthCheck.function_scoped_fixture])
+@given(world=_world_ids())
+def test_the_windowed_read_agrees_with_the_count_per_session(inbox_db, world):
+    from client_portal import db as pdb
+    msgs, reps, cursors, baseline = world
+    _wipe(inbox_db)
+    for sid, owner in _SESSIONS:
+        _session(inbox_db, sid, owner)
+    arrivals = []   # (owner, sid, at, id, kind) — every row, filtered below
+    for i, ((sid, owner), role, at) in enumerate(msgs):
+        mid = _msg(inbox_db, session_id=sid, email=owner, role=role, at=at, msg_id=f"m{i:02d}")
+        if role == "assistant":
+            arrivals.append((owner, sid, at, mid, "message", owner))
+    for i, ((sid, owner), to, at) in enumerate(reps):
+        rid = _report(inbox_db, session_id=sid, addressed=to, at=at, rid=f"r{i:02d}")
+        arrivals.append((owner, sid, at, rid, "deliverable", to))
+    for email, at in baseline.items():
+        _state(inbox_db, email, "account", "baseline", at)
+    for (sid, owner), at in cursors.items():
+        _state(inbox_db, owner, "thread", sid, at)
+
+    for email in _EMAILS:
+        counts = pdb.count_unread_by_session(email)
+        windowed = pdb.unread_arrivals_with_latest(email)
+        assert {s: w["n"] for s, w in windowed.items()} == counts
+        for sid, w in windowed.items():
+            owner = dict(_SESSIONS)[sid]
+            floor = cursors.get((sid, owner), baseline.get(email))
+            mine = [a for a in arrivals
+                    if a[1] == sid and a[0] == email and a[5] == email
+                    and floor is not None and a[2] > floor]
+            assert w["n"] == len(mine) > 0
+            newest = max(mine, key=lambda a: (a[2], a[3]))
+            assert (w["latest"]["at"], w["latest"]["id"]) == (newest[2], newest[3])
+            assert w["latest"]["at"] == max(a[2] for a in mine)
+            msgs_only = [a for a in mine if a[4] == "message"]
+            expected_first = min(msgs_only, key=lambda a: (a[2], a[3]))[3] if msgs_only else None
+            assert w["first_unread_message_id"] == expected_first

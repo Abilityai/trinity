@@ -46,7 +46,7 @@ from services.docker_service import get_agent_container
 from services.platform_audit_service import AuditEventType, platform_audit_service
 
 from database import db
-from . import agent_page, role_card, seat_decisions, service
+from . import agent_page, chat_previews, role_card, seat_decisions, service
 from .models import (
     PortalSessionRename,
     PortalRatingRequest,
@@ -684,9 +684,19 @@ async def portal_briefings(
 # chat id in the install (OSS invariant #8). The service's row cap is what bounds
 # writing junk ids instead.
 
-@router.get("/chat-state", response_model=PortalChatState)
-def portal_chat_state(principal: PortalPrincipal = Depends(get_portal_principal)):
-    """Star + unread state for the signed-in viewer's chats, both kinds."""
+@router.get("/chat-state", response_model=PortalChatState,
+            response_model_exclude_none=True)
+def portal_chat_state(previews: bool = Query(False),
+                      principal: PortalPrincipal = Depends(get_portal_principal)):
+    """Star + unread state for the signed-in viewer's chats, both kinds.
+
+    ``previews=true`` (ent#610, the Inbox) adds each unread thread's newest
+    arrival and first unread message id, read in the SAME statement as the
+    counts (`chat_previews`). Without it the payload is the ent#359 shape,
+    unchanged — None fields are dropped, and no entry carries them."""
+    if previews:
+        return chat_previews.get_chat_state_with_previews(
+            principal.email, principal.is_platform)
     return service.get_chat_state(principal.email)
 
 

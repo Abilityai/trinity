@@ -744,14 +744,43 @@ class PortalAgentReports(BaseModel):
     reports: list[PortalAgentReport] = Field(default_factory=list)
 
 
+class PortalChatArrival(BaseModel):
+    """The newest unread arrival in a chat (ent#610 D5), for the Inbox preview.
+
+    ``kind`` is ``message`` (an agent message) or ``deliverable`` (a report
+    addressed to the viewer). ``excerpt`` is plain text, markdown stripped, at
+    most 160 chars (a deliverable's is its title). ``outcome`` is ``done`` /
+    ``failed`` only for a platform-written run-completion message — read from
+    the ``source`` marker, never the body — else null. ``title`` and
+    ``display_hint`` are set for a deliverable only.
+
+    Deliberately NO ``cost`` / ``execution_id``: AC 7 — nothing #610 adds
+    projects run cost or execution detail to a Workspace viewer.
+    """
+    kind: str
+    id: str
+    at: Optional[str] = None
+    excerpt: Optional[str] = None
+    outcome: Optional[str] = None
+    title: Optional[str] = None
+    display_hint: Optional[str] = None
+
+
 class PortalChatStateEntry(BaseModel):
     """One chat's per-viewer state (ent#359). ``kind`` is ``thread`` (a portal
     session) or ``room`` (a multi-agent room) — two independent id spaces, so
-    both fields are needed to address a chat."""
+    both fields are needed to address a chat.
+
+    ``latest`` / ``first_unread_message_id`` (ent#610) are filled only by
+    ``GET /chat-state?previews=true`` and only for a thread with unread
+    arrivals; the route drops None fields, so without previews the payload is
+    exactly the ent#359 shape."""
     kind: str
     id: str
     starred: bool = False
     unread: int = 0
+    latest: Optional[PortalChatArrival] = None
+    first_unread_message_id: Optional[str] = None
 
 
 class PortalChatState(BaseModel):

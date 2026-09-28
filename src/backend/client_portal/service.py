@@ -5206,14 +5206,16 @@ def _chat_state_room_left(email: str) -> bool:
         return True
 
 
-def get_chat_state(email: str) -> dict:
+def get_chat_state(email: str, unread: dict[str, int] | None = None) -> dict:
     """Star + unread state for every chat the caller has state for.
 
     Unread is computed for threads only; a room carries its own seq cursor and
-    is reported as starred-or-not with `unread = 0`.
+    is reported as starred-or-not with `unread = 0`. `unread` lets a caller pass
+    counts it already read in the same statement as something else
+    (ent#610 `chat_previews`), so the two cannot come from different instants.
     """
     rows = db.get_chat_state(email)
-    unread = db.count_unread_by_session(email)
+    unread = db.count_unread_by_session(email) if unread is None else unread
     chats = []
     seen_threads: set[str] = set()
     for r in rows:

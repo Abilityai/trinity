@@ -1221,6 +1221,75 @@ def count_unread_by_session(client_email: str) -> dict[str, int]:
         return {r["session_id"]: int(r["n"]) for r in rows if r["session_id"]}
 
 
+def unread_arrivals_with_latest(client_email: str) -> dict[str, dict]:
+    """Per-thread unread count, the LATEST arrival and the earliest unread
+    MESSAGE id — in ONE statement over the same `_UNREAD_ARRIVALS` fragment
+    `count_unread_by_session` groups (ent#610 D5).
+
+    One statement, not two reads, because the Inbox renders the count and the
+    preview side by side: a message landing between two reads would show
+    "3 new" beside the excerpt of a 4th. Here both come from one snapshot, and
+    `n` is by construction exactly what `count_unread_by_session` returns for
+    the session (a property test pins the equality).
+
+    Returns ``{session_id: {"n", "latest", "first_unread_message_id"}}`` where
+    ``latest`` = ``{kind, id, at, agent_name, content, source, title,
+    display_hint}``. ``content``/``source`` are set only for a message and
+    ``title``/``display_hint`` only for a deliverable. Deliberately NO ``cost``
+    column is selected — a portal message carries one, and AC 7 keeps it out of
+    every projection #610 adds. The window ordering ``at DESC, id DESC`` makes
+    "latest" deterministic on a timestamp tie. ``first_unread_message_id`` is
+    NULL when every unread arrival in the chat is a deliverable.
+    """
+    stmt = text(
+        "SELECT w.session_id AS session_id, w.n AS n, w.id AS id, w.at AS at, "
+        "       w.kind AS kind, w.agent_name AS agent_name, "
+        "       w.first_message_id AS first_message_id, "
+        "       m2.content AS content, m2.source AS source, "
+        "       r2.title AS title, r2.display_hint AS display_hint "
+        "FROM ("
+        "  SELECT a.session_id, a.id, a.at, a.kind, a.agent_name, "
+        "         COUNT(*) OVER (PARTITION BY a.session_id) AS n, "
+        "         ROW_NUMBER() OVER (PARTITION BY a.session_id "
+        "                            ORDER BY a.at DESC, a.id DESC) AS rn, "
+        "         FIRST_VALUE(CASE WHEN a.kind = 'message' THEN a.id END) OVER ("
+        "           PARTITION BY a.session_id "
+        "           ORDER BY CASE WHEN a.kind = 'message' THEN 0 ELSE 1 END, "
+        "                    a.at ASC, a.id ASC "
+        "           ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING"
+        "         ) AS first_message_id "
+        "  FROM (" + _UNREAD_ARRIVALS + ") AS a"
+        ") AS w "
+        "LEFT JOIN enterprise_portal_messages m2 "
+        "  ON w.kind = 'message' AND m2.id = w.id "
+        "LEFT JOIN agent_reports r2 "
+        "  ON w.kind = 'deliverable' AND r2.id = w.id "
+        "WHERE w.rn = 1"
+    )
+    out: dict[str, dict] = {}
+    with get_engine().connect() as conn:
+        for r in conn.execute(stmt, _unread_params(client_email)).mappings():
+            sid = r["session_id"]
+            if not sid:
+                continue
+            is_msg = r["kind"] == "message"
+            out[sid] = {
+                "n": int(r["n"]),
+                "first_unread_message_id": r["first_message_id"],
+                "latest": {
+                    "kind": r["kind"],
+                    "id": r["id"],
+                    "at": r["at"],
+                    "agent_name": r["agent_name"],
+                    "content": r["content"] if is_msg else None,
+                    "source": r["source"] if is_msg else None,
+                    "title": None if is_msg else r["title"],
+                    "display_hint": None if is_msg else r["display_hint"],
+                },
+            }
+    return out
+
+
 # --- Agent page: first-try rate (ent#360) ------------------------------------
 
 def first_try_stats(agent_name: str, hours: int) -> dict:
