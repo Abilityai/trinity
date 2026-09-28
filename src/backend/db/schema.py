@@ -293,6 +293,8 @@ TABLES = {
             -- never widens what the agent may read or write. Validated against
             -- the agent's own canvases at the boundary that stamps it.
             open_canvas_id TEXT,
+            -- #2806: agent-to-agent hops from a non-agent root. NULL = root (0).
+            chain_depth INTEGER,
             FOREIGN KEY (schedule_id) REFERENCES agent_schedules(id)
         )
     """,
@@ -912,6 +914,28 @@ TABLES = {
         )
     """,
 
+    # trinity-enterprise#465 — accept/dismiss of a Workspace suggestion, per
+    # viewer + agent + suggestion. Generic name + `surface` so the post-action
+    # next-step tier (OP-5) shares one dismissal model instead of growing a
+    # second table. `dismissed_fingerprint` is the STATE the viewer dismissed;
+    # the item returns when the state changes. `agent_name` makes the row follow
+    # the agent's lifecycle (`AGENT_REFS`, CASCADE).
+    "workspace_suggestion_feedback": """
+        CREATE TABLE IF NOT EXISTS workspace_suggestion_feedback (
+            client_email TEXT NOT NULL,
+            agent_name TEXT NOT NULL,
+            suggestion_key TEXT NOT NULL,
+            surface TEXT NOT NULL DEFAULT 'agent',
+            source TEXT,
+            dismissed_at TEXT,
+            dismissed_fingerprint TEXT,
+            accepted_at TEXT,
+            accept_count INTEGER NOT NULL DEFAULT 0,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (client_email, agent_name, suggestion_key)
+        )
+    """,
+
     # -------------------------------------------------------------------------
     # Settings Tables
     # -------------------------------------------------------------------------
@@ -1464,6 +1488,7 @@ TABLES = {
             telegram_secret_token TEXT,
             last_update_id INTEGER DEFAULT 0,
             progress_indicator_enabled INTEGER DEFAULT 1,
+            can_read_all_group_messages INTEGER,
             created_at TEXT NOT NULL,
             updated_at TEXT
         )
@@ -1502,7 +1527,9 @@ TABLES = {
             updated_at TEXT,
             verified_by_email TEXT,
             verified_at TEXT,
-            allow_proactive INTEGER DEFAULT 1
+            allow_proactive INTEGER DEFAULT 1,
+            last_untagged_seen_at TEXT,
+            context_enabled INTEGER DEFAULT 1
         )
     """,
 
@@ -1675,6 +1702,18 @@ TABLES = {
             delivery_detail TEXT,
             delivery_updated_at TEXT,
             divergence_acknowledged_at TEXT,
+            disposition TEXT,
+            disposed_at TEXT,
+            disposed_by TEXT,
+            disposed_by_email TEXT,
+            disposition_reason TEXT,
+            batch_id TEXT,
+            raised_by TEXT,
+            channel TEXT,
+            to_role TEXT,
+            resolved_to TEXT,
+            proposal TEXT,
+            supersedes_expired TEXT,
             FOREIGN KEY (responded_by_id) REFERENCES users(id)
         )
     """,
@@ -2076,6 +2115,10 @@ INDEXES = [
     # this one is for the sweeper, which purges by the share id.
     "CREATE INDEX IF NOT EXISTS idx_portal_file_dismissals_file "
     "ON portal_file_dismissals(file_id)",
+    # ent#465 — the PK leads with `client_email` (the read); this one serves the
+    # per-agent cascade delete.
+    "CREATE INDEX IF NOT EXISTS idx_workspace_suggestion_feedback_agent "
+    "ON workspace_suggestion_feedback(agent_name)",
 
     # Public links indexes
     "CREATE INDEX IF NOT EXISTS idx_public_links_token ON agent_public_links(token)",

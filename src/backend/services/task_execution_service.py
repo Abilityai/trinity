@@ -189,6 +189,10 @@ _AUTONOMOUS_TRIGGERS = frozenset(
     # on; the resume turn runs with nobody reading its reply, so an unresolved
     # command in it is invisible without the alert.
     #
+    # trinity-enterprise#611: `operator_ending` too — the wake for an ask that
+    # was cancelled or expired runs with nobody reading its reply, exactly like
+    # the answer's.
+    #
     # #2845: `retry` belongs here. RETRY-001 fires it from a timer
     # `retry_delay_seconds` after the failure, so nobody is reading its reply —
     # even when the run it retries was started by hand. Without it, a skill that
@@ -196,7 +200,7 @@ _AUTONOMOUS_TRIGGERS = frozenset(
     # before reaching the agent (capacity, timeout) and only the retry got far
     # enough to show it.
     {"schedule", "webhook", "loop", "event", "fan_out", "agent", "reminder",
-     "a2a", "operator_response", "retry"}
+     "a2a", "operator_response", "operator_ending", "retry"}
 )
 
 

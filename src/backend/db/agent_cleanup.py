@@ -187,6 +187,8 @@ AGENT_REFS: List[AgentRef] = [
     # keyed on a purged share id would be orphaned forever with nothing left
     # to join it back to.
     AgentRef("portal_file_dismissals",       "agent_name",        Policy.CASCADE),
+    # ent#465 — Workspace suggestion accept/dismiss rows name the agent.
+    AgentRef("workspace_suggestion_feedback", "agent_name",       Policy.CASCADE),
 
     # --- Public links and chained tables -----------------------------------
     # Order: chained tables before agent_public_links so the link rows

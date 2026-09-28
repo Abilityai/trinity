@@ -828,11 +828,15 @@
   fork-to-own, also gets freeze-on-failure; a `deployment` never does.
 - **An agent** gets a working branch (`trinity/<agent>/<id>`) it alone writes,
   `auto_sync_enabled=1` and `freeze_schedules_if_sync_failing=1`. It only gets
-  them **when its token can push to that repo** (the #2107 receive-pack probe).
+  them **when its own token can push to that repo**: the token must be the
+  creator's (`per_user`) or the agent's (`per_agent`), and the #2107 receive-pack
+  probe must say `ok`. The global platform PAT never qualifies — being able to
+  push is not owning the repo (PR #3020 ruling, the ent#162 class).
 - **Stays pull-only, with the reason on the create response's `git_mode`:**
   - a deployment
   - an ephemeral ghost (ent#69)
   - no token (ent#123; not a 400)
+  - only the platform-wide token (never probed)
   - a refused probe (a template someone else owns — never branches pushed
     into it, the ent#162 class; the reason points to fork-to-own)
   - an unverifiable probe

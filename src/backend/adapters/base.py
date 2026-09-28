@@ -327,6 +327,32 @@ class ChannelAdapter(ABC):
     # Group Authentication (group_auth_mode support)
     # =========================================================================
 
+    async def group_context_enabled(
+        self,
+        message: NormalizedMessage,
+        agent_name: str,
+    ) -> bool:
+        """
+        Whether this group's recent conversation is recorded and replayed as
+        context for the agent's turns (ent#600). Default ON; a channel with a
+        per-group opt-out (Telegram) overrides. Only consulted when
+        ``metadata["is_group"]`` is set.
+        """
+        return True
+
+    async def note_untagged_seen(
+        self,
+        message: NormalizedMessage,
+        agent_name: str,
+    ) -> None:
+        """
+        Called once per group message that did not address the bot
+        (``metadata["untagged"]``), whether it was observed or executed
+        (ent#600). Telegram stores it as the per-group proof that the bot
+        receives un-tagged messages; other channels ignore it.
+        """
+        return None
+
     async def is_group_verified(
         self,
         message: NormalizedMessage,

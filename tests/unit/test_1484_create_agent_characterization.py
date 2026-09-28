@@ -1302,6 +1302,13 @@ async def test_case22_allocator_raise_rolls_back_gitconfig_and_mcp_key(
 # that repo. Every other case stays pull-only with a stated reason — a template
 # someone else owns must never receive an agent's branches (ent#162 class).
 
+def _own_token(monkeypatch, crud, pat="user-pat"):
+    """The creator's own PAT (tier per_user) — the only kind, with per_agent,
+    that can earn the working-branch default. The harness default is the
+    platform-wide token (tier global), which never does."""
+    monkeypatch.setattr(crud, "resolve_github_pat", MagicMock(return_value=(pat, "per_user")))
+
+
 async def _create_default(crud, ctx, monkeypatch, name, **kw):
     _script_github_template(ctx)
     _patch_repo_validation(monkeypatch, crud)
@@ -1311,6 +1318,7 @@ async def _create_default(crud, ctx, monkeypatch, name, **kw):
 @pytest.mark.asyncio
 async def test_ent705_agent_default_with_push_access_gets_the_trio(crud_env, monkeypatch):
     crud, ctx = crud_env
+    _own_token(monkeypatch, crud)
     result = await _create_default(crud, ctx, monkeypatch, "gc-agent")
 
     env = _agent_run_kwargs(ctx)["environment"]
@@ -1321,7 +1329,7 @@ async def test_ent705_agent_default_with_push_access_gets_the_trio(crud_env, mon
     ctx["db"].set_freeze_schedules_if_sync_failing.assert_called_once_with("gc-agent", True)
     # probed once — the default's probe stands in for validation's
     ctx["git_service"].probe_push_access.assert_awaited_once_with(
-        "Abilityai/cornelius", "platform-pat")
+        "Abilityai/cornelius", "user-pat")
     assert result.git_mode["source_mode"] is False
     assert result.git_mode["kind"] == "agent"
     assert "working branch" in result.git_mode["reason"]
@@ -1332,6 +1340,7 @@ async def test_ent705_agent_default_without_push_access_stays_pull_only(crud_env
     """A public template the token cannot write: no 400, no branches pushed into
     someone else's repo — pull-only, and the response says why and what to do."""
     crud, ctx = crud_env
+    _own_token(monkeypatch, crud)
     ctx["git_service"].probe_push_access = AsyncMock(
         return_value=("denied", "remote: Write access to repository not granted."))
     result = await _create_default(crud, ctx, monkeypatch, "gc-readonly")
@@ -1347,8 +1356,46 @@ async def test_ent705_agent_default_without_push_access_stays_pull_only(crud_env
 
 
 @pytest.mark.asyncio
+async def test_ent705_the_platform_token_never_earns_a_working_branch(crud_env, monkeypatch):
+    """PR #3020 ruling — being able to push is not owning the repo.
+
+    The global PAT is the admin's credential for the whole install. Where it
+    can write a shared template repo, granting on the probe alone pushed every
+    creator's agent to a branch on that repo (the ent#162 class). With only
+    that token the default is pull-only, and the probe is never even asked.
+    """
+    crud, ctx = crud_env
+    # harness default: resolve_github_pat -> ("platform-pat", "global"); the
+    # probe would say yes
+    ctx["git_service"].probe_push_access = AsyncMock(return_value=("ok", ""))
+    result = await _create_default(crud, ctx, monkeypatch, "gc-shared")
+
+    env = _agent_run_kwargs(ctx)["environment"]
+    assert env["GIT_SOURCE_MODE"] == "true"
+    assert "GIT_SYNC_AUTO" not in env
+    ctx["git_service"].probe_push_access.assert_not_awaited()
+    ctx["db"].set_git_auto_sync_enabled.assert_not_called()
+    ctx["db"].set_freeze_schedules_if_sync_failing.assert_not_called()
+    assert result.git_mode["source_mode"] is True
+    assert "platform-wide GitHub token" in result.git_mode["reason"]
+    assert "your own GitHub token" in result.git_mode["reason"]
+
+
+@pytest.mark.asyncio
+async def test_ent705_an_agents_own_token_earns_it_like_the_creators(crud_env):
+    crud, ctx = crud_env
+    config = _github_config("gc-own")
+    decision = await crud._apply_agent_kind_default(
+        config, "Abilityai/cornelius", "agent-pat", None, github_pat_tier="per_agent")
+
+    assert config.source_mode is False and decision["push_verified"] is True
+    ctx["git_service"].probe_push_access.assert_awaited_once_with("Abilityai/cornelius", "agent-pat")
+
+
+@pytest.mark.asyncio
 async def test_ent705_unverifiable_push_access_stays_pull_only(crud_env, monkeypatch):
     crud, ctx = crud_env
+    _own_token(monkeypatch, crud)
     ctx["git_service"].probe_push_access = AsyncMock(return_value=("transient", "timed out"))
     result = await _create_default(crud, ctx, monkeypatch, "gc-flaky")
 

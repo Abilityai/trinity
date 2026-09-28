@@ -13,10 +13,11 @@ reservation:
 
 | Case | Mode | Why |
 |---|---|---|
-| `kind=agent`, token can push (the #2107 probe says `ok`) | **working branch** + auto-sync + freeze-on-failure | the repository is the agent |
+| `kind=agent`, the creator's or agent's own token (tier `per_user`/`per_agent`) can push (the #2107 probe says `ok`) | **working branch** + auto-sync + freeze-on-failure | the repository is the agent |
 | `kind=agent`, probe refused | source (pull-only) | a template someone else owns never receives an agent's branches; fork-to-own is the durable path |
 | `kind=agent`, probe unverifiable | source | fail safe |
 | `kind=agent`, no token | source | nothing pushes anonymously (ent#123) |
+| `kind=agent`, only the platform-wide token (tier `global`) | source, never probed | being able to push is not owning the repo — the admin's token can write shared template repos (ent#162 class) |
 | ephemeral ghost | source | its workspace is throwaway (ent#69) |
 | `kind=deployment` | source | a deployment of a codebase |
 | fork-to-own | fork's own trio | it owns its fork |

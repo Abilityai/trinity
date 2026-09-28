@@ -214,8 +214,9 @@ class AgentConfig(BaseModel):
     source_mode: Optional[bool] = True  # True = track source branch (pull only), False = create working branch
     # trinity-enterprise#705: what is being created. "agent" (the default when
     # None) is an agent whose repository IS the agent — a working branch it alone
-    # writes, auto-sync on, freeze-on-failure on — granted only when its token can
-    # actually push to that repo; otherwise it stays pull-only. "deployment" is a
+    # writes, auto-sync on, freeze-on-failure on — granted only when the creator's
+    # or agent's own token (never the platform-wide one) can actually push to
+    # that repo; otherwise it stays pull-only. "deployment" is a
     # deployment of a codebase: source mode, no auto-push. An EXPLICIT
     # `source_mode` always wins for the MODE; an auto-pushing agent (explicit
     # working branch and fork-to-own included) also gets freeze-on-failure.
@@ -3655,13 +3656,36 @@ class OperatorResponse(BaseModel):
     acknowledge_divergence: bool = False
 
 
+def _blank_reason_is_none(value: Optional[str]) -> Optional[str]:
+    """An empty or whitespace-only cancel reason is no reason."""
+    if isinstance(value, str):
+        return value.strip() or None
+    return value
+
+
+class OperatorCancel(BaseModel):
+    """Optional body for cancelling one queue item (trinity-enterprise#611).
+
+    `reason` is the operator's note to the agent: recorded on the row and framed
+    as data in the agent's wake turn. Never written into an audit row (the row
+    records only whether one was given) and never shown to a Workspace client.
+    """
+    reason: Optional[str] = Field(None, max_length=500)
+
+    _blank_is_none = field_validator("reason")(_blank_reason_is_none)
+
+
 class BulkCancelRequest(BaseModel):
     """Body for bulk-cancelling pending queue items (#1017).
 
     The client sends the ids it actually rendered, so a sync-loop race can
-    never cancel items the operator never saw.
+    never cancel items the operator never saw. `reason` (trinity-enterprise#611)
+    is one note for the whole sweep, recorded on every row it ends.
     """
     ids: List[str] = Field(..., min_length=1, max_length=500)
+    reason: Optional[str] = Field(None, max_length=500)
+
+    _blank_is_none = field_validator("reason")(_blank_reason_is_none)
 
 
 class ClearResolvedRequest(BaseModel):
@@ -4163,6 +4187,13 @@ class TelegramGroupConfigResponse(BaseModel):
     # ent#265: per-group consent for completion reports (default allow; the
     # model IS the field allowlist for the GET's `Response(**row)` build).
     allow_proactive: bool = True
+    # ent#600: group conversation context — per-group toggle (default ON), the
+    # honest status (all_messages / tagged_only / unconfirmed / off) with the
+    # next action named, and the proof timestamp behind it.
+    context_enabled: bool = True
+    context_status: str = "unconfirmed"
+    context_hint: Optional[str] = None
+    last_untagged_seen_at: Optional[str] = None
 
 
 class TelegramGroupConfigUpdateRequest(BaseModel):
@@ -4171,6 +4202,9 @@ class TelegramGroupConfigUpdateRequest(BaseModel):
     welcome_text: Optional[str] = None
     # ent#265: human-only arm — the router calls reject_agent_principal when set.
     allow_proactive: Optional[bool] = None
+    # ent#600: human-only arm too — recording a group's conversation is a
+    # privacy decision the owner makes, not one an agent grants itself.
+    context_enabled: Optional[bool] = None
 
 
 class TelegramGroupMessageRequest(BaseModel):

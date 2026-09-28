@@ -18,6 +18,7 @@ import {
   QUEUE_RESPONSE_DIVERGED,
   respondRefusedAsNotPending,
   respondRefusedAsDiverged,
+  queueEndingSortTime,
 } from '../utils/operatorQueue'
 
 // Agent display helpers
@@ -78,10 +79,12 @@ export const useOperatorQueueStore = defineStore('operatorQueue', () => {
   // cancelled from Needs Response vanished from the UI entirely.
   const RESOLVED_STATUSES = ['responded', 'acknowledged', 'cancelled', 'expired']
 
+  // trinity-enterprise#611 (#627 AC6): ordered by when each item ENDED — a
+  // cancellation made this morning used to sort by the day it was filed.
   const resolvedItems = computed(() => {
     return items.value
       .filter(i => RESOLVED_STATUSES.includes(i.status))
-      .sort((a, b) => new Date(b.responded_at || b.created_at) - new Date(a.responded_at || a.created_at))
+      .sort((a, b) => new Date(queueEndingSortTime(b)) - new Date(queueEndingSortTime(a)))
   })
 
   const pendingCount = computed(() =>
@@ -265,15 +268,11 @@ export const useOperatorQueueStore = defineStore('operatorQueue', () => {
     if (data.type === 'operator_queue_new') {
       // New item from agent — refetch to get full data
       fetchItems()
-    } else if (data.type === 'operator_queue_responded') {
-      // Another operator responded — update locally
-      const item = items.value.find(i => i.id === data.data?.id)
-      if (item) {
-        item.status = 'responded'
-        item.response = data.data.response
-        item.responded_by_email = data.data.responded_by_email
-        item.responded_at = new Date().toISOString()
-      }
+    } else if (data.type === 'operator_queue_responded' || data.type === 'operator_queue_cancelled') {
+      // trinity-enterprise#611: an ask ended (answered / cancelled). The trigger
+      // is thin — identifiers only (#918) — so refetch the access-controlled
+      // list rather than patching the row from a payload.
+      fetchItems()
     } else if (data.type === 'operator_queue_acknowledged') {
       // Agent acknowledged — update locally
       const item = items.value.find(i => i.id === data.data?.id)

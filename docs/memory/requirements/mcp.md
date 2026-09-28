@@ -776,6 +776,13 @@ runs the same access gate, so ownership/sharing is never bypassed.
   routing, parallel/self-task paths, idempotency tokens, #914 gateway-timeout recovery, access
   denial). Dedicated tools register with the `connectorDenied` visibility gate and bind their
   audit target (no `agent_name` param).
+- **FR-5a — Chain-depth refusal is a result, not an error (#2806)**: when the backend refuses a
+  hop with 403 `detail.error == "inter_agent_depth_exceeded"` (`core-agent.md` §9.1.1),
+  `client.chat` / `client.task` / `client.fanOut` return a typed refusal instead of throwing,
+  and `runAgentChat` (sequential, parallel, self-task and pull-routed branches) and `fan_out`
+  answer `{"status": "inter_agent_depth_exceeded", "agent", "depth", "max_depth",
+  "retryable": false, "message"}` so the calling model reads "stop, do not retry or re-route".
+  A 403 without that code (access denial, SELF-EXEC-001) still throws as before.
 - **FR-6 — Surfacing**: `mcp_exposed` is exposed on `GET /api/agents` / MCP `list_agents`. A
   Settings-tab toggle ("Expose via MCP") shows the computed tool name and up-to-poll-interval
   latency copy.

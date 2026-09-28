@@ -1829,6 +1829,7 @@ class DatabaseManager:
         source_channel_agent: str = None,
         source_channel_client: str = None,
         open_canvas_id: str = None,
+        chain_depth: int = None,
     ):
         """Create an execution record for a manual/API-triggered task (no schedule)."""
         return self._schedule_ops.create_task_execution(
@@ -1851,7 +1852,12 @@ class DatabaseManager:
             source_channel_agent=source_channel_agent,
             source_channel_client=source_channel_client,
             open_canvas_id=open_canvas_id,
+            chain_depth=chain_depth,
         )
+
+    def get_max_running_chain_depth(self, agent_name: str) -> int:
+        """Deepest chain_depth among the agent's running rows, 0 if none (#2806)."""
+        return self._schedule_ops.get_max_running_chain_depth(agent_name)
 
     def create_schedule_execution(
         self,
@@ -2855,11 +2861,27 @@ class DatabaseManager:
     def get_public_chat_messages(self, session_id: str, limit: int = 20, sender_email: str = None):
         return self._public_chat_ops.get_session_messages(session_id, limit, sender_email=sender_email)
 
-    def get_recent_public_chat_messages(self, session_id: str, limit: int = 20, sender_email: str = None):
-        return self._public_chat_ops.get_recent_messages(session_id, limit, sender_email=sender_email)
+    def get_recent_public_chat_messages(
+        self, session_id: str, limit: int = 20, sender_email: str = None, since: str = None,
+    ):
+        return self._public_chat_ops.get_recent_messages(
+            session_id, limit, sender_email=sender_email, since=since,
+        )
+
+    def prune_public_chat_session(self, session_id: str, keep: int) -> int:
+        # ent#600: bound a Telegram group session that records every visible message.
+        return self._public_chat_ops.prune_session(session_id, keep)
 
     def clear_public_chat_session(self, session_id: str):
         return self._public_chat_ops.clear_session(session_id)
+
+    def clear_public_chat_sessions_by_identifier(
+        self, agent_name: str, channel: str, session_identifier: str,
+    ) -> int:
+        # ent#600: a Telegram group's sessions (the chat + its forum topics).
+        return self._public_chat_ops.clear_sessions_by_identifier(
+            agent_name, channel, session_identifier,
+        )
 
     def build_public_chat_context(self, session_id: str, new_message: str, max_turns: int = 10):
         return self._public_chat_ops.build_context_prompt(session_id, new_message, max_turns)
@@ -3444,6 +3466,14 @@ class DatabaseManager:
         # ent#264: per-binding in-progress indicator toggle (default ON).
         return self._telegram_channel_ops.set_progress_indicator_enabled(agent_name, enabled)
 
+    def set_telegram_can_read_all_group_messages(self, agent_name, value):
+        # ent#600: Telegram's getMe.can_read_all_group_messages (None = not reported).
+        return self._telegram_channel_ops.set_can_read_all_group_messages(agent_name, value)
+
+    def touch_telegram_group_untagged_seen(self, binding_id, chat_id):
+        # ent#600: an un-tagged message reached the bot in this group.
+        return self._telegram_channel_ops.touch_group_untagged_seen(binding_id, chat_id)
+
     def get_all_telegram_bindings(self):
         return self._telegram_channel_ops.get_all_bindings()
 
@@ -3493,7 +3523,7 @@ class DatabaseManager:
 
     def update_telegram_group_config(
         self, group_config_id, trigger_mode=None, welcome_enabled=None,
-        welcome_text=None, allow_proactive=None,
+        welcome_text=None, allow_proactive=None, context_enabled=None,
     ):
         # Keyword passthrough (ent#265 / eng M3): a positional append here risks a
         # silent allow_proactive→welcome_text swap if the ops signature ever moves.
@@ -3503,6 +3533,7 @@ class DatabaseManager:
             welcome_enabled=welcome_enabled,
             welcome_text=welcome_text,
             allow_proactive=allow_proactive,
+            context_enabled=context_enabled,   # ent#600: group-context opt-out
         )
 
     def deactivate_telegram_group_config(self, binding_id, chat_id):
@@ -3665,8 +3696,11 @@ class DatabaseManager:
     # Operator Queue (delegated to db/operator_queue.py) - OPS-001
     # =========================================================================
 
-    def create_operator_queue_item(self, agent_name, item):
-        return self._operator_queue_ops.create_item(agent_name, item)
+    def create_operator_queue_item(self, agent_name, item, *, channel=None, raised_by=None):
+        # trinity-enterprise#611: provenance is keyword-only — never from `item`.
+        return self._operator_queue_ops.create_item(
+            agent_name, item, channel=channel, raised_by=raised_by,
+        )
 
     def prune_operator_queue_terminal_items(self, retention_days, responded_retention_days, limit=5000):
         # #1142: retention sweep for terminal operator-queue rows.
@@ -3676,6 +3710,18 @@ class DatabaseManager:
 
     def get_operator_queue_item(self, item_id):
         return self._operator_queue_ops.get_item(item_id)
+
+    def get_operator_queue_item_for_agent_by_request_id(self, agent_name, request_id):
+        # trinity-enterprise#611: the agent's own readback — ignores Clear All.
+        return self._operator_queue_ops.get_item_for_agent_by_request_id(agent_name, request_id)
+
+    def list_recent_operator_queue_endings(self, agent_name, since, limit,
+                                           exclude_request_id_prefixes=None):
+        # trinity-enterprise#611: ids + endings for the Execution Context line.
+        return self._operator_queue_ops.list_recent_endings_for_agent(
+            agent_name, since, limit,
+            exclude_request_id_prefixes=exclude_request_id_prefixes,
+        )
 
     def list_operator_queue_items(self, **kwargs):
         return self._operator_queue_ops.list_items(**kwargs)
@@ -3688,11 +3734,21 @@ class DatabaseManager:
             divergence_acknowledged=divergence_acknowledged,
         )
 
-    def cancel_operator_queue_item(self, item_id):
-        return self._operator_queue_ops.cancel_item(item_id)
+    def cancel_operator_queue_item(self, item_id, *, disposed_by_email, reason=None):
+        # trinity-enterprise#611: CAS + endings ledger; a lost race carries
+        # `_status_conflict` (the mirror of respond).
+        return self._operator_queue_ops.cancel_item(
+            item_id, disposed_by_email=disposed_by_email, reason=reason,
+        )
 
-    def bulk_cancel_operator_queue_items(self, ids, accessible_agent_names=None):
-        return self._operator_queue_ops.bulk_cancel_items(ids, accessible_agent_names)
+    def bulk_cancel_operator_queue_items(self, ids, accessible_agent_names=None, *,
+                                         disposed_by_email, reason=None):
+        # trinity-enterprise#611: returns {"batch_id", "rows"} — the rows THIS
+        # sweep ended, never the ids it was asked to end.
+        return self._operator_queue_ops.bulk_cancel_items(
+            ids, accessible_agent_names,
+            disposed_by_email=disposed_by_email, reason=reason,
+        )
 
     def clear_resolved_operator_queue_items(self, agent_name=None,
                                             accessible_agent_names=None):
@@ -3740,6 +3796,7 @@ class DatabaseManager:
         return self._operator_queue_ops.mark_acknowledged(agent_name, item_id)
 
     def mark_operator_queue_expired(self):
+        # trinity-enterprise#611: returns the rows this sweep ended (was a count).
         return self._operator_queue_ops.mark_expired()
 
     def get_operator_queue_stats(self, **kwargs):

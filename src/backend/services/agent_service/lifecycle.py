@@ -5,6 +5,7 @@ Contains functions for starting, stopping, and reconfiguring agents.
 """
 import asyncio
 import logging
+import re
 import os
 import time
 from typing import Literal, Optional
@@ -246,12 +247,19 @@ async def inject_assigned_skills(agent_name: str) -> dict:
     warning_count = sum(
         len(r.get("warnings") or []) for r in result.get("results", {}).values()
     )
+    # #2991: a name conflict is not a failure (#2914 — the agent's own copy runs,
+    # `success` stays true), so without this list a start that did NOT install
+    # an assigned skill read exactly like a clean one.
+    conflicts = sorted(
+        n for n, r in (result.get("results") or {}).items() if r.get("status") == "conflict"
+    )
     if result.get("success"):
         return {
             "status": "success",
             "skills_injected": result.get("skills_injected", 0),
             "skills_unchanged": result.get("skills_unchanged", 0),
             "skills_warnings": warning_count,
+            "conflicts": conflicts,
             "results": result.get("results", {}),
             "reconcile": reconcile,
         }
@@ -263,9 +271,85 @@ async def inject_assigned_skills(agent_name: str) -> dict:
             "skills_unchanged": result.get("skills_unchanged", 0),
             "skills_failed": result.get("skills_failed", 0),
             "skills_warnings": warning_count,
+            "conflicts": conflicts,
             "results": result.get("results", {}),
             "reconcile": reconcile,
         }
+
+
+# #2991 — the public projection of a start's skill-delivery result. The start
+# endpoint returns it to REST and MCP callers, so it carries NAMES, STATUSES and
+# CODES only (the ent#334 projection rule): a per-skill `error` is free text
+# that can hold an exception string, a transport URL or a path, and is reduced
+# to a code here, never passed through.
+_CODE_RE = re.compile(r"^[a-z][a-z0-9_]{1,63}$")
+_WARNING_RE = re.compile(r"^(missing_binary|missing_env):[A-Za-z0-9_.+-]{1,128}$")
+_SKILL_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+_PROSE_ERRORS = {
+    "Skill not found in library": "not_in_library",
+    "skill package empty (no committed regular files)": "empty_package",
+    "SKILL.md missing from package": "skill_md_missing",
+    "restore failed (transport)": "restore_failed",
+}
+_COUNTS = ("skills_injected", "skills_unchanged", "skills_failed", "skills_warnings")
+
+
+def _error_code(error) -> Optional[str]:
+    if not error:
+        return None
+    text = str(error)
+    if text in _PROSE_ERRORS:
+        return _PROSE_ERRORS[text]
+    head = text.split(":", 1)[0].strip()
+    return head if _CODE_RE.match(head) else "error"
+
+
+def public_skills_result(raw) -> dict:
+    """``skills_result`` as the start endpoint returns it (#2991).
+
+    Always carries ``status`` — an absent result reads ``unknown``, never an
+    absent field (quality bar #1) — plus ``reason`` for a skip, the counts,
+    ``conflicts`` (names), and per-skill ``{status, code?, warnings?}``.
+    """
+    if not isinstance(raw, dict):
+        return {"status": "unknown"}
+    out: dict = {"status": str(raw.get("status") or "unknown")}
+    if raw.get("reason"):
+        out["reason"] = _error_code(raw["reason"])
+    for key in _COUNTS:
+        if isinstance(raw.get(key), int):
+            out[key] = raw[key]
+    skills: dict = {}
+    results = raw.get("results")
+    # Defensive on shape: this runs inside the start endpoint's try, so a raise
+    # here would turn a start that HAPPENED into a 500 the caller retries.
+    for name, r in (results.items() if isinstance(results, dict) else ()):
+        if not isinstance(name, str) or not _SKILL_NAME_RE.match(name) or not isinstance(r, dict):
+            continue
+        entry = {"status": str(r.get("status") or ("injected" if r.get("success") else "failed"))}
+        code = _error_code(r.get("error"))
+        if code:
+            entry["code"] = code
+        warnings = [w for w in (r.get("warnings") or []) if isinstance(w, str)
+                    and (_WARNING_RE.match(w) or _CODE_RE.match(w))]
+        if warnings:
+            entry["warnings"] = warnings
+        skills[name] = entry
+    if skills:
+        out["skills"] = skills
+    conflicts = raw.get("conflicts")
+    if not isinstance(conflicts, list):
+        conflicts = [n for n, e in skills.items() if e["status"] == "conflict"]
+    out["conflicts"] = sorted(n for n in conflicts if isinstance(n, str) and _SKILL_NAME_RE.match(n))
+    reconcile = raw.get("reconcile")
+    if isinstance(reconcile, dict):
+        rec = {"status": str(reconcile.get("status") or "unknown")}
+        if isinstance(reconcile.get("removed"), int):
+            rec["removed"] = reconcile["removed"]
+        if reconcile.get("reason"):
+            rec["reason"] = _error_code(reconcile["reason"])
+        out["reconcile"] = rec
+    return out
 
 
 async def start_agent_internal(agent_name: str) -> dict:
