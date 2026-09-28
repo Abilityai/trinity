@@ -40,7 +40,10 @@ AGENT = "sales-companion"
 SEAT = "gary@example.com"
 OTHER = "ops@example.com"
 OWNER = "owner@example.com"
-TODAY = date(2026, 9, 23)
+# Anchored on the real UTC date, not a literal: `record()` validates
+# `review_by` against the real clock, so a frozen TODAY turns every
+# `TODAY + N days` into a past date N days after it was written.
+TODAY = datetime.now(timezone.utc).date()
 FUTURE = (TODAY + timedelta(days=90)).isoformat()
 CRITERION = "renewal cost below the switching cost"
 
@@ -693,3 +696,38 @@ def test_the_seat_read_is_not_shadowed_by_the_agent_level_autonomy_toggle():
     assert seen[("/api/agents/{agent_name}/seat-autonomy", "GET")] == "get_seat_autonomy"
     # and the toggle is still where every existing caller expects it
     assert seen[("/api/agents/{agent_name}/autonomy", "GET")] != "get_seat_autonomy"
+
+
+def test_a_thumbs_down_through_submit_rating_demotes_the_stored_verdict(dial, store, monkeypatch):
+    """The rating hook, executed rather than read by text.
+
+    `client_portal.service.submit_rating` is the only demotion path that does
+    not pass through the decision record, so it re-evaluates the seat itself.
+    Drive the real function: a class graduated and persisted by three records
+    must be written back on-request, naming the rating, by the rating call
+    alone — no read of the panel in between.
+    """
+    import database
+    from client_portal import service as portal
+
+    store.set_setting(dial.LEVEL_KEY, "L2")
+    _three(store)
+    before = store.get_seat_ask_class_state(AGENT, SEAT, "vendor-renewal")
+    assert before["state"] == dial.STATE_GRADUATED
+
+    def upsert_workspace_rating(agent_name, *, evaluator, target_kind, target_id, quality, comment):
+        if quality == portal.RATING_VALUES["down"]:
+            store.negatives[agent_name] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        return {"id": "r1"}
+
+    store.upsert_workspace_rating = staticmethod(upsert_workspace_rating)
+    monkeypatch.setattr(database, "db", store, raising=False)
+    monkeypatch.setattr(portal, "agent_on_roster", lambda *a, **k: True)
+    monkeypatch.setattr(portal, "_rating_target_is_visible", lambda *a, **k: True)
+
+    portal.submit_rating(AGENT, SEAT, target_kind=portal.RATING_TARGETS[0],
+                         target_id="m1", rating="down")
+
+    after = store.get_seat_ask_class_state(AGENT, SEAT, "vendor-renewal")
+    assert after["state"] == dial.STATE_ON_REQUEST
+    assert dial.BLOCK_RATING in after["blocked_by"]
