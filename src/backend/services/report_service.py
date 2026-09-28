@@ -92,10 +92,10 @@ def resolve_report_session(execution_id: Optional[str], agent_name: str,
       never showed it — the card was in nobody's chat.
     * Otherwise, **only when `allow_main`**, the addressee's **Main**
       (`ensure_main_session`, race-safe by
-      the partial unique index), touched with `added=0`. The touch keeps a
-      report-only Main visible to the sidebar (`is_main && !last_message_at` is
-      hidden) and moves it in the list; `added=0` because a report is not a
-      message, so Reset's "untouched Main" test (`message_count == 0`) holds.
+      the partial unique index). Resolving mints but never TOUCHES: the caller
+      touches the stamped chat with `touch_report_session` only after the
+      report row is written (/review, ent#610), so a failed insert cannot leave
+      an empty Main listed in the sidebar.
 
     This is the ent#523 landing rule ("an agent-initiated thing lands in Main")
     applied to deliverables, with the same move as
@@ -120,7 +120,6 @@ def resolve_report_session(execution_id: Optional[str], agent_name: str,
         return None
     from client_portal import db as portal_db
     from client_portal import service as portal_service
-    from utils.helpers import utc_now_iso
 
     if execution_id:
         sid = _resolve_portal_session(execution_id, agent_name)
@@ -136,15 +135,33 @@ def resolve_report_session(execution_id: Optional[str], agent_name: str,
     if not allow_main:
         return None
     try:
-        main_id = portal_service.ensure_main_session(agent_name, audience)
-        portal_db.touch_portal_session(main_id, utc_now_iso(), added=0)
-        return main_id
+        return portal_service.ensure_main_session(agent_name, audience)
     except Exception as e:  # noqa: BLE001
         logger.warning(
             "could not stamp a report for %s to the addressee's Main (%s) — it "
             "will publish without an in-chat card", agent_name, type(e).__name__,
         )
         return None
+
+
+def touch_report_session(session_id: str) -> None:
+    """Advance a stamped chat's `last_message_at` once its report is WRITTEN.
+
+    The touch keeps a report-only Main visible to the sidebar
+    (`is_main && !last_message_at` is hidden) and moves the chat in the list;
+    `added=0` because a report is not a message, so Reset's "untouched Main"
+    test (`message_count == 0`) holds. Called after the insert, never before:
+    a failed insert must not list an empty Main. Fails soft with a WARNING — a
+    card placement never fails a publish that has already been written.
+    """
+    from client_portal import db as portal_db
+    from utils.helpers import utc_now_iso
+
+    try:
+        portal_db.touch_portal_session(session_id, utc_now_iso(), added=0)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("could not touch the chat a report was stamped to (%s)",
+                       type(e).__name__)
 
 
 async def _broadcast_report(report: Dict) -> None:

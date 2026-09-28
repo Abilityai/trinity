@@ -114,7 +114,7 @@ Where arrivals come from
 | Backend | `src/backend/client_portal/router.py` | `GET /chat-state?previews=` (`response_model_exclude_none`) |
 | Backend | `src/backend/client_portal/models.py` | `PortalChatArrival` (no `cost`), `PortalChatStateEntry.latest` / `first_unread_message_id` |
 | Backend | `src/backend/services/channel_completion_report.py` | `source="completion:done" \| "completion:failed"` on the portal message |
-| Backend | `src/backend/services/report_service.py`, `src/backend/routers/reports.py` | `resolve_report_session` — the addressee's in-flight chat, else their Main (+ touch) |
+| Backend | `src/backend/services/report_service.py`, `src/backend/routers/reports.py` | `resolve_report_session` — the addressee's in-flight chat, else (agent's own publish only) their Main; `touch_report_session` after the insert |
 | Frontend | `src/frontend/src/router/index.js` | route `WorkspaceInbox` `/workspace/inbox` |
 | Frontend | `src/frontend/src/components/portal/portalInbox.js` | every pure rule: landing, builders, counts, keys, `sidebarThreadsOf`, selection/hold |
 | Frontend | `src/frontend/src/components/portal/PortalInbox.vue`, `PortalInboxList.vue`, `PortalInboxPane.vue`, `PortalInboxRow.vue` | container, list, pane, pinned sidebar row |

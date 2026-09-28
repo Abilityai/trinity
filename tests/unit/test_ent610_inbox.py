@@ -326,6 +326,11 @@ def test_no_execution_stamps_the_addressees_main_minting_and_touching_it(inbox_d
 
     mains = _main_of(inbox_db, ALICE)
     assert [m["id"] for m in mains] == [sid]
+    # Resolving mints but does NOT touch: the touch waits for the insert
+    # (/review N1), so a failed publish never leaves an empty Main listed.
+    assert not mains[0]["last_message_at"]
+    report_service.touch_report_session(sid)
+    mains = _main_of(inbox_db, ALICE)
     # Touched so the sidebar lists it (`is_main && !last_message_at` is hidden)…
     assert mains[0]["last_message_at"]
     # …with added=0: a report is not a message, so Reset's "untouched" test holds.
@@ -337,6 +342,7 @@ def test_an_existing_main_is_reused_not_duplicated(inbox_db, inflight):
     _session(inbox_db, "main-a", ALICE, is_main=1, last="2026-09-01T00:00:00Z", count=4)
 
     assert report_service.resolve_report_session(None, AGENT, ALICE, allow_main=True) == "main-a"
+    report_service.touch_report_session("main-a")
     mains = _main_of(inbox_db, ALICE)
     assert len(mains) == 1
     assert mains[0]["last_message_at"] > "2026-09-01T00:00:00Z"
@@ -436,6 +442,7 @@ def test_a_stamped_report_only_main_counts_and_survives_the_sidebar_filter(inbox
     _read(ALICE, "s-old", "2026-09-01T09:00:00Z")
     sid = report_service.resolve_report_session(None, AGENT, ALICE, allow_main=True)
     _report(inbox_db, session_id=sid, addressed=ALICE, at="2099-01-01T00:00:00Z")
+    report_service.touch_report_session(sid)
 
     assert pdb.count_unread_by_session(ALICE) == {sid: 1}
     assert _main_of(inbox_db, ALICE)[0]["last_message_at"]
@@ -472,6 +479,62 @@ async def test_the_publish_route_stamps_through_the_service_with_or_without_an_e
 
     assert calls == [(None, AGENT, ALICE, True)]
     assert stored["portal_session_id"] == "main-x"
+
+
+@pytest.mark.asyncio
+async def test_the_stamped_chat_is_touched_only_after_the_report_is_written(monkeypatch):
+    """/review N1: the touch sets `last_message_at`, which is what lists a
+    report-only Main in the sidebar. Touching before the insert meant a failed
+    insert left an empty Main listed with nothing in it."""
+    from client_portal import service as cps
+    from models import ReportCreate, User
+    from routers import reports as mod
+
+    order = []
+
+    async def ok_create(**kwargs):
+        order.append("insert")
+        return {"id": "r1", "agent_name": AGENT, "report_type": "recon.leads", "title": "Leads",
+                "payload": {}, "created_at": "2026-09-10T00:00:00Z", "user_id": 1}
+
+    async def failing_create(**kwargs):
+        raise RuntimeError("insert failed")
+
+    monkeypatch.setattr(cps, "agent_on_roster", lambda agent, email, include_owned=False: True)
+    monkeypatch.setattr(mod.rate_limiter, "enforce", lambda *a, **k: None)
+    monkeypatch.setattr(mod.report_service, "resolve_report_session",
+                        lambda eid, agent, audience, *, allow_main: "main-x")
+    monkeypatch.setattr(mod.report_service, "touch_report_session",
+                        lambda sid: order.append(("touch", sid)))
+
+    body = ReportCreate(report_type="recon.leads", title="Leads", payload={"rows": []},
+                        audience_email=ALICE)
+    agent_key = User(id=1, username="admin", role="admin", email="admin@example.com",
+                     agent_name=AGENT)
+
+    monkeypatch.setattr(mod.report_service, "create_report", failing_create)
+    with pytest.raises(RuntimeError):
+        await mod.create_report(body, AGENT, request=None, current_user=agent_key)
+    assert order == []
+
+    monkeypatch.setattr(mod.report_service, "create_report", ok_create)
+    await mod.create_report(body, AGENT, request=None, current_user=agent_key)
+    assert order == ["insert", ("touch", "main-x")]
+
+
+def test_a_touch_that_fails_is_soft_and_never_fails_the_publish(inbox_db, monkeypatch, caplog):
+    import logging
+
+    from client_portal import db as pdb
+    from services import report_service
+
+    def boom(*a, **k):
+        raise RuntimeError("db down")
+
+    monkeypatch.setattr(pdb, "touch_portal_session", boom)
+    with caplog.at_level(logging.WARNING):
+        report_service.touch_report_session("main-x")
+    assert any(r.levelno == logging.WARNING for r in caplog.records)
 
 
 @pytest.mark.asyncio

@@ -41,7 +41,9 @@ directly). Agents call the MCP `report` tool, which POSTs to `POST /api/agents/{
   no execution, a non-portal turn, or another person's chat — **and only when the agent
   publishes as itself** (`allow_main = current_user.agent_name == name`), the report is
   stamped to the addressee's **Main** (`client_portal.service.ensure_main_session`, race-safe by the
-  partial unique index) and that Main is touched with `added=0`. Why: without a chat the
+  partial unique index) and — only after the report row is written
+  (`report_service.touch_report_session`, so a failed insert never lists an empty Main) —
+  that Main is touched with `added=0`. Why: without a chat the
   report has no inline card, no anchor and no unread count (the ent#610 Inbox counts
   deliverables stamped to the viewer's own sessions), and a report addressed to X during
   Y's turn used to be stamped into Y's chat, where neither person's reader showed it. The

@@ -71,8 +71,10 @@ Two rules make the columns trustworthy:
   (an agent-scoped key for this agent; a human sharer's publish stays NULL, so
   one sharer cannot reach another person's Main), the report is stamped to the
   addressee's **Main** (`services/report_service.resolve_report_session` →
-  `ensure_main_session`, then `touch_portal_session(added=0)` so a report-only
-  Main is listed by the sidebar). It therefore always has a chat card and an
+  `ensure_main_session`; after the report row is written the route calls
+  `report_service.touch_report_session` → `touch_portal_session(added=0)` so a
+  report-only Main is listed by the sidebar — never before the insert, so a
+  failed publish leaves no empty Main listed). It therefore always has a chat card and an
   anchor, and it is an **unread arrival**: the ent#610 Inbox and every unread
   count include a report addressed to you stamped to a chat you own. Only an
   unaddressed report stays NULL. Historic NULL rows stay unlinked and uncounted.
