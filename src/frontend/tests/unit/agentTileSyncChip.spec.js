@@ -82,7 +82,10 @@ describe('AgentTile sync chip', () => {
     const found = syncChips(wrapper)
     expect(found).toHaveLength(1)
     expect(found[0].classes()).toContain(kind)
-    expect(found[0].text()).toBe('⟳ ↑7 ↓0 · 12 dirty · pushed 3h ago')
+    // The glyph is its own aria-hidden element (scaled 2x); the chip's flex gap spaces it.
+    expect(found[0].find('.chip-icon.chip-icon-x2').text()).toBe('⟳')
+    expect(found[0].find('.chip-icon').attributes('aria-hidden')).toBe('true')
+    expect(found[0].text()).toBe('⟳↑7 ↓0 · 12 dirty · pushed 3h ago')
   })
 
   it('the tooltip is the reason and the recommendation, never the raw error', async () => {
@@ -123,7 +126,7 @@ describe('AgentTile sync chip', () => {
     const green = mountTile(sync({ state: 'green', ahead_working: 0, dirty_files: 0 }))
     await nextTick()
     const greenTexts = chips(green).map((c) => c.text())
-    expect(greenTexts[greenTexts.length - 1]).toBe('⟳ ↑0 ↓0 · pushed 3h ago')
+    expect(greenTexts[greenTexts.length - 1]).toBe('⟳↑0 ↓0 · pushed 3h ago')
   })
 
   it('/review I2: a divergence-frozen agent whose last sync SUCCEEDED shows a crit chip', async () => {

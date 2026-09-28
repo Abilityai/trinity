@@ -78,7 +78,7 @@
         class="chip"
         :class="chip.kind"
         :title="chip.title"
-      >{{ chip.icon ? chip.icon + ' ' : '' }}{{ chip.text }}<span v-if="chip.timer" class="tmr">&nbsp;{{ chip.timer }}</span></span>
+      ><span v-if="chip.iconClass" class="chip-icon" :class="chip.iconClass" aria-hidden="true">{{ chip.icon }}</span><template v-else>{{ chip.icon ? chip.icon + ' ' : '' }}</template>{{ chip.text }}<span v-if="chip.timer" class="tmr">&nbsp;{{ chip.timer }}</span></span>
     </div>
 
     <!-- Zone 3: twin trend charts -->
@@ -751,6 +751,20 @@ watch(
 .chip.crit {
   background: color-mix(in srgb, var(--gv-red) 12%, transparent);
   color: var(--gv-red-text);
+}
+/* A scaled glyph must not grow the chip: it keeps the strip's height fixed. */
+.chip-icon {
+  display: inline-flex;
+  align-items: center;
+  height: 11px;
+  line-height: 1;
+}
+.chip-icon-x15 { font-size: 1.5em; }
+.chip-icon-x2 {
+  font-size: 2em;
+  /* The fallback font draws ⟳'s ink below its box centre; measured 1.5px low at 2x, 0 after this. */
+  position: relative;
+  top: -0.09em;
 }
 .chip .tmr {
   font-variant-numeric: tabular-nums;

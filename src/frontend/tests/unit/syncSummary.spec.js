@@ -17,6 +17,7 @@ import {
   formatSyncSummary,
   syncChip,
   syncTextClass,
+  syncPillClass,
   formatAge,
 } from '../../src/utils/syncSummary.js'
 
@@ -122,5 +123,29 @@ describe('syncTextClass — status text on a chrome fill (800 light / 300 dark)'
     ['unknown', ''],
   ])('%s → %s', (state, cls) => {
     expect(syncTextClass({ state })).toBe(cls)
+  })
+})
+
+describe('syncPillClass — the Overview pill takes the state tint on red / yellow only', () => {
+  it.each([
+    ['red', 'bg-status-danger-50'],
+    ['yellow', 'bg-status-warning-50'],
+  ])('%s is tinted', (state, cls) => {
+    expect(syncPillClass({ state }).split(' ')).toContain(cls)
+  })
+  it.each(['green', 'unknown'])('%s stays neutral (empty: the template keeps the sibling chrome)', (state) => {
+    expect(syncPillClass({ state })).toBe('')
+  })
+  it('the tint is a ring, not a border, so the pill keeps its siblings\' height', () => {
+    expect(syncPillClass({ state: 'red' })).not.toMatch(/\bborder\b/)
+    expect(syncPillClass({ state: 'red' })).toMatch(/ring-inset/)
+  })
+})
+
+describe('syncChip — the sync glyph', () => {
+  it('is its own element at 2x, so it can scale without growing the chip', () => {
+    const chip = syncChip({ state: 'red', ahead_working: 1, behind_working: 0, last_check_at: new Date().toISOString() }, Date.now())
+    expect(chip.icon).toBe('⟳')
+    expect(chip.iconClass).toBe('chip-icon-x2')
   })
 })

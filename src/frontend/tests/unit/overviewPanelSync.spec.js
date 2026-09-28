@@ -103,6 +103,17 @@ describe('Overview sync line', () => {
     expect(line.find('[data-testid="overview-sync-value"]').classes()).toContain(cls)
   })
 
+  it.each([
+    ['red', 'bg-status-danger-50', false],
+    ['yellow', 'bg-status-warning-50', false],
+    ['green', 'bg-gray-100', true],
+  ])('state %s: the whole pill carries %s', async (s, bg, neutral) => {
+    syncPayload = state({ state: s })
+    const classes = syncLine(await mountPanel()).classes()
+    expect(classes).toContain(bg)
+    expect(classes.includes('bg-gray-100')).toBe(neutral)
+  })
+
   it('hover gives the reason and recommendation, never the raw error', async () => {
     syncPayload = state({
       last_sync_status: 'failed', consecutive_failures: 3, last_error_summary: RAW_ERROR,

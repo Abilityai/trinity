@@ -16,7 +16,7 @@ import { ref, computed, watch, onMounted } from 'vue'
 import axios from 'axios'
 import { parseUTC } from '@/utils/timestamps'
 import { BUCKET_COLORS } from '@/utils/executionBuckets'
-import { formatSyncSummary, syncChip, syncTextClass } from '@/utils/syncSummary'
+import { formatSyncSummary, syncChip, syncPillClass, syncTextClass } from '@/utils/syncSummary'
 import { useAuthStore } from '../stores/auth'
 import { useExecutionsStore } from '../stores/executions'
 import { useAgentsStore } from '../stores/agents'
@@ -90,6 +90,7 @@ const syncTitle = computed(
   () => syncChip(syncState.value, Date.now())?.title ?? 'Sync status unknown'
 )
 const syncClass = computed(() => syncTextClass(syncState.value))
+const syncPill = computed(() => syncPillClass(syncState.value))
 
 // --- formatters ---
 function fmtDuration(ms) {
@@ -534,7 +535,7 @@ onMounted(() => {
         <button v-if="agent.can_share" class="px-2.5 py-1 rounded-md bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-gray-600" @click="emit('navigate-tab', 'sharing')">
           {{ (agent.shares && agent.shares.length) || 0 }} shares
         </button>
-        <span data-testid="overview-sync" :title="syncTitle" class="px-2.5 py-1 rounded-md bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-300 tabular-nums">
+        <span data-testid="overview-sync" :title="syncTitle" class="px-2.5 py-1 rounded-md text-gray-600 dark:text-gray-300 tabular-nums" :class="syncPill || 'bg-gray-100 dark:bg-gray-700'">
           Sync: <span data-testid="overview-sync-value" :class="syncClass">{{ syncText }}</span>
         </span>
       </div>

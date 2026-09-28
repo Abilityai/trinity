@@ -32,6 +32,16 @@ const TEXT_CLASS = {
   green: 'text-status-success-800 dark:text-status-success-300',
 }
 
+// The whole Overview pill takes the state's tint on red / yellow; green and
+// unknown return '' and keep the neutral chrome of their sibling footprint pills.
+const PILL_CLASS = {
+  red: 'bg-status-danger-50 dark:bg-status-danger-900/30 ring-1 ring-inset ring-status-danger-200 dark:ring-status-danger-800',
+  yellow: 'bg-status-warning-50 dark:bg-status-warning-900/30 ring-1 ring-inset ring-status-warning-200 dark:ring-status-warning-800',
+}
+export function syncPillClass(entry) {
+  return PILL_CLASS[classifySyncHealth(entry)] || ''
+}
+
 function count(value) {
   return Number.isInteger(value) && value >= 0 ? value : null
 }
@@ -82,6 +92,7 @@ export function syncChip(entry, now) {
   return {
     kind: CHIP_KIND[classifySyncHealth(entry)],
     icon: '⟳',
+    iconClass: 'chip-icon-x2',
     text,
     title: lines.join('\n'),
   }
