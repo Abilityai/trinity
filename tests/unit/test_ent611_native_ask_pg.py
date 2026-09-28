@@ -48,15 +48,20 @@ def held_insert(monkeypatch):
     enough: the threads serialize on opening pool connections, so a missing
     PostgreSQL lock passed 3 of 3 unforced runs.)"""
     import time
-    import db.operator_queue as dbq
+    from db.operator_queue import OperatorQueueOperations
 
-    real = dbq.make_insert
+    # Patch the dict the running method reads, not the module name: a sibling
+    # test may leave a stand-in in sys.modules["db.operator_queue"] that
+    # re-exports the real class, and a patch on the stand-in never fires
+    # (the module-identity gotcha; test_1632's `_patch_engine`).
+    g = OperatorQueueOperations.create_native_item.__globals__
+    real = g["make_insert"]
 
     def held(table):
         time.sleep(0.15)
         return real(table)
 
-    monkeypatch.setattr(dbq, "make_insert", held)
+    monkeypatch.setitem(g, "make_insert", held)
 
 
 def _create(ops, request_id, *, cap, agent=AGENT):
@@ -133,12 +138,15 @@ def test_a_file_row_that_wins_the_race_turns_the_native_insert_into_a_replay(db_
     transaction itself: the competing row lands after the replay check found
     nothing, as the insert is built — the same interleaving on both backends
     (Andrii's review on #3028)."""
-    import db.operator_queue as dbq
-    from db.operator_queue import OperatorQueueOperations
-    from db.tables import operator_queue
-
     ops = _ops()
-    real_lock, real_insert = OperatorQueueOperations._lock_agent_for_create, dbq.make_insert
+    cls = type(ops)
+    # Patch the dict the running method reads, not the module name: a sibling
+    # test may leave a stand-in in sys.modules["db.operator_queue"] that
+    # re-exports the real class, and a patch on the stand-in never fires
+    # (the module-identity gotcha; test_1632's `_patch_engine`).
+    g = cls.create_native_item.__globals__
+    operator_queue = g["operator_queue"]
+    real_lock, real_insert = cls._lock_agent_for_create, g["make_insert"]
     held = {}
 
     def lock_and_hold(conn, agent_name):
@@ -155,8 +163,8 @@ def test_a_file_row_that_wins_the_race_turns_the_native_insert_into_a_replay(db_
             conn.execute(real_insert(operator_queue).values(**values))
         return real_insert(table)
 
-    monkeypatch.setattr(OperatorQueueOperations, "_lock_agent_for_create", staticmethod(lock_and_hold))
-    monkeypatch.setattr(dbq, "make_insert", lose_then_insert)
+    monkeypatch.setattr(cls, "_lock_agent_for_create", staticmethod(lock_and_hold))
+    monkeypatch.setitem(g, "make_insert", lose_then_insert)
     out = _create(ops, "raced", cap=25)
     assert out["outcome"] == "replayed"
     assert out["row"]["channel"] == "file"   # the row that won, untouched

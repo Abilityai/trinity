@@ -119,9 +119,13 @@ class TestNativeCreate:
         the threads serialize on connection setup and a missing lock passes.
         test_ent611_native_ask_pg.py pins the same on real PostgreSQL."""
         import time
-        import db.operator_queue as dbq
-        real_insert = dbq.make_insert
-        monkeypatch.setattr(dbq, "make_insert", lambda table: (time.sleep(0.15), real_insert(table))[1])
+        # Patch the dict the running method reads, not the module name: a sibling
+        # test may leave a stand-in in sys.modules["db.operator_queue"] that
+        # re-exports the real class, and a patch on the stand-in never fires
+        # (the module-identity gotcha; test_1632's `_patch_engine`).
+        g = type(real_db._operator_queue_ops).create_native_item.__globals__
+        real_insert = g["make_insert"]
+        monkeypatch.setitem(g, "make_insert", lambda table: (time.sleep(0.15), real_insert(table))[1])
         agent = "agent-611b-race"
         for n in range(4):
             _create(real_db, agent, f"seed-{n}", max_pending=5)
@@ -145,13 +149,16 @@ class TestNativeCreate:
         unique-index error (the agent would get a 500). Staged on the native
         transaction itself: the competing row lands after the replay check found
         nothing, as the insert is built. The same interleaving on either backend."""
-        import db.operator_queue as dbq
-        from db.operator_queue import OperatorQueueOperations
-        from db.tables import operator_queue
-
         agent = "agent-611b-lost-race"
         ops = real_db._operator_queue_ops
-        real_lock, real_insert = OperatorQueueOperations._lock_agent_for_create, dbq.make_insert
+        cls = type(ops)
+        # Patch the dict the running method reads, not the module name: a sibling
+        # test may leave a stand-in in sys.modules["db.operator_queue"] that
+        # re-exports the real class, and a patch on the stand-in never fires
+        # (the module-identity gotcha; test_1632's `_patch_engine`).
+        g = cls.create_native_item.__globals__
+        operator_queue = g["operator_queue"]
+        real_lock, real_insert = cls._lock_agent_for_create, g["make_insert"]
         held = {}
 
         def lock_and_hold(conn, agent_name):
@@ -168,8 +175,8 @@ class TestNativeCreate:
                 conn.execute(real_insert(operator_queue).values(**values))
             return real_insert(table)
 
-        monkeypatch.setattr(OperatorQueueOperations, "_lock_agent_for_create", staticmethod(lock_and_hold))
-        monkeypatch.setattr(dbq, "make_insert", lose_then_insert)
+        monkeypatch.setattr(cls, "_lock_agent_for_create", staticmethod(lock_and_hold))
+        monkeypatch.setitem(g, "make_insert", lose_then_insert)
         out = _create(real_db, agent, "lost-1")
         assert out["outcome"] == "replayed"
         assert (out["row"]["channel"], out["row"]["proposal"]) == ("file", None)  # the row that won
