@@ -1,4 +1,4 @@
-# mcp: skills.ts (list_skills, get_skill, get_skills_library_status, assign_skill_to_agent, set_agent_skills, sync_agent_skills, get_agent_skills); skill-manager grant routes: none — admin grant, human-only (grant-vs-use, ent#596)
+# mcp: skills.ts (list_skills, get_skill, get_skills_library_status, list_skill_sets, assign_skill_to_agent, set_agent_skills, sync_agent_skills, get_agent_skills, unassign_skill_set); skill-manager grant routes: none — admin grant, human-only (grant-vs-use, ent#596)
 """
 Skills Router - API endpoints for skills management.
 

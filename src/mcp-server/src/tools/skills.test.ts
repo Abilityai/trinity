@@ -177,6 +177,17 @@ describe("skill sets (ent#530)", () => {
     assert.deepEqual(out.sets, ["dev-backlog"]);
   });
 
+  it("list_skill_sets GETs the library sets route", async () => {
+    const calls: Recorded[] = [];
+    const tools = makeRoutedTools(calls, {
+      "/api/skills/library/sets": [{ name: "dev-backlog", source_id: "default", status: "ok", members: [] }],
+    });
+    const out = JSON.parse(await tools.listSkillSets.execute({}, {}));
+    assert.equal(calls[0].method, "GET");
+    assert.equal(calls[0].path, "/api/skills/library/sets");
+    assert.equal(out[0].name, "dev-backlog");
+  });
+
   it("unassign_skill_set DELETEs the set route, with or without the prefix", async () => {
     for (const name of ["dev-backlog", "set:dev-backlog"]) {
       const calls: Recorded[] = [];

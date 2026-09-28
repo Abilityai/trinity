@@ -4,6 +4,7 @@
  * MCP tools for managing Trinity agent skills:
  * - list_skills: List available skills from the library
  * - get_skill: Get skill details and content
+ * - list_skill_sets: List the skill sets the library declares (ent#530)
  * - assign_skill_to_agent: Assign a skill (or `set:<name>`) to an agent
  * - unassign_skill_set: Remove a skill set from an agent (ent#530)
  * - sync_agent_skills: Inject assigned skills to a running agent
@@ -228,6 +229,24 @@ export function createSkillsTools(
         );
 
         return JSON.stringify(status, null, 2);
+      },
+    },
+
+    // ========================================================================
+    // list_skill_sets - The skill SETS the library declares (ent#530)
+    // ========================================================================
+    listSkillSets: {
+      name: "list_skill_sets",
+      description:
+        "List the skill sets the library's sources declare: each set's name, source, status " +
+        "(`ok` | `partial` | `invalid` — only `ok` can be assigned), members with their versions, " +
+        "problem codes, prerequisites and suggested schedules. Assign one with " +
+        "assign_skill_to_agent using `set:<name>`; get_agent_skills lists the sets an agent holds.",
+      parameters: z.object({}),
+      execute: async (_params: unknown, context?: { session?: McpAuthContext }) => {
+        const apiClient = getClient(context?.session);
+        const sets = await apiClient.request<unknown[]>("GET", "/api/skills/library/sets");
+        return JSON.stringify(sets, null, 2);
       },
     },
 

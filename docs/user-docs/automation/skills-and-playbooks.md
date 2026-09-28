@@ -206,6 +206,7 @@ MCP tools for skills and playbooks:
 | `list_skills()` | List library skills. Each entry carries its `source` name and any `shadowed_by` sources. |
 | `get_skill(name)` | Skill details and contract |
 | `get_skills_library_status()` | Library sync status, including the per-source array |
+| `list_skill_sets()` | The skill sets the library declares: status (`ok` / `partial` / `invalid`; only `ok` can be assigned), members and their versions, problems and prerequisites |
 | `assign_skill_to_agent(skill_name, agent_name)` | Assign one skill — or a set, as `set:<name>` — and deliver it. The response's `delivery` block reports `injected`, `pending_start`, `in_progress`, or `not_delivered` with a `reason` |
 | `set_agent_skills(agent_name, skill_names)` | Set the full skill list. `set:<name>` entries add sets; the agent's other sets are left alone. Remove a set with `unassign_skill_set`. Added names are delivered, dropped names are removed; `delivery` and `removal` report each half |
 | `sync_agent_skills(agent_name)` | Force re-inject into a running agent — the manual retry after a `not_delivered` |
