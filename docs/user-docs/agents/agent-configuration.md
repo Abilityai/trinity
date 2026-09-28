@@ -14,7 +14,7 @@ The Agent Detail page has a **Settings** tab (visible to owners only) -- a secti
 - **Parallel Capacity** — below
 - **Expose via MCP** — publish the agent as a dedicated MCP tool; see [MCP Server](../integrations/mcp-server.md#dedicated-agent-tools-expose-via-mcp)
 - **Trinity access key** — the agent-scoped key the agent uses to call Trinity's own MCP tools, with health status and a **Regenerate** action (the running container is replaced to pick the new key up)
-- **Reliability** — the dispatch circuit breaker (below) and **Wake this agent when an operator answers** (below)
+- **Reliability** — the dispatch circuit breaker (below) and **Wake this agent when an ask it raised ends** (below)
 - **Voice** — let the agent reply with spoken voice notes on messaging channels; see [Voice Replies](../advanced/voice-replies.md)
 - **Cross-model validation** — appears only on entitled installations
 
@@ -90,13 +90,15 @@ When a breaker is open, the agent header and the agent's Dashboard tile show a "
 | `/api/agents/{name}/circuit-breaker` | PUT | Enable or disable the per-agent breaker (`{"enabled": true}`, owner-only) |
 | `/api/agents/{name}/circuit-breaker/reset` | POST | Force both breakers closed without waiting for cooldown (admin-only) |
 
-### Wake on Operator Answer
+### Wake When an Ask Ends
 
-An answer to one of the agent's parked requests (an approval, a question) always reaches the agent, but by default it is only read on the agent's *next* turn. An agent with no schedule has no next turn, so an approved action would wait indefinitely. Turn on **Wake this agent when an operator answers** in **Settings → Reliability** and answering starts one turn so the agent acts on it right away. Off by default.
+How one of the agent's parked requests (an approval, a question) ended always reaches the agent, but by default it is only read on the agent's *next* turn. An agent with no schedule has no next turn, so an approved action would wait indefinitely. Turn on **Wake this agent when an ask it raised ends** in **Settings → Reliability** and the agent is woken for one turn when a person answers (trigger `operator_response`) — and also when an ask is cancelled or expires, so it stops waiting for an answer that will not come (trigger `operator_ending`, one turn per agent per cancellation sweep or expiry). Off by default.
+
+- Each wake-up is one turn the owner pays for: one per answer, one per cancellation or expiry event. A stopped agent is not woken.
 
 - Only the owner or an admin can change it, and never with an agent's key: an agent's own key is refused with `403` even though it acts for the owner. Each wake is a turn the owner pays for, so an agent cannot switch on its own wake-ups. An agent can still read the setting.
 - API: `GET /api/agents/{name}/operator-resume` and `PUT /api/agents/{name}/operator-resume` (`{"enabled": true}`)
-- See [Approvals](../automation/approvals.md) for the operator side.
+- See [Approvals](../automation/approvals.md) for the operator side, and for how an agent reads an ending back (`get_my_ask`).
 
 ### Per-Agent API Key
 

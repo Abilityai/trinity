@@ -86,6 +86,8 @@ services:
       # Mirrors docker-compose.yml — without this line the .env knob is inert in
       # prod (the #1039 packaging-gap class).
       - SLACK_SOCKET_CONNECTION_COUNT=${SLACK_SOCKET_CONNECTION_COUNT:-2}
+      - TELEGRAM_GROUP_CONTEXT_MAX_MESSAGES=${TELEGRAM_GROUP_CONTEXT_MAX_MESSAGES:-}  # ent#600
+      - TELEGRAM_GROUP_CONTEXT_MAX_AGE_HOURS=${TELEGRAM_GROUP_CONTEXT_MAX_AGE_HOURS:-}  # ent#600
       - CREDENTIAL_ENCRYPTION_KEY=${CREDENTIAL_ENCRYPTION_KEY:-}
       - CREDENTIAL_ENCRYPTION_KEY_SECONDARY=${CREDENTIAL_ENCRYPTION_KEY_SECONDARY:-}  # #267 rotation fallback
       # Agent auth master (#1159) - backend derives each agent's in-container
@@ -162,6 +164,7 @@ services:
       - METRICS_RATE_LIMIT=${METRICS_RATE_LIMIT:-60}             # record_metrics calls per agent per 60s
       - METRICS_RETENTION_DAYS=${METRICS_RETENTION_DAYS:-365}    # recorded point retention (0 = forever)
       - METRICS_DAILY_POINT_CAP=${METRICS_DAILY_POINT_CAP:-100000}  # points per agent per UTC day (0 = unlimited)
+      - INTER_AGENT_MAX_CHAIN_DEPTH=${INTER_AGENT_MAX_CHAIN_DEPTH:-8}  # max agent-to-agent hops per call chain (#2806)
       - METRICS_READ_RATE_LIMIT=${METRICS_READ_RATE_LIMIT:-240}   # GET /metrics reads per agent per 60s (tiles, dashboard binds, get_metrics)
       - OBJECTIVES_READ_RATE_LIMIT=${OBJECTIVES_READ_RATE_LIMIT:-60}  # GET /objectives reads per agent per 60s (fans out into the agent container)
       # Agent canvases (ent#438/ent#553) — per-agent ceiling on the canvas pile.

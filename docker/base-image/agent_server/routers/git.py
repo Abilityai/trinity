@@ -1155,6 +1155,43 @@ def _is_stale_lease_rejection(stderr: str) -> bool:
     return "stale info" in s or "stale" in s and "rejected" in s
 
 
+def _ahead_behind_vs(home_dir: Path, ref: str) -> Optional[tuple]:
+    """``(ahead, behind)`` of HEAD vs ``origin/<ref>``, or ``None`` when that
+    can't be computed: the ref doesn't exist or git failed (#2105).
+
+    Unlike :func:`_compute_ahead_behind`, which returns a best-effort ``(0, 0)``
+    for the conflict classifier, this never turns "unknown" into a
+    believable 0.
+    """
+    try:
+        result = run_registered(
+            ["git", "rev-list", "--left-right", "--count", f"origin/{ref}...HEAD"],
+            cwd=str(home_dir), timeout=10,
+        )
+        if result.returncode == 0:
+            parts = result.stdout.strip().split()
+            if len(parts) == 2:
+                return int(parts[1]), int(parts[0])
+    except Exception:  # best-effort diagnostic only
+        pass
+    return None
+
+
+def _count_on_no_remote(home_dir: Path) -> Optional[int]:
+    """Commits reachable from HEAD that no remote-tracking ref contains:
+    the unpushed count for a branch that has no upstream yet (#2105)."""
+    try:
+        result = run_registered(
+            ["git", "rev-list", "--count", "HEAD", "--not", "--remotes"],
+            cwd=str(home_dir), timeout=10,
+        )
+        if result.returncode == 0:
+            return int(result.stdout.strip())
+    except Exception:  # best-effort diagnostic only
+        pass
+    return None
+
+
 def _dual_ahead_behind_payload(current_branch: str, home_dir: Path) -> dict:
     """Return ahead/behind tuples for both `origin/main` and the working branch.
 
@@ -1166,18 +1203,31 @@ def _dual_ahead_behind_payload(current_branch: str, home_dir: Path) -> dict:
     - `ahead_working`/`behind_working` — against `origin/<current_branch>`
       (peer divergence / P5-style silent clobber)
 
+    #2105: the working tuple is measured against `origin/<current_branch>`
+    whatever the branch is called. It used to do that only for `trinity/*`
+    and hand every other branch the `origin/main` counts under the working
+    label, which the fleet audit read as unpushed commits. When the branch has
+    no upstream (never pushed, or a detached HEAD), `ahead_working` counts the
+    commits no remote holds and `behind_working` is `None`. A count that can't
+    be computed is `None`, never 0. For example, the main tuple on a repo that
+    has no `main` is `None`.
+
     Legacy aliases `ahead` and `behind` track the main tuple to preserve
     backward compatibility with clients written against the old response.
     """
-    # Uses upstream's `_compute_ahead_behind(home_dir, branch) -> (ahead, behind)`
-    # defined near the top of this module.
-    main_ahead, main_behind = _compute_ahead_behind(home_dir, "main")
-    # Non-trinity branches use the same ref twice; avoid a second subprocess
-    # for the common case.
-    if current_branch.startswith("trinity/") and current_branch != "main":
-        working_ahead, working_behind = _compute_ahead_behind(home_dir, current_branch)
+    main = _ahead_behind_vs(home_dir, "main")
+    main_ahead, main_behind = main if main is not None else (None, None)
+
+    if current_branch == "main":
+        working = main
+    elif current_branch in ("HEAD", "unknown", ""):
+        working = None  # detached: `origin/HEAD` is the default branch, not ours
     else:
-        working_ahead, working_behind = main_ahead, main_behind
+        working = _ahead_behind_vs(home_dir, current_branch)
+    if working is not None:
+        working_ahead, working_behind = working
+    else:
+        working_ahead, working_behind = _count_on_no_remote(home_dir), None
 
     return {
         "ahead": main_ahead,  # legacy alias
@@ -1201,7 +1251,7 @@ _STATUS_HOME_DIR = Path("/home/developer")
 _STATUS_FOLLOWER_WAIT_SECONDS = 35
 
 # #2742 — COMPUTATION bound, deliberately a different number and a different
-# kind of thing. The child timeouts sum to ~130 s nominal (see
+# kind of thing. The child timeouts sum to ~130-150 s nominal (see
 # `_compute_git_status`'s docstring for the arithmetic) before `run_registered`'s
 # post-killpg drain, and on this design a slow leader costs no follower threads
 # but DOES hold the in-flight slot — so every caller in that window 504s. Cap it
@@ -1263,8 +1313,9 @@ def _compute_git_status(home_dir: Path) -> Dict:
     caller-side bounds.** Sequential worst case:
     `rev-parse` 10 + `status` 10 + `log` 10 + `fetch` **30** + `merge-base` 10 +
     `log`(ancestor) 10 + `remote get-url` 10 = 90, plus `_persist_last_remote_sha`
-    10, `_get_pull_branch` 10 and `_dual_ahead_behind_payload` 10 (20 on a
-    `trinity/*` branch) = **~130 s nominal**, before `run_registered`'s
+    10, `_get_pull_branch` 10 and `_dual_ahead_behind_payload` 10 (20 on any
+    branch other than `main`, 30 when that branch has no upstream, #2105)
+    = **~130-150 s nominal**, before `run_registered`'s
     post-`killpg` drain of up to 10 s per timing-out child. The flow doc's old
     "~30 s worst case" was wrong and is corrected there.
     """
@@ -1418,7 +1469,10 @@ def _compute_git_status(home_dir: Path) -> Dict:
             "behind": behind,
             "common_ancestor_sha": common_ancestor_sha,
             "common_ancestor_age_days": common_ancestor_age_days,
-            "sync_status": "up_to_date" if ahead == 0 and len(changes) == 0 else "pending_sync",
+            # #2105: `ahead` aliases the main tuple, which is now None (not a
+            # best-effort 0) on a repo with no `main`. Treat unknown as 0 so a
+            # clean `master` repo keeps reading "Synced", as it did before.
+            "sync_status": "up_to_date" if (ahead or 0) == 0 and len(changes) == 0 else "pending_sync",
         }
         # #389: dual ahead/behind tuples plus legacy ahead/behind aliases.
         response.update(ahead_behind)

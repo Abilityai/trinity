@@ -30,7 +30,12 @@ logger = logging.getLogger(__name__)
 
 
 def session_key_for_telegram_group(bot_id: str, sender_id: str, chat_id: str) -> str:
-    """Session key for a Telegram group message, via the adapter itself."""
+    """Session key for a Telegram group message, via the adapter itself.
+
+    Since ent#600 group sessions are keyed per chat, so ``sender_id`` no longer
+    shapes the key (kept for the signature) and a broadcast lands in the very
+    session a participant's reply reads — the recall #1649 deferred.
+    """
     from adapters.base import NormalizedMessage
     from adapters.telegram_adapter import TelegramAdapter
 
@@ -43,6 +48,19 @@ def session_key_for_telegram_group(bot_id: str, sender_id: str, chat_id: str) ->
             metadata={"bot_id": bot_id, "is_group": True},
         )
     )
+
+
+def purge_telegram_group_history(agent_name: str, bot_id: str, chat_id: str) -> int:
+    """Delete everything recorded for one Telegram group (ent#600).
+
+    Called when the owner turns the group's context off: "off" means nothing
+    about the group is kept, so what was recorded before the switch goes too —
+    and turning it back on starts from an empty history rather than replaying
+    whatever was still inside the window. Covers the chat's session and every
+    forum-topic session under it. Returns the number of sessions deleted.
+    """
+    base = session_key_for_telegram_group(bot_id=bot_id, sender_id="", chat_id=chat_id)
+    return db.clear_public_chat_sessions_by_identifier(agent_name, "telegram", base)
 
 
 def session_key_for_slack_channel(team_id: str, channel_id: str, thread_ts: str) -> str:

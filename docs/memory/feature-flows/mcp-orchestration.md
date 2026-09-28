@@ -386,6 +386,8 @@ console.log(`Registered ${totalTools} tools`);
 | `fan_out` | 390-590 | `{agent_name, tasks[], timeout_seconds?, max_concurrency?, model?, system_prompt?, allowed_tools?}` | `POST /api/agents/{name}/fan-out` |
 | `get_fan_out_result` | `tools/executions.ts` | `{agent_name, fan_out_id}` | `GET /api/agents/{name}/fan-out/{fan_out_id}` (#2670) |
 
+> **Chain-depth refusal (#2806)**: when the backend refuses an agent-to-agent hop with 403 `inter_agent_depth_exceeded`, `client.chat` / `task` / `fanOut` return a typed `DepthRefusal` (`parseDepthRefusal`) instead of throwing, and `chat_with_agent` (sequential, parallel, pull-routed) and `fan_out` return `{status: "inter_agent_depth_exceeded", agent, depth, max_depth, retryable: false, message}`. Any other 403 still throws `API error (403)`. Test: `src/mcp-server/src/chat-depth.test.ts`.
+
 > **Per-agent timeout fallback (#418, 2026-04-20)**: For `chat_with_agent` (when `parallel=true`) and `fan_out`, `timeout_seconds` is fully optional with **no default**. When omitted, the backend falls back to the target agent's configured `execution_timeout_seconds` (TIMEOUT-001; default 900s, max 7200s). Previously, the Zod schema defaulted to `600`, which silently capped inter-agent invocations below the per-agent setting.
 
 ### System Tools (`src/mcp-server/src/tools/systems.ts`)
