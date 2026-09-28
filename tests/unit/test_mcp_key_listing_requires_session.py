@@ -146,6 +146,11 @@ def _admin_principal(**fields):
 
 
 OVERRIDE_KINDS = {
+    # The real connector key is refused earlier, at the entry point; this one
+    # reaches the route, so the route's own rule is what refuses it.
+    "connector-principal": lambda: _admin_principal(
+        mcp_scope="connector", connector_agent=AGENT
+    ),
     "ops-key": lambda: _admin_principal(mcp_scope="ops"),
     "portal-delegate-key": lambda: _admin_principal(
         mcp_scope="portal_delegate", portal_delegate=True
@@ -194,9 +199,9 @@ class TestSessionListingUnchanged:
 # to the file fails here until it is listed with the rule it follows and a test
 # that pins that rule.
 MCP_KEY_ROUTES = {
-    ("POST", "/api/mcp/keys"): "create — its session rule has its own tests",
+    ("POST", "/api/mcp/keys"): "create — not changed here",
     ("GET", "/api/mcp/keys"): "interactive — this file",
-    ("POST", "/api/mcp/keys/ensure-default"): "create — its session rule has its own tests",
+    ("POST", "/api/mcp/keys/ensure-default"): "create — not changed here",
     ("GET", "/api/mcp/keys/{key_id}"): "owner-scoped read — this file",
     ("POST", "/api/mcp/keys/{key_id}/revoke"): "agent + connector refused — test_1854_agent_mcp_key.py",
     ("DELETE", "/api/mcp/keys/{key_id}"): "agent + connector refused — test_1854_agent_mcp_key.py",
