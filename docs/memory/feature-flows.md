@@ -170,7 +170,7 @@
 | Admin Login | [admin-login.md](feature-flows/admin-login.md) | Password-based admin auth |
 | First-Time Setup | [first-time-setup.md](feature-flows/first-time-setup.md) | Admin password wizard |
 | First-Run Overlay | [onboarding-wizard.md](feature-flows/onboarding-wizard.md) | The blocking post-login setup sequence — step registry, derived completion, re-run (ent#581; formerly the ent#52 wizard) |
-| MCP API Keys | [mcp-api-keys.md](feature-flows/mcp-api-keys.md) | API key management — creating a key (`POST /keys`, `ensure-default`) requires a signed-in session; every creation is audited as `key_create` |
+| MCP API Keys | [mcp-api-keys.md](feature-flows/mcp-api-keys.md) | API key management — creating (`POST /keys`, `ensure-default`) and listing keys require a signed-in session; every creation is audited as `key_create` |
 | Execution Origin Tracking | [AUDIT-001-execution-origin-tracking.md](feature-flows/AUDIT-001-execution-origin-tracking.md) | Track who triggered executions |
 | Agent-Server Authentication | [agent-server-authentication.md](feature-flows/agent-server-authentication.md) | Per-agent inbound auth for the in-container agent server (`:8000`) — derived `X-Trinity-Agent-Token` (HMAC over `AGENT_AUTH_SECRET`) enforced by a pure-ASGI middleware on every HTTP/WS route (#1159) |
 | 4-Tier Role Model | [role-model.md](feature-flows/role-model.md) | user < operator < creator < admin role hierarchy (ROLE-001) |
