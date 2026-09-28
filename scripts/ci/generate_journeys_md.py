@@ -135,6 +135,12 @@ def green_harnesses(junit_dir: str) -> set[str]:
     return {f for f, ok in seen.items() if ok and f in passed}
 
 
+def _issue_ref(issue) -> str:
+    """`#N` for a public-tracker number; a string is a fully-qualified
+    `owner/repo#N` (private tracker) and is rendered as written."""
+    return issue if isinstance(issue, str) else f"#{issue}"
+
+
 def render(catalog: dict, junit_dir: str | None) -> str:
     rows = []
     built = green = 0
@@ -156,7 +162,7 @@ def render(catalog: dict, junit_dir: str | None) -> str:
         # ent#478's write). A scalar `f"#{...}"` renders the list literal
         # `#[477, 478]` into a generated, committed file.
         _issues = j["issue"] if isinstance(j["issue"], list) else [j["issue"]]
-        issue_cell = ", ".join(f"#{n}" for n in _issues)
+        issue_cell = ", ".join(_issue_ref(n) for n in _issues)
         harness = f"`{j['harness']}`" if j["harness"] else "—"
         rows.append(
             f"| **{j['id']}** | {j['promise']} | {j['actor']} | "

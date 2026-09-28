@@ -899,6 +899,7 @@ async def _apply_agent_kind_default(
     github_repo: str,
     github_pat: Optional[str],
     fork_upstream: Optional[str],
+    github_pat_tier: Optional[str] = None,
 ) -> dict:
     """trinity-enterprise#705: decide the git mode for a `github:` create.
 
@@ -916,6 +917,13 @@ async def _apply_agent_kind_default(
     - `kind` "deployment" — a deployment of a codebase
     - an ephemeral ghost — its workspace is throwaway (ent#69)
     - no token — nothing can push anonymously (ent#123)
+    - only the platform-wide token (tier ``global``) — being ABLE to push is
+      not owning the repo. The global PAT is the admin's credential for the
+      whole install; on an install where it can write a shared template repo,
+      granting on the probe alone would push every creator's agent to a branch
+      on that repo (the ent#162 class). Only the creator's own token
+      (``per_user``) or the agent's (``per_agent``) is evidence the repo is
+      theirs to write, so only those are probed.
     - the push probe refused, or could not be completed
 
     Mutates `config.source_mode` only in the one granting case.
@@ -932,6 +940,12 @@ async def _apply_agent_kind_default(
         return {**decision, "reason": "ephemeral agents never auto-push (ent#69)"}
     if not github_pat:
         return {**decision, "reason": "no GitHub token: pull-only"}
+    if github_pat_tier not in ("per_agent", "per_user"):
+        return {**decision, "reason": (
+            "only the platform-wide GitHub token is available, which does not "
+            "show the repository is yours: pull-only. Add your own GitHub token "
+            "in Settings to give agents a working branch"
+        )}
     outcome, detail = await git_service.probe_push_access(github_repo, github_pat)
     if outcome == "ok":
         config.source_mode = False
@@ -1521,7 +1535,7 @@ async def _resolve_template(config: AgentConfig, current_user: User) -> _Templat
             # BEFORE validation and branch reservation, which both read it.
             tr.git_mode_decision = await _apply_agent_kind_default(
                 config, tr.github_repo_for_agent, tr.github_pat_for_agent,
-                tr.fork_upstream_repo,
+                tr.fork_upstream_repo, github_pat_tier=tr.github_pat_tier,
             )
             logger.info(
                 f"[ent#705] git mode for {config.name}: "

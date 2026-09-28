@@ -213,6 +213,8 @@ CREATE TABLE schedule_executions (
     turn_integrity TEXT,                         -- #2467: JSON turn-integrity flags (background_tasks_killed records +
                                                  -- background_tasks_pending_at_exit), derived backend-side at terminal write;
                                                  -- NULL = no evidence, never "verified healthy"
+    chain_depth INTEGER,                         -- #2806: agent-to-agent hops from a non-agent root; NULL = root (0).
+                                                 -- Stamped 1 + MAX(caller's running depths) on agent-principal children
     FOREIGN KEY (schedule_id) REFERENCES agent_schedules(id)
 );
 
@@ -745,6 +747,19 @@ CREATE TABLE operator_queue (
     delivery_updated_at TEXT,           -- #2915
     divergence_acknowledged_at TEXT,    -- #2915 (PR #2989 review): the human answered a changed/closed item knowingly; the write-back delivers into the entry as it is now
     addressed_to_email TEXT,            -- ent#364: the human this ask is for; NULL = operator ask. Validated at ingestion against the agent's roster, never trusted from the payload
+    -- trinity-enterprise#611 (SQLite `operator_queue_ask_object` / Alembic `0076_operator_queue_ask_object`; nullable, no backfill):
+    disposition TEXT,                   -- answered|cancelled|expired — written in the SAME CAS UPDATE that flips `status`; NULL = ended before the ledger
+    disposed_at TEXT,
+    disposed_by TEXT,                   -- person|timeout (an enum of two: only a person or the clock ends an ask)
+    disposed_by_email TEXT,             -- NULL for timeout; withheld from machine keys on get/list
+    disposition_reason TEXT,            -- the operator's optional cancel reason (≤ 500); never in an audit row, never to a Workspace client
+    batch_id TEXT,                      -- one uuid per bulk-cancel sweep; its re-select is the sweep's CAS winners
+    raised_by TEXT,                     -- agent|gate (PR B); NULL for a legacy row or a platform alarm
+    channel TEXT,                       -- file|mcp; keyword-only on create, never read from the agent's entry
+    to_role TEXT,                       -- PR B: the role an agent-raised ask is addressed to
+    resolved_to TEXT,                   -- PR B: JSON list of person refs; withheld from machine keys
+    proposal TEXT,                      -- PR B: JSON, the frozen action
+    supersedes_expired TEXT,            -- PR B: the agent's own expired predecessor (row uuid)
     FOREIGN KEY (responded_by_id) REFERENCES users(id)
 );
 CREATE INDEX idx_operator_queue_agent ON operator_queue(agent_name);

@@ -378,7 +378,10 @@ const clearConfirmMessage = computed(() => {
   }
   const n = clearableCount.value
   if (activeTab.value === 'needs-response') {
-    return `This cancels ${n} pending ${n === 1 ? 'item' : 'items'} shown here. The agents waiting on them will be told their requests were cancelled and will not receive an answer. This affects all operators of these agents.`
+    // trinity-enterprise#611: only what the platform actually delivers — the
+    // file flip reaches an agent's queue file while it runs (and when it next
+    // starts), and only agents set to wake on their asks' endings get a turn.
+    return `This cancels ${n} pending ${n === 1 ? 'item' : 'items'} shown here. Each agent's queue file is marked cancelled — it reads that on its next turn — and running agents set to wake when their asks end are woken now, one turn per agent, billed to you. This affects all operators of these agents.`
   }
   if (activeTab.value === 'notifications') {
     return 'This dismisses every non-dismissed notification from your accessible agents — including any not shown by the current filters — for all operators of these agents.'

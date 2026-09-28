@@ -270,3 +270,76 @@ export function respondRefusedAsDiverged(err) {
 
 export const QUEUE_RESPONSE_DIVERGED =
   'The agent changed this item after you opened it. Review it and send again to answer anyway.'
+
+/**
+ * trinity-enterprise#611 — how an item ENDED, as ONE rule every surface renders
+ * (ResolvedCard, the `/m` "Recently ended" strip, PortalAsks). `null` while the
+ * item is still pending.
+ *
+ * `{ kind, label, who, when }`:
+ *   - `kind` — `answered | cancelled | expired`: the ledger's `disposition`,
+ *     else the terminal status (a row that ended before the ledger). The
+ *     Workspace projection's own `status` (`answered`) reads the same way.
+ *   - `who` — the person, for the Operating Room (`disposed_by_email`, or a
+ *     legacy answer's `responded_by_email`); the Workspace projection's coarse
+ *     `ended_by` (`you` / `the operator`); `timeout` for an expiry; `null` when
+ *     the platform does not know.
+ *   - `when` — the ledger's `disposed_at`, the projection's `ended_at`, or a
+ *     legacy answer's `responded_at`. NEVER `created_at`: that is when the ask
+ *     was filed, and showing it as the ending time is the defect this replaces.
+ */
+export const ENDING_LABELS = Object.freeze({
+  answered: 'Answered',
+  cancelled: 'Cancelled',
+  expired: 'Expired',
+})
+
+function endingKind(item) {
+  const d = item.disposition
+  if (d === 'answered' || d === 'cancelled' || d === 'expired') return d
+  const s = item.status
+  if (s === 'responded' || s === 'acknowledged' || s === 'answered') return 'answered'
+  if (s === 'cancelled' || s === 'expired') return s
+  return null
+}
+
+export function queueEnding(item) {
+  if (!item || typeof item !== 'object') return null
+  const kind = endingKind(item)
+  if (!kind) return null
+  const when = item.disposed_at || item.ended_at || (kind === 'answered' ? item.responded_at : null) || null
+  let who = null
+  if (kind === 'expired') {
+    who = 'timeout'
+  } else if (item.ended_by === 'you') {
+    who = 'you'
+  } else if (item.ended_by === 'operator') {
+    who = 'the operator'
+  } else {
+    who = item.disposed_by_email || (kind === 'answered' ? item.responded_by_email : null) || null
+  }
+  return { kind, label: ENDING_LABELS[kind], who, when }
+}
+
+/** The ending in words: "Cancelled by op@…", "Answered by you",
+ *  "Expired — nobody answered in time", or the bare label when nobody is known. */
+export function queueEndingText(ending) {
+  if (!ending) return ''
+  if (ending.kind === 'expired') return `${ending.label} — nobody answered in time`
+  return ending.who ? `${ending.label} by ${ending.who}` : ending.label
+}
+
+/** What the resolved feed sorts by (#627 AC6): when the item ended; a legacy
+ *  answer's time; else — the only timestamp such a row has — when it was filed. */
+export function queueEndingSortTime(item) {
+  return (item && (item.disposed_at || item.responded_at || item.created_at)) || ''
+}
+
+/** Up to `max` items that ENDED, most recent ending first — the `/m` strip. */
+export function recentlyEnded(items, max = 5) {
+  if (!Array.isArray(items)) return []
+  return items
+    .filter((i) => queueEnding(i))
+    .sort((a, b) => String(queueEndingSortTime(b)).localeCompare(String(queueEndingSortTime(a))))
+    .slice(0, max)
+}

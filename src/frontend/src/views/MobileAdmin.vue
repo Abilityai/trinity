@@ -341,6 +341,32 @@
                 </div>
               </div>
             </div>
+
+            <!-- trinity-enterprise#611: how the latest asks ENDED — who and when,
+                 from the endings ledger (utils/operatorQueue.js::queueEnding).
+                 Shown whatever the pending list's state, including empty. -->
+            <div v-if="recentlyEndedItems.length" class="ops-ended" data-testid="queue-recently-ended">
+              <h2 class="section-title">Recently ended</h2>
+              <div class="ops-list">
+                <div
+                  v-for="item in recentlyEndedItems"
+                  :key="item.id"
+                  class="ops-card"
+                  data-testid="queue-ended-card"
+                  :data-item-id="item.id"
+                >
+                  <div class="ops-card-header">
+                    <span class="ops-agent-name" :title="agentNameTooltip(agentsStore.agentRefForSlug(item.agent_name))">{{ item.agent_name }}</span>
+                    <span
+                      class="ops-sync"
+                      :title="queueEnding(item).when ? formatLocalDateTime(queueEnding(item).when) : undefined"
+                    >{{ queueEnding(item).label }}</span>
+                  </div>
+                  <div class="ops-card-type">{{ queueEndingText(queueEnding(item)) }}</div>
+                  <p class="ops-card-message">{{ item.title }}</p>
+                </div>
+              </div>
+            </div>
           </div>
 
           <!-- Notifications -->
@@ -611,6 +637,9 @@ import {
   optionsOf, queueResponseKind, buildQueueResponse, queueTypeLabel,
   QUEUE_RESPONSE_NOT_RECORDED, respondRefusedAsNotPending, queueSyncBadge,
   QUEUE_RESPONSE_DIVERGED, respondRefusedAsDiverged } from '../utils/operatorQueue'
+// trinity-enterprise#611: a second line so the #2370 import pin above stays byte-exact.
+import { queueEnding, queueEndingText, recentlyEnded } from '../utils/operatorQueue'
+import { formatLocalDateTime } from '../utils/timestamps'
 import LoadFailed from '../components/LoadFailed.vue'
 import InlineError from '../components/InlineError.vue'
 
@@ -654,6 +683,11 @@ const chatInputEl = ref(null)
 
 // Ops
 const queueItems = ref([])
+// trinity-enterprise#611: the asks that ended most recently. The same fetch
+// already returned them; the view used to drop them, so an ask cancelled or
+// expired elsewhere just vanished from the phone.
+const RECENTLY_ENDED_MAX = 5
+const recentlyEndedItems = ref([])
 const notifications = ref([])
 const responseTexts = reactive({})
 const respondingItems = reactive({})
@@ -826,7 +860,9 @@ async function fetchQueue() {
     if (seq !== queueFetchSeq) return // a newer fetch owns the list now
     // The endpoint returns {items, count}; `(res.data || []).filter` on that
     // object threw on every poll, so this tab always read "No pending items".
-    queueItems.value = listFrom(res.data, 'items').filter(i => i.status === 'pending')
+    const all = listFrom(res.data, 'items')
+    queueItems.value = all.filter(i => i.status === 'pending')
+    recentlyEndedItems.value = recentlyEnded(all, RECENTLY_ENDED_MAX)
     pruneQueueItemState(queueItems.value)
     hasLoaded.queue = true
     lastLoadedAt.queue = Date.now()
@@ -1900,6 +1936,11 @@ watch(() => authStore.isAuthenticated, (isAuth) => {
   font-weight: 600;
   font-size: 14px;
   color: white;
+}
+
+/* trinity-enterprise#611: layout only — the strip's cards reuse .ops-card. */
+.ops-ended {
+  margin-top: 20px;
 }
 
 .ops-sync {

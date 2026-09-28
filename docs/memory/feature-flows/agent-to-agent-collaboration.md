@@ -3,7 +3,7 @@
 **Status**: Implemented
 **Date**: 2025-11-29
 **Priority**: High
-**Last Updated**: 2026-06-21 (Pull-pilot routing #946 added)
+**Last Updated**: 2026-09-22 (Chain-depth guard #2806 added)
 
 ---
 
@@ -296,6 +296,27 @@ This mirrors the existing `/chat` (chat.py:242) and `CapacityFull` (chat.py:1577
 
 - `docs/planning/ACTOR_MODEL_POSTCARD.md`, `docs/planning/TARGET_ARCHITECTURE.md` — pull-coordination direction (Epic #1045 / #1081)
 - `mcp-orchestration.md`, `task-execution-service.md`, `idempotency-keys.md`, `dispatch-circuit-breaker.md`
+
+---
+
+## Chain-Depth Guard (#2806)
+
+Stops a call bouncing A→B→A→B… forever. Every agent-to-agent path goes through one helper, `dispatch_admission_service.enforce_inter_agent_depth()`:
+
+| Path | Call site | Runs before |
+|------|-----------|-------------|
+| `/chat` (sequential, every `chat_with_<slug>`) | first line of `admit_chat_request()` | idempotency `begin`, breaker read, `capacity.acquire` |
+| `/task` (parallel, self-task, #946 pull-routed) | `dispatch_parallel_task()` right after `derive_source_and_trigger()` | `begin_task_idempotency`, uploads, row insert, capacity |
+| `/fan-out` | `routers/fan_out.fan_out()` after the target check | `idempotency_service.begin`, `FanOutService.execute` |
+
+1. **Caller** = `current_user.agent_name`, or `trinity-system` for a `scope=system` key. Any other principal is a root → returns `None`, no DB read, child row `chain_depth` NULL. The `X-Source-Agent` header and the typed `parent_execution_id` are never consulted.
+2. **Limit** = `settings_service.get_ops_setting("inter_agent_max_chain_depth", int)` (row → env `INTER_AGENT_MAX_CHAIN_DEPTH` → default 8), clamped to 1–32; a read error falls back to 8.
+3. **Depth** = `1 + db.get_max_running_chain_depth(caller)` — `MAX(chain_depth)` over the caller's `status='running'` rows (`db/schedules/executions.py`).
+4. **Admitted** → depth is stamped on the child row: `ChatAdmission.chain_depth` → `prepare_chat_execution(chain_depth=)`; `create_task_execution_and_activities(chain_depth=)`; `FanOutService.execute(chain_depth=)` → every subtask insert.
+5. **Refused** (`depth > max`) → an `inter_agent_depth_exceeded` audit row and a FAILED `agent_collaboration` activity on the caller (both best-effort), then `InterAgentDepthExceeded` → router → **403** `{"detail": {"error": "inter_agent_depth_exceeded", depth, max_depth, caller, target, message}}` + `X-Trinity-Error-Code`. No execution row, no idempotency claim, no slot.
+6. **MCP** → `client.ts::parseDepthRefusal` turns that 403 into a `DepthRefusal` result; `runAgentChat` returns `{status: "inter_agent_depth_exceeded", retryable: false, ...}` to the calling model.
+
+Access (`get_authorized_agent`, uniform 404) resolves before the helper, so a depth 403 never discloses whether a target exists. Residuals and deferrals (non-agent keys held by agents, calls with no running row, loops/schedules/events): `requirements/core-agent.md` §9.1.1. Tests: `tests/unit/test_2806_inter_agent_depth.py`, `src/mcp-server/src/chat-depth.test.ts`, J10 `test_two_agents_cannot_bounce_a_call_between_each_other_forever`.
 
 ---
 

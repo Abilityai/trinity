@@ -12,11 +12,9 @@ import logging
 from typing import List, Optional
 
 from database import db
-from services.operator_queue_choices import (
-    ResponseNotOfferedError,
-    validate_response_choice,
-)
-from utils.helpers import utc_now_iso
+from services import ask_service
+from services.operator_queue_choices import ResponseNotOfferedError
+from utils.helpers import iso_cutoff, utc_now_iso
 
 from .models import WorkspaceAsk
 
@@ -55,26 +53,55 @@ def _is_expired(item: dict) -> bool:
 # which has no vocabulary for the distinction and no surface that uses it.
 _ANSWERED_STATUSES = frozenset({"responded", "acknowledged"})
 
+# trinity-enterprise#611: how long an ask that ended stays listed, so the person
+# it was addressed to sees how it ended instead of watching it vanish (#606).
+ENDED_WINDOW_DAYS = 7
+
 
 def _status_of(item: dict) -> str:
-    """`pending` | `expired` | `answered` (ent#430 review).
+    """`pending` | `answered` | `cancelled` | `expired`.
 
-    The listing only ever carries pending and expired rows, so `answered` is
-    reachable from ONE place: the response to an answer that was just recorded.
-    That response used to read `status: "pending"` beside
-    `resume_requested: true` — a row simultaneously reporting that nobody has
-    answered it and that answering it started work. Harmless while the second
-    field did not exist; actively contradictory once it did.
+    The ending first (trinity-enterprise#611): `disposition` when the row carries
+    the ledger, else its terminal `status` (a row that ended before the ledger).
+    The clock is consulted only for a row still `pending` — one past its deadline
+    that the poller has not swept yet reads as expired, which is what it is.
 
     Answered is checked BEFORE expiry: an answer that landed is a fact, and an
-    `expires_at` that has since passed does not un-answer it.
+    `expires_at` that has since passed does not un-answer it (ent#430 review).
     """
-    if (item.get("status") or "") in _ANSWERED_STATUSES:
+    disposition = item.get("disposition")
+    status = item.get("status") or ""
+    if disposition == "answered" or status in _ANSWERED_STATUSES:
         return "answered"
+    if disposition == "cancelled" or status == "cancelled":
+        return "cancelled"
+    if disposition == "expired" or status == "expired":
+        return "expired"
     return "expired" if _is_expired(item) else "pending"
 
 
-def _project(item: dict, *, resume_requested: Optional[bool] = None) -> WorkspaceAsk:
+def _ending_of(item: dict, viewer_email: Optional[str]) -> tuple:
+    """`(ended_at, ended_by)` for a client — COARSE on purpose.
+
+    `ended_by` is `you` (the viewer answered), `operator` (another person
+    answered or cancelled) or `timeout`; never an email and never the cancel
+    reason (both are the operator's, not the client's). `ended_at` is the
+    ledger's time, or a legacy answer's time — never `created_at`, which is when
+    the ask was filed, not when it ended.
+    """
+    status = _status_of(item)
+    if status in ("pending",) or (status == "expired" and item.get("status") == "pending"):
+        return None, None
+    if status == "expired":
+        return item.get("disposed_at"), "timeout"
+    by = item.get("disposed_by_email") or (item.get("responded_by_email") if status == "answered" else None)
+    who = "you" if by and viewer_email and by.lower() == viewer_email.lower() else "operator"
+    at = item.get("disposed_at") or (item.get("responded_at") if status == "answered" else None)
+    return at, who
+
+
+def _project(item: dict, *, viewer_email: Optional[str] = None,
+             resume_requested: Optional[bool] = None) -> WorkspaceAsk:
     """The explicit client-facing projection (see `WorkspaceAsk`).
 
     `chat_id` comes from platform-written context only — enforced since ent#429,
@@ -86,6 +113,7 @@ def _project(item: dict, *, resume_requested: Optional[bool] = None) -> Workspac
     context = item.get("context") if isinstance(item.get("context"), dict) else {}
     chat_id = context.get("workspace_session_id")
     from services.operator_queue_service import is_aged
+    ended_at, ended_by = _ending_of(item, viewer_email)
     return WorkspaceAsk(
         id=item["id"],
         agent_name=item["agent_name"],
@@ -97,6 +125,8 @@ def _project(item: dict, *, resume_requested: Optional[bool] = None) -> Workspac
         created_at=item.get("created_at") or "",
         expires_at=item.get("expires_at"),
         status=_status_of(item),
+        ended_at=ended_at,
+        ended_by=ended_by,
         chat_id=chat_id if isinstance(chat_id, str) else None,
         resume_requested=resume_requested,
         sync=_coarse_sync(item),
@@ -108,7 +138,13 @@ def _coarse_sync(item: dict) -> str:
     """The client-facing sync state (#2915): `confirmed | changed | closed |
     unconfirmed`. `missing` and `stale_id` collapse to `unconfirmed` and the
     reason never crosses — `agent_not_running` / `file_missing` describe the
-    operator's infrastructure, not the ask."""
+    operator's infrastructure, not the ask.
+
+    A row outside the file contract (raised over MCP, trinity-enterprise#611)
+    has no agent file to be out of sync with: `confirmed`, never the NULL
+    sync state's `unconfirmed`."""
+    if item.get("channel") not in (None, "file"):
+        return "confirmed"
     state = item.get("sync_state")
     if state == "confirmed":
         return "confirmed"
@@ -135,8 +171,11 @@ def _on_roster(agent_name: str, email: str, is_platform: bool) -> bool:
         return False
 
 
-def list_asks(email: str, is_platform: bool, agent_name: Optional[str] = None) -> List[WorkspaceAsk]:
-    """Open asks addressed to `email`, newest first. Never raises."""
+def list_asks(email: str, is_platform: bool, agent_name: Optional[str] = None,
+              include_ended: bool = False) -> List[WorkspaceAsk]:
+    """Asks addressed to `email`: open ones first, then — with `include_ended` —
+    the ones that ended in the last `ENDED_WINDOW_DAYS`, most recent ending
+    first (trinity-enterprise#611). Never raises."""
     try:
         # The addressee is a SQL condition (ent#428), NOT something filtered out
         # of the result here. `list_items` orders by status, then priority, then
@@ -146,7 +185,12 @@ def list_asks(email: str, is_platform: bool, agent_name: Optional[str] = None) -
         # out of their sidebar as soon as the fleet got busy while still sitting
         # pending in the queue. Nobody else may answer it, so nobody would.
         items = db.list_operator_queue_items(
-            status="pending",
+            status=None if include_ended else "pending",
+            hide_ended_before=iso_cutoff(hours=ENDED_WINDOW_DAYS * 24) if include_ended else None,
+            # Clear All is the OPERATOR's list hygiene (#1017): it must not make
+            # an ended ask vanish from the person it was addressed to inside the
+            # window — the agent's own readback ignores it for the same reason.
+            include_cleared=include_ended,
             agent_name=agent_name,
             addressed_to_email=email,
             limit=200,
@@ -180,7 +224,7 @@ def list_asks(email: str, is_platform: bool, agent_name: Optional[str] = None) -
             continue
         if not _allowed(item.get("agent_name") or ""):
             continue
-        out.append(_project(item))
+        out.append(_project(item, viewer_email=email))
     return out
 
 
@@ -233,104 +277,55 @@ def answer_ask(item_id: str, email: str, is_platform: bool,
                        "The agent changed this ask after you opened it. Review it and answer again.",
                        {"sync": _coarse_sync(item)})
 
-    # The OSS respond path, unchanged: it writes the answer back to the agent's
-    # queue file (the 5s sync loop), stamps the audit fields and broadcasts. A
-    # workspace-specific write would fork all three.
+    # The ask sink (trinity-enterprise#611) — the one writer of an answer, shared
+    # with the operator route: the #2376 check that the answer is one the agent
+    # offered, the compare-and-set with its endings ledger, the audit row, the
+    # thin broadcast, and the ent#329 resume (ent#430 — ONE dispatch surface).
+    # A workspace-specific write would fork all of them.
     #
     # `responded_by_id=None` is deliberate: it is a `users` FK and a workspace
     # client has no row there. Writing one would be a lie in the audit trail, so
     # the responder KIND is recorded instead — "answered by a client" must stay
     # distinguishable from "answered by an operator whose account was deleted".
-    # #2376: same rule as the operator route, from the one shared validator —
-    # a copy per entry point is how the two drift, and this path answers the
-    # same rows.
+    #
+    # A plain `def` on a worker thread, and the sink is synchronous for exactly
+    # this caller: its audit and broadcast hop to the loop, never awaited here.
     try:
-        validate_response_choice(item, response)
+        ending = ask_service.answer(
+            item,
+            response=response,
+            response_text=response_text,
+            actor=ask_service.Actor(email=email),
+            responded_by_id=None,
+            divergence_acknowledged=bool(
+                acknowledge_divergence and item.get("sync_state") in ("changed", "closed_by_filer")
+            ),
+        )
     except ResponseNotOfferedError as e:
         raise AskError(422, e.code, str(e), {"offered_options": e.options})
-
-    updated = db.respond_to_operator_queue_item(
-        item_id=item_id,
-        response=response,
-        response_text=response_text,
-        responded_by_id=None,
-        responded_by_email=email,
-        divergence_acknowledged=bool(
-            acknowledge_divergence and item.get("sync_state") in ("changed", "closed_by_filer")
-        ),
-    )
-    # A lost race has TWO shapes and only one of them is falsy. `respond_to_
-    # operator_queue_item` returns None when the row does not exist, but when the
-    # row exists and has already left `pending` — the race that actually happens
-    # — it returns a TRUTHY dict carrying `_status_conflict`, having written
-    # nothing. Checking `if not updated` alone therefore falls through on the
-    # real race, and this path then spends money dispatching a resume for an
-    # answer that is not in the database, under an idempotency key derived from
-    # the LOSING text — so the two answers hash differently and one queue item
-    # produces two paid executions.
-    #
-    # `routers/operator_queue.py` pops the same flag before its own spawn; this
-    # is that rule, not a new one. Popped rather than read so the sentinel never
-    # reaches `_project` and becomes a client-visible field.
-    if not updated or updated.pop("_status_conflict", False):
+    except ask_service.AskNotFound:
         raise AskError(409, "already_resolved", "This ask was just answered elsewhere.")
+    except ask_service.AskConflict as conflict:
+        # A lost race writes nothing and dispatches nothing — the sink only
+        # reaches its observers on a compare-and-set it WON. Still pending means
+        # the deadline refused it before the poller swept the row.
+        if conflict.code == "expired":
+            raise AskError(409, "expired", "This ask expired before it was answered.")
+        raise AskError(409, "already_resolved", "This ask was just answered elsewhere.")
+    updated = ending.rows[0]
 
     logger.info(
         "[WorkspaceAsks] %s answered by %s (client=%s)",
         item_id, email, not is_platform,
     )
 
-    # ent#430 — the gate. Until this, an answer given here was recorded, reached
-    # the agent's queue file in about three seconds, and re-triggered nothing:
-    # the operator route dispatched, the client route returned. So ent#428/#429
-    # hosted a surface for answers nobody acted on, which is exactly what that
-    # issue says the flag defaulting OFF was standing in for.
-    #
-    # Hung off the CAS WIN only, like the operator route: the 409 above already
-    # returned for a lost race, so reaching here means THIS answer is the one
-    # that landed. Two people answering at once produce one resume.
-    #
-    # Nothing about the mechanism is re-decided here — the per-agent opt-in, the
-    # idempotency key, the audit row and the failure handling all live inside
-    # `maybe_dispatch_resume`. ent#430's body is explicit that a second dispatch
-    # surface "is how the cost, trigger-label and loop-prevention questions get
-    # answered twice, differently", so this path only reaches the first one.
-    #
-    # `updated`, never `item`: the pre-answer read still says `pending`, and a
-    # resume handed that row acts on an ask that does not yet carry its answer.
-    #
-    # Belt-and-braces on the raise: the spawn is fire-and-forget, but a failure
-    # ON THIS LINE would still propagate, and a 500 here would tell the client
-    # their answer failed when it is committed and already on its way to the
-    # agent. The answer is the thing that must not be lost.
-    # `updated` first, `item` as the fallback: both name the same agent, and the
-    # CAS result is the row this answer actually landed on.
-    agent = (updated.get("agent_name") or item.get("agent_name") or "")
-
-    dispatched = False
-    if _resume_requested(agent):
-        try:
-            from services import operator_resume_service
-
-            operator_resume_service.spawn_resume_dispatch(
-                updated,
-                response=response,
-                response_text=response_text,
-                responded_by_email=email,
-            )
-            dispatched = True
-        except Exception:  # noqa: BLE001 — never lose a committed answer
-            logger.exception(
-                "[WorkspaceAsks] resume dispatch could not be started for %s", item_id
-            )
-
-    # AC #5: report what was actually SCHEDULED, not what the flag permits.
-    # This previously read the opt-in a second time after the swallowed spawn, so
-    # a spawn that raised still answered `resume_requested: true` — the exact
-    # over-claim ("an ask that reads as acted upon while nothing happened") the
-    # docstring below says it fails closed against. `dispatched` is set only on
-    # the line after the spawn returns, so the failure path reports false.
-    return _project(updated, resume_requested=dispatched)
+    # ent#430 AC #5: report what was actually SCHEDULED, not what the flag
+    # permits. The resume is the sink's default observer; `observers_ok` is False
+    # when one of them raised, so a spawn that failed reports false. Reading the
+    # opt-in here is a report of intent — see `_resume_requested`.
+    agent = updated.get("agent_name") or item.get("agent_name") or ""
+    dispatched = bool(ending.observers_ok and _resume_requested(agent))
+    return _project(updated, viewer_email=email, resume_requested=dispatched)
 
 
 def _resume_requested(agent_name: str) -> bool:
