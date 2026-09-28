@@ -710,7 +710,7 @@ def test_a_message_that_merely_says_finished_has_no_outcome(inbox_db, roster, so
 
 # --- the route ---------------------------------------------------------------
 
-def _chat_state_client(email=ALICE):
+def _chat_state_client(email=ALICE, is_platform=False):
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
 
@@ -720,7 +720,7 @@ def _chat_state_client(email=ALICE):
     app = FastAPI()
     app.include_router(pr.router)
     app.dependency_overrides[get_portal_principal] = (
-        lambda: PortalPrincipal(email=email, is_platform=False))
+        lambda: PortalPrincipal(email=email, is_platform=is_platform))
     return TestClient(app, raise_server_exceptions=False)
 
 
@@ -749,6 +749,36 @@ def test_with_previews_the_route_attaches_the_latest_arrival_and_no_cost(inbox_d
     assert e["latest"] == {"kind": "message", "id": mid, "at": "2026-09-10T10:00:00Z",
                            "excerpt": "Here you go"}
     assert "cost" not in set(_walk_keys(r.json()))
+
+
+@pytest.mark.parametrize("is_platform", [True, False])
+def test_the_route_reads_the_roster_with_the_callers_principal_kind(inbox_db, monkeypatch, is_platform):
+    """The door: a platform user's previews cover the agents they own, a portal
+    token's only its shared roster. The route must forward the principal kind,
+    never a constant (a hard-coded kind widens or narrows the preview set)."""
+    from client_portal import service as portal_service
+    seen = []
+    monkeypatch.setattr(portal_service, "roster_agent_names",
+                        lambda email, include_owned: seen.append(include_owned) or {AGENT})
+    r = _chat_state_client(is_platform=is_platform).get(
+        "/api/enterprise/client-portal/chat-state?previews=true")
+    assert r.status_code == 200, r.text
+    assert seen == [is_platform]
+
+
+def test_an_unreadable_roster_fails_the_previews_read_loudly(inbox_db, monkeypatch):
+    """Fail loud (the D7 twin): a roster outage is a 5xx the shell reports as a
+    stale read, never a 200 whose threads silently lost their previews."""
+    from client_portal import service as portal_service
+    _session(inbox_db, "s-a", ALICE)
+    _read(ALICE, "s-a", "2026-09-10T09:00:00Z")
+    _msg(inbox_db, session_id="s-a", email=ALICE, at="2026-09-10T10:00:00Z")
+
+    def boom(email, include_owned):
+        raise RuntimeError("roster store down")
+    monkeypatch.setattr(portal_service, "roster_agent_names", boom)
+    r = _chat_state_client().get("/api/enterprise/client-portal/chat-state?previews=true")
+    assert r.status_code >= 500
 
 
 # --- the property: n == the count, latest is the max, first is the min message -
