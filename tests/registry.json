@@ -3569,7 +3569,7 @@
         "events",
         "regression"
       ],
-      "description": "ent#713 GET /api/events access scoping: the real list_all_events handler with real models.User principals over users, agent_ownership and agent_sharing rows written by the real db writers. Non-admin sees exactly owned + shared agents' events; admin is unrestricted; a targeted source_agent that is inaccessible, nonexistent, or shared-but-soft-deleted returns one uniform 403 'Access denied'; an empty source_agent keeps the roster; a principal with no email sees nothing. DB half runs the production list_events query: agent_names IN filter with LIMIT applied after it, empty list returns [] with no engine call, None unrestricted. Per-test uuid names + event_type and far-future created_at keep it order-independent in the shared per-process DB."
+      "description": "ent#713 GET /api/events access scoping: the real list_all_events handler with real models.User principals over users, agent_ownership and agent_sharing rows written by the real db writers. Non-admin sees exactly owned + shared agents' events; admin is unrestricted; a targeted source_agent that is inaccessible, nonexistent, or shared-but-soft-deleted returns one uniform 403 'Access denied'; an empty source_agent keeps the roster; a principal with no email sees nothing; the mounted route (real router, only get_current_user overridden) returns the same scoped list and a 403 {\"detail\": \"Access denied\"} over HTTP to a non-admin. DB half runs the production list_events query: agent_names IN filter with LIMIT applied after it, empty list returns [] with no engine call, None unrestricted. Per-test uuid names + event_type and far-future created_at keep it order-independent in the shared per-process DB."
     }
   ]
 }

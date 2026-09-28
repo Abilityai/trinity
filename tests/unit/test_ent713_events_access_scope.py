@@ -27,7 +27,8 @@ import uuid
 from pathlib import Path
 
 import pytest
-from fastapi import HTTPException
+from fastapi import FastAPI, HTTPException
+from fastapi.testclient import TestClient
 
 _BACKEND = str(Path(__file__).resolve().parents[2] / "src" / "backend")
 if _BACKEND not in sys.path:
@@ -259,3 +260,26 @@ async def test_ent713_principal_without_email_sees_nothing(blank):
     result = await _list(caller, event_type)
     assert result.events == []
     assert result.count == 0
+
+
+def test_ent713_mounted_route_scopes_a_non_admin_caller(fleet):
+    # The same boundary through the real HTTP route: the mounted router binds
+    # the query params, runs the handler behind ``get_current_user`` and
+    # serialises ``AgentEventList``. Only the principal resolution is replaced.
+    app = FastAPI()
+    app.include_router(events_router.router)
+    app.dependency_overrides[dependencies.get_current_user] = lambda: fleet["alice"]
+    client = TestClient(app)
+
+    listed = client.get("/api/events", params={"event_type": fleet["event_type"], "limit": 500})
+    assert listed.status_code == 200, listed.text
+    body = listed.json()
+    assert {e["source_agent"] for e in body["events"]} == {fleet["mine"], fleet["shared"]}
+    assert body["count"] == 4
+
+    denied = client.get(
+        "/api/events",
+        params={"event_type": fleet["event_type"], "source_agent": fleet["unshared"]},
+    )
+    assert denied.status_code == 403
+    assert denied.json() == {"detail": "Access denied"}
