@@ -1,95 +1,118 @@
 <template>
-  <section v-if="page && (page.classes.length || page.other_seats.length)" data-testid="portal-agent-autonomy">
+  <section data-testid="portal-agent-autonomy">
     <div class="flex items-center justify-between gap-2 mb-2">
-      <h2 class="text-[11px] font-semibold uppercase tracking-wide text-gray-400">What it may do unprompted</h2>
-      <BaseBadge :variant="page.ceiling_allows_unprompted ? 'success' : 'neutral'" dot
+      <h2 class="text-[11px] font-semibold uppercase tracking-wide text-gray-500 dark:text-gray-400">What it may do unprompted</h2>
+      <BaseBadge v-if="page" :variant="page.ceiling_allows_unprompted ? 'success' : 'neutral'" dot
                  data-testid="portal-autonomy-level">{{ page.level }}</BaseBadge>
     </div>
 
-    <!-- The two instance-wide facts, said once, so a class does not have to
-         repeat them per row. -->
-    <p class="text-[12.5px] text-gray-400 mb-2" data-testid="portal-autonomy-ceiling">
-      {{ page.level_label }}
-      <template v-if="!page.ceiling_allows_unprompted">
-        · nothing runs unprompted below L2
-      </template>
+    <!-- Loading = no data yet for THIS agent (never "fetch in flight"): the
+         skeleton reserves the ready footprint so nothing shifts on arrival. -->
+    <div v-if="view.state === 'loading'" class="space-y-2" aria-busy="true" data-testid="portal-autonomy-loading">
+      <span class="sr-only">Loading what this agent may do unprompted…</span>
+      <div class="h-4 w-1/2 rounded bg-gray-200 dark:bg-gray-800 animate-pulse motion-reduce:animate-none"></div>
+      <div class="h-12 rounded bg-gray-200 dark:bg-gray-800 animate-pulse motion-reduce:animate-none"></div>
+    </div>
+
+    <InlineError v-else-if="view.state === 'failed'" data-testid="portal-autonomy-failed"
+                 :message="store.autonomyError" retryable @retry="load" />
+
+    <p v-else-if="view.state === 'empty'" class="text-[12.5px] text-gray-500 dark:text-gray-400"
+       data-testid="portal-autonomy-empty">
+      Nothing yet. Record decisions for a kind of ask and it appears here, with what it would take to run
+      without asking you first.
     </p>
-    <InlineError
-      v-if="!page.agent_autonomy_enabled"
-      class="mb-2"
-      data-testid="portal-autonomy-hard-off"
-      message="This agent's autonomy switch is off — the hard off. Nothing runs unprompted while it is, whatever a class has earned."
-    />
 
-    <ul class="space-y-1.5">
-      <li v-for="c in page.classes" :key="c.ask_class"
-          class="rounded-lg border border-gray-200 dark:border-gray-800 px-3 py-2 text-[12.5px]"
-          :data-testid="'portal-autonomy-class-' + c.state">
-        <div class="flex items-center gap-2 flex-wrap">
-          <span class="font-mono text-[11.5px]">{{ c.ask_class }}</span>
-          <BaseBadge :variant="c.unprompted ? 'success' : 'neutral'" dot>
-            {{ c.unprompted ? 'unprompted' : 'on-request' }}
-          </BaseBadge>
-          <BaseBadge v-if="c.held" variant="warning" dot>held</BaseBadge>
-          <BaseBadge v-if="c.guard_metric === 'capped'" variant="warning">guard-capped</BaseBadge>
-          <span v-if="!c.unprompted && c.earned_state === 'graduated'" class="text-[11px] text-gray-400">
-            earned — blocked by the dial
-          </span>
-        </div>
+    <template v-else>
+      <!-- A refresh that failed keeps the data on screen and says so. -->
+      <InlineError v-if="view.stale" class="mb-2" data-testid="portal-autonomy-stale"
+                   :message="store.autonomyError" retryable @retry="load" />
 
-        <!-- Every reason, not the first: a person fixing one wants the rest. -->
-        <ul v-if="c.blocked_by.length" class="mt-1 space-y-0.5" :data-testid="'portal-autonomy-blockers-' + c.ask_class">
-          <li v-for="b in c.blocked_by" :key="b" class="text-gray-500 dark:text-gray-400">— {{ blockerText(b) }}</li>
-        </ul>
-        <p v-else class="mt-1 text-gray-400">
-          {{ c.evidence.count }} decisions on one criterion, no reversals, no thumbs-down in
-          {{ page.rating_window_days }} days.
-        </p>
+      <!-- The two instance-wide facts, said once, so a class does not have to
+           repeat them per row. -->
+      <p class="text-[12.5px] text-gray-500 dark:text-gray-400 mb-2" data-testid="portal-autonomy-ceiling">
+        {{ page.level_label }}
+        <template v-if="!page.ceiling_allows_unprompted">
+          · nothing runs unprompted below L2
+        </template>
+      </p>
+      <InlineError
+        v-if="!page.agent_autonomy_enabled"
+        class="mb-2"
+        data-testid="portal-autonomy-hard-off"
+        message="This agent's autonomy switch is off — the hard off. Nothing runs unprompted while it is, whatever a class has earned."
+      />
 
-        <p v-if="c.evidence.criteria && c.evidence.criteria.length === 1" class="mt-0.5 text-gray-400">
-          <span class="text-gray-400">Criterion ·</span> {{ c.evidence.criteria[0] }}
-        </p>
-        <p v-if="c.evidence_expires_at" class="text-[11px] text-gray-400">
-          Evidence holds until {{ c.evidence_expires_at }}
-        </p>
+      <ul class="space-y-1.5">
+        <li v-for="c in page.classes" :key="c.ask_class"
+            class="rounded-lg border border-gray-200 dark:border-gray-800 px-3 py-2 text-[12.5px]"
+            :data-testid="'portal-autonomy-class-' + c.state">
+          <div class="flex items-center gap-2 flex-wrap">
+            <span class="font-mono text-[11.5px]">{{ c.ask_class }}</span>
+            <BaseBadge :variant="c.unprompted ? 'success' : 'neutral'" dot>
+              {{ c.unprompted ? 'unprompted' : 'on-request' }}
+            </BaseBadge>
+            <BaseBadge v-if="c.held" variant="warning" dot>held</BaseBadge>
+            <BaseBadge v-if="c.guard_metric === 'capped'" variant="warning">guard-capped</BaseBadge>
+            <span v-if="!c.unprompted && c.earned_state === 'graduated'" class="text-[11px] text-gray-500 dark:text-gray-400">
+              earned — blocked by the dial
+            </span>
+          </div>
 
-        <InlineError v-if="actionError && actionError.askClass === c.ask_class" class="mt-1"
-                     :message="actionError.message" @dismiss="store.autonomyActionError = null" />
+          <!-- Every reason, not the first: a person fixing one wants the rest. -->
+          <ul v-if="c.blocked_by.length" class="mt-1 space-y-0.5" :data-testid="'portal-autonomy-blockers-' + c.ask_class">
+            <li v-for="b in c.blocked_by" :key="b" class="text-gray-500 dark:text-gray-400">— {{ blockerText(b) }}</li>
+          </ul>
+          <p v-else class="mt-1 text-gray-500 dark:text-gray-400">
+            {{ c.evidence.count }} decisions on one criterion, no reversals, no thumbs-down in
+            {{ page.rating_window_days }} days.
+          </p>
 
-        <div v-if="c.writable" class="mt-1.5 flex flex-wrap gap-1.5">
-          <BaseButton v-if="!c.held" size="sm" variant="ghost"
-                      :data-testid="'portal-autonomy-hold-' + c.ask_class"
-                      :loading="store.autonomyBusy === c.ask_class"
-                      @click="act(c, 'hold')">Hold on-request</BaseButton>
-          <BaseButton v-else-if="page.can_release" size="sm" variant="secondary"
-                      :data-testid="'portal-autonomy-release-' + c.ask_class"
-                      :loading="store.autonomyBusy === c.ask_class"
-                      @click="act(c, 'release')">Release</BaseButton>
-          <span v-else class="text-[11px] text-gray-400" data-testid="portal-autonomy-release-owner-only">
-            only the agent's owner can release a hold
-          </span>
-        </div>
-      </li>
-    </ul>
+          <p v-if="c.evidence.criteria && c.evidence.criteria.length === 1" class="mt-0.5 text-gray-500 dark:text-gray-400">
+            <span class="text-gray-500 dark:text-gray-400">Criterion ·</span> {{ c.evidence.criteria[0] }}
+          </p>
+          <p v-if="c.evidence_expires_at" class="text-[11px] text-gray-500 dark:text-gray-400">
+            Evidence holds until {{ c.evidence_expires_at }}
+          </p>
 
-    <!-- Other seats: the owner's view. Never rendered for anyone else. -->
-    <details v-if="page.other_seats.length" class="mt-2">
-      <summary class="cursor-pointer text-[11.5px] text-gray-400" data-testid="portal-autonomy-other-seats">
-        Other seats · {{ page.other_seats.length }}
-      </summary>
-      <ul class="mt-1 space-y-1">
-        <li v-for="c in page.other_seats" :key="c.seat + c.ask_class" class="text-[11.5px] text-gray-400 px-3">
-          <span class="font-mono">{{ c.ask_class }}</span> · {{ c.seat }} ·
-          {{ c.unprompted ? 'unprompted' : 'on-request' }}
+          <InlineError v-if="actionError && actionError.askClass === c.ask_class" class="mt-1"
+                       :message="actionError.message" @dismiss="store.autonomyActionError = null" />
+
+          <div v-if="c.writable" class="mt-1.5 flex flex-wrap gap-1.5">
+            <BaseButton v-if="!c.held" size="sm" variant="ghost"
+                        :data-testid="'portal-autonomy-hold-' + c.ask_class"
+                        :loading="store.autonomyBusy === c.ask_class"
+                        @click="act(c, 'hold')">Hold on-request</BaseButton>
+            <BaseButton v-else-if="page.can_release" size="sm" variant="secondary"
+                        :data-testid="'portal-autonomy-release-' + c.ask_class"
+                        :loading="store.autonomyBusy === c.ask_class"
+                        @click="act(c, 'release')">Release</BaseButton>
+            <span v-else class="text-[11px] text-gray-500 dark:text-gray-400" data-testid="portal-autonomy-release-owner-only">
+              only the agent's owner can release a hold
+            </span>
+          </div>
         </li>
       </ul>
-    </details>
 
-    <p class="mt-2 text-[11px] text-gray-400" data-testid="portal-autonomy-note">
-      A class graduates when its decisions apply one criterion repeatedly with no reversals and you have not
-      rated the agent down — never because the ask is frequent. There is no promote button: you can hold a
-      class, not grant it.
-    </p>
+      <!-- Other seats: the owner's view. Never rendered for anyone else. -->
+      <details v-if="page.other_seats.length" class="mt-2">
+        <summary class="cursor-pointer text-[11.5px] text-gray-500 dark:text-gray-400" data-testid="portal-autonomy-other-seats">
+          Other seats · {{ page.other_seats.length }}
+        </summary>
+        <ul class="mt-1 space-y-1">
+          <li v-for="c in page.other_seats" :key="c.seat + c.ask_class" class="text-[11.5px] text-gray-500 dark:text-gray-400 px-3">
+            <span class="font-mono">{{ c.ask_class }}</span> · {{ c.seat }} ·
+            {{ c.unprompted ? 'unprompted' : 'on-request' }}
+          </li>
+        </ul>
+      </details>
+
+      <p class="mt-2 text-[11px] text-gray-500 dark:text-gray-400" data-testid="portal-autonomy-note">
+        A class graduates when its decisions apply one criterion repeatedly with no reversals and you have not
+        rated the agent down — never because the ask is frequent. There is no promote button: you can hold a
+        class, not grant it.
+      </p>
+    </template>
   </section>
 </template>
 
@@ -105,6 +128,7 @@
  */
 import { computed, watch, onMounted } from 'vue'
 import { useClientPortalStore } from '@/stores/clientPortal'
+import { viewState } from '@/utils/loadingState'
 import InlineError from '@/components/InlineError.vue'
 import BaseBadge from '@/components/base/BaseBadge.vue'
 import BaseButton from '@/components/base/BaseButton.vue'
@@ -117,6 +141,11 @@ const store = useClientPortalStore()
 const mine = computed(() => store.autonomyAgent === props.agentName)
 const page = computed(() => (mine.value ? store.autonomy : null))
 const actionError = computed(() => (mine.value ? store.autonomyActionError : null))
+const view = computed(() => viewState({
+  hasLoaded: mine.value && store.autonomyLoaded,
+  error: mine.value ? store.autonomyError : null,
+  count: page.value ? page.value.classes.length + page.value.other_seats.length : 0,
+}))
 
 /** The server sends the sentence for every blocker code (`blocker_text`, from
  *  the same `BLOCKER_TEXT` the companion's prompt reads), so the panel and the

@@ -217,9 +217,46 @@ describe('PortalAgentAutonomy (mounted)', () => {
     expect(w.get('[data-testid="portal-autonomy-other-seats"]').text()).toContain('Other seats · 1')
   })
 
-  it('renders nothing at all for a seat with no ask classes', async () => {
+  // Loading, empty and failed share one footprint (design contract p4/p15):
+  // the section is always mounted, so nothing appears or vanishes on arrival.
+  it('shows a skeleton, not the empty copy, before the first load lands', async () => {
+    axios.get.mockImplementationOnce(() => new Promise(() => {}))
+    const w = mount(PortalAgentAutonomy, { props: { agentName: AGENT }, attachTo: document.body })
+    await flushPromises()
+    expect(w.find('[data-testid="portal-autonomy-loading"]').exists()).toBe(true)
+    expect(w.find('[data-testid="portal-autonomy-empty"]').exists()).toBe(false)
+    expect(w.find('[data-testid="portal-autonomy-failed"]').exists()).toBe(false)
+  })
+
+  it('a seat with no ask classes gets the empty state, only after a load succeeded', async () => {
     const w = await mountWith(page({ classes: [], other_seats: [] }))
-    expect(w.find('[data-testid="portal-agent-autonomy"]').exists()).toBe(false)
+    expect(w.find('[data-testid="portal-agent-autonomy"]').exists()).toBe(true)
+    expect(w.find('[data-testid="portal-autonomy-empty"]').exists()).toBe(true)
+    expect(w.find('[data-testid="portal-autonomy-loading"]').exists()).toBe(false)
+  })
+
+  it('a failed first load says so and retries — never the empty copy', async () => {
+    axios.get.mockRejectedValueOnce(new Error('network'))
+    const w = mount(PortalAgentAutonomy, { props: { agentName: AGENT }, attachTo: document.body })
+    await flushPromises()
+    expect(w.find('[data-testid="portal-autonomy-failed"]').exists()).toBe(true)
+    expect(w.find('[data-testid="portal-autonomy-empty"]').exists()).toBe(false)
+
+    axios.get.mockResolvedValueOnce({ data: page() })
+    await w.get('[data-testid="portal-autonomy-failed"] button').trigger('click')
+    await flushPromises()
+    expect(axios.get).toHaveBeenCalledTimes(2)
+    expect(w.find('[data-testid="portal-autonomy-failed"]').exists()).toBe(false)
+    expect(w.find('[data-testid="portal-autonomy-class-graduated"]').exists()).toBe(true)
+  })
+
+  it('a failed refresh keeps the classes on screen and flags them stale', async () => {
+    const w = await mountWith(page())
+    axios.get.mockRejectedValueOnce(new Error('network'))
+    await useClientPortalStore().loadAgentAutonomy(AGENT)
+    await flushPromises()
+    expect(w.find('[data-testid="portal-autonomy-class-graduated"]').exists()).toBe(true)
+    expect(w.find('[data-testid="portal-autonomy-stale"]').exists()).toBe(true)
   })
 })
 
