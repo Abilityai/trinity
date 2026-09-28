@@ -22,7 +22,7 @@
         "security",
         "users"
       ],
-      "description": "PUT /api/users/me/email and PUT/DELETE /api/users/me/github-pat take Depends(require_interactive): agent, system and the person's own user key -> 403 with users.email and the encrypted PAT column unchanged; override kinds refused by the route gate; JWT path unchanged (bind, 400 malformed, 409 taken, PAT set/clear, status read). Records that email sign-in resolves the account by the email column alone (get_or_create_email_user): after a rebind the old address resolves to a new account, and an email-named account collides."
+      "description": "PUT /api/users/me/email and PUT/DELETE /api/users/me/github-pat take Depends(require_interactive): agent, system and the person's own user key -> 403 with users.email and the encrypted PAT column unchanged; override kinds refused by the route gate; JWT path unchanged (bind, 400 malformed, 409 taken, PAT set/clear, status read)."
     },
     {
       "file": "unit/test_2996_agent_schedule_tools_unchanged.py",

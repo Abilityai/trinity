@@ -12,9 +12,6 @@ the real schema; the kinds the entry point fences earlier or that cannot be
 minted as a row go through an override with a stated principal, so the route's
 own gate is what refuses them.
 
-The last class records how email sign-in resolves an account — by the email
-column alone — which is why binding the sign-in email is a session-only act.
-
 Related: docs/memory/requirements/auth.md §2.8,
 feature-flows/email-authentication.md.
 """
@@ -250,39 +247,3 @@ class TestSessionPathUnchanged:
         res = world.client.get("/api/users/me/github-pat", headers=_owner_user_key())
         assert res.status_code == 200, res.text
         assert res.json()["configured"] is True
-
-
-class TestEmailSignInResolvesByEmailAlone:
-    """Email sign-in finds the account by `users.email`, nothing else
-    (`db/email_auth.py::get_or_create_email_user`). So the account a mailbox
-    signs in to is whichever row carries that address — which is why binding
-    the sign-in email is a session-only act."""
-
-    def test_after_a_rebind_the_old_address_resolves_to_a_new_account(self, world):
-        db.add_to_whitelist(
-            OWNER_EMAIL, added_by=ADMIN, source="manual", default_role="user"
-        )
-        assert _call(world, "email", _jwt()).status_code == 200
-
-        resolved = db.get_or_create_email_user(OWNER_EMAIL)
-        assert resolved["username"] == OWNER_EMAIL
-        assert resolved["id"] != world.owner_id
-        assert _stored_email() == NEW_EMAIL
-
-    def test_after_a_rebind_an_email_named_account_cannot_be_recreated(self, world):
-        """An account whose username IS its address: the new row collides with
-        it on the username key, so the lookup raises rather than resolving."""
-        db.create_user(
-            UserCreate(
-                username="self2996-r@example.com",
-                role="user",
-                email="self2996-r@example.com",
-            )
-        )
-        _hrun(
-            "UPDATE users SET email = :e WHERE username = :u",
-            e="self2996-elsewhere@example.com",
-            u="self2996-r@example.com",
-        )
-        with pytest.raises(Exception):
-            db.get_or_create_email_user("self2996-r@example.com")

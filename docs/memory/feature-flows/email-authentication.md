@@ -867,7 +867,7 @@ class EmailLoginResponse(BaseModel):
 
 ### Binding the sign-in email is session-only (trinity-enterprise#711)
 
-Email sign-in resolves the account by the `users.email` column alone (`db/email_auth.py::get_or_create_email_user`), so the address an account signs in with is its sign-in identity. `PUT /api/users/me/email` (`routers/users.py`) therefore takes `Depends(require_interactive)`: a signed-in (JWT) session only; every MCP key, the person's own `user` key included, gets 403 and the column does not move. `PUT` / `DELETE /api/users/me/github-pat` take the same rule. See requirements `auth.md` §2.8.
+The address an account signs in with is its sign-in identity, so changing it is a human, signed-in act. `PUT /api/users/me/email` (`routers/users.py`) therefore takes `Depends(require_interactive)`: a signed-in (JWT) session only; every MCP key, the person's own `user` key included, gets 403 and the column does not move. `PUT` / `DELETE /api/users/me/github-pat` take the same rule. See requirements `auth.md` §2.8.
 
 ### Email Enumeration Prevention
 
