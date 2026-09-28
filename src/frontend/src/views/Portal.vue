@@ -321,6 +321,24 @@
           </template>
         </div>
 
+        <!-- trinity-enterprise#610 (D9): the Inbox. After the room branches and
+             before the conversation, and only on a READY stage: on `failed` /
+             `empty` the route falls through to the bare-stage block below,
+             whose guard is true here too (the ent#253 lesson). -->
+        <PortalInbox
+          v-else-if="inboxVisible"
+          :threads="sidebarThreads"
+          :previews="chatPreviews"
+          :threads-loaded="threadsLoaded"
+          :threads-failed="store.sessionsFailed"
+          :labels="inboxAgentLabels"
+          :is-platform="store.isPlatformSession"
+          @mark-read="markRead"
+          @refresh="refreshThreads"
+          @open-chat="(url) => router.push(url)"
+          @reply="replyInChat"
+        />
+
         <PortalConversation
           v-else-if="activeAgent"
           ref="conversationRef"
@@ -743,6 +761,11 @@ import PortalRailFiles from '@/components/portal/PortalRailFiles.vue'
 import PortalCodeInput from '@/components/portal/PortalCodeInput.vue'
 import PortalAgentPicker from '@/components/portal/PortalAgentPicker.vue'
 import PortalRoom from '@/components/portal/PortalRoom.vue'
+import PortalInbox from '@/components/portal/PortalInbox.vue'
+import {
+  inboxLandingTarget, isInboxPath, inboxBranchVisible, inboxSelectedAgent,
+  sidebarThreadsOf, agentLabels,
+} from '@/components/portal/portalInbox'
 import {
   partitionAttachments, fanOutPlan, carriedNotice, noticeIsProblem, mergeCarrySources,
 } from '@/components/portal/portalAttachments'
@@ -898,7 +921,17 @@ const activeSessionId = computed(() => route.params.sessionId || null)
 const activeRoomIdFromRoute = computed(() => route.params.roomId || null)
 // ent#360: `/workspace/a/:agentName`.
 const activeAgentPageName = computed(() => route.params.agentName || null)
+// trinity-enterprise#610 (D10): on the Inbox route the rail follows the SELECTED
+// item (`?item=`), never `agents[0]`, and is never written to `activeAgentName`
+// — that would mint a Main (`ensureMainListed`) and retarget the conversation.
+const isInboxRoute = computed(() => isInboxPath(route.path))
+const inboxSelection = computed(() => (isInboxRoute.value ? route.query.item || null : null))
+const inboxVisible = computed(() => inboxBranchVisible({ isInboxRoute: isInboxRoute.value, stageState: stage.value.state }))
+const inboxAgentLabels = computed(() => agentLabels(store.agents))
 const activeAgent = computed(() => {
+  if (isInboxRoute.value) {
+    return inboxSelectedAgent({ item: inboxSelection.value, threads: threads.value, asks: store.asks, agents: store.agents })
+  }
   // Never substitute a different agent for one the caller asked for by name.
   if (unreachableAgent.value) return null
   if (!activeAgentName.value) return store.agents[0] || null
@@ -1709,9 +1742,14 @@ const isStarred = (kind, id) => !!(id && chatState.value[`${kind}:${id}`]?.starr
 // agent the person has never talked to, and the agent's own row already is the
 // way into it. The tab strip must show Main from the first visit, so this is a
 // projection for one consumer rather than a filter on `threads` itself.
-const sidebarThreads = computed(() => threads.value.filter(
-  (t) => !(t.is_main && !t.last_message_at),
-))
+// trinity-enterprise#610 (D13): the predicate lives in `portalInbox.js` so the
+// Inbox's counts and this projection are one rule, property-tested there.
+const sidebarThreads = computed(() => sidebarThreadsOf(threads.value))
+// trinity-enterprise#610 (D5/D13): the previews that ride `/chat-state` while
+// the Inbox is on screen, and the thread list's verdict — latched on the first
+// good read, so the Inbox's empty copy never stands in for "not loaded yet".
+const chatPreviews = ref({})
+const threadsLoaded = ref(false)
 
 // trinity-enterprise#657: `hasDraft` rides the same projection as the star and
 // the unread count — the drafts store's keys are the shell's `chatKey`s, so a
@@ -1735,11 +1773,17 @@ async function refreshThreads() {
   // outright, on the most client-visible surface in the product. Before the
   // batch this was structurally impossible (each per-agent call had its own
   // catch); with one request it is one 500 away, so it is made explicit.
+  // trinity-enterprise#610 (D5): on the Inbox the SAME read carries previews,
+  // so a row's "N new" and its excerpt come from one response.
+  const withPreviews = isInboxRoute.value
+  let listOk = true
   const [list, state] = await Promise.all([
-    store.fetchAllSessions().catch(() => store.lastSessions),
-    store.fetchChatState().catch(() => chatState.value),
+    store.fetchAllSessions().catch(() => { listOk = false; return store.lastSessions }),
+    (withPreviews ? store.fetchChatState({ previews: true }) : store.fetchChatState()).catch(() => null),
   ])
-  chatState.value = state || {}
+  if (state && withPreviews) { chatState.value = state.state || {}; chatPreviews.value = state.previews || {} }
+  else if (state) chatState.value = state
+  if (listOk && !store.sessionsFailed) threadsLoaded.value = true
   threads.value = decorate(list || [])
   // ent#491: rank any agent this session has not ranked yet. Fills only missing
   // keys, so a refresh triggered by an incoming reply cannot walk back a send's
@@ -1952,6 +1996,19 @@ function markRead(kind, id) {
   return store.markChatRead(kind, id)
 }
 
+// trinity-enterprise#610: arriving on the Inbox from another stage fetches its
+// previews now rather than on the next 20 s tick.
+watch(isInboxRoute, (on) => {
+  if (on && store.isClientSignedIn && bootstrapResolved.value) refreshThreads()
+})
+
+// "Reply in chat" (D11): the chat, anchored, with the composer focused.
+async function replyInChat(url) {
+  await router.push(url)
+  await nextTick(); await nextTick()
+  focusConversationComposer()
+}
+
 // ---- Cross-chat search (sidebar) ----------------------------------------------
 const search = ref('')
 const searchResults = ref([])
@@ -2157,7 +2214,12 @@ async function bootstrap() {
   // Read BEFORE the first await: `resolveAgentQuery()`'s landing replace and the
   // strip below both rewrite `route.query`.
   const voiceKeyPresent = route.query[VOICE_QUERY_KEY] !== undefined
+  // trinity-enterprise#610 (D9): bare `/workspace` lands on the Inbox — decided
+  // from the route as it was BEFORE any await, and replaced before the stage
+  // resolves, so no conversation flashes for `agents[0]` first.
+  const landing = inboxLandingTarget({ path: route.path, params: route.params, query: route.query })
   try {
+    if (landing) await router.replace(landing)
     await store.fetchRoster()
     await refreshThreads()
     startAsksPoll()
@@ -2229,6 +2291,7 @@ async function onSignOut() {
   try {
     const target = await store.signOutEverywhere()
     threads.value = []; activeAgentName.value = null; pendingSession.value = null
+    threadsLoaded.value = false; chatPreviews.value = {}   // trinity-enterprise#610
     // #2579: this handler resets state IN PLACE — the OTP form is a branch of
     // this same component, so the view is never remounted. Without clearing
     // these, client B signing in on the same tab inherits client A's resolved

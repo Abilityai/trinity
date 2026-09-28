@@ -50,7 +50,10 @@ describe('ent#557 — the indicator arrives without a navigation', () => {
 describe('ent#557 — the tab marker is wired to the same number the rows show', () => {
   it('the shell computes the total through the shared helper', () => {
     expect(SHELL).toMatch(/const unreadTotal = computed\(\(\) => totalUnread\(threads\.value\)\)/)
-    expect(SIDEBAR).toMatch(/totalUnread\(props\.threads\)/)
+    // trinity-enterprise#610 (D13): the sidebar's aggregate moved to the pinned
+    // Inbox row, whose `came` is `totalUnread` over the same threads
+    // (`inboxCounts`, property-tested in portalInbox.spec.js).
+    expect(SIDEBAR).toMatch(/inboxCounts\(props\.threads/)
   })
 
   it('pushes it at the tab title, and clears on unmount', () => {

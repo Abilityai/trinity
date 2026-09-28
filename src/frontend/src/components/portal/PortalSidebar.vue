@@ -3,41 +3,20 @@
        element's. `w-full` inside the cell, with `w-72` kept as the mobile
        drawer's width, where there is no grid and no handle. -->
   <aside class="flex flex-col h-full w-72 sm:w-full min-w-0 bg-gray-50 dark:bg-gray-950 border-r border-gray-200 dark:border-gray-800">
-    <!-- Brand. ent#359: the aggregate "waiting on you" count lives here, because
-         the agents block now occupies the top of the scroll region and would
-         otherwise scroll a fleet-wide signal out of view. -->
+    <!-- Brand. ent#556: Trinity's mark and the product's name. trinity-enterprise
+         #610 (D9/D13): it links to the Inbox — the Workspace's landing — and
+         the two aggregate counts that used to sit beside it MOVED to the pinned
+         Inbox row below: one home per fact, and that row is in the same
+         non-scrolling top block, so ent#359's "must not scroll out of view"
+         still holds. -->
     <div class="shrink-0 flex items-center gap-2 px-4 h-14 border-b border-gray-200 dark:border-gray-800">
-      <!-- ent#556: Trinity's mark and the product's name, replacing a
-           hand-drawn outline icon and the bare word "Workspace". Linked to the
-           Workspace root — true for both principals, and the only destination a
-           client session can actually open. -->
-      <PortalBrand :to="WORKSPACE_ROOT" />
-      <!-- ent#364: an ASK is a distinct fact from an unread reply — one is waiting
-           on you to decide, the other on you to read — so it gets its own badge
-           rather than being summed into that one. Before the unread count,
-           because a blocked agent outranks unread chatter.
-
-           #2424: `status-urgent` (not amber) — the token the operator NavBar's
-           pending-operator-queue badge already uses for "waiting on you", so the
-           two surfaces agree. Amber maps to `state-autonomous`, an operating
-           mode, which is a different claim. The wording comes from
-           `askBadgeTitle` because the inline literal said "agents" while
-           `askCount` counted asks. -->
-      <span
-        v-if="askCount"
-        class="ml-auto shrink-0 min-w-[1.25rem] px-1.5 h-5 rounded-full bg-status-urgent-500 text-white text-[11px] font-semibold flex items-center justify-center"
-        data-testid="sidebar-ask-count"
-        :title="askBadgeTitle(askCount)"
-      >{{ askCount > 99 ? '99+' : askCount }}</span>
-      <span
-        v-if="totalWaiting"
-        class="shrink-0 min-w-[1.25rem] px-1.5 h-5 rounded-full bg-action-primary-600 text-white text-[11px] font-semibold flex items-center justify-center"
-        :class="askCount ? 'ml-1.5' : 'ml-auto'"
-        :title="`${totalWaiting} ${totalWaiting === 1 ? 'reply' : 'replies'} you haven't read`"
-      >{{ totalWaiting > 99 ? '99+' : totalWaiting }}</span>
+      <PortalBrand :to="WORKSPACE_INBOX" />
     </div>
 
     <div class="p-3 space-y-2">
+      <!-- trinity-enterprise#610: the pinned Inbox row (see the component). -->
+      <PortalInboxRow :needs="inbox.needs" :came="inbox.came" />
+
       <!-- New chat -->
       <!-- ent#357: disabled with an empty roster. `newChat()` only resets
            conversation state, so with no agent to chat with every branch of it
@@ -341,22 +320,24 @@ import { computed, ref } from 'vue'
 import PortalAvatar from './PortalAvatar.vue'
 import ChatRow from './PortalChatRow.vue'
 import PortalBrand from './PortalBrand.vue'
+import PortalInboxRow from './PortalInboxRow.vue'
 import BaseBadge from '@/components/base/BaseBadge.vue'
 import DraftMark from '@/components/base/DraftMark.vue'
 import { useClientPortalStore } from '@/stores/clientPortal'
 import { usePortalDraftsStore } from '@/stores/portalDrafts'
 import { agentsWithDrafts, threadKey } from './portalDrafts'
 import {
-  groupThreadsByDate, partitionStarred, unreadByAgent, totalUnread, availabilityChip,
+  groupThreadsByDate, partitionStarred, unreadByAgent, availabilityChip,
   reservesAvailabilitySlot,
   orderRosterAgents, agentRowMeta,
-  asksByAgent, askBadgeTitle, agentRowTitle as buildAgentRowTitle,
+  asksByAgent, agentRowTitle as buildAgentRowTitle,
   visibleAgentRows, AGENT_COLLAPSE_LIMIT,
   signOutLabelFor,
   searchAgents, sidebarSearchState, searchEmptyLines,
   agentResultsLabel, agentToggleLabel, showAgentToggle, SEARCH_PLACEHOLDER,
-  WORKSPACE_ROOT,
+  WORKSPACE_INBOX,
 } from './portalUtils'
+import { inboxCounts } from './portalInbox'
 
 const props = defineProps({
   roster: { type: Array, default: () => [] },
@@ -390,14 +371,15 @@ const grouped = computed(() => groupThreadsByDate(split.value.rest))
 
 const waiting = computed(() => unreadByAgent(props.threads))
 const waitingFor = (name) => waiting.value[name] || 0
-const totalWaiting = computed(() => totalUnread(props.threads))
 // ent#364: read from the store rather than taken as a prop, because the count and
 // the two ask renderings must come from ONE list — a prop threaded from the view
 // would be a second path to the same fact, free to disagree with it.
 const asksStore = useClientPortalStore()
-const askCount = computed(() => asksStore.askCount)
+// trinity-enterprise#610 (D13): the pinned Inbox row's two counts — `needs` is
+// `askCount` (pending asks), `came` is `totalUnread` over these threads.
+const inbox = computed(() => inboxCounts(props.threads, asksStore.openAsks))
 // #2424: the ask twin of `waiting`. Kept a separate map on purpose — see the
-// brand-badge comment in the template.
+// Inbox-row comment in the template.
 const asksPerAgent = computed(() => asksByAgent(asksStore.openAsks))
 const askCountFor = (name) => asksPerAgent.value[name] || 0
 
