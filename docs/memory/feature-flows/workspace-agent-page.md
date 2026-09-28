@@ -573,11 +573,14 @@ destination" is finally true.
 asks list fails loud: a queue-read fault and an unreadable roster each raise
 `AsksUnavailable` and answer **503 `asks_unavailable`**; a clean off-roster agent
 is still dropped with a 200; `answer_ask` stays a uniform 404 on a roster outage;
-the suggestions build still degrades to no ask ids. Both halves mutation-tested
-(revert the raise to `return []`; make `_on_roster` swallow again → red).
+the suggestions build still degrades to no ask ids (a guard for the new raise
+path, not a regression test: it also passes on the pre-fix code). The raise and
+roster halves are mutation-tested (revert the raise to `return []`; make
+`_on_roster` swallow again → red).
 `src/frontend/tests/unit/workspaceAsks.spec.js` pins the store half: a 5xx keeps
 the last good list with `asksFailed` set and `asksAvailable` untouched, a 404
-is absence, a success clears the failure.
+is absence (and resets `asksLoaded`), a success clears the failure, and a
+sign-out drops the kept list so the next client never inherits it.
 
 `tests/unit/test_ent360_workspace_agent_page.py` — the projections (no
 message/cost/model; alerts excluded; `context` never present, asserted against

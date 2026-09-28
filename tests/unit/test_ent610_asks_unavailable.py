@@ -240,7 +240,10 @@ def test_the_suggestions_build_still_degrades_to_no_ask_ids(
     asks_db, client_email, monkeypatch
 ):
     """`suggestions/service._gather` wraps the call in `attempt(..., [])`; a raise
-    here costs the suggestions their ask items, never the whole list."""
+    here costs the suggestions their ask items, never the whole list.
+
+    A guard for the new raise path, not a regression test: the pre-fix
+    `list_asks` returned `[]`, so this passes there too."""
     from datetime import datetime, timezone
 
     from client_portal.asks import service
