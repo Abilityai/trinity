@@ -236,7 +236,17 @@ renders nothing rather than a `(0)`.
 |---|---|---|
 | per chat | the chat row | which conversation to open |
 | per agent | the agent row in the agents block | which agent is waiting |
-| total | the **wordmark** | the agents block now occupies the top of a *scrolling* region, so a fleet-wide signal parked there scrolls away |
+| total | the pinned **Inbox** row (ent#610; the wordmark until then) | the agents block now occupies the top of a *scrolling* region, so a fleet-wide signal parked there scrolls away; the Inbox row sits in the non-scrolling top block for the same reason |
+
+**The pinned Inbox row (ent#610).** The two fleet-wide counts — asks waiting on you
+(`askCount`, `data-testid="sidebar-ask-count"`, unchanged address) and what came back
+(`totalUnread(sidebarThreads)`, `sidebar-unread-count`) — moved from the brand head to a
+pinned `router-link` to `/workspace/inbox` in the non-scrolling top block: one home per
+fact. Both badges are white on a 700 ground (the old `urgent-500` + white was 2.80:1) with
+`tabular-nums`. **"new", not "replies"**: since ent#610 a count is of *arrivals* — agent
+messages and deliverables addressed to you stamped to your chat — so every title and badge
+says "new". The Inbox reads the same `sidebarThreads` projection, so its "came back" and
+this row can never disagree.
 
 A room credits its unread to **every** agent in it — there is no single agent a
 room is "with", so if three agents share a room you are behind on, all three
@@ -445,5 +455,5 @@ can actually see.
 |---|---|
 | **Rooms report `unread: 0`** | A room already has its own seq cursor (`since`), which is a different model from a timestamp cursor. Stars work for rooms; unread does not, so a room never badges. Reconciling the two is follow-up work. |
 | ~~**Unread needs one open first**~~ | **Fixed by ent#557.** A never-opened thread now counts agent messages newer than the viewer's stored account baseline. What remains is narrower and deliberate: a viewer who has never read *anything* has no baseline and sees no badge, and a chat that predates their baseline and was never opened still reports nothing. |
-| **The agent badge counts replies, not questions** | "Waiting on the user" is read here as "the agent replied and you haven't read it". An agent blocked on an operator-queue approval is a different signal and is not surfaced here — that queue belongs to operators, and a Workspace viewer may be an external client with no standing in it. |
+| **The agent badge counts arrivals, not questions** | "Waiting on the user" is read here as "something came back and you haven't read it" — an agent message or, since ent#610, a deliverable addressed to you. An agent blocked on an operator-queue approval is a different signal and is not surfaced here — that queue belongs to operators, and a Workspace viewer may be an external client with no standing in it. |
 | **Optimistic star, no cross-tab sync** | A star toggled in one tab does not appear in another until its next `refreshThreads`. |

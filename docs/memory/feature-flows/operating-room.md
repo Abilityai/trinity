@@ -49,6 +49,7 @@ As an operator, I want a single inbox where I can see and respond to all agent r
 - **NavBar**: Single "Operations" link (`to="/operations"`, active when `$route.path === '/operations'`) with one combined badge `combinedOpsCount = operatorQueueStore.pendingCount + notificationsStore.pendingCount`. Replaces the former separate Health (`/monitoring`), Ops (`/operating-room`), and Executions (`/executions`) links + their badges.
 - **Legacy redirects** (all preserve bookmarks): `/operating-room` (FUNCTION form, preserves `?tab=` query) -> `/operations`; `/monitoring` -> `/operations?tab=health`; `/executions` -> `/operations?tab=executions`; `/events` -> `/operations?tab=notifications`
 - **Agent**: Writes `~/.trinity/operator-queue.json` inside container
+- **Workspace Inbox** (trinity-enterprise#610): the addressee's door onto the SAME rows — its Action tab is the Workspace asks list (`addressed_to_email = me`, pending), answered through the same ask sink. Four windows (Operations, `/m`, the Workspace ask surfaces, the Inbox) on one ask table; no copy is kept.
 
 ---
 

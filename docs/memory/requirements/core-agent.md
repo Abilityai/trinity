@@ -3498,3 +3498,73 @@ to localStorage in the clear.
   and objective-gap inputs (#500, #661, #477–#479) — each attaches as a new class without
   changing the object; the Inbox placement (#610).
 - **Flow**: `docs/memory/feature-flows/workspace-suggestions.md`
+
+### 5.40 Workspace Inbox — what needs you and what came back, across your agents (trinity-enterprise#610)
+- **Status**: 🚧 In progress (PR A: landing, Unread, All, the reading pane; PR B: role-addressed
+  Action after abilityai/trinity#3028; PR C: rooms in Unread)
+- **Requirement ID**: WORKSPACE_INBOX
+- **GitHub Issue**: abilityai/trinity-enterprise#610 (preceded by the asks-honesty fix, §26.8)
+- **Description**: The Workspace opens on an **Inbox**: one place that answers "what needs me"
+  and "what came back" across every agent on the viewer's roster, with a reading pane so an
+  item can be read and answered without leaving it. It is four windows over rows that already
+  exist — the ask table (OPS-001, `requirements/security.md` §26; §26.9 endings), the portal
+  messages, the addressed deliverables and the #557 read cursor. It owns **no table, no
+  router and no store**.
+- **Landing (AC 1)**: a bootstrap on bare `/workspace` with no route param and no stage key
+  (`agent`, `new`, `voice`) replaces to `/workspace/inbox` before the stage resolves, so no
+  conversation flashes. Every explicit target wins: a chat, a room, an agent page, `?agent=`,
+  `?new=1`, the armed-once `?voice=1`. Bare `/workspace` keeps its meaning (the new-chat
+  stage), and the brand mark and a pinned sidebar row lead to the Inbox.
+- **Three windows (tabs)**:
+  | Tab | Membership | Source |
+  |---|---|---|
+  | **Action** | asks addressed to me, pending (question, approval, alert), roster re-checked | the ONE asks list (`openAsks`) |
+  | **Unread** | chats with new arrivals — one row per chat, "N new", the latest arrival's excerpt; archived chats included | the sidebar's `threads` + `GET /chat-state?previews=true` |
+  | **All** | every chat active in the last 30 days (read or not) and asks that ended in the last 7 days; newest 50 shown with the total stated | the same two lists |
+- **One unread model (AC 6)**: the unit of Unread is a **chat**, read through the existing
+  #557 cursor (`POST /chat-state/thread/{id}/read`); there is no second cursor and no per-item
+  read row. An arrival is an assistant message in my chat **or** a report addressed to me that
+  is stamped to a chat I own. Every surface that shows the count says **"new"** (it used to say
+  "replies"), and the sidebar, the agent row, the tab title and the Inbox read one number.
+- **What arrives (A8)**: Unread holds only what was **addressed into the Workspace** —
+  replies and agent-started messages in my chats, runs whose completion was delivered to me
+  (portal turns, and schedules with `deliver_to_workspace_email` = me), and reports addressed
+  to me. A scheduled, webhook, MCP or agent-to-agent run with no delivery address is in no
+  one's Unread; the Work tab (platform door) owns it. Queued and running work is not an arrival.
+- **A deliverable always has a chat**: an addressed report published with no in-flight chat
+  **of the addressee** is stamped to the addressee's **Main** at publish (a report addressed to
+  X during Y's turn goes to X's Main, never into Y's chat), and that Main is touched so the
+  sidebar lists it. Its card appears inline there, and it counts as an arrival.
+- **The run outcome is a platform marker**: the completion message the platform writes into a
+  chat carries `source = completion:done | completion:failed`; the Inbox's done/failed pill is
+  read from that, never parsed out of the body (an agent reply that begins "**Finished**" is
+  not a run outcome).
+- **The pane (AC 3)**: an ask renders the existing ask card for that one ask (select-option,
+  note, Send — never a one-tap Approve) and stays selected after an answer, shown ended in
+  place. A chat renders its newest arrivals (from the first unread message) and its
+  deliverables through `ReportRenderer` with the summary fallback. Opening a chat row marks it
+  read; the row stays selected and is drawn read in place until the selection changes. **Open
+  in chat** / **Reply in chat** open the chat at the first arrival (`?anchor=`), with the
+  composer focused for Reply (A2 — no composer in the pane). **Mark all read** is secondary
+  and reports how many failed.
+- **The door (AC 7)**: nothing the Inbox adds carries cost, an execution id or run detail; the
+  preview projection has no `cost` field. The Inbox needs no capability flag — it reads the
+  roster payload, the viewer's own chat state and the asks list.
+- **Honest states**: loading ≠ empty ≠ failed ≠ stale, for asks and threads alike. The empty
+  copy renders only after a successful read; a failed first read shows a retry; a failed
+  refresh keeps the list with a stale banner (§26.8, the asks read fails loud).
+- **Phone**: list and pane are successive full-width states with an explicit Back (Esc too);
+  nothing is auto-selected, so the landing starts no agent feed.
+- **Known properties (stated, not bugs)**:
+  - A viewer who has never read anything has no baseline, so nothing counts for them — a first
+    deliverable included (the inherited #557 rule).
+  - **An owner's Inbox is thinner by existing rules (A9)**: asks and reports validate their
+    addressee with `include_owned=False`, so a platform owner is never an addressee. Their
+    Action empty state points to Operations; a client's names what would land here.
+  - Archived chats stay in Unread; Σ "N new" equals the "came back" count.
+  - Counts for the viewer's own chats with agents no longer on their roster are in the
+    chat-state payload (since ent#359/#557) but nothing renders them.
+  - Rooms are not in Unread until PR C (no human room read cursor exists).
+- **Not in scope**: the editable "What would be sent" (09-20 ruling); #609; the `people_for`
+  provider; `may_end` (rides #164); run pills with step labels (need a message→execution link).
+- **Flow**: `docs/memory/feature-flows/workspace-inbox.md`

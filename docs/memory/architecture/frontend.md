@@ -55,6 +55,25 @@
 **Agent-to-agent collaboration data** (`stores/network.js`): the Vue Flow node-graph rendering of collaboration (the Dashboard's Graph mode + `AgentNode.vue`) was **decommissioned in #1689**; the underlying collaboration data still flows and feeds the Timeline replay. Detection: the backend chat endpoint accepts `X-Source-Agent` and broadcasts `agent_collaboration` WS events; `activity_service` broadcasts `agent_activity` (`activity_type`: chat_start/chat_end/tool_call/schedule_start/schedule_end/agent_collaboration; `activity_state`: started/completed/failed/cancelled — a user-cancelled terminal is recorded as `cancelled`, distinct from `failed`, #1332).
 
 
+**The Workspace Inbox (ent#610).** Route `/workspace/inbox` (`WorkspaceInbox`) is a
+stage of the same `views/Portal.vue` shell, not a new view. `components/portal/PortalInbox.vue`
+(container: header, `OverflowTabs` Action · Unread · All, list + pane, phone collapse),
+`PortalInboxList.vue` and `PortalInboxPane.vue` compose existing surfaces — `PortalAsks`
+filtered to one ask by its `askIds` prop and namespaced by `testidPrefix` (default
+`portal-ask`, so every existing test id is unchanged), `PortalMarkdown`, and
+`ReportRenderer` with the `ReportSummary` fallback. **No new store** (Invariant #6):
+Action reads `clientPortal.openAsks`/`asks`; Unread and All read the shell's
+`sidebarThreads` snapshot plus the previews from `store.fetchChatState({previews})`,
+passed as props exactly as the sidebar receives them. Every decidable rule is pure in
+`components/portal/portalInbox.js` (`inboxLandingTarget`, the item builders,
+`inboxCounts`, `itemKey`). Honesty fields: `asksLoaded`/`asksFailed`/`asksLoadedAt` on
+the store (PR A0) and `threadsLoaded` on the shell; the skeleton is keyed on
+`viewState({hasLoaded})`, never on a loading flag. `markChatReadStrict` (rethrows) exists
+for Mark all read only; the per-row open keeps the fire-and-forget `markRead`. Opening a
+chat at an arrival is a one-shot `?anchor=m:<id>|d:<id>` read by `PortalConversation`
+against `data-message-id` / `data-report-id` targets, with `useStickToBottom().detach()`
+so the ResizeObserver does not re-pin the view to the bottom.
+
 **Voice has one consumer, and Agent Detail has a door (#2559).** The orb
 (`components/chat/VoiceOverlay.vue`) and the session composable
 (`composables/useVoiceSession.js`) are mounted in exactly **one** place:
