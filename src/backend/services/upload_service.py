@@ -28,6 +28,9 @@ except ImportError:
     _MAGIC_AVAILABLE = False
     logger.warning("[UPLOAD] python-magic not installed; MIME validation will trust declared MIME")
 
+# Local file header, empty archive, spanned archive
+_ZIP_SIGNATURES = (b"PK\x03\x04", b"PK\x05\x06", b"PK\x07\x08")
+
 # ---------------------------------------------------------------------------
 # Limits — channel adapter uses the larger set; web uses WEB_* constants
 # ---------------------------------------------------------------------------
@@ -199,7 +202,11 @@ async def process_file_uploads(
 
         # Magic-byte MIME validation
         actual_mime = mimetype
-        if _MAGIC_AVAILABLE:
+        if mimetype == "application/zip" and data.startswith(_ZIP_SIGNATURES):
+            # libmagic 5.46 (Debian trixie) detects ZIPs as application/octet-stream
+            # from a buffer, so trust the container signature for a declared ZIP (#3046).
+            pass
+        elif _MAGIC_AVAILABLE:
             try:
                 detected_mime = magic.from_buffer(data, mime=True)
                 declared_is_image = mimetype.startswith("image/")
