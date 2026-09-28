@@ -4,18 +4,19 @@ PostgreSQL half of the dual-track pair; the SQLite half is
 ``db/migrations.py::pull_sync``.
 
 Adds ``agent_git_config.pull_sync_enabled`` (the per-agent switch) and
-``agent_sync_state.last_pull_at / last_pull_status / behind_after_pull`` (the
-pull cycle's outcome), then turns the pull on only where auto-sync is already
+``agent_sync_state.last_pull_at / last_pull_status / behind_after_pull /
+last_pull_error / last_successful_pull_at / consecutive_pull_failures /
+consecutive_pull_skips`` (the pull cycle's outcome and health), then turns the pull on only where auto-sync is already
 on (operator ruling 2026-09-25).
 
-Revision ID: 0076_pull_sync
-Revises: 0075_auto_sync_enabled_backfill
+Revision ID: 0080_pull_sync
+Revises: 0079_telegram_group_context
 """
 from alembic import op
 
 
-revision = "0076_pull_sync"
-down_revision = "0075_auto_sync_enabled_backfill"
+revision = "0080_pull_sync"
+down_revision = "0079_telegram_group_context"
 branch_labels = None
 depends_on = None
 
@@ -30,6 +31,16 @@ def upgrade() -> None:
     op.execute("ALTER TABLE agent_sync_state ADD COLUMN IF NOT EXISTS last_pull_at TEXT")
     op.execute("ALTER TABLE agent_sync_state ADD COLUMN IF NOT EXISTS last_pull_status TEXT")
     op.execute("ALTER TABLE agent_sync_state ADD COLUMN IF NOT EXISTS behind_after_pull INTEGER")
+    op.execute("ALTER TABLE agent_sync_state ADD COLUMN IF NOT EXISTS last_pull_error TEXT")
+    op.execute("ALTER TABLE agent_sync_state ADD COLUMN IF NOT EXISTS last_successful_pull_at TEXT")
+    op.execute(
+        "ALTER TABLE agent_sync_state ADD COLUMN IF NOT EXISTS "
+        "consecutive_pull_failures INTEGER DEFAULT 0"
+    )
+    op.execute(
+        "ALTER TABLE agent_sync_state ADD COLUMN IF NOT EXISTS "
+        "consecutive_pull_skips INTEGER DEFAULT 0"
+    )
     op.execute(
         "UPDATE agent_git_config SET pull_sync_enabled = 1 "
         "WHERE COALESCE(auto_sync_enabled, 0) = 1"
@@ -37,6 +48,10 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    op.execute("ALTER TABLE agent_sync_state DROP COLUMN IF EXISTS consecutive_pull_skips")
+    op.execute("ALTER TABLE agent_sync_state DROP COLUMN IF EXISTS consecutive_pull_failures")
+    op.execute("ALTER TABLE agent_sync_state DROP COLUMN IF EXISTS last_successful_pull_at")
+    op.execute("ALTER TABLE agent_sync_state DROP COLUMN IF EXISTS last_pull_error")
     op.execute("ALTER TABLE agent_sync_state DROP COLUMN IF EXISTS behind_after_pull")
     op.execute("ALTER TABLE agent_sync_state DROP COLUMN IF EXISTS last_pull_status")
     op.execute("ALTER TABLE agent_sync_state DROP COLUMN IF EXISTS last_pull_at")

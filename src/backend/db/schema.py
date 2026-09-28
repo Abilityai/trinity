@@ -1201,6 +1201,10 @@ TABLES = {
             last_pull_at TEXT,  -- trinity-enterprise#703: the container's pull cycle
             last_pull_status TEXT,
             behind_after_pull INTEGER,
+            last_pull_error TEXT,
+            last_successful_pull_at TEXT,
+            consecutive_pull_failures INTEGER DEFAULT 0,
+            consecutive_pull_skips INTEGER DEFAULT 0,
             last_check_at TEXT,
             updated_at TEXT NOT NULL,
             FOREIGN KEY (agent_name) REFERENCES agent_ownership(agent_name)

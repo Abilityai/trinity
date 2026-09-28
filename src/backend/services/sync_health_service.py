@@ -472,6 +472,10 @@ class SyncHealthService:
             last_pull_at=_pull_text(sync_state.get("last_pull_at"), 64),
             last_pull_status=_pull_status(sync_state.get("last_pull_status")),
             behind_after_pull=_coerce_nonneg_int(sync_state.get("behind_after_pull")),
+            last_pull_error=_pull_text(sync_state.get("last_pull_error"), 500),
+            last_successful_pull_at=_pull_text(sync_state.get("last_successful_pull_at"), 64),
+            consecutive_pull_failures=_coerce_nonneg_int(sync_state.get("consecutive_pull_failures")),
+            consecutive_pull_skips=_coerce_nonneg_int(sync_state.get("consecutive_pull_skips")),
             last_check_at=utc_now_iso(),
         )
 

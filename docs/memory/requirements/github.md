@@ -864,17 +864,23 @@
 - **Invariant G3:** human and fleet work reaches the agent within a bound.
 - **Pull cycle** in the agent server beside the push cycle:
   - on its interval: fetch, then fast-forward or rebase
+  - a `trinity/*` working branch also merges `main` in, so human pushes to
+    `main` arrive (a merge — the branch is already pushed; conflict aborted)
   - uncommitted edits stashed and re-applied explicitly
-  - never discards local work: a conflict is aborted or undone, and recorded
-  - never runs while an execution is in flight
+  - never discards local work: a conflict is aborted or undone, and recorded;
+    an edit that could not be put back is named as kept in `git stash`
+  - never runs while an execution is in flight or queued, nor over unmerged
+    paths (and the push cycle never commits them)
 - **Flag:** per-agent `pull_sync_enabled` (both migration tracks), read live
   each cycle, with `GIT_SYNC_PULL` as the fallback; interval
   `GIT_SYNC_PULL_INTERVAL_SECONDS` (defaults to the push interval).
   - on for new `github:` agents, source-mode included
   - on for existing agents only where auto-sync is already on
   - off otherwise; toggle in Settings → Git sync
-- **Observability:** `last_pull_at`, `last_pull_status`, `behind_after_pull`
-  in `sync-state.json`, persisted on `agent_sync_state`. A failed pull never
+- **Observability:** `last_pull_at`, `last_pull_status`, `last_pull_error`,
+  `behind_after_pull`, `last_successful_pull_at`, `consecutive_pull_failures`,
+  `consecutive_pull_skips` in `sync-state.json`, persisted on
+  `agent_sync_state`. A failed pull never
   counts toward the push's `consecutive_failures`.
 - **Edition**: open-core (operator ruling 2026-09-25).
 - **Flow**: `docs/memory/feature-flows/git-sync-health.md` §1d

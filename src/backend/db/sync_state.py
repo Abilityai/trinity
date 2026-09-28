@@ -38,6 +38,10 @@ _COLUMNS = (
     "last_pull_at",  # trinity-enterprise#703: the container's pull cycle
     "last_pull_status",
     "behind_after_pull",
+    "last_pull_error",
+    "last_successful_pull_at",
+    "consecutive_pull_failures",
+    "consecutive_pull_skips",
     "last_check_at",
     "updated_at",
 )
@@ -86,6 +90,10 @@ class SyncStateOperations:
         last_pull_at: Optional[str] = None,
         last_pull_status: Optional[str] = None,
         behind_after_pull: Optional[int] = None,
+        last_pull_error: Optional[str] = None,
+        last_successful_pull_at: Optional[str] = None,
+        consecutive_pull_failures: Optional[int] = None,
+        consecutive_pull_skips: Optional[int] = None,
         last_check_at: Optional[str] = None,
     ) -> Dict:
         """Upsert a sync-state row.
@@ -135,6 +143,13 @@ class SyncStateOperations:
             "last_pull_at": _merged("last_pull_at", last_pull_at),
             "last_pull_status": _merged("last_pull_status", last_pull_status),
             "behind_after_pull": _merged("behind_after_pull", behind_after_pull),
+            # last_pull_error is written as-is, None included: a success clears
+            # it, so a stale error never outlives the pull that fixed it.
+            "last_pull_error": last_pull_error if last_pull_status is not None
+            else _merged("last_pull_error", None),
+            "last_successful_pull_at": _merged("last_successful_pull_at", last_successful_pull_at),
+            "consecutive_pull_failures": _merged("consecutive_pull_failures", consecutive_pull_failures) or 0,
+            "consecutive_pull_skips": _merged("consecutive_pull_skips", consecutive_pull_skips) or 0,
             "last_check_at": last_check_at or now,
             "updated_at": now,
         }

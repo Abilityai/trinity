@@ -1021,6 +1021,10 @@ agent_sync_state = Table(
     Column("last_pull_at", Text),  # trinity-enterprise#703: the container's pull cycle
     Column("last_pull_status", Text),
     Column("behind_after_pull", Integer),
+    Column("last_pull_error", Text),
+    Column("last_successful_pull_at", Text),
+    Column("consecutive_pull_failures", Integer),
+    Column("consecutive_pull_skips", Integer),
     Column("last_check_at", Text),
     Column("updated_at", Text),
 )

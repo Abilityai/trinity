@@ -66,13 +66,15 @@
         <BaseToggle
           :model-value="pull"
           :disabled="savingPull"
-          label="Pull changes from GitHub every 15 minutes"
+          label="Pull changes from GitHub on every sync cycle"
           data-testid="pull-sync-toggle"
           @update:model-value="setPull"
         />
         <p class="mt-1 pl-[46px] text-xs text-gray-500 dark:text-gray-400">
-          Brings in edits people and other agents push to the repository. Never
-          runs while the agent is working, and never discards its own changes.
+          Brings in edits people and other agents push to the repository, and
+          merges main into a working branch. The pull never runs while
+          the agent is working or has a turn queued, and never discards its own
+          changes. With auto-sync on, each push also rebases onto GitHub first.
         </p>
         <InlineError
           class="mt-2"
