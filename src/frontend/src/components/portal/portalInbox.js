@@ -229,7 +229,18 @@ export function inboxSelectedAgent({ item, threads = [], asks = [], agents = [] 
 export function holdSelected(items, held, selectedKey, live = {}) {
   const list = Array.isArray(items) ? items : []
   if (!held || !held.item || !selectedKey || held.item.key !== selectedKey) return list
-  if (list.some((it) => it.key === selectedKey)) return list
+  // Still listed (All keeps a read chat): draw the live row, but with the
+  // snapshot it was OPENED with — the refresh after the read carries no
+  // preview, and the pane would otherwise lose what was new under the reader.
+  if (list.some((it) => it.key === selectedKey)) {
+    const { type, first_unread_message_id: firstId, latest } = held.item
+    if (type !== 'thread' || (!firstId && !latest)) return list
+    return list.map((it) => (it.key !== selectedKey ? it : {
+      ...it,
+      ...(firstId ? { first_unread_message_id: firstId } : {}),
+      ...(latest ? { latest } : {}),
+    }))
+  }
   const it = held.item
   let drawn = it
   if (it.type === 'thread') {

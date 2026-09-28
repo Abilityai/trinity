@@ -174,6 +174,38 @@ describe('reading a chat (D11)', () => {
     expect(store.fetchHistory).toHaveBeenCalledWith('scout', 't1', { limit: 50 })
   })
 
+  it('on All, the pane keeps what was new after the read refreshes the previews away (principle 5)', async () => {
+    const msgs = Array.from({ length: 8 }, (_, i) => ({ id: `m${i + 1}`, role: i % 2 ? 'assistant' : 'user', content: `c${i + 1}` }))
+    store.fetchHistory = vi.fn(async () => ({ messages: msgs }))
+    store.asksLoaded = true
+    const threads = [thread('t1', { unread: 2, last_message_at: iso(1) }), thread('t2', { last_message_at: iso(30) })]
+    const previews = { 'thread:t1': { latest: { kind: 'message', id: 'm8', at: iso(1), excerpt: 'c8' }, first_unread_message_id: 'm2' } }
+    const w = await mountInbox({ threads, previews }, { query: { tab: 'all' } })
+    await w.find('[data-testid="inbox-row-thread:t1"]').trigger('click')
+    await flushPromises()
+    const shown = () => w.findAll('[data-testid^="inbox-pane-message-"]').map((x) => x.attributes('data-testid'))
+    const before = shown()
+    expect(before[0]).toBe('inbox-pane-message-m2')
+    await w.find('[data-testid="inbox-pane-open"]').trigger('click')
+    const href = w.emitted('open-chat')[0][0]
+    expect(href).toContain('m%3Am2')
+
+    // The read lands and the next refresh carries no preview for t1: still on All.
+    await w.setProps({ threads: [{ ...threads[0], unread: 0 }, threads[1]], previews: {} })
+    await flushPromises()
+    expect(shown()).toEqual(before)
+    await w.find('[data-testid="inbox-pane-open"]').trigger('click')
+    expect(w.emitted('open-chat')[1][0]).toBe(href)
+
+    // Selecting another chat releases the hold.
+    await w.find('[data-testid="inbox-row-thread:t2"]').trigger('click')
+    await flushPromises()
+    await w.find('[data-testid="inbox-row-thread:t1"]').trigger('click')
+    await flushPromises()
+    await w.find('[data-testid="inbox-pane-open"]').trigger('click')
+    expect(w.emitted('open-chat').at(-1)[0]).toBe('/workspace/c/t1')
+  })
+
   it('a failed deliverables read is LoadFailed in the pane, not "no deliverables"', async () => {
     store.fetchSessionDeliverablesStrict = vi.fn(async () => { throw new Error('500') })
     const w = await mountInbox({ threads: [thread('t1', { unread: 1 })] }, { query: { tab: 'unread' } })

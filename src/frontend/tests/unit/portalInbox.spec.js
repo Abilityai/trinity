@@ -299,6 +299,18 @@ describe('holdSelected — the opened row stays in place (principle 5)', () => {
     expect(holdSelected([t1, t2], { item: t1, index: 0 }, 'thread:t1')).toEqual([t1, t2])
     expect(holdSelected([t2], null, 'thread:t1')).toEqual([t2])
   })
+
+  it('a still-listed selected chat keeps the snapshot it was opened with (All, after the read)', () => {
+    const opened = { key: 'thread:t1', type: 'thread', id: 't1', n: 2, first_unread_message_id: 'm3',
+      latest: { kind: 'message', id: 'm4', at: 'x', excerpt: 'hi' } }
+    const rebuilt = { ...opened, n: 0, first_unread_message_id: null, latest: null }
+    const out = holdSelected([rebuilt], { item: opened, index: 0 }, 'thread:t1')
+    expect(out[0].first_unread_message_id).toBe('m3')
+    expect(out[0].latest).toEqual(opened.latest)
+    expect(out[0].n).toBe(0)
+    // Another selection releases the hold: the live item is drawn as it is.
+    expect(holdSelected([rebuilt], { item: opened, index: 0 }, 'thread:t2')).toEqual([rebuilt])
+  })
 })
 
 describe('the pane window (D11)', () => {
