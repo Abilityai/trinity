@@ -364,6 +364,17 @@ was already live: `_asks` excluded `alert` items while `/asks` includes them, so
 the page already showed them through `<PortalAsks>`; only the duplicate hid
 them.
 
+**An outage is not "nothing waiting" (trinity-enterprise#610 PR A0).**
+"Unreadable-roster fail-closed" above used to mean the ask silently vanished:
+`list_asks` caught every error and returned `[]`, and `fetchAsks` set
+`asks = []` and `asksAvailable = false` on any failure, so a 5xx cleared this
+section and the sidebar badge alike. Now the list raises `AsksUnavailable` (a
+queue-read fault, or a roster that cannot be READ — an agent genuinely off the
+roster is still dropped) and the route answers **503 `asks_unavailable`**. The
+store keeps the last good list on any non-404/403 failure, sets `asksFailed`,
+leaves `asksAvailable` as it was, and latches `asksLoaded` on the first success
+— so `<PortalAsks>` keeps rendering what it last knew instead of blanking.
+
 ### The Overview row is unconditional, and asks moved below it (#2169)
 
 #2161 put asks and recent work in a grid whose column count was **bound to
