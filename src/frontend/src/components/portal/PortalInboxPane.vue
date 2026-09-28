@@ -17,7 +17,7 @@
 -->
 <template>
   <section class="flex flex-col min-h-0 h-full" :aria-labelledby="headingId" data-testid="inbox-pane">
-    <header class="shrink-0 flex items-center gap-2 px-4 py-3 border-b border-gray-200 dark:border-gray-750">
+    <header class="shrink-0 flex flex-wrap items-center gap-2 px-4 py-3 border-b border-gray-200 dark:border-gray-750">
       <BaseButton
         v-if="showBack"
         variant="ghost"
@@ -32,13 +32,15 @@
         :id="headingId"
         ref="headingEl"
         tabindex="-1"
-        class="min-w-0 flex-1 text-sm font-medium truncate text-gray-900 dark:text-gray-100 focus:outline-none"
+        class="min-w-0 flex-1 basis-48 text-sm font-medium truncate text-gray-900 dark:text-gray-100 focus:outline-none"
         data-testid="inbox-pane-heading"
       >{{ heading }}</h2>
-      <template v-if="item.type === 'thread'">
+      <!-- The title keeps at least 12rem; on a phone the two actions wrap to their
+           own line rather than squeezing it to a few characters. -->
+      <div v-if="item.type === 'thread'" class="ml-auto flex items-center gap-2" data-testid="inbox-pane-actions">
         <BaseButton variant="secondary" size="sm" data-testid="inbox-pane-reply" @click="$emit('reply', target)">Reply in chat</BaseButton>
         <BaseButton variant="primary" size="sm" data-testid="inbox-pane-open" @click="$emit('open-chat', target)">Open in chat</BaseButton>
-      </template>
+      </div>
     </header>
 
     <div class="flex-1 min-h-0 overflow-y-auto px-4 py-4">
