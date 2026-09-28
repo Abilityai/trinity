@@ -701,6 +701,30 @@ class TestReviewRegressions:
         real_db.skills.set_agent_skills(AGENT, [], "alice", set_resolver=set_resolver({}))
         assert _rows(real_db) == {"m": False}
 
+    def test_a_set_assigned_while_the_replace_takes_its_lock_keeps_its_members(self, real_db, monkeypatch):
+        """PR #3005 review: the replace read `existing` / `kept_by` BEFORE it
+        locked, so a set assigned in that window had its member rows deleted by
+        the delete-all (they were never in `existing`, so not in `kept_by_set`).
+        Commit a concurrent `assign_set` at the moment the lock is requested:
+        with the lock first, the replace's reads see it."""
+        import db.skill_sets as sets_mod
+        real_lock = sets_mod.lock_agent_rows
+        fired = []
+
+        def racing_lock(conn, agent_name):
+            if not fired:
+                fired.append(agent_name)
+                real_db.sets.assign_set(AGENT, "dev", "src", "bob", None, {"dev": ["backlog"]})
+            return real_lock(conn, agent_name)
+
+        monkeypatch.setattr(sets_mod, "lock_agent_rows", racing_lock)
+        real_db.skills.assign_skill(AGENT, "solo", "alice")
+        real_db.skills.set_agent_skills(
+            AGENT, ["solo"], "alice",
+            set_resolver=lambda held: {"backlog"} if "dev" in held else set())
+        assert fired == [AGENT]
+        assert _rows(real_db) == {"solo": True, "backlog": False}
+
     def test_the_sqlite_lock_is_taken_before_the_reads(self, tmp_path, monkeypatch):
         """Finding 9: a second writer is blocked from the moment the lock is taken."""
         import sqlite3

@@ -246,6 +246,12 @@ class SkillsOperations:
         source_ids = source_ids or {}
 
         with get_engine().begin() as conn:
+            # ent#530: lock BEFORE the first read. Every read below feeds the
+            # delete-all + reinsert, so a set assigned between a read and a
+            # later lock would have its member rows deleted from under it.
+            if set_resolver is not None:
+                from .skill_sets import lock_agent_rows
+                lock_agent_rows(conn, agent_name)
             # #2914: the replace is delete-all + reinsert, so a retained name
             # would lose its recorded `conflict` on every Save — and the PUT
             # only re-injects ADDED names, so nothing would put it back until
@@ -286,8 +292,7 @@ class SkillsOperations:
             }
             set_named: set = set()
             if set_resolver is not None:
-                from .skill_sets import agent_held_sets, lock_agent_rows
-                lock_agent_rows(conn, agent_name)
+                from .skill_sets import agent_held_sets
                 resolved = set_resolver(agent_held_sets(conn, agent_name))
                 set_named = (
                     {n for n, ind in existing.items() if not ind}   # fail closed
