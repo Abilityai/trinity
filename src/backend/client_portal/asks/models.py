@@ -24,10 +24,17 @@ class WorkspaceAsk(BaseModel):
     options: Optional[List[Any]] = None
     created_at: str
     expires_at: Optional[str] = None
-    # pending | expired on a LISTING (`list_asks` queries `status="pending"`, so
-    # terminal rows never appear there); `answered` is reachable only from the
-    # ANSWER response, where the row this call just recorded is projected back.
+    # pending | answered | cancelled | expired. A listing carries pending asks,
+    # plus — with `include_ended` — the ones that ended in the last 7 days
+    # (trinity-enterprise#611); the ANSWER response projects the row it recorded.
     status: str
+    # How the ask ended, COARSE on purpose (trinity-enterprise#611): `ended_by`
+    # is `you` | `operator` | `timeout`, never an email, and the operator's
+    # cancel reason never crosses. `ended_at` is when it ended — None when the
+    # platform does not know (a row that ended before the ledger), never the
+    # time the ask was filed.
+    ended_at: Optional[str] = None
+    ended_by: Optional[str] = None
     chat_id: Optional[str] = None   # the thread it was attached to, when known
     # #2915: what the platform last established about the agent's own copy of
     # this ask, COARSE on purpose — `confirmed | changed | closed | unconfirmed`.

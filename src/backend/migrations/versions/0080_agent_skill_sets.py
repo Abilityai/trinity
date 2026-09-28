@@ -11,14 +11,14 @@ is ``db/migrations.py::agent_skill_sets``.
 Additive only. ``agent_skill_sets.agent_name`` is a CASCADE entry in
 ``db/agent_cleanup.py``.
 
-Revision ID: 0075_agent_skill_sets
-Revises: 0074_role_readiness_rollout_seed
+Revision ID: 0080_agent_skill_sets
+Revises: 0079_telegram_group_context
 """
 from alembic import op
 import sqlalchemy as sa
 
-revision = "0075_agent_skill_sets"
-down_revision = "0074_role_readiness_rollout_seed"
+revision = "0080_agent_skill_sets"
+down_revision = "0079_telegram_group_context"
 branch_labels = None
 depends_on = None
 

@@ -20,6 +20,17 @@
 
 **WebSocket auth** (C-002, #550): `/ws` uses single-use opaque tickets, not a JWT in the URL: `POST /api/ws/ticket` mints a 32-byte urlsafe ticket (Redis, 30s TTL); client connects `/ws?ticket=...`; backend atomically `GETDEL`s then accepts. Closes the JWT-leak surface (nginx logs, history, proxies); CSWSH mitigated because minting needs the JWT in an `Authorization` header (CORS-blocked cross-origin). `/ws/events` still accepts `?token=trinity_mcp_*` for external scripts (scoped, revocable). `mint_ticket` optional `ttl_seconds` (default 30s, ceiling 600s); VoIP mints call-bound tickets (`scope="voip:{call_id}"`, 180s) since PSTN dial+ring exceeds 30s. Impl: `services/ws_ticket_service.py` + `routers/ws_tickets.py`.
 
+### Telegram group conversation context (ent#600)
+
+A tagged group turn is answered with the group's recent conversation. Policy lives in `services/telegram_group_context.py` (bounds, `format_group_history`, `reply_quote_line`, `group_context_status`); the pipeline is `adapters/message_router.py`.
+
+- **Session per chat, not per sender**: `{bot_id}:group:{chat_id}` (`:topic:{thread}` in forum supergroups). DM keys carry the sender, so DM history cannot reach a group prompt; MEM-001 stays group-excluded.
+- **Observe path (step 0)**: `parse_message` returns un-tagged mention-mode messages as `observe_only` instead of `None`; the router records them (speaker-labelled, never executed, no rate-limit charge). Every consumer that relied on the `None` must check the flag — the webhook transport's command branch does, or a bare `/reset` from any member would fire.
+- **Prompt**: sender identity + reply quote + a delimited, clamped history block (newest `TELEGRAM_GROUP_CONTEXT_MAX_MESSAGES` within `TELEGRAM_GROUP_CONTEXT_MAX_AGE_HOURS`, defaults 40 / 24 h) + the message. Observed text and quoted text are untrusted third-party input: delimiters stripped, one line, brackets neutralised.
+- **Storage bound**: every group write path (observed, tagged turn, `all`/`observe` turns) prunes the session to its newest `STORE_CAP` (500) rows each time the lifetime count crosses a `PRUNE_EVERY` (50) boundary. Rows are bounded by count, not age.
+- **Context off ⇒ nothing recorded**: per-group `context_enabled` (default ON, human-only via the group PUT). Off skips every group write — observed messages, tagged turns and replies, broadcasts — and the OFF write purges the group's sessions, so re-enabling starts empty rather than replaying the window.
+- **Status** (`context_status`): evidence (`last_untagged_seen_at`) beats the `getMe.can_read_all_group_messages` flag; storing a `False` flag clears the evidence, so re-enabling Privacy Mode does not leave a stale "sees all messages" badge.
+
 ### Outbound File Sharing (FILES-001)
 
 Per-agent opt-in (`agent_ownership.file_sharing_enabled`). The agent writes to `/home/developer/public/` (Docker volume `agent-{name}-public`); on share, the backend extracts the named file via Docker SDK `get_archive` (never mounts the workspace — isolated blast radius) and stores bytes at `/data/agent-files/{file_id}`. `agent_shared_files_service.py` handles path validation, MIME blocklist, quota, extraction, URL building.

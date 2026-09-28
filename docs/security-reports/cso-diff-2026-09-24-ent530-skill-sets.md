@@ -19,7 +19,7 @@
 - **Enterprise docs guard:** 0 hits.
 - **Dependencies, CI and Docker:** unchanged.
 - **Injection:** all SQL is parameterized SQLAlchemy, there is no `v-html`, and no catalog string reaches argv or a path.
-- **Migrations:** `0073` exists on both tracks, is additive and idempotent, and leaves a single Alembic head. `agent_skill_sets` is registered as a CASCADE `AgentRef`.
+- **Migrations:** `0080_agent_skill_sets` (Alembic, ← `0079_telegram_group_context`; renumbered from `0073` on rebase) exists on both tracks, is additive and idempotent, and leaves a single Alembic head. `agent_skill_sets` is registered as a CASCADE `AgentRef`.
 
 ## Fixed during the audit
 - **L1:** the status read ran an in-container exec on every call. The probe is now opt-in (`?probe=true`); the Skills tab and the assign response use it, while MCP `get_agent_skills` and plain reads do not.

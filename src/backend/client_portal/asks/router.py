@@ -18,6 +18,7 @@ from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from client_portal.portal_auth import PortalPrincipal, get_portal_principal
+from dependencies import PERSON_REQUIRED_DETAIL
 
 from . import service
 from .models import WorkspaceAsk, WorkspaceAskAnswer
@@ -39,15 +40,19 @@ def _raise(e: AskError):
 @router.get("", response_model=List[WorkspaceAsk])
 def list_asks(
     agent_name: Optional[str] = Query(default=None),
+    include_ended: bool = Query(default=False),
     principal: PortalPrincipal = Depends(get_portal_principal),
 ):
     """Open asks addressed to the caller. `agent_name` narrows to the agent page.
 
     One endpoint for all three renderings (sidebar count, agent page, inline in
     chat) — three bespoke queries is how "answering anywhere clears it everywhere"
-    stops being true.
+    stops being true. `include_ended` (trinity-enterprise#611) adds the asks that
+    ended in the last 7 days, so a person sees how an ask ended instead of
+    watching it vanish; the sidebar count stays pending-only on the client.
     """
-    return service.list_asks(principal.email, principal.is_platform, agent_name)
+    return service.list_asks(principal.email, principal.is_platform, agent_name,
+                             include_ended=include_ended)
 
 
 @router.post("/{item_id}/answer", response_model=WorkspaceAsk)
@@ -60,7 +65,13 @@ def answer_ask(
 
     The uniform 404 is deliberate (Invariant #8): a 403 for "exists but not yours"
     would let any client enumerate which ask ids exist.
+
+    Only a person ends an ask (trinity-enterprise#611): a platform principal
+    that is not one — a system-scoped key keeps #2198's read breadth here — is
+    refused before the row is read, as the operator routes refuse it.
     """
+    if not principal.is_person:
+        raise HTTPException(status_code=403, detail=dict(PERSON_REQUIRED_DETAIL))
     try:
         return service.answer_ask(
             item_id, principal.email, principal.is_platform,

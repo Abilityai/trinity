@@ -61,8 +61,11 @@ mounted panels therefore leave N−1 stuck in a **permanent loading skeleton** �
 absence, because it claims to be fetching something it has already abandoned. Keying that
 store per agent unblocks the grouping; it is a store change, not a rail change.
 
-**The third registry shape: a STATIC tab.** Info declares `signal: RAIL_SIGNAL_NONE` and
-`empty: null`. Both absences are declared rather than filled, because an agent always has
+**The third registry shape: a STATIC tab** (ent#547 — **amended by ent#465**: Info now
+declares `signal: RAIL_SIGNAL_UPDATED`, lit by the shell with a `note` — "N suggestions" —
+while suggestions wait in it; see `workspace-suggestions.md`. `empty: null` stands, and
+`RAIL_SIGNAL_NONE` remains the shape for a tab with neither.) As first shipped, Info declared
+`signal: RAIL_SIGNAL_NONE` and `empty: null`. Both absences are declared rather than filled, because an agent always has
 a name, a health state and a chat list — the body always renders, so the rail's generic
 empty branch is unreachable — and nothing ever writes an `info` signal, so a borrowed
 `updated` would light no dot while documenting a rule that does not exist, diluting the
@@ -385,7 +388,7 @@ opened during a voice call also ends the call.
 | Agent-shared, I am the owner **in a platform session** | both, "Delete for everyone" offered | `db.revoke_agent_shared_file` (soft; the sweeper reclaims bytes) |
 
 **The matrix is session-type dependent, and the copy says so.**
-`PortalPrincipal` is `(email, is_platform)` and carries no role, so
+`PortalPrincipal` is `(email, is_platform, is_person)` and carries no role, so
 `include_owned` is `principal.is_platform` everywhere (ent#358). A **non-owner
 admin is a viewer** in the Workspace — stricter than the platform surface, and
 correct — and an **owner on a magic-link portal token gets the viewer

@@ -418,16 +418,19 @@ def test_the_sqlite_migration_builds_the_table_and_the_column(tmp_path):
     assert cur.execute("SELECT individual FROM agent_skills").fetchone() == (1,)   # additive-safe
     assert {r[1] for r in cur.execute("PRAGMA table_info(agent_skill_sets)")} == {
         "agent_name", "set_name", "source_id", "assigned_by", "assigned_by_agent", "assigned_at"}
-    assert MIGRATIONS[-1] == ("agent_skill_sets", _migrate_agent_skill_sets)
+    # Registered, not necessarily last: a later migration appended after this
+    # one must not turn this test red.
+    assert ("agent_skill_sets", _migrate_agent_skill_sets) in MIGRATIONS
+    assert [n for n, _ in MIGRATIONS].count("agent_skill_sets") == 1
 
 
 def test_the_alembic_revision_extends_the_single_head():
     import importlib.util
     root = _BACKEND / "migrations" / "versions"
-    spec = importlib.util.spec_from_file_location("rev530", root / "0075_agent_skill_sets.py")
+    spec = importlib.util.spec_from_file_location("rev530", root / "0080_agent_skill_sets.py")
     rev = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(rev)
-    assert (rev.revision, rev.down_revision) == ("0075_agent_skill_sets", "0074_role_readiness_rollout_seed")
+    assert (rev.revision, rev.down_revision) == ("0080_agent_skill_sets", "0079_telegram_group_context")
     script = Path(__file__).resolve().parents[2] / "scripts" / "ci" / "check_alembic_heads.py"
     proc = subprocess.run([sys.executable, str(script), str(root)], capture_output=True, text=True)
     assert proc.returncode == 0, proc.stdout + proc.stderr
@@ -440,7 +443,7 @@ def test_the_alembic_upgrade_runs_against_a_real_database(tmp_path):
     from alembic.operations import Operations
     from sqlalchemy import create_engine, inspect, text
     spec = importlib.util.spec_from_file_location(
-        "rev530b", _BACKEND / "migrations" / "versions" / "0075_agent_skill_sets.py")
+        "rev530b", _BACKEND / "migrations" / "versions" / "0080_agent_skill_sets.py")
     rev = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(rev)
     engine = create_engine(f"sqlite:///{tmp_path / 'a.db'}")

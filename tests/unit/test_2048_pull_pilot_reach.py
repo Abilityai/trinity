@@ -123,8 +123,10 @@ def test_reachable_set_is_what_the_two_queueing_producers_can_actually_emit():
     db_joined = {"loop", "fan_out"}
     # #2524: these two DO need the answer in-line, and get it from
     # `dispatch_and_await_terminal` — the sync edge adapter — rather than from
-    # the dispatch's return value.
-    adapter_served = {"a2a", "operator_response"}
+    # the dispatch's return value. trinity-enterprise#611's `operator_ending`
+    # (the wake for a cancelled or expired ask) records the same receipt the
+    # same way.
+    adapter_served = {"a2a", "operator_response", "operator_ending"}
     assert PULL_REACHABLE_TRIGGERS == (
         (task_route_can_emit | scheduler_async_polled | db_joined | adapter_served)
         & _AUTONOMOUS_TRIGGERS
