@@ -204,7 +204,10 @@ async function load() {
 async function loadPayload(d) {
   delete payloadErrors[d.id]
   try {
-    payloads[d.id] = await store.fetchAgentReport(props.item.agent_name, d.id, { rowsLimit: 50 })
+    // fetchAgentReport returns the whole report row; the renderer takes its
+    // payload, exactly as PortalDeliverables does.
+    const full = await store.fetchAgentReport(props.item.agent_name, d.id, { rowsLimit: 50 })
+    payloads[d.id] = full?.payload ?? {}
   } catch {
     payloadErrors[d.id] = "Couldn't load this deliverable. Try again, or open the chat."
   }
