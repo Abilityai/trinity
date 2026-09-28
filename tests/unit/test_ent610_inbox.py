@@ -284,3 +284,231 @@ def test_the_count_is_exactly_the_arrivals_per_session(inbox_db, world):
     for email in _EMAILS:
         assert pdb.count_unread_by_session(email) == _expected(
             email, msgs, reps, cursors, baseline)
+
+
+# ===========================================================================
+# 2. An addressed report always has a chat of its addressee (D4)
+# ===========================================================================
+#
+# `services/report_service.resolve_report_session(execution_id, agent, audience)`:
+# the publishing turn's in-flight chat only if the ADDRESSEE owns it, else the
+# addressee's Main (minted if absent) touched with `added=0`; no audience → None;
+# fail-soft None + WARNING.
+
+@pytest.fixture()
+def inflight(monkeypatch):
+    """Control what the publishing turn resolves to: `valid` = the execution is
+    this agent's; `session` = the ent#286 in-flight marker's answer."""
+    import services.idempotency_service as idem
+    from client_portal import service as portal_service
+
+    state = {"valid": True, "session": None}
+    monkeypatch.setattr(idem, "resolve_and_validate_execution",
+                        lambda eid, agent: object() if state["valid"] else None)
+    monkeypatch.setattr(portal_service, "get_inflight_session_for_execution",
+                        lambda eid: state["session"])
+    return state
+
+
+def _main_of(engine, email, agent=AGENT):
+    from sqlalchemy import text
+    with engine.connect() as conn:
+        return [dict(r) for r in conn.execute(text(
+            "SELECT id, last_message_at, message_count FROM enterprise_portal_sessions "
+            "WHERE client_email = :e AND agent_name = :a AND is_main = 1 AND archived_at IS NULL"
+        ), {"e": email, "a": agent}).mappings()]
+
+
+def test_no_execution_stamps_the_addressees_main_minting_and_touching_it(inbox_db, inflight):
+    from services import report_service
+    sid = report_service.resolve_report_session(None, AGENT, ALICE)
+
+    mains = _main_of(inbox_db, ALICE)
+    assert [m["id"] for m in mains] == [sid]
+    # Touched so the sidebar lists it (`is_main && !last_message_at` is hidden)…
+    assert mains[0]["last_message_at"]
+    # …with added=0: a report is not a message, so Reset's "untouched" test holds.
+    assert int(mains[0]["message_count"] or 0) == 0
+
+
+def test_an_existing_main_is_reused_not_duplicated(inbox_db, inflight):
+    from services import report_service
+    _session(inbox_db, "main-a", ALICE, is_main=1, last="2026-09-01T00:00:00Z", count=4)
+
+    assert report_service.resolve_report_session(None, AGENT, ALICE) == "main-a"
+    mains = _main_of(inbox_db, ALICE)
+    assert len(mains) == 1
+    assert mains[0]["last_message_at"] > "2026-09-01T00:00:00Z"
+    assert int(mains[0]["message_count"]) == 4
+
+
+def test_the_addressees_own_inflight_chat_wins(inbox_db, inflight):
+    from services import report_service
+    _session(inbox_db, "s-alice-turn", ALICE)
+    inflight["session"] = "s-alice-turn"
+
+    assert report_service.resolve_report_session("exec-1", AGENT, ALICE) == "s-alice-turn"
+    assert _main_of(inbox_db, ALICE) == []          # no Main minted for it
+
+
+def test_a_report_for_alice_during_bobs_turn_goes_to_alices_main(inbox_db, inflight):
+    """The Stage 2 C3 case: stamped into Bob's chat, Alice's arm never counted it
+    and Bob's reader filters on audience = Bob — the card was in nobody's chat."""
+    from services import report_service
+    _session(inbox_db, "s-bob-turn", BOB)
+    inflight["session"] = "s-bob-turn"
+
+    sid = report_service.resolve_report_session("exec-1", AGENT, ALICE)
+
+    assert sid != "s-bob-turn"
+    assert [m["id"] for m in _main_of(inbox_db, ALICE)] == [sid]
+
+
+def test_a_foreign_execution_or_a_non_portal_turn_lands_in_main(inbox_db, inflight):
+    from services import report_service
+    inflight["valid"] = False
+    first = report_service.resolve_report_session("exec-foreign", AGENT, ALICE)
+    inflight["valid"], inflight["session"] = True, None
+    second = report_service.resolve_report_session("exec-cron", AGENT, ALICE)
+
+    assert first == second == _main_of(inbox_db, ALICE)[0]["id"]
+
+
+def test_no_audience_is_no_chat_and_mints_nothing(inbox_db, inflight):
+    from services import report_service
+    inflight["session"] = "s-anything"
+
+    assert report_service.resolve_report_session("exec-1", AGENT, None) is None
+    assert report_service.resolve_report_session(None, AGENT, "") is None
+    assert _main_of(inbox_db, ALICE) == []
+
+
+def test_a_main_that_cannot_be_opened_fails_soft_with_a_warning(inbox_db, inflight, monkeypatch, caplog):
+    import logging
+
+    from client_portal import service as portal_service
+    from services import report_service
+
+    def boom(agent, email):
+        raise RuntimeError("db down")
+
+    monkeypatch.setattr(portal_service, "ensure_main_session", boom)
+    with caplog.at_level(logging.WARNING):
+        assert report_service.resolve_report_session(None, AGENT, ALICE) is None
+    assert any(r.levelno == logging.WARNING for r in caplog.records)
+
+
+def test_concurrent_publishes_make_one_main(inbox_db, inflight):
+    """Race-safe by the partial unique index (`idx_portal_sessions_main`), which
+    this fixture carries because it is built by `init_schema`."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    from services import report_service
+
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        ids = list(pool.map(lambda _: report_service.resolve_report_session(None, AGENT, ALICE), range(8)))
+
+    assert len(set(ids)) == 1 and ids[0]
+    assert len(_main_of(inbox_db, ALICE)) == 1
+
+
+def test_resetting_a_report_only_main_is_still_the_already_fresh_no_op(inbox_db, inflight, monkeypatch):
+    from client_portal import service as portal_service
+    from services import report_service
+
+    monkeypatch.setattr(portal_service, "agent_on_roster", lambda *a, **k: True)
+    monkeypatch.setattr(portal_service, "get_turn_inflight", lambda sid: None)
+    main = report_service.resolve_report_session(None, AGENT, ALICE)
+
+    out = portal_service.reset_main_session(AGENT, ALICE)
+
+    assert out["main_session_id"] == main
+    assert out["archived_session_id"] is None
+
+
+def test_a_stamped_report_only_main_counts_and_survives_the_sidebar_filter(inbox_db, inflight):
+    """End to end over the two halves: the stamp gives the report a chat the
+    viewer owns, the arm counts it, and the touch keeps the Main listable."""
+    from client_portal import db as pdb
+    from services import report_service
+
+    _read(ALICE, "s-old", "2026-09-01T09:00:00Z")
+    sid = report_service.resolve_report_session(None, AGENT, ALICE)
+    _report(inbox_db, session_id=sid, addressed=ALICE, at="2099-01-01T00:00:00Z")
+
+    assert pdb.count_unread_by_session(ALICE) == {sid: 1}
+    assert _main_of(inbox_db, ALICE)[0]["last_message_at"]
+
+
+# --- the router calls it -------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_the_publish_route_stamps_through_the_service_with_or_without_an_execution(monkeypatch):
+    from client_portal import service as cps
+    from models import ReportCreate, User
+    from routers import reports as mod
+
+    stored, calls = {}, []
+
+    async def fake_create(**kwargs):
+        stored.update(kwargs)
+        return {"id": "r1", "agent_name": AGENT, "report_type": "recon.leads", "title": "Leads",
+                "payload": {}, "created_at": "2026-09-10T00:00:00Z", "user_id": 1}
+
+    monkeypatch.setattr(cps, "agent_on_roster", lambda agent, email, include_owned=False: True)
+    monkeypatch.setattr(mod.rate_limiter, "enforce", lambda *a, **k: None)
+    monkeypatch.setattr(mod.report_service, "create_report", fake_create)
+    monkeypatch.setattr(mod.report_service, "resolve_report_session",
+                        lambda eid, agent, audience: calls.append((eid, agent, audience)) or "main-x")
+
+    body = ReportCreate(report_type="recon.leads", title="Leads", payload={"rows": []},
+                        audience_email=ALICE)
+    user = User(id=1, username="admin", role="admin", email="admin@example.com")
+    await mod.create_report(body, AGENT, request=None, current_user=user)
+
+    assert calls == [(None, AGENT, ALICE)]
+    assert stored["portal_session_id"] == "main-x"
+
+
+# ===========================================================================
+# 3. The run outcome is a platform-written marker, never the body (D5)
+# ===========================================================================
+
+async def _deliver_completion(status, email=ALICE, sid="s-a"):
+    """Drive the REAL completion writer (`_resolve_portal` → `deliver`)."""
+    from services import channel_completion_report as ccr
+
+    deliver = ccr._resolve_portal(
+        binding_agent=AGENT, executing_agent=AGENT, chat_id=sid,
+        context_client=email, thread=None, status=status,
+        summary_or_error="The leads are in.", execution_id="exec-1",
+    )
+    assert deliver is not None
+    assert await deliver() is True
+
+
+def _messages(engine, sid):
+    from sqlalchemy import text
+    with engine.connect() as conn:
+        return [dict(r) for r in conn.execute(text(
+            "SELECT content, source FROM enterprise_portal_messages WHERE session_id = :s"
+        ), {"s": sid}).mappings()]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status, marker", [
+    ("success", "completion:done"),
+    ("failed", "completion:failed"),
+    ("timeout", "completion:failed"),
+])
+async def test_the_completion_writer_stamps_its_outcome_marker(inbox_db, monkeypatch, status, marker):
+    from client_portal import service as portal_service
+    monkeypatch.setattr(portal_service, "get_turn_inflight", lambda sid: None)
+    _session(inbox_db, "s-a", ALICE)
+
+    await _deliver_completion(status)
+
+    rows = _messages(inbox_db, "s-a")
+    assert [r["source"] for r in rows] == [marker]
+    # The wording is decided by the SAME status, so the two cannot disagree.
+    assert rows[0]["content"].startswith("**Finished**" if status == "success" else "**Didn't finish**")

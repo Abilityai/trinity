@@ -2244,9 +2244,14 @@ def _refuse_turn_during_voice_call(session_id: str, *, voice_call_id: str | None
 def ensure_main_session(agent_name: str, email: str) -> str:
     """The pair's pinned **Main** chat id, creating it on first need (ent#523).
 
-    Main is created LAZILY, at exactly two call sites — this function's two
-    callers, `_resolve_session_id` (a turn or an ask with no named thread) and
-    `list_sessions` (opening the agent, which is what renders the pinned tab).
+    Main is created LAZILY, on first need, by exactly these callers:
+    `_resolve_session_id` (a turn or an ask with no named thread),
+    `list_sessions` (opening the agent, which is what renders the pinned tab),
+    `reset_main_session` (resolving the Main it retires),
+    `services/schedule_workspace_delivery.resolve_and_stamp` (a delivered
+    schedule, ent#498) and `services/report_service.resolve_report_session` (an
+    addressed report with no chat of its addressee, ent#610). The earlier
+    "exactly two call sites" went stale with the schedule caller.
     Deliberately NOT from `list_all_sessions`: that batch spans every rostered
     agent and runs on every sidebar refresh, so ensuring there would write one
     row per agent the user has never opened, and an empty Main is not a "recent

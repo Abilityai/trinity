@@ -418,7 +418,7 @@ def _resolve_portal(
             now = utc_now_iso()
             portal_db.add_portal_message(
                 _uuid.uuid4().hex, session_agent, client_email, "assistant", body,
-                None, now, session_id=chat_id,
+                None, now, session_id=chat_id, source=_portal_source(status),
             )
             # Every other writer of a portal message touches its session, and
             # this one has to for the same reason: `last_message_at` is what
@@ -527,6 +527,22 @@ def _resolve_portal(
         return True
 
     return deliver
+
+
+# trinity-enterprise#610: the platform-written outcome marker on the portal
+# message this module writes. The Inbox's done/failed pill is read from it —
+# never parsed out of the body, where any agent reply beginning "**Finished**"
+# would classify as a finished run. `source` is platform-written only (ent#534)
+# and every frontend reader compares it to 'voice', so these values are inert
+# everywhere else.
+COMPLETION_SOURCE_DONE = "completion:done"
+COMPLETION_SOURCE_FAILED = "completion:failed"
+
+
+def _portal_source(status: str) -> str:
+    """The marker for `status`, decided by the SAME test `_portal_body` uses for
+    its wording, so the pill and the sentence cannot disagree."""
+    return COMPLETION_SOURCE_DONE if status == "success" else COMPLETION_SOURCE_FAILED
 
 
 def _portal_body(*, executing_agent: str, session_agent: str, status: str,

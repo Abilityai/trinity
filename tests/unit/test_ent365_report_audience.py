@@ -199,7 +199,10 @@ async def test_a_reachable_address_is_stored_with_the_report(publish, monkeypatc
     monkeypatch.setattr(cps, "agent_on_roster", lambda agent, email, include_owned=False: True)
     monkeypatch.setattr(mod.rate_limiter, "enforce", lambda *a, **k: None)
     monkeypatch.setattr(mod.report_service, "create_report", fake_create)
-    monkeypatch.setattr(mod, "_resolve_portal_session", lambda eid, agent: "sess-1")
+    # ent#610: the resolution moved to the service (Invariant #1) and takes the
+    # audience, because the turn's chat is kept only if the addressee owns it.
+    monkeypatch.setattr(mod.report_service, "resolve_report_session",
+                        lambda eid, agent, audience: "sess-1")
 
     await call(audience_email=CLIENT, execution_id="exec-1")
 
@@ -238,8 +241,9 @@ async def test_an_unaddressed_report_stays_operator_only(publish, monkeypatch):
 def test_the_session_is_only_resolved_for_an_execution_this_agent_owns(monkeypatch):
     """The agent supplies an execution id, never a conversation. An id it does
     not own resolves to nothing, so it cannot post a card into a chat it was
-    never part of."""
-    from routers import reports as mod
+    never part of. (ent#610 moved the helper to `services/report_service.py`;
+    what an unresolved turn falls back to is pinned in test_ent610_inbox.py.)"""
+    from services import report_service as mod
     import services.idempotency_service as idem
     from client_portal import service as portal_service
 
@@ -251,9 +255,10 @@ def test_the_session_is_only_resolved_for_an_execution_this_agent_owns(monkeypat
 
 
 def test_a_non_portal_turn_resolves_to_no_chat(monkeypatch):
-    """A scheduled run has no Workspace session. The deliverable still lists on
-    the agent page; it simply has no card."""
-    from routers import reports as mod
+    """A scheduled run has no in-flight Workspace session. Since ent#610 an
+    ADDRESSED report then lands in the addressee's Main (test_ent610_inbox.py);
+    this helper still answers only "which turn's chat", and that is None."""
+    from services import report_service as mod
     import services.idempotency_service as idem
     from client_portal import service as portal_service
 
