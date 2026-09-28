@@ -207,6 +207,191 @@ class TestPull:
         assert _state(agent)["behind_after_pull"] == 0
 
 
+class TestReviewFixes:
+    """PR #3021 review: every exit keeps local work, a failed undo stops the
+    push, queued turns count, and working-branch agents receive `main`."""
+
+    @staticmethod
+    def _timeout_on(monkeypatch, verb, times=1):
+        """`run_registered` raises TimeoutExpired for the next `times` git `verb`s."""
+        real = git_router.run_registered
+        left = {"n": times}
+
+        def fake(cmd, *a, **kw):
+            if len(cmd) > 1 and cmd[1] == verb and left["n"] > 0:
+                left["n"] -= 1
+                raise subprocess.TimeoutExpired(cmd, kw.get("timeout", 1))
+            return real(cmd, *a, **kw)
+
+        monkeypatch.setattr(git_router, "run_registered", fake)
+
+    def test_a_timed_out_fast_forward_puts_the_edits_back(self, world, monkeypatch):
+        agent, _, human = world
+        before = _out(agent, "rev-parse", "HEAD")
+        _human_push(human, "role.md", "role v2\n")
+        (agent / "notes.md").write_text("notes — uncommitted\n")
+        self._timeout_on(monkeypatch, "merge")
+
+        result = git_router._run_pull_once(agent)
+
+        assert result["status"] == "failed"
+        assert result["error"] == "git merge timed out"
+        assert _out(agent, "rev-parse", "HEAD") == before
+        assert (agent / "notes.md").read_text() == "notes — uncommitted\n"
+        assert _out(agent, "stash", "list") == ""
+
+    def test_a_stash_left_behind_is_named_in_the_error(self, world, monkeypatch):
+        agent, _, human = world
+        _human_push(human, "role.md", "role v2\n")
+        (agent / "notes.md").write_text("notes — uncommitted\n")
+        # the ff times out, then every restore attempt's pop times out too
+        self._timeout_on(monkeypatch, "merge")
+        real = git_router.run_registered
+
+        def no_pop(cmd, *a, **kw):
+            if cmd[1:3] == ["stash", "pop"]:
+                raise subprocess.TimeoutExpired(cmd, 1)
+            return real(cmd, *a, **kw)
+
+        monkeypatch.setattr(git_router, "run_registered", no_pop)
+
+        result = git_router._run_pull_once(agent)
+
+        assert result["status"] == "failed"
+        assert "local edits are kept in `git stash`" in result["error"]
+        assert "trinity-pull" in _out(agent, "stash", "list")
+
+    def test_a_failed_undo_stops_loudly_and_the_push_refuses_the_markers(self, world, monkeypatch):
+        agent, origin, human = world
+        _human_push(human, "notes.md", "notes — human rewrite\n")
+        (agent / "notes.md").write_text("notes — agent's uncommitted edit\n")
+        real = git_router.run_registered
+
+        def reset_fails(cmd, *a, **kw):
+            if cmd[1:3] == ["reset", "--hard"]:
+                return subprocess.CompletedProcess(cmd, 128, "", "fatal: Unable to create '.git/index.lock': File exists.")
+            return real(cmd, *a, **kw)
+
+        monkeypatch.setattr(git_router, "run_registered", reset_fails)
+        result = git_router._run_pull_once(agent)
+        monkeypatch.setattr(git_router, "run_registered", real)
+
+        assert result["status"] == "failed"
+        assert "could not be undone" in result["error"]
+        assert "local edits are kept in `git stash`" in result["error"]
+        assert git_router._unmerged_paths(agent) == ["notes.md"]
+
+        origin_main = _out(origin, "rev-parse", "main")
+        push = git_router._run_auto_sync_once(agent)
+        assert push["status"] == "failed"
+        assert push["error"].startswith("refused: unmerged paths (notes.md)")
+        assert _out(origin, "rev-parse", "main") == origin_main
+        assert "<<<<<<<" not in _out(origin, "show", "main:notes.md")
+
+    def test_a_pull_refuses_to_run_over_unmerged_paths(self, world, monkeypatch):
+        agent, _, human = world
+        monkeypatch.setattr(git_router, "_unmerged_paths", lambda home: ["notes.md"])
+        _human_push(human, "role.md", "role v2\n")
+        before = _out(agent, "rev-parse", "HEAD")
+
+        result = git_router._run_pull_once(agent)
+
+        assert result["status"] == "failed" and "unmerged paths" in result["error"]
+        assert _out(agent, "rev-parse", "HEAD") == before
+
+    def test_a_queued_turn_counts_as_busy(self, monkeypatch):
+        from agent_server.services import process_registry as pr
+
+        class Reg:
+            def list_running(self):
+                return []
+
+            def list_pending_ids(self):
+                return ["exec-queued"]
+
+        monkeypatch.setattr(pr, "get_process_registry", lambda: Reg())
+        assert git_router._executions_in_flight() == 1
+
+    def test_a_stale_index_lock_is_reaped_before_the_pull(self, world):
+        import os
+        import time
+        agent, _, human = world
+        sha = _human_push(human, "role.md", "role v2\n")
+        lock = agent / ".git" / "index.lock"
+        lock.write_text("")
+        old = time.time() - 7200
+        os.utime(lock, (old, old))
+
+        assert git_router._run_pull_once(agent)["status"] == "success"
+        assert _out(agent, "rev-parse", "HEAD") == sha
+        assert not lock.exists()
+
+    def test_streaks_and_last_success_are_recorded(self, world, monkeypatch):
+        agent, _, human = world
+        monkeypatch.setattr(git_router, "_executions_in_flight", lambda: 1)
+        git_router._run_pull_once(agent)
+        git_router._run_pull_once(agent)
+        st = _state(agent)
+        assert (st["consecutive_pull_skips"], st["consecutive_pull_failures"]) == (2, 0)
+        assert st.get("last_successful_pull_at") is None
+
+        monkeypatch.setattr(git_router, "_executions_in_flight", lambda: 0)
+        _human_push(human, "notes.md", "notes — human rewrite\n")
+        (agent / "notes.md").write_text("notes — agent's uncommitted edit\n")
+        git_router._run_pull_once(agent)
+        st = _state(agent)
+        assert (st["consecutive_pull_skips"], st["consecutive_pull_failures"]) == (0, 1)
+        assert st["last_pull_error"] == "local edits conflict with incoming changes on main"
+
+        _git(agent, "checkout", "--", "notes.md")
+        git_router._run_pull_once(agent)
+        st = _state(agent)
+        assert st["consecutive_pull_failures"] == 0 and st["last_pull_error"] is None
+        assert st["last_successful_pull_at"] == st["last_pull_at"]
+
+
+class TestWorkingBranchReceivesMain:
+    """PR #3021 ruling: a `trinity/*` agent only ever pulled its own branch, so
+    human work pushed to `main` never arrived (invariant G3)."""
+
+    @staticmethod
+    def _on_working_branch(agent):
+        _git(agent, "checkout", "-q", "-b", "trinity/agent/1")
+        (agent / "notes.md").write_text("notes — the agent's\n")
+        _git(agent, "commit", "-qam", "agent: notes")
+        _git(agent, "push", "-q", "-u", "origin", "trinity/agent/1")
+
+    def test_main_is_merged_into_the_working_branch(self, world):
+        agent, origin, human = world
+        self._on_working_branch(agent)
+        pushed = _out(agent, "rev-parse", "HEAD")
+        sha = _human_push(human, "role.md", "role v2 — from main\n")
+
+        result = git_router._run_pull_once(agent)
+
+        assert result["status"] == "success"
+        assert _out(agent, "symbolic-ref", "--short", "HEAD") == "trinity/agent/1"
+        assert (agent / "role.md").read_text() == "role v2 — from main\n"
+        assert (agent / "notes.md").read_text() == "notes — the agent's\n"
+        # a merge, not a rewrite: the pushed working branch is still an ancestor
+        assert _git(agent, "merge-base", "--is-ancestor", pushed, "HEAD", check=False).returncode == 0
+        assert _git(agent, "merge-base", "--is-ancestor", sha, "HEAD", check=False).returncode == 0
+
+    def test_a_conflicting_main_is_aborted_and_recorded(self, world):
+        agent, _, human = world
+        self._on_working_branch(agent)
+        before = _out(agent, "rev-parse", "HEAD")
+        _human_push(human, "notes.md", "notes — human\n")
+
+        result = git_router._run_pull_once(agent)
+
+        assert result["status"] == "failed"
+        assert result["error"].startswith("merging main: ")
+        assert _out(agent, "rev-parse", "HEAD") == before
+        assert not (agent / ".git" / "MERGE_HEAD").exists()
+        assert (agent / "notes.md").read_text() == "notes — the agent's\n"
+
+
 class TestLoopGate:
     @pytest.fixture(autouse=True)
     def _env(self, monkeypatch):

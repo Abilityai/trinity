@@ -15,7 +15,7 @@ import time
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Callable, Dict, Optional
+from typing import Callable, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import JSONResponse
@@ -828,35 +828,70 @@ def _rebase_onto_remote(home_dir: Path, branch: str) -> Optional[str]:
 
 
 def _executions_in_flight() -> Optional[int]:
-    """How many executions are running on this agent, or None if unknown.
-    Indirection so the pull cycle's execution gate is unit-testable."""
+    """How many executions are running OR accepted-but-not-yet-spawned on this
+    agent, or None if unknown. Indirection so the pull cycle's execution gate is
+    unit-testable.
+
+    Pending entries count (#2433): a turn waiting on the chat lock or the
+    headless pool is not in `list_running()` yet, and a rebase that lands in
+    that window changes the files the turn is about to read.
+    """
     try:
         from ..services.process_registry import get_process_registry
-        return len(get_process_registry().list_running())
+        registry = get_process_registry()
+        return len(registry.list_running()) + len(registry.list_pending_ids())
     except Exception:  # noqa: BLE001 — unknown is treated as busy by the caller
         logger.debug("pull: could not read the process registry", exc_info=True)
         return None
 
 
+def _unmerged_paths(home_dir: Path) -> List[str]:
+    """Paths the index holds as unmerged (conflict stages). Committing them —
+    `git add -A` resolves a `UU` file by staging its conflict markers — would
+    push the markers to origin, so both cycles refuse to run while any exist."""
+    out = run_registered(
+        ["git", "diff", "--name-only", "--diff-filter=U"],
+        cwd=str(home_dir), timeout=10,
+    )
+    return [line for line in (out.stdout or "").splitlines() if line.strip()]
+
+
 def _record_pull(home_dir: Path, status: str, *, error: Optional[str] = None,
                  behind: Optional[int] = None) -> Dict:
     """Persist one pull outcome WITHOUT touching the push fields — the push's
-    `consecutive_failures` / `last_sync_*` stay the push's (trinity-enterprise#703)."""
-    _patch_sync_state(home_dir, {
-        "last_pull_at": datetime.now(timezone.utc).isoformat(),
+    `consecutive_failures` / `last_sync_*` stay the push's (trinity-enterprise#703).
+
+    Carries its own streaks (`consecutive_pull_failures` / `_skips`) and the
+    last success time, so a pull that has not landed for hours is visible as
+    such rather than as one `failed` row that looks like the first."""
+    prior = _read_sync_state_file(home_dir)
+    now = datetime.now(timezone.utc).isoformat()
+
+    def _count(key: str) -> int:
+        value = prior.get(key)
+        return value if isinstance(value, int) and value >= 0 else 0
+
+    updates = {
+        "last_pull_at": now,
         "last_pull_status": status,
         "last_pull_error": error,
         "behind_after_pull": behind,
-    })
+        "consecutive_pull_failures": _count("consecutive_pull_failures") + 1 if status == "failed" else 0,
+        "consecutive_pull_skips": _count("consecutive_pull_skips") + 1 if status == "skipped" else 0,
+    }
+    if status == "success":
+        updates["last_successful_pull_at"] = now
+    _patch_sync_state(home_dir, updates)
     result = {"status": status}
     if error:
         result["error"] = error
     return result
 
 
-def _integrate_remote(home_dir: Path, branch: str, ahead: int) -> Optional[str]:
-    """Bring `origin/<branch>` into the checked-out branch without ever losing
-    local work (trinity-enterprise#703). Returns None, or the error recorded.
+def _with_stash(home_dir: Path, branch: str, step) -> Optional[str]:
+    """Run `step()` — something that moves HEAD, or fails and leaves it where it
+    was — with uncommitted tracked edits set aside and put back afterwards.
+    Returns None, or the error recorded (trinity-enterprise#703).
 
     Uncommitted tracked edits are stashed EXPLICITLY — not `--autostash`: when
     incoming commits touch the same files, autostash's re-apply conflicts and
@@ -864,11 +899,18 @@ def _integrate_remote(home_dir: Path, branch: str, ahead: int) -> Optional[str]:
     files silently lose them. Here a conflicting re-apply is undone: back to the
     pre-pull HEAD, where the stash applies cleanly to its own base, and the
     failure is recorded. Untracked files are never stashed; one an incoming
-    commit would overwrite fails the fast-forward/rebase instead.
+    commit would overwrite fails the step instead.
+
+    Every exit path — including a git child that times out (`run_registered`
+    raises `TimeoutExpired`) — either puts the edits back or says in the
+    returned error that they are still in `git stash`. A failed `reset --hard`
+    stops here and says so: the tree may still hold conflict markers, which the
+    push cycle refuses to commit (`_unmerged_paths`).
     """
     def git(*args, timeout=60):
         return run_registered(["git", *args], cwd=str(home_dir), timeout=timeout)
 
+    kept = "; local edits are kept in `git stash`"
     pre_head = git("rev-parse", "HEAD", timeout=10).stdout.strip()
     dirty = git("status", "--porcelain", "--untracked-files=no", timeout=10).stdout.strip()
     stashed = False
@@ -878,55 +920,111 @@ def _integrate_remote(home_dir: Path, branch: str, ahead: int) -> Optional[str]:
             return _summarize_git_error(push.stderr or push.stdout or "stash failed")
         stashed = True
 
-    if ahead == 0:
-        step = git("merge", "--ff-only", f"origin/{branch}")
-        err = None if step.returncode == 0 else _summarize_git_error(
-            step.stderr or step.stdout or "fast-forward failed")
-    else:
-        err = _rebase_onto_remote(home_dir, branch)  # aborts itself on failure
-
-    if err:
-        if stashed:  # nothing moved (ff refused / rebase aborted): put the edits back
-            git("stash", "pop", timeout=30)
-        return err
-
-    if stashed:
-        pop = git("stash", "pop", timeout=30)
-        if pop.returncode != 0:
-            # The edits collide with what came in. Undo the pull — the stash is
-            # still there — and re-apply on the base it was taken from.
-            git("reset", "--hard", pre_head, timeout=30)
-            back = git("stash", "pop", timeout=30)
-            if back.returncode != 0:
-                return ("local edits conflict with incoming changes on "
-                        f"{branch}; they are kept in `git stash`")
+    try:
+        err = step()
+        if err:
+            # Nothing moved (the step aborted itself): put the edits back.
+            if stashed and git("stash", "pop", timeout=30).returncode == 0:
+                stashed = False
+            return err + (kept if stashed else "")
+        if not stashed:
+            return None
+        if git("stash", "pop", timeout=30).returncode == 0:
+            stashed = False
+            return None
+        # The edits collide with what came in. Undo the pull — the stash is
+        # still there — and re-apply on the base it was taken from.
+        reset = git("reset", "--hard", pre_head, timeout=30)
+        if reset.returncode != 0:
+            return (f"local edits conflict with incoming changes on {branch} and the "
+                    f"pull could not be undone ({_summarize_git_error(reset.stderr or reset.stdout or 'reset failed')})"
+                    + kept)
+        if git("stash", "pop", timeout=30).returncode == 0:
+            stashed = False
             return f"local edits conflict with incoming changes on {branch}"
-    return None
+        return f"local edits conflict with incoming changes on {branch}" + kept
+    except subprocess.TimeoutExpired as exc:
+        verb = (exc.cmd or ["git", "command"])[1:2] or ["command"]
+        err = f"git {verb[0]} timed out"
+        if stashed:
+            # Best effort back to the base the stash was taken on, then re-apply.
+            try:
+                if git("reset", "--hard", pre_head, timeout=30).returncode == 0 \
+                        and git("stash", "pop", timeout=30).returncode == 0:
+                    stashed = False
+            except subprocess.TimeoutExpired:
+                pass
+        return err + (kept if stashed else "")
+
+
+def _integrate_remote(home_dir: Path, branch: str, ahead: int) -> Optional[str]:
+    """Bring `origin/<branch>` into the checked-out branch without ever losing
+    local work: a fast-forward when nothing is committed locally, a rebase
+    (aborted on conflict) when something is. See `_with_stash`."""
+    def step() -> Optional[str]:
+        if ahead == 0:
+            ff = run_registered(["git", "merge", "--ff-only", f"origin/{branch}"],
+                                cwd=str(home_dir), timeout=60)
+            return None if ff.returncode == 0 else _summarize_git_error(
+                ff.stderr or ff.stdout or "fast-forward failed")
+        return _rebase_onto_remote(home_dir, branch)  # aborts itself on failure
+
+    return _with_stash(home_dir, branch, step)
+
+
+def _integrate_source(home_dir: Path, branch: str, source: str) -> Optional[str]:
+    """Merge `origin/<source>` into a working branch (PR #3021 ruling).
+
+    A `trinity/*` working branch is the agent's own, so pulling it alone never
+    delivers what humans push to `main` (invariant G3). A MERGE, not a rebase:
+    the working branch is already pushed, and rewriting it would make the next
+    push cycle rebase it back. A conflict is aborted and recorded, never
+    resolved."""
+    def step() -> Optional[str]:
+        merge = run_registered(
+            ["git", "merge", "--no-edit", f"origin/{source}"],
+            cwd=str(home_dir), timeout=60,
+        )
+        if merge.returncode == 0:
+            return None
+        run_registered(["git", "merge", "--abort"], cwd=str(home_dir), timeout=30)
+        return f"merging {source}: " + _summarize_git_error(
+            merge.stderr or merge.stdout or "merge failed")
+
+    return _with_stash(home_dir, branch, step)
 
 
 def _run_pull_once(home_dir: Path) -> Dict:
     """One pull cycle (trinity-enterprise#703, invariant G3): bring origin's
-    commits for the checked-out branch to the agent.
+    commits to the agent.
 
-    Source-mode agents are checked out on their source branch and working-branch
-    agents on their working branch, so the checked-out branch is the one to pull.
+    Source-mode agents are checked out on their source branch, so that branch is
+    pulled. A working-branch agent (`trinity/*`) is checked out on its own
+    branch, which only it writes — so its own branch is brought up to date AND
+    the source branch (`_get_pull_branch`, normally `main`) is merged in, or
+    human work pushed to `main` would never arrive (PR #3021 ruling).
 
-    - Never while an execution runs (a rebase under a running turn changes the
-      files it is reading) — checked before the fetch and again right before the
-      tree is touched; an unreadable registry counts as busy.
+    - Never while an execution runs or is queued (a rebase under a turn changes
+      the files it is reading) — checked before the fetch and again right before
+      the tree is touched; an unreadable registry counts as busy.
     - Serialised with the push cycle and the operator git endpoints on
-      `_REPO_LOCK`; a busy repo skips quietly.
-    - `_integrate_remote`: a fast-forward when nothing is committed locally, a
-      rebase (aborted on conflict) when something is; uncommitted edits are
-      stashed explicitly and re-applied, and a pull whose incoming changes
-      collide with them is undone. Local work is never discarded; a failure is
-      recorded, not resolved.
+      `_REPO_LOCK`; a busy repo skips quietly (and unrecorded: every write to
+      sync-state.json happens under that lock).
+    - Stale lock litter is reaped first, as the push cycle does: a pull-only
+      agent has no push cycle to do it.
+    - Refuses to run over unmerged paths. Local work is never discarded; a
+      failure is recorded, not resolved.
+
+    `behind_after_pull` is the checked-out branch's own lag behind
+    `origin/<branch>`, not its lag behind `main`; `behind_main` in the git
+    status is the latter.
     """
-    # The lock first: every write to sync-state.json happens under it, because
-    # the push cycle read-modify-writes the same file from another thread.
     if not _REPO_LOCK.acquire(blocking=False):
         return {"status": "skipped", "reason": "repo_busy"}
     try:
+        _reap_stale_git_litter(
+            home_dir, repack_budget_seconds=_maintenance_timeout_seconds()
+        )
         running = _executions_in_flight()
         if running is None or running > 0:
             return _record_pull(home_dir, "skipped", error=(
@@ -937,26 +1035,55 @@ def _run_pull_once(home_dir: Path) -> Dict:
         ).stdout.strip()
         if not branch:
             return _record_pull(home_dir, "failed", error="detached HEAD: nothing to pull onto")
+        unmerged = _unmerged_paths(home_dir)
+        if unmerged:
+            return _record_pull(home_dir, "failed", error=(
+                f"unmerged paths in the working tree ({', '.join(unmerged[:3])}): "
+                "resolve them before the pull can run"))
+        source = _get_pull_branch(branch, home_dir)
+        refs = [branch] if source == branch else [branch, source]
         fetch = run_registered(
-            ["git", "fetch", "origin", branch], cwd=str(home_dir), timeout=120,
+            ["git", "fetch", "origin", *refs], cwd=str(home_dir), timeout=120,
         )
+        own_on_origin = True
         if fetch.returncode != 0:
-            if _is_missing_remote_ref(fetch.stderr):
-                return _record_pull(home_dir, "success", behind=0)  # not on origin yet
-            return _record_pull(home_dir, "failed", error=_summarize_git_error(
-                fetch.stderr or fetch.stdout or "fetch failed"))
-        ahead, behind = _compute_ahead_behind(home_dir, branch)
-        if behind == 0:
+            if not _is_missing_remote_ref(fetch.stderr):
+                return _record_pull(home_dir, "failed", error=_summarize_git_error(
+                    fetch.stderr or fetch.stdout or "fetch failed"))
+            # The working branch is not on origin yet (its first push has not
+            # happened): the source branch can still come in.
+            own_on_origin = False
+            if source == branch:
+                return _record_pull(home_dir, "success", behind=0)
+            retry = run_registered(
+                ["git", "fetch", "origin", source], cwd=str(home_dir), timeout=120,
+            )
+            if retry.returncode != 0:
+                return _record_pull(home_dir, "failed", error=_summarize_git_error(
+                    retry.stderr or retry.stdout or "fetch failed"))
+
+        ahead, behind = _compute_ahead_behind(home_dir, branch) if own_on_origin else (0, 0)
+        source_behind = 0
+        if source != branch:
+            _, source_behind = _compute_ahead_behind(home_dir, source)
+        if behind == 0 and source_behind == 0:
             return _record_pull(home_dir, "success", behind=0)
+
         running = _executions_in_flight()
         if running is None or running > 0:
             return _record_pull(home_dir, "skipped", behind=behind, error=(
                 "execution in flight" if running else "execution state unknown"))
-        err = _integrate_remote(home_dir, branch, ahead)
-        if err:
-            return _record_pull(home_dir, "failed", behind=behind, error=err)
-        _, after = _compute_ahead_behind(home_dir, branch)
-        logger.info("pull: %s brought in %s commit(s) on %s", home_dir, behind, branch)
+        if behind:
+            err = _integrate_remote(home_dir, branch, ahead)
+            if err:
+                return _record_pull(home_dir, "failed", behind=behind, error=err)
+        if source_behind:
+            err = _integrate_source(home_dir, branch, source)
+            if err:
+                return _record_pull(home_dir, "failed", behind=0, error=err)
+        after = _compute_ahead_behind(home_dir, branch)[1] if own_on_origin else 0
+        logger.info("pull: %s brought in %s commit(s) on %s and %s from %s",
+                    home_dir, behind, branch, source_behind, source)
         return _record_pull(home_dir, "success", behind=after)
     except subprocess.CalledProcessError as exc:
         return _record_pull(home_dir, "failed", error=_summarize_git_error(
@@ -1025,6 +1152,14 @@ def _run_auto_sync_once(home_dir: Path) -> Dict:
             # stays a clean mirror. Fork-to-own agents own their fork's `main`.
             if _is_shared_source_branch(home_dir, branch):
                 return _fail(f"refused: source-mode on {branch}")
+
+            # Never stage over unmerged paths: `git add -A` resolves a `UU`
+            # file by staging its conflict markers, and the push below would
+            # carry them to origin as a successful sync (PR #3021 review).
+            unmerged = _unmerged_paths(home_dir)
+            if unmerged:
+                return _fail(
+                    f"refused: unmerged paths ({', '.join(unmerged[:3])})")
 
             # Stage everything.
             run_registered(
