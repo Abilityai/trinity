@@ -110,6 +110,22 @@ describe('honest state — loading ≠ empty ≠ failed (principle 15)', () => {
     expect(has(w, 'inbox-empty')).toBe(true)
   })
 
+  it('the total line is reserved in every state, so the list does not move when data lands', async () => {
+    // The list states a total above its rows; before this the line appeared
+    // only with the rows, and the list jumped ~36px down (layout stability).
+    const w = await mountInbox({}, { query: { tab: 'action' } })
+    expect(has(w, 'inbox-list-loading')).toBe(true)
+    expect(has(w, 'inbox-list-total-reserve')).toBe(true)
+    store.asksLoaded = true
+    await flushPromises()
+    expect(has(w, 'inbox-empty')).toBe(true)
+    expect(has(w, 'inbox-list-total-reserve')).toBe(true)
+    store.asks = [ask('a1')]
+    await flushPromises()
+    expect(has(w, 'inbox-list-total')).toBe(true)
+    expect(has(w, 'inbox-list-total-reserve')).toBe(false)
+  })
+
   it('Unread shows no empty copy until the thread list has loaded', async () => {
     const w = await mountInbox({ threadsLoaded: false }, { query: { tab: 'unread' } })
     expect(has(w, 'inbox-empty')).toBe(false)
@@ -211,6 +227,21 @@ describe('reading a chat (D11)', () => {
     const w = await mountInbox({ threads: [thread('t1', { unread: 1 })] }, { query: { tab: 'unread' } })
     expect(has(w, 'inbox-pane-failed')).toBe(true)
     expect(has(w, 'inbox-pane-empty')).toBe(false)
+  })
+
+  it('a deliverable renders its PAYLOAD, never the report row it came in', async () => {
+    // fetchAgentReport returns the whole report ({id, title, payload, row_meta});
+    // handing that to ReportRenderer made ReportSummary dump Id / Agent name /
+    // Report type / Title (found on a live stack). PortalDeliverables unwraps it.
+    store.fetchSessionDeliverablesStrict = vi.fn(async () => [
+      { id: 'r1', report_type: 'summary', title: 'Invoice', display_hint: null, created_at: iso(2) },
+    ])
+    const payload = { summary: 'Totals are in.' }
+    store.fetchAgentReport = vi.fn(async () => ({ id: 'r1', agent_name: 'scout', report_type: 'summary', title: 'Invoice', payload, row_meta: null }))
+    const w = await mountInbox({ threads: [thread('t1', { unread: 1 })] }, { query: { tab: 'unread' } })
+    const renderer = w.findComponent({ name: 'ReportRenderer' })
+    expect(renderer.exists()).toBe(true)
+    expect(renderer.props('payload')).toEqual(payload)
   })
 })
 

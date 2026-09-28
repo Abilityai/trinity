@@ -64,7 +64,16 @@
           data-testid="inbox-stale"
           @retry="retry"
         />
-        <div v-if="view.state === 'loading'" class="px-3 pt-3 space-y-2" aria-busy="true" data-testid="inbox-list-loading">
+        <!-- The list states its total on a line above the rows; that line's box is
+             reserved in every other state too, so the list never jumps when
+             its data lands (layout stability). Same box as PortalInboxList's. -->
+        <p
+          v-if="view.state !== 'ready'"
+          class="shrink-0 px-4 pt-3 pb-2 text-[11px] font-semibold uppercase tracking-wide"
+          aria-hidden="true"
+          data-testid="inbox-list-total-reserve"
+        >&nbsp;</p>
+        <div v-if="view.state === 'loading'" class="px-3 space-y-2" aria-busy="true" data-testid="inbox-list-loading">
           <div v-for="i in 4" :key="i" class="animate-pulse motion-reduce:animate-none h-14 rounded-lg bg-gray-100 dark:bg-gray-800/60"></div>
           <span class="sr-only">Loading your inbox…</span>
         </div>

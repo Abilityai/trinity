@@ -13,8 +13,8 @@ import { test, expect } from '@playwright/test'
  *      CONTAINER-relative (the #2711 method), never against an absolute pixel
  *      floor, which pins the host's scrollbar rather than the layout
  *
- * Arms 1, 2 and 4 need only a signed-in session; arm 3 needs an agent on the
- * roster and skips (never fails) without one (#2199).
+ * Arms 1 and 2 need only a signed-in session; arms 3 and 4 need an agent on
+ * the roster and skip (never fail) without one (#2199).
  */
 
 async function firstRosterAgent(page) {
@@ -57,6 +57,9 @@ test.describe('Workspace Inbox', () => {
   test('@smoke the Inbox list does not shift as its data arrives', async ({ page }) => {
     await page.setViewportSize({ width: 1280, height: 900 })
     await page.goto('/workspace/inbox')
+    // With no roster the Inbox never renders — the stage falls through to the
+    // roster copy (D9) — so there is no list to measure. Skip, never fail (#2199).
+    test.skip(!await firstRosterAgent(page), 'no agent on the roster, so no Inbox list to measure')
     const inbox = page.getByTestId('inbox')
     await inbox.waitFor({ timeout: 20000 })
     // The list's top edge RELATIVE to the Inbox root, from the first frame the
