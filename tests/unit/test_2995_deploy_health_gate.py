@@ -119,13 +119,31 @@ _SUDO_STUB = """\
 exec "$@"
 """
 
-# `inspect` answers for ANY container: the scheduler line calls it too, and a
-# missing answer would exit non-zero for a reason unrelated to the backend.
+# `inspect` answers for ANY container: the scheduler check calls it too, and a
+# missing answer would exit non-zero for a reason unrelated to the backend. The
+# scheduler answers per SCHED_MODE: `healthy`, `starting` (never healthy), or
+# `second` (starting on the first inspect, healthy from the second -- a container
+# `up -d` started a moment ago). `logs` prints one line the Error-check filter
+# keeps and one it drops: the run log is public, so only the first may appear.
 _DOCKER_STUB = """\
 #!/bin/sh
 case "$1" in
-  inspect) echo "running health=healthy restarts=0" ;;
-  logs) echo "ERROR: stub backend log line" ;;
+  inspect)
+    case "$*" in
+      *trinity-scheduler*)
+        n=$(cat "$STUB_DIR/sched.count" 2>/dev/null || echo 0)
+        n=$((n + 1))
+        echo "$n" > "$STUB_DIR/sched.count"
+        case "$SCHED_MODE" in
+          starting) echo starting ;;
+          second) if [ "$n" -ge 2 ]; then echo healthy; else echo starting; fi ;;
+          *) echo healthy ;;
+        esac ;;
+      *) echo "running health=healthy restarts=0" ;;
+    esac ;;
+  logs)
+    echo "ERROR: stub backend log line"
+    echo "INFO: unfiltered stub line that must not reach the public log" ;;
   *) echo "unexpected docker $*" >&2; exit 99 ;;
 esac
 """
@@ -140,7 +158,14 @@ class Run:
     sleeps: int
 
 
-def _run(shell: str, block: str, mode: str, tmp_path: Path, ent_stale: str = "0") -> Run:
+def _run(
+    shell: str,
+    block: str,
+    mode: str,
+    tmp_path: Path,
+    ent_stale: str = "0",
+    sched_mode: str = "healthy",
+) -> Run:
     exe = shutil.which(shell)
     if exe is None:
         pytest.skip(f"{shell} not available")
@@ -160,6 +185,7 @@ def _run(shell: str, block: str, mode: str, tmp_path: Path, ent_stale: str = "0"
         "STUB_DIR": str(stubs),
         "CURL_MODE": mode,
         "ENT_STALE": ent_stale,
+        "SCHED_MODE": sched_mode,
         "HOME": str(tmp_path),
         "LC_ALL": "C",
     }
@@ -224,6 +250,20 @@ def test_a_healthy_backend_passes_without_waiting(shell, tmp_path):
     assert r.rc == 0, _explain(r)
     assert "Backend: OK" in r.stdout, _explain(r)
     assert r.sleeps == 0, "no wasted wait on the healthy path\n" + _explain(r)
+
+
+@pytest.mark.parametrize("shell", _SHELLS)
+def test_a_health_failure_prints_filtered_diagnostics_only(shell, tmp_path):
+    """The new exit pre-empts the Error check, so the Health branch prints the
+    diagnostics itself -- but only the filtered shape: the Actions log is public,
+    and a raw ``docker logs --tail`` would publish every line the backend wrote."""
+    r = _run(shell, _health_slice(), "503", tmp_path)
+    assert r.rc != 0, _explain(r)
+    assert "health=" in r.stdout, "the backend container state was not printed\n" + _explain(r)
+    assert "ERROR: stub backend log line" in r.stdout, _explain(r)
+    assert "unfiltered stub line" not in r.stdout, (
+        "an unfiltered backend log line reached the public run log\n" + _explain(r)
+    )
 
 
 @pytest.mark.parametrize("shell", _SHELLS)
