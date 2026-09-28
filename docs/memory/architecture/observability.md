@@ -35,11 +35,12 @@ directly). Agents call the MCP `report` tool, which POSTs to `POST /api/agents/{
   retention sweeps → 429.
 - **Where an addressed report lands (ent#365, ent#610)**: the chat is resolved server-side
   at publish by `services/report_service.resolve_report_session(execution_id, agent_name,
-  audience)` — never from the request. With no `audience` it is NULL (operator-only). With
+  audience, allow_main=...)` — never from the request. With no `audience` it is NULL (operator-only). With
   one, the in-flight portal session of the publishing turn is kept **only if it belongs to
   the addressee** (`client_portal.db.get_portal_session(sid, agent, audience)`); otherwise —
-  no execution, a non-portal turn, or another person's chat — the report is stamped to the
-  addressee's **Main** (`client_portal.service.ensure_main_session`, race-safe by the
+  no execution, a non-portal turn, or another person's chat — **and only when the agent
+  publishes as itself** (`allow_main = current_user.agent_name == name`), the report is
+  stamped to the addressee's **Main** (`client_portal.service.ensure_main_session`, race-safe by the
   partial unique index) and that Main is touched with `added=0`. Why: without a chat the
   report has no inline card, no anchor and no unread count (the ent#610 Inbox counts
   deliverables stamped to the viewer's own sessions), and a report addressed to X during
@@ -50,7 +51,12 @@ directly). Agents call the MCP `report` tool, which POSTs to `POST /api/agents/{
   WARNING; a card placement never fails a publish. The precedent is
   `schedule_workspace_delivery.resolve_and_stamp`. The addressee is roster-validated with
   `include_owned=False` above it, so this is a bounded push channel to people the agent is
-  shared with (30/min per agent, one Main per pair), never to an arbitrary email.
+  shared with (30/min per agent, one Main per pair), never to an arbitrary email. **The
+  channel is the agent's, not its sharers'** (/cso, ent#610): the route is gated by
+  `AuthorizedAgent`, so every human the agent is shared with can publish as it; a human
+  publish keeps the addressee-owned in-flight chat and otherwise stays NULL, so one sharer
+  cannot mint or touch another person's Main. `allow_main` has no default — every call
+  site states it.
 - **Thin WS trigger**: `/ws` is `SCOPE_ALL`, and until ent#467 it was unfiltered, so the `agent_report` broadcast
   carries only `{agent_name, report_id, report_type, created_at}` — never `title`/`payload`
   (which can be sensitive). The frontend store refetches via the access-controlled REST

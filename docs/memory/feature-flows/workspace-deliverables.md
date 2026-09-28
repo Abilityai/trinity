@@ -67,8 +67,10 @@ Two rules make the columns trustworthy:
   never names a conversation, so it cannot post a card into one it was not part
   of. **Since ent#610** the in-flight chat is kept only if it belongs to the
   **addressee**; otherwise — no marker (a scheduled run, an expired turn), or a
-  turn that was someone else's — the report is stamped to the addressee's
-  **Main** (`services/report_service.resolve_report_session` →
+  turn that was someone else's — and **only when the agent publishes as itself**
+  (an agent-scoped key for this agent; a human sharer's publish stays NULL, so
+  one sharer cannot reach another person's Main), the report is stamped to the
+  addressee's **Main** (`services/report_service.resolve_report_session` →
   `ensure_main_session`, then `touch_portal_session(added=0)` so a report-only
   Main is listed by the sidebar). It therefore always has a chat card and an
   anchor, and it is an **unread arrival**: the ent#610 Inbox and every unread

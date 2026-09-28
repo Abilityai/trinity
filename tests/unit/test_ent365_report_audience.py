@@ -202,7 +202,7 @@ async def test_a_reachable_address_is_stored_with_the_report(publish, monkeypatc
     # ent#610: the resolution moved to the service (Invariant #1) and takes the
     # audience, because the turn's chat is kept only if the addressee owns it.
     monkeypatch.setattr(mod.report_service, "resolve_report_session",
-                        lambda eid, agent, audience: "sess-1")
+                        lambda eid, agent, audience, *, allow_main: "sess-1")
 
     await call(audience_email=CLIENT, execution_id="exec-1")
 

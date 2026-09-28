@@ -3531,10 +3531,12 @@ to localStorage in the clear.
   (portal turns, and schedules with `deliver_to_workspace_email` = me), and reports addressed
   to me. A scheduled, webhook, MCP or agent-to-agent run with no delivery address is in no
   one's Unread; the Work tab (platform door) owns it. Queued and running work is not an arrival.
-- **A deliverable always has a chat**: an addressed report published with no in-flight chat
-  **of the addressee** is stamped to the addressee's **Main** at publish (a report addressed to
+- **A deliverable the agent publishes always has a chat**: an addressed report the agent
+  publishes as itself with no in-flight chat **of the addressee** is stamped to the addressee's **Main** at publish (a report addressed to
   X during Y's turn goes to X's Main, never into Y's chat), and that Main is touched so the
-  sidebar lists it. Its card appears inline there, and it counts as an arrival.
+  sidebar lists it. Its card appears inline there, and it counts as an arrival. A report a
+  human sharer publishes as the agent never falls back to Main: it keeps the addressee's own
+  in-flight chat or none, so one person cannot put a badge in another's Inbox.
 - **The run outcome is a platform marker**: the completion message the platform writes into a
   chat carries `source = completion:done | completion:failed`; the Inbox's done/failed pill is
   read from that, never parsed out of the body (an agent reply that begins "**Finished**" is

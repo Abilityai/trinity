@@ -812,7 +812,8 @@ platform-written **`source = "completion:done" | "completion:failed"`** marker t
 `'voice'` only, so the new values are inert elsewhere.
 
 **An addressed report always has a chat.** See `observability.md` → Agent Reports:
-an addressed report with no in-flight chat **of the addressee** is stamped to the
+an addressed report with no in-flight chat **of the addressee**, published by the
+agent itself (a human sharer's publish never falls back), is stamped to the
 addressee's Main and that Main is touched (`added=0`). That is what makes the
 deliverable arm count it, gives the card an inline home and an anchor, and keeps
 the Main visible to `sidebarThreads` (which hides `is_main && !last_message_at`).
@@ -866,8 +867,8 @@ Main rather than the most recent thread, which is the whole of the rule for an
 agent-initiated message, an ask raised outside a chat (ent#364/#429) and a scheduled
 brief (ent#498) — all three already funnel through it via `ensure_thread_for_ask`. An
 explicit session id still wins. A fourth case lands in Main at WRITE time, not through
-that function: an addressed report published with no in-flight chat of its addressee
-(ent#610, `services/report_service.resolve_report_session`).
+that function: an addressed report the agent publishes with no in-flight chat of its
+addressee (ent#610, `services/report_service.resolve_report_session`).
 
 **Reset needs no second reset primitive.** `POST …/sessions/main/reset` archives the
 current Main and mints a fresh one in ONE transaction (clear the flag before the insert,

@@ -81,7 +81,8 @@ def _resolve_portal_session(execution_id: str, agent_name: str) -> Optional[str]
 
 
 def resolve_report_session(execution_id: Optional[str], agent_name: str,
-                           audience: Optional[str]) -> Optional[str]:
+                           audience: Optional[str], *,
+                           allow_main: bool) -> Optional[str]:
     """The Workspace chat an addressed report is stamped to (ent#365, ent#610).
 
     * No `audience` → None: an unaddressed report is operator-only.
@@ -89,7 +90,8 @@ def resolve_report_session(execution_id: Optional[str], agent_name: str,
       A report addressed to X during Y's turn used to be stamped into Y's chat,
       where X's unread arm never counted it and Y's inline read (audience = Y)
       never showed it — the card was in nobody's chat.
-    * Otherwise the addressee's **Main** (`ensure_main_session`, race-safe by
+    * Otherwise, **only when `allow_main`**, the addressee's **Main**
+      (`ensure_main_session`, race-safe by
       the partial unique index), touched with `added=0`. The touch keeps a
       report-only Main visible to the sidebar (`is_main && !last_message_at` is
       hidden) and moves it in the list; `added=0` because a report is not a
@@ -101,6 +103,15 @@ def resolve_report_session(execution_id: Optional[str], agent_name: str,
     an inline card, an anchor and an unread count. The audience was already
     roster-validated (`include_owned=False`) by the caller, so this is a bounded
     push channel to people the agent is shared with — never an arbitrary email.
+
+    **`allow_main` is the publisher gate, and it has no default on purpose** —
+    every call site states it. The publish route is gated by `AuthorizedAgent`,
+    so every human the agent is shared with can publish AS the agent; the Main
+    fallback is for the agent's OWN publish (an agent-scoped key for this
+    agent) only. Otherwise one sharer could address a report to another person
+    on the roster and mint and touch that person's Main — a badge, an excerpt
+    and a card in their Inbox the agent never produced (/cso, ent#610). A
+    human publish keeps the addressee-owned in-flight chat, else None.
 
     Fails soft to None with a WARNING, like its sibling: a card placement must
     never fail a publish.
@@ -122,6 +133,8 @@ def resolve_report_session(execution_id: Optional[str], agent_name: str,
                     "report session ownership check failed for %s (%s) — "
                     "falling back to the addressee's Main", agent_name, type(e).__name__,
                 )
+    if not allow_main:
+        return None
     try:
         main_id = portal_service.ensure_main_session(agent_name, audience)
         portal_db.touch_portal_session(main_id, utc_now_iso(), added=0)
