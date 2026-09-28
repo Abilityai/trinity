@@ -214,8 +214,9 @@ class AgentConfig(BaseModel):
     source_mode: Optional[bool] = True  # True = track source branch (pull only), False = create working branch
     # trinity-enterprise#705: what is being created. "agent" (the default when
     # None) is an agent whose repository IS the agent — a working branch it alone
-    # writes, auto-sync on, freeze-on-failure on — granted only when its token can
-    # actually push to that repo; otherwise it stays pull-only. "deployment" is a
+    # writes, auto-sync on, freeze-on-failure on — granted only when the creator's
+    # or agent's own token (never the platform-wide one) can actually push to
+    # that repo; otherwise it stays pull-only. "deployment" is a
     # deployment of a codebase: source mode, no auto-push. An EXPLICIT
     # `source_mode` always wins for the MODE; an auto-pushing agent (explicit
     # working branch and fork-to-own included) also gets freeze-on-failure.
