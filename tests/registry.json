@@ -1,6 +1,30 @@
 {
   "test_files": [
     {
+      "file": "unit/test_2996_owner_config_person_only.py",
+      "feature": "#2996",
+      "added": "2026-09-28",
+      "categories": [
+        "backend",
+        "auth",
+        "security",
+        "agent-config"
+      ],
+      "description": "PUT /autonomy and the 8 other agent_config writes (api-key-setting, read-only, resources, capabilities, capacity, timeout, public-channel-model, guardrails) take Depends(require_person). Real get_current_user with seeded key rows: agent key (own agent and a sibling) and system key -> 403 person_required with the stored value unchanged from a non-ambient seed; owner JWT, admin JWT and the owner's user key -> 2xx with the stored value changed. Override with an explicit principal dataclass (never MagicMock) for ops, portal_delegate, connector, an unknown future scope, a user scope carrying an agent identity, the loopback JWT, and a principal missing mcp_scope. Refusal does not disclose agent existence; reads stay open; every write in the file is person-gated."
+    },
+    {
+      "file": "unit/test_2996_self_service_session_only.py",
+      "feature": "ent#711",
+      "added": "2026-09-28",
+      "categories": [
+        "backend",
+        "auth",
+        "security",
+        "users"
+      ],
+      "description": "PUT /api/users/me/email and PUT/DELETE /api/users/me/github-pat take Depends(require_interactive): agent, system and the person's own user key -> 403 with users.email and the encrypted PAT column unchanged; override kinds refused by the route gate; JWT path unchanged (bind, 400 malformed, 409 taken, PAT set/clear, status read). Records that email sign-in resolves the account by the email column alone (get_or_create_email_user): after a rebind the old address resolves to a new account, and an email-named account collides."
+    },
+    {
       "file": "unit/test_2996_agent_schedule_tools_unchanged.py",
       "feature": "#2996",
       "added": "2026-09-28",
