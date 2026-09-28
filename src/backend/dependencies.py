@@ -1154,7 +1154,6 @@ def reject_non_person_principal(current_user: User) -> None:
         )
 
 
-
 # Human-only grant surfaces (#2996, trinity-enterprise#711). Two rules, both
 # ALLOWlists over `mcp_scope` that fail closed on a principal without one:
 #
@@ -1219,6 +1218,7 @@ def require_interactive(current_user: User = Depends(get_current_user)) -> User:
             detail=dict(HUMAN_ONLY_DETAIL),
         )
     return current_user
+
 
 def enforce_agent_spawn_scope(current_user: User, target_agent: str) -> None:
     """Lifecycle-mutation gate for agent-scoped callers
