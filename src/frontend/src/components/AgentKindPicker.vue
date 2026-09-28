@@ -55,7 +55,7 @@ const OPTIONS = [
   {
     value: 'agent',
     title: 'An agent',
-    desc: 'The repository is this agent — its memory, skills and state. It gets its own branch and saves its work there every 15 minutes. If your GitHub token cannot push to this repository it is created pull-only; to keep an agent built from someone else\'s template, choose Fork instead.',
+    desc: 'The repository is this agent — its memory, skills and state. It gets its own branch and saves its work there. That needs your own GitHub token (Settings) with push access to this repository — the platform-wide token does not count; without one it is created pull-only; to keep an agent built from someone else\'s template, choose Fork instead.',
   },
   {
     value: 'deployment',

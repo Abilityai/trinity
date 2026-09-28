@@ -4,7 +4,8 @@
   After a GitHub-backed create: what the platform decided about the git binding
   and why — the create response's `git_mode` ({kind, source_mode, reason},
   ent#705). The case that matters most is the honest one: you asked for an
-  agent, but the token cannot push, so it was created pull-only.
+  agent, but there was no token of your own that can push (the platform-wide
+  token never counts, ent#705), so it was created pull-only.
 -->
 <template>
   <div
