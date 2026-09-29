@@ -62,8 +62,23 @@ def test_firstboot_calls_the_shared_installer_for_the_site_phase() -> None:
 
 
 def test_bakery_calls_the_shared_installer_for_the_machine_phase() -> None:
+    """One bakery, two clouds (#3004): the AWS bundle runs this script with
+    TRINITY_CLOUD=aws, and an unset value keeps the DigitalOcean build as it was."""
     body = _BAKERY.read_text()
-    assert "./scripts/deploy/start.sh --provision --cloud digitalocean --machine-only" in body
+    assert './scripts/deploy/start.sh --provision --cloud "${TRINITY_CLOUD}" --machine-only' in body
+    assert 'TRINITY_CLOUD="${TRINITY_CLOUD:-digitalocean}"' in body
+    assert re.search(r"^\s*digitalocean\|aws\) ;;$", body, re.MULTILINE), (
+        "the bakery must refuse a cloud start.sh does not know"
+    )
+
+
+def test_firstboot_passes_the_aws_provenance_on_the_aws_image() -> None:
+    body = _FIRSTBOOT.read_text()
+    assert "--provision --cloud aws --site-only --provenance aws-marketplace" in body
+    assert 'CLOUD="$(cat "${STATE_DIR}/cloud"' in body
+    assert 'echo "${TRINITY_CLOUD}" > /etc/trinity/cloud' in _BAKERY.read_text(), (
+        "first boot reads the cloud the bakery must record"
+    )
 
 
 def test_packer_tree_does_not_re_implement_provisioning() -> None:

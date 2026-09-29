@@ -182,11 +182,70 @@ password before it creates the droplet.
 
 Provenance is written by whatever provisions the box (in this repo,
 `start.sh --provision`) — `TRINITY_INSTALL_SOURCE` in
-`.env` (`do-marketplace` / `vultr-marketplace` / `do-script` / `script`), read once
+`.env` (`do-marketplace` / `vultr-marketplace` / `aws-marketplace` / `do-script` /
+`aws-script` / `script`), read once
 at first boot and recorded permanently. Setting it by hand afterwards does nothing: the
 recorder never overwrites an existing value and the API refuses to write or
 clear it, because a gate that can be self-asserted is not a gate. Leave it unset
 on an ordinary install — the guide then renders nowhere, which is the intent.
+
+## AWS (EC2)
+
+Three ways onto EC2, all running the same installer (`start.sh --provision --cloud aws`):
+
+| Path | What you do | Admin account |
+|---|---|---|
+| AWS Marketplace AMI (listing pending) | Subscribe, then Launch from Website | Open `https://<public IP>/`, enter the instance ID, set a password |
+| CloudFormation Launch Stack (`packer/aws/trinity.cfn.yaml`) | Create the stack; it adds an Elastic IP and a security group for 80/443 | Same; the stack outputs show the URL and the instance ID |
+| Script on your own Ubuntu 24.04 instance | Run the commands below | Same, unless you supply `ADMIN_PASSWORD` |
+
+**Instance.** x86_64, 8 GiB of memory (`t3a.large` is the default), Ubuntu 24.04,
+a public IPv4 address (auto-assigned or an Elastic IP), and a security group
+allowing TCP 80 and 443 from anywhere. Keep 22 closed or limited to your own
+address. The instance needs no IAM role.
+
+**Script install.** On a fresh instance, as root:
+
+```bash
+git clone --depth 1 --branch <release tag> https://github.com/abilityai/trinity.git /opt/trinity
+cd /opt/trinity
+./scripts/deploy/start.sh --provision --cloud aws --hosted --unattended
+```
+
+It reads the public IP from the instance metadata service (IMDSv2), installs
+Docker, Caddy and the host firewall, obtains a Let's Encrypt certificate for the
+IP, and starts Trinity. Provenance is recorded as `aws-script`; the AMI records
+`aws-marketplace`.
+
+**First admin.** With no `ADMIN_PASSWORD` in the environment or `.env`, an AWS
+install writes this instance's ID (from IMDSv2) to `trinity-data/setup-claim` and
+sets `ADMIN_PASSWORD_SOURCE=instance-id`. `/setup` asks for the instance ID
+(EC2 console → Instances → Instance ID, starting `i-`) before it creates the
+admin, so someone who finds the IP cannot take the instance. Supply
+`ADMIN_PASSWORD=...` in the environment to skip the claim.
+
+**Stop/start.** EC2 gives an instance without an Elastic IP a new public IPv4
+after a stop/start. `trinity-ip-refresh.timer` checks the metadata service a
+minute after boot and every five minutes after that. When the address changed it
+rewrites the Caddyfile and the certificate, rewrites `FRONTEND_URL` only if it
+still points at the old IP (a domain you set is kept), and recreates the backend
+from the images already on the instance. It never pulls or upgrades Trinity, and
+it logs only when something changed or failed. Allow a few minutes after a start before opening the new address. An
+Elastic IP avoids the change altogether.
+
+**No public IPv4.** `start.sh` stops with "this EC2 instance has no public IPv4
+address". Enable auto-assign public IP on the subnet or attach an Elastic IP,
+then re-run.
+
+**Metadata service.** Agent containers cannot reach `169.254.169.254`
+(`docker-firewall.sh` drops link-local traffic from containers). The instance
+metadata service holds user data and any instance-role credentials.
+
+**The CloudFormation template** creates the instance in the region's default
+VPC. An account without a default VPC needs the template's instance given a
+subnet. The AMI is published in us-east-1 only.
+
+**Building the AMI:** [packer/aws/README.md](../packer/aws/README.md).
 
 ## Configuration
 
