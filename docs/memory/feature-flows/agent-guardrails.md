@@ -39,7 +39,7 @@ platform's baseline protections.
 
 - **UI (Agent Detail)**: owner-only **Settings** tab (renamed from "Guardrails", #1108/#1122) — `GuardrailsPanel.vue` rendered unchanged as **section #1** inside `components/settings/SettingsPanel.vue`, wired in `AgentDetail.vue:187` (tab pushed at `647`, gated on `agent.can_share`). Old `?tab=guardrails` deep links resolve via `TAB_ALIASES` (`guardrails → settings`). Exposes `max_turns_chat` / `max_turns_task` only (#967 / #992).
 - **API (read)**: `GET /api/agents/{name}/guardrails` — any authenticated user; 404 if no container.
-- **API (write)**: `PUT /api/agents/{name}/guardrails` — **owner-only**; empty body clears overrides. Requires agent restart to apply.
+- **API (write)**: `PUT /api/agents/{name}/guardrails` — **owner-only** and **person-only** (`Depends(require_person)`, #2996: agent- and system-scoped keys get 403 `person_required`); empty body clears overrides. Requires agent restart to apply.
 - **Agent creation**: overrides serialized into the `AGENT_GUARDRAILS` env var (`crud.py`).
 - **Agent restart**: env var re-serialized from DB (`lifecycle.py`); runtime config regenerated at boot (`startup.sh` → `write-runtime-config.py`).
 - **Tool-call time**: Claude Code `PreToolUse` / `PostToolUse` hooks fire on every `Bash` / file-write tool call.

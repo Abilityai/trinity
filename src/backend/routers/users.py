@@ -21,7 +21,12 @@ from models import (
     UserPreferencesResponse,
 )
 from database import db
-from dependencies import require_admin, get_current_user, reject_non_interactive_principal
+from dependencies import (
+    require_admin,
+    get_current_user,
+    reject_non_interactive_principal,
+    require_interactive,
+)
 from services import user_preferences_service
 from services.user_preferences_service import PreferenceConflict, PreferenceError
 
@@ -37,9 +42,13 @@ _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s.]+$")
 @router.put("/me/email")
 async def update_my_email(
     body: UpdateMyEmailRequest,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_interactive),
 ):
     """Bind a sign-in email to the current account (#82 Phase 1 transition).
+
+    Signed-in session only (trinity-enterprise#711): email sign-in resolves the
+    account by this column, so binding it is a sign-in identity change and no
+    MCP key may make it.
 
     The migration path for an existing admin created before #82 — whose stored
     email is still the placeholder 'admin' — to register a real email and then
@@ -93,9 +102,11 @@ async def get_my_github_pat_status(current_user: User = Depends(get_current_user
 @router.put("/me/github-pat")
 async def set_my_github_pat(
     body: GitHubPATRequest,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_interactive),
 ):
     """Store the caller's personal GitHub PAT (validated + encrypted at rest).
+
+    Signed-in session only: future agent creations inherit this credential.
 
     Honest validation (ent#162): a token GitHub *rejects* is a 400; a token we
     simply could not verify because GitHub was unreachable is a 503 — we do not
@@ -130,8 +141,10 @@ async def set_my_github_pat(
 
 
 @router.delete("/me/github-pat")
-async def clear_my_github_pat(current_user: User = Depends(get_current_user)):
+async def clear_my_github_pat(current_user: User = Depends(require_interactive)):
     """Clear the caller's personal GitHub PAT — reverts them to the global PAT.
+
+    Signed-in session only, like setting it.
 
     Agents already created under it keep their own persisted per-agent copy
     (#347) and are unaffected; only future creations fall back to the platform
