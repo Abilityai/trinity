@@ -178,6 +178,18 @@ describe('D10 — selection scopes the rail, never activeAgentName', () => {
     expect(w.findComponent({ name: 'PortalRail' }).exists()).toBe(true)
   })
 
+  it('§3g A4: the rail is counted before it arrives, and not once its column is there', async () => {
+    arm()
+    const { w } = await boot('/workspace/inbox')
+    const inbox = () => w.findComponent({ name: 'PortalInbox' })
+    expect(w.findComponent({ name: 'PortalRail' }).exists()).toBe(false)
+    expect(inbox().props('railAllowance')).toBeGreaterThanOrEqual(48)
+    inbox().vm.$emit('update:preview', 'thread:t1')
+    await flushPromises()
+    expect(w.findComponent({ name: 'PortalRail' }).exists()).toBe(true)
+    expect(inbox().props('railAllowance')).toBe(0)
+  })
+
   it('no selection → no rail, and the reserved column is only held while loading', async () => {
     arm()
     const { w } = await boot('/workspace/inbox')

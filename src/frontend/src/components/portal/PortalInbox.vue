@@ -18,7 +18,7 @@
   (`?tab=&item=`, written with `replace`), so a reload lands where you were.
 -->
 <template>
-  <div class="flex-1 min-h-0 flex flex-col" data-testid="inbox" @keydown.esc="onEsc">
+  <div ref="rootEl" class="flex-1 min-h-0 flex flex-col" data-testid="inbox" :data-layout="layout.mode" @keydown.esc="onEsc">
     <header class="shrink-0 flex items-start gap-3 px-4 pt-4 pb-2">
       <div class="min-w-0 flex-1">
         <h1 class="text-lg font-semibold text-gray-900 dark:text-gray-100">Inbox</h1>
@@ -66,13 +66,14 @@
     </div>
 
     <div class="flex-1 min-h-0 flex">
-      <!-- The list. Below `sm` it and the pane are successive states of one
-           column (D12); from `sm` up they sit side by side. -->
+      <!-- The list. STACKED (the container is under 720px — §3g A4) it and
+           the pane are successive states of one column (D12); SPLIT they sit
+           side by side, the list 320px, or 384px from 1100. -->
       <div
         ref="listColEl"
         tabindex="-1"
-        class="min-h-0 flex-col w-full sm:w-80 lg:w-96 shrink-0 sm:border-r border-gray-200 dark:border-gray-750 focus:outline-none"
-        :class="phone && selectedItem ? 'hidden sm:flex' : 'flex'"
+        class="min-h-0 flex-col shrink-0 border-gray-200 dark:border-gray-750 focus:outline-none"
+        :class="listColClass"
         data-testid="inbox-list-column"
       >
         <InlineError
@@ -140,14 +141,14 @@
       <!-- On a phone the columns follow the RESOLVED item, not the key: a key
            that names a chat deleted elsewhere must show the list, never a
            pane-less dead end with no Back. -->
-      <div class="min-w-0 flex-1 min-h-0 flex-col" :class="phone && !selectedItem ? 'hidden sm:flex' : 'flex'">
+      <div class="min-w-0 flex-1 min-h-0 flex-col" :class="stacked && !selectedItem ? 'hidden' : 'flex'">
         <PortalInboxPane
           v-if="selectedItem"
           ref="paneEl"
           :key="selectedItem.key"
           :item="selectedItem"
           :agent-label="labels[selectedItem.agent_name] || selectedItem.agent_name || ''"
-          :show-back="phone"
+          :show-back="stacked"
           :read-failed="readFailedKey === selectedItem.key"
           @rendered="(k) => { renderedKey = k }"
           @mark-read="readNow(selectedItem)"
@@ -172,6 +173,7 @@ import BaseButton from '@/components/base/BaseButton.vue'
 import OverflowTabs from '@/components/OverflowTabs.vue'
 import LoadFailed from '@/components/LoadFailed.vue'
 import InlineError from '@/components/InlineError.vue'
+import { useContainerWidth } from '@/composables/useContainerWidth'
 import ConfirmDialog from '@/components/ConfirmDialog.vue'
 import { useNotification } from '@/composables/useNotification'
 import PortalInboxList from './PortalInboxList.vue'
@@ -181,7 +183,7 @@ import { viewState, staleBannerMessage } from '@/utils/loadingState'
 import {
   actionItems, unreadItems, allItems, inboxCounts, defaultInboxTab, normalizeInboxTab,
   stableRows, emptyVisit, isGhost, resolveItem, parseItemKey, listHeadLabel,
-  markAllLabel, markAllConfirm, allFooterNotes, pageWindow, PAGE_SIZE,
+  markAllLabel, markAllConfirm, allFooterNotes, pageWindow, PAGE_SIZE, inboxLayout,
 } from './portalInbox'
 import { askBadgeTitle, unreadBadgeTitle } from './portalUtils'
 import { capCount } from '@/utils/tabTitle'
@@ -197,6 +199,10 @@ const props = defineProps({
   // agent name → display label.
   labels: { type: Object, default: () => ({}) },
   isPlatform: { type: Boolean, default: false },
+  // The rail's width while it is not yet a column (0 once it is): counted
+  // before it arrives, so a preview that brings it in cannot flip the layout
+  // (§3g A4).
+  railAllowance: { type: Number, default: 0 },
   // §3g S5: the shell's `markRead(kind, id)` — resolves true / false, never
   // rejects (S4). A function rather than an emit, because the pane needs its
   // verdict: a false result is `inbox-pane-read-error`.
@@ -208,10 +214,11 @@ const store = useClientPortalStore()
 const route = useRoute()
 const router = useRouter()
 
-// ---- phone (below `sm`) --------------------------------------------------------
-// Read SYNCHRONOUSLY in setup, not on mount: the auto-select watcher below is
-// `immediate`, and a phone that read as desktop for that first run would select
-// (and start the rail feeds for) a row nobody tapped.
+// ---- layout (§3g A4) ------------------------------------------------------------
+// The phone VIEWPORT is read SYNCHRONOUSLY in setup, not on mount: the preview
+// watcher below is `immediate`, and a phone that read as desktop for that first
+// run would preview (and start the rail feeds for) a row nobody tapped. Before
+// the container is measured the layout falls back on it.
 const phone = ref(false)
 const mq = typeof window !== 'undefined' && typeof window.matchMedia === 'function'
   ? window.matchMedia('(max-width: 639px)')
@@ -220,6 +227,21 @@ const syncPhone = () => { phone.value = !!mq?.matches }
 syncPhone()
 onMounted(() => mq?.addEventListener?.('change', syncPhone))
 onBeforeUnmount(() => mq?.removeEventListener?.('change', syncPhone))
+
+// Split or stacked is the CONTAINER's width (`inboxLayout`), with hysteresis:
+// the previous mode is an input, so it is kept in a ref, not derived.
+const rootEl = ref(null)
+const containerWidth = useContainerWidth(rootEl)
+const layout = ref(inboxLayout({ width: 0, phoneViewport: phone.value }))
+watch([containerWidth, () => props.railAllowance, phone], ([width, allowance, phoneViewport]) => {
+  const next = inboxLayout({ width, allowance, phoneViewport, prev: layout.value.mode })
+  if (next.mode !== layout.value.mode || next.wide !== layout.value.wide) layout.value = next
+})
+const stacked = computed(() => layout.value.mode === 'stacked')
+const listColClass = computed(() => {
+  if (stacked.value) return selectedItem.value ? 'hidden w-full' : 'flex w-full'
+  return layout.value.wide ? 'flex w-96 border-r' : 'flex w-80 border-r'
+})
 
 // ---- the rows -------------------------------------------------------------------
 const counts = computed(() => inboxCounts(props.threads, store.openAsks))
@@ -266,7 +288,9 @@ const footerNotes = computed(() => (tab.value === 'all'
 // (`update:preview`) so the rail can follow it without a `?item=`.
 const routeItem = computed(() => (typeof route.query.item === 'string' ? route.query.item : null))
 const previewFor = ref({ tab: null, key: null })
-const previewKey = computed(() => (previewFor.value.tab === tab.value ? previewFor.value.key : null))
+// A STACKED Inbox previews nothing: its pane replaces the list, and a preview
+// there would open a chat nobody chose (§3g A4 — no auto-select when stacked).
+const previewKey = computed(() => (!stacked.value && previewFor.value.tab === tab.value ? previewFor.value.key : null))
 const selectedKey = computed(() => routeItem.value || previewKey.value)
 watch(previewKey, (k) => emit('update:preview', k || null))
 onBeforeUnmount(() => emit('update:preview', null))
@@ -415,7 +439,7 @@ async function open(it) {
   returnIndex = Math.max(0, shownItems.value.findIndex((x) => x.key === it.key))
   if (it.type === 'thread') readIntent.value = it.key
   const navigated = replaceQuery({ tab: tab.value, item: it.key })
-  if (phone.value) {
+  if (stacked.value) {
     // The pane mounts once the URL names the item; focus its heading then.
     returnKey = it.key
     await navigated
@@ -450,20 +474,34 @@ async function back() {
     || col
   el.focus?.()
 }
-function onEsc() { if (phone.value && selectedKey.value) back() }
+function onEsc() { if (stacked.value && selectedKey.value) back() }
+// §3g A4: a layout flip keeps an OPENED item and moves focus to where it now
+// is — split → stacked shows its pane (focus the heading), stacked → split puts
+// its row beside it (focus the row). Only when focus was inside the Inbox, so a
+// resize never steals it from elsewhere (the rail being dragged, the composer).
+watch(stacked, async (now, was) => {
+  if (now === was || !routeItem.value) return
+  const active = typeof document !== 'undefined' ? document.activeElement : null
+  const inside = !active || active === document.body || !!rootEl.value?.contains(active)
+  await nextTick()
+  if (!inside) return
+  if (now) { paneEl.value?.focusHeading?.(); return }
+  const rows = listColEl.value ? [...listColEl.value.querySelectorAll('[data-inbox-row]')] : []
+  rows.find((r) => r.getAttribute('data-inbox-row') === routeItem.value)?.focus?.()
+})
 // On a phone the pane IS the screen: if the open chat is deleted elsewhere the
 // pane has nothing to draw, so it goes Back for the reader — the list, focus on
 // the row now in its place — rather than leaving them on an empty column.
 watch(selectedItem, (it, prev) => {
-  if (phone.value && prev && !it && selectedKey.value) back()
+  if (stacked.value && prev && !it && selectedKey.value) back()
 })
 
 // D10: on desktop the tab's first row is previewed, so the rail column does not
 // pop in on the first click. Never on phone (a landing there costs no feed),
 // never in the URL, and never as a READ — a preview is not the person opening
 // the chat (§3g S5).
-watch([() => view.value.state, () => shownItems.value.length, routeItem, previewKey, tab, phone], () => {
-  if (phone.value || routeItem.value) return
+watch([() => view.value.state, () => shownItems.value.length, routeItem, previewKey, tab, stacked], () => {
+  if (stacked.value || routeItem.value) return
   if (view.value.state !== 'ready' || !shownItems.value.length) return
   if (previewKey.value && shownItems.value.some((it) => it.key === previewKey.value)) return
   previewFor.value = { tab: tab.value, key: shownItems.value[0].key }

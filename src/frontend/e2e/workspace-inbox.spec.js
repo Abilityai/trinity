@@ -79,4 +79,32 @@ test.describe('Workspace Inbox', () => {
     const spread = Math.max(...tops) - Math.min(...tops)
     expect(spread, `the list moved ${spread}px while loading — ${tops.join(',')}`).toBeLessThanOrEqual(1)
   })
+
+  // §3g A4: at 768px (sidebar beside it) and at 640×400 (a 1280 window at 200%)
+  // the Inbox's container is under 720px, so it STACKS: an opened row's pane
+  // takes the whole Inbox instead of the ~150px (768) / 64px (zoomed) the
+  // viewport rule left it. Relative geometry only — the pane against the Inbox
+  // root, never an absolute pixel floor.
+  for (const vp of [{ width: 768, height: 900 }, { width: 640, height: 400 }]) {
+    test(`an opened row's pane takes the Inbox's width at ${vp.width}×${vp.height}`, async ({ page }) => {
+      await page.setViewportSize(vp)
+      await page.goto('/workspace/inbox?tab=all')
+      test.skip(!await firstRosterAgent(page), 'no agent on the roster, so no Inbox')
+      const inbox = page.getByTestId('inbox')
+      await inbox.waitFor({ timeout: 20000 })
+      const row = page.locator('[data-inbox-row]').first()
+      test.skip(!await row.count(), 'nothing in All to open')
+      await expect(inbox).toHaveAttribute('data-layout', 'stacked')
+      await row.click()
+      const pane = page.getByTestId('inbox-pane')
+      await expect(pane).toBeVisible()
+      await expect(page.getByTestId('inbox-list-column')).toBeHidden()
+      const ratio = await page.evaluate(() => {
+        const root = document.querySelector('[data-testid="inbox"]').getBoundingClientRect()
+        const p = document.querySelector('[data-testid="inbox-pane"]').getBoundingClientRect()
+        return p.width / root.width
+      })
+      expect(ratio, `the pane is ${Math.round(ratio * 100)}% of the Inbox`).toBeGreaterThan(0.95)
+    })
+  }
 })

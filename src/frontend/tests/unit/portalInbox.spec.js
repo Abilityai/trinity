@@ -207,6 +207,36 @@ describe('pageWindow — 50 rows, then Show more (§3g SM / C4)', () => {
   })
 })
 
+describe('inboxLayout — split or stacked by the CONTAINER, not the viewport (§3g A4)', () => {
+  const L = (width, o = {}) => inboxLayout({ width, ...o })
+  it.each([
+    // [width, allowance, prev, mode, wide]
+    [1280, 0, null, 'split', true],
+    [1100, 0, null, 'split', true],
+    [1099, 0, null, 'split', false],
+    [720, 0, null, 'split', false],
+    [719, 0, null, 'stacked', false],
+    [719, 0, 'split', 'split', false],     // hysteresis: stays split down to 704
+    [704, 0, 'split', 'split', false],
+    [703, 0, 'split', 'stacked', false],
+    [735, 0, 'stacked', 'split', false],   // …and a stacked one splits again at 720
+    [719, 0, 'stacked', 'stacked', false],
+    [608, 0, null, 'stacked', false],      // 1280 with the rail open
+    [1100, 384, null, 'stacked', false],   // the rail about to arrive is counted
+    [1200, 48, null, 'split', true],
+  ])('%ipx (allowance %i, was %s) → %s', (width, allowance, prev, mode, wide) => {
+    expect(L(width, { allowance, prev })).toEqual({ mode, wide })
+  })
+  it('an unmeasured container falls back to the viewport', () => {
+    expect(L(0, { phoneViewport: true })).toEqual({ mode: 'stacked', wide: false })
+    expect(L(0, { phoneViewport: false })).toEqual({ mode: 'split', wide: false })
+    expect(L(-1, {})).toEqual({ mode: 'split', wide: false })
+  })
+  it('a phone viewport is stacked whatever the container says', () => {
+    expect(L(900, { phoneViewport: true })).toEqual({ mode: 'stacked', wide: false })
+  })
+})
+
 describe('wording: arrivals are "new", not "replies" (D3)', () => {
   it('the row title and the badge title say new', () => {
     expect(agentRowTitle({ name: 'scribe', unread: 2 })).toBe('scribe — 2 new')
@@ -285,6 +315,7 @@ describe('property: the Inbox and the sidebar never disagree (AC 1, D13)', () =>
 import {
   isInboxPath, inboxBranchVisible, inboxSelectedAgent, stableRows, emptyVisit, isGhost, resolveItem,
   paneWindow, openInChatTarget, agentLabels, PANE_TAIL, listHeadLabel, inboxRowLabel, pageWindow, PAGE_SIZE,
+  inboxLayout,
 } from '@/components/portal/portalInbox'
 
 describe('shell seams', () => {

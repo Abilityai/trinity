@@ -55,8 +55,13 @@ Sign-in / reload on bare /workspace
                   counters solid: needs = white on status-urgent-700, new = white on
                   action-primary-700 — the same two on the pinned row, the agent pills
                   (agent-ask-count / agent-unread-count), the chat rows (§3g A3b)
-      desktop: the tab's first row is a local PREVIEW — not ?item=, NOT a read, emitted as
-               update:preview (§3g S5, T2); phone: nothing selected
+      layout (§3g A4): inboxLayout({width: useContainerWidth(root), allowance: Portal's
+               inboxRailAllowance — the rail's width until its column exists, then 0 —,
+               phoneViewport, prev}) → split ≥ 720 (16px hysteresis; w-96 list ≥ 1100) |
+               stacked (list → pane + Back; no preview); data-layout on the root; a flip
+               keeps an opened item and focuses its heading (stacked) / row (split)
+      split: the tab's first row is a local PREVIEW — not ?item=, NOT a read, emitted as
+               update:preview (§3g S5, T2); stacked: nothing selected
     stableRows(fresh, visit)   rows keep their place for one TAB VISIT (§3g S1): a row that leaves
                                stays as a ghost (chat drawn read, ask drawn ended); a poll never
                                re-sorts; a new row goes in before its nearest fresh neighbour; a

@@ -334,6 +334,7 @@
           :labels="inboxAgentLabels"
           :is-platform="store.isPlatformSession"
           :mark-read="markRead"
+          :rail-allowance="inboxRailAllowance"
           @update:preview="(k) => { inboxPreview = k }"
           @refresh="refreshThreads"
           @open-chat="(url) => router.push(url)"
@@ -774,7 +775,7 @@ import PortalAgentBand from '@/components/portal/PortalAgentBand.vue'
 import PortalAgentDetails from '@/components/portal/PortalAgentDetails.vue'
 import PortalSuggestions from '@/components/portal/PortalSuggestions.vue'
 import ColumnResizeHandle from '@/components/ColumnResizeHandle.vue'
-import { useColumnResize } from '@/composables/useColumnResize'
+import { useColumnResize, RAIL_COLLAPSED } from '@/composables/useColumnResize'
 import PortalSkeleton from '@/components/portal/PortalSkeleton.vue'
 import PortalThemeSwitch from '@/components/portal/PortalThemeSwitch.vue'
 import PortalRail from '@/components/portal/PortalRail.vue'
@@ -1131,6 +1132,15 @@ const railColumnReserved = computed(() => Boolean(
 const railHasColumn = computed(() => Boolean(
   railVisible.value && railTabs.value.length && !voiceCanvasHasColumn.value
 ))
+
+// trinity-enterprise#610 §3g A4: the Inbox decides split / stacked by its OWN
+// width. While the rail is not yet a column — nothing selected, so no rail — its
+// width is counted in advance (the width it will render at: the open width or
+// the 48px strip), so a preview that brings the rail in cannot flip the layout
+// it was chosen in. 0 once the column (or its reservation) is really there.
+const inboxRailAllowance = computed(() => ((railHasColumn.value || railColumnReserved.value)
+  ? 0
+  : (railState.value.open ? columns.effectiveRail.value : RAIL_COLLAPSED)))
 
 // #2711 (review): has this column ever actually held the rail? A reservation
 // that is handed back without ever becoming a rail was a guess that did not pay

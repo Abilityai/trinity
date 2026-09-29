@@ -401,6 +401,30 @@ export function resolveItem(key, { threads = [], asks = [], previews = {} } = {}
   return a ? askItem(a) : null
 }
 
+// ---- Layout (§3g A4) ----------------------------------------------------------------
+//
+// Split (list beside pane) or stacked (list, then pane, with Back) is decided by
+// the Inbox's CONTAINER width, never the viewport: the sidebar and the rail take
+// width a viewport query cannot see (1280 with the rail open leaves ~608px).
+// Split needs 720 (a 320 list + a 400 pane); from 1100 the list is 384 wide.
+// 16px of hysteresis stops a resize — or the rail arriving — from flapping it.
+// `allowance` is the rail's width while it is NOT yet a column (0 once it is):
+// counting it before it arrives is what keeps a preview that brings the rail in
+// from flipping the layout it was chosen in. An unmeasured container (width
+// ≤ 0) falls back on the viewport; a phone viewport is always stacked.
+export const SPLIT_MIN = 720
+export const SPLIT_HYSTERESIS = 16
+export const WIDE_MIN = 1100
+export function inboxLayout({ width = 0, allowance = 0, phoneViewport = false, prev = null } = {}) {
+  if (phoneViewport) return { mode: 'stacked', wide: false }
+  const w = Number(width) || 0
+  if (w <= 0) return { mode: 'split', wide: false }
+  const eff = w - (Number(allowance) || 0)
+  const splitAt = prev === 'split' ? SPLIT_MIN - SPLIT_HYSTERESIS : SPLIT_MIN
+  const mode = eff >= splitAt ? 'split' : 'stacked'
+  return { mode, wide: mode === 'split' && eff >= WIDE_MIN }
+}
+
 // ---- The pane (D11) -------------------------------------------------------------
 
 export const PANE_HISTORY_LIMIT = 50

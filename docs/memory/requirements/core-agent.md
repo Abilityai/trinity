@@ -3574,9 +3574,14 @@ to localStorage in the clear.
   refresh keeps the list with a stale banner (§26.8, the asks read fails loud). All waits on
   the chats only: its ask rows merge in when the asks read lands, and a failed asks read is a
   banner above the chats, never a failed All (§3g S3 / A11).
-- **Phone**: list and pane are successive full-width states with an explicit Back (Esc too);
-  nothing is auto-selected, so the landing starts no agent feed.
-  On desktop the tab's first row is previewed (the rail column does not pop in on the first
+- **Split or stacked by the Inbox's own width (§3g A4)**: side by side from 720px of CONTAINER
+  width (a 320px list + a 400px pane; a 384px list from 1100), with 16px of hysteresis; below
+  that — a phone, a 768px window beside the sidebar, 200% zoom, a 1280 window with the rail
+  open — list and pane are successive full-width states with an explicit Back (Esc too), and
+  nothing is previewed, so the landing starts no agent feed. The rail's width is counted
+  before it arrives, so a preview that brings it in cannot flip the layout; a flip keeps an
+  opened item and moves focus to it (its pane heading when stacked, its row when split).
+  When split, the tab's first row is previewed (the rail column does not pop in on the first
   click); the preview is never a read and never enters the URL — `?item=` holds only what the
   reader opened (§3g S5, T2).
 - **Known properties (stated, not bugs)**:

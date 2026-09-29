@@ -732,6 +732,69 @@ describe('Mark all read (D11, §3g A9)', () => {
   })
 })
 
+describe('the layout follows the CONTAINER width (§3g A4)', () => {
+  // A ResizeObserver that reports a fixed content width the moment it observes.
+  function fakeRO(width) {
+    return class {
+      constructor(cb) { this.cb = cb }
+      observe(el) { this.cb([{ target: el, contentRect: { width } }]) }
+      unobserve() {}
+      disconnect() {}
+    }
+  }
+  let saved
+  beforeEach(() => { saved = globalThis.ResizeObserver })
+  afterEach(() => { globalThis.ResizeObserver = saved })
+
+  it('at 700px on a desktop viewport it stacks: the list takes the width and nothing is previewed', async () => {
+    globalThis.ResizeObserver = fakeRO(700)
+    const w = await mountInbox({ threads: [thread('t1', { unread: 2 })] }, { query: { tab: 'unread' } })
+    expect(w.find('[data-testid="inbox"]').attributes('data-layout')).toBe('stacked')
+    expect(has(w, 'inbox-pane')).toBe(false) // no auto-select when stacked
+    expect(w.find('[data-testid="inbox-list-column"]').classes()).toContain('w-full')
+    // Opening a row shows the pane in the list's place, with Back.
+    await w.find('[data-testid="inbox-row-thread:t1"]').trigger('click')
+    await flushPromises()
+    expect(w.find('[data-testid="inbox-list-column"]').classes()).toContain('hidden')
+    expect(has(w, 'inbox-pane-back')).toBe(true)
+  })
+
+  it('at 1280px it splits, with the wide list', async () => {
+    globalThis.ResizeObserver = fakeRO(1280)
+    const w = await mountInbox({ threads: [thread('t1', { unread: 2 })] }, { query: { tab: 'unread' } })
+    expect(w.find('[data-testid="inbox"]').attributes('data-layout')).toBe('split')
+    expect(w.find('[data-testid="inbox-list-column"]').classes()).toContain('w-96')
+    expect(has(w, 'inbox-pane')).toBe(true)
+  })
+
+  it('a flip keeps the opened item and moves focus to where it now is', async () => {
+    let fire
+    globalThis.ResizeObserver = class {
+      constructor(cb) { this.cb = cb }
+      observe(el) { fire = (width) => this.cb([{ target: el, contentRect: { width } }]); fire(1280) }
+      unobserve() {}
+      disconnect() {}
+    }
+    const w = await mountInbox({ threads: [thread('t1', { unread: 2 }), thread('t2', { last_message_at: iso(9) })] },
+      { query: { tab: 'all', item: 'thread:t1' } })
+    w.find('[data-testid="inbox-row-thread:t1"]').element.focus()
+    fire(700) // split → stacked: the pane replaces the list; focus its heading
+    await flushPromises()
+    expect(w.find('[data-testid="inbox"]').attributes('data-layout')).toBe('stacked')
+    expect(document.activeElement?.getAttribute('data-testid')).toBe('inbox-pane-heading')
+    fire(1280) // stacked → split: the selection stays; focus its row
+    await flushPromises()
+    expect(router.currentRoute.value.query.item).toBe('thread:t1')
+    expect(document.activeElement?.getAttribute('data-inbox-row')).toBe('thread:t1')
+  })
+
+  it('the rail about to arrive is counted, so a preview never flips the layout', async () => {
+    globalThis.ResizeObserver = fakeRO(1000)
+    const w = await mountInbox({ threads: [thread('t1', { unread: 2 })], railAllowance: 384 }, { query: { tab: 'unread' } })
+    expect(w.find('[data-testid="inbox"]').attributes('data-layout')).toBe('stacked')
+  })
+})
+
 describe('phone (D12)', () => {
   it('nothing is auto-selected; Back returns to the list and focus to the row', async () => {
     phone = true
