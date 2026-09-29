@@ -12,6 +12,7 @@ Passwordless email-based authentication with verification codes. Users enter the
 ## Revision History
 | Date | Changes |
 |------|---------|
+| 2026-09-29 | **Binding a sign-in email needs mailbox proof (trinity-enterprise#720)**: new `POST /api/users/me/email/code` sends a bind code; `PUT /api/users/me/email` now requires it (console-provider admin bypass, audited unverified), caps wrong guesses at 5 per 10 min under `otp_attempts:bind:{user_id}:{email}`, and `users.email` is unique (case-insensitive). See [Binding a Sign-In Email](#binding-a-sign-in-email-trinity-enterprise720). |
 | 2026-07-04 | **Enumeration hardening (#186)**: `request_email_login_code()` now returns a **byte-identical** body + status for whitelisted, non-whitelisted, and rate-limited emails — the generic `{"success": true, "message": "If your email is registered, you'll receive a code shortly"}` (dropped the distinct `"Verification code sent…"` message and `expires_in_seconds`). Over-limit returns the same generic 200 (WARN-logged `"email-code suppressed: rate limit"`, **no 429**). The verification email is dispatched **fire-and-forget** (`asyncio.create_task`, strong-ref set) so the whitelisted path's latency matches the immediate-return paths — closing the body/status/timing membership oracle (pentest 3.3.3). Frontend safe: `stores/auth.js` falls back to `|| 600` when `expires_in_seconds` is absent. |
 | 2026-05-18 | **Contextual email subjects (#890)**: `send_verification_code()` gains optional `agent_name` and `context_label` params. When `agent_name` is set, subject becomes `Your Trinity access code for "{agent_name}"`; when `context_label` is set, subject becomes `Your {context_label} verification code`. A new private `_get_verification_email_html()` generates an HTML body with inline CSS, 36px monospace code block, and contextual intro text. `auth.py` now passes `context_label="Trinity login"`; `public.py` now passes `agent_name=link["agent_name"]`. |
 | 2026-03-26 | **OTP rate limiting added**: `verify_email_login_code()` now enforces both IP-based rate limiting (existing) and new per-email OTP rate limiting (5 failed attempts → 429 for 10 minutes, Redis key `otp_attempts:{email}`). `confirm_verification_code()` in public.py also gains IP-based rate limiting. New helpers: `check_otp_rate_limit(email)`, `record_otp_attempt(email, success)`. |
@@ -31,6 +32,7 @@ As an admin, I want to control who can access the platform via an email whitelis
 - **UI**: `src/frontend/src/views/Settings.vue:291-390` - Email Whitelist management section
 - **API**: `POST /api/auth/email/request` - Request verification code (lines 140-198 in auth.py)
 - **API**: `POST /api/auth/email/verify` - Verify code and login (lines 201-268 in auth.py)
+- **API**: `POST /api/users/me/email/code` + `PUT /api/users/me/email` - Bind a sign-in email to the signed-in account (routers/users.py, trinity-enterprise#720)
 - **API**: `GET /api/settings/email-whitelist` - List whitelisted emails (lines 429-443 in settings.py)
 - **API**: `POST /api/settings/email-whitelist` - Add email to whitelist (lines 446-478 in settings.py)
 - **API**: `DELETE /api/settings/email-whitelist/{email}` - Remove from whitelist (lines 481-503 in settings.py)
@@ -679,6 +681,68 @@ error for the grant endpoint, an absent field for the JSON one. See
 
 OSS-only builds register no provider, `gate_login` returns `None`, and this
 section does not apply.
+
+### Binding a Sign-In Email (trinity-enterprise#720)
+
+Every sign-in path resolves the account by email alone, so the address on a
+`users` row *is* that identity. Binding one therefore needs proof of the
+mailbox, and an address can sit on only one account.
+
+**Caller**: `stores/auth.js::bindOwnEmail(email, code)` — tries the bind once
+without a code; on `400 code_required` it requests a code and returns
+`{ needsCode: true }`, then the caller retries with the code.
+`resendEmailBindCode(email)` re-sends.
+
+Both routes (`src/backend/routers/users.py`) take `require_interactive`: a
+JWT session only — agent, MCP and system keys get **403**. Both first
+normalise the address (trim + lower-case) and refuse one another account holds.
+
+#### POST /api/users/me/email/code
+
+1. Validate shape → `400 invalid_email`; held by another account → `409 email_in_use`.
+2. Provider is `console` (the code would only reach the server log) and the
+   caller is not an admin → `409 email_verification_unavailable`.
+3. More than 3 codes for that address in 10 minutes → `429 too_many_codes`.
+4. `db.create_login_code(email, expiry_minutes=10, purpose="email_bind:<user id>")`,
+   then mail it (send failure → `502 email_send_failed`). Audited as
+   `email_bind_code_sent`. Returns `{sent, expires_in_seconds}`.
+
+**Code purpose**: `email_login_codes.purpose` is `NULL` for a sign-in code and
+`email_bind:<user id>` for a bind code. `verify_login_code` matches on purpose,
+so a bind code never signs anyone in, a sign-in code never binds, and a code
+minted by one account cannot complete another account's bind.
+
+#### PUT /api/users/me/email
+
+| Case | Result |
+|------|--------|
+| `code` present, attempt counter already at 5 | `429 too_many_attempts` — even the right code is refused |
+| `code` present and wrong/expired | `400 invalid_code` (counter +1) |
+| `code` present and right | bind; counter cleared; audited `email_bound`, `verified: true` |
+| no `code`, provider can deliver | `400 code_required` |
+| no `code`, provider `console`, caller is admin | bind without proof; audited `email_bind_unverified`, `verified: false` (the #82 transition) |
+| no `code`, provider `console`, caller not admin | `409 email_verification_unavailable` |
+| address held by another account (incl. a lost race on the index) | `409 email_in_use` |
+
+**Attempt cap**: reuses the sign-in OTP limiter (`routers/auth.py`
+`check_otp_rate_limit` / `record_otp_attempt`, `OTP_MAX_ATTEMPTS = 5`,
+`OTP_RATE_WINDOW = 600s`) under the bind-scoped key
+`otp_attempts:bind:{user_id}:{email}`. It is deliberately **not** the bare
+`otp_attempts:{email}` key: wrong bind guesses must not lock the address's
+owner out of email sign-in (the same reason the portal uses `portal:`).
+Like sign-in, it fails open when Redis is unavailable.
+
+**Uniqueness**: `idx_users_email_unique ON users(lower(email)) WHERE email IS
+NOT NULL`, and every `users.email` write goes through one checked writer that
+raises `EmailInUseError`. The `ent720_email_identity` migration (SQLite) /
+Alembic `0082_ent720_email_identity` (PostgreSQL) resolves pre-existing
+duplicates first: per address the **earliest-created** account keeps it, every
+other account's email is set to `NULL`, and the migration log names those
+accounts by username (never the address). Their owners lose email sign-in to
+that address until they bind another.
+
+**Tests**: `tests/unit/test_ent720_email_binding.py`;
+`src/frontend/tests/unit/emailBindProof.spec.js`.
 
 ### Whitelist Management Endpoints (`src/backend/routers/settings.py`)
 
