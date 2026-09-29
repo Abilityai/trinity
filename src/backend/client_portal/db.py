@@ -323,10 +323,11 @@ def get_portal_message(message_id: str) -> Optional[dict]:
 
     Returns the owning `agent_name`/`client_email` so the caller can prove the
     message is one the rater can actually see. A rating route that trusted the
-    id alone would let anyone rate anyone's conversation.
+    id alone would let anyone rate anyone's conversation. `content` rides along
+    for ent#610's reply-to, which quotes the row only AFTER the same proof.
     """
     stmt = text(
-        "SELECT id, agent_name, client_email, session_id, role, created_at "
+        "SELECT id, agent_name, client_email, session_id, role, content, created_at "
         "FROM enterprise_portal_messages WHERE id = :id"
     )
     with get_engine().connect() as conn:

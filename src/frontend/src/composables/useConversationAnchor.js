@@ -29,14 +29,13 @@ import { ref, watch, nextTick, onScopeDispose } from 'vue'
 
 export const ANCHOR_QUERY_KEY = 'anchor'
 export const ANCHOR_MISSING_NOTICE = 'That message is further up'
-export const ANCHOR_HIGHLIGHT_MS = 2400
-// Token classes only (design contract), both themes. A soft tint BEHIND the
-// message, not a ring round the row — a 2px frame read as a stray border
-// (sign-off). It holds, then fades out over ANCHOR_FADE_MS; reduced motion
-// drops the fade and the tint simply leaves.
-export const ANCHOR_HIGHLIGHT_CLASSES = ['bg-action-primary-50', 'dark:bg-action-primary-500/16', 'rounded-xl']
-export const ANCHOR_FADE_CLASSES = ['transition-colors', 'duration-1000', 'motion-reduce:transition-none']
-export const ANCHOR_FADE_MS = 1000
+export const ANCHOR_HIGHLIGHT_MS = 3200   // = the anchor-glow animation's duration
+// One class, `anchor-glow` (style.css): a soft token tint that reaches 12px
+// PAST the message (a box-shadow spread — wider, and it moves no layout), eases
+// in, holds and eases out. Not a ring round the row: a 2px frame read as a
+// stray border, and a flat tint the size of the row read as cramped (sign-off).
+// Reduced motion: a still tint for the same span, no animation.
+export const ANCHOR_HIGHLIGHT_CLASSES = ['anchor-glow']
 
 /** `m:<id>` / `d:<id>` → `{kind: 'message'|'deliverable', id}`, else null. */
 export function parseAnchor(raw) {
@@ -98,11 +97,10 @@ export function useConversationAnchor({ scrollEl, detach, pinToBottom, route, ro
 
   function highlight(el) {
     clearTimeout(highlightTimer)
-    el.classList.add(...ANCHOR_FADE_CLASSES, ...ANCHOR_HIGHLIGHT_CLASSES)
-    highlightTimer = setTimeout(() => {
-      el.classList.remove(...ANCHOR_HIGHLIGHT_CLASSES)   // fades: the transition is still on
-      highlightTimer = setTimeout(() => el.classList.remove(...ANCHOR_FADE_CLASSES), ANCHOR_FADE_MS)
-    }, ANCHOR_HIGHLIGHT_MS)
+    el.classList.remove(...ANCHOR_HIGHLIGHT_CLASSES)
+    void el.offsetWidth   // restart the animation on a second landing on the same row
+    el.classList.add(...ANCHOR_HIGHLIGHT_CLASSES)
+    highlightTimer = setTimeout(() => el.classList.remove(...ANCHOR_HIGHLIGHT_CLASSES), ANCHOR_HIGHLIGHT_MS)
   }
 
   async function settle(target) {

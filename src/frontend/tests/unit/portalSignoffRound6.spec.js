@@ -10,54 +10,61 @@ import { describe, it, expect, vi, afterEach } from 'vitest'
 import { effectScope, ref } from 'vue'
 import { mount } from '@vue/test-utils'
 import PortalAgentBubble from '@/components/portal/PortalAgentBubble.vue'
-import { quoteForReply, messageReplyTarget } from '@/components/portal/portalInbox'
+import { replyExcerpt, messageReplyTarget } from '@/components/portal/portalInbox'
+import { readFileSync } from 'fs'
+import { fileURLToPath } from 'url'
+import { dirname, join } from 'path'
 import {
-  useConversationAnchor, ANCHOR_HIGHLIGHT_CLASSES, ANCHOR_FADE_CLASSES, ANCHOR_HIGHLIGHT_MS, ANCHOR_FADE_MS,
+  useConversationAnchor, ANCHOR_HIGHLIGHT_CLASSES, ANCHOR_HIGHLIGHT_MS,
 } from '@/composables/useConversationAnchor'
 
 afterEach(() => { vi.useRealTimers() })
 
-describe('the anchor highlight is a fading tint, not a frame', () => {
-  it('draws no ring or border', () => {
-    for (const c of ANCHOR_HIGHLIGHT_CLASSES) expect(c).not.toMatch(/^(dark:)?(ring|border|outline)/)
-    expect(ANCHOR_HIGHLIGHT_CLASSES).toContain('bg-action-primary-50')
+describe('the anchor highlight is a soft glow, not a frame (round 8: wider, eased)', () => {
+  it('is one animation class, drawing no ring or border', () => {
+    expect(ANCHOR_HIGHLIGHT_CLASSES).toEqual(['anchor-glow'])
   })
 
-  it('the tint lands, then leaves while the fade transition is still on, then the fade goes', async () => {
+  it('the glow reaches past the message and eases in and out, from the token', () => {
+    const css = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'src', 'style.css'), 'utf8')
+    const block = css.slice(css.indexOf('@keyframes anchor-glow'))
+    expect(block).toMatch(/box-shadow:\s*0 0 0 (1[0-9]|2[0-4])px var\(--anchor-tint\)/)   // spread: a wider area, no layout shift
+    expect(css).toMatch(/\.anchor-glow\s*\{[^}]*--anchor-tint:\s*theme\('colors\.action-primary/)
+    expect(css).toMatch(/\.dark \.anchor-glow\s*\{[^}]*--anchor-tint:\s*theme\('colors\.action-primary/)
+    expect(css).toMatch(/prefers-reduced-motion: reduce\)[\s\S]{0,200}\.anchor-glow\s*\{[^}]*animation:\s*none/)
+  })
+
+  it('the class lands, then leaves once the animation has run', async () => {
     vi.useFakeTimers()
     const el = document.createElement('div')
     el.dataset.messageId = 'm1'
     const box = document.createElement('div')
     box.appendChild(el)
-    el.scrollIntoView = () => {}
     const scope = effectScope()
     const api = scope.run(() => useConversationAnchor({
       scrollEl: ref(box), detach: () => {}, pinToBottom: async () => {},
       route: { query: { anchor: 'm:m1' }, path: '/x', hash: '' }, router: { replace: async () => {} },
     }))
     await api.afterHistory()
-    for (const c of [...ANCHOR_HIGHLIGHT_CLASSES, ...ANCHOR_FADE_CLASSES]) expect(el.classList.contains(c)).toBe(true)
-    vi.advanceTimersByTime(ANCHOR_HIGHLIGHT_MS)
-    for (const c of ANCHOR_HIGHLIGHT_CLASSES) expect(el.classList.contains(c)).toBe(false)
-    for (const c of ANCHOR_FADE_CLASSES) expect(el.classList.contains(c)).toBe(true)
-    vi.advanceTimersByTime(ANCHOR_FADE_MS)
-    for (const c of ANCHOR_FADE_CLASSES) expect(el.classList.contains(c)).toBe(false)
+    expect(el.classList.contains('anchor-glow')).toBe(true)
+    vi.advanceTimersByTime(ANCHOR_HIGHLIGHT_MS - 1)
+    expect(el.classList.contains('anchor-glow')).toBe(true)
+    vi.advanceTimersByTime(1)
+    expect(el.classList.contains('anchor-glow')).toBe(false)
     scope.stop()
   })
 })
 
 describe('reply to one message from the Inbox pane', () => {
-  it('quoteForReply: the first paragraph as plain text, quoted, then a blank line', () => {
-    expect(quoteForReply('Heads up: the API returned 429 twice.')).toBe('> Heads up: the API returned 429 twice.\n\n')
-    expect(quoteForReply('It has **bold**, `code` and a [link](https://x.y).\n\nSecond para'))
-      .toBe('> It has bold, code and a link.\n\n')
+  it('replyExcerpt: the first paragraph as one plain line, capped (round 8: a chip, not "> " text)', () => {
+    expect(replyExcerpt('Heads up: the API returned 429 twice.')).toBe('Heads up: the API returned 429 twice.')
+    expect(replyExcerpt('It has **bold**, `code` and a [link](https://x.y).\n\nSecond para')).toBe('It has bold, code and a link.')
     const long = 'word '.repeat(80).trim()
-    const q = quoteForReply(long)
-    expect(q.startsWith('> ')).toBe(true)
-    expect(q.length).toBeLessThanOrEqual(2 + 160 + 1 + 2)
-    expect(q.trimEnd().endsWith('…')).toBe(true)
-    expect(quoteForReply('')).toBe('')
-    expect(quoteForReply('```python\nprint(1)\n```')).toBe('> print(1)\n\n')
+    const e = replyExcerpt(long)
+    expect(e.length).toBeLessThanOrEqual(160)
+    expect(e.endsWith('…')).toBe(true)
+    expect(replyExcerpt('')).toBe('')
+    expect(replyExcerpt('```python\nprint(1)\n```')).toBe('print(1)')
   })
   it('messageReplyTarget: the chat, anchored at that message', () => {
     expect(messageReplyTarget({ type: 'thread', id: 's 1' }, { id: 'm9' })).toBe('/workspace/c/s%201?anchor=m%3Am9')

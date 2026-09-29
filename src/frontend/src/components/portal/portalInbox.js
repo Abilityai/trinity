@@ -549,12 +549,13 @@ export function paneHeading(item, agentLabel = '') {
 }
 
 // ---- reply to one message (sign-off round 6) ---------------------------------
-// The Inbox pane's arrow opens the chat AT a message and prefills the composer
-// with a quote of it, so the reply says what it answers. The quote is the
-// message's first paragraph as plain text (markdown marks dropped, a code
-// fence's body kept), one line, capped, then a blank line for the reply.
+// The Inbox pane's arrow opens the chat AT a message with a "replying to" chip
+// above the composer (round 8 — a chip, never "> " text in the draft). The chip
+// shows the message's first paragraph as one plain line (markdown marks
+// dropped, a code fence's body kept), capped. Display only: what the AGENT sees
+// is quoted server-side from the stored row, by id.
 export const REPLY_QUOTE_MAX = 160
-export function quoteForReply(content) {
+export function replyExcerpt(content) {
   const raw = String(content || '').replace(/```[^\n]*\n?/g, '').trim()
   const para = raw.split(/\n\s*\n/).find((p) => p.trim()) || ''
   const text = para
@@ -563,9 +564,7 @@ export function quoteForReply(content) {
     .replace(/^\s*(?:[-*+]|\d+\.|#+|>)\s+/gm, '')
     .replace(/\s+/g, ' ')
     .trim()
-  if (!text) return ''
-  const cut = text.length > REPLY_QUOTE_MAX ? `${text.slice(0, REPLY_QUOTE_MAX - 1).trimEnd()}…` : text
-  return `> ${cut}\n\n`
+  return text.length > REPLY_QUOTE_MAX ? `${text.slice(0, REPLY_QUOTE_MAX - 1).trimEnd()}…` : text
 }
 export function messageReplyTarget(item, message) {
   if (!item || item.type !== 'thread' || !item.id) return null

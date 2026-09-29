@@ -207,8 +207,9 @@
                 <PortalAvatar :name="item.agent_name" :size="28" class="mt-0.5" />
                 <div class="min-w-0 flex-1 space-y-1.5">
                   <div v-for="(m, i) in run.messages" :key="m.id || i" class="max-w-[85%]" :data-testid="`inbox-pane-message-${m.id || i}`">
-                    <!-- Sign-off round 6: no Copy here — an arrow that opens the
-                         chat AT this message with a quote of it in the composer. -->
+                    <!-- Sign-off round 6/8: no Copy here — an arrow that opens the
+                         chat AT this message with a "replying to" chip on the
+                         composer; the send carries the message id. -->
                     <PortalAgentBubble :content="m.content || ''" :copyable="false">
                       <button
                         type="button"
@@ -216,7 +217,7 @@
                         title="Reply to this message in the chat"
                         aria-label="Reply to this message in the chat"
                         :data-testid="`inbox-pane-reply-to-${m.id || i}`"
-                        @click="$emit('reply', messageReplyTarget(item, m), quoteForReply(m.content))"
+                        @click="$emit('reply', messageReplyTarget(item, m), { sessionId: item.id, messageId: m.id, excerpt: replyExcerpt(m.content) })"
                       >
                         <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 10h10a8 8 0 018 8v2M3 10l6 6m-6-6l6-6" /></svg>
                       </button>
@@ -279,7 +280,7 @@ import PortalAvatar from './PortalAvatar.vue'
 import PortalAgentBubble from './PortalAgentBubble.vue'
 import { useClientPortalStore } from '@/stores/clientPortal'
 import { relativeTime } from './portalUtils'
-import { PANE_HISTORY_LIMIT, paneWindow, paneRuns, openInChatTarget, paneHeading, quoteForReply, messageReplyTarget } from './portalInbox'
+import { PANE_HISTORY_LIMIT, paneWindow, paneRuns, openInChatTarget, paneHeading, replyExcerpt, messageReplyTarget } from './portalInbox'
 import { viewState } from '@/utils/loadingState'
 import { formatLocalDateTime } from '@/utils/timestamps'
 

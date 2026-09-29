@@ -323,6 +323,9 @@
         <div v-else :class="item.message.role === 'user' ? 'flex justify-end' : 'flex items-start gap-2.5'">
           <PortalAvatar v-if="item.message.role !== 'user'" :name="agent.name" :avatar-url="agent.avatar_url" :size="28" class="mt-0.5" />
           <div v-if="item.message.role === 'user'" class="max-w-[85%] flex flex-col items-end gap-1">
+            <!-- ent#610 round 8: what this message replied to (this visit —
+                 the stored row keeps only what was typed). -->
+            <PortalReplyChip v-if="item.message.replyTo" :excerpt="item.message.replyTo.excerpt" :removable="false" class="max-w-full" />
             <div
               class="rounded-2xl rounded-br-md px-3.5 py-3 text-sm leading-relaxed whitespace-pre-wrap"
               :class="item.message.failed ? 'bg-status-danger-50 dark:bg-status-danger-900/30 text-status-danger-800 dark:text-status-danger-200 ring-1 ring-status-danger-300 dark:ring-status-danger-800' : 'bg-action-primary-600 text-white'"
@@ -642,6 +645,14 @@
                of an equal-specificity pair survives. Dark hid it, because every
                `dark:` variant is emitted after both. Mutually exclusive arms have
                no ordering to get wrong. -->
+          <!-- ent#610 round 8: "replying to" — a tab on top of the composer
+               (Codex-style). The turn carries only the message id; the agent
+               gets the stored message quoted server-side. -->
+          <PortalReplyChip
+            v-if="replyTo"
+            :excerpt="replyTo.excerpt"
+            @remove="emit('reply-done')"
+          />
           <div
             class="rounded-2xl border px-2 py-2 transition has-[textarea:focus]:border-action-primary-600 dark:has-[textarea:focus]:border-action-primary-500 has-[textarea:focus]:ring-[3px] has-[textarea:focus]:ring-action-primary-500/40 dark:has-[textarea:focus]:ring-action-primary-400/40"
             :class="voiceCallActive ? 'border-transparent bg-transparent' : 'border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800'"
@@ -819,6 +830,7 @@ import PortalTypeahead from './PortalTypeahead.vue'
 import PortalJumpToLatest from './PortalJumpToLatest.vue'
 import PortalAsks from './PortalAsks.vue'
 import BaseCard from '@/components/base/BaseCard.vue'
+import PortalReplyChip from './PortalReplyChip.vue'
 import PortalDeliverables from './PortalDeliverables.vue'
 import PortalSkeleton from './PortalSkeleton.vue'
 import { workSignalFrom } from './portalRail'
@@ -904,6 +916,9 @@ const props = defineProps({
   // backend's `new_thread`.
   newChat: { type: Boolean, default: false },
   prefill: { type: String, default: '' },
+  // ent#610 round 8: `{ sessionId, messageId, excerpt }` from the Inbox arrow.
+  // Shown only on the chat it belongs to; the shell clears it on `reply-done`.
+  replyTarget: { type: Object, default: null },
   // ent#359: whether the CURRENT thread is starred. Owned by the shell (it
   // holds the per-viewer chat state), rendered here.
   starred: { type: Boolean, default: false },
@@ -917,7 +932,7 @@ const props = defineProps({
 // controls that raised them — the rail strip is the door to both now.
 // Declared emits are the component's contract, so a name left here after
 // its only `$emit` is deleted is a promise nothing keeps.
-const emit = defineEmits(['switch-agent', 'session-adopted', 'sessions-changed', 'open-menu', 'toggle-star', 'escalate-to-room', 'open-thread', 'work-state', 'open-work', 'new-chat', 'main-reset', 'voice-call', 'voice-panel'])
+const emit = defineEmits(['reply-done', 'switch-agent', 'session-adopted', 'sessions-changed', 'open-menu', 'toggle-star', 'escalate-to-room', 'open-thread', 'work-state', 'open-work', 'new-chat', 'main-reset', 'voice-call', 'voice-panel'])
 
 // ent#451/#473: the active thread as the shell's list knows it. Null until the
 // list carries the thread (a just-adopted session lands on the next refresh),
@@ -1014,6 +1029,10 @@ const resetting = ref(false)
 // ent#523 AC 10 — the same pure rule the sidebar chip and the details header
 // read, so the four surfaces cannot disagree about one agent.
 const availabilityNotice = computed(() => composerAvailabilityNotice(props.agent))
+const replyTo = computed(() => (
+  props.replyTarget && props.replyTarget.messageId && props.replyTarget.sessionId === currentSessionId.value
+    ? props.replyTarget : null
+))
 const isMainChat = computed(() => {
   const id = currentSessionId.value
   if (!id) return false
@@ -1765,7 +1784,7 @@ let elapsedTimer = null
 // "Thinking… / Working on it… / Still working…" label went with the dots.
 const elapsed = ref(0)
 
-async function deliver(text) {
+async function deliver(text, { replyId = null } = {}) {
   terminalOutcome.value = null
   sending.value = true
   elapsed.value = 0
@@ -1795,7 +1814,9 @@ async function deliver(text) {
                                             { newThread: props.newChat && !currentSessionId.value,
                                               model: chosenModel,
                                               // ent#555 — what the user is looking at.
-                                              openCanvasId: openCanvasId.value })
+                                              openCanvasId: openCanvasId.value,
+                                              // ent#610 — the message this replies to.
+                                              replyToMessageId: replyId })
     } catch (dispatchErr) {
       // Nothing was created, so a retry is safe — but only retry when the
       // ROUTE is what failed. A 404/405 means an older backend without this
@@ -1814,7 +1835,8 @@ async function deliver(text) {
                                           model: chosenModel,
                                           // ent#555 — the fallback carries it too, or the
                                           // context silently depends on streaming working.
-                                          openCanvasId: openCanvasId.value })
+                                          openCanvasId: openCanvasId.value,
+                                          replyToMessageId: replyId })
     }
 
     if (started) {
@@ -2262,7 +2284,12 @@ async function send() {
 
   input.value = ''
   autoGrowAfterUpdate()
-  await submitUserText(text)
+  // ent#610 round 8: read the chip ONCE, with the text it belongs to.
+  // The chip leaves WITH the text: the message it belongs to now carries it
+  // (its label, and Retry resends it), so the next message is not a reply.
+  const reply = replyTo.value
+  if (reply) emit('reply-done')
+  await submitUserText(text, { replyId: reply?.messageId || null, replyExcerpt: reply?.excerpt || '' })
 }
 
 // The tail every user utterance shares, typed or spoken (ent#440). Extracted
@@ -2270,7 +2297,7 @@ async function send() {
 // be a second conversation wearing the same thread, which is the whole thing
 // this feature exists not to be. Returns the outcome so a caller that is not a
 // person watching the screen — the voice loop — can decide what to do next.
-async function submitUserText(text) {
+async function submitUserText(text, { replyId = null, replyExcerpt = '' } = {}) {
   // ent#491: the user's own activity is the ordering signal, so the bump happens
   // HERE — on send — and not when a reply lands. Any agent this message wakes
   // counts, mirroring the room fan-out (`unreadByAgent`): if you @mention two
@@ -2283,14 +2310,17 @@ async function submitUserText(text) {
   } catch {
     // Ordering is a convenience; it must never be able to block a send.
   }
-  const index = messages.value.push({ role: 'user', content: text, failed: false, error: null }) - 1
+  const index = messages.value.push({
+    role: 'user', content: text, failed: false, error: null,
+    replyTo: replyId ? { messageId: replyId, excerpt: replyExcerpt } : null,
+  }) - 1
   // #2624: sending is an explicit intent to follow the bottom — it pins and
   // re-arms whatever the prior scroll position, so the reader is never handed
   // an unread badge for their own message.
   await pinToBottom()
   // A stale "couldn't stop the turn" must not outlive the turn it described.
   cancelError.value = ''
-  const res = await deliver(text)
+  const res = await deliver(text, { replyId })
   return settleDelivery(index, text, res)
 }
 
@@ -2354,7 +2384,7 @@ async function retry(i) {
   // A stale "couldn't stop the turn" must not outlive the turn it described —
   // and `retry` is a new turn, so it clears it for the same reason `send` does.
   cancelError.value = ''
-  const res = await deliver(content)
+  const res = await deliver(content, { replyId: msg.replyTo?.messageId || null })
   settleDelivery(i, content, res)
 }
 

@@ -332,6 +332,12 @@ class PortalChatRequest(BaseModel):
     # existing caller (and the headless integration surface ent#83 documents)
     # is unaffected.
     open_canvas_id: Optional[str] = Field(None, max_length=64)
+    # ent#610 sign-off — the message this turn replies to (the Inbox pane's
+    # arrow → the composer's "replying to" chip). An ID, never text: the server
+    # resolves it against the caller's own thread and builds the quote itself,
+    # so a client cannot put words in the agent's mouth. Optional; every
+    # existing caller is unaffected.
+    reply_to_message_id: Optional[str] = Field(None, max_length=64)
     # ent#403 — the model this turn should run on. THREE states, preserving the
     # #894 shape rather than collapsing it to two: a curated id = an explicit
     # choice; `None`/`""`/whitespace = INHERIT (the agent's `public_channel_model`,

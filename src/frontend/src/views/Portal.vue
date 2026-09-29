@@ -354,10 +354,12 @@
           :session-id="pendingSession"
           :new-chat="startingNewChat"
           :prefill="prefill"
+          :reply-target="replyTarget"
           :starred="isStarred('thread', activeSessionId || pendingSession)"
           :threads="threads"
           :rename="renameChat"
           @switch-agent="switchAgent"
+          @reply-done="replyTarget = null"
           @new-chat="newChatWithAgent(activeAgent.name)"
           @session-adopted="onSessionAdopted"
           @sessions-changed="onConversationTurnDone"
@@ -2093,14 +2095,19 @@ watch(isInboxRoute, (on) => {
 })
 
 // "Reply in chat" (D11): the chat, anchored, with the composer focused. From a
-// message's arrow (sign-off round 6) it also carries a quote of that message,
-// handed over as a prefill — the "Ask about it" path, never a send.
-async function replyInChat(url, quote = '') {
+// message's arrow (round 8) it also carries `{ sessionId, messageId, excerpt }`,
+// shown as a "replying to" chip on that chat's composer; the turn sends the id.
+const replyTarget = ref(null)
+async function replyInChat(url, reply = null) {
+  replyTarget.value = reply && reply.messageId ? reply : null
   await router.push(url)
   await nextTick(); await nextTick()
-  if (quote) usePlaybook(quote)
-  else focusConversationComposer()
+  focusConversationComposer()
 }
+// A reply belongs to one chat: leaving it drops the chip.
+watch(() => route.params.sessionId, (sid) => {
+  if (replyTarget.value && sid !== replyTarget.value.sessionId) replyTarget.value = null
+})
 
 // ---- Cross-chat search (sidebar) ----------------------------------------------
 const search = ref('')

@@ -854,6 +854,22 @@ feed — `portalInbox.inboxCanvasCount({tabs, canvases, agent})` over
 anyway — and shows only when that agent has a canvas and the Canvas tab is one this
 session has, on chats and asks alike (T6); it emits `open-canvas` → `openRailOn('canvas')`.
 
+**Reply to one message** (sign-off). Each agent message in the Inbox pane carries an arrow
+(not Copy): it opens the chat anchored at that message (`?anchor=m:<id>`, landed by
+`useConversationAnchor` — `scrollWithin` moves only the thread's `scrollTop`, never
+`scrollIntoView`, which also scrolls the `h-screen overflow-hidden` shell; the landing is
+the `anchor-glow` animation in `style.css`) and hands the shell `{sessionId, messageId,
+excerpt}` as `replyTarget`, which the conversation shows as `PortalReplyChip` on top of
+the composer for that chat only. The turn carries **only the id** —
+`PortalChatRequest.reply_to_message_id` on both `/chat` and `/chat/stream`. The router
+resolves it with `service.reply_context()` BEFORE anything is written: the row
+(`db.get_portal_message`, now with `content`) must be this caller's, this agent's and this
+thread's, else one uniform 422 (no existence oracle; loud, because a dropped reply is
+context the person believes they gave). The quote is built server-side, capped at
+`REPLY_QUOTE_MAX_CHARS`, and rides `reply_prefix` directly before the client's text on
+BOTH the resumed and the cold message; the stored user row stays what was typed. Pinned by
+`tests/unit/test_ent610_reply_to_message.py` through the real prompt composition.
+
 ## Agents at the centre — Main, Reset, and the one page (ent#523, ent#524)
 
 Clicking an agent opens the **conversation** you were last in. `/workspace/a/:agentName`

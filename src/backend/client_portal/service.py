@@ -1641,6 +1641,50 @@ def agent_on_roster(agent_name: str, email: str | None,
     return agent_name in roster_agent_names(email, include_owned)
 
 
+REPLY_QUOTE_MAX_CHARS = 2000
+REPLY_TARGET_REFUSED = "That message can't be replied to here. Remove the reply and send again."
+
+
+def reply_context(agent_name: str, email: str, session_id, message_id) -> str:
+    """The prompt block for a turn that replies to one earlier message (ent#610).
+
+    The client sends only the message ID; the quote is built HERE from the
+    stored row, so a client cannot put words in the agent's mouth as "your
+    earlier message". The row must be in THIS caller's thread with THIS agent —
+    the same ownership proof ent#366's rating check makes, plus the thread.
+
+    Fails LOUD, unlike `validated_open_canvas`: a canvas that is not open is a
+    harmless "nothing open", but a reply the agent never sees is context the
+    person believes they gave. So every refusal is one 422 with one message —
+    missing, someone else's, another agent's or another thread's all read the
+    same, so the route is no existence oracle — and the composer keeps the text.
+    """
+    if message_id is None:
+        return ""
+    if not isinstance(message_id, str) or not message_id or len(message_id) > 64:
+        raise ClientPortalError(422, REPLY_TARGET_REFUSED)
+    if not session_id:
+        raise ClientPortalError(422, REPLY_TARGET_REFUSED)
+    row = db.get_portal_message(message_id)
+    content = str((row or {}).get("content") or "").strip()
+    if (
+        not row
+        or row.get("agent_name") != agent_name
+        or str(row.get("client_email") or "").lower() != str(email or "").lower()
+        or row.get("session_id") != session_id
+        or not content
+    ):
+        logger.info("portal reply-to refused: agent=%s session=%s message=%s",
+                    agent_name, session_id, message_id)
+        raise ClientPortalError(422, REPLY_TARGET_REFUSED)
+    if len(content) > REPLY_QUOTE_MAX_CHARS:
+        content = content[:REPLY_QUOTE_MAX_CHARS].rstrip() + "…"
+    quoted = "\n".join(f"> {line}" if line.strip() else ">" for line in content.splitlines())
+    whose = "your earlier message" if row.get("role") == "assistant" else "their own earlier message"
+    return (f"[Client Portal] The user is replying to {whose} in this conversation:\n"
+            f"{quoted}\n\n")
+
+
 def validated_open_canvas(agent_name: str, canvas_id, *, is_platform: bool):
     """The open-canvas id to stamp on a turn, or None (ent#555).
 
@@ -2691,7 +2735,11 @@ async def portal_chat(agent_name: str, message: str, email: str,
                       voice_call_id: str | None = None,
                       # ent#555 — the canvas on screen, validated at the router.
                       # Stamped on the execution so the agent's tools default to it.
-                      open_canvas_id: str | None = None) -> dict:
+                      open_canvas_id: str | None = None,
+                      # ent#610 — the quoted block `reply_context` built at the
+                      # router from a message id. Server-built text, never a
+                      # request field.
+                      reply_context: str = "") -> dict:
     """Run one client chat turn against a rostered agent as a standard platform
     execution (``triggered_by="public"`` — the external-caller path, observable +
     cost-tracked). Scoped to the caller's roster; raises ``ClientPortalError`` on
@@ -2948,8 +2996,13 @@ async def portal_chat(agent_name: str, message: str, email: str,
     # conversation the session never heard, so it reads as history), then the
     # canvas on screen, then the file manifest, then what the client said.
     # The cold message carries the replay in place of the delta.
-    cold_message = history_prefix + canvas_prefix + manifest_prefix + message
-    message = (delta_prefix + canvas_prefix + manifest_prefix + message) if resuming else cold_message
+    # ent#610 — the message this turn replies to, quoted, directly before what
+    # the client said (after the canvas and files, which describe the screen).
+    # On BOTH shapes: a resumed session remembers the thread but not which
+    # message the person just pointed at, and the cold retry needs it as much.
+    reply_prefix = reply_context or ""
+    cold_message = history_prefix + canvas_prefix + manifest_prefix + reply_prefix + message
+    message = (delta_prefix + canvas_prefix + manifest_prefix + reply_prefix + message) if resuming else cold_message
 
     # ent#212: inject the client's durable per-user memory (MEM-001) + the #1205
     # public-channel custom instructions into the turn, so a delegated end user
@@ -3694,7 +3747,9 @@ async def start_portal_turn(agent_name: str, message: str, email: str,
                             model: str | None = None,
                             # ent#555 — the canvas on screen, validated at the router.
                             # Stamped on the execution so the agent's tools default to it.
-                            open_canvas_id: str | None = None) -> dict:
+                            open_canvas_id: str | None = None,
+                            # ent#610 — see `portal_chat`.
+                            reply_context: str = "") -> dict:
     """Begin a turn and return as soon as it is dispatchable.
 
     Returns ``{execution_id, session_id}``. The caller subscribes to the
@@ -3797,7 +3852,8 @@ async def start_portal_turn(agent_name: str, message: str, email: str,
                               # already stamped on the row above, so `portal_chat`
                               # never re-resolves and the two cannot disagree.
                               model=model, resolved_model=resolved_model,
-                              open_canvas_id=open_canvas_id)
+                              open_canvas_id=open_canvas_id,
+                              reply_context=reply_context)
         except ClientPortalError as e:
             # There is no request left to raise into — the 202 went out long ago
             # — so the ONLY way this reaches the client is the record written
