@@ -189,7 +189,7 @@ Run on **both** engines (SQLite supported until EOS 2026-09-01), even though loc
 |----|------|----------|
 | T6.1 | Re-delivery preserves `execution_id` | Requeue and park both keep the row id. |
 | T6.2 | effect_guard dedup across re-delivery | Same `execution_id` re-run → `send_message`/`create_share`/`voip` de-duped. |
-| T6.3 | **effect_guard without a usable `execution_id`** | Platform-injected via the MCP header (#2392). A pull-mode agent's effect with no usable id is refused + alarmed; a `manual` terminal session is sent and logged. Unit: `test_2392_effect_guard_fail_closed.py`. Live positive control: the eu2 emitting arm (`oracle-7-ai-semi`) once it runs an image with #2392. |
+| T6.3 | **effect_guard without a usable `execution_id`** | Platform-injected via the MCP header (#2392). A pull-mode agent's effect with no usable id is refused + alarmed; a `manual` terminal session is sent and logged. Unit: `test_2392_effect_guard_fail_closed.py`. Live positive control: the eu2 emitting arm (a pull-mode pilot agent) once it runs an image with #2392. |
 | T6.4 | Nevermined settle exactly-once | Duplicate re-delivery → single settle on native `agent_request_id` token. |
 
 ### TIER 7 — PostgreSQL (now the LOCAL backend) — P0
