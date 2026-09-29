@@ -1142,6 +1142,9 @@ routed through `create_bounded_alert` (the volume is driven by a client clicking
 agent-influenceable side of the #1677 classification) with its own registered type and a
 reserved id prefix, one item per person per target. It fires on EVERY thumbs-down, not only
 commented ones: "this was not useful" is the report and the words are the elaboration.
+The queue's own reads keep the redaction: since trinity-enterprise#715 they never return the
+item to a machine key (`operator_queue_service.is_about_a_person`), which the rated agent's
+key could otherwise list; the ent#308 inbox-collision alert is withheld the same way.
 Prerequisite, and a live bug: `operator_queue.type` is free TEXT and both queue cards
 hardcoded an `approval → question → alert` chain that rendered no control for anything else,
 so `skill_not_found` items have never been closeable and five of them would jam a budgeted
