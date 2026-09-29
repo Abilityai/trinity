@@ -162,19 +162,22 @@
                the header advertised a count with no way to reach the agent it
                meant. Same token as that header badge; deliberately a DIFFERENT
                colour from the unread pill beside it, because they are
-               different obligations. -->
+               different obligations. ent#610 §3g A3b: both counters are the
+               700 tier — white on urgent-500 measured 2.80:1 — and the same two
+               colours the pinned Inbox row and the Inbox tabs use. -->
           <!-- trinity-enterprise#657: unsent text in one of this agent's chats
                (or in an unsaved new chat with it). Quiet and gray beside the two
                pills — a state of the person's own work, not an obligation. -->
           <span v-if="hasDraftFor(a.name)" class="shrink-0 flex items-center" data-testid="agent-draft"><DraftMark /></span>
           <span
             v-if="askCountFor(a.name)"
-            class="shrink-0 min-w-[1.25rem] px-1.5 h-5 rounded-full bg-status-urgent-500 text-white text-[11px] font-semibold flex items-center justify-center"
+            class="shrink-0 min-w-[1.25rem] px-1.5 h-5 rounded-full bg-status-urgent-700 text-white text-[11px] font-semibold flex items-center justify-center"
             data-testid="agent-ask-count"
           >{{ askCountFor(a.name) > 99 ? '99+' : askCountFor(a.name) }}</span>
           <span
             v-if="waitingFor(a.name)"
-            class="shrink-0 min-w-[1.25rem] px-1.5 h-5 rounded-full bg-action-primary-600 text-white text-[11px] font-semibold flex items-center justify-center"
+            class="shrink-0 min-w-[1.25rem] px-1.5 h-5 rounded-full bg-action-primary-700 text-white text-[11px] font-semibold flex items-center justify-center"
+            data-testid="agent-unread-count"
           >{{ waitingFor(a.name) > 99 ? '99+' : waitingFor(a.name) }}</span>
         </button>
 

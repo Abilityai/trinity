@@ -112,7 +112,11 @@ describe('#2424 part 2 — asks are attributable to an agent', () => {
     // status-urgent is the platform's "waiting on you" token — the same one the
     // operator NavBar's pending-operator-queue badge uses. Not amber: that maps
     // to `state-autonomous`, which is an operating mode, not a pending decision.
-    expect(src).toContain('bg-status-urgent-500')
+    // ent#610 §3g A3b, REVERSED on purpose: the 700 tier. White on urgent-500
+    // is 2.80:1; on urgent-700 5.18 — and the same colour as every other
+    // "needs you" counter (the pinned Inbox row, the Inbox's Action tab).
+    expect(src).toContain('bg-status-urgent-700')
+    expect(src).not.toContain('bg-status-urgent-500')
     // Raw palette classes are ratcheted to zero for new code (design contract).
     expect(src).not.toContain('bg-amber-500')
   })

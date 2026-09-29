@@ -60,7 +60,7 @@
             <span v-else-if="it.latest && it.latest.excerpt" class="mt-0.5 block text-sm truncate" :class="secondary(it)">{{ it.latest.excerpt }}</span>
 
             <span class="mt-1 flex items-center gap-1.5 flex-wrap">
-              <BaseBadge v-if="it.type === 'thread' && it.n > 0" variant="info" class="tabular-nums" :data-testid="`inbox-row-new-${it.key}`">{{ newLabel(it.n) }}</BaseBadge>
+              <BaseBadge v-if="it.type === 'thread' && it.n > 0" variant="primary" class="tabular-nums" :data-testid="`inbox-row-new-${it.key}`">{{ newLabel(it.n) }}</BaseBadge>
               <BaseBadge v-if="it.type === 'thread' && it.readInPlace" variant="neutral" :data-testid="`inbox-row-read-${it.key}`">Read</BaseBadge>
               <!-- `failed` carries an icon AND a word — never hue alone. -->
               <BaseBadge v-if="outcomeOf(it) === 'failed'" variant="danger" :data-testid="`inbox-row-failed-${it.key}`">

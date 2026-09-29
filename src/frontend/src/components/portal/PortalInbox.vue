@@ -209,9 +209,11 @@ watch([asksVerdict, () => props.threadsLoaded, () => store.asksFailed, () => pro
 const tab = computed(() => normalizeInboxTab(route.query.tab) || initialTab.value || 'action')
 const tabLabel = computed(() => ({ action: 'Action', unread: 'Unread', all: 'All' }[tab.value]))
 
+// §3g A3b: the counters are solid, in the colours the pinned row and the agent
+// pills use — needs you urgent-700, new primary-700.
 const tabStrip = computed(() => [
-  { id: 'action', label: 'Action', badge: counts.value.needs || null },
-  { id: 'unread', label: 'Unread', badge: counts.value.came || null },
+  { id: 'action', label: 'Action', badge: counts.value.needs || null, badgeVariant: 'urgent' },
+  { id: 'unread', label: 'Unread', badge: counts.value.came || null, badgeVariant: 'primary' },
   { id: 'all', label: 'All' },
 ])
 

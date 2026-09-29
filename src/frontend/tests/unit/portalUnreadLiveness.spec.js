@@ -98,7 +98,9 @@ describe('ent#557 — honest counts, and an ask is not an unread reply', () => {
     expect(SIDEBAR).toMatch(/data-testid="agent-ask-count"/)
     expect(SIDEBAR).toMatch(/v-if="waitingFor\(a\.name\)"/)
     // Different tokens, deliberately — the colours carry the distinction.
-    expect(SIDEBAR).toMatch(/bg-status-urgent-500/)
-    expect(SIDEBAR).toMatch(/bg-action-primary-600/)
+    // ent#610 §3g A3b, REVERSED on purpose: both counters moved to the 700
+    // tier (white on urgent-500 was 2.80:1) — still two different tokens.
+    expect(SIDEBAR).toMatch(/bg-status-urgent-700/)
+    expect(SIDEBAR).toMatch(/bg-action-primary-700/)
   })
 })

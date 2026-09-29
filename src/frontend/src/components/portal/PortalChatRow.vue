@@ -61,7 +61,7 @@
 
     <span
       v-if="unread"
-      class="shrink-0 min-w-[1.125rem] px-1 h-[1.125rem] rounded-full bg-action-primary-600 text-white text-[10px] font-semibold flex items-center justify-center"
+      class="shrink-0 min-w-[1.125rem] px-1 h-[1.125rem] rounded-full bg-action-primary-700 text-white text-[10px] font-semibold flex items-center justify-center"
     >{{ unread > 99 ? '99+' : unread }}</span>
 
     <PortalStarButton

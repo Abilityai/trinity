@@ -92,7 +92,7 @@
             </span>
             <span
               v-if="c.unread"
-              class="shrink-0 min-w-[1.125rem] px-1 h-[1.125rem] rounded-full bg-action-primary-600 text-white text-[10px] font-semibold flex items-center justify-center"
+              class="shrink-0 min-w-[1.125rem] px-1 h-[1.125rem] rounded-full bg-action-primary-700 text-white text-[10px] font-semibold flex items-center justify-center"
             >{{ c.unread }}</span>
             <span class="text-[11px] text-gray-400 shrink-0">{{ relative(c.last_message_at) }}</span>
           </button>

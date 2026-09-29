@@ -48,6 +48,9 @@ Sign-in / reload on bare /workspace
   PortalInbox  (props: threads=sidebarThreads, previews, threadsLoaded, threadsFailed, labels, isPlatform;
                 asks/openAsks/asksLoaded/asksFailed/asksAbsent read from the clientPortal store)
     OverflowTabs  Action (needs) · Unread (came) · All          ?tab=&item= via router.replace
+                  counters solid: needs = white on status-urgent-700, new = white on
+                  action-primary-700 — the same two on the pinned row, the agent pills
+                  (agent-ask-count / agent-unread-count), the chat rows (§3g A3b)
       desktop: the tab's first row is a local PREVIEW — not ?item=, NOT a read, emitted as
                update:preview (§3g S5, T2); phone: nothing selected
     stableRows(fresh, visit)   rows keep their place for one TAB VISIT (§3g S1): a row that leaves
