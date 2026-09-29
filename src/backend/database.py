@@ -3816,8 +3816,10 @@ class DatabaseManager:
     def create_agent_event(self, source_agent, event_type, payload=None, subscriptions_triggered=0):
         return self._event_subscription_ops.create_event(source_agent, event_type, payload, subscriptions_triggered)
 
-    def list_agent_events(self, source_agent=None, event_type=None, limit=50):
-        return self._event_subscription_ops.list_events(source_agent, event_type, limit)
+    def list_agent_events(self, source_agent=None, event_type=None, limit=50, agent_names=None):
+        return self._event_subscription_ops.list_events(
+            source_agent, event_type, limit, agent_names=agent_names
+        )
 
     # =========================================================================
     # Access Requests (Issue #311)
