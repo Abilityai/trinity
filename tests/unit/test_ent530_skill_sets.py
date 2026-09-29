@@ -238,6 +238,29 @@ class TestRows:
         again = real_db.sets.assign_set(AGENT, "dev", "src", "alice", None, {"dev": ["backlog", "groom"]})
         assert again == (False, [], [])                                  # idempotent
 
+    def test_a_re_assign_records_who_made_it_and_when(self, real_db, monkeypatch):
+        """#3053: re-assigning an already-held set used to update only
+        `source_id`, so the row kept naming whoever assigned it FIRST — the
+        audit field misreported who last made the change. A re-assign by a
+        different principal (here an agent acting for bob) must be recorded."""
+        import db.skill_sets as sets_mod
+        from sqlalchemy import select
+        from db.tables import agent_skill_sets as t
+        clock = {"now": "2026-09-01T00:00:00Z"}
+        monkeypatch.setattr(sets_mod, "utc_now_iso", lambda: clock["now"])
+
+        def row():
+            with sets_mod.get_engine().connect() as conn:
+                return conn.execute(select(t.c.assigned_by, t.c.assigned_by_agent, t.c.assigned_at, t.c.source_id)
+                                    .where(t.c.agent_name == AGENT, t.c.set_name == "dev")).one()
+
+        real_db.sets.assign_set(AGENT, "dev", "src", "alice", None, {"dev": ["backlog"]})
+        assert tuple(row()) == ("alice", None, "2026-09-01T00:00:00Z", "src")
+        clock["now"] = "2026-09-29T12:00:00Z"
+        created, _, _ = real_db.sets.assign_set(AGENT, "dev", "src-2", "bob", "orchestrator", {"dev": ["backlog"]})
+        assert created is False
+        assert tuple(row()) == ("bob", "orchestrator", "2026-09-29T12:00:00Z", "src-2")
+
     def test_unassign_keeps_individual_and_other_set_members(self, real_db):
         real_db.skills.assign_skill(AGENT, "backlog", "alice")
         real_db.sets.assign_set(AGENT, "dev", "src", "alice", None, {"dev": ["backlog", "groom", "claim"]})

@@ -816,3 +816,59 @@
 - **GitHub Issue**: abilityai/trinity-enterprise#615
 
 ---
+
+### 11.17 An Agent Created as an Agent Owns Its Repository (trinity-enterprise#705)
+
+- **Status**: 🚧 In review (PR #3020). #3016, #3017 and #3018 have landed.
+- **Ruling (2026-09-24):** *the repository is the agent; the container is a cache of it.*
+  The 2026-09-24 fleet audit found every git-bound agent with auto-sync off and
+  work on container disks that existed nowhere else.
+- **Create-time `kind`:** `agent` (the default) or `deployment`, on
+  `POST /api/agents` and MCP `create_agent`. The UI half of the choice is
+  trinity-enterprise#704. An **explicit `source_mode` always wins for the
+  mode**. Every auto-pushing agent, including an explicit working branch and
+  fork-to-own, also gets freeze-on-failure; a `deployment` never does.
+- **An agent** gets a working branch (`trinity/<agent>/<id>`) it alone writes,
+  `auto_sync_enabled=1` and `freeze_schedules_if_sync_failing=1`. It only gets
+  them **only when the repo is its creator's own and the token can push to
+  it**: the token must be the creator's (`per_user`; `per_agent` is accepted for
+  future callers, but no create path resolves it today), the template must not
+  be a catalog template, the repo's owner must equal the token's GitHub login
+  (`GET /user`, case-insensitive), and the #2107 receive-pack probe must say
+  `ok`. Being able to push is not owning the repo (PR #3020 ruling, the ent#162
+  class): the global platform PAT never qualifies, and neither does a creator's
+  own token that can write an org's shared template (a classic `repo` PAT or an
+  org-wide fine-grained token). An org-owned repo therefore stays pull-only by
+  default; an explicit `source_mode=false` still asks for a working branch.
+- **Stays pull-only, with the reason on the create response's `git_mode`:**
+  - a deployment
+  - an ephemeral ghost (ent#69)
+  - no token (ent#123; not a 400)
+  - only the platform-wide token (never probed)
+  - a catalog template (shared by definition; never probed)
+  - a repo the token's login does not own, or a login that could not be read
+    (never probed; the reason points to fork-to-own)
+  - a refused probe (a template someone else owns — never branches pushed
+    into it, the ent#162 class; the reason points to fork-to-own)
+  - an unverifiable probe
+- **Fork-to-own** gets the trio (it owns its fork). **Cornelius** is pinned
+  pull-only: it is built from a shared public upstream.
+- **Other create paths:** `trinity deploy --repo` sends `kind: "deployment"` (it
+  deploys a codebase). System manifests gain a per-agent `kind` with
+  trinity-enterprise#704 (PR #3022); until then a manifest agent takes the
+  default, which the ownership rule above already keeps off shared templates.
+- **Not changed:**
+  - existing agents (the default applies to new creates; migration is per
+    agent and explicit — runbook `docs/migrations/AGENT_WORKING_BRANCH_DEFAULT_2026-09.md`)
+  - freeze paging (the `sync_failing` item). Until trinity-enterprise#706
+    adds divergence age, the freeze trips on today's trigger: 3 consecutive
+    failed syncs (about 45 minutes at the 15-minute cadence), including a
+    rebase conflict, which needs a human anyway
+  - the pull cycle — on when trinity-enterprise#703 lands
+  - divergence-age freeze semantics — trinity-enterprise#706
+- **Edition**: open-core (operator ruling 2026-09-25): defaults on the existing
+  open-source create and sync paths.
+- **Flow**: `docs/memory/feature-flows/github-sync.md`
+- **GitHub Issue**: abilityai/trinity-enterprise#705
+
+---

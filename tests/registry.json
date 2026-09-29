@@ -3651,6 +3651,16 @@
       "description": "`.claude/settings.json` is kept out of a commit by CONTENT, not name (ent#708): the agent server's _guard_container_only_settings and the backend shell twin CONTAINER_ONLY_SETTINGS_GUARD run the same matrix on real repos (clean file commits; harmful untracked stays out and on disk; harmful edit of a clean tracked file restores the clean copy; a harmful copy already in HEAD is untracked; fresh repo; no-op); the heartbeat end to end (a harmful file never reaches the remote and the next cycle makes no empty commit; a clean file syncs; a legacy committed copy is deleted from the remote); the guard sits between add and commit in sync_to_github and _run_auto_sync_once and after both `git add .` in initialize; the pattern is gone from the canonical list. 11 of 19 red with the fix reverted."
     },
     {
+      "file": "unit/test_ent705_cli_deploy_kind.py",
+      "feature": "trinity-enterprise#705",
+      "added": "2026-09-29",
+      "categories": [
+        "cli",
+        "git"
+      ],
+      "description": "`trinity deploy --repo` creates a deployment (trinity-enterprise#705): the CLI's POST /api/agents payload carries kind \"deployment\", so deploying a codebase never takes the agent default's working branch + auto-push. Static (AST) because the unit job does not install the CLI's own deps. The ownership rule itself (catalog template / owner != token login stays pull-only) is in test_1484_create_agent_characterization.py."
+    },
+    {
       "file": "unit/test_ent527_readiness_on_lists.py",
       "feature": "abilityai/trinity-enterprise#527",
       "added": "2026-09-28",
