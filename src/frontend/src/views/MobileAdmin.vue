@@ -75,7 +75,7 @@
         <!-- AGENTS TAB -->
         <div v-if="activeTab === 'agents'" class="tab-panel">
           <!-- Search -->
-          <div class="search-bar">
+          <div v-if="!fleetAdminOnly" class="search-bar">
             <input
               v-model="agentSearch"
               type="text"
@@ -89,7 +89,7 @@
                fetch is the failed state (never "No agents found"), and a failed
                refresh with data on screen is the SIBLING stale banner. -->
           <InlineError
-            v-if="agentsView.stale"
+            v-if="!fleetAdminOnly && agentsView.stale"
             class="mb-3"
             :message="staleBannerMessage('agents', lastLoadedAt.agents)"
             :detail="fetchError.agents"
@@ -97,7 +97,15 @@
             @retry="fetchAgents"
             @dismiss="fetchError.agents = ''"
           />
-          <div v-if="agentsView.state === 'loading'" class="skeleton-rows" aria-busy="true"><div v-for="n in 3" :key="n" class="skeleton-row"></div><span class="sr-only">Loading agents...</span></div>
+          <!-- #3041: the fleet list is admin-gated. A 403 is a permission
+               boundary, not a failed load — say so, point at what this session
+               can do, and offer no retry that can never succeed. -->
+          <div v-if="fleetAdminOnly" class="empty-state" data-testid="agents-admin-only">
+            <p>The fleet list is admin-only on mobile.</p>
+            <p class="mt-1">Your own agents are on the desktop dashboard. Ask an admin for access, or answer what your agents need from you in the Queue.</p>
+            <button type="button" class="chat-open-btn admin-only-action" data-testid="agents-admin-only-open-queue" @click="openQueue">Open the Queue</button>
+          </div>
+          <div v-else-if="agentsView.state === 'loading'" class="skeleton-rows" aria-busy="true"><div v-for="n in 3" :key="n" class="skeleton-row"></div><span class="sr-only">Loading agents...</span></div>
           <LoadFailed
             v-else-if="agentsView.state === 'failed'"
             dense
@@ -423,7 +431,7 @@
           <div class="system-section">
             <h2 class="section-title">Fleet Health</h2>
             <InlineError
-              v-if="fleetView.stale"
+              v-if="!fleetAdminOnly && fleetView.stale"
               class="mb-3"
               :message="staleBannerMessage('fleet health', lastLoadedAt.fleet)"
               :detail="fetchError.fleet"
@@ -431,7 +439,11 @@
               @retry="fetchFleetHealth"
               @dismiss="fetchError.fleet = ''"
             />
-            <div v-if="fleetView.state === 'loading'" class="skeleton-rows" aria-busy="true"><div v-for="n in 3" :key="n" class="skeleton-row"></div><span class="sr-only">Loading...</span></div>
+            <!-- #3041: same admin-gated endpoint as the Agents tab. -->
+            <div v-if="fleetAdminOnly" class="empty-state" data-testid="fleet-admin-only">
+              Fleet health and fleet actions are admin-only. Ask an admin for access.
+            </div>
+            <div v-else-if="fleetView.state === 'loading'" class="skeleton-rows" aria-busy="true"><div v-for="n in 3" :key="n" class="skeleton-row"></div><span class="sr-only">Loading...</span></div>
             <LoadFailed
               v-else-if="fleetView.state === 'failed'"
               dense
@@ -461,8 +473,9 @@
             </div>
           </div>
 
-          <!-- Quick Actions -->
-          <div class="system-section">
+          <!-- Quick Actions — every one is admin-gated server-side (#3041):
+               hidden rather than offered as a confirm-then-403 dead end. -->
+          <div v-if="!fleetAdminOnly" class="system-section" data-testid="fleet-actions">
             <h2 class="section-title">Actions</h2>
             <div class="actions-grid">
               <button @click="confirmAction('emergency-stop')" class="action-btn action-danger" :disabled="actionLoading">
@@ -727,6 +740,11 @@ const loading = reactive({
 const hasLoaded = reactive({ agents: false, queue: false, notifications: false, fleet: false })
 const fetchError = reactive({ agents: '', queue: '', notifications: '', fleet: '' })
 const lastLoadedAt = reactive({ agents: null, queue: null, notifications: null, fleet: null })
+// #3041: `GET /api/ops/fleet/status` is admin-gated. A 403 from it is a
+// permission boundary — the Agents tab and the fleet summary say "admin-only"
+// instead of a load failure, and the poll stops asking.
+const fleetAdminOnly = ref(false)
+const isForbidden = (e) => e?.response?.status === 403
 
 // Polling
 let pollInterval = null
@@ -810,7 +828,15 @@ async function fetchAgents() {
       http.get('/api/agents/autonomy-status'),
       http.get('/api/agents/execution-stats', { params: { include_7d: true } })
     ])
-    if (fleetRes.status !== 'fulfilled') throw fleetRes.reason
+    if (fleetRes.status !== 'fulfilled') {
+      if (isForbidden(fleetRes.reason)) {
+        fleetAdminOnly.value = true
+        fetchError.agents = ''
+        return
+      }
+      throw fleetRes.reason
+    }
+    fleetAdminOnly.value = false
     if (autonomyRes.status !== 'fulfilled') throw autonomyRes.reason
     const autonomyMap = autonomyRes.value.data || {}
     const agentList = (fleetRes.value.data.agents || []).map(a => ({
@@ -902,11 +928,17 @@ async function fetchFleetHealth() {
   loading.fleet = true
   try {
     const res = await http.get('/api/ops/fleet/status')
+    fleetAdminOnly.value = false
     fleetSummary.value = res.data.summary || { total: 0, running: 0, stopped: 0, high_context: 0 }
     hasLoaded.fleet = true
     lastLoadedAt.fleet = Date.now()
     fetchError.fleet = ''
   } catch (e) {
+    if (isForbidden(e)) {
+      fleetAdminOnly.value = true
+      fetchError.fleet = ''
+      return
+    }
     console.error('Failed to fetch fleet health:', e)
     fetchError.fleet = apiErrorMessage(e, 'Request failed')
   } finally {
@@ -927,6 +959,12 @@ function loadAllData() {
   fetchAgents()
   fetchQueue()
   fetchNotifications()
+}
+
+// #3041: the Queue is a sub-tab of Ops — land on it, whatever sub-tab was last viewed.
+function openQueue() {
+  activeTab.value = 'ops'
+  activeOpsTab.value = 'queue'
 }
 
 async function refreshCurrentTab() {
@@ -1473,9 +1511,11 @@ function cleanupPWA() {
 function startPolling() {
   stopPolling()
   pollInterval = setInterval(() => {
-    if (activeTab.value === 'agents') fetchAgents()
+    // #3041: a 403 does not change on its own — the poll stops asking; a
+    // manual refresh still re-checks (a role granted meanwhile shows up).
+    if (activeTab.value === 'agents') { if (!fleetAdminOnly.value) fetchAgents() }
     else if (activeTab.value === 'ops') { fetchQueue(); fetchNotifications() }
-    else if (activeTab.value === 'system') fetchFleetHealth()
+    else if (activeTab.value === 'system') { if (!fleetAdminOnly.value) fetchFleetHealth() }
   }, 15000)
 }
 
@@ -2513,6 +2553,10 @@ watch(() => authStore.isAuthenticated, (isAuth) => {
 .text-green { color: #4ade80; }
 .text-yellow { color: #facc15; }
 .text-red { color: #f87171; }
+
+.admin-only-action {
+  margin-top: 12px;
+}
 
 .chat-open-btn {
   padding: 6px 14px;

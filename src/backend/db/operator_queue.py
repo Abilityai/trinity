@@ -555,6 +555,92 @@ class OperatorQueueOperations:
         with get_engine().connect() as conn:
             return [dict(r) for r in conn.execute(stmt).mappings().all()]
 
+    def _list_conditions(
+        self,
+        status: Optional[str] = None,
+        type: Optional[str] = None,
+        priority: Optional[str] = None,
+        agent_name: Optional[str] = None,
+        since: Optional[str] = None,
+        accessible_agent_names: Optional[Set[str]] = None,
+        include_cleared: bool = False,
+        addressed_to_email: Optional[str] = None,
+        hide_ended_before: Optional[str] = None,
+        types: Optional[Tuple[str, ...]] = None,
+    ) -> Optional[list]:
+        """The WHERE conditions `list_items`, `count_items` and
+        `list_item_agent_names` share (#3059) — ONE definition, so a page, its
+        total and the agents it spans can never be computed over different
+        filters. `None` means "matches nothing" (an empty access set); see
+        `list_items` for what each filter means.
+        """
+        if accessible_agent_names is not None and len(accessible_agent_names) == 0:
+            return None
+
+        conds = []
+        if not include_cleared:
+            conds.append(operator_queue.c.cleared_at.is_(None))  # #1017
+
+        if accessible_agent_names is not None:
+            conds.append(operator_queue.c.agent_name.in_(sorted(accessible_agent_names)))
+        if status:
+            conds.append(operator_queue.c.status == status)
+        if type:
+            conds.append(operator_queue.c.type == type)
+        if types is not None:
+            conds.append(operator_queue.c.type.in_(list(types)))
+        if priority:
+            conds.append(operator_queue.c.priority == priority)
+        if agent_name:
+            conds.append(operator_queue.c.agent_name == agent_name)
+        if addressed_to_email is not None:
+            # `is not None`, deliberately NOT the truthiness the filters above
+            # use. For this argument's callers it IS the authorization boundary
+            # — "the asks addressed to this person" — so a falsy value has to
+            # match NOTHING rather than silently widening to everyone's. The
+            # other filters narrow a view the caller is already entitled to see;
+            # this one decides entitlement, which is why it diverges.
+            conds.append(
+                func.lower(operator_queue.c.addressed_to_email)
+                == addressed_to_email.strip().lower()
+            )
+        if since:
+            conds.append(operator_queue.c.created_at >= since)
+        if hide_ended_before:
+            conds.append(or_(
+                operator_queue.c.status == "pending",
+                func.coalesce(
+                    operator_queue.c.disposed_at,
+                    operator_queue.c.responded_at,
+                    operator_queue.c.created_at,
+                ) >= hide_ended_before,
+            ))
+        return conds
+
+    def count_items(self, **filters) -> int:
+        """How many rows `list_items(**filters)` would return with no limit (#3059)."""
+        conds = self._list_conditions(**filters)
+        if conds is None:
+            return 0
+        stmt = select(func.count()).select_from(operator_queue)
+        if conds:
+            stmt = stmt.where(and_(*conds))
+        with get_engine().connect() as conn:
+            return int(conn.execute(stmt).scalar() or 0)
+
+    def list_item_agent_names(self, **filters) -> List[str]:
+        """The distinct agents the rows matching `filters` belong to (#3059) —
+        so a caller can apply a per-agent predicate (the Workspace roster
+        re-check) BEFORE paging instead of after the limit."""
+        conds = self._list_conditions(**filters)
+        if conds is None:
+            return []
+        stmt = select(operator_queue.c.agent_name).distinct()
+        if conds:
+            stmt = stmt.where(and_(*conds))
+        with get_engine().connect() as conn:
+            return sorted(r[0] for r in conn.execute(stmt) if r[0])
+
     def list_items(
         self,
         status: Optional[str] = None,
@@ -568,8 +654,12 @@ class OperatorQueueOperations:
         include_cleared: bool = False,
         addressed_to_email: Optional[str] = None,
         hide_ended_before: Optional[str] = None,
+        types: Optional[Tuple[str, ...]] = None,
     ) -> List[Dict]:
         """List queue items with optional filters.
+
+        types (#3059): narrow to a set of item types in SQL, so a caller that
+        shows only some kinds pages and counts over exactly what it shows.
 
         hide_ended_before (trinity-enterprise#611): an ISO-Z cutoff. Rows that
         ENDED before it are left out; pending rows are unaffected. A row's ending
@@ -603,45 +693,14 @@ class OperatorQueueOperations:
         and an empty one therefore matches nothing. See the comment at the
         condition for why this one argument does not use truthiness like the rest.
         """
-        if accessible_agent_names is not None and len(accessible_agent_names) == 0:
+        conds = self._list_conditions(
+            status=status, type=type, priority=priority, agent_name=agent_name,
+            since=since, accessible_agent_names=accessible_agent_names,
+            include_cleared=include_cleared, addressed_to_email=addressed_to_email,
+            hide_ended_before=hide_ended_before, types=types,
+        )
+        if conds is None:
             return []
-
-        conds = []
-        if not include_cleared:
-            conds.append(operator_queue.c.cleared_at.is_(None))  # #1017
-
-        if accessible_agent_names is not None:
-            conds.append(operator_queue.c.agent_name.in_(sorted(accessible_agent_names)))
-        if status:
-            conds.append(operator_queue.c.status == status)
-        if type:
-            conds.append(operator_queue.c.type == type)
-        if priority:
-            conds.append(operator_queue.c.priority == priority)
-        if agent_name:
-            conds.append(operator_queue.c.agent_name == agent_name)
-        if addressed_to_email is not None:
-            # `is not None`, deliberately NOT the truthiness the filters above
-            # use. For this argument's callers it IS the authorization boundary
-            # — "the asks addressed to this person" — so a falsy value has to
-            # match NOTHING rather than silently widening to everyone's. The
-            # other filters narrow a view the caller is already entitled to see;
-            # this one decides entitlement, which is why it diverges.
-            conds.append(
-                func.lower(operator_queue.c.addressed_to_email)
-                == addressed_to_email.strip().lower()
-            )
-        if since:
-            conds.append(operator_queue.c.created_at >= since)
-        if hide_ended_before:
-            conds.append(or_(
-                operator_queue.c.status == "pending",
-                func.coalesce(
-                    operator_queue.c.disposed_at,
-                    operator_queue.c.responded_at,
-                    operator_queue.c.created_at,
-                ) >= hide_ended_before,
-            ))
 
         # Sort: pending items by priority then age; ended items by WHEN THEY
         # ENDED, newest first (trinity-enterprise#611, #627 AC6) — sorting a
@@ -675,6 +734,11 @@ class OperatorQueueOperations:
                 status_order,
                 pending_priority,
                 sort_time.desc(),
+                # #3059: the last key, so rows that tie on everything above
+                # (raised in the same instant) still order the same way on every
+                # read — which is what lets an offset page without overlapping
+                # or skipping a row.
+                operator_queue.c.id,
             )
             .limit(limit)
             .offset(offset)

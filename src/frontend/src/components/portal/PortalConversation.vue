@@ -1152,7 +1152,12 @@ const {
   pinToBottom,
   scrollToLatest,
   reset: resetFollowing,
-} = useStickToBottom(scrollEl)
+} = useStickToBottom(scrollEl, {
+  // An empty chat is not a transcript: it reads from the top, and a section that
+  // arrives late (the suggestions) grows downward without moving the hints or
+  // scrolling the agent's identity away. Sticking resumes with the first turn.
+  enabled: () => messages.value.length > 0 || sending.value,
+})
 const textarea = ref(null)
 const fileInput = ref(null)
 const pickerRef = ref(null)
