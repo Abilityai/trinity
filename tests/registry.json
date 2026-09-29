@@ -1,6 +1,91 @@
 {
   "test_files": [
     {
+      "file": "unit/test_ent706_sync_health_surfaces.py",
+      "feature": "ent#706",
+      "added": "2026-09-27",
+      "categories": [
+        "backend",
+        "unit",
+        "git-sync",
+        "api"
+      ],
+      "description": "The sync-health read surfaces carry the backend's verdict (trinity-enterprise#706); real DB via db_harness, handlers called directly with the Docker-backed accessibility lookup stubbed. Shared reader db.list_sync_health_rows: config flags + sync-state row per live git-bound agent in one query, soft-deleted and sync_enabled=0 agents excluded, state None before the first poll, scoped by name, empty scope -> {}. GET /api/agents/sync-health: every pre-#706 key kept with its meaning plus state / reason / recommendation / binding / dirty_files / divergence_age_s / last_successful_push_at / freeze; a work agent diverged 26 h is red + frozen with the issue's reason string, a deployment the same age is yellow and not frozen, an agent with no git binding is unknown with the old defaults; scoped to accessible agents. GET /api/agents/{name}/git/sync-state: the raw row (new columns included) plus the verdict; no row -> the old minimal dict plus state unknown."
+    },
+    {
+      "file": "unit/test_ent706_internal_sync_health.py",
+      "feature": "ent#706",
+      "added": "2026-09-27",
+      "categories": [
+        "backend",
+        "unit",
+        "git-sync",
+        "scheduling"
+      ],
+      "description": "GET /api/internal/agents/{name}/sync-health-status after trinity-enterprise#706 (real DB via db_harness, handler called directly): the pre-#706 keys (agent_name, freeze_schedules_if_sync_failing, sync_failing, should_freeze, consecutive_failures) keep their names and meaning; a work agent diverged 7 ahead for 26 h with a fresh observation reports should_freeze with freeze_reason 'diverged 0 behind / 7 ahead for 26h', divergence_age_s ~26 h and work_agent; three failed polls still freeze as sync_failing with the failed-sync reason; control arm: an in-sync row does not freeze and carries no reason; an agent with no git binding is not frozen and is not a work agent."
+    },
+    {
+      "file": "unit/test_1808_sync_freeze_enforcement.py",
+      "feature": "#1808, ent#706",
+      "added": "2026-09-27",
+      "categories": [
+        "scheduler",
+        "unit",
+        "git-sync",
+        "reliability"
+      ],
+      "description": "The scheduler's own freeze gate, on a real temp SQLite through SchedulerDatabase (src/scheduler cannot import the backend). #1808: opted-in + 3+ failed polls freezes; below threshold, not opted in, no sync row and an unknown agent fire; a broken/missing table FAILS OPEN; mapping-only (PG RealDictCursor-shaped) rows still freeze; the threshold is the one policy module's (the backend endpoint no longer restates the rule). trinity-enterprise#706: sync_freeze_reason — a work agent diverged 24 h + 1 s on a fresh observation freezes with 'diverged 0 behind / 7 ahead for 24h' (should_freeze True), 24 h - 1 s fires, control arm diverged_since NULL on the same row fires, a deployment never divergence-freezes, fork-to-own (source_mode=1, auto_sync=1) does, a 16-minute-stale observation fails open, the owner opt-in is required, the sync_failing reason names its polls, and the mapping-only row shape freezes on divergence too. The SchedulerService gate (fake DB, real _execute_schedule_with_lock) writes 'Git sync frozen: <reason>' as the skipped row's skip_reason; control arm: no reason, no skip row; a manual trigger is never frozen."
+    },
+    {
+      "file": "unit/test_ent706_divergence_tracking.py",
+      "feature": "ent#706",
+      "added": "2026-09-27",
+      "categories": [
+        "backend",
+        "unit",
+        "git-sync",
+        "reliability"
+      ],
+      "description": "The SyncHealthService poller keeps the trinity-enterprise#706 columns, driven through the REAL _poll_cycle on a real DB (db_harness) with only /api/git/status faked. diverged_since: set once on the first ahead/behind > 0 poll and unchanged across later polls with different counts; cleared at (0, 0) AND at (0, None) (no upstream, #2105); an uncomputable ahead neither starts nor clears it; a known behind with unknown ahead starts it. dirty_files/dirty_since from changes_count: set-once / clear at 0; garbage (str, negative, bool, > int4) keeps both prior values; dirt never starts the divergence clock. last_successful_push_at: the later of the heartbeat's own #3011 record and an operator Push (agent_git_config.last_sync_at), either direction; an image older than #3011 (key absent) falls back to a success cycle but not a failed one; a #3011 image that never pushed (key present, None) does not; the agent value is validated (garbage, naive, future, non-str rejected); monotonic. An unreachable agent changes nothing. The sync_diverged operator-queue item: exactly one across repeated polls of an aged episode (id sync-diverged-{agent}-{diverged_since}, high priority, reason in the question, counts + recommendation in context, NO last_error_summary); two SyncHealthService instances (fail-open double leader) converge on one; a new episode after a clear gets a second; control arms: the same aged seed with the freeze flag off, or as a deployment, raises ZERO; the prefix is platform-reserved."
+    },
+    {
+      "file": "unit/test_ent706_sync_state_columns.py",
+      "feature": "ent#706",
+      "added": "2026-09-27",
+      "categories": [
+        "backend",
+        "unit",
+        "database",
+        "migrations",
+        "git-sync"
+      ],
+      "description": "The four trinity-enterprise#706 columns on agent_sync_state (diverged_since, dirty_files, dirty_since, last_successful_push_at), both tracks (Invariant #9): the SQLite migration adds them to the pre-#706 table, runs twice as a no-op and backfills nothing; it is registered once in MIGRATIONS; schema.py DDL and the tables.py Core table carry them; the Alembic revision's id equals its filename, its down_revision is a real revision, and it ADD COLUMN IF NOT EXISTS / DROP COLUMN IF EXISTS each of the four. The upsert's three-way clock semantics (db_harness, SQLite + PG when TEST_POSTGRES_URL): the episode clocks default to KEEP across a partial upsert (and KEEP is the explicit spelling), None CLEARS them, and dirty_files = 0 is stored rather than dropped. KEEP is read from the live ops object's upsert.__globals__ (module-identity gotcha under sibling db.* eviction)."
+    },
+    {
+      "file": "unit/test_ent706_sync_policy.py",
+      "feature": "ent#706",
+      "added": "2026-09-27",
+      "categories": [
+        "backend",
+        "unit",
+        "git-sync",
+        "reliability"
+      ],
+      "description": "The one sync-health policy (trinity-enterprise#706, services/sync_freeze_policy.py::classify), table-driven: unknown (no row / never observed); green in sync; one failed poll red not frozen; sync_failing (3 polls) freezes ANY binding and ignores observation freshness (#1808 unchanged); the failed reason carries at most 120 chars of error; the 24 h boundary at +/-1 s (yellow/runs vs red/frozen, divergence_age_s = 86401, freeze_reason names the divergence clause); freeze flag off -> red not frozen; a deployment behind 31 for 26 h is yellow and never freezes; fork-to-own (source_mode=1, auto_sync=1) freezes, source_mode=1 auto_sync=0 never does; a stale observation (16 min) stays red but does not freeze and names its age, 14 min freezes; aware Z, naive string, naive datetime and +03:00 offset give the same verdict; garbage timestamps degrade; behind_main is information only; dirt 24 h +/- 1 s (red not frozen for a work agent, yellow for a deployment, not a state under 24 h); the 7-day no-heartbeat floor (9 d red, 6 d not, never-heartbeat measured from the binding's creation, auto-sync off exempt); first red names the reason and the rest append; the recommendation mapping incl. push_denied / source-mode refusal; the constants; hostile types never raise. Non-ambient pins throughout."
+    },
+    {
+      "file": "unit/test_ent706_sync_policy_parity.py",
+      "feature": "ent#706",
+      "added": "2026-09-27",
+      "categories": [
+        "backend",
+        "scheduler",
+        "unit",
+        "git-sync"
+      ],
+      "description": "Vendored-mirror guard (trinity-enterprise#706, the #1088 precedent): src/scheduler/sync_freeze_policy.py is byte-identical to src/backend/services/sync_freeze_policy.py; the policy is a stdlib-only leaf with no relative imports (it must import in the scheduler image); the scheduler's SYNC_FAILURE_FREEZE_THRESHOLD is imported from the mirror, never re-assigned (one number)."
+    },
+    {
       "file": "unit/test_3080_detect_mime_zip.py",
       "feature": "#3080",
       "added": "2026-09-29",
