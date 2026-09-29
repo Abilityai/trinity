@@ -36,6 +36,8 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from db.write_params import TaskExecutionFields
+from db.write_params import TaskExecutionFields
 
 _BACKEND = Path(__file__).resolve().parents[2] / "src" / "backend"
 if str(_BACKEND) not in sys.path:
@@ -59,6 +61,8 @@ class _DB:
         self.open_counts = 0
 
     def create_task_execution(self, **kw):
+        if kw.get("fields") is not None:  # #1482: inline the parameter object
+            kw.update(vars(kw.pop("fields")))
         self._n += 1
         eid = f"exec_{self._n}"
         self.rows[eid] = {
@@ -102,7 +106,8 @@ class _DB:
     def get_agent_subscription_id(self, agent_name):
         return "sub_1"
 
-    def update_execution_status(self, *, execution_id, status, error=None, **_kw):
+    def update_execution_status(self, *, execution_id, status, result=None, **_kw):
+        error = result.error if result is not None else None  # #1482
         row = self.rows.get(execution_id)
         if row is None or row["status"] not in _OPEN:
             return False  # the CAS: a terminal row is never overwritten
@@ -159,7 +164,11 @@ class TestJoin:
         fan_out_id = "fo_join"
         ids = [
             db.create_task_execution(
-                agent_name="a1", fan_out_id=fan_out_id, fan_out_task_id=f"t{i}"
+                agent_name="a1",
+                fields=TaskExecutionFields(
+                    fan_out_id=fan_out_id,
+                    fan_out_task_id=f"t{i}",
+                ),
             ).id
             for i in range(3)
         ]
@@ -180,7 +189,11 @@ class TestJoin:
         a second aggregate or a double wake of a caller that has moved on."""
         fos, db, _calls, _script = env
         eid = db.create_task_execution(
-            agent_name="a1", fan_out_id="fo_dup", fan_out_task_id="t0"
+            agent_name="a1",
+            fields=TaskExecutionFields(
+                fan_out_id="fo_dup",
+                fan_out_task_id="t0",
+            ),
         ).id
         db.finish(eid)
         with patch.object(fos, "signal_fan_out_batch") as signal:
@@ -192,7 +205,7 @@ class TestJoin:
         """Every terminal in the fleet passes through this. A row with no
         `fan_out_id` must not reach the batch COUNT."""
         fos, db, _calls, _script = env
-        eid = db.create_task_execution(agent_name="a1", fan_out_id=None).id
+        eid = db.create_task_execution(agent_name="a1", fields=TaskExecutionFields(fan_out_id=None)).id
         db.finish(eid)
         before = db.open_counts
         assert _run(fos.join_fan_out_on_terminal(eid)) is False
@@ -481,7 +494,7 @@ class TestDispatch:
 
         # A lost CAS (the row already went terminal) has no side effects.
         emitted.clear(); closed.clear()
-        eid = db.create_task_execution(agent_name="a1", fan_out_id="fo_lost").id
+        eid = db.create_task_execution(agent_name="a1", fields=TaskExecutionFields(fan_out_id="fo_lost")).id
         db.finish(eid)
         _run(fos.FanOutService._fail_subtask("a1", eid, RuntimeError("late")))
         assert emitted == [] and closed == []

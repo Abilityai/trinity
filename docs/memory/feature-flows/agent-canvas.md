@@ -305,9 +305,22 @@ re-sorting only on refetch would leave a just-pinned canvas where it was.
 
 **Living with many** is `CanvasPanel.vue`, shared by Agent Detail and the
 Workspace rail (one rendering layer, as ent#475 established): search over title
-and id once the list passes six, a height-bounded scrolling strip so a long
-list does not cost the rail its other tabs, and a Manage mode giving each row
-its age, its stale mark, a pin toggle and a delete. Decidable rules live in
+and id once the list passes six, and a Manage mode giving each row its age,
+its stale mark, a pin toggle and a delete. **One control row (ent#724,
+design-system principle 30):** the selector is a single `BaseSelect` dropdown
+in a fixed-height row with search, the headroom label and a `Manage`/`Done`
+toggle, rendered identically for 1 canvas and for 40, so the canvas body starts
+at the same y on every agent. The chip strip it replaced grew a row per few
+canvases. A single canvas reads as a disabled one-option select, never a
+different layout (`canvasSelectorVisible` now decides *enabled*, not *shown*).
+Options sort pinned-first with a pin mark and clamp long agent-written titles
+(`canvasOptionLabel`, 60 chars at a word boundary); the full title rides on the
+option's `title` and in the canvas header. Manage opens as a bounded list
+**below** the row (grid-rows height transition, principle 29), so the row never
+moves and Done returns to the canvas that was open. `set_canvas`'s `title`
+description asks agents for ≤ 60 characters and no provenance suffix; the
+`max(300)` schema is unchanged. `canvasPanelControlRow.spec.js` (mounted) pins
+the row's structure across 1, 2 and 40 canvases. Decidable rules live in
 `components/canvas/canvasUtils.js` (`sortCanvases`, `filterCanvases`,
 `selectionState`, `bulkDeletePrompt`, `bulkDeleteOutcome`, `canvasHeadroom`,
 `canvasSelectorVisible`, `canvasAutoSelect`, `canvasSearchVisible`), because

@@ -25,6 +25,7 @@ import ast
 import inspect
 
 import pytest
+from unit._write_params import object_keywords
 
 pytestmark = pytest.mark.unit
 
@@ -47,6 +48,8 @@ def test_precreated_row_carries_the_session_and_the_client(portal_service, monke
             return "sub_1"
 
         def create_task_execution(self, **kwargs):
+            if kwargs.get("fields") is not None:  # #1482: inline the parameter object
+                kwargs.update(vars(kwargs.pop("fields")))
             captured.update(kwargs)
             return type("Row", (), {"id": "exec_abc"})()
 
@@ -87,6 +90,8 @@ def test_still_fails_soft_when_the_row_cannot_be_written(portal_service, monkeyp
             return None
 
         def create_task_execution(self, **kwargs):
+            if kwargs.get("fields") is not None:  # #1482: inline the parameter object
+                kwargs.update(vars(kwargs.pop("fields")))
             raise RuntimeError("db down")
 
     import database
@@ -106,6 +111,8 @@ def test_subscription_lookup_failure_does_not_lose_the_binding(portal_service, m
             raise RuntimeError("no subscription service")
 
         def create_task_execution(self, **kwargs):
+            if kwargs.get("fields") is not None:  # #1482: inline the parameter object
+                kwargs.update(vars(kwargs.pop("fields")))
             captured.update(kwargs)
             return type("Row", (), {"id": "exec_x"})()
 
@@ -128,7 +135,7 @@ def _create_call_kwargs(fn) -> set[str]:
         if isinstance(node, ast.Call):
             name = node.func.attr if isinstance(node.func, ast.Attribute) else getattr(node.func, "id", "")
             if name == "create_task_execution":
-                return {kw.arg for kw in node.keywords if kw.arg}
+                return {kw.arg for kw in object_keywords(node) if kw.arg}
     return set()
 
 
@@ -178,7 +185,7 @@ def test_execute_task_persists_the_binding_only_when_it_creates_the_row(portal_s
             if isinstance(inner, ast.Call):
                 name = inner.func.attr if isinstance(inner.func, ast.Attribute) else getattr(inner.func, "id", "")
                 if name == "create_task_execution":
-                    kws = {kw.arg for kw in inner.keywords if kw.arg}
+                    kws = {kw.arg for kw in object_keywords(inner) if kw.arg}
                     if "source_channel_chat_id" in kws:
                         guarded = True
     assert guarded, (

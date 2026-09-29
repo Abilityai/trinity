@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
 
 from client_portal.portal_auth import PortalPrincipal, get_portal_principal
 from dependencies import PERSON_REQUIRED_DETAIL
@@ -39,8 +39,13 @@ def _raise(e: AskError):
 
 @router.get("", response_model=List[WorkspaceAsk])
 def list_asks(
+    response: Response,
     agent_name: Optional[str] = Query(default=None),
     include_ended: bool = Query(default=False),
+    # #3059 — opt-in paging. The body stays a list so no current caller
+    # changes; the total and the next cursor travel as headers.
+    limit: int = Query(default=service.PAGE_MAX, ge=1, le=service.PAGE_MAX),
+    cursor: Optional[str] = Query(default=None, max_length=64),
     principal: PortalPrincipal = Depends(get_portal_principal),
 ):
     """Open asks addressed to the caller. `agent_name` narrows to the agent page.
@@ -56,13 +61,19 @@ def list_asks(
     waiting, and the client keeps its last good list on this answer.
     """
     try:
-        return service.list_asks(principal.email, principal.is_platform, agent_name,
-                                 include_ended=include_ended)
+        page = service.list_asks_page(principal.email, principal.is_platform, agent_name,
+                                      include_ended=include_ended, limit=limit, cursor=cursor)
     except AsksUnavailable:
         raise HTTPException(status_code=503, detail={
             "code": "asks_unavailable",
             "message": "Couldn't load your asks — try again.",
         })
+    except AskError as e:
+        _raise(e)
+    response.headers["X-Total-Count"] = str(page.total)
+    if page.next_cursor:
+        response.headers["X-Next-Cursor"] = page.next_cursor
+    return page.items
 
 
 @router.post("/{item_id}/answer", response_model=WorkspaceAsk)

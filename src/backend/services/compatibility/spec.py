@@ -46,8 +46,9 @@ Retired ids (#2137) — never reissued, so old persisted `checks_json` rows in
   G-002 — compared against the 58-entry fleet-wide `_GITIGNORE_PATTERNS` that
     Trinity itself injects at git-init. Most of that list is not authorable
     content at all (`.bashrc`, `.profile`, `.bash_history`, `.cache/`,
-    `.local/`, `.npm/`, `.ssh/`, `.claude/plugins/`, `.claude/settings.json`),
-    so a template author could not satisfy it and should not try; and every
+    `.local/`, `.npm/`, `.ssh/`, `.claude/plugins/`; `.claude/settings.json`
+    was on it too until ent#708 moved that file to a content guard), so a
+    template author could not satisfy it and should not try; and every
     author-controllable line in it is ALREADY owned by S-001..S-008, so a
     narrowed G-002 would assert the empty set. The `.gitignore` auto-fix for
     F-003 still writes the canonical list — generating it is Trinity's job,

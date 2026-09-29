@@ -232,6 +232,9 @@ def deploy(ctx, path, name, repo):
             result = client.post("/api/agents", json={
                 "name": agent_name,
                 "template": f"github:{repo}",
+                # ent#705: a deployment of a codebase — pull-only. The server's
+                # default ("agent") would give it a working branch + auto-push.
+                "kind": "deployment",
             })
             click.echo(f"Agent '{result['name']}' created (status: {result['status']})")
         except TrinityAPIError as e:

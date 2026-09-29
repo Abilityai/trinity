@@ -59,6 +59,10 @@
       <p class="mt-1 text-sm font-medium text-gray-900 dark:text-gray-100">{{ ask.title }}</p>
       <p v-if="ask.question && ask.question !== ask.title"
          class="mt-0.5 text-sm text-gray-600 dark:text-gray-300 whitespace-pre-wrap">{{ ask.question }}</p>
+      <!-- trinity-enterprise#611: the exact action this approval would run, which is
+           what the person is deciding. Kept on an ended ask, so it still says what
+           was decided. -->
+      <QueueProposal v-if="ask.proposal" :proposal="ask.proposal" class="mt-2" />
 
       <!-- An ending is RENDERED, never silently dropped: an ask that simply
            vanishes reads as "answered" to the person who did not answer it.
@@ -165,6 +169,7 @@
 <script setup>
 import { computed, reactive, ref, onBeforeUnmount } from 'vue'
 import BaseBadge from '../base/BaseBadge.vue'
+import QueueProposal from '../operator/QueueProposal.vue'
 import { useClientPortalStore } from '@/stores/clientPortal'
 import {
   expiredLabel, askThreadLink, answerConfirmation, ANSWER_CONFIRMATION_MS,
