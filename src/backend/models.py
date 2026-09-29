@@ -3658,6 +3658,31 @@ class OperatorCancel(BaseModel):
     _blank_is_none = field_validator("reason")(_blank_reason_is_none)
 
 
+class OperatorAskCreate(BaseModel):
+    """Body for an agent raising an ask through the platform
+    (trinity-enterprise#611): `POST /api/agents/{name}/operator-queue`.
+
+    TYPES ONLY. Every limit and rule — sizes, the deadline floor, the roles,
+    the re-ask link — is checked by the ask sink (`services/ask_service.py`),
+    so each refusal carries a NAMED code the agent can act on, instead of a
+    generic validation error. Unknown fields are refused: the platform decides
+    the channel, who raised the ask and whom it resolved to, never the body.
+    """
+    model_config = ConfigDict(extra="forbid")
+
+    request_id: str
+    title: str
+    question: Optional[str] = None
+    type: Optional[str] = None
+    priority: Optional[str] = None
+    options: Optional[List[Any]] = None
+    context: Optional[Dict[str, Any]] = None
+    proposal: Optional[Dict[str, Any]] = None
+    expires_at: Optional[str] = None
+    to: Optional[str] = None
+    supersedes_expired: Optional[str] = None
+
+
 class BulkCancelRequest(BaseModel):
     """Body for bulk-cancelling pending queue items (#1017).
 

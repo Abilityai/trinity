@@ -1,7 +1,7 @@
 """Pydantic models for Workspace asks (ent#364). OSS core since ent#428."""
 from __future__ import annotations
 
-from typing import Any, List, Optional
+from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field
 
@@ -22,6 +22,11 @@ class WorkspaceAsk(BaseModel):
     title: str
     question: str
     options: Optional[List[Any]] = None
+    # trinity-enterprise#611: the exact action an approval asks this person to
+    # approve. Agent-authored like `context`, but named here on purpose: it is the
+    # thing being decided, and the prompt tells agents to put it here "so the
+    # operator can verify what they are approving". `context` stays off.
+    proposal: Optional[Dict[str, Any]] = None
     created_at: str
     expires_at: Optional[str] = None
     # pending | answered | cancelled | expired. A listing carries pending asks,

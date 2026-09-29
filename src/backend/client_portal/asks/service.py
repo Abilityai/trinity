@@ -108,7 +108,8 @@ def _project(item: dict, *, viewer_email: Optional[str] = None,
     which strips any agent-authored `workspace_session_id` at the ingestion
     boundary before writing the real one. Until then this docstring described an
     intention rather than a property. `context` is otherwise agent-authored and
-    never forwarded.
+    never forwarded; `proposal` is forwarded by name (trinity-enterprise#611),
+    because it is the action the addressee is being asked to approve.
     """
     context = item.get("context") if isinstance(item.get("context"), dict) else {}
     chat_id = context.get("workspace_session_id")
@@ -122,6 +123,7 @@ def _project(item: dict, *, viewer_email: Optional[str] = None,
         title=item.get("title") or "",
         question=item.get("question") or "",
         options=item.get("options") if isinstance(item.get("options"), list) else None,
+        proposal=item.get("proposal") if isinstance(item.get("proposal"), dict) else None,
         created_at=item.get("created_at") or "",
         expires_at=item.get("expires_at"),
         status=_status_of(item),
