@@ -3744,6 +3744,17 @@
       "description": "Workspace asks read fails loud (ent#610 PR A0): a queue-read fault and an unreadable roster each raise AsksUnavailable and the route answers 503 asks_unavailable (never []); a genuinely off-roster agent is still dropped with a 200; answer_ask stays a uniform 404 on a roster outage (Invariant #8); the suggestions build still degrades to no ask ids through its own attempt() (a guard for the new raise path; it also passes pre-fix). Mutations: revert the raise to return [] (2 red), make _on_roster swallow again (3 red incl. the reversed test_ent428 case)."
     },
     {
+      "file": "unit/test_ent610_ask_context.py",
+      "feature": "trinity-enterprise#610",
+      "added": "2026-09-29",
+      "categories": [
+        "backend",
+        "workspace",
+        "security"
+      ],
+      "description": "An ask's context (ent#610 PR A2 §3g L7, E1) on a real SQLite: origin = the 3 messages before the ask only from a run thread verified as the viewer's, else the ask's own Main with no excerpt; run shown only for the ask's agent, live when filed (parsed, 300 s grace), schedule/manual or the viewer's own — another user's run on the same agent, another agent's run, a run outside its window and a missing execution are all None; the schedule name for platform principals only; recent_answers = the viewer's own 3 newest from this agent; the route has no cost/execution_id, one 404 body for missing/not-mine/off-roster/invisible kind, 503 on a roster outage (the answer path stays 404), the rate-limit key, and the # mcp header. Mutations: agent check, audience check, _owned_ask, +cost, live window, schedule name to clients, unverified origin, non-strict roster (each red)."
+    },
+    {
       "file": "unit/test_ent610_inbox.py",
       "feature": "trinity-enterprise#610",
       "added": "2026-09-28",

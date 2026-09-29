@@ -3605,8 +3605,17 @@ to localStorage in the clear.
   within the day ("Expires in 18m" as a warning under an hour, a neutral "Expires in 5h"
   otherwise, the absolute time on hover); never more than two badges. The expiry counts down
   on a 30-second clock that runs only while such a row exists.
+- **An ask's context (§3g L7, E1, PR A2)**: below an ask in the pane (the answer controls never
+  move, and work whether or not the context loads): where it came from — the conversation the
+  run was in and the three messages before the ask, only when that conversation is the
+  viewer's own, else "Filed in your Main chat" — the run that raised it ("Asked during a
+  scheduled run · 09:00"; a platform user reads the schedule's name), what was delivered in
+  that chat, and the viewer's own last three answers to this agent. A run is named only when
+  it belongs to the ask's agent, was running when the ask was filed, and was a schedule, a
+  manual run or the viewer's own — the agent writes the link, so it is checked, never trusted.
 - **The door (AC 7)**: nothing the Inbox adds carries cost, an execution id or run detail; the
-  preview projection has no `cost` field. The Inbox needs no capability flag — it reads the
+  preview projection has no `cost` field; the ask-context read carries no `cost` and no
+  execution id (a run's kind, label and start time only). The Inbox needs no capability flag — it reads the
   roster payload, the viewer's own chat state and the asks list.
 - **Honest states**: loading ≠ empty ≠ failed ≠ stale, for asks and threads alike. The empty
   copy renders only after a successful read; a failed first read shows a retry; a failed

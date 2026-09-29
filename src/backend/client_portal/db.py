@@ -185,16 +185,25 @@ def add_portal_message(msg_id: str, agent_name: str, client_email: str,
 
 
 def get_portal_messages(agent_name: str, client_email: str, limit: int = 100,
-                        session_id: Optional[str] = None) -> list[dict]:
+                        session_id: Optional[str] = None,
+                        before: Optional[str] = None) -> list[dict]:
     """The most-recent ``limit`` messages for a conversation, oldest-first for
     display. Scoped to one ``session_id`` when given (the multi-session read);
     with no session it falls back to the whole (agent, client) history — the
-    legacy single-thread behaviour."""
+    legacy single-thread behaviour.
+
+    ``before`` (trinity-enterprise#610 §3g L7): only messages strictly older than
+    this ISO-Z instant — the ask context's "what led up to it". A bound
+    parameter compared with another `utc_now_iso()` column, so the two strings
+    share one format (Invariant #16's trap is `datetime('now')`, not this)."""
     where = "agent_name = :agent AND client_email = :email"
     params = {"agent": agent_name, "email": (client_email or "").lower(), "lim": limit}
     if session_id is not None:
         where += " AND session_id = :session"
         params["session"] = session_id
+    if before is not None:
+        where += " AND created_at < :before"
+        params["before"] = before
     stmt = text(
         # ent#366: `id` rides along so a message can be RATED. The row has always
         # had a primary key; the client just never saw it, which is why a thumb
