@@ -119,7 +119,8 @@ def _enforce_timeout_below_agent_cap(agent_name: str, requested_seconds: int) ->
                 "message": (
                     f"Schedule timeout {requested_seconds}s exceeds agent "
                     f"execution_timeout_seconds {cap}s. Raise the agent cap "
-                    f"first via PUT /api/agents/{agent_name}/timeout."
+                    f"first: the agent's owner sets it via PUT /api/agents/{agent_name}/timeout "
+                    "(an agent key cannot)."
                 ),
                 "agent_cap_seconds": cap,
                 "requested_seconds": requested_seconds,
