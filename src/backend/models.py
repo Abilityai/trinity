@@ -4100,7 +4100,12 @@ class SetAdminPasswordRequest(BaseModel):
     confirm_password: str = Field(..., max_length=128)
     # Required admin email — sign-in identity. Shape validated in the handler so
     # a typo / blank value yields a clean 400 (a missing field yields a 422).
+    # #3004: under ADMIN_PASSWORD_SOURCE=instance-id the handler accepts a blank
+    # value (AWS review: no PII required); the field itself stays required.
     email: str = Field(..., max_length=254)
+    # #3004 (PROV-018): the EC2 instance ID, checked only when
+    # ADMIN_PASSWORD_SOURCE=instance-id and ignored otherwise.
+    claim_code: Optional[str] = Field(None, max_length=64)
     # Optional operator profile — all skippable; setup completes without them.
     company: Optional[str] = Field(None, max_length=200)
     name: Optional[str] = Field(None, max_length=200)
