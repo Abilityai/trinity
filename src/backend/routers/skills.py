@@ -26,6 +26,7 @@ from dependencies import (
     reject_non_interactive_principal,
     get_authorized_agent_by_name,
     get_skill_managed_agent_by_name,
+    can_manage_agent_skills,
     acting_agent_name,
 )
 from database import db
@@ -707,8 +708,14 @@ async def get_agent_skill_sets(
 
     `probe=true` checks the declared credentials inside a running agent (one
     in-container exec). Off by default, so a plain read is never an exec
-    amplifier; prerequisites then read `unknown` (cso L1)."""
+    amplifier; prerequisites then read `unknown` (cso L1).
+
+    #3052: the Skills tab always asks for the probe, so the default alone did
+    not hold for the path actually used. The probe is honoured only for a
+    principal who may manage this agent's skills (the same ent#596 fence as
+    the set writes); any other reader gets the unprobed answer, never a 403."""
     from services import skill_set_service
+    probe = probe and can_manage_agent_skills(current_user, agent_name)
     return await skill_set_service.agent_set_status(agent_name, probe=probe)
 
 

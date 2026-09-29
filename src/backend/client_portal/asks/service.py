@@ -8,7 +8,10 @@ they do for an operator.
 """
 from __future__ import annotations
 
+import base64
 import logging
+import re
+from dataclasses import dataclass, field
 from typing import List, Optional
 
 from database import db
@@ -108,7 +111,8 @@ def _project(item: dict, *, viewer_email: Optional[str] = None,
     which strips any agent-authored `workspace_session_id` at the ingestion
     boundary before writing the real one. Until then this docstring described an
     intention rather than a property. `context` is otherwise agent-authored and
-    never forwarded.
+    never forwarded; `proposal` is forwarded by name (trinity-enterprise#611),
+    because it is the action the addressee is being asked to approve.
     """
     context = item.get("context") if isinstance(item.get("context"), dict) else {}
     chat_id = context.get("workspace_session_id")
@@ -122,6 +126,7 @@ def _project(item: dict, *, viewer_email: Optional[str] = None,
         title=item.get("title") or "",
         question=item.get("question") or "",
         options=item.get("options") if isinstance(item.get("options"), list) else None,
+        proposal=item.get("proposal") if isinstance(item.get("proposal"), dict) else None,
         created_at=item.get("created_at") or "",
         expires_at=item.get("expires_at"),
         status=_status_of(item),
@@ -171,61 +176,93 @@ def _on_roster(agent_name: str, email: str, is_platform: bool) -> bool:
         return False
 
 
-def list_asks(email: str, is_platform: bool, agent_name: Optional[str] = None,
-              include_ended: bool = False) -> List[WorkspaceAsk]:
+# #3059: the page size, and the ceiling on it. The default keeps a plain read
+# exactly as big as it always was; what changed is that it now says how many
+# there are and how to get the rest, instead of stopping silently.
+PAGE_MAX = 200
+_CURSOR_RE = re.compile(r"^v1:(\d{1,9})$")
+
+
+@dataclass
+class AsksPage:
+    """One page of the viewer's visible asks, the size of the whole visible set,
+    and — while more remain — the cursor for the next page."""
+    items: List[WorkspaceAsk] = field(default_factory=list)
+    total: int = 0
+    next_cursor: Optional[str] = None
+
+
+def _encode_cursor(offset: int) -> str:
+    return base64.urlsafe_b64encode(f"v1:{offset}".encode()).decode().rstrip("=")
+
+
+def _decode_cursor(cursor: Optional[str]) -> int:
+    """Opaque to clients; an offset over a stably ordered set inside. Anything
+    unreadable is a named 422, never a silent first page."""
+    if cursor is None:
+        return 0
+    try:
+        raw = base64.urlsafe_b64decode(cursor + "=" * (-len(cursor) % 4)).decode("ascii")
+    except Exception:  # noqa: BLE001 — every malformed shape is the same refusal
+        raw = ""
+    m = _CURSOR_RE.match(raw)
+    if not m:
+        raise AskError(422, "invalid_cursor", "That page cursor is not valid. Reload the list.")
+    return int(m.group(1))
+
+
+def list_asks_page(email: str, is_platform: bool, agent_name: Optional[str] = None,
+                   include_ended: bool = False, limit: int = PAGE_MAX,
+                   cursor: Optional[str] = None) -> AsksPage:
     """Asks addressed to `email`: open ones first, then — with `include_ended` —
     the ones that ended in the last `ENDED_WINDOW_DAYS`, most recent ending
-    first (trinity-enterprise#611). Never raises."""
+    first (trinity-enterprise#611). Paged (#3059). Never raises on a read
+    failure; raises `AskError` only for an unreadable cursor."""
+    offset = _decode_cursor(cursor)
+    limit = max(1, min(int(limit), PAGE_MAX))
+    # Every filter the viewer's visibility depends on is a SQL condition,
+    # applied BEFORE the limit (#3059). The addressee always was (ent#428, see
+    # `list_items`: a post-hoc filter reads "the newest 200 items in the FLEET,
+    # some of which are yours"). The visible kinds and the roster re-check used
+    # to run here, on the result — so a page of 200 rows could render fewer,
+    # and no count taken in SQL could be the viewer's real total.
+    filters = dict(
+        status=None if include_ended else "pending",
+        hide_ended_before=iso_cutoff(hours=ENDED_WINDOW_DAYS * 24) if include_ended else None,
+        # Clear All is the OPERATOR's list hygiene (#1017): it must not make
+        # an ended ask vanish from the person it was addressed to inside the
+        # window — the agent's own readback ignores it for the same reason.
+        include_cleared=include_ended,
+        agent_name=agent_name,
+        addressed_to_email=email,
+        types=_VISIBLE_KINDS,
+    )
     try:
-        # The addressee is a SQL condition (ent#428), NOT something filtered out
-        # of the result here. `list_items` orders by status, then priority, then
-        # age and applies `limit` before this code sees a row — so filtering
-        # afterwards would mean "the newest 200 pending items in the FLEET, of
-        # which some are yours", and one client's low-priority ask would drop
-        # out of their sidebar as soon as the fleet got busy while still sitting
-        # pending in the queue. Nobody else may answer it, so nobody would.
-        items = db.list_operator_queue_items(
-            status=None if include_ended else "pending",
-            hide_ended_before=iso_cutoff(hours=ENDED_WINDOW_DAYS * 24) if include_ended else None,
-            # Clear All is the OPERATOR's list hygiene (#1017): it must not make
-            # an ended ask vanish from the person it was addressed to inside the
-            # window — the agent's own readback ignores it for the same reason.
-            include_cleared=include_ended,
-            agent_name=agent_name,
-            addressed_to_email=email,
-            limit=200,
-        )
+        # The roster predicate is unchanged — `_on_roster`, asked once per
+        # AGENT, fail-closed per agent (ent#428) — it is just asked of the
+        # agents the viewer's asks span, and the answer goes into the SQL as the
+        # access set. Re-implementing membership here is how the two drift.
+        allowed = {a for a in db.list_operator_queue_agent_names(**filters)
+                   if _on_roster(a, email, is_platform)}
+        if not allowed:
+            return AsksPage()
+        total = db.count_operator_queue_items(accessible_agent_names=allowed, **filters)
+        items = db.list_operator_queue_items(accessible_agent_names=allowed,
+                                             limit=limit, offset=offset, **filters)
     except Exception:  # noqa: BLE001 — a sidebar badge must not break the Workspace
         logger.warning("[WorkspaceAsks] list failed", exc_info=True)
-        return []
+        return AsksPage()
 
-    # Memoized per REQUEST, not cached across them: `agent_on_roster` is
-    # `agent_name in roster_agent_names(...)` and that inner call is one-to-two
-    # DB reads, so asking it per item made this O(items) queries for an answer
-    # that cannot change inside one request — on an endpoint the Workspace polls
-    # every 20s, per signed-in client, per open tab. A client's asks cluster on
-    # one or two agents, so in practice this is 1-2 reads instead of N.
-    #
-    # Deliberately memoizing `_on_roster` rather than hoisting
-    # `roster_agent_names` up here: that function IS the access predicate
-    # ("the scope of what a caller can DO must equal the scope of what they can
-    # SEE"), and re-implementing membership beside it is how the two drift. It
-    # also keeps the fail-CLOSED behaviour per agent, unchanged.
-    seen: dict[str, bool] = {}
+    out = [_project(item, viewer_email=email) for item in items or []]
+    end = offset + len(items or [])
+    return AsksPage(items=out, total=total,
+                    next_cursor=_encode_cursor(end) if end < total else None)
 
-    def _allowed(agent: str) -> bool:
-        if agent not in seen:
-            seen[agent] = _on_roster(agent, email, is_platform)
-        return seen[agent]
 
-    out: List[WorkspaceAsk] = []
-    for item in items or []:
-        if item.get("type") not in _VISIBLE_KINDS:
-            continue
-        if not _allowed(item.get("agent_name") or ""):
-            continue
-        out.append(_project(item, viewer_email=email))
-    return out
+def list_asks(email: str, is_platform: bool, agent_name: Optional[str] = None,
+              include_ended: bool = False) -> List[WorkspaceAsk]:
+    """The first page as a plain list — the pre-#3059 entry point, unchanged."""
+    return list_asks_page(email, is_platform, agent_name, include_ended=include_ended).items
 
 
 def answer_ask(item_id: str, email: str, is_platform: bool,

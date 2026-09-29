@@ -35,6 +35,7 @@ from services import (
     heartbeat_service, idempotency_service, schedule_seat_memory, schedule_workspace_delivery,
 )
 from services.runtime_secret_scrub import get_staged_values, scrub_text
+from db.write_params import ExecutionResult
 
 logger = logging.getLogger(__name__)
 
@@ -640,7 +641,9 @@ def _fail_execution_row(execution_id: Optional[str], error: str) -> None:
             db.update_execution_status(
                 execution_id=execution_id,
                 status=TaskExecutionStatus.FAILED,
-                error=error,
+                result=ExecutionResult(
+                    error=error,
+                ),
             )
     except Exception as db_err:  # noqa: BLE001
         logger.error("Failed to mark execution %s failed: %s", execution_id, db_err)
@@ -688,7 +691,9 @@ async def _execute_task_internal_background(
                     won = db.update_execution_status(
                         execution_id=request.execution_id,
                         status=TaskExecutionStatus.FAILED,
-                        error="Execution cancelled (backend shutdown)",
+                        result=ExecutionResult(
+                            error="Execution cancelled (backend shutdown)",
+                        ),
                     )
                     logger.info(f"Updated execution {request.execution_id} to FAILED on cancel")
                     # #1804: the second backend-shutdown terminal writer (the
@@ -726,7 +731,9 @@ async def _execute_task_internal_background(
                     db.update_execution_status(
                         execution_id=request.execution_id,
                         status=TaskExecutionStatus.FAILED,
-                        error=error_msg,
+                        result=ExecutionResult(
+                            error=error_msg,
+                        ),
                     )
                     logger.info(f"Updated execution {request.execution_id} to FAILED")
             except Exception as db_err:
