@@ -98,6 +98,8 @@
     </header>
 
     <div class="flex-1 min-h-0 overflow-y-auto px-4 py-4">
+      <!-- Capped at the conversation's reading width (§3g A13). -->
+      <div class="max-w-[var(--ws-message-max,64rem)] mx-auto" data-testid="inbox-pane-body">
       <InlineError
         v-if="readFailed"
         class="mb-3"
@@ -136,18 +138,47 @@
             {{ windowed.earlier }} earlier {{ windowed.earlier === 1 ? 'arrival' : 'arrivals' }} —
             <button type="button" class="text-action-primary-600 dark:text-action-primary-400 hover:underline" @click="$emit('open-chat', target)">Open in chat</button>
           </p>
-          <div
-            v-for="(m, i) in windowed.shown"
-            :key="m.id || i"
-            class="mb-3"
-            :data-testid="`inbox-pane-message-${m.id || i}`"
+          <!-- §3g A13: one header per RUN of one sender (paneRuns), in the
+               chat's own bubbles — the user's accent bubble, the agent's avatar
+               + PortalAgentBubble — and a system line in meta ink. -->
+          <section
+            v-for="run in runs"
+            :key="run.key"
+            class="mb-4"
+            data-testid="inbox-pane-run"
           >
-            <p class="mb-1 text-[11px] font-semibold uppercase tracking-wide text-gray-500 dark:text-gray-400">
-              {{ m.role === 'user' ? 'You' : agentLabel }}
-              <span class="normal-case font-normal tabular-nums" :title="absolute(m.created_at)"> · {{ relative(m.created_at) }}</span>
-            </p>
-            <PortalMarkdown :content="m.content || ''" />
-          </div>
+            <template v-if="run.role === 'system'">
+              <p
+                v-for="(m, i) in run.messages"
+                :key="m.id || i"
+                class="text-[12.5px] text-gray-500 dark:text-gray-400"
+                :data-testid="`inbox-pane-message-${m.id || i}`"
+              >{{ m.content }}</p>
+            </template>
+            <template v-else>
+              <p
+                class="mb-1.5 text-[12.5px] text-gray-600 dark:text-gray-300"
+                :class="run.role === 'user' ? 'text-right' : 'pl-[38px]'"
+                data-testid="inbox-pane-run-header"
+              >{{ run.role === 'user' ? 'You' : agentLabel }} · <span class="tabular-nums" :title="absolute(run.at)">{{ relative(run.at) }}</span></p>
+              <div v-if="run.role === 'user'" class="flex flex-col items-end gap-1.5">
+                <div
+                  v-for="(m, i) in run.messages"
+                  :key="m.id || i"
+                  class="max-w-[85%] rounded-2xl rounded-br-md px-3.5 py-3 text-sm leading-relaxed whitespace-pre-wrap bg-action-primary-600 text-white"
+                  :data-testid="`inbox-pane-message-${m.id || i}`"
+                >{{ m.content }}</div>
+              </div>
+              <div v-else class="flex items-start gap-2.5">
+                <PortalAvatar :name="item.agent_name" :size="28" class="mt-0.5" />
+                <div class="min-w-0 flex-1 space-y-1.5">
+                  <div v-for="(m, i) in run.messages" :key="m.id || i" class="max-w-[85%]" :data-testid="`inbox-pane-message-${m.id || i}`">
+                    <PortalAgentBubble :content="m.content || ''" />
+                  </div>
+                </div>
+              </div>
+            </template>
+          </section>
           <p
             v-if="!windowed.shown.length && !deliverables.length"
             class="text-sm text-gray-600 dark:text-gray-300"
@@ -183,6 +214,7 @@
           </section>
         </template>
       </template>
+      </div>
     </div>
   </section>
 </template>
@@ -196,10 +228,11 @@ import InlineError from '@/components/InlineError.vue'
 import ReportRenderer from '@/components/reports/ReportRenderer.vue'
 import ReportSummary from '@/components/reports/ReportSummary.vue'
 import PortalAsks from './PortalAsks.vue'
-import PortalMarkdown from './PortalMarkdown.vue'
+import PortalAvatar from './PortalAvatar.vue'
+import PortalAgentBubble from './PortalAgentBubble.vue'
 import { useClientPortalStore } from '@/stores/clientPortal'
 import { relativeTime } from './portalUtils'
-import { PANE_HISTORY_LIMIT, paneWindow, openInChatTarget } from './portalInbox'
+import { PANE_HISTORY_LIMIT, paneWindow, paneRuns, openInChatTarget } from './portalInbox'
 import { viewState } from '@/utils/loadingState'
 import { formatLocalDateTime } from '@/utils/timestamps'
 
@@ -239,6 +272,7 @@ let gen = 0
 
 const view = computed(() => viewState({ hasLoaded: loaded.value, error: failed.value }))
 const windowed = computed(() => paneWindow(messages.value, props.item.first_unread_message_id, props.item.n))
+const runs = computed(() => paneRuns(windowed.value.shown))
 
 async function load() {
   const it = props.item

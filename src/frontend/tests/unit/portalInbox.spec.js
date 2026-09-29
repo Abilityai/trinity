@@ -315,7 +315,7 @@ describe('property: the Inbox and the sidebar never disagree (AC 1, D13)', () =>
 import {
   isInboxPath, inboxBranchVisible, inboxSelectedAgent, stableRows, emptyVisit, isGhost, resolveItem,
   paneWindow, openInChatTarget, agentLabels, PANE_TAIL, listHeadLabel, inboxRowLabel, pageWindow, PAGE_SIZE,
-  inboxLayout,
+  inboxLayout, paneRuns,
 } from '@/components/portal/portalInbox'
 
 describe('shell seams', () => {
@@ -544,6 +544,29 @@ describe('the pane window (D11)', () => {
   })
   it('a read chat shows its tail', () => {
     expect(paneWindow(msgs, null).shown).toHaveLength(Math.min(PANE_TAIL, msgs.length))
+  })
+})
+
+describe('paneRuns — one header per run of one sender (§3g A13)', () => {
+  const at = (min) => new Date(NOW + min * 60_000).toISOString()
+  const m = (id, role, min) => ({ id, role, created_at: at(min), content: id })
+  it('consecutive messages from one sender are one run', () => {
+    const runs = paneRuns([m('a1', 'assistant', 0), m('a2', 'assistant', 1), m('a3', 'assistant', 2)])
+    expect(runs).toHaveLength(1)
+    expect(runs[0]).toMatchObject({ role: 'assistant', at: at(0) })
+    expect(runs[0].messages.map((x) => x.id)).toEqual(['a1', 'a2', 'a3'])
+  })
+  it('a change of sender, a system line, or a gap over 10 minutes starts a new run', () => {
+    const runs = paneRuns([
+      m('u1', 'user', 0), m('a1', 'assistant', 1), m('s1', 'system', 2), m('a2', 'assistant', 3),
+      m('a3', 'assistant', 13), m('a4', 'assistant', 23.5),
+    ])
+    expect(runs.map((r) => r.messages.map((x) => x.id))).toEqual([['u1'], ['a1'], ['s1'], ['a2', 'a3'], ['a4']])
+    expect(runs.map((r) => r.role)).toEqual(['user', 'assistant', 'system', 'assistant', 'assistant'])
+  })
+  it('two system lines are two runs; junk tolerated', () => {
+    expect(paneRuns([m('s1', 'system', 0), m('s2', 'system', 0)])).toHaveLength(2)
+    expect(paneRuns(null)).toEqual([])
   })
 })
 

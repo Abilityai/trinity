@@ -96,6 +96,10 @@ Sign-in / reload on bare /workspace
       chat  → store.fetchHistory(agent, id, {limit: 50})  render from first_unread_message_id
               store.fetchSessionDeliverablesStrict → ReportRenderer (+ ReportSummary fallback)
                                                a failed read is LoadFailed, never "no deliverables"
+              grouped by paneRuns (§3g A13): one 12.5px header per run of one sender (a
+              system line, or a gap > 10 min, starts a new run), relative time with the
+              absolute on hover; the chat's own bubbles (user accent bubble; PortalAvatar +
+              PortalAgentBubble); system lines in meta ink; body capped at --ws-message-max
               at most PANE_TAIL (5) messages from there (§3g S2); the hidden ARRIVALS are said:
               "N earlier arrivals — Open in chat" (also when the first unread is outside the 50)
               markRead('thread', id)           a function prop; called when readIntent (a click, or

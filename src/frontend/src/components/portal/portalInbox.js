@@ -453,6 +453,29 @@ export function paneWindow(messages, firstUnreadId, n = 0) {
   return { shown, earlier: Math.max(0, (Number(n) || 0) - shown.length) }
 }
 
+// §3g A13: the pane read like a log — every message carried its own "AGENT ·
+// time" header even when one sender wrote five in a row. Messages group into
+// RUNS of one sender, one header each; a system line is always a run of its
+// own, and a gap of more than 10 minutes starts a new run (a later turn is a
+// later conversation, even from the same sender).
+export const PANE_RUN_GAP_MS = 10 * 60 * 1000
+export function paneRuns(messages) {
+  const runs = []
+  for (const msg of Array.isArray(messages) ? messages : []) {
+    if (!msg) continue
+    const role = msg.role === 'user' ? 'user' : msg.role === 'system' ? 'system' : 'assistant'
+    const last = runs[runs.length - 1]
+    const prev = last && last.messages[last.messages.length - 1]
+    const gap = prev ? ts(msg.created_at) - ts(prev.created_at) : 0
+    if (last && role !== 'system' && last.role === role && gap <= PANE_RUN_GAP_MS) {
+      last.messages.push(msg)
+    } else {
+      runs.push({ key: `run:${msg.id || runs.length}`, role, at: msg.created_at || null, messages: [msg] })
+    }
+  }
+  return runs
+}
+
 // "Open in chat": the chat, anchored at what the reader was looking at — the
 // first unread message, else the latest deliverable, else the bottom.
 export function openInChatTarget(item) {

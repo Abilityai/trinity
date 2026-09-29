@@ -732,6 +732,25 @@ describe('Mark all read (D11, §3g A9)', () => {
   })
 })
 
+describe('the pane reads like the chat (§3g A13)', () => {
+  it('three messages from the agent are one header and three bubbles, in the chat\'s own bubble', async () => {
+    const t0 = Date.now() - 10 * 60_000
+    const msgs = [1, 2, 3].map((i) => ({ id: `m${i}`, role: 'assistant', content: `c${i}`, created_at: new Date(t0 + i * 60_000).toISOString() }))
+    store.fetchHistory = vi.fn(async () => ({ messages: msgs }))
+    const w = await mountInbox({ threads: [thread('t1', { unread: 3 })], previews: { 'thread:t1': { latest: null, first_unread_message_id: 'm1' } } },
+      { query: { tab: 'unread', item: 'thread:t1' } })
+    expect(w.findAll('[data-testid="inbox-pane-run-header"]')).toHaveLength(1)
+    expect(w.findAllComponents({ name: 'PortalAgentBubble' })).toHaveLength(3)
+    expect(w.findAllComponents({ name: 'PortalAvatar' })).toHaveLength(1)
+    const header = w.find('[data-testid="inbox-pane-run-header"]')
+    expect(header.classes()).toContain('text-[12.5px]')
+    expect(header.classes()).not.toContain('uppercase')
+    expect(header.find('[title]').exists()).toBe(true) // absolute time on hover
+    // The body is capped at the conversation's reading width.
+    expect(w.find('[data-testid="inbox-pane-body"]').classes()).toContain('max-w-[var(--ws-message-max,64rem)]')
+  })
+})
+
 describe('the pane header (§3g L5: stacked chrome, split order)', () => {
   const headerIds = (w) => w.find('[data-testid="inbox-pane"] header').findAll('[data-testid]')
     .map((el) => el.attributes('data-testid'))
