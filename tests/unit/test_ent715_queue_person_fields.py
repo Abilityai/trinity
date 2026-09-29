@@ -294,6 +294,16 @@ class TestPlatformRowsAboutAPerson:
         assert is_platform_minted(heads_ups.collision)
         assert is_platform_minted(heads_ups.report)
 
+    def test_every_prefix_about_a_person_is_reserved(self):
+        """The machine reads key on `_ABOUT_A_PERSON_ID_PREFIXES`; the file
+        write-back, the resume wake and the ended-asks line key on
+        `_RESERVED_ID_PREFIXES`. A heads-up prefix outside the reserved set would
+        be hidden from a machine's read yet still written into the agent's file,
+        and an agent could pre-create its id. The tests above drive only today's
+        two emitters; this holds for the next one."""
+        import services.operator_queue_service as oqs
+        assert set(oqs._ABOUT_A_PERSON_ID_PREFIXES) <= set(oqs._RESERVED_ID_PREFIXES)
+
 
 # ===========================================================================
 # 3. The file write-back no longer writes who answered
