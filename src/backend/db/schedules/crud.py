@@ -237,6 +237,32 @@ class ScheduleCrudMixin:
         with get_engine().connect() as conn:
             return [self._row_to_schedule(row) for row in conn.execute(stmt).mappings()]
 
+    def get_workspace_delivery_schedules_for_agents(self, agent_names: List[str]) -> List[dict]:
+        """Live schedules that carry a Workspace delivery address, for many agents
+        in ONE query (the agents list's `brief_held`, ent#527 rider / PR #3038).
+
+        Rows of ``{agent_name, enabled, deliver_to_workspace_email}`` — a projected
+        SELECT, never the prompts. Whether a row is a seat brief is the caller's
+        shared predicate (``role_readiness_gate.is_seat_delivery_schedule``), not
+        SQL, so the list and the role card apply the same rule.
+        """
+        names = list(dict.fromkeys(n for n in agent_names if n))
+        if not names:
+            return []
+        stmt = select(
+            agent_schedules.c.agent_name,
+            agent_schedules.c.enabled,
+            agent_schedules.c.deliver_to_workspace_email,
+        ).where(
+            and_(
+                agent_schedules.c.agent_name.in_(names),
+                agent_schedules.c.deliver_to_workspace_email.isnot(None),
+                agent_schedules.c.deleted_at.is_(None),
+            )
+        )
+        with get_engine().connect() as conn:
+            return [dict(r) for r in conn.execute(stmt).mappings()]
+
     def get_agent_schedule_names(self, agent_name: str) -> Dict[str, str]:
         """``{schedule_id: name}`` for one agent's live schedules (#2161).
 

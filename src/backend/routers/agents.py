@@ -168,10 +168,27 @@ async def list_agents_endpoint(
     # would be an N+1 on the fleet's hottest endpoint. Agents without a label
     # are absent from the map and render under their slug, as they do today.
     all_labels = db.get_display_labels_for_agents(agent_names)
+    # ent#527 rider (ruling 2026-09-24): the owner's readiness stamp on the list
+    # and the fleet grid — batched for the same reason. Only stamped agents carry
+    # one; `None` means "no stamp", never a guessed `calibrating`. The stamp is
+    # decoration: a failed read degrades to "no stamp" rather than failing the
+    # whole list.
+    try:
+        all_readiness = db.get_role_readiness_for_agents(agent_names)
+    except Exception:
+        logger.warning("[ent#527] readiness read failed; listing without stamps", exc_info=True)
+        all_readiness = {}
+    # Whether a calibrating stamp is actually holding a scheduled brief — the
+    # role card's own predicate, one batched schedule read, so the list's
+    # tooltip never claims a pause the card does not (PR #3038 review).
+    from services.role_readiness_gate import briefs_held_for_list
+    held = briefs_held_for_list(agents, all_readiness)
 
     for agent in agents:
         agent["tags"] = all_tags.get(agent.get("name"), [])
         agent["display_label"] = all_labels.get(agent.get("name"))
+        agent["readiness"] = all_readiness.get(agent.get("name"))
+        agent["brief_held"] = agent.get("name") in held
 
     return agents
 
