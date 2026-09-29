@@ -77,17 +77,18 @@
       <!-- ent#429: the conversation this ask was raised against. Shown only when
            it is somewhere the reader is not — an ask raised by a scheduled run
            attaches to a thread at RAISE time, and without a way back to it the
-           attachment is a fact nobody can act on. Additive: it never hides an
-           ask from the thread being read. -->
+           attachment is a fact nobody can act on. Additive: its own `v-if`, so
+           it never takes the controls below away (#3055 — it once did, and
+           every ask read outside Main lost its answer). -->
       <button
-        v-if="askThreadLink(ask, currentSessionId)"
+        v-if="threadLink && askThreadLink(ask, currentSessionId)"
         type="button"
         class="mt-1.5 text-xs text-action-primary-600 hover:underline"
         :data-testid="`${tid.prefix}-open-thread-${ask.id}`"
         @click="emit('open-thread', { id: askThreadLink(ask, currentSessionId), agent_name: ask.agent_name })"
       >Open the conversation</button>
 
-      <template v-else-if="!isEnded(ask)">
+      <template v-if="!isEnded(ask)">
         <!-- #2375: controls come from the shared kind rule (queueResponseKind),
              so this surface cannot drift from desktop QueueCard and /m. An
              approval is select → optional note → explicit Send — never a
@@ -211,6 +212,9 @@ const props = defineProps({
   // With the default every id is byte-identical to what it was before. (The
   // literal repeats DEFAULT_TESTID_PREFIX: defineProps is hoisted out of setup.)
   testidPrefix: { type: String, default: 'portal-ask' },
+  // #3055: a surface that is already beside the ask's chat can turn the
+  // "Open the conversation" link off. It never affects the controls.
+  threadLink: { type: Boolean, default: true },
 })
 
 const emit = defineEmits(['open-thread'])
