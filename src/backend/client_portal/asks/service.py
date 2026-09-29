@@ -29,6 +29,15 @@ logger = logging.getLogger(__name__)
 _VISIBLE_KINDS = ("question", "approval", "alert")
 
 
+class AsksUnavailable(Exception):
+    """The asks list could not be READ (trinity-enterprise#610, PR A0).
+
+    Raised instead of returning `[]`: an empty list is a claim ("nothing needs
+    you"), and making it during an outage is the #2915 failure class. The router
+    maps it to 503 `asks_unavailable`; the store keeps its last good list.
+    """
+
+
 class AskError(Exception):
     """A named, actionable refusal — never a bare 422 from a validator."""
 
@@ -160,19 +169,28 @@ def _coarse_sync(item: dict) -> str:
     return "unconfirmed"
 
 
-def _on_roster(agent_name: str, email: str, is_platform: bool) -> bool:
+def _on_roster(agent_name: str, email: str, is_platform: bool,
+               strict: bool = False) -> bool:
     """Read-time roster re-check (ent#364).
 
     Membership at raise time is not a standing grant: a share revoked afterwards
-    must stop showing the ask. Fails CLOSED — an unreadable roster hides the ask
-    rather than showing one we cannot justify.
+    must stop showing the ask. Fails CLOSED — an unreadable roster never shows an
+    ask we cannot justify.
+
+    `strict` is the LIST mode (trinity-enterprise#610, PR A0): there an
+    unreadable roster raises `AsksUnavailable`, because hiding every ask during a
+    roster outage is a silent "nothing needs you". A clean "not on the roster"
+    still returns False in both modes. The answer path stays non-strict, so its
+    refusal is the uniform 404 whatever the cause (Invariant #8).
     """
     try:
         from client_portal.service import agent_on_roster
 
         return bool(agent_on_roster(agent_name, email, include_owned=is_platform))
-    except Exception:  # noqa: BLE001
+    except Exception as e:  # noqa: BLE001
         logger.warning("[WorkspaceAsks] roster re-check failed for %s", agent_name, exc_info=True)
+        if strict:
+            raise AsksUnavailable("roster unreadable") from e
         return False
 
 
@@ -216,8 +234,12 @@ def list_asks_page(email: str, is_platform: bool, agent_name: Optional[str] = No
                    cursor: Optional[str] = None) -> AsksPage:
     """Asks addressed to `email`: open ones first, then — with `include_ended` —
     the ones that ended in the last `ENDED_WINDOW_DAYS`, most recent ending
-    first (trinity-enterprise#611). Paged (#3059). Never raises on a read
-    failure; raises `AskError` only for an unreadable cursor."""
+    first (trinity-enterprise#611). Paged (#3059).
+
+    Raises `AskError` for an unreadable cursor, and `AsksUnavailable` when the
+    queue or the roster cannot be read (trinity-enterprise#610, PR A0) — an
+    outage is never answered with an empty page, which the client would render
+    as "nothing is waiting"."""
     offset = _decode_cursor(cursor)
     limit = max(1, min(int(limit), PAGE_MAX))
     # Every filter the viewer's visibility depends on is a SQL condition,
@@ -243,15 +265,15 @@ def list_asks_page(email: str, is_platform: bool, agent_name: Optional[str] = No
         # agents the viewer's asks span, and the answer goes into the SQL as the
         # access set. Re-implementing membership here is how the two drift.
         allowed = {a for a in db.list_operator_queue_agent_names(**filters)
-                   if _on_roster(a, email, is_platform)}
+                   if _on_roster(a, email, is_platform, strict=True)}
         if not allowed:
             return AsksPage()
         total = db.count_operator_queue_items(accessible_agent_names=allowed, **filters)
         items = db.list_operator_queue_items(accessible_agent_names=allowed,
                                              limit=limit, offset=offset, **filters)
-    except Exception:  # noqa: BLE001 — a sidebar badge must not break the Workspace
+    except Exception as e:  # noqa: BLE001 — surfaced as a 503, never as "nothing" (A0)
         logger.warning("[WorkspaceAsks] list failed", exc_info=True)
-        return AsksPage()
+        raise AsksUnavailable("queue unreadable") from e
 
     out = [_project(item, viewer_email=email) for item in items or []]
     end = offset + len(items or [])
