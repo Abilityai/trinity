@@ -112,6 +112,7 @@ from db.schema import init_schema
 # Import operation classes
 from db.users import UserOperations
 from db.agents import AgentOperations
+from db.write_params import ChatMessageFields, ExecutionResult, ExecutionSource, TaskExecutionFields
 from db.mcp_keys import McpKeyOperations
 from db.schedules import ScheduleOperations
 from db.chat import ChatOperations
@@ -1815,47 +1816,11 @@ class DatabaseManager:
         agent_name: str,
         message: str,
         triggered_by: str = "manual",
-        source_user_id: int = None,
-        source_user_email: str = None,
-        source_agent_name: str = None,
-        source_mcp_key_id: str = None,
-        source_mcp_key_name: str = None,
-        model_used: str = None,
-        fan_out_id: str = None,
-        fan_out_task_id: str = None,
-        loop_id: str = None,
-        subscription_id: str = None,
-        source_channel: str = None,
-        source_channel_chat_id: str = None,
-        source_channel_thread: str = None,
-        source_channel_agent: str = None,
-        source_channel_client: str = None,
-        open_canvas_id: str = None,
-        chain_depth: int = None,
+        fields: Optional[TaskExecutionFields] = None,
     ):
-        """Create an execution record for a manual/API-triggered task (no schedule)."""
-        return self._schedule_ops.create_task_execution(
-            agent_name, message, triggered_by,
-            source_user_id=source_user_id,
-            source_user_email=source_user_email,
-            source_agent_name=source_agent_name,
-            source_mcp_key_id=source_mcp_key_id,
-            source_mcp_key_name=source_mcp_key_name,
-            model_used=model_used,
-            fan_out_id=fan_out_id,
-            fan_out_task_id=fan_out_task_id,
-            loop_id=loop_id,
-            subscription_id=subscription_id,
-            source_channel=source_channel,
-            source_channel_chat_id=source_channel_chat_id,
-            source_channel_thread=source_channel_thread,
-            # ent#265: binding-agent for channel report-back (set only at the
-            # /task inheritance point; None for direct rows).
-            source_channel_agent=source_channel_agent,
-            source_channel_client=source_channel_client,
-            open_canvas_id=open_canvas_id,
-            chain_depth=chain_depth,
-        )
+        """Create an execution record for a manual/API-triggered task (no schedule).
+        Optional columns ride `fields` (#1482, `db/write_params.py`)."""
+        return self._schedule_ops.create_task_execution(agent_name, message, triggered_by, fields)
 
     def get_max_running_chain_depth(self, agent_name: str) -> int:
         """Deepest chain_depth among the agent's running rows, 0 if none (#2806)."""
@@ -1867,31 +1832,17 @@ class DatabaseManager:
         agent_name: str,
         message: str,
         triggered_by: str = "schedule",
-        source_user_id: int = None,
-        source_user_email: str = None,
-        source_agent_name: str = None,
-        source_mcp_key_id: str = None,
-        source_mcp_key_name: str = None,
-        subscription_id: str = None,
+        source: Optional[ExecutionSource] = None,
     ):
         return self._schedule_ops.create_schedule_execution(
-            schedule_id, agent_name, message, triggered_by,
-            source_user_id=source_user_id,
-            source_user_email=source_user_email,
-            source_agent_name=source_agent_name,
-            source_mcp_key_id=source_mcp_key_id,
-            source_mcp_key_name=source_mcp_key_name,
-            subscription_id=subscription_id,
-        )
+            schedule_id, agent_name, message, triggered_by, source)
 
-    def update_execution_status(self, execution_id: str, status: str, response: str = None, error: str = None,
-                                context_used: int = None, context_max: int = None, cost: float = None, tool_calls: str = None, execution_log: str = None,
-                                claude_session_id: str = None, compact_metadata: str = None, retry_count: int = None,
-                                claim_token: str = None, turn_integrity: str = None):
-        return self._schedule_ops.update_execution_status(execution_id, status, response, error,
-                                                          context_used, context_max, cost, tool_calls, execution_log, claude_session_id,
-                                                          compact_metadata, retry_count, claim_token,
-                                                          turn_integrity=turn_integrity)
+    def update_execution_status(self, execution_id: str, status: str,
+                                result: Optional[ExecutionResult] = None, *, claim_token: str = None):
+        """Terminal write; returns the CAS bool unchanged (#1082/#1083). The
+        recorded values ride `result` (#1482, `db/write_params.py`)."""
+        return self._schedule_ops.update_execution_status(
+            execution_id, status, result, claim_token=claim_token)
 
     def mark_execution_dispatched(self, execution_id: str, async_dispatch: bool = False) -> bool:
         return self._schedule_ops.mark_execution_dispatched(execution_id, async_dispatch)
@@ -2111,13 +2062,9 @@ class DatabaseManager:
         return self._chat_ops.get_or_create_chat_session(agent_name, user_id, user_email, subscription_id=subscription_id)
 
     def add_chat_message(self, session_id: str, agent_name: str, user_id: int, user_email: str,
-                         role: str, content: str, cost: float = None, context_used: int = None,
-                         context_max: int = None, tool_calls: str = None, execution_time_ms: int = None,
-                         source: str = "text", subscription_id: str = None, output_tokens: int = None):
-        return self._chat_ops.add_chat_message(session_id, agent_name, user_id, user_email,
-                                               role, content, cost, context_used, context_max,
-                                               tool_calls, execution_time_ms, source=source,
-                                               subscription_id=subscription_id, output_tokens=output_tokens)
+                         role: str, content: str, fields: Optional[ChatMessageFields] = None):
+        return self._chat_ops.add_chat_message(
+            session_id, agent_name, user_id, user_email, role, content, fields)
 
     def get_chat_session(self, session_id: str):
         return self._chat_ops.get_chat_session(session_id)

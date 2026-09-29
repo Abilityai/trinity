@@ -40,6 +40,7 @@ from services.upload_service import (
     decode_web_file,
     process_file_uploads,
 )
+from db.write_params import TaskExecutionFields
 # The chat-turn rate constants moved here with the accounting that reads them
 # (per-IP and per-token message caps; the connection-level public-link rate
 # limit stays in the router beside its Redis window).
@@ -322,7 +323,9 @@ async def run_public_chat(link: dict, chat_request, client_ip: str):
             agent_name=agent_name,
             message=context_prompt,
             triggered_by="public",
-            source_user_email=source_email,
+            fields=TaskExecutionFields(
+                source_user_email=source_email,
+            ),
         )
         execution_id = execution.id if execution else None
 

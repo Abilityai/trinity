@@ -22,6 +22,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from db.write_params import ChatMessageFields, ExecutionResult
 
 pytestmark = pytest.mark.integration
 
@@ -221,7 +222,7 @@ def test_schedules_and_executions(db):
     ex = db.create_schedule_execution(sid, "sched-agent", "do it", triggered_by="schedule")
     eid = ex["id"] if isinstance(ex, dict) else ex.id
     assert eid
-    db.update_execution_status(eid, "success", response="done", cost=0.01)
+    db.update_execution_status(eid, "success", result=ExecutionResult(response="done", cost=0.01))
     got = db.get_execution(eid)
     status = got["status"] if isinstance(got, dict) else got.status
     assert status == "success"
@@ -241,7 +242,7 @@ def test_chat_session_and_messages(db):
     session = db.get_or_create_chat_session("chat-agent", u["id"], "chatter@example.com")
     sid = session.id if hasattr(session, "id") else session["id"]
     db.add_chat_message(sid, "chat-agent", u["id"], "chatter@example.com", "user", "hello")
-    db.add_chat_message(sid, "chat-agent", u["id"], "chatter@example.com", "assistant", "hi", cost=0.02)
+    db.add_chat_message(sid, "chat-agent", u["id"], "chatter@example.com", "assistant", "hi", fields=ChatMessageFields(cost=0.02))
     msgs = db.get_chat_messages(sid)
     assert len(msgs) == 2
 

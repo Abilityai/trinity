@@ -34,6 +34,7 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
+from unit._write_params import object_keywords
 
 # tests/unit/conftest.py adds src/backend to sys.path and pre-installs the
 # canonical `utils` package via _preload_backend_utils(), so no per-file
@@ -379,7 +380,7 @@ class TestChatRouterSource:
         )
 
         for call in success_calls:
-            kwarg_names = {kw.arg for kw in call.keywords}
+            kwarg_names = {kw.arg for kw in object_keywords(call)}
             assert "claude_session_id" in kwarg_names, (
                 f"update_execution_status SUCCESS call at line {call.lineno} "
                 f"must pass claude_session_id=... — without it the row keeps "
