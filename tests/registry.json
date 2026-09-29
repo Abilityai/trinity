@@ -1,6 +1,16 @@
 {
   "test_files": [
     {
+      "file": "unit/test_3079_base_image_codename_pin.py",
+      "feature": "#3079",
+      "added": "2026-09-29",
+      "categories": [
+        "backend",
+        "infrastructure"
+      ],
+      "description": "Static guard: every image Dockerfile (backend, scheduler, base-image) builds FROM a python tag that names a Debian codename (or a digest), so Docker Hub cannot move the base to a new Debian release under an unrelated rebuild (#1823 tzdata, #3046 libmagic 5.46). Asserts that a codename is named, never which one."
+    },
+    {
       "file": "unit/test_human_only_principals.py",
       "feature": "#2996",
       "added": "2026-09-28",
