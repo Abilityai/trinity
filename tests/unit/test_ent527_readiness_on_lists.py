@@ -109,6 +109,29 @@ class TestListEndpoint:
         assert by_name["plain"]["readiness"] is None
         db.get_role_readiness_for_agents.assert_called_once_with(["companion", "plain"])
 
+    @pytest.mark.asyncio
+    async def test_a_failed_readiness_read_lists_without_stamps(self, monkeypatch):
+        # The stamp is decoration on the fleet's hottest endpoint: a DB fault in
+        # its read degrades every row to "no stamp", never a 500 for the list.
+        from unittest.mock import MagicMock
+        import importlib
+        mod = importlib.import_module("routers.agents")
+        import database
+
+        agents = [{"name": "companion", "autonomy_enabled": True}]
+        monkeypatch.setattr(mod, "get_accessible_agents", lambda user: [dict(a) for a in agents])
+        db = MagicMock()
+        db.get_tags_for_agents.return_value = {}
+        db.get_display_labels_for_agents.return_value = {}
+        db.get_role_readiness_for_agents.side_effect = RuntimeError("database is locked")
+        monkeypatch.setattr(database, "db", db)
+
+        out = await mod.list_agents_endpoint(MagicMock(), tags=None, current_user=MagicMock())
+
+        assert [a["name"] for a in out] == ["companion"]
+        assert out[0]["readiness"] is None
+        assert out[0]["brief_held"] is False
+
 
 # ---------------------------------------------------------------------------
 # brief_held on the list (PR #3038 review, item 1): the calibrating tooltip may
