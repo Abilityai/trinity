@@ -4693,7 +4693,7 @@ def _migrate_seat_ask_class_state_table(cursor, conn):
     (`autonomy_dial_service.LEVEL_KEY`). The live conjuncts (level, the agent's
     autonomy switch, the clock) are read, never written.
 
-    Mirrored by the Alembic revision 0080_seat_ask_class_state.
+    Mirrored by the Alembic revision 0081_seat_ask_class_state.
     """
     cursor.execute(
         """
@@ -4799,6 +4799,39 @@ def _migrate_workspace_suggestion_feedback_table(cursor, conn):
     cursor.execute(
         "CREATE INDEX IF NOT EXISTS idx_workspace_suggestion_feedback_agent "
         "ON workspace_suggestion_feedback(agent_name)"
+    )
+    conn.commit()
+
+
+def _migrate_agent_skill_sets(cursor, conn):
+    """trinity-enterprise#530 — skill sets.
+
+    * ``agent_skill_sets`` — a named set of library skills assigned to an agent.
+    * ``agent_skills.individual`` — 1 (the default, so every existing row keeps
+      its meaning) when the skill was assigned on its own; 0 when it is present
+      only because an assigned set names it. Unassigning a set removes only its
+      individual = 0 rows that no other assigned set names.
+
+    Additive only. Mirrored by the Alembic revision 0080_agent_skill_sets.
+    """
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS agent_skill_sets (
+            agent_name TEXT NOT NULL,
+            set_name TEXT NOT NULL,
+            source_id TEXT,
+            assigned_by TEXT NOT NULL,
+            assigned_by_agent TEXT,
+            assigned_at TEXT NOT NULL,
+            PRIMARY KEY (agent_name, set_name)
+        )
+        """
+    )
+    _safe_add_column(
+        cursor,
+        "agent_skills",
+        "individual",
+        "ALTER TABLE agent_skills ADD COLUMN individual INTEGER NOT NULL DEFAULT 1",
     )
     conn.commit()
 
@@ -5015,5 +5048,6 @@ MIGRATIONS = [
     ("execution_chain_depth", _migrate_execution_chain_depth),
     ("workspace_suggestion_feedback_table", _migrate_workspace_suggestion_feedback_table),
     ("telegram_group_context", _migrate_telegram_group_context),
+    ("agent_skill_sets", _migrate_agent_skill_sets),
     ("seat_ask_class_state_table", _migrate_seat_ask_class_state_table),
 ]

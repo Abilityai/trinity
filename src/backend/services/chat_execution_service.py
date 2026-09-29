@@ -100,6 +100,7 @@ from utils.credential_sanitizer import (
     sanitize_response,
 )
 from utils.helpers import utc_now_iso
+from db.write_params import ChatMessageFields, ExecutionResult, TaskExecutionFields
 
 logger = logging.getLogger(__name__)
 
@@ -184,14 +185,16 @@ async def prepare_chat_execution(
         agent_name=name,
         message=request.message,
         triggered_by=triggered_by,
-        source_user_id=current_user.id,
-        source_user_email=current_user.email or current_user.username,
-        source_agent_name=x_source_agent,
-        source_mcp_key_id=getattr(current_user, "mcp_key_id", None),
-        source_mcp_key_name=getattr(current_user, "mcp_key_name", None),
-        subscription_id=_exec_subscription_id,
-        # #2806: from admission — None for a non-agent principal (a root).
-        chain_depth=chain_depth,
+        fields=TaskExecutionFields(
+            source_user_id=current_user.id,
+            source_user_email=current_user.email or current_user.username,
+            source_agent_name=x_source_agent,
+            source_mcp_key_id=getattr(current_user, "mcp_key_id", None),
+            source_mcp_key_name=getattr(current_user, "mcp_key_name", None),
+            subscription_id=_exec_subscription_id,
+            # #2806: from admission — None for a non-agent principal (a root).
+            chain_depth=chain_depth,
+        ),
     )
     task_execution_id = task_execution.id if task_execution else None
     idempotency_service.attach_execution(idem, task_execution_id)
@@ -420,13 +423,15 @@ async def _finalize_chat_success(
         user_email=current_user.email or current_user.username,
         role="assistant",
         content=sanitized_response,
-        cost=metadata.get("cost_usd"),
-        context_used=session_data.get("context_tokens"),
-        context_max=session_data.get("context_window"),
-        tool_calls=tool_calls_json,
-        execution_time_ms=execution_time_ms,
-        subscription_id=_chat_subscription_id,
-        output_tokens=metadata.get("output_tokens"),
+        fields=ChatMessageFields(
+            cost=metadata.get("cost_usd"),
+            context_used=session_data.get("context_tokens"),
+            context_max=session_data.get("context_window"),
+            tool_calls=tool_calls_json,
+            execution_time_ms=execution_time_ms,
+            subscription_id=_chat_subscription_id,
+            output_tokens=metadata.get("output_tokens"),
+        ),
     )
 
     await activity_service.complete_activity(
@@ -478,16 +483,18 @@ async def _finalize_chat_success(
         db.update_execution_status(
             execution_id=task_execution_id,
             status=TaskExecutionStatus.SUCCESS,
-            response=sanitized_response,
-            context_used=context_used if context_used > 0 else None,
-            context_max=session_data.get("context_window") or DEFAULT_CONTEXT_WINDOW,
-            cost=metadata.get("cost_usd"),
-            tool_calls=tool_calls_json,
-            execution_log=execution_log_json,
-            claude_session_id=real_session_id,
-            # #2958 AC3: a chat turn that auto-compacted is attributed on the
-            # row, as the task path already does (the column is on both tracks).
-            compact_metadata=_compact_metadata_json(metadata),
+            result=ExecutionResult(
+                response=sanitized_response,
+                context_used=context_used if context_used > 0 else None,
+                context_max=session_data.get("context_window") or DEFAULT_CONTEXT_WINDOW,
+                cost=metadata.get("cost_usd"),
+                tool_calls=tool_calls_json,
+                execution_log=execution_log_json,
+                claude_session_id=real_session_id,
+                # #2958 AC3: a chat turn that auto-compacted is attributed on the
+                # row, as the task path already does (the column is on both tracks).
+                compact_metadata=_compact_metadata_json(metadata),
+            ),
         )
 
     # Add execution metadata to response
@@ -556,7 +563,9 @@ async def _finalize_budget_exhausted(
                 if cancelled
                 else TaskExecutionStatus.FAILED
             ),
-            error=budget_msg,
+            result=ExecutionResult(
+                error=budget_msg,
+            ),
         )
     if collaboration_activity_id:
         await activity_service.complete_activity(
@@ -787,13 +796,15 @@ async def _finalize_http_failure(
         db.update_execution_status(
             execution_id=task_execution_id,
             status=TaskExecutionStatus.FAILED,
-            error=error_msg,
-            cost=salvage_cost,
-            context_used=salvage_context,
-            context_max=salvage_context_max,
-            # #2958: the #678 structured body carries the turn's compact events
-            # (504/429/plain-500 bodies carry no metadata — a known gap).
-            compact_metadata=_compact_metadata_json(partial_metadata),
+            result=ExecutionResult(
+                error=error_msg,
+                cost=salvage_cost,
+                context_used=salvage_context,
+                context_max=salvage_context_max,
+                # #2958: the #678 structured body carries the turn's compact events
+                # (504/429/plain-500 bodies carry no metadata — a known gap).
+                compact_metadata=_compact_metadata_json(partial_metadata),
+            ),
         )
 
     if collaboration_activity_id:
@@ -1276,11 +1287,13 @@ async def finalize_self_task(
                     user_email=user_email or "",
                     role="assistant",
                     content=result.response or "",
-                    cost=result.cost,
-                    context_used=result.context_used,
-                    context_max=result.context_max,
-                    execution_time_ms=execution_time_ms,
-                    source="self_task",  # Mark as self-task result
+                    fields=ChatMessageFields(
+                        cost=result.cost,
+                        context_used=result.context_used,
+                        context_max=result.context_max,
+                        execution_time_ms=execution_time_ms,
+                        source="self_task",  # Mark as self-task result
+                    ),
                 )
                 logger.info(
                     f"[Self-Task] Injected result into chat session {request.chat_session_id}"
@@ -1451,20 +1464,22 @@ async def create_task_execution_and_activities(
         agent_name=name,
         message=request.message,
         triggered_by=triggered_by,
-        source_user_id=current_user.id,
-        source_user_email=current_user.email or current_user.username,
-        source_agent_name=x_source_agent,
-        source_mcp_key_id=getattr(current_user, "mcp_key_id", None),
-        source_mcp_key_name=getattr(current_user, "mcp_key_name", None),
-        model_used=request.model,
-        subscription_id=subscription_id,
-        source_channel=src_channel,
-        source_channel_chat_id=src_chat_id,
-        source_channel_thread=src_thread,
-        source_channel_agent=src_channel_agent,
-        source_channel_client=src_channel_client,
-        # #2806: stamped once here; a backlog-queued row keeps it when drained.
-        chain_depth=chain_depth,
+        fields=TaskExecutionFields(
+            source_user_id=current_user.id,
+            source_user_email=current_user.email or current_user.username,
+            source_agent_name=x_source_agent,
+            source_mcp_key_id=getattr(current_user, "mcp_key_id", None),
+            source_mcp_key_name=getattr(current_user, "mcp_key_name", None),
+            model_used=request.model,
+            subscription_id=subscription_id,
+            source_channel=src_channel,
+            source_channel_chat_id=src_chat_id,
+            source_channel_thread=src_thread,
+            source_channel_agent=src_channel_agent,
+            source_channel_client=src_channel_client,
+            # #2806: stamped once here; a backlog-queued row keeps it when drained.
+            chain_depth=chain_depth,
+        ),
     )
     execution_id = execution.id if execution else None
     idempotency_service.attach_execution(idem, execution_id)
@@ -1547,7 +1562,9 @@ def _circuit_open_dispatch_error(name, execution_id, exc) -> ChatDispatchError:
             db.update_execution_status(
                 execution_id=execution_id,
                 status=TaskExecutionStatus.FAILED,
-                error="circuit_open: agent unhealthy (dispatch breaker open)",
+                result=ExecutionResult(
+                    error="circuit_open: agent unhealthy (dispatch breaker open)",
+                ),
             )
         except Exception as e:
             logger.warning(
@@ -1569,7 +1586,9 @@ def _ephemeral_dispatch_error(name, execution_id, exc) -> ChatDispatchError:
             db.update_execution_status(
                 execution_id=execution_id,
                 status=TaskExecutionStatus.FAILED,
-                error=f"ephemeral_exhausted: ghost agent budget spent ({exc.reason})",
+                result=ExecutionResult(
+                    error=f"ephemeral_exhausted: ghost agent budget spent ({exc.reason})",
+                ),
             )
         except Exception as e:
             logger.warning(
@@ -1639,9 +1658,11 @@ async def _acquire_task_capacity(
             db.update_execution_status(
                 execution_id=execution_id,
                 status=TaskExecutionStatus.FAILED,
-                error=(
-                    f"Agent at capacity ({max_parallel_tasks}/{max_parallel_tasks} parallel tasks running) "
-                    f"and backlog is full"
+                result=ExecutionResult(
+                    error=(
+                        f"Agent at capacity ({max_parallel_tasks}/{max_parallel_tasks} parallel tasks running) "
+                        f"and backlog is full"
+                    ),
                 ),
             )
         idempotency_service.fail(idem)
@@ -2308,7 +2329,9 @@ async def _proxy_terminate_and_finalize(
                 cancel_won = db.update_execution_status(
                     execution_id=task_execution_id,
                     status=TaskExecutionStatus.CANCELLED,
-                    error="Execution terminated by user",
+                    result=ExecutionResult(
+                        error="Execution terminated by user",
+                    ),
                 )
                 if cancel_won:
                     logger.info(
@@ -2491,7 +2514,9 @@ async def _cancel_inflight_if_parked(
         cancel_won = db.update_execution_status(
             execution_id=task_execution_id,
             status=TaskExecutionStatus.CANCELLED,
-            error="Execution cancelled by user while queued in the backend agent-call queue",
+            result=ExecutionResult(
+                error="Execution cancelled by user while queued in the backend agent-call queue",
+            ),
         )
         logger.info(
             f"[Terminate] Cancelled parked execution {task_execution_id} on '{name}' "

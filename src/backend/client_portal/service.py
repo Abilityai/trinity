@@ -58,6 +58,7 @@ from .models import (
     PortalPlaybook,
     PortalRoster,
 )
+from db.write_params import ExecutionResult, TaskExecutionFields
 
 logger = logging.getLogger(__name__)
 FEATURE_ID = "client_portal"
@@ -2642,22 +2643,24 @@ def _precreate_sync_execution(
             agent_name=agent_name,
             message=message,
             triggered_by="public",
-            source_user_email=email,
-            subscription_id=subscription_id,
-            source_channel=PORTAL_SOURCE_CHANNEL,
-            # #2426: the destination, not just the surface. The sibling comment
-            # in `start_portal_turn` says "both creation sites or the stamp is a
-            # coin flip depending on which path made the row" — ent#457 covered
-            # the two sites that existed when it was written; ent#365 had added
-            # this third one.
-            source_channel_chat_id=session_id,
-            source_channel_client=email,
-            # ent#403 AC 7 — the model the turn will run on, stamped where the
-            # row is MADE. See the docstring: there is no UPDATE path for this
-            # column anywhere in the repo.
-            model_used=resolved_model,
-            # ent#555 — what the user was looking at when they sent this.
-            open_canvas_id=open_canvas_id,
+            fields=TaskExecutionFields(
+                source_user_email=email,
+                subscription_id=subscription_id,
+                source_channel=PORTAL_SOURCE_CHANNEL,
+                # #2426: the destination, not just the surface. The sibling comment
+                # in `start_portal_turn` says "both creation sites or the stamp is a
+                # coin flip depending on which path made the row" — ent#457 covered
+                # the two sites that existed when it was written; ent#365 had added
+                # this third one.
+                source_channel_chat_id=session_id,
+                source_channel_client=email,
+                # ent#403 AC 7 — the model the turn will run on, stamped where the
+                # row is MADE. See the docstring: there is no UPDATE path for this
+                # column anywhere in the repo.
+                model_used=resolved_model,
+                # ent#555 — what the user was looking at when they sent this.
+                open_canvas_id=open_canvas_id,
+            ),
         )
         return execution.id if execution else None
     except Exception:  # noqa: BLE001
@@ -3635,7 +3638,7 @@ def _fail_unstarted_execution(execution_id: str, reason: str) -> None:
         from database import db as core_db
         core_db.update_execution_status(
             execution_id, "failed",
-            error=(reason or "The turn did not start")[:500],
+            result=ExecutionResult(error=(reason or "The turn did not start")[:500]),
         )
     except Exception as e:  # noqa: BLE001 — best-effort; the watchdog is the backstop
         logger.warning("portal: could not finalize unstarted execution %s: %s",
@@ -3741,24 +3744,26 @@ async def start_portal_turn(agent_name: str, message: str, email: str,
         agent_name=agent_name,
         message=message,
         triggered_by="public",
-        source_user_email=email,
-        subscription_id=subscription_id,
-        # ent#286 pre-creates the row, so the stamp has to be here too — this is
-        # the row `portal_chat` then runs into (#2157).
-        source_channel=PORTAL_SOURCE_CHANNEL,
-        # ent#457: and the destination, for the same reason (both creation sites
-        # or the stamp is a coin flip depending on which path made the row).
-        source_channel_chat_id=session_id,
-        # ent#457 review: see the sibling site above.
-        source_channel_client=email,
-        # ent#403 AC 7: the second of the two creation sites. `model_used` is
-        # written ONLY at creation — there is no UPDATE path for the column
-        # anywhere in the repo — so a model passed as a turn kwarg alone would
-        # never reach the row a client can see.
-        model_used=resolved_model,
-        # ent#555 — both creation sites carry it, for the reason stated above
-        # about the stamp otherwise being a coin flip.
-        open_canvas_id=open_canvas_id,
+        fields=TaskExecutionFields(
+            source_user_email=email,
+            subscription_id=subscription_id,
+            # ent#286 pre-creates the row, so the stamp has to be here too — this is
+            # the row `portal_chat` then runs into (#2157).
+            source_channel=PORTAL_SOURCE_CHANNEL,
+            # ent#457: and the destination, for the same reason (both creation sites
+            # or the stamp is a coin flip depending on which path made the row).
+            source_channel_chat_id=session_id,
+            # ent#457 review: see the sibling site above.
+            source_channel_client=email,
+            # ent#403 AC 7: the second of the two creation sites. `model_used` is
+            # written ONLY at creation — there is no UPDATE path for the column
+            # anywhere in the repo — so a model passed as a turn kwarg alone would
+            # never reach the row a client can see.
+            model_used=resolved_model,
+            # ent#555 — both creation sites carry it, for the reason stated above
+            # about the stamp otherwise being a coin flip.
+            open_canvas_id=open_canvas_id,
+        ),
     )
     execution_id = execution.id if execution else None
     if not execution_id:
