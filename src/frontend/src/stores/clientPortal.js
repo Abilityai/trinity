@@ -612,6 +612,10 @@ export const useClientPortalStore = defineStore('clientPortal', {
       this.asksLoaded = false
       this.asksFailed = false
       this.asksLoadedAt = null
+      // Round-3 /cso: the session list keeps its last good copy the same way
+      // (#2198), so it is session state and goes with the session too.
+      this.lastSessions = []
+      this.sessionsFailed = false
       // #2261: the primitive clears the suppression; `endSession({expired})`
       // re-arms it immediately afterwards. Keeping the clear HERE is what stops
       // a marker from outliving the session it was about.

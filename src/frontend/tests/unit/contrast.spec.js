@@ -189,6 +189,16 @@ describe('BaseBadge primary (ent#610 §3g)', () => {
   })
 })
 
+describe('BaseButton primary fill (round 3)', () => {
+  it('white on 600 / 700 clears AA; the old dark 500 / 400 did not', () => {
+    const I = colors.indigo
+    expect(meetsAA(WHITE, I[600])).toBe(true)
+    expect(meetsAA(WHITE, I[700])).toBe(true)
+    expect(meetsAA(WHITE, I[500])).toBe(false) // 4.47:1, the old dark fill
+    expect(meetsAA(WHITE, I[400])).toBe(false) // the old dark hover
+  })
+})
+
 describe('BaseBadge recipe (token-100 ground, token-700 ink)', () => {
   it('clears AA for every family in light', () => {
     const fams = [colors.green, colors.yellow, colors.red, colors.blue, colors.orange,

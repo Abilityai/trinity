@@ -254,6 +254,28 @@ describe('D10 — selection scopes the rail, never activeAgentName', () => {
     expect(sidebars().length).toBe(before)
   })
 
+  it('D13 (round 3): the tab title sums the SAME threads as the sidebar and the Inbox', async () => {
+    // A Main the sidebar hides (no message yet) must not count in the title
+    // either — the title summed raw `threads` while the others summed
+    // `sidebarThreads` (Codex F5).
+    arm()
+    store.fetchAllSessions = vi.fn(async () => {
+      store.sessionsFailed = false
+      return [
+        { id: 't1', session_id: 't1', agent_name: 'scout', is_main: false, last_message_at: '2026-09-27T10:00:00Z', unread: 0 },
+        { id: 'm0', session_id: 'm0', agent_name: 'sage', is_main: true, last_message_at: null, unread: 0 },
+      ]
+    })
+    store.fetchChatState = vi.fn(async (opts) => (opts
+      ? { state: { 'thread:t1': { unread: 2 }, 'thread:m0': { unread: 5 } }, previews: {} }
+      : { 'thread:t1': { unread: 2 }, 'thread:m0': { unread: 5 } }))
+    const { w } = await boot('/workspace/inbox')
+    const shown = w.findComponent({ name: 'PortalInbox' }).props('threads')
+    const sidebarSum = shown.reduce((n, t) => n + (Number(t.unread) || 0), 0)
+    const m = document.title.match(/^\((\d+|99\+)\)/)
+    expect(m ? Number(m[1]) : 0).toBe(sidebarSum)
+  })
+
   it('no selection → no rail, and the reserved column is only held while loading', async () => {
     arm()
     const { w } = await boot('/workspace/inbox')

@@ -2091,8 +2091,11 @@ export function replyFromHistory(messages, baseline) {
 // `optimisticRead` zeroes a chat's unread and returns the ENTRY it wrote;
 // `rollbackRead` restores the count only while that very entry is still in
 // the state. Identity, not value: a refresh that replaced the state (the server
-// has spoken since) or a second read that wrote its own zero is left alone, so
-// a late failure can never resurrect a count someone else already settled.
+// has spoken since) is left alone, so a late failure never resurrects a count
+// the server already settled. Known limit (round-3 review F6): a second read of
+// an entry that is ALREADY zero writes nothing, so if the first write then
+// fails its rollback restores the count although the second write succeeded —
+// wrong until the next poll (≤20 s), never persisted.
 export function optimisticRead(state, key) {
   const before = state && state[key]
   if (!before || !(Number(before.unread) > 0)) return { state, written: null }

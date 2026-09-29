@@ -31,7 +31,9 @@ describe('BaseButton ghost ink (B7b)', () => {
   })
 
   it('leaves the other three variants as they were', () => {
-    expect(classesOf('primary')).toContain('dark:bg-action-primary-500')
+    // primary's dark fill moved 500 -> 600 on purpose (round 3):
+    // baseButtonPrimaryDark.mount.spec.js.
+    expect(classesOf('primary')).toContain('dark:bg-action-primary-600')
     expect(classesOf('secondary')).toContain('dark:text-gray-100')
     expect(classesOf('danger')).toContain('dark:bg-status-danger-500')
   })

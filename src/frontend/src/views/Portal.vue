@@ -2230,7 +2230,9 @@ function resolveAgentQuery() {
 // helper, so the tab and the rows cannot disagree about the number. "Honest
 // counts" (AC 6) is a property of that sharing, not of a second sum: every unit
 // in this total is a thread in the list the user can click.
-const unreadTotal = computed(() => totalUnread(threads.value))
+// D13 (round 3): the SAME projection the sidebar and the Inbox sum — a Main the
+// sidebar hides must not count in the tab title either.
+const unreadTotal = computed(() => totalUnread(sidebarThreads.value))
 watch(unreadTotal, (n) => setUnreadCount(n), { immediate: true })
 
 // Leaving the Workspace clears it: the count would otherwise outlive the only

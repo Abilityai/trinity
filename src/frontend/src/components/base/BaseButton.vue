@@ -46,10 +46,12 @@ const SIZE_CLASSES = {
 }
 
 const VARIANT_CLASSES = {
+  // Dark uses the light pair (ent#610 round 3): white on 500 was 4.47:1 and on
+  // the 400 hover ~2.9:1, under AA on every dark primary action.
   primary:
     'border-transparent ' +
     'bg-action-primary-600 hover:bg-action-primary-700 text-white ' +
-    'dark:bg-action-primary-500 dark:hover:bg-action-primary-400',
+    'dark:bg-action-primary-600 dark:hover:bg-action-primary-700',
   // The only variant whose border is part of the design: a white button on a
   // white card is its own outline (design-system-reference.html, .btn-secondary
   // → border-color: var(--border-strong)).

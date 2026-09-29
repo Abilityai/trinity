@@ -140,7 +140,7 @@ The dark tinted-ground recipe `token-500 at 16%` is expressible as `token-500/16
 
 | Variant | Recipe (light) | Recipe (dark) |
 |---|---|---|
-| primary | bg action-primary-600, white text; hover 700 | bg action-primary-500; hover 400 |
+| primary | bg action-primary-600, white text; hover 700 | **the light pair**: bg action-primary-600; hover 700 (ent#610 round 3: white on 500 measured 4.47:1 and on the 400 hover ~2.9:1, under AA; 600 / 700 are 6.29 / 7.90) |
 | secondary | surface bg, primary ink, border-strong; hover chrome bg | same roles, dark mappings |
 | danger | bg status-danger-600, white text; hover 700 | bg status-danger-500; hover 400 |
 | ghost | transparent, action-primary-600 text; hover accent-soft bg | transparent, **action-primary-400** text (ent#610 §3g B7b: 500 measured 3.97:1 on gray-900 and 3.29 on gray-800; 400 is 5.95 / 4.92); hover action-primary-500/16 bg, where the 400 ink measures 4.13 over gray-800 — recorded, not fixed, because the hover is transient |

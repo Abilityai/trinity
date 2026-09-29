@@ -235,6 +235,16 @@ describe('an unentitled build says nothing', () => {
   // Keeping the last good list on a failure makes the list session-scoped
   // state: it must not outlive a sign-out, or the next client on the same
   // browser sees the previous client's asks on their first failed read.
+  it('a sign-out drops the kept SESSION list too (round-3 /cso #2)', () => {
+    // fetchAllSessions returns `lastSessions` on a failed refresh — the same
+    // last-good-list shape as the asks, with the same next-client leak.
+    store.lastSessions = [{ id: 's1', agent_name: 'scout' }]
+    store.sessionsFailed = true
+    store.signOut()
+    expect(store.lastSessions).toEqual([])
+    expect(store.sessionsFailed).toBe(false)
+  })
+
   it('a sign-out drops the kept list, so the next client never inherits it', async () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
     portalHttp.get.mockResolvedValueOnce({ data: [ask('a1')] })
