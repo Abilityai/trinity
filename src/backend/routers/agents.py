@@ -172,11 +172,17 @@ async def list_agents_endpoint(
     # and the fleet grid — batched for the same reason. Only stamped agents carry
     # one; `None` means "no stamp", never a guessed `calibrating`.
     all_readiness = db.get_role_readiness_for_agents(agent_names)
+    # Whether a calibrating stamp is actually holding a scheduled brief — the
+    # role card's own predicate, one batched schedule read, so the list's
+    # tooltip never claims a pause the card does not (PR #3038 review).
+    from services.role_readiness_gate import briefs_held_for_list
+    held = briefs_held_for_list(agents, all_readiness)
 
     for agent in agents:
         agent["tags"] = all_tags.get(agent.get("name"), [])
         agent["display_label"] = all_labels.get(agent.get("name"))
         agent["readiness"] = all_readiness.get(agent.get("name"))
+        agent["brief_held"] = agent.get("name") in held
 
     return agents
 

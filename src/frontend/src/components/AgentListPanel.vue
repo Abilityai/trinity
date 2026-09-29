@@ -503,13 +503,13 @@
               </span>
               <!-- ent#527 rider: the owner's readiness stamp (role companions only). -->
               <BaseBadge
-                v-if="readinessBadge(agent.readiness)"
-                :variant="readinessBadge(agent.readiness).variant"
+                v-if="readinessFor(agent)"
+                :variant="readinessFor(agent).variant"
                 dot
                 class="flex-shrink-0"
-                :title="readinessBadge(agent.readiness).title"
+                :title="readinessFor(agent).title"
                 data-testid="readiness-badge"
-              >{{ readinessBadge(agent.readiness).label }}</BaseBadge>
+              >{{ readinessFor(agent).label }}</BaseBadge>
               <RuntimeBadge
                 v-if="showsRuntimeBadgeInList(agent)"
                 data-testid="runtime-badge"
@@ -704,13 +704,13 @@
               class="font-mono text-[11px] min-w-0 max-w-[50%] truncate select-all"
             >{{ agentNameParts(agent).secondary }}</code>
             <BaseBadge
-              v-if="readinessBadge(agent.readiness)"
-              :variant="readinessBadge(agent.readiness).variant"
+              v-if="readinessFor(agent)"
+              :variant="readinessFor(agent).variant"
               dot
               class="flex-shrink-0"
-              :title="readinessBadge(agent.readiness).title"
+              :title="readinessFor(agent).title"
               data-testid="readiness-badge"
-            >{{ readinessBadge(agent.readiness).label }}</BaseBadge>
+            >{{ readinessFor(agent).label }}</BaseBadge>
             <RuntimeBadge
               v-if="showsRuntimeBadgeInList(agent)"
               data-testid="runtime-badge"
@@ -910,6 +910,10 @@ const emit = defineEmits(['tags-changed', 'clear-chassis-filters'])
 // (#389). Do not widen this surface.
 const agentsStore = useAgentsStore()
 const networkStore = useNetworkStore()
+
+// ent#527 rider: the row's stamp plus whether it holds a brief (both ride the
+// GET /api/agents row), through the one predicate the grid tile uses.
+const readinessFor = (agent) => readinessBadge(agent.readiness, agent.brief_held)
 
 const autonomyLoading = ref(null)
 const readOnlyLoading = ref(null)

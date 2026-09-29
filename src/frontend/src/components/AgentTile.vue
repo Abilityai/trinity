@@ -243,7 +243,7 @@ const gridStore = useFleetGridStore()
 
 const name = computed(() => props.agent.name)
 const isSystemAgent = computed(() => props.agent.is_system === true)
-const readiness = computed(() => readinessBadge(props.agent.readiness))
+const readiness = computed(() => readinessBadge(props.agent.readiness, props.agent.brief_held))
 
 // ent#139/#2104 — agent-class variant. Keyed off the runner's FIXED NAME
 // (`trinity-skill-runner` is a fixed-name singleton, RUNNER_AGENT_NAME in the

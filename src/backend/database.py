@@ -1741,6 +1741,9 @@ class DatabaseManager:
     def get_agent_schedule_names(self, agent_name: str):
         return self._schedule_ops.get_agent_schedule_names(agent_name)
 
+    def get_workspace_delivery_schedules_for_agents(self, agent_names):
+        return self._schedule_ops.get_workspace_delivery_schedules_for_agents(agent_names)
+
     def find_active_schedules_exceeding_timeout(self, agent_name: str, ceiling_seconds: int):
         return self._schedule_ops.find_active_schedules_exceeding_timeout(
             agent_name, ceiling_seconds

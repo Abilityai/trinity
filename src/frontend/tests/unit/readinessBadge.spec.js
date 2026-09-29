@@ -20,19 +20,30 @@ describe('readinessBadge', () => {
     expect(readinessBadge({ status: 'ready', changed_at: '2026-09-28T10:00:00Z', source: 'owner' })).toEqual({
       label: 'ready',
       variant: 'success',
-      title: 'Ready — marked ready by its owner since 2026-09-28 (UTC)',
+      title: 'Ready since 2026-09-28 (UTC) — marked ready by its owner',
     })
   })
 
   it('ready from the ent#689 rollout says so', () => {
     expect(readinessBadge({ status: 'ready', changed_at: '2026-09-24T08:00:00Z', source: 'rollout' }).title)
-      .toBe('Ready — carried over when the readiness gate shipped since 2026-09-24 (UTC)')
+      .toBe('Ready since 2026-09-24 (UTC) — carried over when the readiness gate shipped')
   })
 
-  it('calibrating names what it holds back', () => {
-    const b = readinessBadge({ status: 'calibrating', changed_at: '2026-09-28T10:00:00Z', source: 'owner' })
-    expect(b.variant).toBe('warning')
-    expect(b.title).toBe('Calibrating since 2026-09-28 (UTC) — its scheduled brief is paused until its owner marks it ready')
+  it('calibrating names what it holds back — only when a brief is actually held', () => {
+    const cal = { status: 'calibrating', changed_at: '2026-09-28T10:00:00Z', source: 'owner' }
+    const held = readinessBadge(cal, true)
+    expect(held.variant).toBe('warning')
+    expect(held.title).toBe('Calibrating since 2026-09-28 (UTC) — its scheduled brief is paused until its owner marks it ready')
+  })
+
+  it('calibrating with no held brief claims no pause (the role card says none either)', () => {
+    // No seat-delivery schedule, or autonomy off: "marks it ready" would start nothing.
+    const cal = { status: 'calibrating', changed_at: '2026-09-28T10:00:00Z', source: 'owner' }
+    for (const b of [readinessBadge(cal), readinessBadge(cal, false), readinessBadge(cal, undefined)]) {
+      expect(b.label).toBe('calibrating')
+      expect(b.title).toBe('Calibrating since 2026-09-28 (UTC) — not yet marked ready by its owner')
+      expect(b.title).not.toContain('paused')
+    }
   })
 
   it('a missing or malformed date is left out, not printed', () => {

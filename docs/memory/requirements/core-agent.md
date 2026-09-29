@@ -3322,7 +3322,12 @@ to localStorage in the clear.
   when, never who (the role card, owner-scoped, keeps the person). Both surfaces render one
   predicate (`utils/readinessBadge.js`): the role card's words and variants (`ready` =
   success, `calibrating` = warning, with a dot), and a tooltip that names a rollout stamp
-  and what calibrating holds back.
+  and what calibrating holds back. The row also carries `brief_held` (one batched schedule
+  read, the role card's own predicate — `role_readiness_gate.brief_is_held`: a calibrating
+  stamp, an enabled seat-delivery schedule, autonomy on), and the tooltip says the brief is
+  paused only when it is true, so the list never claims a pause the card does not. The
+  dashboard's 30 s agent poll patches `readiness`/`brief_held` in place, so a flip reaches an
+  open tab without a reload.
 
 ### 5.37 Workspace — the seat-level decision record: why a thing was approved, deferred or killed (trinity-enterprise#638)
 - **Status**: ✅ Implemented (2026-09-22). OSS-core (Workspace).
