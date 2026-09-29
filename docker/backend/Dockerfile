@@ -1,4 +1,4 @@
-FROM python:3.13-slim
+FROM python:3.13-slim-trixie
 
 WORKDIR /app
 
@@ -10,10 +10,11 @@ ENV PYTHONUNBUFFERED=1
 # Install curl for healthcheck, git for GitHub cloning, libmagic for file type detection
 #
 # `tzdata-legacy` carries the IANA *backward-compatibility links* (#1823). Debian
-# 13 "trixie" split them out of `tzdata`, and this image is `FROM python:3.13-slim`
+# 13 "trixie" split them out of `tzdata`, and this image was `FROM python:3.13-slim`
 # with no codename pin — so it silently migrated bookworm→trixie and lost
 # `/usr/share/zoneinfo/Europe/Kiev` (and every other legacy alias) without anyone
-# changing a line. `zoneinfo.ZoneInfo("Europe/Kiev")` then raises
+# changing a line. The codename is now pinned (#3079), so the next Debian release
+# is a reviewed diff here rather than a rebuild side effect. `zoneinfo.ZoneInfo("Europe/Kiev")` then raises
 # ZoneInfoNotFoundError inside APScheduler's `astimezone()`, which is how a
 # perfectly ordinary schedule create started 500ing. Do NOT drop this when
 # slimming the image — `tests/unit/test_1823_tz_capability_parity.py` fails if

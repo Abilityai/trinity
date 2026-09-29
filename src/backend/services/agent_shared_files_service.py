@@ -36,6 +36,7 @@ from services.docker_utils import container_get_archive
 from services.settings_service import get_public_chat_url
 from services import turn_audience
 from services.turn_audience import TurnAudience
+from utils.zip_signature import is_zip_container
 
 logger = logging.getLogger(__name__)
 
@@ -123,12 +124,17 @@ def validate_publish_path(filename: str) -> str:
 
 def detect_mime(data: bytes) -> str:
     """Return the MIME type inferred from the first bytes of `data`."""
+    detected = "application/octet-stream"
     if _MAGIC_AVAILABLE:
         try:
-            return magic.from_buffer(data[:4096], mime=True) or "application/octet-stream"
+            detected = magic.from_buffer(data[:4096], mime=True) or detected
         except Exception as e:
             logger.warning(f"[shared-files] MIME detection failed: {e}")
-    return "application/octet-stream"
+    # libmagic 5.46 reports a ZIP buffer as octet-stream (#3080). Only the generic
+    # answer is overridden, so DOCX/XLSX/JAR keep libmagic's more specific type.
+    if detected == "application/octet-stream" and is_zip_container(data):
+        return "application/zip"
+    return detected
 
 
 def check_mime_blocklist(data: bytes, mime_type: str) -> None:

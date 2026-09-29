@@ -1,64 +1,24 @@
 {
   "test_files": [
     {
-      "file": "unit/test_2996_owner_config_person_only.py",
-      "feature": "#2996",
-      "added": "2026-09-28",
+      "file": "unit/test_3080_detect_mime_zip.py",
+      "feature": "#3080",
+      "added": "2026-09-29",
       "categories": [
         "backend",
-        "auth",
-        "security",
-        "agent-config"
+        "file-sharing"
       ],
-      "description": "PUT /autonomy and the 8 other agent_config writes (api-key-setting, read-only, resources, capabilities, capacity, timeout, public-channel-model, guardrails) take Depends(require_person). Real get_current_user with seeded key rows: agent key (own agent and a sibling) and system key -> 403 person_required with the stored value unchanged from a non-ambient seed; owner JWT, admin JWT and the owner's user key -> 2xx with the stored value changed. Override with an explicit principal dataclass (never MagicMock) for ops, portal_delegate, connector, an unknown future scope, a user scope carrying an agent identity, the loopback JWT, and a principal missing mcp_scope. Refusal does not disclose agent existence; reads stay open; every write in the file is person-gated."
+      "description": "Outbound shared-file detect_mime() classifies a ZIP as application/zip when libmagic 5.46 reports application/octet-stream from a buffer; with real libmagic the buffer result equals libmagic's file-path result across 12 variants (deflated/stored/tiny/empty/zip64 ZIPs, DOCX/XLSX/PPTX, JAR, EPUB, ODT, APK), so ZIP-based formats keep their specific type; non-ZIP octet-stream unchanged, works without python-magic, executables still blocked; plus the shared utils.zip_signature helper."
     },
     {
-      "file": "unit/test_2996_self_service_session_only.py",
-      "feature": "ent#711",
-      "added": "2026-09-28",
+      "file": "unit/test_3079_base_image_codename_pin.py",
+      "feature": "#3079",
+      "added": "2026-09-29",
       "categories": [
         "backend",
-        "auth",
-        "security",
-        "users"
+        "infrastructure"
       ],
-      "description": "PUT /api/users/me/email and PUT/DELETE /api/users/me/github-pat take Depends(require_interactive): agent, system and the person's own user key -> 403 with users.email and the encrypted PAT column unchanged; override kinds refused by the route gate; JWT path unchanged (bind, 400 malformed, 409 taken, PAT set/clear, status read)."
-    },
-    {
-      "file": "unit/test_2996_agent_schedule_tools_unchanged.py",
-      "feature": "#2996",
-      "added": "2026-09-28",
-      "categories": [
-        "backend",
-        "auth",
-        "schedules",
-        "regression"
-      ],
-      "description": "Regression pin for the human-only rule's boundary: an agent's own key, through the REAL get_current_user with a seeded agent key row, still creates (201), disables and enables (200) its own schedule — the MCP create/enable/disable_schedule tools are the agent's use, bounded by the person-only autonomy grant. Asserts the stored schedule state moves on each call."
-    },
-    {
-      "file": "unit/test_2996_human_only_routes.py",
-      "feature": "#2996",
-      "added": "2026-09-28",
-      "categories": [
-        "backend",
-        "auth",
-        "security",
-        "guard"
-      ],
-      "description": "Route census (Invariant #8): every OSS HTTP route, every method, resolves to exactly one policy class (interactive / person / admin_widened / admin_tier / portal from code; agent_callable / own_auth / delegated from reviewed tables; or the frozen human_only_route_baseline.json). Ratchet rules: unclassified fails, stale entry fails, gated baseline entry fails, exact FROZEN_BASELINE_COUNT, key in two lists fails, duplicate key fails. Gates count only as Depends or as the handler's first statement on its principal, imported unaliased from dependencies. Websocket routes pinned as a literal set. Self-tests plant sources in a temp tree to show each rule bites. Walker: tests/unit/_route_census.py (pure-stdlib AST, rglob over src/backend minus enterprise/)."
-    },
-    {
-      "file": "unit/test_2996_route_census_runtime.py",
-      "feature": "#2996",
-      "added": "2026-09-28",
-      "categories": [
-        "backend",
-        "auth",
-        "security",
-        "guard"
-      ],
-      "description": "Route census, live side: imports main in a SUBPROCESS and checks every registered non-enterprise APIRoute maps to a key the AST census found, and every stored METHOD /full/path (baseline + reviewed tables) is what the app registers (rule 7). Fails, never skips, on a failed import, unparseable output or zero routes."
+      "description": "Static guard: every image Dockerfile (backend, scheduler, base-image) builds FROM a python tag that names a Debian codename (or a digest), so Docker Hub cannot move the base to a new Debian release under an unrelated rebuild (#1823 tzdata, #3046 libmagic 5.46); asserts that a codename is named, never which one. backend and scheduler must name the same codename (one tz database for the schedule validator and executor, #1472). Parser handles --platform, AS stages, alpineX.Y and digest pins."
     },
     {
       "file": "unit/test_human_only_principals.py",
@@ -3483,7 +3443,7 @@
         "access-control",
         "transport"
       ],
-      "description": "The loop-tool gate is WIRED where server.ts registers it, proved the way an agent reaches it: a real createServer in key mode, a real MCP client presenting an agent-scoped key over streamable HTTP, and a stub backend that answers key validation + the permission-edge read and COUNTS every POST /api/agents/<target>/loops (ent#628 -- no edge: refusal and zero loop starts; edge: the loop starts; self loop: no edge and no permission read). The stub also RECORDS every fire-and-forget POST /api/internal/audit, so the two #2807 cases prove the denial label over the wire: a refused start's row says success:false/denied:true with the reason and target, and deny-then-allow on ONE session leaves no stale marker on the permitted call. #2952: every call through asAgent().call drains ITS OWN audit row before returning and checks it for position (a call counter) AND identity (a per-session bearer the stub echoes back as key_name) -- the previous finder matched `(tool, index-after-length)` and read the prior test's late row on a busy host. A change to withAudit's one-row-per-call breaks this file on purpose (loud precondition); subtests must stay sequential (node:test default). trinity-enterprise#611: a second suite drives get_my_ask over the same real transport against a stub that answers key validation by bearer and records every readback — an agent key is served its OWN agent and no other, a person's user-scoped key is refused before the backend is asked anything, and the orchestrator's system key reads as trinity-system. trinity-enterprise#611 PR B: ask_operator over the same real transport \u2014 an agent key raises as its own agent with exactly the declared fields in the body, an agent_name argument neither aims the raise at a sibling nor reaches the backend, a person's user-scoped key is refused before any backend call, the system key raises as trinity-system, and a named 422 reaches the caller with its code and extras."
+      "description": "The loop-tool gate is WIRED where server.ts registers it, proved the way an agent reaches it: a real createServer in key mode, a real MCP client presenting an agent-scoped key over streamable HTTP, and a stub backend that answers key validation + the permission-edge read and COUNTS every POST /api/agents/<target>/loops (ent#628 -- no edge: refusal and zero loop starts; edge: the loop starts; self loop: no edge and no permission read). The stub also RECORDS every fire-and-forget POST /api/internal/audit, so the two #2807 cases prove the denial label over the wire: a refused start's row says success:false/denied:true with the reason and target, and deny-then-allow on ONE session leaves no stale marker on the permitted call. #2952: every call through asAgent().call drains ITS OWN audit row before returning and checks it for position (a call counter) AND identity (a per-session bearer the stub echoes back as key_name) -- the previous finder matched `(tool, index-after-length)` and read the prior test's late row on a busy host. A change to withAudit's one-row-per-call breaks this file on purpose (loud precondition); subtests must stay sequential (node:test default). trinity-enterprise#611: a second suite drives get_my_ask over the same real transport against a stub that answers key validation by bearer and records every readback — an agent key is served its OWN agent and no other, a person's user-scoped key is refused before the backend is asked anything, and the orchestrator's system key reads as trinity-system. trinity-enterprise#611 PR B: ask_operator over the same real transport — an agent key raises as its own agent with exactly the declared fields in the body, an agent_name argument neither aims the raise at a sibling nor reaches the backend, a person's user-scoped key is refused before any backend call, the system key raises as trinity-system, and a named 422 reaches the caller with its code and extras."
     },
     {
       "file": "unit/test_2915_operator_queue_sync_honesty.py",
@@ -3525,7 +3485,7 @@
         "typescript",
         "access-control"
       ],
-      "description": "Operator-queue MCP tools: the #1101 agent-scope post-filter (pure), the #1104 respond gate and proxy (stub client), and trinity-enterprise#611 get_my_ask — identity from the key (resolveActingAgent), no agent-target parameter, the system key reads as trinity-system, user / connector / agent-less system keys refused before any backend call, backend refusals returned as structured errors, the description teaching the rider — plus the person-only wording on respond_to_operator_queue. node:test. PR B: ask_operator \u2014 raises as the key's agent (the system key as trinity-system; user / connector / agent-less system keys refused before any backend call), declares no agent-shaped parameter, forwards ONLY the declared fields whatever else the arguments carry, returns a 422 / 429 refusal as its named code and extras, keeps an unnamed validation error or a transport failure structured, and its description teaches idempotency, the re-ask link and the readback without the mcp__trinity__ prefix."
+      "description": "Operator-queue MCP tools: the #1101 agent-scope post-filter (pure), the #1104 respond gate and proxy (stub client), and trinity-enterprise#611 get_my_ask — identity from the key (resolveActingAgent), no agent-target parameter, the system key reads as trinity-system, user / connector / agent-less system keys refused before any backend call, backend refusals returned as structured errors, the description teaching the rider — plus the person-only wording on respond_to_operator_queue. node:test. PR B: ask_operator — raises as the key's agent (the system key as trinity-system; user / connector / agent-less system keys refused before any backend call), declares no agent-shaped parameter, forwards ONLY the declared fields whatever else the arguments carry, returns a 422 / 429 refusal as its named code and extras, keeps an unnamed validation error or a transport failure structured, and its description teaches idempotency, the re-ask link and the readback without the mcp__trinity__ prefix."
     },
     {
       "file": "unit/test_ent611_native_ask.py",
@@ -3719,6 +3679,66 @@
         "git"
       ],
       "description": "`trinity deploy --repo` creates a deployment (trinity-enterprise#705): the CLI's POST /api/agents payload carries kind \"deployment\", so deploying a codebase never takes the agent default's working branch + auto-push. Static (AST) because the unit job does not install the CLI's own deps. The ownership rule itself (catalog template / owner != token login stays pull-only) is in test_1484_create_agent_characterization.py."
+    },
+    {
+      "file": "unit/test_2996_owner_config_person_only.py",
+      "feature": "#2996",
+      "added": "2026-09-28",
+      "categories": [
+        "backend",
+        "auth",
+        "security",
+        "agent-config"
+      ],
+      "description": "PUT /autonomy and the 8 other agent_config writes (api-key-setting, read-only, resources, capabilities, capacity, timeout, public-channel-model, guardrails) take Depends(require_person). Real get_current_user with seeded key rows: agent key (own agent and a sibling) and system key -> 403 person_required with the stored value unchanged from a non-ambient seed; owner JWT, admin JWT and the owner's user key -> 2xx with the stored value changed. Override with an explicit principal dataclass (never MagicMock) for ops, portal_delegate, connector, an unknown future scope, a user scope carrying an agent identity, the loopback JWT, and a principal missing mcp_scope. Refusal does not disclose agent existence; reads stay open; every write in the file is person-gated."
+    },
+    {
+      "file": "unit/test_2996_self_service_session_only.py",
+      "feature": "ent#711",
+      "added": "2026-09-28",
+      "categories": [
+        "backend",
+        "auth",
+        "security",
+        "users"
+      ],
+      "description": "PUT /api/users/me/email and PUT/DELETE /api/users/me/github-pat take Depends(require_interactive): agent, system and the person's own user key -> 403 with users.email and the encrypted PAT column unchanged; override kinds refused by the route gate; JWT path unchanged (bind, 400 malformed, 409 taken, PAT set/clear, status read)."
+    },
+    {
+      "file": "unit/test_2996_agent_schedule_tools_unchanged.py",
+      "feature": "#2996",
+      "added": "2026-09-28",
+      "categories": [
+        "backend",
+        "auth",
+        "schedules",
+        "regression"
+      ],
+      "description": "Regression pin for the human-only rule's boundary: an agent's own key, through the REAL get_current_user with a seeded agent key row, still creates (201), disables and enables (200) its own schedule — the MCP create/enable/disable_schedule tools are the agent's use, bounded by the person-only autonomy grant. Asserts the stored schedule state moves on each call."
+    },
+    {
+      "file": "unit/test_2996_human_only_routes.py",
+      "feature": "#2996",
+      "added": "2026-09-28",
+      "categories": [
+        "backend",
+        "auth",
+        "security",
+        "guard"
+      ],
+      "description": "Route census (Invariant #8): every OSS HTTP route, every method, resolves to exactly one policy class (interactive / person / admin_widened / admin_tier / portal from code; agent_callable / own_auth / delegated from reviewed tables; or the frozen human_only_route_baseline.json). Ratchet rules: unclassified fails, stale entry fails, gated baseline entry fails, exact FROZEN_BASELINE_COUNT, key in two lists fails, duplicate key fails. Gates count only as Depends or as the handler's first statement on its principal, imported unaliased from dependencies. Websocket routes pinned as a literal set. Self-tests plant sources in a temp tree to show each rule bites. Walker: tests/unit/_route_census.py (pure-stdlib AST, rglob over src/backend minus enterprise/)."
+    },
+    {
+      "file": "unit/test_2996_route_census_runtime.py",
+      "feature": "#2996",
+      "added": "2026-09-28",
+      "categories": [
+        "backend",
+        "auth",
+        "security",
+        "guard"
+      ],
+      "description": "Route census, live side: imports main in a SUBPROCESS and checks every registered non-enterprise APIRoute maps to a key the AST census found, and every stored METHOD /full/path (baseline + reviewed tables) is what the app registers (rule 7). Fails, never skips, on a failed import, unparseable output or zero routes."
     }
   ]
 }
