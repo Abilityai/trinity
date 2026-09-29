@@ -900,6 +900,7 @@ async def _apply_agent_kind_default(
     github_pat: Optional[str],
     fork_upstream: Optional[str],
     github_pat_tier: Optional[str] = None,
+    catalog_template: bool = False,
 ) -> dict:
     """trinity-enterprise#705: decide the git mode for a `github:` create.
 
@@ -922,18 +923,30 @@ async def _apply_agent_kind_default(
       whole install; on an install where it can write a shared template repo,
       granting on the probe alone would push every creator's agent to a branch
       on that repo (the ent#162 class). Only the creator's own token
-      (``per_user``) or the agent's (``per_agent``) is evidence the repo is
-      theirs to write, so only those are probed.
+      (``per_user``) or the agent's (``per_agent``) can qualify. (No create
+      path resolves ``per_agent`` today — the resolver is called without an
+      agent name — so that tier is accepted for future callers only.)
+    - a catalog template — shared by definition, whoever's token can write it
+    - a repository the token's own GitHub account does not own (owner ≠ the
+      login ``GET /user`` returns), or whose login could not be read. Even the
+      creator's own token is not ownership: a classic ``repo`` PAT or an
+      org-wide fine-grained token can write every repo in the member's orgs,
+      including the org's shared public template (PR #3020 review). An
+      org-owned repo therefore stays pull-only by default; an explicit
+      ``source_mode=false`` still asks for a working branch.
     - the push probe refused, or could not be completed
 
     Mutates `config.source_mode` only in the one granting case.
     """
     kind = config.kind or "agent"
     decision = {"kind": kind, "source_mode": bool(config.source_mode)}
-    if "source_mode" in config.model_fields_set:
-        return {**decision, "reason": "source_mode set explicitly"}
+    # Fork first: `_apply_fork_to_own` ASSIGNS `config.source_mode`, and
+    # Pydantic v2 records an assigned field in `model_fields_set` — checked
+    # the other way round, every fork read as an explicit `source_mode`.
     if config.fork_to_own or fork_upstream:
         return {**decision, "reason": "fork-to-own: the agent owns its fork"}
+    if "source_mode" in config.model_fields_set:
+        return {**decision, "reason": "source_mode set explicitly"}
     if kind == "deployment":
         return {**decision, "reason": "a deployment of a codebase: pull-only"}
     if config.ephemeral:
@@ -945,6 +958,25 @@ async def _apply_agent_kind_default(
             "only the platform-wide GitHub token is available, which does not "
             "show the repository is yours: pull-only. Add your own GitHub token "
             "in Settings to give agents a working branch"
+        )}
+    if catalog_template:
+        return {**decision, "reason": (
+            f"{github_repo} is a shared catalog template: pull-only. Fork it to "
+            f"your own repository to keep this agent's work in git"
+        )}
+    repo_owner = github_repo.split("/", 1)[0]
+    try:
+        status, login = await GitHubService(github_pat).validate_token_detailed()
+    except Exception as e:  # never let the ownership read fail a create
+        logger.warning(f"[ent#705] could not read the token's GitHub login: {e}")
+        status, login = "unreachable", None
+    if status != "valid" or not login:
+        return {**decision, "reason": "could not confirm the repository is yours: pull-only"}
+    if login.lower() != repo_owner.lower():
+        return {**decision, "reason": (
+            f"{github_repo} is owned by {repo_owner}, not your GitHub account "
+            f"({login}): pull-only. Fork it to your own repository to keep this "
+            f"agent's work in git"
         )}
     outcome, detail = await git_service.probe_push_access(github_repo, github_pat)
     if outcome == "ok":
@@ -1536,6 +1568,7 @@ async def _resolve_template(config: AgentConfig, current_user: User) -> _Templat
             tr.git_mode_decision = await _apply_agent_kind_default(
                 config, tr.github_repo_for_agent, tr.github_pat_for_agent,
                 tr.fork_upstream_repo, github_pat_tier=tr.github_pat_tier,
+                catalog_template=bool(gh_template),
             )
             logger.info(
                 f"[ent#705] git mode for {config.name}: "
