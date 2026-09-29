@@ -4765,6 +4765,21 @@ def _migrate_workspace_suggestion_feedback_table(cursor, conn):
     conn.commit()
 
 
+def _migrate_portal_messages_unread_index(cursor, conn):
+    """#3064 — cover the Workspace unread count's message arm.
+
+    `count_unread_by_session` runs on every 20s Workspace poll and filtered
+    `enterprise_portal_messages` by viewer + `role = 'assistant'` + thread +
+    `created_at` with no index leading on the viewer, so SQLite scanned the
+    whole table. Index-only: no column, no data, no behaviour change.
+    PostgreSQL half: Alembic `0081_portal_messages_unread_idx`.
+    """
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_portal_messages_unread "
+        "ON enterprise_portal_messages(client_email, role, session_id, created_at)"
+    )
+
+
 def _migrate_agent_skill_sets(cursor, conn):
     """trinity-enterprise#530 — skill sets.
 
@@ -4876,7 +4891,7 @@ def _migrate_pull_sync(cursor, conn):
     working tree on upgrade; everyone else is off until toggled. New `github:`
     agents get it at creation. Runs once (schema_migrations).
 
-    Mirrored by the Alembic revision 0081_pull_sync.
+    Mirrored by the Alembic revision 0082_pull_sync.
     """
     _safe_add_column(
         cursor, "agent_git_config", "pull_sync_enabled",
@@ -5052,5 +5067,6 @@ MIGRATIONS = [
     ("workspace_suggestion_feedback_table", _migrate_workspace_suggestion_feedback_table),
     ("telegram_group_context", _migrate_telegram_group_context),
     ("agent_skill_sets", _migrate_agent_skill_sets),
+    ("portal_messages_unread_index", _migrate_portal_messages_unread_index),
     ("pull_sync", _migrate_pull_sync),
 ]
