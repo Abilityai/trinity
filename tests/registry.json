@@ -1,6 +1,29 @@
 {
   "test_files": [
     {
+      "file": "unit/test_human_only_principals.py",
+      "feature": "#2996",
+      "added": "2026-09-28",
+      "categories": [
+        "backend",
+        "auth",
+        "security"
+      ],
+      "description": "Human-only principal primitives (dependencies.py): assert_person / require_person (PERSON rule: JWT or the person's own user key) and require_interactive (INTERACTIVE: JWT only) across 10 principal kinds (JWT, user, agent, system, connector, portal_delegate, ops, unknown future scope, user scope carrying an agent identity, event-loopback JWT) plus a principal missing mcp_scope (fails closed); HUMAN_ONLY_DETAIL code person_required, a fresh copy per refusal; the key branch keeps reject_non_interactive_principal's detail; Depends forms resolve through get_current_user; ent#611 PERSON_REQUIRED_DETAIL and is_person_principal pinned byte-identical."
+    },
+    {
+      "file": "unit/test_mcp_key_creation_requires_session.py",
+      "feature": "security §20.10",
+      "added": "2026-09-28",
+      "categories": [
+        "backend",
+        "auth",
+        "security",
+        "mcp-keys"
+      ],
+      "description": "Creating an MCP key requires a signed-in session: POST /api/mcp/keys (every scope) and POST /api/mcp/keys/ensure-default through the REAL get_current_user with seeded agent/system/connector/user key rows -> 403 and mcp_api_keys row count unchanged, no key_create audit row; JWT -> 200 with the secret and one key_create audit row (ensure-default included, target = new key id); admin JWT still creates ops/portal_delegate; non-admin JWT portal_delegate still 403; a user-scoped key asking an admin scope 403; existing user key -> ensure-default returns null, creates and audits nothing; the created key validates as its owner."
+    },
+    {
       "file": "unit/test_ent600_telegram_group_context.py",
       "feature": "ent#600",
       "added": "2026-09-11",

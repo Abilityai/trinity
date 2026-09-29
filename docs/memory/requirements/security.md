@@ -484,6 +484,13 @@
 - **Honest bound**: the credential narrows the **API** surface only. Ops tooling
   that mutates containers over SSH never touches the API; SSH remains the real
   privilege boundary on those hosts.
+- **Creating an MCP key requires a signed-in session**: `POST /api/mcp/keys`
+  (every scope) and `POST /api/mcp/keys/ensure-default` take
+  `Depends(require_interactive)`, so only an interactive (JWT) session may mint
+  one. A credential minter is at least as strict as the principal it produces.
+  `ensure-default` writes the same `key_create` audit row as `POST /api/mcp/keys`,
+  so every mint is attributable. Guard:
+  `tests/unit/test_mcp_key_creation_requires_session.py`.
 
 ---
 
