@@ -3568,6 +3568,28 @@
         "integration"
       ],
       "description": "Journey J13 (suggestions): my agent tells me what I can do with it and what is waiting on me, and only things that are true. A strict=True xfail skeleton — the rules, SQL and doors are unit-proven and the verbs mount-proven; the walk needs a real failing schedule, a shared platform user and a magic-link client on one instance."
+    },
+    {
+      "file": "unit/test_ent530_skill_sets.py",
+      "feature": "trinity-enterprise#530",
+      "added": "2026-09-24",
+      "categories": [
+        "backend",
+        "skills",
+        "database"
+      ],
+      "description": "Skill sets — a named slice of the library assigned as a unit (ent#530, absorbs ent#342). The catalog parser (both forms, total, every problem a code, partial on a missing member, bounds); plan_member_rows including the FAIL-CLOSED rule (an unresolvable set removes nothing); sets read through the guarded catalog.yaml over a real git repo; materialised rows over a real SQLite file (overlap — each assignment stands on its own, unassign keeps individual and other-set members, upstream add/remove, the legacy bulk-PUT round trip neither drops nor promotes set members); the service (custom-wins precedence, shadowing, member provenance, named 404/422 refusals, the honest per-agent status with prerequisites probed only while running); both migration tracks executed plus the single Alembic head; the CASCADE AgentRef; the routes through a real FastAPI app (static-before-catch-all, retained-via-set answer, a skills-only PUT leaves sets alone); fleet re-inject prunes a member dropped upstream; the CLAUDE.md 'via <set>' annotation. Mutations of the fail-closed rule and the PUT keep-derived rule each red."
+    },
+    {
+      "file": "unit/test_ent703_pull_cycle.py",
+      "feature": "trinity-enterprise#703",
+      "added": "2026-09-25",
+      "categories": [
+        "agent-server",
+        "git",
+        "migrations"
+      ],
+      "description": "The container's pull cycle (ent#703, invariant G3) on real repos with a human clone pushing underneath: behind+clean fast-forwards; a local commit is rebased on top; uncommitted edits survive a pull (stashed and re-applied); incoming changes colliding with uncommitted edits are UNDONE — same HEAD, same edits, empty stash, failure recorded (the autostash trap; red against a naive --autostash mutant); a rebase conflict is aborted and recorded; never while an execution runs, including one starting mid-cycle, and an unknown registry counts as busy; a busy repo is skipped without a state write; a pull never touches the push's fields. The loop gate reads the flag live on /git/pull-sync with the env fallback; the interval defaults to the push interval. Both migration tracks: columns + backfill only where auto-sync is on."
     }
   ]
 }

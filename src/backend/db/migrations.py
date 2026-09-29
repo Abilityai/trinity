@@ -4765,6 +4765,39 @@ def _migrate_workspace_suggestion_feedback_table(cursor, conn):
     conn.commit()
 
 
+def _migrate_agent_skill_sets(cursor, conn):
+    """trinity-enterprise#530 — skill sets.
+
+    * ``agent_skill_sets`` — a named set of library skills assigned to an agent.
+    * ``agent_skills.individual`` — 1 (the default, so every existing row keeps
+      its meaning) when the skill was assigned on its own; 0 when it is present
+      only because an assigned set names it. Unassigning a set removes only its
+      individual = 0 rows that no other assigned set names.
+
+    Additive only. Mirrored by the Alembic revision 0080_agent_skill_sets.
+    """
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS agent_skill_sets (
+            agent_name TEXT NOT NULL,
+            set_name TEXT NOT NULL,
+            source_id TEXT,
+            assigned_by TEXT NOT NULL,
+            assigned_by_agent TEXT,
+            assigned_at TEXT NOT NULL,
+            PRIMARY KEY (agent_name, set_name)
+        )
+        """
+    )
+    _safe_add_column(
+        cursor,
+        "agent_skills",
+        "individual",
+        "ALTER TABLE agent_skills ADD COLUMN individual INTEGER NOT NULL DEFAULT 1",
+    )
+    conn.commit()
+
+
 def _migrate_role_readiness_rollout_seed(cursor, conn):
     """The readiness gate's rollout (trinity-enterprise#689), data only.
 
@@ -4824,6 +4857,47 @@ def _migrate_auto_sync_enabled_backfill(cursor, conn):
               WHERE is_ephemeral = 1 AND deleted_at IS NULL
           )
         """
+    )
+    conn.commit()
+
+
+def _migrate_pull_sync(cursor, conn):
+    """The container's pull cycle (trinity-enterprise#703).
+
+    * `agent_git_config.pull_sync_enabled` — the per-agent switch the agent's
+      pull loop reads live each cycle (the #3010 one-writer discipline).
+    * `agent_sync_state.last_pull_at / last_pull_status / behind_after_pull /
+      last_pull_error / last_successful_pull_at / consecutive_pull_failures /
+      consecutive_pull_skips` — the pull cycle's own outcome and health,
+      persisted by the sync-health poller.
+
+    Backfill (operator ruling 2026-09-25): on only where auto-sync is already
+    on, so no agent that is not already writing to git starts rebasing its
+    working tree on upgrade; everyone else is off until toggled. New `github:`
+    agents get it at creation. Runs once (schema_migrations).
+
+    Mirrored by the Alembic revision 0081_pull_sync.
+    """
+    _safe_add_column(
+        cursor, "agent_git_config", "pull_sync_enabled",
+        "ALTER TABLE agent_git_config ADD COLUMN pull_sync_enabled INTEGER DEFAULT 0",
+    )
+    for column, ddl in (
+        ("last_pull_at", "TEXT"),
+        ("last_pull_status", "TEXT"),
+        ("behind_after_pull", "INTEGER"),
+        ("last_pull_error", "TEXT"),
+        ("last_successful_pull_at", "TEXT"),
+        ("consecutive_pull_failures", "INTEGER DEFAULT 0"),
+        ("consecutive_pull_skips", "INTEGER DEFAULT 0"),
+    ):
+        _safe_add_column(
+            cursor, "agent_sync_state", column,
+            f"ALTER TABLE agent_sync_state ADD COLUMN {column} {ddl}",
+        )
+    cursor.execute(
+        "UPDATE agent_git_config SET pull_sync_enabled = 1 "
+        "WHERE COALESCE(auto_sync_enabled, 0) = 1"
     )
     conn.commit()
 
@@ -4977,4 +5051,6 @@ MIGRATIONS = [
     ("execution_chain_depth", _migrate_execution_chain_depth),
     ("workspace_suggestion_feedback_table", _migrate_workspace_suggestion_feedback_table),
     ("telegram_group_context", _migrate_telegram_group_context),
+    ("agent_skill_sets", _migrate_agent_skill_sets),
+    ("pull_sync", _migrate_pull_sync),
 ]

@@ -332,6 +332,7 @@ class AgentGitConfig(BaseModel):
     # #389 sync health observability
     auto_sync_enabled: bool = False
     freeze_schedules_if_sync_failing: bool = False
+    pull_sync_enabled: bool = False  # trinity-enterprise#703: the container's pull cycle
 
 
 class GitSyncResult(BaseModel):
@@ -734,7 +735,10 @@ class AgentSkill(BaseModel):
     # was an agent principal; None for a human. `assigned_by` stays the owner's
     # username, so "the agent did it" is distinguishable from "the person did it".
     assigned_by_agent: Optional[str] = None
-
+    # ent#530: False = present only because an assigned skill SET names it;
+    # `via_sets` names those sets (filled by the router from the current catalogs).
+    individual: bool = True
+    via_sets: List[str] = []
 
 
 class SkillSource(BaseModel):
@@ -797,6 +801,10 @@ class SkillInfo(BaseModel):
 class AgentSkillsUpdate(BaseModel):
     """Request model for bulk updating agent skills."""
     skills: List[str]  # List of skill names to assign
+    # ent#530: the agent's skill SETS. None = leave sets untouched, so a client
+    # that only knows skills can never drop a set; a list replaces the sets.
+    # `set:<name>` entries in `skills` are accepted too and treated as sets.
+    sets: Optional[List[str]] = None
 
 
 class SkillsLibraryStatus(BaseModel):

@@ -13,7 +13,9 @@ reservation:
 
 | Case | Mode | Why |
 |---|---|---|
-| `kind=agent`, the creator's or agent's own token (tier `per_user`/`per_agent`) can push (the #2107 probe says `ok`) | **working branch** + auto-sync + freeze-on-failure | the repository is the agent |
+| `kind=agent`, the creator's own token (tier `per_user`; `per_agent` accepted for future callers), a non-catalog repo whose owner is the token's GitHub login, and the #2107 probe says `ok` | **working branch** + auto-sync + freeze-on-failure | the repository is the agent |
+| `kind=agent`, a catalog template | source, never probed | shared by definition |
+| `kind=agent`, repo owner ≠ the token's login (or the login can't be read) | source, never probed | a pushable token is not ownership — a classic `repo` PAT or org-wide token can write an org's shared template (ent#162 class) |
 | `kind=agent`, probe refused | source (pull-only) | a template someone else owns never receives an agent's branches; fork-to-own is the durable path |
 | `kind=agent`, probe unverifiable | source | fail safe |
 | `kind=agent`, no token | source | nothing pushes anonymously (ent#123) |

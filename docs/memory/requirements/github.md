@@ -817,7 +817,7 @@
 
 ### 11.17 An Agent Created as an Agent Owns Its Repository (trinity-enterprise#705)
 
-- **Status**: 🚧 In review. Merges only after #3016, #3017 and #3018, the three named blockers.
+- **Status**: 🚧 In review (PR #3020). #3016, #3017 and #3018 have landed.
 - **Ruling (2026-09-24):** *the repository is the agent; the container is a cache of it.*
   The 2026-09-24 fleet audit found every git-bound agent with auto-sync off and
   work on container disks that existed nowhere else.
@@ -827,20 +827,31 @@
   fork-to-own, also gets freeze-on-failure; a `deployment` never does.
 - **An agent** gets a working branch (`trinity/<agent>/<id>`) it alone writes,
   `auto_sync_enabled=1` and `freeze_schedules_if_sync_failing=1`. It only gets
-  them **when its own token can push to that repo**: the token must be the
-  creator's (`per_user`) or the agent's (`per_agent`), and the #2107 receive-pack
-  probe must say `ok`. The global platform PAT never qualifies — being able to
-  push is not owning the repo (PR #3020 ruling, the ent#162 class).
+  them **only when the repo is its creator's own and the token can push to
+  it**: the token must be the creator's (`per_user`; `per_agent` is accepted for
+  future callers, but no create path resolves it today), the template must not
+  be a catalog template, the repo's owner must equal the token's GitHub login
+  (`GET /user`, case-insensitive), and the #2107 receive-pack probe must say
+  `ok`. Being able to push is not owning the repo (PR #3020 ruling, the ent#162
+  class): the global platform PAT never qualifies, and neither does a creator's
+  own token that can write an org's shared template (a classic `repo` PAT or an
+  org-wide fine-grained token). An org-owned repo therefore stays pull-only by
+  default; an explicit `source_mode=false` still asks for a working branch.
 - **Stays pull-only, with the reason on the create response's `git_mode`:**
   - a deployment
   - an ephemeral ghost (ent#69)
   - no token (ent#123; not a 400)
   - only the platform-wide token (never probed)
+  - a catalog template (shared by definition; never probed)
+  - a repo the token's login does not own, or a login that could not be read
+    (never probed; the reason points to fork-to-own)
   - a refused probe (a template someone else owns — never branches pushed
     into it, the ent#162 class; the reason points to fork-to-own)
   - an unverifiable probe
 - **Fork-to-own** gets the trio (it owns its fork). **Cornelius** is pinned
   pull-only: it is built from a shared public upstream.
+- **Other create paths:** `trinity deploy --repo` sends `kind: "deployment"` (it
+  deploys a codebase); a system manifest takes `kind` per agent (below).
 - **Asked in the UI and the manifest (trinity-enterprise#704):**
   - the create modal asks "What is this repository?" (an agent / a deployment
     of a codebase) exactly when the create binds git: a GitHub template from the
@@ -866,5 +877,39 @@
   open-source create and sync paths.
 - **Flow**: `docs/memory/feature-flows/github-sync.md`
 - **GitHub Issue**: abilityai/trinity-enterprise#705
+
+---
+
+### 11.18 The Container Pulls Origin on Its Own (trinity-enterprise#703)
+
+- **Status**: 🚧 In review. Stacked on #3020; merges after it.
+- **Invariant G3:** human and fleet work reaches the agent within a bound.
+- **Pull cycle** in the agent server beside the push cycle:
+  - on its interval: fetch, then fast-forward or rebase
+  - a `trinity/*` working branch also merges `main` in, so human pushes to
+    `main` arrive (a merge — the branch is already pushed; conflict aborted)
+  - uncommitted edits stashed and re-applied explicitly
+  - never discards local work: a conflict is aborted or undone, and recorded;
+    an edit that could not be put back is named as kept in `git stash`
+  - never STARTS while an execution is in flight or queued, nor over unmerged
+    paths (and the push cycle never commits them). The gate is check-then-act:
+    admission does not wait for a pull, so a turn accepted during the integrate
+    window (fast-forward or merge up to 60 s, rebase up to 120 s, plus the stash
+    steps) can read files while HEAD moves. Holding admission during a pull is a
+    follow-up.
+- **Flag:** per-agent `pull_sync_enabled` (both migration tracks), read live
+  each cycle, with `GIT_SYNC_PULL` as the fallback; interval
+  `GIT_SYNC_PULL_INTERVAL_SECONDS` (defaults to the push interval).
+  - on for new `github:` agents, source-mode included
+  - on for existing agents only where auto-sync is already on
+  - off otherwise; toggle in Settings → Git sync
+- **Observability:** `last_pull_at`, `last_pull_status`, `last_pull_error`,
+  `behind_after_pull`, `last_successful_pull_at`, `consecutive_pull_failures`,
+  `consecutive_pull_skips` in `sync-state.json`, persisted on
+  `agent_sync_state`. A failed pull never
+  counts toward the push's `consecutive_failures`.
+- **Edition**: open-core (operator ruling 2026-09-25).
+- **Flow**: `docs/memory/feature-flows/git-sync-health.md` §1d
+- **GitHub Issue**: abilityai/trinity-enterprise#703
 
 ---

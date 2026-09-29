@@ -215,6 +215,12 @@ async def inject_assigned_skills(agent_name: str) -> dict:
         dict with injection status
     """
     from database import db
+    from services import skill_set_service
+
+    # ent#530 step 1: bring set-derived rows in line with the catalogs (DB only,
+    # fail-closed) BEFORE the names are read, so a member added upstream is
+    # injected and one removed upstream is pruned by the reconcile below.
+    await asyncio.to_thread(skill_set_service.reconcile_agent, agent_name)
 
     # Get assigned skills
     skill_names = db.get_agent_skill_names(agent_name)
@@ -714,6 +720,7 @@ _GIT_ENV_KEYS = (
     "GIT_SOURCE_MODE",
     "GIT_SOURCE_BRANCH",
     "GIT_SYNC_AUTO",
+    "GIT_SYNC_PULL",  # trinity-enterprise#703
     "TRINITY_GIT_BASE_URL",
 )
 
@@ -894,6 +901,14 @@ def _apply_git_env_from_db(
         env_vars["GIT_SYNC_AUTO"] = "true"
     else:
         env_vars.pop("GIT_SYNC_AUTO", None)
+
+    # trinity-enterprise#703: the pull cycle's fallback env, from the DB flag
+    # alone — same one-writer rule as GIT_SYNC_AUTO; the loop reads the flag
+    # live every cycle and falls back to this only when the platform is down.
+    if _gc("pull_sync_enabled"):
+        env_vars["GIT_SYNC_PULL"] = "true"
+    else:
+        env_vars.pop("GIT_SYNC_PULL", None)
 
     # --- optional self-hosted git base URL: refresh from the CURRENT backend
     # env (the AGENT_TOOL_STALL_LIMIT_S idiom), so pointing the platform at or

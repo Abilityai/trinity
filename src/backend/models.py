@@ -214,9 +214,10 @@ class AgentConfig(BaseModel):
     source_mode: Optional[bool] = True  # True = track source branch (pull only), False = create working branch
     # trinity-enterprise#705: what is being created. "agent" (the default when
     # None) is an agent whose repository IS the agent — a working branch it alone
-    # writes, auto-sync on, freeze-on-failure on — granted only when the creator's
-    # or agent's own token (never the platform-wide one) can actually push to
-    # that repo; otherwise it stays pull-only. "deployment" is a
+    # writes, auto-sync on, freeze-on-failure on — granted only when the repo is
+    # the creator's own (not a catalog template; owner == the token's GitHub
+    # login) and the creator's own token (never the platform-wide one) can
+    # actually push to it; otherwise it stays pull-only. "deployment" is a
     # deployment of a codebase: source mode, no auto-push. An EXPLICIT
     # `source_mode` always wins for the MODE; an auto-pushing agent (explicit
     # working branch and fork-to-own included) also gets freeze-on-failure.
@@ -3211,6 +3212,11 @@ class FreezeSchedulesToggle(BaseModel):
     enabled: bool
 
 
+class PullSyncToggle(BaseModel):
+    """trinity-enterprise#703: the container's pull cycle on/off."""
+    enabled: bool
+
+
 # =============================================================================
 # Image Generation Models (routers/image_generation.py)
 # =============================================================================
@@ -4983,3 +4989,52 @@ class ObjectiveJoinRead(BaseModel):
     findings: List[ObjectiveFinding] = []
     summary: ObjectiveJoinSummary
     message: Optional[str] = None
+
+
+# ---------------------------------------------------------------------------
+# trinity-enterprise#530 — skill sets
+# ---------------------------------------------------------------------------
+
+class SkillSetMember(BaseModel):
+    name: str
+    present: bool
+    version: Optional[str] = None
+    # The source that wins this member when it is NOT the set's own source.
+    shadowed_source: Optional[str] = None
+
+
+class SkillSetInfo(BaseModel):
+    """A set declared by a library source's catalog.yaml. `problems` are codes only."""
+    name: str
+    source_id: str
+    source_name: Optional[str] = None
+    shadowed_by: List[Dict[str, Any]] = []
+    members: List[SkillSetMember] = []
+    status: str  # ok | partial | invalid — only ok is assignable or resolves
+    problems: List[str] = []
+    requires: Dict[str, List[str]] = {}
+    schedules: List[Dict[str, str]] = []  # suggestions only — never created
+
+
+class AgentSkillSetMember(BaseModel):
+    name: str
+    state: str  # assigned | conflict | not_assigned | missing_upstream
+    version: Optional[str] = None
+    shadowed_source: Optional[str] = None
+
+
+class AgentSkillSetStatus(BaseModel):
+    """An assigned set's honest status on one agent (#342)."""
+    name: str
+    status: str  # ok | partial | unresolved
+    # Why a set is unresolved: not_found | invalid | partial_upstream | source_changed.
+    # While any held set is unresolved, no set-derived skill is removed (fail-closed).
+    reason: Optional[str] = None
+    source_id: Optional[str] = None
+    drift: bool = False
+    members: List[AgentSkillSetMember] = []
+    prerequisites: Dict[str, Any] = {}
+    suggested_schedules: List[Dict[str, str]] = []
+    assigned_by: Optional[str] = None
+    assigned_by_agent: Optional[str] = None
+    assigned_at: Optional[str] = None

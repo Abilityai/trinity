@@ -294,8 +294,9 @@ export function createAgentTools(
           .describe(
             "What is being created from a 'github:owner/repo' template (trinity-enterprise#705). " +
             "'agent' (default when omitted): the repository IS the agent — it gets a working branch it " +
-            "alone writes, auto-sync on and schedules paused while sync fails, but only when the creator's " +
-            "own GitHub token (not the platform-wide one) can push to that repo; otherwise it is created pull-only and the response's git_mode " +
+            "alone writes, auto-sync on and schedules paused while sync fails, but only when the repo is owned by the " +
+            "creator's own GitHub account (not a catalog template) and their own token (not the platform-wide one) can push to it; " +
+            "otherwise it is created pull-only and the response's git_mode " +
             "says why. 'deployment': a deployment of a codebase — pull-only, no auto-push."
           ),
         import_intent: z

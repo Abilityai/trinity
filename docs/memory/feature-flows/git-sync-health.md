@@ -355,6 +355,82 @@ so it reconciles (all under `_REPO_LOCK`, every child via `run_registered`):
   lacked, before the rebase) and `last_successful_push_at` (stamped on success)
   in `sync-state.json`, for the divergence-age work (trinity-enterprise#706).
 
+### 1d. Pull cycle — origin reaches the agent (trinity-enterprise#703)
+
+Invariant **G3**: human and fleet work reaches the agent within a bound. Before
+this, nothing inside the container ever pulled. The only pulls were an
+operator's, the fleet orchestrator's daily sweep, or a marketplace
+SessionStart hook, and the 2026-09-24 audit found agents up to 31 commits behind.
+
+- **Loop:** `auto_sync.run_pull_loop`, beside the push loop, every
+  `GIT_SYNC_PULL_INTERVAL_SECONDS` (defaults to the push interval, 900 s).
+- **Gate:** each cycle reads the owner's `pull_sync_enabled` live
+  (`GET .../git/pull-sync`, agent key), with `GIT_SYNC_PULL` as the fallback,
+  the #3010 pattern.
+- **Where it's on:**
+  - new `github:` agents: on at creation, source-mode included
+  - existing agents: on only where `auto_sync_enabled` was already on
+  - everyone else: off until toggled in Settings → Git sync
+- **Cycle** (`_run_pull_once`, under `_REPO_LOCK`):
+  - Stale lock litter is reaped first (`_reap_stale_git_litter`), as the push
+    cycle does — a pull-only agent has no push cycle to do it.
+  - Skipped while any execution is running **or queued** (`list_running()` +
+    `list_pending_ids()`, #2433), checked again right before the tree is
+    touched; an unreadable registry counts as busy. This gate is about
+    *starting*: turn admission does not wait on a pull, so a turn admitted
+    during the integrate window (up to 60 s for a merge, 120 s for a rebase)
+    can see HEAD move.
+  - Refused while the index holds unmerged paths.
+  - Counts are strict (`_ahead_behind_vs`): a branch that can't be counted
+    against origin fails the pull (`could not count commits on …`) instead of
+    reading as up to date.
+  - Fetches the **checked-out** branch: source-mode agents sit on their source
+    branch, working-branch agents on theirs.
+  - Nothing committed locally → a fast-forward. A local commit → a rebase,
+    aborted on conflict (`diverged: …`).
+  - A `trinity/*` working branch also gets its source branch
+    (`_get_pull_branch`, `main`) **merged** in (`_integrate_source`) — only the
+    agent writes its working branch, so without this human pushes to `main`
+    never arrive. A merge, not a rebase: the branch is already pushed. A
+    conflict is aborted and recorded as `diverged: merge conflict with main
+    (<files>)` (plus `merge --abort failed (…)` if the abort did). Every rebase
+    here and in the push cycle is `--rebase-merges`, so an unpushed merge of
+    `main` survives a later rebase onto the agent's own branch instead of being
+    flattened into copies of `main`'s commits.
+- **Uncommitted edits** (`_integrate_remote`) are stashed explicitly and
+  re-applied. `--autostash` is deliberately not used: when the incoming commits
+  touch the same files, its re-apply conflicts, leaves the edits *only in the
+  stash*, and still reports success. Instead a colliding pull is **undone**:
+  back to the pre-pull HEAD, where the stash applies cleanly. The result is
+  recorded as `local edits conflict with incoming changes on <branch>`.
+  Every exit (`_with_stash`) — a git child timing out included — either puts
+  the edits back or says `local edits are kept in \`git stash\``. A timed-out
+  step is reset to the pre-pull HEAD whether or not anything was stashed (a
+  killed merge can leave a half-updated tree or a `MERGE_HEAD`); a reset that
+  can't run says `the tree could not be reset to <sha> (…)`. A failed
+  `reset --hard` stops there and says so. The push cycle refuses to stage over
+  unmerged paths, so conflict markers left by such a failure are never
+  committed and pushed.
+- **Recorded:**
+  - `sync-state.json`: `last_pull_at`, `last_pull_status`
+    (`success`/`failed`/`skipped`), `last_pull_error`, `behind_after_pull`,
+    `last_successful_pull_at`, `consecutive_pull_failures`,
+    `consecutive_pull_skips`. A repo-busy skip is not recorded (every write to
+    this file happens under the lock it could not take).
+    `behind_after_pull` is the checked-out branch's lag behind
+    `origin/<branch>` — on a `trinity/*` agent that is its own branch, not
+    `main`; the git status's `behind_main` is the latter.
+    These are written through `_patch_sync_state`, so the push's
+    `consecutive_failures` / `last_sync_*` are never touched.
+  - The poller persists them on `agent_sync_state` (status bounded to the
+    vocabulary, counters coerced, error capped at 500 chars). Nothing feeds
+    `sync_failing` from them yet — that is ent#706/#707.
+- **Auto-sync agents already reconcile:** the #3011 push cycle fetches and
+  rebases onto `origin/<branch>` every cycle, without an execution gate. For
+  them the pull's own-branch step is mostly redundant; what it adds is the
+  execution gate on its own step and `main` for working branches.
+- **Not here:** the hooks-vs-heartbeat owner (ent#708).
+
 ### 2. Backend poller
 
 ```

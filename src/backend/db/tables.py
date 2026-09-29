@@ -991,6 +991,7 @@ agent_git_config = Table(
     Column("github_pat_encrypted", Text),
     Column("auto_sync_enabled", Integer),
     Column("freeze_schedules_if_sync_failing", Integer),
+    Column("pull_sync_enabled", Integer),  # trinity-enterprise#703
 )
 
 agent_sync_state = Table(
@@ -1017,6 +1018,13 @@ agent_sync_state = Table(
     Column("pack_count", Integer),  # #1595: packs from `git count-objects -v`
     Column("loose_objects", Integer),  # #1595: loose objects (gc-health signal)
     Column("maintenance_failures", Integer),  # #1595: consecutive failed maintenance
+    Column("last_pull_at", Text),  # trinity-enterprise#703: the container's pull cycle
+    Column("last_pull_status", Text),
+    Column("behind_after_pull", Integer),
+    Column("last_pull_error", Text),
+    Column("last_successful_pull_at", Text),
+    Column("consecutive_pull_failures", Integer),
+    Column("consecutive_pull_skips", Integer),
     Column("last_check_at", Text),
     Column("updated_at", Text),
 )
@@ -1040,6 +1048,19 @@ agent_skills = Table(
     # username — "the agent did it" must stay distinguishable from "the person
     # did it". Audit column: KEEP on rename (the source_agent_name precedent).
     Column("assigned_by_agent", Text),
+    # ent#530: 0 = present only because an assigned SET names it.
+    Column("individual", Integer, nullable=False, server_default=text("1")),
+)
+
+agent_skill_sets = Table(
+    "agent_skill_sets",
+    metadata,
+    Column("agent_name", Text, primary_key=True),
+    Column("set_name", Text, primary_key=True),
+    Column("source_id", Text),
+    Column("assigned_by", Text, nullable=False),
+    Column("assigned_by_agent", Text),
+    Column("assigned_at", Text, nullable=False),
 )
 
 
