@@ -879,14 +879,20 @@ async def agent_files_share(payload: ShareFileRequest):
     /internal/execute-task (forging requires the internal secret).
     """
     from services.agent_shared_files_service import create_share
+    from services.idempotency_service import EffectUnguardedError
 
-    result = await create_share(
-        agent_name=payload.agent_name,
-        filename=payload.filename,
-        display_name=payload.display_name,
-        expires_in=payload.expires_in,
-        created_by=payload.agent_name,
-    )
+    try:
+        result = await create_share(
+            agent_name=payload.agent_name,
+            filename=payload.filename,
+            display_name=payload.display_name,
+            expires_in=payload.expires_in,
+            created_by=payload.agent_name,
+        )
+    except EffectUnguardedError as e:
+        # #2392: this path carries no execution id, so a pull-mode agent's share
+        # is refused here; the MCP route (`/api/agents/{name}/shared-files`) is the one to use.
+        raise HTTPException(status_code=422, detail={"reason": "effect_unguarded", "message": str(e)})
     return ShareFileResponse(**result)
 
 

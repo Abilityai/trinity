@@ -2419,7 +2419,8 @@ issue if it's ever wanted. Also deferred: `data.json` caching/streaming.
   the thing being criticised is a prompt-injection path into it — is why the
   operator's copy goes to the queue directly and the agent-facing redaction
   (`comment_withheld`) is untouched. The operator sees the comment; the agent
-  still does not.
+  still does not — including through its own key: the operator queue's reads
+  never return this item to a machine principal (trinity-enterprise#715).
 - **Routed through the budget, never allowlisted** (#1677). The volume here is
   driven by a *client* clicking, so this is an agent-influenceable emitter by
   the classification rule and goes through

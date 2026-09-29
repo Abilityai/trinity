@@ -518,8 +518,9 @@ async def create_share(
     + the addressee (ent#549 — re-addressing a file is a second share),
     scoped to ``execution_id``. A re-run of the same turn sharing the same file
     replays the original signed URL instead of minting a second token; a changed
-    file (different content) under the same name produces a new share. Fail-open
-    when ``execution_id`` is absent/invalid (old image / the internal path).
+    file (different content) under the same name produces a new share. Without a
+    usable ``execution_id`` (old image / the internal path): refused on a
+    pull-mode agent, else shared and logged as degraded (#2392).
     """
     # --- flag gate ---
     if not db.get_file_sharing_enabled(agent_name):
