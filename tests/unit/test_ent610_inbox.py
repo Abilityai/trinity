@@ -719,6 +719,22 @@ def test_the_latest_arrival_is_the_newest_and_the_first_unread_is_the_earliest_m
                            "title": "Weekly **leads**", "display_hint": "table"}
 
 
+def test_a_deliverable_title_is_redacted_like_its_excerpt(inbox_db, roster):
+    """/cso round 3: `latest.excerpt` was the title through `sanitize_text`
+    while `latest.title` shipped the same string raw, undoing the redaction
+    inside one object."""
+    _session(inbox_db, "s-a", ALICE)
+    _read(ALICE, "s-a", "2026-09-10T09:00:00Z")
+    key = "sk-ant-" + "a1B2c3D4e5F6g7H8i9J0k1L2"
+    _report(inbox_db, session_id="s-a", addressed=ALICE, at="2026-09-10T12:00:00Z",
+            title=f"Leads for {key}")
+
+    latest = _entry(_previews(), "s-a")["latest"]
+    assert key not in latest["excerpt"]
+    assert key not in latest["title"]
+    assert latest["title"].startswith("Leads for ")
+
+
 def test_a_chat_whose_only_arrivals_are_deliverables_has_no_first_unread_message(inbox_db, roster):
     _session(inbox_db, "s-a", ALICE)
     _read(ALICE, "s-a", "2026-09-10T09:00:00Z")
