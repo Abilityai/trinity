@@ -253,7 +253,7 @@ No WebSocket updates yet — manual refresh on action (acceptable because volume
 | Path validation | `validate_publish_path()` | Rejects absolute paths, `..` segments, backslashes. Resolves against `/home/developer/public/`. |
 | Audience | `_audience_from_override()` / `turn_audience.resolve_turn_audience()` | Who the file is for — the agent's rostered `audience_email`, else the person the turn was for, else the owner only. Resolved before extraction. See *Who a file is for*. |
 | Extraction | `extract_from_agent()` | Docker SDK `get_archive`. Caps buffer at 50 MB + 4 KB tar overhead to prevent OOM. Rejects non-regular tar members (symlinks, dirs, devices). |
-| MIME detection | `detect_mime()` + `check_mime_blocklist()` | python-magic on first 4096 bytes. Blocklist: PE (`MZ`), ELF (`\x7fELF`), Mach-O (4 variants), `#!` shebang. |
+| MIME detection | `detect_mime()` + `check_mime_blocklist()` | python-magic on first 4096 bytes. When libmagic answers the generic `application/octet-stream` (or is unavailable) and the bytes start with a ZIP signature (`utils/zip_signature.is_zip_container`), the type is `application/zip` — libmagic 5.46 on Debian trixie misreports a ZIP buffer (#3080). A specific type libmagic reports for a ZIP-based format (DOCX/XLSX/JAR) is kept. Blocklist: PE (`MZ`), ELF (`\x7fELF`), Mach-O (4 variants), `#!` shebang. |
 | Quota | `enforce_quota()` | Sum of non-revoked, non-expired `size_bytes` for the agent; default 500 MB. |
 | Token | `secrets.token_urlsafe(32)` | 192-bit entropy, stored in `download_token`. URL param name is `sig` (NOT `download_token`) to bypass the credential sanitizer's `.*TOKEN.*` pattern. |
 | URL build | `build_download_url()` | `{public_chat_url}/api/files/{id}?sig={token}` — uses existing `/api/*` proxy path on Vite dev + prod nginx, no new proxy rules needed. |
@@ -339,7 +339,7 @@ See `docs/drafts/amazing-file-outbound.md` §6 for the full threat model. Key pr
 | S3 | Predictable tokens | 192-bit `secrets.token_urlsafe(32)`; constant-time compare via `secrets.compare_digest` |
 | S6 | XSS via agent-uploaded HTML | **`inline` is an ALLOWLIST, not a relaxation** (ent#461): only `_INLINE_SAFE_TYPES` (audio/video/image/PDF) — `text/html`, `application/xhtml+xml` and `image/svg+xml` stay `attachment`, and the type is python-magic-detected from the bytes, never agent-supplied, with an unavailable-fallback outside the allowlist. `X-Content-Type-Options: nosniff` is kept and becomes MORE load-bearing once anything is inline. The requester's `?download=1` is one-way toward `attachment` (#2582), so no requester input can widen this |
 | S7 | Filename header injection (CRLF) | Sanitizer allows `[A-Za-z0-9._\- ]` only; RFC 6266 UTF-8 percent-encoding for non-ASCII |
-| S8 | MIME spoofing | python-magic detects actual MIME; blocklist rejects PE/ELF/Mach-O/shebang before storage |
+| S8 | MIME spoofing | python-magic detects actual MIME; blocklist rejects PE/ELF/Mach-O/shebang before storage (it checks the byte prefix first, so the ZIP-signature fallback in `detect_mime()` cannot relabel an executable) |
 | S9 | Storage DoS | 50 MB per-file + 500 MB per-agent quota (setting-configurable) |
 | S10 | Token enumeration | 192-bit entropy + IP rate limit + audit log |
 | S11 | Cross-tenant download | File addressed by `file_id` only; agent_name resolved from DB row |
