@@ -4765,6 +4765,54 @@ def _migrate_workspace_suggestion_feedback_table(cursor, conn):
     conn.commit()
 
 
+def _migrate_portal_messages_unread_index(cursor, conn):
+    """#3064 — cover the Workspace unread count's message arm.
+
+    `count_unread_by_session` runs on every 20s Workspace poll and filtered
+    `enterprise_portal_messages` by viewer + `role = 'assistant'` + thread +
+    `created_at` with no index leading on the viewer, so SQLite scanned the
+    whole table. Index-only: no column, no data, no behaviour change.
+    PostgreSQL half: Alembic `0081_portal_messages_unread_idx`.
+    """
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_portal_messages_unread "
+        "ON enterprise_portal_messages(client_email, role, session_id, created_at)"
+    )
+
+
+def _migrate_agent_skill_sets(cursor, conn):
+    """trinity-enterprise#530 — skill sets.
+
+    * ``agent_skill_sets`` — a named set of library skills assigned to an agent.
+    * ``agent_skills.individual`` — 1 (the default, so every existing row keeps
+      its meaning) when the skill was assigned on its own; 0 when it is present
+      only because an assigned set names it. Unassigning a set removes only its
+      individual = 0 rows that no other assigned set names.
+
+    Additive only. Mirrored by the Alembic revision 0080_agent_skill_sets.
+    """
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS agent_skill_sets (
+            agent_name TEXT NOT NULL,
+            set_name TEXT NOT NULL,
+            source_id TEXT,
+            assigned_by TEXT NOT NULL,
+            assigned_by_agent TEXT,
+            assigned_at TEXT NOT NULL,
+            PRIMARY KEY (agent_name, set_name)
+        )
+        """
+    )
+    _safe_add_column(
+        cursor,
+        "agent_skills",
+        "individual",
+        "ALTER TABLE agent_skills ADD COLUMN individual INTEGER NOT NULL DEFAULT 1",
+    )
+    conn.commit()
+
+
 def _migrate_role_readiness_rollout_seed(cursor, conn):
     """The readiness gate's rollout (trinity-enterprise#689), data only.
 
@@ -4977,4 +5025,6 @@ MIGRATIONS = [
     ("execution_chain_depth", _migrate_execution_chain_depth),
     ("workspace_suggestion_feedback_table", _migrate_workspace_suggestion_feedback_table),
     ("telegram_group_context", _migrate_telegram_group_context),
+    ("agent_skill_sets", _migrate_agent_skill_sets),
+    ("portal_messages_unread_index", _migrate_portal_messages_unread_index),
 ]

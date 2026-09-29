@@ -296,6 +296,14 @@ def github(monkeypatch):
                 template=template, fork_to_own=None,
                 source_branch=None, source_mode=True,
                 import_intent=None,  # ent#15 (#2040)
+                # trinity-enterprise#705: the two attributes the real AgentConfig
+                # always carries and the kind default reads. `source_mode=True` is
+                # set explicitly here, so it is in the set — exactly what a real
+                # `AgentConfig(source_mode=True)` reports — and the default never
+                # probes push access (no extra GitHub call).
+                name="second-brain", kind=None, ephemeral=None,
+                model_fields_set={"template", "fork_to_own", "source_branch",
+                                  "source_mode", "import_intent"},
             )
             return catalog, asyncio.run(crud._resolve_template(config, _user()))
 

@@ -21,6 +21,7 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
+from db.write_params import ExecutionResult
 
 _BACKEND = Path(__file__).resolve().parents[2] / "src" / "backend"
 if str(_BACKEND) not in sys.path:
@@ -165,7 +166,9 @@ class TestLateSuccessUpgradeChain:
         assert schedule_ops.update_execution_status(
             execution_id="exec-late",
             status=TaskExecutionStatus.FAILED,
-            error="lease_expired: slot lease expired (no result callback)",
+            result=ExecutionResult(
+                error="lease_expired: slot lease expired (no result callback)",
+            ),
         ) is True
         assert activity_ops.complete_activity(
             "act-late", ActivityState.FAILED, error="lease_expired"
@@ -176,7 +179,9 @@ class TestLateSuccessUpgradeChain:
         assert schedule_ops.update_execution_status(
             execution_id="exec-late",
             status=TaskExecutionStatus.SUCCESS,
-            response="done",
+            result=ExecutionResult(
+                response="done",
+            ),
         ) is True
 
         # 3. The close must FIND the failed activity (authoritative lookup) and
@@ -204,7 +209,9 @@ class TestLateSuccessUpgradeChain:
         assert schedule_ops.update_execution_status(
             execution_id="exec-cxl",
             status=TaskExecutionStatus.CANCELLED,
-            error="Execution terminated by user",
+            result=ExecutionResult(
+                error="Execution terminated by user",
+            ),
         ) is True
         assert activity_ops.complete_activity(
             "act-cxl", ActivityState.CANCELLED, error="Execution terminated by user"
@@ -213,7 +220,9 @@ class TestLateSuccessUpgradeChain:
         assert schedule_ops.update_execution_status(
             execution_id="exec-cxl",
             status=TaskExecutionStatus.SUCCESS,
-            response="too late",
+            result=ExecutionResult(
+                response="too late",
+            ),
         ) is False
         assert activity_ops.complete_activity(
             "act-cxl", ActivityState.COMPLETED

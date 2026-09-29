@@ -159,6 +159,7 @@
   - Events persisted to `agent_events` table, subscriptions to `agent_event_subscriptions`
   - WebSocket broadcast for real-time event visibility
   - MCP tools: `emit_event`, `subscribe_to_event`, `list_event_subscriptions`, `delete_event_subscription`
+  - Event history reads are access-scoped: `GET /api/events` returns only events whose `source_agent` the caller can access (admin: all); a `?source_agent=` the caller cannot access returns 403; `limit` applies after the access filter (trinity-enterprise#713)
 - **GitHub Issue**: #169
 - **Relationship to 17.2 (Redis Streams)**: This is a pragmatic first step. If Redis Streams (#22) lands later, subscriptions can migrate.
 

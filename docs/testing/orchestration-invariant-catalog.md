@@ -177,9 +177,10 @@ Any `drain-{agent}-{ts}` sentinel in a slots ZSET lives < 10 s. (The drain in `b
 **B-01** Queue-status coherence *(Tier A, 🔴)*
 `backlog_service.get_queued_count(A) = COUNT(schedule_executions WHERE agent_name=A AND status='queued')`. Backlog never has its own table — queued rows ARE the queue.
 
-**B-02** No queued without slots-full *(Tier B ≤ 60 s, 🔴)*
-If `COUNT(status='queued' AND agent_name=A) > 0`, then either (a) `ZCARD(agent:slots:A) = max_parallel_tasks` or (b) a drain callback/maintenance tick is pending (≤60 s SLA).
-Signal: queued rows while slots have free space ⇒ drain callback failed. `drain_orphans_all` is the backstop every 60 s.
+**B-02** Queued work is being picked up *(Tier B ≤ 60 s push / ≤ 120 s pull, 🔴)*
+Push agents: if `COUNT(status='queued' AND agent_name=A) > 0`, then either (a) `ZCARD(agent:slots:A) = max_parallel_tasks` or (b) a drain callback/maintenance tick is pending (≤60 s SLA). `drain_orphans_all` is the backstop every 60 s.
+Pull pilots (#2840): the backend never drains them. For a running pilot in pull mode, the oldest queued row is ≤120 s old, OR every worker in the container's pool holds an unexpired lease. Stopped pilots and containers without pull mode are B-08's.
+Signal: push — queued rows while slots have free space and `canary:drain_tick_at` older than 60 s ⇒ drain callback failed; pull — `MIN(queued_at)` older than 120 s while `COUNT(status='running' AND lease_expires_at > now) <` the container's `TRINITY_MAX_PARALLEL_TASKS`.
 
 **B-03** Claim atomicity *(Tier A, 🔴)*
 At most one drain wins for a given queued row (enforced by single-row `UPDATE … RETURNING` in `claim_next_queued`). Check: count of transitions `queued → running` per execution_id = exactly 1.
@@ -195,6 +196,10 @@ If `claim_next_queued` returns a row but the subsequent real `acquire_slot` fail
 
 **B-07** Agent deletion drains backlog *(Tier A on delete, 🔴)*
 After agent delete, `COUNT(status='queued' AND agent_name=A) = 0` (cancelled with reason). See `backlog_service.cancel_all_backlog`.
+
+**B-08** Pull workers alive *(Tier B ≤ 300 s, 🟡)*
+For a pull pilot (#2840): a stopped container has no queued row older than 120 s; a running container runs pull mode (`TRINITY_PULL_MODE=true`), and while any worker is idle a claim attempt arrived within 300 s of now or of the container start. Separate from B-02 so a long-lived pool state cannot hold B-02 red.
+Signal: container not running with `MIN(queued_at)` older than 120 s; container env lacks `TRINITY_PULL_MODE=true`; or `GET agent:pull_poll:A` (stamped on every `GET /api/internal/next-task`) older than 300 s while `COUNT(status='running' AND lease_expires_at > now) <` the pool size.
 
 ---
 
@@ -529,6 +534,7 @@ The first column is the module, on purpose: a table whose first cell is an id is
 |---|---|---|---|
 | `b01_queue_status_coherence.py` | B-01 | B-01 | #882 Phase 2 |
 | `b02_no_queued_without_slots_full.py` | B-02 | B-02 | #882 Phase 3 |
+| `b08_pull_workers_alive.py` | B-08 | B-08 | #2840 |
 | `e01_terminal_state_closure.py` | E-01 | E-01 | #882 Phase 2 |
 | `e02_no_phantom_reversal.py` | E-02 | E-02 | #653 Phase 1 |
 | `e03_completed_rows_populated.py` | E-03 | E-03 | #1077 Phase 4 |
@@ -558,7 +564,7 @@ The first column is the module, on purpose: a table whose first cell is an id is
 
 ## Recommended starting subset
 
-Twelve invariants cover ~80% of orchestration risk:
+Thirteen invariants cover ~80% of orchestration risk:
 
 | ID | Invariant | Why |
 |----|-----------|-----|
@@ -570,7 +576,8 @@ Twelve invariants cover ~80% of orchestration risk:
 | E-05 | Dispatched rows have session | #106 |
 | E-09 | No completed-but-not-reported | #129 |
 | B-01 | Queue-status coherence | Backlog integrity |
-| B-02 | No queued without slots-full | Drain liveness |
+| B-02 | Queued work is being picked up | Drain liveness (push and pull) |
+| B-08 | Pull workers alive | Pull pool liveness |
 | L-03 | Delete cascades | Prevents dangling references |
 | G-01 | No resource leak on restart | Recovery correctness |
 | R-01 | No zombie Claude processes | #407 |

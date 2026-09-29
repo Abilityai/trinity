@@ -152,9 +152,9 @@ def _load_crud(monkeypatch, docker_available=True):
         return_value=("iid-1", "main"))
     git_service.materialize_persistent_state = AsyncMock()
     git_service.materialize_data_paths = AsyncMock()
-    # crud gates auto-sync (GIT_SYNC_AUTO) and the #2107 push probe on this
-    # predicate, so the mock must answer it (a bare MagicMock attribute is
-    # truthy for every agent).
+    # crud writes the DB auto-sync flag (#3010) and gates the push probe (#2107)
+    # on this predicate, so the mock must answer it (a bare MagicMock attribute
+    # is truthy for every agent).
     # Same shape as services/git_service/gitignore_clone.py::_git_auto_sync_baked.
     git_service._git_auto_sync_baked = MagicMock(
         side_effect=lambda config, repo, pat, fork: (
@@ -390,10 +390,13 @@ def _script_github_template(ctx, fork_to_own_meta=None):
     }
 
 
-def _patch_repo_validation(monkeypatch, crud, default_branch="main"):
+def _patch_repo_validation(monkeypatch, crud, default_branch="main",
+                           login=("valid", "eugene-gh")):
     """crud re-validates the repo via GitHubService(pat).check_repo_exists —
     services.github_service is NOT mocked, so without this every github case
     makes a real (silently-swallowed) network call and half-exercises the path.
+    `login` is what `validate_token_detailed` answers: the ent#705 default asks
+    whose token it is before granting a working branch.
     """
     class _CrudFakeGH:
         def __init__(self, pat):
@@ -401,6 +404,9 @@ def _patch_repo_validation(monkeypatch, crud, default_branch="main"):
 
         async def check_repo_exists(self, owner, name):
             return _FakeRepoInfo(True, default_branch)
+
+        async def validate_token_detailed(self):
+            return login
 
     monkeypatch.setattr(crud, "GitHubService", _CrudFakeGH)
 
@@ -486,8 +492,10 @@ async def test_case2_github_template_full_env(crud_env, monkeypatch, predefined)
         template = "github:someowner/somerepo"
     _patch_repo_validation(monkeypatch, crud)
 
+    # trinity-enterprise#705: a DEPLOYMENT keeps the pull-only shape pinned below
+    # (an agent is the default now — see the ent705 tests at the end of this file).
     await crud.create_agent_internal(
-        _github_config("gh-full", template=template), _user(uid=7), None)
+        _github_config("gh-full", template=template, kind="deployment"), _user(uid=7), None)
 
     # PAT resolver keyed on ownership only; git branch reserved
     ctx["settings_service"].resolve_github_pat.assert_called_once_with(owner_id=7)
@@ -505,7 +513,7 @@ async def test_case2_github_template_full_env(crud_env, monkeypatch, predefined)
     assert env["GH_TOKEN"] == "platform-pat"
     assert env["GITHUB_TOKEN"] == "platform-pat"
     assert env["GIT_SYNC_ENABLED"] == "true"
-    # source_mode default True ⇒ no working-branch autopush heartbeat
+    # a deployment ⇒ source mode, no working-branch autopush heartbeat
     assert env["GIT_SOURCE_MODE"] == "true"
     ctx["db"].set_git_auto_sync_enabled.assert_not_called()
 
@@ -584,7 +592,8 @@ async def test_2107_pull_only_source_mode_is_not_probed(crud_env, monkeypatch):
     _script_github_template(ctx)
     _patch_repo_validation(monkeypatch, crud)
 
-    await crud.create_agent_internal(_github_config("gh-src"), _user(), None)
+    await crud.create_agent_internal(
+        _github_config("gh-src", kind="deployment"), _user(), None)
 
     ctx["git_service"].probe_push_access.assert_not_awaited()
 
@@ -1289,3 +1298,303 @@ async def test_case22_allocator_raise_rolls_back_gitconfig_and_mcp_key(
     ctx["db"].delete_git_config.assert_called_once_with("rb-alloc")
     ctx["db"].delete_agent_mcp_api_key.assert_called_once_with("rb-alloc")
     ctx["docker_utils"].containers_run.assert_not_awaited()
+
+
+# ===========================================================================
+# trinity-enterprise#705 — an agent created AS an agent owns its repository
+# ===========================================================================
+# The default (`kind` unset = "agent") takes a working branch + auto-sync +
+# freeze-on-failure, but ONLY when the push probe says the token can push to
+# that repo. Every other case stays pull-only with a stated reason — a template
+# someone else owns must never receive an agent's branches (ent#162 class).
+
+def _own_token(monkeypatch, crud, pat="user-pat"):
+    """The creator's own PAT (tier per_user) — the only kind, with per_agent,
+    that can earn the working-branch default. The harness default is the
+    platform-wide token (tier global), which never does."""
+    monkeypatch.setattr(crud, "resolve_github_pat", MagicMock(return_value=(pat, "per_user")))
+
+
+async def _create_default(crud, ctx, monkeypatch, name, **kw):
+    _script_github_template(ctx)
+    _patch_repo_validation(monkeypatch, crud)
+    return await crud.create_agent_internal(_github_config(name, **kw), _user(), None)
+
+
+# The creator's OWN repository: a dynamic `github:alice/brain` (not the
+# catalog) and a token that GitHub says is alice's.
+_OWN_REPO = "alice/brain"
+
+
+async def _create_own_repo(crud, ctx, monkeypatch, name, login=("valid", "alice"), **kw):
+    _script_github_template(ctx)
+    ctx["template_service"].get_github_template.return_value = None  # dynamic
+    _patch_repo_validation(monkeypatch, crud, login=login)
+    return await crud.create_agent_internal(
+        _github_config(name, template=f"github:{_OWN_REPO}", **kw), _user(), None)
+
+
+@pytest.mark.asyncio
+async def test_ent705_agent_default_on_the_creators_own_repo_gets_the_trio(crud_env, monkeypatch):
+    crud, ctx = crud_env
+    _own_token(monkeypatch, crud)
+    result = await _create_own_repo(crud, ctx, monkeypatch, "gc-agent")
+
+    env = _agent_run_kwargs(ctx)["environment"]
+    assert "GIT_SOURCE_MODE" not in env
+    assert env["GIT_WORKING_BRANCH"] == "main"  # the harness's reserved branch
+    assert env["GIT_SYNC_AUTO"] == "true"
+    ctx["db"].set_git_auto_sync_enabled.assert_called_once_with("gc-agent", True)
+    ctx["db"].set_freeze_schedules_if_sync_failing.assert_called_once_with("gc-agent", True)
+    # probed once — the default's probe stands in for validation's
+    ctx["git_service"].probe_push_access.assert_awaited_once_with(_OWN_REPO, "user-pat")
+    assert result.git_mode["source_mode"] is False
+    assert result.git_mode["kind"] == "agent"
+    assert "working branch" in result.git_mode["reason"]
+
+
+@pytest.mark.asyncio
+async def test_ent705_repo_owner_matches_the_token_login_case_insensitively(crud_env, monkeypatch):
+    crud, ctx = crud_env
+    _own_token(monkeypatch, crud)
+    result = await _create_own_repo(crud, ctx, monkeypatch, "gc-case", login=("valid", "Alice"))
+
+    assert result.git_mode["source_mode"] is False
+
+
+@pytest.mark.asyncio
+async def test_ent705_a_shared_catalog_template_stays_pull_only_even_when_pushable(
+        crud_env, monkeypatch):
+    """PR #3020 review — a creator's own token that CAN push (a classic `repo`
+    PAT, an org-wide fine-grained token) is still not ownership. Creating from
+    the org's shared public template must not put a `trinity/<agent>/<id>`
+    branch on it and auto-push the workspace there (the ent#162 class). A
+    catalog template is shared by definition, so it never qualifies."""
+    crud, ctx = crud_env
+    _own_token(monkeypatch, crud)
+    ctx["git_service"].probe_push_access = AsyncMock(return_value=("ok", ""))
+    result = await _create_default(crud, ctx, monkeypatch, "gc-catalog")
+
+    env = _agent_run_kwargs(ctx)["environment"]
+    assert env["GIT_SOURCE_MODE"] == "true"
+    assert "GIT_SYNC_AUTO" not in env
+    ctx["git_service"].probe_push_access.assert_not_awaited()
+    ctx["db"].set_git_auto_sync_enabled.assert_not_called()
+    ctx["db"].set_freeze_schedules_if_sync_failing.assert_not_called()
+    assert result.git_mode["source_mode"] is True
+    assert "shared" in result.git_mode["reason"]
+    assert "Fork it" in result.git_mode["reason"]
+
+
+@pytest.mark.asyncio
+async def test_ent705_a_repo_someone_else_owns_stays_pull_only_even_when_pushable(
+        crud_env, monkeypatch):
+    """The same shared repo named directly (not via the catalog): the token's
+    login is not the repo's owner, so no working branch — whatever the probe
+    would say."""
+    crud, ctx = crud_env
+    _own_token(monkeypatch, crud)
+    ctx["git_service"].probe_push_access = AsyncMock(return_value=("ok", ""))
+    _script_github_template(ctx)
+    ctx["template_service"].get_github_template.return_value = None  # dynamic
+    _patch_repo_validation(monkeypatch, crud, login=("valid", "alice"))
+    result = await crud.create_agent_internal(
+        _github_config("gc-org", template="github:Abilityai/cornelius"), _user(), None)
+
+    assert _agent_run_kwargs(ctx)["environment"]["GIT_SOURCE_MODE"] == "true"
+    ctx["git_service"].probe_push_access.assert_not_awaited()
+    ctx["db"].set_git_auto_sync_enabled.assert_not_called()
+    assert result.git_mode["source_mode"] is True
+    assert "owned by Abilityai" in result.git_mode["reason"]
+    assert "alice" in result.git_mode["reason"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("login", [("invalid", None), ("unreachable", None), ("valid", None)])
+async def test_ent705_an_unknown_token_login_stays_pull_only(crud_env, monkeypatch, login):
+    crud, ctx = crud_env
+    _own_token(monkeypatch, crud)
+    result = await _create_own_repo(crud, ctx, monkeypatch, "gc-who", login=login)
+
+    assert _agent_run_kwargs(ctx)["environment"]["GIT_SOURCE_MODE"] == "true"
+    ctx["git_service"].probe_push_access.assert_not_awaited()
+    assert result.git_mode["reason"] == (
+        "could not confirm the repository is yours: pull-only")
+
+
+@pytest.mark.asyncio
+async def test_ent705_agent_default_without_push_access_stays_pull_only(crud_env, monkeypatch):
+    """The creator's own repo but a token that cannot write it: no 400, no
+    branches pushed — pull-only, and the response says why and what to do."""
+    crud, ctx = crud_env
+    _own_token(monkeypatch, crud)
+    ctx["git_service"].probe_push_access = AsyncMock(
+        return_value=("denied", "remote: Write access to repository not granted."))
+    result = await _create_own_repo(crud, ctx, monkeypatch, "gc-readonly")
+
+    env = _agent_run_kwargs(ctx)["environment"]
+    assert env["GIT_SOURCE_MODE"] == "true"
+    assert "GIT_SYNC_AUTO" not in env
+    ctx["db"].set_git_auto_sync_enabled.assert_not_called()
+    ctx["db"].set_freeze_schedules_if_sync_failing.assert_not_called()
+    assert result.git_mode["source_mode"] is True
+    assert f"cannot push to {_OWN_REPO}" in result.git_mode["reason"]
+
+
+@pytest.mark.asyncio
+async def test_ent705_the_platform_token_never_earns_a_working_branch(crud_env, monkeypatch):
+    """PR #3020 ruling — being able to push is not owning the repo.
+
+    The global PAT is the admin's credential for the whole install. Where it
+    can write a shared template repo, granting on the probe alone pushed every
+    creator's agent to a branch on that repo (the ent#162 class). With only
+    that token the default is pull-only, and the probe is never even asked.
+    """
+    crud, ctx = crud_env
+    # harness default: resolve_github_pat -> ("platform-pat", "global"); the
+    # probe would say yes
+    ctx["git_service"].probe_push_access = AsyncMock(return_value=("ok", ""))
+    result = await _create_default(crud, ctx, monkeypatch, "gc-shared")
+
+    env = _agent_run_kwargs(ctx)["environment"]
+    assert env["GIT_SOURCE_MODE"] == "true"
+    assert "GIT_SYNC_AUTO" not in env
+    ctx["git_service"].probe_push_access.assert_not_awaited()
+    ctx["db"].set_git_auto_sync_enabled.assert_not_called()
+    ctx["db"].set_freeze_schedules_if_sync_failing.assert_not_called()
+    assert result.git_mode["source_mode"] is True
+    assert "platform-wide GitHub token" in result.git_mode["reason"]
+    assert "your own GitHub token" in result.git_mode["reason"]
+
+
+@pytest.mark.asyncio
+async def test_ent705_an_agents_own_token_earns_it_like_the_creators(crud_env, monkeypatch):
+    """No create path resolves the `per_agent` tier today (the resolver is
+    called without an agent name); the helper accepts it for future callers."""
+    crud, ctx = crud_env
+    _patch_repo_validation(monkeypatch, crud, login=("valid", "alice"))
+    config = _github_config("gc-own")
+    decision = await crud._apply_agent_kind_default(
+        config, _OWN_REPO, "agent-pat", None, github_pat_tier="per_agent")
+
+    assert config.source_mode is False and decision["push_verified"] is True
+    ctx["git_service"].probe_push_access.assert_awaited_once_with(_OWN_REPO, "agent-pat")
+
+
+@pytest.mark.asyncio
+async def test_ent705_unverifiable_push_access_stays_pull_only(crud_env, monkeypatch):
+    crud, ctx = crud_env
+    _own_token(monkeypatch, crud)
+    ctx["git_service"].probe_push_access = AsyncMock(return_value=("transient", "timed out"))
+    result = await _create_own_repo(crud, ctx, monkeypatch, "gc-flaky")
+
+    assert _agent_run_kwargs(ctx)["environment"]["GIT_SOURCE_MODE"] == "true"
+    assert result.git_mode["reason"] == "push access could not be verified: pull-only"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kw, reason", [
+    ({"kind": "deployment"}, "a deployment of a codebase: pull-only"),
+    ({"source_mode": True}, "source_mode set explicitly"),
+])
+async def test_ent705_deployment_and_explicit_source_mode_are_never_probed(
+        crud_env, monkeypatch, kw, reason):
+    crud, ctx = crud_env
+    result = await _create_default(crud, ctx, monkeypatch, "gc-deploy", **kw)
+
+    assert _agent_run_kwargs(ctx)["environment"]["GIT_SOURCE_MODE"] == "true"
+    ctx["git_service"].probe_push_access.assert_not_awaited()
+    ctx["db"].set_freeze_schedules_if_sync_failing.assert_not_called()
+    assert result.git_mode["reason"] == reason
+
+
+@pytest.mark.asyncio
+async def test_ent705_explicit_working_branch_still_refuses_a_read_only_token(
+        crud_env, monkeypatch):
+    """An EXPLICIT source_mode=false is a request, not a default: #2107's 400 stands."""
+    from fastapi import HTTPException
+
+    crud, ctx = crud_env
+    ctx["git_service"].probe_push_access = AsyncMock(
+        return_value=("denied", "remote: Write access to repository not granted."))
+    with pytest.raises(HTTPException) as exc:
+        await _create_default(crud, ctx, monkeypatch, "gc-explicit", source_mode=False)
+    assert exc.value.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_ent705_tokenless_agent_default_is_pull_only_not_a_400(crud_env, monkeypatch):
+    """Before #705 a tokenless create was admitted because the default was source
+    mode; the agent default must not turn that into ent#123's 400."""
+    crud, ctx = crud_env
+    # crud binds the resolver at import, so patch it where crud looks it up
+    monkeypatch.setattr(crud, "resolve_github_pat", MagicMock(return_value=("", "none")))
+    # the tokenless path validates over the anonymous git transport (ent#123)
+    ctx["git_service"].probe_anonymous_repo_access = AsyncMock(return_value="ok")
+    ctx["git_service"].check_remote_branch_exists = AsyncMock(return_value=True)
+    result = await _create_default(crud, ctx, monkeypatch, "gc-anon")
+
+    assert _agent_run_kwargs(ctx)["environment"]["GIT_SOURCE_MODE"] == "true"
+    ctx["git_service"].probe_push_access.assert_not_awaited()
+    assert result.git_mode["reason"] == "no GitHub token: pull-only"
+
+
+
+@pytest.mark.asyncio
+async def test_ent705_an_ephemeral_ghost_never_takes_a_working_branch(crud_env):
+    from models import EphemeralConfig
+
+    crud, ctx = crud_env
+    config = _github_config("gc-ghost", ephemeral=EphemeralConfig(max_executions=3))
+    decision = await crud._apply_agent_kind_default(
+        config, "Abilityai/cornelius", "platform-pat", None)
+
+    assert config.source_mode is True
+    ctx["git_service"].probe_push_access.assert_not_awaited()
+    assert decision["reason"] == "ephemeral agents never auto-push (ent#69)"
+
+
+def test_ent705_cornelius_is_pinned_pull_only():
+    """Cornelius is built from a SHARED public upstream: the agent default must
+    never give it a working branch there (ent#162)."""
+    import ast
+    src = (Path(__file__).resolve().parents[2]
+           / "src/backend/services/cornelius_agent_service.py").read_text()
+    calls = [n for n in ast.walk(ast.parse(src))
+             if isinstance(n, ast.Call) and getattr(n.func, "id", None) == "AgentConfig"]
+    assert calls, "Cornelius no longer builds an AgentConfig"
+    kws = {k.arg: k.value for k in calls[0].keywords}
+    assert ast.literal_eval(kws["kind"]) == "deployment"
+    assert ast.literal_eval(kws["source_mode"]) is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind, expected", [(None, "agent"), ("deployment", "deployment")])
+async def test_ent705_a_fork_reports_the_kind_that_was_asked_for(crud_env, kind, expected):
+    """The decision must name the kind the freeze write reads — a fork asked for
+    as a deployment is reported as one, never silently relabelled an agent."""
+    crud, ctx = crud_env
+    config = _github_config("gc-fork", kind=kind)
+    decision = await crud._apply_agent_kind_default(
+        config, "alice/brain", "ghp_user", "Abilityai/cornelius")
+
+    assert decision["kind"] == expected
+    assert decision["reason"] == "fork-to-own: the agent owns its fork"
+    ctx["git_service"].probe_push_access.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_ent705_a_fork_is_reported_as_a_fork_after_fork_to_own_ran(crud_env):
+    """PR #3022 review — `_apply_fork_to_own` ASSIGNS `config.source_mode`, and
+    Pydantic v2 adds an assigned field to `model_fields_set`. The explicit-
+    `source_mode` branch then fired first and every fork create was reported
+    as "source_mode set explicitly"; the fork branch was unreachable."""
+    crud, ctx = crud_env
+    config = _github_config("gc-fork2")
+    config.source_mode = True  # exactly what _apply_fork_to_own does
+    assert "source_mode" in config.model_fields_set  # the trap
+    decision = await crud._apply_agent_kind_default(
+        config, "alice/brain", "ghp_user", "Abilityai/cornelius")
+
+    assert decision["reason"] == "fork-to-own: the agent owns its fork"
+    ctx["git_service"].probe_push_access.assert_not_awaited()

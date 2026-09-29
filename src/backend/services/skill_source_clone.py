@@ -190,6 +190,8 @@ class SkillSourceClone:
         # per-operation (skill_service._clones constructs fresh ones per call),
         # so the cache has no staleness window across syncs.
         self._rel_root: Optional[str] = None
+        # ent#530: the parsed catalog.yaml, read once per instance (False = not read yet).
+        self._catalog_data = False
         # True when the probe found SKILL.md evidence under BOTH skills/ and
         # .claude/skills/ with no catalog.yaml to decide — surfaced in status.
         self.dual_layout = False
@@ -244,6 +246,8 @@ class SkillSourceClone:
             return self._sync(url, expected_sha)
         finally:
             self._auth = {}
+            # ent#530: the checkout may have moved — re-read catalog.yaml next time.
+            self._catalog_data = False
 
     def _sync(self, auth_url: str, expected_sha: Optional[str] = None) -> Dict[str, Any]:
         try:
@@ -534,14 +538,22 @@ class SkillSourceClone:
             return _PROBE_SKILLS_ROOT
         return _DEFAULT_SKILLS_ROOT
 
-    def _declared_root(self) -> Optional[str]:
-        """The catalog.yaml ``skills_root`` declaration, validated, or None.
+    def _catalog(self) -> Optional[dict]:
+        """The parsed catalog.yaml mapping, or None when absent/unusable (ent#530).
 
-        A missing catalog.yaml is silent; a PRESENT-but-unusable one warns.
+        Memoised per instance, so ``skills_root`` and ``sets`` read the file once
+        (and warn once). A missing catalog.yaml is silent; a PRESENT-but-unusable
+        one warns.
         Never raises: ``HardenedYamlError`` is a ValueError, not a YAMLError,
         so it is caught EXPLICITLY — missing it would escape through
         ``list_skills`` and 500 the merged listing (the skill_packaging trap).
         """
+        if self._catalog_data is not False:
+            return self._catalog_data
+        self._catalog_data = self._read_catalog()
+        return self._catalog_data
+
+    def _read_catalog(self) -> Optional[dict]:
         catalog = self.path / "catalog.yaml"
         try:
             # lstat-order guard: never open a symlinked catalog.yaml — git
@@ -594,6 +606,13 @@ class SkillSourceClone:
                 "unknown catalog.yaml schema_version %r for skill source %s; "
                 "ignoring the catalog", schema, self.source_id,
             )
+            return None
+        return data
+
+    def _declared_root(self) -> Optional[str]:
+        """The catalog.yaml ``skills_root`` declaration, validated, or None."""
+        data = self._catalog()
+        if data is None:
             return None
         value = data.get("skills_root")
         if value is None:
@@ -725,6 +744,21 @@ class SkillSourceClone:
             p.name for p in skills_dir.iterdir()
             if p.is_dir() and (p / "SKILL.md").exists()
         )
+
+    def declared_sets(self) -> list:
+        """The catalog's ``sets:`` (ent#530), validated against THIS source's
+        skills at its current commit. Never raises; a catalog without ``sets:``
+        (every source before ent#530) yields []."""
+        from services.skill_sets import parse_catalog_sets
+
+        data = self._catalog()
+        if data is None:
+            return []
+        try:
+            return parse_catalog_sets(data.get("sets"), set(self.skill_names()))
+        except Exception as e:  # noqa: BLE001 — a set problem never breaks the library
+            logger.warning("could not parse sets for skill source %s: %s", self.source_id, e)
+            return []
 
     def tree_shas(self) -> Dict[str, str]:
         """Per-skill git tree SHA — the package version (ent#183)."""

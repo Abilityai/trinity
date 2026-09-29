@@ -99,6 +99,16 @@ def set_websocket_manager(ws_manager) -> None:
     _ws_manager = ws_manager
 
 
+def _via_sets_or_empty(agent_name: str) -> Dict[str, List[str]]:
+    """``skill → [assigned sets naming it]`` (ent#530); ``{}`` on any failure."""
+    try:
+        from services.skill_set_service import via_sets_map
+        return via_sets_map(agent_name)
+    except Exception as e:  # noqa: BLE001 — annotation only
+        logger.debug("[ent#530] via_sets unavailable for %s: %s", agent_name, e)
+        return {}
+
+
 async def broadcast_skills_changed(agent_name: str) -> None:
     """Fleet-wide `agent_skills_changed` for ONE agent. Best-effort — a delivery
     failure never fails the write that triggered it."""
@@ -1688,6 +1698,10 @@ print(json.dumps(out))
         # The bulk-assign PUT historically persisted arbitrary strings, so the
         # ONE name guard must run before any name reaches an in-container exec.
         valid_names = [n for n in skill_names if pkg.validate_skill_name(n)]
+        # ent#530 AC3: which assigned sets name each skill, recorded in the
+        # injected meta and the CLAUDE.md section so the agent can say why a
+        # skill is present. Cosmetic — never fails an injection.
+        via_sets = await asyncio.to_thread(_via_sets_or_empty, agent_name)
         # #2703: re-read assignments INSIDE the lock — the mirror of
         # `_remove_skills_locked`'s `still_assigned` guard. A PUT on worker A
         # computes its list, commits, and starts injecting; a DELETE on worker B
@@ -1846,6 +1860,8 @@ print(json.dumps(out))
                 "manifest": manifest,
                 "injected_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
             }
+            if via_sets.get(skill_name):
+                meta["via_sets"] = sorted(via_sets[skill_name])
             tar_bytes = await asyncio.to_thread(
                 pkg.build_injection_tar, skill_name, members, meta
             )
@@ -1906,7 +1922,7 @@ print(json.dumps(out))
         # writes (eng review #5).
         present = [n for n, r in results.items() if r["status"] in success_statuses]
         if present:
-            await self._update_claude_md_skills_section(client, present, results)
+            await self._update_claude_md_skills_section(client, present, results, via_sets)
 
         # #2914: the durable verdict. Stamp conflicts, clear the stamp on names
         # that landed; a failed restore keeps whatever the row had (not a
@@ -2308,7 +2324,8 @@ print(json.dumps(out))
                     [n for n in remaining if (metas.get(n) or {}).get("exists")]
                     if metas else remaining
                 )
-            await self._update_claude_md_skills_section(client, present)
+            await self._update_claude_md_skills_section(
+                client, present, via_sets=await asyncio.to_thread(_via_sets_or_empty, agent_name))
         except Exception as e:  # noqa: BLE001 — cosmetic, never fails a removal
             logger.warning(f"CLAUDE.md rebuild after removal failed for {agent_name}: {e}")
 
@@ -2778,6 +2795,7 @@ print(json.dumps(out))
         client,
         skill_names: List[str],
         results: Optional[Dict[str, Dict[str, Any]]] = None,
+        via_sets: Optional[Dict[str, List[str]]] = None,
     ) -> None:
         """
         Update CLAUDE.md with a Platform Skills section.
@@ -2804,6 +2822,9 @@ print(json.dumps(out))
             lines = []
             for skill in sorted(skill_names):
                 entry = f"- `/{skill}` - Use with /{skill} command"
+                sets = (via_sets or {}).get(skill)
+                if sets:
+                    entry += f" (via {', '.join(sorted(sets))})"
                 skill_result = (results or {}).get(skill) or {}
                 missing = [
                     w.split(":", 1)[1]
