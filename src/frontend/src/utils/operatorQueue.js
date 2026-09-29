@@ -217,6 +217,39 @@ export function queueSyncBadge(item) {
   return null
 }
 
+/**
+ * trinity-enterprise#610 §3g B5 — the badge a WORKSPACE reader sees. The same
+ * rule as `queueSyncBadge`, minus `unconfirmed`: that state means only that no
+ * confirming poll has read the row back from the agent's file yet — platform
+ * bookkeeping, nothing a client can act on (it read as "is this ask real?").
+ * An unconfirmed ask that is also aging still says "Waiting". Desktop and `/m`
+ * keep the full rule; they are the operator's door.
+ *
+ * @param {object|undefined} item
+ * @returns {{label: string, variant: string, title: string}|null}
+ */
+export function workspaceAskBadge(item) {
+  if (!item || typeof item !== 'object') return null
+  const state = item.sync_state || item.sync
+  if (state === 'unconfirmed' && item.delivery_state !== 'undelivered') {
+    return queueSyncBadge({ ...item, sync_state: null, sync: null })
+  }
+  return queueSyncBadge(item)
+}
+
+/**
+ * trinity-enterprise#610 §3g B3 — the options a QUESTION offered, as quick
+ * picks. `queueResponseKind` keeps a question free-text on purpose (desktop and
+ * `/m` rely on it); these only FILL the answer box, they never send. An option
+ * longer than the answer field accepts (`WorkspaceAskAnswer.response`,
+ * max 500) is left out rather than cut — a pick must be what the agent offered.
+ */
+export const QUICK_PICK_MAX = 500
+export function questionQuickPicks(item) {
+  if (!item || item.type !== 'question') return []
+  return optionsOf(item).filter((s) => s.length <= QUICK_PICK_MAX)
+}
+
 function changedTitle(detail) {
   const fields = typeof detail === 'string' && detail ? detail.split(',').join(', ') : 'content'
   return `The agent rewrote this item since it was ingested (${fields}). You are reading the original.`

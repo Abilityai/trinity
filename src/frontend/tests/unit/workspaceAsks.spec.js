@@ -503,8 +503,12 @@ describe('#2375 — the panel goes through the shared module (source-asserted)',
     // The exact regression: option buttons used to call answer() directly, so a
     // tap on an irreversible decision had no note and no explicit submit.
     expect(sfc).not.toMatch(/@click="answer\(/)
-    // A tap only arms Send: the option click writes the pick, nothing else.
-    expect(sfc).toMatch(/@click="picks\[ask\.id\] = /)
+    // A tap only arms Send: the option click goes through `pick`, which writes
+    // the pick and moves focus to the note (ent#610 §3g B2) — and never sends.
+    expect(sfc).toMatch(/@click="pick\(ask, opt\)"/)
+    const pickBody = sfc.match(/function pick\(ask, opt\) \{([\s\S]*?)\n\}/)?.[1] || ''
+    expect(pickBody).toMatch(/picks\[ask\.id\] = /)
+    expect(pickBody).not.toMatch(/submit|answerAsk/)
     expect(sfc).toMatch(/:disabled="busyId === ask\.id \|\| !picks\[ask\.id\]"/)
   })
 

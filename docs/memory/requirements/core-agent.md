@@ -3580,6 +3580,13 @@ to localStorage in the clear.
   confirm), one chat is read directly. Success is a toast ("Marked 28 chats read") and a new
   tab visit; a partial failure names how many failed and those chats keep their count (the S4
   rollback) (§3g A9).
+- **The ask card while answering (§3g L6, PR A2)**: picking an approval option moves focus to
+  the note field (not on a touch screen, where it would pop the keyboard), so the Enter that
+  follows sends instead of unselecting the option — still pick, then Send (#2375). A question
+  the agent offered options for shows them as quick picks that fill the answer box and never
+  send (an option over the answer's 500-character limit is left out, never cut). "Unconfirmed"
+  is never shown in the Workspace — it is the platform's own bookkeeping; every other sync
+  state still is (`workspaceAskBadge`). After Send, focus lands on the answered card.
 - **Open canvas (§3g C10)**: the pane offers "Open canvas" — on a chat or an ask — only when
   the item's agent has a canvas this viewer can see; it opens the rail on that canvas.
 - **Long tabs page (§3g SM / C4)**: every tab renders 50 rows, states "Showing 50 of 212", and

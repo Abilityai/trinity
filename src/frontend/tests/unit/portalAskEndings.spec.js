@@ -109,8 +109,10 @@ describe('PortalAsks renders how an ask ended (mounted)', () => {
 
   it('a sync badge speaks only about an ask that is still waiting', () => {
     store.asks = [
-      ask('p1', { sync: 'unconfirmed' }),
-      ask('c1', { status: 'cancelled', ended_by: 'operator', ended_at: ENDED, sync: 'unconfirmed' }),
+      // ent#610 §3g B5: `changed`, not `unconfirmed` — the Workspace hides
+      // "Unconfirmed" on every ask, so it could no longer tell pending from ended.
+      ask('p1', { sync: 'changed' }),
+      ask('c1', { status: 'cancelled', ended_by: 'operator', ended_at: ENDED, sync: 'changed' }),
     ]
     store.asksAvailable = true
     const w = mount(PortalAsks, { props: { agentName: 'scout' } })

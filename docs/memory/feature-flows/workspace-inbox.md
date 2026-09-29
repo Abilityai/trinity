@@ -95,6 +95,11 @@ Sign-in / reload on bare /workspace
                       + zone on hover; ≤ 2 badges; a 30 s clock only while such a row exists
     PortalInboxPane
       ask   → <PortalAsks :ask-ids="[id]" testid-prefix="inbox-ask"> → store.answerAsk → asks/router
+              the card (§3g L6, every surface): a pick focuses the note (not on a coarse
+              pointer) so Enter sends; a question's options are quick picks that FILL the
+              answer (questionQuickPicks, ≤ 500 chars) and never send; the badge is
+              workspaceAskBadge (queueSyncBadge minus "Unconfirmed"); after Send focus
+              lands on the answered card (tabindex=-1)
       chat  → store.fetchHistory(agent, id, {limit: 50})  render from first_unread_message_id
               store.fetchSessionDeliverablesStrict → ReportRenderer (+ ReportSummary fallback)
                                                a failed read is LoadFailed, never "no deliverables"

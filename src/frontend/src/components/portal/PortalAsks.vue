@@ -35,6 +35,8 @@
       :class="isEnded(ask)
         ? 'border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-800/40'
         : 'border-amber-300 dark:border-amber-700 bg-amber-50 dark:bg-amber-900/20'"
+      :ref="(el) => setCardRef(ask.id, el)"
+      tabindex="-1"
       :data-testid="`${tid.prefix}-${ask.id}`"
       :data-status="ask.status"
     >
@@ -46,14 +48,16 @@
         <span v-if="showAgent" class="mt-0.5 text-xs text-gray-500 dark:text-gray-400">{{ ask.agent_name }}</span>
         <!-- #2915: coarse sync state / aging from the projection, same rule as the desktop.
              trinity-enterprise#611: only while the ask is still waiting — once
-             it ended, the agent's copy is not something the person can act on. -->
+             it ended, the agent's copy is not something the person can act on.
+             ent#610 §3g B5: minus "Unconfirmed", platform bookkeeping a
+             Workspace reader cannot act on (workspaceAskBadge). -->
         <BaseBadge
-          v-if="!isEnded(ask) && queueSyncBadge(ask)"
-          :variant="queueSyncBadge(ask).variant"
+          v-if="!isEnded(ask) && workspaceAskBadge(ask)"
+          :variant="workspaceAskBadge(ask).variant"
           dot
-          :title="queueSyncBadge(ask).title"
+          :title="workspaceAskBadge(ask).title"
           :data-testid="tid.syncBadge"
-        >{{ queueSyncBadge(ask).label }}</BaseBadge>
+        >{{ workspaceAskBadge(ask).label }}</BaseBadge>
       </div>
 
       <p class="mt-1 text-sm font-medium text-gray-900 dark:text-gray-100">{{ ask.title }}</p>
@@ -121,14 +125,18 @@
               class="rounded-lg border text-xs font-medium px-2.5 py-1.5 disabled:opacity-50"
               :class="picks[ask.id] === opt
                 ? 'bg-action-primary-600 border-action-primary-600 text-white'
-                : 'bg-white dark:bg-gray-900 border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-200 hover:border-action-primary-500'"
+                : CHIP_IDLE"
               :aria-pressed="picks[ask.id] === opt"
               :data-testid="`${tid.prefix}-option-${ask.id}`"
-              @click="picks[ask.id] = picks[ask.id] === opt ? null : opt"
+              @click="pick(ask, opt)"
             >{{ opt }}</button>
           </div>
           <form class="mt-2 flex items-center gap-2" @submit.prevent="submit(ask)">
+            <!-- ent#610 §3g B2: a pick moves focus here, so the Enter that
+                 follows sends (the form's submit) instead of re-clicking the
+                 chip and unselecting it. -->
             <input
+              :ref="(el) => setNoteRef(ask.id, el)"
               v-model="notes[ask.id]"
               type="text"
               maxlength="4000"
@@ -157,9 +165,25 @@
         >{{ busyId === ask.id ? 'Sending…' : 'Got it' }}</button>
 
         <!-- A question (or an approval that offered no options) takes a typed
-             answer — sent as the DECISION (`response`), never as a note (#2375). -->
-        <form v-else class="mt-2 flex items-center gap-2" @submit.prevent="submit(ask)">
+             answer — sent as the DECISION (`response`), never as a note (#2375).
+             ent#610 §3g B3: the options a question offered are quick picks
+             that FILL the answer — they never send. -->
+        <template v-else>
+        <div v-if="quickPicks(ask).length" class="mt-2 flex flex-wrap gap-2">
+          <button
+            v-for="opt in quickPicks(ask)"
+            :key="opt"
+            type="button"
+            :disabled="busyId === ask.id"
+            class="rounded-lg border text-xs font-medium px-2.5 py-1.5 disabled:opacity-50"
+            :class="CHIP_IDLE"
+            :data-testid="`${tid.prefix}-pick-${ask.id}`"
+            @click="fillAnswer(ask, opt)"
+          >{{ opt }}</button>
+        </div>
+        <form class="mt-2 flex items-center gap-2" @submit.prevent="submit(ask)">
           <input
+            :ref="(el) => setAnswerRef(ask.id, el)"
             v-model="drafts[ask.id]"
             type="text"
             maxlength="500"
@@ -174,6 +198,7 @@
             class="rounded-lg bg-action-primary-600 hover:bg-action-primary-700 disabled:opacity-50 text-white text-xs font-medium px-2.5 py-1.5"
           >{{ busyId === ask.id ? 'Sending…' : 'Send' }}</button>
         </form>
+        </template>
 
         <p v-if="errors[ask.id]" class="mt-1.5 text-xs text-red-600 dark:text-red-400">{{ errors[ask.id] }}</p>
       </template>
@@ -182,7 +207,7 @@
 </template>
 
 <script setup>
-import { computed, reactive, ref, onBeforeUnmount } from 'vue'
+import { computed, nextTick, reactive, ref, onBeforeUnmount } from 'vue'
 import BaseBadge from '../base/BaseBadge.vue'
 import PortalMarkdown from './PortalMarkdown.vue'
 import QueueProposal from '../operator/QueueProposal.vue'
@@ -192,12 +217,17 @@ import {
 } from './portalUtils'
 import { optionsOf, queueResponseKind, buildQueueResponse, queueTypeLabel } from '@/utils/operatorQueue'
 // #2915: the same home; a second line so the #2375 import pin above stays byte-exact.
-import { queueSyncBadge, respondRefusedAsDiverged, QUEUE_RESPONSE_DIVERGED } from '@/utils/operatorQueue'
+import { respondRefusedAsDiverged, QUEUE_RESPONSE_DIVERGED } from '@/utils/operatorQueue'
 // trinity-enterprise#611: the one ending rule, a third line for the same reason.
 import { queueEnding, queueEndingText } from '@/utils/operatorQueue'
+// trinity-enterprise#610 §3g B3/B5: the Workspace's badge and a question's quick picks.
+import { workspaceAskBadge, questionQuickPicks } from '@/utils/operatorQueue'
 import { formatLocalDateTime, formatRelativeTime } from '@/utils/timestamps'
 
 const DEFAULT_TESTID_PREFIX = 'portal-ask'
+// An option chip at rest — the approval's unpicked arm and a question's quick
+// pick (ent#610 §3g B3) are one look, spelled once.
+const CHIP_IDLE = 'bg-white dark:bg-gray-900 border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-200 hover:border-action-primary-500'
 
 const props = defineProps({
   // Omit to render every ask addressed to this user (chat/global); pass a name to
@@ -249,6 +279,37 @@ const picks = reactive({})    // approval: the selected option
 const notes = reactive({})    // approval: the optional free-text note
 const errors = reactive({})
 const diverged = reactive({})   // #2915: ask id → the person has seen the divergence notice
+
+// ent#610 §3g B2/B3/after-Send: the elements focus moves between. Plain maps,
+// not refs — nothing renders from them.
+const cardEls = new Map()
+const noteEls = new Map()
+const answerEls = new Map()
+const keep = (map) => (id, el) => { if (el) map.set(id, el); else map.delete(id) }
+const setCardRef = keep(cardEls)
+const setNoteRef = keep(noteEls)
+const setAnswerRef = keep(answerEls)
+// A coarse pointer is a touch screen: focusing a field there pops the keyboard
+// over the options the person is still reading, so focus stays put.
+const coarsePointer = () => (
+  typeof window !== 'undefined' && typeof window.matchMedia === 'function'
+  && window.matchMedia('(pointer: coarse)').matches
+)
+
+// B2: a pick arms Send and moves to the note, so Enter sends; an un-pick
+// only disarms. Still two steps (#2375) — the pick never sends.
+function pick(ask, opt) {
+  const next = picks[ask.id] === opt ? null : opt
+  picks[ask.id] = next
+  if (!next || coarsePointer()) return
+  nextTick(() => noteEls.get(ask.id)?.focus())
+}
+// B3: a quick pick FILLS the answer and focuses it; the person still sends.
+const quickPicks = (ask) => questionQuickPicks({ type: ask.kind, options: ask.options })
+function fillAnswer(ask, opt) {
+  drafts[ask.id] = opt
+  nextTick(() => answerEls.get(ask.id)?.focus())
+}
 
 const allItems = computed(() => {
   if (props.agentName) return store.asksForAgent(props.agentName)
@@ -357,6 +418,12 @@ async function submit(ask) {
     delete drafts[ask.id]
     delete picks[ask.id]
     delete notes[ask.id]
+    // After Send the controls unmount (the ask ended), and focus fell to
+    // <body>. It lands on the answered card instead, where the ending line
+    // and the confirmation above say what happened. A card that left the
+    // list (a surface showing pending only) has nothing to hold focus.
+    await nextTick()
+    cardEls.get(ask.id)?.focus?.({ preventScroll: true })
   } catch (err) {
     if (respondRefusedAsDiverged(err)) {
       // #2915: the agent changed or closed this ask after it was read. Show it,
