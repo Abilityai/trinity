@@ -287,6 +287,38 @@ describe('reading a chat (D11)', () => {
   })
 })
 
+describe('All says what it holds (§3g D-4)', () => {
+  it('lists an old chat, and its footer says how ended asks leave', async () => {
+    store.asksLoaded = true
+    const w = await mountInbox({ threads: [thread('old', { last_message_at: iso(90 * 24 * 60) })] }, { query: { tab: 'all' } })
+    expect(has(w, 'inbox-row-thread:old')).toBe(true)
+    expect(w.find('[data-testid="inbox-list-footer"]').text()).toContain('Answered, expired and cancelled asks drop off after 7 days.')
+    expect(w.find('[data-testid="inbox-list-footer"]').text()).not.toContain('Rooms')
+  })
+
+  it('says rooms are not here yet only to a viewer who has rooms', async () => {
+    store.asksLoaded = true
+    const threads = [thread('t1'), { id: 'r1', is_room: true, title: 'Room', last_message_at: iso(2) }]
+    const w = await mountInbox({ threads }, { query: { tab: 'all' } })
+    expect(w.find('[data-testid="inbox-list-footer"]').text()).toContain("Rooms aren't in the Inbox yet. Open them from the sidebar.")
+  })
+
+  it('says when the asks read stopped at its 200-row cap', async () => {
+    store.asks = Array.from({ length: 200 }, (_, i) => ask(`a${i}`, { created_at: iso(i + 1) }))
+    store.asksLoaded = true
+    const w = await mountInbox({ threads: [] }, { query: { tab: 'all' } })
+    expect(w.find('[data-testid="inbox-list-footer"]').text()).toContain('Showing your 200 most recent asks.')
+  })
+
+  it('an empty All offers a new chat', async () => {
+    store.asksLoaded = true
+    const w = await mountInbox({ threads: [] }, { query: { tab: 'all' } })
+    expect(w.find('[data-testid="inbox-empty"]').text()).toContain('No chats or asks yet')
+    expect(w.find('[data-testid="inbox-empty"]').text()).toContain('Start a chat with one of your agents. Its replies and asks land here.')
+    expect(w.find('[data-testid="inbox-empty-link"]').text()).toBe('New chat')
+  })
+})
+
 describe('counts say what they count (§3g A8 / D-1 / B6)', () => {
   it('a tab counter caps at 99+, and the tab is named with the full number', async () => {
     const threads = Array.from({ length: 2 }, (_, i) => thread(`t${i}`, { unread: i ? 57 : 100 }))

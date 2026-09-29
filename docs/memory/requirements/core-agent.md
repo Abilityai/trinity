@@ -3520,7 +3520,7 @@ to localStorage in the clear.
   |---|---|---|
   | **Action** | asks addressed to me, pending (question, approval, alert), roster re-checked | the ONE asks list (`openAsks`) |
   | **Unread** | chats with new arrivals — one row per chat, "N new", the latest arrival's excerpt; archived chats included | the sidebar's `threads` + `GET /chat-state?previews=true` |
-  | **All** | every chat active in the last 30 days (read or not) and asks that ended in the last 7 days; newest 50 shown with the total stated | the same two lists |
+  | **All** | every chat the sidebar lists, of any age (read or not; an unused Main is not listed; rooms wait for PR C), pending asks, and asks that ended in the last 7 days; its footer says the 7-day rule, the 200-ask read cap when hit, and — to a viewer with rooms — that rooms are not here yet (§3g D-4) | the same two lists |
 - **One unread model (AC 6)**: the unit of Unread is a **chat**, read through the existing
   #557 cursor (`POST /chat-state/thread/{id}/read`); there is no second cursor and no per-item
   read row. An arrival is an assistant message in my chat **or** a report addressed to me that

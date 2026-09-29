@@ -5,8 +5,8 @@
 The Workspace opens on an **Inbox**. Three tabs answer two questions across every agent
 on the viewer's roster: **Action** (asks addressed to you, waiting), **Unread** (chats
 where something came back since you last read them — replies, completed runs delivered
-to you, deliverables addressed to you) and **All** (the last 30 days, read or not, plus
-asks that ended in the last 7). A reading pane opens an item without leaving the Inbox:
+to you, deliverables addressed to you) and **All** (every chat of any age, read or not,
+plus pending asks and asks that ended in the last 7 days — §3g D-4). A reading pane opens an item without leaving the Inbox:
 an ask is answered in place; a chat shows its new arrivals and deliverables, and is
 marked read.
 
@@ -66,6 +66,11 @@ Sign-in / reload on bare /workspace
     PortalInboxList   bounded; the head counts LIVE rows in units — listHeadLabel: "21 asks",
                       "15 chats · 70 new", "3 chats · 2 asks", "All caught up" (§3g A8 / D-1);
                       rows are <button>s; outcome pill done / failed (icon + label)
+                      All's footer (§3g D-4b, allFooterNotes): "Answered, expired and cancelled
+                      asks drop off after 7 days."; "Showing your 200 most recent asks." when the
+                      asks read hit its cap (T16; server total is #3059); "Rooms aren't in the
+                      Inbox yet…" only to a viewer with rooms. Empty All: "No chats or asks yet"
+                      + a New chat link (/workspace?new=1)
                       ask rows (§3g A10, portalAskUrgency.js): kind by SHAPE in gray
                       (shield-check / question-mark-circle / bell, kind sr-only); no
                       "Waiting on you"; Critical (danger) / High (urgent) only; "Expires

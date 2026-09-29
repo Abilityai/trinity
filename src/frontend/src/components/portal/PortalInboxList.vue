@@ -103,6 +103,13 @@
         </button>
       </li>
     </ul>
+    <div
+      v-if="notes.length"
+      class="shrink-0 px-4 pt-2 pb-3 border-t border-gray-200 dark:border-gray-750 space-y-0.5 text-[12.5px] text-gray-600 dark:text-gray-300"
+      data-testid="inbox-list-footer"
+    >
+      <p v-for="n in notes" :key="n">{{ n }}</p>
+    </div>
   </div>
 </template>
 
@@ -120,6 +127,9 @@ const props = defineProps({
   // The line above the rows — the container's, because it counts LIVE rows
   // (a ghost is not a member of the tab) and knows the tab's full total.
   head: { type: String, default: '' },
+  // Lines under the rows that say what the tab does NOT hold, in tertiary ink
+  // (§3g D-4b) — the ended-ask window, the asks cap, rooms.
+  notes: { type: Array, default: () => [] },
   selectedKey: { type: String, default: null },
   // agent name → the human-facing label (the roster's display_label).
   labels: { type: Object, default: () => ({}) },

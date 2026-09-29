@@ -7,8 +7,8 @@
     Action  the ONE asks list's pending rows (`clientPortal.openAsks`)
     Unread  chats with new arrivals — the shell's `sidebarThreads`, the same
             projection the sidebar sums, so the two never disagree (D13)
-    All     chats active in the last 30 days, merged with asks (ended ones for
-            the 7 days the server keeps them), bounded to 50 with the total said
+    All     every chat of any age, merged with asks (ended ones for the 7 days
+            the server keeps them); the list pages it (§3g D-4)
   Every rule lives in `portalInbox.js`; this file wires them to the screen.
 
   Honest state per tab (principle 15): a skeleton while that tab's source has
@@ -127,6 +127,7 @@
           ref="listEl"
           :items="shownItems"
           :head="head"
+          :notes="footerNotes"
           :selected-key="selectedKey"
           :labels="labels"
           :label="`${tabLabel} items`"
@@ -178,7 +179,7 @@ import { viewState, staleBannerMessage } from '@/utils/loadingState'
 import {
   actionItems, unreadItems, allItems, inboxCounts, defaultInboxTab, normalizeInboxTab,
   stableRows, emptyVisit, isGhost, resolveItem, parseItemKey, listHeadLabel,
-  markAllLabel, markAllConfirm,
+  markAllLabel, markAllConfirm, allFooterNotes,
 } from './portalInbox'
 import { askBadgeTitle, unreadBadgeTitle } from './portalUtils'
 import { capCount } from '@/utils/tabTitle'
@@ -249,12 +250,14 @@ const tabStrip = computed(() => [
   { id: 'all', label: 'All' },
 ])
 
-const all = computed(() => allItems(props.threads, store.asks, props.previews))
 const baseItems = computed(() => {
   if (tab.value === 'action') return actionItems(store.openAsks)
   if (tab.value === 'unread') return unreadItems(props.threads, props.previews)
-  return all.value.items
+  return allItems(props.threads, store.asks, props.previews)
 })
+const footerNotes = computed(() => (tab.value === 'all'
+  ? allFooterNotes({ hasRooms: props.threads.some((t) => t && t.is_room), askCount: store.asks.length })
+  : []))
 
 // §3g S5 (T2): the URL holds only what the reader OPENED. The desktop
 // auto-selection is a local preview, kept per tab and told to the shell
@@ -288,14 +291,9 @@ const shownItems = computed(() => {
   return out.rows
 })
 // The head counts LIVE rows, never ghosts, in units (§3g A8); with only ghosts
-// left it says "All caught up". All is still bounded here, so it states when
-// rows were left out.
+// left it says "All caught up".
 const liveItems = computed(() => shownItems.value.filter((it) => !isGhost(it)))
-const head = computed(() => {
-  const label = listHeadLabel(tab.value, liveItems.value)
-  const n = liveItems.value.length
-  return tab.value === 'all' && all.value.total > n ? `${label} · latest ${n} of ${all.value.total} shown` : label
-})
+const head = computed(() => listHeadLabel(tab.value, liveItems.value))
 
 // A selection the rendered rows do not hold (an old chat, a deep link) is
 // resolved from the shell's data by key — the one fallback, never a slice.
@@ -351,7 +349,11 @@ const empty = computed(() => {
   if (tab.value === 'unread') {
     return { title: "You're all caught up", body: 'New replies and deliverables from your agents land here.' }
   }
-  return { title: 'Nothing in the last 30 days', body: 'Start a chat with one of your agents from the sidebar.' }
+  return {
+    title: 'No chats or asks yet',
+    body: 'Start a chat with one of your agents. Its replies and asks land here.',
+    link: { to: { path: '/workspace', query: { new: '1' } }, label: 'New chat' },
+  }
 })
 
 function retry() {

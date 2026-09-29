@@ -12,7 +12,7 @@ import { describe, it, expect } from 'vitest'
 import {
   inboxLandingTarget, actionItems, unreadItems, allItems, inboxCounts,
   itemKey, parseItemKey, sidebarThreadsOf, inSidebar, defaultInboxTab,
-  normalizeInboxTab, newLabel, totalLabel, ALL_LIMIT,
+  normalizeInboxTab, newLabel,
 } from '@/components/portal/portalInbox'
 import {
   totalUnread, unreadByAgent, WORKSPACE_INBOX, WORKSPACE_ROOT, shouldEscapeStage,
@@ -126,43 +126,59 @@ describe('Unread (D1)', () => {
   })
 })
 
-describe('All', () => {
+describe('All — literally all (§3g D-4a)', () => {
   it('recency is the later of last_message_at and latest.at', () => {
     const threads = [
       thread('msg', { last_message_at: iso(2 * H) }),
       thread('dlv', { last_message_at: iso(5 * H), unread: 1 }),
     ]
     const previews = { 'thread:dlv': { latest: { kind: 'deliverable', id: 'r', at: iso(H) } } }
-    const { items } = allItems(threads, [], previews, NOW)
-    expect(items.map((r) => r.id)).toEqual(['dlv', 'msg'])
+    expect(allItems(threads, [], previews, NOW).map((r) => r.id)).toEqual(['dlv', 'msg'])
   })
 
-  it('30-day chat window; ended asks for 7 days; pending asks always', () => {
-    const { items, total } = allItems(
-      [thread('fresh', { last_message_at: iso(29 * D) }), thread('stale', { last_message_at: iso(31 * D) }),
-        thread('never', { last_message_at: null })],
+  it('every chat of any age; ended asks for 7 days; pending asks always', () => {
+    const items = allItems(
+      [thread('fresh', { last_message_at: iso(29 * D) }), thread('old', { last_message_at: iso(400 * D) })],
       [ask('p-old', { created_at: iso(40 * D) }),
         ask('e-in', { status: 'expired', ended_at: iso(6 * D), created_at: iso(20 * D) }),
         ask('e-out', { status: 'answered', ended_at: iso(8 * D) })],
       {}, NOW,
     )
-    expect(items.map((r) => r.key).sort()).toEqual(['ask:e-in', 'ask:p-old', 'thread:fresh'])
-    expect(total).toBe(3)
+    expect(items.map((r) => r.key).sort()).toEqual(['ask:e-in', 'ask:p-old', 'thread:fresh', 'thread:old'])
+  })
+
+  it('an empty non-Main chat is ordered by when it was created', () => {
+    const items = allItems(
+      [thread('a', { last_message_at: iso(3 * H) }), thread('empty', { last_message_at: null, created_at: iso(H) })],
+      [], {}, NOW,
+    )
+    expect(items.map((r) => r.id)).toEqual(['empty', 'a'])
   })
 
   it('rooms are not listed (PR C)', () => {
-    const { items } = allItems([{ id: 'r', is_room: true, last_message_at: iso(H) }], [], {}, NOW)
-    expect(items).toEqual([])
+    expect(allItems([{ id: 'r', is_room: true, last_message_at: iso(H) }], [], {}, NOW)).toEqual([])
   })
 
-  it('bounded to 50 with the total stated', () => {
+  it('is not bounded: the list pages instead (pageWindow)', () => {
     const many = Array.from({ length: 70 }, (_, i) => thread(`t${i}`, { last_message_at: iso(i * H) }))
-    const { items, total } = allItems(many, [], {}, NOW)
-    expect(items).toHaveLength(ALL_LIMIT)
-    expect(total).toBe(70)
+    const items = allItems(many, [], {}, NOW)
+    expect(items).toHaveLength(70)
     expect(items[0].id).toBe('t0')
-    expect(totalLabel(total, items.length)).toBe('70 · latest 50 shown')
-    expect(totalLabel(12, 12)).toBe('12')
+  })
+
+  it('property: Unread ⊆ All, over generated fleets', () => {
+    let seed = 11
+    const rnd = () => { seed = (seed * 1103515245 + 12345) % 2147483648; return seed / 2147483648 }
+    for (let run = 0; run < 300; run++) {
+      const threads = Array.from({ length: 1 + Math.floor(rnd() * 12) }, (_, i) => thread(`t${i}`, {
+        unread: rnd() < 0.5 ? Math.floor(rnd() * 9) : 0,
+        last_message_at: rnd() < 0.1 ? null : iso(Math.floor(rnd() * 400) * D),
+        created_at: iso(Math.floor(rnd() * 500) * D),
+        archived_at: rnd() < 0.2 ? iso(D) : null,
+      })).filter(inSidebar)
+      const all = new Set(allItems(threads, [], {}, NOW).map((r) => r.key))
+      for (const u of unreadItems(threads, {})) expect(all.has(u.key)).toBe(true)
+    }
   })
 })
 

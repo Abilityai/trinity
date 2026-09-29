@@ -19,11 +19,12 @@ import { capCount } from '@/utils/tabTitle'
 
 export const INBOX_TABS = ['action', 'unread', 'all']
 
-// All: chats with activity in the last 30 days, ended asks for the 7 days the
-// server keeps them (`ENDED_WINDOW_DAYS`), at most 50 rows with the total stated.
-export const ALL_WINDOW_DAYS = 30
+// All (§3g D-4a): EVERY chat the sidebar lists, of any age, plus the asks list —
+// pending asks always, ended ones for the 7 days the server keeps them
+// (`asks/service.py`, which also stops the read at 200 rows, pending first).
+// Not bounded here: the list pages it (`pageWindow`).
 export const ENDED_ASK_WINDOW_DAYS = 7
-export const ALL_LIMIT = 50
+export const ASKS_READ_CAP = 200
 
 const DAY_MS = 24 * 60 * 60 * 1000
 
@@ -119,8 +120,10 @@ function threadItem(t, previews) {
     latest,
     first_unread_message_id: p?.first_unread_message_id || null,
     // All's recency key: an arrival (a deliverable) can be newer than the last
-    // message, so the later of the two orders the row.
-    at: ts(latestAt) >= ts(lastAt) ? (latestAt || lastAt) : lastAt,
+    // message, so the later of the two orders the row. A chat with no message
+    // yet (an empty non-Main chat — an unused Main is not listed) is ordered by
+    // when it was created (§3g D-4a).
+    at: (ts(latestAt) >= ts(lastAt) ? (latestAt || lastAt) : lastAt) || t.created_at || null,
     thread: t,
   }
 }
@@ -149,22 +152,30 @@ export function unreadItems(threads, previews) {
     .sort(byAtDesc)
 }
 
-// All: read and unread chats active in the last 30 days, merged with the asks
-// list — pending asks always, ended ones for 7 days. Bounded to 50 rows; the
-// total is returned so the list can state it ("12 · latest 50 shown").
+// All: every chat (read or not, any age; rooms wait for PR C), merged with the
+// asks list — pending asks always, ended ones for 7 days. The server applies
+// that window too; the client guard stays for an ask that expired while it was
+// still listed as pending.
 export function allItems(threads, asks, previews, now = Date.now()) {
-  const chatCutoff = now - ALL_WINDOW_DAYS * DAY_MS
   const askCutoff = now - ENDED_ASK_WINDOW_DAYS * DAY_MS
   const chats = (Array.isArray(threads) ? threads : [])
     .filter((t) => t && !t.is_room && threadId(t))
     .map((t) => threadItem(t, previews))
-    .filter((it) => ts(it.at) >= chatCutoff)
   const askRows = (Array.isArray(asks) ? asks : [])
     .filter((a) => a && a.id)
     .map(askItem)
     .filter((it) => it.status === 'pending' || ts(it.at) >= askCutoff)
-  const merged = [...chats, ...askRows].sort(byAtDesc)
-  return { items: merged.slice(0, ALL_LIMIT), total: merged.length }
+  return [...chats, ...askRows].sort(byAtDesc)
+}
+
+// §3g D-4b / T16: what All's footer says, beyond the paging line. The ended-ask
+// window always; rooms only to a viewer who has some; the asks read's cap only
+// when it was hit (server pagination + a total is #3059).
+export function allFooterNotes({ hasRooms = false, askCount = 0 } = {}) {
+  const notes = ['Answered, expired and cancelled asks drop off after 7 days.']
+  if (askCount >= ASKS_READ_CAP) notes.push(`Showing your ${ASKS_READ_CAP} most recent asks.`)
+  if (hasRooms) notes.push("Rooms aren't in the Inbox yet. Open them from the sidebar.")
+  return notes
 }
 
 // D13: the two counts on the pinned row. `came` is `totalUnread` over the SAME
@@ -222,12 +233,6 @@ export function inboxRowLabel({ needs = 0, came = 0 } = {}) {
   return ['Inbox', askBadgeTitle(needs), unreadBadgeTitle(came)].filter(Boolean).join(', ')
 }
 
-// Bounded lists state their total (contract: "412 · latest 50 shown").
-export function totalLabel(total, shown) {
-  const t = Number(total) || 0
-  const s = Number(shown) || 0
-  return t > s ? `${t} · latest ${s} shown` : `${t}`
-}
 
 // ---- The shell's seams (Portal.vue) -------------------------------------------
 //
