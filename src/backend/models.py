@@ -4247,6 +4247,16 @@ class UserRoleUpdate(BaseModel):
 
 class UpdateMyEmailRequest(BaseModel):
     email: str
+    # trinity-enterprise#720: the 6-digit code sent to `email` by
+    # `POST /api/users/me/email/code` — proof the caller holds the mailbox.
+    # Optional only for the audited admin transition on an install that cannot
+    # deliver mail; everywhere else a missing code is a 400.
+    code: Optional[str] = None
+
+
+class RequestEmailBindCodeRequest(BaseModel):
+    """`POST /api/users/me/email/code` — send a bind code to a NEW address (ent#720)."""
+    email: str
 
 
 class UserPreferenceWrite(BaseModel):

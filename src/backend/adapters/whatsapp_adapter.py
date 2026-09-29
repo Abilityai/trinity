@@ -672,6 +672,12 @@ class WhatsAppAdapter(ChannelAdapter):
             result = db.verify_login_code(pending_email, arg)
             if not result:
                 return "❌ Invalid or expired code. Try again or request a new one."
+            # ent#720: a suspended account is refused here as on the web — the
+            # verified email is NOT recorded, so the open-access shortcut below
+            # and the per-message gate never see it.
+            if db.is_email_account_suspended(pending_email):
+                _clear_pending_login(binding["id"], message.sender_id)
+                return "❌ This account is suspended. Contact the agent's owner."
             db.set_whatsapp_verified_email(binding["id"], message.sender_id, pending_email)
             _clear_pending_login(binding["id"], message.sender_id)
 

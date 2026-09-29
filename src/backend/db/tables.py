@@ -194,6 +194,7 @@ email_login_codes = Table(
     Column("expires_at", Text),
     Column("verified", Integer),
     Column("used_at", Text),
+    Column("purpose", Text),  # ent#720: NULL = sign-in; 'email_bind:<user id>'
 )
 
 agent_schedules = Table(

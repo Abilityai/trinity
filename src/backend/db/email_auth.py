@@ -22,6 +22,7 @@ from sqlalchemy import select, insert, update, delete, func, and_, cast, Text
 from .engine import get_engine
 from .tables import email_whitelist, email_login_codes, users
 from utils.helpers import utc_now_iso
+from .users import EmailInUseError
 
 # Valid role values for new users. Kept local to avoid a circular import with
 # dependencies.py (which imports from database, which imports from this module).
@@ -152,9 +153,14 @@ class EmailAuthOperations:
     # Login Code Operations
     # =========================================================================
 
-    def create_login_code(self, email: str, expiry_minutes: int = 10) -> dict:
+    def create_login_code(self, email: str, expiry_minutes: int = 10,
+                          purpose: Optional[str] = None) -> dict:
         """
         Generate a 6-digit login code for an email.
+
+        purpose (ent#720): NULL is a sign-in code. An email-bind code carries
+        `email_bind:<user id>` so it can only complete THAT account's bind, and
+        neither kind of code is accepted where the other is expected.
 
         Returns:
             dict with code_id, code, expires_at
@@ -172,6 +178,7 @@ class EmailAuthOperations:
             created_at=created_at.isoformat(),
             expires_at=expires_at.isoformat(),
             verified=0,
+            purpose=purpose,
         )
         with get_engine().begin() as conn:
             conn.execute(stmt)
@@ -184,9 +191,11 @@ class EmailAuthOperations:
             "expires_in_seconds": expiry_minutes * 60
         }
 
-    def verify_login_code(self, email: str, code: str) -> Optional[dict]:
+    def verify_login_code(self, email: str, code: str,
+                          purpose: Optional[str] = None) -> Optional[dict]:
         """
-        Verify a login code for an email.
+        Verify a login code for an email. `purpose` must match exactly — the
+        default (None) accepts only sign-in codes (ent#720).
 
         Returns:
             dict with code verification result, or None if invalid
@@ -205,6 +214,8 @@ class EmailAuthOperations:
                         func.lower(email_login_codes.c.email) == email.lower(),
                         email_login_codes.c.code == code,
                         email_login_codes.c.verified == 0,
+                        (email_login_codes.c.purpose.is_(None) if purpose is None
+                         else email_login_codes.c.purpose == purpose),
                     )
                 )
                 .order_by(email_login_codes.c.created_at.desc())
@@ -283,20 +294,11 @@ class EmailAuthOperations:
         if role not in _VALID_DEFAULT_ROLES:
             role = "user"
 
-        # Create new user
-        now = utc_now_iso()
-        # Username = email (lowercase)
-        username = email.lower()
-
-        stmt = insert(users).values(
-            username=username,
-            email=email.lower(),
-            role=role,
-            created_at=now,
-            updated_at=now,
-        )
-        with get_engine().begin() as conn:
-            conn.execute(stmt)
-
-        # Return the created user
-        return self._user_ops.get_user_by_email(email)
+        # Create new user — through the one checked writer (ent#720), which
+        # also keeps a reclaimed `username = email` from becoming a 500.
+        try:
+            return self._user_ops.insert_email_user(email, role)
+        except EmailInUseError:
+            # Lost a race with a concurrent first sign-in for the same address:
+            # that account is this person's account.
+            return self._user_ops.get_user_by_email(email)

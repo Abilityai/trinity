@@ -1254,6 +1254,14 @@ class ChannelMessageRouter:
             if verified_email:
                 verified_email = verified_email.strip().lower() or None
 
+            # ent#720: a verified email whose account is suspended reaches
+            # nothing — not even an open_access agent. An email verified BEFORE
+            # the suspension is still recorded on the channel link, so the check
+            # has to live here, per message, not only at code redemption.
+            if verified_email and db.is_email_account_suspended(verified_email):
+                logger.info(f"[ROUTER:{channel}] Access denied: account suspended (agent={agent_name})")
+                return False, None
+
             require_email = policy.get("require_email", False)
             open_access = policy.get("open_access", False)
 
