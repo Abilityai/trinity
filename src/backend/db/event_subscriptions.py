@@ -261,9 +261,19 @@ class EventSubscriptionOperations:
         self,
         source_agent: Optional[str] = None,
         event_type: Optional[str] = None,
-        limit: int = 50
+        limit: int = 50,
+        agent_names: Optional[List[str]] = None,
     ) -> List[AgentEvent]:
-        """List events with optional filters."""
+        """List events with optional filters.
+
+        ``agent_names`` restricts results to events whose ``source_agent`` is in
+        the list (trinity-enterprise#713): ``None`` is unrestricted, an empty
+        list returns ``[]`` without querying (never ``IN ()``). The filter is in
+        the WHERE clause, so ``limit`` applies after it.
+        """
+        if agent_names is not None and not agent_names:
+            return []
+
         t = agent_events
         stmt = select(
             t.c.id, t.c.source_agent, t.c.event_type, t.c.payload,
@@ -275,6 +285,8 @@ class EventSubscriptionOperations:
             conds.append(t.c.source_agent == source_agent)
         if event_type:
             conds.append(t.c.event_type == event_type)
+        if agent_names is not None:
+            conds.append(t.c.source_agent.in_(agent_names))
 
         if conds:
             stmt = stmt.where(and_(*conds))
