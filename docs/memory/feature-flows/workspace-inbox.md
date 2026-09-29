@@ -231,9 +231,9 @@ table, no migration. The report publish may mint the addressee's Main
   pinned by a test that walks the payload). The pane renders neither.
 - **Excerpts** are credential-sanitised before markdown stripping and rendered by text
   interpolation; pane messages go through `PortalMarkdown` (DOMPurify).
-- **Report stamp.** Only the agent's own publish (`current_user.agent_name == name`) may fall
-  back to the addressee's Main; a human sharer's publish stays in the addressee's own
-  in-flight chat or `NULL`, so a sharer cannot push a badge into another person's Inbox. The
+- **Report stamp.** Only the agent's own publish (`current_user.agent_name == name`) may
+  be placed at all (the addressee's in-flight chat, else their Main); a human sharer's
+  publish is `NULL`, even when it quotes the addressee's live turn, so a sharer cannot push a badge into another person's Inbox. The
   addressee is roster-validated (`include_owned=False`) and the report route is rate-limited.
 - **URL params.** `?tab=` is allowlisted; `?item=` resolves only against the viewer's loaded
   items; `?anchor=` compares `dataset` values in JS, never builds a selector.

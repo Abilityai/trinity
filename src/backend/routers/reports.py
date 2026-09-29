@@ -226,15 +226,16 @@ async def create_report(
 
     # Which Workspace chat this belongs in, resolved server-side — never read
     # from the request: the agent supplies an execution id, the backend decides
-    # what conversation that is (the MEM-001 rule). ent#610: the turn's chat
-    # only if the ADDRESSEE owns it, else — for the agent's OWN publish only —
-    # the addressee's Main. A human sharer publishing as the agent never mints
-    # or touches another person's Main (/cso). Unaddressed ⇒ NULL (operator-only).
+    # what conversation that is (the MEM-001 rule). ent#610: for the agent's
+    # OWN publish only, the turn's chat if the ADDRESSEE owns it, else the
+    # addressee's Main. A human sharer publishing as the agent places no card
+    # anywhere — not in another person's Main, not in their live turn (/cso).
+    # Unaddressed ⇒ NULL (operator-only).
     portal_session_id = None
     if audience:
         portal_session_id = report_service.resolve_report_session(
             data.execution_id, name, audience,
-            allow_main=current_user.agent_name == name)
+            agent_publish=current_user.agent_name == name)
 
     report = await report_service.create_report(
         agent_name=name,

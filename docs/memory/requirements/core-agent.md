@@ -3535,8 +3535,8 @@ to localStorage in the clear.
   publishes as itself with no in-flight chat **of the addressee** is stamped to the addressee's **Main** at publish (a report addressed to
   X during Y's turn goes to X's Main, never into Y's chat), and that Main is touched so the
   sidebar lists it. Its card appears inline there, and it counts as an arrival. A report a
-  human sharer publishes as the agent never falls back to Main: it keeps the addressee's own
-  in-flight chat or none, so one person cannot put a badge in another's Inbox.
+  human sharer publishes as the agent is placed in no chat at all (not Main, not the
+  addressee's in-flight turn), so one person cannot put a badge in another's Inbox.
 - **The run outcome is a platform marker**: the completion message the platform writes into a
   chat carries `source = completion:done | completion:failed`; the Inbox's done/failed pill is
   read from that, never parsed out of the body (an agent reply that begins "**Finished**" is

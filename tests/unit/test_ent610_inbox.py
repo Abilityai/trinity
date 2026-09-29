@@ -291,8 +291,8 @@ def test_the_count_is_exactly_the_arrivals_per_session(inbox_db, world):
 # ===========================================================================
 #
 # `services/report_service.resolve_report_session(execution_id, agent, audience,
-# allow_main=...)`: the publishing turn's in-flight chat only if the ADDRESSEE
-# owns it, else — for the AGENT'S OWN publish only (`allow_main=True`) — the
+# agent_publish=...)`: the publishing turn's in-flight chat only if the ADDRESSEE
+# owns it, else — for the AGENT'S OWN publish only (`agent_publish=True`) — the
 # addressee's Main (minted if absent) touched with `added=0`; no audience → None;
 # fail-soft None + WARNING.
 
@@ -322,7 +322,7 @@ def _main_of(engine, email, agent=AGENT):
 
 def test_no_execution_stamps_the_addressees_main_minting_and_touching_it(inbox_db, inflight):
     from services import report_service
-    sid = report_service.resolve_report_session(None, AGENT, ALICE, allow_main=True)
+    sid = report_service.resolve_report_session(None, AGENT, ALICE, agent_publish=True)
 
     mains = _main_of(inbox_db, ALICE)
     assert [m["id"] for m in mains] == [sid]
@@ -341,7 +341,7 @@ def test_an_existing_main_is_reused_not_duplicated(inbox_db, inflight):
     from services import report_service
     _session(inbox_db, "main-a", ALICE, is_main=1, last="2026-09-01T00:00:00Z", count=4)
 
-    assert report_service.resolve_report_session(None, AGENT, ALICE, allow_main=True) == "main-a"
+    assert report_service.resolve_report_session(None, AGENT, ALICE, agent_publish=True) == "main-a"
     report_service.touch_report_session("main-a")
     mains = _main_of(inbox_db, ALICE)
     assert len(mains) == 1
@@ -354,7 +354,7 @@ def test_the_addressees_own_inflight_chat_wins(inbox_db, inflight):
     _session(inbox_db, "s-alice-turn", ALICE)
     inflight["session"] = "s-alice-turn"
 
-    assert report_service.resolve_report_session("exec-1", AGENT, ALICE, allow_main=True) == "s-alice-turn"
+    assert report_service.resolve_report_session("exec-1", AGENT, ALICE, agent_publish=True) == "s-alice-turn"
     assert _main_of(inbox_db, ALICE) == []          # no Main minted for it
 
 
@@ -365,7 +365,7 @@ def test_a_report_for_alice_during_bobs_turn_goes_to_alices_main(inbox_db, infli
     _session(inbox_db, "s-bob-turn", BOB)
     inflight["session"] = "s-bob-turn"
 
-    sid = report_service.resolve_report_session("exec-1", AGENT, ALICE, allow_main=True)
+    sid = report_service.resolve_report_session("exec-1", AGENT, ALICE, agent_publish=True)
 
     assert sid != "s-bob-turn"
     assert [m["id"] for m in _main_of(inbox_db, ALICE)] == [sid]
@@ -374,9 +374,9 @@ def test_a_report_for_alice_during_bobs_turn_goes_to_alices_main(inbox_db, infli
 def test_a_foreign_execution_or_a_non_portal_turn_lands_in_main(inbox_db, inflight):
     from services import report_service
     inflight["valid"] = False
-    first = report_service.resolve_report_session("exec-foreign", AGENT, ALICE, allow_main=True)
+    first = report_service.resolve_report_session("exec-foreign", AGENT, ALICE, agent_publish=True)
     inflight["valid"], inflight["session"] = True, None
-    second = report_service.resolve_report_session("exec-cron", AGENT, ALICE, allow_main=True)
+    second = report_service.resolve_report_session("exec-cron", AGENT, ALICE, agent_publish=True)
 
     assert first == second == _main_of(inbox_db, ALICE)[0]["id"]
 
@@ -385,8 +385,8 @@ def test_no_audience_is_no_chat_and_mints_nothing(inbox_db, inflight):
     from services import report_service
     inflight["session"] = "s-anything"
 
-    assert report_service.resolve_report_session("exec-1", AGENT, None, allow_main=True) is None
-    assert report_service.resolve_report_session(None, AGENT, "", allow_main=True) is None
+    assert report_service.resolve_report_session("exec-1", AGENT, None, agent_publish=True) is None
+    assert report_service.resolve_report_session(None, AGENT, "", agent_publish=True) is None
     assert _main_of(inbox_db, ALICE) == []
 
 
@@ -401,7 +401,7 @@ def test_a_main_that_cannot_be_opened_fails_soft_with_a_warning(inbox_db, inflig
 
     monkeypatch.setattr(portal_service, "ensure_main_session", boom)
     with caplog.at_level(logging.WARNING):
-        assert report_service.resolve_report_session(None, AGENT, ALICE, allow_main=True) is None
+        assert report_service.resolve_report_session(None, AGENT, ALICE, agent_publish=True) is None
     assert any(r.levelno == logging.WARNING for r in caplog.records)
 
 
@@ -413,7 +413,7 @@ def test_concurrent_publishes_make_one_main(inbox_db, inflight):
     from services import report_service
 
     with ThreadPoolExecutor(max_workers=4) as pool:
-        ids = list(pool.map(lambda _: report_service.resolve_report_session(None, AGENT, ALICE, allow_main=True), range(8)))
+        ids = list(pool.map(lambda _: report_service.resolve_report_session(None, AGENT, ALICE, agent_publish=True), range(8)))
 
     assert len(set(ids)) == 1 and ids[0]
     assert len(_main_of(inbox_db, ALICE)) == 1
@@ -425,7 +425,7 @@ def test_resetting_a_report_only_main_is_still_the_already_fresh_no_op(inbox_db,
 
     monkeypatch.setattr(portal_service, "agent_on_roster", lambda *a, **k: True)
     monkeypatch.setattr(portal_service, "get_turn_inflight", lambda sid: None)
-    main = report_service.resolve_report_session(None, AGENT, ALICE, allow_main=True)
+    main = report_service.resolve_report_session(None, AGENT, ALICE, agent_publish=True)
 
     out = portal_service.reset_main_session(AGENT, ALICE)
 
@@ -440,7 +440,7 @@ def test_a_stamped_report_only_main_counts_and_survives_the_sidebar_filter(inbox
     from services import report_service
 
     _read(ALICE, "s-old", "2026-09-01T09:00:00Z")
-    sid = report_service.resolve_report_session(None, AGENT, ALICE, allow_main=True)
+    sid = report_service.resolve_report_session(None, AGENT, ALICE, agent_publish=True)
     _report(inbox_db, session_id=sid, addressed=ALICE, at="2099-01-01T00:00:00Z")
     report_service.touch_report_session(sid)
 
@@ -468,8 +468,8 @@ async def test_the_publish_route_stamps_through_the_service_with_or_without_an_e
     monkeypatch.setattr(mod.report_service, "create_report", fake_create)
     monkeypatch.setattr(
         mod.report_service, "resolve_report_session",
-        lambda eid, agent, audience, *, allow_main:
-            calls.append((eid, agent, audience, allow_main)) or "main-x")
+        lambda eid, agent, audience, *, agent_publish:
+            calls.append((eid, agent, audience, agent_publish)) or "main-x")
 
     body = ReportCreate(report_type="recon.leads", title="Leads", payload={"rows": []},
                         audience_email=ALICE)
@@ -503,7 +503,7 @@ async def test_the_stamped_chat_is_touched_only_after_the_report_is_written(monk
     monkeypatch.setattr(cps, "agent_on_roster", lambda agent, email, include_owned=False: True)
     monkeypatch.setattr(mod.rate_limiter, "enforce", lambda *a, **k: None)
     monkeypatch.setattr(mod.report_service, "resolve_report_session",
-                        lambda eid, agent, audience, *, allow_main: "main-x")
+                        lambda eid, agent, audience, *, agent_publish: "main-x")
     monkeypatch.setattr(mod.report_service, "touch_report_session",
                         lambda sid: order.append(("touch", sid)))
 
@@ -560,7 +560,7 @@ async def test_only_the_agents_own_publish_may_fall_back_to_the_addressees_main(
     monkeypatch.setattr(mod.report_service, "create_report", fake_create)
     monkeypatch.setattr(
         mod.report_service, "resolve_report_session",
-        lambda eid, agent, audience, *, allow_main: calls.append(allow_main) or None)
+        lambda eid, agent, audience, *, agent_publish: calls.append(agent_publish) or None)
 
     body = ReportCreate(report_type="recon.leads", title="Leads", payload={"rows": []},
                         audience_email=ALICE)
@@ -581,22 +581,34 @@ def test_a_human_publish_never_mints_or_stamps_the_addressees_main(inbox_db, inf
     _read(ALICE, "s-old", "2026-09-01T09:00:00Z")
     before = __import__("client_portal.db", fromlist=["x"]).count_unread_by_session(ALICE)
 
-    assert report_service.resolve_report_session(None, AGENT, ALICE, allow_main=False) is None
+    assert report_service.resolve_report_session(None, AGENT, ALICE, agent_publish=False) is None
     inflight["session"] = None
-    assert report_service.resolve_report_session("exec-1", AGENT, ALICE, allow_main=False) is None
+    assert report_service.resolve_report_session("exec-1", AGENT, ALICE, agent_publish=False) is None
 
     assert _main_of(inbox_db, ALICE) == []
     from client_portal import db as pdb
     assert pdb.count_unread_by_session(ALICE) == before
 
 
-def test_a_human_publish_still_lands_in_the_addressees_own_inflight_chat(inbox_db, inflight):
+def test_a_human_publish_is_not_stamped_even_into_the_addressees_own_inflight_chat(inbox_db, inflight):
+    # /cso round 3 (ent#610): `GET /api/agents/{a}/executions` lists every
+    # running Workspace turn with its id to anyone the agent is shared with, so
+    # a human sharer could quote ANOTHER client's live turn and plant a card —
+    # now an unread Inbox arrival — in that client's chat, presented as the
+    # agent's. Placement is the agent's own publish only; a human publish is an
+    # operator-only report.
     from services import report_service
     _session(inbox_db, "s-alice-turn", ALICE)
     inflight["session"] = "s-alice-turn"
+    before = __import__("client_portal.db", fromlist=["x"]).count_unread_by_session(ALICE)
 
     assert report_service.resolve_report_session(
-        "exec-1", AGENT, ALICE, allow_main=False) == "s-alice-turn"
+        "exec-1", AGENT, ALICE, agent_publish=False) is None
+    from client_portal import db as pdb
+    assert pdb.count_unread_by_session(ALICE) == before
+    # The agent's own publish in the same turn still lands there.
+    assert report_service.resolve_report_session(
+        "exec-1", AGENT, ALICE, agent_publish=True) == "s-alice-turn"
 
 
 def test_a_human_publish_during_someone_elses_turn_is_not_stamped_anywhere(inbox_db, inflight):
@@ -605,7 +617,7 @@ def test_a_human_publish_during_someone_elses_turn_is_not_stamped_anywhere(inbox
     inflight["session"] = "s-bob-turn"
 
     assert report_service.resolve_report_session(
-        "exec-1", AGENT, ALICE, allow_main=False) is None
+        "exec-1", AGENT, ALICE, agent_publish=False) is None
     assert _main_of(inbox_db, ALICE) == []
 
 

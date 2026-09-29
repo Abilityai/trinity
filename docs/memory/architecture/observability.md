@@ -35,11 +35,11 @@ directly). Agents call the MCP `report` tool, which POSTs to `POST /api/agents/{
   retention sweeps → 429.
 - **Where an addressed report lands (ent#365, ent#610)**: the chat is resolved server-side
   at publish by `services/report_service.resolve_report_session(execution_id, agent_name,
-  audience, allow_main=...)` — never from the request. With no `audience` it is NULL (operator-only). With
-  one, the in-flight portal session of the publishing turn is kept **only if it belongs to
+  audience, agent_publish=...)` — never from the request. With no `audience`, or when the
+  agent is not publishing as itself (`agent_publish = current_user.agent_name == name`), it is
+  NULL (operator-only). Otherwise the in-flight portal session of the publishing turn is kept **only if it belongs to
   the addressee** (`client_portal.db.get_portal_session(sid, agent, audience)`); otherwise —
-  no execution, a non-portal turn, or another person's chat — **and only when the agent
-  publishes as itself** (`allow_main = current_user.agent_name == name`), the report is
+  no execution, a non-portal turn, or another person's chat — the report is
   stamped to the addressee's **Main** (`client_portal.service.ensure_main_session`, race-safe by the
   partial unique index) and — only after the report row is written
   (`report_service.touch_report_session`, so a failed insert never lists an empty Main) —
@@ -56,9 +56,10 @@ directly). Agents call the MCP `report` tool, which POSTs to `POST /api/agents/{
   shared with (30/min per agent, one Main per pair), never to an arbitrary email. **The
   channel is the agent's, not its sharers'** (/cso, ent#610): the route is gated by
   `AuthorizedAgent`, so every human the agent is shared with can publish as it; a human
-  publish keeps the addressee-owned in-flight chat and otherwise stays NULL, so one sharer
-  cannot mint or touch another person's Main. `allow_main` has no default — every call
-  site states it.
+  publish places no card at all, so one sharer cannot mint or touch another person's Main,
+  nor quote their LIVE turn (which `GET /api/agents/{a}/executions` lists to any sharer) to
+  plant a card — now an unread Inbox arrival — in the chat they are in (/cso round 3).
+  `agent_publish` has no default — every call site states it.
 - **Thin WS trigger**: `/ws` is `SCOPE_ALL`, and until ent#467 it was unfiltered, so the `agent_report` broadcast
   carries only `{agent_name, report_id, report_type, created_at}` — never `title`/`payload`
   (which can be sensitive). The frontend store refetches via the access-controlled REST

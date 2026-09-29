@@ -813,7 +813,7 @@ platform-written **`source = "completion:done" | "completion:failed"`** marker t
 
 **An addressed report always has a chat.** See `observability.md` → Agent Reports:
 an addressed report with no in-flight chat **of the addressee**, published by the
-agent itself (a human sharer's publish never falls back), is stamped to the
+agent itself (a human sharer's publish places no card at all), is stamped to the
 addressee's Main and that Main is touched (`added=0`). That is what makes the
 deliverable arm count it, gives the card an inline home and an anchor, and keeps
 the Main visible to `sidebarThreads` (which hides `is_main && !last_message_at`).

@@ -68,8 +68,9 @@ Two rules make the columns trustworthy:
   of. **Since ent#610** the in-flight chat is kept only if it belongs to the
   **addressee**; otherwise — no marker (a scheduled run, an expired turn), or a
   turn that was someone else's — and **only when the agent publishes as itself**
-  (an agent-scoped key for this agent; a human sharer's publish stays NULL, so
-  one sharer cannot reach another person's Main), the report is stamped to the
+  (an agent-scoped key for this agent; a human sharer's publish stays NULL —
+  in-flight chat included — so one sharer cannot reach another person's Main or
+  their live turn), the report is stamped to the
   addressee's **Main** (`services/report_service.resolve_report_session` →
   `ensure_main_session`; after the report row is written the route calls
   `report_service.touch_report_session` → `touch_portal_session(added=0)` so a
