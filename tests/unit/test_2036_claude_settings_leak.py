@@ -60,9 +60,10 @@ if backend_path not in sys.path:
 
 
 # The runtime artifacts observed leaking in a single real sync commit on an
-# affected agent. `settings.json` is the one that bricks; the rest are state.
+# affected agent. ent#708: `.claude/settings.json` — the one that bricked — is no
+# longer a path rule; its harmful CONTENT is kept out by a commit-time guard
+# (tests/unit/test_ent708_settings_json_guard.py), so it is not listed here.
 LEAKING_PATHS = (
-    ".claude/settings.json",
     ".claude/remote-settings.json",
     ".claude/policy-limits.json",
     ".claude/backups/session-2026-08-01.json",
@@ -232,7 +233,6 @@ def test_dockerfile_no_longer_installs_settings_into_the_repo_root():
 @pytest.mark.parametrize(
     "pattern",
     [
-        ".claude/settings.json",
         ".claude/remote-settings.json",
         ".claude/policy-limits.json",
         ".claude/backups/",
@@ -319,11 +319,11 @@ def test_existing_committed_settings_is_untracked_but_kept_on_disk(tmp_path, mon
         f"{still_tracked}"
     )
 
-    # The running agent must NOT lose its hooks: index-only removal.
-    assert (tmp_path / ".claude" / "settings.json").is_file(), (
-        "working-tree settings.json was deleted — the live agent would lose "
-        "its guardrail hook registration"
-    )
+    # Index-only removal: every untracked path is still on disk. (ent#708: the
+    # harmful-settings.json case — untracked, kept on disk — is owned by the
+    # commit guard, tests/unit/test_ent708_settings_json_guard.py.)
+    for rel in LEAKING_PATHS:
+        assert (tmp_path / rel).exists(), f"migration deleted {rel} from disk"
 
     dropped = [p for p in KEEP_PATHS if p not in tracked_after]
     assert not dropped, f"migration untracked legitimate agent source: {dropped}"
@@ -346,21 +346,18 @@ def test_migration_is_idempotent(tmp_path, monkeypatch):
     assert len(lines) == len(set(lines)), "duplicate .gitignore entries appended"
 
 
-def test_agent_can_override_with_a_negation(tmp_path, monkeypatch):
-    """The #1596 escape hatch still works: an agent that genuinely needs to
-    commit project settings negates the rule in its own `.gitignore`.
-
-    Asserted because the fix removes a file Claude Code also uses for
-    PROJECT-level settings — the trade-off is only acceptable if the opt-out
-    is real."""
+def test_project_settings_json_is_committable_without_a_negation(tmp_path, monkeypatch):
+    """ent#708: `.claude/settings.json` is Claude Code's PROJECT settings file.
+    The file-level rule made a template's hooks vanish on every deployed agent
+    unless it negated the rule; the rule is gone, so a clean copy stages with
+    the canonical `.gitignore` alone."""
     gs = _load_git_service(monkeypatch)
     git = _init_repo(tmp_path)
     _write(tmp_path, ".claude/settings.json")
 
     _run_shell(gs._build_gitignore_merge_command(str(tmp_path)), tmp_path)
-    with (tmp_path / ".gitignore").open("a") as fh:
-        fh.write("!.claude/settings.json\n")
 
     git("add", "-A")
     staged = set(git("diff", "--cached", "--name-only").stdout.splitlines())
     assert ".claude/settings.json" in staged
+    assert ".claude/settings.json" not in gs._GITIGNORE_PATTERNS

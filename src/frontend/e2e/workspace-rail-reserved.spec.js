@@ -63,6 +63,42 @@ test.describe('workspace rail column reservation (#2711)', () => {
       .toBeLessThanOrEqual(1)
   })
 
+  test('@interactive a rail left OPEN is reserved at its open width — no jump when it lands (#3060)', async ({ page }) => {
+    // Every arm above cold-loads with the rail COLLAPSED (the default), where
+    // reserved and settled are both 48px — so they could not see that the
+    // reservation ignored the persisted open state: 48px while loading, then
+    // the open width the moment the stage was ready, the conversation's right
+    // edge jumping left by the difference in one frame.
+    //
+    // Relative geometry only: the column's width and the stage's right edge are
+    // compared against THEMSELVES across the load, never against a pixel floor.
+    await page.setViewportSize({ width: 1440, height: 900 })
+    await page.addInitScript(() => {
+      localStorage.setItem('trinity-workspace-rail', JSON.stringify({ open: true, tab: 'work' }))
+    })
+    await page.goto('/workspace')
+    const column = page.getByTestId('ws-rail-column')
+    await column.waitFor({ timeout: 20000 })
+
+    const samples = []
+    for (let i = 0; i < 30; i++) {
+      samples.push(await page.evaluate(() => {
+        const c = document.querySelector('[data-testid="ws-rail-column"]')
+        if (!c) return null
+        const r = c.getBoundingClientRect()
+        return { w: Math.round(r.width), left: Math.round(r.left), reserved: c.dataset.reserved === 'true' }
+      }))
+      await page.waitForTimeout(100)
+    }
+    const seen = samples.filter(Boolean)
+    expect(seen.some((s) => s.reserved), 'never observed the reserved phase — the fixture loaded too fast to test this').toBeTruthy()
+    expect(seen.some((s) => !s.reserved), 'the rail never landed in the reserved column').toBeTruthy()
+    const widths = [...new Set(seen.map((s) => s.w))]
+    const lefts = [...new Set(seen.map((s) => s.left))]
+    expect(widths, `the column changed width across the load: ${widths.join(' → ')}px`).toHaveLength(1)
+    expect(lefts, `the stage's right edge moved across the load: ${lefts.join(' → ')}px`).toHaveLength(1)
+  })
+
   test('@interactive a direct load of /workspace/c/<session> does not shift the composer', async ({ page }) => {
     // The route the AC names. Every arm above loads bare `/workspace`, which on
     // an instance with threads REDIRECTS into a conversation — so those arms

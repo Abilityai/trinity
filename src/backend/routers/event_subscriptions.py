@@ -455,10 +455,30 @@ async def list_all_events(
     limit: int = Query(50, ge=1, le=500),
     current_user: User = Depends(get_current_user),
 ):
-    """List all events with optional filters."""
+    """List events the caller can access, with optional filters.
+
+    Scoped to the caller's accessible agents (trinity-enterprise#713): admins
+    are unrestricted; everyone else sees only events whose ``source_agent`` is
+    in their accessible roster (``db.get_accessible_agent_names``, the same
+    roster the ``/ws`` and ``/ws/events`` sockets filter ``agent_event`` with).
+    The roster is applied in SQL, so ``limit`` counts accessible events only.
+    A ``source_agent`` outside the caller's access returns one uniform 403.
+    """
+    # No email -> empty roster, never a lookup keyed on "" (same as /ws).
+    if current_user.role == "admin":
+        roster = None
+    elif current_user.email:
+        roster = db.get_accessible_agent_names(current_user.email, is_admin=False)
+    else:
+        roster = []
+    if source_agent:
+        assert_agent_access(current_user, source_agent)
+        if roster is not None and source_agent not in roster:
+            raise HTTPException(status_code=403, detail="Access denied")
     events = db.list_agent_events(
         source_agent=source_agent,
         event_type=event_type,
         limit=limit,
+        agent_names=roster,
     )
     return AgentEventList(count=len(events), events=events)

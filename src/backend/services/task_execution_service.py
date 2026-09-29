@@ -77,6 +77,7 @@ from services.platform_prompt_service import (
     get_platform_system_prompt,
     is_execution_context_enabled,
 )
+from db.write_params import ExecutionResult, TaskExecutionFields
 
 
 def _resolve_agent_runtime(agent_name: str) -> str:
@@ -964,11 +965,13 @@ async def _write_terminal_and_gate(
         won = db.update_execution_status(
             execution_id=execution_id,
             status=status,
-            error=error,
-            cost=cost,
-            context_used=context_used,
-            context_max=context_max,
-            retry_count=retry_count,
+            result=ExecutionResult(
+                error=error,
+                cost=cost,
+                context_used=context_used,
+                context_max=context_max,
+                retry_count=retry_count,
+            ),
         )
     if won:
         # #1804: the CAS winner owns the close. ``activity_status`` was dropped
@@ -1342,23 +1345,25 @@ class TaskExecutionService:
                 agent_name=agent_name,
                 message=message,
                 triggered_by=triggered_by,
-                source_user_id=source_user_id,
-                source_user_email=source_user_email,
-                source_agent_name=source_agent_name,
-                source_mcp_key_id=source_mcp_key_id,
-                source_mcp_key_name=source_mcp_key_name,
-                model_used=model,
-                fan_out_id=fan_out_id,
-                loop_id=loop_id,
-                subscription_id=_exec_sub_id,
-                open_canvas_id=open_canvas_id,
-                source_channel=source_channel,
-                source_channel_chat_id=source_channel_chat_id,
-                source_channel_thread=source_channel_thread,
-                # ent#457 review: the paired write. Accepting the kwarg without
-                # persisting it would leave `_resolve_portal` failing closed on
-                # every row this branch creates — the sync Workspace turn.
-                source_channel_client=source_channel_client,
+                fields=TaskExecutionFields(
+                    source_user_id=source_user_id,
+                    source_user_email=source_user_email,
+                    source_agent_name=source_agent_name,
+                    source_mcp_key_id=source_mcp_key_id,
+                    source_mcp_key_name=source_mcp_key_name,
+                    model_used=model,
+                    fan_out_id=fan_out_id,
+                    loop_id=loop_id,
+                    subscription_id=_exec_sub_id,
+                    open_canvas_id=open_canvas_id,
+                    source_channel=source_channel,
+                    source_channel_chat_id=source_channel_chat_id,
+                    source_channel_thread=source_channel_thread,
+                    # ent#457 review: the paired write. Accepting the kwarg without
+                    # persisting it would leave `_resolve_portal` failing closed on
+                    # every row this branch creates — the sync Workspace turn.
+                    source_channel_client=source_channel_client,
+                ),
             )
             execution_id = execution.id if execution else None
 
@@ -1595,7 +1600,9 @@ class TaskExecutionService:
                         won = db.update_execution_status(
                             execution_id=execution_id,
                             status=TaskExecutionStatus.FAILED,
-                            error="Execution cancelled (backend shutdown)",
+                            result=ExecutionResult(
+                                error="Execution cancelled (backend shutdown)",
+                            ),
                         )
                         # #1804: #767 closed the execution record here so the
                         # cleanup sweep wouldn't inflate ITS duration — but left
@@ -1733,7 +1740,9 @@ class TaskExecutionService:
                     db.update_execution_status(
                         execution_id=execution_id,
                         status=TaskExecutionStatus.FAILED,
-                        error=error_msg,
+                        result=ExecutionResult(
+                            error=error_msg,
+                        ),
                     )
                 return False, TaskExecutionResult(
                     execution_id=execution_id or "",
@@ -1756,7 +1765,9 @@ class TaskExecutionService:
                     db.update_execution_status(
                         execution_id=execution_id,
                         status=TaskExecutionStatus.FAILED,
-                        error=error_msg,
+                        result=ExecutionResult(
+                            error=error_msg,
+                        ),
                     )
                 return False, TaskExecutionResult(
                     execution_id=execution_id or "",
@@ -1779,7 +1790,9 @@ class TaskExecutionService:
                     db.update_execution_status(
                         execution_id=execution_id,
                         status=TaskExecutionStatus.FAILED,
-                        error=error_msg,
+                        result=ExecutionResult(
+                            error=error_msg,
+                        ),
                     )
                 return False, TaskExecutionResult(
                     execution_id=execution_id or "",
@@ -2789,16 +2802,18 @@ class TaskExecutionService:
                 won = db.update_execution_status(
                     execution_id=eid,
                     status=TaskExecutionStatus.SUCCESS,
-                    response=sanitized_resp,
-                    context_used=context_used if context_used > 0 else None,
-                    context_max=metadata.get("context_window") or DEFAULT_CONTEXT_WINDOW,
-                    cost=total_cost,
-                    tool_calls=tool_calls_json,
-                    execution_log=execution_log_json,
-                    claude_session_id=claude_session_id,
-                    compact_metadata=compact_metadata_json,
-                    retry_count=envelope.retry_count or None,
-                    turn_integrity=turn_integrity_json,
+                    result=ExecutionResult(
+                        response=sanitized_resp,
+                        context_used=context_used if context_used > 0 else None,
+                        context_max=metadata.get("context_window") or DEFAULT_CONTEXT_WINDOW,
+                        cost=total_cost,
+                        tool_calls=tool_calls_json,
+                        execution_log=execution_log_json,
+                        claude_session_id=claude_session_id,
+                        compact_metadata=compact_metadata_json,
+                        retry_count=envelope.retry_count or None,
+                        turn_integrity=turn_integrity_json,
+                    ),
                 )
                 if not won:
                     # #671/H4: SUCCESS lost the CAS — only to a CANCELLED row.
@@ -2947,17 +2962,19 @@ class TaskExecutionService:
                 # finalizes CANCELLED (and any future non-success terminal). A
                 # no-op for every current caller — all still pass FAILED.
                 status=envelope.status,
-                error=envelope.error,
-                cost=salvage_cost,
-                context_used=salvage_context,
-                context_max=salvage_context_max,
-                # #1853: mirror SUCCESS — persist the sanitized transcript, the
-                # tool_calls summary, and the session id so the failing row is
-                # diagnosable via the same API as a successful one.
-                execution_log=salvage_execution_log_json,
-                tool_calls=salvage_tool_calls_json,
-                claude_session_id=salvage_session_id,
-                retry_count=envelope.retry_count or None,
+                result=ExecutionResult(
+                    error=envelope.error,
+                    cost=salvage_cost,
+                    context_used=salvage_context,
+                    context_max=salvage_context_max,
+                    # #1853: mirror SUCCESS — persist the sanitized transcript, the
+                    # tool_calls summary, and the session id so the failing row is
+                    # diagnosable via the same API as a successful one.
+                    execution_log=salvage_execution_log_json,
+                    tool_calls=salvage_tool_calls_json,
+                    claude_session_id=salvage_session_id,
+                    retry_count=envelope.retry_count or None,
+                ),
             )
         # #671/H4: complete the activity, record the AUTH breaker outcome, and
         # release the slot ONLY if this writer won the CAS.

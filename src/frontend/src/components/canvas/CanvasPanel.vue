@@ -17,112 +17,123 @@
     </div>
 
     <template v-else>
-      <!-- ent#553 — the list has to stay usable at fifty. Search appears only
-           once the pile is real, the strip is height-bounded so a long list
-           scrolls WITHOUT the rail losing its other tabs (AC 4), and manage
-           mode is opt-in so the ordinary read stays a single click. -->
-      <div v-if="showSearch || headroom.label || canManage" class="mb-2 flex flex-wrap items-center gap-2">
+      <!-- ent#724 — ONE fixed-height control row above the canvas (design-system
+           principle 30): the dropdown, then search and headroom when they
+           apply, then Manage. It renders the same row for 1 canvas and for 40,
+           so the canvas body below starts at the same y on every agent. The
+           chip strip it replaces grew a row per few canvases and shoved the
+           canvas down by however many there were. -->
+      <div class="mb-2 flex h-9 items-center gap-2" data-testid="canvas-control-row">
+        <BaseSelect
+          class="min-w-0 flex-1"
+          :model-value="selectedId || ''"
+          :disabled="!selectorEnabled"
+          aria-label="Canvas"
+          data-testid="canvas-select"
+          @update:model-value="select"
+        >
+          <option
+            v-for="c in options"
+            :key="c.canvas_id"
+            :value="c.canvas_id"
+            :title="c.title || c.canvas_id"
+            :data-canvas-id="c.canvas_id"
+          >{{ canvasOptionLabel(c) }}</option>
+        </BaseSelect>
         <input
           v-if="showSearch"
           v-model="query"
           type="search"
-          placeholder="Search canvases…"
+          placeholder="Search…"
+          aria-label="Search canvases"
           data-testid="canvas-search"
-          class="min-w-0 flex-1 rounded-lg border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-900 px-2.5 py-1 text-xs"
+          class="h-9 w-24 shrink-0 rounded-lg border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-900 px-2.5 text-xs"
         />
-        <span v-if="headroom.label" class="text-[11px] text-gray-500 dark:text-gray-400" data-testid="canvas-headroom">
+        <span v-if="headroom.label" class="shrink-0 text-[11px] text-gray-500 dark:text-gray-400" data-testid="canvas-headroom">
           {{ headroom.label }}
         </span>
-        <button
+        <BaseButton
           v-if="canManage"
-          class="rounded-lg border border-gray-300 dark:border-gray-700 px-2.5 py-1 text-xs font-medium hover:bg-gray-100 dark:hover:bg-gray-800"
+          variant="secondary"
+          size="sm"
+          class="shrink-0"
+          :aria-pressed="manage"
+          aria-controls="canvas-manage-region"
           data-testid="canvas-manage-toggle"
           @click="manage = !manage; selectedIds = []"
-        >{{ manage ? 'Done' : 'Manage' }}</button>
+        >{{ manage ? 'Done' : 'Manage' }}</BaseButton>
       </div>
 
-      <!-- Selector only when there is a choice to make — and ALWAYS when a
-           search has a hit (`canvasSelectorVisible`): at exactly one match the
-           old `visible.length > 1` gate hid the strip with the previous canvas
-           still on screen. -->
+      <!-- Manage opens BELOW the row as a bounded list (principle 29): the row
+           never moves, and the region eases open rather than snapping the
+           canvas down. The grid-rows 0fr→1fr transition animates to the list's
+           own height without measuring it. Selection is untouched, so Done
+           returns to the canvas that was open. -->
       <div
-        v-if="selectorVisible"
-        class="mb-3 flex max-h-48 flex-wrap gap-1.5 overflow-y-auto"
-        data-testid="canvas-select"
+        id="canvas-manage-region"
+        class="grid transition-[grid-template-rows] duration-200 ease-out motion-reduce:transition-none"
+        :class="manage ? 'grid-rows-[1fr]' : 'grid-rows-[0fr]'"
+        :aria-hidden="!manage"
+        :inert="!manage"
       >
-        <template v-if="!manage">
-          <button
-            v-for="c in visible"
-            :key="c.canvas_id"
-            :data-canvas-id="c.canvas_id"
-            :class="[
-              'rounded-full px-3 py-1 text-xs font-medium border transition-colors',
-              c.canvas_id === selectedId
-                ? 'bg-action-primary-600 text-white border-action-primary-600'
-                : 'border-gray-300 dark:border-gray-700 text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800',
-            ]"
-            @click="select(c.canvas_id)"
-          >
-            <span v-if="c.pinned" aria-hidden="true">📌 </span>{{ c.title || c.canvas_id }}
-          </button>
-        </template>
+        <div class="min-h-0 overflow-hidden">
+          <!-- Manage mode: one row per canvas, each carrying its own age and
+               stale mark so the choice of what to retire is informed. -->
+          <ul v-if="manage" class="mb-2 max-h-48 space-y-1 overflow-y-auto" data-testid="canvas-manage-list">
+            <li
+              v-for="c in visible"
+              :key="c.canvas_id"
+              class="flex items-center gap-2 rounded-lg border border-gray-200 dark:border-gray-800 px-2 py-1.5"
+              :data-canvas-row="c.canvas_id"
+            >
+              <input
+                type="checkbox"
+                :checked="selection.ids.includes(c.canvas_id)"
+                :aria-label="`Select ${c.title || c.canvas_id}`"
+                @change="toggleSelected(c.canvas_id)"
+              />
+              <span class="min-w-0 flex-1 truncate text-xs" :title="c.title || c.canvas_id">{{ c.title || c.canvas_id }}</span>
+              <span class="shrink-0 text-[11px] text-gray-500 dark:text-gray-400">{{ ageOf(c) }}</span>
+              <span
+                v-if="c.stale"
+                class="shrink-0 rounded-full bg-status-warning-100 px-1.5 text-[10px] text-status-warning-700 dark:bg-status-warning-500/16 dark:text-status-warning-300"
+              >stale</span>
+              <button
+                class="shrink-0 rounded px-1 text-xs hover:bg-gray-100 dark:hover:bg-gray-800"
+                :disabled="busy"
+                :aria-pressed="!!c.pinned"
+                :title="c.pinned ? 'Unpin' : 'Pin to the top'"
+                :data-canvas-pin="c.canvas_id"
+                @click="togglePin(c)"
+              >{{ c.pinned ? '📌' : '📍' }}</button>
+              <button
+                class="shrink-0 rounded px-1 text-xs text-status-danger-600 hover:bg-status-danger-50 dark:hover:bg-status-danger-500/16"
+                :disabled="busy"
+                title="Delete this canvas"
+                :data-canvas-delete="c.canvas_id"
+                @click="removeOne(c)"
+              >Delete</button>
+            </li>
+          </ul>
 
-        <!-- Manage mode: one row per canvas, each carrying its own age and
-             stale mark so the choice of what to retire is informed. -->
-        <ul v-else class="w-full space-y-1" data-testid="canvas-manage-list">
-          <li
-            v-for="c in visible"
-            :key="c.canvas_id"
-            class="flex items-center gap-2 rounded-lg border border-gray-200 dark:border-gray-800 px-2 py-1.5"
-            :data-canvas-row="c.canvas_id"
+          <!-- The bulk bar names the count, and only one confirmation follows. -->
+          <div
+            v-if="manage && selection.any"
+            class="mb-2 flex items-center gap-2 rounded-lg bg-gray-100 dark:bg-gray-800 px-3 py-2"
+            data-testid="canvas-bulk-bar"
           >
-            <input
-              type="checkbox"
-              :checked="selection.ids.includes(c.canvas_id)"
-              :aria-label="`Select ${c.title || c.canvas_id}`"
-              @change="toggleSelected(c.canvas_id)"
-            />
-            <span class="min-w-0 flex-1 truncate text-xs">{{ c.title || c.canvas_id }}</span>
-            <span class="shrink-0 text-[11px] text-gray-500 dark:text-gray-400">{{ ageOf(c) }}</span>
-            <span
-              v-if="c.stale"
-              class="shrink-0 rounded-full bg-status-warning-100 px-1.5 text-[10px] text-status-warning-700 dark:bg-status-warning-500/16 dark:text-status-warning-300"
-            >stale</span>
+            <span class="text-xs">{{ selection.count }} selected</span>
+            <button class="text-xs underline" @click="toggleAll">
+              {{ selection.all ? 'Clear' : 'Select all' }}
+            </button>
             <button
-              class="shrink-0 rounded px-1 text-xs hover:bg-gray-100 dark:hover:bg-gray-800"
+              class="ml-auto rounded-lg bg-status-danger-600 px-2.5 py-1 text-xs font-medium text-white disabled:opacity-50"
               :disabled="busy"
-              :aria-pressed="!!c.pinned"
-              :title="c.pinned ? 'Unpin' : 'Pin to the top'"
-              :data-canvas-pin="c.canvas_id"
-              @click="togglePin(c)"
-            >{{ c.pinned ? '📌' : '📍' }}</button>
-            <button
-              class="shrink-0 rounded px-1 text-xs text-status-danger-600 hover:bg-status-danger-50 dark:hover:bg-status-danger-500/16"
-              :disabled="busy"
-              title="Delete this canvas"
-              :data-canvas-delete="c.canvas_id"
-              @click="removeOne(c)"
-            >Delete</button>
-          </li>
-        </ul>
-      </div>
-
-      <!-- The bulk bar names the count, and only one confirmation follows. -->
-      <div
-        v-if="manage && selection.any"
-        class="mb-3 flex items-center gap-2 rounded-lg bg-gray-100 dark:bg-gray-800 px-3 py-2"
-        data-testid="canvas-bulk-bar"
-      >
-        <span class="text-xs">{{ selection.count }} selected</span>
-        <button class="text-xs underline" @click="toggleAll">
-          {{ selection.all ? 'Clear' : 'Select all' }}
-        </button>
-        <button
-          class="ml-auto rounded-lg bg-status-danger-600 px-2.5 py-1 text-xs font-medium text-white disabled:opacity-50"
-          :disabled="busy"
-          data-testid="canvas-bulk-delete"
-          @click="removeSelected"
-        >Delete selected</button>
+              data-testid="canvas-bulk-delete"
+              @click="removeSelected"
+            >Delete selected</button>
+          </div>
+        </div>
       </div>
 
       <p v-if="actionError" class="mb-2 text-xs text-status-danger-600 dark:text-status-danger-400" data-testid="canvas-action-error">
@@ -263,6 +274,8 @@
 
 <script setup>
 import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
+import BaseSelect from '../base/BaseSelect.vue'
+import BaseButton from '../base/BaseButton.vue'
 import CanvasBlock from './CanvasBlock.vue'
 import CanvasKit from './CanvasKit.vue'
 import { placeBlocks } from './canvasLayouts'
@@ -272,6 +285,7 @@ import {
   bulkDeleteOutcome,
   bulkDeletePrompt,
   canvasAutoSelect,
+  canvasOptionLabel,
   canvasSearchVisible,
   canvasHeadroom,
   canvasSelectorVisible,
@@ -336,9 +350,20 @@ const visible = computed(() => filterCanvases(ordered.value, query.value))
 const showSearch = computed(() => canvasSearchVisible(ordered.value.length, SEARCH_THRESHOLD, query.value))
 const headroom = computed(() => canvasHeadroom(props.canvases.length, props.canvasLimit))
 const selection = computed(() => selectionState(selectedIds.value, visible.value))
-const selectorVisible = computed(() => canvasSelectorVisible({
-  visible: visible.value.length, manage: manage.value, query: query.value,
+// ent#724: the dropdown is ALWAYS rendered (the row never changes shape); the
+// ent#553 gate now decides whether it is enabled — a single canvas with no
+// search reads as a disabled one-option select, never a different layout.
+const selectorEnabled = computed(() => canvasSelectorVisible({
+  visible: visible.value.length, manage: false, query: query.value,
 }))
+// The open canvas stays an option even when a search filters it out, so the
+// select never shows a blank while the canvas below still renders.
+const options = computed(() => {
+  const rows = visible.value
+  if (!selectedId.value || rows.some((c) => c.canvas_id === selectedId.value)) return rows
+  const open = ordered.value.find((c) => c.canvas_id === selectedId.value)
+  return open ? [open, ...rows] : rows
+})
 const canManage = computed(() => props.canManage && !!props.deleteCanvas)
 
 function ageOf(c) { return c?.updated_at ? relativeTime(c.updated_at) : 'never updated' }

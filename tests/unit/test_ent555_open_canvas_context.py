@@ -27,6 +27,7 @@ wrote to when nobody named one (AC #7).
 from __future__ import annotations
 
 import pytest
+from db.write_params import TaskExecutionFields
 
 
 @pytest.fixture()
@@ -65,9 +66,14 @@ def _canvas(agent="mira", canvas_id="open-items", audience="roster"):
 
 def _turn(agent="mira", open_canvas_id=None):
     from database import db
-    return db.create_task_execution(agent_name=agent, message="add a column to this",
-                                    triggered_by="public",
-                                    open_canvas_id=open_canvas_id)
+    return db.create_task_execution(
+        agent_name=agent,
+        message="add a column to this",
+        triggered_by="public",
+        fields=TaskExecutionFields(
+            open_canvas_id=open_canvas_id,
+        ),
+    )
 
 
 # --- what may be stamped (the write side) -----------------------------------

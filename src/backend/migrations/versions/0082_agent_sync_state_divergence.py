@@ -19,15 +19,15 @@ Mirrors the SQLite ``agent_sync_state_divergence`` migration in
 ``0001_baseline``'s reuse of the schema DDL; ``ADD COLUMN IF NOT EXISTS`` keeps
 this a no-op there.
 
-Revision ID: 0081_agent_sync_state_divergence
-Revises: 0080_agent_skill_sets
+Revision ID: 0082_agent_sync_state_divergence
+Revises: 0081_portal_messages_unread_idx
 Create Date: 2026-09-27
 """
 from alembic import op
 
 # revision identifiers, used by Alembic.
-revision = "0081_agent_sync_state_divergence"
-down_revision = "0080_agent_skill_sets"
+revision = "0082_agent_sync_state_divergence"
+down_revision = "0081_portal_messages_unread_idx"
 branch_labels = None
 depends_on = None
 

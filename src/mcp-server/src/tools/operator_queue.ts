@@ -9,6 +9,9 @@
  *                                 agent- and system-scoped keys (#611)
  *   - get_my_ask                — an agent reads back its OWN ask by the
  *                                 request_id it chose (#611, self-acting)
+ *   - ask_operator              — an agent raises an ask as ITSELF, validated
+ *                                 at the call, with a receipt (#611,
+ *                                 self-acting; the queue file is the fallback)
  *
  * Access control crux: the backend resolves an agent-scoped MCP key to its
  * OWNER and filters by the owner's accessible agents — it does NOT apply
@@ -21,8 +24,8 @@
  */
 
 import { z } from "zod";
-import { TrinityClient } from "../client.js";
-import type { McpAuthContext } from "../types.js";
+import { ApiError, TrinityClient } from "../client.js";
+import type { McpAuthContext, OperatorAskCreate } from "../types.js";
 import { accessDenied, resolveActingAgent } from "../access.js";
 
 /**
@@ -38,6 +41,95 @@ export function filterQueueItemsForAgentScope<T extends { agent_name: string }>(
 ): T[] {
   return items.filter((item) => allowedNames.has(item.agent_name));
 }
+
+/**
+ * trinity-enterprise#611: a raise refusal as the backend named it. The route
+ * answers `detail: {code, message, …extras}` (422 / 429 / 403), and the agent
+ * gets exactly that, so it can act on the code. FastAPI's own request
+ * validation answers `detail: [{loc, msg}]` with no code, reported as
+ * `invalid_ask`. A failure that is not an API answer keeps its message.
+ */
+export function askRefusal(error: unknown): Record<string, unknown> {
+  if (!(error instanceof ApiError)) {
+    return { success: false, error: error instanceof Error ? error.message : String(error) };
+  }
+  let detail: unknown;
+  try {
+    detail = (JSON.parse(error.body) as { detail?: unknown })?.detail;
+  } catch {
+    detail = undefined;
+  }
+  if (detail && typeof detail === "object" && !Array.isArray(detail)
+      && typeof (detail as { code?: unknown }).code === "string") {
+    return { success: false, status: error.status, ...(detail as Record<string, unknown>) };
+  }
+  if (Array.isArray(detail)) {
+    const message = detail
+      .map((d: { loc?: unknown; msg?: unknown }) =>
+        [Array.isArray(d?.loc) ? d.loc.slice(1).join(".") : "", d?.msg].filter(Boolean).join(": "))
+      .join("; ");
+    return { success: false, status: error.status, code: "invalid_ask", message: message || error.body };
+  }
+  return { success: false, status: error.status, error: typeof detail === "string" ? detail : error.body };
+}
+
+/**
+ * A free-form JSON object an agent may fill with any keys. A union with null on
+ * purpose: fastmcp publishes every tool through xsschema's `strictJsonSchema`,
+ * which stamps `additionalProperties: false` on each object-typed property —
+ * a plain `z.record` included — so the published schema would read "no keys
+ * allowed" to the model and to any client that enforces it. The walker skips a
+ * property whose schema is an `anyOf`, so the record keeps its "any keys".
+ * `null` means the same as leaving the field out (the backend drops it).
+ */
+const anyJsonObject = () => z.union([z.record(z.string(), z.unknown()), z.null()]);
+
+/** The ask an agent raises — every field the backend's `OperatorAskCreate` takes. */
+const askOperatorParameters = z.object({
+  request_id: z
+    .string()
+    .min(1)
+    .max(256)
+    .describe(
+      "An id YOU choose for this ask: letters, digits, '.', '_', ':' or '-'. Raising again with the same id returns the first receipt instead of a second ask.",
+    ),
+  title: z.string().min(1).describe("One line the person reads first (up to 300 characters)."),
+  question: z
+    .string()
+    .optional()
+    .describe("The question or the decision you need, with what the person must know to answer (up to 4000 characters)."),
+  type: z
+    .enum(["approval", "question", "alert"])
+    .optional()
+    .describe("approval (needs options), question (the default) or alert (goes to the operators by default)."),
+  priority: z.enum(["critical", "high", "medium", "low"]).optional().describe("Defaults to medium."),
+  options: z
+    .array(z.string().min(1))
+    .optional()
+    .describe("The choices a person picks from. Required for an approval."),
+  context: anyJsonObject()
+    .optional()
+    .describe("Supporting data shown with the ask (JSON, up to 8 KB)."),
+  proposal: anyJsonObject()
+    .optional()
+    .describe("For an approval: the exact action you will take if it is approved, frozen with the ask (JSON, up to 8 KB)."),
+  to: z
+    .enum(["primary", "approver", "viewer", "operator"])
+    .optional()
+    .describe(
+      "Who should answer: primary (your owner; the default for approval and question) or operator (the platform's operators; the default for alert). approver and viewer are refused until someone fills them.",
+    ),
+  expires_at: z
+    .string()
+    .optional()
+    .describe("An ISO-8601 time WITH a timezone, at least 15 minutes out, e.g. 2026-10-01T09:00:00Z. When it passes, the ask ends as denied by timeout."),
+  supersedes_expired: z
+    .string()
+    .min(1)
+    .max(256)
+    .optional()
+    .describe("When re-asking after one of your asks expired: that ask's request_id."),
+});
 
 export function createOperatorQueueTools(
   client: TrinityClient,
@@ -299,6 +391,69 @@ export function createOperatorQueueTools(
           const msg = error instanceof Error ? error.message : String(error);
           console.error(`[get_my_ask] error: ${msg}`);
           return JSON.stringify({ error: msg }, null, 2);
+        }
+      },
+    },
+
+    // ========================================================================
+    // ask_operator (trinity-enterprise#611)
+    // ========================================================================
+    askOperator: {
+      name: "ask_operator",
+      description:
+        "Ask a person for a decision, or tell the operators something, as YOURSELF. " +
+        "The ask is validated, stored and shown at once in the Operating Room (and, " +
+        "when it goes to your owner, in their Workspace), and you get a receipt: " +
+        "status (created | replayed), id, to_role (the role it went to, never a " +
+        "person's email), resolved (false when nobody could be named and it went to " +
+        "the operators), ask_status, and wakes_on_ending (true when your owner has " +
+        "turned on waking you when your asks end). Idempotent by request_id: raising again with the " +
+        "same request_id returns the first receipt as status replayed, with differs " +
+        "naming any field that is not the same, so a retry never makes a second ask; " +
+        "use a NEW request_id for a new ask. An ask ends when a person answers or " +
+        "cancels it, or at expires_at: an expired ask is denied by timeout, so do not " +
+        "re-ask the same action without new information, and when you do re-ask, set " +
+        "supersedes_expired to the expired ask's request_id (repeating its proposal " +
+        "without that link is refused with reask_requires_link). Learn how it ended " +
+        "from the wake when wakes_on_ending is true, or read it any time with " +
+        "get_my_ask. A refusal comes back as {success: false, status, code, message}: " +
+        "422 for a malformed ask (invalid_*, field_too_large, options_required, " +
+        "role_unassigned, reask_requires_link), 429 rate_limited or queue_full (too " +
+        "many open asks: wait for some to end). Acts as the agent your key belongs " +
+        "to; there is no agent parameter.",
+      parameters: askOperatorParameters,
+      execute: async (
+        params: OperatorAskCreate,
+        context?: { session?: McpAuthContext },
+      ) => {
+        const authContext = context?.session;
+        let agentName: string;
+        try {
+          agentName = resolveActingAgent(authContext, "The ask_operator tool");
+        } catch (error) {
+          return JSON.stringify(
+            { success: false, error: error instanceof Error ? error.message : String(error) },
+            null,
+            2,
+          );
+        }
+        // Only the declared fields travel: the backend refuses unknown ones
+        // (`extra="forbid"`), and an agent_name smuggled into the arguments
+        // must never reach it.
+        const given = params as unknown as Record<string, unknown>;
+        const body = Object.fromEntries(
+          Object.keys(askOperatorParameters.shape)
+            .filter((k) => given[k] !== undefined)
+            .map((k) => [k, given[k]]),
+        ) as unknown as OperatorAskCreate;
+        const apiClient = getClient(authContext);
+        try {
+          const receipt = await apiClient.raiseAsk(agentName, body);
+          return JSON.stringify(receipt, null, 2);
+        } catch (error) {
+          const refusal = askRefusal(error);
+          console.error(`[ask_operator] refused: ${String(refusal.code ?? refusal.error)}`);
+          return JSON.stringify(refusal, null, 2);
         }
       },
     },

@@ -241,9 +241,9 @@ app.include_router(mcp_keys_router)
 
 | Method | Endpoint | Handler | Line | Description |
 |--------|----------|---------|------|-------------|
-| `POST` | `/api/mcp/keys` | `create_mcp_api_key_endpoint()` | `mcp_keys.py:14-34` | Create new API key |
+| `POST` | `/api/mcp/keys` | `create_mcp_api_key_endpoint()` | `mcp_keys.py:25` | Create new API key — **signed-in session only** (`Depends(require_interactive)`, every scope) |
 | `GET` | `/api/mcp/keys` | `list_mcp_api_keys_endpoint()` | `mcp_keys.py:37-51` | List user's keys (admin sees all) |
-| `POST` | `/api/mcp/keys/ensure-default` | `ensure_default_mcp_api_key()` | `mcp_keys.py:54-96` | Auto-create default key |
+| `POST` | `/api/mcp/keys/ensure-default` | `ensure_default_mcp_api_key()` | `mcp_keys.py:114` | Auto-create default key — **signed-in session only**; audited as `key_create` |
 | `GET` | `/api/mcp/keys/{key_id}` | `get_mcp_api_key_endpoint()` | `mcp_keys.py:99-111` | Get single key details |
 | `POST` | `/api/mcp/keys/{key_id}/revoke` | `revoke_mcp_api_key_endpoint()` | `mcp_keys.py:114-126` | Revoke (deactivate) key |
 | `DELETE` | `/api/mcp/keys/{key_id}` | `delete_mcp_api_key_endpoint()` | `mcp_keys.py:129-141` | Permanently delete key |
@@ -253,18 +253,26 @@ app.include_router(mcp_keys_router)
 
 #### Create API Key (POST /api/mcp/keys)
 ```python
-# mcp_keys.py:14-34
+# mcp_keys.py:25
 @router.post("/keys", response_model=McpApiKeyWithSecret)
 async def create_mcp_api_key_endpoint(
     key_data: McpApiKeyCreate,
     request: Request,
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(require_interactive)
 ):
+    # scope != "user": ops/portal_delegate only, admin-only (see Key scopes)
     api_key = db.create_mcp_api_key(current_user.username, key_data)
     if not api_key:
         raise HTTPException(status_code=400, detail="Failed to create API key")
+    await platform_audit_service.log(... event_action="key_create" ...)
     return api_key
 ```
+
+**Who may create a key.** Only a signed-in (JWT) session, for every scope
+(`Depends(require_interactive)`, `dependencies.py`). A request authenticated with
+any MCP key gets a 403 and nothing is written. A credential minter is at least as
+strict as the principal it produces. The UI (`McpKeysTab.vue`) and the CLI
+(`trinity login`) both create keys on the login JWT.
 
 #### List API Keys (GET /api/mcp/keys)
 ```python
@@ -287,7 +295,7 @@ async def list_mcp_api_keys_endpoint(
 @router.post("/keys/ensure-default", response_model=McpApiKeyWithSecret | None)
 async def ensure_default_mcp_api_key(
     request: Request,
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(require_interactive)   # signed-in session only
 ):
     # Check if user has any active user-scoped keys
     keys = db.list_mcp_api_keys(current_user.username)
@@ -301,8 +309,14 @@ async def ensure_default_mcp_api_key(
         name="Default MCP Key",
         description="Auto-generated key for MCP access"
     )
-    return db.create_mcp_api_key(current_user.username, key_data)
+    api_key = db.create_mcp_api_key(current_user.username, key_data)
+    await platform_audit_service.log(... event_action="key_create" ...)  # same row as POST /keys
+    return api_key
 ```
+
+The created default key is audited exactly like `POST /keys` (`key_create`, target
+= the new key id, `details.scope = "user"`). When a user-scoped key already
+exists nothing is created and nothing is audited.
 
 #### Validate API Key (POST /api/mcp/validate)
 ```python
@@ -534,6 +548,7 @@ const server = new FastMCP({
 | Revoke not found | 404 | MCP API key not found | `revoke_mcp_api_key_endpoint` |
 | Delete not found | 404 | MCP API key not found | `delete_mcp_api_key_endpoint` |
 | Creation failed | 400 | Failed to create API key | `create_mcp_api_key_endpoint` |
+| Create / ensure-default with an MCP key | 403 | This operation requires an interactive session; MCP API keys cannot perform it | `require_interactive` |
 | Server error | 500 | Failed to [action] MCP API key: {error} | All endpoints |
 
 ---
@@ -726,3 +741,4 @@ accessible_agents = db.get_accessible_agent_names(user_email, is_admin)
 | 2026-01-13 | Initial documentation |
 | 2026-02-05 | **Trinity Connect Authentication**: Added section documenting MCP API key usage for `/ws/events` WebSocket authentication. Keys provide user identity for server-side event filtering. |
 | 2026-02-20 | **NOTIF-003 Agent Attribution**: Added "Agent-Scoped Key Authentication Context" section. Agent-scoped keys now populate `User.agent_name` field during authentication (dependencies.py:147-154). Enables correct attribution for notifications, activity tracking, and audit logging. |
+| 2026-09-28 | **Creating a key requires a signed-in session**: `POST /api/mcp/keys` (every scope) and `POST /api/mcp/keys/ensure-default` take `Depends(require_interactive)`; ensure-default now writes the `key_create` audit row. Test: `tests/unit/test_mcp_key_creation_requires_session.py`. |

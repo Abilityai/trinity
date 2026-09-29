@@ -32,6 +32,7 @@ from services import chat_persistence_service
 import services.dispatch_admission_service as _DISPATCH
 import services.chat_execution_service as _CE
 from models import ParallelTaskRequest, TaskExecutionStatus
+from unit._write_params import flat_kwargs
 
 _MOD = sys.modules[ENDPOINT.__module__]  # routers.chat (endpoint stays here)
 
@@ -321,7 +322,7 @@ def test_1578_reserved_event_sync_sink():
          _env() as m:
         _call(ParallelTaskRequest(message="hi"),
               x_event_trigger="agent.task", x_internal_secret="secret")
-    assert m["db"].create_task_execution.call_args.kwargs["triggered_by"] == "event"
+    assert flat_kwargs(m["db"].create_task_execution.call_args)["triggered_by"] == "event"
     assert m["task_service"].execute_task.call_args.kwargs["triggered_by"] == "event"
 
 
@@ -335,7 +336,7 @@ def test_1578_reserved_event_async_override_and_backlog_sink():
         _call(ParallelTaskRequest(message="hi", async_mode=True),
               x_event_trigger="agent.task", x_internal_secret="secret")
     # create row
-    assert m["db"].create_task_execution.call_args.kwargs["triggered_by"] == "event"
+    assert flat_kwargs(m["db"].create_task_execution.call_args)["triggered_by"] == "event"
     # backlog payload (overflow_payload arg to acquire)
     payload = m["cap"].acquire.call_args.kwargs["overflow_payload"]
     assert payload.triggered_by == "event"
@@ -352,4 +353,4 @@ def test_1578_spoofed_event_trigger_without_secret_ignored():
          _env() as m:
         _call(ParallelTaskRequest(message="hi"),
               x_event_trigger="agent.task", x_internal_secret="wrong")
-    assert m["db"].create_task_execution.call_args.kwargs["triggered_by"] == "manual"
+    assert flat_kwargs(m["db"].create_task_execution.call_args)["triggered_by"] == "manual"
