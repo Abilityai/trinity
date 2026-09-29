@@ -158,7 +158,8 @@ def _reject_timeout_above_cap(agent_name: str, requested_seconds: Optional[int])
                 "message": (
                     f"Loop timeout_per_run {requested_seconds}s exceeds agent "
                     f"execution_timeout_seconds {cap}s. Raise the agent cap "
-                    f"first via PUT /api/agents/{agent_name}/timeout."
+                    f"first: the agent's owner sets it via PUT /api/agents/{agent_name}/timeout "
+                    "(an agent key cannot)."
                 ),
                 "agent_cap_seconds": cap,
                 "requested_seconds": requested_seconds,
