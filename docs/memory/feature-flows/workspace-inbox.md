@@ -188,6 +188,21 @@ GET /api/enterprise/client-portal/chat-state?previews=true      (only while the 
       excerpt: credential-sanitised, markdown-stripped, ≤160; a deliverable's excerpt = its title
       response_model_exclude_none → no preview = keys absent; roster read failure → raises (fail loud)
 
+GET /api/enterprise/client-portal/asks/{item_id}/context        (PR A2 §3g L7 — one per selected ask)
+  rate_limiter.enforce("portal_ask_context:{email}", 120, 60)
+  asks/service.get_ask_context(item_id, email, is_platform)
+    _owned_ask(strict=True)   lookup + addressee + _VISIBLE_KINDS + roster → uniform 404;
+                              roster outage → AsksUnavailable → 503 (answer_ask shares it, non-strict)
+    _validated_run            db.get_execution(row.execution_id — AGENT-written): same agent AND
+                              started_at ≤ created_at ≤ (completed_at|now)+300s (parsed) AND
+                              schedule/manual or the viewer's own (email / a thread they hold)
+    _run_view                 kind + label (schedule NAME for platform only, T12) + started_at
+    _origin                   the run's portal thread if get_portal_session(chat, agent, email):
+                              get_portal_messages(limit=3, before=created_at) → _arrival_excerpt(280);
+                              else the ask's own chat (workspace_session_id), no excerpt
+    _recent_answers           the viewer's own 3 newest answered asks from this agent (7 days)
+  → WorkspaceAskContext (asks/models.py): no cost, no execution_id; any read failure → 503
+
 Where arrivals come from
   a turn's reply / an agent-started message         → enterprise_portal_messages (role=assistant)
   a delivered run (portal turn, delivery schedule)  → channel_completion_report → source="completion:done|failed"
@@ -288,6 +303,7 @@ table, no migration. The report publish may mint the addressee's Main
 | Backend | `src/backend/client_portal/service.py` | `get_chat_state(email, unread=None)` — the optional precomputed map only |
 | Backend | `src/backend/client_portal/router.py` | `GET /chat-state?previews=` (`response_model_exclude_none`) |
 | Backend | `src/backend/client_portal/models.py` | `PortalChatArrival` (no `cost`), `PortalChatStateEntry.latest` / `first_unread_message_id` |
+| Backend | `src/backend/client_portal/asks/service.py`, `asks/router.py`, `asks/models.py` | `_owned_ask`, `get_ask_context` (+ `_validated_run`, `_run_view`, `_origin`, `_recent_answers`); `GET /asks/{id}/context`; `WorkspaceAskContext` (PR A2 §3g L7) |
 | Backend | `src/backend/services/channel_completion_report.py` | `source="completion:done" \| "completion:failed"` on the portal message |
 | Backend | `src/backend/services/report_service.py`, `src/backend/routers/reports.py` | `resolve_report_session` — the addressee's in-flight chat, else (agent's own publish only) their Main; `touch_report_session` after the insert |
 | Frontend | `src/frontend/src/router/index.js` | route `WorkspaceInbox` `/workspace/inbox` |
@@ -295,7 +311,9 @@ table, no migration. The report publish may mint the addressee's Main
 | Frontend | `src/frontend/src/components/portal/PortalInbox.vue`, `PortalInboxList.vue`, `PortalInboxPane.vue`, `PortalInboxRow.vue` | container, list, pane, pinned sidebar row |
 | Frontend | `src/frontend/src/views/Portal.vue` | stage branch, landing replace, `threadsLoaded`, `chatPreviews`, `replyInChat` |
 | Frontend | `src/frontend/src/components/portal/PortalSidebar.vue`, `portalUtils.js` | pinned row mount, `WORKSPACE_INBOX`, "new" wording (`unreadBadgeTitle`) |
-| Frontend | `src/frontend/src/components/portal/PortalAsks.vue` | `askIds`, `testidPrefix` |
+| Frontend | `src/frontend/src/components/portal/PortalAsks.vue` | `askIds`, `testidPrefix`, `threadLink`; PR A2: pick → note focus, question quick picks, `workspaceAskBadge`, focus after Send, the QueueBrief seam and stacked impact options |
+| Frontend | `src/frontend/src/components/operator/QueueBrief.vue`, `src/frontend/src/utils/operatorQueue.js` | the brief seam (`part` lead / fallback); `briefOf`, `briefImpactFor`, `ifNoAnswerLabel`, `workspaceAskBadge`, `questionQuickPicks` |
+| Frontend | `src/frontend/src/components/portal/PortalAskContext.vue`, `portalAskUrgency.js` | the ask's context below the card; `askContextMeta` |
 | Frontend | `src/frontend/src/components/portal/PortalConversation.vue`, `PortalDeliverables.vue`, `composables/useConversationAnchor.js`, `composables/useStickToBottom.js` | anchors (`data-message-id`, `data-report-id`, `loaded`, `detach()`) |
 | Frontend | `src/frontend/src/stores/clientPortal.js` | `fetchChatState({previews})`, `markChatReadStrict`, `fetchSessionDeliverablesStrict`, `asksAbsent` |
 
@@ -328,6 +346,9 @@ an ask that ends while selected; a deep-linked `?item=`; previews read failing m
 | `src/frontend/tests/unit/portalSidebarInboxRow.spec.js` | the pinned row's counts and link |
 | `src/frontend/tests/unit/portalAsksTestidPrefix.mount.spec.js` | default ids unchanged, prefix over every id, disjoint id sets |
 | `src/frontend/tests/unit/portalConversationAnchor.mount.spec.js`, `stickToBottom.spec.js` | `?anchor=` found / missing / one-shot, `detach()` |
+| `tests/unit/test_ent610_ask_context.py` | PR A2 §3g L7: origin only from a verified thread, run gates (agent, live window, audience), schedule name for platform only, recent answers, no `cost`/`execution_id`, one 404 body, 503 on a roster outage, the `# mcp:` header |
+| `src/frontend/tests/unit/portalAskAnswerFlow.mount.spec.js`, `queueBrief.mount.spec.js`, `portalAskContext.mount.spec.js` | PR A2: B2/B3/B5 + focus after Send; the brief seam order, impact hints, XSS; the context below the card, its states, anchors |
+| `src/frontend/tests/unit/portalInboxActionSort.spec.js`, `portalInboxAgentFilter.spec.js`, `portalChatAsksElsewhere.spec.js` | PR A2: C1 urgency order, C2 `?from=` facets (+ mount cases in `portalInbox.mount.spec.js`), B1 a client's link to the Inbox |
 | `src/frontend/e2e/workspace-inbox.spec.js` (`@smoke`) | landing, the pinned row, explicit targets still win |
 | `src/frontend/e2e/workspace-rail-reserved.spec.js`, `e2e/contrast-ratchet.spec.js` | retargeted to `?agent=` / `?new=1`; `/workspace/inbox` held at zero contrast failures |
 
