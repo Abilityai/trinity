@@ -39,6 +39,14 @@ export const useSkillsLibraryStore = defineStore('skillsLibrary', () => {
   // as a target. Server-computed; the client never re-derives that predicate.
   const assignableAgents = ref([])
 
+  // ent#530 — skill SETS the library's sources declare. Same isolation as
+  // assignments: a failed read is `setsError`, never a blank library.
+  const sets = ref([])
+  const setsError = ref(null)
+  const setsLoaded = ref(false)
+  // {setName: {agent, result}} — the last assign made from this page.
+  const setResults = ref({})
+
   // `fetching` is "a request is in flight"; `loading` is "there is nothing to
   // show yet". They were one flag, which is wrong for the ScanlineReveal
   // contract (§ data loading: "Loading means 'no data yet', never 'fetch in
@@ -104,7 +112,7 @@ export const useSkillsLibraryStore = defineStore('skillsLibrary', () => {
         // invariant), with the assignment rows saying so rather than reading
         // as "assigned to nobody". Keep it non-throwing — the isolation lives
         // in that function, not in this call site.
-        await loadAssignments()
+        await Promise.all([loadAssignments(), loadSets()])
       } else {
         library.value = []
         assignments.value = {}
@@ -155,6 +163,52 @@ export const useSkillsLibraryStore = defineStore('skillsLibrary', () => {
         e?.response?.data?.detail || 'Could not load skill assignments'
     } finally {
       if (mine === assignmentsGeneration) assignmentsFetching.value = false
+    }
+  }
+
+  /** ent#530 — never throws; see `setsError`. */
+  async function loadSets() {
+    try {
+      const res = await api.get('/api/skills/library/sets')
+      sets.value = res.data || []
+      setsError.value = null
+      setsLoaded.value = true
+    } catch (e) {
+      setsLoaded.value = false
+      const d = e?.response?.data?.detail
+      setsError.value = (d && typeof d === 'object' ? d.message : d) || 'Could not load skill sets'
+    }
+  }
+
+  /**
+   * Assign a set to an agent through the per-agent set route (ent#530), which
+   * carries the ent#596 fence. Patches the member holder chips in place.
+   * Returns an error string, never throws — like `assignSkill`.
+   */
+  async function assignSet(setName, agentName) {
+    try {
+      const { data } = await api.post(
+        `/api/agents/${encodeURIComponent(agentName)}/skill-sets/${encodeURIComponent(setName)}`,
+        {},
+        { timeout: ASSIGN_TIMEOUT_MS },
+      )
+      setResults.value = { ...setResults.value, [setName]: { agent: agentName, result: data || null } }
+      const set = sets.value.find((x) => x.name === setName)
+      const label = assignableAgents.value.find((a) => a.name === agentName)
+      const map = { ...assignments.value }
+      for (const m of set?.members || []) {
+        if (!m.present) continue
+        const next = [...(map[m.name] || [])]
+        if (!next.some((a) => a.name === agentName)) {
+          next.push({ name: agentName, display_label: label?.display_label ?? null })
+        }
+        map[m.name] = next
+      }
+      assignments.value = map
+      return null
+    } catch (e) {
+      const d = e?.response?.data?.detail
+      return (d && typeof d === 'object' ? d.message : d) || 'Could not assign the set'
     }
   }
 
@@ -282,13 +336,23 @@ export const useSkillsLibraryStore = defineStore('skillsLibrary', () => {
       // The server's own reason, verbatim — "Skill 'x' not found in library"
       // and "Agent not found" are the named failures AC 4 asks for, and
       // inventing our own wording here would drift from them.
-      return e?.response?.data?.detail || 'Could not assign the skill'
+      const d = e?.response?.data?.detail
+      return (d && typeof d === 'object' ? d.message : d) || 'Could not assign the skill'
     }
   }
 
   async function unassignSkill(skillName, agentName) {
     try {
-      await api.delete(`/api/agents/${encodeURIComponent(agentName)}/skills/${encodeURIComponent(skillName)}`)
+      const { data } = await api.delete(
+        `/api/agents/${encodeURIComponent(agentName)}/skills/${encodeURIComponent(skillName)}`,
+      )
+      // ent#530: a skill an assigned set still names stays on the agent (now
+      // set-derived). The agent still holds it, so the chip stays and the
+      // server's sentence says why — dropping it would claim a removal that
+      // did not happen.
+      if (data && data.removed === false && data.retained_via_sets?.length) {
+        return data.message || `Still assigned through set ${data.retained_via_sets.join(', ')}`
+      }
       // An unassign supersedes the last assign's note for this skill.
       if (deliveries.value[skillName]) {
         const map = { ...deliveries.value }; delete map[skillName]; deliveries.value = map
@@ -303,7 +367,10 @@ export const useSkillsLibraryStore = defineStore('skillsLibrary', () => {
       assignments.value = map
       return null
     } catch (e) {
-      return e?.response?.data?.detail || 'Could not unassign the skill'
+      // The 409 `skill_set_unresolved` detail is an object; the caller renders
+      // a string (InlineError), never `[object Object]`.
+      const d = e?.response?.data?.detail
+      return (d && typeof d === 'object' ? d.message : d) || 'Could not unassign the skill'
     }
   }
 
@@ -315,5 +382,6 @@ export const useSkillsLibraryStore = defineStore('skillsLibrary', () => {
     load, loadAssignments, agentsFor, sync,
     assignableFor, canModify, assignSkill, unassignSkill,
     deliveries,
+    sets, setsError, setsLoaded, setResults, loadSets, assignSet,
   }
 })

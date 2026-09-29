@@ -646,7 +646,7 @@ def test_a_turn_that_never_started_gets_a_terminal(portal, monkeypatch):
 
     calls = []
     monkeypatch.setattr(core_db, "update_execution_status",
-                        lambda eid, status, **kw: calls.append((eid, status, kw.get("error"))))
+                        lambda eid, status, result=None, **kw: calls.append((eid, status, result and result.error)))
 
     svc._fail_unstarted_execution("exec-1", "This conversation is already handling a message.")
 

@@ -12,9 +12,10 @@ time math is done in Python). The public API of ``OperatorQueueOperations`` is
 unchanged.
 """
 
+import hashlib
 import json
 import uuid
-from typing import Optional, List, Dict, Set
+from typing import Optional, List, Dict, Set, Tuple
 from datetime import datetime
 
 from sqlalchemy import select, update, func, and_, or_, case, delete
@@ -217,6 +218,155 @@ class OperatorQueueOperations:
             exists — on conflict that is the pre-existing row, NOT the uuid this
             call minted).
         """
+        return self.create_item_with_outcome(
+            agent_name, item, channel=channel, raised_by=raised_by,
+        )[0]
+
+    def create_item_with_outcome(
+        self,
+        agent_name: str,
+        item: Dict,
+        *,
+        channel: Optional[str] = None,
+        raised_by: Optional[str] = None,
+    ) -> Tuple[str, bool]:
+        """`create_item`, plus whether THIS call inserted the row
+        (trinity-enterprise#611).
+
+        The (agent_name, request_id) conflict makes a repeat a silent no-op
+        that returns the surviving row's uuid — indistinguishable, to the
+        caller, from a fresh create. The file poller used to count such a
+        repeat as an admission (a phantom admit against the depth cap, and a
+        "new" broadcast); with the flag it skips it. `inserted` is the INSERT's
+        rowcount, so it is the database's answer, not a prior read's guess.
+        """
+        request_id, values = self._insert_values(
+            agent_name, item, channel=channel, raised_by=raised_by,
+        )
+        stmt = make_insert(operator_queue).values(**values).on_conflict_do_nothing(
+            index_elements=["agent_name", "request_id"]
+        )
+        # Insert + re-read in one transaction: on conflict the insert is a no-op
+        # and the surviving row carries a DIFFERENT uuid, so to honour the
+        # documented contract (return the id of the row that exists) the return
+        # must be that row's id, not the `new_id` this call minted and discarded.
+        with get_engine().begin() as conn:
+            inserted = bool(conn.execute(stmt).rowcount)
+            row = conn.execute(
+                select(operator_queue.c.id).where(
+                    and_(
+                        operator_queue.c.agent_name == agent_name,
+                        operator_queue.c.request_id == request_id,
+                    )
+                )
+            ).first()
+        return (row[0] if row else values["id"]), inserted
+
+    def create_native_item(
+        self,
+        agent_name: str,
+        item: Dict,
+        *,
+        max_pending: int,
+        channel: str,
+        raised_by: str,
+        to_role: Optional[str],
+        resolved_to: Optional[List[str]],
+        proposal: Optional[Dict],
+        supersedes_expired: Optional[str],
+    ) -> Dict:
+        """Create an agent-raised ask, atomically per agent (trinity-enterprise#611).
+
+        ONE serialized step: the replay check, the depth count and the insert
+        run inside a per-agent lock (PostgreSQL `pg_advisory_xact_lock`; SQLite
+        `BEGIN IMMEDIATE`, the db/audit.py precedent), so N concurrent calls at
+        depth `max_pending - 1` admit exactly one. A count-then-insert across
+        workers would make the cap a rate limit, not a bound.
+
+        Returns `{"outcome": "created" | "replayed" | "queue_full", "row"}`:
+        - `replayed` — `(agent_name, request_id)` exists; `row` is the FIRST
+          row, untouched (a retry gets its first receipt, whatever it sends).
+          Checked before the cap, so a retry is never refused a slot it holds.
+          Also the answer when a file entry re-using the id lands between that
+          check and the insert: the file poller does not take this lock, so on
+          PostgreSQL it can, and the insert's `ON CONFLICT DO NOTHING` turns
+          what would be a unique-index error (a 500 for the agent) into a
+          replay of the row that won.
+        - `queue_full` — `max_pending` of this agent's asks are pending; `row`
+          is None and nothing is written.
+        - `created` — `row` is the new row.
+
+        The row never takes part in the file contract: `delivery_state` is
+        `not_applicable` (`mcp_raised`) so no write-back set selects it, and
+        `sync_state` stays NULL — there is no file entry to be out of sync with.
+        Every platform column is a keyword-only argument, never read from
+        `item` (the item is agent-authored).
+        """
+        request_id, values = self._insert_values(
+            agent_name, item, channel=channel, raised_by=raised_by,
+        )
+        values.update(
+            to_role=to_role,
+            resolved_to=json.dumps(list(resolved_to)) if resolved_to else None,
+            proposal=json.dumps(proposal) if proposal is not None else None,
+            supersedes_expired=supersedes_expired,
+            delivery_state="not_applicable",
+            delivery_detail="mcp_raised",
+        )
+        mine = and_(
+            operator_queue.c.agent_name == agent_name,
+            operator_queue.c.request_id == request_id,
+        )
+        with get_engine().begin() as conn:
+            self._lock_agent_for_create(conn, agent_name)
+            existing = conn.execute(select(*self._SELECT_COLS).where(mine)).mappings().first()
+            if existing:
+                return {"outcome": "replayed", "row": self._row_to_item(existing)}
+            pending = conn.execute(
+                select(func.count()).where(and_(
+                    operator_queue.c.agent_name == agent_name,
+                    operator_queue.c.status == "pending",
+                ))
+            ).scalar() or 0
+            if pending >= max_pending:
+                return {"outcome": "queue_full", "row": None}
+            inserted = bool(conn.execute(
+                make_insert(operator_queue).values(**values).on_conflict_do_nothing(
+                    index_elements=["agent_name", "request_id"])
+            ).rowcount)
+            row = conn.execute(select(*self._SELECT_COLS).where(mine)).mappings().first()
+        return {"outcome": "created" if inserted else "replayed", "row": self._row_to_item(row)}
+
+    @staticmethod
+    def _lock_agent_for_create(conn, agent_name: str) -> None:
+        """Serialize native creates for ONE agent until COMMIT/ROLLBACK.
+
+        Fails CLOSED (an unusable lock raises) — the db/audit.py rule: an
+        unserialized count-then-insert silently turns the cap into a rate limit,
+        which is the defect the lock exists to remove.
+        """
+        dialect = conn.engine.dialect.name
+        if dialect == "postgresql":
+            key = int.from_bytes(
+                hashlib.sha256(f"opq-native:{agent_name}".encode("utf-8")).digest()[:8],
+                "big", signed=True,
+            )
+            conn.exec_driver_sql("SELECT pg_advisory_xact_lock(%s)", (key,))
+        elif dialect == "sqlite":
+            # pysqlite has not sent BEGIN yet (it defers until DML), so this opens
+            # the transaction with the RESERVED lock already held.
+            conn.exec_driver_sql("BEGIN IMMEDIATE")
+
+    def _insert_values(
+        self,
+        agent_name: str,
+        item: Dict,
+        *,
+        channel: Optional[str],
+        raised_by: Optional[str],
+    ) -> Tuple[str, Dict]:
+        """The DB-sink belts and the column values of a new row, shared by every
+        create so the belts cannot drift between the file and native paths."""
         # #1525: `id` was the last hard-indexed field. The sync loop guards on a
         # truthy id before calling, but keep the DB boundary self-defensive so an
         # id-less item can never KeyError-hot-loop here (raise a clear ValueError
@@ -277,7 +427,7 @@ class OperatorQueueOperations:
         # (mirrors how type/status/priority are already defaulted) so the item is
         # created once and the loop stops (the next cycle sees it via exists()).
         # `created_at` defaults to now (ingest time) per the issue's preferred fix.
-        stmt = make_insert(operator_queue).values(
+        values = dict(
             id=new_id,
             agent_name=agent_name,
             request_id=request_id,
@@ -300,23 +450,8 @@ class OperatorQueueOperations:
             # it does not decide it, and it must never derive it from `context`
             # (which is agent-authored).
             addressed_to_email=item.get("addressed_to_email"),
-        ).on_conflict_do_nothing(index_elements=["agent_name", "request_id"])
-
-        # Insert + re-read in one transaction: on conflict the insert is a no-op
-        # and the surviving row carries a DIFFERENT uuid, so to honour the
-        # documented contract (return the id of the row that exists) the return
-        # must be that row's id, not the `new_id` this call minted and discarded.
-        with get_engine().begin() as conn:
-            conn.execute(stmt)
-            row = conn.execute(
-                select(operator_queue.c.id).where(
-                    and_(
-                        operator_queue.c.agent_name == agent_name,
-                        operator_queue.c.request_id == request_id,
-                    )
-                )
-            ).first()
-        return row[0] if row else new_id
+        )
+        return request_id, values
 
     def get_item(self, item_id: str) -> Optional[Dict]:
         """Get a single queue item by ID."""
@@ -346,6 +481,43 @@ class OperatorQueueOperations:
         with get_engine().connect() as conn:
             row = conn.execute(stmt).mappings().first()
         return self._row_to_item(row) if row else None
+
+    def list_expired_proposals_for_agent(
+        self, agent_name: str, limit: int, raised_by: Optional[str] = None,
+    ) -> List[Dict]:
+        """`{request_id, proposal}` of this agent's EXPIRED asks that carried a
+        proposal, most recent ending first (trinity-enterprise#611). With
+        `raised_by`, only that raiser's: the guard compares an ask with the
+        same raiser's denials, never across raisers.
+
+        Read by the native create's re-ask guard: an agent that repeats the exact
+        action a timeout already denied must link the expired ask
+        (`supersedes_expired`) so the person sees it is asking again. Bounded;
+        the proposal is returned parsed so the caller compares values, not the
+        stored JSON's key order.
+        """
+        conditions = [
+            operator_queue.c.agent_name == agent_name,
+            operator_queue.c.status == "expired",
+            operator_queue.c.proposal.isnot(None),
+        ]
+        if raised_by is not None:
+            conditions.append(operator_queue.c.raised_by == raised_by)
+        stmt = (
+            select(operator_queue.c.request_id, operator_queue.c.proposal)
+            .where(and_(*conditions))
+            .order_by(func.coalesce(operator_queue.c.disposed_at, operator_queue.c.created_at).desc())
+            .limit(limit)
+        )
+        with get_engine().connect() as conn:
+            rows = conn.execute(stmt).all()
+        out = []
+        for request_id, proposal in rows:
+            try:
+                out.append({"request_id": request_id, "proposal": json.loads(proposal)})
+            except (TypeError, ValueError):
+                continue
+        return out
 
     def list_recent_endings_for_agent(
         self,
@@ -383,6 +555,92 @@ class OperatorQueueOperations:
         with get_engine().connect() as conn:
             return [dict(r) for r in conn.execute(stmt).mappings().all()]
 
+    def _list_conditions(
+        self,
+        status: Optional[str] = None,
+        type: Optional[str] = None,
+        priority: Optional[str] = None,
+        agent_name: Optional[str] = None,
+        since: Optional[str] = None,
+        accessible_agent_names: Optional[Set[str]] = None,
+        include_cleared: bool = False,
+        addressed_to_email: Optional[str] = None,
+        hide_ended_before: Optional[str] = None,
+        types: Optional[Tuple[str, ...]] = None,
+    ) -> Optional[list]:
+        """The WHERE conditions `list_items`, `count_items` and
+        `list_item_agent_names` share (#3059) — ONE definition, so a page, its
+        total and the agents it spans can never be computed over different
+        filters. `None` means "matches nothing" (an empty access set); see
+        `list_items` for what each filter means.
+        """
+        if accessible_agent_names is not None and len(accessible_agent_names) == 0:
+            return None
+
+        conds = []
+        if not include_cleared:
+            conds.append(operator_queue.c.cleared_at.is_(None))  # #1017
+
+        if accessible_agent_names is not None:
+            conds.append(operator_queue.c.agent_name.in_(sorted(accessible_agent_names)))
+        if status:
+            conds.append(operator_queue.c.status == status)
+        if type:
+            conds.append(operator_queue.c.type == type)
+        if types is not None:
+            conds.append(operator_queue.c.type.in_(list(types)))
+        if priority:
+            conds.append(operator_queue.c.priority == priority)
+        if agent_name:
+            conds.append(operator_queue.c.agent_name == agent_name)
+        if addressed_to_email is not None:
+            # `is not None`, deliberately NOT the truthiness the filters above
+            # use. For this argument's callers it IS the authorization boundary
+            # — "the asks addressed to this person" — so a falsy value has to
+            # match NOTHING rather than silently widening to everyone's. The
+            # other filters narrow a view the caller is already entitled to see;
+            # this one decides entitlement, which is why it diverges.
+            conds.append(
+                func.lower(operator_queue.c.addressed_to_email)
+                == addressed_to_email.strip().lower()
+            )
+        if since:
+            conds.append(operator_queue.c.created_at >= since)
+        if hide_ended_before:
+            conds.append(or_(
+                operator_queue.c.status == "pending",
+                func.coalesce(
+                    operator_queue.c.disposed_at,
+                    operator_queue.c.responded_at,
+                    operator_queue.c.created_at,
+                ) >= hide_ended_before,
+            ))
+        return conds
+
+    def count_items(self, **filters) -> int:
+        """How many rows `list_items(**filters)` would return with no limit (#3059)."""
+        conds = self._list_conditions(**filters)
+        if conds is None:
+            return 0
+        stmt = select(func.count()).select_from(operator_queue)
+        if conds:
+            stmt = stmt.where(and_(*conds))
+        with get_engine().connect() as conn:
+            return int(conn.execute(stmt).scalar() or 0)
+
+    def list_item_agent_names(self, **filters) -> List[str]:
+        """The distinct agents the rows matching `filters` belong to (#3059) —
+        so a caller can apply a per-agent predicate (the Workspace roster
+        re-check) BEFORE paging instead of after the limit."""
+        conds = self._list_conditions(**filters)
+        if conds is None:
+            return []
+        stmt = select(operator_queue.c.agent_name).distinct()
+        if conds:
+            stmt = stmt.where(and_(*conds))
+        with get_engine().connect() as conn:
+            return sorted(r[0] for r in conn.execute(stmt) if r[0])
+
     def list_items(
         self,
         status: Optional[str] = None,
@@ -396,8 +654,12 @@ class OperatorQueueOperations:
         include_cleared: bool = False,
         addressed_to_email: Optional[str] = None,
         hide_ended_before: Optional[str] = None,
+        types: Optional[Tuple[str, ...]] = None,
     ) -> List[Dict]:
         """List queue items with optional filters.
+
+        types (#3059): narrow to a set of item types in SQL, so a caller that
+        shows only some kinds pages and counts over exactly what it shows.
 
         hide_ended_before (trinity-enterprise#611): an ISO-Z cutoff. Rows that
         ENDED before it are left out; pending rows are unaffected. A row's ending
@@ -431,45 +693,14 @@ class OperatorQueueOperations:
         and an empty one therefore matches nothing. See the comment at the
         condition for why this one argument does not use truthiness like the rest.
         """
-        if accessible_agent_names is not None and len(accessible_agent_names) == 0:
+        conds = self._list_conditions(
+            status=status, type=type, priority=priority, agent_name=agent_name,
+            since=since, accessible_agent_names=accessible_agent_names,
+            include_cleared=include_cleared, addressed_to_email=addressed_to_email,
+            hide_ended_before=hide_ended_before, types=types,
+        )
+        if conds is None:
             return []
-
-        conds = []
-        if not include_cleared:
-            conds.append(operator_queue.c.cleared_at.is_(None))  # #1017
-
-        if accessible_agent_names is not None:
-            conds.append(operator_queue.c.agent_name.in_(sorted(accessible_agent_names)))
-        if status:
-            conds.append(operator_queue.c.status == status)
-        if type:
-            conds.append(operator_queue.c.type == type)
-        if priority:
-            conds.append(operator_queue.c.priority == priority)
-        if agent_name:
-            conds.append(operator_queue.c.agent_name == agent_name)
-        if addressed_to_email is not None:
-            # `is not None`, deliberately NOT the truthiness the filters above
-            # use. For this argument's callers it IS the authorization boundary
-            # — "the asks addressed to this person" — so a falsy value has to
-            # match NOTHING rather than silently widening to everyone's. The
-            # other filters narrow a view the caller is already entitled to see;
-            # this one decides entitlement, which is why it diverges.
-            conds.append(
-                func.lower(operator_queue.c.addressed_to_email)
-                == addressed_to_email.strip().lower()
-            )
-        if since:
-            conds.append(operator_queue.c.created_at >= since)
-        if hide_ended_before:
-            conds.append(or_(
-                operator_queue.c.status == "pending",
-                func.coalesce(
-                    operator_queue.c.disposed_at,
-                    operator_queue.c.responded_at,
-                    operator_queue.c.created_at,
-                ) >= hide_ended_before,
-            ))
 
         # Sort: pending items by priority then age; ended items by WHEN THEY
         # ENDED, newest first (trinity-enterprise#611, #627 AC6) — sorting a
@@ -503,6 +734,11 @@ class OperatorQueueOperations:
                 status_order,
                 pending_priority,
                 sort_time.desc(),
+                # #3059: the last key, so rows that tie on everything above
+                # (raised in the same instant) still order the same way on every
+                # read — which is what lets an offset page without overlapping
+                # or skipping a row.
+                operator_queue.c.id,
             )
             .limit(limit)
             .offset(offset)
@@ -734,7 +970,13 @@ class OperatorQueueOperations:
 
         now = utc_now_iso()
         conds = [
-            operator_queue.c.status.in_(("acknowledged", "cancelled", "expired")),
+            or_(
+                operator_queue.c.status.in_(("acknowledged", "cancelled", "expired")),
+                # trinity-enterprise#611: a native ask is never acknowledged
+                # through a file, so `responded` is its last state and there is
+                # no write-back to wait for.
+                and_(operator_queue.c.status == "responded", ~self._file_contract()),
+            ),
             operator_queue.c.cleared_at.is_(None),
         ]
         if accessible_agent_names is not None:
@@ -1021,6 +1263,7 @@ class OperatorQueueOperations:
             and_(
                 operator_queue.c.agent_name == agent_name,
                 operator_queue.c.status == "responded",
+                self._file_contract(),  # trinity-enterprise#611: nothing to write for a native ask
             )
         )
         with get_engine().connect() as conn:
@@ -1047,6 +1290,7 @@ class OperatorQueueOperations:
                 and_(
                     operator_queue.c.agent_name == agent_name,
                     operator_queue.c.status.in_(("cancelled", "expired")),
+                    self._file_contract(),  # trinity-enterprise#611
                     or_(
                         operator_queue.c.delivery_state.is_(None),
                         operator_queue.c.delivery_state == "undelivered",
@@ -1088,6 +1332,7 @@ class OperatorQueueOperations:
             and_(
                 operator_queue.c.agent_name == agent_name,
                 operator_queue.c.status.in_(("pending", "responded")),
+                self._file_contract(),
             )
         )
         term_stmt = select(
@@ -1101,11 +1346,23 @@ class OperatorQueueOperations:
             and_(
                 operator_queue.c.agent_name == agent_name,
                 operator_queue.c.status.notin_(("pending", "responded")),
+                self._file_contract(),
+            )
+        )
+        # trinity-enterprise#611: the request_ids of this agent's NATIVE asks. A
+        # file entry reusing one is skipped before the create branch — filtering
+        # native rows out of the two sets above without naming them here would
+        # read such an entry as brand new every cycle (the phantom admit).
+        foreign_stmt = select(operator_queue.c.request_id).where(
+            and_(
+                operator_queue.c.agent_name == agent_name,
+                ~self._file_contract(),
             )
         )
         with get_engine().connect() as conn:
             open_rows = conn.execute(open_stmt).mappings().all()
             term_rows = conn.execute(term_stmt).mappings().all()
+            foreign = [r[0] for r in conn.execute(foreign_stmt).all()]
         return {
             "open": [self._row_to_item(r) for r in open_rows],
             "terminal": {
@@ -1115,6 +1372,7 @@ class OperatorQueueOperations:
                 }
                 for r in term_rows
             },
+            "foreign": foreign,
         }
 
     def set_sync_state(
@@ -1193,6 +1451,14 @@ class OperatorQueueOperations:
             return result.rowcount > 0
 
     @staticmethod
+    def _file_contract():
+        """SQL: the row takes part in the agent's `operator-queue.json` contract
+        (trinity-enterprise#611). NULL covers every row created before the
+        channel column; a native (`mcp`) ask has no file entry to reconcile,
+        flag or write back into."""
+        return or_(operator_queue.c.channel.is_(None), operator_queue.c.channel == "file")
+
+    @staticmethod
     def _not_prefixed(prefixes):
         """`request_id` does not start with any reserved platform prefix — the SQL
         twin of `is_platform_minted` (#2989 review: a platform alarm was never in
@@ -1220,6 +1486,7 @@ class OperatorQueueOperations:
                 ),
             ),
             *self._not_prefixed(exclude_request_id_prefixes),
+            self._file_contract(),  # trinity-enterprise#611: nothing is owed to a file
         ]
         if running_agents:
             conds.append(operator_queue.c.agent_name.notin_(list(running_agents)))
@@ -1263,6 +1530,7 @@ class OperatorQueueOperations:
         elif exclude_agents:
             conds.append(operator_queue.c.agent_name.notin_(list(exclude_agents)))
         conds.extend(self._not_prefixed(exclude_request_id_prefixes))
+        conds.append(self._file_contract())  # trinity-enterprise#611: a native ask has no file to read
         with get_engine().begin() as conn:
             result = conn.execute(
                 update(operator_queue)

@@ -755,7 +755,7 @@ CREATE TABLE operator_queue (
     disposition_reason TEXT,            -- the operator's optional cancel reason (≤ 500); never in an audit row, never to a Workspace client
     batch_id TEXT,                      -- one uuid per bulk-cancel sweep; its re-select is the sweep's CAS winners
     raised_by TEXT,                     -- agent|gate (PR B); NULL for a legacy row or a platform alarm
-    channel TEXT,                       -- file|mcp; keyword-only on create, never read from the agent's entry
+    channel TEXT,                       -- file|mcp|gate; keyword-only on create, never read from the agent's entry
     to_role TEXT,                       -- PR B: the role an agent-raised ask is addressed to
     resolved_to TEXT,                   -- PR B: JSON list of person refs; withheld from machine keys
     proposal TEXT,                      -- PR B: JSON, the frozen action
@@ -1107,6 +1107,29 @@ agent that made the assignment, NULL for a person — `assigned_by` has only eve
 owner's username. Audit-only initiator provenance, deliberately **not** an `AgentRef` (the
 `source_agent_name` precedent). The bulk replace carries `assigned_by` / `assigned_at` /
 `assigned_by_agent` across for names it keeps.
+
+`agent_skills.individual` (trinity-enterprise#530; same revision as below) is 1 for a skill
+assigned on its own (the default — every pre-existing row keeps its meaning) and 0 for one
+present only because an assigned set names it.
+
+**agent_skill_sets** (trinity-enterprise#530) — a skill set assigned to an agent; its members
+are **materialised** as `agent_skills` rows (`individual = 0`) on purpose, so the rows are the
+durable fallback when a catalog cannot be read:
+```sql
+CREATE TABLE agent_skill_sets (
+    agent_name TEXT NOT NULL,
+    set_name TEXT NOT NULL,
+    source_id TEXT,                    -- the source that owned the name when assigned (drift marker)
+    assigned_by TEXT NOT NULL,
+    assigned_by_agent TEXT,
+    assigned_at TEXT NOT NULL,
+    PRIMARY KEY (agent_name, set_name)
+);
+```
+Both tracks: SQLite `agent_skill_sets`, Alembic `0080_agent_skill_sets` (← `0079`). `AgentRef(..., CASCADE)`.
+Every write ends in one transaction (`db/skill_sets._apply`, PostgreSQL row-locks `agent_ownership`)
+over the pure `services/skill_sets.plan_member_rows`, which **fails closed**: while any assigned set
+is unresolvable no set-derived row is removed.
 
 **agent_capability_grants** (trinity-enterprise#596) — a capability an instance admin grants
 to a named agent:

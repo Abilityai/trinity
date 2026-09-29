@@ -1213,7 +1213,24 @@ TABLES = {
             source_id TEXT,
             delivery_status TEXT,
             assigned_by_agent TEXT,
+            individual INTEGER NOT NULL DEFAULT 1,
             UNIQUE(agent_name, skill_name)
+        )
+    """,
+    # trinity-enterprise#530 — a named skill SET assigned to an agent. The
+    # members are materialised as agent_skills rows (individual = 0 unless also
+    # assigned on their own); this row is what names them, so unassigning the
+    # set removes only what it alone brought. `source_id` is the source the set
+    # resolved from when assigned (drift is reported, not re-pointed).
+    "agent_skill_sets": """
+        CREATE TABLE IF NOT EXISTS agent_skill_sets (
+            agent_name TEXT NOT NULL,
+            set_name TEXT NOT NULL,
+            source_id TEXT,
+            assigned_by TEXT NOT NULL,
+            assigned_by_agent TEXT,
+            assigned_at TEXT NOT NULL,
+            PRIMARY KEY (agent_name, set_name)
         )
     """,
     # trinity-enterprise#596 — capabilities an instance admin grants to a named
@@ -2336,6 +2353,14 @@ INDEXES = [
     # migration to a pre-existing table and this index had to wait for it.
     "CREATE INDEX IF NOT EXISTS idx_portal_messages_session "
     "ON enterprise_portal_messages(session_id, created_at)",
+    # #3064 — the unread count's message arm (`count_unread_by_session`, every
+    # 20s Workspace poll per open tab) filters on the viewer, `role =
+    # 'assistant'`, the thread and `created_at` past a read cursor. Neither
+    # index above leads with `client_email`, so the plan was a SCAN of every
+    # message in the install. Equality columns first, then the GROUP BY key,
+    # then the range column.
+    "CREATE INDEX IF NOT EXISTS idx_portal_messages_unread "
+    "ON enterprise_portal_messages(client_email, role, session_id, created_at)",
     # ent#523 — ONE live Main per (agent, client). This is not a performance
     # index: it is the invariant. `ensure_main_session` is reachable from two
     # request paths and runs in every uvicorn worker, so a check-then-insert

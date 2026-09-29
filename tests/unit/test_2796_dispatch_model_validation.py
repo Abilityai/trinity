@@ -53,6 +53,7 @@ from services.model_catalog import (
     validate_dispatch_model,
 )
 from services.model_context import _FAMILY_PREFIX_WINDOWS
+from unit._write_params import flat_kwargs
 
 pytestmark = pytest.mark.unit
 
@@ -233,7 +234,7 @@ def test_2796_task_still_dispatches_a_legitimate_model():
     with _task_env() as m:
         _call_task(ParallelTaskRequest(message="hi", model="claude-sonnet-5"))
     assert m["task_service"].execute_task.await_args.kwargs["model"] == "claude-sonnet-5"
-    assert m["db"].create_task_execution.call_args.kwargs["model_used"] == "claude-sonnet-5"
+    assert flat_kwargs(m["db"].create_task_execution.call_args)["model_used"] == "claude-sonnet-5"
 
 
 def test_2796_task_keeps_the_documented_free_text_passthrough():
@@ -259,7 +260,7 @@ def test_2796_role_does_not_reach_the_model_slot():
     assert kwargs["model"] is None
     assert kwargs["triggered_by"] == "manual"
     assert kwargs["source_user_email"] == "admin"
-    assert m["db"].create_task_execution.call_args.kwargs["model_used"] is None
+    assert flat_kwargs(m["db"].create_task_execution.call_args)["model_used"] is None
 
 
 def test_2796_task_treats_blank_as_inherit_not_as_invalid():

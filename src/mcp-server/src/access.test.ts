@@ -74,7 +74,7 @@ describe("ent#628 TOOL_ACCESS_POLICY is total over the registered tools", () => 
     // They were `baselined: ENT629` — "ungated at MCP, backend owner-equivalent".
     // The fence now exists (routers/skills.py get_skill_managed_agent_by_name),
     // so a row pointing back at ENT629 would claim the gap is still open.
-    for (const tool of ["assign_skill_to_agent", "set_agent_skills", "sync_agent_skills"]) {
+    for (const tool of ["assign_skill_to_agent", "set_agent_skills", "sync_agent_skills", "unassign_skill_set"]) {
       const policy = TOOL_ACCESS_POLICY[tool];
       assert.equal(policy.kind, "baselined", tool);
       assert.match((policy as { owner: string }).owner, /get_skill_managed_agent_by_name.*#596/, tool);

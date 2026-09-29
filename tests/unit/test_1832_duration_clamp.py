@@ -57,6 +57,7 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
+from db.write_params import ExecutionResult
 
 # ---------------------------------------------------------------------------
 # Bootstrap: mirror test_1771c_schedules_cas_edges.py so `src/backend` imports
@@ -153,7 +154,7 @@ def test_1832_future_started_at_clamps_to_zero(ops):
     future = _iso(datetime.now(timezone.utc) + timedelta(seconds=300))
     eid = _insert("c1832-skew", started_at=future)
 
-    assert ops.update_execution_status(eid, "success", response="ok") is True
+    assert ops.update_execution_status(eid, "success", result=ExecutionResult(response="ok")) is True
 
     assert _duration(eid) == 0
 
@@ -163,7 +164,7 @@ def test_1832_normal_duration_is_untouched(ops):
     past = _iso(datetime.now(timezone.utc) - timedelta(seconds=5))
     eid = _insert("c1832-normal", started_at=past)
 
-    assert ops.update_execution_status(eid, "success", response="ok") is True
+    assert ops.update_execution_status(eid, "success", result=ExecutionResult(response="ok")) is True
 
     duration = _duration(eid)
     assert 4_000 <= duration <= 6_000, duration
@@ -193,7 +194,7 @@ def test_1832_analytics_never_reports_a_negative_duration(ops):
     """A skewed row must not poison the Overview chart's avg/p95."""
     future = _iso(datetime.now(timezone.utc) + timedelta(seconds=300))
     eid = _insert("c1832-analytics", started_at=future)
-    assert ops.update_execution_status(eid, "success", response="ok") is True
+    assert ops.update_execution_status(eid, "success", result=ExecutionResult(response="ok")) is True
 
     out = ops.get_agent_analytics(AGENT, 168)
 

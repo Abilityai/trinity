@@ -578,6 +578,25 @@ export function railColumnReservedFor({
   return stageState === 'loading'
 }
 
+/**
+ * Should the rail COLUMN be sized open (#3060)?
+ *
+ * `useColumnResize` sizes the column from this: the rail's open width when true,
+ * the 48px collapsed strip when false. It used to be `open && visible`, and the
+ * rail is never visible while the stage loads (`railVisibleFor`), so the column
+ * `railColumnReservedFor` holds open during the load was sized COLLAPSED even
+ * for a rail the person left open — 48px reserved, then the open width the
+ * moment the stage was ready, which jumped the conversation's right edge by the
+ * difference (336px at the default width) in one frame. The reservation's whole
+ * point is that loading and loaded share one footprint; it has to reserve the
+ * width the rail will actually take.
+ *
+ * Strict booleans, like `normalizeRailState`: a truthy non-boolean is not open.
+ */
+export function railSizedOpen({ open = false, visible = false, reserved = false } = {}) {
+  return open === true && (visible === true || reserved === true)
+}
+
 // ---------------------------------------------------------------- slice 2 (ent#475): feeds, seen markers, openers
 
 /**
