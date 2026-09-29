@@ -3490,6 +3490,17 @@
       "description": "The native ask create is atomic per agent on BOTH backends (trinity-enterprise#611, PR B): `requires_postgres` + the db_backend harness, so schema-parity CI runs it on real PostgreSQL. Each create is held inside its critical section (after the count, before the insert) so racers overlap deterministically: six creates at the cap admit exactly one, six retries of one id make one row, one agent's full queue never holds back another's, and the file create reports whether its ON CONFLICT DO NOTHING insert happened. Removing the pg_advisory_xact_lock / BEGIN IMMEDIATE turns the matching backend red on every run."
     },
     {
+      "file": "unit/test_ent715_queue_person_fields.py",
+      "feature": "trinity-enterprise#715",
+      "added": "2026-09-29",
+      "categories": [
+        "backend",
+        "unit",
+        "security"
+      ],
+      "description": "The operator queue stops handing a person's email to a machine key (trinity-enterprise#715). GET /api/operator-queue, /{id} and /agents/{name} give every non-person principal (agent, system, ops, connector, portal_delegate, a user scope carrying an agent identity, an unknown scope) exactly the allowlisted machine key set, pinned as a literal on file and native rows whose person fields are all non-null; a person (JWT, user key) reads every field, which is also the classification guard (a new column fails until classified). One arm presents a real minted agent key with no overrides. The platform's heads-ups about a person (the ent#499 problem report, the ent#308 inbox collision), raised through their real emitters, are never listed to a machine and 404 on the item route, while a person still reads them; both are platform alarms. The file write-back names no person on delivery or reconstruction, and an answered collision alert is never written into the agent's file. The clear-resolved /ws trigger is the count only. The composed prompt no longer promises responded_by. Call-site mutations red: the allowlist, the row filter, the item 404, both write-back lines, the reserved prefix, the trigger, the prompt, and a new unclassified column."
+    },
+    {
       "file": "unit/test_2845_retry_trigger_sets.py",
       "feature": "#2845",
       "added": "2026-09-22",

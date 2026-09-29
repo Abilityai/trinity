@@ -733,8 +733,8 @@ CREATE TABLE operator_queue (
     expires_at TEXT,
     response TEXT,
     response_text TEXT,
-    responded_by_id TEXT,
-    responded_by_email TEXT,
+    responded_by_id TEXT,               -- withheld from machine keys on get/list (ent#715)
+    responded_by_email TEXT,            -- withheld from machine keys on get/list; never written into the agent's file (ent#715)
     responded_at TEXT,
     acknowledged_at TEXT,
     cleared_at TEXT,                    -- #1017: NULL = visible; set = hidden by Clear All (rows deleted by the #1142 retention sweep past operator_queue_retention_days)
@@ -746,7 +746,7 @@ CREATE TABLE operator_queue (
     delivery_detail TEXT,               -- #2915: conflict|http_<code>|unreachable|timeout|entry_missing|entry_changed|closed_by_filer|agent_not_running|platform_minted
     delivery_updated_at TEXT,           -- #2915
     divergence_acknowledged_at TEXT,    -- #2915 (PR #2989 review): the human answered a changed/closed item knowingly; the write-back delivers into the entry as it is now
-    addressed_to_email TEXT,            -- ent#364: the human this ask is for; NULL = operator ask. Validated at ingestion against the agent's roster, never trusted from the payload
+    addressed_to_email TEXT,            -- ent#364: the human this ask is for; NULL = operator ask. Validated at ingestion against the agent's roster, never trusted from the payload; withheld from machine keys on get/list (ent#715)
     -- trinity-enterprise#611 (SQLite `operator_queue_ask_object` / Alembic `0076_operator_queue_ask_object`; nullable, no backfill):
     disposition TEXT,                   -- answered|cancelled|expired — written in the SAME CAS UPDATE that flips `status`; NULL = ended before the ledger
     disposed_at TEXT,
