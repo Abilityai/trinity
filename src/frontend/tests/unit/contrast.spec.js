@@ -179,6 +179,16 @@ describe('BaseButton ghost ink (ent#610 §3g B7b)', () => {
   })
 })
 
+describe('BaseBadge primary (ent#610 §3g)', () => {
+  const blend = (fg, bg, a) => '#' + parseHex(fg).map((v, i) => Math.round(v * a + parseHex(bg)[i] * (1 - a)).toString(16).padStart(2, '0')).join('')
+  it('700 on 100 in light, 300 on 500/16 in dark', () => {
+    const I = colors.indigo
+    expect(ratio(I[700], I[100])).toBe(6.41)
+    expect(ratio(I[300], blend(I[500], G[900], 0.16))).toBe(7.53)
+    expect(meetsAA(I[300], blend(I[500], G[800], 0.16))).toBe(true)
+  })
+})
+
 describe('BaseBadge recipe (token-100 ground, token-700 ink)', () => {
   it('clears AA for every family in light', () => {
     const fams = [colors.green, colors.yellow, colors.red, colors.blue, colors.orange,

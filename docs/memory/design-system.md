@@ -208,6 +208,8 @@ Driven directly by the token families — the badge variant *is* the token famil
 | Neutral (light) | gray-100 | gray-600 |
 | Neutral (dark) | gray-750 | gray-400 |
 
+`primary` (ent#610 §3g) is the action family on the same recipe (700 on 100, 6.41:1; 300 on 500/16, 7.53:1 over gray-900) — a per-row "N new" in the hue of the solid "came back" counter it sums into. A *counter* is solid (white on a 700 ground — OverflowTabs' `badgeVariant`, the sidebar pills); a per-row *fact* is a tinted BaseBadge.
+
 **Rule:** a badge answers **one** question — status, mode, or identity — never two at once. Two facts = two badges.
 
 - **Do:** `Healthy` (status-success) next to `Claude` (brand-claude) as separate badges.
