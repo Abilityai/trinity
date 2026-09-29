@@ -44,6 +44,17 @@ HARMFUL = json.dumps({"hooks": {"PreToolUse": [{"hooks": [
 CLEAN = json.dumps({"hooks": {"Stop": [{"hooks": [
     {"type": "command", "command": "bash .claude/hooks/on-stop.sh"}]}]}}) + "\n"
 CLEAN_V2 = CLEAN.replace("on-stop", "on-stop-v2")
+# Ordinary template content the guard refuses as NEW content (a non-empty
+# `env`) or used to refuse on a bare substring (a deny rule naming
+# `/opt/trinity/`). Committed, it must be left alone: nothing leaks that is not
+# already in history, and untracking it would commit a DELETION of a template's
+# project settings (review of #3019).
+HARMLESS_ENV = json.dumps({"env": {"BASH_DEFAULT_TIMEOUT_MS": "600000",
+                                   "DISABLE_TELEMETRY": "1"}}, indent=2) + "\n"
+DENY_MENTION = json.dumps({"permissions": {"deny": ["Read(/opt/trinity/**)"]}},
+                          indent=2) + "\n"
+NON_UTF8 = b'{"note": "caf\xe9"}\n'
+
 # What the boot-time plugin reinstall writes on every agent today — must commit.
 PLATFORM_WRITTEN = json.dumps({
     "extraKnownMarketplaces": {"abilityai": {"source": {
@@ -89,7 +100,10 @@ def _repo(tmp_path, name="repo"):
 def _write(repo, content):
     path = repo / SETTINGS
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(content)
+    if isinstance(content, bytes):
+        path.write_bytes(content)
+    else:
+        path.write_text(content)
 
 
 def _commit(repo, msg="c"):
@@ -102,7 +116,8 @@ def _index_blob(repo):
     return res.stdout if res.returncode == 0 else None
 
 
-_SHELL_NAMES = ("_CREDENTIAL_SETTINGS_KEYS", "_SETTINGS_CHECK", "CONTAINER_ONLY_SETTINGS_GUARD")
+_SHELL_NAMES = ("_CREDENTIAL_SETTINGS_KEYS", "_SETTINGS_PARSE", "_SETTINGS_CHECK", "_SETTINGS_HEAL_CHECK",
+                "CONTAINER_ONLY_SETTINGS_GUARD")
 
 
 def _backend_shell_names():
@@ -195,6 +210,55 @@ class TestTheRule:
         run_guard(repo, shell_guard)
         assert _git(repo, "diff", "--cached", "--name-only").stdout.split() == ["a.txt"]
 
+    @pytest.mark.parametrize("content", [HARMLESS_ENV, DENY_MENTION], ids=["env", "deny"])
+    def test_a_committed_copy_that_is_not_a_hook_path_is_left_alone(
+            self, tmp_path, shell_guard, run_guard, content):
+        """Review of #3019 (blocking): the index copy equals HEAD, so nothing
+        new would leak. Untracking it commits a deletion of the template's
+        settings from the remote."""
+        repo = _repo(tmp_path)
+        _write(repo, content)
+        _commit(repo, "template settings")
+        _git(repo, "add", "-A")
+        run_guard(repo, shell_guard)
+        assert _index_blob(repo) == content
+        assert _git(repo, "diff", "--cached", "--name-only").stdout == ""
+
+    def test_a_deny_rule_naming_opt_trinity_is_not_a_hook_path(
+            self, tmp_path, shell_guard, run_guard):
+        """Only hook COMMANDS under /opt/trinity/ brick a foreign clone; a
+        permission rule that merely names the path is portable."""
+        repo = _repo(tmp_path)
+        _commit(repo, "init")
+        _write(repo, DENY_MENTION)
+        _git(repo, "add", "-A")
+        run_guard(repo, shell_guard)
+        assert _index_blob(repo) == DENY_MENTION
+
+    def test_a_refused_edit_of_a_committed_refused_copy_restores_the_head_copy(
+            self, tmp_path, shell_guard, run_guard):
+        """HEAD already holds a refused (non-hook) copy: the new content stays
+        out, and the HEAD copy stays tracked — no deletion is committed."""
+        repo = _repo(tmp_path)
+        _write(repo, HARMLESS_ENV)
+        _commit(repo, "template settings")
+        _write(repo, _with_credential("apiKeyHelper"))
+        _git(repo, "add", "-A")
+        run_guard(repo, shell_guard)
+        assert _index_blob(repo) == HARMLESS_ENV
+
+    def test_a_non_utf8_file_is_refused_not_a_crash(self, tmp_path, shell_guard, run_guard):
+        """Review of #3019: a strict decode raised before the check ran, so the
+        Python guard failed every cycle while the shell twin refused the file."""
+        repo = _repo(tmp_path)
+        _commit(repo, "init")
+        _write(repo, NON_UTF8)
+        (repo / "w.md").write_text("w\n")
+        _git(repo, "add", "-A")
+        run_guard(repo, shell_guard)
+        assert _index_blob(repo) is None
+        assert _git(repo, "diff", "--cached", "--name-only").stdout.split() == ["w.md"]
+
 
 @GUARDS
 class TestCredentialBearingSettings:
@@ -241,13 +305,17 @@ class TestCredentialBearingSettings:
         run_guard(repo, shell_guard)
         assert _index_blob(repo) == PLATFORM_WRITTEN
 
-    def test_a_committed_credential_copy_is_untracked(self, tmp_path, shell_guard, run_guard):
+    def test_a_committed_credential_copy_is_left_in_history_not_deleted(
+            self, tmp_path, shell_guard, run_guard):
+        """Untracking cannot un-leak what history already holds; it would only
+        commit a deletion. Rotating the credential is the remedy, not a commit."""
         repo = _repo(tmp_path)
-        _write(repo, _with_credential("env"))
+        content = _with_credential("env")
+        _write(repo, content)
         _commit(repo, "leak")
         _git(repo, "add", "-A")
         run_guard(repo, shell_guard)
-        assert _index_blob(repo) is None
+        assert _index_blob(repo) == content
 
     def test_unparseable_content_cannot_be_cleared_so_it_stays_out(
             self, tmp_path, shell_guard, run_guard):
@@ -284,6 +352,26 @@ class TestOneRule:
         assert "env" in text and "credential" in text
         assert SECRET_VALUE not in text
         assert "ANTHROPIC_API_KEY" not in text
+
+
+class TestLogOnce:
+    def test_the_same_refused_content_is_logged_once(self, tmp_path, caplog):
+        """Review nit: an untracked refused file is re-staged by `git add -A`
+        and refused again every 15 minutes — one WARNING per content, not per
+        cycle."""
+        repo = _repo(tmp_path)
+        _commit(repo, "init")
+        _write(repo, _with_credential("gcpAuthRefresh"))
+        with caplog.at_level("WARNING"):
+            for _ in range(3):
+                _git(repo, "add", "-A")
+                git_router._guard_container_only_settings(repo)
+        assert caplog.text.count("kept .claude/settings.json out") == 1
+        _write(repo, _with_credential("awsAuthRefresh"))
+        with caplog.at_level("WARNING"):
+            _git(repo, "add", "-A")
+            git_router._guard_container_only_settings(repo)
+        assert caplog.text.count("kept .claude/settings.json out") == 2
 
 
 class TestHeartbeatEndToEnd:
@@ -343,6 +431,31 @@ class TestHeartbeatEndToEnd:
         assert SETTINGS not in _git(remote, "ls-tree", "-r", "--name-only", "main").stdout.split()
         assert (repo / SETTINGS).read_text() == HARMFUL
 
+    @pytest.mark.parametrize("content", [HARMLESS_ENV, DENY_MENTION], ids=["env", "deny"])
+    def test_an_idle_heartbeat_leaves_a_committed_template_settings_file(self, agent, content):
+        """Review of #3019 (blocking) repro: a committed template-style file and
+        no other change made a `Trinity auto-sync` commit deleting it."""
+        repo, remote = agent
+        _write(repo, content)
+        _git(repo, "add", "-f", SETTINGS)
+        _git(repo, "commit", "-q", "-m", "template settings")
+        _git(repo, "push", "-q", "origin", "main")
+        head = _git(repo, "rev-parse", "HEAD").stdout
+
+        result = git_router._run_auto_sync_once(repo)
+        assert result["status"] == "success", result
+        assert _git(repo, "rev-parse", "HEAD").stdout == head, "no commit on an idle cycle"
+        assert _git(remote, "show", f"main:{SETTINGS}").stdout == content
+
+    def test_a_non_utf8_settings_file_does_not_stop_syncing(self, agent):
+        repo, remote = agent
+        _write(repo, NON_UTF8)
+        (repo / "w.md").write_text("w\n")
+        result = git_router._run_auto_sync_once(repo)
+        assert result["status"] == "success", result
+        remote_files = _git(remote, "ls-tree", "-r", "--name-only", "main").stdout.split()
+        assert "w.md" in remote_files and SETTINGS not in remote_files
+
 
 class TestResetPreserveStateEndToEnd:
     """`reset_to_main_preserve_state_impl` (reset route + MCP tool) stages with
@@ -387,6 +500,19 @@ class TestResetPreserveStateEndToEnd:
         assert _git(repo, "show", f"HEAD:{SETTINGS}").stdout == CLEAN
         assert _git(remote, "show", f"main:{SETTINGS}").stdout == CLEAN
         assert (repo / SETTINGS).read_text() == HARMFUL
+
+    def test_a_committed_template_settings_file_survives_the_force_push(self, agent):
+        repo, remote = agent
+        _write(repo, HARMLESS_ENV)
+        _commit(repo, "template settings")
+        _git(repo, "push", "-q", "origin", "main")
+
+        result = git_router.reset_to_main_preserve_state_impl(
+            repo, read_allowlist=lambda: [], skip_push=False)
+
+        assert "error" not in result, result
+        assert _git(repo, "show", f"HEAD:{SETTINGS}").stdout == HARMLESS_ENV
+        assert _git(remote, "show", f"main:{SETTINGS}").stdout == HARMLESS_ENV
 
 
 class TestWiring:
@@ -441,3 +567,69 @@ class TestWiring:
                         and getattr(n.target, "id", "") == "_GITIGNORE_PATTERNS")
         values = {e.value for e in patterns.value.elts if isinstance(e, ast.Constant)}
         assert SETTINGS not in values
+
+
+def _gitignore_module():
+    try:
+        import services.git_service.gitignore as gs
+    except Exception:  # pragma: no cover - backend venv required
+        pytest.skip("backend venv required")
+    return gs
+
+
+class TestExistingAgentsLoseTheOldIgnoreLine:
+    """Review of #3019 (should-fix): the merge strips only managed lines, so an
+    agent whose `.gitignore` came from the pre-ent#708 list kept
+    `.claude/settings.json` — migrated into the USER region, still ignoring the
+    template's hooks. The line is superseded, but only inside a container whose
+    agent server carries the content guard: a pre-guard base image would
+    otherwise commit a legacy `/opt/trinity/` copy or a credential."""
+
+    AGENT_GIT_PY = str(Path(git_router.__file__).resolve())
+
+    def _merge(self, gs, repo):
+        subprocess.run(shlex.split(gs._build_gitignore_merge_command(str(repo))),
+                       cwd=str(repo), check=True, capture_output=True, timeout=20)
+
+    def _old_repo(self, tmp_path, monkeypatch, gs):
+        repo = _repo(tmp_path)
+        (repo / ".gitignore").write_text("my-rule/\n")
+        with monkeypatch.context() as m:
+            # The pre-ent#708 canonical list: the line sat in the defaults block.
+            patterns = list(gs._GITIGNORE_PATTERNS)
+            patterns.insert(patterns.index(".claude/plugins/") + 1, SETTINGS)
+            m.setattr(gs, "_GITIGNORE_PATTERNS", tuple(patterns))
+            m.setattr(gs, "_GITIGNORE_MANAGED_LINES",
+                      tuple(patterns) + gs._GITIGNORE_SUPERSEDED_LINES + gs._GITIGNORE_MARKERS)
+            m.setattr(gs, "_SETTINGS_GUARD_PROBE_PATH", str(tmp_path / "absent.py"))
+            self._merge(gs, repo)
+        _write(repo, CLEAN)
+        assert _git(repo, "check-ignore", "-q", SETTINGS, check=False).returncode == 0
+        return repo
+
+    def test_a_guarded_image_drops_the_old_line_on_merge(self, tmp_path, monkeypatch):
+        gs = _gitignore_module()
+        repo = self._old_repo(tmp_path, monkeypatch, gs)
+        monkeypatch.setattr(gs, "_SETTINGS_GUARD_PROBE_PATH", self.AGENT_GIT_PY)
+        self._merge(gs, repo)
+        lines = (repo / ".gitignore").read_text().splitlines()
+        assert SETTINGS not in lines
+        assert "my-rule/" in lines
+        assert _git(repo, "check-ignore", "-q", SETTINGS, check=False).returncode == 1
+
+    def test_a_pre_guard_image_keeps_the_old_line(self, tmp_path, monkeypatch):
+        gs = _gitignore_module()
+        repo = self._old_repo(tmp_path, monkeypatch, gs)
+        pre_guard = tmp_path / "old_git.py"
+        pre_guard.write_text("# an agent server without the content guard\n")
+        monkeypatch.setattr(gs, "_SETTINGS_GUARD_PROBE_PATH", str(pre_guard))
+        self._merge(gs, repo)
+        assert _git(repo, "check-ignore", "-q", SETTINGS, check=False).returncode == 0
+
+    def test_the_probe_names_the_real_agent_server_guard(self):
+        gs = _gitignore_module()
+        assert gs._SETTINGS_GUARD_PROBE_PATH == "/app/agent_server/routers/git.py"
+        assert gs._SETTINGS_GUARD_PROBE_TOKEN == "_guard_container_only_settings"
+        assert hasattr(git_router, gs._SETTINGS_GUARD_PROBE_TOKEN)
+        assert SETTINGS in gs._GITIGNORE_GUARD_GATED_SUPERSEDED_LINES
+        assert SETTINGS not in gs._GITIGNORE_MANAGED_LINES

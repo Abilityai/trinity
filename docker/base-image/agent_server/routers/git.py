@@ -3,6 +3,7 @@ Git sync endpoints for GitHub bidirectional sync.
 """
 import asyncio
 import functools
+import hashlib
 import json
 import os
 import re
@@ -756,21 +757,26 @@ def _maybe_run_git_maintenance(home_dir: Path, stats: Dict) -> Optional[str]:
 # ent#708: the ONE Claude Code settings file whose content (not its name) makes
 # it unfit for the repo. `.claude/settings.json` is the agent's project settings
 # and may be committed — unless its content is container-only or secret:
-#   - it registers the container's absolute `/opt/trinity/` hook paths, which
-#     brick any clone made outside the container (#2036: a PreToolUse hook whose
-#     script is missing exits 2 = "block"). The base image stopped baking such a
-#     copy in ent#345, but a legacy one survives on volumes whose copy does not
-#     byte-match the managed file, and an agent can write one;
+#   - it registers a HOOK whose command runs from the container's absolute
+#     `/opt/trinity/` path, which bricks any clone made outside the container
+#     (#2036: a PreToolUse hook whose script is missing exits 2 = "block"). The
+#     base image stopped baking such a copy in ent#345, but a legacy one survives
+#     on volumes whose copy does not byte-match the managed file, and an agent
+#     can write one. Only the `hooks` subtree counts: a `permissions.deny` rule
+#     naming the path is portable (review of #3019);
 #   - it carries a credential-bearing key. HOME is the repo root (#1703), so
 #     this is ALSO Claude Code's user settings file, and these top-level keys
 #     hold a credential or name the command that produces one (Claude Code
 #     settings reference): `env` (environment variables, e.g. an API key),
 #     `apiKeyHelper`, `awsAuthRefresh`, `awsCredentialExport`, `gcpAuthRefresh`,
 #     `otelHeadersHelper`. A present-but-empty value is not a credential;
-#   - it is not a JSON object, so it cannot be cleared of either (fail closed).
+#   - it is not UTF-8 JSON object text, so it cannot be cleared of either (fail
+#     closed).
 # Mirrored for the backend's initialize path by
 # `services/git_service/gitignore.py::CONTAINER_ONLY_SETTINGS_GUARD` — same rule,
-# parity-tested against `_CREDENTIAL_SETTINGS_KEYS`.
+# parity-tested against `_CREDENTIAL_SETTINGS_KEYS`. The backend's `.gitignore`
+# merge also greps THIS file for `_guard_container_only_settings` before it drops
+# the pre-ent#708 ignore line (`_SETTINGS_GUARD_PROBE_TOKEN`) — keep the name.
 _CONTAINER_ONLY_SETTINGS = ".claude/settings.json"
 _CONTAINER_ONLY_MARKER = "/opt/trinity/"
 _CREDENTIAL_SETTINGS_KEYS = (
@@ -783,40 +789,73 @@ _CREDENTIAL_SETTINGS_KEYS = (
 )
 
 
+def _parse_settings(content: str):
+    """(data, None) for UTF-8 JSON text, else (None, reason). `content` is read
+    with `surrogateescape`, so undecodable bytes survive as lone surrogates and
+    fail the re-encode here instead of raising inside `git show`."""
+    try:
+        content.encode("utf-8")
+    except UnicodeEncodeError:
+        return None, "it is not valid UTF-8, so it cannot be checked for credentials"
+    try:
+        return json.loads(content), None
+    except ValueError:
+        return None, "it is not valid JSON, so it cannot be checked for credentials"
+
+
+def _registers_container_hooks(data) -> bool:
+    """True when a hook in this settings object runs from `/opt/trinity/`."""
+    return isinstance(data, dict) and _CONTAINER_ONLY_MARKER in json.dumps(data.get("hooks"))
+
+
 def _settings_refusal_reason(content: str) -> Optional[str]:
     """Why this settings content must not be committed, or None when it may.
     The reason names keys, never values — it goes to the log."""
-    if _CONTAINER_ONLY_MARKER in content:
+    data, reason = _parse_settings(content)
+    if reason:
+        return reason
+    if not isinstance(data, dict):
+        return "it is not a JSON object, so it cannot be checked for credentials"
+    if _registers_container_hooks(data):
         return (
             f"it registers container-only {_CONTAINER_ONLY_MARKER} hook paths, "
             "which would break any clone made outside the container"
         )
-    try:
-        data = json.loads(content)
-    except ValueError:
-        return "it is not valid JSON, so it cannot be checked for credentials"
-    if not isinstance(data, dict):
-        return "it is not a JSON object, so it cannot be checked for credentials"
     keys = [k for k in _CREDENTIAL_SETTINGS_KEYS if data.get(k)]
     if keys:
         return f"it carries credential-bearing key(s): {', '.join(keys)}"
     return None
 
 
+# (repo, action, sha256 of the refused content) already logged — an untracked
+# refused file is re-staged by `git add -A` and refused again every cycle, so it
+# is logged once per content, not once per 15 minutes. Bounded: cleared when big.
+_SETTINGS_REFUSALS_LOGGED: set = set()
+
+
 def _guard_container_only_settings(home_dir: Path) -> Optional[str]:
-    """Keep a container-only or credential-bearing `.claude/settings.json` out
-    of the next commit.
+    """Keep NEW container-only or credential-bearing `.claude/settings.json`
+    content out of the next commit.
 
     Runs after staging. When the INDEX copy is refused by
-    `_settings_refusal_reason` (container paths or credential-bearing keys):
-    restore the HEAD copy if HEAD holds an acceptable one, else untrack it
-    (which also heals a harmful copy already committed — the commit records the
-    deletion). The working-tree file is never touched: the running agent keeps
-    whatever it registers. Returns what it did ("restored" / "untracked"), or
-    None when there was nothing to keep out.
+    `_settings_refusal_reason`:
+      - HEAD holds the file and it registers no `/opt/trinity/` hook: keep the
+        HEAD copy (`git reset`). When the index copy already EQUALS HEAD this is
+        a no-op and nothing is logged — the content is in history, nothing new
+        leaks, and untracking would only commit a deletion of a template's
+        settings (review of #3019);
+      - HEAD registers `/opt/trinity/` hooks (a pre-#2036 leak), or there is no
+        HEAD copy: untrack it. For the leak, the next commit records the
+        deletion, which unbricks future clones.
+    The working-tree file is never touched: the running agent keeps whatever it
+    registers. Returns what it did ("restored" / "untracked"), or None when
+    there was nothing to keep out.
     """
     def _blob(spec: str) -> Optional[str]:
-        res = run_registered(["git", "show", spec], cwd=str(home_dir), timeout=10)
+        res = run_registered(
+            ["git", "show", spec], cwd=str(home_dir), timeout=10,
+            errors="surrogateescape",
+        )
         return res.stdout if res.returncode == 0 else None
 
     staged = _blob(f":{_CONTAINER_ONLY_SETTINGS}")
@@ -826,7 +865,9 @@ def _guard_container_only_settings(home_dir: Path) -> Optional[str]:
     if reason is None:
         return None
     head = _blob(f"HEAD:{_CONTAINER_ONLY_SETTINGS}")
-    if head is not None and _settings_refusal_reason(head) is None:
+    if head is not None and not _registers_container_hooks(_parse_settings(head)[0]):
+        if head == staged:
+            return None
         run_registered(
             ["git", "reset", "-q", "--", _CONTAINER_ONLY_SETTINGS],
             cwd=str(home_dir), timeout=10, check=True,
@@ -838,10 +879,16 @@ def _guard_container_only_settings(home_dir: Path) -> Optional[str]:
             cwd=str(home_dir), timeout=10, check=True,
         )
         action = "untracked"
-    logger.warning(
-        "git: kept %s out of the commit (%s) — %s",
-        _CONTAINER_ONLY_SETTINGS, action, reason,
-    )
+    digest = hashlib.sha256(staged.encode("utf-8", "surrogateescape")).hexdigest()
+    key = (str(home_dir), action, digest)
+    if key not in _SETTINGS_REFUSALS_LOGGED:
+        if len(_SETTINGS_REFUSALS_LOGGED) > 256:
+            _SETTINGS_REFUSALS_LOGGED.clear()
+        _SETTINGS_REFUSALS_LOGGED.add(key)
+        logger.warning(
+            "git: kept %s out of the commit (%s) — %s",
+            _CONTAINER_ONLY_SETTINGS, action, reason,
+        )
     return action
 
 

@@ -70,22 +70,28 @@ _TRINITY_AUTHORED_PATHS: Tuple[str, ...] = (
 # ent#708: the shell twin of the agent server's `_guard_container_only_settings`
 # (the agent server ships as its own image and cannot import this module), for
 # the backend-driven commit in `provisioning.initialize_git_in_container`. Runs
-# after staging: when the INDEX copy of `.claude/settings.json` registers
-# container-only `/opt/trinity/` paths or carries a credential-bearing key
+# after staging: when the INDEX copy of `.claude/settings.json` registers a hook
+# under container-only `/opt/trinity/` paths or carries a credential-bearing key
 # (HOME is the repo root, so it is also Claude Code's user settings file), or is
-# not a JSON object, restore an acceptable HEAD copy if there is one, else
-# untrack it. The working-tree file is never touched.
+# not UTF-8 JSON object text, keep the HEAD copy when HEAD registers no
+# `/opt/trinity/` hook (a no-op when the index already equals HEAD: nothing new
+# leaks, and untracking would commit a DELETION of a template's settings —
+# review of #3019), else untrack it (no HEAD copy, or a pre-#2036 hook-path leak
+# to heal). The working-tree file is never touched.
 #
 # ONE rule, two homes. A key check cannot be expressed robustly in grep (a key
 # name can appear inside a hook command or a nested object), so the checker is
 # the SAME predicate as `agent_server/routers/git.py::_settings_refusal_reason`,
 # run by the container's own python3: exit 0 = may commit, anything else
-# (refused, unparseable, python3 missing) = keep it out — fail closed. The
-# marker and the key list are passed as argv so the program needs no string
-# literals: the whole constant is spliced into `bash -c "cd <dir> && <cmd>"` and
-# docker-py `shlex.split`s it, so it must carry no double quotes, `$`, backslash
-# or backtick. `_CREDENTIAL_SETTINGS_KEYS` below must equal the agent server's
-# tuple of the same name (parity-tested in test_ent708_settings_json_guard.py).
+# (refused, undecodable, unparseable, python3 missing) = keep it out — fail
+# closed. The heal check fails the OTHER way: exit 0 only on a positively
+# detected `/opt/trinity/` hook, so an error keeps the HEAD copy rather than
+# committing a deletion. The marker and the key list are passed as argv so the
+# programs need no string literals: the whole constant is spliced into
+# `bash -c "cd <dir> && <cmd>"` and docker-py `shlex.split`s it, so it must
+# carry no double quotes, `$`, backslash or backtick. `_CREDENTIAL_SETTINGS_KEYS`
+# below must equal the agent server's tuple of the same name (parity-tested in
+# test_ent708_settings_json_guard.py).
 _CREDENTIAL_SETTINGS_KEYS: Tuple[str, ...] = (
     "env",
     "apiKeyHelper",
@@ -94,18 +100,24 @@ _CREDENTIAL_SETTINGS_KEYS: Tuple[str, ...] = (
     "gcpAuthRefresh",
     "otelHeadersHelper",
 )
+_SETTINGS_PARSE = (
+    "import sys,json;a=sys.argv;d=json.loads(sys.stdin.buffer.read().decode());"
+    "h=isinstance(d,dict) and a[1] in json.dumps(d.get(a[2]));"
+)
 _SETTINGS_CHECK = (
-    "python3 -c 'import sys,json;t=sys.stdin.read();a=sys.argv;d=json.loads(t);"
-    "sys.exit(int(a[1] in t or not isinstance(d,dict) "
-    "or any(d.get(k) for k in a[2:])))' /opt/trinity/ "
-    + " ".join(_CREDENTIAL_SETTINGS_KEYS)
-    + " 2>/dev/null"
+    "python3 -c '" + _SETTINGS_PARSE
+    + "sys.exit(int(not isinstance(d,dict) or h or any(d.get(k) for k in a[3:])))' "
+    "/opt/trinity/ hooks " + " ".join(_CREDENTIAL_SETTINGS_KEYS) + " 2>/dev/null"
+)
+_SETTINGS_HEAL_CHECK = (
+    "python3 -c '" + _SETTINGS_PARSE + "sys.exit(int(not h))' "
+    "/opt/trinity/ hooks 2>/dev/null"
 )
 CONTAINER_ONLY_SETTINGS_GUARD = (
     "if git cat-file -e :.claude/settings.json 2>/dev/null "
     "&& ! git show :.claude/settings.json | " + _SETTINGS_CHECK + "; then "
     "if git cat-file -e HEAD:.claude/settings.json 2>/dev/null "
-    "&& git show HEAD:.claude/settings.json | " + _SETTINGS_CHECK + "; "
+    "&& ! git show HEAD:.claude/settings.json | " + _SETTINGS_HEAL_CHECK + "; "
     "then git reset -q -- .claude/settings.json; "
     "else git rm -q --cached -- .claude/settings.json; fi; fi"
 )
@@ -230,6 +242,25 @@ _GITIGNORE_SUPERSEDED_LINES: Tuple[str, ...] = (
     ".trinity/",
     ".trinity",
 )
+
+# ent#708: lines retired from the canonical list whose removal is only SAFE once
+# the container can enforce what replaced them. `.claude/settings.json` left the
+# list for a content guard, and the merge strips only managed lines — so without
+# this every existing agent kept the old line, migrated into its user region,
+# and its template hooks stayed dropped (review of #3019). But the merge also
+# runs by `docker exec` on containers still on a pre-guard base image, whose
+# heartbeat and Push would then commit a legacy `/opt/trinity/` copy or a
+# credential. So these are stripped only when the container's agent server
+# carries the guard, probed at merge time by grepping its source for the guard's
+# name; a pre-guard container keeps the line until it is recreated on a new
+# image. Deliberately NOT in `_GITIGNORE_MANAGED_LINES`: on a pre-guard image the
+# line is legitimately still there, and the sweep's "shadowed by us" oracle must
+# not claim it. The probe fails SAFE — a missing or renamed file keeps the line.
+_GITIGNORE_GUARD_GATED_SUPERSEDED_LINES: Tuple[str, ...] = (
+    ".claude/settings.json",
+)
+_SETTINGS_GUARD_PROBE_PATH = "/app/agent_server/routers/git.py"
+_SETTINGS_GUARD_PROBE_TOKEN = "_guard_container_only_settings"
 
 AGENT_HOME_DIR = "/home/developer"
 
@@ -386,7 +417,7 @@ if not _GITIGNORE_PROTECTED <= set(_GITIGNORE_PATTERNS):
         "that is not there would be written to the floor and never stripped."
     )
 
-for _managed_line in _GITIGNORE_MANAGED_LINES:
+for _managed_line in (*_GITIGNORE_MANAGED_LINES, *_GITIGNORE_GUARD_GATED_SUPERSEDED_LINES):
     # `grep -vxF -f` is the strip mechanism. An EMPTY entry in that pattern file
     # matches every blank line with `-x` (silently deleting the user's spacing)
     # and every line without it (wiping the file); a newline-bearing entry
@@ -470,6 +501,14 @@ def _build_gitignore_merge_command(git_dir: str) -> str:
         q(line) for line in (_GITIGNORE_FLOOR_BEGIN, *floor, _GITIGNORE_FLOOR_END)
     )
     strip_args = " ".join(q(line) for line in _GITIGNORE_MANAGED_LINES)
+    gated_args = " ".join(q(line) for line in _GITIGNORE_GUARD_GATED_SUPERSEDED_LINES)
+    # ent#708: see `_GITIGNORE_GUARD_GATED_SUPERSEDED_LINES` — stripped only
+    # inside a container whose agent server carries the settings content guard.
+    gated_strip = (
+        f"if grep -qsF -- {q(_SETTINGS_GUARD_PROBE_TOKEN)} "
+        f"{q(_SETTINGS_GUARD_PROBE_PATH)}; then "
+        f"printf '%s\\n' {gated_args}; printf '%s\\r\\n' {gated_args}; fi"
+    )
 
     script = (
         f"cd {q(git_dir)} && "
@@ -479,7 +518,8 @@ def _build_gitignore_merge_command(git_dir: str) -> str:
         "{ [ -e .gitignore ] || : > .gitignore; } && "
         f"printf '%s\\n' {top_args} > .gitignore.tmp && "
         "{ LC_ALL=C grep -a -vxF -f "
-        f"<(printf '%s\\n' {strip_args}; printf '%s\\r\\n' {strip_args}) "
+        f"<(printf '%s\\n' {strip_args}; printf '%s\\r\\n' {strip_args}; "
+        f"{gated_strip}) "
         ".gitignore >> .gitignore.tmp || [ $? -eq 1 ]; } && "
         f"printf '%s\\n' {floor_args} >> .gitignore.tmp && "
         "if cmp -s .gitignore.tmp .gitignore; then rm -f .gitignore.tmp; "

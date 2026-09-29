@@ -378,25 +378,53 @@ container. Every platform commit path now runs a guard after staging:
 | reset-to-main-preserve-state `reset_to_main_preserve_state_impl` (route + MCP tool) | same |
 | `initialize_git_in_container` (backend) | `gitignore.CONTAINER_ONLY_SETTINGS_GUARD` (shell twin, same rule) |
 
-If the index copy registers container paths or credential-bearing keys, the
-guard restores a clean HEAD copy when one exists, and otherwise untracks the
-file. Container paths are absolute `/opt/trinity/`. Credential-bearing keys
-matter because `HOME` is the repo root (#1703), so this file is also Claude
-Code's **user** settings: a non-empty top-level `env`, `apiKeyHelper`,
+The guard refuses **new** content that registers a container-only hook or
+carries a credential-bearing key. A container-only hook is a command in the
+`hooks` subtree under absolute `/opt/trinity/`; a `permissions.deny` rule that
+merely names the path is portable and commits. Credential-bearing keys matter
+because `HOME` is the repo root (#1703), so this file is also Claude Code's
+**user** settings: a non-empty top-level `env`, `apiKeyHelper`,
 `awsAuthRefresh`, `awsCredentialExport`, `gcpAuthRefresh` or `otelHeadersHelper`
 (the keys the Claude Code settings reference documents as holding a credential
 or naming the command that produces one) is refused, and so is content that is
-not a JSON object, which cannot be checked (fail closed). The log line names the
-reason and the keys, never a value. The platform-written plugin config
-(`extraKnownMarketplaces`, `enabledPlugins`) commits normally. The shell twin
-runs the same predicate with the container's `python3`, keys passed as argv
-(parity-tested). A harmful copy committed before
-#2036 is therefore deleted from the remote on the next commit. The working-tree
-file is never touched. This also covers the legacy copies that `startup.sh`'s
-exact-match removal (ent#345) leaves on long-lived volumes. The heartbeat decides
-"anything to commit?" from **staged** entries only (`_has_staged_changes`, the
-same rule Push uses), so a guarded-out file that stays untracked on disk never
-turns a cycle into an empty-commit failure.
+not UTF-8 JSON object text, which cannot be checked (fail closed; a non-UTF-8
+file no longer stops the cycle). The platform-written plugin config
+(`extraKnownMarketplaces`, `enabledPlugins`) commits normally.
+
+What happens to a refused index copy depends on HEAD:
+
+| HEAD holds | Action |
+|---|---|
+| the same content | nothing: it is already in history, and untracking would only commit a deletion of the template's settings (e.g. a harmless `env` like `BASH_DEFAULT_TIMEOUT_MS`) |
+| other content with no `/opt/trinity/` hook | keep the HEAD copy (`git reset`) |
+| a `/opt/trinity/` hook (pre-#2036 leak) | untrack, so the next commit deletes it from the remote and unbricks future clones |
+| nothing | untrack (it stays on disk, untracked) |
+
+A credential already committed stays in history either way — rotate it; a
+deletion commit would not un-leak it. The log line names the reason and the
+keys, never a value, and is emitted once per distinct content rather than every
+cycle. The shell twin runs the same predicates with the container's `python3`,
+keys passed as argv (parity-tested). The working-tree file is never touched.
+This also covers the legacy copies that `startup.sh`'s exact-match removal
+(ent#345) leaves on long-lived volumes. The heartbeat decides "anything to
+commit?" from **staged** entries only (`_has_staged_changes`, the same rule
+Push uses), so a guarded-out file that stays untracked on disk never turns a
+cycle into an empty-commit failure.
+
+**Existing agents and the old ignore line.** An agent created before ent#708
+has `.claude/settings.json` in its `.gitignore` from the old canonical list. The
+`.gitignore` merge (Push, start, creation) drops that line only inside a
+container whose agent server carries the guard: it probes
+`/app/agent_server/routers/git.py` for `_guard_container_only_settings`
+(`gitignore._GITIGNORE_GUARD_GATED_SUPERSEDED_LINES`). A container still on a
+pre-guard base image keeps the ignore until it is recreated on the new image,
+because its heartbeat would otherwise commit a legacy `/opt/trinity/` copy or a
+credential unchecked. On the first merge after that, the file becomes
+committable, and an auto-syncing agent commits its current settings once (the
+platform-written plugin config, or the template's settings) unless the guard
+refuses them. A user who wrote the exact line `.claude/settings.json` in their
+own region loses it too; they can re-add a differently spelled rule such as
+`/.claude/settings.json`.
 
 ### 2. Backend poller
 
