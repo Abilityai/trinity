@@ -19,6 +19,7 @@ from datetime import datetime
 from unittest.mock import AsyncMock, MagicMock, patch, call
 
 import pytest
+from unit._write_params import flat_kwargs
 
 # ---------------------------------------------------------------------------
 # Path setup — mirror pattern from test_watchdog_unit.py
@@ -438,7 +439,7 @@ class TestCancelledErrorInExecuteTask:
         mock_db.update_execution_status.assert_called_once()
         call_kwargs = mock_db.update_execution_status.call_args
         assert call_kwargs.kwargs.get("status") == TaskExecutionStatus.FAILED
-        assert "cancelled" in (call_kwargs.kwargs.get("error") or "").lower()
+        assert "cancelled" in (flat_kwargs(call_kwargs).get("error") or "").lower()
 
     @pytest.mark.asyncio
     async def test_cancelled_error_is_reraised(self):
@@ -558,7 +559,7 @@ class TestCancelledErrorInBackground:
         mock_db.update_execution_status.assert_called_once()
         call_kwargs = mock_db.update_execution_status.call_args
         assert call_kwargs.kwargs.get("status") == TaskExecutionStatus.FAILED
-        assert "cancelled" in (call_kwargs.kwargs.get("error") or "").lower()
+        assert "cancelled" in (flat_kwargs(call_kwargs).get("error") or "").lower()
 
     @pytest.mark.asyncio
     async def test_background_cancelled_reraises(self):

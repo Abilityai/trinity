@@ -26,6 +26,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from unit._write_params import flat_kwargs
 
 _BACKEND = Path(__file__).resolve().parents[2] / "src" / "backend"
 if str(_BACKEND) not in sys.path:
@@ -110,7 +111,7 @@ class TestSelfTaskInjectOwnership:
         mock_db = _run_finalize(session=_chat_session(owner_id=7), caller_user_id=7)
 
         mock_db.add_chat_message.assert_called_once()
-        kwargs = mock_db.add_chat_message.call_args.kwargs
+        kwargs = flat_kwargs(mock_db.add_chat_message.call_args)
         assert kwargs["role"] == "assistant"
         assert kwargs["source"] == "self_task"
         assert kwargs["content"] == "task done"

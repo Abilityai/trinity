@@ -24,6 +24,7 @@ from typing import Optional
 from models import ParallelTaskRequest, TaskExecutionStatus
 from database import db
 from utils.helpers import utc_now_iso
+from db.write_params import ChatMessageFields
 
 logger = logging.getLogger(__name__)
 
@@ -101,10 +102,12 @@ async def persist_chat_session(
             user_email=user_email,
             role="assistant",
             content=result.response or "",
-            cost=result.cost,
-            context_used=result.context_used,
-            context_max=result.context_max,
-            execution_time_ms=execution_time_ms,
+            fields=ChatMessageFields(
+                cost=result.cost,
+                context_used=result.context_used,
+                context_max=result.context_max,
+                execution_time_ms=execution_time_ms,
+            ),
         )
         logger.debug(f"[Task] Saved to chat session {session.id} for agent '{agent_name}'")
         return session.id

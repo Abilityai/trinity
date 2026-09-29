@@ -533,9 +533,9 @@ def streaming(monkeypatch, redis_stub):
                         lambda **kw: types.SimpleNamespace(id=EXEC_ID))
     monkeypatch.setattr(core_db, "get_agent_subscription_id", lambda a: "sub-1")
 
-    def _terminal(execution_id, status, error=None, **kw):
+    def _terminal(execution_id, status, result=None, **kw):
         state.terminals.append({"execution_id": execution_id, "status": status,
-                                "error": error})
+                                "error": result.error if result else None})
         return True
 
     monkeypatch.setattr(core_db, "update_execution_status", _terminal)

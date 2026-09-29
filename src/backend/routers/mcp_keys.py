@@ -15,6 +15,7 @@ from dependencies import (
     get_current_user,
     reject_agent_principal,
     reject_non_interactive_principal,
+    require_interactive,
 )
 from services.platform_audit_service import platform_audit_service, AuditEventType
 
@@ -25,11 +26,14 @@ router = APIRouter(prefix="/api/mcp", tags=["mcp"])
 async def create_mcp_api_key_endpoint(
     key_data: McpApiKeyCreate,
     request: Request,
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(require_interactive)
 ):
     """
     Create a new MCP API key for the current user.
     The full API key is only returned once during creation - store it securely.
+
+    Requires a signed-in (JWT) session, for every scope: a credential minter is
+    at least as strict as the principal it produces.
 
     Scope is `user` unless explicitly requested. `portal_delegate` (ent#163) is
     admin-only: it lets the holder act as any end user who has portal access, so
@@ -110,11 +114,14 @@ async def list_mcp_api_keys_endpoint(
 @router.post("/keys/ensure-default", response_model=McpApiKeyWithSecret | None)
 async def ensure_default_mcp_api_key(
     request: Request,
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(require_interactive)
 ):
     """
     Ensure the user has at least one user-scoped MCP API key.
     If no user-scoped keys exist, creates a default one and returns it.
+
+    Requires a signed-in (JWT) session, like `POST /keys`, and writes the same
+    `key_create` audit row.
 
     This is used for first-time setup to provide users with a ready-to-use
     MCP configuration.
@@ -143,6 +150,23 @@ async def ensure_default_mcp_api_key(
 
         if not api_key:
             raise HTTPException(status_code=400, detail="Failed to create default API key")
+
+        await platform_audit_service.log(
+            event_type=AuditEventType.MCP_OPERATION,
+            event_action="key_create",
+            source="api",
+            actor_user=current_user,
+            actor_ip=request.client.host if request.client else None,
+            target_type="mcp_key",
+            target_id=getattr(api_key, "id", None),
+            endpoint=str(request.url.path),
+            request_id=getattr(request.state, "request_id", None),
+            details={
+                "name": key_data.name,
+                "scope": getattr(api_key, "scope", None),
+                "agent_name": getattr(api_key, "agent_name", None),
+            },
+        )
 
         return api_key
 

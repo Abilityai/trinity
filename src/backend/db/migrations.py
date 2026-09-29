@@ -3458,6 +3458,43 @@ def _migrate_telegram_progress_indicator(cursor, conn):
     )
 
 
+def _migrate_telegram_group_context(cursor, conn):
+    """ent#600 — Telegram group conversation context.
+
+    Three additive, nullable/defaulted columns:
+
+    * ``telegram_bindings.can_read_all_group_messages INTEGER`` — Telegram's
+      ``getMe`` fact (Privacy Mode off ⇒ 1). NULL = never checked; refreshed at
+      connect, Verify, and when the bot is added to a group.
+    * ``telegram_group_configs.last_untagged_seen_at TEXT`` — when an un-tagged
+      message last reached the bot in that group: the per-group proof that it
+      sees the conversation (an admin bot does regardless of Privacy Mode).
+    * ``telegram_group_configs.context_enabled INTEGER DEFAULT 1`` — per-group
+      opt-out. ``ADD COLUMN ... DEFAULT 1`` populates existing rows, so every
+      current group gets context ON without a backfill UPDATE (ent#264's shape).
+
+    Mirrored by Alembic 0079_telegram_group_context.
+    """
+    _safe_add_column(
+        cursor,
+        "telegram_bindings",
+        "can_read_all_group_messages",
+        "ALTER TABLE telegram_bindings ADD COLUMN can_read_all_group_messages INTEGER",
+    )
+    _safe_add_column(
+        cursor,
+        "telegram_group_configs",
+        "last_untagged_seen_at",
+        "ALTER TABLE telegram_group_configs ADD COLUMN last_untagged_seen_at TEXT",
+    )
+    _safe_add_column(
+        cursor,
+        "telegram_group_configs",
+        "context_enabled",
+        "ALTER TABLE telegram_group_configs ADD COLUMN context_enabled INTEGER DEFAULT 1",
+    )
+
+
 def _migrate_channel_report_back_columns(cursor, conn):
     """ent#265 — channel completion report-back: Telegram leg + binding identity.
 
@@ -4728,6 +4765,39 @@ def _migrate_workspace_suggestion_feedback_table(cursor, conn):
     conn.commit()
 
 
+def _migrate_agent_skill_sets(cursor, conn):
+    """trinity-enterprise#530 — skill sets.
+
+    * ``agent_skill_sets`` — a named set of library skills assigned to an agent.
+    * ``agent_skills.individual`` — 1 (the default, so every existing row keeps
+      its meaning) when the skill was assigned on its own; 0 when it is present
+      only because an assigned set names it. Unassigning a set removes only its
+      individual = 0 rows that no other assigned set names.
+
+    Additive only. Mirrored by the Alembic revision 0080_agent_skill_sets.
+    """
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS agent_skill_sets (
+            agent_name TEXT NOT NULL,
+            set_name TEXT NOT NULL,
+            source_id TEXT,
+            assigned_by TEXT NOT NULL,
+            assigned_by_agent TEXT,
+            assigned_at TEXT NOT NULL,
+            PRIMARY KEY (agent_name, set_name)
+        )
+        """
+    )
+    _safe_add_column(
+        cursor,
+        "agent_skills",
+        "individual",
+        "ALTER TABLE agent_skills ADD COLUMN individual INTEGER NOT NULL DEFAULT 1",
+    )
+    conn.commit()
+
+
 def _migrate_role_readiness_rollout_seed(cursor, conn):
     """The readiness gate's rollout (trinity-enterprise#689), data only.
 
@@ -4939,4 +5009,6 @@ MIGRATIONS = [
     ("operator_queue_ask_object", _migrate_operator_queue_ask_object),
     ("execution_chain_depth", _migrate_execution_chain_depth),
     ("workspace_suggestion_feedback_table", _migrate_workspace_suggestion_feedback_table),
+    ("telegram_group_context", _migrate_telegram_group_context),
+    ("agent_skill_sets", _migrate_agent_skill_sets),
 ]

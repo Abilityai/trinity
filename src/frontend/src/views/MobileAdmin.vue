@@ -251,6 +251,9 @@
                 <div class="ops-card-type" data-testid="queue-type">{{ queueTypeLabel(item.type) }}</div>
                 <p v-if="item.title && item.title !== item.question" class="ops-card-title" data-testid="queue-title">{{ item.title }}</p>
                 <p class="ops-card-message">{{ item.message || item.question || item.description }}</p>
+                <!-- trinity-enterprise#611: the exact action this approval would run,
+                     on the same card that offers the decision (desktop parity). -->
+                <QueueProposal v-if="item.proposal" :proposal="item.proposal" class="mt-2" />
                 <!-- Controls switch on the item TYPE (desktop parity), and an
                      approval is never answered on one tap: select → restated
                      consequence → optional note → explicit Send. The decision
@@ -642,6 +645,7 @@ import { queueEnding, queueEndingText, recentlyEnded } from '../utils/operatorQu
 import { formatLocalDateTime } from '../utils/timestamps'
 import LoadFailed from '../components/LoadFailed.vue'
 import InlineError from '../components/InlineError.vue'
+import QueueProposal from '../components/operator/QueueProposal.vue'
 
 const route = useRoute()
 const authStore = useAuthStore()

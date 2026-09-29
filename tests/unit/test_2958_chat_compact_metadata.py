@@ -18,6 +18,7 @@ from datetime import datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
+from unit._write_params import flat_kwargs
 
 EVENT = {
     "trigger": "auto",
@@ -70,7 +71,7 @@ def _finalize_success(metadata: dict):
                 idem="idem-1",
             )
         )
-    return body, mdb.update_execution_status.call_args.kwargs
+    return body, flat_kwargs(mdb.update_execution_status.call_args)
 
 
 def test_success_row_carries_compact_metadata():
@@ -146,6 +147,6 @@ def test_structured_failure_body_carries_compact_metadata_to_the_failed_row():
         except Exception:  # noqa: BLE001 — the finalizer's raise is not under test
             pass
 
-    kw = mdb.update_execution_status.call_args.kwargs
+    kw = flat_kwargs(mdb.update_execution_status.call_args)
     assert kw["status"] == "failed"
     assert json.loads(kw["compact_metadata"]) == [EVENT]

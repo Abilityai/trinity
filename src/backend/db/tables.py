@@ -1040,6 +1040,19 @@ agent_skills = Table(
     # username — "the agent did it" must stay distinguishable from "the person
     # did it". Audit column: KEEP on rename (the source_agent_name precedent).
     Column("assigned_by_agent", Text),
+    # ent#530: 0 = present only because an assigned SET names it.
+    Column("individual", Integer, nullable=False, server_default=text("1")),
+)
+
+agent_skill_sets = Table(
+    "agent_skill_sets",
+    metadata,
+    Column("agent_name", Text, primary_key=True),
+    Column("set_name", Text, primary_key=True),
+    Column("source_id", Text),
+    Column("assigned_by", Text, nullable=False),
+    Column("assigned_by_agent", Text),
+    Column("assigned_at", Text, nullable=False),
 )
 
 
@@ -1249,6 +1262,7 @@ telegram_bindings = Table(
     Column("telegram_secret_token", Text),
     Column("last_update_id", Integer),
     Column("progress_indicator_enabled", Integer),  # ent#264: default ON (1)
+    Column("can_read_all_group_messages", Integer),  # ent#600: getMe fact; NULL = never checked
     Column("created_at", Text),
     Column("updated_at", Text),
 )
@@ -1286,6 +1300,10 @@ telegram_group_configs = Table(
     Column("verified_at", Text),
     # ent#265: per-group consent for completion reports (default allow, opt-out mute)
     Column("allow_proactive", Integer),
+    # ent#600: group conversation context — proof an untagged message arrived,
+    # and the per-group opt-out toggle (default ON)
+    Column("last_untagged_seen_at", Text),
+    Column("context_enabled", Integer),
 )
 
 whatsapp_bindings = Table(
@@ -1446,7 +1464,7 @@ operator_queue = Table(
     # trinity-enterprise#611: the agent-raised ask. Platform-owned — written only
     # from keyword-only arguments, never from an agent's file entry.
     Column("raised_by", Text),           # agent|gate (NULL: legacy row or platform alarm)
-    Column("channel", Text),             # file|mcp
+    Column("channel", Text),             # file|mcp|gate
     Column("to_role", Text),
     Column("resolved_to", Text),         # JSON list of person refs
     Column("proposal", Text),            # JSON — the frozen action

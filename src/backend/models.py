@@ -3658,6 +3658,31 @@ class OperatorCancel(BaseModel):
     _blank_is_none = field_validator("reason")(_blank_reason_is_none)
 
 
+class OperatorAskCreate(BaseModel):
+    """Body for an agent raising an ask through the platform
+    (trinity-enterprise#611): `POST /api/agents/{name}/operator-queue`.
+
+    TYPES ONLY. Every limit and rule — sizes, the deadline floor, the roles,
+    the re-ask link — is checked by the ask sink (`services/ask_service.py`),
+    so each refusal carries a NAMED code the agent can act on, instead of a
+    generic validation error. Unknown fields are refused: the platform decides
+    the channel, who raised the ask and whom it resolved to, never the body.
+    """
+    model_config = ConfigDict(extra="forbid")
+
+    request_id: str
+    title: str
+    question: Optional[str] = None
+    type: Optional[str] = None
+    priority: Optional[str] = None
+    options: Optional[List[Any]] = None
+    context: Optional[Dict[str, Any]] = None
+    proposal: Optional[Dict[str, Any]] = None
+    expires_at: Optional[str] = None
+    to: Optional[str] = None
+    supersedes_expired: Optional[str] = None
+
+
 class BulkCancelRequest(BaseModel):
     """Body for bulk-cancelling pending queue items (#1017).
 
@@ -4075,7 +4100,12 @@ class SetAdminPasswordRequest(BaseModel):
     confirm_password: str = Field(..., max_length=128)
     # Required admin email — sign-in identity. Shape validated in the handler so
     # a typo / blank value yields a clean 400 (a missing field yields a 422).
+    # #3004: under ADMIN_PASSWORD_SOURCE=instance-id the handler accepts a blank
+    # value (AWS review: no PII required); the field itself stays required.
     email: str = Field(..., max_length=254)
+    # #3004 (PROV-018): the EC2 instance ID, checked only when
+    # ADMIN_PASSWORD_SOURCE=instance-id and ignored otherwise.
+    claim_code: Optional[str] = Field(None, max_length=64)
     # Optional operator profile — all skippable; setup completes without them.
     company: Optional[str] = Field(None, max_length=200)
     name: Optional[str] = Field(None, max_length=200)
@@ -4170,6 +4200,13 @@ class TelegramGroupConfigResponse(BaseModel):
     # ent#265: per-group consent for completion reports (default allow; the
     # model IS the field allowlist for the GET's `Response(**row)` build).
     allow_proactive: bool = True
+    # ent#600: group conversation context — per-group toggle (default ON), the
+    # honest status (all_messages / tagged_only / unconfirmed / off) with the
+    # next action named, and the proof timestamp behind it.
+    context_enabled: bool = True
+    context_status: str = "unconfirmed"
+    context_hint: Optional[str] = None
+    last_untagged_seen_at: Optional[str] = None
 
 
 class TelegramGroupConfigUpdateRequest(BaseModel):
@@ -4178,6 +4215,9 @@ class TelegramGroupConfigUpdateRequest(BaseModel):
     welcome_text: Optional[str] = None
     # ent#265: human-only arm — the router calls reject_agent_principal when set.
     allow_proactive: Optional[bool] = None
+    # ent#600: human-only arm too — recording a group's conversation is a
+    # privacy decision the owner makes, not one an agent grants itself.
+    context_enabled: Optional[bool] = None
 
 
 class TelegramGroupMessageRequest(BaseModel):
@@ -4957,3 +4997,52 @@ class ObjectiveJoinRead(BaseModel):
     findings: List[ObjectiveFinding] = []
     summary: ObjectiveJoinSummary
     message: Optional[str] = None
+
+
+# ---------------------------------------------------------------------------
+# trinity-enterprise#530 — skill sets
+# ---------------------------------------------------------------------------
+
+class SkillSetMember(BaseModel):
+    name: str
+    present: bool
+    version: Optional[str] = None
+    # The source that wins this member when it is NOT the set's own source.
+    shadowed_source: Optional[str] = None
+
+
+class SkillSetInfo(BaseModel):
+    """A set declared by a library source's catalog.yaml. `problems` are codes only."""
+    name: str
+    source_id: str
+    source_name: Optional[str] = None
+    shadowed_by: List[Dict[str, Any]] = []
+    members: List[SkillSetMember] = []
+    status: str  # ok | partial | invalid — only ok is assignable or resolves
+    problems: List[str] = []
+    requires: Dict[str, List[str]] = {}
+    schedules: List[Dict[str, str]] = []  # suggestions only — never created
+
+
+class AgentSkillSetMember(BaseModel):
+    name: str
+    state: str  # assigned | conflict | not_assigned | missing_upstream
+    version: Optional[str] = None
+    shadowed_source: Optional[str] = None
+
+
+class AgentSkillSetStatus(BaseModel):
+    """An assigned set's honest status on one agent (#342)."""
+    name: str
+    status: str  # ok | partial | unresolved
+    # Why a set is unresolved: not_found | invalid | partial_upstream | source_changed.
+    # While any held set is unresolved, no set-derived skill is removed (fail-closed).
+    reason: Optional[str] = None
+    source_id: Optional[str] = None
+    drift: bool = False
+    members: List[AgentSkillSetMember] = []
+    prerequisites: Dict[str, Any] = {}
+    suggested_schedules: List[Dict[str, str]] = []
+    assigned_by: Optional[str] = None
+    assigned_by_agent: Optional[str] = None
+    assigned_at: Optional[str] = None
