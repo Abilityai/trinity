@@ -575,6 +575,42 @@ describe('a chat is read only after the pane has rendered it (§3g S5, D-3)', ()
     expect(markRead).toHaveBeenCalledWith('thread', 't1')
   })
 
+  it('clicking the PREVIEWED chat reloads it first: arrivals since the preview are shown before the read (round 3)', async () => {
+    // The preview rendered t1 (renderedKey = t1); a poll then brought arrivals
+    // the pane never drew. The click must not read on the stale verdict.
+    const markRead = vi.fn(async () => true)
+    const w = await mountInbox({ threads: [thread('t1', { unread: 2 })], markRead }, { query: { tab: 'unread' } })
+    expect(store.fetchHistory).toHaveBeenCalledTimes(1) // the preview's read
+    const hist = deferred()
+    store.fetchHistory = vi.fn(() => hist.p)
+    await w.find('[data-testid="inbox-row-thread:t1"]').trigger('click')
+    await flushPromises()
+    expect(store.fetchHistory).toHaveBeenCalledTimes(1) // a fresh read for the open
+    expect(markRead).not.toHaveBeenCalled() // ...and no read until it lands
+    hist.resolve({ messages: [{ id: 'm9', role: 'assistant', content: 'new' }] })
+    await flushPromises()
+    expect(markRead).toHaveBeenCalledTimes(1)
+  })
+
+  it('reopening a chat read earlier waits for the new load, and a failed reload leaves it unread (round 3)', async () => {
+    const markRead = vi.fn(async () => true)
+    const threads = [thread('t1', { unread: 2 }), thread('t2', { unread: 1, last_message_at: iso(9) })]
+    store.asksLoaded = true
+    store.asks = [ask('a1')]
+    const w = await mountInbox({ threads, markRead }, { query: { tab: 'all' } })
+    await w.find('[data-testid="inbox-row-thread:t2"]').trigger('click')
+    await flushPromises()
+    expect(markRead).toHaveBeenCalledTimes(1)
+    // An ask renders no chat, so nothing replaces t2's verdict...
+    await w.find('[data-testid="inbox-row-ask:a1"]').trigger('click')
+    await flushPromises()
+    // ...and t2 reopens with a load that FAILS: it must stay unread.
+    store.fetchHistory = vi.fn(async () => { throw new Error('500') })
+    await w.find('[data-testid="inbox-row-thread:t2"]').trigger('click')
+    await flushPromises()
+    expect(markRead).toHaveBeenCalledTimes(1)
+  })
+
   it('a read write that fails says so in the pane', async () => {
     const markRead = vi.fn(async () => false)
     const w = await mountInbox({ threads: [thread('t1', { unread: 2 })], markRead }, { query: { tab: 'unread', item: 'thread:t1' } })

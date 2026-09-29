@@ -358,14 +358,18 @@ async function retryPayload(d) {
   if (await loadPayload(d)) maybeRendered()
 }
 
-watch(() => props.item.key, () => {
+// A fresh read, from nothing. Also exposed: an explicit open of the chat the
+// pane is ALREADY showing (the desktop preview, a re-click) must draw what came
+// since, and say `rendered` again, before the container reads it (round 3).
+function reload() {
   messages.value = []; deliverables.value = []
   loaded.value = false; failed.value = false
   for (const k of Object.keys(payloads)) delete payloads[k]
   for (const k of Object.keys(payloadErrors)) delete payloadErrors[k]
   renderedFor = null
   load()
-}, { immediate: true })
+}
+watch(() => props.item.key, reload, { immediate: true })
 
 const relative = (iso) => relativeTime(iso)
 let zone = ''
@@ -395,5 +399,5 @@ onBeforeUnmount(() => document.removeEventListener('pointerdown', onOutside))
 
 // D12: on phone the pane replaces the list, so focus moves to its heading.
 function focusHeading() { nextTick(() => headingEl.value?.focus?.()) }
-defineExpose({ focusHeading })
+defineExpose({ focusHeading, reload })
 </script>

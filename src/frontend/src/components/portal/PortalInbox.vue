@@ -463,7 +463,15 @@ watch([readIntent, renderedKey], ([want, done]) => {
 let pushedKey = null
 async function open(it) {
   returnIndex = Math.max(0, shownItems.value.findIndex((x) => x.key === it.key))
-  if (it.type === 'thread') readIntent.value = it.key
+  if (it.type === 'thread') {
+    // The read waits for a render OF THIS OPEN (round 3): a verdict left over
+    // from an earlier render of the same chat — the preview, a re-click, a
+    // reopen after an ask — would read arrivals the pane never drew. A pane
+    // already showing the chat is not remounted, so it reloads.
+    renderedKey.value = null
+    readIntent.value = it.key
+    if (paneEl.value && selectedItem.value?.key === it.key) paneEl.value.reload?.()
+  }
   let navigated
   if (stacked.value) {
     pushedKey = it.key
