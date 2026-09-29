@@ -157,7 +157,14 @@ describe('an unentitled build says nothing', () => {
     warn.mockRestore()
   })
 
-  it('a real failure is reported once, and clears the list rather than showing stale asks', async () => {
+  // trinity-enterprise#610 (PR A0) REVERSED this case. It used to pin "a real
+  // failure clears the list rather than showing stale asks" — and with
+  // `asksAvailable=false` that blanked every PortalAsks surface and dropped the
+  // sidebar badge to zero on a 5xx: the Workspace claiming "nothing needs you"
+  // during an outage (#2915). The design-system contract forbids exactly that
+  // ("never overwrite the data with a synthetic empty payload in a catch",
+  // ent#253). A failure now keeps the last good list and SAYS it failed.
+  it('a real failure is reported once, keeps the last good list and says it failed', async () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
     portalHttp.get.mockResolvedValueOnce({ data: [ask('a1')] })
     await store.fetchAsks()
@@ -166,9 +173,145 @@ describe('an unentitled build says nothing', () => {
     await store.fetchAsks()
 
     expect(warn).toHaveBeenCalledTimes(1)
+    expect(store.asks.map((a) => a.id)).toEqual(['a1'])
+    expect(store.askCount).toBe(1)
+    expect(store.asksFailed).toBe(true)
+    expect(store.asksLoaded).toBe(true)
+    // Left as it was: flipping it would blank PortalAsks (its render gate).
+    expect(store.asksAvailable).toBe(true)
+    warn.mockRestore()
+  })
+
+  it('a 503 asks_unavailable or a network error before any success is a failure, not absence', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    portalHttp.get.mockRejectedValueOnce({
+      response: { status: 503, data: { detail: { code: 'asks_unavailable' } } },
+    })
+    await store.fetchAsks()
+
+    expect(store.asksFailed).toBe(true)
+    expect(store.asksLoaded).toBe(false)
+    expect(store.asks).toEqual([])
+
+    portalHttp.get.mockRejectedValueOnce(new Error('Network Error'))
+    await store.fetchAsks()
+    expect(store.asksFailed).toBe(true)
+    expect(store.asksLoaded).toBe(false)
+    warn.mockRestore()
+  })
+
+  it('a success after a failure clears the failure and stamps the load time', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    portalHttp.get.mockRejectedValueOnce({ response: { status: 500 } })
+    await store.fetchAsks()
+    expect(store.asksFailed).toBe(true)
+    expect(store.asksLoadedAt).toBe(null)
+
+    portalHttp.get.mockResolvedValueOnce({ data: [ask('a2')] })
+    await store.fetchAsks()
+
+    expect(store.asksFailed).toBe(false)
+    expect(store.asksLoaded).toBe(true)
+    expect(store.asksAvailable).toBe(true)
+    expect(typeof store.asksLoadedAt).toBe('number')
+    expect(store.asks.map((a) => a.id)).toEqual(['a2'])
+    warn.mockRestore()
+  })
+
+  it('a 404 after a success is absence again, not a failure', async () => {
+    portalHttp.get.mockResolvedValueOnce({ data: [ask('a1')] })
+    await store.fetchAsks()
+
+    portalHttp.get.mockRejectedValueOnce({ response: { status: 404 } })
+    await store.fetchAsks()
+
+    expect(store.asksAvailable).toBe(false)
+    expect(store.asks).toEqual([])
+    expect(store.asksFailed).toBe(false)
+    // A surface that no longer exists has no "loaded" verdict either.
+    expect(store.asksLoaded).toBe(false)
+  })
+
+  // Keeping the last good list on a failure makes the list session-scoped
+  // state: it must not outlive a sign-out, or the next client on the same
+  // browser sees the previous client's asks on their first failed read.
+  it('a sign-out drops the kept list, so the next client never inherits it', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    portalHttp.get.mockResolvedValueOnce({ data: [ask('a1')] })
+    await store.fetchAsks()
+    expect(store.asks.map((a) => a.id)).toEqual(['a1'])
+
+    store.signOut()
     expect(store.asks).toEqual([])
     expect(store.asksAvailable).toBe(false)
+    expect(store.asksLoaded).toBe(false)
+    expect(store.asksFailed).toBe(false)
+    expect(store.asksLoadedAt).toBe(null)
+
+    store.portalToken = 'another-client'
+    portalHttp.get.mockRejectedValueOnce({ response: { status: 503 } })
+    await store.fetchAsks()
+
+    expect(store.asks).toEqual([])
+    expect(store.askCount).toBe(0)
+    expect(store.asksFailed).toBe(true)
     warn.mockRestore()
+  })
+
+  // A 401 is not an outage, it is the end of the session. The 20s poll runs
+  // `fetchAsks`, never the roster, and `portalHttp`'s 401 interceptor acts only
+  // for a platform session, so for a portal-token client this branch is the
+  // ONLY thing that ends it. Counted as `asksFailed`, the expired client's list
+  // stayed on screen indefinitely.
+  it('a 401 on a portal-token session ends it, as the roster does, and drops the list', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    portalHttp.get.mockResolvedValueOnce({ data: [ask('a1')] })
+    await store.fetchAsks()
+    expect(store.asks.map((a) => a.id)).toEqual(['a1'])
+
+    portalHttp.get.mockRejectedValueOnce({ response: { status: 401 } })
+    const out = await store.fetchAsks()
+
+    expect(out).toEqual([])
+    expect(store.asks).toEqual([])
+    expect(store.askCount).toBe(0)
+    expect(store.asksFailed).toBe(false)
+    expect(store.portalToken).toBe(null)
+    expect(store.isClientSignedIn).toBe(false)
+    expect(store.sessionExpired).toBe(true)
+    expect(store.resumePath).toBe(window.location.pathname)
+    expect(localStorage.getItem('trinity.portalToken')).toBe(null)
+    // Not an outage: nothing to warn about.
+    expect(warn).not.toHaveBeenCalled()
+    warn.mockRestore()
+  })
+
+  it('a read that resolves after sign-out does not write the old list back', async () => {
+    let resolve
+    portalHttp.get.mockReturnValueOnce(new Promise((r) => { resolve = r }))
+    const inFlight = store.fetchAsks()
+
+    store.signOut()
+    resolve({ data: [ask('a1')] })
+    await inFlight
+
+    expect(store.asks).toEqual([])
+    expect(store.asksLoaded).toBe(false)
+    expect(store.asksAvailable).toBe(false)
+  })
+
+  it('a read that resolves after ANOTHER client signed in is dropped too', async () => {
+    let resolve
+    portalHttp.get.mockReturnValueOnce(new Promise((r) => { resolve = r }))
+    const inFlight = store.fetchAsks()
+
+    store.signOut()
+    store.portalToken = 'another-client'
+    resolve({ data: [ask('a1')] })
+    await inFlight
+
+    expect(store.asks).toEqual([])
+    expect(store.asksLoaded).toBe(false)
   })
 
   it('does not poll at all when nobody is signed in', async () => {

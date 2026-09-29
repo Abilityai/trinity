@@ -1017,6 +1017,13 @@ agent_sync_state = Table(
     Column("pack_count", Integer),  # #1595: packs from `git count-objects -v`
     Column("loose_objects", Integer),  # #1595: loose objects (gc-health signal)
     Column("maintenance_failures", Integer),  # #1595: consecutive failed maintenance
+    # trinity-enterprise#706: the divergence / dirt episode clocks (ISO-Z, set
+    # once, cleared on return to 0), the porcelain change count, and the last
+    # push that actually landed. All nullable, no backfill.
+    Column("diverged_since", Text),
+    Column("dirty_files", Integer),
+    Column("dirty_since", Text),
+    Column("last_successful_push_at", Text),
     Column("last_check_at", Text),
     Column("updated_at", Text),
 )

@@ -47,6 +47,7 @@ import { createAssignmentTools } from "./tools/assignments.js";
 import { configureAudit, withAudit } from "./audit.js";
 import { installLogRedaction } from "./log-redaction.js";
 import type { McpAuthContext } from "./types.js";
+import { EXECUTION_ID_HEADER, parseExecutionIdHeader } from "./tools/execution_id.js";
 
 export interface ServerConfig {
   name?: string;
@@ -542,6 +543,8 @@ export async function createServer(config: ServerConfig = {}) {
               // value the union does not name arrives here as a plain string.
               scope: scope as McpAuthContext["scope"],
               mcpApiKey: apiKey,  // Store the actual API key for user-scoped requests
+              // #2392: per-request — fastmcp re-authenticates every POST.
+              executionId: parseExecutionIdHeader(readHeader(request.headers[EXECUTION_ID_HEADER])),
             };
             return authContext;
           }

@@ -12,7 +12,7 @@ As an agent owner, I want to enable read-only mode so that the agent cannot modi
 
 - **UI (Agent Detail)**: `src/frontend/src/components/AgentHeader.vue:128-136` - ReadOnlyToggle component
 - **UI (Dashboard List)**: `src/frontend/src/components/AgentListPanel.vue` - ReadOnlyToggle in the row controls (ent#260 — replaces the retired Agents page; rows read `agent.read_only_enabled` off the fleet payload, the per-agent GET N+1 is gone)
-- **API**: `GET/PUT /api/agents/{name}/read-only`
+- **API**: `GET/PUT /api/agents/{name}/read-only` — the `PUT` is person-only (`Depends(require_person)`, #2996: agent- and system-scoped keys get 403 `person_required`)
 
 ---
 

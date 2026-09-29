@@ -71,7 +71,8 @@ describe('#2580 — replyFromHistory reads the row the server wrote', () => {
   it('returns the newest assistant row WITH its id once it differs from the baseline', () => {
     const before = replyBaseline(hist(1))
     const reply = replyFromHistory([...hist(2), { role: 'user', content: 'q' }], before)
-    expect(reply).toEqual({ response: 'a1', cost: 1, id: 'm1', myRating: null })
+    // #3063: no cost — history no longer carries it, and nothing read it off the reply.
+    expect(reply).toEqual({ response: 'a1', id: 'm1', myRating: null })
   })
 
   it('carries an existing rating through', () => {

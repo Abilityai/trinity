@@ -132,6 +132,10 @@ _ALLOWED_CALLERS = {
         "platform-only: edge-triggered once per failure series (2→3 crossing, #389)",
     ("services/sync_health_service.py", "SyncHealthService._emit_git_bloat_alert"):
         "platform-only: edge-triggered per threshold crossing (#1595)",
+    ("services/sync_health_service.py", "SyncHealthService._emit_sync_diverged_alert"):
+        "platform-only: deterministic per-episode id (sync-diverged-{agent}-"
+        "{diverged_since}), and an episode must last > 24 h before it can raise "
+        "one, so at most one per agent per day (trinity-enterprise#706)",
     ("services/system_agent_service.py",
      "SystemAgentService._emit_base_image_stale_alert"):
         "platform-only: per-process cooldown, hosted on trinity-system (#1816)",
