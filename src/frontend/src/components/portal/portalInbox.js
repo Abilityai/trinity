@@ -20,6 +20,15 @@ import { queueTypeLabel } from '@/utils/operatorQueue'
 
 export const INBOX_TABS = ['action', 'unread', 'all']
 
+// #3060: the strip's fixed shape — id, label, and the reserved badge slot on
+// the two counted tabs — shared by the Inbox and its stage skeleton, so both
+// draw ONE strip and the counts land into space that is already there.
+export const INBOX_TAB_SHELL = Object.freeze([
+  Object.freeze({ id: 'action', label: 'Action', badgeSlot: true }),
+  Object.freeze({ id: 'unread', label: 'Unread', badgeSlot: true }),
+  Object.freeze({ id: 'all', label: 'All' }),
+])
+
 // All (§3g D-4a): EVERY chat the sidebar lists, of any age, plus the asks list —
 // pending asks always, ended ones for the 7 days the server keeps them
 // (`asks/service.py`, which also stops the read at 200 rows, pending first).

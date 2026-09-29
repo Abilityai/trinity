@@ -119,10 +119,9 @@
           aria-hidden="true"
           data-testid="inbox-list-total-reserve"
         >&nbsp;</p>
-        <div v-if="view.state === 'loading'" class="px-3 space-y-2" aria-busy="true" data-testid="inbox-list-loading">
-          <div v-for="i in 4" :key="i" class="animate-pulse motion-reduce:animate-none h-14 rounded-lg bg-gray-100 dark:bg-gray-800/60"></div>
-          <span class="sr-only">Loading your inbox…</span>
-        </div>
+        <!-- #3060: rows at the ready row's box (PortalInboxList's), the same
+             placeholder the stage skeleton draws, so neither hand-off moves. -->
+        <PortalInboxSkeleton v-if="view.state === 'loading'" part="rows" data-testid="inbox-list-loading" />
         <LoadFailed
           v-else-if="view.state === 'failed'"
           dense
@@ -180,6 +179,9 @@
           @reply="(url, reply) => url && $emit('reply', url, reply)"
           @open-thread="(t) => $emit('open-chat', `/workspace/c/${t.id}`)"
         />
+        <!-- #3060: while the list has no verdict there is nothing to pick yet —
+             the pane's placeholder, as the stage skeleton draws it. -->
+        <PortalInboxSkeleton v-else-if="view.state === 'loading' && !stacked" part="pane" />
         <p v-else-if="!noRows" class="m-auto px-6 text-center text-sm text-gray-600 dark:text-gray-300" data-testid="inbox-pane-none">
           Pick something on the left to read it here.
         </p>
@@ -200,12 +202,14 @@ import ConfirmDialog from '@/components/ConfirmDialog.vue'
 import { useNotification } from '@/composables/useNotification'
 import PortalInboxList from './PortalInboxList.vue'
 import PortalInboxPane from './PortalInboxPane.vue'
+import PortalInboxSkeleton from './PortalInboxSkeleton.vue'
 import { useClientPortalStore } from '@/stores/clientPortal'
 import { viewState, staleBannerMessage } from '@/utils/loadingState'
 import {
   actionItems, unreadItems, allItems, inboxCounts, defaultInboxTab, normalizeInboxTab,
   stableRows, emptyVisit, isGhost, resolveItem, parseItemKey, listHeadLabel,
   markAllLabel, markAllConfirm, allFooterNotes, pageWindow, PAGE_SIZE, inboxLayout, listHeadExact,
+  INBOX_TAB_SHELL,
 } from './portalInbox'
 import { askBadgeTitle, unreadBadgeTitle } from './portalUtils'
 import { capCount } from '@/utils/tabTitle'
@@ -294,16 +298,19 @@ const tabLabel = computed(() => ({ action: 'Action', unread: 'Unread', all: 'All
 // pills use — needs you urgent-700, new primary-700.
 // §3g A8c / D-1: the counter caps at 99+ like every other, and the tab is
 // NAMED with the full number in words (the badge is then aria-hidden).
+// #3060: Action and Unread reserve their badge's width (`badgeSlot`, from
+// INBOX_TAB_SHELL) — the counts land after the strip renders, and without the
+// slot they slid Unread and All ~29px right.
 const tabStrip = computed(() => [
   {
-    id: 'action', label: 'Action', badge: capCount(counts.value.needs) || null, badgeVariant: 'urgent',
+    ...INBOX_TAB_SHELL[0], badge: capCount(counts.value.needs) || null, badgeVariant: 'urgent',
     badgeLabel: counts.value.needs ? `Action, ${askBadgeTitle(counts.value.needs)}` : undefined,
   },
   {
-    id: 'unread', label: 'Unread', badge: capCount(counts.value.came) || null, badgeVariant: 'primary',
+    ...INBOX_TAB_SHELL[1], badge: capCount(counts.value.came) || null, badgeVariant: 'primary',
     badgeLabel: counts.value.came ? `Unread, ${unreadBadgeTitle(counts.value.came)}` : undefined,
   },
-  { id: 'all', label: 'All' },
+  { ...INBOX_TAB_SHELL[2] },
 ])
 
 const baseItems = computed(() => {

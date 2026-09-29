@@ -66,6 +66,14 @@ const props = defineProps({
   // `hasDraft` (trinity-enterprise#657) draws the quiet Draft mark after the
   // label — "this tab holds unsent text" — in the same three places, and in
   // the re-measure key, because it changes the tab's width when it toggles.
+  // `badgeSlot` (#3060) is an OPT-IN reservation for a count that lands after
+  // the strip renders: the badge span is drawn whether or not `badge` has a
+  // value — `invisible` (width kept) while it has none — at a tabular-nums
+  // min-width, so the count's arrival does not slide the neighbouring tabs.
+  // In the visible row AND the mirror (a tab measured narrower than it draws
+  // overflows one tab too late); the dropdown keeps its badge/signal chain
+  // untouched (#2794) — a menu row's count moves nothing beside it. A tab
+  // without it renders exactly what it did.
   tabs: { type: Array, required: true },
   // active tab id
   modelValue: { type: [String, null], required: true },
@@ -121,6 +129,9 @@ const BADGE_TONES = {
   primary: 'bg-action-primary-700 text-white',
 }
 const badgeTone = (tab) => BADGE_TONES[tab.badgeVariant] || BADGE_TONES.success
+// #3060: the reserved badge's footprint — one literal, used by both rows.
+const BADGE_SLOT = 'min-w-[1.75rem] text-center tabular-nums'
+const badgeSlotClass = (tab) => (tab.badgeSlot ? BADGE_SLOT : '')
 
 // B6a: the wrapper the inline tabs render in — a labelled tablist when asked
 // for, and NO element at all otherwise (the slot's nodes are returned bare), so
@@ -302,9 +313,10 @@ onUnmounted(() => {
         <span class="min-w-0 truncate">{{ tab.label }}</span>
         <DraftMark v-if="tab.hasDraft" class="ml-1.5" />
         <span
-          v-if="tab.badge"
-          :class="['ml-1.5 shrink-0 px-1.5 py-0.5 text-[10px] font-semibold', badgeTone(tab), 'rounded-full leading-none']"
+          v-if="tab.badge || tab.badgeSlot"
+          :class="['ml-1.5 shrink-0 px-1.5 py-0.5 text-[10px] font-semibold', badgeTone(tab), 'rounded-full leading-none', badgeSlotClass(tab), tab.badge ? '' : 'invisible']"
           :aria-hidden="tab.badgeLabel ? 'true' : undefined"
+          :data-badge-slot="tab.badgeSlot ? '' : undefined"
         >
           {{ tab.badge }}
         </span>
@@ -435,8 +447,9 @@ onUnmounted(() => {
           {{ tab.label }}
           <DraftMark v-if="tab.hasDraft" class="ml-1.5" />
           <span
-            v-if="tab.badge"
+            v-if="tab.badge || tab.badgeSlot"
             class="ml-1.5 px-1.5 py-0.5 text-[10px] font-semibold rounded-full leading-none"
+            :class="badgeSlotClass(tab)"
           >
             {{ tab.badge }}
           </span>
