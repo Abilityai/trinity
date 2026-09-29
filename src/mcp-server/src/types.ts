@@ -493,12 +493,15 @@ export interface OperatorQueueItem {
   expires_at?: string | null;
   response?: string | null;
   response_text?: string | null;
+  // A person's identity — withheld from agent, system and other machine keys
+  // (trinity-enterprise#715), as are `addressed_to_email`, `disposed_by_email`
+  // and `resolved_to`. Only a person's JWT or user-scoped key reads them.
   responded_by_id?: string | null;
   responded_by_email?: string | null;
   responded_at?: string | null;
   acknowledged_at?: string | null;
   // trinity-enterprise#611 — how the ask ended (NULL on a row that ended before
-  // the ledger: read `status`). `disposed_by_email` is withheld from agent keys.
+  // the ledger: read `status`).
   disposition?: string | null;        // answered | cancelled | expired
   disposed_at?: string | null;
   disposed_by?: string | null;        // person | timeout
