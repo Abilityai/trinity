@@ -277,9 +277,9 @@ describe('Overview containment', () => {
     // being non-empty, so an agent with nothing waiting renders no section at
     // all — same rule, one source, now on the conversation.
     const src = stripComments(readFileSync(CONVERSATION, 'utf8'))
-    // ent#610 sign-off: the mount now sits inside a capped scroll box, so the
+    // ent#610 sign-off: the mount now sits inside a closed-by-default row + capped box, so the
     // window widened; the guard it pins (`agentAsks.length` gates it) is unchanged.
-    expect(src).toMatch(/v-if="agentAsks\.length"[\s\S]{0,400}<PortalAsks/)
+    expect(src).toMatch(/v-if="agentAsks\.length"[\s\S]{0,1500}<PortalAsks/)
   })
 
   it('does not nest a scroll region inside the asks rendering', () => {

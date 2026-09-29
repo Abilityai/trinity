@@ -282,7 +282,7 @@ onUnmounted(() => {
         v-for="(tab, i) in inlineTabs"
         :key="tab.id"
         type="button"
-        :title="fixedWidth ? tab.label : undefined"
+        :title="tab.signalTitle || (fixedWidth ? tab.label : undefined)"
         :role="tablistLabel ? 'tab' : undefined"
         :aria-selected="tablistLabel ? String(modelValue === tab.id) : undefined"
         :tabindex="tablistLabel ? (tab.id === rovingId ? 0 : -1) : undefined"

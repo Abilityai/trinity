@@ -792,3 +792,14 @@ function participantList(value) {
     .filter((v) => typeof v === 'string' && v.trim().length > 0)
     .map((v) => v.trim())
 }
+
+// Sign-off round 5: Info's dot. The "answer what this agent asked you"
+// suggestion is left out — Work and the Inbox own the asks, and a third pointer
+// at them read as an unexplained dot. What remains is a real suggestion.
+export const INFO_OMITTED_SOURCES = Object.freeze(['asks'])
+export function infoSignalFrom(suggestions) {
+  const list = Array.isArray(suggestions?.suggestions) ? suggestions.suggestions : []
+  const omitted = list.filter((s) => INFO_OMITTED_SOURCES.includes(s.source)).length
+  const n = Math.max(0, (suggestions?.total || 0) - omitted)
+  return n > 0 ? { updated: true, note: n === 1 ? '1 suggestion' : `${n} suggestions` } : null
+}

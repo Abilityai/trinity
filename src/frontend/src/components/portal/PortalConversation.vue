@@ -450,18 +450,34 @@
          third rendering of the SAME row the sidebar counts and the agent page
          shows, so answering here clears it in both. Directly above the input
          because it is a turn that is waiting on the person about to type. -->
-    <!-- ent#610 sign-off: only THIS chat's asks are pinned (splitChatAsks), in
-         a block capped at a third of the screen with its own scroll — a sibling
-         of the thread's scroll region, never nested in it — and the rest are one
-         line away in Work. `relative` keeps each card's sr-only text inside. -->
+    <!-- ent#610 sign-off: Work is the asks' home, so a chat shows ONE row —
+         "N asks waiting on you" — closed by default and expanding inline, like
+         a "Delivered here" card. Only THIS chat's asks (splitChatAsks); open,
+         they sit in a box capped at a third of the screen with its own scroll,
+         a sibling of the thread's scroll region, never nested in it. The rest
+         are one line away in Work. `relative` keeps each card's sr-only text
+         inside the box. -->
     <div v-if="agentAsks.length" class="shrink-0 px-3 sm:px-6 pt-2">
-      <div v-if="chatAskIds.length" class="relative max-w-[var(--ws-message-max,64rem)] mx-auto max-h-[33vh] overflow-y-auto" data-testid="portal-chat-asks">
+      <BaseCard v-if="chatAskIds.length" flush class="max-w-[var(--ws-message-max,64rem)] mx-auto" data-testid="portal-chat-asks">
+        <!-- A native disclosure: the browser owns the expanded state and its
+             semantics (no aria on this file — the composer's no-combobox guard). -->
+        <details :open="asksOpen" @toggle="asksOpen = $event.target.open">
+        <summary
+          class="w-full px-3.5 py-2.5 flex items-center gap-3 text-left text-sm font-medium cursor-pointer select-none list-none [&::-webkit-details-marker]:hidden"
+          data-testid="portal-chat-asks-toggle"
+        >
+          <span class="min-w-0 flex-1">{{ chatAsksLabel(chatAsksPending) }}</span>
+          <svg class="w-4 h-4 shrink-0 transition" :class="{ 'rotate-180': asksOpen }" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" /></svg>
+        </summary>
+        <div v-if="asksOpen" class="relative max-h-[33vh] overflow-y-auto px-3.5 pb-3">
         <PortalAsks
           :ask-ids="chatAskIds"
           :current-session-id="currentSessionId"
           @open-thread="(t) => emit('open-thread', t)"
         />
-      </div>
+        </div>
+        </details>
+      </BaseCard>
       <p
         v-if="chatAsks.elsewhere.length"
         class="max-w-[var(--ws-message-max,64rem)] mx-auto pt-1 text-xs"
@@ -791,7 +807,7 @@ import PortalStarButton from './PortalStarButton.vue'
 import PortalEditableTitle from './PortalEditableTitle.vue'
 import PortalChatTabs from './PortalChatTabs.vue'
 import { newChatHotkeyLabel, MAIN_TAB_LABEL, composerAvailabilityNotice, assistantRow, replyFromHistory, replyBaseline, readReplyBaseline } from './portalUtils'
-import { splitChatAsks } from './portalUtils'
+import { splitChatAsks, pinnedAskIds, chatAsksLabel } from './portalUtils'
 import { usePortalFileDrop, attachmentState } from '@/composables/usePortalFileDrop'
 import { useStickToBottom } from '@/composables/useStickToBottom'
 import { useConversationAnchor } from '@/composables/useConversationAnchor'
@@ -802,6 +818,7 @@ import { draftKeyFor, shouldFocusOnRestore } from './portalDrafts'
 import PortalTypeahead from './PortalTypeahead.vue'
 import PortalJumpToLatest from './PortalJumpToLatest.vue'
 import PortalAsks from './PortalAsks.vue'
+import BaseCard from '@/components/base/BaseCard.vue'
 import PortalDeliverables from './PortalDeliverables.vue'
 import PortalSkeleton from './PortalSkeleton.vue'
 import { workSignalFrom } from './portalRail'
@@ -922,10 +939,6 @@ const store = useClientPortalStore()
 // nothing and this surface — the third of the three ent#364 promises — had never
 // rendered. It failed SILENTLY, as an empty list is a legitimate state.
 const agentAsks = computed(() => store.asksForAgent(props.agent.name))
-const chatAsks = computed(() => splitChatAsks(agentAsks.value, {
-  sessionId: currentSessionId.value, isMain: isMainChat.value,
-}))
-const chatAskIds = computed(() => chatAsks.value.here.map((a) => a.id))
 const messages = ref([])
 const currentSessionId = ref(props.sessionId)
 // ent#555 — the canvas the rail has open for THIS agent, or null.
@@ -1007,6 +1020,22 @@ const isMainChat = computed(() => {
   const row = (props.threads || []).find((t) => !t.is_room && (t.id || t.session_id) === id)
   return !!row?.is_main
 })
+
+// ent#610 sign-off: the chat's asks row. Declared after `currentSessionId`
+// and `isMainChat`: its `immediate` watcher reads both at setup.
+const chatAsks = computed(() => splitChatAsks(agentAsks.value, {
+  sessionId: currentSessionId.value, isMain: isMainChat.value,
+}))
+// An ask seen pending in this chat stays drawn (ended) after you answer it,
+// until you leave the chat; the row starts closed on every chat.
+const seenPendingAsks = ref(new Set())
+const asksOpen = ref(false)
+watch(() => chatAsks.value.here.filter((a) => a.status === 'pending').map((a) => a.id), (ids) => {
+  if (ids.some((id) => !seenPendingAsks.value.has(id))) seenPendingAsks.value = new Set([...seenPendingAsks.value, ...ids])
+}, { immediate: true })
+watch(currentSessionId, () => { seenPendingAsks.value = new Set(); asksOpen.value = false })
+const chatAskIds = computed(() => pinnedAskIds(chatAsks.value.here, seenPendingAsks.value))
+const chatAsksPending = computed(() => chatAsks.value.here.filter((a) => a.status === 'pending').length)
 
 // Archive this conversation and start the agent cold. No confirmation dialog
 // (operator, 2026-09-06) — nothing is lost, and the archived chat is one click

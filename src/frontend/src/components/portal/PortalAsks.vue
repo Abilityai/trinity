@@ -223,6 +223,9 @@ const props = defineProps({
   // #3055: a surface that is already beside the ask's chat can turn the
   // "Open the conversation" link off. It never affects the controls.
   threadLink: { type: Boolean, default: true },
+  // ent#610 sign-off: asks shown elsewhere on screen (the Inbox pane's open
+  // ask) are left out, so one ask is never drawn twice side by side.
+  excludeIds: { type: Array, default: null },
 })
 
 const emit = defineEmits(['open-thread'])
@@ -248,7 +251,10 @@ const items = computed(() => {
     const ids = new Set(props.askIds.filter(Boolean))
     return store.asks.filter((a) => ids.has(a.id))
   }
-  return props.pendingOnly ? allItems.value.filter((a) => a.status === 'pending') : allItems.value
+  const shown = props.pendingOnly ? allItems.value.filter((a) => a.status === 'pending') : allItems.value
+  if (!Array.isArray(props.excludeIds) || !props.excludeIds.length) return shown
+  const skip = new Set(props.excludeIds)
+  return shown.filter((a) => !skip.has(a.id))
 })
 
 const tid = computed(() => {

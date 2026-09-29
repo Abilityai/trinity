@@ -45,7 +45,7 @@
       <!-- Waiting on you -->
       <section v-if="asks.length" data-testid="portal-work-waiting">
         <h3 :class="OVERLINE">Waiting on you</h3>
-        <PortalAsks :agent-names="participants" pending-only :show-agent="participants.length > 1" :current-session-id="chatId" @open-thread="(t) => $emit('open-thread', t)" />
+        <PortalAsks :agent-names="participants" pending-only :show-agent="participants.length > 1" :current-session-id="chatId" :exclude-ids="excludeAskIds" @open-thread="(t) => $emit('open-thread', t)" />
       </section>
 
       <!-- Empty: teaches the next action (principle 16). -->
@@ -159,6 +159,8 @@ const props = defineProps({
   tab: { type: Object, default: null },
   // The open thread in a 1:1 — scopes "Waiting on you" links and the children.
   chatId: { type: String, default: null },
+  // ent#610 sign-off: the ask the Inbox pane already shows — not repeated here.
+  excludeAskIds: { type: Array, default: () => [] },
 })
 const emit = defineEmits(['open-thread', 'see-hints', 'ask-about-it'])
 
@@ -178,7 +180,8 @@ const view = computed(() => workView({
 // ent#428: the same rows the sidebar counts, narrowed to this chat.
 const asks = computed(() => {
   const names = new Set(participants.value)
-  return portal.asks.filter((a) => a.status === 'pending' && names.has(a.agent_name))
+  const skip = new Set(props.excludeAskIds || [])
+  return portal.asks.filter((a) => a.status === 'pending' && names.has(a.agent_name) && !skip.has(a.id))
 })
 
 const expanded = ref(false)

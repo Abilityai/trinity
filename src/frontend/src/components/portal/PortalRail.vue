@@ -188,6 +188,7 @@ import {
   railEmptyCopy,
   signalFor,
   signalShape,
+  railTitle,
 } from './portalRail'
 
 const props = defineProps({
@@ -217,7 +218,13 @@ const active = computed(() => {
 
 const strip = computed(() => collapsedSignals(props.signals, props.tabs))
 const stripTabs = computed(() =>
-  props.tabs.map((t) => ({ id: t.id, label: t.label, signal: signalShape(signalFor(props.signals, t)) }))
+  props.tabs.map((t) => {
+    const sig = signalFor(props.signals, t)
+    const signal = signalShape(sig)
+    // The dot's meaning on hover ("Info · 2 suggestions"), so it is never an
+    // unexplained circle (ent#610 sign-off).
+    return { id: t.id, label: t.label, signal, signalTitle: signal ? railTitle(t, sig) : undefined }
+  })
 )
 const activeSignal = computed(() => signalFor(props.signals, active.value))
 const empty = computed(() => railEmptyCopy(active.value, props.participants))

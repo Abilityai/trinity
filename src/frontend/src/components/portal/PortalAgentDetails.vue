@@ -60,6 +60,7 @@
     <PortalSuggestions
       v-if="store.isPlatformSession"
       :agent-name="agentName"
+      :omit-sources="['asks']"
       @use-playbook="(text) => $emit('use-playbook', text)"
       @open-section="openSection"
       @open-chat="$emit('focus-composer')"

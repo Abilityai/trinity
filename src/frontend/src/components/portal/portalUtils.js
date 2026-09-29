@@ -1669,6 +1669,17 @@ export function askThreadLink(ask, currentSessionId = null) {
 // takes the unattached ones, which have nowhere else to live — and the rest
 // that still wait are counted, one link away in Work. An ask that ended in
 // another chat is not waiting, so it is not counted.
+// Sign-off round 5: the chat's asks row. Pending asks, plus any that were
+// pending while this chat was on screen — an ask you just answered stays drawn,
+// ended, with its confirmation, until you leave the chat.
+export function pinnedAskIds(here, seenPending = new Set()) {
+  return (here || []).filter((a) => a.status === 'pending' || seenPending.has(a.id)).map((a) => a.id)
+}
+export function chatAsksLabel(n) {
+  if (!n) return 'No asks waiting on you'
+  return n === 1 ? '1 ask waiting on you' : `${n} asks waiting on you`
+}
+
 export function splitChatAsks(asks, { sessionId = null, isMain = false } = {}) {
   const here = []
   const elsewhere = []

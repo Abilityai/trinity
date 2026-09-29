@@ -645,7 +645,7 @@
              body READS a shell-owned store (`usePortalRailFeeds`) and never
              fetches, so the collapsed rail can signal with nothing mounted. -->
         <template #tab-work="{ participants, tab }">
-          <PortalWork :participants="participants" :tab="tab" :chat-id="railChatId" @open-thread="openThread" @see-hints="seeHints" @ask-about-it="askAboutIt" />
+          <PortalWork :participants="participants" :tab="tab" :chat-id="railChatId" :exclude-ask-ids="inboxOpenAskIds" @open-thread="openThread" @see-hints="seeHints" @ask-about-it="askAboutIt" />
         </template>
         <template #tab-loops="{ participants, tab }">
           <PortalLoops :participants="participants" :tab="tab" />
@@ -704,7 +704,7 @@
            body READS a shell-owned store (`usePortalRailFeeds`) and never
            fetches, so the collapsed rail can signal with nothing mounted. -->
       <template #tab-work="{ participants, tab }">
-        <PortalWork :participants="participants" :tab="tab" :chat-id="railChatId" @open-thread="openThread" @see-hints="seeHints" @ask-about-it="askAboutIt" />
+        <PortalWork :participants="participants" :tab="tab" :chat-id="railChatId" :exclude-ask-ids="inboxOpenAskIds" @open-thread="openThread" @see-hints="seeHints" @ask-about-it="askAboutIt" />
       </template>
       <template #tab-loops="{ participants, tab }">
         <PortalLoops :participants="participants" :tab="tab" />
@@ -780,7 +780,7 @@ import PortalAgentPicker from '@/components/portal/PortalAgentPicker.vue'
 import PortalRoom from '@/components/portal/PortalRoom.vue'
 import PortalInbox from '@/components/portal/PortalInbox.vue'
 import {
-  inboxLandingTarget, isInboxPath, inboxBranchVisible, inboxSelectedAgent, inboxCanvasCount,
+  inboxLandingTarget, isInboxPath, inboxBranchVisible, inboxSelectedAgent, inboxCanvasCount, parseItemKey,
   sidebarThreadsOf, agentLabels, inboxRailAllowance as inboxRailAllowanceFor,
 } from '@/components/portal/portalInbox'
 import {
@@ -813,6 +813,7 @@ import {
   railVisibleFor,
   saveRailState,
   visibleTabs,
+  infoSignalFrom,
 } from '@/components/portal/portalRail'
 import { stageZone } from '@/components/portal/portalBriefingState'
 import {
@@ -954,6 +955,11 @@ const isInboxRoute = computed(() => isInboxPath(route.path))
 // §3g S5 (T2): or the Inbox's desktop PREVIEW, which never enters the URL.
 const inboxPreview = ref(null)
 const inboxSelection = computed(() => (isInboxRoute.value ? route.query.item || inboxPreview.value || null : null))
+// ent#610 sign-off: the ask open in the Inbox pane is not repeated in Work.
+const inboxOpenAskIds = computed(() => {
+  const parsed = inboxSelection.value ? parseItemKey(inboxSelection.value) : null
+  return parsed && parsed.type === 'ask' ? [parsed.id] : []
+})
 const inboxVisible = computed(() => inboxBranchVisible({ isInboxRoute: isInboxRoute.value, stageState: stage.value.state }))
 const inboxAgentLabels = computed(() => agentLabels(store.agents))
 const activeAgent = computed(() => {
@@ -1229,8 +1235,7 @@ const rail = usePortalRailFeeds({
 const infoSignal = computed(() => {
   const name = activeAgent.value?.name
   if (!name || !store.isPlatformSession || store.suggestionsAgent !== name) return null
-  const n = store.suggestions?.total || 0
-  return n > 0 ? { updated: true, note: n === 1 ? '1 suggestion' : `${n} suggestions` } : null
+  return infoSignalFrom(store.suggestions)
 })
 // Loaded by the shell, not only by the bodies that render it: the dot exists
 // for the person mid-conversation with the rail collapsed, where neither the
