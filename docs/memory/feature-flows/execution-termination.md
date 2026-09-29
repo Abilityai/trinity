@@ -243,7 +243,7 @@ except httpx.TimeoutException:
         if existing and existing.status == "cancelled":
             logger.info(f"Execution {execution_id} already cancelled, not overwriting with timeout status")
         else:
-            db.update_execution_status(execution_id, status="failed", error="...")
+            db.update_execution_status(execution_id, status="failed", result=ExecutionResult(error="..."))
 
 # HTTP error handler (lines 591-616)
 except httpx.HTTPError as e:
@@ -253,7 +253,7 @@ except httpx.HTTPError as e:
         if existing and existing.status == "cancelled":
             logger.info(f"Execution {execution_id} already cancelled, not overwriting with failed status")
         else:
-            db.update_execution_status(execution_id, status="failed", error=error_msg)
+            db.update_execution_status(execution_id, status="failed", result=ExecutionResult(error=error_msg))
 ```
 
 **POST /api/agents/{name}/executions/{execution_id}/terminate** (lines 1363-1443):

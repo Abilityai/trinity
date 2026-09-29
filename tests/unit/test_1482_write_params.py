@@ -170,7 +170,7 @@ class TestCreateExecution:
         from db.write_params import ExecutionSource
         values = {
             "source_user_id": 3, "source_user_email": "o@example.com",
-            "source_agent_name": None, "source_mcp_key_id": "k", "source_mcp_key_name": "K",
+            "source_agent_name": "sched-caller", "source_mcp_key_id": "k", "source_mcp_key_name": "K",
             "model_used": "claude-sonnet-5", "subscription_id": "sub-9",
         }
         assert set(values) == {f.name for f in dataclasses.fields(ExecutionSource)}
@@ -194,7 +194,7 @@ class TestUpdateExecutionStatus:
         from db.write_params import ExecutionResult
         eid = self._fresh(schedule_ops)
         values = {
-            "response": "done", "error": None, "context_used": 1200, "context_max": 200000,
+            "response": "done", "error": "e", "context_used": 1200, "context_max": 200000,
             "cost": 0.42, "tool_calls": "[]", "execution_log": "[{}]",
             "claude_session_id": "sess-1", "compact_metadata": "{}", "retry_count": 1,
             "turn_integrity": "complete",
