@@ -3558,6 +3558,16 @@
         "integration"
       ],
       "description": "Journey J13 (suggestions): my agent tells me what I can do with it and what is waiting on me, and only things that are true. A strict=True xfail skeleton — the rules, SQL and doors are unit-proven and the verbs mount-proven; the walk needs a real failing schedule, a shared platform user and a magic-link client on one instance."
+    },
+    {
+      "file": "unit/test_ent705_cli_deploy_kind.py",
+      "feature": "trinity-enterprise#705",
+      "added": "2026-09-29",
+      "categories": [
+        "cli",
+        "git"
+      ],
+      "description": "`trinity deploy --repo` creates a deployment (trinity-enterprise#705): the CLI's POST /api/agents payload carries kind \"deployment\", so deploying a codebase never takes the agent default's working branch + auto-push. Static (AST) because the unit job does not install the CLI's own deps. The ownership rule itself (catalog template / owner != token login stays pull-only) is in test_1484_create_agent_characterization.py."
     }
   ]
 }
