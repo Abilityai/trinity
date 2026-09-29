@@ -534,7 +534,7 @@ enterprise-only and both env-backed. The view calls four helpers:
 | `retentionFormFromStatus(retention)` | pre-fills the form and is the snapshot Save diffs against |
 | `retentionSaveBody(fields, form, loaded, retention)` | only changed fields; never an env-sourced one; the number as typed (never `parseInt`, which turns `1e22` into `1`) |
 
-Save is disabled until something changed. A rejected save (a named 422 such as an
+Save is disabled until something changed, and the first new edit clears "Saved". A rejected save (a named 422 such as an
 out-of-bounds quota) renders in an `InlineError` beside Save and leaves the form in
 place — it used to replace the whole panel. Tests:
 `src/frontend/tests/unit/retentionFields.spec.js`,
