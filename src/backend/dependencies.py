@@ -1763,6 +1763,27 @@ async def enforce_agent_capability(
     )
 
 
+def can_manage_agent_skills(current_user: User, agent_name: str) -> bool:
+    """The non-raising form of `get_skill_managed_agent_by_name` (#3052).
+
+    For a READ that has one privileged option — `GET .../skill-sets?probe=true`
+    runs an in-container exec — the read stays open to anyone who can see the
+    agent, and the option is honoured only for a principal who would pass the
+    writes' fence: the skills-manage capability, then the owner fence (a
+    connector key never passes it). Everyone else gets the unprivileged read.
+
+    Never raises and never writes an audit row: a downgraded read is not a
+    refused write. Fails closed on the shapes the fence refuses (no
+    `mcp_scope`, an unknown scope, a connector key).
+    """
+    from db.capability_grants import CAPABILITY_SKILLS_MANAGE
+    if getattr(current_user, "connector_agent", None):
+        return False
+    if capability_refusal(current_user, CAPABILITY_SKILLS_MANAGE) is not None:
+        return False
+    return bool(db.can_user_share_agent(current_user.username, agent_name))
+
+
 async def get_skill_managed_agent_by_name(
     request: Request,
     agent_name: str = Path(..., description="Agent name from path"),
