@@ -33,6 +33,7 @@ from services.agent_auth import agent_httpx_client
 from services.docker_service import get_agent_container
 from services.platform_audit_service import platform_audit_service, AuditEventType
 from services.runtime_secret_scrub import get_staged_values, scrub_text
+from db.write_params import ChatMessageFields
 
 logger = logging.getLogger(__name__)
 
@@ -620,7 +621,9 @@ def _save_transcript(session) -> int:
                 user_email=session.user_email,
                 role=entry.role,
                 content=scrub_text(_staged, entry.text),
-                source="voice",
+                fields=ChatMessageFields(
+                    source="voice",
+                ),
             )
             saved += 1
         except Exception as e:

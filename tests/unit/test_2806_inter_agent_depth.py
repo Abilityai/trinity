@@ -37,6 +37,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
+from db.write_params import TaskExecutionFields
 
 _BACKEND = Path(__file__).resolve().parents[2] / "src" / "backend"
 if str(_BACKEND) not in sys.path:
@@ -146,7 +147,9 @@ def _running_row(agent: str, depth, status: str = "running") -> str:
         agent_name=agent,
         message="in-flight turn",
         triggered_by="agent",
-        chain_depth=depth,
+        fields=TaskExecutionFields(
+            chain_depth=depth,
+        ),
     )
     if status != "running":
         _hrun(
@@ -442,7 +445,7 @@ def test_2806_under_the_limit_the_child_is_stamped_on_the_object_and_the_row(wor
 
 
 def test_2806_create_task_execution_returns_the_stamp_it_wrote(world):
-    row = db.create_task_execution(agent_name=B, message="m", chain_depth=4)
+    row = db.create_task_execution(agent_name=B, message="m", fields=TaskExecutionFields(chain_depth=4))
     assert row.chain_depth == 4
     assert db.get_execution(row.id).chain_depth == 4
 

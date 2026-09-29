@@ -21,6 +21,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from unit._write_params import flat_kwargs
 
 _BACKEND = Path(__file__).resolve().parents[2] / "src" / "backend"
 if str(_BACKEND) not in sys.path:
@@ -126,7 +127,7 @@ class TestSuccessGolden:
         assert result.status == TaskExecutionStatus.SUCCESS
         assert result.response == "all done"
         # Golden kwargs for the SUCCESS write.
-        kw = mdb.update_execution_status.call_args.kwargs
+        kw = flat_kwargs(mdb.update_execution_status.call_args)
         assert kw["status"] == TaskExecutionStatus.SUCCESS
         assert kw["response"] == "all done"
         assert kw["cost"] == 0.05
@@ -150,14 +151,14 @@ class TestSuccessGolden:
 
     def test_success_session_id_falls_back_to_metadata(self):
         result, (mdb, *_rest) = _run_apply(_success_envelope(session_id=None))
-        assert mdb.update_execution_status.call_args.kwargs["claude_session_id"] == "meta-sess"
+        assert flat_kwargs(mdb.update_execution_status.call_args)["claude_session_id"] == "meta-sess"
 
     def test_success_cost_rollup_includes_previous_attempt(self):
         """#678 R2: previous_attempt_cost is summed into the terminal cost."""
         result, (mdb, *_rest) = _run_apply(
             _success_envelope(metadata={"cost_usd": 0.03}, previous_attempt_cost=0.10)
         )
-        assert mdb.update_execution_status.call_args.kwargs["cost"] == pytest.approx(0.13)
+        assert flat_kwargs(mdb.update_execution_status.call_args)["cost"] == pytest.approx(0.13)
 
     def test_success_lost_cas_reconciles_no_side_effects(self):
         from services.task_execution_service import (
@@ -189,7 +190,7 @@ class TestFailedGolden:
 
         assert result.status == TaskExecutionStatus.FAILED
         assert result.error == "agent said no"
-        kw = mdb.update_execution_status.call_args.kwargs
+        kw = flat_kwargs(mdb.update_execution_status.call_args)
         assert kw["status"] == TaskExecutionStatus.FAILED
         assert kw["error"] == "agent said no"
         assert kw["cost"] == 0.02                   # salvaged from partial metadata
@@ -215,7 +216,7 @@ class TestFailedGolden:
 
     def test_failed_empty_metadata_writes_null_context(self):
         result, (mdb, *_rest) = _run_apply(_failed_envelope(metadata={}))
-        kw = mdb.update_execution_status.call_args.kwargs
+        kw = flat_kwargs(mdb.update_execution_status.call_args)
         assert kw["context_used"] is None
         assert kw["context_max"] is None
         assert kw["cost"] is None
@@ -224,7 +225,7 @@ class TestFailedGolden:
         result, (mdb, *_rest) = _run_apply(
             _failed_envelope(metadata={"cost_usd": 0.02}, previous_attempt_cost=0.05)
         )
-        assert mdb.update_execution_status.call_args.kwargs["cost"] == pytest.approx(0.07)
+        assert flat_kwargs(mdb.update_execution_status.call_args)["cost"] == pytest.approx(0.07)
 
     def test_failed_lost_cas_skips_all_side_effects(self):
         from services.task_execution_service import TaskExecutionStatus

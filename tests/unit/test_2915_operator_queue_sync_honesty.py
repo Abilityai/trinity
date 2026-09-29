@@ -88,7 +88,7 @@ def _fake_db(open_rows=(), terminal=None, responded=(), terminal_items=(), pendi
     db = MagicMock()
     db.count_operator_queue_pending_for_agent.return_value = pending
     db.get_operator_queue_sync_index_for_agent.return_value = {
-        "open": [dict(r) for r in open_rows], "terminal": dict(terminal or {}),
+        "open": [dict(r) for r in open_rows], "terminal": dict(terminal or {}), "foreign": [],
     }
     db.set_operator_queue_sync_state.return_value = True
     db.set_operator_queue_delivery_state.return_value = True
@@ -99,6 +99,11 @@ def _fake_db(open_rows=(), terminal=None, responded=(), terminal_items=(), pendi
     db.get_operator_queue_terminal_for_agent.return_value = [dict(r) for r in terminal_items]
     db.get_setting_value.return_value = "24"
     db.create_operator_queue_item.return_value = "uuid-new"
+    # trinity-enterprise#611: the poller creates through the outcome accessor.
+    # Route it through the plain create mock, so every assertion here still
+    # counts the poller's creates and a raising create still raises.
+    db.create_operator_queue_item_with_outcome.side_effect = (
+        lambda agent, item, **kw: (db.create_operator_queue_item(agent, item, **kw), True))
     db.mark_operator_queue_expired.return_value = []
     db.mark_operator_queue_undelivered_for_stopped_agents.return_value = []
     return db

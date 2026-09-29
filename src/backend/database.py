@@ -112,6 +112,7 @@ from db.schema import init_schema
 # Import operation classes
 from db.users import UserOperations
 from db.agents import AgentOperations
+from db.write_params import ChatMessageFields, ExecutionResult, ExecutionSource, TaskExecutionFields
 from db.mcp_keys import McpKeyOperations
 from db.schedules import ScheduleOperations
 from db.chat import ChatOperations
@@ -132,6 +133,7 @@ from db.settings import SettingsOperations
 from db.public_links import PublicLinkOperations
 from db.email_auth import EmailAuthOperations
 from db.skills import SkillsOperations
+from db.skill_sets import SkillSetsOperations
 from db.role_readiness import RoleReadinessOperations
 from db.capability_grants import CapabilityGrantOperations
 from db.seat_decisions import SeatDecisionOperations
@@ -1011,6 +1013,7 @@ class DatabaseManager:
         self._public_link_ops = PublicLinkOperations(self._user_ops, self._agent_ops)
         self._email_auth_ops = EmailAuthOperations(self._user_ops)
         self._skills_ops = SkillsOperations()
+        self._skill_sets_ops = SkillSetsOperations()
         self._role_readiness_ops = RoleReadinessOperations()
         self._capability_grant_ops = CapabilityGrantOperations()
         self._seat_decision_ops = SeatDecisionOperations()
@@ -1816,47 +1819,11 @@ class DatabaseManager:
         agent_name: str,
         message: str,
         triggered_by: str = "manual",
-        source_user_id: int = None,
-        source_user_email: str = None,
-        source_agent_name: str = None,
-        source_mcp_key_id: str = None,
-        source_mcp_key_name: str = None,
-        model_used: str = None,
-        fan_out_id: str = None,
-        fan_out_task_id: str = None,
-        loop_id: str = None,
-        subscription_id: str = None,
-        source_channel: str = None,
-        source_channel_chat_id: str = None,
-        source_channel_thread: str = None,
-        source_channel_agent: str = None,
-        source_channel_client: str = None,
-        open_canvas_id: str = None,
-        chain_depth: int = None,
+        fields: Optional[TaskExecutionFields] = None,
     ):
-        """Create an execution record for a manual/API-triggered task (no schedule)."""
-        return self._schedule_ops.create_task_execution(
-            agent_name, message, triggered_by,
-            source_user_id=source_user_id,
-            source_user_email=source_user_email,
-            source_agent_name=source_agent_name,
-            source_mcp_key_id=source_mcp_key_id,
-            source_mcp_key_name=source_mcp_key_name,
-            model_used=model_used,
-            fan_out_id=fan_out_id,
-            fan_out_task_id=fan_out_task_id,
-            loop_id=loop_id,
-            subscription_id=subscription_id,
-            source_channel=source_channel,
-            source_channel_chat_id=source_channel_chat_id,
-            source_channel_thread=source_channel_thread,
-            # ent#265: binding-agent for channel report-back (set only at the
-            # /task inheritance point; None for direct rows).
-            source_channel_agent=source_channel_agent,
-            source_channel_client=source_channel_client,
-            open_canvas_id=open_canvas_id,
-            chain_depth=chain_depth,
-        )
+        """Create an execution record for a manual/API-triggered task (no schedule).
+        Optional columns ride `fields` (#1482, `db/write_params.py`)."""
+        return self._schedule_ops.create_task_execution(agent_name, message, triggered_by, fields)
 
     def get_max_running_chain_depth(self, agent_name: str) -> int:
         """Deepest chain_depth among the agent's running rows, 0 if none (#2806)."""
@@ -1868,31 +1835,17 @@ class DatabaseManager:
         agent_name: str,
         message: str,
         triggered_by: str = "schedule",
-        source_user_id: int = None,
-        source_user_email: str = None,
-        source_agent_name: str = None,
-        source_mcp_key_id: str = None,
-        source_mcp_key_name: str = None,
-        subscription_id: str = None,
+        source: Optional[ExecutionSource] = None,
     ):
         return self._schedule_ops.create_schedule_execution(
-            schedule_id, agent_name, message, triggered_by,
-            source_user_id=source_user_id,
-            source_user_email=source_user_email,
-            source_agent_name=source_agent_name,
-            source_mcp_key_id=source_mcp_key_id,
-            source_mcp_key_name=source_mcp_key_name,
-            subscription_id=subscription_id,
-        )
+            schedule_id, agent_name, message, triggered_by, source)
 
-    def update_execution_status(self, execution_id: str, status: str, response: str = None, error: str = None,
-                                context_used: int = None, context_max: int = None, cost: float = None, tool_calls: str = None, execution_log: str = None,
-                                claude_session_id: str = None, compact_metadata: str = None, retry_count: int = None,
-                                claim_token: str = None, turn_integrity: str = None):
-        return self._schedule_ops.update_execution_status(execution_id, status, response, error,
-                                                          context_used, context_max, cost, tool_calls, execution_log, claude_session_id,
-                                                          compact_metadata, retry_count, claim_token,
-                                                          turn_integrity=turn_integrity)
+    def update_execution_status(self, execution_id: str, status: str,
+                                result: Optional[ExecutionResult] = None, *, claim_token: str = None):
+        """Terminal write; returns the CAS bool unchanged (#1082/#1083). The
+        recorded values ride `result` (#1482, `db/write_params.py`)."""
+        return self._schedule_ops.update_execution_status(
+            execution_id, status, result, claim_token=claim_token)
 
     def mark_execution_dispatched(self, execution_id: str, async_dispatch: bool = False) -> bool:
         return self._schedule_ops.mark_execution_dispatched(execution_id, async_dispatch)
@@ -2112,13 +2065,9 @@ class DatabaseManager:
         return self._chat_ops.get_or_create_chat_session(agent_name, user_id, user_email, subscription_id=subscription_id)
 
     def add_chat_message(self, session_id: str, agent_name: str, user_id: int, user_email: str,
-                         role: str, content: str, cost: float = None, context_used: int = None,
-                         context_max: int = None, tool_calls: str = None, execution_time_ms: int = None,
-                         source: str = "text", subscription_id: str = None, output_tokens: int = None):
-        return self._chat_ops.add_chat_message(session_id, agent_name, user_id, user_email,
-                                               role, content, cost, context_used, context_max,
-                                               tool_calls, execution_time_ms, source=source,
-                                               subscription_id=subscription_id, output_tokens=output_tokens)
+                         role: str, content: str, fields: Optional[ChatMessageFields] = None):
+        return self._chat_ops.add_chat_message(
+            session_id, agent_name, user_id, user_email, role, content, fields)
 
     def get_chat_session(self, session_id: str):
         return self._chat_ops.get_chat_session(session_id)
@@ -2727,10 +2676,36 @@ class DatabaseManager:
         return self._skills_ops.unassign_skill(agent_name, skill_name)
 
     def set_agent_skills(self, agent_name: str, skill_names: list, assigned_by: str,
-                         source_ids: dict = None, assigned_by_agent: str = None):
+                         source_ids: dict = None, assigned_by_agent: str = None,
+                         set_resolver=None, result: dict = None):
         return self._skills_ops.set_agent_skills(
-            agent_name, skill_names, assigned_by, source_ids, assigned_by_agent
+            agent_name, skill_names, assigned_by, source_ids, assigned_by_agent,
+            set_resolver, result,
         )
+
+    # ent#530 — skill sets (delegated to db/skill_sets.py)
+    def list_agent_skill_sets(self, agent_name: str):
+        return self._skill_sets_ops.list_agent_sets(agent_name)
+
+    def agent_skill_set_names(self, agent_name: str):
+        return self._skill_sets_ops.agent_set_names(agent_name)
+
+    def assign_skill_set(self, agent_name, set_name, source_id, assigned_by, assigned_by_agent, resolved):
+        return self._skill_sets_ops.assign_set(agent_name, set_name, source_id, assigned_by,
+                                               assigned_by_agent, resolved)
+
+    def unassign_skill_set(self, agent_name, set_name, resolved, assigned_by):
+        return self._skill_sets_ops.unassign_set(agent_name, set_name, resolved, assigned_by)
+
+    def reconcile_skill_sets(self, agent_name, resolved):
+        return self._skill_sets_ops.reconcile(agent_name, resolved)
+
+    def replace_skill_sets(self, agent_name, set_names, source_ids, assigned_by, assigned_by_agent, resolved):
+        return self._skill_sets_ops.replace_sets(agent_name, set_names, source_ids, assigned_by,
+                                                 assigned_by_agent, resolved)
+
+    def set_skill_individual(self, agent_name, skill_name, individual):
+        return self._skill_sets_ops.set_individual(agent_name, skill_name, individual)
 
     def delete_agent_skills(self, agent_name: str):
         return self._skills_ops.delete_agent_skills(agent_name)
@@ -3702,6 +3677,24 @@ class DatabaseManager:
             agent_name, item, channel=channel, raised_by=raised_by,
         )
 
+    def create_operator_queue_item_with_outcome(self, agent_name, item, *, channel=None, raised_by=None):
+        # trinity-enterprise#611: the file poller's create — `(id, inserted)`, so a
+        # repeat is never counted as an admission.
+        return self._operator_queue_ops.create_item_with_outcome(
+            agent_name, item, channel=channel, raised_by=raised_by,
+        )
+
+    def create_native_operator_queue_item(self, agent_name, item, *, max_pending, channel,
+                                          raised_by, to_role, resolved_to, proposal,
+                                          supersedes_expired):
+        # trinity-enterprise#611: an agent-raised ask — replay, depth cap and insert
+        # in one per-agent serialized step.
+        return self._operator_queue_ops.create_native_item(
+            agent_name, item, max_pending=max_pending, channel=channel,
+            raised_by=raised_by, to_role=to_role, resolved_to=resolved_to,
+            proposal=proposal, supersedes_expired=supersedes_expired,
+        )
+
     def prune_operator_queue_terminal_items(self, retention_days, responded_retention_days, limit=5000):
         # #1142: retention sweep for terminal operator-queue rows.
         return self._operator_queue_ops.prune_terminal_items(
@@ -3714,6 +3707,10 @@ class DatabaseManager:
     def get_operator_queue_item_for_agent_by_request_id(self, agent_name, request_id):
         # trinity-enterprise#611: the agent's own readback — ignores Clear All.
         return self._operator_queue_ops.get_item_for_agent_by_request_id(agent_name, request_id)
+
+    def list_expired_operator_queue_proposals(self, agent_name, limit, raised_by=None):
+        # trinity-enterprise#611: the native create's re-ask guard (C6).
+        return self._operator_queue_ops.list_expired_proposals_for_agent(agent_name, limit, raised_by)
 
     def list_recent_operator_queue_endings(self, agent_name, since, limit,
                                            exclude_request_id_prefixes=None):
@@ -3847,8 +3844,10 @@ class DatabaseManager:
     def create_agent_event(self, source_agent, event_type, payload=None, subscriptions_triggered=0):
         return self._event_subscription_ops.create_event(source_agent, event_type, payload, subscriptions_triggered)
 
-    def list_agent_events(self, source_agent=None, event_type=None, limit=50):
-        return self._event_subscription_ops.list_events(source_agent, event_type, limit)
+    def list_agent_events(self, source_agent=None, event_type=None, limit=50, agent_names=None):
+        return self._event_subscription_ops.list_events(
+            source_agent, event_type, limit, agent_names=agent_names
+        )
 
     # =========================================================================
     # Access Requests (Issue #311)

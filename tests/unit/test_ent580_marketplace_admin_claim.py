@@ -100,12 +100,18 @@ def _lines(dot: str, key: str) -> list[str]:
 _TEMPLATE = "ADMIN_USERNAME=admin\nADMIN_PASSWORD=\n"  # what .env.example ships
 
 
+# `instance-id` (#3004, PROV-018) is the AWS claim mode: the same blank password,
+# with the first admin gated on the EC2 instance ID at /setup.
+_CLAIM_MODES = ["browser", "instance-id"]
+
+
 @pytest.mark.skipif(not _BASH, reason="bash required")
-def test_first_boot_claim_leaves_the_password_blank_and_persists_why(tmp_path):
+@pytest.mark.parametrize("source", _CLAIM_MODES)
+def test_first_boot_claim_leaves_the_password_blank_and_persists_why(tmp_path, source):
     """The claimable boot: firstboot exports the marker and passes --unattended,
     which on any other install means "generate one"."""
     r, vals, dot = _ensure_admin_password(
-        tmp_path, _TEMPLATE, {"ADMIN_PASSWORD_SOURCE": "browser", "UNATTENDED": "1"}
+        tmp_path, _TEMPLATE, {"ADMIN_PASSWORD_SOURCE": source, "UNATTENDED": "1"}
     )
     assert r.returncode == 0, r.stderr
     assert vals == {"GENERATED": "", "IN_BROWSER": "1"}
@@ -113,7 +119,7 @@ def test_first_boot_claim_leaves_the_password_blank_and_persists_why(tmp_path):
         "the password must stay EXPLICITLY blank — compose's `${ADMIN_PASSWORD?}` "
         "refuses an unset one"
     )
-    assert _lines(dot, "ADMIN_PASSWORD_SOURCE") == ["ADMIN_PASSWORD_SOURCE=browser"]
+    assert _lines(dot, "ADMIN_PASSWORD_SOURCE") == [f"ADMIN_PASSWORD_SOURCE={source}"]
 
 
 @pytest.mark.skipif(not _BASH, reason="bash required")
@@ -126,13 +132,14 @@ def test_claim_writes_an_explicit_blank_when_the_env_has_no_line(tmp_path):
 
 
 @pytest.mark.skipif(not _BASH, reason="bash required")
+@pytest.mark.parametrize("source", _CLAIM_MODES)
 @pytest.mark.parametrize("unattended", ["0", "1"])
-def test_a_later_update_run_leaves_a_claimed_instance_alone(tmp_path, unattended):
+def test_a_later_update_run_leaves_a_claimed_instance_alone(tmp_path, unattended, source):
     """`start.sh --hosted` is the documented update, with or without
     --unattended. Generating here would put a password in .env that the backend
     re-syncs over the browser-set one on the next boot; refusing would block the
     update. The marker in .env — not the environment — is what it reads."""
-    before = "ADMIN_USERNAME=admin\nADMIN_PASSWORD=\nADMIN_PASSWORD_SOURCE=browser\n"
+    before = f"ADMIN_USERNAME=admin\nADMIN_PASSWORD=\nADMIN_PASSWORD_SOURCE={source}\n"
     r, vals, dot = _ensure_admin_password(tmp_path, before, {"UNATTENDED": unattended})
     assert r.returncode == 0, r.stderr
     assert vals == {"GENERATED": "", "IN_BROWSER": "1"}
@@ -165,9 +172,9 @@ def test_without_the_marker_unattended_still_generates(tmp_path):
 
 
 @pytest.mark.skipif(not _BASH, reason="bash required")
-@pytest.mark.parametrize("marker", [None, "yes", "BROWSER", ""])
+@pytest.mark.parametrize("marker", [None, "yes", "BROWSER", "", "INSTANCE-ID", "instance_id"])
 def test_without_the_marker_an_interactive_run_still_refuses(tmp_path, marker):
-    """Unchanged, and only the exact value `browser` opts in."""
+    """Unchanged, and only the exact values `browser` / `instance-id` opt in."""
     env = {} if marker is None else {"ADMIN_PASSWORD_SOURCE": marker}
     r, _, dot = _ensure_admin_password(tmp_path, _TEMPLATE, env)
     assert r.returncode == 1
