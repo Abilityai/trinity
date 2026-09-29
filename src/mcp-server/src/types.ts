@@ -114,6 +114,8 @@ export interface McpAuthContext extends Record<string, unknown> {
   // treated as least-privileged, never as `user`.
   scope: "user" | "agent" | "system" | "connector" | "portal_delegate" | "anonymous" | "ops";
   mcpApiKey?: string;    // The actual MCP API key (for user-scoped requests to Trinity backend)
+  // #2392: X-Trinity-Execution-Id of THIS request (turn id or "manual"); wins over an agent-supplied execution_id.
+  executionId?: string;
 
   // --- #848 inline email auth (anonymous scope only) ---------------------
   // Mutated IN PLACE by verify_login. FastMCP hands every tool the same auth

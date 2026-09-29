@@ -52,6 +52,39 @@ class EffectInProgressError(Exception):
     """
 
 
+# Value the agent's MCP config sends in `X-Trinity-Execution-Id` when the
+# spawning process carries no `TRINITY_EXECUTION_ID` — a person running
+# `claude` in the web terminal or over SSH (#2392). There is no execution to
+# re-deliver, so a send can go without dedup; it is logged, never rejected.
+MANUAL_EXECUTION_ID = "manual"
+
+# Id prefix of the unguarded-effect alarm — reserved in operator_queue_service
+# so an agent cannot pre-create (and so suppress) its own alarm.
+EFFECT_UNGUARDED_ALERT_PREFIX = "effect-unguarded-"
+
+
+class EffectUnguardedError(Exception):
+    """A side effect on a pull-mode agent arrived without a usable execution id (#2392).
+
+    Pull re-delivers the SAME execution after a lease expiry, so the effect
+    guard is the only thing between a re-run and a duplicate message, call or
+    share. Without an id that resolves to the calling agent's own execution the
+    guard cannot de-duplicate, so the effect is refused rather than sent
+    (fail-closed, `TARGET_ARCHITECTURE.md` §Re-Delivery and Side-Effect
+    Recovery). Not retryable: a retry carries the same missing id.
+    """
+
+    def __init__(self, effect_type: str, reason: str) -> None:
+        self.effect_type = effect_type
+        self.reason = reason
+        super().__init__(
+            f"'{effect_type}' refused: this agent runs on the durable queue, where a "
+            f"turn can be re-delivered, and the request carried no usable execution id "
+            f"({reason}), so the send could not be de-duplicated. Do not retry — an "
+            f"operator has been alerted."
+        )
+
+
 # ---------------------------------------------------------------------------
 # Scope + key derivation
 # ---------------------------------------------------------------------------
@@ -248,39 +281,114 @@ def derive_effect_key(
     return f"{effect_type}:{h.hexdigest()}"
 
 
+def _resolve_execution_with_reason(
+    execution_id: Optional[str], agent_name: str, *, log: bool = True
+) -> "tuple[Optional[Any], str]":
+    """Resolve an agent's execution; return `(execution, reason)`.
+
+    `reason` is `ok` when the execution exists AND belongs to `agent_name`,
+    else one of `absent` (no id), `manual` (a person's terminal session, see
+    `MANUAL_EXECUTION_ID`), `unknown` (no such execution), `foreign` (another
+    agent's execution) or `lookup_error` (the lookup itself failed).
+    """
+    if not execution_id:
+        return None, "absent"
+    if execution_id == MANUAL_EXECUTION_ID:
+        return None, "manual"
+    try:
+        execution = db.get_execution(execution_id)
+    except Exception as e:
+        if log:
+            logger.warning(
+                "resolve_and_validate_execution: get_execution(%s) failed: %s",
+                execution_id, e,
+            )
+        return None, "lookup_error"
+    if not execution:
+        return None, "unknown"
+    if getattr(execution, "agent_name", None) != agent_name:
+        if log:
+            logger.warning(
+                "resolve_and_validate_execution: execution %s does not belong to agent %s "
+                "(owner=%s)",
+                execution_id, agent_name, getattr(execution, "agent_name", None),
+            )
+        return None, "foreign"
+    return execution, "ok"
+
+
 def resolve_and_validate_execution(execution_id: Optional[str], agent_name: str) -> Optional[Any]:
     """Return the execution iff it exists AND belongs to `agent_name`; else None.
 
     Generalizes the MEM-001 server-side resolution (routers/public_memory.py):
-    the agent supplies an execution_id, never its own identity, and the backend
-    confirms ownership. FAIL-OPEN by design — a missing execution_id (old image /
-    absent tool arg), a lookup error, or an agent mismatch returns None so the
-    caller proceeds WITHOUT dedup rather than 5xx-ing a legitimate send. Safe
-    today because pull-mode re-delivery is off (fail-open cannot produce a
-    duplicate yet); enabling pull-mode default-ON for side-effect agents requires
-    trusted execution_id injection + fail-closed-when-absent first (a BLOCKING
-    prerequisite on Epic #1045/#1081 — see the contract doc).
+    the backend confirms ownership of the id it is handed. The id reaches the
+    effect sinks from the platform — the agent's MCP config carries it per
+    process (#2392) — with the agent-supplied tool argument as the fallback for
+    older images. What happens when this returns None is the caller's policy;
+    `effect_guard` refuses on a pull-mode agent (`_on_unguarded_effect`).
     """
-    if not execution_id:
-        return None
-    try:
-        execution = db.get_execution(execution_id)
-    except Exception as e:  # fail-open: a lookup hiccup must not block a real send
-        logger.warning(
-            "resolve_and_validate_execution: get_execution(%s) failed — fail-open: %s",
-            execution_id, e,
+    return _resolve_execution_with_reason(execution_id, agent_name)[0]
+
+
+def effect_dedup_required(agent_name: str) -> bool:
+    """True when this agent's turns can be re-delivered, so an effect must dedup.
+
+    Today that is the pull pilots. Phase 5 (#429) puts every agent on the
+    durable queue; this is the one place that flips.
+    """
+    from services.pull_pilot import is_pull_pilot_agent
+    return is_pull_pilot_agent(agent_name)
+
+
+# Reasons that refuse the effect on a pull-mode agent. `manual` has no
+# execution to re-deliver; `lookup_error` is a DB blip that must not stop every
+# send (and `begin()` would fail open on the same outage anyway).
+_REFUSED_REASONS = frozenset({"absent", "unknown", "foreign"})
+
+
+async def _on_unguarded_effect(
+    effect_type: str, agent_name: Optional[str], reason: str
+) -> None:
+    """Refuse (pull-mode) or log (otherwise) an effect sent without dedup (#2392).
+
+    Either way the degraded case is visible: an operator alarm for a refusal,
+    an `effect_guard.degraded` warning for a send that went out unguarded.
+    """
+    if agent_name and reason in _REFUSED_REASONS and effect_dedup_required(agent_name):
+        logger.error(
+            "effect_guard.refused effect_type=%s agent=%s reason=%s — "
+            "pull-mode agent sent an effect without a usable execution id",
+            effect_type, agent_name, reason,
         )
-        return None
-    if not execution:
-        return None
-    if getattr(execution, "agent_name", None) != agent_name:
-        logger.warning(
-            "resolve_and_validate_execution: execution %s does not belong to agent %s "
-            "(owner=%s) — fail-open",
-            execution_id, agent_name, getattr(execution, "agent_name", None),
-        )
-        return None
-    return execution
+        from services.operator_queue_service import create_bounded_alert
+        from utils.helpers import utc_now_iso
+        now = utc_now_iso()
+        await create_bounded_alert(agent_name, {
+            "id": f"{EFFECT_UNGUARDED_ALERT_PREFIX}{agent_name}-{now}",
+            "agent_name": agent_name,
+            "type": "effect_unguarded",
+            "status": "pending",
+            "priority": "high",
+            "title": "Side effect refused: no execution id",
+            "question": (
+                f"{agent_name} tried to send a '{effect_type}' without a usable execution "
+                f"id ({reason}). It runs on the durable queue, where a turn can be "
+                f"re-delivered, so the send was refused rather than risk a duplicate. "
+                f"Usual causes: the agent runs an image older than #2392 (rebuild the "
+                f"base image and restart it); the call came from outside a turn (a "
+                f"person running Codex in the agent's terminal, or a user-scoped key "
+                f"acting for this agent), which carries no id; or the API was called "
+                f"directly instead of through the agent's Trinity MCP tools."
+            ),
+            "context": {"effect_type": effect_type, "reason": reason},
+            "created_at": now,
+        })
+        raise EffectUnguardedError(effect_type, reason)
+    logger.warning(
+        "effect_guard.degraded effect_type=%s agent=%s reason=%s — "
+        "sent without de-duplication",
+        effect_type, agent_name, reason,
+    )
 
 
 class _EffectGuardState:
@@ -327,8 +435,12 @@ async def effect_guard(
     - **fresh claim** → yields `g.dedup_enabled=True`; on clean exit `complete()`
       stores `g.snapshot`, on exception `fail()` releases the claim so a failed
       attempt retries.
-    - **fail-open** → an absent/invalid execution_id (and no payment_request_id),
-      or a claim hiccup, yields a no-op state so the send proceeds without dedup.
+    - **no usable execution_id** (and no payment_request_id) → on a pull-mode
+      agent, raises `EffectUnguardedError` BEFORE yielding and raises an operator
+      alarm (#2392); otherwise yields a no-op state and logs
+      `effect_guard.degraded`. A `manual` id or a lookup error always proceeds.
+    - **fail-open** → a claim hiccup yields a no-op state so the send proceeds
+      without dedup.
 
     Two scopes:
     - Effect path (messages/voip/share): `effect:{execution_id}`, after
@@ -352,7 +464,15 @@ async def effect_guard(
             else None
         )
         if execution is None:
-            # Dedup disabled (absent/invalid execution_id) — run the body, no guard.
+            # Why it did not resolve — re-derived here, not returned above, so
+            # `resolve_and_validate_execution` stays the one patchable seam.
+            reason = (
+                _resolve_execution_with_reason(execution_id, agent_name, log=False)[1]
+                if agent_name is not None
+                else "absent"
+            )
+            # Raises on a pull-mode agent; otherwise the send runs unguarded, logged.
+            await _on_unguarded_effect(effect_type, agent_name, reason)
             yield state
             return
         scope = make_effect_scope(execution_id)  # type: ignore[arg-type]
