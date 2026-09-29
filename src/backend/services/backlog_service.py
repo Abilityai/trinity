@@ -34,6 +34,7 @@ from typing import Any, Dict, Optional
 from models import ParallelTaskRequest, TaskExecutionStatus
 from services.slot_service import get_slot_service
 from utils.helpers import utc_now_iso
+from db.write_params import ExecutionResult
 
 logger = logging.getLogger(__name__)
 
@@ -246,7 +247,9 @@ class BacklogService:
             db.update_execution_status(
                 execution_id=execution_id,
                 status=TaskExecutionStatus.FAILED,
-                error=f"Backlog drain failed: corrupt metadata ({e})",
+                result=ExecutionResult(
+                    error=f"Backlog drain failed: corrupt metadata ({e})",
+                ),
             )
             await slots.release_slot(agent_name, execution_id)
             return False
@@ -265,7 +268,9 @@ class BacklogService:
             db.update_execution_status(
                 execution_id=execution_id,
                 status=TaskExecutionStatus.FAILED,
-                error=f"Backlog drain spawn failed: {e}",
+                result=ExecutionResult(
+                    error=f"Backlog drain spawn failed: {e}",
+                ),
             )
             await slots.release_slot(agent_name, execution_id)
             return False

@@ -363,3 +363,148 @@ describe("trinity-enterprise#611 get_my_ask acts as the key's agent (real transp
     assert.deepEqual(readbacks, ["trinity-system/fleet-7"]);
   });
 });
+
+// ---------------------------------------------------------------------------
+// trinity-enterprise#611 — ask_operator raises as the KEY's own agent, over the
+// real transport. The stub backend RECORDS every raise, path and body: the
+// agent comes from the key, only the declared fields travel, a key with no
+// agent identity never reaches the backend, and a named refusal reaches the
+// caller with its code.
+// ---------------------------------------------------------------------------
+
+describe("trinity-enterprise#611 ask_operator raises as the key's agent (real transport)", () => {
+  let backend: Server;
+  let mcpServer: { stop: () => Promise<void> };
+  let mcpUrl: URL;
+  const raises: Array<{ agent: string; body: Record<string, unknown> }> = [];
+
+  const KEYS: Record<string, { scope: string; agent_name?: string }> = {
+    "trinity_mcp_611_agent": { scope: "agent", agent_name: CALLER },
+    "trinity_mcp_611_user": { scope: "user" },
+    "trinity_mcp_611_system": { scope: "system", agent_name: "trinity-system" },
+  };
+  const REFUSAL = { code: "reask_requires_link", message: "Link the expired ask.", expired_request_id: "deploy-0" };
+
+  before(async () => {
+    backend = createHttpServer((req, res) => {
+      let raw = "";
+      req.on("data", (chunk) => { raw += chunk; });
+      req.on("end", () => {
+        const send = (status: number, payload: unknown) => {
+          res.writeHead(status, { "Content-Type": "application/json" });
+          res.end(JSON.stringify(payload));
+        };
+        const url = req.url ?? "";
+        if (url === "/api/mcp/validate") {
+          const key = String(req.headers.authorization ?? "").replace(/^Bearer /, "");
+          const row = KEYS[key];
+          if (!row) return send(401, { valid: false });
+          return send(200, {
+            valid: true, key_id: `id-${key}`, user_id: "owner",
+            user_email: "owner@example.com", key_name: key, ...row,
+          });
+        }
+        const raise = url.match(/^\/api\/agents\/([^/]+)\/operator-queue$/);
+        if (raise && req.method === "POST") {
+          const body = JSON.parse(raw || "{}");
+          raises.push({ agent: decodeURIComponent(raise[1]), body });
+          if (body.request_id === "refuse-me") return send(422, { detail: REFUSAL });
+          return send(201, {
+            status: "created", id: "uuid-1", request_id: body.request_id, channel: "mcp",
+            type: body.type ?? "question", to_role: "primary", resolved: true,
+            ask_status: "pending", wakes_on_ending: false,
+          });
+        }
+        return send(200, {});
+      });
+    });
+    await new Promise<void>((r) => backend.listen(0, "127.0.0.1", () => r()));
+    const backendPort = (backend.address() as AddressInfo).port;
+    const probe = createHttpServer();
+    await new Promise<void>((r) => probe.listen(0, "127.0.0.1", () => r()));
+    const mcpPort = (probe.address() as AddressInfo).port;
+    await new Promise<void>((r) => probe.close(() => r()));
+    const { server } = await createServer({
+      trinityApiUrl: `http://127.0.0.1:${backendPort}`,
+      requireApiKey: true,
+      port: mcpPort,
+    });
+    await server.start({ transportType: "httpStream", httpStream: { port: mcpPort, host: "127.0.0.1" } });
+    mcpServer = server;
+    mcpUrl = new URL(`http://127.0.0.1:${mcpPort}/mcp`);
+  });
+
+  after(async () => {
+    await mcpServer?.stop();
+    await new Promise<void>((r) => backend.close(() => r()));
+  });
+
+  const callAs = async (key: string, args: Record<string, unknown>) => {
+    const client = new Client({ name: key, version: "1.0.0" });
+    const transport = new StreamableHTTPClientTransport(mcpUrl, {
+      requestInit: { headers: { Authorization: `Bearer ${key}` } },
+    });
+    await client.connect(transport);
+    const r: any = await client.callTool({ name: "ask_operator", arguments: args });
+    await client.close();
+    return JSON.parse(r.content.map((c: any) => c.text).join("\n"));
+  };
+
+  const ASK = { request_id: "deploy-1", title: "Deploy the release?", type: "approval", options: ["approve", "reject"] };
+
+  it("an agent key raises as its own agent, and only the declared fields travel", async () => {
+    raises.length = 0;
+    const out = await callAs("trinity_mcp_611_agent", ASK);
+    assert.equal(out.status, "created");
+    assert.deepEqual(raises, [{ agent: CALLER, body: ASK }]);
+  });
+
+  it("an agent_name argument can neither aim it at a sibling nor reach the backend", async () => {
+    raises.length = 0;
+    await callAs("trinity_mcp_611_agent", { ...ASK, agent_name: SIBLING }).catch(() => undefined);
+    assert.ok(
+      raises.every((r) => r.agent === CALLER && !("agent_name" in r.body)),
+      `a raise was aimed or carried an agent: ${JSON.stringify(raises)}`,
+    );
+  });
+
+  it("a person's user-scoped key is refused before the backend is asked anything", async () => {
+    raises.length = 0;
+    const out = await callAs("trinity_mcp_611_user", ASK);
+    assert.equal(out.success, false);
+    assert.match(out.error, /agent identity/);
+    assert.deepEqual(raises, []);
+  });
+
+  it("the orchestrator's system key raises as trinity-system", async () => {
+    raises.length = 0;
+    await callAs("trinity_mcp_611_system", { ...ASK, request_id: "fleet-7" });
+    assert.deepEqual(raises.map((r) => r.agent), ["trinity-system"]);
+  });
+
+  it("a named refusal reaches the caller with its code and extras", async () => {
+    const out = await callAs("trinity_mcp_611_agent", { ...ASK, request_id: "refuse-me" });
+    assert.deepEqual(out, { success: false, status: 422, ...REFUSAL });
+  });
+
+  it("the published schema lets context and proposal carry keys", async () => {
+    // fastmcp publishes every tool through xsschema's strictJsonSchema, which
+    // stamps `additionalProperties: false` on each object-typed property —
+    // a record included — so a plain z.record reads "no keys allowed" to the
+    // model and to any client that enforces the schema.
+    const client = new Client({ name: "schema", version: "1.0.0" });
+    await client.connect(new StreamableHTTPClientTransport(mcpUrl, {
+      requestInit: { headers: { Authorization: "Bearer trinity_mcp_611_agent" } },
+    }));
+    const { tools } = await client.listTools();
+    await client.close();
+    const props = (tools.find((t) => t.name === "ask_operator")?.inputSchema as any)?.properties ?? {};
+    for (const field of ["context", "proposal"]) {
+      const branches = props[field]?.anyOf ?? [props[field]];
+      const objectBranch = branches.find((b: any) => b?.type === "object");
+      assert.ok(objectBranch, `${field} publishes no object branch: ${JSON.stringify(props[field])}`);
+      assert.notEqual(objectBranch.additionalProperties, false,
+        `${field} is published as an object that accepts no keys: ${JSON.stringify(props[field])}`);
+    }
+  });
+});

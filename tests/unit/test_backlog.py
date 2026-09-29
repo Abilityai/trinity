@@ -409,6 +409,8 @@ class _FakeDb:
         return True
 
     def update_execution_status(self, **kwargs):
+        if kwargs.get("result") is not None:  # #1482: inline the parameter object
+            kwargs.update(vars(kwargs.pop("result")))
         self.fail_status_calls.append(kwargs)
         return True
 

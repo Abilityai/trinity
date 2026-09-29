@@ -19,6 +19,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
+from db.write_params import TaskExecutionFields
 
 _BACKEND = Path(__file__).resolve().parents[2] / "src" / "backend"
 if str(_BACKEND) not in sys.path:
@@ -50,12 +51,23 @@ def _set_status(eid: str, status: str) -> None:
 
 def test_fan_out_task_id_round_trips_and_the_read_is_agent_scoped(ops):
     a = ops.create_task_execution(
-        agent_name="scout", message="m1", triggered_by="fan_out",
-        fan_out_id="fo_real", fan_out_task_id="alpha", subscription_id="sub_1",
+        agent_name="scout",
+        message="m1",
+        triggered_by="fan_out",
+        fields=TaskExecutionFields(
+            fan_out_id="fo_real",
+            fan_out_task_id="alpha",
+            subscription_id="sub_1",
+        ),
     )
     ops.create_task_execution(
-        agent_name="other", message="m2", triggered_by="fan_out",
-        fan_out_id="fo_real", fan_out_task_id="beta",
+        agent_name="other",
+        message="m2",
+        triggered_by="fan_out",
+        fields=TaskExecutionFields(
+            fan_out_id="fo_real",
+            fan_out_task_id="beta",
+        ),
     )
 
     rows = ops.get_fan_out_executions("scout", "fo_real")
@@ -68,8 +80,13 @@ def test_fan_out_task_id_round_trips_and_the_read_is_agent_scoped(ops):
 def test_count_fan_out_open_counts_only_non_terminal_rows(ops):
     ids = [
         ops.create_task_execution(
-            agent_name="scout", message=f"m{i}", triggered_by="fan_out",
-            fan_out_id="fo_count", fan_out_task_id=f"t{i}",
+            agent_name="scout",
+            message=f"m{i}",
+            triggered_by="fan_out",
+            fields=TaskExecutionFields(
+                fan_out_id="fo_count",
+                fan_out_task_id=f"t{i}",
+            ),
         ).id
         for i in range(6)
     ]
@@ -88,8 +105,13 @@ def test_a_row_left_waiting_for_a_slot_would_be_swept(ops):
     no session; nothing distinguishes a row waiting behind the fan-out semaphore
     from a silent launch failure, so after 60s the sweep FAILs it."""
     waiting = ops.create_task_execution(
-        agent_name="scout", message="tail", triggered_by="fan_out",
-        fan_out_id="fo_tail", fan_out_task_id="t9",
+        agent_name="scout",
+        message="tail",
+        triggered_by="fan_out",
+        fields=TaskExecutionFields(
+            fan_out_id="fo_tail",
+            fan_out_task_id="t9",
+        ),
     )
     old = (datetime.now(timezone.utc) - timedelta(seconds=120)).strftime(
         "%Y-%m-%dT%H:%M:%S.%fZ"
