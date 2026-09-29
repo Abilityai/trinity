@@ -4669,12 +4669,11 @@ def _alert_collided_inbox(agent_name: str, legacy_dir: str, claimants: list[str]
     repeat access does not re-alert. Never raises — an alert failure must not
     break a client's inbox read.
 
-    Residual, stated rather than hidden: this id carries none of the #1632
-    reserved prefixes, so an agent writing its own `operator-queue.json` could
-    pre-create it and swallow the alert via that same ON CONFLICT. The ERROR log
-    in the caller is therefore the primary signal and fires on every access
-    regardless; the queue item is the convenience. Adding a reserved prefix would
-    mean changing the OSS guard list, which is out of scope here.
+    The id's prefix is reserved (`_RESERVED_ID_PREFIXES`, #715): the text lists
+    client addresses, so the item is a platform alarm the agent's own file and
+    resume turn never receive, the queue's reads never return it to a machine
+    key, and an agent cannot pre-create the id to swallow the alert through that
+    same ON CONFLICT. The ERROR log in the caller still fires on every access.
     """
     try:
         from database import db as core_db

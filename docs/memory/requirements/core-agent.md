@@ -2419,7 +2419,8 @@ issue if it's ever wanted. Also deferred: `data.json` caching/streaming.
   the thing being criticised is a prompt-injection path into it — is why the
   operator's copy goes to the queue directly and the agent-facing redaction
   (`comment_withheld`) is untouched. The operator sees the comment; the agent
-  still does not.
+  still does not — including through its own key: the operator queue's reads
+  never return this item to a machine principal (trinity-enterprise#715).
 - **Routed through the budget, never allowlisted** (#1677). The volume here is
   driven by a *client* clicking, so this is an agent-influenceable emitter by
   the classification rule and goes through
@@ -3317,6 +3318,22 @@ to localStorage in the clear.
     shipped", never "by <owner>"; when a seat-delivery schedule exists and readiness is not
     `ready`, the card adds "its scheduled brief is paused until you mark it ready" — for
     platform viewers only, and not when autonomy is off (the autonomy gate stops it first).
+- **The stamp on the agents list and the fleet grid (rider, operator ruling 2026-09-24 —
+  ent#560's closure)**: readiness is a role-companion property, and the owner's stamp is
+  shown beside the agent wherever the operator scans the fleet, not only on the role card.
+  `GET /api/agents` attaches `readiness: {status, changed_at, source}` from ONE batched
+  read (`get_role_readiness_for_agents`, the display-label pattern); an agent with no stamp
+  carries `null` and shows nothing — never a guessed `calibrating`, because whether it is a
+  companion at all is in its template.yaml, which a list never reads. The list says what and
+  when, never who (the role card, owner-scoped, keeps the person). Both surfaces render one
+  predicate (`utils/readinessBadge.js`): the role card's words and variants (`ready` =
+  success, `calibrating` = warning, with a dot), and a tooltip that names a rollout stamp
+  and what calibrating holds back. The row also carries `brief_held` (one batched schedule
+  read, the role card's own predicate — `role_readiness_gate.brief_is_held`: a calibrating
+  stamp, an enabled seat-delivery schedule, autonomy on), and the tooltip says the brief is
+  paused only when it is true, so the list never claims a pause the card does not. The
+  dashboard's 30 s agent poll patches `readiness`/`brief_held` in place, so a flip reaches an
+  open tab without a reload.
 
 ### 5.37 Workspace — the seat-level decision record: why a thing was approved, deferred or killed (trinity-enterprise#638)
 - **Status**: ✅ Implemented (2026-09-22). OSS-core (Workspace).

@@ -45,3 +45,17 @@ Note that the kept answer is *itself* a checkpoint ("…when it reports back I'l
 ledger each created draft…"), not a finished deliverable. That is not incidental:
 it is precisely the partial-recovery risk the `#1870` recovery notice
 (`_RECOVERY_NOTICE`) exists to flag to an operator.
+
+## `human_only_route_baseline.json`
+
+The frozen baseline of the #2996 route census (`tests/unit/_route_census.py`):
+every OSS HTTP route that, at freeze, was neither gated by a recognised principal
+rule nor listed with a reason in `AGENT_CALLABLE` / `OWN_AUTH` / `DELEGATED`.
+Keys are `<definition relpath under src/backend>::<qualname>`; values are the
+registered `"METHOD /full/path"`, checked against the live app by
+`test_2996_route_census_runtime.py`.
+
+It is written **once, by hand** (`python tests/unit/_route_census.py --freeze`)
+and only ever shrinks: gating or classifying a route removes its entry and lowers
+`FROZEN_BASELINE_COUNT` in the same change. A new route never goes here — it is
+gated or classified instead. Being listed is a to-do marker, not a judgement.

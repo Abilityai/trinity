@@ -509,6 +509,19 @@ def test_an_in_flight_duplicate_is_a_409(client, monkeypatch):
     assert r.status_code == 409
 
 
+def test_an_unguarded_effect_on_a_pull_agent_is_a_422(client, monkeypatch):
+    """#2392: a refused effect surfaces as a named, non-retryable 422."""
+    from services.idempotency_service import EffectUnguardedError
+
+    async def _refuse(**kwargs):
+        raise EffectUnguardedError("a2a_call", "absent")
+
+    monkeypatch.setattr(a2a_outbound_service, "call_agent", _refuse)
+    r = client.http.post("/api/agents/bot/a2a/call", json=_body())
+    assert r.status_code == 422
+    assert r.json()["detail"]["reason"] == "effect_unguarded"
+
+
 def test_a_failed_call_releases_the_claim_so_a_retry_is_possible(monkeypatch, endpoint):
     """`effect_guard` releases on exception. Without it a transient peer failure
     would wedge that (endpoint, label) for the whole 24h TTL."""

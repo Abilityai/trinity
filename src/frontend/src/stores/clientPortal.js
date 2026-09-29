@@ -2104,8 +2104,21 @@ export const useClientPortalStore = defineStore('clientPortal', {
     // every PortalAsks surface and zero the badge, i.e. "nothing needs you"
     // during an outage (#2915; the contract's "never overwrite the data with a
     // synthetic empty payload in a catch", ent#253).
+    //
+    // A 401 is neither: the SESSION ended. It goes through `endSession` exactly
+    // as the roster fetch's 401 does (ent#375), which clears the list via
+    // `signOut()`. Folding it into `asksFailed` kept the previous client's list
+    // on screen: the 20s poll runs this and `refreshThreads`, never the roster,
+    // and `portalHttp`'s 401 interceptor acts only for a platform session — so
+    // for a portal-token client nothing else would ever end it.
+    //
+    // A read that resolves after the session it was issued under has ended
+    // (sign-out, expiry, another client signing in) is dropped: writing it
+    // would put that session's asks back into the store the sign-out cleared.
     async fetchAsks(agentName = null) {
       if (!this.isClientSignedIn) return []
+      const issuedUnder = this.portalToken
+      const stale = () => this.portalToken !== issuedUnder || !this.isClientSignedIn
       try {
         // trinity-enterprise#611: the asks that ended in the last 7 days ride the
         // same list, so a person sees how an ask ended instead of watching it
@@ -2114,6 +2127,7 @@ export const useClientPortalStore = defineStore('clientPortal', {
           headers: this.authHeader,
           params: agentName ? { agent_name: agentName, include_ended: true } : { include_ended: true },
         })
+        if (stale()) return []
         this.asks = Array.isArray(data) ? data : []
         this.asksAvailable = true
         this.asksAbsent = false
@@ -2122,6 +2136,14 @@ export const useClientPortalStore = defineStore('clientPortal', {
         this.asksLoadedAt = Date.now()
         return this.asks
       } catch (err) {
+        if (stale()) return []
+        if (err.response?.status === 401 && this.portalToken) {
+          this.endSession({
+            expired: true,
+            resumePath: typeof window !== 'undefined' ? window.location.pathname : null,
+          })
+          return []
+        }
         if ([403, 404].includes(err.response?.status)) {
           this.asksAvailable = false
           this.asksAbsent = true

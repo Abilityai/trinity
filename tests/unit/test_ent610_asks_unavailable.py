@@ -85,42 +85,62 @@ def _raise_ask(addressed, agent="agent-a"):
     return db.create_operator_queue_item(agent, item)
 
 
-_APP = None
-_PRINCIPAL = {"p": None}
+@pytest.fixture(scope="module")
+def asks_app():
+    """One app over the asks router for the module, built once and torn down with
+    it; `get_portal_principal` is overridden by walking the routes' own dependant
+    trees (the test_ent611 pattern, no reimport). The principal is a mutable cell
+    each test sets through `client_for`, so no module global carries state across
+    a random test order."""
+    from fastapi import FastAPI
+
+    from client_portal.asks import router as ar
+
+    app = FastAPI()
+    app.include_router(ar.router)
+    found = set()
+
+    def walk(dependant):
+        for sub in dependant.dependencies:
+            if getattr(sub.call, "__name__", "") == "get_portal_principal":
+                found.add(sub.call)
+            walk(sub)
+
+    for route in ar.router.routes:
+        if getattr(route, "dependant", None) is not None:
+            walk(route.dependant)
+    assert found, "no get_portal_principal dependency on the asks routes"
+    principal = {"p": None}
+    for call in found:
+        app.dependency_overrides[call] = lambda: principal["p"]
+    yield app, principal
+    app.dependency_overrides.clear()
 
 
-def _client(email):
-    """One app over the asks router; `get_portal_principal` overridden by walking
-    the routes' own dependant trees (the test_ent611 pattern, no reimport)."""
-    global _APP
+@pytest.fixture()
+def client_for(asks_app):
     from fastapi.testclient import TestClient
 
     from client_portal.portal_auth import PortalPrincipal
 
-    if _APP is None:
-        from fastapi import FastAPI
+    app, principal = asks_app
 
-        from client_portal.asks import router as ar
+    def _make(email):
+        principal["p"] = PortalPrincipal(email=email, is_platform=False)
+        return TestClient(app, raise_server_exceptions=False)
 
-        app = FastAPI()
-        app.include_router(ar.router)
-        found = set()
+    yield _make
+    principal["p"] = None
 
-        def walk(dependant):
-            for sub in dependant.dependencies:
-                if getattr(sub.call, "__name__", "") == "get_portal_principal":
-                    found.add(sub.call)
-                walk(sub)
 
-        for route in ar.router.routes:
-            if getattr(route, "dependant", None) is not None:
-                walk(route.dependant)
-        assert found, "no get_portal_principal dependency on the asks routes"
-        for call in found:
-            app.dependency_overrides[call] = lambda: _PRINCIPAL["p"]
-        _APP = app
-    _PRINCIPAL["p"] = PortalPrincipal(email=email, is_platform=False)
-    return TestClient(_APP, raise_server_exceptions=False)
+# Every queue read the list makes (#3059 split one read into three: the agents
+# the viewer's asks span, the count, the page). A fault in ANY of them is the
+# same outage. An ask is seeded first so the later reads are actually reached.
+_QUEUE_READS = (
+    "list_operator_queue_agent_names",
+    "count_operator_queue_items",
+    "list_operator_queue_items",
+)
 
 
 URL = "/api/enterprise/client-portal/asks"
@@ -129,20 +149,18 @@ URL = "/api/enterprise/client-portal/asks"
 # --- the service raises ------------------------------------------------------
 
 
+@pytest.mark.parametrize("read", _QUEUE_READS)
 def test_a_queue_read_fault_raises_rather_than_returning_empty(
-    asks_db, client_email, monkeypatch
+    asks_db, client_email, monkeypatch, read
 ):
     from client_portal.asks import service
+
+    _raise_ask(client_email)
 
     def boom(**_kw):
         raise RuntimeError("db down")
 
-    # #3059 split the read into three queue reads (the agents the asks span,
-    # the count, the page); an unreadable queue fails them all, and the first
-    # one runs before any early return — so every one of them is faulted.
-    for read in ("list_operator_queue_agent_names", "count_operator_queue_items",
-                 "list_operator_queue_items"):
-        monkeypatch.setattr(service.db, read, boom)
+    monkeypatch.setattr(service.db, read, boom)
     with pytest.raises(service.AsksUnavailable):
         service.list_asks(client_email, is_platform=False)
 
@@ -189,55 +207,57 @@ def test_answering_on_an_unreadable_roster_stays_a_uniform_404(
 # --- the route answers 503 -----------------------------------------------------
 
 
+@pytest.mark.parametrize("read", _QUEUE_READS)
 def test_the_route_answers_503_asks_unavailable_on_a_queue_fault(
-    asks_db, client_email, monkeypatch
+    asks_db, client_email, monkeypatch, client_for, read
 ):
     from client_portal.asks import service
+
+    _raise_ask(client_email)
 
     def boom(**_kw):
         raise RuntimeError("db down")
 
-    # #3059 split the read into three queue reads (the agents the asks span,
-    # the count, the page); an unreadable queue fails them all, and the first
-    # one runs before any early return — so every one of them is faulted.
-    for read in ("list_operator_queue_agent_names", "count_operator_queue_items",
-                 "list_operator_queue_items"):
-        monkeypatch.setattr(service.db, read, boom)
-    r = _client(client_email).get(URL, params={"include_ended": True})
+    monkeypatch.setattr(service.db, read, boom)
+    r = client_for(client_email).get(URL, params={"include_ended": True})
 
     assert r.status_code == 503
     assert r.json()["detail"]["code"] == "asks_unavailable"
     assert r.json()["detail"]["message"]
+    # A back-off hint for clients and proxies; the poll interval, not a default.
+    assert r.headers.get("Retry-After") == "20"
 
 
-def test_the_route_answers_503_on_an_unreadable_roster(asks_db, client_email, roster):
+def test_the_route_answers_503_on_an_unreadable_roster(
+    asks_db, client_email, roster, client_for
+):
     _raise_ask(client_email)
     roster["raises"] = True
 
-    r = _client(client_email).get(URL)
+    r = client_for(client_email).get(URL)
 
     assert r.status_code == 503
     assert r.json()["detail"]["code"] == "asks_unavailable"
 
 
 def test_the_route_still_answers_200_for_a_clean_off_roster_agent(
-    asks_db, client_email, roster
+    asks_db, client_email, roster, client_for
 ):
     _raise_ask(client_email)
     roster["on"] = False
 
-    r = _client(client_email).get(URL)
+    r = client_for(client_email).get(URL)
 
     assert r.status_code == 200
     assert r.json() == []
 
 
 def test_the_route_answers_200_with_the_ask_when_everything_reads(
-    asks_db, client_email
+    asks_db, client_email, client_for
 ):
     ask_id = _raise_ask(client_email)
 
-    r = _client(client_email).get(URL)
+    r = client_for(client_email).get(URL)
 
     assert r.status_code == 200
     assert [a["id"] for a in r.json()] == [ask_id]
@@ -262,12 +282,8 @@ def test_the_suggestions_build_still_degrades_to_no_ask_ids(
     def boom(**_kw):
         raise RuntimeError("db down")
 
-    # #3059 split the read into three queue reads (the agents the asks span,
-    # the count, the page); an unreadable queue fails them all, and the first
-    # one runs before any early return — so every one of them is faulted.
-    for read in ("list_operator_queue_agent_names", "count_operator_queue_items",
-                 "list_operator_queue_items"):
-        monkeypatch.setattr(service.db, read, boom)
+    _raise_ask(client_email)
+    monkeypatch.setattr(service.db, "list_operator_queue_agent_names", boom)
     out = suggestions._gather(
         "agent-a", client_email, datetime.now(timezone.utc), False
     )

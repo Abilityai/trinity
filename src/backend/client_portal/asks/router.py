@@ -24,6 +24,11 @@ from . import service
 from .models import WorkspaceAsk, WorkspaceAskAnswer
 from .service import AskError, AsksUnavailable
 
+# The 503 `asks_unavailable` Retry-After, in seconds (trinity-enterprise#610,
+# PR A0). It is the Workspace's asks poll interval (`Portal.vue::ASKS_POLL_MS`):
+# its next read is the retry anyway.
+ASKS_RETRY_AFTER_SECONDS = "20"
+
 router = APIRouter(
     prefix="/api/enterprise/client-portal/asks",
     tags=["client-portal"],
@@ -67,7 +72,7 @@ def list_asks(
         raise HTTPException(status_code=503, detail={
             "code": "asks_unavailable",
             "message": "Couldn't load your asks — try again.",
-        })
+        }, headers={"Retry-After": ASKS_RETRY_AFTER_SECONDS})
     except AskError as e:
         _raise(e)
     response.headers["X-Total-Count"] = str(page.total)
