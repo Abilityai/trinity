@@ -8,7 +8,7 @@
         "backend",
         "infrastructure"
       ],
-      "description": "Static guard: every image Dockerfile (backend, scheduler, base-image) builds FROM a python tag that names a Debian codename (or a digest), so Docker Hub cannot move the base to a new Debian release under an unrelated rebuild (#1823 tzdata, #3046 libmagic 5.46). Asserts that a codename is named, never which one."
+      "description": "Static guard: every image Dockerfile (backend, scheduler, base-image) builds FROM a python tag that names a Debian codename (or a digest), so Docker Hub cannot move the base to a new Debian release under an unrelated rebuild (#1823 tzdata, #3046 libmagic 5.46); asserts that a codename is named, never which one. backend and scheduler must name the same codename (one tz database for the schedule validator and executor, #1472). Parser handles --platform, AS stages, alpineX.Y and digest pins."
     },
     {
       "file": "unit/test_human_only_principals.py",
