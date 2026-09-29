@@ -51,6 +51,16 @@ def _bind_purpose(user_id) -> str:
     return f"email_bind:{user_id}"
 
 
+def _bind_attempt_scope(user_id, email: str) -> str:
+    """The OTP failure-counter key for one account binding one address.
+
+    Scoped to the bind (`otp_attempts:bind:{user_id}:{email}`), never the bare
+    address: wrong bind guesses must not lock the address's real owner out of
+    email sign-in (`otp_attempts:{email}`) — the cross-surface lockout the
+    portal's `portal:` prefix avoids too (ent#311)."""
+    return f"bind:{user_id}:{email}"
+
+
 def _email_can_be_delivered() -> bool:
     """False when the provider is `console`: the code only reaches the server log."""
     from services.settings_service import settings_service
@@ -122,7 +132,20 @@ async def update_my_email(
     code = (body.code or "").strip()
     verified = False
     if code:
+        # Cap wrong guesses exactly as email sign-in does (OTP_MAX_ATTEMPTS=5 in
+        # 10 minutes, pentest 3.1.5): past the cap even the right code is
+        # refused, so a caller cannot mint 3 live codes and guess without limit.
+        from routers import auth as auth_limits
+        scope = _bind_attempt_scope(current_user.id, email)
+        try:
+            auth_limits.check_otp_rate_limit(scope)
+        except HTTPException as e:
+            if e.status_code != 429:
+                raise
+            _refuse(429, "too_many_attempts",
+                    "Too many wrong codes for that address. Try again in a few minutes.")
         verified = bool(db.verify_login_code(email, code, purpose=_bind_purpose(current_user.id)))
+        auth_limits.record_otp_attempt(scope, success=verified)
         if not verified:
             _refuse(400, "invalid_code", "That code is wrong or has expired. Request a new one.")
     elif _email_can_be_delivered():

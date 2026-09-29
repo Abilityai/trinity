@@ -56,10 +56,13 @@ def users_db(tmp_path, monkeypatch):
 
 
 def _users_mod(db):
-    """The `db.users` module the live `db` singleton actually uses. Another test
-    may evict and re-import `db.users`, so a fresh `from db.users import …` can
-    hand back a different class object than the one `db` raises or calls."""
-    return sys.modules[type(db._user_ops).__module__]
+    """The namespace the live `db` singleton's user code actually raises from.
+    Another test may evict and re-import `db.users`, after which
+    `sys.modules["db.users"]` is a NEW module while the singleton still raises
+    the OLD module's `EmailInUseError` — so read the raising function's own
+    globals, not the module registry."""
+    import types
+    return types.SimpleNamespace(**type(db._user_ops)._insert_user.__globals__)
 
 
 def _make_user(db, email=None, role="user", username=None):
@@ -382,6 +385,101 @@ class TestBindNeedsProof:
         c = api["as"](me, **extra)
         assert c.post("/api/users/me/email/code", json={"email": _addr()}).status_code == 403
         assert c.put("/api/users/me/email", json={"email": _addr(), "code": "123456"}).status_code == 403
+
+
+class _FakeRedis:
+    """Just enough Redis for the OTP failure counter (get/ttl/delete/incr+expire)."""
+
+    def __init__(self):
+        self.store = {}
+
+    def get(self, key):
+        return self.store.get(key)
+
+    def ttl(self, key):
+        return 600 if key in self.store else -2
+
+    def delete(self, key):
+        self.store.pop(key, None)
+
+    def pipeline(self):
+        store = self.store
+
+        class _Pipe:
+            def incr(self, key):
+                store[key] = str(int(store.get(key, 0)) + 1)
+
+            def expire(self, key, seconds):
+                pass
+
+            def execute(self):
+                pass
+
+        return _Pipe()
+
+
+@pytest.fixture()
+def otp_redis(monkeypatch):
+    """Back the shared OTP limiter (`routers.auth`) with an in-memory store."""
+    import routers.auth as auth_module
+    fr = _FakeRedis()
+    monkeypatch.setattr(auth_module, "get_redis_client", lambda: fr)
+    return fr
+
+
+class TestBindGuessCap:
+    """A bind code gets the sign-in cap: 5 wrong guesses, then even the right
+    code is refused — under a bind-scoped key, not the bare address."""
+
+    def _mint(self, api, who, new):
+        c = api["as"](who)
+        assert c.post("/api/users/me/email/code", json={"email": new}).status_code == 200
+        return c, api["sent"][-1][1]
+
+    @staticmethod
+    def _wrong(code):
+        return f"{(int(code) + 1) % 1_000_000:06d}"
+
+    def test_five_wrong_codes_lock_out_the_right_one(self, api, otp_redis):
+        me = _make_user(api["db"], email=_addr("me"))
+        new = _addr("new")
+        c, code = self._mint(api, me, new)
+        for _ in range(5):
+            r = c.put("/api/users/me/email", json={"email": new, "code": self._wrong(code)})
+            assert r.status_code == 400 and r.json()["detail"]["code"] == "invalid_code"
+        r = c.put("/api/users/me/email", json={"email": new, "code": code})
+        assert r.status_code == 429 and r.json()["detail"]["code"] == "too_many_attempts"
+        assert api["db"].get_user_by_email(new) is None
+
+    def test_the_sign_in_counter_for_that_address_is_untouched(self, api, otp_redis):
+        me = _make_user(api["db"], email=_addr("me"))
+        new = _addr("new")
+        c, code = self._mint(api, me, new)
+        for _ in range(6):
+            c.put("/api/users/me/email", json={"email": new, "code": self._wrong(code)})
+        assert otp_redis.get(f"otp_attempts:{new}") is None
+        import routers.auth as auth_module
+        assert auth_module.check_otp_rate_limit(new) is True   # owner can still sign in
+
+    def test_another_account_has_its_own_counter(self, api, otp_redis):
+        new = _addr("new")
+        alice = _make_user(api["db"], email=_addr("alice"))
+        bob = _make_user(api["db"], email=_addr("bob"))
+        ca, code_a = self._mint(api, alice, new)
+        for _ in range(5):
+            ca.put("/api/users/me/email", json={"email": new, "code": self._wrong(code_a)})
+        cb, code_b = self._mint(api, bob, new)
+        r = cb.put("/api/users/me/email", json={"email": new, "code": code_b})
+        assert r.status_code == 200 and r.json()["verified"] is True
+
+    def test_a_successful_bind_clears_the_counter(self, api, otp_redis):
+        me = _make_user(api["db"], email=_addr("me"))
+        new = _addr("new")
+        c, code = self._mint(api, me, new)
+        for _ in range(4):
+            c.put("/api/users/me/email", json={"email": new, "code": self._wrong(code)})
+        assert c.put("/api/users/me/email", json={"email": new, "code": code}).status_code == 200
+        assert otp_redis.get(f"otp_attempts:bind:{me['id']}:{new}") is None
 
 
 class TestNoDeliveryInstall:
