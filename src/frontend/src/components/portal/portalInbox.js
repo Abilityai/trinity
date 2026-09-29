@@ -476,6 +476,16 @@ export function paneRuns(messages) {
   return runs
 }
 
+// §3g C10: "Open canvas" appears only when there is a canvas to open — the
+// selected item's agent has one in the rail's canvas feed (which the rail loads
+// for that agent anyway), and the Canvas tab is one this session has. On chats
+// and asks alike (T6).
+export function inboxCanvasCount({ tabs = [], canvases = {}, agent = null } = {}) {
+  if (!agent || !(Array.isArray(tabs) ? tabs : []).some((t) => t && t.id === 'canvas')) return 0
+  const list = canvases && canvases[agent]
+  return Array.isArray(list) ? list.length : 0
+}
+
 // "Open in chat": the chat, anchored at what the reader was looking at — the
 // first unread message, else the latest deliverable, else the bottom.
 export function openInChatTarget(item) {

@@ -275,3 +275,23 @@ describe('§3g A5 / F4 — the phone drawer from the Inbox', () => {
     expect(sidebars()).toBe(1)
   })
 })
+
+describe('§3g C10 — Open canvas from the Inbox', () => {
+  it("the Inbox is told the selected agent's canvas count, and Open canvas opens the rail on Canvas", async () => {
+    arm()
+    const { w } = await boot('/workspace/inbox')
+    const { usePortalRailFeedsStore } = await import('@/stores/portalRailFeeds')
+    const feeds = usePortalRailFeedsStore()
+    const inbox = () => w.findComponent({ name: 'PortalInbox' })
+    inbox().vm.$emit('update:preview', 'thread:t1')
+    await flushPromises()
+    expect(inbox().props('canvasCount')).toBe(0) // the feed has not landed
+    // The rail's feed lands for the selected agent (it loads it anyway).
+    feeds.canvases = { scout: [{ id: 'c1', updated_at: '2026-09-27T10:00:00Z' }] }
+    await flushPromises()
+    expect(inbox().props('canvasCount')).toBe(1)
+    inbox().vm.$emit('open-canvas')
+    await flushPromises()
+    expect(w.findComponent({ name: 'PortalRail' }).props('activeTab')).toBe('canvas')
+  })
+})

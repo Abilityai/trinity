@@ -3558,6 +3558,8 @@ to localStorage in the clear.
   confirm), one chat is read directly. Success is a toast ("Marked 28 chats read") and a new
   tab visit; a partial failure names how many failed and those chats keep their count (the S4
   rollback) (§3g A9).
+- **Open canvas (§3g C10)**: the pane offers "Open canvas" — on a chat or an ask — only when
+  the item's agent has a canvas this viewer can see; it opens the rail on that canvas.
 - **Long tabs page (§3g SM / C4)**: every tab renders 50 rows, states "Showing 50 of 212", and
   offers "Show more" (50 at a time, focus to the first new row); the window resets when the tab
   changes, never on a refresh, and always includes the selected row.

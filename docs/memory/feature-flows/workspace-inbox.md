@@ -118,7 +118,10 @@ Sign-in / reload on bare /workspace
                                (data-message-id / data-report-id, useStickToBottom.detach(),
                                 not found → bottom + "That message is further up"; key stripped)
               Reply in chat → the same, then focusConversationComposer() (A2: no composer in the pane)
-              Open canvas  → NOT built (deferred: no cheap per-agent "has a visible canvas" fact)
+              Open canvas  → shown when inboxCanvasCount({tabs: railTabs, canvases: the rail feed
+                             store, agent}) > 0 — on chats AND asks (T6); split: leftmost of
+                             the actions; stacked: in More → open-canvas → openRailOn('canvas')
+                             (§3g C10)
     Mark N chats read (ghost; Unread + All only — §3g A9) → k > 1: ConfirmDialog (confirm-variant
       primary, Cancel focused, "M new messages across N chats will be marked read. You can't undo
       this.") | k = 1: direct → Promise.allSettled(props.markRead per chat — S4 rollback each)

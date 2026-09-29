@@ -163,6 +163,8 @@
           :agent-label="labels[selectedItem.agent_name] || selectedItem.agent_name || ''"
           :show-back="stacked"
           :stacked="stacked"
+          :canvas-count="canvasCount"
+          @open-canvas="$emit('open-canvas')"
           :read-failed="readFailedKey === selectedItem.key"
           @rendered="(k) => { renderedKey = k }"
           @mark-read="readNow(selectedItem)"
@@ -217,12 +219,15 @@ const props = defineProps({
   // before it arrives, so a preview that brings it in cannot flip the layout
   // (§3g A4).
   railAllowance: { type: Number, default: 0 },
+  // §3g C10: the selected item's agent's canvases (the shell reads the rail's
+  // feed); 0 hides Open canvas.
+  canvasCount: { type: Number, default: 0 },
   // §3g S5: the shell's `markRead(kind, id)` — resolves true / false, never
   // rejects (S4). A function rather than an emit, because the pane needs its
   // verdict: a false result is `inbox-pane-read-error`.
   markRead: { type: Function, default: null },
 })
-const emit = defineEmits(['refresh', 'open-chat', 'reply', 'update:preview', 'open-menu'])
+const emit = defineEmits(['refresh', 'open-chat', 'reply', 'update:preview', 'open-menu', 'open-canvas'])
 
 const store = useClientPortalStore()
 const route = useRoute()

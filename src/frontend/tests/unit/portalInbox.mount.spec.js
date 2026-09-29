@@ -789,6 +789,40 @@ describe('the pane header (§3g L5: stacked chrome, split order)', () => {
   })
 })
 
+describe('Open canvas (§3g C10, T6)', () => {
+  const headerIds = (w) => w.find('[data-testid="inbox-pane"] header').findAll('[data-testid]')
+    .map((el) => el.attributes('data-testid'))
+    .filter((id) => /^inbox-pane-(heading|open-canvas|mark-read|reply|open|more)$/.test(id))
+
+  it('split: leftmost of the actions on a chat, and on an ask; it asks the shell for the canvas', async () => {
+    store.asks = [ask('q1')]
+    store.asksLoaded = true
+    const w = await mountInbox({ threads: [thread('t1', { unread: 2 })], canvasCount: 2 }, { query: { tab: 'unread', item: 'thread:t1' } })
+    expect(headerIds(w)).toEqual(['inbox-pane-heading', 'inbox-pane-open-canvas', 'inbox-pane-mark-read', 'inbox-pane-reply', 'inbox-pane-open'])
+    await w.find('[data-testid="inbox-pane-open-canvas"]').trigger('click')
+    expect(w.emitted('open-canvas')).toHaveLength(1)
+    await router.replace({ path: '/workspace/inbox', query: { tab: 'action', item: 'ask:q1' } })
+    await flushPromises()
+    expect(has(w, 'inbox-pane-open-canvas')).toBe(true)
+  })
+
+  it('absent with no canvas', async () => {
+    const w = await mountInbox({ threads: [thread('t1', { unread: 2 })], canvasCount: 0 }, { query: { tab: 'unread', item: 'thread:t1' } })
+    expect(has(w, 'inbox-pane-open-canvas')).toBe(false)
+  })
+
+  it('stacked: it lives in More', async () => {
+    phone = true
+    stubMatchMedia()
+    const w = await mountInbox({ threads: [thread('t1', { unread: 2 })], canvasCount: 1 }, { query: { tab: 'unread' } })
+    await w.find('[data-testid="inbox-row-thread:t1"]').trigger('click')
+    await flushPromises()
+    expect(headerIds(w)).not.toContain('inbox-pane-open-canvas')
+    await w.find('[data-testid="inbox-pane-more"]').trigger('click')
+    expect(w.find('[data-testid="inbox-pane-more-menu"] [data-testid="inbox-pane-open-canvas"]').exists()).toBe(true)
+  })
+})
+
 describe('a phone reaches the menu from the Inbox (§3g A5)', () => {
   it('a 44px, phone-only Menu button asks the shell for the drawer', async () => {
     const w = await mountInbox({ threads: [] }, { query: { tab: 'all' } })

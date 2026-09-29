@@ -315,7 +315,7 @@ describe('property: the Inbox and the sidebar never disagree (AC 1, D13)', () =>
 import {
   isInboxPath, inboxBranchVisible, inboxSelectedAgent, stableRows, emptyVisit, isGhost, resolveItem,
   paneWindow, openInChatTarget, agentLabels, PANE_TAIL, listHeadLabel, inboxRowLabel, pageWindow, PAGE_SIZE,
-  inboxLayout, paneRuns,
+  inboxLayout, paneRuns, inboxCanvasCount,
 } from '@/components/portal/portalInbox'
 
 describe('shell seams', () => {
@@ -567,6 +567,19 @@ describe('paneRuns — one header per run of one sender (§3g A13)', () => {
   it('two system lines are two runs; junk tolerated', () => {
     expect(paneRuns([m('s1', 'system', 0), m('s2', 'system', 0)])).toHaveLength(2)
     expect(paneRuns(null)).toEqual([])
+  })
+})
+
+describe('inboxCanvasCount — Open canvas only when there is one to open (§3g C10)', () => {
+  const tabs = [{ id: 'work' }, { id: 'canvas' }]
+  it('the agent\'s canvases, when the Canvas tab is one this session has', () => {
+    expect(inboxCanvasCount({ tabs, canvases: { scout: [{ id: 'c1' }, { id: 'c2' }] }, agent: 'scout' })).toBe(2)
+  })
+  it('0 without the tab, the agent, or any canvas', () => {
+    expect(inboxCanvasCount({ tabs: [{ id: 'work' }], canvases: { scout: [{ id: 'c1' }] }, agent: 'scout' })).toBe(0)
+    expect(inboxCanvasCount({ tabs, canvases: { scout: [{ id: 'c1' }] }, agent: null })).toBe(0)
+    expect(inboxCanvasCount({ tabs, canvases: {}, agent: 'scout' })).toBe(0)
+    expect(inboxCanvasCount({})).toBe(0)
   })
 })
 

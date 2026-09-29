@@ -844,8 +844,11 @@ when the reader opened it (a click, or the initial `?item=`) AND the pane has em
 `rendered` — history, the strict deliverables list and every payload on screen; the
 shell's `markRead` arrives as a function prop because the pane shows its `false`
 verdict. On phone nothing is previewed. The pinned sidebar row is its own component,
-`PortalInboxRow.vue`. The pane's **Open canvas** button is not built (the shell has no
-cheap per-agent "has a visible canvas" fact); it is deferred.
+`PortalInboxRow.vue`. The pane's **Open canvas** (§3g C10) reads the rail's own canvas
+feed — `portalInbox.inboxCanvasCount({tabs, canvases, agent})` over
+`stores/portalRailFeeds.canvases` for the selected item's agent, which the rail loads
+anyway — and shows only when that agent has a canvas and the Canvas tab is one this
+session has, on chats and asks alike (T6); it emits `open-canvas` → `openRailOn('canvas')`.
 
 ## Agents at the centre — Main, Reset, and the one page (ent#523, ent#524)
 

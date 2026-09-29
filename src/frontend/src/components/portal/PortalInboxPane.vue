@@ -45,8 +45,19 @@
         class="min-w-0 flex-1 text-sm font-medium truncate text-gray-900 dark:text-gray-100 focus:outline-none"
         data-testid="inbox-pane-heading"
       >{{ heading }}</h2>
-      <div v-if="item.type === 'thread'" class="shrink-0 flex items-center gap-2" data-testid="inbox-pane-actions">
+      <div v-if="item.type === 'thread' || canvasCount > 0" class="shrink-0 flex items-center gap-2" data-testid="inbox-pane-actions">
         <template v-if="!stacked">
+          <!-- §3g C10: leftmost — it arrives late (the canvas feed), and only
+               the truncating title may give way when it does. -->
+          <BaseButton
+            v-if="canvasCount > 0"
+            variant="ghost"
+            size="sm"
+            data-testid="inbox-pane-open-canvas"
+            @click="$emit('open-canvas')"
+          >Open canvas</BaseButton>
+        </template>
+        <template v-if="!stacked && item.type === 'thread'">
           <BaseButton
             v-if="item.n > 0"
             variant="ghost"
@@ -56,7 +67,7 @@
           >Mark read</BaseButton>
           <BaseButton variant="secondary" size="sm" data-testid="inbox-pane-reply" @click="$emit('reply', target)">Reply in chat</BaseButton>
         </template>
-        <BaseButton variant="primary" size="sm" data-testid="inbox-pane-open" @click="$emit('open-chat', target)">Open in chat</BaseButton>
+        <BaseButton v-if="item.type === 'thread'" variant="primary" size="sm" data-testid="inbox-pane-open" @click="$emit('open-chat', target)">Open in chat</BaseButton>
         <div v-if="stacked" ref="moreRootEl" class="relative">
           <BaseButton
             ref="moreBtn"
@@ -78,7 +89,15 @@
             @keydown.esc.stop="closeMore(true)"
           >
             <BaseButton
-              v-if="item.n > 0"
+              v-if="canvasCount > 0"
+              variant="ghost"
+              size="sm"
+              class="justify-start rounded-none"
+              data-testid="inbox-pane-open-canvas"
+              @click="closeMore(); $emit('open-canvas')"
+            >Open canvas</BaseButton>
+            <BaseButton
+              v-if="item.type === 'thread' && item.n > 0"
               variant="ghost"
               size="sm"
               class="justify-start rounded-none"
@@ -86,6 +105,7 @@
               @click="closeMore(); $emit('mark-read')"
             >Mark read</BaseButton>
             <BaseButton
+              v-if="item.type === 'thread'"
               variant="ghost"
               size="sm"
               class="justify-start rounded-none"
@@ -243,10 +263,12 @@ const props = defineProps({
   // §3g L5: the pane is a screen of its own (the Inbox is stacked) — the
   // header keeps [Back][title] … [Open in chat] and puts the rest in More.
   stacked: { type: Boolean, default: false },
+  // §3g C10: the selected agent's canvases (0 → no Open canvas).
+  canvasCount: { type: Number, default: 0 },
   // §3g S5: the container's read write for this chat failed.
   readFailed: { type: Boolean, default: false },
 })
-const emit = defineEmits(['back', 'open-chat', 'reply', 'open-thread', 'rendered', 'mark-read', 'dismiss-read-error'])
+const emit = defineEmits(['back', 'open-chat', 'reply', 'open-thread', 'rendered', 'mark-read', 'dismiss-read-error', 'open-canvas'])
 
 const store = useClientPortalStore()
 const headingEl = ref(null)

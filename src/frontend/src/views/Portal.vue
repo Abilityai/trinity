@@ -335,6 +335,8 @@
           :is-platform="store.isPlatformSession"
           :mark-read="markRead"
           :rail-allowance="inboxRailAllowance"
+          :canvas-count="inboxCanvases"
+          @open-canvas="openRailOn('canvas')"
           @open-menu="mobileNav = true"
           @update:preview="(k) => { inboxPreview = k }"
           @refresh="refreshThreads"
@@ -766,7 +768,7 @@ import PortalAgentPicker from '@/components/portal/PortalAgentPicker.vue'
 import PortalRoom from '@/components/portal/PortalRoom.vue'
 import PortalInbox from '@/components/portal/PortalInbox.vue'
 import {
-  inboxLandingTarget, isInboxPath, inboxBranchVisible, inboxSelectedAgent,
+  inboxLandingTarget, isInboxPath, inboxBranchVisible, inboxSelectedAgent, inboxCanvasCount,
   sidebarThreadsOf, agentLabels,
 } from '@/components/portal/portalInbox'
 import {
@@ -784,6 +786,7 @@ import PortalRailStrip from '@/components/portal/PortalRailStrip.vue'
 import PortalVoiceCanvas from '@/components/portal/PortalVoiceCanvas.vue'
 import ConfirmDialog from '@/components/ConfirmDialog.vue'
 import { usePortalRailFeeds } from '@/composables/usePortalRailFeeds'
+import { usePortalRailFeedsStore } from '@/stores/portalRailFeeds'
 import {
   RAIL_TABS,
   askCanvasPrefill,
@@ -1137,6 +1140,14 @@ const railColumnReserved = computed(() => Boolean(
 const railHasColumn = computed(() => Boolean(
   railVisible.value && railTabs.value.length && !voiceCanvasHasColumn.value
 ))
+
+// trinity-enterprise#610 §3g C10: the selected item's agent's canvases, from
+// the rail's own feed (it loads that agent's canvases anyway) — "Open canvas"
+// shows only when there is one, and opens the rail on it.
+const railFeedsStore = usePortalRailFeedsStore()
+const inboxCanvases = computed(() => inboxCanvasCount({
+  tabs: railTabs.value, canvases: railFeedsStore.canvases, agent: activeAgent.value?.name || null,
+}))
 
 // trinity-enterprise#610 §3g A4: the Inbox decides split / stacked by its OWN
 // width. While the rail is not yet a column — nothing selected, so no rail — its
