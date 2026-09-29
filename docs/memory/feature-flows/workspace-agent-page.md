@@ -374,6 +374,12 @@ roster is still dropped) and the route answers **503 `asks_unavailable`**. The
 store keeps the last good list on any non-404/403 failure, sets `asksFailed`,
 leaves `asksAvailable` as it was, and latches `asksLoaded` on the first success
 — so `<PortalAsks>` keeps rendering what it last knew instead of blanking.
+A **401** is not an outage but the end of the session: `fetchAsks` calls
+`endSession({expired: true, resumePath})` exactly as the roster fetch does
+(ent#375), because the 20s poll never re-reads the roster and `portalHttp`'s 401
+interceptor acts only for a platform session. A read that resolves after its
+session ended (sign-out, expiry, another client) is dropped, never written.
+The 503 carries `Retry-After: 20`.
 
 ### The Overview row is unconditional, and asks moved below it (#2169)
 
@@ -579,8 +585,10 @@ roster halves are mutation-tested (revert the raise to `return []`; make
 `_on_roster` swallow again → red).
 `src/frontend/tests/unit/workspaceAsks.spec.js` pins the store half: a 5xx keeps
 the last good list with `asksFailed` set and `asksAvailable` untouched, a 404
-is absence (and resets `asksLoaded`), a success clears the failure, and a
-sign-out drops the kept list so the next client never inherits it.
+is absence (and resets `asksLoaded`), a success clears the failure, a
+sign-out drops the kept list so the next client never inherits it, a 401 ends a
+portal-token session and drops the list, and a read resolving after sign-out
+writes nothing (each mutation-tested).
 
 `tests/unit/test_ent360_workspace_agent_page.py` — the projections (no
 message/cost/model; alerts excluded; `context` never present, asserted against
