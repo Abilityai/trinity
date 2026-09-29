@@ -283,25 +283,34 @@ async def internal_agent_brief_readiness(agent_name: str):
 
 @router.get("/agents/{agent_name}/sync-health-status")
 async def internal_agent_sync_health(agent_name: str):
-    """#389: lightweight read used by the dedicated scheduler before dispatching.
+    """#389: the per-agent freeze decision, as the backend computes it.
 
-    Returns both the per-agent `freeze_schedules_if_sync_failing` flag and
-    whether the current sync state would trip it. The scheduler multiplies
-    the two to decide whether to skip the fire.
+    Returns the per-agent `freeze_schedules_if_sync_failing` flag, whether sync
+    is failing, and `should_freeze`. Since trinity-enterprise#706 the decision
+    is `sync_freeze_policy.classify` — the same module the scheduler vendors —
+    so `should_freeze` also covers a work agent diverged from origin for more
+    than 24 h, and `freeze_reason` / `divergence_age_s` / `work_agent` say why.
+
+    The dedicated scheduler does NOT call this endpoint: it reads the database
+    directly (`SchedulerDatabase.sync_freeze_reason`) with the vendored copy of
+    the same policy. This is the backend's read of the same decision.
     """
     from database import db as _db
+    from services.sync_health_view import sync_view
+
     freeze_flag = _db.get_freeze_schedules_if_sync_failing(agent_name)
+    config = _db.get_git_config(agent_name)
     state = _db.get_sync_state(agent_name) or {}
-    failing = (
-        state.get("last_sync_status") == "failed"
-        and (state.get("consecutive_failures") or 0) >= 3
-    )
+    view = sync_view(state or None, config)
     return {
         "agent_name": agent_name,
         "freeze_schedules_if_sync_failing": bool(freeze_flag),
-        "sync_failing": bool(failing),
-        "should_freeze": bool(freeze_flag and failing),
+        "sync_failing": bool(view["sync_failing"]),
+        "should_freeze": bool(freeze_flag and view["freeze"]),
         "consecutive_failures": state.get("consecutive_failures") or 0,
+        "freeze_reason": view["freeze_reason"] if freeze_flag else None,
+        "divergence_age_s": view["divergence_age_s"],
+        "work_agent": bool(config is not None and view["work_agent"]),
     }
 
 

@@ -185,6 +185,9 @@ _RESERVED_ID_PREFIXES = (
     "cb-dormant-",       # agent_client circuit-breaker-dormant alert
     "sync-failing-",     # sync_health_service
     "git-bloat-",        # sync_health_service
+    "sync-diverged-",    # sync_health_service divergence-freeze episode item
+                         # (trinity-enterprise#706) — deterministic id, so the
+                         # reservation is what keeps it unsuppressible
     "skill-not-found-",  # task_execution_service
     "val_",              # validation_service
     "system-seed-",      # system_seed_service first-run seed alerts (ent#124)

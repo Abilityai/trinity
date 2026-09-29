@@ -16,6 +16,10 @@ from typing import Optional, List
 
 from .config import config
 from .models import Schedule, ScheduleExecution, ExecutionStatus, ProcessSchedule, ProcessScheduleExecution, Reminder
+# #389/#1808: consecutive failed syncs before a freeze-enabled agent stops
+# firing. ONE number: it lives in the sync policy, which this package vendors
+# byte-identically from the backend (trinity-enterprise#706).
+from .sync_freeze_policy import SYNC_FAILURE_FREEZE_THRESHOLD, classify  # noqa: F401 (re-exported)
 from .utils import (
     duration_ms_between,
     parse_scheduler_ts,
@@ -24,11 +28,6 @@ from .utils import (
 )
 
 logger = logging.getLogger(__name__)
-
-# #389/#1808: consecutive failed syncs before a freeze-enabled agent stops
-# firing. Mirrors the threshold in the backend's
-# routers/internal.py::internal_agent_sync_health — keep the two in step.
-SYNC_FAILURE_FREEZE_THRESHOLD = 3
 
 
 def _scheduler_pg_url() -> Optional[str]:
@@ -467,19 +466,34 @@ class SchedulerDatabase:
             )
 
     def should_freeze_schedules(self, agent_name: str) -> bool:
-        """Is this agent's cron firing frozen by a failing git sync? (#389/#1808)
+        """Is this agent's cron firing frozen by its git sync? (#389/#1808, ent#706)
+
+        A bool view of :meth:`sync_freeze_reason` — kept for callers that only
+        need the yes/no.
+        """
+        return self.sync_freeze_reason(agent_name) is not None
+
+    def sync_freeze_reason(self, agent_name: str) -> Optional[str]:
+        """Why this agent's cron firing is frozen, or None when it may fire.
 
         True only when the owner opted in (`freeze_schedules_if_sync_failing`)
-        AND sync is actually failing. Mirrors the predicate the backend already
-        exposes at `/api/internal/agents/{name}/sync-health-status`; read
-        directly here because the scheduler talks to the same database for
-        every other gate (autonomy, enabled, reminders) and an extra HTTP hop
-        would add a failure mode to the fire path for no benefit.
+        AND either sync is failing (#1808, any binding) or a WORK agent has
+        been diverged from origin for more than 24 h on a fresh observation
+        (trinity-enterprise#706). The rule is `sync_freeze_policy.classify`,
+        vendored byte-identically from the backend, so the dashboard and this
+        gate cannot disagree. Read directly here because the scheduler talks to
+        the same database for every other gate (autonomy, enabled, reminders)
+        and an extra HTTP hop would add a failure mode to the fire path for no
+        benefit.
 
-        FAIL-OPEN: any error (missing table on an older DB, read failure)
-        returns False and the schedule fires. A freeze-on-error would silently
-        stop the whole fleet the moment this query broke — the opposite of the
-        bug this closes.
+        Returns a reason string rather than a tuple on purpose: a
+        `(False, None)` tuple is truthy, so a caller that kept the old
+        `if db.should_freeze_...(...)` shape would freeze the whole fleet.
+
+        FAIL-OPEN: any error (missing table or column on an older DB, read
+        failure) returns None and the schedule fires. A freeze-on-error would
+        silently stop the whole fleet the moment this query broke — the
+        opposite of the bug this closes.
         """
         try:
             with self.get_connection() as conn:
@@ -487,8 +501,16 @@ class SchedulerDatabase:
                 cursor.execute(
                     """
                     SELECT gc.freeze_schedules_if_sync_failing,
+                           gc.source_mode,
+                           gc.auto_sync_enabled,
                            ss.last_sync_status,
-                           ss.consecutive_failures
+                           ss.consecutive_failures,
+                           ss.ahead_main,
+                           ss.behind_main,
+                           ss.ahead_working,
+                           ss.behind_working,
+                           ss.diverged_since,
+                           ss.last_check_at
                     FROM agent_git_config gc
                     LEFT JOIN agent_sync_state ss ON ss.agent_name = gc.agent_name
                     WHERE gc.agent_name = ?
@@ -497,23 +519,40 @@ class SchedulerDatabase:
                 )
                 row = cursor.fetchone()
                 if not row:
-                    return False
+                    return None
                 # Named access only: the PG path (#300) yields RealDictCursor
                 # mapping rows with no positional indexing — row[0] would
                 # KeyError and silently fail-open on every PostgreSQL deploy.
-                freeze_enabled = bool(row["freeze_schedules_if_sync_failing"])
-                if not freeze_enabled:
-                    return False
-                failing = (
-                    row["last_sync_status"] == "failed"
-                    and (row["consecutive_failures"] or 0) >= SYNC_FAILURE_FREEZE_THRESHOLD
+                if not bool(row["freeze_schedules_if_sync_failing"]):
+                    return None
+                verdict = classify(
+                    {
+                        key: row[key]
+                        for key in (
+                            "last_sync_status",
+                            "consecutive_failures",
+                            "ahead_main",
+                            "behind_main",
+                            "ahead_working",
+                            "behind_working",
+                            "diverged_since",
+                            "last_check_at",
+                        )
+                    },
+                    {
+                        "source_mode": row["source_mode"],
+                        "auto_sync_enabled": row["auto_sync_enabled"],
+                        "freeze_schedules_if_sync_failing": row[
+                            "freeze_schedules_if_sync_failing"
+                        ],
+                    },
                 )
-                return bool(failing)
+                return verdict["freeze_reason"] if verdict["freeze"] else None
         except Exception as e:
             logger.warning(
                 f"Sync-freeze check failed for {agent_name} ({e}); firing anyway"
             )
-            return False
+            return None
 
     def create_skipped_execution(
         self,
