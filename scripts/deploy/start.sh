@@ -400,9 +400,21 @@ PRIVATE
     # Render beside the live file, never over it. Caddy keeps a bad config
     # only in memory until the next restart; an invalid file on disk with the
     # unit enabled takes the site down on the next reboot.
+    # No-SNI clients (curl and every browser, when the URL is an IP address)
+    # must get the IP certificate. Caddy chooses the TLS automation policy from
+    # the ClientHello's raw ServerName, BEFORE default_sni is applied, and an
+    # empty name matches any policy that has no subjects — so a bare `https://`
+    # on-demand site captured them and asked the backend about the IP, which it
+    # refuses. On a cloud whose public IP is NATed (EC2) that is every visit. So:
+    # `default_sni` names the IP, and the on-demand site lists hostname
+    # wildcards (one `*` per label, 2 to 6 labels), which an empty name cannot
+    # match. Both are needed; each alone still fails (reproduced on 2.11.4).
+    # ponytail: domains deeper than 6 labels get no on-demand certificate; add
+    # another `*.` pattern if one ever needs it.
     cat > /etc/caddy/Caddyfile.new <<CADDY
 {
     acme_ca https://acme-v02.api.letsencrypt.org/directory
+    default_sni ${ip}
     on_demand_tls {
         ask http://127.0.0.1:8000/api/public/tls-allowed
     }
@@ -424,7 +436,7 @@ https://${ip} {
     ${_do_header}
 }
 
-https:// {
+https://*.*, https://*.*.*, https://*.*.*.*, https://*.*.*.*.*, https://*.*.*.*.*.* {
     tls {
         on_demand
     }

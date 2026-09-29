@@ -424,3 +424,47 @@ def test_the_refresh_skips_the_banner() -> None:
     body = _START.read_text()
     banner = body.index('echo "Trinity Agent Platform - Starting"')
     assert '"--refresh-ip" ] && _quiet_banner=1' in body[:banner]
+
+
+# ---------------------------------------------------------------------------
+# Clients that send no SNI get the IP certificate
+# ---------------------------------------------------------------------------
+
+_DOMAIN_SITE = "https://*.*, https://*.*.*, https://*.*.*.*, https://*.*.*.*.*, https://*.*.*.*.*.* {"
+
+
+def _rendered_caddyfile(tmp_path) -> str:
+    src = _START.read_text()
+    cidr_fn = _extract("provision_private_cidrs")
+    caddy_fn = src[src.index("provision_caddyfile() {"): src.index("\nprovision_site() {")]
+    out = tmp_path / "Caddyfile"
+    harness = (
+        (cidr_fn + "\n" + caddy_fn).replace("/etc/caddy/Caddyfile", str(out))
+        + "\nenv_value() { :; }\nsystemctl() { :; }\ncaddy() { :; }\n"
+        + 'provision_caddyfile "203.0.113.10" "aws-marketplace"\n'
+    )
+    r = subprocess.run(["bash", "-c", harness], capture_output=True, text=True,
+                       env={"PATH": _SYS_PATH})
+    assert r.returncode == 0, r.stderr
+    return out.read_text()
+
+
+def test_a_client_without_sni_is_served_the_ip_certificate(tmp_path):
+    """curl and browsers send no SNI to an IP address. Caddy picks the TLS
+    automation policy from the RAW ServerName before `default_sni` is applied
+    (caddytls connpolicy.go: getConfigForName(hello.ServerName)), so an empty
+    name landed on the subject-less on-demand policy, which asked the backend
+    about the IP and was refused: `tlsv1 alert internal error` on EC2, where the
+    public IP is not on the interface. Two changes together fix it, and each
+    alone was reproduced failing in caddy 2.11.4: `default_sni <ip>`, and the
+    on-demand site's subjects are hostname wildcards, which an empty name
+    cannot match."""
+    c = _rendered_caddyfile(tmp_path)
+    glob = c[: c.index("\n}\n")]
+    assert "default_sni 203.0.113.10" in glob
+    assert _DOMAIN_SITE in c.splitlines(), "the on-demand site must not be a subject-less catch-all"
+    assert not re.search(r"^https:// \{", c, re.M)
+    site = c[c.index(_DOMAIN_SITE):]
+    site = site[: site.index("\n}\n")]
+    assert re.search(r"tls \{\s*on_demand\s*\}", site)
+    assert "https://203.0.113.10 {" in c, "the IP site is unchanged"

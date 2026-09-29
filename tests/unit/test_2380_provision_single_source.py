@@ -255,8 +255,10 @@ def test_the_provisioned_caddyfile_gates_on_demand_tls_on_the_backend() -> None:
     # asserted as a BLOCK: `on_demand` anywhere in the file is satisfied by the
     # global `on_demand_tls` option above, so deleting this site — which is the
     # whole feature — passed the previous spelling of this test.
-    site = re.search(r"^https:// \{\n(.*?)^\}", caddy, re.S | re.M)
-    assert site, "the catch-all https:// site is gone — a saved domain reaches nothing"
+    # Hostname wildcards, never a bare `https://` (#3004: a subject-less site
+    # captures clients that send no SNI; see test_3004_aws_provision).
+    site = re.search(r"^https://\*\.\*,[^\n]*\{\n(.*?)^\}", caddy, re.S | re.M)
+    assert site, "the on-demand domain site is gone — a saved domain reaches nothing"
     assert re.search(r"tls \{[^}]*\bon_demand\b", site.group(1), re.S), (
         "the catch-all site does not request an on-demand certificate"
     )
