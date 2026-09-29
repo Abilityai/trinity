@@ -89,38 +89,29 @@ describe('#2641 — the slot is reserved for the LIST, not for every row', () =>
   })
 })
 
-describe('#2641 — the template spends the predicate where it matters', () => {
-  it('the availability slot is conditional on it', () => {
-    expect(SIDEBAR).toMatch(
-      /<span\s+v-if="reserveAvailability"[^>]*min-w-\[4\.5rem\]/
-    )
+// ent#610 sign-off: #2641 reserved the chip's 72px on EVERY row once any
+// visible row could show one. "Show all" revealed three stopped agents and, in
+// a ~250px sidebar (avatar + the 56px date + that 72px + two count pills), the
+// name got 0px on every row — the agents vanished. The chip now sits on the
+// row's SECOND line, under the name, so the meta strip reserves nothing for it
+// and no row pays for another row's state. (`reservesAvailabilitySlot` above
+// keeps its contract; the template no longer spends it.)
+describe('ent#610 sign-off — the availability chip lives under the name', () => {
+  const nameBlock = () => {
+    const i = SIDEBAR.indexOf('{{ agentLabel(a) }}')
+    return SIDEBAR.slice(i, SIDEBAR.indexOf('w-14 text-right', i))
+  }
+  it('the chip renders inside the name block, on the subtitle line', () => {
+    expect(nameBlock()).toMatch(/<BaseBadge v-if="chipFor\(a\)"[^>]*:variant="chipFor\(a\)\.variant"/)
   })
-
-  it('removes the ELEMENT, not just its width', () => {
-    // A zero-width flex child still sits between the date and the row edge, and
-    // `gap-2.5` on the row would keep paying 10px for it — the date would still
-    // not be flush. So the guard is a `v-if`, never a conditional class.
-    const slot = SIDEBAR.slice(SIDEBAR.indexOf('reserveAvailability'))
-    expect(slot).not.toMatch(/:class="reserveAvailability/)
+  it('nothing after the date reserves width for it', () => {
+    const tail = SIDEBAR.slice(SIDEBAR.indexOf('w-14 text-right'), SIDEBAR.indexOf('data-testid="agent-unread-count"'))
+    expect(tail).not.toMatch(/min-w-\[4\.5rem\]/)
+    expect(tail).not.toMatch(/chipFor\(a\)/)
+    expect(SIDEBAR).not.toMatch(/v-if="reserveAvailability"/)
   })
-
-  it('is computed over the RENDERED rows, not the whole roster', () => {
-    // A stopped agent hidden by search or by the collapse limit must not
-    // reserve width on a list that shows no chip — that is the reported bug
-    // with extra steps.
-    expect(SIDEBAR).toMatch(
-      /const reserveAvailability = computed\(\(\) => reservesAvailabilitySlot\(\s*shownAgents\.value/
-    )
-  })
-
-  it('the date column is the last thing before the conditional slot', () => {
-    // With nothing reserved after it, "flush right" is a consequence of the
-    // date being the final always-rendered element — the badges after it are
-    // content and have always been conditional.
-    const dateIdx = SIDEBAR.indexOf('w-14 text-right')
-    const slotIdx = SIDEBAR.indexOf('v-if="reserveAvailability"')
-    expect(dateIdx).toBeGreaterThan(-1)
-    expect(slotIdx).toBeGreaterThan(dateIdx)
+  it('the subtitle line still truncates its text beside the chip', () => {
+    expect(nameBlock()).toMatch(/min-w-0 truncate[^"]*"[^>]*>\{\{ rowMeta\[a\.name\]\.preview \}\}/)
   })
 })
 

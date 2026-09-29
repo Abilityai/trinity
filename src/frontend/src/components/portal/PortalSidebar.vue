@@ -111,8 +111,18 @@
                  exists to remove. The slug stays the subtitle when the agent
                  renders under a label; the preview takes the line below it,
                  and never both lines at once. -->
-            <span v-if="rowMeta[a.name]?.preview" class="block text-xs truncate" :class="META_INK">{{ rowMeta[a.name].preview }}</span>
-            <span v-else-if="agentLabel(a) !== a.name" class="block text-xs truncate font-mono" :class="META_INK">{{ a.name }}</span>
+            <!-- ent#610 sign-off: the #2196 availability chip sits HERE, on the
+                 subtitle line, not in a strip reserved on every row (#2641) —
+                 that strip left a ~250px sidebar 0px for the names the moment
+                 "Show all" revealed a stopped agent. The text beside it truncates. -->
+            <span
+              v-if="chipFor(a) || rowMeta[a.name]?.preview || agentLabel(a) !== a.name"
+              class="flex items-center gap-1.5 min-w-0 text-xs"
+            >
+              <BaseBadge v-if="chipFor(a)" class="shrink-0" :variant="chipFor(a).variant">{{ chipFor(a).label }}</BaseBadge>
+              <span v-if="rowMeta[a.name]?.preview" class="min-w-0 truncate" :class="META_INK">{{ rowMeta[a.name].preview }}</span>
+              <span v-else-if="agentLabel(a) !== a.name" class="min-w-0 truncate font-mono" :class="META_INK">{{ a.name }}</span>
+            </span>
           </span>
           <!-- ent#523 / board A3: when you last heard from this agent. Tight
                enough to sit beside the name without competing with it. -->
@@ -133,33 +143,11 @@
           <span class="shrink-0 w-14 text-right text-[11px] tabular-nums" :class="META_INK">
             <template v-if="rowMeta[a.name]?.time">{{ rowMeta[a.name].time }}</template>
           </span>
-          <!-- #2196: the agent can't currently run. LABEL, never disable —
-               disabling would relocate the dead state rather than remove it,
-               since a client whose agents are all stopped (a routine
-               resource-saving posture) would get an entirely inert Workspace.
-               The chip sets the expectation; the server's 502 is the honest
-               refusal. Nothing is rendered for `ready` or `unknown`.
-
-               The slot's footprint is RESERVED so a row does not reflow when an
-               agent starts or stops between refreshes — the same reason the
-               roster is not re-sorted by this.
-
-               #2641: the reservation is a property of the LIST, not of a row.
-               `availabilityChip` answers null for everything except `stopped`
-               and `unavailable`, so on a fleet where everything is running the
-               strip was empty on EVERY row — which is why the dates stopped
-               72px short of the right edge and the name was charged 72px for
-               nothing. Reserved on every row iff any VISIBLE row can show a
-               chip: uniform down the list, so #2580's identical truncation
-               point survives, and absent entirely when there is nothing to hold
-               space for, which puts the date flush against the row's edge.
-
-               The whole element goes, not just its width — a zero-width flex
-               child still sits between the date and the edge, and `gap-2.5` on
-               the row would keep paying 10px for it. -->
-          <span v-if="reserveAvailability" class="shrink-0 min-w-[4.5rem] flex justify-end">
-            <BaseBadge v-if="chipFor(a)" :variant="chipFor(a).variant">{{ chipFor(a).label }}</BaseBadge>
-          </span>
+          <!-- #2196's availability chip (LABEL, never disable) moved to the
+               subtitle line under the name (ent#610 sign-off): #2641's strip,
+               reserved on every row once any visible row could show a chip,
+               left the names 0px in a ~250px sidebar. Nothing after the date
+               reserves width now, so the date stays flush right (#2641). -->
           <!-- #2424: the ask badge ent#364's comment above already promised.
                It got an aggregate in the brand header and nothing per row, so
                the header advertised a count with no way to reach the agent it
@@ -335,7 +323,6 @@ import { usePortalDraftsStore } from '@/stores/portalDrafts'
 import { agentsWithDrafts, threadKey } from './portalDrafts'
 import {
   groupThreadsByDate, partitionStarred, unreadByAgent, availabilityChip,
-  reservesAvailabilitySlot,
   orderRosterAgents, agentRowMeta,
   asksByAgent, agentRowTitle as buildAgentRowTitle,
   visibleAgentRows, AGENT_COLLAPSE_LIMIT,
@@ -519,8 +506,6 @@ const shownAgents = computed(() => (isSearching.value
 // reported bug with extra steps. Declared after `shownAgents` rather than
 // beside `chipFor` so the dependency reads in source order; one pass per
 // render, beside `rowMeta`'s.
-const reserveAvailability = computed(() => reservesAvailabilitySlot(
-  shownAgents.value, { detailed: props.isPlatformSession }))
 
 // The one-line preview under the name (AC 6): the newest chat you have with
 // this agent. Null when there is nothing to show, so a row with no history

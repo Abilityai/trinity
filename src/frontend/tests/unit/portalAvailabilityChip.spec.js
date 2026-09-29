@@ -161,10 +161,22 @@ describe('#2196 the surfaces consume the shared rule', () => {
     expect(shown[0]).not.toMatch(/sort|availability/)
   })
 
-  it('the chip slot reserves its footprint so the row does not reflow', () => {
-    const block = SIDEBAR.slice(SIDEBAR.indexOf('v-for="a in shownAgents"'))
+  it('a start/stop never moves the row\'s horizontal layout', () => {
+    // ent#610 sign-off: was "the chip slot reserves its footprint". The
+    // reservation (#2641: on every row once any visible row had a chip) left
+    // the names 0px in the sidebar, so the chip moved to the subtitle line
+    // under the name. The right-hand strip — date, draft, counts — now carries
+    // nothing that depends on availability, which is the no-reflow property
+    // itself: the name's truncation point cannot change when an agent stops.
+    const bare = SIDEBAR.replace(/<!--[\s\S]*?-->/g, '')
+    const block = bare.slice(bare.indexOf('v-for="a in shownAgents"'))
     const row = block.slice(0, block.indexOf('</button>'))
-    expect(row).toMatch(/min-w-\[[\d.]+rem\][^"]*flex justify-end/)
+    const DATE = 'class="shrink-0 w-14 text-right'
+    expect(row.indexOf(DATE)).toBeGreaterThan(-1)
+    const strip = row.slice(row.indexOf(DATE))
+    expect(strip).not.toMatch(/chipFor\(a\)|availability/i)
+    const name = row.slice(row.indexOf('{{ agentLabel(a) }}'), row.indexOf(DATE))
+    expect(name).toMatch(/<BaseBadge v-if="chipFor\(a\)"/)
   })
 
   it('the row title carries the state, so it is reachable without colour', () => {
