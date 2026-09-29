@@ -91,13 +91,20 @@
            attachment is a fact nobody can act on. Additive: its own `v-if`, so
            it never takes the controls below away (#3055 — it once did, and
            every ask read outside Main lost its answer). -->
+      <!-- Sign-off: its own line (`flex w-fit` — a block box as wide as its
+           words), so the inline controls below never run into it; and the
+           card's own ink, underlined, with an arrow — a brand blue on the
+           amber card (no dark half) was low-contrast and fought the card. -->
       <button
         v-if="threadLink && askThreadLink(ask, currentSessionId)"
         type="button"
-        class="mt-1.5 text-xs text-action-primary-600 hover:underline"
+        class="mt-1.5 flex w-fit items-center gap-1 text-xs font-medium underline underline-offset-2 decoration-1 hover:decoration-2 rounded focus:outline-none focus-visible:ring-2 focus-visible:ring-action-primary-500/40"
         :data-testid="`${tid.prefix}-open-thread-${ask.id}`"
         @click="emit('open-thread', { id: askThreadLink(ask, currentSessionId), agent_name: ask.agent_name })"
-      >Open the conversation</button>
+      >
+        Open the conversation
+        <svg class="w-3 h-3 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M13 7l5 5m0 0l-5 5m5-5H6" /></svg>
+      </button>
 
       <template v-if="!isEnded(ask)">
         <!-- #2375: controls come from the shared kind rule (queueResponseKind),
