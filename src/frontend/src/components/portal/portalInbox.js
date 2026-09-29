@@ -168,6 +168,22 @@ export function allItems(threads, asks, previews, now = Date.now()) {
   return [...chats, ...askRows].sort(byAtDesc)
 }
 
+// §3g SM / C4: every tab renders at most `limit` rows, then "Show more". Not
+// virtualisation — rows vary in height, and Tab order and ghosts must hold.
+// A selected row past the window widens it to include that row (a deep link to
+// row 72 shows 72), so the selection is always on screen.
+export const PAGE_SIZE = 50
+export function pageWindow(items, limit = PAGE_SIZE, selectedKey = null) {
+  const list = Array.isArray(items) ? items : []
+  let n = Math.max(0, Number(limit) || 0)
+  if (selectedKey) {
+    const i = list.findIndex((it) => it && it.key === selectedKey)
+    if (i >= n) n = i + 1
+  }
+  const shown = list.slice(0, n)
+  return { shown, total: list.length, hidden: list.length - shown.length }
+}
+
 // §3g D-4b / T16: what All's footer says, beyond the paging line. The ended-ask
 // window always; rooms only to a viewer who has some; the asks read's cap only
 // when it was hit (server pagination + a total is #3059).

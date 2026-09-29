@@ -3558,6 +3558,9 @@ to localStorage in the clear.
   confirm), one chat is read directly. Success is a toast ("Marked 28 chats read") and a new
   tab visit; a partial failure names how many failed and those chats keep their count (the S4
   rollback) (§3g A9).
+- **Long tabs page (§3g SM / C4)**: every tab renders 50 rows, states "Showing 50 of 212", and
+  offers "Show more" (50 at a time, focus to the first new row); the window resets when the tab
+  changes, never on a refresh, and always includes the selected row.
 - **An ask row says what differs (§3g A10)**: its kind by shape (approval, question, alert —
   gray outlines, the kind spoken); a priority only when High or Critical; its expiry only
   within the day ("Expires in 18m" as a warning under an hour, a neutral "Expires in 5h"

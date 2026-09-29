@@ -66,6 +66,10 @@ Sign-in / reload on bare /workspace
     PortalInboxList   bounded; the head counts LIVE rows in units — listHeadLabel: "21 asks",
                       "15 chats · 70 new", "3 chats · 2 asks", "All caught up" (§3g A8 / D-1);
                       rows are <button>s; outcome pill done / failed (icon + label)
+                      every tab pages (§3g SM / C4, pageWindow): 50 rows, then "Showing 50 of
+                      212" (tabular-nums) + a secondary "Show more" (+50, focus to the first new
+                      row); the limit resets on a tab change, never on a poll; a selected row past
+                      the window widens it (a ?item= at row 72 shows 72). Not virtualisation.
                       All's footer (§3g D-4b, allFooterNotes): "Answered, expired and cancelled
                       asks drop off after 7 days."; "Showing your 200 most recent asks." when the
                       asks read hit its cap (T16; server total is #3059); "Rooms aren't in the

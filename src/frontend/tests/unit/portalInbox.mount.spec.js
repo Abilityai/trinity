@@ -319,6 +319,56 @@ describe('All says what it holds (§3g D-4)', () => {
   })
 })
 
+describe('long lists page: 50, then Show more (§3g SM / C4)', () => {
+  const many = (n, over = {}) => Array.from({ length: n }, (_, i) => thread(`t${i}`, { unread: 1, last_message_at: iso(i + 1), ...over }))
+  const rowCount = (w) => w.findAll('[data-inbox-row]').length
+
+  it('120 rows show 50; Show more adds 50, moves focus to the first new row, and survives a poll', async () => {
+    store.asksLoaded = true
+    const threads = many(120)
+    const w = await mountInbox({ threads }, { query: { tab: 'all' } })
+    expect(rowCount(w)).toBe(50)
+    const foot = w.find('[data-testid="inbox-list-page"]')
+    expect(foot.text()).toContain('Showing 50 of 120')
+    await w.find('[data-testid="inbox-show-more"]').trigger('click')
+    await flushPromises()
+    expect(rowCount(w)).toBe(100)
+    expect(document.activeElement?.getAttribute('data-inbox-row')).toBe('thread:t50')
+    // A poll (a fresh thread list) never shrinks the window back.
+    await w.setProps({ threads: threads.map((t) => ({ ...t })) })
+    await flushPromises()
+    expect(rowCount(w)).toBe(100)
+  })
+
+  it('a ?item= at row 72 is shown, selected', async () => {
+    const w = await mountInbox({ threads: many(120) }, { query: { tab: 'unread', item: 'thread:t71' } })
+    expect(rowCount(w)).toBe(72)
+    expect(w.find('[data-testid="inbox-row-thread:t71"]').attributes('aria-current')).toBe('true')
+  })
+
+  it('leaving the tab and coming back starts at 50 again', async () => {
+    store.asksLoaded = true
+    const w = await mountInbox({ threads: many(120) }, { query: { tab: 'unread' } })
+    await w.find('[data-testid="inbox-show-more"]').trigger('click')
+    await flushPromises()
+    expect(rowCount(w)).toBe(100)
+    await router.replace({ path: '/workspace/inbox', query: { tab: 'all' } })
+    await flushPromises()
+    await router.replace({ path: '/workspace/inbox', query: { tab: 'unread' } })
+    await flushPromises()
+    expect(rowCount(w)).toBe(50)
+  })
+
+  it('Unread with 80 rows pages too, and the paging line is gone once all are shown', async () => {
+    const w = await mountInbox({ threads: many(80) }, { query: { tab: 'unread' } })
+    expect(rowCount(w)).toBe(50)
+    await w.find('[data-testid="inbox-show-more"]').trigger('click')
+    await flushPromises()
+    expect(rowCount(w)).toBe(80)
+    expect(has(w, 'inbox-list-page')).toBe(false)
+  })
+})
+
 describe('counts say what they count (§3g A8 / D-1 / B6)', () => {
   it('a tab counter caps at 99+, and the tab is named with the full number', async () => {
     const threads = Array.from({ length: 2 }, (_, i) => thread(`t${i}`, { unread: i ? 57 : 100 }))

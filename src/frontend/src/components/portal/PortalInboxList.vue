@@ -104,10 +104,14 @@
       </li>
     </ul>
     <div
-      v-if="notes.length"
+      v-if="notes.length || total > items.length"
       class="shrink-0 px-4 pt-2 pb-3 border-t border-gray-200 dark:border-gray-750 space-y-0.5 text-[12.5px] text-gray-600 dark:text-gray-300"
       data-testid="inbox-list-footer"
     >
+      <p v-if="total > items.length" class="flex items-center gap-3" data-testid="inbox-list-page">
+        <span class="tabular-nums">Showing {{ items.length }} of {{ total }}</span>
+        <BaseButton variant="secondary" size="sm" data-testid="inbox-show-more" @click="$emit('show-more')">Show more</BaseButton>
+      </p>
       <p v-for="n in notes" :key="n">{{ n }}</p>
     </div>
   </div>
@@ -116,6 +120,7 @@
 <script setup>
 import { onBeforeUnmount, ref, watch } from 'vue'
 import BaseBadge from '@/components/base/BaseBadge.vue'
+import BaseButton from '@/components/base/BaseButton.vue'
 import { relativeTime } from './portalUtils'
 import { newLabel } from './portalInbox'
 import { priorityBadge, expiresSoonLabel, needsExpiryTick, askKindIcon } from './portalAskUrgency'
@@ -130,12 +135,15 @@ const props = defineProps({
   // Lines under the rows that say what the tab does NOT hold, in tertiary ink
   // (§3g D-4b) — the ended-ask window, the asks cap, rooms.
   notes: { type: Array, default: () => [] },
+  // §3g SM / C4: the rows in the tab (the window is `items`); the paging line
+  // shows only while some are not rendered.
+  total: { type: Number, default: 0 },
   selectedKey: { type: String, default: null },
   // agent name → the human-facing label (the roster's display_label).
   labels: { type: Object, default: () => ({}) },
   label: { type: String, default: 'Inbox items' },
 })
-defineEmits(['open'])
+defineEmits(['open', 'show-more'])
 
 const labelFor = (name) => props.labels[name] || name || ''
 const relative = (iso) => relativeTime(iso)

@@ -182,6 +182,31 @@ describe('All — literally all (§3g D-4a)', () => {
   })
 })
 
+describe('pageWindow — 50 rows, then Show more (§3g SM / C4)', () => {
+  const rows = (n) => Array.from({ length: n }, (_, i) => ({ key: `thread:t${i}` }))
+  it('shows the first `limit` rows and says the total', () => {
+    const w = pageWindow(rows(120), PAGE_SIZE)
+    expect(PAGE_SIZE).toBe(50)
+    expect(w.shown).toHaveLength(50)
+    expect(w.total).toBe(120)
+    expect(w.hidden).toBe(70)
+  })
+  it('expands to include a selected row past the window', () => {
+    const w = pageWindow(rows(120), 50, 'thread:t71')
+    expect(w.shown).toHaveLength(72)
+    expect(w.shown.at(-1).key).toBe('thread:t71')
+    expect(w.hidden).toBe(48)
+  })
+  it('a selection inside the window, or not in the list, changes nothing', () => {
+    expect(pageWindow(rows(120), 50, 'thread:t3').shown).toHaveLength(50)
+    expect(pageWindow(rows(120), 50, 'thread:gone').shown).toHaveLength(50)
+  })
+  it('everything when it fits; junk tolerated', () => {
+    expect(pageWindow(rows(12), 50)).toMatchObject({ total: 12, hidden: 0 })
+    expect(pageWindow(null, 50)).toMatchObject({ shown: [], total: 0, hidden: 0 })
+  })
+})
+
 describe('wording: arrivals are "new", not "replies" (D3)', () => {
   it('the row title and the badge title say new', () => {
     expect(agentRowTitle({ name: 'scribe', unread: 2 })).toBe('scribe — 2 new')
@@ -259,7 +284,7 @@ describe('property: the Inbox and the sidebar never disagree (AC 1, D13)', () =>
 // ---- The shell's and the pane's seams (F3) ------------------------------------
 import {
   isInboxPath, inboxBranchVisible, inboxSelectedAgent, stableRows, emptyVisit, isGhost, resolveItem,
-  paneWindow, openInChatTarget, agentLabels, PANE_TAIL, listHeadLabel, inboxRowLabel,
+  paneWindow, openInChatTarget, agentLabels, PANE_TAIL, listHeadLabel, inboxRowLabel, pageWindow, PAGE_SIZE,
 } from '@/components/portal/portalInbox'
 
 describe('shell seams', () => {

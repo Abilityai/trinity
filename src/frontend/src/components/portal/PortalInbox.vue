@@ -125,7 +125,9 @@
         <PortalInboxList
           v-else
           ref="listEl"
-          :items="shownItems"
+          :items="paged.shown"
+          :total="paged.total"
+          @show-more="showMore"
           :head="head"
           :notes="footerNotes"
           :selected-key="selectedKey"
@@ -179,7 +181,7 @@ import { viewState, staleBannerMessage } from '@/utils/loadingState'
 import {
   actionItems, unreadItems, allItems, inboxCounts, defaultInboxTab, normalizeInboxTab,
   stableRows, emptyVisit, isGhost, resolveItem, parseItemKey, listHeadLabel,
-  markAllLabel, markAllConfirm, allFooterNotes,
+  markAllLabel, markAllConfirm, allFooterNotes, pageWindow, PAGE_SIZE,
 } from './portalInbox'
 import { askBadgeTitle, unreadBadgeTitle } from './portalUtils'
 import { capCount } from '@/utils/tabTitle'
@@ -290,6 +292,19 @@ const shownItems = computed(() => {
   visit = { tab: tab.value, ...out.visit }
   return out.rows
 })
+// §3g SM / C4: 50 rows, then "Show more" — per tab visit: the limit resets on a
+// tab change, never on a poll.
+const pageLimit = ref(PAGE_SIZE)
+watch(tab, () => { pageLimit.value = PAGE_SIZE })
+const paged = computed(() => pageWindow(shownItems.value, pageLimit.value, selectedKey.value))
+async function showMore() {
+  const first = paged.value.shown.length
+  pageLimit.value = first + PAGE_SIZE
+  await nextTick()
+  const rows = listColEl.value ? [...listColEl.value.querySelectorAll('[data-inbox-row]')] : []
+  rows[first]?.focus?.()
+}
+
 // The head counts LIVE rows, never ghosts, in units (§3g A8); with only ghosts
 // left it says "All caught up".
 const liveItems = computed(() => shownItems.value.filter((it) => !isGhost(it)))
