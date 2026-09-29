@@ -150,7 +150,7 @@ message/voip/share entries are exposed as MCP tool params on `messages.ts` /
 `send_message`, `call_user`, `send_voice_reply`, `share_file` and
 `call_a2a_agent` send `resolveExecutionId(authContext, params.execution_id)`
 (`tools/execution_id.ts`): the header value, else the optional tool arg (older
-agent images). `client.ts` threads it and `dedup_label` into the request body. `chat_with_agent` already derives an
+agent images). `manual` is honoured only from the header; typed as the tool arg it is dropped. `client.ts` threads it and `dedup_label` into the request body. `chat_with_agent` already derives an
 `Idempotency-Key` (#525) — unchanged, regression-asserted in `messages.test.ts`.
 
 ## Pull-mode: fail-closed without a usable id (#2392)

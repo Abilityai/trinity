@@ -22,10 +22,17 @@ export function parseExecutionIdHeader(value: string | undefined): string | unde
   return v && EXECUTION_ID_RE.test(v) ? v : undefined;
 }
 
-/** Header value wins; the agent-supplied param is the fallback. */
+export const MANUAL_EXECUTION_ID = "manual";
+
+/**
+ * Header value wins; the agent-supplied param is the fallback. `manual` is
+ * honoured only from the header (the platform-written config): a model typing
+ * it as the param would otherwise skip the pull-mode refusal.
+ */
 export function resolveExecutionId(
   authContext: McpAuthContext | undefined,
   paramValue: string | undefined
 ): string | undefined {
-  return authContext?.executionId ?? paramValue;
+  if (authContext?.executionId) return authContext.executionId;
+  return paramValue === MANUAL_EXECUTION_ID ? undefined : paramValue;
 }

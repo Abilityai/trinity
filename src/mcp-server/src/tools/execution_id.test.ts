@@ -32,6 +32,10 @@ describe("#2392 resolveExecutionId", () => {
   it("forwards `manual` as-is", () => {
     assert.equal(resolveExecutionId(session("manual").session, "exec-param"), "manual");
   });
+  it("drops `manual` typed as the param — only the header may claim it", () => {
+    assert.equal(resolveExecutionId(session().session, "manual"), undefined);
+    assert.equal(resolveExecutionId(undefined, "manual"), undefined);
+  });
 });
 
 describe("#2392 parseExecutionIdHeader", () => {
