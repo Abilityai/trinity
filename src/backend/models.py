@@ -212,6 +212,16 @@ class AgentConfig(BaseModel):
     # GitHub source mode (unidirectional pull from a branch)
     source_branch: Optional[str] = "main"  # Branch to pull updates from
     source_mode: Optional[bool] = True  # True = track source branch (pull only), False = create working branch
+    # trinity-enterprise#705: what is being created. "agent" (the default when
+    # None) is an agent whose repository IS the agent — a working branch it alone
+    # writes, auto-sync on, freeze-on-failure on — granted only when the repo is
+    # the creator's own (not a catalog template; owner == the token's GitHub
+    # login) and the creator's own token (never the platform-wide one) can
+    # actually push to it; otherwise it stays pull-only. "deployment" is a
+    # deployment of a codebase: source mode, no auto-push. An EXPLICIT
+    # `source_mode` always wins for the MODE; an auto-pushing agent (explicit
+    # working branch and fork-to-own included) also gets freeze-on-failure.
+    kind: Optional[Literal["agent", "deployment"]] = None
     # Multi-runtime support
     runtime: Optional[str] = "claude-code"  # "claude-code" or "gemini-cli"
     runtime_model: Optional[str] = None  # Model override (e.g., "sonnet-4.5", "gemini-2.5-pro")
@@ -307,6 +317,9 @@ class AgentStatus(BaseModel):
     # trinity-enterprise#15: copy-intent provenance — {source_repo, source_branch,
     # head_sha, file_count}; set only on the create response of a snapshot import.
     import_snapshot: Optional[Dict[str, Any]] = None
+    # trinity-enterprise#705: on a `github:` create, how the git mode was decided
+    # — {kind, source_mode, reason} — so "why is this agent pull-only?" has an answer.
+    git_mode: Optional[dict] = None
 
     class Config:
         json_encoders = {
@@ -3658,6 +3671,31 @@ class OperatorCancel(BaseModel):
     _blank_is_none = field_validator("reason")(_blank_reason_is_none)
 
 
+class OperatorAskCreate(BaseModel):
+    """Body for an agent raising an ask through the platform
+    (trinity-enterprise#611): `POST /api/agents/{name}/operator-queue`.
+
+    TYPES ONLY. Every limit and rule — sizes, the deadline floor, the roles,
+    the re-ask link — is checked by the ask sink (`services/ask_service.py`),
+    so each refusal carries a NAMED code the agent can act on, instead of a
+    generic validation error. Unknown fields are refused: the platform decides
+    the channel, who raised the ask and whom it resolved to, never the body.
+    """
+    model_config = ConfigDict(extra="forbid")
+
+    request_id: str
+    title: str
+    question: Optional[str] = None
+    type: Optional[str] = None
+    priority: Optional[str] = None
+    options: Optional[List[Any]] = None
+    context: Optional[Dict[str, Any]] = None
+    proposal: Optional[Dict[str, Any]] = None
+    expires_at: Optional[str] = None
+    to: Optional[str] = None
+    supersedes_expired: Optional[str] = None
+
+
 class BulkCancelRequest(BaseModel):
     """Body for bulk-cancelling pending queue items (#1017).
 
@@ -4085,7 +4123,12 @@ class SetAdminPasswordRequest(BaseModel):
     confirm_password: str = Field(..., max_length=128)
     # Required admin email — sign-in identity. Shape validated in the handler so
     # a typo / blank value yields a clean 400 (a missing field yields a 422).
+    # #3004: under ADMIN_PASSWORD_SOURCE=instance-id the handler accepts a blank
+    # value (AWS review: no PII required); the field itself stays required.
     email: str = Field(..., max_length=254)
+    # #3004 (PROV-018): the EC2 instance ID, checked only when
+    # ADMIN_PASSWORD_SOURCE=instance-id and ignored otherwise.
+    claim_code: Optional[str] = Field(None, max_length=64)
     # Optional operator profile — all skippable; setup completes without them.
     company: Optional[str] = Field(None, max_length=200)
     name: Optional[str] = Field(None, max_length=200)

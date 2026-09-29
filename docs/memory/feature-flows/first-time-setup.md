@@ -30,6 +30,25 @@ First-time setup wizard for admin password and API key configuration. On an inst
 > before hashing. The accepted creation-to-first-visit risk is in
 > `docs/DEPLOYMENT.md` → Security Recommendations.
 >
+> **Instance-ID claim (#3004, PROV-018).** The AWS image cannot use the open
+> first-visitor claim (Marketplace review), so it boots with
+> `ADMIN_PASSWORD_SOURCE=instance-id` and provisioning stores the EC2 instance
+> ID in `/data/setup-claim`. The router guard's `/api/setup/status` fetch caches
+> `claim_required` (`router/index.js::getSetupClaimRequired`), and
+> `SetupPassword.vue` then shows an "EC2 instance ID" field first (shape
+> `^i-[0-9a-f]{8,17}$`, link to the EC2 Instances page), marks email optional,
+> and disables the updates opt-in while email is blank. The POST carries
+> `claim_code`; the backend checks it after the existing-admin and `unset`
+> refusals and before hashing: per-IP rate limit, `hmac.compare_digest` on
+> trimmed, lowercased bytes, one generic 403 (`That instance ID does not match
+> this server.`, shown inline; every other 403 still redirects to `/login`).
+> With no email the response's `username` is used to sign in. After validation
+> the claim file is taken by atomic rename (one winner among concurrent correct
+> claims), restored if the password write raises, and deleted after success. If
+> the guard's status fetch failed, the page refetches it on mount and keeps
+> submit disabled until it knows whether the ID is required. Tests: `tests/unit/test_3004_setup_instance_id_claim.py`,
+> `src/frontend/tests/unit/setupPasswordClaim.spec.js`.
+>
 > Two consequences for the flows documented below:
 >
 > 1. `POST /api/setup/admin-password` **refuses (403) whenever a usable admin

@@ -367,7 +367,9 @@ class BacklogService:
 
         n = db.expire_stale_queued(max_age_hours)
         if n:
-            logger.info(f"[Backlog] Expired {n} stale queued rows (>{max_age_hours}h)")
+            # Warning, not info (#2840): a row nobody picked up for a day is a
+            # failure, and on a pull pilot this is the only trace it leaves.
+            logger.warning(f"[Backlog] Expired {n} stale queued rows (>{max_age_hours}h)")
         return n
 
     async def drain_orphans_all(self) -> int:

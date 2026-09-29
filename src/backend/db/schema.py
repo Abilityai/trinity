@@ -2389,6 +2389,14 @@ INDEXES = [
     # migration to a pre-existing table and this index had to wait for it.
     "CREATE INDEX IF NOT EXISTS idx_portal_messages_session "
     "ON enterprise_portal_messages(session_id, created_at)",
+    # #3064 — the unread count's message arm (`count_unread_by_session`, every
+    # 20s Workspace poll per open tab) filters on the viewer, `role =
+    # 'assistant'`, the thread and `created_at` past a read cursor. Neither
+    # index above leads with `client_email`, so the plan was a SCAN of every
+    # message in the install. Equality columns first, then the GROUP BY key,
+    # then the range column.
+    "CREATE INDEX IF NOT EXISTS idx_portal_messages_unread "
+    "ON enterprise_portal_messages(client_email, role, session_id, created_at)",
     # ent#523 — ONE live Main per (agent, client). This is not a performance
     # index: it is the invariant. `ensure_main_session` is reachable from two
     # request paths and runs in every uvicorn worker, so a check-then-insert

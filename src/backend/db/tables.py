@@ -1487,7 +1487,7 @@ operator_queue = Table(
     # trinity-enterprise#611: the agent-raised ask. Platform-owned — written only
     # from keyword-only arguments, never from an agent's file entry.
     Column("raised_by", Text),           # agent|gate (NULL: legacy row or platform alarm)
-    Column("channel", Text),             # file|mcp
+    Column("channel", Text),             # file|mcp|gate
     Column("to_role", Text),
     Column("resolved_to", Text),         # JSON list of person refs
     Column("proposal", Text),            # JSON — the frozen action

@@ -616,7 +616,7 @@ CREATE TABLE seat_ask_class_state (
 );
 CREATE INDEX idx_seat_ask_class_state_seat ON seat_ask_class_state(agent_name, seat_email);
 ```
-Both tracks: SQLite `seat_ask_class_state_table`, Alembic `0081_seat_ask_class_state`
+Both tracks: SQLite `seat_ask_class_state_table`, Alembic `0082_seat_ask_class_state`
 (← `0079`); `AgentRef(..., Policy.CASCADE)`. The row holds only what was EARNED —
 the instance level, the agent's autonomy switch and the clock are ANDed at read
 time (`services/autonomy_dial_service.live_verdict`), never materialised. The
@@ -779,7 +779,7 @@ CREATE TABLE operator_queue (
     disposition_reason TEXT,            -- the operator's optional cancel reason (≤ 500); never in an audit row, never to a Workspace client
     batch_id TEXT,                      -- one uuid per bulk-cancel sweep; its re-select is the sweep's CAS winners
     raised_by TEXT,                     -- agent|gate (PR B); NULL for a legacy row or a platform alarm
-    channel TEXT,                       -- file|mcp; keyword-only on create, never read from the agent's entry
+    channel TEXT,                       -- file|mcp|gate; keyword-only on create, never read from the agent's entry
     to_role TEXT,                       -- PR B: the role an agent-raised ask is addressed to
     resolved_to TEXT,                   -- PR B: JSON list of person refs; withheld from machine keys
     proposal TEXT,                      -- PR B: JSON, the frozen action

@@ -21,9 +21,23 @@
             :title="syncBadge.title"
             data-testid="queue-sync-badge"
           >{{ syncBadge.label }}</BaseBadge>
+          <!-- trinity-enterprise#611 (#627 AC6): a re-ask and the expired ask it
+               re-raises name each other — one rule
+               (utils/operatorQueue.js::queueReaskBadges), one fact per badge. -->
+          <BaseBadge
+            v-for="b in reaskBadges"
+            :key="b.key"
+            :title="b.title"
+            :data-testid="b.key === 'reask-of' ? 'queue-reask-of' : 'queue-reasked-as'"
+          >{{ b.prefix }} <span v-if="b.id" class="min-w-0 max-w-[12rem] truncate font-mono" :title="b.id" data-testid="queue-reask-id">{{ b.id }}</span></BaseBadge>
         </div>
 
         <p class="text-sm text-gray-600 dark:text-gray-400">{{ item.title }}</p>
+
+        <!-- trinity-enterprise#611: the action this ask proposed, so the record
+             says what was approved, denied or let expire (the Workspace keeps it
+             on ended asks too). -->
+        <QueueProposal v-if="item.proposal" :proposal="item.proposal" class="mt-2" />
 
         <!-- Response (responded/acknowledged) or terminal status (cancelled/expired, #1017).
              trinity-enterprise#611: who ended it and when, from the endings
@@ -70,10 +84,11 @@ import { computed } from 'vue'
 import { useOperatorQueueStore } from '../../stores/operatorQueue'
 import { useAgentsStore } from '../../stores/agents'
 import { agentNameTooltip } from '../../utils/agentName'
-import { queueSyncBadge, queueEnding, queueEndingText } from '../../utils/operatorQueue'
+import { queueSyncBadge, queueEnding, queueEndingText, queueReaskBadges } from '../../utils/operatorQueue'
 import { formatLocalDateTime } from '../../utils/timestamps'
 import AgentAvatar from '../AgentAvatar.vue'
 import BaseBadge from '../base/BaseBadge.vue'
+import QueueProposal from './QueueProposal.vue'
 
 const props = defineProps({
   item: { type: Object, required: true }
@@ -83,6 +98,7 @@ const store = useOperatorQueueStore()
 const agentsStore = useAgentsStore()
 
 const syncBadge = computed(() => queueSyncBadge(props.item))   // #2915
+const reaskBadges = computed(() => queueReaskBadges(props.item, store.items))   // trinity-enterprise#611
 const isTerminalWithoutResponse = computed(() =>
   props.item.status === 'cancelled' || props.item.status === 'expired'
 )

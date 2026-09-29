@@ -3703,6 +3703,24 @@ class DatabaseManager:
             agent_name, item, channel=channel, raised_by=raised_by,
         )
 
+    def create_operator_queue_item_with_outcome(self, agent_name, item, *, channel=None, raised_by=None):
+        # trinity-enterprise#611: the file poller's create — `(id, inserted)`, so a
+        # repeat is never counted as an admission.
+        return self._operator_queue_ops.create_item_with_outcome(
+            agent_name, item, channel=channel, raised_by=raised_by,
+        )
+
+    def create_native_operator_queue_item(self, agent_name, item, *, max_pending, channel,
+                                          raised_by, to_role, resolved_to, proposal,
+                                          supersedes_expired):
+        # trinity-enterprise#611: an agent-raised ask — replay, depth cap and insert
+        # in one per-agent serialized step.
+        return self._operator_queue_ops.create_native_item(
+            agent_name, item, max_pending=max_pending, channel=channel,
+            raised_by=raised_by, to_role=to_role, resolved_to=resolved_to,
+            proposal=proposal, supersedes_expired=supersedes_expired,
+        )
+
     def prune_operator_queue_terminal_items(self, retention_days, responded_retention_days, limit=5000):
         # #1142: retention sweep for terminal operator-queue rows.
         return self._operator_queue_ops.prune_terminal_items(
@@ -3716,6 +3734,10 @@ class DatabaseManager:
         # trinity-enterprise#611: the agent's own readback — ignores Clear All.
         return self._operator_queue_ops.get_item_for_agent_by_request_id(agent_name, request_id)
 
+    def list_expired_operator_queue_proposals(self, agent_name, limit, raised_by=None):
+        # trinity-enterprise#611: the native create's re-ask guard (C6).
+        return self._operator_queue_ops.list_expired_proposals_for_agent(agent_name, limit, raised_by)
+
     def list_recent_operator_queue_endings(self, agent_name, since, limit,
                                            exclude_request_id_prefixes=None):
         # trinity-enterprise#611: ids + endings for the Execution Context line.
@@ -3726,6 +3748,12 @@ class DatabaseManager:
 
     def list_operator_queue_items(self, **kwargs):
         return self._operator_queue_ops.list_items(**kwargs)
+
+    def count_operator_queue_items(self, **kwargs):
+        return self._operator_queue_ops.count_items(**kwargs)
+
+    def list_operator_queue_agent_names(self, **kwargs):
+        return self._operator_queue_ops.list_item_agent_names(**kwargs)
 
     def respond_to_operator_queue_item(self, item_id, response, response_text,
                                         responded_by_id, responded_by_email,
@@ -3848,8 +3876,10 @@ class DatabaseManager:
     def create_agent_event(self, source_agent, event_type, payload=None, subscriptions_triggered=0):
         return self._event_subscription_ops.create_event(source_agent, event_type, payload, subscriptions_triggered)
 
-    def list_agent_events(self, source_agent=None, event_type=None, limit=50):
-        return self._event_subscription_ops.list_events(source_agent, event_type, limit)
+    def list_agent_events(self, source_agent=None, event_type=None, limit=50, agent_names=None):
+        return self._event_subscription_ops.list_events(
+            source_agent, event_type, limit, agent_names=agent_names
+        )
 
     # =========================================================================
     # Access Requests (Issue #311)
