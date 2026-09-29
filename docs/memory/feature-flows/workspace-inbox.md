@@ -105,6 +105,10 @@ Sign-in / reload on bare /workspace
                                                result is inbox-pane-read-error; "Mark read" (n>0)
                                                reads on demand. The row stays, drawn read, for
                                                the tab visit
+              header (§3g L5), never wrapping: split [title flex-1 truncate] … [Mark read]
+                [Reply][Open in chat] — volatile actions leftmost; stacked [Back][title] …
+                [Open in chat][More ▾ → Mark read · Reply] (a disclosure: Esc returns focus),
+                and the Inbox's title, subtitle and tabs are hidden over the pane
               Open in chat → /workspace/c/:id?anchor=m:<first_unread> | d:<report>
                              → PortalConversation + composables/useConversationAnchor.js
                                (data-message-id / data-report-id, useStickToBottom.detach(),

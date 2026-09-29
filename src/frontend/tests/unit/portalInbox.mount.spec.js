@@ -732,6 +732,44 @@ describe('Mark all read (D11, §3g A9)', () => {
   })
 })
 
+describe('the pane header (§3g L5: stacked chrome, split order)', () => {
+  const headerIds = (w) => w.find('[data-testid="inbox-pane"] header').findAll('[data-testid]')
+    .map((el) => el.attributes('data-testid'))
+    .filter((id) => /^inbox-pane-(back|heading|mark-read|reply|open|more)$/.test(id))
+
+  it('stacked: [Back][title] … [Open in chat][More ▾]; the Inbox title and tabs step aside', async () => {
+    phone = true
+    stubMatchMedia()
+    const w = await mountInbox({ threads: [thread('t1', { unread: 2 })] }, { query: { tab: 'unread' } })
+    expect(w.find('[data-testid="inbox-header"]').classes()).not.toContain('hidden')
+    await w.find('[data-testid="inbox-row-thread:t1"]').trigger('click')
+    await flushPromises()
+    expect(headerIds(w)).toEqual(['inbox-pane-back', 'inbox-pane-heading', 'inbox-pane-open', 'inbox-pane-more'])
+    expect(w.find('[data-testid="inbox-header"]').classes()).toContain('hidden')
+    expect(w.find('[data-testid="inbox-tabs"]').classes()).toContain('hidden')
+    // More holds the rest.
+    const more = w.find('[data-testid="inbox-pane-more"]')
+    expect(more.attributes('aria-expanded')).toBe('false')
+    await more.trigger('click')
+    expect(more.attributes('aria-expanded')).toBe('true')
+    const menu = w.find('[data-testid="inbox-pane-more-menu"]')
+    expect(menu.find('[data-testid="inbox-pane-reply"]').exists()).toBe(true)
+    expect(menu.find('[data-testid="inbox-pane-mark-read"]').exists()).toBe(true)
+    await menu.trigger('keydown', { key: 'Escape' })
+    expect(w.find('[data-testid="inbox-pane-more-menu"]').exists()).toBe(false)
+    expect(document.activeElement).toBe(more.element)
+  })
+
+  it('split: [title] … [Mark read][Reply][Open in chat] — volatile actions leftmost, the title truncates', async () => {
+    const w = await mountInbox({ threads: [thread('t1', { unread: 2 })] }, { query: { tab: 'unread', item: 'thread:t1' } })
+    expect(headerIds(w)).toEqual(['inbox-pane-heading', 'inbox-pane-mark-read', 'inbox-pane-reply', 'inbox-pane-open'])
+    const h = w.find('[data-testid="inbox-pane-heading"]')
+    expect(h.classes()).toEqual(expect.arrayContaining(['flex-1', 'truncate', 'min-w-0']))
+    expect(w.find('[data-testid="inbox-pane"] header').classes()).not.toContain('flex-wrap')
+    expect(w.find('[data-testid="inbox-header"]').classes()).not.toContain('hidden')
+  })
+})
+
 describe('a phone reaches the menu from the Inbox (§3g A5)', () => {
   it('a 44px, phone-only Menu button asks the shell for the drawer', async () => {
     const w = await mountInbox({ threads: [] }, { query: { tab: 'all' } })

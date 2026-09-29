@@ -19,7 +19,9 @@
 -->
 <template>
   <div ref="rootEl" class="flex-1 min-h-0 flex flex-col" data-testid="inbox" :data-layout="layout.mode" @keydown.esc="onEsc">
-    <header class="shrink-0 flex items-start gap-3 px-4 pt-4 pb-2">
+    <!-- §3g L5: over a STACKED pane the Inbox's own title, subtitle and tabs
+         step aside (~130px back at 390) — the pane's Back is the way out. -->
+    <header class="shrink-0 flex items-start gap-3 px-4 pt-4 pb-2" :class="overPane ? 'hidden' : ''" data-testid="inbox-header">
       <!-- §3g A5: on a phone the sidebar is a drawer, and the Inbox is the
            landing — without this it was a dead end. 44px, the touch floor. -->
       <button
@@ -72,7 +74,7 @@
       @dismiss="markAllError = ''"
     />
 
-    <div class="shrink-0 px-4 border-b border-gray-200 dark:border-gray-750">
+    <div class="shrink-0 px-4 border-b border-gray-200 dark:border-gray-750" :class="overPane ? 'hidden' : ''" data-testid="inbox-tabs">
       <OverflowTabs :tabs="tabStrip" :model-value="tab" dense tablist-label="Inbox" @update:model-value="onTab" />
     </div>
 
@@ -160,6 +162,7 @@
           :item="selectedItem"
           :agent-label="labels[selectedItem.agent_name] || selectedItem.agent_name || ''"
           :show-back="stacked"
+          :stacked="stacked"
           :read-failed="readFailedKey === selectedItem.key"
           @rendered="(k) => { renderedKey = k }"
           @mark-read="readNow(selectedItem)"
@@ -249,6 +252,8 @@ watch([containerWidth, () => props.railAllowance, phone], ([width, allowance, ph
   if (next.mode !== layout.value.mode || next.wide !== layout.value.wide) layout.value = next
 })
 const stacked = computed(() => layout.value.mode === 'stacked')
+// The pane is on screen in place of the list.
+const overPane = computed(() => stacked.value && !!selectedItem.value)
 const listColClass = computed(() => {
   if (stacked.value) return selectedItem.value ? 'hidden w-full' : 'flex w-full'
   return layout.value.wide ? 'flex w-96 border-r' : 'flex w-80 border-r'

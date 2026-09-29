@@ -23,7 +23,11 @@
 -->
 <template>
   <section class="flex flex-col min-h-0 h-full" :aria-labelledby="headingId" data-testid="inbox-pane">
-    <header class="shrink-0 flex flex-wrap items-center gap-2 px-4 py-3 border-b border-gray-200 dark:border-gray-750">
+    <!-- §3g L5: the header never wraps. SPLIT: [title] … [Mark read][Reply]
+         [Open in chat] — the volatile actions sit LEFTMOST of the group, so
+         when one arrives late only the truncating title gives way. STACKED:
+         [Back][title] … [Open in chat][More ▾], the rest in More. -->
+    <header class="shrink-0 flex items-center gap-2 px-4 py-3 border-b border-gray-200 dark:border-gray-750">
       <BaseButton
         v-if="showBack"
         variant="ghost"
@@ -38,21 +42,58 @@
         :id="headingId"
         ref="headingEl"
         tabindex="-1"
-        class="min-w-0 flex-1 basis-48 text-sm font-medium truncate text-gray-900 dark:text-gray-100 focus:outline-none"
+        class="min-w-0 flex-1 text-sm font-medium truncate text-gray-900 dark:text-gray-100 focus:outline-none"
         data-testid="inbox-pane-heading"
       >{{ heading }}</h2>
-      <!-- The title keeps at least 12rem; on a phone the two actions wrap to their
-           own line rather than squeezing it to a few characters. -->
-      <div v-if="item.type === 'thread'" class="ml-auto flex items-center gap-2" data-testid="inbox-pane-actions">
-        <BaseButton
-          v-if="item.n > 0"
-          variant="ghost"
-          size="sm"
-          data-testid="inbox-pane-mark-read"
-          @click="$emit('mark-read')"
-        >Mark read</BaseButton>
-        <BaseButton variant="secondary" size="sm" data-testid="inbox-pane-reply" @click="$emit('reply', target)">Reply in chat</BaseButton>
+      <div v-if="item.type === 'thread'" class="shrink-0 flex items-center gap-2" data-testid="inbox-pane-actions">
+        <template v-if="!stacked">
+          <BaseButton
+            v-if="item.n > 0"
+            variant="ghost"
+            size="sm"
+            data-testid="inbox-pane-mark-read"
+            @click="$emit('mark-read')"
+          >Mark read</BaseButton>
+          <BaseButton variant="secondary" size="sm" data-testid="inbox-pane-reply" @click="$emit('reply', target)">Reply in chat</BaseButton>
+        </template>
         <BaseButton variant="primary" size="sm" data-testid="inbox-pane-open" @click="$emit('open-chat', target)">Open in chat</BaseButton>
+        <div v-if="stacked" ref="moreRootEl" class="relative">
+          <BaseButton
+            ref="moreBtn"
+            variant="ghost"
+            size="sm"
+            :aria-expanded="moreOpen ? 'true' : 'false'"
+            :aria-controls="moreMenuId"
+            data-testid="inbox-pane-more"
+            @click="toggleMore"
+          >
+            More
+            <svg class="w-3.5 h-3.5 transition-transform" :class="moreOpen ? 'rotate-180' : ''" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M19 9l-7 7-7-7" /></svg>
+          </BaseButton>
+          <div
+            v-if="moreOpen"
+            :id="moreMenuId"
+            class="absolute right-0 top-full z-20 mt-1 min-w-[11rem] py-1 flex flex-col bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-750 rounded-md shadow-lg"
+            data-testid="inbox-pane-more-menu"
+            @keydown.esc.stop="closeMore(true)"
+          >
+            <BaseButton
+              v-if="item.n > 0"
+              variant="ghost"
+              size="sm"
+              class="justify-start rounded-none"
+              data-testid="inbox-pane-mark-read"
+              @click="closeMore(); $emit('mark-read')"
+            >Mark read</BaseButton>
+            <BaseButton
+              variant="ghost"
+              size="sm"
+              class="justify-start rounded-none"
+              data-testid="inbox-pane-reply"
+              @click="closeMore(); $emit('reply', target)"
+            >Reply in chat</BaseButton>
+          </div>
+        </div>
       </div>
     </header>
 
@@ -147,7 +188,7 @@
 </template>
 
 <script setup>
-import { computed, nextTick, reactive, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, reactive, ref, watch } from 'vue'
 import BaseButton from '@/components/base/BaseButton.vue'
 import BaseCard from '@/components/base/BaseCard.vue'
 import LoadFailed from '@/components/LoadFailed.vue'
@@ -166,6 +207,9 @@ const props = defineProps({
   item: { type: Object, required: true },
   agentLabel: { type: String, default: '' },
   showBack: { type: Boolean, default: false },
+  // §3g L5: the pane is a screen of its own (the Inbox is stacked) — the
+  // header keeps [Back][title] … [Open in chat] and puts the rest in More.
+  stacked: { type: Boolean, default: false },
   // §3g S5: the container's read write for this chat failed.
   readFailed: { type: Boolean, default: false },
 })
@@ -270,6 +314,27 @@ const relative = (iso) => relativeTime(iso)
 let zone = ''
 try { zone = Intl.DateTimeFormat().resolvedOptions().timeZone || '' } catch { zone = '' }
 const absolute = (iso) => (iso ? `${formatLocalDateTime(iso)}${zone ? ` (${zone})` : ''}` : undefined)
+
+// ---- More ▾ (stacked) -------------------------------------------------------------
+// A plain disclosure of buttons (the OverflowTabs menu's model): Esc closes and
+// returns focus to the trigger, a pointer outside closes it.
+const moreOpen = ref(false)
+const moreBtn = ref(null)
+const moreRootEl = ref(null)
+const moreMenuId = computed(() => `inbox-pane-more-${props.item.key}`)
+function onOutside(e) { if (moreRootEl.value && !moreRootEl.value.contains(e.target)) closeMore() }
+function toggleMore() {
+  moreOpen.value = !moreOpen.value
+  if (moreOpen.value) document.addEventListener('pointerdown', onOutside)
+  else document.removeEventListener('pointerdown', onOutside)
+}
+function closeMore(returnFocus = false) {
+  if (!moreOpen.value) return
+  moreOpen.value = false
+  document.removeEventListener('pointerdown', onOutside)
+  if (returnFocus) (moreBtn.value?.$el || moreBtn.value)?.focus?.()
+}
+onBeforeUnmount(() => document.removeEventListener('pointerdown', onOutside))
 
 // D12: on phone the pane replaces the list, so focus moves to its heading.
 function focusHeading() { nextTick(() => headingEl.value?.focus?.()) }
