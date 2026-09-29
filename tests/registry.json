@@ -3526,7 +3526,7 @@
         "backend",
         "git"
       ],
-      "description": "The git status reports the binding (trinity-enterprise#704): db_config.source_mode on GET /api/agents/{name}/git/status, for both a pull-only and a working-branch agent, feeding the Git panel badge. Manifest `kind` (parsed, not warned about; an out-of-range value rejected; passed to create) is in test_2373_system_endpoints.py and test_ent125_resilient_system_deploy.py; the create-modal question in src/frontend/tests/unit/createAgentKind.spec.js."
+      "description": "The git status reports the binding (trinity-enterprise#704): db_config.source_mode and db_config.pushes on GET /api/agents/{name}/git/status — pushes is true for a working branch (auto-sync on or paused) and for fork-to-own (source mode + auto-sync), false for pull-only — feeding the Git panel badge (PR #3022 review: fork-to-own was shown as pull-only). git_mode.pushes on the create response is in test_1484_create_agent_characterization.py; manifest `kind` export round-trip in test_2373_system_endpoints.py. Manifest `kind` (parsed, not warned about; an out-of-range value rejected; passed to create) is in test_2373_system_endpoints.py and test_ent125_resilient_system_deploy.py; the create-modal question in src/frontend/tests/unit/createAgentKind.spec.js."
     },
     {
       "file": "unit/test_3010_autosync_toggle.py",
