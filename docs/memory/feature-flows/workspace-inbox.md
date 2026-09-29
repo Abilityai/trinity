@@ -116,6 +116,15 @@ Sign-in / reload on bare /workspace
               recommends") → options (stacked with an impact hint when the brief has one)
               → answer row → QueueBrief fallback ("If you don't answer by …") — the brief
               is the E2 seam, fixture-tested; L8 supplies it
+            → <PortalAskContext :ask> BELOW the card (§3g L7, E1; the card's thread link
+              is off in the pane — "Open the conversation" lives here): store.fetchAskContext
+              (RETHROWS) → GET /asks/{id}/context; skeleton → LoadFailed dense (retry) in
+              its slot, the controls above never depend on it; meta line askContextMeta
+              ("Asked 8m ago during a scheduled run · 09:00 · expires in 5h · High
+              priority"); Where it came from (a verified thread: title + the 3 messages
+              before the ask, Open the conversation → ?anchor=m:<last>; else "Filed in your
+              Main chat" → the chat) → Delivered in that chat (verified only,
+              fetchSessionDeliverablesStrict → ?anchor=d:<id>) → Your recent answers
       chat  → store.fetchHistory(agent, id, {limit: 50})  render from first_unread_message_id
               store.fetchSessionDeliverablesStrict → ReportRenderer (+ ReportSummary fallback)
                                                a failed read is LoadFailed, never "no deliverables"

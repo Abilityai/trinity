@@ -64,3 +64,39 @@ export function askKindIcon(kind) {
   if (kind === 'question') return ICONS.question
   return ICONS.alert
 }
+
+// §3g L7 (E1) — the context's one meta line: when it was asked (with the run
+// that asked it folded in — reconcile row 14), how soon it expires, and a
+// priority worth saying. The run's label comes from the server, which already
+// decided what this viewer may read of it (a client never gets the schedule's
+// name). `formatTime` is injectable so the wording is testable locale-free.
+const defaultClock = (iso) => {
+  const t = iso ? Date.parse(iso) : NaN
+  return Number.isFinite(t) ? new Date(t).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : ''
+}
+function ago(iso, now) {
+  const t = iso ? Date.parse(iso) : NaN
+  if (!Number.isFinite(t)) return ''
+  const ms = Math.max(0, now - t)
+  if (ms < 60_000) return 'just now'
+  if (ms < HOUR_MS) return `${Math.floor(ms / 60_000)}m ago`
+  if (ms < DAY_MS) return `${Math.floor(ms / HOUR_MS)}h ago`
+  return `${Math.floor(ms / DAY_MS)}d ago`
+}
+export function askContextMeta(ask, run = null, now = Date.now(), formatTime = defaultClock) {
+  if (!ask) return []
+  const when = ago(ask.created_at, now)
+  let head = when ? `Asked ${when}` : 'Asked'
+  if (run && run.label) {
+    const clock = formatTime(run.started_at)
+    const how = /^Asked\s+/.test(run.label) ? run.label.replace(/^Asked\s+/, '') : null
+    head = how ? `${head} ${how}` : `${head} · ${run.label}`
+    if (clock) head = `${head} · ${clock}`
+  }
+  const parts = [head]
+  const soon = ask.status === 'pending' ? expiresSoonLabel(ask.expires_at, now) : null
+  if (soon) parts.push(soon.label.charAt(0).toLowerCase() + soon.label.slice(1))
+  const prio = priorityBadge(ask.priority)
+  if (prio) parts.push(`${prio.label} priority`)
+  return parts
+}

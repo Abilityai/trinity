@@ -2188,6 +2188,17 @@ export const useClientPortalStore = defineStore('clientPortal', {
     // of it — now `answered`, by you (trinity-enterprise#611: an ended ask stays
     // listed) — never patched locally: the server's answer is authoritative, and
     // a client that kept a stale "pending" copy would offer to answer it twice.
+    // trinity-enterprise#610 PR A2 §3g L7 (E1): one ask's context — its origin,
+    // the run that raised it, the viewer's recent answers. It RETHROWS: the
+    // pane must tell "this ask has no context" from "the read failed".
+    async fetchAskContext(askId) {
+      const { data } = await portalHttp.get(
+        `/api/enterprise/client-portal/asks/${askId}/context`,
+        { headers: this.authHeader },
+      )
+      return data
+    },
+
     async answerAsk(askId, { response = null, responseText = null, acknowledgeDivergence = false } = {}) {
       const { data } = await portalHttp.post(
         `/api/enterprise/client-portal/asks/${askId}/answer`,

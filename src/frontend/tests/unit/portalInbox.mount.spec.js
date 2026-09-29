@@ -956,14 +956,21 @@ describe('a phone reaches the menu from the Inbox (§3g A5)', () => {
 describe('an ask attached to a chat is answerable in the pane (#3055 / §3g L0)', () => {
   // Ingestion attaches every addressed ask to Main, so every real ask has a
   // chat_id — and the card's thread link once took the controls away. The
-  // pane keeps the link (the only way to the ask's chat until E1 lands) AND
-  // the controls.
+  // controls always render. The way back to the ask's chat moved BELOW the
+  // card with E1 (§3g L7, PR A2): the context's "Open the conversation", so
+  // the card's own link is off in the pane (`threadLink=false`).
   it('a question with a chat shows its answer box and the link back', async () => {
     store.asksLoaded = true
     store.asks = [ask('q1', { chat_id: 'main-1' })]
+    store.fetchAskContext = vi.fn(async () => ({
+      origin: { chat_id: 'main-1', title: null, is_main: true, verified: false, messages: [] },
+      run: null, recent_answers: [],
+    }))
     const w = await mountInbox({}, { query: { tab: 'action', item: 'ask:q1' } })
     expect(has(w, 'inbox-ask-input-q1')).toBe(true)
-    expect(has(w, 'inbox-ask-open-thread-q1')).toBe(true)
+    expect(has(w, 'inbox-ask-open-thread-q1')).toBe(false)
+    await w.find('[data-testid="inbox-ask-context-open"]').trigger('click')
+    expect(w.emitted('open-chat')?.at(-1)).toEqual(['/workspace/c/main-1'])
   })
   it('an approval with a chat shows its options and Send', async () => {
     store.asksLoaded = true
