@@ -181,7 +181,7 @@ const props = defineProps({
   agentName: { type: String, required: true },
   // {source_repo, source_branch, head_sha, file_count} — copy intent only.
   importSnapshot: { type: Object, default: null },
-  // trinity-enterprise#704: the create response's git_mode ({kind, source_mode, reason}).
+  // trinity-enterprise#704: the create response's git_mode ({kind, source_mode, pushes, reason}).
   gitMode: { type: Object, default: null },
 })
 const emit = defineEmits(['close'])

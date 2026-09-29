@@ -4,7 +4,8 @@
   After a GitHub-backed create: what the platform decided about the git binding
   and why — the create response's `git_mode` ({kind, source_mode, pushes,
   reason}, ent#705). Keyed on `pushes`, never on `source_mode` alone: a
-  fork-to-own agent is source-mode AND pushes to its own repo (PR #3022 review). The case that matters most is the honest one: you asked for an
+  fork-to-own agent is source-mode AND pushes to its own repo (PR #3022 review).
+  The case that matters most is the honest one: you asked for an
   agent, but there was no token of your own that can push (the platform-wide
   token never counts, ent#705), so it was created pull-only.
 -->

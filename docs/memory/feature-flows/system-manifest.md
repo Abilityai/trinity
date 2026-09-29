@@ -640,6 +640,12 @@ hands it the agent default's working branch and auto-push. A member that pushes
 (a working branch, or fork-to-own: source mode on its own fork with auto-sync on)
 or has no git binding exports no `kind`. An agent that asked for `agent` but fell
 back to pull-only exports as a deployment too — the conservative direction.
+**Known limit:** export infers fork-to-own from "source mode + auto-sync on". An
+owner who turns auto-sync on for a deployment in Settings → Git sync makes it
+read as a pushing agent, so it exports with no `kind` (and its badge says it
+saves to its default branch, while the heartbeat refuses to push there).
+Rejecting that toggle for non-fork source-mode agents needs a persisted fork
+marker, which `agent_git_config` does not have yet.
 
 **Permission Detection Logic**:
 - Check first agent's permissions
