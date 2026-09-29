@@ -975,6 +975,21 @@ operator can lift the cap without typing a huge number.
 module — `metrics_retention_days` is registered together with its sweeper. The
 cap is deliberately NOT a retention key: it is a write budget, not a window.
 
+**Settings surface (trinity-enterprise#671).** Settings → Retention shows both
+knobs beside the sibling windows: **Metric points** (days — the window, subject
+to the panel's existing floor rule on the managed path) and **Metric point
+quota** (points / agent / day, its own hint "0 = unlimited", no floor). They
+save through the same managed endpoint as the sibling windows, so the rows
+render only in an edition where that endpoint exists; in Community they are
+absent and `PUT /api/settings/ops/config` stays the write path.
+`GET /api/settings/retention` reports the window in `windows`/`sources` and the
+cap in `quotas.metrics_daily_point_cap` (`value` + `source`), where the value is
+read the way the write boundary enforces it. When a knob's source is `env`, its
+row is read-only with an `env` badge naming the variable and what unsetting it
+does (the #2085 seeder then writes the code default as a row), and Save omits
+it. Save sends only the fields the operator changed, so saving one window never
+turns another knob's code default or env value into a stored row.
+
 ### 47.9 Legacy `metrics.json` — retired as a source, named as a finding (ent#479)
 
 `GET /api/agents/{name}/metrics` keeps its URL and is **re-backed by the point

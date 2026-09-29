@@ -1,6 +1,17 @@
 {
   "test_files": [
     {
+      "file": "unit/test_ent671_retention_metric_rows.py",
+      "feature": "trinity-enterprise#671",
+      "added": "2026-09-29",
+      "categories": [
+        "backend",
+        "settings",
+        "retention"
+      ],
+      "description": "Settings -> Retention metric rows: GET /api/settings/retention carries quotas.metrics_daily_point_cap {value, source} in both editions and keeps the cap out of windows/sources; env-supplied values report source env for both knobs; a stored row wins over env; the reported quota equals what the record_metrics write boundary enforces (metric_points._ops_int) for default/0/env/garbage/-1 resolver output; call-site pin that Settings.vue uses utils/retentionFields.js (visibleRetentionFields, retentionSaveBody) and has no private field list."
+    },
+    {
       "file": "unit/test_human_only_principals.py",
       "feature": "#2996",
       "added": "2026-09-28",
