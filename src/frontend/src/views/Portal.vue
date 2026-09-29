@@ -766,6 +766,7 @@ import {
   emptySignal,
   loadRailState,
   railColumnReservedFor,
+  railSizedOpen,
   railParticipantsFor,
   railVisibleFor,
   saveRailState,
@@ -998,7 +999,14 @@ function onVoiceCall(sig) {
 // auto-collapse below, which is the AC's tie-breaker when the viewport cannot
 // fit all three.
 const columns = useColumnResize({
-  railOpen: computed(() => railState.value.open && railVisible.value),
+  // #3060: sized open while the column is RESERVED too, not only once the rail
+  // is visible — otherwise a rail left open reserves 48px and then jumps to its
+  // open width when the stage lands (`railSizedOpen`).
+  railOpen: computed(() => railSizedOpen({
+    open: railState.value.open,
+    visible: railVisible.value,
+    reserved: railColumnReserved.value,
+  })),
   setRailOpen: (open) => { if (!open) setRailOpen(false) },
 })
 
