@@ -87,10 +87,17 @@ side-effect-bearing agents.
    - Each sink stores a **sanitized, JSON-stable snapshot** (message_id /
      call_id+status / settle receipt / share URL), never a raw provider object.
 
-4. **Agent passes `execution_id` as a tool arg** (MEM-001 template), **fail-open
-   when absent** — for this PR. Safe today because pull-mode re-delivery is OFF,
-   so fail-open cannot produce a duplicate. The MCP server can't currently see
-   `TRINITY_EXECUTION_ID`; trusted runtime injection is deferred (see Gate).
+4. **The platform supplies `execution_id` (#2392).** The agent server sets
+   `TRINITY_EXECUTION_ID` in every spawned runtime process; the agent's Trinity
+   MCP entry sends it as `X-Trinity-Execution-Id` (Claude Code:
+   `${TRINITY_EXECUTION_ID:-manual}`; Codex `env_http_headers`; Gemini env
+   expansion). The MCP server reads it per request and it wins over the
+   agent-supplied tool arg, which stays as the fallback for older images.
+   `manual` marks a person's terminal/SSH session: no execution to re-deliver.
+   When no usable id arrives, a **pull-mode** agent's effect is **refused**
+   (`EffectUnguardedError` → 422 `effect_unguarded`, operator alarm
+   `effect_unguarded`); any other agent's effect is sent and logged as
+   `effect_guard.degraded` (see Pull-mode section).
 
 5. **Guard at the service entry, keyed on resolved recipient+channel(+account).**
    A chunked message = one effect; a mid-chunk crash re-sends the whole message
@@ -121,34 +128,52 @@ message/voip/share entries are exposed as MCP tool params on `messages.ts` /
 - **Primitive** — `services/idempotency_service.py`: `make_effect_scope`,
   `make_payment_scope`, `derive_effect_key`, `resolve_and_validate_execution`
   (generalizes the MEM-001 server-side resolution in `routers/public_memory.py`
-  — the agent supplies an execution_id, never its own identity; fail-open on
-  missing/mismatch), `EffectInProgressError`, and `effect_guard`. Reuses the
+  — the backend confirms the id belongs to the calling agent), `EffectInProgressError`,
+  `EffectUnguardedError`, `effect_dedup_required` (today: the pull pilots; Phase 5
+  flips it), and `effect_guard`. Reuses the
   existing `begin`/`complete`/`fail` over `db/idempotency.py` — **no schema or
   migration change**.
 - **Sinks** wrap their actual emission in `effect_guard`; a success records the
   sanitized snapshot, an exception releases the claim for retry.
 - **Routers** surface a concurrent in-flight duplicate as **409**
-  (`messages.py`, `voip.py`, `agent_files.py`); `paid.py` returns a retryable
+  (`messages.py`, `voip.py`, `agent_files.py`, `a2a.py`) and a refused
+  unguarded effect as **422** `{"reason": "effect_unguarded"}` (same routers plus
+  `internal.py`'s `/agent-files/share`, which carries no id and is therefore
+  refused for a pull-mode agent); `paid.py` returns a retryable
   "settlement already in progress" result. The VoIP router keeps its boundary
   `Idempotency-Key` gate as the OUTER layer.
 
 ## MCP Layer (Invariant #13)
 
-`messages.ts` / `voip.ts` / `files.ts` add optional `execution_id` +
-`dedup_label` params (agent reads `execution_id` from the 'Execution Context'
-block of its system prompt, same source as `write_user_memory`). `client.ts`
-threads both into the request body. `chat_with_agent` already derives an
+`server.ts` `authenticate` parses `X-Trinity-Execution-Id` into
+`authContext.executionId` on every POST (fastmcp re-runs it per request).
+`send_message`, `call_user`, `send_voice_reply`, `share_file` and
+`call_a2a_agent` send `resolveExecutionId(authContext, params.execution_id)`
+(`tools/execution_id.ts`): the header value, else the optional tool arg (older
+agent images). `client.ts` threads it and `dedup_label` into the request body. `chat_with_agent` already derives an
 `Idempotency-Key` (#525) — unchanged, regression-asserted in `messages.test.ts`.
 
-## Pull-mode default-ON gate (BLOCKING prerequisite)
+## Pull-mode: fail-closed without a usable id (#2392)
 
-`dispatch_async_eligible()` stays `DISPATCH_ASYNC AND triggered_by in
-ASYNC_DISPATCH_ELIGIBLE_TRIGGERS` (DISPATCH_ASYNC default-OFF). Enabling pull-mode
-default-ON for **any** side-effect-bearing agent REQUIRES, first:
-(a) **trusted runtime injection** of `execution_id` (so an agent can't forge or
-omit it), and (b) **fail-closed-when-absent** (no execution_id → refuse the
-effect, not fail-open). Both are tracked as a **blocking dependency on Epic
-#1045/#1081**, not doc-only-and-forget.
+Pull re-delivers the same `execution_id` after a lease expiry, so on a pull-mode
+agent (`effect_dedup_required`) the guard refuses an effect it cannot de-duplicate:
+
+| id reaching the guard | pull-mode agent | other agent |
+|---|---|---|
+| resolves to the caller's own execution | dedup | dedup |
+| `manual` (terminal/SSH session; Claude Code and Gemini) | send, `effect_guard.degraded` | same |
+| absent (old image, raw API call, internal share route) | **refuse** + alarm | send, degraded log |
+| unknown / another agent's execution | **refuse** + alarm | send, degraded log |
+| lookup error (DB blip) | send, degraded log | same |
+
+Codex omits the header when `TRINITY_EXECUTION_ID` is unset, so a person running
+Codex in a pull-mode agent's terminal reaches `absent` and is refused; so is a
+user-scoped key acting for a pull-mode agent from outside a turn.
+
+The alarm goes through `create_bounded_alert` (type `effect_unguarded`, id prefix
+`effect-unguarded-` reserved); at the budget cap the effect is still refused.
+The header is not a trust boundary: an agent owns its `.mcp.json` and can cite
+any of its own executions. The guard stops omission, not a hostile agent.
 
 > **Reframed (v2, 2026-07-01).** `TARGET_ARCHITECTURE.md` reframes the pull-mode side-effect rollout from a **per-agent** gate to **per-effect**: read/analysis-only + reversible + capability-confined-irreversible effects default on; only irreversible-**un-confineable** effects wait, via the **async operator queue** (#1402). `effect_guard` (this doc) is the reversible/backend-sink slice; general recovery is **retry-with-prior-trace** (#1401). The (a)/(b) trusted-injection requirement above still applies to the *confined-irreversible* tool-side gate.
 
@@ -161,13 +186,13 @@ effect, not fail-open). Both are tracked as a **blocking dependency on Epic
 | `in_flight` replay | duplicate worker mid-flight | raise `EffectInProgressError` → 409 | clear retryable error |
 | chunked message crash | crash after chunk 3/5 | whole message re-sent on retry | duplicate chunks (at-least-once, documented) |
 | Nevermined settle | settle on terminal turn | terminal-turn guard preserved (no settle on failed execution) | no double-charge |
-| absent execution_id | old image / agent omits arg | fail-open → send proceeds, no 5xx | no |
+| no usable execution_id, pull-mode agent | old image / raw API call / foreign or unknown id | `EffectUnguardedError` → 422 `effect_unguarded` + operator alarm; nothing sent | agent sees a non-retryable refusal; operator sees the alarm |
+| no usable execution_id, other agent | same | send proceeds, `effect_guard.degraded` warning | log only |
 
 ## NOT in Scope (deferred)
 
 - Pull-mode re-delivery itself (#1045/#1081) — this only makes it *safe* to enable.
-- Trusted runtime/MCP injection of `execution_id` + fail-closed-when-absent — the
-  enforced capability gate (BLOCKING prerequisite above).
+- A per-execution credential that would make the id unforgeable by the agent itself.
 - The "re-delivery preserves the same `execution_id`" dispatcher invariant + its
   integration test — owned by the pull-mode epic.
 - Per-chunk / per-provider-call guarding — single-target sinks use the entry
@@ -194,6 +219,12 @@ effect, not fail-open). Both are tracked as a **blocking dependency on Epic
   (`tests/unit/test_ent549_file_audience.py`).
 - MCP: `send_message` forwards `execution_id` + `dedup_label` (undefined when
   omitted); `chat_with_agent` still sets a non-empty `mcp:` Idempotency-Key.
+- #2392 (`tests/unit/test_2392_effect_guard_fail_closed.py`): the table above
+  for pull-mode and other agents, the alarm payload and budget-cap refusal, and a
+  re-delivered execution emitting each of message / voip_call / share_file /
+  a2a_call once. `tests/unit/test_2392_execution_id_header.py`: the MCP config
+  writers and validator. MCP: `tools/execution_id.test.ts`,
+  `execution-id-transport.test.ts` (two requests on one session carry distinct ids).
 
 ### Integration (sibling stack `-p trinity-1084-test`, remapped ports)
 - Re-deliver the same `execution_id` through proactive send → exactly one

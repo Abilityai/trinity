@@ -189,7 +189,7 @@ Run on **both** engines (SQLite supported until EOS 2026-09-01), even though loc
 |----|------|----------|
 | T6.1 | Re-delivery preserves `execution_id` | Requeue and park both keep the row id. |
 | T6.2 | effect_guard dedup across re-delivery | Same `execution_id` re-run → `send_message`/`create_share`/`voip` de-duped. |
-| T6.3 | **effect_guard fail-open when `execution_id` absent** | Without trusted injection a re-run **double-emits**. Must close before default-ON for side-effect agents. **Policy is decided — `TARGET_ARCHITECTURE.md` says fail-closed; #2392 is the build, not a decision.** |
+| T6.3 | **effect_guard without a usable `execution_id`** | Platform-injected via the MCP header (#2392). A pull-mode agent's effect with no usable id is refused + alarmed; a `manual` terminal session is sent and logged. Unit: `test_2392_effect_guard_fail_closed.py`. Live positive control: the eu2 emitting arm (`oracle-7-ai-semi`) once it runs an image with #2392. |
 | T6.4 | Nevermined settle exactly-once | Duplicate re-delivery → single settle on native `agent_request_id` token. |
 
 ### TIER 7 — PostgreSQL (now the LOCAL backend) — P0
@@ -346,7 +346,7 @@ the moment the lease-reaper became eligible and stayed red until its next sweep.
 the reaper never touches still fires — that is M4's automated owner (§9). Canary lease-awareness is now
 complete: S-01 and E-05 exclude leased rows, E-01 grace-bounds them; E-02 deliberately does neither (a
 terminal→non-terminal reversal is corruption regardless of ownership, and pull is the more exposed path) ·
-Tier-6 `effect_guard` `execution_id` injection (**#2392** — build fail-closed injection + operator alarm; the policy itself is already decided in the spec, do not re-open it) · ~~G3 canary-on-PG (#1540)~~ ✅ closed ·
+~~Tier-6 `effect_guard` `execution_id` injection~~ ✅ **built by #2392** — the id reaches the sinks through the agent's MCP header, and a pull-mode agent's effect without a usable id is refused with an operator alarm (§3 T6.3) · ~~G3 canary-on-PG (#1540)~~ ✅ closed ·
 B6 runtime-verify on the rebuilt image · the ≥2-week soak (#856 / #1766, measurement set in §9).
 
 **Also closed by #1766:** the pilot flag was purely additive, so a pilot ran push AND pull concurrently —

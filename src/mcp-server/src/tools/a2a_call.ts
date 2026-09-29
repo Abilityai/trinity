@@ -40,6 +40,7 @@
 import { z } from "zod";
 import { TrinityClient, ApiError } from "../client.js";
 import type { McpAuthContext } from "../types.js";
+import { resolveExecutionId } from "./execution_id.js";
 import { accessDenied } from "../access.js";
 
 export function createA2ACallTools(client: TrinityClient, requireApiKey: boolean) {
@@ -154,7 +155,8 @@ export function createA2ACallTools(client: TrinityClient, requireApiKey: boolean
           "Continue a specific remote task (e.g. answering an input-required prompt).",
         ),
         execution_id: z.string().max(200).optional().describe(
-          "Your current execution id, if you have one. Enables at-most-once delivery on retry.",
+          "Your current execution id, if you have one. Enables at-most-once delivery on retry." +
+          " The platform normally supplies this automatically (#2392); this param is a fallback for older agent images.",
         ),
       }),
       execute: async (
@@ -183,7 +185,7 @@ export function createA2ACallTools(client: TrinityClient, requireApiKey: boolean
             dedup_label: params.dedup_label,
             context_id: params.context_id,
             task_id: params.task_id,
-            execution_id: params.execution_id,
+            execution_id: resolveExecutionId(context?.session, params.execution_id),
           });
           return JSON.stringify({ success: true, ...(result as object) }, null, 2);
         } catch (e) {
