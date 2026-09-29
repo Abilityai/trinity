@@ -541,6 +541,21 @@ AGENT_CALLABLE: Dict[str, Tuple[str, str]] = {
     "routers/agent_config.py::get_agent_guardrails": ("GET /api/agents/{agent_name}/guardrails", "a non-sensitive read of this agent's own setting (access-level)"),
     "routers/users.py::get_my_github_pat_status": (
         "GET /api/users/me/github-pat", "configured flags only, never the token (ent#162)"),
+    # Skill sets (ent#530). The writes are the USE of the skills-manage capability, fenced like
+    # the single-skill writes by get_skill_managed_agent_by_name (capability, then owner); the
+    # GRANT is PUT /agents/{name}/skill-manager, admin + interactive (ent#596). Not a setting.
+    "routers/skills.py::list_skill_sets": (
+        "GET /api/skills/library/sets", "library set metadata (names, members, schedules), open like the skills listing"),
+    "routers/skills.py::get_agent_skill_sets": (
+        "GET /api/agents/{agent_name}/skill-sets", "a read of this agent's sets; ?probe= honoured only under the ent#596 fence (#3052)"),
+    "routers/skills.py::assign_skill_set": (
+        "POST /api/agents/{agent_name}/skill-sets/{set_name}", "ent#596 skills-manage USE: capability holder + owner fence; grant is admin-interactive"),
+    "routers/skills.py::unassign_skill_set": (
+        "DELETE /api/agents/{agent_name}/skill-sets/{set_name}", "ent#596 skills-manage USE: capability holder + owner fence; grant is admin-interactive"),
+    # The agent's own ask (ent#611): what MCP ask_operator calls; get_self_acting_agent admits
+    # only the agent's own key (or trinity-system as itself) and refuses every person.
+    "routers/operator_queue.py::raise_my_ask": (
+        "POST /api/agents/{name}/operator-queue", "MCP ask_operator; the agent raises its own ask, self-only (get_self_acting_agent)"),
 }
 
 # Authenticates itself, or unauthenticated by design. key -> ("METHOD /full/path", reason)
