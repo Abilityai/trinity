@@ -251,7 +251,20 @@
              branch that used to precede it, so no terminal arm can render under
              it (the ent#253 lesson). The scanline beam that was here
              (#2163) is the CHART motion and is gone from every non-chart zone. -->
-        <PortalSkeleton v-if="stage.state === 'loading'" variant="stage" />
+        <!-- #3060: on the Inbox route (or bare /workspace, which lands there)
+             the placeholder is the INBOX's own frame — header, the same tab
+             strip with its badge slots reserved, the list column at the width
+             the Inbox will pick, and the pane block — not the conversation's. -->
+        <PortalInboxSkeleton
+          v-if="stage.state === 'loading' && inboxSkeleton"
+          :rail-allowance="inboxRailAllowance"
+          @open-menu="mobileNav = true"
+        >
+          <template #header-end>
+            <PortalThemeSwitch />
+          </template>
+        </PortalInboxSkeleton>
+        <PortalSkeleton v-else-if="stage.state === 'loading'" variant="stage" />
         <template v-else>
         <PortalRoom
           v-if="activeRoomIdFromRoute && store.multiAgentChatAvailable"
@@ -786,6 +799,7 @@ import PortalCodeInput from '@/components/portal/PortalCodeInput.vue'
 import PortalAgentPicker from '@/components/portal/PortalAgentPicker.vue'
 import PortalRoom from '@/components/portal/PortalRoom.vue'
 import PortalInbox from '@/components/portal/PortalInbox.vue'
+import PortalInboxSkeleton from '@/components/portal/PortalInboxSkeleton.vue'
 import {
   inboxLandingTarget, isInboxPath, inboxBranchVisible, inboxSelectedAgent, inboxCanvasCount, parseItemKey,
   sidebarThreadsOf, agentLabels, inboxRailAllowance as inboxRailAllowanceFor,
@@ -969,6 +983,11 @@ const inboxOpenAskIds = computed(() => {
   return parsed && parsed.type === 'ask' ? [parsed.id] : []
 })
 const inboxVisible = computed(() => inboxBranchVisible({ isInboxRoute: isInboxRoute.value, stageState: stage.value.state }))
+// #3060: which skeleton the stage draws while it has no verdict. Bare
+// `/workspace` is replaced by the Inbox route in onMounted, AFTER first paint,
+// so it counts as the Inbox here too — or it drew one frame of the chat shape.
+const inboxSkeleton = computed(() => isInboxRoute.value
+  || Boolean(inboxLandingTarget({ path: route.path, params: route.params, query: route.query })))
 const inboxAgentLabels = computed(() => agentLabels(store.agents))
 const activeAgent = computed(() => {
   if (isInboxRoute.value) {

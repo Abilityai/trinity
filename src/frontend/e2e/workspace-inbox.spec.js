@@ -80,6 +80,99 @@ test.describe('Workspace Inbox', () => {
     expect(spread, `the list moved ${spread}px while loading — ${tops.join(',')}`).toBeLessThanOrEqual(1)
   })
 
+  // #3060: the Inbox's first load, sampled on EVERY animation frame from the
+  // document's start (an init script, so the first paint is in the record).
+  // Every Workspace read is held back ~700ms, so the stage skeleton, the
+  // Inbox's own loading state and the late counts are each on screen for many
+  // frames — without the delay a fast local stack settles before the first
+  // sample and the arm proves nothing. Geometry is CONTAINER-relative (#2711):
+  // the stage wrapper both the skeleton and the Inbox mount into.
+  async function sampleInboxLoad(page, width) {
+    await page.setViewportSize({ width, height: 900 })
+    await page.addInitScript(() => {
+      const out = []
+      window.__inboxFrames = out
+      const rel = (el, base) => {
+        if (!el || !base) return null
+        const r = el.getBoundingClientRect()
+        const b = base.getBoundingClientRect()
+        return { l: Math.round(r.left - b.left), r: Math.round(r.right - b.left), t: Math.round(r.top - b.top) }
+      }
+      const tick = () => {
+        const root = document.querySelector('[data-testid="inbox-skeleton"], [data-testid="inbox"]')
+        if (root) {
+          const base = root.parentElement
+          const strip = root.querySelector('[role="tablist"][aria-label="Inbox"]')
+          const tabs = strip ? [...strip.querySelectorAll('[role="tab"]')].map((t) => rel(t, base)) : []
+          const list = root.querySelector('[data-testid="inbox-skeleton-list"], [data-testid="inbox-list-column"]')
+          // A LANDED count: a visible numeric span in a tab — not the slot
+          // attribute, so the arm still sees counts when the slot is absent.
+          const badges = strip ? [...strip.querySelectorAll('[role="tab"] span')]
+            .filter((b) => /^\d+\+?$/.test(b.textContent.trim()) && getComputedStyle(b).visibility !== 'hidden').length : 0
+          out.push({ phase: root.dataset.testid, frame: rel(root, base), tabs, list: rel(list, base), badges })
+        }
+        if (out.length < 400) requestAnimationFrame(tick)
+      }
+      requestAnimationFrame(tick)
+    })
+    await page.route('**/api/enterprise/client-portal/**', async (route) => {
+      await new Promise((r) => setTimeout(r, 700))
+      await route.continue()
+    })
+    await page.goto('/workspace/inbox')
+    await page.getByTestId('inbox').waitFor({ timeout: 30000 })
+    // Not `networkidle`: the Workspace polls, so it may never be idle. The
+    // held-back reads settle within ~2s of the Inbox mounting.
+    await page.waitForTimeout(3000)
+    return page.evaluate(() => window.__inboxFrames)
+  }
+  const spreadOf = (xs) => Math.max(...xs) - Math.min(...xs)
+
+  for (const width of [1440, 1024]) {
+    test(`@interactive skeleton → ready: no column or tab moves at ${width}px (#3060)`, async ({ page }) => {
+      await page.goto('/workspace/inbox')
+      test.skip(!await firstRosterAgent(page), 'no agent on the roster, so the stage never reaches the Inbox')
+      const frames = await sampleInboxLoad(page, width)
+      const phases = new Set(frames.map((f) => f.phase))
+      expect(phases.has('inbox-skeleton'), 'never saw the Inbox skeleton — the stage drew another shape').toBe(true)
+      expect(phases.has('inbox'), 'never saw the Inbox').toBe(true)
+      // The frame's RIGHT edge is the rail column's (reserved while the stage
+      // loads, then settled by whether the Inbox previews a row) — not what
+      // the skeleton decides. So left / top are held across every frame, and
+      // the list's right edge (which a stacked list takes from the frame)
+      // across the frames at the skeleton's frame width.
+      const skelWidth = frames.find((f) => f.phase === 'inbox-skeleton').frame.r
+      for (const [name, pick] of [
+        ['the frame', (f) => f.frame && [f.frame.l, f.frame.t]],
+        ['the list column', (f) => f.list && [f.list.l, f.list.t]],
+        ['the list column\'s right edge', (f) => f.list && f.frame && f.frame.r === skelWidth && [f.list.r]],
+        ['the tab strip', (f) => f.tabs.length === 3 && f.tabs.flatMap((t) => [t.l, t.t])],
+      ]) {
+        const rows = frames.map(pick).filter(Boolean)
+        expect(rows.length, `never measured ${name}`).toBeGreaterThan(5)
+        for (let k = 0; k < rows[0].length; k++) {
+          const xs = rows.map((r) => r[k])
+          expect(spreadOf(xs), `${name} moved across the load at ${width}px (coord ${k}): ${[...new Set(xs)].join(' → ')}`).toBeLessThanOrEqual(1)
+        }
+      }
+    })
+  }
+
+  test('@interactive the tabs do not slide when the counts land (#3060)', async ({ page }) => {
+    await page.goto('/workspace/inbox')
+    test.skip(!await firstRosterAgent(page), 'no agent on the roster, so no Inbox')
+    const frames = (await sampleInboxLoad(page, 1280)).filter((f) => f.tabs.length === 3)
+    const before = frames.filter((f) => f.badges === 0)
+    const after = frames.filter((f) => f.badges > 0)
+    test.skip(!after.length, 'no pending ask and no unread chat, so no count ever lands')
+    expect(before.length, 'the counts were already there on the first frame').toBeGreaterThan(0)
+    // Unread's and All's left edges: the ones a landing count would push.
+    for (const i of [1, 2]) {
+      const xs = [...before, ...after].map((f) => f.tabs[i].l)
+      expect(spreadOf(xs), `tab ${i} slid as the counts landed: ${[...new Set(xs)].join(' → ')}`).toBeLessThanOrEqual(1)
+    }
+  })
+
   // §3g A4: at 768px (sidebar beside it) and at 640×400 (a 1280 window at 200%)
   // the Inbox's container is under 720px, so it STACKS: an opened row's pane
   // takes the whole Inbox instead of the ~150px (768) / 64px (zoomed) the

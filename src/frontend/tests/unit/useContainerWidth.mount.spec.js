@@ -51,6 +51,30 @@ describe('useContainerWidth', () => {
     w.unmount()
   })
 
+  it('#3060: reads the content width at attach, before the observer reports', async () => {
+    // Without it a layout decided from this ref drew one frame on the
+    // "unmeasured" fallback (the Inbox: a split list, then stacked).
+    const { RO, all } = fakeRO()
+    const desc = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'clientWidth')
+    Object.defineProperty(HTMLElement.prototype, 'clientWidth', {
+      configurable: true, get() { return this.dataset && this.dataset.x ? 500 : 0 },
+    })
+    try {
+      const show = ref(true)
+      const { C, width } = harness(RO, show)
+      const w = mount(C, { attachTo: document.body })
+      await nextTick()
+      expect(all.length).toBe(1)
+      expect(width(), 'the width waited for the observer').toBe(500)
+      all[0].cb([{ contentRect: { width: 480 } }])
+      expect(width()).toBe(480)
+      w.unmount()
+    } finally {
+      if (desc) Object.defineProperty(HTMLElement.prototype, 'clientWidth', desc)
+      else delete HTMLElement.prototype.clientWidth
+    }
+  })
+
   it('disconnects its observer on unmount', async () => {
     const { RO, all } = fakeRO()
     const show = ref(true)

@@ -241,11 +241,13 @@ describe('placement and sharing (source guards)', () => {
     }
   })
 
-  it('the shell fills the slot on the conversation, the room AND the Inbox', () => {
+  it('the shell fills the slot on the conversation, the room, the Inbox AND its skeleton', () => {
     // ent#610 sign-off: the Inbox (the Workspace landing) is the third stage —
-    // without its fill it was the one screen with no theme control.
+    // without its fill it was the one screen with no theme control. #3060: the
+    // Inbox's own skeleton draws its header, so it carries the switch too, or
+    // the control popped in when the stage landed.
     const fills = PORTAL.split('<template #header-end>').length - 1
-    expect(fills).toBe(3)
+    expect(fills).toBe(4)
     expect(PORTAL).toContain("import PortalThemeSwitch from '@/components/portal/PortalThemeSwitch.vue'")
   })
 
