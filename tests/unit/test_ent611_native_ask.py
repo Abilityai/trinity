@@ -1008,8 +1008,9 @@ class TestRaiseRoute:
         does a read: `resolved_to` and `addressed_to_email` hold the same email,
         so both are withheld from machines. Today that person is the owner
         (whose email an agent key can read anyway); once an assignment provider
-        answers `people_for` it can be someone else. A file entry's addressee is
-        the agent's own input and stays."""
+        answers `people_for` it can be someone else. Since trinity-enterprise#715
+        a file entry's addressee is withheld too: the agent wrote it, but the
+        same key reads its siblings' rows."""
         uid = self._post(route, _body(f"rt-wh-{path}")).json()["id"]
         filed = route.ask.db.create_operator_queue_item(
             self.AGENT, {"id": f"rt-file-{path}", "type": "question", "title": "t", "question": "q",
@@ -1031,7 +1032,7 @@ class TestRaiseRoute:
         assert native["addressed_to_email"] == OWNER
         native, file_row = rows(lambda: route.as_(mcp_scope="agent", agent_name=self.AGENT))
         assert "addressed_to_email" not in native and "resolved_to" not in native
-        assert file_row["addressed_to_email"] == "client@example.com"
+        assert "addressed_to_email" not in file_row
 
     def test_a_null_context_or_proposal_reads_as_absent(self, route):
         """The MCP tool publishes both as object-or-null (so the published

@@ -14,6 +14,7 @@
 import { z } from "zod";
 import { TrinityClient } from "../client.js";
 import type { McpAuthContext } from "../types.js";
+import { resolveExecutionId } from "./execution_id.js";
 
 export function createVoiceReplyTools(
   client: TrinityClient,
@@ -68,11 +69,12 @@ export function createVoiceReplyTools(
       parameters: z.object({
         text: z.string().min(1).max(4096)
           .describe("The text to speak as a voice note. Keep it short and natural to hear."),
-        execution_id: z.string().min(1)
+        execution_id: z.string().min(1).optional()
           .describe(
             "Your current execution_id — shown in the 'Execution Context' block of your " +
-            "system prompt as '- **Execution ID**: <id>'. Required: the backend resolves the " +
-            "channel destination from it, and it dedupes a re-delivered turn (#1084)."
+            "system prompt as '- **Execution ID**: <id>'. One of this or the platform-supplied id is required: the backend resolves the " +
+            "channel destination from it, and it dedupes a re-delivered turn (#1084)." +
+            " The platform normally supplies this automatically (#2392); this param is a fallback for older agent images."
           ),
         dedup_label: z.string().optional()
           .describe(
@@ -88,7 +90,7 @@ export function createVoiceReplyTools(
       execute: async (
         params: {
           text: string;
-          execution_id: string;
+          execution_id?: string;
           dedup_label?: string;
           agent_name?: string;
         },
@@ -101,11 +103,17 @@ export function createVoiceReplyTools(
           return JSON.stringify({ delivered: false, error: "Text cannot be empty" }, null, 2);
         }
 
+        // #2392: header first, param fallback; the backend needs one to find the channel.
+        const executionId = resolveExecutionId(authContext, params.execution_id);
+        if (!executionId) {
+          return JSON.stringify({ delivered: false, error: "execution_id is required", fallback_to_text: true }, null, 2);
+        }
+
         try {
           const agentName = getAgentName(authContext, params.agent_name);
           const result = await apiClient.sendVoiceReply(agentName, {
             text: params.text.trim(),
-            execution_id: params.execution_id,
+            execution_id: executionId,
             dedup_label: params.dedup_label,
           });
           return JSON.stringify(

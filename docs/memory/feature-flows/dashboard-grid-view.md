@@ -92,6 +92,12 @@ not navigate**: it is a copy affordance; navigation stays on `.t-name` and the
 Details button. Ink is `var(--gv-muted)`, the same token as the repo text it
 sits beside — no new `--gv-*` var.
 
+**Nameline badge order:** `.t-name` · runtime icon · **readiness** · SYSTEM /
+SKILL RUNNER. The readiness badge (trinity-enterprise#527 rider) is a `BaseBadge`
+(`flex-none`) that renders only for a stamped role companion, from the same
+`utils/readinessBadge.js` predicate as the agents list; its calibrating tooltip
+names a paused brief only when the row's `brief_held` is true.
+
 ### Trigger-bucket collapse (tile scale)
 
 The backend's #1107 buckets collapse to three groups: **Scheduled** ←

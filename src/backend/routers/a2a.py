@@ -57,7 +57,7 @@ from services.a2a_outbound_service import (
     A2AEndpointNotFound,
     A2AOutboundDisabled,
 )
-from services.idempotency_service import EffectInProgressError
+from services.idempotency_service import EffectInProgressError, EffectUnguardedError
 from services.agent_auth import agent_httpx_client
 from services.docker_service import get_agent_container
 from services.platform_audit_service import AuditEventType, platform_audit_service
@@ -760,6 +760,9 @@ async def call_a2a_agent(
                 ),
             },
         )
+    except EffectUnguardedError as exc:
+        # #2392: pull-mode agent, no usable execution id — refused, not retryable.
+        raise HTTPException(status_code=422, detail={"reason": "effect_unguarded", "message": str(exc)})
     except EffectInProgressError as exc:
         raise HTTPException(status_code=409, detail=str(exc))
     except A2ACallError as exc:
