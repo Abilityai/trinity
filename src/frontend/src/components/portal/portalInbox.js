@@ -16,6 +16,7 @@ import {
   STAGE_QUERY_KEYS, WORKSPACE_ROOT, WORKSPACE_INBOX, totalUnread, askBadgeTitle, unreadBadgeTitle,
 } from './portalUtils'
 import { capCount } from '@/utils/tabTitle'
+import { queueTypeLabel } from '@/utils/operatorQueue'
 
 export const INBOX_TABS = ['action', 'unread', 'all']
 
@@ -532,4 +533,17 @@ export function agentLabels(agents) {
     if (a && a.name) out[a.name] = String(a.display_label || '').trim() || a.name
   }
   return out
+}
+
+// ---- the pane's header -----------------------------------------------------
+// An ask's header names WHO asks and WHAT KIND of ask — the card right under it
+// carries the title, and repeating it there read as the same line twice
+// (sign-off). A chat is `agent · chat title`.
+export function paneHeading(item, agentLabel = '') {
+  if (item?.type === 'ask') {
+    const kind = queueTypeLabel(item.ask?.kind) || 'Question'
+    return `${agentLabel} · ${kind}`
+  }
+  const chat = item?.is_main ? 'Main' : (item?.title || 'Chat')
+  return `${agentLabel} · ${chat}`
 }

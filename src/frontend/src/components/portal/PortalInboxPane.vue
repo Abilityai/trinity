@@ -266,7 +266,7 @@ import PortalAvatar from './PortalAvatar.vue'
 import PortalAgentBubble from './PortalAgentBubble.vue'
 import { useClientPortalStore } from '@/stores/clientPortal'
 import { relativeTime } from './portalUtils'
-import { PANE_HISTORY_LIMIT, paneWindow, paneRuns, openInChatTarget } from './portalInbox'
+import { PANE_HISTORY_LIMIT, paneWindow, paneRuns, openInChatTarget, paneHeading } from './portalInbox'
 import { viewState } from '@/utils/loadingState'
 import { formatLocalDateTime } from '@/utils/timestamps'
 
@@ -288,12 +288,7 @@ const store = useClientPortalStore()
 const headingEl = ref(null)
 const headingId = computed(() => `inbox-pane-h-${props.item.key}`)
 
-const heading = computed(() => {
-  const it = props.item
-  if (it.type === 'ask') return `${props.agentLabel} asks: ${it.title}`
-  const chat = it.is_main ? 'Main' : (it.title || 'Chat')
-  return `${props.agentLabel} · ${chat}`
-})
+const heading = computed(() => paneHeading(props.item, props.agentLabel))
 const target = computed(() => openInChatTarget(props.item))
 
 // ---- a chat's arrivals ---------------------------------------------------------

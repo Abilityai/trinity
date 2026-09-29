@@ -19,7 +19,10 @@
       :title="headExact || undefined"
       data-testid="inbox-list-total"
     ><span :aria-hidden="headExact ? 'true' : undefined">{{ head }}</span><span v-if="headExact" class="sr-only">{{ headExact }}</span></p>
-    <ul class="flex-1 min-h-0 overflow-y-auto px-2 pb-2 space-y-1" :aria-label="label" data-testid="inbox-list">
+    <!-- `relative`: each ask row's spoken kind is `sr-only` (absolute). With no
+         positioned ancestor it escaped this scroll box and stretched the PAGE
+         to the list's full height, so the whole shell scrolled away (sign-off). -->
+    <ul class="relative flex-1 min-h-0 overflow-y-auto px-2 pb-2 space-y-1" :aria-label="label" data-testid="inbox-list">
       <li v-for="it in items" :key="it.key">
         <button
           type="button"

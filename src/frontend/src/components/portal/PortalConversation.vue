@@ -450,14 +450,26 @@
          third rendering of the SAME row the sidebar counts and the agent page
          shows, so answering here clears it in both. Directly above the input
          because it is a turn that is waiting on the person about to type. -->
+    <!-- ent#610 sign-off: only THIS chat's asks are pinned (splitChatAsks), in
+         a block capped at a third of the screen with its own scroll — a sibling
+         of the thread's scroll region, never nested in it — and the rest are one
+         line away in Work. `relative` keeps each card's sr-only text inside. -->
     <div v-if="agentAsks.length" class="shrink-0 px-3 sm:px-6 pt-2">
-      <div class="max-w-[var(--ws-message-max,64rem)] mx-auto">
+      <div v-if="chatAskIds.length" class="relative max-w-[var(--ws-message-max,64rem)] mx-auto max-h-[33vh] overflow-y-auto" data-testid="portal-chat-asks">
         <PortalAsks
-          :agent-name="agent.name"
+          :ask-ids="chatAskIds"
           :current-session-id="currentSessionId"
           @open-thread="(t) => emit('open-thread', t)"
         />
       </div>
+      <p
+        v-if="chatAsks.elsewhere.length"
+        class="max-w-[var(--ws-message-max,64rem)] mx-auto pt-1 text-xs"
+        data-testid="portal-chat-asks-elsewhere"
+      >
+        {{ chatAsks.elsewhere.length }} more {{ chatAsks.elsewhere.length === 1 ? 'ask is' : 'asks are' }} waiting in other chats ·
+        <button type="button" class="text-action-primary-600 dark:text-action-primary-400 hover:underline" @click="emit('open-work')">Open in Work</button>
+      </p>
     </div>
 
     <!-- ent#474: the rail's mobile collapsed form — a strip above the
@@ -779,6 +791,7 @@ import PortalStarButton from './PortalStarButton.vue'
 import PortalEditableTitle from './PortalEditableTitle.vue'
 import PortalChatTabs from './PortalChatTabs.vue'
 import { newChatHotkeyLabel, MAIN_TAB_LABEL, composerAvailabilityNotice, assistantRow, replyFromHistory, replyBaseline, readReplyBaseline } from './portalUtils'
+import { splitChatAsks } from './portalUtils'
 import { usePortalFileDrop, attachmentState } from '@/composables/usePortalFileDrop'
 import { useStickToBottom } from '@/composables/useStickToBottom'
 import { useConversationAnchor } from '@/composables/useConversationAnchor'
@@ -909,6 +922,10 @@ const store = useClientPortalStore()
 // nothing and this surface — the third of the three ent#364 promises — had never
 // rendered. It failed SILENTLY, as an empty list is a legitimate state.
 const agentAsks = computed(() => store.asksForAgent(props.agent.name))
+const chatAsks = computed(() => splitChatAsks(agentAsks.value, {
+  sessionId: currentSessionId.value, isMain: isMainChat.value,
+}))
+const chatAskIds = computed(() => chatAsks.value.here.map((a) => a.id))
 const messages = ref([])
 const currentSessionId = ref(props.sessionId)
 // ent#555 — the canvas the rail has open for THIS agent, or null.

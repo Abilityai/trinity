@@ -57,8 +57,15 @@
       </div>
 
       <p class="mt-1 text-sm font-medium text-gray-900 dark:text-gray-100">{{ ask.title }}</p>
-      <p v-if="ask.question && ask.question !== ask.title"
-         class="mt-0.5 text-sm text-gray-600 dark:text-gray-300 whitespace-pre-wrap">{{ ask.question }}</p>
+      <!-- An agent writes its ask in markdown, as it writes its replies: the
+           body goes through the one sanitized renderer (PortalMarkdown →
+           DOMPurify), never printed as its syntax (ent#610 sign-off). -->
+      <PortalMarkdown
+        v-if="ask.question && ask.question !== ask.title"
+        :content="ask.question"
+        class="mt-0.5 min-w-0 text-sm text-gray-600 dark:text-gray-300"
+        :data-testid="`${tid.prefix}-question-${ask.id}`"
+      />
 
       <!-- An ending is RENDERED, never silently dropped: an ask that simply
            vanishes reads as "answered" to the person who did not answer it.
@@ -166,6 +173,7 @@
 <script setup>
 import { computed, reactive, ref, onBeforeUnmount } from 'vue'
 import BaseBadge from '../base/BaseBadge.vue'
+import PortalMarkdown from './PortalMarkdown.vue'
 import { useClientPortalStore } from '@/stores/clientPortal'
 import {
   expiredLabel, askThreadLink, answerConfirmation, ANSWER_CONFIRMATION_MS,

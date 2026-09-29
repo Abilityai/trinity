@@ -1663,6 +1663,23 @@ export function askThreadLink(ask, currentSessionId = null) {
   return target
 }
 
+// trinity-enterprise#610 sign-off: which of an agent's asks a chat PINS above
+// its composer. Pinning all of them, uncapped, let seven cards crush the
+// conversation to nothing. A chat pins the asks raised against it — Main also
+// takes the unattached ones, which have nowhere else to live — and the rest
+// that still wait are counted, one link away in Work. An ask that ended in
+// another chat is not waiting, so it is not counted.
+export function splitChatAsks(asks, { sessionId = null, isMain = false } = {}) {
+  const here = []
+  const elsewhere = []
+  for (const a of asks || []) {
+    const onThis = a.chat_id ? (!!sessionId && a.chat_id === sessionId) : isMain
+    if (onThis) here.push(a)
+    else if (a.status === 'pending') elsewhere.push(a)
+  }
+  return { here, elsewhere }
+}
+
 
 // ---- ent#365: deliverables ------------------------------------------------
 
