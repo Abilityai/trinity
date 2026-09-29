@@ -350,7 +350,15 @@ export function paneWindow(messages, firstUnreadId, n = 0) {
   const list = Array.isArray(messages) ? messages : []
   if (!firstUnreadId) return { shown: list.slice(-PANE_TAIL), earlier: 0 }
   const i = list.findIndex((m) => m && m.id === firstUnreadId)
-  if (i >= 0) return { shown: list.slice(i), earlier: 0 }
+  if (i >= 0) {
+    // §3g S2 (A2): a long run of arrivals is capped at the tail too — 41 new
+    // rendered 40 bubbles. `earlier` counts the hidden ARRIVALS (assistant
+    // rows), the unit the pane's "N earlier arrivals" line names.
+    const tail = list.slice(i)
+    const shown = tail.slice(-PANE_TAIL)
+    const hidden = tail.slice(0, tail.length - shown.length)
+    return { shown, earlier: hidden.filter((m) => m && m.role === 'assistant').length }
+  }
   const arrivals = list.filter((m) => m && m.role === 'assistant')
   const shown = arrivals.slice(-Math.max(1, Math.min(Number(n) || 1, PANE_TAIL)))
   return { shown, earlier: Math.max(0, (Number(n) || 0) - shown.length) }

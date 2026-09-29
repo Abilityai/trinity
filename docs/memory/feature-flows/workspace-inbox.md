@@ -62,7 +62,8 @@ Sign-in / reload on bare /workspace
       chat  → store.fetchHistory(agent, id, {limit: 50})  render from first_unread_message_id
               store.fetchSessionDeliverablesStrict → ReportRenderer (+ ReportSummary fallback)
                                                a failed read is LoadFailed, never "no deliverables"
-              "N earlier arrivals — Open in chat" when the first unread is outside the 50
+              at most PANE_TAIL (5) messages from there (§3g S2); the hidden ARRIVALS are said:
+              "N earlier arrivals — Open in chat" (also when the first unread is outside the 50)
               markRead('thread', id)           explicit open only (existing #557 cursor; the row
                                                stays, drawn read in place, for the tab visit)
               Open in chat → /workspace/c/:id?anchor=m:<first_unread> | d:<report>

@@ -201,7 +201,9 @@ describe('reading a chat (D11)', () => {
     await flushPromises()
     const shown = () => w.findAll('[data-testid^="inbox-pane-message-"]').map((x) => x.attributes('data-testid'))
     const before = shown()
-    expect(before[0]).toBe('inbox-pane-message-m2')
+    // m2..m8 are new; the pane caps at the tail (§3g S2), and names the rest.
+    expect(before[0]).toBe('inbox-pane-message-m4')
+    expect(w.find('[data-testid="inbox-pane-earlier"]').text()).toContain('1 earlier arrival')
     await w.find('[data-testid="inbox-pane-open"]').trigger('click')
     const href = w.emitted('open-chat')[0][0]
     expect(href).toContain('m%3Am2')

@@ -430,6 +430,22 @@ describe('the pane window (D11)', () => {
     expect(w.earlier).toBe(9 - w.shown.length)
     expect(w.earlier).toBeGreaterThan(0)
   })
+  it('caps a long run of arrivals at the tail, and says how many are earlier (§3g S2 / A2)', () => {
+    const twelve = Array.from({ length: 12 }, (_, i) => ({ id: `m${i + 1}`, role: 'assistant' }))
+    const w = paneWindow(twelve, 'm1', 12)
+    expect(w.shown.map((m) => m.id)).toEqual(['m8', 'm9', 'm10', 'm11', 'm12'])
+    expect(w.earlier).toBe(7)
+  })
+  it('the earlier count is arrivals only: a hidden user message is not one', () => {
+    const mixed = [
+      { id: 'm1', role: 'assistant' }, { id: 'm2', role: 'user' }, { id: 'm3', role: 'assistant' },
+      { id: 'm4', role: 'assistant' }, { id: 'm5', role: 'assistant' }, { id: 'm6', role: 'assistant' },
+      { id: 'm7', role: 'assistant' },
+    ]
+    const w = paneWindow(mixed, 'm1', 6)
+    expect(w.shown.map((m) => m.id)).toEqual(['m3', 'm4', 'm5', 'm6', 'm7'])
+    expect(w.earlier).toBe(1)
+  })
   it('a read chat shows its tail', () => {
     expect(paneWindow(msgs, null).shown).toHaveLength(Math.min(PANE_TAIL, msgs.length))
   })
