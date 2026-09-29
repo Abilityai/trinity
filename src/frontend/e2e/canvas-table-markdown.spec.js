@@ -75,7 +75,8 @@ test.afterAll(async ({ request, baseURL }) => {
 async function openCanvas(page) {
   await page.goto(`/agents/${AGENT}?tab=canvas`)
   await page.getByTestId('canvas-select').waitFor({ timeout: 20000 })
-  await page.locator(`[data-testid="canvas-select"] [data-canvas-id="${CANVAS_ID}"]`).click({ timeout: 10000 })
+  // ent#724: the selector is a dropdown now, not a chip strip.
+  await page.getByTestId('canvas-select').selectOption(CANVAS_ID, { timeout: 10000 })
   await expect(page.locator(`[data-testid="canvas-panel"][data-canvas-id="${CANVAS_ID}"]`)).toBeVisible()
 }
 

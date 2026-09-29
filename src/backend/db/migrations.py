@@ -4765,6 +4765,21 @@ def _migrate_workspace_suggestion_feedback_table(cursor, conn):
     conn.commit()
 
 
+def _migrate_portal_messages_unread_index(cursor, conn):
+    """#3064 — cover the Workspace unread count's message arm.
+
+    `count_unread_by_session` runs on every 20s Workspace poll and filtered
+    `enterprise_portal_messages` by viewer + `role = 'assistant'` + thread +
+    `created_at` with no index leading on the viewer, so SQLite scanned the
+    whole table. Index-only: no column, no data, no behaviour change.
+    PostgreSQL half: Alembic `0081_portal_messages_unread_idx`.
+    """
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_portal_messages_unread "
+        "ON enterprise_portal_messages(client_email, role, session_id, created_at)"
+    )
+
+
 def _migrate_ent720_email_identity(cursor, conn):
     """trinity-enterprise#720 — a sign-in email is unique, and a code has a purpose.
 
@@ -4780,7 +4795,7 @@ def _migrate_ent720_email_identity(cursor, conn):
 
     Idempotent; a fresh install whose tables do not exist yet on the first pass
     gets both from `db/schema.py`. PostgreSQL half: Alembic
-    `0081_ent720_email_identity` (same decision function, `resolve_duplicate_emails`).
+    `0082_ent720_email_identity` (same decision function, `resolve_duplicate_emails`).
     """
     cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='email_login_codes'")
     if cursor.fetchone():
@@ -5074,5 +5089,6 @@ MIGRATIONS = [
     ("workspace_suggestion_feedback_table", _migrate_workspace_suggestion_feedback_table),
     ("telegram_group_context", _migrate_telegram_group_context),
     ("agent_skill_sets", _migrate_agent_skill_sets),
+    ("portal_messages_unread_index", _migrate_portal_messages_unread_index),
     ("ent720_email_identity", _migrate_ent720_email_identity),
 ]

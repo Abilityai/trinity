@@ -117,10 +117,15 @@ class SkillSetsOperations:
                 ).on_conflict_do_nothing(index_elements=[agent_skill_sets.c.agent_name, agent_skill_sets.c.set_name])
             ).rowcount > 0
             if not created:
-                # Re-assigning re-points a drifted set at the source that owns it now.
+                # Re-assigning re-points a drifted set at the source that owns it
+                # now — and records who made THIS change and when (#3053). Only
+                # `source_id` used to move, so the row went on naming whoever
+                # assigned the set first.
                 conn.execute(update(agent_skill_sets).where(
                     agent_skill_sets.c.agent_name == agent_name,
-                    agent_skill_sets.c.set_name == set_name).values(source_id=source_id))
+                    agent_skill_sets.c.set_name == set_name).values(
+                        source_id=source_id, assigned_by=assigned_by,
+                        assigned_by_agent=assigned_by_agent, assigned_at=utc_now_iso()))
             add, remove = self._apply(conn, agent_name, resolved, assigned_by, assigned_by_agent)
         return created, add, remove
 

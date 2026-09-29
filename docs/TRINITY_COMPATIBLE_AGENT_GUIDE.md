@@ -231,11 +231,11 @@ __pycache__/
 .claude/sessions/
 .claude/shell-snapshots/
 .claude/plugins/
-# settings.json is baked by the Trinity base image with container-only hook
-# paths (/opt/trinity/hooks/*.py). Committing it bricks any clone made outside
-# the container: the missing hook script exits 2, which Claude Code reads as
-# "block this tool call", so every Bash/Edit/Write fails there. (#2036)
-.claude/settings.json
+# .claude/settings.json is NOT ignored: it is your project settings and may be
+# committed (ent#708). Trinity keeps it out of a commit only when it carries
+# container paths (/opt/trinity/ hooks, which brick a clone made outside the
+# container, #2036) or credential-bearing keys (env, apiKeyHelper, awsAuthRefresh,
+# awsCredentialExport, gcpAuthRefresh, otelHeadersHelper) — on disk either way.
 .claude/remote-settings.json
 .claude/policy-limits.json
 .claude/backups/

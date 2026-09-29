@@ -12,14 +12,14 @@ pinned equal by ``tests/unit/test_ent720_email_binding.py``.
    address the earliest-created account keeps it, the rest → NULL, logged by
    username only), then ``idx_users_email_unique`` is created.
 
-Revision ID: 0081_ent720_email_identity
-Revises: 0080_agent_skill_sets
+Revision ID: 0082_ent720_email_identity
+Revises: 0081_portal_messages_unread_idx
 """
 from alembic import op
 import sqlalchemy as sa
 
-revision = "0081_ent720_email_identity"
-down_revision = "0080_agent_skill_sets"
+revision = "0082_ent720_email_identity"
+down_revision = "0081_portal_messages_unread_idx"
 branch_labels = None
 depends_on = None
 

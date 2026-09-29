@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { railColumnReservedFor, railVisibleFor } from '../../src/components/portal/portalRail.js'
+import { railColumnReservedFor, railVisibleFor, railSizedOpen } from '../../src/components/portal/portalRail.js'
 
 /**
  * #2711 — the rail column is reserved while the stage loads.
@@ -19,6 +19,32 @@ import { railColumnReservedFor, railVisibleFor } from '../../src/components/port
  * column is held open empty rather than appearing later and taking the
  * conversation column's width with it.
  */
+// #3060 — the reservation was sized as COLLAPSED even for a rail the person
+// left open: `useColumnResize` was told the rail is open only when it is
+// VISIBLE, and it is never visible while the stage loads. So a persisted-open
+// rail reserved 48px, then jumped to its open width (384px by default) the
+// moment the stage was ready, shoving the conversation's right edge 336px in
+// one frame. The reserved column must take the width the rail will have.
+describe('railSizedOpen (#3060)', () => {
+  it('a persisted-open rail is sized open while its column is reserved', () => {
+    expect(railSizedOpen({ open: true, visible: false, reserved: true })).toBe(true)
+  })
+  it('and open once it is visible, as before', () => {
+    expect(railSizedOpen({ open: true, visible: true, reserved: false })).toBe(true)
+  })
+  it('a collapsed rail is collapsed in every phase', () => {
+    for (const phase of [{ visible: false, reserved: true }, { visible: true, reserved: false }]) {
+      expect(railSizedOpen({ open: false, ...phase })).toBe(false)
+    }
+  })
+  it('with no column at all (agent page, room load, failed stage) it is not open', () => {
+    expect(railSizedOpen({ open: true, visible: false, reserved: false })).toBe(false)
+  })
+  it('reads booleans strictly — a truthy non-boolean never opens it', () => {
+    expect(railSizedOpen({ open: 'true', visible: 1, reserved: 1 })).toBe(false)
+  })
+})
+
 describe('railColumnReservedFor', () => {
   it('reserves on a 1:1 conversation route while the stage loads', () => {
     expect(railColumnReservedFor({ stageState: 'loading' })).toBe(true)
