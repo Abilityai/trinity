@@ -62,7 +62,7 @@
     <span
       v-if="unread"
       class="shrink-0 min-w-[1.125rem] px-1 h-[1.125rem] rounded-full bg-action-primary-700 text-white text-[10px] font-semibold flex items-center justify-center"
-    >{{ unread > 99 ? '99+' : unread }}</span>
+    >{{ capCount(unread) }}</span>
 
     <PortalStarButton
       :starred="!!thread.starred"
@@ -87,6 +87,7 @@ import PortalStarButton from './PortalStarButton.vue'
 import PortalEditableTitle from './PortalEditableTitle.vue'
 import DraftMark from '@/components/base/DraftMark.vue'
 import { rowAgents, threadTitle } from './portalUtils'
+import { capCount } from '@/utils/tabTitle'
 
 const props = defineProps({
   thread: { type: Object, required: true },

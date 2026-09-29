@@ -120,3 +120,13 @@ describe('the pinned Inbox row', () => {
     }
   })
 })
+
+describe('§3g B6b — the pinned row is named once', () => {
+  it('its accessible name carries both counts; the badges are hidden from it', async () => {
+    const { w } = await mountSidebar()
+    const row = w.find('[data-testid="sidebar-inbox"]')
+    expect(row.attributes('aria-label')).toBe("Inbox, 2 asks are waiting on your answer, 5 new you haven't read")
+    expect(row.find('[data-testid="sidebar-ask-count"]').attributes('aria-hidden')).toBe('true')
+    expect(row.find('[data-testid="sidebar-unread-count"]').attributes('aria-hidden')).toBe('true')
+  })
+})

@@ -43,7 +43,7 @@
     />
 
     <div class="shrink-0 px-4 border-b border-gray-200 dark:border-gray-750">
-      <OverflowTabs :tabs="tabStrip" :model-value="tab" dense @update:model-value="onTab" />
+      <OverflowTabs :tabs="tabStrip" :model-value="tab" dense tablist-label="Inbox" @update:model-value="onTab" />
     </div>
 
     <div class="flex-1 min-h-0 flex">
@@ -156,8 +156,10 @@ import { useClientPortalStore } from '@/stores/clientPortal'
 import { viewState, staleBannerMessage } from '@/utils/loadingState'
 import {
   actionItems, unreadItems, allItems, inboxCounts, defaultInboxTab, normalizeInboxTab,
-  stableRows, emptyVisit, isGhost, resolveItem, totalLabel, parseItemKey,
+  stableRows, emptyVisit, isGhost, resolveItem, parseItemKey, listHeadLabel,
 } from './portalInbox'
+import { askBadgeTitle, unreadBadgeTitle } from './portalUtils'
+import { capCount } from '@/utils/tabTitle'
 
 const props = defineProps({
   // The shell's `sidebarThreads` — the same projection the sidebar sums (D13).
@@ -211,9 +213,17 @@ const tabLabel = computed(() => ({ action: 'Action', unread: 'Unread', all: 'All
 
 // §3g A3b: the counters are solid, in the colours the pinned row and the agent
 // pills use — needs you urgent-700, new primary-700.
+// §3g A8c / D-1: the counter caps at 99+ like every other, and the tab is
+// NAMED with the full number in words (the badge is then aria-hidden).
 const tabStrip = computed(() => [
-  { id: 'action', label: 'Action', badge: counts.value.needs || null, badgeVariant: 'urgent' },
-  { id: 'unread', label: 'Unread', badge: counts.value.came || null, badgeVariant: 'primary' },
+  {
+    id: 'action', label: 'Action', badge: capCount(counts.value.needs) || null, badgeVariant: 'urgent',
+    badgeLabel: counts.value.needs ? `Action, ${askBadgeTitle(counts.value.needs)}` : undefined,
+  },
+  {
+    id: 'unread', label: 'Unread', badge: capCount(counts.value.came) || null, badgeVariant: 'primary',
+    badgeLabel: counts.value.came ? `Unread, ${unreadBadgeTitle(counts.value.came)}` : undefined,
+  },
   { id: 'all', label: 'All' },
 ])
 
@@ -255,12 +265,15 @@ const shownItems = computed(() => {
   visit = { tab: tab.value, ...out.visit }
   return out.rows
 })
-// The head counts LIVE rows, never ghosts; with only ghosts left it says so.
-const liveCount = computed(() => shownItems.value.filter((it) => !isGhost(it)).length)
-const total = computed(() => (tab.value === 'all' ? Math.max(all.value.total, liveCount.value) : liveCount.value))
-const head = computed(() => (liveCount.value === 0 && shownItems.value.length
-  ? 'All caught up'
-  : totalLabel(total.value, liveCount.value)))
+// The head counts LIVE rows, never ghosts, in units (§3g A8); with only ghosts
+// left it says "All caught up". All is still bounded here, so it states when
+// rows were left out.
+const liveItems = computed(() => shownItems.value.filter((it) => !isGhost(it)))
+const head = computed(() => {
+  const label = listHeadLabel(tab.value, liveItems.value)
+  const n = liveItems.value.length
+  return tab.value === 'all' && all.value.total > n ? `${label} · latest ${n} of ${all.value.total} shown` : label
+})
 
 // A selection the rendered rows do not hold (an old chat, a deep link) is
 // resolved from the shell's data by key — the one fallback, never a slice.

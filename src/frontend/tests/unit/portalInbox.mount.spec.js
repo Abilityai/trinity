@@ -287,6 +287,23 @@ describe('reading a chat (D11)', () => {
   })
 })
 
+describe('counts say what they count (§3g A8 / D-1 / B6)', () => {
+  it('a tab counter caps at 99+, and the tab is named with the full number', async () => {
+    const threads = Array.from({ length: 2 }, (_, i) => thread(`t${i}`, { unread: i ? 57 : 100 }))
+    const w = await mountInbox({ threads }, { query: { tab: 'unread' } })
+    const tab = w.findAll('[role="tab"]').find((t) => t.text().startsWith('Unread'))
+    expect(tab.text()).toContain('99+')
+    expect(tab.attributes('aria-label')).toBe("Unread, 157 new you haven't read")
+    expect(w.find('[role="tablist"]').attributes('aria-label')).toBe('Inbox')
+  })
+
+  it('the list head names its unit', async () => {
+    const threads = [thread('t1', { unread: 2 }), thread('t2', { unread: 3, last_message_at: iso(9) })]
+    const w = await mountInbox({ threads }, { query: { tab: 'unread' } })
+    expect(w.find('[data-testid="inbox-list-total"]').text()).toBe('2 chats · 5 new')
+  })
+})
+
 describe('rows keep their place for one tab visit (§3g S1)', () => {
   it('A1: a clicked Unread row survives its read landing before the route does', async () => {
     // t2 is 40 days old: no 30-day All window can rescue it as a fallback.

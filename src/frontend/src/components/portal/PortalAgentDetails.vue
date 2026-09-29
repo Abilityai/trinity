@@ -93,7 +93,7 @@
             <span
               v-if="c.unread"
               class="shrink-0 min-w-[1.125rem] px-1 h-[1.125rem] rounded-full bg-action-primary-700 text-white text-[10px] font-semibold flex items-center justify-center"
-            >{{ c.unread }}</span>
+            >{{ capCount(c.unread) }}</span>
             <span class="text-[11px] text-gray-400 shrink-0">{{ relative(c.last_message_at) }}</span>
           </button>
         </li>
@@ -220,6 +220,7 @@ import PortalAgentRole from './PortalAgentRole.vue'
 import PortalAgentDecisions from './PortalAgentDecisions.vue'
 import PortalSuggestions from './PortalSuggestions.vue'
 import { agentDisplayName } from '@/utils/agentName'
+import { capCount } from '@/utils/tabTitle'
 import { availabilityChip, threadTitle, MAIN_TAB_LABEL } from './portalUtils'
 import { usePortalAgentPage } from '@/composables/usePortalAgentPage'
 

@@ -48,6 +48,10 @@ Sign-in / reload on bare /workspace
   PortalInbox  (props: threads=sidebarThreads, previews, threadsLoaded, threadsFailed, labels, isPlatform;
                 asks/openAsks/asksLoaded/asksFailed/asksAbsent read from the clientPortal store)
     OverflowTabs  Action (needs) · Unread (came) · All          ?tab=&item= via router.replace
+                  tablist-label="Inbox" (role=tablist, manual activation — §3g B6a); each
+                  counter caps at 99+ (utils/tabTitle.js::capCount, the one cap every
+                  Workspace counter uses) and the tab is NAMED with the full number
+                  (badgeLabel from askBadgeTitle / unreadBadgeTitle — §3g A8c)
                   counters solid: needs = white on status-urgent-700, new = white on
                   action-primary-700 — the same two on the pinned row, the agent pills
                   (agent-ask-count / agent-unread-count), the chat rows (§3g A3b)
@@ -59,7 +63,8 @@ Sign-in / reload on bare /workspace
                                deleted chat drops. New visit = tab change, re-click, bulk read.
     selectedItem = the row, else resolveItem(key, threads/asks/previews) — never "Pick something"
                    for an old chat; on a phone a key that resolves to nothing goes Back
-    PortalInboxList   bounded; the head counts LIVE rows ("All caught up" over ghosts only);
+    PortalInboxList   bounded; the head counts LIVE rows in units — listHeadLabel: "21 asks",
+                      "15 chats · 70 new", "3 chats · 2 asks", "All caught up" (§3g A8 / D-1);
                       rows are <button>s; outcome pill done / failed (icon + label)
     PortalInboxPane
       ask   → <PortalAsks :ask-ids="[id]" testid-prefix="inbox-ask"> → store.answerAsk → asks/router
@@ -88,7 +93,9 @@ Counts (one projection)
   Needs me  = store.askCount                    (= openAsks.length)
   Came back = totalUnread(sidebarThreads)       (= the sidebar's own sum = the tab title's)
   pinned PortalInboxRow in PortalSidebar carries both (sidebar-ask-count, sidebar-unread-count),
-  white on a 700 ground, tabular-nums
+  white on a 700 ground, tabular-nums, capped by capCount; the row is NAMED once —
+  inboxRowLabel({needs, came}) → "Inbox, 2 asks are waiting on your answer, 5 new you haven't
+  read" — and both badges are aria-hidden (§3g B6b)
 ```
 
 Key sites: `Portal.vue:2224` (landing target read before the first await),

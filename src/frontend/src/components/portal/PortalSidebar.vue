@@ -173,12 +173,12 @@
             v-if="askCountFor(a.name)"
             class="shrink-0 min-w-[1.25rem] px-1.5 h-5 rounded-full bg-status-urgent-700 text-white text-[11px] font-semibold flex items-center justify-center"
             data-testid="agent-ask-count"
-          >{{ askCountFor(a.name) > 99 ? '99+' : askCountFor(a.name) }}</span>
+          >{{ capCount(askCountFor(a.name)) }}</span>
           <span
             v-if="waitingFor(a.name)"
             class="shrink-0 min-w-[1.25rem] px-1.5 h-5 rounded-full bg-action-primary-700 text-white text-[11px] font-semibold flex items-center justify-center"
             data-testid="agent-unread-count"
-          >{{ waitingFor(a.name) > 99 ? '99+' : waitingFor(a.name) }}</span>
+          >{{ capCount(waitingFor(a.name)) }}</span>
         </button>
 
         <!-- #2159: ONE persistent button, never two v-if-alternated ones —
@@ -341,6 +341,7 @@ import {
   WORKSPACE_INBOX,
 } from './portalUtils'
 import { inboxCounts } from './portalInbox'
+import { capCount } from '@/utils/tabTitle'
 
 const props = defineProps({
   roster: { type: Array, default: () => [] },

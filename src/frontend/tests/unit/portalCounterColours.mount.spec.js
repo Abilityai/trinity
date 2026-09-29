@@ -110,7 +110,7 @@ describe('the Inbox', () => {
     const w = mount(PortalInbox, { props: { threads: THREADS, threadsLoaded: true }, global: { plugins: [router] } })
     await flushPromises()
     const tabBadge = (label) => {
-      const btn = w.findAll('nav button').find((b) => b.text().startsWith(label) && !b.attributes('data-measure-tab') && b.attributes('tabindex') !== '-1')
+      const btn = w.findAll('[role="tab"]').find((b) => b.text().startsWith(label))
       return btn.findAll('span').find((s) => /^\d+$/.test(s.text()))
     }
     expect(grounds(tabBadge('Action'))).toEqual([NEEDS])

@@ -12,7 +12,10 @@
 // "came back" count and the sidebar's own unread sum are read from the same
 // projection, so they agree by construction rather than by coincidence.
 
-import { STAGE_QUERY_KEYS, WORKSPACE_ROOT, WORKSPACE_INBOX, totalUnread } from './portalUtils'
+import {
+  STAGE_QUERY_KEYS, WORKSPACE_ROOT, WORKSPACE_INBOX, totalUnread, askBadgeTitle, unreadBadgeTitle,
+} from './portalUtils'
+import { capCount } from '@/utils/tabTitle'
 
 export const INBOX_TABS = ['action', 'unread', 'all']
 
@@ -176,6 +179,32 @@ export function inboxCounts(threads, openAsks) {
 export function newLabel(n) {
   const k = Number(n) || 0
   return k > 0 ? `${k} new` : ''
+}
+
+// §3g A8 / D-1: the line above a tab's rows, in units — never a bare number.
+// Counts LIVE rows (a ghost is not a member); the "new" sum is the same message
+// count the tab badge and the sidebar show (D13), capped like them.
+const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`
+export function listHeadLabel(tab, liveItems) {
+  const items = Array.isArray(liveItems) ? liveItems : []
+  if (!items.length) return 'All caught up'
+  const chats = items.filter((it) => it && it.type === 'thread')
+  const asks = items.filter((it) => it && it.type === 'ask')
+  if (tab === 'action') return plural(asks.length, 'ask', 'asks')
+  if (tab === 'unread') {
+    const fresh = chats.reduce((sum, it) => sum + (Number(it.n) || 0), 0)
+    return `${plural(chats.length, 'chat', 'chats')} · ${capCount(fresh) || 0} new`
+  }
+  const parts = []
+  if (chats.length) parts.push(plural(chats.length, 'chat', 'chats'))
+  if (asks.length) parts.push(plural(asks.length, 'ask', 'asks'))
+  return parts.join(' · ')
+}
+
+// §3g B6b: the pinned sidebar row's accessible name — named once, with both
+// counts in words, so a screen reader never hears "Inbox 3 5".
+export function inboxRowLabel({ needs = 0, came = 0 } = {}) {
+  return ['Inbox', askBadgeTitle(needs), unreadBadgeTitle(came)].filter(Boolean).join(', ')
 }
 
 // Bounded lists state their total (contract: "412 · latest 50 shown").

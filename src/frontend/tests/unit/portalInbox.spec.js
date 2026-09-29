@@ -243,7 +243,7 @@ describe('property: the Inbox and the sidebar never disagree (AC 1, D13)', () =>
 // ---- The shell's and the pane's seams (F3) ------------------------------------
 import {
   isInboxPath, inboxBranchVisible, inboxSelectedAgent, stableRows, emptyVisit, isGhost, resolveItem,
-  paneWindow, openInChatTarget, agentLabels, PANE_TAIL,
+  paneWindow, openInChatTarget, agentLabels, PANE_TAIL, listHeadLabel, inboxRowLabel,
 } from '@/components/portal/portalInbox'
 
 describe('shell seams', () => {
@@ -412,6 +412,30 @@ describe('resolveItem — the one fallback for a selection outside the list', ()
     expect(resolveItem('ask:gone', { asks: [] })).toBeNull()
     expect(resolveItem('nonsense', {})).toBeNull()
     expect(resolveItem(null, {})).toBeNull()
+  })
+})
+
+describe('units and caps (§3g A8 / D-1 / B6b)', () => {
+  const live = (n, type, extra = {}) => Array.from({ length: n }, (_, i) => ({ key: `${type}:${i}`, type, n: 0, ...extra }))
+  it('the list head names its unit on every tab', () => {
+    expect(listHeadLabel('action', live(21, 'ask'))).toBe('21 asks')
+    expect(listHeadLabel('action', live(1, 'ask'))).toBe('1 ask')
+    expect(listHeadLabel('unread', [...live(14, 'thread', { n: 5 }), { key: 'thread:x', type: 'thread', n: 0 }])).toBe('15 chats · 70 new')
+    expect(listHeadLabel('unread', live(1, 'thread', { n: 1 }))).toBe('1 chat · 1 new')
+    expect(listHeadLabel('all', [...live(3, 'thread'), ...live(2, 'ask')])).toBe('3 chats · 2 asks')
+    expect(listHeadLabel('all', live(1, 'thread'))).toBe('1 chat')
+    expect(listHeadLabel('all', live(1, 'ask'))).toBe('1 ask')
+  })
+  it('with no live rows it says so rather than "0"', () => {
+    for (const t of ['action', 'unread', 'all']) expect(listHeadLabel(t, [])).toBe('All caught up')
+  })
+  it('the "new" sum caps like every other count', () => {
+    expect(listHeadLabel('unread', live(2, 'thread', { n: 80 }))).toBe('2 chats · 99+ new')
+  })
+  it('the pinned row is named once, with both counts in words', () => {
+    expect(inboxRowLabel({ needs: 0, came: 0 })).toBe('Inbox')
+    expect(inboxRowLabel({ needs: 2, came: 0 })).toBe('Inbox, 2 asks are waiting on your answer')
+    expect(inboxRowLabel({ needs: 1, came: 157 })).toBe("Inbox, 1 ask is waiting on your answer, 157 new you haven't read")
   })
 })
 
