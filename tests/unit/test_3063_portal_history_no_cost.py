@@ -106,3 +106,35 @@ def test_the_history_message_model_declares_no_cost():
     """The projection itself, so a later row-to-model path cannot reintroduce it."""
     from client_portal.models import PortalHistoryMessage
     assert "cost" not in PortalHistoryMessage.model_fields
+
+
+# ---------------------------------------------------------------------------
+# The synchronous chat route (the streaming fallback) is the same contract.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("is_platform", [False, True], ids=["portal-token", "platform"])
+def test_the_sync_chat_reply_carries_no_cost(client_for, monkeypatch, is_platform):
+    from client_portal import router as prouter, service as svc
+    from services import rate_limiter
+    monkeypatch.setattr(rate_limiter, "enforce", lambda *a, **kw: None)
+    monkeypatch.setattr(prouter, "_require_roster", lambda *a, **kw: None)
+    monkeypatch.setattr(svc, "validate_requested_model", lambda m, is_platform: None)
+    monkeypatch.setattr(svc, "validated_open_canvas", lambda *a, **kw: None)
+
+    async def fake_chat(*a, **kw):
+        # The real service return shape: it still carries the cost for accounting.
+        return {"response": "done", "cost": 0.4242, "session_id": THREAD, "message_id": "m-reply"}
+    monkeypatch.setattr(svc, "portal_chat", fake_chat)
+
+    r = client_for(is_platform).post(f"/api/enterprise/client-portal/agents/{AGENT}/chat",
+                                      json={"message": "go", "session_id": THREAD})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    # Positive control: the reply and its handles are on the wire.
+    assert body["response"] == "done" and body["message_id"] == "m-reply"
+    assert "cost" not in body, f"cost reached the wire: {json.dumps(body)}"
+
+
+def test_the_chat_response_model_declares_no_cost():
+    from client_portal.models import PortalChatResponse
+    assert "cost" not in PortalChatResponse.model_fields

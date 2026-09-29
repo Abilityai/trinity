@@ -348,9 +348,13 @@ class PortalChatRequest(BaseModel):
 
 class PortalChatResponse(BaseModel):
     """The agent's reply to a portal chat turn. ``session_id`` echoes the thread
-    the turn landed in, so a client that sent none learns which session was used."""
+    the turn landed in, so a client that sent none learns which session was used.
+
+    No ``cost`` (#3063): external clients never see a turn's cost, and this
+    synchronous route is the streaming path's fallback. The service still
+    returns it for internal accounting; not declaring it is what keeps it off
+    the wire (``response_model`` drops undeclared keys)."""
     response: str
-    cost: Optional[float] = None
     session_id: Optional[str] = None
     # #2580: the persisted row's id, so the caller can rate the reply it was just
     # given instead of waiting for a reload to learn what to point at. The
