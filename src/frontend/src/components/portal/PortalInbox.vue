@@ -44,6 +44,7 @@
         v-if="tab !== 'action'"
         variant="ghost"
         size="sm"
+        class="max-sm:min-h-11"
         :disabled="!unreadRows.length || markingAll"
         :loading="markingAll"
         loading-label="Marking…"

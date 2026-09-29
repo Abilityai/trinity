@@ -120,6 +120,9 @@ test.describe('Workspace Inbox', () => {
     const key = await row.getAttribute('data-inbox-row')
     await row.click()
     await expect(page.getByTestId('inbox-pane')).toBeVisible()
+    // F6: the pane's Back is a 44px target on a phone.
+    const paneBack = await page.getByTestId('inbox-pane-back').boundingBox()
+    expect(paneBack.height).toBeGreaterThanOrEqual(44)
     await page.goBack()
     await expect(page).toHaveURL(/\/workspace\/inbox/)
     await expect(page.getByTestId('inbox-pane')).toHaveCount(0)

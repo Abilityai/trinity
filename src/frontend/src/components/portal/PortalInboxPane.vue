@@ -32,6 +32,7 @@
         v-if="showBack"
         variant="ghost"
         size="sm"
+        class="max-sm:min-h-11"
         data-testid="inbox-pane-back"
         @click="$emit('back')"
       >

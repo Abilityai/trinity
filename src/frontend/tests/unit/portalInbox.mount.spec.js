@@ -1015,6 +1015,16 @@ describe('phone (D12)', () => {
     expect(router.currentRoute.value.query.item).toBeUndefined()
   })
 
+  it('§3g F6: the pane\'s Back and Mark all read are 44px tall on a phone', async () => {
+    phone = true
+    stubMatchMedia()
+    const w = await mountInbox({ threads: [thread('t1', { unread: 2 })] }, { query: { tab: 'unread' } })
+    expect(w.find('[data-testid="inbox-mark-all-read"]').classes()).toContain('max-sm:min-h-11')
+    await w.find('[data-testid="inbox-row-thread:t1"]').trigger('click')
+    await flushPromises()
+    expect(w.find('[data-testid="inbox-pane-back"]').classes()).toContain('max-sm:min-h-11')
+  })
+
   it('Esc goes back too', async () => {
     phone = true
     stubMatchMedia()
