@@ -181,6 +181,7 @@
             @new-chat-with-agent="(n) => { mobileNav = false; newChatWithAgent(n) }"
             @open-agent="(n) => { mobileNav = false; openAgentPage(n) }"
             @open-thread="(t) => { mobileNav = false; openThread(t) }"
+            @open-inbox="mobileNav = false"
             @toggle-star="toggleStar"
             @sign-out="onSignOut"
           />

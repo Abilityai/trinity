@@ -239,6 +239,21 @@ describe('D10 — selection scopes the rail, never activeAgentName', () => {
     expect(JSON.parse(localStorage.getItem('trinity-workspace-rail')).open).toBe(false)
   })
 
+  it('§3g F4 (round 3): the drawer closes on its Inbox row even when the URL does not change', async () => {
+    // A phone LANDS on /workspace/inbox, so tapping the drawer's Inbox row
+    // there changes no route and the fullPath watcher never fired.
+    arm()
+    const { w } = await boot('/workspace/inbox')
+    const sidebars = () => w.findAllComponents({ name: 'PortalSidebar' })
+    const before = sidebars().length
+    w.findComponent({ name: 'PortalInbox' }).vm.$emit('open-menu')
+    await flushPromises()
+    expect(sidebars().length).toBe(before + 1) // the drawer's copy
+    sidebars().at(-1).vm.$emit('open-inbox')
+    await flushPromises()
+    expect(sidebars().length).toBe(before)
+  })
+
   it('no selection → no rail, and the reserved column is only held while loading', async () => {
     arm()
     const { w } = await boot('/workspace/inbox')

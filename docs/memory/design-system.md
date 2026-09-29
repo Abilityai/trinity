@@ -237,6 +237,8 @@ Driven directly by the token families — the badge variant *is* the token famil
   that restates an irreversible but non-destructive consequence — "Mark 28 chats read?" /
   "157 new messages across 28 chats will be marked read. You can't undo this." Cancel keeps
   the initial focus either way: that is `data-destructive`'s job, not the button colour's.
+  Pair it with `variant="info"` (an i in a circle, primary ink; ent#610 round 3): a warning
+  triangle over a primary confirm reads as a danger the button then contradicts.
 
 ### OverflowTabs
 

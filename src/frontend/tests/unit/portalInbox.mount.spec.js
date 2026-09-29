@@ -730,6 +730,11 @@ describe('Mark all read (D11, §3g A9)', () => {
     expect(w.find('[data-testid="inbox-empty"]').text()).toContain("You're all caught up")
   })
 
+  it('the confirm is drawn as information, not a warning — it is not destructive (round 3)', async () => {
+    const w = await mountInbox({ threads: [thread('t1', { unread: 2 }), thread('t2', { unread: 1 })] }, { query: { tab: 'unread' } })
+    expect(w.findComponent({ name: 'ConfirmDialog' }).props('variant')).toBe('info')
+  })
+
   it('Cancel reads nothing', async () => {
     const threads = [thread('t1', { unread: 2 }), thread('t2', { unread: 3, last_message_at: iso(9) })]
     const markRead = shellLike(threads)
@@ -799,7 +804,17 @@ describe('the pane header (§3g L5: stacked chrome, split order)', () => {
     expect(w.find('[data-testid="inbox-header"]').classes()).not.toContain('hidden')
     await w.find('[data-testid="inbox-row-thread:t1"]').trigger('click')
     await flushPromises()
+    // Round 3: the title has a line of its own under the actions — beside
+    // them it got 73–90px at 375–390 and 0px at 200% zoom, which pushed More
+    // off-screen (WCAG 1.4.10).
+    // The heading stays FIRST in the reading order and moves by `order`.
     expect(headerIds(w)).toEqual(['inbox-pane-back', 'inbox-pane-heading', 'inbox-pane-open', 'inbox-pane-more'])
+    const h = w.find('[data-testid="inbox-pane-heading"]')
+    expect(h.classes()).toEqual(expect.arrayContaining(['order-last', 'basis-full']))
+    expect(h.attributes('title')).toBe(h.text())
+    for (const id of ['inbox-pane-back', 'inbox-pane-open', 'inbox-pane-more']) {
+      expect(w.find(`[data-testid="${id}"]`).classes()).toContain('max-sm:min-h-11')
+    }
     expect(w.find('[data-testid="inbox-header"]').classes()).toContain('hidden')
     expect(w.find('[data-testid="inbox-tabs"]').classes()).toContain('hidden')
     // More holds the rest.
@@ -810,9 +825,51 @@ describe('the pane header (§3g L5: stacked chrome, split order)', () => {
     const menu = w.find('[data-testid="inbox-pane-more-menu"]')
     expect(menu.find('[data-testid="inbox-pane-reply"]').exists()).toBe(true)
     expect(menu.find('[data-testid="inbox-pane-mark-read"]').exists()).toBe(true)
+    expect(menu.find('[data-testid="inbox-pane-reply"]').classes()).toContain('max-sm:min-h-11')
     await menu.trigger('keydown', { key: 'Escape' })
     expect(w.find('[data-testid="inbox-pane-more-menu"]').exists()).toBe(false)
     expect(document.activeElement).toBe(more.element)
+  })
+
+  it('Esc with More open and focus on its button closes the menu, not the pane (round 3)', async () => {
+    phone = true
+    stubMatchMedia()
+    const w = await mountInbox({ threads: [thread('t1', { unread: 2 })] }, { query: { tab: 'unread' } })
+    await w.find('[data-testid="inbox-row-thread:t1"]').trigger('click')
+    await flushPromises()
+    const more = w.find('[data-testid="inbox-pane-more"]')
+    more.element.focus()
+    await more.trigger('click')
+    await more.trigger('keydown', { key: 'Escape' })
+    await flushPromises()
+    expect(w.find('[data-testid="inbox-pane-more-menu"]').exists()).toBe(false)
+    expect(router.currentRoute.value.query.item).toBe('thread:t1')
+    expect(has(w, 'inbox-pane')).toBe(true)
+    expect(document.activeElement).toBe(more.element)
+    // With the menu shut, Esc is Back again.
+    await more.trigger('keydown', { key: 'Escape' })
+    await flushPromises()
+    expect(router.currentRoute.value.query.item).toBeUndefined()
+  })
+
+  it("split: the pane's Mark read hands focus to the pane heading as it leaves (round 3)", async () => {
+    store.fetchSessionDeliverablesStrict = vi.fn(async () => [{ id: 'r1', report_type: 'summary', title: 'R', created_at: iso(1) }])
+    store.fetchAgentReport = vi.fn(async () => { throw new Error('500') }) // keeps it unread, so the button shows
+    const markRead = vi.fn(async () => true)
+    const w = await mountInbox({ threads: [thread('t1', { unread: 2 })], markRead }, { query: { tab: 'unread', item: 'thread:t1' } })
+    const btn = w.find('[data-testid="inbox-pane-mark-read"]')
+    btn.element.focus()
+    await btn.trigger('click')
+    await w.setProps({ threads: [thread('t1', { unread: 0 })] })
+    await flushPromises()
+    expect(document.activeElement?.getAttribute('data-testid')).toBe('inbox-pane-heading')
+  })
+
+  it('split: the header reserves the action row, so an action landing late does not move the body (round 3)', async () => {
+    store.asksLoaded = true
+    store.asks = [ask('a1')]
+    const w = await mountInbox({}, { query: { tab: 'action', item: 'ask:a1' } })
+    expect(w.find('[data-testid="inbox-pane"] header').classes()).toContain('min-h-[3.25rem]')
   })
 
   it('split: [title] … [Mark read][Reply][Open in chat] — volatile actions leftmost, the title truncates', async () => {
@@ -860,6 +917,11 @@ describe('Open canvas (§3g C10, T6)', () => {
 })
 
 describe('a phone reaches the menu from the Inbox (§3g A5)', () => {
+  it('the subtitle steps aside on a phone, so the header is one line (round 3)', async () => {
+    const w = await mountInbox({ threads: [thread('t1', { unread: 2 })] }, { query: { tab: 'unread' } })
+    expect(w.find('[data-testid="inbox-subtitle"]').classes()).toContain('max-sm:hidden')
+  })
+
   it('a 44px, phone-only Menu button asks the shell for the drawer', async () => {
     const w = await mountInbox({ threads: [] }, { query: { tab: 'all' } })
     const btn = w.find('[data-testid="inbox-menu"]')

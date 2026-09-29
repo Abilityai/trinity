@@ -35,7 +35,7 @@
       </button>
       <div class="min-w-0 flex-1">
         <h1 class="text-lg font-semibold text-gray-900 dark:text-gray-100">Inbox</h1>
-        <p class="text-[12.5px] text-gray-600 dark:text-gray-300">What needs you, and what came back, across your agents.</p>
+        <p class="text-[12.5px] text-gray-600 dark:text-gray-300 max-sm:hidden" data-testid="inbox-subtitle">What needs you, and what came back, across your agents.</p>
       </div>
       <!-- §3g A9: Unread and All only — Action's rows are asks, which a read
            does not touch — named with the number of chats it reads, and
@@ -54,7 +54,7 @@
     </header>
     <ConfirmDialog
       v-model:visible="markAllConfirmOpen"
-      variant="warning"
+      variant="info"
       confirm-variant="primary"
       :title="markAllCopy.title"
       :message="markAllCopy.message"

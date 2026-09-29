@@ -124,8 +124,8 @@ Sign-in / reload on bare /workspace
                              store, agent}) > 0 — on chats AND asks (T6); split: leftmost of
                              the actions; stacked: in More → open-canvas → openRailOn('canvas')
                              (§3g C10)
-    Mark N chats read (ghost; Unread + All only — §3g A9) → k > 1: ConfirmDialog (confirm-variant
-      primary, Cancel focused, "M new messages across N chats will be marked read. You can't undo
+    Mark N chats read (ghost; Unread + All only — §3g A9) → k > 1: ConfirmDialog (variant info,
+      confirm-variant primary, Cancel focused, "M new messages across N chats will be marked read. You can't undo
       this.") | k = 1: direct → Promise.allSettled(props.markRead per chat — S4 rollback each)
       → all true: toast "Marked N chats read" + a new tab visit | any false: InlineError "N failed"
   inboxSelection (?item= || the Inbox's preview) → activeAgent (never activeAgentName) → the rail follows it

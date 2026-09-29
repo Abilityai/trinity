@@ -23,11 +23,19 @@
 -->
 <template>
   <section class="flex flex-col min-h-0 h-full" :aria-labelledby="headingId" data-testid="inbox-pane">
-    <!-- §3g L5: the header never wraps. SPLIT: [title] … [Mark read][Reply]
+    <!-- §3g L5: SPLIT, the header never wraps: [title] … [Mark read][Reply]
          [Open in chat] — the volatile actions sit LEFTMOST of the group, so
-         when one arrives late only the truncating title gives way. STACKED:
-         [Back][title] … [Open in chat][More ▾], the rest in More. -->
-    <header class="shrink-0 flex items-center gap-2 px-4 py-3 border-b border-gray-200 dark:border-gray-750">
+         when one arrives late only the truncating title gives way, and the
+         row's height is reserved so an ask pane (no actions until a canvas
+         lands) does not grow under the reader (round 3). STACKED:
+         [Back] … [Open in chat][More ▾], and the title on a line of its own
+         below — beside them it got 73–90px on a phone and 0px at 200% zoom,
+         which pushed More off-screen (round 3, WCAG 1.4.10). It moves by
+         `order`, so the heading stays first in the reading order. -->
+    <header
+      class="shrink-0 flex items-center gap-2 px-4 py-3 border-b border-gray-200 dark:border-gray-750"
+      :class="stacked ? 'flex-wrap gap-y-1' : 'min-h-[3.25rem]'"
+    >
       <BaseButton
         v-if="showBack"
         variant="ghost"
@@ -43,10 +51,12 @@
         :id="headingId"
         ref="headingEl"
         tabindex="-1"
+        :title="heading"
         class="min-w-0 flex-1 text-sm font-medium truncate text-gray-900 dark:text-gray-100 focus:outline-none"
+        :class="stacked ? 'order-last basis-full' : ''"
         data-testid="inbox-pane-heading"
       >{{ heading }}</h2>
-      <div v-if="item.type === 'thread' || canvasCount > 0" class="shrink-0 flex items-center gap-2" data-testid="inbox-pane-actions">
+      <div v-if="item.type === 'thread' || canvasCount > 0" class="shrink-0 flex items-center gap-2" :class="stacked ? 'ml-auto' : ''" data-testid="inbox-pane-actions">
         <template v-if="!stacked">
           <!-- §3g C10: leftmost — it arrives late (the canvas feed), and only
                the truncating title may give way when it does. -->
@@ -64,16 +74,20 @@
             variant="ghost"
             size="sm"
             data-testid="inbox-pane-mark-read"
-            @click="$emit('mark-read')"
+            @click="markRead"
           >Mark read</BaseButton>
           <BaseButton variant="secondary" size="sm" data-testid="inbox-pane-reply" @click="$emit('reply', target)">Reply in chat</BaseButton>
         </template>
-        <BaseButton v-if="item.type === 'thread'" variant="primary" size="sm" data-testid="inbox-pane-open" @click="$emit('open-chat', target)">Open in chat</BaseButton>
-        <div v-if="stacked" ref="moreRootEl" class="relative">
+        <BaseButton v-if="item.type === 'thread'" variant="primary" size="sm" class="max-sm:min-h-11" data-testid="inbox-pane-open" @click="$emit('open-chat', target)">Open in chat</BaseButton>
+        <!-- Esc is handled on the WRAPPER: focus stays on the More button
+             when it opens the menu, so a handler on the menu never ran and
+             Esc reached the Inbox's own Esc — Back (round 3). -->
+        <div v-if="stacked" ref="moreRootEl" class="relative" @keydown.esc="onMoreEsc">
           <BaseButton
             ref="moreBtn"
             variant="ghost"
             size="sm"
+            class="max-sm:min-h-11"
             :aria-expanded="moreOpen ? 'true' : 'false'"
             :aria-controls="moreMenuId"
             data-testid="inbox-pane-more"
@@ -87,13 +101,12 @@
             :id="moreMenuId"
             class="absolute right-0 top-full z-20 mt-1 min-w-[11rem] py-1 flex flex-col bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-750 rounded-md shadow-lg"
             data-testid="inbox-pane-more-menu"
-            @keydown.esc.stop="closeMore(true)"
           >
             <BaseButton
               v-if="canvasCount > 0"
               variant="ghost"
               size="sm"
-              class="justify-start rounded-none"
+              class="justify-start rounded-none max-sm:min-h-11"
               data-testid="inbox-pane-open-canvas"
               @click="closeMore(); $emit('open-canvas')"
             >Open canvas</BaseButton>
@@ -101,15 +114,15 @@
               v-if="item.type === 'thread' && item.n > 0"
               variant="ghost"
               size="sm"
-              class="justify-start rounded-none"
+              class="justify-start rounded-none max-sm:min-h-11"
               data-testid="inbox-pane-mark-read"
-              @click="closeMore(); $emit('mark-read')"
+              @click="closeMore(); markRead()"
             >Mark read</BaseButton>
             <BaseButton
               v-if="item.type === 'thread'"
               variant="ghost"
               size="sm"
-              class="justify-start rounded-none"
+              class="justify-start rounded-none max-sm:min-h-11"
               data-testid="inbox-pane-reply"
               @click="closeMore(); $emit('reply', target)"
             >Reply in chat</BaseButton>
@@ -389,6 +402,11 @@ function toggleMore() {
   if (moreOpen.value) document.addEventListener('pointerdown', onOutside)
   else document.removeEventListener('pointerdown', onOutside)
 }
+function onMoreEsc(e) {
+  if (!moreOpen.value) return // a shut menu: Esc is the Inbox's (Back)
+  e.stopPropagation()
+  closeMore(true)
+}
 function closeMore(returnFocus = false) {
   if (!moreOpen.value) return
   moreOpen.value = false
@@ -396,6 +414,13 @@ function closeMore(returnFocus = false) {
   if (returnFocus) (moreBtn.value?.$el || moreBtn.value)?.focus?.()
 }
 onBeforeUnmount(() => document.removeEventListener('pointerdown', onOutside))
+
+// Mark read unmounts its own button once the count reaches 0, which dropped
+// focus to <body> (round 3): the heading takes it first.
+function markRead() {
+  emit('mark-read')
+  headingEl.value?.focus?.()
+}
 
 // D12: on phone the pane replaces the list, so focus moves to its heading.
 function focusHeading() { nextTick(() => headingEl.value?.focus?.()) }

@@ -16,18 +16,19 @@
               <!-- Icon -->
               <div :class="[
                 'mx-auto flex-shrink-0 flex items-center justify-center h-12 w-12 rounded-full sm:mx-0 sm:h-10 sm:w-10',
-                variant === 'danger' ? 'bg-status-danger-100 dark:bg-status-danger-900/50' : 'bg-status-warning-100 dark:bg-status-warning-900/50'
+                ICON_BG[variant]
               ]">
                 <svg
-                  :class="[
-                    'h-6 w-6',
-                    variant === 'danger' ? 'text-status-danger-600 dark:text-status-danger-400' : 'text-status-warning-700 dark:text-status-warning-400'
-                  ]"
+                  :class="['h-6 w-6', ICON_INK[variant]]"
                   fill="none"
                   viewBox="0 0 24 24"
                   stroke="currentColor"
+                  aria-hidden="true"
+                  data-testid="confirm-dialog-icon"
+                  :data-variant="variant"
                 >
-                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+                  <path v-if="variant === 'info'" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                  <path v-else stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
                 </svg>
               </div>
 
@@ -81,6 +82,18 @@ import { ref, watch } from 'vue'
 import BaseButton from './base/BaseButton.vue'
 import BaseModal from './base/BaseModal.vue'
 
+// The icon's disc and ink per variant (danger / warning unchanged).
+const ICON_BG = {
+  danger: 'bg-status-danger-100 dark:bg-status-danger-900/50',
+  warning: 'bg-status-warning-100 dark:bg-status-warning-900/50',
+  info: 'bg-action-primary-100 dark:bg-action-primary-900/50',
+}
+const ICON_INK = {
+  danger: 'text-status-danger-600 dark:text-status-danger-400',
+  warning: 'text-status-warning-700 dark:text-status-warning-400',
+  info: 'text-action-primary-700 dark:text-action-primary-300',
+}
+
 const props = defineProps({
   visible: {
     type: Boolean,
@@ -104,8 +117,12 @@ const props = defineProps({
   },
   variant: {
     type: String,
-    default: 'danger', // 'danger' or 'warning'
-    validator: (value) => ['danger', 'warning'].includes(value)
+    // 'danger' | 'warning' | 'info'. ent#610 round 3: `info` (an i in a
+    // circle, primary ink) is for a confirm that is consequential but NOT
+    // destructive — a warning triangle over "Mark 28 chats read" read as a
+    // danger the primary button then contradicted.
+    default: 'danger',
+    validator: (value) => ['danger', 'warning', 'info'].includes(value)
   },
   // ent#610 §3g A9: the confirm button's own variant. Default `danger`, so
   // every existing dialog is unchanged; `primary` is for a confirm that is

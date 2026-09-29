@@ -15,7 +15,10 @@
 
     <div class="p-3 space-y-2">
       <!-- trinity-enterprise#610: the pinned Inbox row (see the component). -->
-      <PortalInboxRow :needs="inbox.needs" :came="inbox.came" />
+      <!-- Round 3 (§3g F4): said out loud, because on the drawer's landing
+           URL (/workspace/inbox) the row changes no route, and the shell's
+           route watcher is what closes the drawer everywhere else. -->
+      <PortalInboxRow :needs="inbox.needs" :came="inbox.came" @click="$emit('open-inbox')" />
 
       <!-- New chat -->
       <!-- ent#357: disabled with an empty roster. `newChat()` only resets
@@ -366,7 +369,7 @@ const props = defineProps({
   rename: { type: Function, default: null },
 })
 const emit = defineEmits([
-  'new-chat', 'new-chat-with-agent', 'open-agent', 'open-thread', 'toggle-star',
+  'new-chat', 'new-chat-with-agent', 'open-agent', 'open-thread', 'toggle-star', 'open-inbox',
   'update:search', 'sign-out',
 ])
 
