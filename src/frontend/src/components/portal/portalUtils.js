@@ -2063,7 +2063,6 @@ export function replyFromHistory(messages, baseline) {
   if (!isNew) return null
   return {
     response: last.content,
-    cost: last.cost ?? null,
     id: last.id || null,
     myRating: last.my_rating || null,
   }

@@ -854,7 +854,11 @@ class PortalHistoryMessage(BaseModel):
     id: Optional[str] = None
     role: str                       # 'user' | 'assistant'
     content: str
-    cost: Optional[float] = None
+    # #3063: no `cost`. The row stores it, but a turn's cost is never a
+    # Workspace field — the viewer may be an external client and the contract
+    # excludes costs outright (the Work projection's rule). Undeclared here, the
+    # route's `response_model` strips it for every principal; nothing in the
+    # client read it.
     created_at: Optional[str] = None
     # The caller's OWN rating of this message, if any — never anyone else's.
     # Present so a reload shows the thumb the person already gave.
