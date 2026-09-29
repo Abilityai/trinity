@@ -1,6 +1,16 @@
 {
   "test_files": [
     {
+      "file": "unit/test_3080_detect_mime_zip.py",
+      "feature": "#3080",
+      "added": "2026-09-29",
+      "categories": [
+        "backend",
+        "file-sharing"
+      ],
+      "description": "Outbound shared-file detect_mime() classifies a ZIP as application/zip when libmagic 5.46 reports application/octet-stream from a buffer, keeps libmagic's specific type for ZIP-based formats (DOCX/XLSX/JAR), leaves non-ZIP octet-stream unchanged, and works without python-magic; plus the shared utils.zip_signature helper."
+    },
+    {
       "file": "unit/test_human_only_principals.py",
       "feature": "#2996",
       "added": "2026-09-28",
