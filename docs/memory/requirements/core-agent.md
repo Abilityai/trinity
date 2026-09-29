@@ -3558,6 +3558,11 @@ to localStorage in the clear.
   confirm), one chat is read directly. Success is a toast ("Marked 28 chats read") and a new
   tab visit; a partial failure names how many failed and those chats keep their count (the S4
   rollback) (§3g A9).
+- **An ask row says what differs (§3g A10)**: its kind by shape (approval, question, alert —
+  gray outlines, the kind spoken); a priority only when High or Critical; its expiry only
+  within the day ("Expires in 18m" as a warning under an hour, a neutral "Expires in 5h"
+  otherwise, the absolute time on hover); never more than two badges. The expiry counts down
+  on a 30-second clock that runs only while such a row exists.
 - **The door (AC 7)**: nothing the Inbox adds carries cost, an execution id or run detail; the
   preview projection has no `cost` field. The Inbox needs no capability flag — it reads the
   roster payload, the viewer's own chat state and the asks list.

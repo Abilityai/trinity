@@ -31,13 +31,17 @@
           :data-testid="`inbox-row-${it.key}`"
           @click="$emit('open', it)"
         >
-          <!-- Identity by SHAPE as well as colour (principle 24): a question
-               mark for an ask, a speech bubble for a chat. -->
-          <svg
-            v-if="it.type === 'ask'"
-            class="w-4 h-4 mt-0.5 shrink-0 text-status-urgent-700 dark:text-status-urgent-300"
-            fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true"
-          ><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8.228 9c.549-1.165 2.03-2 3.772-2 2.21 0 4 1.343 4 3 0 1.4-1.278 2.575-3.006 2.907-.542.104-.994.54-.994 1.093m0 3h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
+          <!-- Identity by SHAPE (principle 24): each ask kind its own outline
+               (shield-check / question-mark-circle / bell), a speech bubble for
+               a chat — in gray, so an ended ask is not orange and the kind is
+               never carried by hue (§3g A10). The kind is spoken. -->
+          <template v-if="it.type === 'ask'">
+            <svg
+              class="w-4 h-4 mt-0.5 shrink-0 text-gray-500 dark:text-gray-400"
+              fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true"
+            ><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" :d="askKindIcon(it.ask && it.ask.kind).path" /></svg>
+            <span class="sr-only">{{ kindLabel(it) }}</span>
+          </template>
           <svg
             v-else
             class="w-4 h-4 mt-0.5 shrink-0"
@@ -72,7 +76,23 @@
                 Finished
               </BaseBadge>
               <BaseBadge v-if="it.latest && it.latest.kind === 'deliverable'" variant="purple">Deliverable</BaseBadge>
-              <BaseBadge v-if="it.type === 'ask' && it.status === 'pending'" variant="urgent">Waiting on you</BaseBadge>
+              <!-- §3g A10: what DIFFERS between pending asks — a high or critical
+                   priority, and an expiry within the day — at most two badges.
+                   "Waiting on you" was true of every row, so it said nothing. -->
+              <template v-if="it.type === 'ask' && it.status === 'pending'">
+                <BaseBadge
+                  v-if="priorityBadge(it.ask && it.ask.priority)"
+                  :variant="priorityBadge(it.ask.priority).variant"
+                  data-testid="inbox-row-badge-priority"
+                >{{ priorityBadge(it.ask.priority).label }}</BaseBadge>
+                <BaseBadge
+                  v-if="expiry(it)"
+                  :variant="expiry(it).variant"
+                  class="tabular-nums"
+                  :title="absolute(it.ask.expires_at)"
+                  data-testid="inbox-row-badge-expiry"
+                >{{ expiry(it).label }}</BaseBadge>
+              </template>
               <BaseBadge
                 v-else-if="it.type === 'ask'"
                 :variant="it.status === 'expired' ? 'warning' : 'neutral'"
@@ -87,9 +107,12 @@
 </template>
 
 <script setup>
+import { onBeforeUnmount, ref, watch } from 'vue'
 import BaseBadge from '@/components/base/BaseBadge.vue'
 import { relativeTime } from './portalUtils'
 import { newLabel } from './portalInbox'
+import { priorityBadge, expiresSoonLabel, needsExpiryTick, askKindIcon } from './portalAskUrgency'
+import { queueTypeLabel } from '@/utils/operatorQueue'
 import { formatLocalDateTime } from '@/utils/timestamps'
 
 const props = defineProps({
@@ -124,6 +147,19 @@ const meta = (it) => (it.key === props.selectedKey
 const secondary = (it) => (it.key === props.selectedKey
   ? 'text-gray-700 dark:text-gray-200'
   : 'text-gray-600 dark:text-gray-300')
+
+// §3g A10: the expiry badge counts down on a 30 s clock that runs ONLY while a
+// pending row has an expiry within the day.
+const now = ref(Date.now())
+let tick = null
+const stopTick = () => { if (tick) { clearInterval(tick); tick = null } }
+watch(() => needsExpiryTick(props.items.filter((it) => it.type === 'ask').map((it) => it.ask || {}), now.value), (on) => {
+  if (on && !tick) tick = setInterval(() => { now.value = Date.now() }, 30_000)
+  else if (!on) stopTick()
+}, { immediate: true })
+onBeforeUnmount(stopTick)
+const expiry = (it) => expiresSoonLabel(it.ask && it.ask.expires_at, now.value)
+const kindLabel = (it) => queueTypeLabel(it.ask && it.ask.kind) || 'Ask'
 
 function askStatusLabel(it) {
   const s = it.status

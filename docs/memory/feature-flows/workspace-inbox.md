@@ -66,6 +66,11 @@ Sign-in / reload on bare /workspace
     PortalInboxList   bounded; the head counts LIVE rows in units — listHeadLabel: "21 asks",
                       "15 chats · 70 new", "3 chats · 2 asks", "All caught up" (§3g A8 / D-1);
                       rows are <button>s; outcome pill done / failed (icon + label)
+                      ask rows (§3g A10, portalAskUrgency.js): kind by SHAPE in gray
+                      (shield-check / question-mark-circle / bell, kind sr-only); no
+                      "Waiting on you"; Critical (danger) / High (urgent) only; "Expires
+                      in 18m" (warning, < 1h) / "Expires in 5h" (neutral, 1–24h), absolute
+                      + zone on hover; ≤ 2 badges; a 30 s clock only while such a row exists
     PortalInboxPane
       ask   → <PortalAsks :ask-ids="[id]" testid-prefix="inbox-ask"> → store.answerAsk → asks/router
       chat  → store.fetchHistory(agent, id, {limit: 50})  render from first_unread_message_id

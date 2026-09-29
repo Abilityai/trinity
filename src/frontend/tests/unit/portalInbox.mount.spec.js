@@ -304,6 +304,69 @@ describe('counts say what they count (§3g A8 / D-1 / B6)', () => {
   })
 })
 
+describe('an ask row says what differs (§3g A10)', () => {
+  const inMin = (m) => new Date(Date.now() + m * 60_000).toISOString()
+  const rowOf = (w, id) => w.find(`[data-testid="inbox-row-ask:${id}"]`)
+  const badges = (row) => row.findAll('[data-testid^="inbox-row-badge-"]').map((b) => b.text())
+
+  it('no "Waiting on you"; high/critical say so, medium/low say nothing; expiry within a day is said', async () => {
+    store.asks = [
+      ask('c', { priority: 'critical', created_at: iso(1) }),
+      ask('h', { priority: 'high', created_at: iso(2), expires_at: inMin(18) }),
+      ask('m', { priority: 'medium', created_at: iso(3), expires_at: inMin(5 * 60 + 5) }),
+      ask('l', { priority: 'low', created_at: iso(4) }),
+    ]
+    store.asksLoaded = true
+    const w = await mountInbox({}, { query: { tab: 'action' } })
+    expect(w.text()).not.toContain('Waiting on you')
+    expect(badges(rowOf(w, 'c'))).toEqual(['Critical'])
+    expect(badges(rowOf(w, 'h'))).toEqual(['High', 'Expires in 18m'])
+    expect(badges(rowOf(w, 'm'))).toEqual(['Expires in 5h'])
+    expect(badges(rowOf(w, 'l'))).toEqual([])
+    // Under an hour is a warning; 1–24h is neutral gray, with the absolute time on hover.
+    expect(rowOf(w, 'h').find('[data-testid="inbox-row-badge-expiry"]').classes()).toContain('bg-status-warning-100')
+    const soon = rowOf(w, 'm').find('[data-testid="inbox-row-badge-expiry"]')
+    expect(soon.classes()).toContain('bg-gray-100')
+    expect(soon.attributes('title')).toMatch(/\(/) // "… (Zone)"
+  })
+
+  it('kind icons are distinct shapes in gray, with the kind spoken; an ended ask is not orange', async () => {
+    store.asks = [
+      ask('ap', { kind: 'approval', options: ['yes', 'no'], created_at: iso(1) }),
+      ask('qu', { kind: 'question', created_at: iso(2) }),
+      ask('al', { kind: 'notification', created_at: iso(3) }),
+    ]
+    store.asksLoaded = true
+    const w = await mountInbox({}, { query: { tab: 'action' } })
+    const icon = (id) => rowOf(w, id).find('svg')
+    const paths = ['ap', 'qu', 'al'].map((id) => icon(id).find('path').attributes('d'))
+    expect(new Set(paths).size).toBe(3)
+    for (const id of ['ap', 'qu', 'al']) {
+      expect(icon(id).classes()).toContain('text-gray-500')
+      expect(icon(id).classes()).toContain('dark:text-gray-400')
+      expect(icon(id).classes().some((k) => k.includes('urgent'))).toBe(false)
+    }
+    expect(rowOf(w, 'ap').find('.sr-only').text()).toBe('Needs approval')
+  })
+
+  it('the expiry clock ticks every 30 s only while such a row exists', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval', 'Date'] })
+    try {
+      store.asks = [ask('x', { created_at: iso(1), expires_at: inMin(61) })]
+      store.asksLoaded = true
+      const w = await mountInbox({}, { query: { tab: 'action' } })
+      expect(badges(rowOf(w, 'x'))).toEqual(['Expires in 1h'])
+      vi.advanceTimersByTime(2 * 60_000)
+      await flushPromises()
+      expect(badges(rowOf(w, 'x'))).toEqual(['Expires in 59m'])
+      // Nothing left to move → the clock stops.
+      store.asks = [ask('x', { created_at: iso(1), expires_at: null })]
+      await flushPromises()
+      expect(vi.getTimerCount()).toBe(0)
+    } finally { vi.useRealTimers() }
+  })
+})
+
 describe('rows keep their place for one tab visit (§3g S1)', () => {
   it('A1: a clicked Unread row survives its read landing before the route does', async () => {
     // t2 is 40 days old: no 30-day All window can rescue it as a fallback.
