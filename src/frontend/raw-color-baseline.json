@@ -991,7 +991,7 @@
     "src/frontend/src/views/SetupPassword.vue": {
       "raw_nongray": 0,
       "raw_gray": 0,
-      "hardcoded_colors": 48
+      "hardcoded_colors": 46
     },
     "src/frontend/src/views/enterprise/Audit.vue": {
       "raw_nongray": 43,

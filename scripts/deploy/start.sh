@@ -599,14 +599,16 @@ ensure_admin_password() {
     # `=''` and `= ` render EMPTY in the hosted compose, so they are blank here.
     [ -n "$(env_value ADMIN_PASSWORD)" ] && return 0
     local src="${ADMIN_PASSWORD_SOURCE:-$(env_value ADMIN_PASSWORD_SOURCE)}"
-    if [ "$src" = "browser" ]; then
+    # `instance-id` (#3004, PROV-018) is the AWS variant: the same blank
+    # password, with /setup also asking for the EC2 instance ID.
+    if [ "$src" = "browser" ] || [ "$src" = "instance-id" ]; then
         # Explicitly blank, not absent: the hosted compose file renders an empty
         # ADMIN_PASSWORD (`${ADMIN_PASSWORD?}`) but still refuses an unset one.
         # Any `ADMIN_PASSWORD=` line already reads blank (checked above).
         grep -qE '^ADMIN_PASSWORD=' .env 2>/dev/null || set_env_key ADMIN_PASSWORD ""
-        [ "$(env_value ADMIN_PASSWORD_SOURCE)" = "browser" ] || set_env_key ADMIN_PASSWORD_SOURCE browser
+        [ "$(env_value ADMIN_PASSWORD_SOURCE)" = "$src" ] || set_env_key ADMIN_PASSWORD_SOURCE "$src"
         ADMIN_IN_BROWSER=1
-        echo "ADMIN_PASSWORD left blank (ADMIN_PASSWORD_SOURCE=browser): the first visitor creates the admin at /setup."
+        echo "ADMIN_PASSWORD left blank (ADMIN_PASSWORD_SOURCE=${src}): the first visitor creates the admin at /setup."
     elif [ "$UNATTENDED" = "1" ]; then
         GENERATED_ADMIN_PASSWORD=$(openssl rand -base64 18 | tr -dc 'A-Za-z0-9' | head -c 24)
         set_env_key ADMIN_PASSWORD "$GENERATED_ADMIN_PASSWORD"
@@ -1156,6 +1158,11 @@ if [ -n "$GENERATED_ADMIN_PASSWORD" ]; then
     echo ""
     echo "         admin / ${GENERATED_ADMIN_PASSWORD}"
     echo ""
+elif [ "$ADMIN_IN_BROWSER" = "1" ] && [ "$(env_value ADMIN_PASSWORD_SOURCE)" = "instance-id" ]; then
+    # #3004: the browser is the only way in, gated on the EC2 instance ID.
+    echo "     No admin account exists yet: open it and create one with this"
+    echo "     server's EC2 instance ID (AWS console → EC2 → Instances) and a"
+    echo "     password. Already done? Sign in with that password."
 elif [ "$ADMIN_IN_BROWSER" = "1" ]; then
     # ent#580: there is no password to show. The browser is the only way in.
     echo "     No admin account exists yet: the first person to open it creates one"
