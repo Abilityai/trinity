@@ -201,6 +201,21 @@ export function listHeadLabel(tab, liveItems) {
   return parts.join(' · ')
 }
 
+// §3g A9: Mark all read names what it does — the number of CHATS it reads —
+// and asks first when that is more than one.
+export function markAllLabel(k) {
+  const n = Number(k) || 0
+  return n > 0 ? `Mark ${plural(n, 'chat', 'chats')} read` : 'Mark all read'
+}
+export function markAllConfirm({ chats = 0, messages = 0 } = {}) {
+  return {
+    title: `${markAllLabel(chats)}?`,
+    message: `${plural(Number(messages) || 0, 'new message', 'new messages')} across ${plural(Number(chats) || 0, 'chat', 'chats')} will be marked read. You can't undo this.`,
+    confirm: markAllLabel(chats),
+    done: `Marked ${plural(Number(chats) || 0, 'chat', 'chats')} read`,
+  }
+}
+
 // §3g B6b: the pinned sidebar row's accessible name — named once, with both
 // counts in words, so a screen reader never hears "Inbox 3 5".
 export function inboxRowLabel({ needs = 0, came = 0 } = {}) {

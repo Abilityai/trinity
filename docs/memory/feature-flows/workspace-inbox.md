@@ -86,7 +86,10 @@ Sign-in / reload on bare /workspace
                                 not found → bottom + "That message is further up"; key stripped)
               Reply in chat → the same, then focusConversationComposer() (A2: no composer in the pane)
               Open canvas  → NOT built (deferred: no cheap per-agent "has a visible canvas" fact)
-    Mark all read (ghost) → Promise.allSettled(markChatReadStrict) → InlineError "N failed"
+    Mark N chats read (ghost; Unread + All only — §3g A9) → k > 1: ConfirmDialog (confirm-variant
+      primary, Cancel focused, "M new messages across N chats will be marked read. You can't undo
+      this.") | k = 1: direct → Promise.allSettled(props.markRead per chat — S4 rollback each)
+      → all true: toast "Marked N chats read" + a new tab visit | any false: InlineError "N failed"
   inboxSelection (?item= || the Inbox's preview) → activeAgent (never activeAgentName) → the rail follows it
 
 Counts (one projection)
@@ -252,7 +255,7 @@ an ask that ends while selected; a deep-linked `?item=`; previews read failing m
 | `tests/unit/test_ent557_unread_never_opened_chat.py`, `test_ent359_portal_chat_state.py`, `test_ent365_report_audience.py`, `test_ent457_portal_completion_report.py` | updated fixtures / retargets for the arm and the stamp |
 | `src/frontend/tests/unit/portalInbox.spec.js` | pure rules + the seeded count-parity property |
 | `src/frontend/tests/unit/portalInboxStore.spec.js` | `fetchChatState({previews})`, `markChatReadStrict` |
-| `src/frontend/tests/unit/portalInbox.mount.spec.js` | honest states, mark-read once, answer via store, Mark all read failures, phone Back + focus; §3g S1 rows keep their place (A1 click-then-read, A7 answer on All, A12 poll ghosts + "All caught up"), a deleted open chat goes Back on phone; §3g S5 read after render (payloads awaited, a failed payload stays unread + Mark read, preview not in the URL, deep link reads, a false write shows the error) |
+| `src/frontend/tests/unit/portalInbox.mount.spec.js` | honest states, mark-read once, answer via store, Mark all read (Unread/All only, confirm for k>1 with Cancel focused, k=1 direct, success toast + new visit, partial failure), phone Back + focus; §3g S1 rows keep their place (A1 click-then-read, A7 answer on All, A12 poll ghosts + "All caught up"), a deleted open chat goes Back on phone; §3g S5 read after render (payloads awaited, a failed payload stays unread + Mark read, preview not in the URL, deep link reads, a false write shows the error) |
 | `src/frontend/tests/unit/portalInboxShell.mount.spec.js` | the stage chain (roster error, empty roster, no `PortalConversation`), selection never writes `activeAgentName` |
 | `src/frontend/tests/unit/portalSidebarInboxRow.spec.js` | the pinned row's counts and link |
 | `src/frontend/tests/unit/portalAsksTestidPrefix.mount.spec.js` | default ids unchanged, prefix over every id, disjoint id sets |

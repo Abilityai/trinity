@@ -3552,8 +3552,12 @@ to localStorage in the clear.
   leaves any tab stays as a ghost — a chat drawn read, an ask drawn ended — and a poll never
   re-sorts; leaving the tab, clicking it again or a completed Mark all read starts a new visit). **Open
   in chat** / **Reply in chat** open the chat at the first arrival (`?anchor=`), with the
-  composer focused for Reply (A2 — no composer in the pane). **Mark all read** is secondary
-  and reports how many failed.
+  composer focused for Reply (A2 — no composer in the pane). **Mark all read** is secondary,
+  on Unread and All only, and names what it reads ("Mark 28 chats read"); for more than one
+  chat it asks first (ConfirmDialog, the consequence restated, Cancel focused, a non-danger
+  confirm), one chat is read directly. Success is a toast ("Marked 28 chats read") and a new
+  tab visit; a partial failure names how many failed and those chats keep their count (the S4
+  rollback) (§3g A9).
 - **The door (AC 7)**: nothing the Inbox adds carries cost, an execution id or run detail; the
   preview projection has no `cost` field. The Inbox needs no capability flag — it reads the
   roster payload, the viewer's own chat state and the asks list.

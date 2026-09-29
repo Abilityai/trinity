@@ -54,7 +54,7 @@
                  still renders Confirm on the right — marking it moves the
                  FOCUS without moving the button, which reordering would. -->
             <BaseButton
-              variant="danger"
+              :variant="confirmVariant"
               class="w-full sm:ml-3 sm:w-auto"
               data-testid="confirm-dialog-confirm"
               data-destructive
@@ -106,6 +106,15 @@ const props = defineProps({
     type: String,
     default: 'danger', // 'danger' or 'warning'
     validator: (value) => ['danger', 'warning'].includes(value)
+  },
+  // ent#610 §3g A9: the confirm button's own variant. Default `danger`, so
+  // every existing dialog is unchanged; `primary` is for a confirm that is
+  // consequential but not destructive (Mark N chats read). Focus still lands
+  // on Cancel either way — that is `data-destructive`'s job, not the colour's.
+  confirmVariant: {
+    type: String,
+    default: 'danger',
+    validator: (value) => ['danger', 'primary'].includes(value)
   }
 })
 

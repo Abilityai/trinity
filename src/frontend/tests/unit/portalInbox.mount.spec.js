@@ -498,15 +498,91 @@ describe('a selection restored from the URL (D8)', () => {
   })
 })
 
-describe('Mark all read (D11)', () => {
-  it('settles through markChatReadStrict and names how many failed', async () => {
-    store.markChatReadStrict = vi.fn(async (_k, id) => { if (id === 't2') throw new Error('500') })
-    const threads = [thread('t1', { unread: 2 }), thread('t2', { unread: 1, last_message_at: iso(9) })]
-    const w = await mountInbox({ threads }, { query: { tab: 'unread' } })
+describe('Mark all read (D11, §3g A9)', () => {
+  // The shell's markRead zeroes the chat before its write resolves; mimic that
+  // so the props follow the reads the way they do in Portal.vue.
+  function shellLike(initial, fail = () => false) {
+    let current = initial
+    const fn = vi.fn(async (_k, id) => {
+      if (fail(id)) return false
+      current = current.map((t) => (t.id === id ? { ...t, unread: 0 } : t))
+      await wrapper.setProps({ threads: current })
+      return true
+    })
+    return fn
+  }
+  const confirmEl = () => document.querySelector('[data-testid="confirm-dialog"]')
+
+  it('is on Unread and All only, and says how many chats it reads', async () => {
+    store.asks = [ask('a1')]
+    store.asksLoaded = true
+    const threads = [thread('t1', { unread: 2 }), thread('t2', { unread: 3, last_message_at: iso(9) })]
+    const w = await mountInbox({ threads }, { query: { tab: 'action' } })
+    expect(has(w, 'inbox-mark-all-read')).toBe(false)
+    await router.replace({ path: '/workspace/inbox', query: { tab: 'unread' } })
+    await flushPromises()
+    expect(w.find('[data-testid="inbox-mark-all-read"]').text()).toBe('Mark 2 chats read')
+  })
+
+  it('more than one chat asks first, with the consequence, Cancel focused, and a non-danger confirm', async () => {
+    const threads = [thread('t1', { unread: 2 }), thread('t2', { unread: 3, last_message_at: iso(9) })]
+    const markRead = shellLike(threads)
+    const w = await mountInbox({ threads, markRead }, { query: { tab: 'unread' } })
     await w.find('[data-testid="inbox-mark-all-read"]').trigger('click')
     await flushPromises()
-    expect(store.markChatReadStrict.mock.calls.map((c) => c[1]).sort()).toEqual(['t1', 't2'])
+    expect(markRead).not.toHaveBeenCalled()
+    const dlg = confirmEl()
+    expect(dlg).toBeTruthy()
+    expect(dlg.querySelector('[data-testid="confirm-dialog-title"]').textContent.trim()).toBe('Mark 2 chats read?')
+    expect(dlg.querySelector('[data-testid="confirm-dialog-message"]').textContent.trim())
+      .toBe("5 new messages across 2 chats will be marked read. You can't undo this.")
+    const confirm = dlg.querySelector('[data-testid="confirm-dialog-confirm"]')
+    expect(confirm.textContent.trim()).toBe('Mark 2 chats read')
+    expect(confirm.className).not.toContain('bg-status-danger')
+    expect(document.activeElement?.getAttribute('data-testid')).toBe('confirm-dialog-cancel')
+
+    confirm.click()
+    await flushPromises()
+    expect(markRead.mock.calls.map((c) => c[1]).sort()).toEqual(['t1', 't2'])
+    expect(w.find('[data-testid="inbox-toast"]').text()).toBe('Marked 2 chats read')
+    // A completed bulk read starts a new visit: no ghosts, the empty copy.
+    expect(w.find('[data-testid="inbox-empty"]').text()).toContain("You're all caught up")
+  })
+
+  it('Cancel reads nothing', async () => {
+    const threads = [thread('t1', { unread: 2 }), thread('t2', { unread: 3, last_message_at: iso(9) })]
+    const markRead = shellLike(threads)
+    const w = await mountInbox({ threads, markRead }, { query: { tab: 'unread' } })
+    await w.find('[data-testid="inbox-mark-all-read"]').trigger('click')
+    await flushPromises()
+    document.querySelector('[data-testid="confirm-dialog-cancel"]').click()
+    await flushPromises()
+    expect(markRead).not.toHaveBeenCalled()
+    expect(confirmEl()).toBeNull()
+  })
+
+  it('one chat writes directly', async () => {
+    const threads = [thread('t1', { unread: 2 })]
+    const markRead = shellLike(threads)
+    const w = await mountInbox({ threads, markRead }, { query: { tab: 'unread' } })
+    expect(w.find('[data-testid="inbox-mark-all-read"]').text()).toBe('Mark 1 chat read')
+    await w.find('[data-testid="inbox-mark-all-read"]').trigger('click')
+    await flushPromises()
+    expect(confirmEl()).toBeNull()
+    expect(markRead).toHaveBeenCalledWith('thread', 't1')
+  })
+
+  it('a partial failure names the count, keeps those chats, and is no success', async () => {
+    const threads = [thread('t1', { unread: 2 }), thread('t2', { unread: 1, last_message_at: iso(9) })]
+    const markRead = shellLike(threads, (id) => id === 't2')
+    const w = await mountInbox({ threads, markRead }, { query: { tab: 'unread' } })
+    await w.find('[data-testid="inbox-mark-all-read"]').trigger('click')
+    await flushPromises()
+    document.querySelector('[data-testid="confirm-dialog-confirm"]').click()
+    await flushPromises()
     expect(w.find('[data-testid="inbox-mark-all-error"]').text()).toContain('1 of 2 chats')
+    expect(has(w, 'inbox-toast')).toBe(false)
+    expect(has(w, 'inbox-row-thread:t2')).toBe(true)
     expect(w.emitted('refresh')).toHaveLength(1)
   })
 })

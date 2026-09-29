@@ -24,16 +24,35 @@
         <h1 class="text-lg font-semibold text-gray-900 dark:text-gray-100">Inbox</h1>
         <p class="text-[12.5px] text-gray-600 dark:text-gray-300">What needs you, and what came back, across your agents.</p>
       </div>
+      <!-- §3g A9: Unread and All only — Action's rows are asks, which a read
+           does not touch — named with the number of chats it reads, and
+           confirmed first when that is more than one. -->
       <BaseButton
+        v-if="tab !== 'action'"
         variant="ghost"
         size="sm"
-        :disabled="!counts.came || markingAll"
+        :disabled="!unreadRows.length || markingAll"
         :loading="markingAll"
         loading-label="Marking…"
         data-testid="inbox-mark-all-read"
-        @click="markAllRead"
-      >Mark all read</BaseButton>
+        @click="askMarkAll"
+      >{{ markAllLabel(unreadRows.length) }}</BaseButton>
     </header>
+    <ConfirmDialog
+      v-model:visible="markAllConfirmOpen"
+      variant="warning"
+      confirm-variant="primary"
+      :title="markAllCopy.title"
+      :message="markAllCopy.message"
+      :confirm-text="markAllCopy.confirm"
+      @confirm="markAllRead"
+    />
+    <p
+      v-if="notification && notification.type === 'success'"
+      role="status"
+      class="fixed bottom-6 right-6 z-50 px-4 py-3 rounded-lg shadow-lg text-sm border bg-status-success-100 border-status-success-300 text-status-success-700 dark:bg-status-success-900/50 dark:border-status-success-700 dark:text-status-success-300"
+      data-testid="inbox-toast"
+    >{{ notification.message }}</p>
     <InlineError
       v-if="markAllError"
       class="mx-4 mb-2"
@@ -150,6 +169,8 @@ import BaseButton from '@/components/base/BaseButton.vue'
 import OverflowTabs from '@/components/OverflowTabs.vue'
 import LoadFailed from '@/components/LoadFailed.vue'
 import InlineError from '@/components/InlineError.vue'
+import ConfirmDialog from '@/components/ConfirmDialog.vue'
+import { useNotification } from '@/composables/useNotification'
 import PortalInboxList from './PortalInboxList.vue'
 import PortalInboxPane from './PortalInboxPane.vue'
 import { useClientPortalStore } from '@/stores/clientPortal'
@@ -157,6 +178,7 @@ import { viewState, staleBannerMessage } from '@/utils/loadingState'
 import {
   actionItems, unreadItems, allItems, inboxCounts, defaultInboxTab, normalizeInboxTab,
   stableRows, emptyVisit, isGhost, resolveItem, parseItemKey, listHeadLabel,
+  markAllLabel, markAllConfirm,
 } from './portalInbox'
 import { askBadgeTitle, unreadBadgeTitle } from './portalUtils'
 import { capCount } from '@/utils/tabTitle'
@@ -430,25 +452,41 @@ watch([() => view.value.state, () => shownItems.value.length, routeItem, preview
   previewFor.value = { tab: tab.value, key: shownItems.value[0].key }
 }, { immediate: true })
 
-// ---- Mark all read (D11) --------------------------------------------------------
+// ---- Mark all read (D11, §3g A9) ------------------------------------------------
 const markingAll = ref(false)
 const markAllError = ref('')
+const markAllConfirmOpen = ref(false)
+const { notification, showNotification } = useNotification()
+const unreadRows = computed(() => unreadItems(props.threads, props.previews))
+const markAllCopy = computed(() => markAllConfirm({
+  chats: unreadRows.value.length,
+  messages: unreadRows.value.reduce((sum, r) => sum + (Number(r.n) || 0), 0),
+}))
+function askMarkAll() {
+  if (unreadRows.value.length > 1) markAllConfirmOpen.value = true
+  else markAllRead()
+}
 async function markAllRead() {
-  const rows = unreadItems(props.threads, props.previews)
+  const rows = unreadRows.value
   if (!rows.length || markingAll.value) return
+  const done = markAllCopy.value.done
   markingAll.value = true
   markAllError.value = ''
   try {
-    // `markChatReadStrict` rethrows — the fire-and-forget `markChatRead` would
-    // make every rejection a silent success here.
-    const results = await Promise.allSettled(rows.map((r) => store.markChatReadStrict('thread', r.id)))
-    const failed = results.filter((r) => r.status === 'rejected').length
+    // Through the shell's `markRead` (S4): each write rolls its own zero back
+    // on failure and resolves false — never a silent success.
+    const read = props.markRead || (async () => true)
+    const results = await Promise.allSettled(rows.map((r) => read('thread', r.id)))
+    const failed = results.filter((r) => r.status === 'rejected' || r.value === false).length
     if (failed) {
       markAllError.value = `${failed} of ${rows.length} ${rows.length === 1 ? 'chat' : 'chats'} couldn't be marked read. They keep their count — try again.`
+    } else {
+      showNotification(done)
+      // A completed bulk read starts a new visit: the rows it read leave
+      // rather than lingering as ghosts ("You're all caught up").
+      await nextTick()
+      newVisit()
     }
-    // A completed bulk read starts a new visit: the rows it read leave rather
-    // than lingering as ghosts.
-    else newVisit()
   } finally {
     markingAll.value = false
     emit('refresh')

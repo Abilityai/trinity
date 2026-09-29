@@ -232,6 +232,11 @@ Driven directly by the token families — the badge variant *is* the token famil
 
 - **Do:** `Cancel` focused, `Delete agent` as the named danger action.
 - **Don't:** "Are you sure? — OK / Cancel" with focus on OK.
+- **Consequential, not destructive (ent#610 §3g A9):** `ConfirmDialog`'s `confirmVariant`
+  (default `danger`, so every existing dialog is unchanged) takes `primary` for a confirm
+  that restates an irreversible but non-destructive consequence — "Mark 28 chats read?" /
+  "157 new messages across 28 chats will be marked read. You can't undo this." Cancel keeps
+  the initial focus either way: that is `data-destructive`'s job, not the button colour's.
 
 ### OverflowTabs
 
