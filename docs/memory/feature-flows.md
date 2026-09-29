@@ -169,7 +169,7 @@
 | Admin Login | [admin-login.md](feature-flows/admin-login.md) | Password-based admin auth |
 | First-Time Setup | [first-time-setup.md](feature-flows/first-time-setup.md) | Admin password wizard |
 | First-Run Overlay | [onboarding-wizard.md](feature-flows/onboarding-wizard.md) | The blocking post-login setup sequence — step registry, derived completion, re-run (ent#581; formerly the ent#52 wizard) |
-| MCP API Keys | [mcp-api-keys.md](feature-flows/mcp-api-keys.md) | API key management |
+| MCP API Keys | [mcp-api-keys.md](feature-flows/mcp-api-keys.md) | API key management — creating a key (`POST /keys`, `ensure-default`) requires a signed-in session; every creation is audited as `key_create` |
 | Execution Origin Tracking | [AUDIT-001-execution-origin-tracking.md](feature-flows/AUDIT-001-execution-origin-tracking.md) | Track who triggered executions |
 | Agent-Server Authentication | [agent-server-authentication.md](feature-flows/agent-server-authentication.md) | Per-agent inbound auth for the in-container agent server (`:8000`) — derived `X-Trinity-Agent-Token` (HMAC over `AGENT_AUTH_SECRET`) enforced by a pure-ASGI middleware on every HTTP/WS route (#1159) |
 | 4-Tier Role Model | [role-model.md](feature-flows/role-model.md) | user < operator < creator < admin role hierarchy (ROLE-001) |
@@ -250,7 +250,7 @@
 |------|----------|-------------|
 | Agent Notifications | [agent-notifications.md](feature-flows/agent-notifications.md) | Agent-to-platform notifications (NOTIF-001) |
 | Events Page UI | [events-page.md](feature-flows/events-page.md) | Consolidated into Operating Room Notifications tab |
-| Operating Room | [operating-room.md](feature-flows/operating-room.md) | Unified operator command center: queue, notifications, resolved (OPS-001); async fire-and-park contract + derived request ids + lease-reaper poison-park items (#1402); agent-authored ingestion depth/rate/size caps + reserved-id guard + leader lock (#1632); per-(agent, type) budget for agent-influenceable platform emitters + caller-parity guard (#1677); per-branch bounds on the skills legacy-adoption alarm (#2744); sync honesty — per-row sync/delivery state, fingerprint reconcile, if_match write-back, 409 `item_diverged`, aging + receipt, header counts (#2915) |
+| Operating Room | [operating-room.md](feature-flows/operating-room.md) | Unified operator command center: queue, notifications, resolved (OPS-001); async fire-and-park contract + derived request ids + lease-reaper poison-park items (#1402); agent-authored ingestion depth/rate/size caps + reserved-id guard + leader lock (#1632); per-(agent, type) budget for agent-influenceable platform emitters + caller-parity guard (#1677); per-branch bounds on the skills legacy-adoption alarm (#2744); sync honesty — per-row sync/delivery state, fingerprint reconcile, if_match write-back, 409 `item_diverged`, aging + receipt, header counts (#2915); the ask object — endings ledger, person-only endings, wake on any ending, self-readback `get_my_ask`, and native raising via `ask_operator` with receipts and re-asks (trinity-enterprise#611) |
 | Proactive Messaging | [proactive-messaging.md](feature-flows/proactive-messaging.md) | Proactive agent-to-user messaging (#321) |
 
 ### Configuration & Settings

@@ -28,6 +28,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from unit._write_params import flat_kwargs
 
 _BACKEND = Path(__file__).resolve().parents[2] / "src" / "backend"
 if str(_BACKEND) not in sys.path:
@@ -390,7 +391,7 @@ class TestApplyResultIntegration:
 
     def test_kill_tail_writes_turn_integrity_and_prepends_notice(self):
         result, mdb = _run_apply(_success_envelope())
-        kw = mdb.update_execution_status.call_args.kwargs
+        kw = flat_kwargs(mdb.update_execution_status.call_args)
         payload = json.loads(kw["turn_integrity"])
         assert payload["background_tasks_killed"][0]["final_status"] == "killed"
         # The stored response AND the returned result both carry the notice,
@@ -406,7 +407,7 @@ class TestApplyResultIntegration:
             response="all done",
             execution_log=[{"type": "tool_use", "name": "Bash"}],
         ))
-        kw = mdb.update_execution_status.call_args.kwargs
+        kw = flat_kwargs(mdb.update_execution_status.call_args)
         assert kw["turn_integrity"] is None
         assert kw["response"] == "all done"
         assert result.response == "all done"
@@ -415,7 +416,7 @@ class TestApplyResultIntegration:
         """Mixed fleet: an envelope with no transcript (or a very old image)
         writes NULL — 'no evidence', never a crash, never 'verified healthy'."""
         _, mdb = _run_apply(_success_envelope(response="ok", execution_log=None))
-        assert mdb.update_execution_status.call_args.kwargs["turn_integrity"] is None
+        assert flat_kwargs(mdb.update_execution_status.call_args)["turn_integrity"] is None
 
     def test_waited_path_pending_rides_the_column_without_notice(self):
         _, mdb = _run_apply(_success_envelope(
@@ -424,7 +425,7 @@ class TestApplyResultIntegration:
             metadata={"cost_usd": 0.05, "context_window": 200000,
                       "background_tasks_pending_at_exit": 2},
         ))
-        kw = mdb.update_execution_status.call_args.kwargs
+        kw = flat_kwargs(mdb.update_execution_status.call_args)
         assert json.loads(kw["turn_integrity"]) == {
             "background_tasks_pending_at_exit": 2
         }

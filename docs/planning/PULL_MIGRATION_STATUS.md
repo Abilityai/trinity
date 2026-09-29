@@ -28,7 +28,7 @@ behind **`PULL_MODE_PILOT_AGENTS`** (default empty ⇒ inert).
 | **Phase 2** | Agent worker pool behind `PULL_MODE_PILOT_AGENTS`; scoped-key auth | ✅ done |
 | **Phase 3** | Lease reaper + `MAX_REDELIVERY` + capacity shadow meter + canary lease-awareness | ✅ done (Alembic `0017`) |
 | **Phase 4** | Sync edge adapter + async fan-out join | 🔶 **in review — [#2532](https://github.com/abilityai/trinity/pull/2532)** |
-| **Phase 5** | Default-ON + delete ZSET / overflow LIST / dispatch-breaker-gate / canary S-01–S-03 | ⬜ blocked — see §4 |
+| **Phase 5** | Default-ON + delete ZSET / overflow LIST / dispatch-breaker-gate / canary S-01–S-03 and B-02's push arm (B-02 stays as the pull check, alongside B-08 pull-worker liveness, #2840) | ⬜ blocked — see §4 |
 
 ## 3. Trigger reach — which work can actually reach the queue
 
@@ -68,7 +68,9 @@ The spec names the gates (`TARGET_ARCHITECTURE.md`, §Re-Delivery and Side-Effec
    (`trinity-ops-agent:docs/pull-soak-eu2.md`). System of record for the soak is
    [#1766](https://github.com/abilityai/trinity/issues/1766)'s comment thread — read it before measuring.
 4. **Phase 5: flip default-ON and delete the legacy machinery** — the 9-path cleanup pyramid, the slot ZSET,
-   the overflow LIST, the dispatch-breaker gate, canary S-01–S-03. Tracked as
+   the overflow LIST, the dispatch-breaker gate, canary S-01–S-03, and canary B-02's push arm — B-02 itself
+   stays, as the check that pilots' queued work is being claimed, and B-08 checks the pull workers are alive
+   (#2840). Tracked as
    [#429](https://github.com/abilityai/trinity/issues/429). Until this lands, both systems run at once.
 5. **Interactive chat joins the queue** — **DECIDED 2026-09-16**
    ([#1989](https://github.com/abilityai/trinity/issues/1989)): the queue carries all traffic and the

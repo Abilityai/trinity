@@ -40,6 +40,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from fastapi import HTTPException
+from unit._write_params import flat_kwargs
 
 _REPO = Path(__file__).resolve().parents[2]
 _BACKEND = _REPO / "src" / "backend"
@@ -227,7 +228,7 @@ class TestTaskRoute:
                 x_source_agent="agent-a",
             )
         assert out["task_execution_id"] == "exec1"
-        row = m["db"].create_task_execution.call_args.kwargs
+        row = flat_kwargs(m["db"].create_task_execution.call_args)
         assert row["source_agent_name"] == "agent-a"
         assert row["triggered_by"] == "agent"
         collab = _collab_calls(m["activity"])
@@ -242,7 +243,7 @@ class TestTaskRoute:
                 current_user=_mock_user(agent_name=None, vouched="worker-a", role="admin"),
                 x_source_agent="worker-a",
             )
-        row = m["db"].create_task_execution.call_args.kwargs
+        row = flat_kwargs(m["db"].create_task_execution.call_args)
         assert row["source_agent_name"] == "worker-a"
         assert row["triggered_by"] == "agent"
 
@@ -263,7 +264,7 @@ class TestTaskRoute:
                 x_event_trigger=None,
                 x_internal_secret=None,
             ))
-        row = m["db"].create_task_execution.call_args.kwargs
+        row = flat_kwargs(m["db"].create_task_execution.call_args)
         assert row["source_agent_name"] is None
         assert row["triggered_by"] == "mcp"
         assert _collab_calls(m["activity"]) == []

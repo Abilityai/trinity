@@ -104,8 +104,9 @@ if [ -f .env ]; then
     # Check critical vars are set
     # ent#580: a marketplace droplet leaves ADMIN_PASSWORD blank on purpose —
     # its admin is created in the browser, so blank is not a misconfiguration.
+    # #3004: `instance-id` (AWS) is the same, gated on the EC2 instance ID.
     admin_in_browser=0
-    grep -qE '^ADMIN_PASSWORD_SOURCE=browser$' .env 2>/dev/null && admin_in_browser=1
+    grep -qE '^ADMIN_PASSWORD_SOURCE=(browser|instance-id)$' .env 2>/dev/null && admin_in_browser=1
     for var in SECRET_KEY CREDENTIAL_ENCRYPTION_KEY ADMIN_PASSWORD; do
         [ "$var" = "ADMIN_PASSWORD" ] && [ "$admin_in_browser" = 1 ] && continue
         val=$(grep -E "^${var}=" .env 2>/dev/null | cut -d'=' -f2-)

@@ -492,6 +492,10 @@ def app_client(real_db, fake_library, monkeypatch):
     app.dependency_overrides[skills.get_current_user] = lambda: human
     app.dependency_overrides[skills.get_skill_managed_agent_by_name] = lambda agent_name: agent_name
     app.dependency_overrides[skills.get_authorized_agent_by_name] = lambda agent_name: agent_name
+    # #3052: `probe=true` is honoured only for a principal who may manage this
+    # agent's skills. The fixture's principal is an admin; the reader case
+    # flips this in its own test.
+    monkeypatch.setattr(skills, "can_manage_agent_skills", lambda user, agent: True)
     return TestClient(app)
 
 
@@ -565,6 +569,35 @@ class TestRoutes:
         st = app_client.get(f"/api/agents/{AGENT}/skill-sets?probe=true").json()[0]
         probe.assert_awaited_once()
         assert st["prerequisites"]["state"] == "ok"
+
+    def test_a_reader_who_cannot_manage_skills_never_triggers_the_probe(self, app_client, monkeypatch):
+        """#3052: the Skills tab always sends `probe=true`. A principal who can
+        read the agent but not manage its skills (a shared user) must not run
+        an in-container exec by opening the tab — the read degrades to
+        `unknown`, exactly as a plain read does."""
+        from routers import skills
+        from services import skill_set_service as svc
+        monkeypatch.setattr(svc, "_is_running", AsyncMock(return_value=True))
+        probe = AsyncMock(return_value={"GITHUB_TOKEN": True, "JIRA_KEY": True})
+        monkeypatch.setattr(svc, "_probe_env", probe)
+        app_client.post(f"/api/agents/{AGENT}/skill-sets/pm")
+        probe.reset_mock()
+        seen = []
+        monkeypatch.setattr(skills, "can_manage_agent_skills",
+                            lambda user, agent: seen.append(agent) or False)
+        r = app_client.get(f"/api/agents/{AGENT}/skill-sets?probe=true")
+        assert r.status_code == 200
+        probe.assert_not_awaited()
+        assert r.json()[0]["prerequisites"]["state"] == "unknown"
+        assert seen == [AGENT]
+
+    def test_a_plain_read_does_not_even_ask_the_fence(self, app_client, monkeypatch):
+        """No probe asked, nothing to gate: the fence check is not consulted."""
+        from routers import skills
+        called = []
+        monkeypatch.setattr(skills, "can_manage_agent_skills", lambda u, a: called.append(a) or True)
+        app_client.get(f"/api/agents/{AGENT}/skill-sets")
+        assert called == []
 
     def test_put_with_an_unknown_set_changes_nothing(self, app_client, real_db):
         app_client.post(f"/api/agents/{AGENT}/skill-sets/pm")

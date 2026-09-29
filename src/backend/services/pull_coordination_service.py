@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from dataclasses import dataclass
 from typing import Any, Dict, Optional, Tuple
 
@@ -41,6 +42,7 @@ from services.platform_prompt_service import (
 from services.slot_service import SLOT_TTL_BUFFER
 from services.runtime_secret_scrub import get_staged_values, scrub_obj, scrub_text
 from utils.credential_sanitizer import sanitize_execution_log, sanitize_response
+from db.write_params import ExecutionResult
 
 logger = logging.getLogger(__name__)
 
@@ -182,6 +184,25 @@ _TASK_OVERRIDE_KEYS = (
 # ---------------------------------------------------------------------------
 
 
+def record_worker_poll(agent_name: str) -> None:
+    """Stamp the agent's last claim attempt for canary B-08 (#2840).
+
+    Called on every claim attempt, empty or not: an idle worker polls at least
+    every 15s, so a stale stamp on an agent with idle workers means the pool
+    is dead or cannot reach the backend. Best-effort — a Redis failure must
+    never block a claim.
+    """
+    try:
+        from services.pull_pilot import PULL_POLL_KEY_PREFIX, PULL_POLL_TTL_SECONDS
+        from services.slot_service import get_slot_service
+
+        get_slot_service().redis.set(
+            f"{PULL_POLL_KEY_PREFIX}{agent_name}", time.time(), ex=PULL_POLL_TTL_SECONDS
+        )
+    except Exception:  # noqa: BLE001
+        logger.debug("[#2840] could not record pull poll for %s", agent_name, exc_info=True)
+
+
 def claim_next_task(agent_name: str, worker_id: str) -> Optional[Dict[str, Any]]:
     """Atomically claim the oldest queued task for ``agent_name`` on behalf of
     ``worker_id``. Returns the §3.1 claim response, or None when the queue is
@@ -196,6 +217,7 @@ def claim_next_task(agent_name: str, worker_id: str) -> Optional[Dict[str, Any]]
     from being re-delivered while it still runs — the job the (never built)
     lease-renewal heartbeat was specified for.
     """
+    record_worker_poll(agent_name)
     cap = int(db.get_execution_timeout(agent_name))
     row = db.claim_next_queued(agent_name, worker_id=worker_id, lease_seconds=cap + SLOT_TTL_BUFFER)
     if not row:
@@ -494,13 +516,15 @@ def apply_task_result(
         won = db.update_execution_status(
             execution_id=execution_id,
             status=TaskExecutionStatus.SUCCESS,
-            response=sanitized_content,
-            cost=cost,
-            context_used=context_used,
-            context_max=context_max,
-            execution_log=log_json,
-            tool_calls=log_json,
-            claude_session_id=session_id,
+            result=ExecutionResult(
+                response=sanitized_content,
+                cost=cost,
+                context_used=context_used,
+                context_max=context_max,
+                execution_log=log_json,
+                tool_calls=log_json,
+                claude_session_id=session_id,
+            ),
             claim_token=claim_token,
         )
     else:
@@ -515,11 +539,13 @@ def apply_task_result(
         won = db.update_execution_status(
             execution_id=execution_id,
             status=row_status,
-            error=err_text or None,
-            response=sanitized_content,
-            cost=cost,
-            context_used=context_used,
-            context_max=context_max,
+            result=ExecutionResult(
+                error=err_text or None,
+                response=sanitized_content,
+                cost=cost,
+                context_used=context_used,
+                context_max=context_max,
+            ),
             claim_token=claim_token,
         )
 

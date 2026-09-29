@@ -356,6 +356,8 @@ def _fake_core_db(captured, monkeypatch, *, override=None):
             return override
 
         def create_task_execution(self, **kwargs):
+            if kwargs.get("fields") is not None:  # #1482: inline the parameter object
+                kwargs.update(vars(kwargs.pop("fields")))
             captured.append(kwargs)
             return types.SimpleNamespace(id=f"exec_{len(captured)}")
 
