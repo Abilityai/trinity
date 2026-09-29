@@ -111,7 +111,7 @@
           :selected-key="selectedKey"
           :labels="labels"
           :label="`${tabLabel} items`"
-          @open="(it) => open(it)"
+          @open="open"
         />
       </div>
 
@@ -126,6 +126,10 @@
           :item="selectedItem"
           :agent-label="labels[selectedItem.agent_name] || selectedItem.agent_name || ''"
           :show-back="phone"
+          :read-failed="readFailedKey === selectedItem.key"
+          @rendered="(k) => { renderedKey = k }"
+          @mark-read="readNow(selectedItem)"
+          @dismiss-read-error="readFailedKey = null"
           @back="back"
           @open-chat="(url) => url && $emit('open-chat', url)"
           @reply="(url) => url && $emit('reply', url)"
@@ -152,7 +156,7 @@ import { useClientPortalStore } from '@/stores/clientPortal'
 import { viewState, staleBannerMessage } from '@/utils/loadingState'
 import {
   actionItems, unreadItems, allItems, inboxCounts, defaultInboxTab, normalizeInboxTab,
-  stableRows, emptyVisit, isGhost, resolveItem, totalLabel,
+  stableRows, emptyVisit, isGhost, resolveItem, totalLabel, parseItemKey,
 } from './portalInbox'
 
 const props = defineProps({
@@ -166,8 +170,12 @@ const props = defineProps({
   // agent name → display label.
   labels: { type: Object, default: () => ({}) },
   isPlatform: { type: Boolean, default: false },
+  // §3g S5: the shell's `markRead(kind, id)` — resolves true / false, never
+  // rejects (S4). A function rather than an emit, because the pane needs its
+  // verdict: a false result is `inbox-pane-read-error`.
+  markRead: { type: Function, default: null },
 })
-const emit = defineEmits(['mark-read', 'refresh', 'open-chat', 'reply'])
+const emit = defineEmits(['refresh', 'open-chat', 'reply', 'update:preview'])
 
 const store = useClientPortalStore()
 const route = useRoute()
@@ -214,7 +222,15 @@ const baseItems = computed(() => {
   return all.value.items
 })
 
-const selectedKey = computed(() => (typeof route.query.item === 'string' ? route.query.item : null))
+// §3g S5 (T2): the URL holds only what the reader OPENED. The desktop
+// auto-selection is a local preview, kept per tab and told to the shell
+// (`update:preview`) so the rail can follow it without a `?item=`.
+const routeItem = computed(() => (typeof route.query.item === 'string' ? route.query.item : null))
+const previewFor = ref({ tab: null, key: null })
+const previewKey = computed(() => (previewFor.value.tab === tab.value ? previewFor.value.key : null))
+const selectedKey = computed(() => routeItem.value || previewKey.value)
+watch(previewKey, (k) => emit('update:preview', k || null))
+onBeforeUnmount(() => emit('update:preview', null))
 
 // Principle 5 (§3g S1): the rows of one TAB VISIT keep their place — a row
 // that leaves stays as a ghost drawn read / ended, a poll never re-sorts, and a
@@ -319,13 +335,32 @@ function replaceQuery(patch) {
   return router.replace({ path: route.path, query })
 }
 
-// An explicit open (click / Enter / Space). Opening a chat reads it: the shell's
-// `markRead`, once. The row keeps its place through the read (`stableRows`).
-async function open(it, { explicit = true } = {}) {
+// ---- reading (§3g S5, D-3) -------------------------------------------------------
+// A chat is read when the reader OPENED it (a click / Enter, or the initial
+// `?item=` of a deep link) AND the pane has rendered it (`rendered`): history,
+// deliverables and every payload on screen. Never on a preview, and never
+// before the content — a failed load leaves the chat unread.
+const initial = parseItemKey(routeItem.value)
+const readIntent = ref(initial && initial.type === 'thread' ? routeItem.value : null)
+const renderedKey = ref(null)
+const readFailedKey = ref(null)
+async function readNow(it) {
+  if (!it || it.type !== 'thread') return
+  readIntent.value = null
+  readFailedKey.value = null
+  const ok = props.markRead ? await props.markRead('thread', it.id) : true
+  if (ok === false) readFailedKey.value = it.key
+}
+watch([readIntent, renderedKey], ([want, done]) => {
+  if (want && want === done) readNow(selectedItem.value?.key === want ? selectedItem.value : resolveItem(want, { threads: props.threads }))
+})
+
+// An explicit open (click / Enter / Space). The row keeps its place through the
+// read (`stableRows`); the read itself waits for the pane (above).
+async function open(it) {
   returnIndex = Math.max(0, shownItems.value.findIndex((x) => x.key === it.key))
+  if (it.type === 'thread') readIntent.value = it.key
   const navigated = replaceQuery({ tab: tab.value, item: it.key })
-  if (!explicit) return
-  if (it.type === 'thread') emit('mark-read', 'thread', it.id)
   if (phone.value) {
     // The pane mounts once the URL names the item; focus its heading then.
     returnKey = it.key
@@ -369,13 +404,15 @@ watch(selectedItem, (it, prev) => {
   if (phone.value && prev && !it && selectedKey.value) back()
 })
 
-// D10: on desktop the tab's first row is selected, so the rail column does not
+// D10: on desktop the tab's first row is previewed, so the rail column does not
 // pop in on the first click. Never on phone (a landing there costs no feed),
-// and never as a READ — an auto-selection is not the person opening the chat.
-watch([() => view.value.state, () => shownItems.value.length, selectedKey, tab, phone], () => {
-  if (phone.value || selectedKey.value) return
+// never in the URL, and never as a READ — a preview is not the person opening
+// the chat (§3g S5).
+watch([() => view.value.state, () => shownItems.value.length, routeItem, previewKey, tab, phone], () => {
+  if (phone.value || routeItem.value) return
   if (view.value.state !== 'ready' || !shownItems.value.length) return
-  open(shownItems.value[0], { explicit: false })
+  if (previewKey.value && shownItems.value.some((it) => it.key === previewKey.value)) return
+  previewFor.value = { tab: tab.value, key: shownItems.value[0].key }
 }, { immediate: true })
 
 // ---- Mark all read (D11) --------------------------------------------------------

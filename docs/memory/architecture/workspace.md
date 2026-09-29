@@ -834,9 +834,13 @@ selection on the Inbox route, so the rail follows the selected item and
 — the same projection the sidebar sums — so "came back" equals the sidebar total by
 construction; `threadsLoaded` (latched on the first successful sessions read) and
 `store.sessionsFailed` gate the empty copy, the D7 twin of `asksLoaded`/`asksFailed`.
-On desktop the tab's first row is auto-selected (so the rail column does not pop in)
-but an auto-selection is **not** a read — only an explicit open marks the chat read;
-on phone nothing is auto-selected. The pinned sidebar row is its own component,
+On desktop the tab's first row is a local **preview** (so the rail column does not pop
+in): never in the URL, never a read, told to the shell as `update:preview` so
+`inboxSelection = ?item= || preview` scopes the rail (§3g S5, T2). A chat is read only
+when the reader opened it (a click, or the initial `?item=`) AND the pane has emitted
+`rendered` — history, the strict deliverables list and every payload on screen; the
+shell's `markRead` arrives as a function prop because the pane shows its `false`
+verdict. On phone nothing is previewed. The pinned sidebar row is its own component,
 `PortalInboxRow.vue`. The pane's **Open canvas** button is not built (the shell has no
 cheap per-agent "has a visible canvas" fact); it is deferred.
 

@@ -14,6 +14,12 @@
 
   `item` is the snapshot taken when the row was opened, so the first unread id
   survives the read that zeroes the count.
+
+  §3g S5 (D-3): the pane says when a chat is RENDERED — `rendered(key)`, once
+  the history, the strict deliverables list and every deliverable payload have
+  settled successfully — and the container reads the chat only then. A payload
+  that fails leaves the chat unread (its error is in the card), and the header's
+  "Mark read" stays to hand; a failed read write is `readFailed`.
 -->
 <template>
   <section class="flex flex-col min-h-0 h-full" :aria-labelledby="headingId" data-testid="inbox-pane">
@@ -38,12 +44,26 @@
       <!-- The title keeps at least 12rem; on a phone the two actions wrap to their
            own line rather than squeezing it to a few characters. -->
       <div v-if="item.type === 'thread'" class="ml-auto flex items-center gap-2" data-testid="inbox-pane-actions">
+        <BaseButton
+          v-if="item.n > 0"
+          variant="ghost"
+          size="sm"
+          data-testid="inbox-pane-mark-read"
+          @click="$emit('mark-read')"
+        >Mark read</BaseButton>
         <BaseButton variant="secondary" size="sm" data-testid="inbox-pane-reply" @click="$emit('reply', target)">Reply in chat</BaseButton>
         <BaseButton variant="primary" size="sm" data-testid="inbox-pane-open" @click="$emit('open-chat', target)">Open in chat</BaseButton>
       </div>
     </header>
 
     <div class="flex-1 min-h-0 overflow-y-auto px-4 py-4">
+      <InlineError
+        v-if="readFailed"
+        class="mb-3"
+        message="Couldn't mark this chat read. It keeps its count — try Mark read again."
+        data-testid="inbox-pane-read-error"
+        @dismiss="$emit('dismiss-read-error')"
+      />
       <!-- An ask: the card itself. -->
       <PortalAsks
         v-if="item.type === 'ask'"
@@ -107,7 +127,7 @@
                 v-if="payloadErrors[d.id]"
                 :message="payloadErrors[d.id]"
                 retryable
-                @retry="loadPayload(d)"
+                @retry="retryPayload(d)"
                 @dismiss="delete payloadErrors[d.id]"
               />
               <div v-else-if="!payloads[d.id]" class="animate-pulse motion-reduce:animate-none h-8 rounded-lg bg-gray-100 dark:bg-gray-800/60" aria-busy="true"></div>
@@ -146,8 +166,10 @@ const props = defineProps({
   item: { type: Object, required: true },
   agentLabel: { type: String, default: '' },
   showBack: { type: Boolean, default: false },
+  // §3g S5: the container's read write for this chat failed.
+  readFailed: { type: Boolean, default: false },
 })
-defineEmits(['back', 'open-chat', 'reply', 'open-thread'])
+const emit = defineEmits(['back', 'open-chat', 'reply', 'open-thread', 'rendered', 'mark-read', 'dismiss-read-error'])
 
 const store = useClientPortalStore()
 const headingEl = ref(null)
@@ -192,7 +214,8 @@ async function load() {
     deliverables.value = Array.isArray(reps) ? reps : []
     loaded.value = true
     failed.value = false
-    for (const d of deliverables.value) loadPayload(d)
+    await Promise.all(deliverables.value.map((d) => loadPayload(d)))
+    if (mine === gen) maybeRendered()
   } catch {
     if (mine !== gen) return
     failed.value = true
@@ -203,14 +226,35 @@ async function load() {
 
 async function loadPayload(d) {
   delete payloadErrors[d.id]
+  const mine = gen
   try {
     // fetchAgentReport returns the whole report row; the renderer takes its
     // payload, exactly as PortalDeliverables does.
     const full = await store.fetchAgentReport(props.item.agent_name, d.id, { rowsLimit: 50 })
+    if (mine !== gen) return false
     payloads[d.id] = full?.payload ?? {}
+    return true
   } catch {
+    if (mine !== gen) return false
     payloadErrors[d.id] = "Couldn't load this deliverable. Try again, or open the chat."
+    return false
   }
+}
+
+// Rendered = the history loaded AND every deliverable's payload is on screen.
+// Said once per selection, after the DOM has it; a retried payload that lands
+// completes it.
+let renderedFor = null
+async function maybeRendered() {
+  const key = props.item.key
+  if (renderedFor === key || !loaded.value || failed.value) return
+  if (!deliverables.value.every((d) => payloads[d.id] !== undefined)) return
+  renderedFor = key
+  await nextTick()
+  emit('rendered', key)
+}
+async function retryPayload(d) {
+  if (await loadPayload(d)) maybeRendered()
 }
 
 watch(() => props.item.key, () => {
@@ -218,6 +262,7 @@ watch(() => props.item.key, () => {
   loaded.value = false; failed.value = false
   for (const k of Object.keys(payloads)) delete payloads[k]
   for (const k of Object.keys(payloadErrors)) delete payloadErrors[k]
+  renderedFor = null
   load()
 }, { immediate: true })
 

@@ -168,6 +168,16 @@ describe('D10 — selection scopes the rail, never activeAgentName', () => {
     expect(w.findComponent({ name: 'PortalRail' }).exists()).toBe(true)
   })
 
+  it("§3g S5: the Inbox's desktop preview scopes the rail without a ?item=", async () => {
+    arm()
+    const { w, router } = await boot('/workspace/inbox')
+    expect(w.findComponent({ name: 'PortalRail' }).exists()).toBe(false)
+    w.findComponent({ name: 'PortalInbox' }).vm.$emit('update:preview', 'thread:t1')
+    await flushPromises()
+    expect(router.currentRoute.value.query.item).toBeUndefined()
+    expect(w.findComponent({ name: 'PortalRail' }).exists()).toBe(true)
+  })
+
   it('no selection → no rail, and the reserved column is only held while loading', async () => {
     arm()
     const { w } = await boot('/workspace/inbox')
@@ -222,24 +232,19 @@ describe('§3g S4 — a failed read write is rolled back', () => {
   it('restores the count and resolves false — it never rejects', async () => {
     const { inbox, unreadOf } = await bootUnread(async () => { throw new Error('500') })
     expect(unreadOf()).toBe(3)
-    const readFn = inbox.props('markRead')
-    let settled
-    if (readFn) settled = readFn('thread', 't1')
-    else inbox.vm.$emit('mark-read', 'thread', 't1')
+    // §3g S5: the Inbox receives the shell's markRead as a function prop.
+    const settled = inbox.props('markRead')('thread', 't1')
     await flushPromises()
     expect(store.markChatReadStrict).toHaveBeenCalledWith('thread', 't1')
     expect(unreadOf()).toBe(3)
-    if (settled) await expect(settled).resolves.toBe(false)
+    await expect(settled).resolves.toBe(false)
   })
 
   it('a write that lands keeps the zero and resolves true', async () => {
     const { inbox, unreadOf } = await bootUnread(async () => {})
-    const readFn = inbox.props('markRead')
-    let settled
-    if (readFn) settled = readFn('thread', 't1')
-    else inbox.vm.$emit('mark-read', 'thread', 't1')
+    const settled = inbox.props('markRead')('thread', 't1')
     await flushPromises()
     expect(unreadOf()).toBe(0)
-    if (settled) await expect(settled).resolves.toBe(true)
+    await expect(settled).resolves.toBe(true)
   })
 })

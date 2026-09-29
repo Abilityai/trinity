@@ -48,7 +48,8 @@ Sign-in / reload on bare /workspace
   PortalInbox  (props: threads=sidebarThreads, previews, threadsLoaded, threadsFailed, labels, isPlatform;
                 asks/openAsks/asksLoaded/asksFailed/asksAbsent read from the clientPortal store)
     OverflowTabs  Action (needs) · Unread (came) · All          ?tab=&item= via router.replace
-      desktop: the tab's first row is auto-selected — NOT a read; phone: nothing selected
+      desktop: the tab's first row is a local PREVIEW — not ?item=, NOT a read, emitted as
+               update:preview (§3g S5, T2); phone: nothing selected
     stableRows(fresh, visit)   rows keep their place for one TAB VISIT (§3g S1): a row that leaves
                                stays as a ghost (chat drawn read, ask drawn ended); a poll never
                                re-sorts; a new row goes in before its nearest fresh neighbour; a
@@ -64,8 +65,13 @@ Sign-in / reload on bare /workspace
                                                a failed read is LoadFailed, never "no deliverables"
               at most PANE_TAIL (5) messages from there (§3g S2); the hidden ARRIVALS are said:
               "N earlier arrivals — Open in chat" (also when the first unread is outside the 50)
-              markRead('thread', id)           explicit open only (existing #557 cursor; the row
-                                               stays, drawn read in place, for the tab visit)
+              markRead('thread', id)           a function prop; called when readIntent (a click, or
+                                               the initial ?item=) === the pane's rendered(key):
+                                               history + deliverables + every payload settled OK
+                                               (§3g S5). A failed payload leaves it unread; a false
+                                               result is inbox-pane-read-error; "Mark read" (n>0)
+                                               reads on demand. The row stays, drawn read, for
+                                               the tab visit
               Open in chat → /workspace/c/:id?anchor=m:<first_unread> | d:<report>
                              → PortalConversation + composables/useConversationAnchor.js
                                (data-message-id / data-report-id, useStickToBottom.detach(),
@@ -73,7 +79,7 @@ Sign-in / reload on bare /workspace
               Reply in chat → the same, then focusConversationComposer() (A2: no composer in the pane)
               Open canvas  → NOT built (deferred: no cheap per-agent "has a visible canvas" fact)
     Mark all read (ghost) → Promise.allSettled(markChatReadStrict) → InlineError "N failed"
-  inboxSelection (computed from ?item=) → activeAgent (never activeAgentName) → the rail follows it
+  inboxSelection (?item= || the Inbox's preview) → activeAgent (never activeAgentName) → the rail follows it
 
 Counts (one projection)
   Needs me  = store.askCount                    (= openAsks.length)
@@ -236,7 +242,7 @@ an ask that ends while selected; a deep-linked `?item=`; previews read failing m
 | `tests/unit/test_ent557_unread_never_opened_chat.py`, `test_ent359_portal_chat_state.py`, `test_ent365_report_audience.py`, `test_ent457_portal_completion_report.py` | updated fixtures / retargets for the arm and the stamp |
 | `src/frontend/tests/unit/portalInbox.spec.js` | pure rules + the seeded count-parity property |
 | `src/frontend/tests/unit/portalInboxStore.spec.js` | `fetchChatState({previews})`, `markChatReadStrict` |
-| `src/frontend/tests/unit/portalInbox.mount.spec.js` | honest states, mark-read once, answer via store, Mark all read failures, phone Back + focus; §3g S1 rows keep their place (A1 click-then-read, A7 answer on All, A12 poll ghosts + "All caught up"), a deleted open chat goes Back on phone |
+| `src/frontend/tests/unit/portalInbox.mount.spec.js` | honest states, mark-read once, answer via store, Mark all read failures, phone Back + focus; §3g S1 rows keep their place (A1 click-then-read, A7 answer on All, A12 poll ghosts + "All caught up"), a deleted open chat goes Back on phone; §3g S5 read after render (payloads awaited, a failed payload stays unread + Mark read, preview not in the URL, deep link reads, a false write shows the error) |
 | `src/frontend/tests/unit/portalInboxShell.mount.spec.js` | the stage chain (roster error, empty roster, no `PortalConversation`), selection never writes `activeAgentName` |
 | `src/frontend/tests/unit/portalSidebarInboxRow.spec.js` | the pinned row's counts and link |
 | `src/frontend/tests/unit/portalAsksTestidPrefix.mount.spec.js` | default ids unchanged, prefix over every id, disjoint id sets |

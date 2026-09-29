@@ -193,14 +193,16 @@ describe('honest state — loading ≠ empty ≠ failed (principle 15)', () => {
 describe('reading a chat (D11)', () => {
   it('opening a chat row marks it read exactly once, and the row stays selected, drawn read', async () => {
     const threads = [thread('t1', { unread: 2, last_message_at: iso(1) }), thread('t2', { unread: 3, last_message_at: iso(20) })]
-    const w = await mountInbox({ threads }, { query: { tab: 'unread' } })
-    // Desktop auto-selects the first row — and that is NOT a read.
-    expect(router.currentRoute.value.query.item).toBe('thread:t1')
-    expect(w.emitted('mark-read')).toBeUndefined()
+    const markRead = vi.fn(async () => true)
+    const w = await mountInbox({ threads, markRead }, { query: { tab: 'unread' } })
+    // Desktop previews the first row — not in the URL, and NOT a read (§3g S5).
+    expect(router.currentRoute.value.query.item).toBeUndefined()
+    expect(w.find('[data-testid="inbox-row-thread:t1"]').attributes('aria-current')).toBe('true')
+    expect(markRead).not.toHaveBeenCalled()
 
     await w.find('[data-testid="inbox-row-thread:t2"]').trigger('click')
     await flushPromises()
-    expect(w.emitted('mark-read')).toEqual([['thread', 't2']])
+    expect(markRead.mock.calls).toEqual([['thread', 't2']])
     expect(router.currentRoute.value.query.item).toBe('thread:t2')
 
     // The shell zeroes the count: the row leaves Unread's membership but stays
@@ -210,7 +212,7 @@ describe('reading a chat (D11)', () => {
     expect(row.exists()).toBe(true)
     expect(row.attributes('aria-current')).toBe('true')
     expect(has(w, 'inbox-row-read-thread:t2')).toBe(true)
-    expect(w.emitted('mark-read')).toHaveLength(1)
+    expect(markRead).toHaveBeenCalledTimes(1)
   })
 
   it('the pane reads the chat once, with the bounded history window', async () => {
@@ -355,6 +357,70 @@ describe('rows keep their place for one tab visit (§3g S1)', () => {
   })
 })
 
+describe('a chat is read only after the pane has rendered it (§3g S5, D-3)', () => {
+  // A deferred promise, so a read can be held open mid-test.
+  const deferred = () => { let resolve, reject; const p = new Promise((r, j) => { resolve = r; reject = j }); return { p, resolve, reject } }
+
+  it('an explicit open marks read once history, deliverables and every payload have settled', async () => {
+    const hist = deferred()
+    const pay = deferred()
+    store.fetchHistory = vi.fn(() => hist.p)
+    store.fetchSessionDeliverablesStrict = vi.fn(async () => [{ id: 'r1', report_type: 'summary', title: 'R', created_at: iso(1) }])
+    store.fetchAgentReport = vi.fn(() => pay.p)
+    const markRead = vi.fn(async () => true)
+    const threads = [thread('t1', { unread: 2, last_message_at: iso(1) }), thread('t2', { unread: 1, last_message_at: iso(9) })]
+    const w = await mountInbox({ threads, markRead }, { query: { tab: 'unread' } })
+    await w.find('[data-testid="inbox-row-thread:t2"]').trigger('click')
+    await flushPromises()
+    expect(markRead).not.toHaveBeenCalled() // history still in flight
+    hist.resolve({ messages: [{ id: 'm1', role: 'assistant', content: 'hi' }] })
+    await flushPromises()
+    expect(markRead).not.toHaveBeenCalled() // the deliverable's payload still in flight
+    pay.resolve({ payload: { summary: 'ok' } })
+    await flushPromises()
+    expect(markRead).toHaveBeenCalledTimes(1)
+    expect(markRead).toHaveBeenCalledWith('thread', 't2')
+  })
+
+  it('a payload read that fails leaves the chat unread, with the error in the pane and Mark read to hand', async () => {
+    store.fetchSessionDeliverablesStrict = vi.fn(async () => [{ id: 'r1', report_type: 'summary', title: 'R', created_at: iso(1) }])
+    store.fetchAgentReport = vi.fn(async () => { throw new Error('500') })
+    const markRead = vi.fn(async () => true)
+    const w = await mountInbox({ threads: [thread('t1', { unread: 2 })], markRead }, { query: { tab: 'unread', item: 'thread:t1' } })
+    expect(markRead).not.toHaveBeenCalled()
+    expect(w.text()).toContain("Couldn't load this deliverable")
+    const btn = w.find('[data-testid="inbox-pane-mark-read"]')
+    expect(btn.exists()).toBe(true)
+    await btn.trigger('click')
+    await flushPromises()
+    expect(markRead).toHaveBeenCalledWith('thread', 't1')
+  })
+
+  it('the desktop auto-selection is a preview: no ?item=, no read, and the shell is told', async () => {
+    const markRead = vi.fn(async () => true)
+    const w = await mountInbox({ threads: [thread('t1', { unread: 2 })], markRead }, { query: { tab: 'unread' } })
+    expect(router.currentRoute.value.query.item).toBeUndefined()
+    expect(w.find('[data-testid="inbox-row-thread:t1"]').attributes('aria-current')).toBe('true')
+    expect(has(w, 'inbox-pane')).toBe(true)
+    expect(markRead).not.toHaveBeenCalled()
+    expect(w.emitted('update:preview')?.at(-1)).toEqual(['thread:t1'])
+  })
+
+  it('a deep-linked ?item= is an open: read after render', async () => {
+    const markRead = vi.fn(async () => true)
+    await mountInbox({ threads: [thread('t1', { unread: 2 })], markRead }, { query: { tab: 'unread', item: 'thread:t1' } })
+    expect(markRead).toHaveBeenCalledTimes(1)
+    expect(markRead).toHaveBeenCalledWith('thread', 't1')
+  })
+
+  it('a read write that fails says so in the pane', async () => {
+    const markRead = vi.fn(async () => false)
+    const w = await mountInbox({ threads: [thread('t1', { unread: 2 })], markRead }, { query: { tab: 'unread', item: 'thread:t1' } })
+    expect(markRead).toHaveBeenCalledTimes(1)
+    expect(has(w, 'inbox-pane-read-error')).toBe(true)
+  })
+})
+
 describe('answering an ask in the pane (D8)', () => {
   it('goes through store.answerAsk, and the ended ask stays in place until the tab is left (§3g T1)', async () => {
     store.asks = [ask('q1')]
@@ -365,7 +431,9 @@ describe('answering an ask in the pane (D8)', () => {
       return answered
     })
     const w = await mountInbox({}, { query: { tab: 'action' } })
-    expect(router.currentRoute.value.query.item).toBe('ask:q1')
+    // The desktop preview (§3g S5): selected, not in the URL.
+    expect(router.currentRoute.value.query.item).toBeUndefined()
+    expect(w.find('[data-testid="inbox-row-ask:q1"]').attributes('aria-current')).toBe('true')
 
     await w.find('[data-testid="inbox-ask-input-q1"]').setValue('yes, go')
     await w.find('[data-testid="inbox-ask-input-q1"]').element.form.dispatchEvent(new Event('submit'))

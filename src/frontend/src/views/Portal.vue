@@ -333,7 +333,8 @@
           :threads-failed="store.sessionsFailed || previewsFailed"
           :labels="inboxAgentLabels"
           :is-platform="store.isPlatformSession"
-          @mark-read="markRead"
+          :mark-read="markRead"
+          @update:preview="(k) => { inboxPreview = k }"
           @refresh="refreshThreads"
           @open-chat="(url) => router.push(url)"
           @reply="replyInChat"
@@ -927,7 +928,9 @@ const activeAgentPageName = computed(() => route.params.agentName || null)
 // item (`?item=`), never `agents[0]`, and is never written to `activeAgentName`
 // — that would mint a Main (`ensureMainListed`) and retarget the conversation.
 const isInboxRoute = computed(() => isInboxPath(route.path))
-const inboxSelection = computed(() => (isInboxRoute.value ? route.query.item || null : null))
+// §3g S5 (T2): or the Inbox's desktop PREVIEW, which never enters the URL.
+const inboxPreview = ref(null)
+const inboxSelection = computed(() => (isInboxRoute.value ? route.query.item || inboxPreview.value || null : null))
 const inboxVisible = computed(() => inboxBranchVisible({ isInboxRoute: isInboxRoute.value, stageState: stage.value.state }))
 const inboxAgentLabels = computed(() => agentLabels(store.agents))
 const activeAgent = computed(() => {

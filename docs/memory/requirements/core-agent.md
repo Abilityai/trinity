@@ -3544,8 +3544,11 @@ to localStorage in the clear.
 - **The pane (AC 3)**: an ask renders the existing ask card for that one ask (select-option,
   note, Send — never a one-tap Approve) and stays selected after an answer, shown ended in
   place. A chat renders its newest arrivals (from the first unread message) and its
-  deliverables through `ReportRenderer` with the summary fallback. Opening a chat row marks it
-  read; the row keeps its place, drawn read, for the rest of the tab visit (§3g S1: a row that
+  deliverables through `ReportRenderer` with the summary fallback. Opening a chat row (or
+  arriving on its `?item=` deep link) marks it read only AFTER the pane has rendered it —
+  history, deliverables and every deliverable payload on screen (§3g S5, D-3); a failed load
+  leaves it unread, a failed write says so in the pane, and the pane's **Mark read** (shown
+  while the chat has new messages) reads it on demand. The row keeps its place, drawn read, for the rest of the tab visit (§3g S1: a row that
   leaves any tab stays as a ghost — a chat drawn read, an ask drawn ended — and a poll never
   re-sorts; leaving the tab, clicking it again or a completed Mark all read starts a new visit). **Open
   in chat** / **Reply in chat** open the chat at the first arrival (`?anchor=`), with the
@@ -3561,8 +3564,9 @@ to localStorage in the clear.
   banner above the chats, never a failed All (§3g S3 / A11).
 - **Phone**: list and pane are successive full-width states with an explicit Back (Esc too);
   nothing is auto-selected, so the landing starts no agent feed.
-  On desktop the tab's first row is auto-selected (the rail column does not pop in on the
-  first click), but an auto-selection is never a read: only an explicit open marks a chat read.
+  On desktop the tab's first row is previewed (the rail column does not pop in on the first
+  click); the preview is never a read and never enters the URL — `?item=` holds only what the
+  reader opened (§3g S5, T2).
 - **Known properties (stated, not bugs)**:
   - A viewer who has never read anything has no baseline, so nothing counts for them — a first
     deliverable included (the inherited #557 rule).
