@@ -481,13 +481,21 @@
         </div>
         </details>
       </BaseCard>
+      <!-- ent#610 PR A2 §3g B1: Work is a platform-door tab, so a client is
+           sent to the Inbox's Action narrowed to this agent (chatAsksElsewhere). -->
       <p
-        v-if="chatAsks.elsewhere.length"
+        v-if="asksElsewhere"
         class="max-w-[var(--ws-message-max,64rem)] mx-auto pt-1 text-xs"
         data-testid="portal-chat-asks-elsewhere"
       >
-        {{ chatAsks.elsewhere.length }} more {{ chatAsks.elsewhere.length === 1 ? 'ask is' : 'asks are' }} waiting in other chats ·
-        <button type="button" class="text-action-primary-600 dark:text-action-primary-400 hover:underline" @click="emit('open-work')">Open in Work</button>
+        {{ asksElsewhere.text }} ·
+        <router-link
+          v-if="asksElsewhere.to"
+          :to="asksElsewhere.to"
+          class="text-action-primary-600 dark:text-action-primary-400 hover:underline"
+          data-testid="portal-chat-asks-open-inbox"
+        >{{ asksElsewhere.action }}</router-link>
+        <button v-else type="button" class="text-action-primary-600 dark:text-action-primary-400 hover:underline" @click="emit('open-work')">{{ asksElsewhere.action }}</button>
       </p>
     </div>
 
@@ -818,7 +826,7 @@ import PortalStarButton from './PortalStarButton.vue'
 import PortalEditableTitle from './PortalEditableTitle.vue'
 import PortalChatTabs from './PortalChatTabs.vue'
 import { newChatHotkeyLabel, MAIN_TAB_LABEL, composerAvailabilityNotice, assistantRow, replyFromHistory, replyBaseline, readReplyBaseline } from './portalUtils'
-import { splitChatAsks, pinnedAskIds, chatAsksLabel } from './portalUtils'
+import { splitChatAsks, pinnedAskIds, chatAsksLabel, chatAsksElsewhere } from './portalUtils'
 import { usePortalFileDrop, attachmentState } from '@/composables/usePortalFileDrop'
 import { useStickToBottom } from '@/composables/useStickToBottom'
 import { useConversationAnchor } from '@/composables/useConversationAnchor'
@@ -1054,6 +1062,9 @@ watch(() => chatAsks.value.here.filter((a) => a.status === 'pending').map((a) =>
 }, { immediate: true })
 watch(currentSessionId, () => { seenPendingAsks.value = new Set(); asksOpen.value = false })
 const chatAskIds = computed(() => pinnedAskIds(chatAsks.value.here, seenPendingAsks.value))
+const asksElsewhere = computed(() => chatAsksElsewhere({
+  n: chatAsks.value.elsewhere.length, agentName: props.agent?.name, isPlatform: store.isPlatformSession === true,
+}))
 const chatAsksPending = computed(() => chatAsks.value.here.filter((a) => a.status === 'pending').length)
 
 // Archive this conversation and start the agent cold. No confirmation dialog

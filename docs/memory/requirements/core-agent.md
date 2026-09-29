@@ -3580,6 +3580,9 @@ to localStorage in the clear.
   confirm), one chat is read directly. Success is a toast ("Marked 28 chats read") and a new
   tab visit; a partial failure names how many failed and those chats keep their count (the S4
   rollback) (§3g A9).
+- **A chat's asks point at a door the reader has (§3g B1, PR A2)**: a chat shows only its own
+  asks; the rest of that agent's waiting asks are one line. A platform reader opens the rail's
+  Work tab; a client — who has no Work tab — opens the Inbox's Action narrowed to that agent.
 - **Action by agent (§3g C2, PR A2)**: when two or more agents are waiting on you, Action shows
   a second strip — "All agents", then each agent with its count — and choosing one narrows the
   tab to that agent's asks (`?from=<agent>`, so it survives a reload and can be linked). The

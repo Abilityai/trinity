@@ -1680,6 +1680,26 @@ export function chatAsksLabel(n) {
   return n === 1 ? '1 ask waiting on you' : `${n} asks waiting on you`
 }
 
+// ent#610 PR A2 §3g B1: where the chat's "N more" line leads. Work (the asks'
+// home, round 5) is a PLATFORM-door rail tab — a client's rail never renders
+// it, so the link opened nothing for them. A client goes to the Inbox's Action
+// tab narrowed to this agent (`?from=`, §3g C2), which lists exactly those asks.
+export function chatAsksElsewhere({ n = 0, agentName = null, isPlatform = false } = {}) {
+  if (!n) return null
+  if (isPlatform) {
+    return {
+      text: `${n} more ${n === 1 ? 'ask is' : 'asks are'} waiting in other chats`,
+      action: 'Open in Work',
+      to: null,
+    }
+  }
+  return {
+    text: `${n} more ${n === 1 ? 'ask' : 'asks'} from this agent`,
+    action: 'Open in Inbox',
+    to: { path: WORKSPACE_INBOX, query: { tab: 'action', from: agentName } },
+  }
+}
+
 export function splitChatAsks(asks, { sessionId = null, isMain = false } = {}) {
   const here = []
   const elsewhere = []
