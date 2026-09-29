@@ -44,10 +44,22 @@ claimable by it. Only `docker-compose.hosted.yml` renders a blank
 marketplace (start.sh writes `browser`) — and this endpoint refuses it (403),
 after the #2381 existing-admin check and before any password work. An ABSENT
 variable (the dev compose, ent#49's blank dev install) and `browser` still pass.
+
+#3004 (PROV-018) adds `ADMIN_PASSWORD_SOURCE=instance-id` for the AWS image, where
+Marketplace review rejects an open first-visitor claim: the first admin must prove
+control of the instance with its EC2 instance ID. Provisioning writes that ID to
+`/data/setup-claim` (0600, owner 1000:1000); this router reads it and never
+queries IMDS. The check runs after the existing-admin refusal and before any
+password work, is rate-limited per client IP, fails closed on a missing or empty
+claim file, and answers every failure with one generic 403. The file is deleted
+once setup succeeds. Email is optional on this path only (no PII required).
 """
+import hmac
 import logging
 import os
 import re
+import uuid
+from pathlib import Path
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
 
@@ -58,6 +70,8 @@ from services.system_seed_service import ensure_first_run_seeded
 from services.operator_intake_service import submit_operator_intake
 from utils.password_validation import validate_password_strength, PASSWORD_REQUIREMENTS_MESSAGE
 from utils.admin_identity import admin_username, is_usable_password_hash
+from routers.auth import check_login_rate_limit, record_login_attempt
+from routers.public import _get_client_ip
 
 logger = logging.getLogger(__name__)
 
@@ -66,7 +80,61 @@ logger = logging.getLogger(__name__)
 # verification mail here (a fresh install has no email provider configured).
 _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s.]+$")
 
+# #3004 (PROV-018): the instance-ID claim. Written by provisioning, deleted here
+# after the first admin is created.
+_CLAIM_MODE = "instance-id"
+_SETUP_CLAIM_PATH = Path("/data/setup-claim")
+# The one answer for every claim failure (wrong, missing, or no claim on file),
+# so a response never says which it was.
+_CLAIM_MISMATCH = "That instance ID does not match this server."
+
 router = APIRouter(prefix="/api/setup", tags=["setup"])
+
+
+def _claim_required():
+    """`"instance-id"` when this install's first admin needs the claim, else None."""
+    return _CLAIM_MODE if os.getenv("ADMIN_PASSWORD_SOURCE") == _CLAIM_MODE else None
+
+
+def _normalise_claim(value: str) -> bytes:
+    # Bytes for hmac.compare_digest, which raises TypeError on non-ASCII str.
+    return value.strip().lower().encode()
+
+
+def _check_claim(claim_code, request: Request) -> None:
+    """Refuse (403) unless `claim_code` matches the stored instance ID.
+
+    Per-IP only, on the login bucket: an account-style bucket would be one
+    global key, letting anyone lock the owner out of their own claim.
+    """
+    client_ip = _get_client_ip(request)
+    check_login_rate_limit(client_ip)
+    try:
+        expected = _normalise_claim(_SETUP_CLAIM_PATH.read_text())
+    except (OSError, UnicodeDecodeError):
+        expected = b""
+    if not expected:
+        # Warning, not error: an unauthenticated caller can trigger it at will.
+        logger.warning("Setup claim file missing, empty or unreadable — refusing first-run setup")
+    given = _normalise_claim(claim_code or "")
+    if not expected or not hmac.compare_digest(given, expected):
+        record_login_attempt(client_ip, success=False)
+        raise HTTPException(status_code=403, detail=_CLAIM_MISMATCH)
+    record_login_attempt(client_ip, success=True)
+
+
+def _take_claim() -> Path:
+    """Atomically take the claim file so one request, and only one, proceeds.
+
+    Two requests with the right ID both pass `_check_claim`; `rename` succeeds
+    for exactly one of them. The loser gets the same generic 403.
+    """
+    taken = _SETUP_CLAIM_PATH.with_name(f"{_SETUP_CLAIM_PATH.name}.{uuid.uuid4().hex}")
+    try:
+        _SETUP_CLAIM_PATH.rename(taken)
+    except OSError:
+        raise HTTPException(status_code=403, detail=_CLAIM_MISMATCH)
+    return taken
 
 
 @router.get("/status")
@@ -80,11 +148,14 @@ async def get_setup_status():
           now that setup writes only to SQLite (the Redis-backed setup token was
           removed in trinity-enterprise#49); kept in the response for backward
           compatibility with older frontends.
+        - claim_required: `"instance-id"` when the first admin must also give
+          the EC2 instance ID (#3004), else null. Never carries the value.
     """
     setup_completed = db.get_setting_value('setup_completed', 'false') == 'true'
     return {
         "setup_completed": setup_completed,
         "setup_available": True,
+        "claim_required": _claim_required(),
     }
 
 
@@ -159,6 +230,12 @@ async def set_admin_password(
             ),
         )
 
+    # #3004: the instance-ID claim, before any password work (bcrypt is
+    # deliberately expensive and this route is unauthenticated).
+    claim_mode = _claim_required()
+    if claim_mode:
+        _check_claim(data.claim_code, request)
+
     # Check setup not already completed.
     if db.get_setting_value('setup_completed', 'false') == 'true':
         raise HTTPException(
@@ -185,19 +262,34 @@ async def set_admin_password(
     # Admin email is required (trinity-enterprise#49). Validate the shape up-front
     # (before any writes) so a blank/typo'd value surfaces as a clean 400 rather
     # than half-completing setup. A missing field already 422s at the model layer.
+    # #3004: on the instance-id path a blank email is allowed (AWS review: no PII
+    # required); the admin then signs in with the username + password. A given
+    # email is still shape-checked.
     normalized_email = (data.email or "").strip().lower()
-    if not normalized_email or not _EMAIL_RE.match(normalized_email):
+    if (normalized_email or not claim_mode) and not _EMAIL_RE.match(normalized_email):
         raise HTTPException(status_code=400, detail="A valid admin email is required")
 
-    # Hash the password and update admin user.
-    hashed_password = hash_password(data.password)
+    # #3004: take the claim only now, after every 400 above, so a rejected
+    # password or email leaves it in place for the owner's retry. If the writes
+    # below raise, it is put back for the same reason.
+    taken_claim = _take_claim() if claim_mode else None
+    try:
+        # Hash the password and update admin user.
+        hashed_password = hash_password(data.password)
 
-    # Update admin user's password in database (creates the admin row if absent).
-    # `admin_username()`, not a hardcoded "admin" (#2381): `_ensure_admin_user`
-    # honours ADMIN_USERNAME, so on an `ADMIN_USERNAME=root` install the literal
-    # made this call miss the real admin and INSERT a *second* role='admin'
-    # account (update_user_password upserts) instead of updating the first.
-    db.update_user_password(admin_username(), hashed_password)
+        # Update admin user's password in database (creates the admin row if absent).
+        # `admin_username()`, not a hardcoded "admin" (#2381): `_ensure_admin_user`
+        # honours ADMIN_USERNAME, so on an `ADMIN_USERNAME=root` install the literal
+        # made this call miss the real admin and INSERT a *second* role='admin'
+        # account (update_user_password upserts) instead of updating the first.
+        db.update_user_password(admin_username(), hashed_password)
+    except BaseException:
+        if taken_claim is not None:
+            try:
+                taken_claim.rename(_SETUP_CLAIM_PATH)
+            except OSError as e:
+                logger.warning("Could not restore the setup claim file: %s", type(e).__name__)
+        raise
 
     # Register the operator email as the admin's sign-in identity (#82 Phase 1).
     # No verification email is sent: a fresh install has no email provider
@@ -205,14 +297,25 @@ async def set_admin_password(
     # bind the email to the admin account — the operator can then sign in with
     # email + password instead of the fixed 'admin' username.
     email_registered = False
-    try:
-        db.update_user(admin_username(), {"email": normalized_email})
-        email_registered = True
-    except Exception as e:  # never block setup on a profile write
-        logger.warning("Failed to register admin email at setup: %s", type(e).__name__)
+    if normalized_email:
+        try:
+            db.update_user(admin_username(), {"email": normalized_email})
+            email_registered = True
+        except Exception as e:  # never block setup on a profile write
+            logger.warning("Failed to register admin email at setup: %s", type(e).__name__)
 
     # Mark setup as completed.
     db.set_setting('setup_completed', 'true')
+
+    # #3004: the instance ID stops being a credential once the admin exists.
+    # A failed delete is harmless (the endpoint now refuses before reading it,
+    # and the taken copy is never read again), so it is logged and never fails
+    # setup.
+    if taken_claim is not None:
+        try:
+            taken_claim.unlink(missing_ok=True)
+        except OSError as e:
+            logger.warning("Could not delete the setup claim file: %s", type(e).__name__)
 
     # First-run seeding: the default Cornelius agent (ent#107) plus the default
     # system manifest (trinity-enterprise#124), sequenced under ONE persisted
@@ -228,7 +331,8 @@ async def set_admin_password(
     # Scheduled as a background task so it runs AFTER the response is sent — it
     # can never delay or break setup. The service is idempotent (once-per-install)
     # and swallows all errors (air-gapped / blocked / offline).
-    if data.consent_updates:
+    # The intake sends the email, so it never runs without one (#3004).
+    if data.consent_updates and normalized_email:
         background_tasks.add_task(
             submit_operator_intake,
             email=normalized_email,
@@ -238,4 +342,5 @@ async def set_admin_password(
             use_case=(data.use_case or "").strip() or None,
         )
 
-    return {"success": True, "email_registered": email_registered}
+    # `username` lets the page sign in when no email was given (#3004).
+    return {"success": True, "email_registered": email_registered, "username": admin_username()}

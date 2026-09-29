@@ -3717,6 +3717,12 @@ class DatabaseManager:
     def list_operator_queue_items(self, **kwargs):
         return self._operator_queue_ops.list_items(**kwargs)
 
+    def count_operator_queue_items(self, **kwargs):
+        return self._operator_queue_ops.count_items(**kwargs)
+
+    def list_operator_queue_agent_names(self, **kwargs):
+        return self._operator_queue_ops.list_item_agent_names(**kwargs)
+
     def respond_to_operator_queue_item(self, item_id, response, response_text,
                                         responded_by_id, responded_by_email,
                                         divergence_acknowledged=False):

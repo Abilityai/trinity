@@ -11,6 +11,16 @@
       "description": "Outbound shared-file detect_mime() classifies a ZIP as application/zip when libmagic 5.46 reports application/octet-stream from a buffer; with real libmagic the buffer result equals libmagic's file-path result across 12 variants (deflated/stored/tiny/empty/zip64 ZIPs, DOCX/XLSX/PPTX, JAR, EPUB, ODT, APK), so ZIP-based formats keep their specific type; non-ZIP octet-stream unchanged, works without python-magic, executables still blocked; plus the shared utils.zip_signature helper."
     },
     {
+      "file": "unit/test_3079_base_image_codename_pin.py",
+      "feature": "#3079",
+      "added": "2026-09-29",
+      "categories": [
+        "backend",
+        "infrastructure"
+      ],
+      "description": "Static guard: every image Dockerfile (backend, scheduler, base-image) builds FROM a python tag that names a Debian codename (or a digest), so Docker Hub cannot move the base to a new Debian release under an unrelated rebuild (#1823 tzdata, #3046 libmagic 5.46); asserts that a codename is named, never which one. backend and scheduler must name the same codename (one tz database for the schedule validator and executor, #1472). Parser handles --platform, AS stages, alpineX.Y and digest pins."
+    },
+    {
       "file": "unit/test_human_only_principals.py",
       "feature": "#2996",
       "added": "2026-09-28",
@@ -3649,6 +3659,26 @@
         "database"
       ],
       "description": "Skill sets — a named slice of the library assigned as a unit (ent#530, absorbs ent#342). The catalog parser (both forms, total, every problem a code, partial on a missing member, bounds); plan_member_rows including the FAIL-CLOSED rule (an unresolvable set removes nothing); sets read through the guarded catalog.yaml over a real git repo; materialised rows over a real SQLite file (overlap — each assignment stands on its own, unassign keeps individual and other-set members, upstream add/remove, the legacy bulk-PUT round trip neither drops nor promotes set members); the service (custom-wins precedence, shadowing, member provenance, named 404/422 refusals, the honest per-agent status with prerequisites probed only while running); both migration tracks executed plus the single Alembic head; the CASCADE AgentRef; the routes through a real FastAPI app (static-before-catch-all, retained-via-set answer, a skills-only PUT leaves sets alone); fleet re-inject prunes a member dropped upstream; the CLAUDE.md 'via <set>' annotation. Mutations of the fail-closed rule and the PUT keep-derived rule each red."
+    },
+    {
+      "file": "unit/test_ent708_settings_json_guard.py",
+      "feature": "trinity-enterprise#708",
+      "added": "2026-09-25",
+      "categories": [
+        "agent-server",
+        "git"
+      ],
+      "description": "`.claude/settings.json` is kept out of a commit by CONTENT, not name (ent#708): the agent server's _guard_container_only_settings and the backend shell twin CONTAINER_ONLY_SETTINGS_GUARD run the same matrix on real repos (clean file commits; harmful untracked stays out and on disk; harmful edit of a clean tracked file restores the clean copy; a harmful copy already in HEAD is untracked; fresh repo; no-op); the heartbeat end to end (a harmful file never reaches the remote and the next cycle makes no empty commit; a clean file syncs; a legacy committed copy is deleted from the remote); the guard sits between add and commit in sync_to_github and _run_auto_sync_once and after both `git add .` in initialize; the pattern is gone from the canonical list. 11 of 19 red with the fix reverted."
+    },
+    {
+      "file": "unit/test_ent705_cli_deploy_kind.py",
+      "feature": "trinity-enterprise#705",
+      "added": "2026-09-29",
+      "categories": [
+        "cli",
+        "git"
+      ],
+      "description": "`trinity deploy --repo` creates a deployment (trinity-enterprise#705): the CLI's POST /api/agents payload carries kind \"deployment\", so deploying a codebase never takes the agent default's working branch + auto-push. Static (AST) because the unit job does not install the CLI's own deps. The ownership rule itself (catalog template / owner != token login stays pull-only) is in test_1484_create_agent_characterization.py."
     }
   ]
 }
