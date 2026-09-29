@@ -1,7 +1,7 @@
 """Static guard: images that resolve timezones ship a complete tz database (#1823).
 
-`docker/{backend,scheduler}/Dockerfile` are built ``FROM python:3.13-slim`` with
-**no Debian codename pin**. Docker Hub repointed that tag from bookworm to
+`docker/{backend,scheduler}/Dockerfile` were built ``FROM python:3.13-slim`` with
+**no Debian codename pin** (pinned since #3079). Docker Hub repointed that tag from bookworm to
 trixie, and trixie split the IANA *backward-compatibility links* out of `tzdata`
 into a separate `tzdata-legacy` package. Nobody changed a line of Trinity; the
 images simply stopped shipping `/usr/share/zoneinfo/Europe/Kiev`.
@@ -159,8 +159,8 @@ def test_tz_resolving_image_declares_the_tzdata_wheel(rel: str) -> None:
     `zoneinfo` reads the SYSTEM database first and falls back to the wheel only
     for keys the system lacks, so with rule 1 satisfied the wheel is inert in
     production. It is here because the recurrence vector for #1823 is a base
-    image moving underneath us: `python:3.13-slim` carries no codename pin, and
-    an apt-only fix is Debian-shaped. The wheel makes the capability hold
+    image moving underneath us: `python:3.13-slim` carried no codename pin until
+    #3079, and an apt-only fix is Debian-shaped. The wheel makes the capability hold
     regardless of the base.
     """
     assert "tzdata" in _declared_package_names(rel), (
