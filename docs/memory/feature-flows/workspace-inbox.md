@@ -162,6 +162,7 @@ table, no migration. The report publish may mint the addressee's Main
 | Roster unreadable during `?previews=true` | 5xx (fail loud), never a 200 with previews dropped |
 | Deliverables read fails in the pane | `LoadFailed` in the pane, never "no deliverables" |
 | Mark all read partly fails | `InlineError` naming the failed count; those rows keep "N new" |
+| A single read write fails (any of `Portal.vue::markRead`'s 7 callers) | the optimistic zero is rolled back — only while the entry is still the one that call wrote (`portalUtils.optimisticRead` / `rollbackRead`, compared via `toRaw`) — and the call resolves `false`; it never rejects (§3g S4) |
 | First unread message outside the 50-message window | "N earlier arrivals — Open in chat" |
 | `?anchor=` target not found | bottom of the chat + "That message is further up"; key stripped |
 | Roster error / empty roster on `/workspace/inbox` | the existing bare-stage copy, not the Inbox |

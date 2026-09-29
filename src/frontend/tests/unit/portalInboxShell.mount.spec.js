@@ -205,3 +205,41 @@ describe('D13 twin — a failed previews read is not silent', () => {
     expect(inbox(w).props('threadsFailed')).toBe(false)
   })
 })
+
+describe('§3g S4 — a failed read write is rolled back', () => {
+  async function bootUnread(strict) {
+    arm()
+    store.fetchChatState = vi.fn(async (opts) => (opts
+      ? { state: { 'thread:t1': { kind: 'thread', id: 't1', unread: 3 } }, previews: {} }
+      : { 'thread:t1': { kind: 'thread', id: 't1', unread: 3 } }))
+    store.markChatReadStrict = vi.fn(strict)
+    const { w } = await boot('/workspace/inbox?tab=unread')
+    const inbox = w.findComponent({ name: 'PortalInbox' })
+    const unreadOf = () => (inbox.props('threads').find((t) => t.id === 't1') || {}).unread
+    return { w, inbox, unreadOf }
+  }
+
+  it('restores the count and resolves false — it never rejects', async () => {
+    const { inbox, unreadOf } = await bootUnread(async () => { throw new Error('500') })
+    expect(unreadOf()).toBe(3)
+    const readFn = inbox.props('markRead')
+    let settled
+    if (readFn) settled = readFn('thread', 't1')
+    else inbox.vm.$emit('mark-read', 'thread', 't1')
+    await flushPromises()
+    expect(store.markChatReadStrict).toHaveBeenCalledWith('thread', 't1')
+    expect(unreadOf()).toBe(3)
+    if (settled) await expect(settled).resolves.toBe(false)
+  })
+
+  it('a write that lands keeps the zero and resolves true', async () => {
+    const { inbox, unreadOf } = await bootUnread(async () => {})
+    const readFn = inbox.props('markRead')
+    let settled
+    if (readFn) settled = readFn('thread', 't1')
+    else inbox.vm.$emit('mark-read', 'thread', 't1')
+    await flushPromises()
+    expect(unreadOf()).toBe(0)
+    if (settled) await expect(settled).resolves.toBe(true)
+  })
+})

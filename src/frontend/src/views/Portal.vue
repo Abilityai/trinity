@@ -743,7 +743,7 @@
 </template>
 
 <script setup>
-import { ref, computed, watch, onMounted, onBeforeUnmount, onUnmounted, nextTick } from 'vue'
+import { ref, computed, watch, onMounted, onBeforeUnmount, onUnmounted, nextTick, toRaw } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useClientPortalStore, MULTI_AGENT_UNAVAILABLE, PLATFORM_LOGIN_ROUTE } from '@/stores/clientPortal'
 import { useAuthStore } from '@/stores/auth'
@@ -803,6 +803,8 @@ import {
   // ent#557: the SAME sum the sidebar renders, so the tab and the rows cannot
   // disagree about the number.
   totalUnread,
+  // trinity-enterprise#610 §3g S4: the read's optimistic zero and its rollback.
+  optimisticRead, rollbackRead,
 } from '@/components/portal/portalUtils'
 // ent#557: the tab title's unread half. The router owns the label; this pushes
 // the count. See `utils/tabTitle.js` for why neither writes `document.title`.
@@ -1990,14 +1992,32 @@ function onGlobalKeydown(e) {
 // `GET /chat-state` racing the cursor UPSERT overwrites the optimistic zero
 // with a stale count, and the badge comes back on the conversation the user is
 // reading — possibly for minutes, until the next refresh.
-function markRead(kind, id) {
-  if (!id) return Promise.resolve()
+// trinity-enterprise#610 §3g S4: a failed write ROLLS BACK the zero — only
+// while the entry is still the one this call wrote (`rollbackRead`) — and the
+// promise resolves `false`. It NEVER rejects: seven callers use it, two of
+// them `.then(refreshThreads)`, and a rejection would skip that refresh.
+async function markRead(kind, id) {
+  if (!id) return true
   const key = `${kind}:${id}`
-  if (chatState.value[key]?.unread) {
-    chatState.value = { ...chatState.value, [key]: { ...chatState.value[key], unread: 0 } }
+  const { state, written } = optimisticRead(chatState.value, key)
+  if (written) {
+    chatState.value = state
     threads.value = decorate(threads.value)
   }
-  return store.markChatRead(kind, id)
+  try {
+    await store.markChatReadStrict(kind, id)
+    return true
+  } catch {
+    // `toRaw`: the guard is an IDENTITY check, and a reactive ref hands back
+    // a proxy of the entry, never the object this call wrote.
+    const now = toRaw(chatState.value)
+    const back = rollbackRead(now, key, written)
+    if (back !== now) {
+      chatState.value = back
+      threads.value = decorate(threads.value)
+    }
+    return false
+  }
 }
 
 // trinity-enterprise#610: arriving on the Inbox from another stage fetches its

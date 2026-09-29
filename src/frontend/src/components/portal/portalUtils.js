@@ -2086,3 +2086,21 @@ export function replyFromHistory(messages, baseline) {
     myRating: last.my_rating || null,
   }
 }
+
+// trinity-enterprise#610 §3g S4 — the read's optimistic zero, and its rollback.
+// `optimisticRead` zeroes a chat's unread and returns the ENTRY it wrote;
+// `rollbackRead` restores the count only while that very entry is still in
+// the state. Identity, not value: a refresh that replaced the state (the server
+// has spoken since) or a second read that wrote its own zero is left alone, so
+// a late failure can never resurrect a count someone else already settled.
+export function optimisticRead(state, key) {
+  const before = state && state[key]
+  if (!before || !(Number(before.unread) > 0)) return { state, written: null }
+  const entry = { ...before, unread: 0 }
+  return { state: { ...state, [key]: entry }, written: { entry, before } }
+}
+
+export function rollbackRead(state, key, written) {
+  if (!written || !state || state[key] !== written.entry) return state
+  return { ...state, [key]: written.before }
+}
