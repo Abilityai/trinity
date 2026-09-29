@@ -273,6 +273,25 @@ overflows one tab too late); it enters the **re-measure key** (`tabsSignature`),
 or toggling it repacks nothing; and in the overflow-menu row it gets its **own**
 `v-if`, never another arm of the `badge`/`signal` chain (#2794's `v-else` lesson).
 
+**Opt-in counter and tab semantics (ent#610 §3g L1).** Three fields, each off by default
+and each rendering the pre-existing DOM byte-for-byte when off:
+- `tab.badgeVariant` — `success` (default: the tinted pill) · `urgent` · `primary`. The
+  last two are **solid white on the 700 tier** (white on status-urgent-700 5.18:1, on
+  action-primary-700 7.90:1): a *counter* is solid, a per-row *fact* is tinted (the
+  counter-vs-label rule). One class arm per variant, never two colours of a property in
+  one string (#2662).
+- `tab.badgeLabel` — the tab's `aria-label` when the bare count would be read as
+  "Action 21"; the badge is then `aria-hidden`. Neither field changes a tab's width, so
+  neither enters `tabsSignature`.
+- `tablistLabel` (prop) — the inline tabs render inside a `role="tablist"` of that name,
+  each a `role="tab"` with `aria-selected` and a roving tabindex; Arrow Left/Right wrap,
+  Home/End jump, and activation is **manual** (arrows move focus; Enter/Space selects).
+  The More trigger is not a tab and stays outside the tablist. Off, the wrapper is not
+  rendered at all (a functional component returns its slot bare). Flipping the default,
+  and retargeting the e2e specs that address tabs as buttons, is #3056.
+
+Guarded by `tests/unit/overflowTabsTablist.mount.spec.js`.
+
 ### Data table
 
 **Recipe:** header — chrome bg, mono 10.5 caps tracking .1em, weight 500, tertiary ink, `position: sticky; top: 0` while scrolling · rows ≥40px (padding 10×14), 1px dividers (gray-200 / gray-750), hover row → chrome bg · status cells use BaseBadge · numbers right-aligned, mono 12.5, tabular-nums.
