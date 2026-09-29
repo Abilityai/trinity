@@ -38,6 +38,7 @@
         <span class="ml-2.5 min-w-0">
           <span class="block text-sm font-medium text-gray-900 dark:text-white">{{ opt.title }}</span>
           <span class="mt-0.5 block text-xs text-gray-500 dark:text-gray-400">{{ opt.desc }}</span>
+          <span v-if="opt.note" class="mt-0.5 block text-xs text-gray-500 dark:text-gray-400">{{ opt.note }}</span>
         </span>
       </label>
     </div>
@@ -55,7 +56,8 @@ const OPTIONS = [
   {
     value: 'agent',
     title: 'An agent',
-    desc: 'The repository is this agent — its memory, skills and state. It gets its own branch and saves its work there. That needs your own GitHub token (Settings) with push access to this repository — the platform-wide token does not count; without one it is created pull-only; to keep an agent built from someone else\'s template, choose Fork instead.',
+    desc: 'The repository is this agent — its memory, skills and state. It saves its work to its own branch.',
+    note: 'Needs a repository you own and your own GitHub token (Settings), or it is created pull-only. For someone else\'s template, choose Fork.',
   },
   {
     value: 'deployment',

@@ -138,24 +138,41 @@ describe('the create flow asks what the repository is', () => {
 
 describe('GitModeNotice', () => {
   it('says plainly when an agent was created pull-only, with the reason', () => {
-    const w = mount(GitModeNotice, { props: { gitMode: { kind: 'agent', source_mode: true, reason: 'no GitHub token: pull-only' } } })
+    const w = mount(GitModeNotice, { props: { gitMode: { kind: 'agent', source_mode: true, pushes: false, reason: 'no GitHub token: pull-only' } } })
     expect(w.text()).toContain('Created pull-only')
     expect(w.text()).toContain('no GitHub token: pull-only')
   })
 
   it('names an agent with its own branch, and a deployment', () => {
-    const agent = mount(GitModeNotice, { props: { gitMode: { kind: 'agent', source_mode: false, reason: 'the token can push: working branch' } } })
+    const agent = mount(GitModeNotice, { props: { gitMode: { kind: 'agent', source_mode: false, pushes: true, reason: 'the token can push: working branch' } } })
     expect(agent.text()).toContain('its own branch')
-    const dep = mount(GitModeNotice, { props: { gitMode: { kind: 'deployment', source_mode: true, reason: 'a deployment of a codebase: pull-only' } } })
+    const dep = mount(GitModeNotice, { props: { gitMode: { kind: 'deployment', source_mode: true, pushes: false, reason: 'a deployment of a codebase: pull-only' } } })
     expect(dep.text()).toContain('A deployment')
     expect(dep.text()).not.toContain('Created pull-only')
+  })
+
+  // PR #3022 review: fork-to-own is source_mode=true (it tracks its fork's
+  // default branch) but PUSHES there — deciding "pull-only" from source_mode
+  // told every fork-to-own user their work would not be kept.
+  it('does not call a fork-to-own agent pull-only: it pushes to its own repo', () => {
+    const w = mount(GitModeNotice, { props: { gitMode: { kind: 'agent', source_mode: true, pushes: true, reason: 'fork-to-own: the agent owns its fork' } } })
+    expect(w.text()).not.toContain('Created pull-only')
+    expect(w.text()).not.toContain('never pushes')
+    expect(w.text()).toContain('owns its repository')
+    expect(w.find('[data-testid="git-mode-notice"]').classes().join(' ')).not.toContain('status-warning')
   })
 })
 
 describe('GitBindingBadge', () => {
-  it('names the binding, and renders nothing when it is unknown', () => {
-    expect(mount(GitBindingBadge, { props: { sourceMode: false } }).text()).toBe('Agent · own branch')
-    expect(mount(GitBindingBadge, { props: { sourceMode: true } }).text()).toBe('Pull-only')
-    expect(mount(GitBindingBadge, { props: { sourceMode: null } }).find('[data-testid="git-binding-badge"]').exists()).toBe(false)
+  it('names the binding from whether the agent pushes, and renders nothing when it is unknown', () => {
+    expect(mount(GitBindingBadge, { props: { pushes: true, sourceMode: false } }).text()).toBe('Agent · own branch')
+    expect(mount(GitBindingBadge, { props: { pushes: false, sourceMode: true } }).text()).toBe('Pull-only')
+    expect(mount(GitBindingBadge, { props: { pushes: null, sourceMode: true } }).find('[data-testid="git-binding-badge"]').exists()).toBe(false)
+  })
+
+  it('names a fork-to-own agent as owning its repo, not pull-only', () => {
+    const w = mount(GitBindingBadge, { props: { pushes: true, sourceMode: true } })
+    expect(w.text()).toBe('Agent · own repo')
+    expect(w.attributes('title')).not.toContain('never pushes')
   })
 })

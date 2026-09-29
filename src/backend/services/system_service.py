@@ -1191,6 +1191,20 @@ def export_manifest(system_name: str, agents: List[Dict]) -> str:
         if agent.get('resources'):
             config["resources"] = agent['resources']
 
+        # trinity-enterprise#704: `kind` round-trips (PR #3022 review). `kind`
+        # is not persisted, so it is read back from the binding: a pull-only
+        # git member (source mode, not auto-pushing — fork-to-own is source
+        # mode AND auto-pushes) exports as a deployment, so a redeploy never
+        # hands it the agent default's working branch + auto-push. An agent
+        # that pushes, or has no git binding, exports no `kind` (the default).
+        try:
+            git_config = db.get_git_config(full_name)
+            if (git_config is not None and git_config.source_mode
+                    and not getattr(git_config, "auto_sync_enabled", False)):
+                config["kind"] = "deployment"
+        except Exception as e:
+            logger.warning(f"Failed to get git config for {full_name}: {e}")
+
         # Get folders config from database
         try:
             folder_config = db.get_agent_folder_config(full_name)

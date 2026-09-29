@@ -2,22 +2,38 @@
   GitBindingBadge.vue (trinity-enterprise#704)
 
   On the agent's Git panel: the binding the create-time choice produced —
-  its own branch (an agent that saves its work) or pull-only (a deployment, or
-  an agent whose token could not push). `sourceMode` is `db_config.source_mode`.
+  whether the agent saves its work to GitHub (its own branch, or its own repo
+  after fork-to-own) or is pull-only (a deployment, or an agent whose token
+  could not push). Keyed on `pushes` (`db_config.pushes`), never on
+  `source_mode` alone: a fork-to-own agent is source-mode AND pushes (PR #3022
+  review). `sourceMode` only names which of the two pushing shapes it is.
 -->
 <template>
   <span
-    v-if="sourceMode !== null && sourceMode !== undefined"
+    v-if="pushes !== null && pushes !== undefined"
     class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-gray-100 text-gray-700 dark:bg-gray-700 dark:text-gray-300"
-    :title="sourceMode
-      ? 'Pull-only: this agent tracks the branch and never pushes to it.'
-      : 'This agent writes its own branch and saves its work there.'"
+    :title="title"
     data-testid="git-binding-badge"
-  >{{ sourceMode ? 'Pull-only' : 'Agent · own branch' }}</span>
+  >{{ label }}</span>
 </template>
 
 <script setup>
-defineProps({
+import { computed } from 'vue'
+
+const props = defineProps({
+  pushes: { type: Boolean, default: null },
   sourceMode: { type: Boolean, default: null },
+})
+
+const label = computed(() => {
+  if (!props.pushes) return 'Pull-only'
+  return props.sourceMode ? 'Agent · own repo' : 'Agent · own branch'
+})
+
+const title = computed(() => {
+  if (!props.pushes) return 'Pull-only: this agent tracks the branch and never pushes to it.'
+  return props.sourceMode
+    ? 'This agent owns its repository and saves its work to its default branch.'
+    : 'This agent writes its own branch and saves its work there.'
 })
 </script>

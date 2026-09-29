@@ -861,9 +861,13 @@
   - the create response's `git_mode` is shown after creation, and it says so
     plainly when an agent was created pull-only, with the reason.
   - the Git panel shows the binding as a badge (`Agent · own branch` /
-    `Pull-only`), from `db_config.source_mode` on the git status.
+    `Agent · own repo` / `Pull-only`). The badge and the post-create notice key
+    on whether the agent **pushes** (`git_mode.pushes`, `db_config.pushes`),
+    never on `source_mode` alone: a fork-to-own agent is source-mode and
+    pushes to its own repo.
   - a system manifest takes `kind` per agent; an unset `kind` uses the create
-    default.
+    default. Export writes `kind: deployment` for a pull-only git member, so a
+    deployment stays pull-only across export → redeploy.
 - **Not changed:**
   - existing agents (the default applies to new creates; migration is per
     agent and explicit — runbook `docs/migrations/AGENT_WORKING_BRANCH_DEFAULT_2026-09.md`)

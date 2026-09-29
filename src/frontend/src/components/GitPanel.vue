@@ -207,7 +207,7 @@
                   {{ gitStatus.branch }}
                 </span>
                 <!-- trinity-enterprise#704: own branch vs pull-only -->
-                <GitBindingBadge :source-mode="gitStatus.db_config?.source_mode ?? null" />
+                <GitBindingBadge :pushes="gitStatus.db_config?.pushes ?? null" :source-mode="gitStatus.db_config?.source_mode ?? null" />
                 <span v-if="gitStatus.ahead > 0" class="text-xs text-status-success-600">
                   {{ gitStatus.ahead }} ahead
                 </span>

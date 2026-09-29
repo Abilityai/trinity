@@ -126,6 +126,14 @@ async def get_git_status(
             # trinity-enterprise#704: the binding, so the Git panel can say
             # whether this agent writes its own branch or is pull-only.
             "source_mode": bool(git_config.source_mode),
+            # PR #3022 review: whether the agent saves its work to GitHub. Not
+            # `not source_mode`: a fork-to-own agent is source-mode on its own
+            # fork AND auto-pushes there. A source-mode row with auto-sync on is
+            # that population (creation turns auto-sync on for a source-mode
+            # agent only when it forked); a working branch pushes even while
+            # its auto-sync is paused (operator Push).
+            "pushes": (not git_config.source_mode) or bool(
+                getattr(git_config, "auto_sync_enabled", False)),
         }
 
     return status

@@ -633,6 +633,14 @@ def export_manifest(system_name: str, agents: List[Dict]) -> str:
     """
 ```
 
+**`kind` round-trip (trinity-enterprise#704, PR #3022 review)**: `kind` is not
+persisted, so export reads it back from the git binding. A pull-only git member
+(`source_mode` on, auto-sync off) exports `kind: deployment`, so a redeploy never
+hands it the agent default's working branch and auto-push. A member that pushes
+(a working branch, or fork-to-own: source mode on its own fork with auto-sync on)
+or has no git binding exports no `kind`. An agent that asked for `agent` but fell
+back to pull-only exports as a deployment too — the conservative direction.
+
 **Permission Detection Logic**:
 - Check first agent's permissions
 - If matches full-mesh pattern (can call all other agents), verify all agents
