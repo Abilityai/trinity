@@ -91,6 +91,7 @@ from services.sync_waiter import (
     wait_for_fan_out_batch,
 )
 from services.task_execution_service import get_task_execution_service
+from db.write_params import ExecutionResult, TaskExecutionFields
 
 logger = logging.getLogger(__name__)
 
@@ -472,16 +473,18 @@ class FanOutService:
                     agent_name=agent_name,
                     message=task.message,
                     triggered_by="fan_out",
-                    source_user_id=source_user_id,
-                    source_user_email=source_user_email,
-                    source_agent_name=source_agent_name,
-                    source_mcp_key_id=source_mcp_key_id,
-                    source_mcp_key_name=source_mcp_key_name,
-                    model_used=model,
-                    fan_out_id=fan_out_id,
-                    fan_out_task_id=task.id,
-                    subscription_id=subscription_id,
-                    chain_depth=chain_depth,
+                    fields=TaskExecutionFields(
+                        source_user_id=source_user_id,
+                        source_user_email=source_user_email,
+                        source_agent_name=source_agent_name,
+                        source_mcp_key_id=source_mcp_key_id,
+                        source_mcp_key_name=source_mcp_key_name,
+                        model_used=model,
+                        fan_out_id=fan_out_id,
+                        fan_out_task_id=task.id,
+                        subscription_id=subscription_id,
+                        chain_depth=chain_depth,
+                    ),
                 )
                 if execution is None:
                     logger.error(
@@ -554,7 +557,9 @@ class FanOutService:
             won = db.update_execution_status(
                 execution_id=execution_id,
                 status=TaskExecutionStatus.FAILED,
-                error=error_text,
+                result=ExecutionResult(
+                    error=error_text,
+                ),
             )
             if won:
                 # #1804: a terminal writer owns closing the paired dispatch activity.
