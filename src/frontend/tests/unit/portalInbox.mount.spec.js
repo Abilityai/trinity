@@ -340,10 +340,28 @@ describe('long lists page: 50, then Show more (§3g SM / C4)', () => {
     expect(rowCount(w)).toBe(100)
   })
 
-  it('a ?item= at row 72 is shown, selected', async () => {
+  it('a ?item= at row 72 is shown, selected, and scrolled to (round 3)', async () => {
+    const scrolled = []
+    const orig = Element.prototype.scrollIntoView
+    Element.prototype.scrollIntoView = function () { scrolled.push(this.getAttribute('data-inbox-row')) }
+    try {
+      const w = await mountInbox({ threads: many(120) }, { query: { tab: 'unread', item: 'thread:t71' } })
+      expect(rowCount(w)).toBe(72)
+      expect(w.find('[data-testid="inbox-row-thread:t71"]').attributes('aria-current')).toBe('true')
+      // It sat ~6,000px below the visible list before: the reader saw a pane
+      // with no idea which row it was.
+      expect(scrolled).toContain('thread:t71')
+    } finally {
+      Element.prototype.scrollIntoView = orig
+    }
+  })
+
+  it('the window a deep link widened stays wide when the reader picks another row (round 3)', async () => {
     const w = await mountInbox({ threads: many(120) }, { query: { tab: 'unread', item: 'thread:t71' } })
     expect(rowCount(w)).toBe(72)
-    expect(w.find('[data-testid="inbox-row-thread:t71"]').attributes('aria-current')).toBe('true')
+    await w.find('[data-testid="inbox-row-thread:t10"]').trigger('click')
+    await flushPromises()
+    expect(rowCount(w)).toBe(72)
   })
 
   it('leaving the tab and coming back starts at 50 again', async () => {
@@ -394,7 +412,8 @@ describe('an ask row says what differs (§3g A10)', () => {
   it('no "Waiting on you"; high/critical say so, medium/low say nothing; expiry within a day is said', async () => {
     store.asks = [
       ask('c', { priority: 'critical', created_at: iso(1) }),
-      ask('h', { priority: 'high', created_at: iso(2), expires_at: inMin(18) }),
+      // 18.5: minutes are floored (round 3), and NOW is taken at module load.
+      ask('h', { priority: 'high', created_at: iso(2), expires_at: inMin(18.5) }),
       ask('m', { priority: 'medium', created_at: iso(3), expires_at: inMin(5 * 60 + 5) }),
       ask('l', { priority: 'low', created_at: iso(4) }),
     ]
@@ -933,6 +952,52 @@ describe('a phone reaches the menu from the Inbox (§3g A5)', () => {
   })
 })
 
+describe('round-3 list fixes', () => {
+  it('an empty tab is one column: no "Pick something on the left" beside nothing to pick', async () => {
+    store.asksLoaded = true
+    const w = await mountInbox({ threads: [] }, { query: { tab: 'all' } })
+    expect(has(w, 'inbox-empty')).toBe(true)
+    expect(has(w, 'inbox-pane-none')).toBe(false)
+    expect(w.find('[data-testid="inbox-list-column"]').classes()).toContain('w-full')
+  })
+
+  it("a row's agent name keeps its width; the chat title is what truncates", async () => {
+    const w = await mountInbox({ threads: [thread('t1', { unread: 2, title: 'A very long title '.repeat(8) })] }, { query: { tab: 'unread' } })
+    const agent = w.find('[data-testid="inbox-row-agent-thread:t1"]')
+    expect(agent.classes()).toEqual(expect.arrayContaining(['shrink-0', 'max-w-[60%]', 'truncate']))
+  })
+
+  it("the head's capped count is available in full", async () => {
+    const threads = [thread('t1', { unread: 80 }), thread('t2', { unread: 95 })]
+    const w = await mountInbox({ threads }, { query: { tab: 'unread' } })
+    const head = w.find('[data-testid="inbox-list-total"]')
+    expect(head.text()).toContain('99+ new')
+    expect(head.attributes('title')).toBe('2 chats · 175 new')
+    expect(head.find('.sr-only').text()).toBe('2 chats · 175 new')
+  })
+
+  it('an ask crossing into the day gets its badge although no row was ticking', async () => {
+    vi.useFakeTimers({ now: NOW, toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'Date'] })
+    try {
+      store.asksLoaded = true
+      store.asks = [ask('a1', { expires_at: new Date(NOW + 25 * 3600_000).toISOString() })]
+      const w = await mountInbox({}, { query: { tab: 'action' } })
+      expect(has(w, 'inbox-row-badge-expiry')).toBe(false)
+      await vi.advanceTimersByTimeAsync(61 * 60_000)
+      expect(w.find('[data-testid="inbox-row-badge-expiry"]').text()).toBe('Expires in 23h')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('stacked, the list keeps a reading width', async () => {
+    phone = true
+    stubMatchMedia()
+    const w = await mountInbox({ threads: [thread('t1', { unread: 2 })] }, { query: { tab: 'unread' } })
+    expect(w.find('[data-testid="inbox-list-column"]').classes()).toEqual(expect.arrayContaining(['w-full', 'max-w-3xl']))
+  })
+})
+
 describe('the layout follows the CONTAINER width (§3g A4)', () => {
   // A ResizeObserver that reports a fixed content width the moment it observes.
   function fakeRO(width) {
@@ -1090,6 +1155,22 @@ describe('phone (D12)', () => {
     expect(document.activeElement?.getAttribute('data-inbox-row')).toBe('thread:t2')
   })
 
+  it("§3g A6: the pane's Back after a phone open POPS our entry, so Forward reopens it (round 3)", async () => {
+    // A replace here would leave a duplicate history entry: the hardware Back
+    // would then reopen the pane. Popping is what makes Forward land on it.
+    phone = true
+    stubMatchMedia()
+    const w = await mountInbox({ threads: [thread('t1', { unread: 2 })] }, { query: { tab: 'unread' } })
+    await w.find('[data-testid="inbox-row-thread:t1"]').trigger('click')
+    await flushPromises()
+    await w.find('[data-testid="inbox-pane-back"]').trigger('click')
+    await flushPromises()
+    expect(router.currentRoute.value.query.item).toBeUndefined()
+    router.forward()
+    await flushPromises()
+    expect(router.currentRoute.value.query.item).toBe('thread:t1')
+  })
+
   it('§3g A6: split, an open REPLACES — Back does not step through every row read', async () => {
     const w = await mountInbox({ threads: [thread('t1', { unread: 2 }), thread('t2', { unread: 1, last_message_at: iso(9) })] }, { query: { tab: 'unread' } })
     // A guard for the split branch (it held before A6 too): two opens, one Back,
@@ -1101,6 +1182,7 @@ describe('phone (D12)', () => {
     router.back()
     await flushPromises()
     expect(router.currentRoute.value.query.item).not.toBe('thread:t2')
+    expect(router.currentRoute.value.path).toBe('/workspace/inbox')
   })
 
   it("the pane's Back after a DEEP-LINKED item replaces — it never walks out of the Inbox", async () => {

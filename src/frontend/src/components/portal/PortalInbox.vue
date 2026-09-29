@@ -144,6 +144,7 @@
           :total="paged.total"
           @show-more="showMore"
           :head="head"
+          :head-exact="headExact"
           :notes="footerNotes"
           :selected-key="selectedKey"
           :labels="labels"
@@ -155,7 +156,7 @@
       <!-- On a phone the columns follow the RESOLVED item, not the key: a key
            that names a chat deleted elsewhere must show the list, never a
            pane-less dead end with no Back. -->
-      <div class="min-w-0 flex-1 min-h-0 flex-col" :class="stacked && !selectedItem ? 'hidden' : 'flex'">
+      <div class="min-w-0 flex-1 min-h-0 flex-col" :class="(stacked || noRows) && !selectedItem ? 'hidden' : 'flex'">
         <PortalInboxPane
           v-if="selectedItem"
           ref="paneEl"
@@ -175,7 +176,7 @@
           @reply="(url) => url && $emit('reply', url)"
           @open-thread="(t) => $emit('open-chat', `/workspace/c/${t.id}`)"
         />
-        <p v-else class="m-auto px-6 text-center text-sm text-gray-600 dark:text-gray-300" data-testid="inbox-pane-none">
+        <p v-else-if="!noRows" class="m-auto px-6 text-center text-sm text-gray-600 dark:text-gray-300" data-testid="inbox-pane-none">
           Pick something on the left to read it here.
         </p>
       </div>
@@ -200,7 +201,7 @@ import { viewState, staleBannerMessage } from '@/utils/loadingState'
 import {
   actionItems, unreadItems, allItems, inboxCounts, defaultInboxTab, normalizeInboxTab,
   stableRows, emptyVisit, isGhost, resolveItem, parseItemKey, listHeadLabel,
-  markAllLabel, markAllConfirm, allFooterNotes, pageWindow, PAGE_SIZE, inboxLayout,
+  markAllLabel, markAllConfirm, allFooterNotes, pageWindow, PAGE_SIZE, inboxLayout, listHeadExact,
 } from './portalInbox'
 import { askBadgeTitle, unreadBadgeTitle } from './portalUtils'
 import { capCount } from '@/utils/tabTitle'
@@ -260,8 +261,13 @@ watch([containerWidth, () => props.railAllowance, phone], ([width, allowance, ph
 const stacked = computed(() => layout.value.mode === 'stacked')
 // The pane is on screen in place of the list.
 const overPane = computed(() => stacked.value && !!selectedItem.value)
+// Round 3: stacked, the list keeps a reading width (at 1280 with the rail open
+// it ran 984px, the time ~900px from the name); and a tab with NO rows is one
+// column — split, it put a 776px "Pick something on the left" beside nothing.
+const noRows = computed(() => view.value.state === 'empty' || view.value.state === 'failed')
 const listColClass = computed(() => {
-  if (stacked.value) return selectedItem.value ? 'hidden w-full' : 'flex w-full'
+  if (stacked.value) return selectedItem.value ? 'hidden w-full' : 'flex w-full max-w-3xl mx-auto'
+  if (noRows.value && !selectedItem.value) return 'flex w-full'
   return layout.value.wide ? 'flex w-96 border-r' : 'flex w-80 border-r'
 })
 
@@ -343,6 +349,24 @@ const shownItems = computed(() => {
 const pageLimit = ref(PAGE_SIZE)
 watch(tab, () => { pageLimit.value = PAGE_SIZE })
 const paged = computed(() => pageWindow(shownItems.value, pageLimit.value, selectedKey.value))
+// A window a selection widened (a deep link to row 72) stays that wide for the
+// visit: it shrank back to 50 under the reader on the next click (round 3).
+watch(() => paged.value.shown.length, (n) => { if (n > pageLimit.value) pageLimit.value = n }, { immediate: true })
+// A selection the reader did not click — a deep link, a reload — is scrolled
+// to once its row is drawn; it sat ~6,000px below the visible list (round 3).
+// A clicked row is already where the reader is looking.
+let clickedKey = null
+let scrolledTo = null
+watch([routeItem, () => paged.value.shown.length], async ([k]) => {
+  if (!k || k === clickedKey || k === scrolledTo) return
+  await nextTick()
+  const row = listColEl.value
+    ? [...listColEl.value.querySelectorAll('[data-inbox-row]')].find((r) => r.getAttribute('data-inbox-row') === k)
+    : null
+  if (!row) return
+  scrolledTo = k
+  row.scrollIntoView?.({ block: 'nearest' })
+}, { immediate: true })
 async function showMore() {
   const first = paged.value.shown.length
   pageLimit.value = first + PAGE_SIZE
@@ -355,6 +379,7 @@ async function showMore() {
 // left it says "All caught up".
 const liveItems = computed(() => shownItems.value.filter((it) => !isGhost(it)))
 const head = computed(() => listHeadLabel(tab.value, liveItems.value))
+const headExact = computed(() => listHeadExact(tab.value, liveItems.value))
 
 // A selection the rendered rows do not hold (an old chat, a deep link) is
 // resolved from the shell's data by key — the one fallback, never a slice.
@@ -462,6 +487,7 @@ watch([readIntent, renderedKey], ([want, done]) => {
 // it REPLACES: Back must not step through every row the reader looked at.
 let pushedKey = null
 async function open(it) {
+  clickedKey = it.key
   returnIndex = Math.max(0, shownItems.value.findIndex((x) => x.key === it.key))
   if (it.type === 'thread') {
     // The read waits for a render OF THIS OPEN (round 3): a verdict left over

@@ -375,6 +375,7 @@ onUnmounted(() => {
         :key="tab.id"
         data-menu-item
         type="button"
+        :aria-label="tab.badgeLabel || undefined"
         :title="fixedWidth ? tab.label : undefined"
         @click="select(tab.id)"
         :class="[

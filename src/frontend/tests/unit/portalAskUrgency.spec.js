@@ -8,7 +8,7 @@
  * critical, and how soon it expires only when that is within a day.
  */
 import { describe, it, expect } from 'vitest'
-import { priorityBadge, expiresSoonLabel, needsExpiryTick, askKindIcon } from '@/components/portal/portalAskUrgency'
+import { priorityBadge, expiresSoonLabel, needsExpiryTick, askKindIcon, nextExpiryEntry } from '@/components/portal/portalAskUrgency'
 
 const NOW = Date.parse('2026-09-29T12:00:00Z')
 const inMin = (m) => new Date(NOW + m * 60_000).toISOString()
@@ -25,6 +25,10 @@ describe('expiresSoonLabel', () => {
   it('under an hour: a warning, in minutes', () => {
     expect(expiresSoonLabel(inMin(18), NOW)).toEqual({ label: 'Expires in 18m', variant: 'warning' })
     expect(expiresSoonLabel(inMin(0.4), NOW)).toEqual({ label: 'Expires in 1m', variant: 'warning' })
+  })
+  it('minutes are floored, so the last half-minute of the hour is not "60m" (round 3)', () => {
+    expect(expiresSoonLabel(inMin(59.75), NOW)).toEqual({ label: 'Expires in 59m', variant: 'warning' })
+    expect(expiresSoonLabel(inMin(18.9), NOW)).toEqual({ label: 'Expires in 18m', variant: 'warning' })
   })
   it('one to 24 hours: neutral, in hours — the reason for the Action order stays visible', () => {
     expect(expiresSoonLabel(inMin(60), NOW)).toEqual({ label: 'Expires in 1h', variant: 'neutral' })
@@ -54,5 +58,23 @@ describe('askKindIcon — identity by shape, not hue (principle 24)', () => {
     expect(q.name).toBe('question-mark-circle')
     expect(n.name).toBe('bell')
     expect(askKindIcon(undefined).name).toBe('bell')
+  })
+})
+
+describe('nextExpiryEntry — when the next ask enters the 24h window (round 3)', () => {
+  // With no row inside the window the 30 s clock is off, and `now` never moved:
+  // an ask 25h out never got its badge when it crossed into the day.
+  it('the ms until the soonest pending ask is 24h from expiry', () => {
+    expect(nextExpiryEntry([{ status: 'pending', expires_at: inMin(25 * 60) }], NOW)).toBe(60 * 60_000)
+    expect(nextExpiryEntry([
+      { status: 'pending', expires_at: inMin(30 * 60) },
+      { status: 'pending', expires_at: inMin(26 * 60) },
+    ], NOW)).toBe(2 * 60 * 60_000)
+  })
+  it('null when nothing is outside the window and still to come', () => {
+    expect(nextExpiryEntry([{ status: 'pending', expires_at: inMin(90) }], NOW)).toBeNull()
+    expect(nextExpiryEntry([{ status: 'answered', expires_at: inMin(30 * 60) }], NOW)).toBeNull()
+    expect(nextExpiryEntry([{ status: 'pending', expires_at: 'x' }, null], NOW)).toBeNull()
+    expect(nextExpiryEntry(null, NOW)).toBeNull()
   })
 })

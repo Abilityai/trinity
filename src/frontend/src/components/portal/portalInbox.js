@@ -228,6 +228,17 @@ export function listHeadLabel(tab, liveItems) {
   return parts.join(' · ')
 }
 
+// The head caps its message count at 99+ (A8); this is the same line with the
+// full number, for its `title` and screen readers — null when nothing was
+// capped (round 3).
+export function listHeadExact(tab, liveItems) {
+  if (tab !== 'unread') return null
+  const chats = (Array.isArray(liveItems) ? liveItems : []).filter((it) => it && it.type === 'thread')
+  const fresh = chats.reduce((sum, it) => sum + (Number(it.n) || 0), 0)
+  if (!chats.length || String(capCount(fresh)) === String(fresh)) return null
+  return `${plural(chats.length, 'chat', 'chats')} · ${fresh} new`
+}
+
 // §3g A9: Mark all read names what it does — the number of CHATS it reads —
 // and asks first when that is more than one.
 export function markAllLabel(k) {
@@ -324,7 +335,9 @@ function ghostOf(snap, live) {
     const a = live.ask ? live.ask(snap.id) : null
     return a
       ? { ...snap, status: a.status, ask: a, endedInPlace: a.status !== 'pending', ghost: true }
-      : { ...snap, endedInPlace: true, ghost: true }
+      // Gone from the fetched list (past the 200 cap, or deleted): never the
+      // pending snapshot, which drew a row that looked answerable (round 3).
+      : { ...snap, status: 'unavailable', endedInPlace: true, ghost: true }
   }
   return null
 }

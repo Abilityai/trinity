@@ -16,8 +16,9 @@
   <div class="flex flex-col min-h-0 h-full">
     <p
       class="shrink-0 px-4 pt-3 pb-2 text-[11px] font-semibold uppercase tracking-wide tabular-nums text-gray-500 dark:text-gray-400"
+      :title="headExact || undefined"
       data-testid="inbox-list-total"
-    >{{ head }}</p>
+    ><span :aria-hidden="headExact ? 'true' : undefined">{{ head }}</span><span v-if="headExact" class="sr-only">{{ headExact }}</span></p>
     <ul class="flex-1 min-h-0 overflow-y-auto px-2 pb-2 space-y-1" :aria-label="label" data-testid="inbox-list">
       <li v-for="it in items" :key="it.key">
         <button
@@ -51,10 +52,13 @@
 
           <span class="min-w-0 flex-1">
             <span class="flex items-center gap-2 min-w-0">
-              <span class="text-sm font-medium truncate text-gray-900 dark:text-gray-100">{{ labelFor(it.agent_name) }}</span>
-              <span v-if="it.type === 'thread'" class="text-xs truncate" :class="meta(it)">· {{ threadTitle(it) }}</span>
+              <!-- Round 3: the agent keeps its width (to 60%) and the chat title
+                   is what truncates — both shrank, and a long title left the
+                   agent at 1–7 characters. -->
+              <span class="shrink-0 max-w-[60%] text-sm font-medium truncate text-gray-900 dark:text-gray-100" :data-testid="`inbox-row-agent-${it.key}`">{{ labelFor(it.agent_name) }}</span>
+              <span v-if="it.type === 'thread'" class="min-w-0 text-[12.5px] truncate" :class="meta(it)">· {{ threadTitle(it) }}</span>
               <span
-                class="ml-auto shrink-0 text-xs tabular-nums"
+                class="ml-auto shrink-0 text-[12.5px] tabular-nums"
                 :class="meta(it)"
                 :title="absolute(it.at)"
               >{{ relative(it.at) }}</span>
@@ -65,7 +69,14 @@
 
             <span class="mt-1 flex items-center gap-1.5 flex-wrap">
               <BaseBadge v-if="it.type === 'thread' && it.n > 0" variant="primary" class="tabular-nums" :data-testid="`inbox-row-new-${it.key}`">{{ newLabel(it.n) }}</BaseBadge>
-              <BaseBadge v-if="it.type === 'thread' && it.readInPlace" variant="neutral" :data-testid="`inbox-row-read-${it.key}`">Read</BaseBadge>
+              <!-- On a selected row the neutral fill is the row's own (gray-750
+                   in dark), so it gets an edge (round 3). -->
+              <BaseBadge
+                v-if="it.type === 'thread' && it.readInPlace"
+                variant="neutral"
+                :class="it.key === selectedKey ? 'ring-1 ring-inset ring-gray-300 dark:ring-gray-600' : ''"
+                :data-testid="`inbox-row-read-${it.key}`"
+              >Read</BaseBadge>
               <!-- `failed` carries an icon AND a word — never hue alone. -->
               <BaseBadge v-if="outcomeOf(it) === 'failed'" variant="danger" :data-testid="`inbox-row-failed-${it.key}`">
                 <svg class="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M6 18L18 6M6 6l12 12" /></svg>
@@ -123,7 +134,7 @@ import BaseBadge from '@/components/base/BaseBadge.vue'
 import BaseButton from '@/components/base/BaseButton.vue'
 import { relativeTime } from './portalUtils'
 import { newLabel } from './portalInbox'
-import { priorityBadge, expiresSoonLabel, needsExpiryTick, askKindIcon } from './portalAskUrgency'
+import { priorityBadge, expiresSoonLabel, needsExpiryTick, nextExpiryEntry, askKindIcon } from './portalAskUrgency'
 import { queueTypeLabel } from '@/utils/operatorQueue'
 import { formatLocalDateTime } from '@/utils/timestamps'
 
@@ -132,6 +143,8 @@ const props = defineProps({
   // The line above the rows — the container's, because it counts LIVE rows
   // (a ghost is not a member of the tab) and knows the tab's full total.
   head: { type: String, default: '' },
+  // The head with its capped count in full (`listHeadExact`), or null.
+  headExact: { type: String, default: null },
   // Lines under the rows that say what the tab does NOT hold, in tertiary ink
   // (§3g D-4b) — the ended-ask window, the asks cap, rooms.
   notes: { type: Array, default: () => [] },
@@ -168,14 +181,26 @@ const secondary = (it) => (it.key === props.selectedKey
 
 // §3g A10: the expiry badge counts down on a 30 s clock that runs ONLY while a
 // pending row has an expiry within the day.
+// Round 3: `now` is refreshed whenever the rows change (a fresh ask was labelled
+// against the mount time), and one timer wakes the list when the next ask
+// ENTERS the day — with nothing inside it the clock was off and never moved.
 const now = ref(Date.now())
 let tick = null
+let entry = null
 const stopTick = () => { if (tick) { clearInterval(tick); tick = null } }
-watch(() => needsExpiryTick(props.items.filter((it) => it.type === 'ask').map((it) => it.ask || {}), now.value), (on) => {
+const stopEntry = () => { if (entry) { clearTimeout(entry); entry = null } }
+const pendingAsks = () => props.items.filter((it) => it.type === 'ask').map((it) => it.ask || {})
+watch(() => props.items, () => { now.value = Date.now() })
+watch(() => needsExpiryTick(pendingAsks(), now.value), (on) => {
   if (on && !tick) tick = setInterval(() => { now.value = Date.now() }, 30_000)
   else if (!on) stopTick()
 }, { immediate: true })
-onBeforeUnmount(stopTick)
+watch([() => props.items, now], () => {
+  stopEntry()
+  const wait = nextExpiryEntry(pendingAsks(), now.value)
+  if (wait !== null) entry = setTimeout(() => { entry = null; now.value = Date.now() }, wait + 1000)
+}, { immediate: true })
+onBeforeUnmount(() => { stopTick(); stopEntry() })
 const expiry = (it) => expiresSoonLabel(it.ask && it.ask.expires_at, now.value)
 const kindLabel = (it) => queueTypeLabel(it.ask && it.ask.kind) || 'Ask'
 
@@ -184,6 +209,7 @@ function askStatusLabel(it) {
   if (s === 'answered') return it.ask?.ended_by === 'you' ? 'Answered · you' : 'Answered'
   if (s === 'expired') return 'Expired'
   if (s === 'cancelled') return 'Cancelled'
+  if (s === 'unavailable') return 'No longer available'
   return s || ''
 }
 </script>

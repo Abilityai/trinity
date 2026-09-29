@@ -166,7 +166,7 @@
         <template v-else>
           <p
             v-if="windowed.earlier > 0"
-            class="mb-3 text-xs text-gray-600 dark:text-gray-300"
+            class="mb-3 text-[12.5px] text-gray-600 dark:text-gray-300"
             data-testid="inbox-pane-earlier"
           >
             {{ windowed.earlier }} earlier {{ windowed.earlier === 1 ? 'arrival' : 'arrivals' }} —
@@ -228,7 +228,7 @@
               :data-testid="`inbox-pane-deliverable-${d.id}`"
             >
               <p class="text-sm font-medium text-gray-900 dark:text-gray-100">{{ d.title || d.report_type }}</p>
-              <p class="mb-2 text-xs text-gray-500 dark:text-gray-400">{{ d.report_type }} · <span :title="absolute(d.created_at)">{{ relative(d.created_at) }}</span></p>
+              <p class="mb-2 text-[12.5px] text-gray-500 dark:text-gray-400">{{ d.report_type }} · <span :title="absolute(d.created_at)">{{ relative(d.created_at) }}</span></p>
               <InlineError
                 v-if="payloadErrors[d.id]"
                 :message="payloadErrors[d.id]"

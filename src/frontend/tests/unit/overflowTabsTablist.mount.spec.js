@@ -138,4 +138,28 @@ describe('tablistLabel (B6a): real tabs, manual activation', () => {
       if (cw) Object.defineProperty(Element.prototype, 'clientWidth', cw)
     }
   })
+
+  it('a tab moved into the More menu keeps its badgeLabel as its name (round 3)', async () => {
+    const proto = HTMLElement.prototype
+    const rect = proto.getBoundingClientRect
+    const cw = Object.getOwnPropertyDescriptor(Element.prototype, 'clientWidth')
+    proto.getBoundingClientRect = function () { return { width: 100, height: 20, top: 0, left: 0, right: 100, bottom: 20 } }
+    Object.defineProperty(Element.prototype, 'clientWidth', { configurable: true, get() { return 200 } })
+    try {
+      const tabs = TABS.map((t) => (t.badge ? { ...t, badgeLabel: `${t.label}, ${t.badge} things` } : t))
+      mk({ tabs, tablistLabel: 'Inbox' })
+      await nextTick(); await nextTick()
+      await w.find('[data-overflow-trigger]').trigger('click')
+      await nextTick()
+      const items = w.findAll('[data-menu-item]')
+      expect(items.length).toBeGreaterThan(0)
+      for (const it of items) {
+        const t = tabs.find((x) => it.text().startsWith(x.label))
+        expect(it.attributes('aria-label')).toBe(t.badgeLabel)
+      }
+    } finally {
+      proto.getBoundingClientRect = rect
+      if (cw) Object.defineProperty(Element.prototype, 'clientWidth', cw)
+    }
+  })
 })

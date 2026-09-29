@@ -25,7 +25,8 @@ export function expiresSoonLabel(expiresAt, now = Date.now()) {
   if (!Number.isFinite(at)) return null
   const ms = at - now
   if (ms <= 0 || ms > DAY_MS) return null
-  if (ms < HOUR_MS) return { label: `Expires in ${Math.max(1, Math.round(ms / 60000))}m`, variant: 'warning' }
+  // Floored like the hours (round 3): rounded, 59m30s+ read "60m".
+  if (ms < HOUR_MS) return { label: `Expires in ${Math.max(1, Math.floor(ms / 60000))}m`, variant: 'warning' }
   return { label: `Expires in ${Math.floor(ms / HOUR_MS)}h`, variant: 'neutral' }
 }
 
@@ -33,6 +34,22 @@ export function expiresSoonLabel(expiresAt, now = Date.now()) {
 // down within the day — never an idle timer on a list that has nothing to move.
 export function needsExpiryTick(asks, now = Date.now()) {
   return (Array.isArray(asks) ? asks : []).some((a) => a && a.status === 'pending' && !!expiresSoonLabel(a.expires_at, now))
+}
+
+// When the next pending ask ENTERS the day (ms from `now`), or null. With no
+// row inside the window the 30 s clock is off and nothing moves `now`, so an
+// ask 25h out never got its badge as it crossed in (round 3): the list sets one
+// timer for this instead of ticking for days.
+export function nextExpiryEntry(asks, now = Date.now()) {
+  let soonest = null
+  for (const a of Array.isArray(asks) ? asks : []) {
+    if (!a || a.status !== 'pending' || !a.expires_at) continue
+    const at = Date.parse(a.expires_at)
+    if (!Number.isFinite(at)) continue
+    const wait = at - DAY_MS - now
+    if (wait > 0 && (soonest === null || wait < soonest)) soonest = wait
+  }
+  return soonest
 }
 
 // Identity by SHAPE (principle 24): an approval, a question and anything else

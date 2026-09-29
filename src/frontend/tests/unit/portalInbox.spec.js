@@ -624,3 +624,27 @@ describe('inboxRailAllowance — the rail width the Inbox has not lost YET (§3g
     expect(inboxRailAllowance({ target: 384, present: true, measured: 400 })).toBe(0)
   })
 })
+
+import { listHeadLabel as headLabel, listHeadExact } from '@/components/portal/portalInbox'
+
+describe('listHeadExact — the head\'s exact count when its label is capped (round 3)', () => {
+  const T = (n) => ({ type: 'thread', key: `thread:${n}`, n })
+  it('names the full number only when the label capped it', () => {
+    const rows = [T(80), T(95)]
+    expect(headLabel('unread', rows)).toBe('2 chats · 99+ new')
+    expect(listHeadExact('unread', rows)).toBe('2 chats · 175 new')
+    expect(listHeadExact('unread', [T(3)])).toBeNull()
+    expect(listHeadExact('action', [])).toBeNull()
+  })
+})
+
+describe('stableRows — an ask that LEFT the fetched list is not drawn pending (round 3)', () => {
+  it('its ghost is `unavailable`, never the pending snapshot', () => {
+    const A = { type: 'ask', key: 'ask:a1', id: 'a1', status: 'pending', at: '2026-09-28T10:00:00Z', agent_name: 's' }
+    const first = stableRows([A], emptyVisit(), { thread: () => null, ask: () => ({ id: 'a1', status: 'pending' }) })
+    const next = stableRows([], first.visit, { thread: () => null, ask: () => null })
+    expect(next.rows).toHaveLength(1)
+    expect(next.rows[0].status).toBe('unavailable')
+    expect(next.rows[0].endedInPlace).toBe(true)
+  })
+})
