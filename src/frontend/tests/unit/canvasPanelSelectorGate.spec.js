@@ -13,6 +13,12 @@
  * and evaluated against the pure functions with the ejection's numbers, and
  * the template's `v-if` is asserted to read that computed rather than a
  * re-derived length test.
+ *
+ * ent#724 — the chip strip became ONE always-rendered dropdown (principle 30:
+ * the control row never changes shape), so the same rule now decides whether
+ * the dropdown is ENABLED rather than whether the strip exists. The computed is
+ * `selectorEnabled`, and manage mode no longer feeds it (manage opens a list
+ * below the row instead of swapping the selector's layout).
  */
 import { describe, it, expect } from 'vitest'
 import { readFileSync } from 'fs'
@@ -22,10 +28,10 @@ import { canvasSelectorVisible, canvasAutoSelect, canvasSearchVisible } from '..
 const SRC = fileURLToPath(new URL('../../src/components/canvas/CanvasPanel.vue', import.meta.url))
 const source = readFileSync(SRC, 'utf8')
 
-/** Slice `const selectorVisible = computed(() => …)` and run its body. */
+/** Slice `const selectorEnabled = computed(() => …)` and run its body. */
 function selectorVisibleFor({ visible, manage, query }) {
-  const m = source.match(/const selectorVisible = computed\(\(\) => (canvasSelectorVisible\(\{[\s\S]*?\}\))\)/)
-  expect(m, 'selectorVisible computed is gone').toBeTruthy()
+  const m = source.match(/const selectorEnabled = computed\(\(\) => (canvasSelectorVisible\(\{[\s\S]*?\}\))\)/)
+  expect(m, 'selectorEnabled computed is gone').toBeTruthy()
   const body = m[1]
   // eslint-disable-next-line no-new-func
   return new Function('canvasSelectorVisible', 'visible', 'manage', 'query', `return ${body}`)(
@@ -51,19 +57,24 @@ function showSearchFor({ count, query }) {
 }
 
 describe('CanvasPanel selector gate (ent#553 review)', () => {
-  it('the template gates the strip on the computed, not on a raw length test', () => {
-    expect(source).toMatch(/data-testid="canvas-select"/)
-    const strip = source.match(/<div\s+v-if="([^"]+)"[^>]*data-testid="canvas-select"/)
-    expect(strip, 'the strip div lost its v-if or its testid').toBeTruthy()
-    expect(strip[1]).toBe('selectorVisible')
+  it('the dropdown is always rendered and its ENABLED state reads the computed (ent#724)', () => {
+    const sel = source.match(/<BaseSelect[\s\S]*?data-testid="canvas-select"[\s\S]*?>/)
+    expect(sel, 'the canvas-select BaseSelect is gone').toBeTruthy()
+    expect(sel[0]).not.toMatch(/v-if=/)
+    expect(sel[0]).toMatch(/:disabled="!selectorEnabled"/)
     expect(source).not.toMatch(/v-if="visible\.length > 1 \|\| manage"/)
   })
 
-  it('the ejection repro: 7 canvases, query narrowing to ONE match still shows the strip', () => {
+  it('manage mode never disables the dropdown (it opens a list below instead)', () => {
+    expect(selectorVisibleFor({ visible: 1, manage: true, query: '' })).toBe(false)
+    expect(selectorVisibleFor({ visible: 5, manage: true, query: '' })).toBe(true)
+  })
+
+  it('the ejection repro: 7 canvases, query narrowing to ONE match keeps the dropdown enabled', () => {
     expect(selectorVisibleFor({ visible: 1, manage: false, query: 'Topic 3' })).toBe(true)
   })
 
-  it('and with no query, one canvas is no choice — the strip collapses as before', () => {
+  it('and with no query, one canvas is no choice — the dropdown is disabled, the row stays', () => {
     expect(selectorVisibleFor({ visible: 1, manage: false, query: '' })).toBe(false)
     expect(selectorVisibleFor({ visible: 2, manage: false, query: '' })).toBe(true)
   })

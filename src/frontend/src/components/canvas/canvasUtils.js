@@ -225,6 +225,26 @@ export function filterCanvases(list, query) {
  *
  * @param {{ visible: number, manage: boolean, query: string }} s
  */
+/**
+ * ent#724 — the dropdown option for one canvas. Agent-written titles run long
+ * ("Decision 1 — … — archived from main 2026-09-14"), and a native <option>
+ * cannot wrap, so the label is clamped at a word boundary with an ellipsis; the
+ * full title rides on the option's `title` and in the canvas header below.
+ * Pinned canvases carry the pin mark, since they also sort first.
+ */
+export const CANVAS_OPTION_MAX = 60
+
+export function canvasOptionLabel(canvas, max = CANVAS_OPTION_MAX) {
+  const full = String(canvas?.title || canvas?.canvas_id || '').replace(/\s+/g, ' ').trim()
+  let label = full
+  if (full.length > max) {
+    const cut = full.slice(0, max - 1)
+    const space = cut.lastIndexOf(' ')
+    label = `${(space > max * 0.6 ? cut.slice(0, space) : cut).replace(/[\s—–\-,:;·]+$/, '')}…`
+  }
+  return canvas?.pinned ? `📌 ${label}` : label
+}
+
 export function canvasSelectorVisible({ visible, manage, query }) {
   if (manage) return true
   if (String(query || '').trim()) return visible > 0
