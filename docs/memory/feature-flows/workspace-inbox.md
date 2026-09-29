@@ -63,6 +63,9 @@ Sign-in / reload on bare /workspace
       phone (§3g A5 / F4): an sm:hidden 44px Menu button (inbox-menu) emits open-menu →
                Portal's mobileNav = true; watch(route.fullPath) closes the drawer on ANY
                navigation (the pinned Inbox row is a router-link and left it open)
+      history (§3g A6): stacked, an open PUSHES (the hardware Back returns to the list, focus on
+               the row, via a routeItem watcher); split, it REPLACES. The pane's Back pops the
+               entry our open pushed, else replaces the item away (a deep link never walks out)
       split: the tab's first row is a local PREVIEW — not ?item=, NOT a read, emitted as
                update:preview (§3g S5, T2); stacked: nothing selected
     stableRows(fresh, visit)   rows keep their place for one TAB VISIT (§3g S1): a row that leaves

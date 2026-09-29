@@ -107,4 +107,25 @@ test.describe('Workspace Inbox', () => {
       expect(ratio, `the pane is ${Math.round(ratio * 100)}% of the Inbox`).toBeGreaterThan(0.95)
     })
   }
+
+  // §3g A6: on a phone, opening a row PUSHES, so the browser's Back returns to
+  // the list — in the Inbox, focus on the row — instead of leaving the Workspace.
+  test('a phone Back after opening a row stays in the Inbox', async ({ page }) => {
+    await page.setViewportSize({ width: 390, height: 844 })
+    await page.goto('/workspace/inbox?tab=all')
+    test.skip(!await firstRosterAgent(page), 'no agent on the roster, so no Inbox')
+    await page.getByTestId('inbox').waitFor({ timeout: 20000 })
+    const row = page.locator('[data-inbox-row]').first()
+    test.skip(!await row.count(), 'nothing in All to open')
+    const key = await row.getAttribute('data-inbox-row')
+    await row.click()
+    await expect(page.getByTestId('inbox-pane')).toBeVisible()
+    await page.goBack()
+    await expect(page).toHaveURL(/\/workspace\/inbox/)
+    await expect(page.getByTestId('inbox-pane')).toHaveCount(0)
+    await expect(page.locator(`[data-inbox-row="${key}"]`)).toBeFocused()
+    // F6: the touch targets that remain are at least 44px tall.
+    const menu = await page.getByTestId('inbox-menu').boundingBox()
+    expect(menu.height).toBeGreaterThanOrEqual(44)
+  })
 })

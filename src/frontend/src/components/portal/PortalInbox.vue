@@ -446,10 +446,20 @@ watch([readIntent, renderedKey], ([want, done]) => {
 
 // An explicit open (click / Enter / Space). The row keeps its place through the
 // read (`stableRows`); the read itself waits for the pane (above).
+// §3g A6: STACKED, the pane is a screen of its own, so opening it PUSHES — the
+// hardware / browser Back returns to the list, not out of the Workspace. Split,
+// it REPLACES: Back must not step through every row the reader looked at.
+let pushedKey = null
 async function open(it) {
   returnIndex = Math.max(0, shownItems.value.findIndex((x) => x.key === it.key))
   if (it.type === 'thread') readIntent.value = it.key
-  const navigated = replaceQuery({ tab: tab.value, item: it.key })
+  let navigated
+  if (stacked.value) {
+    pushedKey = it.key
+    navigated = router.push({ path: route.path, query: { ...route.query, tab: tab.value, item: it.key } })
+  } else {
+    navigated = replaceQuery({ tab: tab.value, item: it.key })
+  }
   if (stacked.value) {
     // The pane mounts once the URL names the item; focus its heading then.
     returnKey = it.key
@@ -471,11 +481,21 @@ function onTab(next) {
 // is a no-op in a real browser. The row keeps its place through a read (a
 // ghost), so it is normally still there; if it is not (deleted), the row now
 // in its place, else the list itself.
+// §3g A6: the pane's Back pops the entry OUR open pushed — the same step the
+// hardware Back takes — and otherwise (a deep link, a reload) replaces the item
+// away, so it never walks out of the Inbox. Focus is restored by the watcher
+// below, which the hardware Back reaches too.
 async function back() {
-  const key = returnKey || selectedKey.value
+  if (pushedKey && pushedKey === routeItem.value) {
+    pushedKey = null
+    router.back()
+    return
+  }
+  await replaceQuery({ item: undefined })
+}
+async function focusRowAfterBack(key) {
   const index = returnIndex
   returnKey = null
-  await replaceQuery({ item: undefined })
   await nextTick()
   const col = listColEl.value
   if (!col) return
@@ -485,6 +505,14 @@ async function back() {
     || col
   el.focus?.()
 }
+// An item leaving the URL while STACKED — the pane's Back, the hardware Back,
+// or the open chat deleted under it — puts the reader back on the list, on the
+// row they came from.
+watch(routeItem, (now, was) => {
+  if (!stacked.value || !was || now) return
+  if (pushedKey === was) pushedKey = null
+  focusRowAfterBack(returnKey || was)
+})
 function onEsc() { if (stacked.value && selectedKey.value) back() }
 // §3g A4: a layout flip keeps an OPENED item and moves focus to where it now
 // is — split → stacked shows its pane (focus the heading), stacked → split puts

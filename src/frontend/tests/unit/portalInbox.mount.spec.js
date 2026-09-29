@@ -885,6 +885,45 @@ describe('phone (D12)', () => {
     expect(w.find('[data-testid="inbox-list-column"]').classes()).not.toContain('hidden')
   })
 
+  it('§3g A6: the hardware Back after a phone open stays in the Inbox, focus on the row', async () => {
+    phone = true
+    stubMatchMedia()
+    const w = await mountInbox({ threads: [thread('t1', { unread: 2 }), thread('t2', { unread: 1, last_message_at: iso(9) })] }, { query: { tab: 'unread' } })
+    await w.find('[data-testid="inbox-row-thread:t2"]').trigger('click')
+    await flushPromises()
+    expect(router.currentRoute.value.query.item).toBe('thread:t2')
+    router.back() // the browser's / the OS's Back, not the pane's button
+    await flushPromises()
+    await flushPromises()
+    expect(router.currentRoute.value.path).toBe('/workspace/inbox')
+    expect(router.currentRoute.value.query.item).toBeUndefined()
+    expect(router.currentRoute.value.query.tab).toBe('unread')
+    expect(document.activeElement?.getAttribute('data-inbox-row')).toBe('thread:t2')
+  })
+
+  it('§3g A6: split, an open REPLACES — Back does not step through every row read', async () => {
+    const w = await mountInbox({ threads: [thread('t1', { unread: 2 }), thread('t2', { unread: 1, last_message_at: iso(9) })] }, { query: { tab: 'unread' } })
+    // A guard for the split branch (it held before A6 too): two opens, one Back,
+    // and Back never lands on the first row opened.
+    await w.find('[data-testid="inbox-row-thread:t2"]').trigger('click')
+    await flushPromises()
+    await w.find('[data-testid="inbox-row-thread:t1"]').trigger('click')
+    await flushPromises()
+    router.back()
+    await flushPromises()
+    expect(router.currentRoute.value.query.item).not.toBe('thread:t2')
+  })
+
+  it("the pane's Back after a DEEP-LINKED item replaces — it never walks out of the Inbox", async () => {
+    phone = true
+    stubMatchMedia()
+    const w = await mountInbox({ threads: [thread('t1', { unread: 2 })] }, { query: { tab: 'unread', item: 'thread:t1' } })
+    await w.find('[data-testid="inbox-pane-back"]').trigger('click')
+    await flushPromises()
+    expect(router.currentRoute.value.path).toBe('/workspace/inbox')
+    expect(router.currentRoute.value.query.item).toBeUndefined()
+  })
+
   it('Esc goes back too', async () => {
     phone = true
     stubMatchMedia()
