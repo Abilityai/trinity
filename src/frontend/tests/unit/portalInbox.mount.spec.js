@@ -732,6 +732,18 @@ describe('Mark all read (D11, §3g A9)', () => {
   })
 })
 
+describe('a phone reaches the menu from the Inbox (§3g A5)', () => {
+  it('a 44px, phone-only Menu button asks the shell for the drawer', async () => {
+    const w = await mountInbox({ threads: [] }, { query: { tab: 'all' } })
+    const btn = w.find('[data-testid="inbox-menu"]')
+    expect(btn.exists()).toBe(true)
+    expect(btn.attributes('aria-label')).toBe('Menu')
+    expect(btn.classes()).toEqual(expect.arrayContaining(['sm:hidden', 'h-11', 'w-11']))
+    await btn.trigger('click')
+    expect(w.emitted('open-menu')).toHaveLength(1)
+  })
+})
+
 describe('the layout follows the CONTAINER width (§3g A4)', () => {
   // A ResizeObserver that reports a fixed content width the moment it observes.
   function fakeRO(width) {

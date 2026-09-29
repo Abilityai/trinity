@@ -60,6 +60,9 @@ Sign-in / reload on bare /workspace
                phoneViewport, prev}) → split ≥ 720 (16px hysteresis; w-96 list ≥ 1100) |
                stacked (list → pane + Back; no preview); data-layout on the root; a flip
                keeps an opened item and focuses its heading (stacked) / row (split)
+      phone (§3g A5 / F4): an sm:hidden 44px Menu button (inbox-menu) emits open-menu →
+               Portal's mobileNav = true; watch(route.fullPath) closes the drawer on ANY
+               navigation (the pinned Inbox row is a router-link and left it open)
       split: the tab's first row is a local PREVIEW — not ?item=, NOT a read, emitted as
                update:preview (§3g S5, T2); stacked: nothing selected
     stableRows(fresh, visit)   rows keep their place for one TAB VISIT (§3g S1): a row that leaves

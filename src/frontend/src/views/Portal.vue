@@ -335,6 +335,7 @@
           :is-platform="store.isPlatformSession"
           :mark-read="markRead"
           :rail-allowance="inboxRailAllowance"
+          @open-menu="mobileNav = true"
           @update:preview="(k) => { inboxPreview = k }"
           @refresh="refreshThreads"
           @open-chat="(url) => router.push(url)"
@@ -914,6 +915,10 @@ const unreachableAgent = ref(null)
 const pendingSession = ref(null)      // session to load when the conversation (re)mounts
 const prefill = ref('')
 const mobileNav = ref(false)
+// trinity-enterprise#610 §3g F4: the phone drawer closes on ANY navigation —
+// tapping the pinned Inbox row (a router-link, not one of the sidebar's emits)
+// left it open over the page it had just opened.
+watch(() => route.fullPath, () => { mobileNav.value = false })
 const convGen = ref(0)                // bumps on explicit thread switches → remount
 // #2163 — `bootstrap()` has finished placing the caller (see the function).
 // Deliberately a separate bit from `store.rosterLoaded`: that one says the

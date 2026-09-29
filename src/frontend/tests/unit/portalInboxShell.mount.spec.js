@@ -260,3 +260,18 @@ describe('§3g S4 — a failed read write is rolled back', () => {
     await expect(settled).resolves.toBe(true)
   })
 })
+
+describe('§3g A5 / F4 — the phone drawer from the Inbox', () => {
+  it("the Inbox's Menu opens the drawer, and any navigation closes it", async () => {
+    arm()
+    const { w, router } = await boot('/workspace/inbox')
+    const sidebars = () => w.findAllComponents({ name: 'PortalSidebar' }).length
+    expect(sidebars()).toBe(1)
+    w.findComponent({ name: 'PortalInbox' }).vm.$emit('open-menu')
+    await flushPromises()
+    expect(sidebars()).toBe(2) // the drawer's copy
+    await router.push('/workspace/inbox?tab=all')
+    await flushPromises()
+    expect(sidebars()).toBe(1)
+  })
+})

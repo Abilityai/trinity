@@ -20,6 +20,17 @@
 <template>
   <div ref="rootEl" class="flex-1 min-h-0 flex flex-col" data-testid="inbox" :data-layout="layout.mode" @keydown.esc="onEsc">
     <header class="shrink-0 flex items-start gap-3 px-4 pt-4 pb-2">
+      <!-- §3g A5: on a phone the sidebar is a drawer, and the Inbox is the
+           landing — without this it was a dead end. 44px, the touch floor. -->
+      <button
+        type="button"
+        class="sm:hidden -ml-2 h-11 w-11 shrink-0 flex items-center justify-center rounded-md text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-750 focus:outline-none focus-visible:ring-2 focus-visible:ring-action-primary-500/40"
+        aria-label="Menu"
+        data-testid="inbox-menu"
+        @click="$emit('open-menu')"
+      >
+        <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16" /></svg>
+      </button>
       <div class="min-w-0 flex-1">
         <h1 class="text-lg font-semibold text-gray-900 dark:text-gray-100">Inbox</h1>
         <p class="text-[12.5px] text-gray-600 dark:text-gray-300">What needs you, and what came back, across your agents.</p>
@@ -208,7 +219,7 @@ const props = defineProps({
   // verdict: a false result is `inbox-pane-read-error`.
   markRead: { type: Function, default: null },
 })
-const emit = defineEmits(['refresh', 'open-chat', 'reply', 'update:preview'])
+const emit = defineEmits(['refresh', 'open-chat', 'reply', 'update:preview', 'open-menu'])
 
 const store = useClientPortalStore()
 const route = useRoute()
