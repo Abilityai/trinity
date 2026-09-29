@@ -1,7 +1,7 @@
 """Pydantic models for Workspace asks (ent#364). OSS core since ent#428."""
 from __future__ import annotations
 
-from typing import Any, List, Optional
+from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field
 
@@ -22,13 +22,31 @@ class WorkspaceAsk(BaseModel):
     title: str
     question: str
     options: Optional[List[Any]] = None
+    # trinity-enterprise#611: the exact action an approval asks this person to
+    # approve. Agent-authored like `context`, but named here on purpose: it is the
+    # thing being decided, and the prompt tells agents to put it here "so the
+    # operator can verify what they are approving". `context` stays off.
+    proposal: Optional[Dict[str, Any]] = None
     created_at: str
     expires_at: Optional[str] = None
-    # pending | expired on a LISTING (`list_asks` queries `status="pending"`, so
-    # terminal rows never appear there); `answered` is reachable only from the
-    # ANSWER response, where the row this call just recorded is projected back.
+    # pending | answered | cancelled | expired. A listing carries pending asks,
+    # plus — with `include_ended` — the ones that ended in the last 7 days
+    # (trinity-enterprise#611); the ANSWER response projects the row it recorded.
     status: str
+    # How the ask ended, COARSE on purpose (trinity-enterprise#611): `ended_by`
+    # is `you` | `operator` | `timeout`, never an email, and the operator's
+    # cancel reason never crosses. `ended_at` is when it ended — None when the
+    # platform does not know (a row that ended before the ledger), never the
+    # time the ask was filed.
+    ended_at: Optional[str] = None
+    ended_by: Optional[str] = None
     chat_id: Optional[str] = None   # the thread it was attached to, when known
+    # #2915: what the platform last established about the agent's own copy of
+    # this ask, COARSE on purpose — `confirmed | changed | closed | unconfirmed`.
+    # A client never sees the reason (it names the operator's infrastructure)
+    # nor a poller timestamp. `aging` is the operator's configured bound.
+    sync: str = "unconfirmed"
+    aging: bool = False
     # ent#430 AC #5: whether answering this ask sets work in motion, so a
     # surface can say "answered" without implying the agent started working.
     # Populated only on the ANSWER response — a pending ask has not been
@@ -52,3 +70,5 @@ class WorkspaceAskAnswer(BaseModel):
     """
     response: Optional[str] = Field(default=None, max_length=500)
     response_text: Optional[str] = Field(default=None, max_length=4000)
+    # #2915: see `OperatorResponse.acknowledge_divergence`.
+    acknowledge_divergence: bool = False

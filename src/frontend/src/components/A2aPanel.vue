@@ -98,7 +98,7 @@
           <div v-else class="text-sm text-gray-500 dark:text-gray-400">
             No skills advertised — the agent's template declares no capabilities.
           </div>
-          <p v-if="!config.curated_skills && capabilities.length" class="mt-2 text-xs text-gray-400 dark:text-gray-500">
+          <p v-if="!config.curated_skills && capabilities.length" class="mt-2 text-xs text-gray-500 dark:text-gray-400">
             Advertising all {{ capabilities.length }} capabilities (default).
           </p>
         </template>

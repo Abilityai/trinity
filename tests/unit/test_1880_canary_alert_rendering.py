@@ -129,6 +129,16 @@ _OBSERVED_STATE = {
         "free_slots": 2,
         "drain_tick_age_seconds": 900,
     },
+    "B-08": {
+        "agent_name": "agent-a",
+        "kind": "workers_silent",
+        "container_pull_mode": True,
+        "pool_size": 3,
+        "busy_workers": 0,
+        "idle_workers": 3,
+        "poll_silence_seconds": 900,
+        "snapshot_time": _SNAP,
+    },
     "R-01": {"agent_name": "agent-a", "zombie_count": 3},
     # H-01 is the only fleet-wide invariant: no `agent_name`, at most one
     # violation. Both renderers read `violations[0]` directly instead of
@@ -462,3 +472,22 @@ def test_scrubbed_invariants_render_only_whitelisted_keys(invariant_id):
         f"{invariant_id}: sentinel reached a Block Kit block. The branch must "
         f"read named keys only — never iterate observed_state."
     )
+
+
+def test_b02_pull_row_renders_its_own_evidence():
+    """#2840: a pull-arm B-02 row has no drain tick or free slots; it must
+    render its kind, queue age and worker counts, not `free_slots=?`."""
+    obs = {
+        "mode": "pull",
+        "kind": "queued_not_claimed",
+        "agent_name": "agent-p",
+        "queued_count": 2,
+        "oldest_queued_age_seconds": 400,
+        "pool_size": 3,
+        "idle_workers": 2,
+    }
+    text, blocks = _payload("B-02", [_violation("B-02", obs)])
+    rendered = " ".join(b["text"]["text"] for b in blocks if b["type"] == "section")
+    assert "queued_not_claimed" in rendered
+    assert "oldest 400s" in rendered and "2/3" in rendered
+    assert "free_slots" not in rendered and "stale drain tick" not in rendered

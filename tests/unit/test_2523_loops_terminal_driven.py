@@ -195,6 +195,8 @@ class _DB:
 
     # executions
     def create_task_execution(self, **kw):
+        if kw.get("fields") is not None:  # #1482: inline the parameter object
+            kw.update(vars(kw.pop("fields")))
         eid = f"exec_{len(self.executions) + 1}"
         self.executions[eid] = _Execution(eid)
         return self.executions[eid]
@@ -202,7 +204,8 @@ class _DB:
     def get_execution(self, eid):
         return self.executions.get(eid)
 
-    def update_execution_status(self, *, execution_id, status, error=None, **_kw):
+    def update_execution_status(self, *, execution_id, status, result=None, **_kw):
+        error = result.error if result is not None else None  # #1482
         row = self.executions.get(execution_id)
         if row is None:
             return False

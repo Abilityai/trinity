@@ -1,0 +1,68 @@
+{
+  "version": "1.1",
+  "date": "2026-09-24",
+  "mode": "diff",
+  "scope": "all",
+  "confidence_gate": 8,
+  "branch": "feature/ent689-readiness-gate",
+  "issue": "abilityai/trinity-enterprise#689",
+  "phases_run": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    9,
+    12,
+    13,
+    14
+  ],
+  "attack_surface": {
+    "new_endpoints": [
+      "GET /api/internal/agents/{name}/brief-readiness (internal router; router-level verify_internal_secret)"
+    ],
+    "new_outbound_calls": [
+      "scheduler -> backend brief-readiness (X-Internal-Secret, 5 s, fail-open)"
+    ],
+    "changed_payloads": [
+      "client-portal role card: readiness.source 'rollout', brief_held (platform viewers only)"
+    ],
+    "migrations": [
+      "data-only seed, static SQL, both tracks"
+    ]
+  },
+  "findings": [],
+  "fixed_during_audit": [
+    "brief_held computed for platform viewers only (hardening; the disclosure claim was refuted by an independent verifier as not contradicting a stated invariant)"
+  ],
+  "appendix": [
+    "TENTATIVE (6/10): an UNSTAMPED companion can exempt itself by removing x-role from its own template.yaml, or by making the template read exceed 3 s (fail open). An owner's explicit stamp is never bypassed. Governance, not a security boundary; recorded in the requirement's fail-open rule.",
+    "PRE-EXISTING, out of diff scope: the role card sends readiness.changed_by (the owner's email for an owner stamp) to external verified-email clients. Raised to the user for a separate issue."
+  ],
+  "supply_chain_summary": "no dependency, lockfile, CI, Dockerfile or compose change",
+  "filter_stats": {
+    "candidates": 3,
+    "refuted": 1,
+    "excluded_by_rule": 0,
+    "detail": [
+      "brief_held schedule-derived bit to external clients \u2014 refuted as a finding (ent#78 platform-door text scopes the executions ledger only); applied as hardening",
+      "self-exemption by an unstamped companion \u2014 below the 8/10 gate (appendix)",
+      "changed_by owner email to clients \u2014 pre-existing, not introduced by this diff"
+    ]
+  },
+  "totals": {
+    "critical": 0,
+    "high": 0,
+    "medium": 0,
+    "low": 0
+  },
+  "mutations": [
+    "gate lets unstamped companions fire -> 2 red",
+    "seed overwrites stamps -> 1 red",
+    "scheduler never asks -> 1 red"
+  ],
+  "trend": "first diff report for this feature"
+}

@@ -612,7 +612,8 @@ class AgentClient:
         path: str,
         content: str,
         timeout: float = 30.0,
-        platform: bool = False
+        platform: bool = False,
+        if_match: Optional[str] = None,
     ) -> dict:
         """
         Write content to a file in the agent's workspace.
@@ -623,6 +624,10 @@ class AgentClient:
             content: File content to write
             timeout: Request timeout
             platform: If True, allows writes to .trinity directory (platform-initiated)
+            if_match: #2915 — sha256 hex of the content this caller last READ.
+                The agent server refuses the write with 412 when the file no
+                longer matches (a compare-and-swap), so a concurrent agent write
+                is never clobbered. An older agent server ignores the parameter.
 
         Returns:
             dict with success status and file info
@@ -636,6 +641,8 @@ class AgentClient:
             query = f"path={encoded_path}"
             if platform:
                 query += "&platform=true"
+            if if_match:
+                query += f"&if_match={urllib.parse.quote(if_match, safe='')}"
 
             response = await self.put(
                 f"/api/files?{query}",

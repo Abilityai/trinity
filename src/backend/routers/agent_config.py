@@ -512,6 +512,10 @@ async def set_agent_timeout(
     Body:
     - execution_timeout_seconds: Timeout in seconds (60-7200, i.e., 1 min to 2 hours)
 
+    Applies to new runs. Runs already in progress keep their current limit;
+    queued pull-dispatched jobs with a longer timeout are cut to this one
+    when they start.
+
     Only agent owners can modify timeout settings.
     """
     # Only owners can change timeout

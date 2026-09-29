@@ -36,25 +36,37 @@ def validate_widget(widget: Dict[str, Any], index: int) -> Optional[str]:
     if widget_type not in valid_types:
         return f"Widget {index}: invalid type '{widget_type}'. Valid types: {', '.join(valid_types)}"
 
+    # ent#479: a widget carrying `metric: <name>` is BOUND — the backend fills
+    # its `value` (and a status widget's `color`) from the declared metric
+    # registry on every read, so requiring the author to write a number here
+    # would require them to write a FAKE number forever. `label` stays
+    # required: it is the widget's own copy, not a measurement.
+    #
+    # An agent on an older base image still has the strict rule, so the guide
+    # tells authors to keep a placeholder `value:` until their image carries
+    # this change — the backend overwrites it when the binding resolves, so
+    # the placeholder is never what an operator sees.
+    bound = bool(widget.get('metric'))
+
     # Type-specific validation
     if widget_type == 'metric':
         if 'label' not in widget:
             return f"Widget {index} (metric): missing required 'label' field"
-        if 'value' not in widget:
+        if 'value' not in widget and not bound:
             return f"Widget {index} (metric): missing required 'value' field"
 
     elif widget_type == 'status':
         if 'label' not in widget:
             return f"Widget {index} (status): missing required 'label' field"
-        if 'value' not in widget:
+        if 'value' not in widget and not bound:
             return f"Widget {index} (status): missing required 'value' field"
-        if 'color' not in widget:
+        if 'color' not in widget and not bound:
             return f"Widget {index} (status): missing required 'color' field"
 
     elif widget_type == 'progress':
         if 'label' not in widget:
             return f"Widget {index} (progress): missing required 'label' field"
-        if 'value' not in widget:
+        if 'value' not in widget and not bound:
             return f"Widget {index} (progress): missing required 'value' field"
 
     elif widget_type == 'text':

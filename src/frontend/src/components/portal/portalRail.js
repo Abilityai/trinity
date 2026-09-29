@@ -199,17 +199,23 @@ export const RAIL_TABS = Object.freeze([
   //     rail's column; false once it IS the column's content. Collapsing the
   //     rail dismisses it, and the rail already remembers the tab you left.
   //
-  // A STATIC tab — the third registry shape. No signal (nothing about an agent's
-  // context is an event) and no empty state (an agent always has a name, a
-  // health state and a chat list, so the body always renders and the rail's
-  // generic empty branch is unreachable). Both are declared as absent rather
-  // than filled with a plausible value; see RAIL_SIGNAL_NONE.
+  // No empty state (an agent always has a name, a health state and a chat
+  // list, so the body always renders and the rail's generic empty branch is
+  // unreachable) — declared absent rather than filled with a plausible value.
+  //
+  // ent#465 amends ent#547's "static tab": Info now carries the `updated` dot
+  // while suggestions are waiting for you in it (the shell writes an `info`
+  // entry with a `note`, "2 suggestions", which the tooltip and the mobile
+  // strip read instead of "updated"). The dot is the rail's own vocabulary —
+  // one shape, one hue (principle 24) — rather than a numeric badge the design
+  // pass never defined. A signalling tab without an empty state is therefore a
+  // legal registry shape; `RAIL_SIGNAL_NONE` stays for a tab with neither.
   Object.freeze({
     id: 'info',
     label: 'Info',
     door: RAIL_DOORS.SOLO_AGENT,
     scope: RAIL_SCOPE_PARTICIPANTS,
-    signal: RAIL_SIGNAL_NONE,
+    signal: RAIL_SIGNAL_UPDATED,
     icon: 'info',
     empty: null,
   }),
@@ -348,7 +354,12 @@ export function signalFor(signals, tab) {
   if (!raw || typeof raw !== 'object') return emptySignal()
   const live = Number.isInteger(raw.live) && raw.live > 0 ? raw.live : 0
   const agents = participantList(raw.agents)
-  return { live, updated: raw.updated === true, agents }
+  const out = { live, updated: raw.updated === true, agents }
+  // ent#465: an optional short phrase that replaces "updated" in words
+  // ("2 suggestions"). Carried only when present, so every existing signal
+  // keeps its exact shape.
+  if (typeof raw.note === 'string' && raw.note) out.note = raw.note
+  return out
 }
 
 /** Which shape the tab wears: live outranks updated; null = no dot. */
@@ -364,7 +375,7 @@ export function railTitle(tab, sig) {
   const label = tab && tab.label ? tab.label : ''
   const shape = signalShape(sig)
   if (shape === RAIL_SIGNAL_LIVE) return `${label} · ${sig.live} running`
-  if (shape === RAIL_SIGNAL_UPDATED) return `${label} · updated`
+  if (shape === RAIL_SIGNAL_UPDATED) return `${label} · ${sig.note || 'updated'}`
   return label
 }
 
@@ -383,6 +394,7 @@ export function collapsedSignals(signals, visible) {
       live: sig.live,
       updated: sig.updated,
       agents: sig.agents,
+      note: sig.note,
       shape: signalShape(sig),
       title: railTitle(tab, sig),
     }
@@ -405,7 +417,9 @@ export function stripSegments(signals, visible) {
     return signalled.map((s) => ({
       id: s.id,
       shape: s.shape,
-      text: s.shape === RAIL_SIGNAL_LIVE ? `${s.label} · ${s.live} running` : `${s.label} updated`,
+      text: s.shape === RAIL_SIGNAL_LIVE
+        ? `${s.label} · ${s.live} running`
+        : (s.note ? `${s.label} · ${s.note}` : `${s.label} updated`),
     }))
   }
   return (Array.isArray(visible) ? visible : []).map((t) => ({ id: t.id, shape: null, text: t.label }))
@@ -526,6 +540,61 @@ export function railVisibleFor({
   if (stageState !== 'ready') return false
   if (roomId) return roomsAvailable === true
   return Boolean(activeAgent) && !unreachable
+}
+
+/**
+ * Should the rail's COLUMN be held open while the stage is still loading (#2711)?
+ *
+ * `railVisibleFor` answers "may the rail render", and it is false for every
+ * non-ready stage — correctly, since the rail's tabs need the roster. But the
+ * column's WIDTH does not: it comes from the persisted rail state and is known
+ * synchronously at first paint. Without this the conversation column rendered
+ * full width and then lost the rail's width the moment the roster landed,
+ * shifting the composer, the thread and the header left — animated since #2676,
+ * which made it a 300ms slide rather than a jump, but still a shift. The
+ * contract's layout-stability rule is that loading and loaded share ONE
+ * footprint.
+ *
+ * Deliberately narrower than `railVisibleFor`'s route set:
+ *
+ *   - an agent page never carries a rail, so reserving there would invent a gap;
+ *   - a ROOM route is excluded even though a ready room usually has a rail,
+ *     because that depends on `roomsAvailable`, which arrives ON the roster
+ *     payload (#2128) — reserving on a capability we have not been told about
+ *     yet would trade this shift for the opposite one on any install without it.
+ *
+ * So this reserves for exactly the case the bug is about: a 1:1 conversation
+ * route, mid-load. If the rail then turns out not to render (an unreachable deep
+ * link), the column leaves through the same width transition rather than
+ * vanishing — a shrink, not a jump.
+ */
+export function railColumnReservedFor({
+  agentPage = null,
+  stageState = 'loading',
+  roomId = null,
+} = {}) {
+  if (agentPage) return false
+  if (roomId) return false
+  return stageState === 'loading'
+}
+
+/**
+ * Should the rail COLUMN be sized open (#3060)?
+ *
+ * `useColumnResize` sizes the column from this: the rail's open width when true,
+ * the 48px collapsed strip when false. It used to be `open && visible`, and the
+ * rail is never visible while the stage loads (`railVisibleFor`), so the column
+ * `railColumnReservedFor` holds open during the load was sized COLLAPSED even
+ * for a rail the person left open — 48px reserved, then the open width the
+ * moment the stage was ready, which jumped the conversation's right edge by the
+ * difference (336px at the default width) in one frame. The reservation's whole
+ * point is that loading and loaded share one footprint; it has to reserve the
+ * width the rail will actually take.
+ *
+ * Strict booleans, like `normalizeRailState`: a truthy non-boolean is not open.
+ */
+export function railSizedOpen({ open = false, visible = false, reserved = false } = {}) {
+  return open === true && (visible === true || reserved === true)
 }
 
 // ---------------------------------------------------------------- slice 2 (ent#475): feeds, seen markers, openers

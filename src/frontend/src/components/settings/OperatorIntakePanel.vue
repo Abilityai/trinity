@@ -65,7 +65,7 @@
           </button>
         </div>
 
-        <p class="text-xs text-gray-400 dark:text-gray-500">
+        <p class="text-xs text-gray-500 dark:text-gray-400">
           Toggling off records a durable decline for any future contact from this install.
           It cannot recall the existing record — the hosted endpoint has no local delete authority.
           To request deletion of the record itself, email
@@ -94,19 +94,19 @@
             />
           </label>
           <label class="block">
-            <span :class="LABEL_CLASS">Company <span class="font-normal text-gray-400 dark:text-gray-500">(optional)</span></span>
+            <span :class="LABEL_CLASS">Company <span class="font-normal text-gray-500 dark:text-gray-400">(optional)</span></span>
             <input v-model.trim="form.company" type="text" maxlength="200" autocomplete="organization" placeholder="Acme Inc." :class="[SETTINGS_TEXT_INPUT_CLASS, 'mt-1 w-full']" />
           </label>
           <label class="block">
-            <span :class="LABEL_CLASS">Name <span class="font-normal text-gray-400 dark:text-gray-500">(optional)</span></span>
+            <span :class="LABEL_CLASS">Name <span class="font-normal text-gray-500 dark:text-gray-400">(optional)</span></span>
             <input v-model.trim="form.name" type="text" maxlength="200" autocomplete="name" placeholder="Ada Lovelace" :class="[SETTINGS_TEXT_INPUT_CLASS, 'mt-1 w-full']" />
           </label>
           <label class="block">
-            <span :class="LABEL_CLASS">Role <span class="font-normal text-gray-400 dark:text-gray-500">(optional)</span></span>
+            <span :class="LABEL_CLASS">Role <span class="font-normal text-gray-500 dark:text-gray-400">(optional)</span></span>
             <input v-model.trim="form.role" type="text" maxlength="200" autocomplete="organization-title" placeholder="Platform engineer" :class="[SETTINGS_TEXT_INPUT_CLASS, 'mt-1 w-full']" />
           </label>
           <label class="block">
-            <span :class="LABEL_CLASS">Primary use case <span class="font-normal text-gray-400 dark:text-gray-500">(optional)</span></span>
+            <span :class="LABEL_CLASS">Primary use case <span class="font-normal text-gray-500 dark:text-gray-400">(optional)</span></span>
             <input v-model.trim="form.use_case" type="text" maxlength="500" placeholder="What you plan to run on Trinity" :class="[SETTINGS_TEXT_INPUT_CLASS, 'mt-1 w-full']" />
           </label>
         </div>

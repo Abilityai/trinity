@@ -28,6 +28,16 @@ from typing import Optional, Set
 logger = logging.getLogger(__name__)
 
 
+# Per-agent last worker claim attempt (unix seconds), stamped by
+# `pull_coordination_service.claim_next_task` and read by canary B-08 (#2840)
+# to tell a dead pool from an idle one. Defined here because this
+# module is the stdlib leaf both sides can import.
+PULL_POLL_KEY_PREFIX = "agent:pull_poll:"
+# Hygiene only: B-08 measures silence from the later of this value and the
+# container start, so an expired key cannot fire on its own.
+PULL_POLL_TTL_SECONDS = 86400
+
+
 def _pilot_allowlist() -> Set[str]:
     raw = os.getenv("PULL_MODE_PILOT_AGENTS", "")
     return {name.strip() for name in raw.split(",") if name.strip()}
@@ -78,6 +88,20 @@ def is_pull_pilot_agent(agent_name: str) -> bool:
 # elsewhere, which the adapter does by waiting out the queue and rebuilding the
 # result from the row.
 #
+# ``operator_ending`` (trinity-enterprise#611) is the same wake as
+# ``operator_response`` for an ask that was cancelled or expired instead of
+# answered: dispatched from ``operator_resume_service`` through the same
+# adapter, for the same receipt.
+#
+# ``retry`` (#2845) is RETRY-001's second attempt at a failed scheduler run. The
+# scheduler creates the row and dispatches it through the SAME async-poll path as
+# the cron fire (``_execute_retry`` → ``_call_backend_execute_task``), so it is
+# exactly as pullable as the run it retries. Without it a pilot's scheduled run
+# was pulled and its retry pushed — the second attempt, which exists because the
+# first failed, ran on the path with no lease and no reaper recovery. A retry of
+# a MANUAL run still changes system (push → pull) until interactive triggers are
+# pullable (#1989); that direction lands on the durable path, not off it.
+#
 # **The set is currently equal to ``_AUTONOMOUS_TRIGGERS``, and it stays an
 # explicit allow-list anyway.** That is the point of it: a trigger added to the
 # autonomous set later must be reviewed against dispatch topology rather than
@@ -89,7 +113,7 @@ def is_pull_pilot_agent(agent_name: str) -> bool:
 # still drops it here, and widening reach is a deliberate edit to this set.
 PULL_REACHABLE_TRIGGERS = frozenset(
     {"agent", "event", "schedule", "webhook", "reminder", "loop", "fan_out",
-     "a2a", "operator_response"}
+     "a2a", "operator_response", "operator_ending", "retry"}
 )
 
 

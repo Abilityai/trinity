@@ -113,7 +113,11 @@ class TestSpecConsistency:
         # #2137: 101 -> 88. 17 retired (dead-field, legacy-layout, duplicate)
         # + 4 DP checks implemented. Retired ids are never reissued.
         # ent#411: +1 (I-006, Trinity plugin presence) -> 89.
-        assert len(spec.CHECKS) == 89, f"expected 89 checks, found {len(spec.CHECKS)}"
+        # ent#477: +1 (D-009, `metrics:` entries well-formed) -> 90. A NEW id,
+        # not a revival of retired D-006 — `test_retired_ids_are_never_reissued`
+        # below still asserts D-006 stays out of the catalog.
+        # ent#479: +1 (D-010, metrics.json superseded) -> 91.
+        assert len(spec.CHECKS) == 91, f"expected 91 checks, found {len(spec.CHECKS)}"
 
     def test_retired_ids_are_never_reissued(self):
         """#2137: persisted `checks_json` rows predate the retirement.

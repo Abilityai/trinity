@@ -34,6 +34,7 @@ from typing import Any, Dict, Optional
 from models import ParallelTaskRequest, TaskExecutionStatus
 from services.slot_service import get_slot_service
 from utils.helpers import utc_now_iso
+from db.write_params import ExecutionResult
 
 logger = logging.getLogger(__name__)
 
@@ -246,7 +247,9 @@ class BacklogService:
             db.update_execution_status(
                 execution_id=execution_id,
                 status=TaskExecutionStatus.FAILED,
-                error=f"Backlog drain failed: corrupt metadata ({e})",
+                result=ExecutionResult(
+                    error=f"Backlog drain failed: corrupt metadata ({e})",
+                ),
             )
             await slots.release_slot(agent_name, execution_id)
             return False
@@ -265,7 +268,9 @@ class BacklogService:
             db.update_execution_status(
                 execution_id=execution_id,
                 status=TaskExecutionStatus.FAILED,
-                error=f"Backlog drain spawn failed: {e}",
+                result=ExecutionResult(
+                    error=f"Backlog drain spawn failed: {e}",
+                ),
             )
             await slots.release_slot(agent_name, execution_id)
             return False
@@ -362,7 +367,9 @@ class BacklogService:
 
         n = db.expire_stale_queued(max_age_hours)
         if n:
-            logger.info(f"[Backlog] Expired {n} stale queued rows (>{max_age_hours}h)")
+            # Warning, not info (#2840): a row nobody picked up for a day is a
+            # failure, and on a pull pilot this is the only trace it leaves.
+            logger.warning(f"[Backlog] Expired {n} stale queued rows (>{max_age_hours}h)")
         return n
 
     async def drain_orphans_all(self) -> int:

@@ -12,6 +12,19 @@ import { accessDenied } from "../access.js";
 import { ApiError } from "../client.js";
 
 /**
+ * #2958: `compact_metadata` is stored as a JSON string. Parse it for the
+ * caller; a malformed value degrades to null rather than failing the read.
+ */
+function parseCompactMetadata(raw: string | null | undefined): unknown {
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Create execution query tools with the given client
  * @param client - Base Trinity client (provides base URL, no auth when requireApiKey=true)
  * @param requireApiKey - Whether API key authentication is enabled
@@ -139,6 +152,8 @@ export function createExecutionTools(
         "Get the full result of a specific execution including response text, cost, and status. " +
         "Use this to poll for results after chat_with_agent(async=true, parallel=true) returns an execution_id. " +
         "Optionally include the full execution transcript (tool calls, thinking, responses). " +
+        "A long `duration_ms` with a non-null `compact_metadata` is a one-off context auto-compaction " +
+        "(its trigger, pre/post tokens and duration), not a degraded agent. " +
         "Access control: agents can only view executions on self or permitted agents.",
       parameters: z.object({
         agent_name: z.string().describe("Name of the agent that ran the execution"),
@@ -184,6 +199,7 @@ export function createExecutionTools(
           context_used: execution.context_used || null,
           context_max: execution.context_max || null,
           model_used: execution.model_used || null,
+          compact_metadata: parseCompactMetadata(execution.compact_metadata),
         };
 
         if (include_log) {

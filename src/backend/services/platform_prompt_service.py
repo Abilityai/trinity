@@ -21,6 +21,7 @@ from models import (
     REPORT_PAYLOAD_MAX_BYTES,
 )
 from services.prompt_tier import PromptTier, resolve_prompt_tier
+from utils.helpers import iso_cutoff
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +39,11 @@ MAX_PLATFORM_URL_LEN = 200
 MAX_DISPLAY_NAME_LEN = 120
 MAX_ROLE_ID_LEN = 64
 MAX_STAKEHOLDER_LEN = 140
+# Ended asks (trinity-enterprise#611): the agent's own request ids, how each
+# ended and when — a bounded list, one day back.
+MAX_ENDED_ASKS = 5
+MAX_REQUEST_ID_LEN = 64
+ENDED_ASKS_WINDOW_HOURS = 24
 
 # Static platform instructions — moved from agent-side trinity.py
 PLATFORM_INSTRUCTIONS = """# Trinity Platform Instructions
@@ -61,10 +67,12 @@ Use `list_agents` to discover your available collaborators.
 When the user asks for a file (image, PDF, document, generated asset) or when your answer is best delivered as a file instead of inline text — but see **Publishing Reports** below first: rows-and-columns results belong in a report, which the user can already export to Excel or PDF, and which works even when file sharing is off:
 
 1. Write the file to `/home/developer/public/` (NOT `/home/developer/` or any other path).
-2. Call the `mcp__trinity__share_file` MCP tool with the relative filename.
+2. Call the `mcp__trinity__share_file` MCP tool with the relative filename and your `execution_id` (see the Execution Context block).
 3. Include the returned `url` in your reply as-is.
 
 The platform returns a time-limited download URL that works across every channel (web, Slack, Telegram, WhatsApp, email). If the owner has not enabled file sharing for you, the tool returns `FEATURE_DISABLED` — ask the operator to turn it on in the agent's Sharing tab.
+
+**Who sees a shared file.** The link works for anyone you give it to. The file is also listed in the Workspace Files tab of ONE person — the person this conversation is with. The platform works that out from your `execution_id`; you do not choose it. A turn with no person (a schedule, an operator chat, an agent-to-agent call) lists the file for your owner only. To list it for a different person you are already shared with, pass `audience_email`. If the result says `visible_to_requester: false`, the platform could not tell which conversation the share came from — `visibility_note` says what to do.
 
 ### Publishing Reports
 
@@ -122,29 +130,40 @@ Limits: __CANVAS_MAX_BLOCKS__ blocks, __CANVAS_BLOCKS_MAX__ serialized — aggre
 
 ### Operator Communication
 
-You can ask your human operator for input — approvals, answers to questions, or alerts — through a file-based queue protocol.
-
-**Queue File**: `~/.trinity/operator-queue.json`
-
-The platform monitors this file and presents requests to the operator in the Operating Room UI. The operator's responses are written back to the same file.
+You can ask a person for input — approvals, answers to questions, or alerts. Raise an ask with the `ask_operator` tool: the platform checks it, shows it in the Operating Room (and, when it goes to your owner, in their Workspace) and returns a receipt. The queue file `~/.trinity/operator-queue.json` still works as a fallback for two releases, then it is removed.
 
 #### The contract: fire-and-park, never block-and-wait
 
 All operator communication is **asynchronous**. A human may answer in minutes or in days, so:
 
-1. **Park** your request by appending an entry to the queue file.
+1. **Park** your request: call `ask_operator` (or append an entry to the queue file).
 2. **End your turn.** Never wait, poll, or sleep for a response inside the current turn — a turn that blocks on a human burns its whole timeout budget and delivers nothing.
-3. **Process responses in a later turn.** At the start of each autonomous run (scheduled task, loop iteration), check the queue file for items with `status: "responded"`, act on them, then set their status to `"acknowledged"`.
+3. **Act on the outcome in a later turn.** Read how an ask ended with `get_my_ask`; the Execution Context block also lists your asks that ended in the last 24 hours. For a queue-file entry, check the file for items with `status: "responded"`, act on them, then set their status to `"acknowledged"`.
 
-The operator's answer reaches your queue file within seconds of them responding, but only a future turn can act on it. If nothing will wake you (you have no schedule or heartbeat), say so in the request itself — include resume instructions in the `question`, e.g. "after approving, re-trigger schedule X" or "send me a chat message with your decision".
+If the receipt says `wakes_on_ending: true`, the platform wakes you when the ask ends. Otherwise, if nothing will wake you (you have no schedule or heartbeat), say so in the request itself — include resume instructions in the `question`, e.g. "after approving, re-trigger schedule X" or "send me a chat message with your decision".
 
 #### Ask before irreversible actions
 
-Before performing an action that cannot be undone or verified afterwards — payments or money movement, emails/messages sent through your own credentials, public posts, destructive deletions — park an `approval` request and end your turn if you are uncertain it should happen. Be especially careful when the task looks like a repeat of work you may have already done (check your own records and the queue file first). Do the reversible parts of the task now; gate only the irreversible step.
+Before performing an action that cannot be undone or verified afterwards — payments or money movement, emails/messages sent through your own credentials, public posts, destructive deletions — park an `approval` request and end your turn if you are uncertain it should happen. Be especially careful when the task looks like a repeat of work you may have already done (check your own records and your earlier asks first). Do the reversible parts of the task now; gate only the irreversible step.
 
 #### How to Use
 
-**Write a request** by adding an entry to the `requests` array:
+`ask_operator` takes a `request_id` and a `title`, plus optional `question`, `type`, `options`, `priority`, `context`, `proposal`, `to` and `expires_at`; its description has the details and the named refusals.
+
+**Request IDs must be globally unique.** Derive the `request_id` from your current execution ID (see the Execution Context block), e.g. `approval-{execution_id}-{short-slug}`. Never use date-serial IDs like `req-20260307-001` — a second task that picks the same ID gets the first ask's receipt instead of a new ask. Re-using your own derived ID when the same task runs again is safe and intentional: it prevents duplicate requests.
+
+**Request types:**
+- `approval` — You need a yes/no or multi-choice decision. Provide `options`, and state the exact action and its parameters in `proposal` so the operator can verify what they are approving.
+- `question` — You need freeform guidance. No `options` needed.
+- `alert` — You're reporting a situation. No decision needed; it goes to the operators.
+
+**Priority levels:** `critical`, `high`, `medium`, `low`
+
+**Set `expires_at`** on requests that gate an action: an ISO-8601 time with a timezone, at least 15 minutes out. If it passes without a response the ask ends `expired` — treat that as "not approved; do not proceed", and do not re-ask the same action without new information. When you do re-ask, set `supersedes_expired` to the expired ask's `request_id`.
+
+#### The queue file (fallback)
+
+Until it is removed, an entry appended to the `requests` array of `~/.trinity/operator-queue.json` still reaches the operator:
 
 ```json
 {
@@ -166,22 +185,7 @@ Before performing an action that cannot be undone or verified afterwards — pay
 }
 ```
 
-**Request IDs must be globally unique.** Derive the `id` from your current execution ID (see the Execution Context block), e.g. `approval-{execution_id}-{short-slug}`. Never use date-serial IDs like `req-20260307-001` — another agent choosing the same ID silently swallows your request. Re-using your own derived ID when the same task runs again is safe and intentional: it prevents duplicate requests.
-
-**Request types:**
-- `approval` — You need a yes/no or multi-choice decision. Provide `options` array. State the exact action and its parameters in `context` so the operator can verify what they are approving.
-- `question` — You need freeform guidance. No `options` needed.
-- `alert` — You're reporting a situation. No decision needed, just acknowledgement.
-
-**Priority levels:** `critical`, `high`, `medium`, `low`
-
-**Set `expires_at`** on requests that gate an action. If it passes without a response the platform marks the item `expired` — treat that as "not approved; do not proceed."
-
-**Check for responses** at the start of a later turn: items with `status: "responded"` carry `response`, `responded_by`, and `responded_at` fields.
-
-**After processing a response**, update the item's status to `"acknowledged"`.
-
-**File hygiene**: Keep only `pending` and `responded` items plus up to 3 recent `acknowledged` items.
+The operator's answer is written back into the entry: `status: "responded"` with `response`, `responded_by` and `responded_at`. An item that has waited past the operator's aging bound carries a `platform.aging_since` timestamp written by Trinity — read it, never write to `platform`. After processing a response, update the item's status to `"acknowledged"`. Keep only `pending` and `responded` items plus up to 3 recent `acknowledged` items. An ID you raised with `ask_operator` is never read from the file.
 
 #### When to Use
 
@@ -251,7 +255,7 @@ The `execution_id` is in the **Execution Context** block below. The platform sto
 
 - Write the complete updated memory blob each time (read → update → write).
 - The current memory for this user (if any) appears in the **"What you know about this user"** block above.
-- Only available during user-facing sessions (public link, Slack, Telegram, WhatsApp). The tool returns an error if called from a scheduled task or agent-to-agent call."""
+- Available during user-facing sessions (public link, Slack, Telegram, WhatsApp), and in a scheduled run that is addressed to one person (the run's prompt then says so and carries their memory). The tool returns an error from a scheduled run that names no one, or from an agent-to-agent call."""
 
 # The payload ceiling is INTERPOLATED, never typed twice (#1838 review). The
 # block shipped `256 KB` while `REPORT_PAYLOAD_MAX_BYTES` was already 5 MiB in
@@ -321,8 +325,10 @@ _KNOWN_SECTION_HEADINGS = frozenset({
 # NOT tool-usage guidance and have no tool description to live in:
 #   * Operator Communication — the #1402 fire-and-park contract. Sentinel-locked
 #     by tests/unit/test_1402_prompt_contract.py and synced to
-#     config/trinity-meta-prompt/prompt.md; it documents a FILE protocol
-#     (~/.trinity/operator-queue.json), not an MCP tool.
+#     config/trinity-meta-prompt/prompt.md. It names `ask_operator` bare
+#     (trinity-enterprise#611) but is not that tool's usage guide — the tool
+#     description is — it is the turn discipline around asking a human, which
+#     no tool description can carry, plus the file fallback for two releases.
 #   * Remembering Things About Users — carries the shared-memory-directory leak
 #     warning. A privacy guard, un-gateable by construction.
 #   * Package Persistence — a Trinity environment gotcha (~/.trinity/setup.sh)
@@ -439,7 +445,13 @@ def format_user_memory_block(memory_record: dict) -> Optional[str]:
         return None
     agent_notes = (memory_record.get("agent_notes") or "").strip()
     summary = (memory_record.get("conversation_summary") or "").strip()
-    if not agent_notes and not summary:
+    # ent#638: the seat's standing decisions ride the same block on every
+    # caller (public link, channel adapters, seat runs, the Workspace) — the
+    # read-into-context path that makes a criterion reusable and `cites`
+    # non-zero. Read here, keyed off the record's own seat, so no caller can
+    # forget it; fail-open, bounded, no person emails.
+    decisions = _seat_decisions_block(memory_record)
+    if not agent_notes and not summary and not decisions:
         return None
 
     lines = ["## What you know about this user", ""]
@@ -447,8 +459,24 @@ def format_user_memory_block(memory_record: dict) -> Optional[str]:
         lines.extend(["### Agent notes", "", agent_notes, ""])
     if summary:
         lines.extend(["### Conversation summary", "", summary, ""])
+    if decisions:
+        lines.extend([decisions])
     lines.append("---")
     return "\n".join(lines)
+
+
+def _seat_decisions_block(memory_record: dict) -> Optional[str]:
+    agent_name = memory_record.get("agent_name")
+    seat_email = memory_record.get("user_email")
+    if not agent_name or not seat_email:
+        return None
+    try:
+        from database import db
+        from services import seat_decision_service
+        return seat_decision_service.prompt_block(db, agent_name, seat_email)
+    except Exception:  # noqa: BLE001 — a prompt never breaks on the decision record
+        logger.debug("[ent#638] decisions block skipped", exc_info=True)
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -665,6 +693,11 @@ class ExecutionContext:
     role_id: Optional[str] = None
     stakeholders: Optional[List[str]] = None
     proactive_consent: Optional[bool] = None
+    # trinity-enterprise#611: asks this agent raised that ended in the last day —
+    # `{request_id, disposition, disposed_at}` each, no human text. Auto-filled
+    # from the DB; stateless, so a wake that was lost (a crash, a stopped agent)
+    # still reaches the agent on its next turn.
+    ended_asks: Optional[List[dict]] = None
 
     @staticmethod
     def derive_mode(triggered_by: Optional[str]) -> str:
@@ -737,6 +770,25 @@ def _render_collaborators(ctx: ExecutionContext) -> Optional[str]:
         shown = cleaned[:MAX_COLLABORATORS]
         return ", ".join(shown) + f", … ({len(cleaned) - MAX_COLLABORATORS} more)"
     return ", ".join(cleaned)
+
+
+def _render_ended_asks(ctx: ExecutionContext) -> Optional[str]:
+    """The `Ended asks` line body (trinity-enterprise#611): ids, the ending, the
+    time — no title, answer or reason, which a person wrote and this block
+    reaches every composed turn. Bounded; the rest is one tool call away."""
+    if not ctx.ended_asks:
+        return None
+    entries: List[str] = []
+    for ask in ctx.ended_asks[:MAX_ENDED_ASKS]:
+        rid = _sanitize_field(ask.get("request_id"), max_len=MAX_REQUEST_ID_LEN)
+        how = _sanitize_field(ask.get("disposition"), max_len=16)
+        when = _sanitize_field(ask.get("disposed_at"), max_len=MAX_TIMESTAMP_LEN)
+        if rid and how:
+            entries.append(" ".join(x for x in (rid, how, when) if x))
+    if not entries:
+        return None
+    more = ", and more" if len(ctx.ended_asks) > MAX_ENDED_ASKS else ""
+    return "; ".join(entries) + f"{more} — read one with get_my_ask"
 
 
 def _render_assignment(ctx: ExecutionContext) -> Optional[str]:
@@ -852,6 +904,10 @@ def build_execution_context(ctx: ExecutionContext) -> str:
         if collaborators:
             lines.append(f"- **Collaborators**: {collaborators}")
 
+        ended_asks = _render_ended_asks(ctx)
+        if ended_asks:
+            lines.append(f"- **Ended asks (last {ENDED_ASKS_WINDOW_HOURS} h)**: {ended_asks}")
+
         timestamp = _sanitize_field(
             ctx.timestamp, max_len=MAX_TIMESTAMP_LEN
         ) or datetime.now(timezone.utc).isoformat()
@@ -895,6 +951,25 @@ def _resolve_assignment(
     from services.assignment_provider import resolve_assignment
 
     return resolve_assignment(agent_name, triggered_by) or {}
+
+
+def _resolve_ended_asks(agent_name: Optional[str]) -> List[dict]:
+    """This agent's asks that ended in the last day, newest first. Empty on any
+    failure — the line is omitted, never the turn (trinity-enterprise#611)."""
+    if not agent_name:
+        return []
+    try:
+        from services.operator_queue_service import _RESERVED_ID_PREFIXES
+
+        return db.list_recent_operator_queue_endings(
+            agent_name,
+            iso_cutoff(hours=ENDED_ASKS_WINDOW_HOURS),
+            MAX_ENDED_ASKS + 1,
+            exclude_request_id_prefixes=_RESERVED_ID_PREFIXES,
+        ) or []
+    except Exception as e:
+        logger.debug(f"_resolve_ended_asks({agent_name}) failed: {e}")
+        return []
 
 
 def _resolve_platform_url() -> Optional[str]:
@@ -955,7 +1030,8 @@ def compose_system_prompt(
         # caller that pre-fills BOTH collaborators and platform_url would
         # otherwise skip the whole replace block, and the assignment fields
         # would silently never render.
-        if ctx.collaborators is None or ctx.platform_url is None or needs_assignment:
+        if (ctx.collaborators is None or ctx.platform_url is None or needs_assignment
+                or ctx.ended_asks is None):
             assignment = (
                 _resolve_assignment(ctx.agent_name, ctx.triggered_by)
                 if needs_assignment
@@ -992,6 +1068,11 @@ def compose_system_prompt(
                     ctx.proactive_consent
                     if ctx.proactive_consent is not None
                     else assignment.get("proactive_consent")
+                ),
+                ended_asks=(
+                    ctx.ended_asks
+                    if ctx.ended_asks is not None
+                    else _resolve_ended_asks(ctx.agent_name)
                 ),
             )
         block = build_execution_context(ctx)

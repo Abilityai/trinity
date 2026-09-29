@@ -98,6 +98,14 @@ services:
       # Agent structured reports (#918) — per-agent create-rate cap (60s window fixed in code).
       # Must reach the container or the .env lever is inert in prod (the #1039 packaging class).
       - REPORT_RATE_LIMIT=${REPORT_RATE_LIMIT:-30}               # reports per agent per 60s
+      # trinity-enterprise#478 — metric write path. The two policy values are a
+      # bootstrap fallback; a Settings row wins over them.
+      - METRICS_RATE_LIMIT=${METRICS_RATE_LIMIT:-60}             # record_metrics calls per agent per 60s
+      - METRICS_RETENTION_DAYS=${METRICS_RETENTION_DAYS:-365}    # recorded point retention (0 = forever)
+      - METRICS_DAILY_POINT_CAP=${METRICS_DAILY_POINT_CAP:-100000}  # points per agent per UTC day (0 = unlimited)
+      - INTER_AGENT_MAX_CHAIN_DEPTH=${INTER_AGENT_MAX_CHAIN_DEPTH:-8}  # max agent-to-agent hops per call chain (#2806)
+      - METRICS_READ_RATE_LIMIT=${METRICS_READ_RATE_LIMIT:-240}   # GET /metrics reads per agent per 60s (tiles, dashboard binds, get_metrics)
+      - OBJECTIVES_READ_RATE_LIMIT=${OBJECTIVES_READ_RATE_LIMIT:-60}  # GET /objectives reads per agent per 60s (fans out into the agent container)
       # Agent canvases (ent#438/ent#553) — per-agent ceiling on the canvas pile.
       # The refusal names this number, so it must reach the container or the
       # operator is told to raise a lever that is inert (the #1039 class).
@@ -133,6 +141,7 @@ services:
       - OPERATOR_QUEUE_QUESTION_MAX=${OPERATOR_QUEUE_QUESTION_MAX:-4000}                       # question char cap (truncate)
       - OPERATOR_QUEUE_CONTEXT_MAX_BYTES=${OPERATOR_QUEUE_CONTEXT_MAX_BYTES:-8192}             # context byte cap (marker over)
       - OPERATOR_QUEUE_OPTIONS_MAX_BYTES=${OPERATOR_QUEUE_OPTIONS_MAX_BYTES:-4096}             # options byte cap (dropped over)
+      - OPERATOR_QUEUE_PROPOSAL_MAX_BYTES=${OPERATOR_QUEUE_PROPOSAL_MAX_BYTES:-8192}           # proposal byte cap (native asks; 422 over)
       - OPERATOR_QUEUE_ID_MAX=${OPERATOR_QUEUE_ID_MAX:-256}                                    # max agent-supplied id length
       - OPERATOR_QUEUE_EXECUTION_ID_MAX=${OPERATOR_QUEUE_EXECUTION_ID_MAX:-128}                # max execution_id kept in a marker
       - OPERATOR_QUEUE_EMAIL_MAX=${OPERATOR_QUEUE_EMAIL_MAX:-320}                               # ent#364: addressee email length clamp (RFC 5321)
@@ -282,6 +291,9 @@ services:
       - SLACK_SIGNING_SECRET=${SLACK_SIGNING_SECRET:-}
       # Socket Mode concurrent WebSocket count (#244); clamped to [1,10], default 2
       - SLACK_SOCKET_CONNECTION_COUNT=${SLACK_SOCKET_CONNECTION_COUNT:-2}
+      # Telegram group context bounds (ent#600); empty = code defaults (40 / 24h)
+      - TELEGRAM_GROUP_CONTEXT_MAX_MESSAGES=${TELEGRAM_GROUP_CONTEXT_MAX_MESSAGES:-}
+      - TELEGRAM_GROUP_CONTEXT_MAX_AGE_HOURS=${TELEGRAM_GROUP_CONTEXT_MAX_AGE_HOURS:-}
       # SSH access host override
       - SSH_HOST=${SSH_HOST:-}
       # Host telemetry (/api/telemetry) — container-stats cache freshness (s) and
@@ -633,6 +645,7 @@ services:
       # #1022: scheduler→backend dispatch + pre-check deadlines (operator-tunable).
       - DISPATCH_TIMEOUT=${DISPATCH_TIMEOUT:-30}
       - PRE_CHECK_TIMEOUT=${PRE_CHECK_TIMEOUT:-70}
+      - READINESS_CHECK_TIMEOUT=${READINESS_CHECK_TIMEOUT:-5}
       - MISFIRE_GRACE_TIME=3600
       - PUBLISH_EVENTS=true
       - INTERNAL_API_SECRET=${INTERNAL_API_SECRET:-}

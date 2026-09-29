@@ -9,14 +9,24 @@
 
 export const MODEL_CATALOG = [
   {
-    "id": "claude-opus-5",
-    "label": "Claude Opus 5",
+    "id": "claude-opus-5-5",
+    "label": "Claude Opus 5.5",
     "note": "Most capable Opus (latest)",
     "publicChannel": true,
     "adminDefaultSelectable": true,
     "recommended": false,
     "workspace": true,
     "workspaceTier": "Most capable"
+  },
+  {
+    "id": "claude-opus-5",
+    "label": "Claude Opus 5",
+    "note": "Most capable Opus (prior point release)",
+    "publicChannel": true,
+    "adminDefaultSelectable": true,
+    "recommended": false,
+    "workspace": false,
+    "workspaceTier": ""
   },
   {
     "id": "claude-fable-5-1",

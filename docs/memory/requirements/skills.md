@@ -61,6 +61,24 @@
 - **Schema commitment**: `skills_root` v1 means a **single flat root, one level deep**. Nesting / repo-root skills (`skills_root: "."` is rejected) arrive only via a `schema_version` bump, which current platforms refuse (degrading to the probe) rather than misread. Platform parses ONLY `schema_version` + `skills_root`; `categories`/`providers` are catalog metadata for UIs (#235)
 - **Status surface**: each source's entry in `GET /api/skills/library/status` carries the resolved `skills_root` (null until cloned) and `layout_conflict`
 
+#### 21.1.5 Skill Sets in the Catalog (trinity-enterprise#530, absorbs ent#342)
+- **Status**: ✅ Implemented (2026-09-24)
+- **Why**: runtime skill *families* call each other (`/sprint` → `/claim` → `/commit`), and one-at-a-time assignment lets an operator silently assign half a family. A set is **access control and packaging over one library** (operator ruling 2026-09-19) — a named slice of the shared library an agent sees, not an installation bundle, a role definition, or a second library.
+- **Catalog shape** (`catalog.yaml`, `schema_version: 1`, beside `skills_root`); both forms accepted:
+  ```yaml
+  sets:
+    project-management: [project-init, project-task]        # short form
+    dev-backlog:                                              # long form
+      skills: [backlog, roadmap, groom]
+      requires: {env: [GITHUB_TOKEN]}                         # prerequisite credential keys
+      schedules: [{name: Weekly groom, cron: "0 9 * * 1", message: /groom}]   # SUGGESTED only
+  ```
+- **Parsing is total** (`services/skill_sets.parse_catalog_sets`, read through the same guarded catalog load as `skills_root` — symlink refusal, 64 KiB bound, hardened YAML): a catalog without `sets:` (every current source) yields none; set names and members follow the skill-name rule; a set names **its own source's** skills at that commit; every problem is a **code** (`member_missing`, `invalid_member_name`, `name_collides_with_skill`, `invalid_set`, `invalid_schedule`, `invalid_env`, `too_many`), never author text. A set with a missing member stays listed as `partial`; a set whose definition is broken (a typo'd key, a bad or dropped member name, too many members, no members) is `invalid`. Neither can be assigned. Bounds: 50 sets, 100 members, 10 schedules, 20 env keys.
+- **Resolution across sources** uses skill precedence (custom wins): the first source owning a set name wins; later ones are reported as `shadowed_by`. A member resolves by the global precedence like any skill; a member whose winning copy comes from another source carries `shadowed_source` — flagged, never silently swapped.
+- **Surface**: `GET /api/skills/library/sets` → per set `{name, source_id, source_name, shadowed_by, members[{name, present, version, shadowed_source}], status ok|partial, problems, requires{env}, schedules}`. `version` is the winning copy's tree SHA.
+- **Suggested schedules are shown, never created** (operator ruling at plan gate) — a schedule is an operator act.
+- **Out of scope here**: the library validator (`tools/validate.py`) and CONTRIBUTING rule in `trinity-skills` (owned by trinity-pm; the schema above is posted on the issue).
+
 ### 21.2 Skill Types (by Convention)
 - **Status**: ⏳ Not Started
 - **Description**: Three skill types via naming convention (`policy-*`, `procedure-*`, no prefix)
@@ -71,8 +89,40 @@
 - **Description**: Assign specific skills to individual agents
 - **Key Features**:
   - Database stores assignments only (`agent_skills` table)
-  - Bulk save via PUT `/api/agents/{name}/skills`; single assign/unassign via POST/DELETE `/api/agents/{name}/skills/{skill}` (owner-only)
+  - Bulk save via PUT `/api/agents/{name}/skills`; single assign/unassign via POST/DELETE `/api/agents/{name}/skills/{skill}` (owner-only; an agent key additionally needs the §21.3.1 grant)
 - **Note**: assignment surfaces — the Agent Detail **Skills tab** (visible since trinity-enterprise#235 / PR #1877, 2026-07-29; §22.2) plus REST/MCP. The Library page's skills section is browse-only, never a second assignment path (§22.3)
+
+### 21.3.1 Skill managers — only designated agents may change an agent's skills (trinity-enterprise#596)
+- **Status**: ✅ Implemented (2026-09-23). OSS-core (operator ruling 2026-09-23 — the deny gate is a security fence, and the grant surface ships with it or OSS orchestrators could never be granted).
+- **Requirement ID**: SKILL_MANAGER_PERMISSION
+- **Ruling** (operator 2026-09-17, addendum the same day, restated 2026-09-18): changing an agent's skills — **another agent's or its own** — is its own permission. An instance admin grants it to named agents (the fleet orchestrators). A holder changes its own skills the same way it changes a sibling's; **every other agent key is refused, on a sibling and on itself**. It is not implied by permission to call or message an agent, and does not imply it. People (UI or their own key) and the system agent are unchanged.
+- **Why it was needed**: an agent-scoped key resolves to its owner carrying the owner's role (Invariant #8), so the owner fence on the §21.3 routes let any agent rewrite the skills of every sibling its owner holds — and since #2703 an assignment also writes the skill's executable files into the target in the same call.
+- **The fence** (`dependencies.get_skill_managed_agent_by_name`, a composed dependency on all four §21.3 write routes — bulk PUT, sync, assign, unassign):
+  - an **allowlist** (#2323): humans (JWT / user key) and `trinity-system` pass unchanged; an `agent` key passes only while its agent holds the grant; every other scope — `connector`, `ops`, `portal_delegate`, one invented tomorrow — is refused; a principal with no scope at all fails closed;
+  - the capability check runs **before** the owner fence, so a non-holder gets one uniform named 403 (`skill_management_not_permitted`, naming where the grant lives) whether or not the target exists — never an existence signal (#186) — and a holder gains no reach beyond its owner's agents;
+  - a refusal changes nothing (no row, no delivery) and is written to the audit log with the agent and key.
+- **The file-route bypass is closed too**: `PUT`/`DELETE /api/agents/{name}/files` and `POST …/files/mkdir` under `~/.claude/skills/` take the same capability (a `DELETE` of an ancestor — `.claude`, the home dir — counts, since it removes every skill). Without this the fence above was decorative: the same `SKILL.md` + `scripts/` landed through a route that checks only access. Humans are unaffected.
+- **Grant surface**: Settings → Agents → **Skill managers** (`SkillManagersPanel.vue`) — list holders with who granted and when, grant, revoke. `GET /api/skills/managers` (admin), `PUT /api/agents/{name}/skill-manager` `{granted}` (admin **and** interactive — granting is the grant half of grant-vs-use; a user-scoped MCP key is refused). Refuses a nonexistent or soft-deleted agent (uniform 404), the system agent and ephemeral agents (named 422). Every change audited.
+- **Attribution (Tandem R29)**: `agent_skills.assigned_by_agent` records the agent that made an assignment (the system agent's writes are attributed to it), NULL for a person; returned on `GET /api/agents/{name}/skills` and MCP `get_agent_skills`. A bulk replace keeps the original who/when on the names it keeps — only the names it adds belong to it.
+- **Storage**: `agent_capability_grants(agent_name, capability, granted_by, granted_at)`, capability `skills.manage` — a row, not a column, so who/when is answerable and later capabilities (ent#590, ent#341) share the seam. Both tracks (SQLite `agent_capability_grants` + Alembic `0072_agent_capability_grants`); `AgentRef` CASCADE (rename re-keys, delete removes). A soft-deleted agent holds nothing; recovery restores the grant with the rest of its configuration.
+- **Default on upgrade: nobody holds it** (the ruling). Orchestrators that apply a skill map (`/reconcile-skill-map`) are refused with the named error until an admin grants them — grant `trinity-pm` / `corbin` at or before deploy.
+- **Known limits, stated**: an agent editing its **own** `~/.claude/skills` from inside its container (no platform gate reaches there); a git pull into a sibling; chat-driven self-modification; the other owner-equivalent routes of ent#629.
+- **Related**: ent#493 (MCP unassign / list-assignments tools — will inherit this fence), ent#530 (skill sets), ent#646 (the orchestrator's intended mapping), ent#589 (its installer must assign through the orchestrator, not self-assign).
+- **Flow**: `docs/memory/feature-flows/skill-manager-permission.md`
+
+### 21.3.2 Skill-set assignment (trinity-enterprise#530)
+- **Status**: ✅ Implemented (2026-09-24)
+- **Requirement ID**: SKILL_SET_ASSIGNMENT
+- **Assign / unassign**: `POST` / `DELETE /api/agents/{name}/skill-sets/{set}`, and `set:<name>` wherever a skill name is accepted (MCP `assign_skill_to_agent`, `set_agent_skills`, the bulk PUT's `sets` field). All go through the §21.3.1 fence (`get_skill_managed_agent_by_name`); the record names who did it (`assigned_by`, `assigned_by_agent`). An unknown set → 404 `unknown_set`; a set with a missing member → 422 `set_member_missing` naming them — never a silent partial assign.
+- **Storage**: `agent_skill_sets(agent_name, set_name, source_id, assigned_by, assigned_by_agent, assigned_at)` + `agent_skills.individual` (default 1 — every pre-existing row stays individual). Members are **materialised** as `agent_skills` rows with `individual = 0` (a member also assigned on its own keeps `1`). Materialised on purpose: the rows are the durable fallback when a catalog cannot be read. Both tracks (SQLite `agent_skill_sets` + Alembic `0080_agent_skill_sets`); `AgentRef` CASCADE.
+- **Overlap — each assignment stands on its own** (operator ruling at plan gate): unassigning a set removes the members it brought and **none** that another assigned set names or that were assigned individually. Unassigning a set-named skill individually keeps it (`individual → 0`) and answers `retained_via_sets` — never a silent no-op.
+- **One transactional recompute** (`db/skill_sets._apply` over the pure `plan_member_rows`) ends every mutation: re-read rows + assigned sets under the agent lock, add missing members, drop set-derived rows no set names. **Fails closed**: while any assigned set cannot be resolved no set-derived row is removed and the set reports `unresolved` with a `reason` — `not_found` (source disabled/removed, catalog unreadable, set dropped), `invalid` (broken definition), `partial_upstream` (its source no longer ships a member — also what an empty or half-checked-out skills root looks like), or `source_changed` (the name now resolves to a different source than it was assigned from; re-assigning re-points it). A catalog hiccup never strips a fleet's skills, and a disabled source never silently swaps in another source's family. An unassign that cannot remove members for that reason answers `removal_deferred`; a single unassign of a set-derived skill while its set is unresolved is refused (409 `skill_set_unresolved`) rather than silently undone by the next reconcile.
+- **Kept current as a unit**: every inject path (agent start, manual inject, fleet re-inject) reconciles sets **before** reading the names to deliver, then prunes after — a member added upstream is injected, a member removed upstream is pruned by the existing manifest prune rules. The fleet re-inject resolves sets once per sweep.
+- **Bulk PUT round-trip**: `skills` stays the individual list; `sets` is optional (absent = sets untouched), so a legacy client that PUTs back the names it read never drops a set's members. The held sets are resolved inside the replace's own transaction; a set member omitted from the list is demoted to set-derived, never deleted (the single-unassign rule). `set:` entries in `skills` only ADD sets (each new one must be assignable, all-or-nothing); the explicit `sets` field is the only full replace, and every set it lists must be assignable — drop one set with the set DELETE.
+- **Honest status** (absorbs ent#342): `GET /api/agents/{name}/skill-sets` (`?probe=true` checks credentials in a running agent — one exec, off by default so a read is never an exec amplifier; the assign response and the Skills tab probe) → per assigned set `status ok|partial|unresolved`, members `{state: assigned|conflict|not_assigned|missing_upstream, version, shadowed_source}`, `drift` (the recorded source no longer wins), `prerequisites {state none|ok|missing|unknown, missing_env}` — the set's `requires.env` ∪ its members' own, probed only while the agent runs (`unknown` otherwise, never "missing"), and `suggested_schedules`. Assigning with missing prerequisites is allowed and visibly flagged.
+- **Why a skill is present**: `GET /api/agents/{name}/skills` carries `individual` + `via_sets` per skill; the injected per-skill manifest records `via_sets`; the agent's CLAUDE.md Platform Skills lines say "via <set>".
+- **Non-goals**: no permission semantics beyond §21.3.1; no pack-state service — assigned ≡ present.
+- **Flow**: `docs/memory/feature-flows/skill-assignment.md`
 
 ### 21.4 Skill Injection (Full Directory Packages)
 - **Status**: ✅ Implemented (trinity-enterprise#183, 2026-07-19; OSS-core by decision)

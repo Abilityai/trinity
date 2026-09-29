@@ -100,6 +100,10 @@ function writeSuppressed(on) {
 // `axios.defaults` and a suppressed session must carry no Authorization).
 export const portalHttp = axios.create()
 
+// ent#465 — the suggestions read is reused this long across the two
+// placements that mount it together (the Info tab and the empty chat).
+export const SUGGESTIONS_FRESH_MS = 60_000
+
 // #2261 — what to do when a workspace request 401s while the workspace session
 // IS the platform session (ent#357's operator case).
 //
@@ -367,6 +371,48 @@ export const useClientPortalStore = defineStore('clientPortal', {
     // "loaded" must never mean "failed and returned nothing" (contract #15).
     reportsLoaded: false,
     reportsError: null,
+    // ent#637 — what this agent remembers about the viewer and the writes
+    // behind it. Same generation guard as reports: a response landing after an
+    // agent switch is discarded, never shown under the new agent's name.
+    memoryAgent: null,
+    _memoryGeneration: 0,
+    memory: null,            // {agent_name, notes, updated_at, writes: [...]}
+    memoryLoaded: false,     // set ONLY by a fetch that succeeded (contract #15)
+    memoryError: null,
+    memoryUndoError: null,   // the failed verb's home, next to the control (contract #18)
+    memoryUndoing: null,     // write id in flight
+    // ent#527 — the role card: a projection of the agent's own files, plus the
+    // owner's readiness stamp. Same generation guard as reports.
+    roleAgent: null,
+    _roleGeneration: 0,
+    role: null,              // PortalRoleCard, or {role: null} for an agent with none
+    roleLoaded: false,
+    roleError: null,
+    roleFlipError: null,
+    roleFlipping: false,
+    // ent#638 — the seat decision record: why things were approved, deferred
+    // or killed. Same generation guard; refusals (the grammar receipt) land
+    // next to the form, keyed by field.
+    decisionsAgent: null,
+    _decisionsGeneration: 0,
+    decisions: null,          // PortalSeatDecisions
+    decisionsLoaded: false,
+    decisionsError: null,
+    decisionError: null,      // {code, message, fields:{}} of the failed verb
+    decisionBusy: null,       // 'record' | decision id in flight
+    // ent#465 — suggestions for one viewer + one agent (platform door only).
+    // Same generation guard. Both placements (the Info tab and the empty chat)
+    // read this one slice, so a dismiss in one is gone from the other.
+    suggestionsAgent: null,
+    _suggestionsGeneration: 0,
+    suggestions: null,        // PortalSuggestions
+    suggestionsLoaded: false,
+    suggestionsError: null,
+    suggestionsFetchedAt: 0,
+    suggestionError: null,    // {key, message} of the failed dismiss
+    _suggestionsInFlight: null, // the running load, shared by both placements
+    _suggestionsLoadSeq: 0,     // only the LATEST load may write
+    _suggestionsDismissed: [],  // keys dismissed since the last load STARTED
     reportPayloads: {},
     // id -> {total, loaded}; present only for a payload the server actually
     // windowed, so a bounded document never renders a paging footer.
@@ -939,6 +985,318 @@ export const useClientPortalStore = defineStore('clientPortal', {
       this.reportRowMeta = {}
       this.reportErrors = {}
       this._reportInFlight = {}
+    },
+
+    // ---- ent#637: the viewer's memory with an agent ------------------------
+
+    resetAgentMemory(agentName = null) {
+      this._memoryGeneration += 1
+      this.memoryAgent = agentName
+      this.memory = null
+      this.memoryLoaded = false
+      this.memoryError = null
+      this.memoryUndoError = null
+      this.memoryUndoing = null
+    },
+
+    async loadAgentMemory(agentName) {
+      if (this.memoryAgent !== agentName) this.resetAgentMemory(agentName)
+      const gen = this._memoryGeneration
+      this.memoryError = null
+      try {
+        const { data } = await portalHttp.get(
+          `/api/enterprise/client-portal/agents/${agentName}/memory`,
+          { headers: this.authHeader },
+        )
+        if (gen !== this._memoryGeneration) return
+        this.memory = data
+        this.memoryLoaded = true
+      } catch {
+        if (gen !== this._memoryGeneration) return
+        this.memoryError = 'The request failed. Check your connection and try again.'
+      }
+    },
+
+    /**
+     * Undo one write: the notes revert to what they were before it. The
+     * server decides what is undoable (latest, not already undone) and names
+     * a refusal (`not_latest` / `already_undone`) — rendered next to the
+     * control, never swallowed. On success the payload is re-read so the
+     * list and the notes come from the same read.
+     */
+    async undoMemoryWrite(agentName, writeId) {
+      const gen = this._memoryGeneration
+      this.memoryUndoError = null
+      this.memoryUndoing = writeId
+      try {
+        await portalHttp.post(
+          `/api/enterprise/client-portal/agents/${agentName}/memory/writes/${writeId}/undo`,
+          null, { headers: this.authHeader },
+        )
+        if (gen !== this._memoryGeneration) return true
+        await this.loadAgentMemory(agentName)
+        return true
+      } catch (e) {
+        if (gen !== this._memoryGeneration) return false
+        const d = e?.response?.data?.detail
+        this.memoryUndoError = (d && typeof d === 'object' && d.message)
+          || (typeof d === 'string' ? d : null)
+          || 'Could not undo that change. Try again.'
+        return false
+      } finally {
+        if (gen === this._memoryGeneration) this.memoryUndoing = null
+      }
+    },
+
+    // ---- ent#527: the role card ------------------------------------------
+
+    resetAgentRole(agentName = null) {
+      this._roleGeneration += 1
+      this.roleAgent = agentName
+      this.role = null
+      this.roleLoaded = false
+      this.roleError = null
+      this.roleFlipError = null
+      this.roleFlipping = false
+    },
+
+    async loadAgentRole(agentName) {
+      if (this.roleAgent !== agentName) this.resetAgentRole(agentName)
+      const gen = this._roleGeneration
+      this.roleError = null
+      try {
+        const { data } = await portalHttp.get(
+          `/api/enterprise/client-portal/agents/${agentName}/role`,
+          { headers: this.authHeader },
+        )
+        if (gen !== this._roleGeneration) return
+        this.role = data
+        this.roleLoaded = true
+      } catch {
+        if (gen !== this._roleGeneration) return
+        this.roleError = 'The request failed. Check your connection and try again.'
+      }
+    },
+
+    /** The owner's flip (#663). A named refusal lands next to the control. */
+    async flipAgentReadiness(agentName, status) {
+      const gen = this._roleGeneration
+      this.roleFlipError = null
+      this.roleFlipping = true
+      try {
+        await portalHttp.post(
+          `/api/enterprise/client-portal/agents/${agentName}/role/readiness`,
+          { status }, { headers: this.authHeader },
+        )
+        if (gen !== this._roleGeneration) return true
+        await this.loadAgentRole(agentName)
+        return true
+      } catch (e) {
+        if (gen !== this._roleGeneration) return false
+        const d = e?.response?.data?.detail
+        this.roleFlipError = (d && typeof d === 'object' && d.message)
+          || (typeof d === 'string' ? d : null)
+          || 'Could not change readiness. Try again.'
+        return false
+      } finally {
+        if (gen === this._roleGeneration) this.roleFlipping = false
+      }
+    },
+
+    // ---- ent#465: suggestions ------------------------------------------
+
+    resetAgentSuggestions(agentName = null) {
+      this._suggestionsGeneration += 1
+      this.suggestionsAgent = agentName
+      this.suggestions = null
+      this.suggestionsLoaded = false
+      this.suggestionsError = null
+      this.suggestionsFetchedAt = 0
+      this.suggestionError = null
+      this._suggestionsInFlight = null
+      this._suggestionsDismissed = []
+    },
+
+    /**
+     * Load (or reuse, when fresh) this agent's suggestions. Two placements
+     * mount at once, so a fetch younger than `SUGGESTIONS_FRESH_MS` is reused
+     * rather than repeated; `force` bypasses it.
+     */
+    async loadAgentSuggestions(agentName, { force = false } = {}) {
+      if (this.suggestionsAgent !== agentName) this.resetAgentSuggestions(agentName)
+      if (!force && this.suggestionsLoaded && Date.now() - this.suggestionsFetchedAt < SUGGESTIONS_FRESH_MS) return
+      // Both placements mount together: the second caller joins the first
+      // request instead of sending (and making the agent answer) its own.
+      if (!force && this._suggestionsInFlight) return this._suggestionsInFlight
+      const gen = this._suggestionsGeneration
+      const seq = ++this._suggestionsLoadSeq
+      this.suggestionsError = null
+      this._suggestionsDismissed = []
+      // Superseded: an older load answering after a newer (forced) one must not
+      // overwrite it — same generation, so the agent guard alone cannot tell.
+      const stale = () => gen !== this._suggestionsGeneration || seq !== this._suggestionsLoadSeq
+      const run = (async () => {
+        try {
+          const { data } = await portalHttp.get(
+            `/api/enterprise/client-portal/agents/${encodeURIComponent(agentName)}/suggestions`,
+            { headers: this.authHeader },
+          )
+          if (stale()) return
+          // A dismiss that landed while this load was in flight must not come
+          // back with it (the server may have answered before the write).
+          const gone = new Set(this._suggestionsDismissed)
+          const list = (data.suggestions || []).filter((x) => !gone.has(x.key))
+          this.suggestions = { ...data, suggestions: list, total: Math.max(0, (data.total || 0) - ((data.suggestions || []).length - list.length)) }
+          this.suggestionsLoaded = true
+          this.suggestionsFetchedAt = Date.now()
+        } catch {
+          if (stale()) return
+          this.suggestionsError = "Couldn't load suggestions. Check your connection and try again."
+        } finally {
+          if (gen === this._suggestionsGeneration && this._suggestionsInFlight === run) this._suggestionsInFlight = null
+        }
+      })()
+      this._suggestionsInFlight = run
+      return run
+    },
+
+    /**
+     * Dismiss: hidden at once, restored with the error beside it if the write
+     * fails (design system p18 — a verb's failure sits next to its control).
+     */
+    async dismissSuggestion(agentName, key) {
+      const gen = this._suggestionsGeneration
+      const list = this.suggestions?.suggestions || []
+      const index = list.findIndex((s) => s.key === key)
+      const removed = index >= 0 ? list[index] : null
+      this.suggestionError = null
+      if (removed) {
+        this.suggestions = {
+          ...this.suggestions,
+          suggestions: list.filter((s) => s.key !== key),
+          total: Math.max(0, (this.suggestions.total || 0) - 1),
+        }
+      }
+      this._suggestionsDismissed = [...this._suggestionsDismissed, key]
+      try {
+        await portalHttp.post(
+          `/api/enterprise/client-portal/agents/${encodeURIComponent(agentName)}/suggestions/feedback`,
+          { key, action: 'dismiss' }, { headers: this.authHeader },
+        )
+        return true
+      } catch {
+        if (gen !== this._suggestionsGeneration) return false
+        this._suggestionsDismissed = this._suggestionsDismissed.filter((k) => k !== key)
+        // Put back only the item this dismiss removed, into whatever list is
+        // current now — never a snapshot that a newer load has replaced.
+        const now = this.suggestions?.suggestions || []
+        if (removed && !now.some((s) => s.key === key)) {
+          const next = now.slice()
+          next.splice(Math.min(index, next.length), 0, removed)
+          this.suggestions = { ...this.suggestions, suggestions: next, total: (this.suggestions.total || 0) + 1 }
+        }
+        this.suggestionError = { key, message: "Couldn't dismiss that. Try again." }
+        return false
+      }
+    },
+
+    /**
+     * Accept is recorded for usefulness only. The action itself (prefill, open,
+     * link) has already happened on the client, so a failed record is not the
+     * person's problem and is deliberately not surfaced.
+     */
+    async acceptSuggestion(agentName, key) {
+      try {
+        await portalHttp.post(
+          `/api/enterprise/client-portal/agents/${encodeURIComponent(agentName)}/suggestions/feedback`,
+          { key, action: 'accept' }, { headers: this.authHeader },
+        )
+      } catch { /* usefulness data only — see the docblock */ }
+    },
+
+    clearSuggestionError() { this.suggestionError = null },
+
+    // ---- ent#638: the seat decision record ------------------------------
+
+    resetAgentDecisions(agentName = null) {
+      this._decisionsGeneration += 1
+      this.decisionsAgent = agentName
+      this.decisions = null
+      this.decisionsLoaded = false
+      this.decisionsError = null
+      this.decisionError = null
+      this.decisionBusy = null
+    },
+
+    async loadAgentDecisions(agentName) {
+      if (this.decisionsAgent !== agentName) this.resetAgentDecisions(agentName)
+      const gen = this._decisionsGeneration
+      this.decisionsError = null
+      try {
+        const { data } = await portalHttp.get(
+          `/api/enterprise/client-portal/agents/${agentName}/decisions`,
+          { headers: this.authHeader },
+        )
+        if (gen !== this._decisionsGeneration) return
+        this.decisions = data
+        this.decisionsLoaded = true
+      } catch {
+        if (gen !== this._decisionsGeneration) return
+        this.decisionsError = 'The request failed. Check your connection and try again.'
+      }
+    },
+
+    _decisionRefusal(e) {
+      const d = e?.response?.data?.detail
+      if (d && typeof d === 'object') {
+        return { code: d.code || null, message: d.message || 'The record was refused.',
+                 fields: (d.receipt && d.receipt.fields) || {} }
+      }
+      return { code: null, message: typeof d === 'string' ? d : 'The request failed. Try again.', fields: {} }
+    },
+
+    /** Record a decision for my seat. Returns the result or null on refusal. */
+    async recordSeatDecision(agentName, body) {
+      const gen = this._decisionsGeneration
+      this.decisionError = null
+      this.decisionBusy = 'record'
+      try {
+        const { data } = await portalHttp.post(
+          `/api/enterprise/client-portal/agents/${agentName}/decisions`,
+          body, { headers: this.authHeader },
+        )
+        if (gen !== this._decisionsGeneration) return data
+        await this.loadAgentDecisions(agentName)
+        return data
+      } catch (e) {
+        if (gen !== this._decisionsGeneration) return null
+        this.decisionError = this._decisionRefusal(e)
+        return null
+      } finally {
+        if (gen === this._decisionsGeneration) this.decisionBusy = null
+      }
+    },
+
+    /** close / reverse / reconfirm / supersede one of my decisions. */
+    async actOnSeatDecision(agentName, decisionId, body) {
+      const gen = this._decisionsGeneration
+      this.decisionError = null
+      this.decisionBusy = decisionId
+      try {
+        const { data } = await portalHttp.post(
+          `/api/enterprise/client-portal/agents/${agentName}/decisions/${decisionId}/actions`,
+          body, { headers: this.authHeader },
+        )
+        if (gen !== this._decisionsGeneration) return data
+        await this.loadAgentDecisions(agentName)
+        return data
+      } catch (e) {
+        if (gen !== this._decisionsGeneration) return null
+        this.decisionError = { ...this._decisionRefusal(e), decisionId }
+        return null
+      } finally {
+        if (gen === this._decisionsGeneration) this.decisionBusy = null
+      }
     },
 
     async loadAgentReports(agentName) {
@@ -1674,9 +2032,12 @@ export const useClientPortalStore = defineStore('clientPortal', {
     async fetchAsks(agentName = null) {
       if (!this.isClientSignedIn) return []
       try {
+        // trinity-enterprise#611: the asks that ended in the last 7 days ride the
+        // same list, so a person sees how an ask ended instead of watching it
+        // vanish; `openAsks` (the badge) and the Work tab stay pending-only.
         const { data } = await portalHttp.get('/api/enterprise/client-portal/asks', {
           headers: this.authHeader,
-          params: agentName ? { agent_name: agentName } : {},
+          params: agentName ? { agent_name: agentName, include_ended: true } : { include_ended: true },
         })
         this.asks = Array.isArray(data) ? data : []
         this.asksAvailable = true
@@ -1717,16 +2078,21 @@ export const useClientPortalStore = defineStore('clientPortal', {
       return data
     },
 
-    // Answer one ask. The row is removed from local state on success rather than
-    // patched: the server's answer is authoritative, and a client that keeps a
-    // stale "pending" copy would offer to answer it twice.
-    async answerAsk(askId, { response = null, responseText = null } = {}) {
+    // Answer one ask. On success the row is REPLACED by the server's projection
+    // of it — now `answered`, by you (trinity-enterprise#611: an ended ask stays
+    // listed) — never patched locally: the server's answer is authoritative, and
+    // a client that kept a stale "pending" copy would offer to answer it twice.
+    async answerAsk(askId, { response = null, responseText = null, acknowledgeDivergence = false } = {}) {
       const { data } = await portalHttp.post(
         `/api/enterprise/client-portal/asks/${askId}/answer`,
-        { response, response_text: responseText },
+        // #2915: the key rides only when the person acknowledged — the body
+        // stays byte-identical to the #2375 shape for every other answer.
+        { response, response_text: responseText, ...(acknowledgeDivergence ? { acknowledge_divergence: true } : {}) },
         { headers: this.authHeader },
       )
-      this.asks = this.asks.filter((a) => a.id !== askId)
+      this.asks = data && data.id === askId
+        ? this.asks.map((a) => (a.id === askId ? data : a))
+        : this.asks.filter((a) => a.id !== askId)
       return data
     },
 

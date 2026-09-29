@@ -1,5 +1,17 @@
 // Types for Trinity API responses
 
+/** #2991: `POST /api/agents/{name}/start` — skill delivery rides the response. */
+export interface StartAgentResult {
+  message: string;
+  skills_injection?: string;
+  skills_result?: {
+    status: string;
+    reason?: string | null;
+    conflicts?: string[];
+    skills?: Record<string, { status: string; code?: string; warnings?: string[] }>;
+  };
+}
+
 export interface Agent {
   name: string;
   status: string;
@@ -308,6 +320,9 @@ export interface ScheduleExecution {
   execution_log?: string;
   model_used?: string;
   claude_session_id?: string;
+  // #2958: JSON array of auto-compaction events ({trigger, pre_tokens,
+  // post_tokens, duration_ms, timestamp}); null when the turn did not compact.
+  compact_metadata?: string | null;
   source_agent_name?: string;
   source_user_email?: string;
   // AUDIT-001: MCP key origin tracking — used by #914 chat-timeout
@@ -482,6 +497,84 @@ export interface OperatorQueueItem {
   responded_by_email?: string | null;
   responded_at?: string | null;
   acknowledged_at?: string | null;
+  // trinity-enterprise#611 — how the ask ended (NULL on a row that ended before
+  // the ledger: read `status`). `disposed_by_email` is withheld from agent keys.
+  disposition?: string | null;        // answered | cancelled | expired
+  disposed_at?: string | null;
+  disposed_by?: string | null;        // person | timeout
+  disposition_reason?: string | null; // the operator's optional cancel reason
+}
+
+/**
+ * An agent's own ask, read back by the request_id it chose
+ * (GET /api/agents/{name}/operator-queue/{request_id}, trinity-enterprise#611).
+ * A redacted projection: never a person's email.
+ */
+export interface OperatorQueueAskReadback {
+  id: string;
+  request_id: string;
+  agent_name: string;
+  type: string;
+  priority: string;
+  status: string;
+  title: string;
+  question: string;
+  options?: unknown;
+  created_at: string;
+  expires_at?: string | null;
+  response?: string | null;
+  response_text?: string | null;
+  responded_at?: string | null;
+  disposition?: string | null;
+  disposed_at?: string | null;
+  disposed_by?: string | null;
+  disposition_reason?: string | null;
+  raised_by?: string | null;
+  channel?: string | null;
+  to_role?: string | null;
+  proposal?: unknown;
+  supersedes_expired?: string | null;
+}
+
+/**
+ * trinity-enterprise#611: an ask an agent raises as itself
+ * (POST /api/agents/{name}/operator-queue). The backend validates every field
+ * and names each refusal; this is the wire shape only.
+ */
+export interface OperatorAskCreate {
+  request_id: string;
+  title: string;
+  question?: string;
+  type?: "approval" | "question" | "alert";
+  priority?: "critical" | "high" | "medium" | "low";
+  options?: string[];
+  context?: Record<string, unknown> | null;
+  proposal?: Record<string, unknown> | null;
+  to?: "primary" | "approver" | "viewer" | "operator";
+  expires_at?: string;
+  supersedes_expired?: string;
+}
+
+/**
+ * trinity-enterprise#611: the receipt a raise returns. It names the ROLE the
+ * ask went to, never a person's email. `differs` is present on a replay only.
+ */
+export interface OperatorAskReceipt {
+  status: "created" | "replayed";
+  id: string;
+  request_id: string;
+  raised_by: "agent" | "gate" | null;   // null: a replay of a row older than the column
+  channel: string;
+  type: string;
+  to_role: string;
+  resolved: boolean;
+  ask_status: string;
+  disposition?: string | null;
+  disposed_at?: string | null;
+  expires_at?: string | null;
+  wakes_on_ending: boolean;
+  supersedes_expired?: string | null;
+  differs?: string[];
 }
 
 export interface OperatorQueueListResponse {

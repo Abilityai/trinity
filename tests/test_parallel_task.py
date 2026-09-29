@@ -565,9 +565,6 @@ class TestAsyncModeExecution:
 
         require_agent_answer(response, what="POST /task")
 
-        if response.status_code == 429:
-            pytest.skip("Agent at capacity from prior async tests")
-
         assert_status(response, 200)
         data = response.json()
         execution_id = data["execution_id"]
@@ -626,9 +623,6 @@ class TestAsyncModeExecution:
 
         require_agent_answer(response, what="POST /task")
 
-        if response.status_code == 429:
-            pytest.skip("Agent at capacity from prior async tests")
-
         # Should work (200) or fail gracefully if model not available
         assert_status_in(response, [200, 400, 500])
 
@@ -659,9 +653,6 @@ class TestAsyncModeExecution:
             )
 
             require_agent_answer(response, what="POST /task")
-
-            if response.status_code == 429:
-                pytest.skip("Agent at capacity from prior async tests")
 
             assert_status(response, 200)
             data = response.json()
@@ -714,9 +705,6 @@ class TestAsyncModeActivities:
         )
 
         require_agent_answer(response, what="POST /task")
-
-        if response.status_code == 429:
-            pytest.skip("Agent at capacity from prior async tests")
 
         assert_status(response, 200)
 
@@ -790,8 +778,6 @@ class TestAsyncModeUnifiedExecutor:
                 timeout=10.0,
             )
             require_agent_answer(first, what="POST /task")
-            if first.status_code == 429:
-                pytest.skip("Slots still occupied from prior tests — rerun isolated")
             assert_status(first, 200)
 
             # BACKLOG-001: Second async task should be queued (not rejected 429)
@@ -835,8 +821,6 @@ class TestAsyncModeUnifiedExecutor:
             timeout=10.0,
         )
         require_agent_answer(resp, what="POST /task")
-        if resp.status_code == 429:
-            pytest.skip("Agent at capacity from prior test")
         assert_status(resp, 200)
         execution_id = resp.json()["execution_id"]
 

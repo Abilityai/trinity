@@ -322,6 +322,7 @@ async def update_setting(
             ),
         )
 
+    from config import OPS_SETTINGS_VALIDATION
     from services.settings_service import RETENTION_OPS_KEYS
 
     if key in RETENTION_OPS_KEYS:
@@ -332,6 +333,23 @@ async def update_setting(
                 "PUT /api/settings/ops/config (type- and range-validated, "
                 "audit-logged). See GET /api/settings/retention for the "
                 "effective values (ent#297)"
+            ),
+        )
+
+    # ent#297's redirect, generalised (trinity-enterprise#478 / E4): a key that
+    # HAS validation must have exactly ONE write path, or the validation is
+    # advisory. The retention block above named one subset by hand, which left
+    # every other validated ops key — `metrics_daily_point_cap` among them —
+    # reachable here unchecked, where garbage is stored verbatim and then 500s
+    # the reader that calls `int()` on it. The rule is now the property, not a
+    # list someone has to remember to extend.
+    if key in OPS_SETTINGS_VALIDATION:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"{key} is a validated ops setting and must be set via "
+                "PUT /api/settings/ops/config (type- and range-validated, "
+                "audit-logged)"
             ),
         )
 

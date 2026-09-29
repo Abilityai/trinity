@@ -16,6 +16,8 @@
 ### 11.2 GitHub Repository Initialization
 - **Status**: ✅ Implemented
 - **Description**: Initialize GitHub sync for existing agents
+- **Repo root (#2938)**: a repository that does not exist yet is always created at `/home/developer` — the one root the agent server's git router reads — whatever `workspace/` holds; an existing repo (a legacy workspace-rooted one included) stays where `git rev-parse --show-toplevel` finds it — and because the agent server reads only `/home/developer`, the post-init verify then refuses a workspace-rooted one with a 400 and rolls the config back (before #2938 that case returned 200 and reported "not enabled" forever). The pre-#2075 "populated `workspace/` ⇒ legacy root" content heuristic is retired: it created a template's repo where Sync / Log / the git panel could never see it.
+- **Verified where it is consumed (#2938)**: init is confirmed through the agent server's own `GET /api/git/status` after the backend's `git rev-parse --git-dir`; `git_enabled: false` there fails the init with a named reason (400, config row rolled back), an unanswerable probe warns and keeps the backend verdict. A backend-only check cannot catch a mis-rooted repo, since it runs in the directory the backend chose.
 - **Flow**: `docs/memory/feature-flows/github-repo-initialization.md`
 
 ### 11.3 Operator-Readable Conflict Diagnosis (S5)
@@ -88,7 +90,7 @@
   - Concurrent-writer safety: `repack -A -d -l --unpack-unreachable=1.hour.ago` + `gc --prune=1.hour.ago` (never `--prune=now`); `pack.threads=1` + `pack.windowMemory=128m` RSS bound
   - Stale-lock hygiene: startup reap (`index.lock`, `gc.pid`, `maintenance.lock`, ref/reflog locks) + per-cycle age-gated reap incl. abandoned `tmp_pack_*`. **#2742 makes the startup reap speak** (it was `rm -f`, silent whether or not it removed anything): it now tests-then-removes, echoes a line naming each lock it cleared, and drops a marker the agent server converts into `sync_state.last_lock_recovery` → the `lock_recovery` field on `GET /api/git/status`, so a self-healed wedge reaches the platform instead of vanishing. It also now reaps `index.lock` under `<gitdir>/modules/*` and `<gitdir>/worktrees/*` — covered by nothing before, so a submodule or linked-worktree wedge survived every restart.
   - Signal: `pack_count`/`loose_objects`/`maintenance_failures` in sync-state → `agent_sync_state` (agent-supplied ints coerced at the boundary) → `GET /api/agents/sync-health`; edge-triggered `git_bloat` operator alerts (`GIT_DIR_ALERT_BYTES` default 10 GiB; 3 consecutive maintenance failures)
-  - **Lock-free status read (#2742)**: `GET /api/git/status` — the surface the 60 s `SyncHealthService` poll drives — runs `git --no-optional-locks status --porcelain`, so the poll no longer takes `.git/index.lock` ~2×/min in every agent workspace (the flag is scoped to THIS one call site; the auto-sync commit path and the `sync`/`pull` bodies legitimately want the index writeback and keep the plain form). Every status child now routes through `run_registered`, so a sweep tick straddling the 30 s `git fetch` can no longer orphan ref litter. The handler is computed in ONE worker thread behind a loop-level single-flight, so concurrent callers (poller + UI git panel + MCP `get_git_status`) coalesce onto one computation and one `git fetch origin` — and the response carries `computed_at`, because coalescing is bounded staleness and a follower can be served a snapshot up to one leader-run old.
+  - **Lock-free status read (#2742)**: `GET /api/git/status` — the surface the 60 s `SyncHealthService` poll drives — runs `git --no-optional-locks status --porcelain -z`, so the poll no longer takes `.git/index.lock` ~2×/min in every agent workspace (the flag is scoped to THIS one call site; the auto-sync commit path and the `sync`/`pull` bodies legitimately want the index writeback and keep the plain form). Every status child now routes through `run_registered`, so a sweep tick straddling the 30 s `git fetch` can no longer orphan ref litter. The handler is computed in ONE worker thread behind a loop-level single-flight, so concurrent callers (poller + UI git panel + MCP `get_git_status`) coalesce onto one computation and one `git fetch origin` — and the response carries `computed_at`, because coalescing is bounded staleness and a follower can be served a snapshot up to one leader-run old.
   - **Stuck-lock report, never a runtime delete (#2742)**: a currently-present `index.lock` is *observed* and surfaced as `index_lock_stuck`, never unlinked. A 0-byte lock is the signature of a **live** `git add` for ~100 % of its life (measured: 29 s at 60 000 files; 155 s under a `clean` filter), `st_mtime` is stamped at create and never advances, so neither size nor age separates *abandoned* from *busy* — and a wrong unlink promotes another git's in-flight file onto `.git/index`, a permanent 0-byte-index wedge that no Trinity path clears. Detection is therefore a **two-point inode-stability** observation (same `st_ino`/`st_mtime_ns`/`st_size` unchanged across ≥3 ticks spanning ≥15 min), which is also immune to a forward clock step; the tunable is the number of stable sightings, not a wall-clock age. The observer resolves the real gitdir (`.git` is a FILE for a worktree or submodule) and covers `<gitdir>/index.lock`, `<gitdir>/modules/*/index.lock` and `<gitdir>/worktrees/*/index.lock`. It takes no repo lock (an `lstat` needs none, and holding one would make a status poll a new source of 409 `agent_busy`) and is wrapped in its own `except OSError` — an observability path must never be able to 500 the feed it feeds.
 - **Rollout**: base-image rebuild + agent recreate required; recovery of pre-existing bloated fleets is ops-side (trinity-ops-agent#127) using the tunable budget + memory bounds
 - **Flow**: `docs/memory/feature-flows/git-sync-health.md`
@@ -573,7 +575,9 @@
   requires it and `credential_requirements_service` reads it, so an agent that ships
   one lost it on its first Push and then failed its own compatibility contract — and
   **`.claude/settings.json`**, whose negation was the escape hatch #2036's own
-  rationale offered. `#1703` (repo root ≡ `$HOME`) retires this whole layer
+  rationale offered (since trinity-enterprise#708 no negation is needed: the file
+  is no longer a canonical ignore, and only a copy carrying container paths or
+  credential-bearing keys is kept out of a commit). `#1703` (repo root ≡ `$HOME`) retires this whole layer
   structurally; until then this is the correctness fix, designed as the steady state
   because #1703 is P3, unassigned and a decision issue first.
 - **Key Features**:
@@ -810,5 +814,61 @@
 - **Flow**: `docs/memory/feature-flows/github-sync.md`,
   `docs/memory/feature-flows/github-repo-initialization.md`
 - **GitHub Issue**: abilityai/trinity-enterprise#615
+
+---
+
+### 11.17 An Agent Created as an Agent Owns Its Repository (trinity-enterprise#705)
+
+- **Status**: 🚧 In review (PR #3020). #3016, #3017 and #3018 have landed.
+- **Ruling (2026-09-24):** *the repository is the agent; the container is a cache of it.*
+  The 2026-09-24 fleet audit found every git-bound agent with auto-sync off and
+  work on container disks that existed nowhere else.
+- **Create-time `kind`:** `agent` (the default) or `deployment`, on
+  `POST /api/agents` and MCP `create_agent`. The UI half of the choice is
+  trinity-enterprise#704. An **explicit `source_mode` always wins for the
+  mode**. Every auto-pushing agent, including an explicit working branch and
+  fork-to-own, also gets freeze-on-failure; a `deployment` never does.
+- **An agent** gets a working branch (`trinity/<agent>/<id>`) it alone writes,
+  `auto_sync_enabled=1` and `freeze_schedules_if_sync_failing=1`. It only gets
+  them **only when the repo is its creator's own and the token can push to
+  it**: the token must be the creator's (`per_user`; `per_agent` is accepted for
+  future callers, but no create path resolves it today), the template must not
+  be a catalog template, the repo's owner must equal the token's GitHub login
+  (`GET /user`, case-insensitive), and the #2107 receive-pack probe must say
+  `ok`. Being able to push is not owning the repo (PR #3020 ruling, the ent#162
+  class): the global platform PAT never qualifies, and neither does a creator's
+  own token that can write an org's shared template (a classic `repo` PAT or an
+  org-wide fine-grained token). An org-owned repo therefore stays pull-only by
+  default; an explicit `source_mode=false` still asks for a working branch.
+- **Stays pull-only, with the reason on the create response's `git_mode`:**
+  - a deployment
+  - an ephemeral ghost (ent#69)
+  - no token (ent#123; not a 400)
+  - only the platform-wide token (never probed)
+  - a catalog template (shared by definition; never probed)
+  - a repo the token's login does not own, or a login that could not be read
+    (never probed; the reason points to fork-to-own)
+  - a refused probe (a template someone else owns — never branches pushed
+    into it, the ent#162 class; the reason points to fork-to-own)
+  - an unverifiable probe
+- **Fork-to-own** gets the trio (it owns its fork). **Cornelius** is pinned
+  pull-only: it is built from a shared public upstream.
+- **Other create paths:** `trinity deploy --repo` sends `kind: "deployment"` (it
+  deploys a codebase). System manifests gain a per-agent `kind` with
+  trinity-enterprise#704 (PR #3022); until then a manifest agent takes the
+  default, which the ownership rule above already keeps off shared templates.
+- **Not changed:**
+  - existing agents (the default applies to new creates; migration is per
+    agent and explicit — runbook `docs/migrations/AGENT_WORKING_BRANCH_DEFAULT_2026-09.md`)
+  - freeze paging (the `sync_failing` item). Until trinity-enterprise#706
+    adds divergence age, the freeze trips on today's trigger: 3 consecutive
+    failed syncs (about 45 minutes at the 15-minute cadence), including a
+    rebase conflict, which needs a human anyway
+  - the pull cycle — on when trinity-enterprise#703 lands
+  - divergence-age freeze semantics — trinity-enterprise#706
+- **Edition**: open-core (operator ruling 2026-09-25): defaults on the existing
+  open-source create and sync paths.
+- **Flow**: `docs/memory/feature-flows/github-sync.md`
+- **GitHub Issue**: abilityai/trinity-enterprise#705
 
 ---

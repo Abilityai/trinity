@@ -1,5 +1,7 @@
 # Feature: Skill Injection (Full Directory Packages)
 
+> **2026-09-24 — ent#530 skill sets.** Every inject path — agent start (`lifecycle.inject_assigned_skills`), manual Sync (`POST …/skills/inject`), fleet re-inject — runs `skill_set_service.reconcile_agent` (DB only, fail-closed) BEFORE reading the names, then prunes with `reconcile_agent_skills` outside the lock. Behaviour change beyond sets: a manual Sync now prunes orphaned platform-managed skills for EVERY agent (the start path always did); the fleet re-inject prunes only when the set reconcile dropped members. The per-skill `.trinity-skill.json` meta records `via_sets`, and the CLAUDE.md *Platform Skills* line reads `(via <set>)`.
+
 ## Overview
 
 Skill Injection ships each assigned skill's **entire directory package**

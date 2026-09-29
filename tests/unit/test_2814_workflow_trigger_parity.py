@@ -108,6 +108,17 @@ ACCEPTED_UNTIL_RELEASE: dict[tuple[str, str], str] = {
     # publish-images `workflow_dispatch` — is now declared on `main`, and the
     # guard below said so on every run since. Add a row only for a NEW
     # divergence, with its reason.
+    #
+    # #2945 (2026-09-22): two NEW workflows. Both fire from `dev` today through
+    # their `push` trigger where they have one; the default-branch-registered
+    # events below are inert until the next release cut carries the files to
+    # `main`. Consequence, stated so nobody waits for a nightly that cannot yet
+    # run: `dev-nightly.yml` does NOT run at all until then (Tier 3 is the
+    # release cut's gain, not this PR's), and `dev-ci-status.yml`'s manual
+    # re-evaluation is unavailable, while its per-push verdict works from day one.
+    ("dev-nightly.yml", "schedule"): "new file; nightly on dev starts at the next release cut",
+    ("dev-nightly.yml", "workflow_dispatch"): "new file; manual run available once on main",
+    ("dev-ci-status.yml", "workflow_dispatch"): "new file; the push trigger is the live path, dispatch is re-evaluation only",
 }
 
 

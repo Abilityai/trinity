@@ -1098,6 +1098,128 @@ def is_interactive_principal(current_user: User) -> bool:
     return getattr(current_user, "mcp_scope", "__missing__") is None
 
 
+# trinity-enterprise#611: the principals that may END an ask (answer, cancel,
+# bulk-cancel). The interactive human (JWT ⇒ `mcp_scope is None`) and the
+# human's own user-scoped MCP key. Everything else — agent, system, connector,
+# portal_delegate, ops, and whatever scope ships next — is refused.
+PERSON_SCOPES = frozenset({None, "user"})
+
+
+def is_person_principal(current_user: User) -> bool:
+    """Is this caller a PERSON — the only author an ask's ending may record?
+
+    The endings ledger records `disposed_by` as an enum of two, `person` or
+    `timeout` (trinity-enterprise#611). An agent-scoped key resolves to its OWNER
+    carrying the owner's role, so before this an agent could answer or cancel any
+    ask its owner could reach — its own approval included — and the row recorded
+    the owner. Recording that as `person` would make the ledger lie.
+
+    An ALLOWlist over `mcp_scope` for the same reason as
+    `is_interactive_principal`: the scope column is free text with no CHECK
+    constraint, so a denylist naming `agent` is open to the next scope that
+    ships. The identity fields are checked as well (belt-and-braces: a
+    user-scoped principal carrying an agent identity is not a person), and an
+    object with no `mcp_scope` at all fails CLOSED through the sentinel — never
+    `getattr(..., None)`, which would read an absent attribute as the JWT value
+    (the #2323 getattr-discriminator trap).
+    """
+    if getattr(current_user, "mcp_scope", "__missing__") not in PERSON_SCOPES:
+        return False
+    return not (
+        getattr(current_user, "agent_name", None)
+        or getattr(current_user, "connector_agent", None)
+        or getattr(current_user, "portal_delegate", False)
+    )
+
+
+# The refusal every door that ends an ask gives a caller that is not a person —
+# the operator routes below and the Workspace answer (client_portal/asks).
+PERSON_REQUIRED_DETAIL = {
+    "code": "person_required",
+    "message": (
+        "Only a person can answer or cancel an ask; agent- and "
+        "system-scoped keys cannot end one"
+    ),
+}
+
+
+def reject_non_person_principal(current_user: User) -> None:
+    """Refuse — with a named 403 — any caller that is not a person
+    (trinity-enterprise#611). Guards the three ways an ask ends by hand:
+    respond, cancel and bulk-cancel."""
+    if not is_person_principal(current_user):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=dict(PERSON_REQUIRED_DETAIL),
+        )
+
+
+# Human-only grant surfaces (#2996, trinity-enterprise#711). Two rules, both
+# ALLOWlists over `mcp_scope` that fail closed on a principal without one:
+#
+#   PERSON       `is_person_principal` above — a JWT session or the person's own
+#                `user`-scoped key. For routes that grant or change what an agent
+#                may do (autonomy, the agent-config toggles).
+#   INTERACTIVE  `is_interactive_principal` — a JWT session only. For routes that
+#                mint, bind or rotate a credential or sign-in identity: a minter
+#                must be stricter than the principal class it produces, or the
+#                PERSON rule is circular.
+#
+# These are credential-class rules, not proof of human origin: a `user` key is
+# the person's delegated credential, and a JWT counts as interactive only because
+# non-human JWTs are fenced at `get_current_user`. Both primitives additionally
+# refuse a principal carrying `vouched_source_agent` (the event-loopback JWT has
+# `mcp_scope=None`; its entry-point fence is the first layer, this the second).
+#
+# Enumeration-safe (Invariant #8, #186): the refusal depends only on the
+# principal, never on whether the addressed agent exists, so a 403 answered
+# before a path's 404 discloses nothing.
+HUMAN_ONLY_DETAIL = {
+    "code": "person_required",
+    "message": (
+        "This operation is human-only; agent- and system-scoped keys "
+        "cannot perform it"
+    ),
+}
+
+
+def assert_person(current_user: User) -> None:
+    """Refuse (403, `HUMAN_ONLY_DETAIL`) any caller that is not a PERSON.
+
+    The imperative form of `require_person`, for a handler that must run the
+    check itself. Same predicate as ent#611's `reject_non_person_principal` plus
+    the loopback refusal; the detail is neutral rather than ask-specific.
+    """
+    if not is_person_principal(current_user) or getattr(
+        current_user, "vouched_source_agent", None
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=dict(HUMAN_ONLY_DETAIL),
+        )
+
+
+def require_person(current_user: User = Depends(get_current_user)) -> User:
+    """`Depends` form of `assert_person` — the PERSON rule on a route."""
+    assert_person(current_user)
+    return current_user
+
+
+def require_interactive(current_user: User = Depends(get_current_user)) -> User:
+    """`Depends` form of the INTERACTIVE rule: a JWT session only.
+
+    A key-authenticated caller gets `reject_non_interactive_principal`'s
+    existing refusal, unchanged; a loopback JWT gets `HUMAN_ONLY_DETAIL`.
+    """
+    reject_non_interactive_principal(current_user)
+    if getattr(current_user, "vouched_source_agent", None):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=dict(HUMAN_ONLY_DETAIL),
+        )
+    return current_user
+
+
 def enforce_agent_spawn_scope(current_user: User, target_agent: str) -> None:
     """Lifecycle-mutation gate for agent-scoped callers
     (trinity-enterprise#69 Part 2) — INTERIM until #948 capability tokens.
@@ -1456,6 +1578,46 @@ def get_authorized_agent(
     return name
 
 
+def get_self_acting_agent(
+    name: str = Path(..., description="Agent name from path"),
+    current_user: User = Depends(get_current_user),
+) -> str:
+    """The agent in the path, acting as ITSELF (trinity-enterprise#611).
+
+    For the routes whose record claims "an agent did this" or that return what an
+    agent may read only about itself — an agent reading back its own ask. The
+    identity comes from the KEY, never from a body or the path alone: an
+    agent-scoped key may act only as the agent it belongs to, the system key only
+    as `trinity-system`, and every other principal (a person, a user-scoped key,
+    a connector) is refused — a person reads the queue through the operator
+    routes.
+
+    Identity FIRST, as one uniform 403 for every name that is not the caller's,
+    existent or not, so the refusal discloses nothing (Invariant #8's
+    self-uniform rule). Only then the ordinary access check, with its uniform 404.
+    """
+    from db.agents import SYSTEM_AGENT_NAME
+
+    scope = getattr(current_user, "mcp_scope", "__missing__")
+    agent = getattr(current_user, "agent_name", None)
+    is_self = (
+        (scope == "agent" and bool(agent) and agent == name)
+        or (scope == "system" and not agent and name == SYSTEM_AGENT_NAME)
+    )
+    if not is_self:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={
+                "code": "agent_identity_required",
+                "message": (
+                    "Only the agent itself can do this, with its own key; "
+                    "use the operator queue routes to read another agent's asks"
+                ),
+            },
+        )
+    return get_authorized_agent(name, current_user)
+
+
 def get_owned_agent(
     name: str = Path(..., description="Agent name from path"),
     current_user: User = Depends(get_current_user)
@@ -1540,6 +1702,177 @@ def get_owned_agent_by_name(
             detail="Agent not found"
         )
     return agent_name
+
+
+# ============================================================================
+# Agent capability gate (trinity-enterprise#596)
+# ============================================================================
+# An agent-scoped key resolves to its OWNER carrying the owner's role (Invariant
+# #8), so an owner fence alone lets any agent act on every sibling the owner
+# holds. A capability is the thing an instance admin grants to a NAMED agent to
+# close that: without the grant, the agent key is refused — on a sibling AND on
+# itself. `skills.manage` is the first (only designated agents may change an
+# agent's skills; since #2703 an assignment also writes the skill's executable
+# files into the target in the same call).
+#
+# ALLOWLIST, not a denylist (#2323): `mcp_scope` is free text, so the shape is
+# "these scopes pass, this one passes with a grant, everything else is
+# refused" — a future scope is refused until someone decides otherwise.
+#   * ADMIN_GATE_SCOPES ({None, user, system}) — humans (JWT / user key) and
+#     `trinity-system`: unchanged by the ruling.
+#   * `agent` — passes only while its agent holds the capability (a LIVE row).
+#   * everything else — connector, ops, portal_delegate, a scope invented
+#     tomorrow — refused. Ephemeral ("ghost") agents are scope `agent` and are
+#     fenced earlier, at auth, by `_enforce_ephemeral_key_fence`; the grant
+#     route also refuses to grant one.
+# The gate never reads `agent_permissions` and granting never writes it:
+# permission to CALL an agent and permission to change its skills are
+# independent in both directions (ruling 2026-09-17).
+# ============================================================================
+
+# The named refusal per capability: the machine-readable code an agent can branch
+# on, and a sentence that says what is missing and where it is granted.
+_CAPABILITY_REFUSALS = {
+    "skills.manage": (
+        "skill_management_not_permitted",
+        "This agent does not hold the skill-management permission, which changing "
+        "any agent's skills requires \u2014 its own included. An instance admin can "
+        "grant it in Settings \u2192 Agents \u2192 Skill managers.",
+    ),
+}
+
+
+def acting_agent_name(current_user) -> Optional[str]:
+    """The AGENT behind a request, for attribution (ent#596, Tandem R29).
+
+    `current_user.agent_name` is populated only for `scope == "agent"`, so the
+    system agent's writes would otherwise be indistinguishable from a human's —
+    the one distinction the attribution exists to keep. None for a human.
+    """
+    scope = getattr(current_user, "mcp_scope", None)
+    if scope == "agent":
+        return getattr(current_user, "agent_name", None) or None
+    if scope == "system":
+        from db.agents import SYSTEM_AGENT_NAME
+        return SYSTEM_AGENT_NAME
+    return None
+
+
+def capability_refusal(current_user, capability: str) -> Optional[tuple]:
+    """`None` when this principal may use `capability`; else `(code, message)`.
+
+    Pure apart from one DB read, so the whole scope matrix is testable without
+    a request. A principal with no `mcp_scope` at all fails CLOSED — the
+    `_SCOPE_ABSENT` sentinel, never `getattr(..., None)`, which would make an
+    absent attribute the privileged JWT value (the #2323 trap).
+    """
+    code, message = _CAPABILITY_REFUSALS.get(
+        capability, ("capability_not_permitted", f"This key may not use '{capability}'.")
+    )
+    scope = getattr(current_user, "mcp_scope", _SCOPE_ABSENT)
+    if scope is _SCOPE_ABSENT:
+        return code, "Principal carries no mcp_scope; cannot satisfy a capability gate."
+    if scope in ADMIN_GATE_SCOPES:
+        return None
+    if scope == "agent":
+        agent = getattr(current_user, "agent_name", None)
+        if agent and db.agent_has_capability(agent, capability):
+            return None
+        return code, message
+    return code, f"A '{scope}' key cannot do this: {message}"
+
+
+async def enforce_agent_capability(
+    request: Request, current_user: User, capability: str, *, target: Optional[str] = None,
+) -> None:
+    """Refuse with a named 403 — and an audit row — unless the principal may use
+    `capability`. The refused attempt of a prompt-injected agent is exactly the
+    event worth keeping, so a refusal is recorded, not only returned."""
+    refusal = capability_refusal(current_user, capability)
+    if refusal is None:
+        return
+    code, message = refusal
+    try:  # best-effort: an audit failure must never turn a 403 into a 500
+        from services.platform_audit_service import platform_audit_service, AuditEventType
+        # The refused ACTOR is the agent, not its owner. `platform_audit_service`
+        # ranks `actor_user` above `actor_agent_name`, so passing the principal
+        # would file a prompt-injected agent's attempt as the owner's own act —
+        # the exact "the agent did it" vs "the person did it" line (Tandem R29)
+        # this capability exists to keep. For an agent principal: the agent is
+        # the actor, the owner rides as `actor_email`, and the key is named
+        # explicitly (the service derives it from `actor_user` otherwise).
+        agent = getattr(current_user, "agent_name", None)
+        actor = {"actor_user": current_user} if not agent else {
+            "actor_agent_name": agent,
+            "actor_email": getattr(current_user, "email", None),
+            "mcp_key_id": getattr(current_user, "mcp_key_id", None),
+            "mcp_key_name": getattr(current_user, "mcp_key_name", None),
+            "mcp_scope": getattr(current_user, "mcp_scope", None),
+        }
+        await platform_audit_service.log(
+            event_type=AuditEventType.AUTHORIZATION,
+            event_action="capability_refused",
+            source="api",
+            **actor,
+            actor_ip=request.client.host if request.client else None,
+            target_type="agent",
+            target_id=target,
+            endpoint=str(request.url.path),
+            request_id=getattr(request.state, "request_id", None),
+            details={"capability": capability, "code": code, "method": request.method},
+        )
+    except Exception:  # noqa: BLE001
+        logger.warning("capability refusal audit failed for %s", capability)
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail={"code": code, "capability": capability, "message": message},
+    )
+
+
+def can_manage_agent_skills(current_user: User, agent_name: str) -> bool:
+    """The non-raising form of `get_skill_managed_agent_by_name` (#3052).
+
+    For a READ that has one privileged option — `GET .../skill-sets?probe=true`
+    runs an in-container exec — the read stays open to anyone who can see the
+    agent, and the option is honoured only for a principal who would pass the
+    writes' fence: the skills-manage capability, then the owner fence (a
+    connector key never passes it). Everyone else gets the unprivileged read.
+
+    Never raises and never writes an audit row: a downgraded read is not a
+    refused write. Fails closed on the shapes the fence refuses (no
+    `mcp_scope`, an unknown scope, a connector key).
+    """
+    from db.capability_grants import CAPABILITY_SKILLS_MANAGE
+    if getattr(current_user, "connector_agent", None):
+        return False
+    if capability_refusal(current_user, CAPABILITY_SKILLS_MANAGE) is not None:
+        return False
+    return bool(db.can_user_share_agent(current_user.username, agent_name))
+
+
+async def get_skill_managed_agent_by_name(
+    request: Request,
+    agent_name: str = Path(..., description="Agent name from path"),
+    current_user: User = Depends(get_current_user),
+) -> str:
+    """The fence for every route that changes an agent's skills (ent#596).
+
+    The capability check runs FIRST, then the owner fence. The order is the
+    point: a non-holder gets one uniform 403 whether or not the target exists,
+    so the refusal is never an existence oracle (#186), and it always names the
+    missing permission. A holder then meets the unchanged owner fence — the grant
+    never widens reach beyond the owner's own agents.
+
+    A composed dependency rather than a first-line call in each handler: a
+    convention has no guard, and the next route added to `routers/skills.py`
+    would forget it. `tests/unit/test_ent596_skill_manager.py` asserts every
+    skill-changing route there depends on this.
+    """
+    from db.capability_grants import CAPABILITY_SKILLS_MANAGE
+    await enforce_agent_capability(
+        request, current_user, CAPABILITY_SKILLS_MANAGE, target=agent_name
+    )
+    return get_owned_agent_by_name(agent_name=agent_name, current_user=current_user)
 
 
 # ============================================================================
@@ -1731,6 +2064,7 @@ OwnedAgent = Annotated[str, Depends(get_owned_agent)]
 # For routes using {agent_name} path parameter (agents, git, sharing, public_links)
 AuthorizedAgentByName = Annotated[str, Depends(get_authorized_agent_by_name)]
 OwnedAgentByName = Annotated[str, Depends(get_owned_agent_by_name)]
+SkillManagedAgentByName = Annotated[str, Depends(get_skill_managed_agent_by_name)]  # ent#596
 
 # Current user type alias
 CurrentUser = Annotated[User, Depends(get_current_user)]

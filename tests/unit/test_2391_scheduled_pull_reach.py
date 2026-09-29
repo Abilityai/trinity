@@ -188,7 +188,7 @@ def no_pilots(monkeypatch):
 
 class TestFlagOffIsUnchanged:
     @pytest.mark.parametrize(
-        "trigger", ["schedule", "webhook", "reminder", "loop", "fan_out"]
+        "trigger", ["schedule", "webhook", "reminder", "loop", "fan_out", "retry"]
     )
     def test_policy_stays_reject_with_no_pilots(self, no_pilots, trigger):
         """The property the entire risk assessment rests on: with an empty

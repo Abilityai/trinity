@@ -368,7 +368,9 @@
   - The JSONL reaper keep-set is the **union** of `agent_sessions` and
     `enterprise_portal_sessions` cached UUIDs. Without the union the 6h sweep
     deletes live Workspace JSONLs one hour after they are written, and continuity
-    breaks with no error anywhere
+    breaks with no error anywhere. Open rooms (#2610) and the agent's own
+    `/api/chat` session, read from its marker file (#2958, §5.38), are the third
+    and fourth sources
   - `?tab=session` and legacy session deep links redirect to
     `/workspace?agent=<name>`, query-preserving, and deliberately **same-tab**
     (a URL rewrite of an in-flight navigation, not an entry point); the two
@@ -852,6 +854,8 @@ is existing output gaining an audience.
 - **FR-7 — Files**: file scoping is unchanged in this pass, as the issue directs — the
   per-agent inbox boundary stays where it is (it is where the last two portal security
   bugs lived). Shared files therefore keep listing per agent and are not yet addressable.
+  *(Closed by trinity-enterprise#549: a shared file now has an addressee — see
+  `content-files.md` §13.10.)*
 - **FR-8 — Ratings deferred**: AC #6 asks deliverable cards to carry the rating
   affordance from trinity-enterprise#366, which is not built. The card is the surface it
   will attach to; nothing here pre-empts its shape.
@@ -1421,9 +1425,14 @@ bounding the table. OSS-core (Workspace rule above). Flow:
   re-derives it because an optimistic pin or delete mutates the list in place.
 - **FR-22 — Living with many** (AC 4): `CanvasPanel.vue`, shared by Agent
   Detail and the Workspace rail (one rendering layer, ent#475): search over
-  title and id once the list passes six, a height-bounded scrolling strip so a
-  long list does not cost the rail its other tabs, and an opt-in Manage mode
-  (age, stale mark, pin toggle, delete, bulk bar). Decidable rules are pure in
+  title and id once the list passes six, and an opt-in Manage mode (age,
+  stale mark, pin toggle, delete, bulk bar). **ent#724:** the canvas is chosen
+  from ONE fixed-height control row — a `BaseSelect` dropdown (pinned first,
+  long titles clamped with the full title on hover and in the header), search,
+  headroom and a Manage toggle — identical for 1 and 40 canvases, so the canvas
+  body never moves with the count (design-system principle 30). Manage opens a
+  bounded list below that row without moving it; agents are asked for canvas
+  titles of ≤ 60 characters with no provenance suffix (schema unchanged). Decidable rules are pure in
   `canvasUtils.js` (`sortCanvases`, `filterCanvases`, `selectionState`,
   `bulkDeletePrompt`, `bulkDeleteOutcome`, `canvasHeadroom`,
   `canvasSelectorVisible`, `canvasAutoSelect`, `canvasSearchVisible`) —
@@ -1896,6 +1905,19 @@ bounding the table. OSS-core (Workspace rule above). Flow:
 - **Status**: ✅ Implemented (2025-11-29)
 - **Description**: Agents communicate via Trinity MCP with agent-scoped API keys
 - **Flow**: `docs/memory/feature-flows/agent-to-agent-collaboration.md`
+
+#### 9.1.1 Chain-depth guard (#2806)
+- **Status**: ✅ Implemented (2026-09-22)
+- **Problem**: nothing marked an agent-to-agent call as part of a chain, so two agents allowed to call each other could bounce a call A→B→A→B… until an incidental limit (per-hop timeout, parallel slots, the agent-call limiter's deadlock timeout) happened to stop it. Rooms had a cap (`ROOM_MAX_CHAIN_DEPTH = 8`); chat had none.
+- **Depth semantics**: every execution row carries `schedule_executions.chain_depth` (INTEGER, NULL read as 0). A call made by a **non-agent principal** (human JWT, user-scoped key, connector, portal delegate, event loopback) is a root: its child row is depth 0 and stored NULL. A call made by an **agent principal** (an agent-scoped key, keyed on `current_user.agent_name`; a `scope=system` key counts as caller `trinity-system`) stamps its child `1 + MAX(chain_depth)` over the **calling agent's `status='running'` rows** (0 when it has none). The raw `X-Source-Agent` header and the model-typed `parent_execution_id` play no part, so an agent cannot strip the guard by omitting either. Taking the max fails toward over-refusal, never under-refusal.
+- **Limit**: ops setting `inter_agent_max_chain_depth`, **default 8, validated 1–32**, resolved `system_settings` row → env `INTER_AGENT_MAX_CHAIN_DEPTH` → default, and changed with `PUT /api/settings/ops/config` (API + env only; no Settings UI field). A child at depth ≤ max runs; **max + 1 is the first refused**. The floor of 1 means no value can refuse a direct agent→agent call. The value is read per call and clamped to [1, 32] on use; an unreadable or non-integer stored value falls back to 8 with a warning and never fails the dispatch.
+- **Covered paths**: `POST /api/agents/{name}/chat` (MCP `chat_with_agent` sequential and every `chat_with_<slug>` tool), `POST /api/agents/{name}/task` (parallel, self-task and the #946 pull-routed sequential path), `POST /api/agents/{name}/fan-out`, and raw REST on those three routes with an agent-scoped key. Fan-out subtasks carry the depth captured at request time.
+- **Refusal contract**: HTTP **403**, `detail = {"error": "inter_agent_depth_exceeded", "depth", "max_depth", "caller", "target", "message"}`, header `X-Trinity-Error-Code: inter_agent_depth_exceeded`. The check runs **after** the uniform-404 target-access dependency (so it never discloses whether a target exists, Invariant #8) and **before** the idempotency claim, capacity acquire and row insert (Invariant #18), so a refused hop burns no key, holds no slot, starts no model work and **creates no execution row**. The message tells the calling model not to retry or re-route.
+- **Recording**: a platform audit row (`event_type=execution`, `event_action=inter_agent_depth_exceeded`) and an `agent_collaboration` activity on the **caller**, opened and closed FAILED with the code. Both are best-effort; the refusal is raised whether or not they are written.
+- **MCP**: `chat_with_agent` (all branches) and `fan_out` return a structured `{"status": "inter_agent_depth_exceeded", "retryable": false, ...}` result instead of throwing `API error (403)` (see `requirements/mcp.md`).
+- **Named residuals** (the guarantee holds for a call made with an agent-scoped credential while the calling agent has a running execution): **(a)** a non-agent credential held by an agent (a hand-pasted user-scoped key, detected by #1854) resolves to the human owner and counts as a root; **(b)** agent-key calls with no running row (a web-terminal session, a spawned background process, an orphan after its row went terminal) count as depth 1, or max+1 over any other running rows. An exact parent link needs a platform-injected execution id (#2392).
+- **Deferred**: loops (`run_agent_loop`), schedule trigger (`trigger_schedule`) and agent-emitted events each start a new root at depth 0 and so do not inherit depth yet — follow-up #2973. A2A cross-instance chains are the peer's to bound.
+- **Tests**: `tests/unit/test_2806_inter_agent_depth.py`; keyed end-to-end `tests/journeys/test_j10_agent_calls_agent_journey.py::test_two_agents_cannot_bounce_a_call_between_each_other_forever`; invariant IA-04 in `docs/testing/orchestration-invariant-catalog.md`.
 
 ### 9.2 Agent Permissions
 - **Status**: ✅ Implemented (2025-12-10, Updated 2026-02-19)
@@ -2859,9 +2881,11 @@ to localStorage in the clear.
   previous session (this also avoids a one-time false-dot burst on deploy). A
   preview no longer inflates the owner's `download_count` — a ranged prefix read
   is still audited, marked `ranged_prefix: true`, but does not bump the counter.
-  Every rostered client of an agent already sees every active share of that
-  agent; a dismissal is a preference, not authorization (follow-up with the
-  audience model, ent#484/#489).
+  A dismissal is a preference, not authorization. When this shipped every
+  rostered client of an agent saw every active share of that agent;
+  trinity-enterprise#549 gave a share an addressee (`content-files.md` §13.10),
+  so the tab lists the viewer's own files and a dismissal is a preference over
+  those.
 - **Flow**: `docs/memory/feature-flows/workspace-rail.md` (Slice 3),
   `file-sharing-outbound.md`
 
@@ -3210,3 +3234,272 @@ to localStorage in the clear.
   (session-only — the chips carry upload state and inbox ids), server-side
   drafts synced across devices.
 - **Flow**: `docs/memory/feature-flows/workspace-drafts.md`
+
+### 5.36 Workspace — the role card in Agent details: role, objectives with metric freshness, readiness (trinity-enterprise#527)
+- **Status**: ✅ Implemented (2026-09-21) — the Role + Readiness half; the relationship line waits for ent#500. OSS-core (Workspace).
+- **Requirement ID**: WORKSPACE_ROLE_CARD
+- **GitHub Issue**: abilityai/trinity-enterprise#527 (+ #663, the 1.0 gate on who flips readiness)
+- **Description**: When a companion has a role (Tandem, ent#497), the Info rail's
+  Agent details show a **Role** card: the role it fills, the objectives it owns or
+  supports with each metric's latest value, target and freshness, the viewer's
+  relationship to it, and its **readiness** state. Framework §8's "organisation UI
+  over the canon" shrunk to one agent: **files are truth, this is a projection.**
+- **Files are truth, read through the platform, never a second store.** Everything the
+  card shows about the role comes from the agent's own container on each read
+  (`client_portal/role_card.py`, via the agent client — the same door the Files tab
+  uses): `template.yaml → x-role: {role, status, seat?}` (written by the
+  `create-agent:role-companion` wizard, #511) and `x-canon.clone_path` (default
+  `canon`); the role file `<canon>/roles/<id>.yaml` and `<canon>/objectives/*.yaml`
+  (framework §3.4 grammar — `owner: role:<id>` or `supporting_agents` names this
+  agent); metric values from the agent's `metrics.json` through its own
+  `/api/metrics` (`last_updated` is the freshness stamp). Nothing is cached or
+  copied platform-side. Every read is fail-soft and **named**: no `x-role` → no
+  card at all (the panel is unchanged, AC 5); a role file that cannot be read or
+  parsed → the card says so (`role.error`), never an empty role; a stopped agent
+  → "the agent is stopped; the card reads its files when it runs".
+- **Freshness is honest, never optimistic (quality bar #4).** A metric is `stale`
+  when its value is missing, when `metrics.json` carries no `last_updated`, or when
+  that stamp is older than the framework's 30-day staleness bound (§3.5); a stale
+  metric renders as stale beside its last value and age, never as current. A
+  per-metric cadence is the business-metrics workstream's to declare; until then
+  the bound is the one rule the framework already states.
+- **Readiness is a platform record, and only the agent owner writes it (#663,
+  ruled 2026-09-20).** `x-role.status` in `template.yaml` is agent-writable, so it
+  cannot be the thing that says a companion is `ready`. `agent_role_readiness`
+  (`agent_name` PK, `status`, `changed_at`, `changed_by`; dual-track — SQLite
+  `agent_role_readiness_table` + Alembic `0067_agent_role_readiness`; CASCADE in
+  `AGENT_REFS`) is the owner's stamp. The effective state is the platform record
+  when one exists, else the template's `calibrating`; a template that says `ready`
+  **without** an owner stamp is shown as `calibrating` with a note that no owner
+  has stamped it — `status: ready` is valid only with an owner stamp (#663 DoD 3).
+  `POST …/role/readiness {status}` is gated on the platform's **owner of the agent
+  record** (`db.get_owned_roster(email)` — creator/infra owner, not an assignment
+  kind, R8/R11): anyone else gets a named 403 (`readiness_owner_only`), the agent
+  never can (portal-token principals are not owners; the route is on the
+  platform-authenticated door). The card shows the state, the date it changed and
+  who flipped it. The flip **records**; it does not switch schedules on — turning
+  the brief schedule on at `ready` stays the operator's act until the wizard owns
+  it (#511).
+- **Walkthrough progress while calibrating** (§7.2 step 8–9): the card shows the
+  viewer's own asks with this agent — user turns in their Main chat, capped at the
+  ten the three-strikes test asks for — and how many of the agent's replies they
+  rated down (ent#366). A proxy for the ten-ask walkthrough, labelled as the
+  viewer's own count, never a fleet number.
+- **Your relationship**: rendered from ent#500's assignment when it lands; until
+  then the line states "no assignment recorded" rather than being blank (AC 3).
+- **Not this issue**: editing the canon from the card (files are truth — edit the
+  file), the organisation view (ent#502), enabling schedules on the flip.
+- **Flow**: `docs/memory/feature-flows/workspace-role-card.md`
+
+- **Readiness gates the proactive brief (trinity-enterprise#689 — the enforcement half of
+  #663)**: a companion's **cron-fired** seat brief (a schedule with
+  `deliver_to_workspace_email`, ent#498) runs only when the agent's owner stamp says
+  `ready`. An unstamped agent that declares `x-role` is held; an agent without `x-role` is
+  not a companion and is never gated. Manual runs, webhooks, retries and schedules that do
+  not deliver to a seat are untouched. The gate sits in the scheduler just ahead of the
+  #454 pre-check skip gate (so a held brief never runs the agent's hook) and asks the backend (`GET /api/internal/agents/{name}/brief-readiness`)
+  for the verdict: a held brief is a `skipped` execution whose reason names the fix
+  ("Held: … runs once its owner marks it ready"), a `schedule_execution_skipped` event, and
+  advanced run times — never a failure, a retry or an alert. **Every ambiguity fails open
+  and is logged** (verdict call failed, container not running, Docker or template.yaml
+  unreadable within 3 s). The template is read only to learn whether the agent is a
+  companion; `x-role.status` is agent-writable and is never trusted (#663). Honest limit: an
+  *unstamped* companion can take itself out of scope (drop `x-role`, or stall the read into
+  fail-open); an owner's stamp is the one thing it cannot touch.
+  - **Rollout (ruled 2026-09-24, amended from option 1 at plan review)**: a one-time,
+    database-only seed on both migration tracks stamps `ready` (`changed_by =
+    rollout:ent#689`) for every live agent with autonomy on and an enabled, non-deleted
+    seat-delivery schedule at deploy — the brief that fires today is the value in force
+    (#2085; with autonomy off it does not fire, so it is not grandfathered), so no install
+    changes behaviour. Insert-if-absent: an existing stamp is never overwritten (an agent
+    already stamped `calibrating` is held from deploy on).
+  - **The card says so**: a rollout stamp reads "carried over when the readiness gate
+    shipped", never "by <owner>"; when a seat-delivery schedule exists and readiness is not
+    `ready`, the card adds "its scheduled brief is paused until you mark it ready" — for
+    platform viewers only, and not when autonomy is off (the autonomy gate stops it first).
+
+### 5.37 Workspace — the seat-level decision record: why a thing was approved, deferred or killed (trinity-enterprise#638)
+- **Status**: ✅ Implemented (2026-09-22). OSS-core (Workspace).
+- **Requirement ID**: WORKSPACE_SEAT_DECISIONS
+- **GitHub Issue**: abilityai/trinity-enterprise#638 (ruling R25; the evidence base for #641)
+- **Description**: The approve / defer / kill judgments a role companion and its
+  human make every week are recorded as a platform primitive owned by the **seat**
+  (agent × person — the ent#637 memory scope). A record is lintable, not prose:
+  `outcome` (approved | deferred | killed) · what was `decided` · the `alternatives`
+  that were live · the `criterion` that discriminated (the reusable part) · who
+  decided (role + person) · `decided_at` and `review_by` · what would `reverse` it ·
+  `notes` (the only free prose) · `ask_class` (slug) · `cites`.
+- **Refusals are receipts** (`services/seat_decision_service.validate_record`): prose
+  where a field belongs (over 280 chars, a second paragraph, a missing field) →
+  422 `decision_prose_only` naming every failing field and its rule; no alternatives
+  → 422 `decision_is_a_note` ("keep it in the seat's memory"); a citation outside the
+  seat's own records → 422 `unknown_citation`. Nothing is stored on refusal.
+- **Direction is not a seat decision (R C3)**: the caller declares `scope`; a
+  `direction` record (pricing, positioning, roadmap) is kept as `routed` — visible,
+  expiring, excluded from the evidence — and the answer carries the canon-proposal
+  hint, so it neither evaporates nor pollutes the seat's record.
+- **It expires, correction supersedes, history stays**: `expired` = `review_by` before
+  today (UTC; equal is not expired), computed on read, never written; `reconfirm`
+  moves `review_by`; `supersede` inserts a new row chained by `supersedes_id` and flips
+  the old one in one CAS transaction; `close` / `reverse` are status flips (`reverse`
+  requires a one-line reason — the evidence). Any action on a non-active row is a
+  named 409 `decision_not_active`. Nothing is deleted.
+- **Evidence (AC 5)**: `reused` = records cited by a LATER record of the seat (a
+  superseding record does not implicitly cite its predecessor) — conversion, not
+  volume; per `ask_class`: the distinct normalized criteria, the reversals, and
+  `stable` (≥3 non-expired records, one criterion, no reversal) — shipped as #641's
+  input, documented as such, not its verdict.
+- **Two surfaces, one seat rule**: the companion records over MCP (`record_decision` /
+  `list_seat_decisions` → `POST/GET /api/agents/{name}/decisions`; the seat is resolved
+  from `execution_id` exactly as `write_user_memory` does, never supplied;
+  `Idempotency-Key` honoured, the tool derives one over the arguments; `decided_by_role`
+  from `assignment_provider.resolve_assignment` or the caller, never a container read;
+  **no email in the answer** — the decider is `seat` / `owner`). The person records,
+  corrects, reconfirms, closes and reverses in Agent details
+  (`GET/POST /api/enterprise/client-portal/agents/{name}/decisions`,
+  `POST …/decisions/{id}/actions`, `PortalAgentDecisions.vue`).
+- **Readers**: own seat always; the agent OWNER (`role_card._is_owner`) every seat,
+  writable; a stakeholder the assignment provider recognises through the optional seam
+  method `kinds_for(agent_name, reader_email) -> {kind, role_id}` every seat read-only
+  (per-agent in v1 — DEBT_INBOX 2026-09-22); no provider → own seat only. Writes: own
+  seat, or the owner on a named seat; a foreign id is the uniform 404.
+- **Read into context**: the seat's active decisions (criterion first, bounded) ride the
+  shared memory block on every turn — public link, channels, seat runs, Workspace — so
+  a criterion is reusable and `cites` can be non-zero.
+- **Storage**: `seat_decisions` (both tracks; Alembic `0071` ← `0070`; cleanup CASCADE);
+  JSON lists in TEXT; stats in Python; reads bounded (500 rows / seat, 50 seats). Field
+  names match the role pack's YAML (`record-decision`, #510) so the canon-folder copy is
+  a move (export deferred — DEBT_INBOX 2026-09-22).
+- **Not in scope**: the autonomy dial itself (#641); auto-recording an answered decision
+  REQUEST (#611 — `request_id` is the link, DEBT_INBOX 2026-09-22).
+- **Flow**: `docs/memory/feature-flows/workspace-seat-decisions.md`
+
+### 5.38 Chat continuity is the chat's own session (#2958)
+- **Status**: ✅ Implemented (2026-09-22). Claude runtime.
+- **Requirement ID**: CHAT_OWN_SESSION
+- **GitHub Issue**: abilityai/trinity#2958
+- **Problem**: a sequential chat turn (`POST /api/agents/{name}/chat`, which MCP
+  `chat_with_agent(parallel=false)` and CLI `trinity chat` use) ran `claude --continue`,
+  which resumes the newest JSONL in the shared project dir whoever wrote it. Every
+  `/api/task` with an effective timeout above 600 s persists its JSONL there (#678), so
+  the next chat silently continued a scheduled run's near-full context, paid an
+  auto-compaction first (one field case: 162 s of a 173 s execution) and could switch
+  models mid-session. The row said `success` with a large `duration_ms`, which callers
+  read as a degraded agent.
+- **AC1 — own session**: the chat records its session id after a **successful** turn
+  (`agent_state.chat_session_id`, UUID-validated) and resumes it with `--resume <id>`.
+  A failed turn never moves the id. `--continue` is gone from the chat path.
+  **Scope**: the session is per **agent**, shared by every caller of `/chat` on that
+  agent — true before this fix and unchanged by it. It is a **known limitation, not
+  intended behaviour** (a cross-user exposure, tracked separately).
+- **AC2 — model rule**: a different *effective* model (request model, else the agent's
+  `current_model`) starts a fresh session (`event=chat_session_model_change`). Cost:
+  MCP sequential and CLI callers lose context after a `PUT /api/agents/{name}/model`
+  (including the Agent Detail model dropdown). Alias vs full id counts as a change. The
+  Chat tab and MobileAdmin post `/task`, not `/chat`, so they are unaffected.
+- **Dead handle — one cold retry**: a resume turn that fails (not 429/503/504) whose
+  JSONL is **absent after the failure**, that ran no tool and was not cancelled, is
+  retried once cold with the same `execution_id` (re-registered pending first, so a
+  cancel in the gap is honoured) and logs `event=chat_resume_fallback`. Decided by the
+  filesystem, never by the CLI's error text. A failed resume is now a 502
+  (`Execution error: …`), not "returned empty response". **Residual**: a file that
+  exists but still cannot be resumed raises that 502 each turn until
+  `DELETE /api/chat/history` or a model change.
+- **Reset**: `DELETE /api/chat/history` clears the id and marker and bumps a generation
+  counter; a turn in flight across it discards its capture
+  (`event=chat_session_capture_discarded`). No lock (a turn may hold it 30 min).
+- **Cold start counters**: a fresh session resets `session_context_tokens` / cost /
+  output tokens, so it never reports the old session's context as `context_used`.
+- **Keep set**: the agent writes `~/.trinity/chat-session.json` atomically (mkstemp,
+  0600) after each successful turn; cleared on reset and at agent-server startup. The
+  JSONL reaper reads it over docker exec as `developer` (`head -c 512`, in-container
+  `timeout 5`, `asyncio.wait_for`) and unions it in; any unclean read aborts that
+  agent's sweep, and the log names the failure kind only. A failed write keeps the
+  in-memory id (the cold retry absorbs a later reap). Writer and reader paths are pinned
+  by a parity test; `TRINITY_CHAT_SESSION_FILE` overrides it for tests only.
+- **AC3 — attribution**: the agent reads compact events from the JSONL (off the event
+  loop, before the error checks); the backend writes `compact_metadata` on the chat
+  SUCCESS row and on the FAILED row from the #678 structured body, and the `/chat`
+  response's `execution.compaction` is `{events, trigger, pre_tokens, post_tokens,
+  duration_ms}` or null. **Partial**: 504 / 429 / plain-500 bodies carry no metadata,
+  so those failures stay unattributed (follow-up).
+- **AC4 — guidance**: `chat_with_agent` and `get_execution_result` descriptions name
+  the one-off compaction delay; `get_execution_result` returns `compact_metadata`.
+- **Known, not fixed here**: an idle limit on the chat session (it now lives until a
+  restart, reset or model change, and compacts on its own — attributed); per-caller
+  scoping; Continue-as-Chat on a chat row can resume the chat's id (explicit user
+  action); Gemini's bare `--resume` (Claude-only fix).
+- **No schema change** (the column exists on both tracks). No new endpoint.
+- **Tests**: `tests/unit/test_2958_chat_session_isolation.py` (a fake `claude` driving
+  the real chat and headless paths), `test_2958_chat_compact_metadata.py`,
+  `test_2958_session_cleanup_chat_marker.py`, `test_2958_marker_path_parity.py`,
+  `test_2610_resume_surface_parity.py`, `src/mcp-server/src/tools/executions.compact.test.ts`.
+
+### 5.39 Workspace — suggestions: what you can do with this agent, and what is waiting (trinity-enterprise#465)
+- **Status**: 🚧 In progress
+- **Requirement ID**: WORKSPACE_SUGGESTIONS
+- **GitHub Issue**: abilityai/trinity-enterprise#465 (1.0 story step 3, #649)
+- **Description**: A platform user who opens an agent in the Workspace sees a short list of
+  suggestions computed for **that user and that agent** — never a list identical for every
+  user. Each is an actionable object, not advice: **Accept** or **Dismiss**, both recorded.
+  Every item displays the signal it came from so the claim can be checked. When nothing
+  crosses a threshold the surface says so and is never padded to a fixed count.
+- **Two kinds (decision 15, option 1 — the engine-bay ruling)**: `invoke` items act inside
+  the Workspace — Accept **prefills** the composer (`/<playbook> `) or opens the section the
+  item names; nothing is ever sent on the person's behalf (the ent#138 prefill rule).
+  `configure` items (a schedule's health, autonomy) are read-only awareness whose Accept is a
+  **deep link** to the operator agent page (`/agents/<name>?tab=schedules`). Building agents
+  stays operator-side (§5.11 "it reports; it does not configure").
+- **Door, declared per class**: every v1 class is behind the **platform-authenticated door**
+  (ent#357). A verified-email portal token gets a uniform 404 on the read and the feedback
+  write — usage- and schedule-derived data must be unreachable from the external projection
+  (ent#78 auth-path invariant). `configure` classes additionally require **owner or admin**,
+  the same audience that may enable/disable a schedule (`OwnedAgent`). The Workspace
+  principal carries `is_admin` for this one decision only; everywhere else a non-owner admin
+  stays a viewer (ent#358).
+- **v1 classes** (order = display priority; at most 5 shown, `total` returned; UTC):
+  | Class | Kind | Emitted when | Signal shown |
+  |---|---|---|---|
+  | `asks` | invoke | ≥1 pending ask addressed to me on this agent | "N questions waiting on you" |
+  | `decisions_due` | invoke | ≥1 decision on my seat past `review_by` | "N decisions past their review date" |
+  | `schedule_failing:<id>` | configure | last ≥3 terminal runs failed (skipped/cancelled neither count nor break the streak) | "Failed K runs in a row, last <date>" |
+  | `autonomy_held` | configure | autonomy off and ≥1 enabled schedule or a pending reminder past `fire_at` | "N schedules won't run — autonomy is off" |
+  | `schedule_never_fired:<id>` | configure | enabled, autonomy on, never run, and the cron's first expected fire after creation is >1h past | "Enabled since <date>, has never run" |
+  | `schedule_disabled:<id>` | configure | disabled ≥7 days and it had run before | "Disabled since <date> — it used to run" |
+  | `dormant` | invoke | I have chatted here and my last message is ≥14 days old | "Your last conversation was <date>" |
+  | `unused_playbook:<name>` | invoke | an exposed playbook I have not started, at most 3 | "You haven't run /name yet" |
+  One agent-level `autonomy_held` item replaces per-schedule "held" items: autonomy is off by
+  default, so per-schedule items would fill every slot, and no timestamp records when it was
+  turned off — a "held N days" figure would be invented. Autonomy off suppresses
+  `schedule_never_fired`.
+- **Usage dimension (recorded decision)**: per-user — yes, keyed by the viewer's email.
+  Per-skill — **explicit slash invocations only**: `/<name>` at the start of the person's own
+  Workspace messages or of executions attributed to them (`source_user_email`), and a
+  playbook an enabled schedule already runs is never offered. A plain-language request for
+  the same work is not detected, which is why the copy says "haven't run /name" rather than
+  "never used". Reads existing rows only — no parallel tracking store.
+- **Capabilities**: the same briefing ladder as the hints and "What it can do" (ent#380) —
+  the ent#178 curated set slots into that seam when it lands. **Playbooks only**: template
+  use-case text is not offered, because whether someone has "used" a free-text example is
+  unverifiable. When the agent is not running or does not answer, capability items are
+  omitted and the response says capabilities are unavailable — never "nothing unused".
+  With no usage history the list is capability-only and says so.
+- **Dismissal**: per user + agent + suggestion, persisted. A dismissed item stays hidden
+  while its **state fingerprint** is unchanged — the identity of the state, never a count
+  (the first failure of a streak, the set of held schedules, the set of waiting asks), so a
+  failing schedule does not return with every additional failure but does return when a new
+  streak starts. Accept is recorded (usefulness) and does not hide an item: the signal clears
+  itself when the thing is done. Writes are bounded to items currently emitted for the
+  caller; the server computes the fingerprint.
+- **Placement**: the rail's **Info** tab carries the full list and the tab shows its count;
+  an empty chat shows the top 3 above "Things you can ask". Suggestions never arrive as
+  messages.
+- **Cost**: no LLM call. Per read: at most one bounded briefing fetch (cached 60s, skipped
+  for a stopped agent), a handful of indexed queries and one windowed executions query.
+  Rate-limited per viewer.
+- **Not in scope (follow-ups)**: a suggestion that consults another agent (2026-09-21
+  amendment → ent#698); suggestions derived from the current conversation (2026-09-22 →
+  ent#699); role, project
+  and objective-gap inputs (#500, #661, #477–#479) — each attaches as a new class without
+  changing the object; the Inbox placement (#610).
+- **Flow**: `docs/memory/feature-flows/workspace-suggestions.md`

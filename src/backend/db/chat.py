@@ -17,6 +17,7 @@ from sqlalchemy import select, insert, update, delete, and_
 
 from .engine import get_engine
 from .tables import chat_sessions, chat_messages
+from .write_params import ChatMessageFields
 from db_models import ChatSession, ChatMessage
 from utils.helpers import utc_now_iso
 
@@ -124,16 +125,15 @@ class ChatOperations:
         user_email: str,
         role: str,
         content: str,
-        cost: Optional[float] = None,
-        context_used: Optional[int] = None,
-        context_max: Optional[int] = None,
-        tool_calls: Optional[str] = None,
-        execution_time_ms: Optional[int] = None,
-        source: Optional[str] = "text",
-        subscription_id: Optional[str] = None,
-        output_tokens: Optional[int] = None,
+        fields: Optional[ChatMessageFields] = None,
     ) -> ChatMessage:
-        """Add a message to a chat session and update session stats."""
+        """Add a message to a chat session and update session stats.
+
+        `fields` carries every optional column (#1482); None is a plain text
+        message with no cost/context/timing recorded.
+        """
+        f = fields or ChatMessageFields()
+        cost, context_used, context_max = f.cost, f.context_used, f.context_max
         with get_engine().begin() as conn:
             # Create message
             message_id = secrets.token_urlsafe(16)
@@ -152,11 +152,11 @@ class ChatOperations:
                     cost=cost,
                     context_used=context_used,
                     context_max=context_max,
-                    tool_calls=tool_calls,
-                    execution_time_ms=execution_time_ms,
-                    source=source or "text",
-                    subscription_id=subscription_id,
-                    output_tokens=output_tokens,
+                    tool_calls=f.tool_calls,
+                    execution_time_ms=f.execution_time_ms,
+                    source=f.source or "text",
+                    subscription_id=f.subscription_id,
+                    output_tokens=f.output_tokens,
                 )
             )
 

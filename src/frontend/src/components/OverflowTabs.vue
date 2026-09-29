@@ -41,6 +41,10 @@ export const FIXED_TAB_WIDTH = 'w-40'
  */
 import { ref, computed, onMounted, onUnmounted, watch, nextTick } from 'vue'
 import DraftMark from './base/DraftMark.vue'
+// #1925 — the fit arithmetic moved to a pure module so NavBar's priority+ link
+// row packs by the SAME rule instead of a second copy, and so the rule is
+// reachable by a plain unit test.
+import { computeInlineCount, FIT_EPSILON } from '../utils/overflowFit'
 
 const props = defineProps({
   // [{ id, label, badge?, signal?: 'live'|'updated', pinned?: boolean }]
@@ -92,7 +96,6 @@ let ro = null
 let rafId = null
 let lastWidth = -1
 
-const EPSILON = 1 // px tolerance for sub-pixel rounding in the fit decision
 
 const tabPad = computed(() => (props.dense ? 'px-3 py-2 text-xs' : 'px-4 py-3 text-sm'))
 const morePad = computed(() => (props.dense ? 'px-3 py-2 text-xs' : 'px-4 py-3 text-sm'))
@@ -132,38 +135,21 @@ function measure() {
 }
 
 function recompute() {
-  const cw = containerWidth.value
-  // Not yet measured / hidden container / stale widths → render all inline.
-  if (cw <= 0 || tabWidths.value.length !== props.tabs.length) {
+  // Stale widths (the mirror has not re-rendered for the new tab set yet) →
+  // render all inline; this guard is about props, so it stays here while the
+  // width arithmetic lives in the shared module.
+  if (tabWidths.value.length !== props.tabs.length) {
     inlineCount.value = props.tabs.length
     return
   }
-  const widths = tabWidths.value
-  const total = widths.reduce((a, b) => a + b, 0)
-  if (total <= cw + EPSILON) {
-    inlineCount.value = props.tabs.length // everything fits — no More button
-    return
-  }
-  // Reserve room for the More trigger, then pack from the left.
-  const avail = cw - moreWidth.value
-  let acc = 0
-  let count = 0
-  for (let i = 0; i < widths.length; i++) {
-    if (acc + widths[i] <= avail + EPSILON) {
-      acc += widths[i]
-      count++
-    } else {
-      break
-    }
-  }
-  // If exactly one tab overflows and it would fit without reserving the More
-  // trigger, keep it inline rather than spend More-width to hide one item.
-  if (count === widths.length - 1 && acc + widths[count] <= cw + EPSILON) {
-    count = widths.length
-  }
-  // Always keep at least one tab inline when even the first one fits.
-  if (count === 0 && widths[0] <= cw + EPSILON) count = 1
-  inlineCount.value = count
+  inlineCount.value = computeInlineCount({
+    containerWidth: containerWidth.value,
+    itemWidths: tabWidths.value,
+    moreWidth: moreWidth.value,
+    // Padding-spaced strip: no flex gap to account for.
+    gap: 0,
+    epsilon: FIT_EPSILON,
+  })
 }
 
 function onResize() {

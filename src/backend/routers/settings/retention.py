@@ -234,15 +234,23 @@ async def get_retention_status(
         RETENTION_OPS_KEYS,
     )
 
+    # Both resolve through `settings_service.resolve_ops_setting` so the env
+    # tier minted for ent#478's two knobs is reported rather than skipped — an
+    # endpoint whose whole job is to say WHERE a window came from must not
+    # answer "code-default" for a value the environment is actually supplying.
+    from config import ENV_BACKED_OPS_KEYS
+    from services.settings_service import settings_service as _settings
+
     def _ops_int(key: str) -> int:
-        raw = db.get_setting_value(key, OPS_SETTINGS_DEFAULTS.get(key, "0"))
+        raw, _src = _settings.resolve_ops_setting(key)
         try:
             return max(int(raw), 0)
         except (TypeError, ValueError):
             return 0
 
     def _ops_source(key: str) -> str:
-        return "db-row" if db.get_setting_value(key, None) is not None else "code-default"
+        _value, source = _settings.resolve_ops_setting(key)
+        return "code-default" if source == "default" else source
 
     entitled = entitlement_service.is_entitled("retention")
     audit_days = max(int(os.getenv("AUDIT_LOG_RETENTION_DAYS", "365") or 365), 365)
@@ -252,6 +260,7 @@ async def get_retention_status(
     from services.retention_guard import (
         MAX_ROWS_PER_SWEEP,
         FLOOR_AGENTS,
+        FLOOR_METRIC_POINTS,
         FLOOR_SCHEDULES,
         evaluate as _guard_evaluate,
     )
@@ -271,6 +280,14 @@ async def get_retention_status(
         ("schedule_soft_delete_retention_days",
          "Soft-deleted schedules",
          FLOOR_SCHEDULES, db.count_soft_deleted_schedules_past_retention),
+        # trinity-enterprise#478. Unlike the two above, a refusal here is the
+        # EXPECTED path rather than an exception: narrowing the window on a
+        # mature table puts a year of points past the cutoff at once, the guard
+        # refuses, and its acknowledgements are single-use — so without an
+        # approve control the only unblock would be the alarm's link.
+        ("metrics_retention_days",
+         "Recorded metric points",
+         FLOOR_METRIC_POINTS, db.count_metric_points_candidates),
     )
     pending_acknowledgements = []
     blocked_sweeps = []
@@ -321,7 +338,12 @@ async def get_retention_status(
         # EXECUTION_ROW_RETENTION_DAYS et al: zero reads). Only log archival is
         # env-driven. Claiming an escape hatch that does not exist is what left
         # operators with no way to pre-empt #1638.
-        "precedence": "db-row → code-default (OPS windows); env (log archival only)",
+        "precedence": (
+            "db-row → code-default (OPS windows); "
+            "db-row → env → code-default for the env-backed keys "
+            f"({', '.join(sorted(ENV_BACKED_OPS_KEYS))}); "
+            "env (log archival only)"
+        ),
         "sources": {k: _ops_source(k) for k in RETENTION_OPS_KEYS},
         # #1644 blast-radius guard. Reported separately from `windows` because it
         # is not a retention window — it is the threshold above which a prune is

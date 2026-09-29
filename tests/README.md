@@ -94,7 +94,8 @@ What it does beyond running pytest:
   a pass in every summary line pytest prints, which is how whole tiers came to
   be silently uncovered. Adding an allowlist entry requires writing down why
   the condition is acceptable.
-- **A model turn's 503 is classified, never blanket-skipped (#2889)** — a test
+- **A model turn's 503 or 429 is classified, never blanket-skipped (#2889,
+  #2919)** — a test
   that POSTs `/chat`, `/task` or `/fan-out` routes the response through
   `testkit.readiness.require_agent_answer(resp, what="POST /task")` and carries
   `@pytest.mark.requires_model`. The helper reads the backend's
@@ -108,8 +109,14 @@ What it does beyond running pytest:
   `TEST_AGENT_NAME` set — when one real `/task` probe proves the credential
   cannot execute; a credential-class verdict seen mid-session fails every later
   `requires_model` test at setup instead of spending a 120 s call each.
+  A 429 goes through the same helper: `capacity` (admission refused before
+  any model turn — the header, or the backend's pinned queue-full wording)
+  skips with evidence, likewise unallowlisted; `billing` (an exhausted
+  subscription) fails the test and arms the session fast-fail; anything else
+  fails as `unknown`.
   `tests/unit/test_2889_readiness_classifier.py` fails CI on a bare
-  `if resp.status_code == 503: pytest.skip(...)` after a model-turn POST.
+  `if resp.status_code == 503: pytest.skip(...)` **or `== 429`** after a
+  model-turn POST.
 - **Nothing can hang it** — every tier carries `--timeout` and
   `--timeout-method=thread` (`signal` re-enters the interpreter from a handler
   and turned one hung read into a pytest INTERNALERROR).

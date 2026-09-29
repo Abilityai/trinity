@@ -178,27 +178,22 @@ def test_nested_workspace_repo_wins_over_home_repo(tmp_path, monkeypatch):
     assert _detect_against_fs(gs, home) == str(home / "workspace")
 
 
-def test_no_repo_defers_to_the_content_heuristic(tmp_path, monkeypatch):
-    """No repository anywhere: git answers nothing and placement is decided by
-    the (hardcoded-path) legacy heuristic — the branch
-    `initialize_git_in_container` needs for a repo that does not exist yet.
+def test_no_repo_places_a_new_one_at_home_whatever_workspace_holds(tmp_path, monkeypatch):
+    """No repository anywhere: git answers nothing and placement is the home
+    directory — the only root the agent server reads (#2938). A populated
+    `workspace/` used to route a NEW repo there, and every git route on the
+    agent side then said "not enabled" forever.
     """
     gs = _load_git_service(monkeypatch)
     home = _make_home(tmp_path)
     (home / "workspace" / "seed.txt").write_text("x")
-
-    # The heuristic probes the real container paths, so on the host it answers
-    # for `/home/developer`, not the temp tree. What this proves is that the
-    # git probe declined and the fallback decided.
-    assert _detect_against_fs(gs, home) in (
-        "/home/developer",
-        "/home/developer/workspace",
-    )
+    assert _detect_against_fs(gs, home) == "/home/developer"
 
 
 @pytest.mark.asyncio
-async def test_fallback_heuristic_is_byte_compatible(monkeypatch):
-    """The fresh-agent placement probe is unchanged from the pre-#2075 code."""
+async def test_no_repo_runs_no_content_probe(monkeypatch):
+    """#2938: the pre-#2075 `find workspace | head | wc` heuristic is gone —
+    the only exec a repo-less container sees is git's own toplevel probe."""
     gs = _load_git_service(monkeypatch)
     seen = []
 
@@ -206,16 +201,13 @@ async def test_fallback_heuristic_is_byte_compatible(monkeypatch):
         seen.append(command)
         if "rev-parse" in command:
             return {"exit_code": 128, "output": ""}
-        return {"exit_code": 0, "output": "0\n"}
+        return {"exit_code": 0, "output": "1\n"}     # a populated workspace, if anyone asked
 
     with patch.object(gs, "execute_command_in_container", AsyncMock(side_effect=_exec)):
         assert await gs._detect_git_dir("agent-x") == "/home/developer"
 
-    assert seen[-1] == (
-        'bash -c "[ -d /home/developer/workspace ] && '
-        'find /home/developer/workspace -mindepth 1 -maxdepth 1 | '
-        'head -1 | wc -l"'
-    )
+    assert all("rev-parse" in c for c in seen), seen
+    assert not any("workspace -mindepth" in c for c in seen)
 
 
 def test_no_workspace_directory_at_all(tmp_path, monkeypatch):
@@ -247,12 +239,15 @@ async def test_toplevel_outside_agent_home_is_rejected(monkeypatch):
     with patch.object(gs, "execute_command_in_container", AsyncMock(side_effect=_exec)):
         assert await gs._detect_git_dir("agent-x") == "/home/developer"
     assert any("rev-parse --show-toplevel" in c for c in calls)
-    # The fallback heuristic ran only because the probe was rejected.
-    assert any("find /home/developer/workspace" in c for c in calls)
+    # A rejected probe is "no repository": placement is home, with no second
+    # exec (#2938 retired the content heuristic that used to run here).
+    assert len(calls) == 1
 
 
 @pytest.mark.asyncio
 async def test_git_failure_falls_back(monkeypatch):
+    """A git probe that fails is "no repository" — placement is home (#2938),
+    never the workspace the agent server cannot see."""
     gs = _load_git_service(monkeypatch)
 
     async def _exec(container_name: str, command: str, timeout: int = 5):
@@ -261,7 +256,7 @@ async def test_git_failure_falls_back(monkeypatch):
         return {"exit_code": 0, "output": "1\n"}
 
     with patch.object(gs, "execute_command_in_container", AsyncMock(side_effect=_exec)):
-        assert await gs._detect_git_dir("agent-x") == "/home/developer/workspace"
+        assert await gs._detect_git_dir("agent-x") == "/home/developer"
 
 
 @pytest.mark.asyncio
@@ -394,8 +389,12 @@ def test_a_boundary_is_not_evidence_of_a_missing_repo(tmp_path, monkeypatch):
     assert _detect_against_fs(gs, home) == str(home)
 
     # And this is the pre-fix path — kept as documentation of the failure mode
-    # the flag removes, not as an aspiration: a boundary-failed probe still
-    # degrades to the heuristic, which is why the probe must not fail.
+    # the flag removes: a boundary-failed probe reads as "no repository". Before
+    # #2938 that degraded to the content heuristic, which answered
+    # `/home/developer/workspace` and rooted a NEW repo where the agent server
+    # never looks; now it answers the home directory, the same place the probe
+    # itself would have answered had it crossed the boundary — so even the
+    # failure mode is no longer a different placement.
     import asyncio
 
     async def _boundary_failure(container_name: str, command: str, timeout: int = 5):
@@ -411,12 +410,6 @@ def test_a_boundary_is_not_evidence_of_a_missing_repo(tmp_path, monkeypatch):
          patch.object(gs, "execute_command_in_container",
                       AsyncMock(side_effect=_boundary_failure)):
         degraded = asyncio.run(gs._detect_git_dir("agent-x"))
-    # The literal, not `home / "workspace"`: `_detect_git_dir_fallback` embeds
-    # `/home/developer/workspace` directly rather than reading the module constants
-    # the probe uses, so patching them does not move it. Worth stating — it means
-    # the fallback answers the same path whatever the constants say (harmless in
-    # production, where they agree) and it is why this assertion is spelled out
-    # rather than derived from `home`.
-    assert degraded == "/home/developer/workspace", (
-        "if this ever stops being the fallback's answer, the comment above is stale"
-    )
+    # The literal, not `home`: `NEW_REPO_ROOT` is the agent server's fixed root,
+    # not a patched module constant.
+    assert degraded == "/home/developer"

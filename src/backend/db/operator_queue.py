@@ -12,16 +12,17 @@ time math is done in Python). The public API of ``OperatorQueueOperations`` is
 unchanged.
 """
 
+import hashlib
 import json
 import uuid
-from typing import Optional, List, Dict, Set
+from typing import Optional, List, Dict, Set, Tuple
 from datetime import datetime
 
 from sqlalchemy import select, update, func, and_, or_, case, delete
 
 from .engine import get_engine, make_insert
 from .tables import operator_queue
-from utils.helpers import utc_now_iso, iso_cutoff
+from utils.helpers import utc_now_iso, iso_cutoff, parse_iso_timestamp, to_utc_iso
 
 
 # #1632: generous hard "belt" caps enforced at the DB sink itself. The agent
@@ -37,6 +38,31 @@ _DB_BELT_TITLE_MAX_BYTES = 4 * 1024
 _DB_BELT_QUESTION_MAX_BYTES = 16 * 1024
 _DB_BELT_CONTEXT_MAX_BYTES = 64 * 1024
 _DB_BELT_ID_MAX = 512
+
+# trinity-enterprise#611: expiry is swept by a text comparison
+# (`expires_at < now`), so a deadline written with an offset ("…+02:00") or
+# without a zone compared hours off (Invariant #16). Bounded so the per-cycle
+# sweep never holds an unbounded write set; the rest wait for the next cycle.
+_EXPIRY_BATCH_MAX = 500
+
+
+def _iso_z_deadline(value) -> Optional[str]:
+    """A deadline as ISO-8601 UTC with a `Z` suffix; text that does not parse —
+    or lands past the year range once moved to UTC — is kept as written, and a
+    falsy value is None. Never raises: a raise here fails the create, and the
+    poller quarantines the ask instead of showing it.
+
+    Kept verbatim rather than dropped because the #2915 fingerprint
+    (`operator_queue_service._normalise_expires`) compares an unparseable value
+    as its own text — dropping it here would read as the agent rewriting the
+    deadline on every cycle.
+    """
+    if not value:
+        return None
+    try:
+        return to_utc_iso(parse_iso_timestamp(str(value)))
+    except (TypeError, ValueError, OverflowError):
+        return str(value)
 
 
 def _operator_queue_prune_predicate(
@@ -95,6 +121,32 @@ class OperatorQueueOperations:
             "acknowledged_at": row["acknowledged_at"],
             "cleared_at": row["cleared_at"],  # #1017
             "addressed_to_email": row["addressed_to_email"],  # ent#364
+            # #2915 — what the poller last established, and whether the answer landed
+            "sync_state": row["sync_state"],
+            "sync_detail": row["sync_detail"],
+            "sync_updated_at": row["sync_updated_at"],
+            "last_confirmed_at": row["last_confirmed_at"],
+            "delivery_state": row["delivery_state"],
+            "delivery_detail": row["delivery_detail"],
+            "delivery_updated_at": row["delivery_updated_at"],
+            # #2989 review — the operator answered a diverged item knowingly; the
+            # write-back delivers into the entry as it is now
+            "divergence_acknowledged_at": row["divergence_acknowledged_at"],
+            # trinity-enterprise#611 — how the ask ended (NULL on a row that
+            # ended before the ledger: read the ending from `status`)
+            "disposition": row["disposition"],
+            "disposed_at": row["disposed_at"],
+            "disposed_by": row["disposed_by"],
+            "disposed_by_email": row["disposed_by_email"],
+            "disposition_reason": row["disposition_reason"],
+            "batch_id": row["batch_id"],
+            # trinity-enterprise#611 — the agent-raised ask (platform-owned)
+            "raised_by": row["raised_by"],
+            "channel": row["channel"],
+            "to_role": row["to_role"],
+            "resolved_to": json.loads(row["resolved_to"]) if row["resolved_to"] else None,
+            "proposal": json.loads(row["proposal"]) if row["proposal"] else None,
+            "supersedes_expired": row["supersedes_expired"],
         }
 
     # Columns selected for a full queue-item record, in the canonical order.
@@ -120,20 +172,201 @@ class OperatorQueueOperations:
         operator_queue.c.acknowledged_at,
         operator_queue.c.cleared_at,  # #1017 — Clear All hide flag
         operator_queue.c.addressed_to_email,  # ent#364 — the human it is for
+        operator_queue.c.sync_state,  # #2915
+        operator_queue.c.sync_detail,
+        operator_queue.c.sync_updated_at,
+        operator_queue.c.last_confirmed_at,
+        operator_queue.c.delivery_state,
+        operator_queue.c.delivery_detail,
+        operator_queue.c.delivery_updated_at,
+        operator_queue.c.divergence_acknowledged_at,
+        operator_queue.c.disposition,  # trinity-enterprise#611 — the endings ledger
+        operator_queue.c.disposed_at,
+        operator_queue.c.disposed_by,
+        operator_queue.c.disposed_by_email,
+        operator_queue.c.disposition_reason,
+        operator_queue.c.batch_id,
+        operator_queue.c.raised_by,  # trinity-enterprise#611 — the agent-raised ask
+        operator_queue.c.channel,
+        operator_queue.c.to_role,
+        operator_queue.c.resolved_to,
+        operator_queue.c.proposal,
+        operator_queue.c.supersedes_expired,
     )
 
-    def create_item(self, agent_name: str, item: Dict) -> str:
+    def create_item(
+        self,
+        agent_name: str,
+        item: Dict,
+        *,
+        channel: Optional[str] = None,
+        raised_by: Optional[str] = None,
+    ) -> str:
         """Create a queue item from agent JSON data.
 
         Args:
             agent_name: The agent that created this item
             item: Queue item data from agent's operator-queue.json
+            channel / raised_by: trinity-enterprise#611 — how the ask arrived
+                (`file` | `mcp`) and who raised it (`agent` | `gate`). KEYWORD-ONLY
+                and never read from `item`: the item is agent-authored, and a
+                file entry that could carry `"channel": "mcp"` would forge its
+                own provenance. A platform alarm passes neither (NULL).
 
         Returns:
             The item ID (the platform-minted uuid of the row that actually
             exists — on conflict that is the pre-existing row, NOT the uuid this
             call minted).
         """
+        return self.create_item_with_outcome(
+            agent_name, item, channel=channel, raised_by=raised_by,
+        )[0]
+
+    def create_item_with_outcome(
+        self,
+        agent_name: str,
+        item: Dict,
+        *,
+        channel: Optional[str] = None,
+        raised_by: Optional[str] = None,
+    ) -> Tuple[str, bool]:
+        """`create_item`, plus whether THIS call inserted the row
+        (trinity-enterprise#611).
+
+        The (agent_name, request_id) conflict makes a repeat a silent no-op
+        that returns the surviving row's uuid — indistinguishable, to the
+        caller, from a fresh create. The file poller used to count such a
+        repeat as an admission (a phantom admit against the depth cap, and a
+        "new" broadcast); with the flag it skips it. `inserted` is the INSERT's
+        rowcount, so it is the database's answer, not a prior read's guess.
+        """
+        request_id, values = self._insert_values(
+            agent_name, item, channel=channel, raised_by=raised_by,
+        )
+        stmt = make_insert(operator_queue).values(**values).on_conflict_do_nothing(
+            index_elements=["agent_name", "request_id"]
+        )
+        # Insert + re-read in one transaction: on conflict the insert is a no-op
+        # and the surviving row carries a DIFFERENT uuid, so to honour the
+        # documented contract (return the id of the row that exists) the return
+        # must be that row's id, not the `new_id` this call minted and discarded.
+        with get_engine().begin() as conn:
+            inserted = bool(conn.execute(stmt).rowcount)
+            row = conn.execute(
+                select(operator_queue.c.id).where(
+                    and_(
+                        operator_queue.c.agent_name == agent_name,
+                        operator_queue.c.request_id == request_id,
+                    )
+                )
+            ).first()
+        return (row[0] if row else values["id"]), inserted
+
+    def create_native_item(
+        self,
+        agent_name: str,
+        item: Dict,
+        *,
+        max_pending: int,
+        channel: str,
+        raised_by: str,
+        to_role: Optional[str],
+        resolved_to: Optional[List[str]],
+        proposal: Optional[Dict],
+        supersedes_expired: Optional[str],
+    ) -> Dict:
+        """Create an agent-raised ask, atomically per agent (trinity-enterprise#611).
+
+        ONE serialized step: the replay check, the depth count and the insert
+        run inside a per-agent lock (PostgreSQL `pg_advisory_xact_lock`; SQLite
+        `BEGIN IMMEDIATE`, the db/audit.py precedent), so N concurrent calls at
+        depth `max_pending - 1` admit exactly one. A count-then-insert across
+        workers would make the cap a rate limit, not a bound.
+
+        Returns `{"outcome": "created" | "replayed" | "queue_full", "row"}`:
+        - `replayed` — `(agent_name, request_id)` exists; `row` is the FIRST
+          row, untouched (a retry gets its first receipt, whatever it sends).
+          Checked before the cap, so a retry is never refused a slot it holds.
+          Also the answer when a file entry re-using the id lands between that
+          check and the insert: the file poller does not take this lock, so on
+          PostgreSQL it can, and the insert's `ON CONFLICT DO NOTHING` turns
+          what would be a unique-index error (a 500 for the agent) into a
+          replay of the row that won.
+        - `queue_full` — `max_pending` of this agent's asks are pending; `row`
+          is None and nothing is written.
+        - `created` — `row` is the new row.
+
+        The row never takes part in the file contract: `delivery_state` is
+        `not_applicable` (`mcp_raised`) so no write-back set selects it, and
+        `sync_state` stays NULL — there is no file entry to be out of sync with.
+        Every platform column is a keyword-only argument, never read from
+        `item` (the item is agent-authored).
+        """
+        request_id, values = self._insert_values(
+            agent_name, item, channel=channel, raised_by=raised_by,
+        )
+        values.update(
+            to_role=to_role,
+            resolved_to=json.dumps(list(resolved_to)) if resolved_to else None,
+            proposal=json.dumps(proposal) if proposal is not None else None,
+            supersedes_expired=supersedes_expired,
+            delivery_state="not_applicable",
+            delivery_detail="mcp_raised",
+        )
+        mine = and_(
+            operator_queue.c.agent_name == agent_name,
+            operator_queue.c.request_id == request_id,
+        )
+        with get_engine().begin() as conn:
+            self._lock_agent_for_create(conn, agent_name)
+            existing = conn.execute(select(*self._SELECT_COLS).where(mine)).mappings().first()
+            if existing:
+                return {"outcome": "replayed", "row": self._row_to_item(existing)}
+            pending = conn.execute(
+                select(func.count()).where(and_(
+                    operator_queue.c.agent_name == agent_name,
+                    operator_queue.c.status == "pending",
+                ))
+            ).scalar() or 0
+            if pending >= max_pending:
+                return {"outcome": "queue_full", "row": None}
+            inserted = bool(conn.execute(
+                make_insert(operator_queue).values(**values).on_conflict_do_nothing(
+                    index_elements=["agent_name", "request_id"])
+            ).rowcount)
+            row = conn.execute(select(*self._SELECT_COLS).where(mine)).mappings().first()
+        return {"outcome": "created" if inserted else "replayed", "row": self._row_to_item(row)}
+
+    @staticmethod
+    def _lock_agent_for_create(conn, agent_name: str) -> None:
+        """Serialize native creates for ONE agent until COMMIT/ROLLBACK.
+
+        Fails CLOSED (an unusable lock raises) — the db/audit.py rule: an
+        unserialized count-then-insert silently turns the cap into a rate limit,
+        which is the defect the lock exists to remove.
+        """
+        dialect = conn.engine.dialect.name
+        if dialect == "postgresql":
+            key = int.from_bytes(
+                hashlib.sha256(f"opq-native:{agent_name}".encode("utf-8")).digest()[:8],
+                "big", signed=True,
+            )
+            conn.exec_driver_sql("SELECT pg_advisory_xact_lock(%s)", (key,))
+        elif dialect == "sqlite":
+            # pysqlite has not sent BEGIN yet (it defers until DML), so this opens
+            # the transaction with the RESERVED lock already held.
+            conn.exec_driver_sql("BEGIN IMMEDIATE")
+
+    def _insert_values(
+        self,
+        agent_name: str,
+        item: Dict,
+        *,
+        channel: Optional[str],
+        raised_by: Optional[str],
+    ) -> Tuple[str, Dict]:
+        """The DB-sink belts and the column values of a new row, shared by every
+        create so the belts cannot drift between the file and native paths."""
         # #1525: `id` was the last hard-indexed field. The sync loop guards on a
         # truthy id before calling, but keep the DB boundary self-defensive so an
         # id-less item can never KeyError-hot-loop here (raise a clear ValueError
@@ -194,7 +427,7 @@ class OperatorQueueOperations:
         # (mirrors how type/status/priority are already defaulted) so the item is
         # created once and the loop stops (the next cycle sees it via exists()).
         # `created_at` defaults to now (ingest time) per the issue's preferred fix.
-        stmt = make_insert(operator_queue).values(
+        values = dict(
             id=new_id,
             agent_name=agent_name,
             request_id=request_id,
@@ -207,29 +440,18 @@ class OperatorQueueOperations:
             context=context_json,
             execution_id=context_execution_id,
             created_at=item.get("created_at") or utc_now_iso(),
-            expires_at=item.get("expires_at"),
+            # trinity-enterprise#611: ISO-Z at the sink, whichever path wrote it —
+            # expiry and the respond deadline compare it as text (Invariant #16).
+            expires_at=_iso_z_deadline(item.get("expires_at")),
+            channel=channel,
+            raised_by=raised_by,
             # ent#364: already validated against the agent's roster by
             # `operator_queue_service._validated_addressee`. This layer stores it;
             # it does not decide it, and it must never derive it from `context`
             # (which is agent-authored).
             addressed_to_email=item.get("addressed_to_email"),
-        ).on_conflict_do_nothing(index_elements=["agent_name", "request_id"])
-
-        # Insert + re-read in one transaction: on conflict the insert is a no-op
-        # and the surviving row carries a DIFFERENT uuid, so to honour the
-        # documented contract (return the id of the row that exists) the return
-        # must be that row's id, not the `new_id` this call minted and discarded.
-        with get_engine().begin() as conn:
-            conn.execute(stmt)
-            row = conn.execute(
-                select(operator_queue.c.id).where(
-                    and_(
-                        operator_queue.c.agent_name == agent_name,
-                        operator_queue.c.request_id == request_id,
-                    )
-                )
-            ).first()
-        return row[0] if row else new_id
+        )
+        return request_id, values
 
     def get_item(self, item_id: str) -> Optional[Dict]:
         """Get a single queue item by ID."""
@@ -240,6 +462,184 @@ class OperatorQueueOperations:
         if not row:
             return None
         return self._row_to_item(row)
+
+    def get_item_for_agent_by_request_id(self, agent_name: str, request_id: str) -> Optional[Dict]:
+        """One agent's ask by the id the AGENT chose (trinity-enterprise#611).
+
+        The agent's own readback. Scoped to `(agent_name, request_id)` — the
+        uniqueness the #1631 index enforces — so one agent can never read
+        another's ask by guessing its id. Deliberately NOT filtered on
+        `cleared_at`: Clear All hides a row from the operator's list, and must
+        not hide how the ask ended from the agent that raised it.
+        """
+        stmt = select(*self._SELECT_COLS).where(
+            and_(
+                operator_queue.c.agent_name == agent_name,
+                operator_queue.c.request_id == request_id,
+            )
+        )
+        with get_engine().connect() as conn:
+            row = conn.execute(stmt).mappings().first()
+        return self._row_to_item(row) if row else None
+
+    def list_expired_proposals_for_agent(
+        self, agent_name: str, limit: int, raised_by: Optional[str] = None,
+    ) -> List[Dict]:
+        """`{request_id, proposal}` of this agent's EXPIRED asks that carried a
+        proposal, most recent ending first (trinity-enterprise#611). With
+        `raised_by`, only that raiser's: the guard compares an ask with the
+        same raiser's denials, never across raisers.
+
+        Read by the native create's re-ask guard: an agent that repeats the exact
+        action a timeout already denied must link the expired ask
+        (`supersedes_expired`) so the person sees it is asking again. Bounded;
+        the proposal is returned parsed so the caller compares values, not the
+        stored JSON's key order.
+        """
+        conditions = [
+            operator_queue.c.agent_name == agent_name,
+            operator_queue.c.status == "expired",
+            operator_queue.c.proposal.isnot(None),
+        ]
+        if raised_by is not None:
+            conditions.append(operator_queue.c.raised_by == raised_by)
+        stmt = (
+            select(operator_queue.c.request_id, operator_queue.c.proposal)
+            .where(and_(*conditions))
+            .order_by(func.coalesce(operator_queue.c.disposed_at, operator_queue.c.created_at).desc())
+            .limit(limit)
+        )
+        with get_engine().connect() as conn:
+            rows = conn.execute(stmt).all()
+        out = []
+        for request_id, proposal in rows:
+            try:
+                out.append({"request_id": request_id, "proposal": json.loads(proposal)})
+            except (TypeError, ValueError):
+                continue
+        return out
+
+    def list_recent_endings_for_agent(
+        self,
+        agent_name: str,
+        since: str,
+        limit: int,
+        exclude_request_id_prefixes=None,
+    ) -> List[Dict]:
+        """The asks this agent raised that ENDED at or after `since`, newest first
+        (trinity-enterprise#611 — the Execution Context line).
+
+        Ids and the ending only — `request_id`, `disposition`, `disposed_at` —
+        never a title, an answer or a reason: the line reaches every composed
+        turn. Only rows that carry the ledger (a row that ended before it has no
+        ending time to show); platform alarms excluded by prefix (the agent
+        raised none of them, ent#499).
+        """
+        stmt = (
+            select(
+                operator_queue.c.request_id,
+                operator_queue.c.disposition,
+                operator_queue.c.disposed_at,
+            )
+            .where(
+                and_(
+                    operator_queue.c.agent_name == agent_name,
+                    operator_queue.c.disposition.isnot(None),
+                    operator_queue.c.disposed_at >= since,
+                    *self._not_prefixed(exclude_request_id_prefixes),
+                )
+            )
+            .order_by(operator_queue.c.disposed_at.desc())
+            .limit(limit)
+        )
+        with get_engine().connect() as conn:
+            return [dict(r) for r in conn.execute(stmt).mappings().all()]
+
+    def _list_conditions(
+        self,
+        status: Optional[str] = None,
+        type: Optional[str] = None,
+        priority: Optional[str] = None,
+        agent_name: Optional[str] = None,
+        since: Optional[str] = None,
+        accessible_agent_names: Optional[Set[str]] = None,
+        include_cleared: bool = False,
+        addressed_to_email: Optional[str] = None,
+        hide_ended_before: Optional[str] = None,
+        types: Optional[Tuple[str, ...]] = None,
+    ) -> Optional[list]:
+        """The WHERE conditions `list_items`, `count_items` and
+        `list_item_agent_names` share (#3059) — ONE definition, so a page, its
+        total and the agents it spans can never be computed over different
+        filters. `None` means "matches nothing" (an empty access set); see
+        `list_items` for what each filter means.
+        """
+        if accessible_agent_names is not None and len(accessible_agent_names) == 0:
+            return None
+
+        conds = []
+        if not include_cleared:
+            conds.append(operator_queue.c.cleared_at.is_(None))  # #1017
+
+        if accessible_agent_names is not None:
+            conds.append(operator_queue.c.agent_name.in_(sorted(accessible_agent_names)))
+        if status:
+            conds.append(operator_queue.c.status == status)
+        if type:
+            conds.append(operator_queue.c.type == type)
+        if types is not None:
+            conds.append(operator_queue.c.type.in_(list(types)))
+        if priority:
+            conds.append(operator_queue.c.priority == priority)
+        if agent_name:
+            conds.append(operator_queue.c.agent_name == agent_name)
+        if addressed_to_email is not None:
+            # `is not None`, deliberately NOT the truthiness the filters above
+            # use. For this argument's callers it IS the authorization boundary
+            # — "the asks addressed to this person" — so a falsy value has to
+            # match NOTHING rather than silently widening to everyone's. The
+            # other filters narrow a view the caller is already entitled to see;
+            # this one decides entitlement, which is why it diverges.
+            conds.append(
+                func.lower(operator_queue.c.addressed_to_email)
+                == addressed_to_email.strip().lower()
+            )
+        if since:
+            conds.append(operator_queue.c.created_at >= since)
+        if hide_ended_before:
+            conds.append(or_(
+                operator_queue.c.status == "pending",
+                func.coalesce(
+                    operator_queue.c.disposed_at,
+                    operator_queue.c.responded_at,
+                    operator_queue.c.created_at,
+                ) >= hide_ended_before,
+            ))
+        return conds
+
+    def count_items(self, **filters) -> int:
+        """How many rows `list_items(**filters)` would return with no limit (#3059)."""
+        conds = self._list_conditions(**filters)
+        if conds is None:
+            return 0
+        stmt = select(func.count()).select_from(operator_queue)
+        if conds:
+            stmt = stmt.where(and_(*conds))
+        with get_engine().connect() as conn:
+            return int(conn.execute(stmt).scalar() or 0)
+
+    def list_item_agent_names(self, **filters) -> List[str]:
+        """The distinct agents the rows matching `filters` belong to (#3059) —
+        so a caller can apply a per-agent predicate (the Workspace roster
+        re-check) BEFORE paging instead of after the limit."""
+        conds = self._list_conditions(**filters)
+        if conds is None:
+            return []
+        stmt = select(operator_queue.c.agent_name).distinct()
+        if conds:
+            stmt = stmt.where(and_(*conds))
+        with get_engine().connect() as conn:
+            return sorted(r[0] for r in conn.execute(stmt) if r[0])
 
     def list_items(
         self,
@@ -253,8 +653,18 @@ class OperatorQueueOperations:
         accessible_agent_names: Optional[Set[str]] = None,
         include_cleared: bool = False,
         addressed_to_email: Optional[str] = None,
+        hide_ended_before: Optional[str] = None,
+        types: Optional[Tuple[str, ...]] = None,
     ) -> List[Dict]:
         """List queue items with optional filters.
+
+        types (#3059): narrow to a set of item types in SQL, so a caller that
+        shows only some kinds pages and counts over exactly what it shows.
+
+        hide_ended_before (trinity-enterprise#611): an ISO-Z cutoff. Rows that
+        ENDED before it are left out; pending rows are unaffected. A row's ending
+        time is `disposed_at`, else (a row that ended before the ledger) its
+        answer time, else its filing time — the only window signal such a row has.
 
         accessible_agent_names: if None, no access filter (admin). If a set,
         only items whose agent_name is in the set are returned. Empty set
@@ -283,48 +693,37 @@ class OperatorQueueOperations:
         and an empty one therefore matches nothing. See the comment at the
         condition for why this one argument does not use truthiness like the rest.
         """
-        if accessible_agent_names is not None and len(accessible_agent_names) == 0:
+        conds = self._list_conditions(
+            status=status, type=type, priority=priority, agent_name=agent_name,
+            since=since, accessible_agent_names=accessible_agent_names,
+            include_cleared=include_cleared, addressed_to_email=addressed_to_email,
+            hide_ended_before=hide_ended_before, types=types,
+        )
+        if conds is None:
             return []
 
-        conds = []
-        if not include_cleared:
-            conds.append(operator_queue.c.cleared_at.is_(None))  # #1017
-
-        if accessible_agent_names is not None:
-            conds.append(operator_queue.c.agent_name.in_(sorted(accessible_agent_names)))
-        if status:
-            conds.append(operator_queue.c.status == status)
-        if type:
-            conds.append(operator_queue.c.type == type)
-        if priority:
-            conds.append(operator_queue.c.priority == priority)
-        if agent_name:
-            conds.append(operator_queue.c.agent_name == agent_name)
-        if addressed_to_email is not None:
-            # `is not None`, deliberately NOT the truthiness the filters above
-            # use. For this argument's callers it IS the authorization boundary
-            # — "the asks addressed to this person" — so a falsy value has to
-            # match NOTHING rather than silently widening to everyone's. The
-            # other filters narrow a view the caller is already entitled to see;
-            # this one decides entitlement, which is why it diverges.
-            conds.append(
-                func.lower(operator_queue.c.addressed_to_email)
-                == addressed_to_email.strip().lower()
-            )
-        if since:
-            conds.append(operator_queue.c.created_at >= since)
-
-        # Sort: pending items by priority then age, others by created_at desc
-        status_order = case(
-            (operator_queue.c.status == "pending", 0),
-            else_=1,
-        )
+        # Sort: pending items by priority then age; ended items by WHEN THEY
+        # ENDED, newest first (trinity-enterprise#611, #627 AC6) — sorting a
+        # cancellation made this morning by the day the ask was filed buried it.
+        # A row that ended before the ledger falls back to its answer time, then
+        # to its filing time (no other timestamp exists for it).
+        is_pending = operator_queue.c.status == "pending"
+        status_order = case((is_pending, 0), else_=1)
         priority_order = case(
             (operator_queue.c.priority == "critical", 0),
             (operator_queue.c.priority == "high", 1),
             (operator_queue.c.priority == "medium", 2),
             (operator_queue.c.priority == "low", 3),
             else_=4,
+        )
+        pending_priority = case((is_pending, priority_order), else_=0)
+        sort_time = case(
+            (is_pending, operator_queue.c.created_at),
+            else_=func.coalesce(
+                operator_queue.c.disposed_at,
+                operator_queue.c.responded_at,
+                operator_queue.c.created_at,
+            ),
         )
 
         stmt = select(*self._SELECT_COLS)
@@ -333,8 +732,13 @@ class OperatorQueueOperations:
         stmt = (
             stmt.order_by(
                 status_order,
-                priority_order,
-                operator_queue.c.created_at.desc(),
+                pending_priority,
+                sort_time.desc(),
+                # #3059: the last key, so rows that tie on everything above
+                # (raised in the same instant) still order the same way on every
+                # read — which is what lets an offset page without overlapping
+                # or skipping a row.
+                operator_queue.c.id,
             )
             .limit(limit)
             .offset(offset)
@@ -352,10 +756,23 @@ class OperatorQueueOperations:
         response_text: Optional[str],
         responded_by_id: Optional[str],
         responded_by_email: str,
+        divergence_acknowledged: bool = False,
     ) -> Optional[Dict]:
         """Record a response to a queue item.
 
+        `divergence_acknowledged` (#2989 review): the operator saw that the agent
+        had rewritten or closed the entry and answered anyway; the write-back then
+        delivers into the entry as it is now instead of refusing it.
+
         Returns the updated item or None if not found.
+
+        trinity-enterprise#611: the same UPDATE writes the endings ledger
+        (`disposition='answered'`, `disposed_by='person'`), and the compare-and-set
+        also requires the deadline not to have passed. An answer that arrives
+        after `expires_at` but before the poller sweeps the row returns the row
+        with `_status_conflict` while its status still reads `pending` — the
+        caller names that `expired`; an approval must never land after the
+        deadline the rider calls "denied by timeout".
 
         `responded_by_id` is Optional on purpose (ent#364/ent#428): it is a
         `users` id, and an ask answered by a Workspace client has no row there.
@@ -375,6 +792,10 @@ class OperatorQueueOperations:
                     and_(
                         operator_queue.c.id == item_id,
                         operator_queue.c.status == "pending",
+                        or_(
+                            operator_queue.c.expires_at.is_(None),
+                            operator_queue.c.expires_at > now,
+                        ),
                     )
                 )
                 .values(
@@ -384,6 +805,11 @@ class OperatorQueueOperations:
                     responded_by_id=responded_by_id,
                     responded_by_email=responded_by_email,
                     responded_at=now,
+                    divergence_acknowledged_at=now if divergence_acknowledged else None,
+                    disposition="answered",
+                    disposed_at=now,
+                    disposed_by="person",
+                    disposed_by_email=responded_by_email,
                 )
             )
 
@@ -397,17 +823,32 @@ class OperatorQueueOperations:
                 if not row:
                     return None
                 # Item exists but not pending — lost a race (e.g. bulk-cancel
-                # landed between the router's status check and this UPDATE).
-                # Mark the conflict so the router can 409 instead of returning
-                # a 200 for a response that was never recorded (#1017).
+                # landed between the router's status check and this UPDATE) — or
+                # still pending past its deadline (#611). Mark the conflict so
+                # the caller can 409 instead of returning a 200 for a response
+                # that was never recorded (#1017).
                 item = self.get_item(item_id)
                 item["_status_conflict"] = True
                 return item
 
         return self.get_item(item_id)
 
-    def cancel_item(self, item_id: str) -> Optional[Dict]:
-        """Cancel a pending queue item."""
+    def cancel_item(
+        self,
+        item_id: str,
+        *,
+        disposed_by_email: str,
+        reason: Optional[str] = None,
+    ) -> Optional[Dict]:
+        """Cancel a pending queue item, recording who ended it (trinity-enterprise#611).
+
+        The status flip and the endings ledger are ONE compare-and-set, the mirror
+        of `respond_to_item`: a caller that loses the race (the ask was answered,
+        cancelled or expired first) gets the row back with `_status_conflict` and
+        writes nothing, so the ending it would have recorded never overwrites the
+        one that happened. Returns None when the item does not exist.
+        """
+        now = utc_now_iso()
         with get_engine().begin() as conn:
             result = conn.execute(
                 update(operator_queue)
@@ -417,7 +858,14 @@ class OperatorQueueOperations:
                         operator_queue.c.status == "pending",
                     )
                 )
-                .values(status="cancelled")
+                .values(
+                    status="cancelled",
+                    disposition="cancelled",
+                    disposed_at=now,
+                    disposed_by="person",
+                    disposed_by_email=disposed_by_email,
+                    disposition_reason=reason,
+                )
             )
 
             if result.rowcount == 0:
@@ -426,6 +874,9 @@ class OperatorQueueOperations:
                 ).first()
                 if not exists:
                     return None
+                item = self.get_item(item_id)
+                item["_status_conflict"] = True
+                return item
 
         return self.get_item(item_id)
 
@@ -433,7 +884,10 @@ class OperatorQueueOperations:
         self,
         ids: List[str],
         accessible_agent_names: Optional[Set[str]] = None,
-    ) -> int:
+        *,
+        disposed_by_email: str,
+        reason: Optional[str] = None,
+    ) -> Dict:
         """Cancel the listed items that are still pending (#1017).
 
         Only items in `ids` are touched — the caller sends the ids it actually
@@ -444,25 +898,52 @@ class OperatorQueueOperations:
         (a zero-agent user must not be able to touch anything); non-empty =
         SQL-side IN filter.
 
-        Returns the number of items actually cancelled.
+        trinity-enterprise#611: the sweep mints ONE `batch_id` and the same
+        compare-and-set UPDATE stamps it with the endings ledger, so re-selecting
+        `id IN (:ids) AND batch_id = :b` returns exactly the rows THIS sweep
+        flipped — never a row another writer ended first (dialect-agnostic, no
+        RETURNING). Returns `{"batch_id", "rows"}`; `batch_id` is None when the
+        sweep ended nothing.
         """
+        empty = {"batch_id": None, "rows": []}
         if not ids:
-            return 0
+            return empty
         if accessible_agent_names is not None and len(accessible_agent_names) == 0:
-            return 0
+            return empty
 
+        ids = list(ids)
         conds = [
             operator_queue.c.status == "pending",
-            operator_queue.c.id.in_(list(ids)),
+            operator_queue.c.id.in_(ids),
         ]
         if accessible_agent_names is not None:
             conds.append(operator_queue.c.agent_name.in_(sorted(accessible_agent_names)))
 
+        batch_id = uuid.uuid4().hex
+        now = utc_now_iso()
         with get_engine().begin() as conn:
             result = conn.execute(
-                update(operator_queue).where(and_(*conds)).values(status="cancelled")
+                update(operator_queue).where(and_(*conds)).values(
+                    status="cancelled",
+                    disposition="cancelled",
+                    disposed_at=now,
+                    disposed_by="person",
+                    disposed_by_email=disposed_by_email,
+                    disposition_reason=reason,
+                    batch_id=batch_id,
+                )
             )
-            return result.rowcount
+            if result.rowcount == 0:
+                return empty
+            rows = conn.execute(
+                select(*self._SELECT_COLS).where(
+                    and_(
+                        operator_queue.c.id.in_(ids),
+                        operator_queue.c.batch_id == batch_id,
+                    )
+                )
+            ).mappings().all()
+        return {"batch_id": batch_id, "rows": [self._row_to_item(r) for r in rows]}
 
     def clear_resolved_items(
         self,
@@ -489,7 +970,13 @@ class OperatorQueueOperations:
 
         now = utc_now_iso()
         conds = [
-            operator_queue.c.status.in_(("acknowledged", "cancelled", "expired")),
+            or_(
+                operator_queue.c.status.in_(("acknowledged", "cancelled", "expired")),
+                # trinity-enterprise#611: a native ask is never acknowledged
+                # through a file, so `responded` is its last state and there is
+                # no write-back to wait for.
+                and_(operator_queue.c.status == "responded", ~self._file_contract()),
+            ),
             operator_queue.c.cleared_at.is_(None),
         ]
         if accessible_agent_names is not None:
@@ -597,6 +1084,11 @@ class OperatorQueueOperations:
                         operator_queue.c.agent_name == agent_name,
                         operator_queue.c.request_id == request_id,
                         operator_queue.c.status == "responded",
+                        # #2989 review: an agent-side `acknowledged` is an ack of OUR
+                        # answer only when that answer reached the entry. Without
+                        # this, an entry the agent closed itself flipped the row and
+                        # the platform claimed an ack of an answer never seen.
+                        operator_queue.c.delivery_state == "delivered",
                     )
                 )
                 .values(status="acknowledged", acknowledged_at=now)
@@ -613,25 +1105,55 @@ class OperatorQueueOperations:
             ).first()
             return row[0] if row else None
 
-    def mark_expired(self) -> int:
-        """Mark pending items past their expires_at as expired.
+    def mark_expired(self) -> List[Dict]:
+        """Expire pending items past their deadline; return the rows THIS call ended.
 
-        Returns number of items expired.
+        trinity-enterprise#611: a bounded candidate select, then one
+        compare-and-set UPDATE per id (`status = 'pending'` still) that also
+        writes the ledger with `disposed_by = 'timeout'`. The rowcount of each
+        UPDATE is the identity of the winner, so two overlapping sweeps (a Redis
+        flap can briefly give two leaders) end — and later wake — each row once.
+        Edge-triggered: a second pass over the same rows ends nothing.
         """
         now = utc_now_iso()
+        candidates = (
+            select(operator_queue.c.id)
+            .where(
+                and_(
+                    operator_queue.c.status == "pending",
+                    operator_queue.c.expires_at.isnot(None),
+                    operator_queue.c.expires_at < now,
+                )
+            )
+            .order_by(operator_queue.c.expires_at.asc())
+            .limit(_EXPIRY_BATCH_MAX)
+        )
+        won = []
         with get_engine().begin() as conn:
-            result = conn.execute(
-                update(operator_queue)
-                .where(
-                    and_(
-                        operator_queue.c.status == "pending",
-                        operator_queue.c.expires_at.isnot(None),
-                        operator_queue.c.expires_at < now,
+            for (item_id,) in conn.execute(candidates).all():
+                result = conn.execute(
+                    update(operator_queue)
+                    .where(
+                        and_(
+                            operator_queue.c.id == item_id,
+                            operator_queue.c.status == "pending",
+                        )
+                    )
+                    .values(
+                        status="expired",
+                        disposition="expired",
+                        disposed_at=now,
+                        disposed_by="timeout",
                     )
                 )
-                .values(status="expired")
-            )
-            return result.rowcount
+                if result.rowcount:
+                    won.append(item_id)
+            if not won:
+                return []
+            rows = conn.execute(
+                select(*self._SELECT_COLS).where(operator_queue.c.id.in_(won))
+            ).mappings().all()
+        return [self._row_to_item(r) for r in rows]
 
     def get_stats(self, accessible_agent_names: Optional[Set[str]] = None) -> Dict:
         """Get queue statistics.
@@ -741,34 +1263,306 @@ class OperatorQueueOperations:
             and_(
                 operator_queue.c.agent_name == agent_name,
                 operator_queue.c.status == "responded",
+                self._file_contract(),  # trinity-enterprise#611: nothing to write for a native ask
             )
         )
         with get_engine().connect() as conn:
             rows = conn.execute(stmt).mappings().all()
         return [self._row_to_item(row) for row in rows]
 
-    def get_terminal_items_for_agent(self, agent_name: str, since_hours: int = 168) -> List[Dict]:
-        """Get recently cancelled/expired items for a specific agent (#1017).
+    def get_terminal_items_for_agent(self, agent_name: str, limit: int = 200) -> List[Dict]:
+        """Cancelled/expired items whose terminal flip has not been delivered (#1017, #2915).
 
-        Used by the sync service to flip still-'pending' entries in the
-        agent's queue file to their terminal status so the agent stops
-        waiting (and so a stale 'pending' file entry can't resurrect the
-        item if its row is ever purged). Deliberately NOT filtered on
-        cleared_at — hidden items still need their flip delivered. Bounded
-        by created_at (there is no per-status timestamp) so the per-agent
-        5s sync query stays cheap.
+        Used by the sync service to flip still-'pending' entries in the agent's
+        queue file to their terminal status so the agent stops waiting. Bounded by
+        DELIVERY STATE, not by a `created_at` window: before #2915 a row that went
+        terminal more than 168 h after it was created was never fetched, so it
+        was neither flipped nor recorded as undeliverable — the card said
+        "cancelled", the agent's file said "pending", and nothing said so. A row
+        leaves this set when the flip lands (`delivered`) or is platform-minted
+        (`not_applicable`); `undelivered` rows are retried each cycle (the read is
+        already paid for) and bounded by the retention sweep. Deliberately NOT
+        filtered on cleared_at — hidden items still need their flip delivered.
         """
-        cutoff = iso_cutoff(since_hours)
-        stmt = select(*self._SELECT_COLS).where(
+        stmt = (
+            select(*self._SELECT_COLS)
+            .where(
+                and_(
+                    operator_queue.c.agent_name == agent_name,
+                    operator_queue.c.status.in_(("cancelled", "expired")),
+                    self._file_contract(),  # trinity-enterprise#611
+                    or_(
+                        operator_queue.c.delivery_state.is_(None),
+                        operator_queue.c.delivery_state == "undelivered",
+                    ),
+                    # #2989 review: a flip whose entry the agent already dropped can
+                    # never land — it stays recorded, but leaves the retry set so the
+                    # cap cannot starve rows that still can. Oldest first, same reason.
+                    func.coalesce(operator_queue.c.delivery_detail, "") != "entry_missing",
+                )
+            )
+            .order_by(operator_queue.c.created_at.asc())
+            .limit(limit)
+        )
+        with get_engine().connect() as conn:
+            rows = conn.execute(stmt).mappings().all()
+        return [self._row_to_item(row) for row in rows]
+
+    # ------------------------------------------------------------------
+    # #2915 — sync honesty accessors. Written ONLY by the leader-locked poller.
+    # Every writer is edge-triggered: the WHERE excludes rows already carrying
+    # the value, and the returned rowcount IS the transition — never read-then-
+    # write, so two overlapping leaders cannot double-record one change.
+    # ------------------------------------------------------------------
+
+    def get_sync_index_for_agent(self, agent_name: str) -> Dict:
+        """Everything the poller needs to reconcile one agent's file in two reads.
+
+        `open` — full rows for pending + responded items (the ones the file is
+        expected to carry); `terminal` — `{request_id: {"id", "status",
+        "sync_state", "delivery_state", "delivery_detail"}}` for every other
+        status, so a pending file entry whose id matches a row that already went
+        terminal is recognised as `stale_id` instead of being re-admitted (the
+        on-conflict create returns the surviving uuid silently, so without this
+        index it would count against the depth cap and broadcast "new" every
+        cycle). The delivery columns tell that re-use apart from the ORIGINAL
+        entry this cycle's write-back is about to flip (#3024).
+        """
+        open_stmt = select(*self._SELECT_COLS).where(
             and_(
                 operator_queue.c.agent_name == agent_name,
-                operator_queue.c.status.in_(("cancelled", "expired")),
-                operator_queue.c.created_at >= cutoff,
+                operator_queue.c.status.in_(("pending", "responded")),
+                self._file_contract(),
+            )
+        )
+        term_stmt = select(
+            operator_queue.c.request_id,
+            operator_queue.c.id,
+            operator_queue.c.status,
+            operator_queue.c.sync_state,
+            operator_queue.c.delivery_state,  # #3024
+            operator_queue.c.delivery_detail,
+        ).where(
+            and_(
+                operator_queue.c.agent_name == agent_name,
+                operator_queue.c.status.notin_(("pending", "responded")),
+                self._file_contract(),
+            )
+        )
+        # trinity-enterprise#611: the request_ids of this agent's NATIVE asks. A
+        # file entry reusing one is skipped before the create branch — filtering
+        # native rows out of the two sets above without naming them here would
+        # read such an entry as brand new every cycle (the phantom admit).
+        foreign_stmt = select(operator_queue.c.request_id).where(
+            and_(
+                operator_queue.c.agent_name == agent_name,
+                ~self._file_contract(),
             )
         )
         with get_engine().connect() as conn:
-            rows = conn.execute(stmt).mappings().all()
-        return [self._row_to_item(row) for row in rows]
+            open_rows = conn.execute(open_stmt).mappings().all()
+            term_rows = conn.execute(term_stmt).mappings().all()
+            foreign = [r[0] for r in conn.execute(foreign_stmt).all()]
+        return {
+            "open": [self._row_to_item(r) for r in open_rows],
+            "terminal": {
+                r["request_id"]: {
+                    "id": r["id"], "status": r["status"], "sync_state": r["sync_state"],
+                    "delivery_state": r["delivery_state"], "delivery_detail": r["delivery_detail"],
+                }
+                for r in term_rows
+            },
+            "foreign": foreign,
+        }
+
+    def set_sync_state(
+        self, item_id: str, state: str, detail: Optional[str], now: str,
+    ) -> bool:
+        """Record what the poller established; True iff the row CHANGED.
+
+        `confirmed` also stamps `last_confirmed_at`. The predicate is spelled
+        `IS NULL OR !=` because `IS DISTINCT FROM` is PostgreSQL-only.
+        """
+        detail_v = detail or ""
+        values = {"sync_state": state, "sync_detail": detail, "sync_updated_at": now}
+        if state == "confirmed":
+            values["last_confirmed_at"] = now
+        with get_engine().begin() as conn:
+            result = conn.execute(
+                update(operator_queue)
+                .where(
+                    and_(
+                        operator_queue.c.id == item_id,
+                        or_(
+                            operator_queue.c.sync_state.is_(None),
+                            operator_queue.c.sync_state != state,
+                            func.coalesce(operator_queue.c.sync_detail, "") != detail_v,
+                        ),
+                    )
+                )
+                .values(**values)
+            )
+            return result.rowcount > 0
+
+    def refresh_last_confirmed(self, agent_name: str, now: str, older_than: str) -> int:
+        """One batched UPDATE per agent per cycle: `last_confirmed_at = now` for
+        confirmed open rows whose stamp is older than `older_than` (a minute
+        cadence — the card can say "last confirmed at HH:MM" without a write per
+        row per 5 s cycle)."""
+        with get_engine().begin() as conn:
+            result = conn.execute(
+                update(operator_queue)
+                .where(
+                    and_(
+                        operator_queue.c.agent_name == agent_name,
+                        operator_queue.c.status.in_(("pending", "responded")),
+                        operator_queue.c.sync_state == "confirmed",
+                        or_(
+                            operator_queue.c.last_confirmed_at.is_(None),
+                            operator_queue.c.last_confirmed_at < older_than,
+                        ),
+                    )
+                )
+                .values(last_confirmed_at=now)
+            )
+            return result.rowcount
+
+    def set_delivery_state(
+        self, item_id: str, state: str, detail: Optional[str], now: str,
+    ) -> bool:
+        """Record whether the answer (or terminal flip) reached the agent's file;
+        True iff the row CHANGED (same edge rule as `set_sync_state`)."""
+        detail_v = detail or ""
+        with get_engine().begin() as conn:
+            result = conn.execute(
+                update(operator_queue)
+                .where(
+                    and_(
+                        operator_queue.c.id == item_id,
+                        or_(
+                            operator_queue.c.delivery_state.is_(None),
+                            operator_queue.c.delivery_state != state,
+                            func.coalesce(operator_queue.c.delivery_detail, "") != detail_v,
+                        ),
+                    )
+                )
+                .values(delivery_state=state, delivery_detail=detail, delivery_updated_at=now)
+            )
+            return result.rowcount > 0
+
+    @staticmethod
+    def _file_contract():
+        """SQL: the row takes part in the agent's `operator-queue.json` contract
+        (trinity-enterprise#611). NULL covers every row created before the
+        channel column; a native (`mcp`) ask has no file entry to reconcile,
+        flag or write back into."""
+        return or_(operator_queue.c.channel.is_(None), operator_queue.c.channel == "file")
+
+    @staticmethod
+    def _not_prefixed(prefixes):
+        """`request_id` does not start with any reserved platform prefix — the SQL
+        twin of `is_platform_minted` (#2989 review: a platform alarm was never in
+        the agent's file, so no file-derived state may be written on it)."""
+        return [
+            func.substr(operator_queue.c.request_id, 1, len(p)) != p
+            for p in (prefixes or ())
+        ]
+
+    def mark_undelivered_for_stopped_agents(
+        self, now: str, *, running_agents: List[str],
+        exclude_request_id_prefixes=None,
+    ) -> List[Dict]:
+        """Every answer / terminal flip still owed to an agent that is NOT running
+        becomes `undelivered:agent_not_running` (#2989 review, AC3) — and the
+        transitioned rows are returned so the caller can audit each once.
+        Edge-triggered; an empty running list is an explicit branch."""
+        conds = [
+            operator_queue.c.status.in_(("responded", "cancelled", "expired")),
+            or_(
+                operator_queue.c.delivery_state.is_(None),
+                and_(
+                    operator_queue.c.delivery_state == "undelivered",
+                    func.coalesce(operator_queue.c.delivery_detail, "") != "agent_not_running",
+                ),
+            ),
+            *self._not_prefixed(exclude_request_id_prefixes),
+            self._file_contract(),  # trinity-enterprise#611: nothing is owed to a file
+        ]
+        if running_agents:
+            conds.append(operator_queue.c.agent_name.notin_(list(running_agents)))
+        with get_engine().begin() as conn:
+            rows = conn.execute(
+                select(operator_queue.c.id, operator_queue.c.status, operator_queue.c.agent_name)
+                .where(and_(*conds))
+            ).mappings().all()
+            if not rows:
+                return []
+            conn.execute(
+                update(operator_queue)
+                .where(operator_queue.c.id.in_([r["id"] for r in rows]))
+                .values(delivery_state="undelivered", delivery_detail="agent_not_running",
+                        delivery_updated_at=now)
+            )
+        return [dict(r) for r in rows]
+
+    def mark_unconfirmed(
+        self, detail: str, now: str, *,
+        agent_name: Optional[str] = None,
+        exclude_agents: Optional[List[str]] = None,
+        exclude_request_id_prefixes=None,
+    ) -> int:
+        """Flip open rows to `unconfirmed:<detail>` — for ONE agent (`agent_name`,
+        the read-failure path) or for every agent NOT in `exclude_agents` (the
+        per-cycle not-running sweep). An EMPTY exclude list means every open row,
+        spelled as an explicit branch because SQLAlchemy's `notin_([])` warns and
+        matches every row by accident. Edge-triggered: rows already carrying the
+        value are excluded, so the steady state writes nothing."""
+        conds = [
+            operator_queue.c.status.in_(("pending", "responded")),
+            or_(
+                operator_queue.c.sync_state.is_(None),
+                operator_queue.c.sync_state != "unconfirmed",
+                func.coalesce(operator_queue.c.sync_detail, "") != detail,
+            ),
+        ]
+        if agent_name is not None:
+            conds.append(operator_queue.c.agent_name == agent_name)
+        elif exclude_agents:
+            conds.append(operator_queue.c.agent_name.notin_(list(exclude_agents)))
+        conds.extend(self._not_prefixed(exclude_request_id_prefixes))
+        conds.append(self._file_contract())  # trinity-enterprise#611: a native ask has no file to read
+        with get_engine().begin() as conn:
+            result = conn.execute(
+                update(operator_queue)
+                .where(and_(*conds))
+                .values(sync_state="unconfirmed", sync_detail=detail, sync_updated_at=now)
+            )
+            return result.rowcount
+
+    def count_flags(self, accessible_agent_names: Optional[Set[str]] = None) -> Dict[str, int]:
+        """`{"undelivered": n, "closed_by_filer": n}` over the rows the caller may
+        see — the visible escalation the Operations header renders (#2915)."""
+        base = []
+        if accessible_agent_names is not None:
+            if not accessible_agent_names:
+                return {"undelivered": 0, "closed_by_filer": 0}
+            base.append(operator_queue.c.agent_name.in_(list(accessible_agent_names)))
+        # #2989 review: a cancellation whose entry the agent already dropped is
+        # recorded but is not an escalation — nothing is left for anyone to do.
+        undelivered = select(func.count()).select_from(operator_queue).where(
+            and_(*base, operator_queue.c.delivery_state == "undelivered",
+                 operator_queue.c.cleared_at.is_(None),
+                 ~and_(operator_queue.c.status.in_(("cancelled", "expired")),
+                       func.coalesce(operator_queue.c.delivery_detail, "") == "entry_missing"))
+        )
+        closed = select(func.count()).select_from(operator_queue).where(
+            and_(*base, operator_queue.c.status == "pending",
+                 operator_queue.c.sync_state == "closed_by_filer")
+        )
+        with get_engine().connect() as conn:
+            u = conn.execute(undelivered).scalar() or 0
+            c = conn.execute(closed).scalar() or 0
+        return {"undelivered": int(u), "closed_by_filer": int(c)}
 
     def item_exists(self, agent_name: str, item_id: str) -> bool:
         """Check whether this agent already created an item for a request id.

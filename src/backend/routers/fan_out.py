@@ -35,7 +35,9 @@ from services.fan_out_service import (
     FanOutTaskInput,
     get_fan_out_service,
 )
-from services import idempotency_service
+from services import dispatch_admission_service, idempotency_service
+from services.chat_execution_service import ERROR_CODE_HEADER
+from services.chat_signals import InterAgentDepthExceeded
 from services.platform_audit_service import platform_audit_service, AuditEventType
 
 logger = logging.getLogger(__name__)
@@ -74,6 +76,24 @@ async def fan_out(
         raise HTTPException(
             status_code=400,
             detail=f"Fan-out target must be 'self' or '{name}'. Cross-agent fan-out is not yet supported.",
+        )
+
+    # #2806: chain-depth guard, after target access (the path dependency's
+    # uniform 404) and before the idempotency claim — a refused batch burns no
+    # key and dispatches nothing. The depth is captured HERE, at request time,
+    # so a subtask granted a slot later still carries it.
+    try:
+        chain_depth = await dispatch_admission_service.enforce_inter_agent_depth(
+            current_user=current_user,
+            target=name,
+            endpoint=f"/api/agents/{name}/fan-out",
+            x_via_mcp=x_via_mcp,
+        )
+    except InterAgentDepthExceeded as e:
+        raise HTTPException(
+            status_code=403,
+            detail=e.detail(),
+            headers={ERROR_CODE_HEADER: e.detail()["error"]},
         )
 
     # RELIABILITY-006 (#525): idempotency over the whole batch — a duplicate
@@ -150,6 +170,7 @@ async def fan_out(
             # #2389: the credential actually presented, never the forgeable X-MCP-Key-* headers.
             source_mcp_key_id=getattr(current_user, "mcp_key_id", None),
             source_mcp_key_name=getattr(current_user, "mcp_key_name", None),
+            chain_depth=chain_depth,
             # #2670: record the batch id on the idempotency claim as soon as it
             # exists rather than only at `complete()`. A fan-out runs longer
             # than any single task by construction, so the window in which a

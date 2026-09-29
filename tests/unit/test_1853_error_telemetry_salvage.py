@@ -55,6 +55,8 @@ from agent_server.services.headless_executor import (
 )  # noqa: E402
 from agent_server.models import ExecutionMetadata  # noqa: E402
 from fastapi import HTTPException  # noqa: E402
+from db.write_params import ExecutionResult
+from unit._write_params import flat_kwargs
 
 _BACKEND = Path(__file__).resolve().parents[2] / "src" / "backend"
 if str(_BACKEND) not in sys.path:
@@ -346,7 +348,7 @@ class TestFailedBranchSalvage:
         env = _failed_envelope(execution_log=transcript, session_id=_UUID)
         _result, (mdb, mact, _mcap, _mrec) = _run_apply(env)
 
-        kw = mdb.update_execution_status.call_args.kwargs
+        kw = flat_kwargs(mdb.update_execution_status.call_args)
         # execution_log persisted AND the embedded secret redacted
         # (sanitize_execution_log fires — concern b).
         assert kw["execution_log"] is not None
@@ -373,7 +375,7 @@ class TestFailedBranchSalvage:
         )
         _result, (mdb, *_rest) = _run_apply(env)
         assert (
-            mdb.update_execution_status.call_args.kwargs["claude_session_id"] == _UUID
+            flat_kwargs(mdb.update_execution_status.call_args)["claude_session_id"] == _UUID
         )
 
     def test_bare_string_body_graceful_degrade(self):
@@ -382,7 +384,7 @@ class TestFailedBranchSalvage:
             execution_log=None, session_id=None, metadata={"cost_usd": 0.02}
         )
         _result, (mdb, *_rest) = _run_apply(env)
-        kw = mdb.update_execution_status.call_args.kwargs
+        kw = flat_kwargs(mdb.update_execution_status.call_args)
         assert kw["execution_log"] is None
         assert kw["tool_calls"] is None
         assert kw["claude_session_id"] is None
@@ -431,11 +433,13 @@ def test_failed_row_persists_new_columns_real_sqlite(tmp_db):
     won = ops.update_execution_status(
         execution_id="e-1853",
         status=TaskExecutionStatus.FAILED,
-        error="Execution error: boom",
-        cost=0.13,
-        execution_log='[{"type":"assistant","text":"redacted"}]',
-        tool_calls='[{"type":"tool_use","tool":"Bash","input":null}]',
-        claude_session_id=_UUID,
+        result=ExecutionResult(
+            error="Execution error: boom",
+            cost=0.13,
+            execution_log='[{"type":"assistant","text":"redacted"}]',
+            tool_calls='[{"type":"tool_use","tool":"Bash","input":null}]',
+            claude_session_id=_UUID,
+        ),
     )
     assert won is True
 

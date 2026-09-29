@@ -401,7 +401,23 @@
             </div>
           </template>
           <template #empty>
-            <PortalBriefing :agent="activeAgent" @use-playbook="usePlaybook" />
+            <PortalBriefing :agent="activeAgent" @use-playbook="usePlaybook">
+              <!-- ent#465: the top 3 suggestions for you and this agent, below
+                   its hints (they load after them and change; the hints do
+                   not) — platform sessions, 1:1 only; renders nothing when
+                   there is nothing to suggest. -->
+              <template #after-hints>
+                <PortalSuggestions
+                  v-if="store.isPlatformSession && activeAgent && !activeRoomIdFromRoute"
+                  compact
+                  :agent-name="activeAgent.name"
+                  :limit="3"
+                  @use-playbook="usePlaybook"
+                  @open-section="openSuggestionSection"
+                  @open-chat="focusConversationComposer"
+                />
+              </template>
+            </PortalBriefing>
           </template>
           <template #rail-strip>
             <PortalRailStrip v-if="railVisible" :tabs="railTabs" :signals="railSignals" @open="railSheetOpen = true" />
@@ -564,18 +580,34 @@
            is conserved at every frame — so the hazard is gone by construction
            rather than held off by a flag, and the two motions now overlap
            instead of running back to back. -->
+      <!-- #2711 (review): the LEAVE is animated only when the column actually
+           held a rail. A reservation that turns out to be wrong — an empty or
+           failed roster, where the rail never arrives — must be given back in
+           one frame, not slid away over 300ms, or the fix hands back the very
+           shift it removes. Measured before this: `reserved(48) → 22 → 3 → none`
+           on a rosterless load. The ENTER keeps its transition: it only ever
+           runs for the voice-canvas swap (#2676), since a reserved column is
+           present from the first frame and never enters. -->
       <Transition
-        enter-active-class="transition-[width] duration-300 ease-out overflow-hidden motion-reduce:transition-none motion-reduce:duration-0"
-        leave-active-class="transition-[width] duration-300 ease-out overflow-hidden motion-reduce:transition-none motion-reduce:duration-0"
+        :enter-active-class="RAIL_MOTION"
+        :leave-active-class="railEverHeldRail ? RAIL_MOTION : ''"
         enter-from-class="!w-0"
-        leave-to-class="!w-0"
+        :leave-to-class="railEverHeldRail ? '!w-0' : ''"
       >
       <div
-        v-if="railHasColumn"
+        v-if="railHasColumn || railColumnReserved"
         class="hidden sm:flex shrink-0 min-h-0 w-[var(--ws-rail,24rem)]"
         data-testid="ws-rail-column"
+        :data-reserved="railColumnReserved && !railHasColumn ? 'true' : undefined"
       >
+      <!-- #2711: the column exists while the stage loads, EMPTY. Its width is
+           the persisted one, known synchronously, so the conversation column
+           lands on the footprint it will keep instead of losing the rail's width
+           the moment the roster arrives. The rail itself still waits for a ready
+           stage — `railHasColumn` is unchanged — because its tabs need the
+           roster; what is reserved is space, not content. -->
       <PortalRail
+        v-if="railHasColumn"
         :tabs="railTabs"
         :active-tab="railState.tab"
         :open="railState.open"
@@ -612,6 +644,8 @@
             :threads="threads"
             @open-thread="openThread"
             @use-playbook="usePlaybook"
+            @open-rail-tab="openRailOn"
+            @focus-composer="focusConversationComposer"
           />
         </template>
       </PortalRail>
@@ -660,6 +694,8 @@
           :threads="threads"
           @open-thread="(t) => { railSheetOpen = false; openThread(t) }"
           @use-playbook="(text) => { railSheetOpen = false; usePlaybook(text) }"
+          @open-rail-tab="openRailOn"
+          @focus-composer="() => { railSheetOpen = false; focusConversationComposer() }"
         />
       </template>
     </PortalRail>
@@ -713,6 +749,7 @@ import {
 } from '@/components/portal/portalAttachments'
 import PortalAgentBand from '@/components/portal/PortalAgentBand.vue'
 import PortalAgentDetails from '@/components/portal/PortalAgentDetails.vue'
+import PortalSuggestions from '@/components/portal/PortalSuggestions.vue'
 import ColumnResizeHandle from '@/components/ColumnResizeHandle.vue'
 import { useColumnResize } from '@/composables/useColumnResize'
 import PortalSkeleton from '@/components/portal/PortalSkeleton.vue'
@@ -729,6 +766,8 @@ import {
   railOpenPlan,
   emptySignal,
   loadRailState,
+  railColumnReservedFor,
+  railSizedOpen,
   railParticipantsFor,
   railVisibleFor,
   saveRailState,
@@ -961,7 +1000,14 @@ function onVoiceCall(sig) {
 // auto-collapse below, which is the AC's tie-breaker when the viewport cannot
 // fit all three.
 const columns = useColumnResize({
-  railOpen: computed(() => railState.value.open && railVisible.value),
+  // #3060: sized open while the column is RESERVED too, not only once the rail
+  // is visible — otherwise a rail left open reserves 48px and then jumps to its
+  // open width when the stage lands (`railSizedOpen`).
+  railOpen: computed(() => railSizedOpen({
+    open: railState.value.open,
+    visible: railVisible.value,
+    reserved: railColumnReserved.value,
+  })),
   setRailOpen: (open) => { if (!open) setRailOpen(false) },
 })
 
@@ -1035,9 +1081,41 @@ const railVisible = computed(() => railVisibleFor({
 // carries `v-if="tabs.length"` — with the width now on a wrapper this view
 // owns, a tabless rail would otherwise leave a full-width empty column behind.
 // Reading the same list the component does keeps the two from disagreeing.
+// #2711 — the column is held open while the stage loads, so the conversation
+// column lands on the footprint it keeps. The rule is pure (`portalRail.js`)
+// and deliberately narrower than `railVisible`: see its docblock for why a room
+// route is excluded. `voiceCanvasHasColumn` still wins — the canvas and the rail
+// are never both in the row.
+// One definition of the rail column's motion, so the enter and the (conditional)
+// leave cannot drift apart.
+const RAIL_MOTION = 'transition-[width] duration-300 ease-out overflow-hidden '
+  + 'motion-reduce:transition-none motion-reduce:duration-0'
+
+const railColumnReserved = computed(() => Boolean(
+  railColumnReservedFor({
+    agentPage: activeAgentPageName.value,
+    stageState: stage.value.state,
+    roomId: activeRoomIdFromRoute.value,
+  }) && !voiceCanvasHasColumn.value
+))
+
 const railHasColumn = computed(() => Boolean(
   railVisible.value && railTabs.value.length && !voiceCanvasHasColumn.value
 ))
+
+// #2711 (review): has this column ever actually held the rail? A reservation
+// that is handed back without ever becoming a rail was a guess that did not pay
+// off, and giving it back instantly is strictly better than animating it away.
+// Reset per route, because the answer is about THIS stage: navigating from a
+// conversation to an empty roster must not inherit the conversation's verdict.
+const railEverHeldRail = ref(false)
+watch(railHasColumn, (has) => { if (has) railEverHeldRail.value = true })
+// `route.fullPath`, not `route.value.fullPath`: `useRoute()` returns a REACTIVE
+// OBJECT, not a ref. The `.value` spelling threw on every Workspace load —
+// Vue routes a watch-getter error to its error handler rather than aborting
+// setup, so the page still rendered and the e2e still passed while this
+// watcher was dead. Every other route read in this file is the plain form.
+watch(() => route.fullPath, () => { railEverHeldRail.value = railHasColumn.value })
 // ent#475: the ONE owner of what the Loops / Canvas / Files tabs read. It
 // feeds `portalLoops` and `portalRailFeeds` off the same door gate and
 // participant list the rail renders from — nothing is fetched for a tab this
@@ -1059,7 +1137,26 @@ const rail = usePortalRailFeeds({
 })
 // ent#525: the Work signal is store-derived now — the owner merges the
 // conversation's emit into the feed's running rows BY EXECUTION ID.
-const railSignals = computed(() => ({ ...rail.signals.value }))
+// ent#465: Info's dot — suggestions waiting for you on the agent on screen.
+// Read only when the store slice belongs to that agent (the #2162 rule).
+const infoSignal = computed(() => {
+  const name = activeAgent.value?.name
+  if (!name || !store.isPlatformSession || store.suggestionsAgent !== name) return null
+  const n = store.suggestions?.total || 0
+  return n > 0 ? { updated: true, note: n === 1 ? '1 suggestion' : `${n} suggestions` } : null
+})
+// Loaded by the shell, not only by the bodies that render it: the dot exists
+// for the person mid-conversation with the rail collapsed, where neither the
+// empty chat nor the Info tab is mounted. Reused for 60 s across placements.
+watch(
+  () => (store.isPlatformSession && !activeRoomIdFromRoute.value ? activeAgent.value?.name : null),
+  (name) => { if (name) store.loadAgentSuggestions(name) },
+  { immediate: true },
+)
+const railSignals = computed(() => ({
+  ...rail.signals.value,
+  ...(infoSignal.value ? { info: infoSignal.value } : {}),
+}))
 
 function setRailOpen(open) { railState.value = { ...railState.value, open } }
 function setRailTab(tab) { railState.value = { ...railState.value, tab } }
@@ -1094,6 +1191,15 @@ function askForCanvas() {
 function askAboutIt(text) {
   railSheetOpen.value = false
   usePlaybook(text)
+}
+// ent#465: a suggestion's Accept. Asks are answered in Work's "Waiting on
+// you"; decisions live in the Info tab. `open_chat` puts the caret in the
+// composer — never a send.
+function openSuggestionSection(name) {
+  openRailOn(name === 'asks' ? 'work' : 'info')
+}
+function focusConversationComposer() {
+  conversationRef.value?.focusComposer?.()
 }
 function onRoomParticipants(list) { roomParticipants.value = Array.isArray(list) ? list : [] }
 

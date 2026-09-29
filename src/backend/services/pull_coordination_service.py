@@ -24,8 +24,9 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from dataclasses import dataclass
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 from config import MAX_REDELIVERY
 from database import db
@@ -41,6 +42,7 @@ from services.platform_prompt_service import (
 from services.slot_service import SLOT_TTL_BUFFER
 from services.runtime_secret_scrub import get_staged_values, scrub_obj, scrub_text
 from utils.credential_sanitizer import sanitize_execution_log, sanitize_response
+from db.write_params import ExecutionResult
 
 logger = logging.getLogger(__name__)
 
@@ -182,6 +184,25 @@ _TASK_OVERRIDE_KEYS = (
 # ---------------------------------------------------------------------------
 
 
+def record_worker_poll(agent_name: str) -> None:
+    """Stamp the agent's last claim attempt for canary B-08 (#2840).
+
+    Called on every claim attempt, empty or not: an idle worker polls at least
+    every 15s, so a stale stamp on an agent with idle workers means the pool
+    is dead or cannot reach the backend. Best-effort — a Redis failure must
+    never block a claim.
+    """
+    try:
+        from services.pull_pilot import PULL_POLL_KEY_PREFIX, PULL_POLL_TTL_SECONDS
+        from services.slot_service import get_slot_service
+
+        get_slot_service().redis.set(
+            f"{PULL_POLL_KEY_PREFIX}{agent_name}", time.time(), ex=PULL_POLL_TTL_SECONDS
+        )
+    except Exception:  # noqa: BLE001
+        logger.debug("[#2840] could not record pull poll for %s", agent_name, exc_info=True)
+
+
 def claim_next_task(agent_name: str, worker_id: str) -> Optional[Dict[str, Any]]:
     """Atomically claim the oldest queued task for ``agent_name`` on behalf of
     ``worker_id``. Returns the §3.1 claim response, or None when the queue is
@@ -190,12 +211,66 @@ def claim_next_task(agent_name: str, worker_id: str) -> Optional[Dict[str, Any]]
     The lease TTL reuses the slot-TTL convention: the agent's
     ``execution_timeout_seconds`` plus ``SLOT_TTL_BUFFER`` (so a legitimately
     long turn's lease outlives its deadline exactly as a slot would).
+
+    #2846: the turn limit is clamped to that same timeout, read once here, so
+    the turn always ends inside its lease. This is what keeps a healthy turn
+    from being re-delivered while it still runs — the job the (never built)
+    lease-renewal heartbeat was specified for.
     """
-    lease_seconds = int(db.get_execution_timeout(agent_name)) + SLOT_TTL_BUFFER
-    row = db.claim_next_queued(agent_name, worker_id=worker_id, lease_seconds=lease_seconds)
+    record_worker_poll(agent_name)
+    cap = int(db.get_execution_timeout(agent_name))
+    row = db.claim_next_queued(agent_name, worker_id=worker_id, lease_seconds=cap + SLOT_TTL_BUFFER)
     if not row:
         return None
-    return _build_claim_response(row)
+    claim = _build_claim_response(row)
+    overrides = claim["envelope"]["payload"]["task_overrides"]
+    limit, shortened_from = _turn_limit(overrides.get("timeout_seconds"), cap)
+    overrides["timeout_seconds"] = limit
+    if shortened_from is not None:
+        logger.warning(
+            "[#2846] %s: turn limit shortened from %ss to %ss (agent %s timeout)",
+            row["id"], shortened_from, limit, agent_name,
+        )
+    return claim
+
+
+def _turn_limit(requested: Any, cap: int) -> Tuple[int, Optional[int]]:
+    """``(limit, shortened_from)`` — ``requested`` capped at the agent timeout.
+
+    A row carries the timeout copied at enqueue; it exceeds ``cap`` when the
+    agent's timeout was lowered while the row waited. Absent/invalid → ``cap``.
+    """
+    try:
+        asked = int(requested)
+    except (TypeError, ValueError):
+        return cap, None
+    if asked <= 0:
+        return cap, None
+    return (cap, asked) if asked > cap else (asked, None)
+
+
+def _shortened_note(execution: Any) -> str:
+    """Suffix for a timeout error when the row asked for more than the agent allows.
+
+    Best-effort: runs before the terminal CAS write, so it must never raise.
+    """
+    try:
+        meta = json.loads(execution.backlog_metadata or "{}")
+        nested = meta.get("task_overrides") if isinstance(meta, dict) else None
+        requested = (nested or {}).get("timeout_seconds") or meta.get("timeout_seconds")
+        # Compares against the agent's CURRENT timeout, so the note states
+        # the two numbers rather than claiming the claim shortened this run
+        # (the timeout may have changed after the claim).
+        cap = int(db.get_execution_timeout(execution.agent_name))
+    except Exception:  # noqa: BLE001 — a missing note must not block the terminal
+        return ""
+    limit, shortened_from = _turn_limit(requested, cap)
+    if shortened_from is None:
+        return ""
+    return (
+        f" (this job asked for {shortened_from}s but the agent's timeout is "
+        f"{limit}s; raise the agent's timeout to give it longer)"
+    )
 
 
 def _build_claim_response(row: Dict[str, Any]) -> Dict[str, Any]:
@@ -349,14 +424,23 @@ def _context_used(metadata: Dict[str, Any], tokens: Optional[int]) -> Optional[i
 _SWITCH_FAILURE_KINDS = {"billing": "rate_limit", "auth": "auth"}
 
 
-def _switch_failure_kind(error_code: Optional[str]) -> Optional[str]:
+def _switch_failure_kind(
+    error_code: Optional[str], error_text: str = ""
+) -> Optional[str]:
     """Which SUB-003 failure kind, if any, a pull terminal's code means (#2643).
 
     An ALLOWLIST, deliberately: a code this map has not heard of switches
     nothing. The inverse — "switch unless the code is one we know is benign" —
     would churn an agent through every subscription it owns the first time a
     worker reports a crash class nobody has taught this map about.
+
+    #3012: a worker older than #3012 reports a model the CLI refused as 503 →
+    ``auth``. No subscription can fix that, so the text overrides the code.
     """
+    from services.failure_classifier import is_model_rejection
+
+    if is_model_rejection(error_text):
+        return None
     return _SWITCH_FAILURE_KINDS.get((error_code or "").strip().lower())
 
 
@@ -432,13 +516,15 @@ def apply_task_result(
         won = db.update_execution_status(
             execution_id=execution_id,
             status=TaskExecutionStatus.SUCCESS,
-            response=sanitized_content,
-            cost=cost,
-            context_used=context_used,
-            context_max=context_max,
-            execution_log=log_json,
-            tool_calls=log_json,
-            claude_session_id=session_id,
+            result=ExecutionResult(
+                response=sanitized_content,
+                cost=cost,
+                context_used=context_used,
+                context_max=context_max,
+                execution_log=log_json,
+                tool_calls=log_json,
+                claude_session_id=session_id,
+            ),
             claim_token=claim_token,
         )
     else:
@@ -447,14 +533,19 @@ def apply_task_result(
         err_text = sanitized_content or ""
         if error_code:
             err_text = f"[{error_code}] {err_text}".strip()
+        if (error_code or "").strip().lower() == "timeout":
+            # #2846: name the setting to change when the claim clamped the limit.
+            err_text += _shortened_note(execution)
         won = db.update_execution_status(
             execution_id=execution_id,
             status=row_status,
-            error=err_text or None,
-            response=sanitized_content,
-            cost=cost,
-            context_used=context_used,
-            context_max=context_max,
+            result=ExecutionResult(
+                error=err_text or None,
+                response=sanitized_content,
+                cost=cost,
+                context_used=context_used,
+                context_max=context_max,
+            ),
             claim_token=claim_token,
         )
 
@@ -523,7 +614,7 @@ def apply_task_result(
         switch_kind = (
             None
             if row_status == TaskExecutionStatus.SUCCESS
-            else _switch_failure_kind(error_code)
+            else _switch_failure_kind(error_code, err_text)
         )
         if switch_kind is not None:
             subscription_auto_switch.spawn_subscription_failure(

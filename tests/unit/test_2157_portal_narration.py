@@ -33,6 +33,7 @@ from services.platform_prompt_service import (
     build_narrated_surface_prompt,
     build_voice_capability_prompt,
 )
+from unit._write_params import object_keywords
 
 
 # ---------------------------------------------------------------------------
@@ -364,7 +365,7 @@ def test_portal_stamps_the_surface_on_its_executions():
     )
     unstamped = [
         site.lineno for site in creation_sites
-        if not any(kw.arg == "source_channel" for kw in site.keywords)
+        if not any(kw.arg == "source_channel" for kw in object_keywords(site))
     ]
     assert not unstamped, (
         f"create_task_execution sites without a source_channel stamp: {unstamped}. "

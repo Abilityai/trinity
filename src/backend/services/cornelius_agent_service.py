@@ -218,6 +218,12 @@ class CorneliusAgentService:
             template=CORNELIUS_TEMPLATE,
             # resources / tools / capabilities / runtime are read from the bundled
             # template.yaml inside create_agent_internal.
+            # trinity-enterprise#705: pinned pull-only. The template is a SHARED
+            # public upstream; the agent-default working branch would push this
+            # agent's knowledge base into it whenever the resolved token happens
+            # to have write access there (the ent#162 class).
+            kind="deployment",
+            source_mode=True,
         )
         await create_agent_internal(config, admin_user, request=None)
 

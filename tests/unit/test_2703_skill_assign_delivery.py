@@ -287,7 +287,7 @@ def _request():
 
 
 def test_post_assign_delivers_and_broadcasts(router, monkeypatch, ws):
-    monkeypatch.setattr(router.db, "assign_skill", lambda a, s, u: {"agent_name": a, "skill_name": s})
+    monkeypatch.setattr(router.db, "assign_skill", lambda a, s, u, **kw: {"agent_name": a, "skill_name": s})
     deliver = AsyncMock(return_value={"status": "injected", "skills": {"research": {"status": "injected"}}})
     monkeypatch.setattr(router.skill_service, "deliver_assigned", deliver)
 
@@ -302,7 +302,7 @@ def test_post_assign_delivers_and_broadcasts(router, monkeypatch, ws):
 def test_post_already_assigned_still_delivers(router, monkeypatch):
     """The Library control has no Sync button — a re-click after `not_delivered`
     is the only retry it has, so the idempotent branch must deliver too."""
-    monkeypatch.setattr(router.db, "assign_skill", lambda a, s, u: None)
+    monkeypatch.setattr(router.db, "assign_skill", lambda a, s, u, **kw: None)
     deliver = AsyncMock(return_value={"status": "injected", "skills": {"research": {"status": "injected"}}})
     monkeypatch.setattr(router.skill_service, "deliver_assigned", deliver)
     body = asyncio.run(router.assign_skill("research", agent_name=AGENT, current_user=_user()))
@@ -312,7 +312,7 @@ def test_post_already_assigned_still_delivers(router, monkeypatch):
 
 
 def test_post_row_survives_a_delivery_that_raises_and_still_answers_200(router, monkeypatch):
-    monkeypatch.setattr(router.db, "assign_skill", lambda a, s, u: {"agent_name": a, "skill_name": s})
+    monkeypatch.setattr(router.db, "assign_skill", lambda a, s, u, **kw: {"agent_name": a, "skill_name": s})
     monkeypatch.setattr(router.skill_service, "deliver_assigned", AsyncMock(side_effect=RuntimeError("x")))
     body = asyncio.run(router.assign_skill("research", agent_name=AGENT, current_user=_user()))
     assert body["success"] is True
@@ -322,7 +322,7 @@ def test_post_row_survives_a_delivery_that_raises_and_still_answers_200(router, 
 
 def test_post_unknown_skill_is_404_before_any_write_or_delivery(router, monkeypatch):
     from fastapi import HTTPException
-    assign = lambda a, s, u: (_ for _ in ()).throw(AssertionError("wrote a row"))
+    assign = lambda a, s, u, **kw: (_ for _ in ()).throw(AssertionError("wrote a row"))
     monkeypatch.setattr(router.db, "assign_skill", assign)
     deliver = AsyncMock()
     monkeypatch.setattr(router.skill_service, "deliver_assigned", deliver)

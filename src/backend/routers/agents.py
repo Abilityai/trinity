@@ -57,6 +57,7 @@ from services.agent_service import (
     get_accessible_agents,
     # Lifecycle
     start_agent_internal,
+    public_skills_result,
     # CRUD
     create_agent_internal as _create_agent_internal,
     # Deploy
@@ -866,6 +867,13 @@ async def start_agent_endpoint(agent_name: AuthorizedAgentByName, request: Reque
             "message": f"Agent {agent_name} started",
             "credentials_injection": credentials_status,
             "credentials_result": credentials_result,
+            # #2991: skill delivery, mirroring the credentials pair. Dropping it
+            # here made a `conflict` or a failed package invisible to every REST
+            # and MCP caller. `skills_result` is a PROJECTION (names, statuses,
+            # codes — never the raw per-skill error text); a no-op start still
+            # answers `skipped` with a reason, never an absent field.
+            "skills_injection": result.get("skills_injection", "unknown"),
+            "skills_result": public_skills_result(result.get("skills_result")),
             # #1809: whether (and why) this start replaced the container —
             # answers "why did my container id change / uptime reset".
             "recreated": bool(result.get("recreated")),
@@ -1613,9 +1621,8 @@ async def agent_execution_result(
     callback is a no-op (no double activity close / breaker churn / slot drain).
     """
     from services import heartbeat_service
+    from services.execution_envelope import terminal_from_callback_payload
     from services.task_execution_service import (
-        TaskExecutionErrorCode,
-        TerminalEnvelope,
         dispatch_breaker_active,
         get_task_execution_service,
     )
@@ -1711,49 +1718,11 @@ async def agent_execution_result(
             )
 
     # ---- Build the normalized terminal + apply -----------------------------
-    # #679: 3-way map — success→SUCCESS, cancelled→CANCELLED, everything else
-    # (incl. unknown forward-compat values) →FAILED. CANCELLED flows through
-    # apply_result (release_slot=True); the replay gate above already short-
-    # circuits a terminate-wrote-first CANCELLED row, and the reverse race
-    # (callback CANCELLED first) makes the later terminate write a CAS no-op.
-    #
-    # Finding 2 (CSO 2026-06-22): an auth/rate terminal must NOT be reclassified
-    # as a clean cancellation even when the agent labels it "cancelled". The
-    # agent side already guards this (result_callback._is_auth_or_rate), but the
-    # callback is the backend trust boundary — a buggy or mixed-version agent
-    # that POSTs status:"cancelled" carrying error_code:"auth" (or an auth/
-    # rate_limit terminal_reason) would otherwise silently dodge the AUTH
-    # dispatch breaker / SUB-003 auto-switch. Mirror the guard so the invariant
-    # ("auth/rate is never cancellation") holds regardless of the caller image.
-    is_auth_or_rate = (
-        payload.error_code == TaskExecutionErrorCode.AUTH.value
-        or payload.terminal_reason in ("auth", "rate_limit")
-    )
-    if payload.status == "success":
-        status = TaskExecutionStatus.SUCCESS
-    elif payload.status == "cancelled" and not is_auth_or_rate:
-        status = TaskExecutionStatus.CANCELLED
-    else:
-        status = TaskExecutionStatus.FAILED
-    error_code = None
-    if payload.error_code:
-        try:
-            error_code = TaskExecutionErrorCode(payload.error_code)
-        except ValueError:
-            # Unknown codes are non-fatal — apply_result only special-cases AUTH.
-            error_code = None
-
-    envelope = TerminalEnvelope(
-        execution_id=execution_id,
-        status=status,
-        response=payload.response,
-        error=payload.error,
-        error_code=error_code,
-        metadata=payload.metadata or {},
-        execution_log=payload.execution_log,
-        session_id=payload.session_id,
-        execution_time_ms=payload.execution_time_ms,
-    )
+    # The 3-way status map and the auth-is-never-cancellation guard live in
+    # `terminal_from_callback_payload` (services/execution_envelope.py) since
+    # #2944, because the cleanup watchdog now reads the same envelope shape off
+    # an agent's retained terminal — one classification, two callers.
+    envelope = terminal_from_callback_payload(payload, execution_id)
 
     svc = get_task_execution_service()
     result = await svc.apply_result(

@@ -4,11 +4,15 @@ on:
   pull_request:
     paths:
       - 'src/frontend/**'
+      # #2964: previewTitle's contract with the server's clean_title (vitest twin).
+      - 'tests/fixtures/portal-work-titles.json'
       - '.github/workflows/frontend-build.yml'
   push:
     branches: [main, dev]
     paths:
       - 'src/frontend/**'
+      # #2964: previewTitle's contract with the server's clean_title (vitest twin).
+      - 'tests/fixtures/portal-work-titles.json'
       - '.github/workflows/frontend-build.yml'
 
 # CSO M9: least-privilege token — this workflow only reads the checkout.

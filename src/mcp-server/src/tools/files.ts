@@ -42,7 +42,14 @@ export function createFileTools(
         "publish volume into platform storage; the URL includes a signed " +
         "token and expires after 7 days by default (configurable). " +
         "The owner must enable file sharing for this agent in the Sharing " +
-        "panel before this tool can be used.",
+        "panel before this tool can be used. " +
+        "WHO SEES IT: the link works for anyone you give it to. Separately, the " +
+        "file is listed in the Workspace Files tab of ONE person — the person " +
+        "this conversation is with. The platform works that out from your " +
+        "execution_id, so pass it. A turn with no person (a schedule, an " +
+        "operator chat, an agent-to-agent call) lists the file for the agent's " +
+        "owner only. The result tells you what happened: check " +
+        "`visible_to_requester`.",
       parameters: z.object({
         filename: z
           .string()
@@ -72,16 +79,26 @@ export function createFileTools(
           .optional()
           .describe(
             "Your current execution_id — shown in the 'Execution Context' block of your system " +
-              "prompt. Pass it so a re-run of this turn replays the original signed URL instead of " +
-              "minting a new token (effect-scoped idempotency, #1084). Optional: if omitted, a new " +
-              "share is created each time."
+              "prompt. Pass it: it is how the platform knows which conversation this share belongs " +
+              "to, and so whose Files tab lists the file — without it the file is listed for the " +
+              "agent's owner only. It also lets a re-run of this turn replay the original signed " +
+              "URL instead of minting a new token (#1084)."
+          ),
+        audience_email: z
+          .string()
+          .optional()
+          .describe(
+            "Optional. List the file in the Files tab of a DIFFERENT person instead of the one " +
+              "this conversation is with. Must be the email of someone this agent is already " +
+              "shared with; any other address is refused (AUDIENCE_NOT_ON_ROSTER). Omit it in the " +
+              "ordinary case — the platform addresses the file to the person you are talking to."
           ),
         dedup_label: z
           .string()
           .optional()
           .describe(
             "Optional discriminator to intentionally create TWO distinct shares of the same file " +
-              "in one turn. Default empty → at-most-one share per (filename, content) per turn."
+              "in one turn. Default empty → at-most-one share per (filename, content, addressee) per turn."
           ),
       }),
       execute: async (
@@ -91,6 +108,7 @@ export function createFileTools(
           expires_in?: number;
           execution_id?: string;
           dedup_label?: string;
+          audience_email?: string;
         },
         context?: { session?: McpAuthContext }
       ) => {
@@ -126,6 +144,7 @@ export function createFileTools(
             expires_in: params.expires_in,
             execution_id: params.execution_id,
             dedup_label: params.dedup_label,
+            audience_email: params.audience_email,
           });
 
           return JSON.stringify(
@@ -136,6 +155,15 @@ export function createFileTools(
               expires_at: result.expires_at,
               size_bytes: result.size_bytes,
               mime_type: result.mime_type,
+              // ent#549 — honest status, in the names `set_canvas` uses. `false`
+              // means the platform could not tell which conversation this came
+              // from and listed the file for the owner only; the note says how
+              // to fix it. `null` is no claim, never a guess.
+              visible_to_requester: result.visible_to_requester ?? null,
+              visibility_note: result.visibility_note ?? null,
+              // Only ever the address THIS agent supplied. One the platform
+              // resolved is never returned to a model.
+              addressed_to: result.addressed_to ?? null,
             },
             null,
             2

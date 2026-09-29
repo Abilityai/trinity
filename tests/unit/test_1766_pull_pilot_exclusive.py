@@ -183,7 +183,7 @@ class TestPullOwnsDispatch:
     @pytest.mark.parametrize(
         "trigger",
         ["agent", "event", "schedule", "webhook", "reminder", "loop", "fan_out",
-         "a2a", "operator_response"],
+         "a2a", "operator_response", "retry"],
     )
     def test_pilot_owns_the_autonomous_triggers_dispatch_can_deliver(self, pilot, trigger):
         """Narrowed by #2048, re-widened by #2391 and #2523.

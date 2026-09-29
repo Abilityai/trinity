@@ -58,6 +58,7 @@ from .models import (
     PortalPlaybook,
     PortalRoster,
 )
+from db.write_params import ExecutionResult, TaskExecutionFields
 
 logger = logging.getLogger(__name__)
 FEATURE_ID = "client_portal"
@@ -166,6 +167,12 @@ PORTAL_FAILURE_CATEGORIES = (
     # closed taxonomy in BOTH directions precisely so a new raise site cannot
     # silently degrade like that.
     "auth_switched",
+    # #3012 — the agent's OWN default model is one its Claude Code refuses (CLI
+    # too old, or an id the API does not know). Not `auth`: that copy says the
+    # agent hit a usage limit, which sent people to resend into the same
+    # failure. Not `invalid_model`: the client did not choose this model, so
+    # there is no stored preference to clear. Only an operator can fix it.
+    "model_unsupported",
     "internal",            # anything uncategorised; copy is fixed, never raw
 )
 
@@ -2636,22 +2643,24 @@ def _precreate_sync_execution(
             agent_name=agent_name,
             message=message,
             triggered_by="public",
-            source_user_email=email,
-            subscription_id=subscription_id,
-            source_channel=PORTAL_SOURCE_CHANNEL,
-            # #2426: the destination, not just the surface. The sibling comment
-            # in `start_portal_turn` says "both creation sites or the stamp is a
-            # coin flip depending on which path made the row" — ent#457 covered
-            # the two sites that existed when it was written; ent#365 had added
-            # this third one.
-            source_channel_chat_id=session_id,
-            source_channel_client=email,
-            # ent#403 AC 7 — the model the turn will run on, stamped where the
-            # row is MADE. See the docstring: there is no UPDATE path for this
-            # column anywhere in the repo.
-            model_used=resolved_model,
-            # ent#555 — what the user was looking at when they sent this.
-            open_canvas_id=open_canvas_id,
+            fields=TaskExecutionFields(
+                source_user_email=email,
+                subscription_id=subscription_id,
+                source_channel=PORTAL_SOURCE_CHANNEL,
+                # #2426: the destination, not just the surface. The sibling comment
+                # in `start_portal_turn` says "both creation sites or the stamp is a
+                # coin flip depending on which path made the row" — ent#457 covered
+                # the two sites that existed when it was written; ent#365 had added
+                # this third one.
+                source_channel_chat_id=session_id,
+                source_channel_client=email,
+                # ent#403 AC 7 — the model the turn will run on, stamped where the
+                # row is MADE. See the docstring: there is no UPDATE path for this
+                # column anywhere in the repo.
+                model_used=resolved_model,
+                # ent#555 — what the user was looking at when they sent this.
+                open_canvas_id=open_canvas_id,
+            ),
         )
         return execution.id if execution else None
     except Exception:  # noqa: BLE001
@@ -3078,6 +3087,19 @@ async def portal_chat(agent_name: str, message: str, email: str,
         # The substring tests stay as the fallback for a None code, so this is
         # additive — nothing that classified before stops classifying now.
         code = _error_code_name(result)
+        # #3012: the runtime refused the model. When the client picked it, the
+        # generic branch below answers `invalid_model` and self-heals the stored
+        # choice. When the agent's own default is the problem, only an operator
+        # can fix it — the CLI's version sentence stays on the execution row for
+        # them and is not shown to an external client.
+        if code == "MODEL_UNSUPPORTED" and not model:
+            raise ClientPortalError(
+                502,
+                "This agent's model isn't supported by its runtime, so sending "
+                "again won't help. An admin needs to update the agent image or "
+                "pick another model.",
+                category="model_unsupported", retryable=False,
+            )
         if code in ("AUTH", "BILLING"):
             # #2638: "re-sending re-fails" is only true while nothing changed
             # underneath. SUB-003 may have MOVED the agent onto a different
@@ -3127,8 +3149,9 @@ async def portal_chat(agent_name: str, message: str, email: str,
         #
         # ent#403: this — the GENERIC branch, and only it — names the chosen
         # model when the user chose one. The three branches above are left
-        # ALONE deliberately. There is no "this model is unavailable" code in
-        # the #2320 ladder (`_PULL_ERROR_CODES` has no model member), and the
+        # ALONE deliberately. The one model code in the #2320 ladder is #3012's
+        # MODEL_UNSUPPORTED, which reaches here only when the client chose the
+        # model (the self-heal below is the right answer for it), and the
         # AUTH/BILLING branch merges into one "reached its usage limit" answer
         # with a true and specific cause — rewording it whenever a model was
         # picked would blame the model for an exhausted subscription.
@@ -3615,7 +3638,7 @@ def _fail_unstarted_execution(execution_id: str, reason: str) -> None:
         from database import db as core_db
         core_db.update_execution_status(
             execution_id, "failed",
-            error=(reason or "The turn did not start")[:500],
+            result=ExecutionResult(error=(reason or "The turn did not start")[:500]),
         )
     except Exception as e:  # noqa: BLE001 — best-effort; the watchdog is the backstop
         logger.warning("portal: could not finalize unstarted execution %s: %s",
@@ -3721,24 +3744,26 @@ async def start_portal_turn(agent_name: str, message: str, email: str,
         agent_name=agent_name,
         message=message,
         triggered_by="public",
-        source_user_email=email,
-        subscription_id=subscription_id,
-        # ent#286 pre-creates the row, so the stamp has to be here too — this is
-        # the row `portal_chat` then runs into (#2157).
-        source_channel=PORTAL_SOURCE_CHANNEL,
-        # ent#457: and the destination, for the same reason (both creation sites
-        # or the stamp is a coin flip depending on which path made the row).
-        source_channel_chat_id=session_id,
-        # ent#457 review: see the sibling site above.
-        source_channel_client=email,
-        # ent#403 AC 7: the second of the two creation sites. `model_used` is
-        # written ONLY at creation — there is no UPDATE path for the column
-        # anywhere in the repo — so a model passed as a turn kwarg alone would
-        # never reach the row a client can see.
-        model_used=resolved_model,
-        # ent#555 — both creation sites carry it, for the reason stated above
-        # about the stamp otherwise being a coin flip.
-        open_canvas_id=open_canvas_id,
+        fields=TaskExecutionFields(
+            source_user_email=email,
+            subscription_id=subscription_id,
+            # ent#286 pre-creates the row, so the stamp has to be here too — this is
+            # the row `portal_chat` then runs into (#2157).
+            source_channel=PORTAL_SOURCE_CHANNEL,
+            # ent#457: and the destination, for the same reason (both creation sites
+            # or the stamp is a coin flip depending on which path made the row).
+            source_channel_chat_id=session_id,
+            # ent#457 review: see the sibling site above.
+            source_channel_client=email,
+            # ent#403 AC 7: the second of the two creation sites. `model_used` is
+            # written ONLY at creation — there is no UPDATE path for the column
+            # anywhere in the repo — so a model passed as a turn kwarg alone would
+            # never reach the row a client can see.
+            model_used=resolved_model,
+            # ent#555 — both creation sites carry it, for the reason stated above
+            # about the stamp otherwise being a coin flip.
+            open_canvas_id=open_canvas_id,
+        ),
     )
     execution_id = execution.id if execution else None
     if not execution_id:
@@ -4292,8 +4317,9 @@ def get_history(agent_name: str, email: str, session_id: str | None = None,
 
 
 def portal_documents(agent_name: str, email: str, include_owned: bool = False) -> dict:
-    """List the files a rostered agent has shared (FILES-001), each with a
-    download URL. Scoped to the caller's roster (miss → 404). Download URLs are
+    """List the files a rostered agent has shared WITH THIS PERSON (FILES-001,
+    ent#549), each with a download URL. Scoped to the caller's roster (miss →
+    404), then to what is addressed to them. Download URLs are
     built from the PORTAL base URL (#79 resolver) so a private-deployment portal
     emits private links; when no base is configured they're relative (same-origin
     as the portal page). The `?sig=` token is the download credential — the OSS
@@ -4319,8 +4345,28 @@ def portal_documents(agent_name: str, email: str, include_owned: bool = False) -
     # `clientPortal.js::fetchDocuments`), so the filter cannot leak into the
     # turn manifest the agent is handed.
     dismissed = db.dismissed_file_ids(email)
+    # ent#549 — a shared file is for the person the turn was for. This used to
+    # read `list_active_shared_files_for_agent`, the OPERATOR question, so every
+    # rostered client saw every active share of the agent, download token
+    # included: a file made in one person's chat in another person's tab. The
+    # third time this exact shape shipped (asks ent#428, reports ent#365) — a
+    # table scoped by agent gains a per-person dimension, and a reader written
+    # before the column cannot be neutral about it.
+    #
+    # Narrowed IN THE QUERY. The agent's owner additionally reads the rows
+    # addressed to nobody (a schedule's, an operator chat's, a pre-column row's):
+    # "the owner only" has to be somewhere the owner actually works.
+    # `portal_owns_agent` is the membership the roster card renders, so a
+    # non-owner admin and an owner on a magic-link token are viewers here exactly
+    # as they are for the delete affordance (ent#358, #2582).
+    from services.turn_audience import normalize_addressee_email
+    shares = core_db.list_active_shared_files_for_viewer(
+        agent_name,
+        normalize_addressee_email(email),
+        include_owner_only=portal_owns_agent(email, agent_name, include_owned),
+    )
     docs = []
-    for row in core_db.list_active_shared_files_for_agent(agent_name):
+    for row in shares:
         fid, token = row["id"], row["download_token"]
         if fid in dismissed:
             continue

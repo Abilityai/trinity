@@ -22,7 +22,7 @@
   >
     <div class="flex items-center justify-between px-3 py-1.5 border-b border-gray-100 dark:border-gray-800">
       <span class="text-[11px] font-semibold uppercase tracking-wide text-gray-400">{{ heading }}</span>
-      <span class="text-[11px] text-gray-400 dark:text-gray-500 hidden sm:block">
+      <span class="text-[11px] text-gray-500 dark:text-gray-400 hidden sm:block">
         <kbd class="px-1 py-0.5 rounded bg-gray-100 dark:bg-gray-800 text-[10px] font-mono">↑↓</kbd>
         move
         <kbd class="ml-1.5 px-1 py-0.5 rounded bg-gray-100 dark:bg-gray-800 text-[10px] font-mono">Tab</kbd>
@@ -68,7 +68,7 @@
 
     <div
       v-if="overflow > 0 || hiddenCount > 0"
-      class="px-3 py-1.5 border-t border-gray-100 dark:border-gray-800 text-[11px] text-gray-400 dark:text-gray-500"
+      class="px-3 py-1.5 border-t border-gray-100 dark:border-gray-800 text-[11px] text-gray-500 dark:text-gray-400"
     >
       <span v-if="overflow > 0">{{ overflow }} more — keep typing to filter</span>
       <!-- #2213: two DIFFERENT omissions, said separately. `overflow` is rows this

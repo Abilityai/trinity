@@ -307,6 +307,8 @@ class ScheduleExecution(BaseModel):
     # ent#555 — the canvas the user had open for this turn. Context about what
     # is being discussed; never authority over what may be read or written.
     open_canvas_id: Optional[str] = None
+    # #2806 — agent-to-agent hops from a non-agent root (NULL/None = root).
+    chain_depth: Optional[int] = None
 
 
 # =========================================================================
@@ -728,6 +730,14 @@ class AgentSkill(BaseModel):
     # library package (the agent's own copy is what runs); None = no standing
     # conflict. Written and cleared by the inject path only.
     delivery_status: Optional[str] = None
+    # ent#596 (Tandem R29): the agent that made the assignment, when the writer
+    # was an agent principal; None for a human. `assigned_by` stays the owner's
+    # username, so "the agent did it" is distinguishable from "the person did it".
+    assigned_by_agent: Optional[str] = None
+    # ent#530: False = present only because an assigned skill SET names it;
+    # `via_sets` names those sets (filled by the router from the current catalogs).
+    individual: bool = True
+    via_sets: List[str] = []
 
 
 class SkillSource(BaseModel):
@@ -790,6 +800,10 @@ class SkillInfo(BaseModel):
 class AgentSkillsUpdate(BaseModel):
     """Request model for bulk updating agent skills."""
     skills: List[str]  # List of skill names to assign
+    # ent#530: the agent's skill SETS. None = leave sets untouched, so a client
+    # that only knows skills can never drop a set; a list replaces the sets.
+    # `set:<name>` entries in `skills` are accepted too and treated as sets.
+    sets: Optional[List[str]] = None
 
 
 class SkillsLibraryStatus(BaseModel):
@@ -1112,6 +1126,11 @@ class AgentHealthDetail(BaseModel):
     # #526: unified breaker block — {dispatch:{...}, transport:{...}, open: bool,
     # config:{enabled}}. Same shape as GET /api/agents/{name}/circuit-breaker.
     circuit_breaker: Optional[dict] = None
+    # ent#479: INFORMATIONAL declared-metric freshness — counts and names, no
+    # values. It never feeds `aggregate_status` or `issues`: a business metric
+    # going stale is the operator's news, not a platform health failure, and a
+    # store read failure leaves this `None` rather than failing the check.
+    metrics: Optional[dict] = None
 
 
 class AgentHealthSummary(BaseModel):

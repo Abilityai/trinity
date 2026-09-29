@@ -13,7 +13,7 @@
 import { z } from "zod";
 import { TrinityClient } from "../client.js";
 import type { McpAuthContext } from "../types.js";
-import { accessDenied } from "../access.js";
+import { accessDenied, resolveActingAgent } from "../access.js";
 
 
 /**
@@ -69,18 +69,14 @@ export function createReportTools(client: TrinityClient, requireApiKey: boolean)
   };
 
   /**
-   * Resolve the reporting agent from the auth context. The report tool is
-   * agent-facing: it requires an agent-scoped key so a report can only ever be
-   * attributed to the calling agent (no spoofing).
+   * Resolve the reporting agent from the auth context. The report tool takes no
+   * target parameter, so a report can only ever be attributed to the identity
+   * the KEY carries — `resolveActingAgent` is that rule, shared with the canvas
+   * and metrics tools (#2975; it admits the platform orchestrator's
+   * system-scoped key, which carries `trinity-system`, and nothing else).
    */
-  const getAgentName = (authContext: McpAuthContext | undefined): string => {
-    if (authContext?.scope === "agent" && authContext.agentName) {
-      return authContext.agentName;
-    }
-    throw new Error(
-      "The report tool requires an agent-scoped API key (it publishes a report as the calling agent)."
-    );
-  };
+  const getAgentName = (authContext: McpAuthContext | undefined): string =>
+    resolveActingAgent(authContext, "The report tool");
 
   /**
    * Agent-to-agent READ gate (mirrors operator_queue.ts / executions.ts).

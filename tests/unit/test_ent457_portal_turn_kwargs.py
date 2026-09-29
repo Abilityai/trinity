@@ -28,6 +28,7 @@ import ast
 import inspect
 
 import pytest
+from unit._write_params import object_keywords
 
 pytestmark = pytest.mark.unit
 
@@ -111,7 +112,7 @@ def test_the_client_stamp_is_persisted_not_merely_accepted():
         name = fn.attr if isinstance(fn, ast.Attribute) else getattr(fn, "id", None)
         if name != "create_task_execution":
             continue
-        names = {kw.arg for kw in node.keywords if kw.arg}
+        names = {kw.arg for kw in object_keywords(node) if kw.arg}
         assert "source_channel_client" in names, (
             "execute_task's row-creation branch accepts source_channel_client but "
             "does not persist it"

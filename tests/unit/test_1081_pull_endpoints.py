@@ -27,6 +27,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
+from db.write_params import ExecutionResult
 
 # ---------------------------------------------------------------------------
 # Bootstrap: make src/backend importable (mirror tests/unit/test_backlog.py).
@@ -216,7 +217,12 @@ class TestDbCasResult:
     def test_correct_token_applies_success_terminal(self, schedule_ops, enqueue):
         eid, token = self._claim(schedule_ops, enqueue)
         assert schedule_ops.update_execution_status(
-            eid, "success", response="done", claim_token=token
+            eid,
+            "success",
+            result=ExecutionResult(
+                response="done",
+            ),
+            claim_token=token,
         ) is True
         row = schedule_ops.get_execution(eid)
         assert row.status == "success"
@@ -225,7 +231,12 @@ class TestDbCasResult:
     def test_wrong_token_is_rejected_no_write(self, schedule_ops, enqueue):
         eid, token = self._claim(schedule_ops, enqueue)
         assert schedule_ops.update_execution_status(
-            eid, "failed", error="boom", claim_token="not-the-token"
+            eid,
+            "failed",
+            result=ExecutionResult(
+                error="boom",
+            ),
+            claim_token="not-the-token",
         ) is False
         # Row untouched — still running.
         assert schedule_ops.get_execution(eid).status == "running"
@@ -234,12 +245,22 @@ class TestDbCasResult:
         eid, token = self._claim(schedule_ops, enqueue)
         # First terminal wins.
         assert schedule_ops.update_execution_status(
-            eid, "failed", error="boom", claim_token=token
+            eid,
+            "failed",
+            result=ExecutionResult(
+                error="boom",
+            ),
+            claim_token=token,
         ) is True
         # A late duplicate (even with the right token) cannot overwrite the
         # already-terminal row — the status precondition blocks it.
         assert schedule_ops.update_execution_status(
-            eid, "failed", error="AGAIN", claim_token=token
+            eid,
+            "failed",
+            result=ExecutionResult(
+                error="AGAIN",
+            ),
+            claim_token=token,
         ) is False
         row = schedule_ops.get_execution(eid)
         assert row.status == "failed"
@@ -287,6 +308,37 @@ class TestServiceClaim:
         from services import pull_coordination_service as pcs
 
         assert pcs.claim_next_task("alpha", "w1") is None
+
+    def test_every_claim_attempt_stamps_the_worker_poll(self, seed_agent, monkeypatch):
+        """#2840: canary B-02 tells a dead pool from an idle one by this stamp,
+        so an EMPTY claim must write it too."""
+        seed_agent("alpha")
+        from services import pull_coordination_service as pcs
+        from services import slot_service
+
+        writes = {}
+
+        class _R:
+            def set(self, key, value, ex=None):
+                writes[key] = (value, ex)
+
+        monkeypatch.setattr(slot_service, "get_slot_service", lambda: SimpleNamespace(redis=_R()))
+        assert pcs.claim_next_task("alpha", "w1") is None
+        value, ttl = writes["agent:pull_poll:alpha"]
+        assert float(value) > 0 and ttl == 86400
+
+    def test_poll_stamp_failure_never_blocks_a_claim(self, seed_agent, enqueue, monkeypatch):
+        seed_agent("alpha")
+        eid = enqueue("alpha", message="m")
+        from services import pull_coordination_service as pcs
+        from services import slot_service
+
+        def _boom():
+            raise RuntimeError("redis down")
+
+        monkeypatch.setattr(slot_service, "get_slot_service", _boom)
+        claim = pcs.claim_next_task("alpha", "w1")
+        assert claim is not None and claim["execution_id"] == eid
 
 
 class TestServiceResult:
@@ -358,6 +410,72 @@ class TestServiceResult:
         row = db.get_execution(eid)
         assert row.status == "failed"
         assert "auth" in (row.error or "")
+
+
+class TestClaimTurnLimit:
+    """#2846: the turn limit a claim hands the worker never exceeds the agent's
+    timeout, so a healthy turn always ends inside its lease (agent timeout +
+    SLOT_TTL_BUFFER) and is never re-delivered while it is still running."""
+
+    def _claim_with(self, seed_agent, enqueue, *, cap, meta):
+        import json
+        seed_agent("alpha", execution_timeout_seconds=cap)
+        enqueue("alpha", backlog_metadata=json.dumps(meta))
+        from services import pull_coordination_service as pcs
+
+        return pcs.claim_next_task("alpha", "alpha#w1")
+
+    @pytest.mark.parametrize("meta, expected", [
+        ({"timeout_seconds": 1800}, 600),   # stale: agent timeout lowered after enqueue
+        ({}, 600),                          # none recorded: worker would default to 900
+        ({"timeout_seconds": 300}, 300),    # within the cap: untouched
+    ])
+    def test_turn_limit_is_clamped_to_agent_timeout(
+        self, seed_agent, enqueue, meta, expected
+    ):
+        claim = self._claim_with(seed_agent, enqueue, cap=600, meta=meta)
+        limit = claim["envelope"]["payload"]["task_overrides"]["timeout_seconds"]
+        assert limit == expected
+        from services.slot_service import SLOT_TTL_BUFFER
+        lease = datetime.fromisoformat(claim["lease_expires_at"])
+        remaining = (lease - datetime.now(timezone.utc)).total_seconds()
+        assert remaining > limit + SLOT_TTL_BUFFER - 30  # turn ends well inside its lease
+
+    def test_timeout_failure_says_the_limit_was_shortened(self, seed_agent, enqueue):
+        claim = self._claim_with(seed_agent, enqueue, cap=600, meta={"timeout_seconds": 1800})
+        from services import pull_coordination_service as pcs
+        from database import db
+
+        pcs.apply_task_result(
+            claim["execution_id"], claim["claim_token"], status="failed",
+            content="Task execution timed out after 600 seconds", error_code="timeout",
+        )
+        error = db.get_execution(claim["execution_id"]).error
+        assert "asked for 1800s but the agent's timeout is 600s" in error
+
+    def test_timeout_failure_within_cap_has_no_note(self, seed_agent, enqueue):
+        claim = self._claim_with(seed_agent, enqueue, cap=600, meta={"timeout_seconds": 300})
+        from services import pull_coordination_service as pcs
+        from database import db
+
+        pcs.apply_task_result(
+            claim["execution_id"], claim["claim_token"], status="failed",
+            content="Task execution timed out after 300 seconds", error_code="timeout",
+        )
+        assert "asked for" not in db.get_execution(claim["execution_id"]).error
+
+    def test_note_failure_never_blocks_the_terminal_write(self, seed_agent, enqueue):
+        claim = self._claim_with(seed_agent, enqueue, cap=600, meta={"timeout_seconds": 1800})
+        from services import pull_coordination_service as pcs
+        from database import db
+
+        with patch.object(pcs.db, "get_execution_timeout", side_effect=RuntimeError("db down")):
+            outcome = pcs.apply_task_result(
+                claim["execution_id"], claim["claim_token"], status="failed",
+                content="Task execution timed out after 600 seconds", error_code="timeout",
+            )
+        assert outcome.kind == "applied"
+        assert db.get_execution(claim["execution_id"]).status == "failed"
 
 
 # ===========================================================================

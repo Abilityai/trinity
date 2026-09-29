@@ -177,9 +177,10 @@ Any `drain-{agent}-{ts}` sentinel in a slots ZSET lives < 10 s. (The drain in `b
 **B-01** Queue-status coherence *(Tier A, 🔴)*
 `backlog_service.get_queued_count(A) = COUNT(schedule_executions WHERE agent_name=A AND status='queued')`. Backlog never has its own table — queued rows ARE the queue.
 
-**B-02** No queued without slots-full *(Tier B ≤ 60 s, 🔴)*
-If `COUNT(status='queued' AND agent_name=A) > 0`, then either (a) `ZCARD(agent:slots:A) = max_parallel_tasks` or (b) a drain callback/maintenance tick is pending (≤60 s SLA).
-Signal: queued rows while slots have free space ⇒ drain callback failed. `drain_orphans_all` is the backstop every 60 s.
+**B-02** Queued work is being picked up *(Tier B ≤ 60 s push / ≤ 120 s pull, 🔴)*
+Push agents: if `COUNT(status='queued' AND agent_name=A) > 0`, then either (a) `ZCARD(agent:slots:A) = max_parallel_tasks` or (b) a drain callback/maintenance tick is pending (≤60 s SLA). `drain_orphans_all` is the backstop every 60 s.
+Pull pilots (#2840): the backend never drains them. For a running pilot in pull mode, the oldest queued row is ≤120 s old, OR every worker in the container's pool holds an unexpired lease. Stopped pilots and containers without pull mode are B-08's.
+Signal: push — queued rows while slots have free space and `canary:drain_tick_at` older than 60 s ⇒ drain callback failed; pull — `MIN(queued_at)` older than 120 s while `COUNT(status='running' AND lease_expires_at > now) <` the container's `TRINITY_MAX_PARALLEL_TASKS`.
 
 **B-03** Claim atomicity *(Tier A, 🔴)*
 At most one drain wins for a given queued row (enforced by single-row `UPDATE … RETURNING` in `claim_next_queued`). Check: count of transitions `queued → running` per execution_id = exactly 1.
@@ -195,6 +196,10 @@ If `claim_next_queued` returns a row but the subsequent real `acquire_slot` fail
 
 **B-07** Agent deletion drains backlog *(Tier A on delete, 🔴)*
 After agent delete, `COUNT(status='queued' AND agent_name=A) = 0` (cancelled with reason). See `backlog_service.cancel_all_backlog`.
+
+**B-08** Pull workers alive *(Tier B ≤ 300 s, 🟡)*
+For a pull pilot (#2840): a stopped container has no queued row older than 120 s; a running container runs pull mode (`TRINITY_PULL_MODE=true`), and while any worker is idle a claim attempt arrived within 300 s of now or of the container start. Separate from B-02 so a long-lived pool state cannot hold B-02 red.
+Signal: container not running with `MIN(queued_at)` older than 120 s; container env lacks `TRINITY_PULL_MODE=true`; or `GET agent:pull_poll:A` (stamped on every `GET /api/internal/next-task`) older than 300 s while `COUNT(status='running' AND lease_expires_at > now) <` the pool size.
 
 ---
 
@@ -499,7 +504,7 @@ Signal: file predicate inside the container — `names(plugins.yaml) − (instal
 
 ## 19. Inter-agent calls (`chat_with_agent` · A2A · fan-out)
 
-The permission boundary itself is P-01/P-02 (the edge table, and the MCP-layer gate that consults it). This family covers what a call leaves behind: the recorded execution, the fan-out batch, and the failure shape when the callee is not there. `fan_out` is **self-only** in v1 (`routers/fan_out.py` rejects any other target with 400), so a batch is one agent's N subtasks, not a cross-agent call. Journey J10 — *"my agents can call each other, and I can see what they said."* **No depth counter exists on any inter-agent path** — see *Gaps to fill next*.
+The permission boundary itself is P-01/P-02 (the edge table, and the MCP-layer gate that consults it). This family covers what a call leaves behind: the recorded execution, the fan-out batch, the failure shape when the callee is not there, and how deep a chain of calls may go. A fan-out batch lands on **one** agent — the path agent (`routers/fan_out.py` rejects a body `agent` that is neither `self` nor the path name with 400) — but the path agent need not be the caller: an agent principal can fan out to another agent by naming it in the path, so a batch can be a cross-agent call. Journey J10 — *"my agents can call each other, and I can see what they said."* Chain depth is counted on `chat_with_agent` (sequential, parallel, pull-routed) and `fan_out` since #2806 (IA-04); loops, schedule triggers and agent-emitted events still start a new root — see *Gaps to fill next*.
 
 **IA-01** A recorded agent-to-agent execution had an edge *(Tier A, 🔴)* — the DB-side twin of P-02.
 `schedule_executions.source_agent_name IS NOT NULL AND source_agent_name <> agent_name` ⇒ `agent_permissions(source_agent = source_agent_name, target_agent = agent_name)` exists, or the source is the system agent (`scope='system'` bypasses the gate — `src/mcp-server/src/tools/chat.ts checkAgentAccess`). P-02 says the gate denies; this says nothing got past it. **Trust boundary (closed by ent#614):** `source_agent_name` comes from the `X-Source-Agent` header, whose presence is also what makes `triggered_by = 'agent'` (`chat_execution_service`). Every router that reads the header now resolves it through `dependencies.resolve_source_agent`, which honours it only for an agent-scoped key naming its own agent or the event loopback's backend-vouched source and refuses every other principal with a 403 — so a row with `source_agent_name` set IS an inter-agent call (or a vouched event dispatch), and the false-positive source this note used to record no longer exists. The journey harness drives the MCP path with agent-scoped keys; a canary implementation can read the row directly.
@@ -513,6 +518,10 @@ Signal: `SELECT fan_out_id FROM schedule_executions WHERE fan_out_id IS NOT NULL
 A call to an agent whose container is not running returns `503 {"detail": "Agent is not running"}` on `/api/agents/{name}/chat` (`chat_execution_service`, surfaced verbatim through `chat_with_agent`) within the connect timeout — never a hang to `execution_timeout_seconds`, never a `schedule_executions` row. Measured on a live instance at 0.16 s (#2337 analysis, 2026-09-12); asserted end to end by J10 (#2349). **The A2A half is unverified and the earlier `409` claim was wrong (#2349, 2026-09-15):** the inbound `message/send` route (`routers/a2a.py`) converts a failed dispatch into a JSON-RPC error on HTTP 200 — its only `409` is the outbound `/a2a/call` effect-in-progress — so whether a stopped callee fails fast and row-less on that path is not something any harness has measured.
 Signal: HTTP — `/chat` status 503 within 5 s, AND `SELECT count(*) FROM schedule_executions WHERE agent_name = <callee> AND started_at > <call time>` = 0.
 
+**IA-04** An agent-to-agent hop past the configured chain depth is refused before it runs, and leaves no execution row *(Tier A, 🟡)*
+Every child row of an agent-principal call on `/chat`, `/task` or `/fan-out` is stamped `chain_depth = 1 + MAX(chain_depth)` over the calling agent's `running` rows, keyed on the authenticated principal (`dispatch_admission_service.enforce_inter_agent_depth`, #2806); a hop above `inter_agent_max_chain_depth` (default 8) is refused with 403 `inter_agent_depth_exceeded` after the uniform-404 access check and before the idempotency claim, capacity acquire and row insert, and is recorded as an audit row plus a FAILED `agent_collaboration` activity on the caller. **Caveat:** lowering the setting while deeper rows are still running is a transient true-positive of the predicate, not a violation — those rows were admitted under the old limit. **Residuals** (named in `requirements/core-agent.md` §9.1.1): an agent holding a non-agent key counts as a root, and an agent-key call with no running row counts as depth 1.
+Signal: `SELECT count(*) FROM schedule_executions WHERE chain_depth > <inter_agent_max_chain_depth> AND started_at > <last setting change>` → 0. **Deterministic check:** `tests/unit/test_2806_inter_agent_depth.py`. **Keyed end-to-end:** J10 `test_two_agents_cannot_bounce_a_call_between_each_other_forever`.
+
 ---
 
 ## Canary mapping — what the harness evaluates live
@@ -525,6 +534,7 @@ The first column is the module, on purpose: a table whose first cell is an id is
 |---|---|---|---|
 | `b01_queue_status_coherence.py` | B-01 | B-01 | #882 Phase 2 |
 | `b02_no_queued_without_slots_full.py` | B-02 | B-02 | #882 Phase 3 |
+| `b08_pull_workers_alive.py` | B-08 | B-08 | #2840 |
 | `e01_terminal_state_closure.py` | E-01 | E-01 | #882 Phase 2 |
 | `e02_no_phantom_reversal.py` | E-02 | E-02 | #653 Phase 1 |
 | `e03_completed_rows_populated.py` | E-03 | E-03 | #1077 Phase 4 |
@@ -548,13 +558,13 @@ The first column is the module, on purpose: a table whose first cell is an id is
 - **S-01, E-02, E-09, L-03, G-01 are the five "must never break" invariants** — these encode the fixes from #378/#403/#407/#129 and agent-delete cascades. Put them in a red-alert dashboard. (E-09 is the #129 orphan check, still unimplemented; it carried the id `E-06` until #2337, which now names the shipped `next_run_at` check — see § Canary mapping.)
 - **Invariants with Redis ↔ SQLite ↔ Docker triplets** (S-01, L-01, L-03, G-01) are the highest-leverage targets for chaos testing — they fail under partition/crash, not under ordinary load.
 - **Audit log** (AU-01/02) gives you retroactive reasoning when a live invariant fires — without it, a Tier-A violation has no forensic trail.
-- **Gaps to fill next**: chat-session cascade on user-delete (no such path today); soft-delete vs hard-delete of shared-with-me agents; per-subscription quota invariants (SUB-004 path); fan-out (`fan_out_id`) completion aggregation (the batch *bound* is IA-02; the join-completion half is open); **install/boot** — "a fresh install comes up alive" (J01, J02) has no state invariant beyond G-01's restart sweep and P-05's first-login role; the boot itself is asserted as a scenario by J01's harness until one exists; **inter-agent recursion depth** — no depth counter or caller chain exists on `chat_with_agent`, A2A or fan-out (`X-Source-Agent` is one hop; only rooms carry `ROOM_MAX_CHAIN_DEPTH=8`), so a self-permitted agent can recurse until `max_parallel_tasks` and timeouts bound it. A product guard has to exist before this can be an invariant; file it when J10's harness (#2349) meets it.
+- **Gaps to fill next**: chat-session cascade on user-delete (no such path today); soft-delete vs hard-delete of shared-with-me agents; per-subscription quota invariants (SUB-004 path); fan-out (`fan_out_id`) completion aggregation (the batch *bound* is IA-02; the join-completion half is open); **install/boot** — "a fresh install comes up alive" (J01, J02) has no state invariant beyond G-01's restart sweep and P-05's first-login role; the boot itself is asserted as a scenario by J01's harness until one exists; **inter-agent recursion depth across new roots** — depth is guarded on `chat_with_agent` (sequential, parallel, pull-routed) and `fan_out` since #2806 (IA-04), but `run_agent_loop`, `trigger_schedule` and agent-emitted events each start a fresh depth-0 tree, so an agent near the limit can launder its depth through them (#2973, follow-up to #2806); A2A cross-instance chains are the peer's to bound.
 
 ---
 
 ## Recommended starting subset
 
-Twelve invariants cover ~80% of orchestration risk:
+Thirteen invariants cover ~80% of orchestration risk:
 
 | ID | Invariant | Why |
 |----|-----------|-----|
@@ -566,7 +576,8 @@ Twelve invariants cover ~80% of orchestration risk:
 | E-05 | Dispatched rows have session | #106 |
 | E-09 | No completed-but-not-reported | #129 |
 | B-01 | Queue-status coherence | Backlog integrity |
-| B-02 | No queued without slots-full | Drain liveness |
+| B-02 | Queued work is being picked up | Drain liveness (push and pull) |
+| B-08 | Pull workers alive | Pull pool liveness |
 | L-03 | Delete cascades | Prevents dangling references |
 | G-01 | No resource leak on restart | Recovery correctness |
 | R-01 | No zombie Claude processes | #407 |

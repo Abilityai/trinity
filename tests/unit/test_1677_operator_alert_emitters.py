@@ -61,6 +61,16 @@ _ALLOWED_CALLERS = {
         "platform-only: idempotent id per portal client's legacy dir (ent#308)",
     ("database.py", "DatabaseManager.create_operator_queue_item"):
         "the facade delegation itself (the _operator_queue_ops.create_item spelling)",
+    ("database.py", "DatabaseManager.create_operator_queue_item_with_outcome"):
+        "the facade delegation itself (trinity-enterprise#611: the file poller's create, "
+        "which also reports whether it inserted)",
+    ("database.py", "DatabaseManager.create_native_operator_queue_item"):
+        "the facade delegation itself (trinity-enterprise#611: the native create)",
+    ("services/ask_service.py", "raise_ask"):
+        "the native (MCP) ask seam itself (trinity-enterprise#611): agent-authored, so "
+        "NOT platform-only — bounded instead by the #1632 depth cap, enforced ATOMICALLY "
+        "per agent inside create_native_item, and by the SAME per-agent + fleet rate "
+        "buckets as the file seam; every field validated at the call",
     ("services/agent_client/circuit.py", "_emit_dormant_alert"):  # 1028: package split
         "platform-only: edge-triggered after consecutive failed CB probes (cb-dormant)",
     ("services/archive_storage.py", "_alarm_unwritable_archive_dir"):
@@ -150,6 +160,19 @@ def _receiver_names(node: ast.AST) -> list[str]:
     return names
 
 
+# trinity-enterprise#611 added two creates beside the original: the file
+# poller's `…_with_outcome` and the native ask's create. Each is a way to put a
+# row in the queue, so each is a spelling this guard must see — a new create
+# method is exactly how an unclassified emitter would slip past a guard that
+# matched one name.
+_FACADE_CREATES = (
+    "create_operator_queue_item",
+    "create_operator_queue_item_with_outcome",
+    "create_native_operator_queue_item",
+)
+_OPS_CREATES = ("create_item", "create_item_with_outcome", "create_native_item")
+
+
 def _is_emitter_call(call: ast.Call) -> bool:
     """True for any spelling of the operator-queue create.
 
@@ -164,12 +187,12 @@ def _is_emitter_call(call: ast.Call) -> bool:
     """
     func = call.func
     if isinstance(func, ast.Name):
-        return func.id == "create_operator_queue_item"
+        return func.id in _FACADE_CREATES
     if not isinstance(func, ast.Attribute):
         return False
-    if func.attr == "create_operator_queue_item":
+    if func.attr in _FACADE_CREATES:
         return True
-    if func.attr == "create_item":
+    if func.attr in _OPS_CREATES:
         return any(
             n in ("_operator_queue_ops", "OperatorQueueOperations")
             for n in _receiver_names(func.value)

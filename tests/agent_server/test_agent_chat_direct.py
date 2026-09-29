@@ -31,8 +31,6 @@ class TestSendMessage:
         )
 
         require_agent_answer(response, what="POST /chat")
-        if response.status_code == 429:
-            pytest.skip("Agent queue full")
 
         assert_status(response, 200)
         data = assert_json_response(response)

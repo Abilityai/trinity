@@ -36,7 +36,7 @@
         <!-- Stored value exceeds the current ceiling -->
         <p
           v-if="exceedsCeiling"
-          class="text-xs text-status-warning-600 dark:text-status-warning-400"
+          class="text-xs text-status-warning-700 dark:text-status-warning-400"
         >
           Your setting ({{ stored }}) exceeds the current fleet ceiling
           ({{ ceiling }}); effective limit is {{ ceiling }}.

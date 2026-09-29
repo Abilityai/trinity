@@ -47,6 +47,7 @@ from routers.agents import router as agents_router, set_websocket_manager as set
 from routers.agent_config import router as agent_config_router
 from routers.agent_data import router as agent_data_router
 from routers.agent_files import router as agent_files_router
+from routers.metric_points import router as metric_points_router
 from routers.agent_brain_orb import router as agent_brain_orb_router  # #58 Brain Orb proxy
 from routers.agent_rename import router as agent_rename_router, set_websocket_manager as set_agent_rename_ws_manager, set_filtered_websocket_manager as set_agent_rename_filtered_ws_manager
 from routers.agent_ssh import router as agent_ssh_router
@@ -105,7 +106,8 @@ from routers.paid import router as paid_router
 from routers.nevermined import router as nevermined_router
 from routers.image_generation import router as image_generation_router
 from routers.avatar import router as avatar_router
-from routers.operator_queue import router as operator_queue_router, set_websocket_manager as set_operator_queue_ws_manager
+from routers.operator_queue import router as operator_queue_router, agent_router as operator_queue_agent_router, set_websocket_manager as set_operator_queue_ws_manager
+from services.ask_service import set_websocket_manager as set_ask_service_ws_manager  # trinity-enterprise#611
 from routers.voice import router as voice_router
 from routers.voip import public_router as voip_public_router, auth_router as voip_auth_router
 from routers.event_subscriptions import router as event_subscriptions_router, set_websocket_manager as set_event_subs_ws_manager, set_filtered_websocket_manager as set_event_subs_filtered_ws_manager
@@ -116,6 +118,7 @@ from routers.a2a import a2a_server_router  # ent#157 A2A inbound server (well-kn
 from routers.admin_recovery import router as admin_recovery_router  # #834 Phase 1c
 from routers.messages import router as messages_router  # Proactive Messaging (#321)
 from routers.public_memory import router as public_memory_router  # MEM-001 write path (#888)
+from routers.seat_decisions import router as seat_decisions_router  # ent#638 seat decision record
 from routers.loops import (
     agent_router as loops_agent_router,
     loop_router as loops_loop_router,
@@ -130,6 +133,7 @@ from services.ws_identity_service import accessible_agents_for, resolve_ws_ident
 # keeps the move reviewable as a move.
 from client_portal.asks.router import router as portal_asks_router
 from client_portal.work.router import router as portal_work_router
+from client_portal.suggestions.router import router as portal_suggestions_router
 from client_portal.router import router as client_portal_router
 from shared_sessions.router import budget_router as room_budget_router
 from shared_sessions.router import router as rooms_router
@@ -308,6 +312,7 @@ set_reports_filtered_ws_manager(filtered_manager)
 set_monitoring_ws_manager(manager)
 set_monitoring_filtered_ws_manager(filtered_manager)
 set_operator_queue_ws_manager(manager)
+set_ask_service_ws_manager(manager)  # trinity-enterprise#611: the ask sink's thin triggers
 set_opqueue_sync_ws_manager(manager)
 set_event_subs_ws_manager(manager)
 set_event_subs_filtered_ws_manager(filtered_manager)
@@ -1285,6 +1290,10 @@ app.include_router(agents_router)
 app.include_router(agent_config_router)
 app.include_router(agent_data_router)  # #1169: data export/import
 app.include_router(agent_files_router)
+# trinity-enterprise#478. Registered beside agent_files_router and ahead of the
+# agents router's single-segment `/{name}` routes (Invariant #4) — a static
+# path under /api/agents must be declared before anything that could shadow it.
+app.include_router(metric_points_router)
 app.include_router(agent_brain_orb_router)  # #58: Brain Orb read-only data proxy
 app.include_router(agent_rename_router)
 app.include_router(agent_ssh_router)
@@ -1336,6 +1345,7 @@ app.include_router(mcp_auth_router)  # MCP inline email auth (#848) — internal
 app.include_router(agent_mcp_key_router)  # Per-agent Trinity MCP key: read/verify/rotate (#1854)
 app.include_router(messages_router)  # Proactive Messaging (#321)
 app.include_router(public_memory_router)  # MEM-001 write path (#888)
+app.include_router(seat_decisions_router)  # ent#638 seat decision record
 app.include_router(subscriptions_router)  # Subscription Management (SUB-001)
 app.include_router(monitoring_router)  # Agent Monitoring (MON-001)
 app.include_router(slack_public_router)  # Slack Integration Public (SLACK-001)
@@ -1349,6 +1359,7 @@ app.include_router(nevermined_router)  # Nevermined Admin Config (NVM-001)
 app.include_router(image_generation_router)  # Image Generation (IMG-001)
 app.include_router(avatar_router)  # Agent Avatars (AVATAR-001)
 app.include_router(operator_queue_router)  # Operator Queue (OPS-001)
+app.include_router(operator_queue_agent_router)  # an agent's own ask readback (trinity-enterprise#611)
 app.include_router(voice_router)  # Voice Chat (VOICE-001)
 app.include_router(voip_public_router)  # VoIP Telephony Media Streams WS (VOIP-001)
 app.include_router(voip_auth_router)  # VoIP Telephony binding + trigger (VOIP-001)
@@ -1378,6 +1389,8 @@ app.include_router(portal_asks_router)
 # (trinity-enterprise#525, the visual half of ent#457). Same prefix, same
 # transition rule as the asks router above; platform-door only inside.
 app.include_router(portal_work_router)
+# trinity-enterprise#465 — Workspace suggestions: per-viewer, per-agent, platform door only.
+app.include_router(portal_suggestions_router)
 
 
 # #847 Phase 0 — Enterprise modules (closed-source companion submodule

@@ -55,6 +55,12 @@ def _format_model_name(model_id: str) -> str:
         # NOT mapped: its fallback is already correct, and a prefix entry for it
         # would swallow this one (startswith, first match wins).
         "claude-fable-5-1": "Claude Fable 5.1",
+        # #2987: same shape one tier over — `claude-opus-5-5` keeps its trailing
+        # `-5` past the 8-digit strip and would render "Claude Opus 5 5". It must
+        # sit BEFORE any `claude-opus-5` prefix entry (startswith, first match
+        # wins); `claude-opus-5` itself stays unmapped because its fallback is
+        # already correct, and mapping it here would swallow this line.
+        "claude-opus-5-5": "Claude Opus 5.5",
         "claude-sonnet-4": "Claude Sonnet 4",
         "claude-opus-4": "Claude Opus 4",
         "claude-haiku-4": "Claude Haiku 4",

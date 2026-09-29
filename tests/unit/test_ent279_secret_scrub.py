@@ -51,6 +51,7 @@ from unittest.mock import MagicMock
 
 import fakeredis
 import pytest
+from unit._write_params import flat_kwargs
 
 os.environ.setdefault("REDIS_URL", "redis://test:test@redis:6379")
 os.environ.setdefault("REDIS_PASSWORD", "test")
@@ -437,7 +438,7 @@ class TestApplyResultChokepoint:
 
     def test_success_scrubs_response_execution_log_tool_calls_and_raw_response(self):
         result, mdb = self._run(self._success_envelope(), [PLAIN])
-        kw = mdb.update_execution_status.call_args.kwargs
+        kw = flat_kwargs(mdb.update_execution_status.call_args)
         # The three agent-free-text columns on schedule_executions.
         assert PLAIN not in (kw["response"] or "")
         assert PLAIN not in (kw["execution_log"] or "")
@@ -463,7 +464,7 @@ class TestApplyResultChokepoint:
             metadata={"cost_usd": 0.0},
         )
         result, mdb = self._run(env, [PLAIN])
-        assert PLAIN not in mdb.update_execution_status.call_args.kwargs["error"]
+        assert PLAIN not in flat_kwargs(mdb.update_execution_status.call_args)["error"]
         assert PLAIN not in (result.error or "")
         assert MARK in result.error
 
@@ -471,7 +472,7 @@ class TestApplyResultChokepoint:
         # Behaviour-neutral for OSS: nothing staged -> the secret text is untouched.
         result, mdb = self._run(self._success_envelope(), [])
         assert result.response == f"connected using {PLAIN}"
-        assert PLAIN in mdb.update_execution_status.call_args.kwargs["response"]
+        assert PLAIN in flat_kwargs(mdb.update_execution_status.call_args)["response"]
 
     def test_escaping_evasion_json_escaped_value_is_redacted(self):
         # THE feature's headline test: a quote/backslash/non-ASCII secret in a
@@ -487,7 +488,7 @@ class TestApplyResultChokepoint:
             },
         )
         result, mdb = self._run(env, [EVIL])
-        kw = mdb.update_execution_status.call_args.kwargs
+        kw = flat_kwargs(mdb.update_execution_status.call_args)
         escaped = json.dumps(EVIL)[1:-1]
         for blob in (
             kw["response"],
@@ -546,7 +547,7 @@ class TestWriteTerminalAndGate:
                     agent_name="agent-x",
                 )
             )
-        assert PLAIN not in mdb.update_execution_status.call_args.kwargs["error"]
+        assert PLAIN not in flat_kwargs(mdb.update_execution_status.call_args)["error"]
 
 
 # ---------------------------------------------------------------------------
@@ -605,9 +606,9 @@ class TestChatExecutionChokepoints:
                 )
             )
         # assistant message content scrubbed
-        assert PLAIN not in mdb.add_chat_message.call_args.kwargs["content"]
+        assert PLAIN not in flat_kwargs(mdb.add_chat_message.call_args)["content"]
         # terminal row response/execution_log/tool_calls scrubbed
-        kw = mdb.update_execution_status.call_args.kwargs
+        kw = flat_kwargs(mdb.update_execution_status.call_args)
         assert PLAIN not in (kw["response"] or "")
         assert PLAIN not in (kw["execution_log"] or "")
         assert PLAIN not in (kw["tool_calls"] or "")
@@ -638,7 +639,7 @@ class TestChatExecutionChokepoints:
                     collaboration_activity_id=None,
                 )
             )
-        assert PLAIN not in mdb.update_execution_status.call_args.kwargs["error"]
+        assert PLAIN not in flat_kwargs(mdb.update_execution_status.call_args)["error"]
         assert PLAIN not in str(exc.value.detail)
 
     def test_parse_agent_http_error_scrubs_before_log_and_persist(self):
@@ -713,7 +714,7 @@ class TestPullSinkChokepoint:
             content=f"result: {PLAIN}",
             execution_log=[{"type": "tool_result", "content": f"psql {PLAIN}"}],
         )
-        kw = mdb.update_execution_status.call_args.kwargs
+        kw = flat_kwargs(mdb.update_execution_status.call_args)
         assert PLAIN not in (kw["response"] or "")
         assert PLAIN not in (kw["execution_log"] or "")
 
@@ -724,7 +725,7 @@ class TestPullSinkChokepoint:
             execution_log=None,
             error_code="agent_error",
         )
-        kw = mdb.update_execution_status.call_args.kwargs
+        kw = flat_kwargs(mdb.update_execution_status.call_args)
         assert PLAIN not in (kw["error"] or "")
         assert PLAIN not in (kw["response"] or "")
 

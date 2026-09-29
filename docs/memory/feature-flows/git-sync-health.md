@@ -94,7 +94,8 @@ Migration: `sync_health` in `src/backend/db/migrations.py` (idempotent,
 
 - `.trinity/sync-state.json` — written by the agent's auto-sync loop after
   every cycle. Fields: `last_sync_status`, `last_sync_at`,
-  `last_error_summary`, `consecutive_failures`. Read/merged into
+  `last_error_summary`, `consecutive_failures`, and (#3011)
+  `last_successful_push_at` + `behind_after_fetch`. Read/merged into
   `GET /api/git/status` so the backend poller picks it up.
 
 ## Execution Flow
@@ -171,9 +172,14 @@ merge_gitignore_after_clone(name)   monotonic deadline _MERGE_READY_TIMEOUT_SECO
              │
              ▼
 ┌──────────────────────────────┐
-│ routers/git._run_auto_sync_  │  git add -A
-│ once(home_dir)               │  git commit (if dirty)
-│                              │  git push origin HEAD
+│ routers/git._run_auto_sync_  │  refuse: source-mode on default branch (#3011)
+│ once(home_dir)               │  git add -A
+│                              │  git commit (if dirty)
+│                              │  git fetch origin <branch>
+│                              │  behind > 0 → git rebase --autostash
+│                              │     conflict → rebase --abort, record diverged
+│                              │     clean    → push --force-with-lease=<fetched>
+│                              │  else git push origin HEAD
 └────────────┬─────────────────┘
              │
              ▼
@@ -182,32 +188,34 @@ merge_gitignore_after_clone(name)   monotonic deadline _MERGE_READY_TIMEOUT_SECO
 └──────────────────────────────┘
 ```
 
-- Loop is guarded by `should_run_auto_sync()` (`GIT_SYNC_AUTO=true` env).
-- `containers_run` env-var wiring in
-  `services/agent_service/crud.py` sets `GIT_SYNC_AUTO=true` only for
-  non-source-mode GitHub-template agents (auto-pushing to `main` would
-  clobber protected branches).
-- **On every container rebuild (ent#109)** the flag is re-derived by
-  `lifecycle.py::_apply_git_env_from_db` as **`auto_sync_enabled` OR the baked
-  env**, not from the column alone. The two creation writers disagree today:
-  the DB opt-in in `crud.py::_materialize_agent_files` carries
-  `and not config.ephemeral` inside a swallowing `try/except` while
-  `_apply_github_env` does not, and the column defaults to `0` — so
-  env-`true`/DB-`0` is reachable from one transient DB hiccup at creation and
-  permanently for ghosts, and DB-only derivation would **silently stop
-  auto-push** for that slice of the fleet (no error, just a stale
-  `agent_sync_state`). The helper **derives only — it never writes the column
-  back**: `PUT /{agent}/git/auto-sync` writes the row and nothing else while
-  the agent gates on container env, so "baked `true` / DB `0`" is *also*
-  exactly what an owner's explicit disable looks like. A backfill would
-  silently re-enable it, erase the only record of that intent, and — since
-  `PUT .../auto-sync` is `OwnedAgentByName` while `POST .../start` (which
-  triggers the recreate) is `AuthorizedAgentByName` — let a shared non-owner,
-  or an agent-scoped key resolving to its owner with the owner's role
-  (trinity-ops-agent#232), flip an owner-only flag. The disagreement is
-  logged instead. Making
-  `PUT /git/auto-sync` authoritative over the baked env is a tracked
-  follow-up.
+- **The toggle is authoritative and live (#3010).** The loop starts whenever
+  the agent can ask the platform (`TRINITY_BACKEND_URL` + its own
+  `TRINITY_MCP_API_KEY`) or was baked with `GIT_SYNC_AUTO=true`, and **every
+  cycle** reads the owner's flag through `GET /api/agents/{name}/git/auto-sync`
+  (`auto_sync.resolve_auto_sync_enabled`). OFF skips that cycle, ON runs it —
+  a `PUT .../git/auto-sync` lands within one interval, no recreate. 404 "Git
+  not configured" → off; the platform unreachable, a 5xx, an auth refusal or a
+  uniform 404 → the `GIT_SYNC_AUTO` env, which is the last value the platform
+  handed the container. The agent-side `GET /api/git/status` reports the value
+  the loop is running with as `auto_sync_enabled`.
+- `auto_sync_enabled` in `agent_git_config` is the **one writer**. Creation
+  (`crud.py::_materialize_agent_files`) sets it from the same
+  `_git_auto_sync_baked` predicate that bakes `GIT_SYNC_AUTO` — ghosts
+  included — and on every container rebuild (ent#109)
+  `lifecycle.py::_apply_git_env_from_db` derives `GIT_SYNC_AUTO` from the
+  flag **alone**. The old `DB flag OR baked env` meant an owner's OFF never
+  stuck (creation set both; the PUT cleared only the DB; the OR re-armed it
+  on every recreate). Still derive-only, never written back, so the recreate
+  trigger (`POST .../start`, `AuthorizedAgentByName`) cannot flip the
+  owner-only flag (`PUT .../auto-sync`, `OwnedAgentByName`).
+- **One-shot backfill** (`auto_sync_enabled_backfill` + Alembic `0075`):
+  live non-source-mode ghosts — the env-true/DB-0 slice the DB can
+  identify — get the flag set so they keep auto-pushing. Agents bound later
+  through `POST /git/initialize` are also `source_mode = 0` but never baked
+  the env, so a wider backfill would arm pushes they never had; a non-ghost
+  whose flag is 0 now stays off (an owner's earlier OFF finally takes effect).
+- Settings → **Git sync** (`GitSyncSettingsPanel.vue`) carries both toggles
+  (auto-sync and pause-schedules-while-failing).
 - Loop swallows every exception so a single bad tick can't kill the
   heartbeat.
 - **#1595:** the cycle runs in a worker thread (`asyncio.to_thread`) so a
@@ -314,6 +322,110 @@ _run_auto_sync_once (worker thread, repo lock held)
   base-image rebuild + agent recreate; pre-existing bloat recovery is
   ops-side (trinity-ops-agent#127) using `GIT_MAINTENANCE_TIMEOUT_SECONDS`.
 
+### 1b. Reconcile before push (#3011)
+
+The cycle used to be `add -A → commit → push origin HEAD` with no fetch, so
+the first foreign push to the agent's branch failed every later cycle
+non-fast-forward, forever — the `sync_failing` alert fired but the divergence
+was never repaired and the agent's commits piled up on the container disk. The
+heartbeat is now the durability mechanism for agents whose humans also push,
+so it reconciles (all under `_REPO_LOCK`, every child via `run_registered`):
+
+- **Refusal first.** `GIT_SOURCE_MODE=true` (pull-only by contract) on the
+  repo's default branch (`origin/HEAD`, else `main`/`master`) refuses before
+  anything is committed: `failed`, `refused: source-mode on <branch>`. The
+  clone stays a clean mirror and three refusals raise `sync_failing`, naming
+  the contradictory config. Fork-to-own agents own their fork's `main` and are
+  exempt — recognised by `GIT_UPSTREAM_REPO` or, since that env is not
+  re-derived on recreate, the `upstream` remote on the persistent volume.
+- **Fetch** `origin <branch>` (the one new network call). A branch missing on
+  the remote (a fresh working branch) is not an error — the push creates it.
+- **Behind → rebase** `--autostash` onto `origin/<branch>`. A clean rebase
+  pushes with `--force-with-lease=refs/heads/<branch>:<fetched sha>`, so a
+  push landing between fetch and push is rejected (recorded, retried next
+  cycle), never overwritten; never the bare forced form. Not behind → the
+  plain `git push origin HEAD` as before.
+- **Conflict → abort.** `git rebase --abort` (also on a timeout-killed
+  rebase) leaves the repo exactly as it was — the agent's commit intact, the
+  remote untouched, nothing reset, nothing resolved automatically — and
+  records `diverged: rebase conflict on <branch>`; the existing three-strike
+  `sync_failing` path raises it. Resolution stays with the operator
+  `sync_to_github` endpoint, which is unchanged.
+- **Recorded:** `behind_after_fetch` (the commits the remote had that we
+  lacked, before the rebase) and `last_successful_push_at` (stamped on success)
+  in `sync-state.json`, for the divergence-age work (trinity-enterprise#706).
+
+### 1c. Durability owner and `.claude/settings.json` (trinity-enterprise#708)
+
+**Ruling (2026-09-25): on a deployed agent the platform heartbeat owns
+commit-and-push durability.** It is fleet-wide, one writer, observable in
+`agent_sync_state` and freeze-capable. The marketplace `add-git-sync`
+Stop/SessionStart hooks own it for **local** sessions only; they are invisible to
+sync health and do not run under headless `claude --print`. On Trinity the skill
+stands down when it sees the platform (`TRINITY_*` env), which is a marketplace
+follow-up. Two writers doing `git add -A` on one tree is the race this rules out.
+
+**`.claude/settings.json` is committable.** It is Claude Code's project settings
+file, and the #2036 file-level ignore silently dropped every template's hooks
+(`add-git-sync` had to learn to negate it). What #2036 fixed was one content:
+absolute `/opt/trinity/` hook paths, which brick any clone made outside the
+container. Every platform commit path now runs a guard after staging:
+
+| Path | Guard |
+|---|---|
+| heartbeat `_run_auto_sync_once` | `routers/git.py::_guard_container_only_settings` |
+| operator Push `sync_to_github` | same |
+| reset-to-main-preserve-state `reset_to_main_preserve_state_impl` (route + MCP tool) | same |
+| `initialize_git_in_container` (backend) | `gitignore.CONTAINER_ONLY_SETTINGS_GUARD` (shell twin, same rule) |
+
+The guard refuses **new** content that registers a container-only hook or
+carries a credential-bearing key. A container-only hook is a command in the
+`hooks` subtree under absolute `/opt/trinity/`; a `permissions.deny` rule that
+merely names the path is portable and commits. Credential-bearing keys matter
+because `HOME` is the repo root (#1703), so this file is also Claude Code's
+**user** settings: a non-empty top-level `env`, `apiKeyHelper`,
+`awsAuthRefresh`, `awsCredentialExport`, `gcpAuthRefresh` or `otelHeadersHelper`
+(the keys the Claude Code settings reference documents as holding a credential
+or naming the command that produces one) is refused, and so is content that is
+not UTF-8 JSON object text, which cannot be checked (fail closed; a non-UTF-8
+file no longer stops the cycle). The platform-written plugin config
+(`extraKnownMarketplaces`, `enabledPlugins`) commits normally.
+
+What happens to a refused index copy depends on HEAD:
+
+| HEAD holds | Action |
+|---|---|
+| the same content | nothing: it is already in history, and untracking would only commit a deletion of the template's settings (e.g. a harmless `env` like `BASH_DEFAULT_TIMEOUT_MS`) |
+| other content with no `/opt/trinity/` hook | keep the HEAD copy (`git reset`) |
+| a `/opt/trinity/` hook (pre-#2036 leak) | untrack, so the next commit deletes it from the remote and unbricks future clones |
+| nothing | untrack (it stays on disk, untracked) |
+
+A credential already committed stays in history either way — rotate it; a
+deletion commit would not un-leak it. The log line names the reason and the
+keys, never a value, and is emitted once per distinct content rather than every
+cycle. The shell twin runs the same predicates with the container's `python3`,
+keys passed as argv (parity-tested). The working-tree file is never touched.
+This also covers the legacy copies that `startup.sh`'s exact-match removal
+(ent#345) leaves on long-lived volumes. The heartbeat decides "anything to
+commit?" from **staged** entries only (`_has_staged_changes`, the same rule
+Push uses), so a guarded-out file that stays untracked on disk never turns a
+cycle into an empty-commit failure.
+
+**Existing agents and the old ignore line.** An agent created before ent#708
+has `.claude/settings.json` in its `.gitignore` from the old canonical list. The
+`.gitignore` merge (Push, start, creation) drops that line only inside a
+container whose agent server carries the guard: it probes
+`/app/agent_server/routers/git.py` for `_guard_container_only_settings`
+(`gitignore._GITIGNORE_GUARD_GATED_SUPERSEDED_LINES`). A container still on a
+pre-guard base image keeps the ignore until it is recreated on the new image,
+because its heartbeat would otherwise commit a legacy `/opt/trinity/` copy or a
+credential unchecked. On the first merge after that, the file becomes
+committable, and an auto-syncing agent commits its current settings once (the
+platform-written plugin config, or the template's settings) unless the guard
+refuses them. A user who wrote the exact line `.claude/settings.json` in their
+own region loses it too; they can re-add a differently spelled rule such as
+`/.claude/settings.json`.
+
 ### 2. Backend poller
 
 ```
@@ -330,6 +442,11 @@ SyncHealthService._poll_loop (SYNC_HEALTH_POLL_INTERVAL_SECONDS, default 60 s)
     │     ├── if consecutive_failures crossed 3:
     │     │     └── db.create_operator_queue_item(
     │     │           type='sync_failing', priority='high', …)
+    │     │         #2107: when last_error_summary is a refused push
+    │     │         (git_service.is_push_denied) the item is titled
+    │     │         "Git token can't push", says it will not recover on
+    │     │         its own, and carries context.cause='push_denied' +
+    │     │         context.remediation (grant Contents: write / `repo`)
     │     ├── #1595 git_bloat alerts (same edge-trigger pattern):
     │     │     ├── git_dir_bytes crossed GIT_DIR_ALERT_BYTES (10 GiB)
     │     │     └── maintenance_failures crossed 3
@@ -350,7 +467,7 @@ GET /api/git/status  (poller 10 s · UI git panel 60 s · MCP get_git_status)
                            ctx.terminate, auto-sync and pipe-close)
                 └── _compute_git_status()                  (worker thread)
                       rev-parse / log / merge-base / remote -> run_registered
-                      git --no-optional-locks status --porcelain -> NO index.lock
+                      git --no-optional-locks status --porcelain -z -> NO index.lock
                       git fetch origin (30 s)               -> run_registered
                       lstat index.lock -> index_lock_stuck  (REPORT, never unlink)
                       + computed_at, lock_recovery
@@ -361,10 +478,10 @@ Two bounds, deliberately distinct. `_STATUS_FOLLOWER_WAIT_SECONDS = 35` is a
 given up (poller 10 s, backend `git_service` 30 s) — a follower waiting longer
 can only produce work nobody awaits, and times out as `504`. The leader carries
 its own **computation** bound (`_STATUS_LEADER_DEADLINE_SECONDS = 90`) because
-the child timeouts sum to ~130 s nominal (10 `rev-parse` + 10 `status` + 10
+the child timeouts sum to ~130–150 s nominal (10 `rev-parse` + 10 `status` + 10
 `log` + **30 `fetch`** + 10 `merge-base` + 10 `log` + 10 `remote get-url`, plus
-10 `_persist_last_remote_sha` + 10 `_get_pull_branch` + 10‥20
-`_dual_ahead_behind_payload`, before `run_registered`'s post-`killpg` drain), and
+10 `_persist_last_remote_sha` + 10 `_get_pull_branch` + 10‥30
+`_dual_ahead_behind_payload` (#2105), before `run_registered`'s post-`killpg` drain), and
 a wedged leader would otherwise hold the in-flight slot for all of it.
 
 Coalescing **is** bounded staleness and the doc says so rather than denying it:
@@ -388,6 +505,15 @@ computes BOTH tuples:
   (template-improvements signal)
 - `ahead_working` / `behind_working` — `HEAD` vs `origin/<current_branch>`
   (peer-divergence signal — the P6 case)
+
+The working tuple uses `origin/<current_branch>` whatever the branch is named
+(#2105). It used to do that only for `trinity/*` branches. Every other branch got
+the `origin/main` counts under the working label, and the fleet audit reads
+`ahead_working` as unpushed commits. When there is no upstream (the branch was
+never pushed, or HEAD is detached), `ahead_working` counts the commits that no
+remote holds, and `behind_working` is `null`. A count that can't be computed is
+`null`, never 0: for example, the main tuple on a repo with no `main`. The
+backend stores `null` as 0 (`sync_health_service._coerce_counter`).
 
 Legacy `ahead` / `behind` in the response alias the main tuple so older
 clients keep working.
@@ -452,7 +578,7 @@ the data-loss setup.
 | `services/sync_health_service.py` | Background poller + operator-queue emitter. #2742: `synchealth:leader` lease (fail-open, compare-and-delete release), the `SYNC_HEALTH_POLL_INTERVAL_SECONDS` knob, and `_coerce_lock_recovery` / `_coerce_lock_stuck` + the one-shot recovery WARNING |
 | `services/fleet_audit_service.py` | `build_fleet_sync_audit()` aggregation |
 | `services/agent_service/crud.py` | Sets `GIT_SYNC_AUTO` env + `auto_sync_enabled=1` for non-source-mode agents; `_apply_github_env` gates on `git_service._git_auto_sync_baked` (#2069, single owner of the bake predicate); `_materialize_agent_files` fires `spawn_gitignore_merge_after_clone` on the same predicate (#2069 creation seed) |
-| `services/agent_service/lifecycle.py` | `_apply_git_env_from_db` re-derives `GIT_SYNC_AUTO` on every container rebuild as `auto_sync_enabled` OR the baked env — derive-only, never writing the column back (ent#109); `start_agent_internal` fires `spawn_gitignore_merge_after_clone` on the DB `auto_sync_enabled` flag (#2069 T1 fleet remediation) |
+| `services/agent_service/lifecycle.py` | `_apply_git_env_from_db` re-derives `GIT_SYNC_AUTO` on every container rebuild from `auto_sync_enabled` alone (#3010) — derive-only, never writing the column back (ent#109); `start_agent_internal` fires `spawn_gitignore_merge_after_clone` on the DB `auto_sync_enabled` flag (#2069 T1 fleet remediation) |
 | `services/git_service.py` | `merge_gitignore_after_clone` (readiness-gated poll-then-merge, reusing `_build_gitignore_merge_command`), `spawn_gitignore_merge_after_clone` (fire-and-forget, Semaphore-capped), `_git_auto_sync_baked` (the `GIT_SYNC_AUTO`-bake predicate) — #2069 creation-time seed |
 | `services/git_service.py` | `_GITIGNORE_PROTECTED` + the four `_GITIGNORE_BLOCK_*`/`_GITIGNORE_FLOOR_*` markers, the rebuilt `_build_gitignore_merge_command`, the reporting probes on `_build_rm_cached_ignored_command`, `GitignoreSweep`/`_parse_gitignore_sweep`/`_shadowed_negations`/`_coerce_sweep`/`_with_sweep`, `_emit_gitignore_untracked_alert`, `_augment_commit_message` — #2529 precedence + honest sweep reporting |
 | `db_models.py`, `routers/git.py`, `src/mcp-server/src/tools/git.ts`, `src/frontend/src/composables/useGitSync.js` | the three sweep fields on `GitSyncResult` and their five surfaces (#2529) |

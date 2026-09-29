@@ -17,6 +17,7 @@ import { createRoomTools } from "./tools/rooms.js";  // ent#169 shared sessions
 import { createScheduleTools } from "./tools/schedules.js";
 import { createTagTools } from "./tools/tags.js";
 import { createNotificationTools } from "./tools/notifications.js";
+import { createMetricsTools } from "./tools/metrics.js";
 import { createReportTools } from "./tools/reports.js";
 import { createCanvasTools } from "./tools/canvas.js";
 import { createSubscriptionTools } from "./tools/subscriptions.js";
@@ -31,6 +32,7 @@ import { createVoipTools } from "./tools/voip.js";
 import { createFileTools } from "./tools/files.js";
 import { createPipelineTools } from "./tools/pipelines.js";
 import { createMemoryTools } from "./tools/memory.js";
+import { createDecisionTools } from "./tools/decisions.js";
 import { createLoopTools } from "./tools/loops.js";
 import { policyFor, resolveClient, withAgentAccess, type ToolAccessPolicy } from "./access.js";
 import { createReminderTools } from "./tools/reminders.js";
@@ -628,6 +630,7 @@ export async function createServer(config: ServerConfig = {}) {
     createTagTools(client, requireApiKey),
     createNotificationTools(client, requireApiKey),
     createReportTools(client, requireApiKey),     // Agent Reports (#918)
+    createMetricsTools(client, requireApiKey),    // Declared metrics (ent#478)
     createCanvasTools(client, requireApiKey),     // Agent canvas (ent#438)
     createFileTools(client, requireApiKey),       // FILES-001 — outbound file sharing
     createPipelineTools(client, requireApiKey),   // #919 — agent-defined pipeline introspection
@@ -640,6 +643,7 @@ export async function createServer(config: ServerConfig = {}) {
     createMessageTools(client, requireApiKey),
     createVoiceReplyTools(client, requireApiKey), // send_voice_reply — per-message voice (ent#117)
     createMemoryTools(client, requireApiKey),     // MEM-001 write path (#888)
+    createDecisionTools(client, requireApiKey),   // Seat decision record (ent#638)
     createLoopTools(client, requireApiKey),       // Sequential agent loops (#740)
     createReminderTools(client, requireApiKey),   // Agent self-reminders (#1296)
     createVoipTools(client, requireApiKey),       // VoIP telephony — call_user (VOIP-001, #1056)

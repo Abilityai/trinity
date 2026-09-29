@@ -91,8 +91,8 @@
 > `raise_for_status`), a 429/auth is interceptable **pre-raise**, adjacent to the #678 502 block,
 > and falls through to the single shared success-parse path by reassigning `response` — no
 > duplication. New module helpers: `classify_switch_failure(response)` maps the response to the
-> full SUB-003 surface (`429`→rate_limit; `503/401/403/402` or `is_auth_failure` body→auth; else
-> None); `_extract_agent_error(response, fallback)` is the shared body→`(msg, metadata, execution_log)`
+> full SUB-003 surface (a model-rejection body → None first, #3012; `429`→rate_limit;
+> `503/401/403/402` or `is_auth_failure` body→auth; else None); `_extract_agent_error(response, fallback)` is the shared body→`(msg, metadata, execution_log)`
 > extractor (the 3rd element is the #1853 transcript) reused by the `except httpx.HTTPError`
 > handler; `_salvage_attempt_cost(metadata)` feeds the #678
 > R2 `previous_attempt_cost` rollup. The retry is guarded by a dedicated
