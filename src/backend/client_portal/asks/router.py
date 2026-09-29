@@ -22,7 +22,12 @@ from dependencies import PERSON_REQUIRED_DETAIL
 
 from . import service
 from .models import WorkspaceAsk, WorkspaceAskAnswer
-from .service import AskError
+from .service import AskError, AsksUnavailable
+
+# The 503 `asks_unavailable` Retry-After, in seconds (trinity-enterprise#610,
+# PR A0). It is the Workspace's asks poll interval (`Portal.vue::ASKS_POLL_MS`):
+# its next read is the retry anyway.
+ASKS_RETRY_AFTER_SECONDS = "20"
 
 router = APIRouter(
     prefix="/api/enterprise/client-portal/asks",
@@ -55,10 +60,19 @@ def list_asks(
     stops being true. `include_ended` (trinity-enterprise#611) adds the asks that
     ended in the last 7 days, so a person sees how an ask ended instead of
     watching it vanish; the sidebar count stays pending-only on the client.
+
+    An unreadable queue or roster is **503 `asks_unavailable`**, never `[]`
+    (trinity-enterprise#610, PR A0): an empty list is a claim that nothing is
+    waiting, and the client keeps its last good list on this answer.
     """
     try:
         page = service.list_asks_page(principal.email, principal.is_platform, agent_name,
                                       include_ended=include_ended, limit=limit, cursor=cursor)
+    except AsksUnavailable:
+        raise HTTPException(status_code=503, detail={
+            "code": "asks_unavailable",
+            "message": "Couldn't load your asks — try again.",
+        }, headers={"Retry-After": ASKS_RETRY_AFTER_SECONDS})
     except AskError as e:
         _raise(e)
     response.headers["X-Total-Count"] = str(page.total)

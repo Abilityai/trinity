@@ -865,6 +865,10 @@ class EmailLoginResponse(BaseModel):
 
 ## Security Considerations
 
+### Binding the sign-in email is session-only (trinity-enterprise#711)
+
+The address an account signs in with is its sign-in identity, so changing it is a human, signed-in act. `PUT /api/users/me/email` (`routers/users.py`) therefore takes `Depends(require_interactive)`: a signed-in (JWT) session only; every MCP key, the person's own `user` key included, gets 403 and the column does not move. `PUT` / `DELETE /api/users/me/github-pat` take the same rule. See requirements `auth.md` §2.8.
+
 ### Email Enumeration Prevention
 
 The system prevents attackers from discovering which emails are registered:
