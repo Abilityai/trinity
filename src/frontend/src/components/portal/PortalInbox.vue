@@ -51,6 +51,10 @@
         data-testid="inbox-mark-all-read"
         @click="askMarkAll"
       >{{ markAllLabel(unreadRows.length) }}</BaseButton>
+      <!-- Sign-off: the shell's light/dark switch, through the SAME seam the
+           chat and the room headers expose — without it the Inbox, the
+           Workspace's landing, was the one stage with no theme control. -->
+      <div class="shrink-0 flex items-center min-h-8"><slot name="header-end" /></div>
     </header>
     <ConfirmDialog
       v-model:visible="markAllConfirmOpen"

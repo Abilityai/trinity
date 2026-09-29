@@ -343,7 +343,11 @@
           @refresh="refreshThreads"
           @open-chat="(url) => router.push(url)"
           @reply="replyInChat"
-        />
+        >
+          <template #header-end>
+            <PortalThemeSwitch />
+          </template>
+        </PortalInbox>
 
         <PortalConversation
           v-else-if="activeAgent"
