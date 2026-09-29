@@ -61,7 +61,7 @@
         <!-- ent#402: while searching the label states the MATCH count. The
              toggle beside the rows states the overflow, so this must not
              repeat it — one fact, one place. -->
-        <div class="px-1.5 pt-1 pb-1.5 text-[11px] font-semibold uppercase tracking-wide text-gray-400">{{ isSearching ? agentResultsLabel(agentResults.total) : 'Agents' }}</div>
+        <div class="px-1.5 pt-1 pb-1.5 text-[11px] font-semibold uppercase tracking-wide" :class="META_INK">{{ isSearching ? agentResultsLabel(agentResults.total) : 'Agents' }}</div>
 
         <!-- #2159: the roster load is the first thing that happens after
              sign-in and it is not instant on a large fleet. Without this the
@@ -108,8 +108,8 @@
                  exists to remove. The slug stays the subtitle when the agent
                  renders under a label; the preview takes the line below it,
                  and never both lines at once. -->
-            <span v-if="rowMeta[a.name]?.preview" class="block text-xs text-gray-400 truncate">{{ rowMeta[a.name].preview }}</span>
-            <span v-else-if="agentLabel(a) !== a.name" class="block text-xs text-gray-400 truncate font-mono">{{ a.name }}</span>
+            <span v-if="rowMeta[a.name]?.preview" class="block text-xs truncate" :class="META_INK">{{ rowMeta[a.name].preview }}</span>
+            <span v-else-if="agentLabel(a) !== a.name" class="block text-xs truncate font-mono" :class="META_INK">{{ a.name }}</span>
           </span>
           <!-- ent#523 / board A3: when you last heard from this agent. Tight
                enough to sit beside the name without competing with it. -->
@@ -127,7 +127,7 @@
                identical on every row — the same reason the availability slot
                below reserves its own footprint. `tabular-nums` was already
                right and is what makes a fixed column line up digit-for-digit. -->
-          <span class="shrink-0 w-14 text-right text-[11px] text-gray-400 tabular-nums">
+          <span class="shrink-0 w-14 text-right text-[11px] tabular-nums" :class="META_INK">
             <template v-if="rowMeta[a.name]?.time">{{ rowMeta[a.name].time }}</template>
           </span>
           <!-- #2196: the agent can't currently run. LABEL, never disable —
@@ -205,7 +205,8 @@
              both would state the same absence twice in two different words. -->
         <div
           v-if="isSearching && emptyLines.agents && roster.length"
-          class="px-2 py-3 text-xs text-gray-400"
+          class="px-2 py-3 text-xs"
+          :class="META_INK"
         >{{ emptyLines.agents }}</div>
 
         <!-- ent#357/#359 AC: an empty roster keeps a next action. Which one
@@ -231,7 +232,7 @@
         <!-- Header and section status are ONE group and share one ink
              declaration; the result rows below are siblings, so they keep the
              body colour a chat title needs. -->
-        <div class="text-gray-400">
+        <div :class="META_INK">
           <div class="px-2 pb-1 text-[11px] font-semibold uppercase tracking-wide">Chats</div>
           <div v-if="emptyLines.chats" class="px-2 py-3 text-xs">
             {{ emptyLines.chats }}
@@ -251,7 +252,7 @@
             <PortalAvatar :name="r.agent_name" :avatar-url="avatarFor(r.agent_name)" :size="22" />
             <span class="min-w-0 flex-1">
               <span class="block text-sm truncate">{{ r.title || 'Chat' }}</span>
-              <span v-if="r.snippet" class="block text-xs text-gray-400 truncate">{{ r.snippet }}</span>
+              <span v-if="r.snippet" class="block text-xs truncate" :class="META_INK">{{ r.snippet }}</span>
             </span>
             <!-- trinity-enterprise#657: a search hit is a third row site with no
                  ChatRow, so the mark is read from the store here. -->
@@ -264,7 +265,7 @@
         <!-- Starred first, and LIFTED OUT of the date groups below (a starred
              chat appears exactly once — see partitionStarred). -->
         <div v-if="starred.length" class="mt-3">
-          <div class="px-2 pb-1 text-[11px] font-semibold uppercase tracking-wide text-gray-400">Starred</div>
+          <div class="px-2 pb-1 text-[11px] font-semibold uppercase tracking-wide" :class="META_INK">Starred</div>
           <ChatRow
             v-for="t in starred"
             :key="rowKey(t)"
@@ -278,7 +279,7 @@
         </div>
 
         <div v-for="g in grouped" :key="g.label" class="mt-3">
-          <div class="px-2 pb-1 text-[11px] font-semibold uppercase tracking-wide text-gray-400">{{ g.label }}</div>
+          <div class="px-2 pb-1 text-[11px] font-semibold uppercase tracking-wide" :class="META_INK">{{ g.label }}</div>
           <ChatRow
             v-for="t in g.threads"
             :key="rowKey(t)"
@@ -302,7 +303,7 @@
          lesson); only the accessible name changes. -->
     <div class="shrink-0 border-t border-gray-200 dark:border-gray-800 p-3 flex items-center gap-2">
       <div class="min-w-0 flex-1">
-        <div class="text-xs text-gray-400">{{ isPlatformSession ? 'Signed in to Trinity' : 'Signed in' }}</div>
+        <div class="text-xs" :class="META_INK">{{ isPlatformSession ? 'Signed in to Trinity' : 'Signed in' }}</div>
         <div class="text-sm truncate" :title="clientEmail">{{ clientEmail }}</div>
       </div>
       <button
@@ -342,6 +343,11 @@ import {
 } from './portalUtils'
 import { inboxCounts } from './portalInbox'
 import { capCount } from '@/utils/tabTitle'
+
+// ent#610 §3g B7a: the sidebar's meta ink, ONE string for every meta text
+// site. Bare gray-400 ink is 2.54:1 on white ("gray-400 is not text") and
+// had no dark half; gray-500 light is 4.83:1, gray-400 dark 6.99:1 on gray-900.
+const META_INK = 'text-gray-500 dark:text-gray-400'
 
 const props = defineProps({
   roster: { type: Array, default: () => [] },

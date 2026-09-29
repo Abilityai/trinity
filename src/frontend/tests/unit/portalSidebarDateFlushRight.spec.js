@@ -133,7 +133,9 @@ describe('#2641 — #2580 is not regressed', () => {
     // #2580's actual fix: the span disappearing on an agent you have never
     // talked to moved the whole row's truncation point. The conditional is on
     // the CONTENT, not on the column.
-    const m = SIDEBAR.match(/<span class="shrink-0 w-14 text-right[^"]*">\s*<template v-if="rowMeta\[a\.name\]\?\.time">/)
+    // ent#610 §3g B7a: the span's ink moved to a `:class="META_INK"` binding;
+    // the column is still unconditional, which is what this pins.
+    const m = SIDEBAR.match(/<span class="shrink-0 w-14 text-right[^"]*"(?:\s+:class="META_INK")?>\s*<template v-if="rowMeta\[a\.name\]\?\.time">/)
     expect(m, 'the date column must be unconditional with the v-if inside').toBeTruthy()
   })
 

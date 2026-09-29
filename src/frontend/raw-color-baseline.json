@@ -720,7 +720,7 @@
     },
     "src/frontend/src/components/portal/PortalSidebar.vue": {
       "raw_nongray": 0,
-      "raw_gray": 43,
+      "raw_gray": 35,
       "hardcoded_colors": 0
     },
     "src/frontend/src/components/portal/PortalSkeleton.vue": {
@@ -1006,7 +1006,7 @@
   },
   "totals": {
     "raw_nongray": 815,
-    "raw_gray": 8760,
+    "raw_gray": 8752,
     "hardcoded_colors": 447,
     "semantic_tokens": 4030,
     "files_with_violations": 198
