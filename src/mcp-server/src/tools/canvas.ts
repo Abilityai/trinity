@@ -180,7 +180,11 @@ export function createCanvasTools(client: TrinityClient, requireApiKey: boolean)
           "'weekly') to keep a separate surface. 1-64 characters of letters, digits, dot, dash or " +
           "underscore. Reuse the SAME id to update a canvas; a new id makes a new one.",
         ),
-        title: z.string().max(300).optional().describe("Short human-readable title for the canvas."),
+        title: z.string().max(300).optional().describe(
+          "Short human-readable title for the canvas — aim for 60 characters or fewer; readers pick " +
+          "canvases from a one-line list that clamps anything longer. Name WHAT it is ('Q4 pipeline', " +
+          "'Codex subscription auth decision'), with no provenance suffix such as ' — archived from main " +
+          "2026-09-14': where it came from and when belongs in a block or the canvas body."),
         blocks: z.array(blockSchema).max(50).describe(
           // Keep in step with CANVAS_MAX_BLOCKS / CANVAS_BLOCKS_MAX_BYTES in
           // the backend `models.py`. The backend is the enforcer; this merely
@@ -255,7 +259,8 @@ export function createCanvasTools(client: TrinityClient, requireApiKey: boolean)
         "canvas already holds (read them with get_canvas — blocks written without ids were assigned " +
         "b1..bN); an unknown id is refused by name, never appended, and there is still no append tool: " +
         "you name what changes. Each block you send replaces the stored block WHOLE (kind, title and " +
-        "payload), so resend the title you want kept. Last write wins if two turns patch at once.",
+        "payload), so resend the title you want kept (block titles too: short, no provenance suffixes). " +
+        "Last write wins if two turns patch at once.",
       parameters: z.object({
         canvas_id: z.string().optional().describe(
           "The canvas to patch. Omit to patch the canvas the user has OPEN (what they mean " +
