@@ -137,7 +137,12 @@ def test_a_queue_read_fault_raises_rather_than_returning_empty(
     def boom(**_kw):
         raise RuntimeError("db down")
 
-    monkeypatch.setattr(service.db, "list_operator_queue_items", boom)
+    # #3059 split the read into three queue reads (the agents the asks span,
+    # the count, the page); an unreadable queue fails them all, and the first
+    # one runs before any early return — so every one of them is faulted.
+    for read in ("list_operator_queue_agent_names", "count_operator_queue_items",
+                 "list_operator_queue_items"):
+        monkeypatch.setattr(service.db, read, boom)
     with pytest.raises(service.AsksUnavailable):
         service.list_asks(client_email, is_platform=False)
 
@@ -192,7 +197,12 @@ def test_the_route_answers_503_asks_unavailable_on_a_queue_fault(
     def boom(**_kw):
         raise RuntimeError("db down")
 
-    monkeypatch.setattr(service.db, "list_operator_queue_items", boom)
+    # #3059 split the read into three queue reads (the agents the asks span,
+    # the count, the page); an unreadable queue fails them all, and the first
+    # one runs before any early return — so every one of them is faulted.
+    for read in ("list_operator_queue_agent_names", "count_operator_queue_items",
+                 "list_operator_queue_items"):
+        monkeypatch.setattr(service.db, read, boom)
     r = _client(client_email).get(URL, params={"include_ended": True})
 
     assert r.status_code == 503
@@ -252,7 +262,12 @@ def test_the_suggestions_build_still_degrades_to_no_ask_ids(
     def boom(**_kw):
         raise RuntimeError("db down")
 
-    monkeypatch.setattr(service.db, "list_operator_queue_items", boom)
+    # #3059 split the read into three queue reads (the agents the asks span,
+    # the count, the page); an unreadable queue fails them all, and the first
+    # one runs before any early return — so every one of them is faulted.
+    for read in ("list_operator_queue_agent_names", "count_operator_queue_items",
+                 "list_operator_queue_items"):
+        monkeypatch.setattr(service.db, read, boom)
     out = suggestions._gather(
         "agent-a", client_email, datetime.now(timezone.utc), False
     )

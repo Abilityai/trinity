@@ -432,10 +432,11 @@
           </template>
           <template #empty>
             <PortalBriefing :agent="activeAgent" @use-playbook="usePlaybook">
-              <!-- ent#465: the top 3 suggestions for you and this agent, between
-                   its identity and its hints — platform sessions, 1:1 only;
-                   renders nothing when there is nothing to suggest. -->
-              <template #before-hints>
+              <!-- ent#465: the top 3 suggestions for you and this agent, below
+                   its hints (they load after them and change; the hints do
+                   not) — platform sessions, 1:1 only; renders nothing when
+                   there is nothing to suggest. -->
+              <template #after-hints>
                 <PortalSuggestions
                   v-if="store.isPlatformSession && activeAgent && !activeRoomIdFromRoute"
                   compact
@@ -815,6 +816,7 @@ import {
   emptySignal,
   loadRailState,
   railColumnReservedFor,
+  railSizedOpen,
   railParticipantsFor,
   railVisibleFor,
   saveRailState,
@@ -1071,9 +1073,16 @@ function onVoiceCall(sig) {
 // auto-collapse below, which is the AC's tie-breaker when the viewport cannot
 // fit all three.
 const columns = useColumnResize({
-  // Round 3: the Inbox's placeholder rail is an OPEN column (its width is the
-  // one the Inbox counted), so the grid renders it at the open width.
-  railOpen: computed(() => railState.value.open && (railVisible.value || inboxRailPlaceholder.value)),
+  // #3060: sized open while the column is RESERVED too, not only once the rail
+  // is visible — otherwise a rail left open reserves 48px and then jumps to its
+  // open width when the stage lands (`railSizedOpen`).
+  // ent#610 round 3: the Inbox's placeholder rail is an OPEN column too (its
+  // width is the one the Inbox counted), so it counts as visible here.
+  railOpen: computed(() => railSizedOpen({
+    open: railState.value.open,
+    visible: Boolean(railVisible.value || inboxRailPlaceholder.value),
+    reserved: railColumnReserved.value,
+  })),
   setRailOpen: (open) => { if (!open) setRailOpen(false) },
 })
 

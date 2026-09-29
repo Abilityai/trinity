@@ -36,9 +36,35 @@
           <p class="sub">This sets up the owner of this Trinity instance.</p>
 
           <form @submit.prevent="handleSubmit" novalidate>
-            <!-- Admin email (required) -->
+            <!-- EC2 instance ID (#3004): an AWS install's first admin proves
+                 they control this server. -->
+            <div v-if="claimRequired" class="field">
+              <div class="labrow">
+                <label for="instanceId">EC2 instance ID <span class="req">*</span></label>
+                <span v-if="claimCode.trim() && !claimValid" class="match bad">Format: i-0abc123…</span>
+              </div>
+              <div class="ipt">
+                <input
+                  type="text"
+                  id="instanceId"
+                  v-model="claimCode"
+                  :disabled="loading"
+                  placeholder="i-0abc123def4567890"
+                  autocomplete="off"
+                  autocapitalize="off"
+                  spellcheck="false"
+                  required
+                />
+              </div>
+              <p class="hint">
+                EC2 console → Instances → Instance ID.
+                <a :href="EC2_INSTANCES_URL" target="_blank" rel="noopener noreferrer">Open EC2</a>
+              </p>
+            </div>
+
+            <!-- Admin email (required; optional on an instance-ID claim, #3004) -->
             <div class="field">
-              <label for="adminEmail">Admin email <span class="req">*</span></label>
+              <label for="adminEmail">Admin email <span v-if="claimRequired" class="opt">(optional)</span><span v-else class="req">*</span></label>
               <div class="ipt">
                 <input
                   type="email"
@@ -47,15 +73,20 @@
                   :disabled="loading"
                   placeholder="you@company.com"
                   autocomplete="email"
-                  required
+                  :required="!claimRequired"
                 />
               </div>
-              <p class="hint">You'll sign in with this email and your password.</p>
+              <p class="hint">{{ claimRequired
+                ? "Leave blank to sign in as admin."
+                : "You'll sign in with this email and your password." }}</p>
             </div>
 
             <!-- Password -->
             <div class="field">
-              <label for="password">Password <span class="req">*</span></label>
+              <div class="labrow">
+                <label for="password">Password <span class="req">*</span></label>
+                <b v-if="password" class="strength" :style="{ color: strengthColor }">{{ passwordStrengthText }}</b>
+              </div>
               <div class="ipt">
                 <input
                   :type="showPassword ? 'text' : 'password'"
@@ -73,9 +104,7 @@
                 </span>
               </div>
 
-              <template v-if="password">
-                <div class="meter"><i :style="{ width: `${passwordStrength * 20}%`, background: strengthColor }"></i></div>
-                <div class="strength"><span>Strength</span><b :style="{ color: strengthColor }">{{ passwordStrengthText }}</b></div>
+              <div class="meter"><i :style="{ width: `${passwordStrength * 20}%`, background: strengthColor }"></i></div>
                 <div class="reqs">
                   <div v-for="req in passwordRequirements" :key="req.label" :class="{ met: req.met }">
                     <svg v-if="req.met" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-width="3" stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/></svg>
@@ -83,12 +112,18 @@
                     {{ req.label }}
                   </div>
                 </div>
-              </template>
             </div>
 
             <!-- Confirm password -->
             <div class="field">
-              <label for="confirmPassword">Confirm password <span class="req">*</span></label>
+              <div class="labrow">
+                <label for="confirmPassword">Confirm password <span class="req">*</span></label>
+                <span v-if="password && confirmPassword" class="match" :class="{ bad: !passwordsMatch }">
+                <svg v-if="passwordsMatch" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/></svg>
+                <svg v-else fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12"/></svg>
+                {{ passwordsMatch ? 'Passwords match' : 'Passwords do not match' }}
+                </span>
+              </div>
               <div class="ipt">
                 <input
                   :type="showConfirmPassword ? 'text' : 'password'"
@@ -105,11 +140,6 @@
                   <svg v-else fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/><path stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"/></svg>
                 </span>
               </div>
-              <div v-if="password && confirmPassword" class="match" :class="{ bad: !passwordsMatch }">
-                <svg v-if="passwordsMatch" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/></svg>
-                <svg v-else fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12"/></svg>
-                {{ passwordsMatch ? 'Passwords match' : 'Passwords do not match' }}
-              </div>
             </div>
 
             <div class="divider"></div>
@@ -124,24 +154,23 @@
 
             <!-- Updates opt-in -->
             <div class="checkrow">
-              <input id="consentUpdates" type="checkbox" v-model="consentUpdates" :disabled="loading" />
+              <input id="consentUpdates" type="checkbox" v-model="consentUpdates" :disabled="loading || (claimRequired && !email.trim())" />
               <label for="consentUpdates">Occasionally email me important security &amp; product updates.
                 <small>Sends your email{{ company ? ' + company' : '' }} to ability.ai — nothing else. Skippable; disable via env on air-gapped installs.</small>
               </label>
             </div>
 
-            <!-- Error -->
-            <div v-if="error" class="errbox">
-              <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
-              <span>{{ error }}</span>
-            </div>
-
-            <button class="cta" type="submit" :disabled="!isValid || loading">
+<button class="cta" type="submit" :disabled="!isValid || loading">
               <svg v-if="loading" class="spin" fill="none" viewBox="0 0 24 24"><circle class="o25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="o75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>
               {{ loading ? 'Creating account…' : 'Create admin account & continue →' }}
             </button>
 
-            <div class="secnote">
+            <!-- Error: takes the note's one-line slot, so nothing above moves -->
+            <div v-if="error" class="secnote errbox">
+              <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+              <span>{{ error }}</span>
+            </div>
+            <div v-else class="secnote">
               <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"/></svg>
               Available only until your admin account is created.
             </div>
@@ -154,15 +183,37 @@
 </template>
 
 <script setup>
-import { ref, computed } from 'vue'
+import { ref, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import axios from 'axios'
-import { clearSetupCache } from '../router'
+import { clearSetupCache, getSetupClaimRequired } from '../router'
 import { useAuthStore } from '../stores/auth'
 import TrinityMark from '../components/TrinityMark.vue'
 
 const router = useRouter()
 const authStore = useAuthStore()
+
+// #3004: 'instance-id' when this install's first admin must give the EC2
+// instance ID, null when not. Fetched by the router guard before this page
+// rendered; `undefined` means that fetch failed, so ask again on mount rather
+// than render a form that may be missing the ID field.
+const claimMode = ref(getSetupClaimRequired())
+const claimRequired = computed(() => claimMode.value === 'instance-id')
+onMounted(async () => {
+  if (claimMode.value !== undefined) return
+  try {
+    const { data } = await axios.get('/api/setup/status')
+    claimMode.value = data?.claim_required ?? null
+  } catch {
+    error.value = 'Could not reach this server to load setup. Check your connection and reload the page.'
+  }
+})
+const EC2_INSTANCES_URL = 'https://console.aws.amazon.com/ec2/home#Instances:'
+// Mirrors the backend's one answer for every claim failure (routers/setup.py).
+const CLAIM_MISMATCH = 'That instance ID does not match this server.'
+const CLAIM_RE = /^i-[0-9a-f]{8,17}$/
+const claimCode = ref('')
+const claimValid = computed(() => CLAIM_RE.test(claimCode.value.trim().toLowerCase()))
 
 const email = ref('')
 const password = ref('')
@@ -183,11 +234,11 @@ const passwordsMatch = computed(() => password.value === confirmPassword.value)
 const passwordRequirements = computed(() => {
   const p = password.value
   return [
-    { label: 'At least 12 characters', met: p.length >= 12 },
-    { label: 'Uppercase letter (A-Z)', met: /[A-Z]/.test(p) },
-    { label: 'Lowercase letter (a-z)', met: /[a-z]/.test(p) },
-    { label: 'Number (0-9)', met: /[0-9]/.test(p) },
-    { label: 'Special character (!@#$…)', met: /[^A-Za-z0-9]/.test(p) },
+    { label: '12+ characters', met: p.length >= 12 },
+    { label: 'Uppercase', met: /[A-Z]/.test(p) },
+    { label: 'Lowercase', met: /[a-z]/.test(p) },
+    { label: 'Number', met: /[0-9]/.test(p) },
+    { label: 'Symbol', met: /[^A-Za-z0-9]/.test(p) },
   ]
 })
 
@@ -204,7 +255,9 @@ const strengthColor = computed(() => {
 })
 
 const isValid = computed(() =>
-  emailValid.value && passwordRequirements.value.every(r => r.met) && passwordsMatch.value
+  claimMode.value !== undefined &&
+  (claimRequired.value ? claimValid.value && (!email.value.trim() || emailValid.value) : emailValid.value) &&
+  passwordRequirements.value.every(r => r.met) && passwordsMatch.value
 )
 
 async function handleSubmit() {
@@ -213,13 +266,16 @@ async function handleSubmit() {
   loading.value = true
   error.value = null
 
+  const emailValue = email.value.trim()
   try {
     const { data } = await axios.post('/api/setup/admin-password', {
-      email: email.value.trim(),
+      email: emailValue,
       password: password.value,
       confirm_password: confirmPassword.value,
       company: company.value.trim() || null,
-      consent_updates: consentUpdates.value,
+      // The opt-in sends the email, so there is nothing to consent to without one.
+      consent_updates: consentUpdates.value && !!emailValue,
+      ...(claimRequired.value ? { claim_code: claimCode.value.trim() } : {}),
     })
 
     // Clear the cache so the router knows setup is done.
@@ -229,13 +285,19 @@ async function handleSubmit() {
     // email just claimed, never a literal 'admin': the account is created under
     // ADMIN_USERNAME (#2381), and the backend accepts the admin's email as the
     // username. Any failure (email not bound, a 2FA challenge, a race) falls
-    // back to the login page as before.
+    // back to the login page as before. With no email (allowed only on an
+    // instance-ID claim, #3004) the backend returns the admin username instead.
+    const identity = emailValue || data?.username
     const signedIn =
-      data?.email_registered !== false &&
-      (await authStore.loginWithCredentials(email.value.trim(), password.value))
+      !!identity &&
+      (!emailValue || data?.email_registered !== false) &&
+      (await authStore.loginWithCredentials(identity, password.value))
     router.push(signedIn ? '/' : '/login')
   } catch (e) {
-    if (e.response?.status === 403) {
+    if (e.response?.status === 403 && e.response?.data?.detail === CLAIM_MISMATCH) {
+      // A wrong instance ID: stay here so it can be corrected.
+      error.value = CLAIM_MISMATCH
+    } else if (e.response?.status === 403) {
       // Setup already completed — endpoint self-disabled. Send them to login.
       error.value = 'Setup has already been completed.'
       setTimeout(() => router.push('/login'), 2000)
@@ -343,11 +405,14 @@ async function handleSubmit() {
 .ipt .eye{position:absolute;right:10px;top:50%;transform:translateY(-50%);color:var(--muted2);cursor:pointer;display:flex}
 .ipt .eye svg{width:18px;height:18px}
 .hint{font-size:11.5px;color:var(--muted2);margin-top:5px}
+.hint a{color:var(--indigo-400)}
 .meter{height:4px;border-radius:3px;background:var(--g700);margin-top:8px;overflow:hidden}
 .meter>i{display:block;height:100%;border-radius:3px;transition:width .3s,background .3s}
-.strength{display:flex;justify-content:space-between;font-size:11.5px;margin-top:6px;color:var(--muted)}
-.strength b{font-weight:600}
-.reqs{margin:8px 0 2px;display:grid;grid-template-columns:1fr 1fr;gap:3px 12px}
+.labrow{display:flex;justify-content:space-between;align-items:baseline;gap:8px;margin-bottom:6px}
+.labrow label{margin-bottom:0 !important}
+.labrow .match{margin-top:0;font-size:11.5px}
+.strength{font-size:11.5px;font-weight:600}
+.reqs{margin:8px 0 2px;display:flex;flex-wrap:wrap;gap:3px 12px}
 .reqs div{display:flex;align-items:center;gap:6px;font-size:11.5px;color:var(--muted2)}
 .reqs div.met{color:var(--green-400)}
 .reqs svg{width:13px;height:13px;flex:none}
@@ -359,8 +424,8 @@ async function handleSubmit() {
 .checkrow input{margin-top:2px;width:15px;height:15px;accent-color:var(--indigo-600);flex:none}
 .checkrow label{font-size:12.5px;color:var(--muted);line-height:1.45}
 .checkrow label small{display:block;color:var(--muted2);font-size:11px;margin-top:2px}
-.errbox{display:flex;gap:8px;align-items:flex-start;margin-top:16px;padding:10px 12px;border-radius:10px;background:rgba(248,113,113,.1);border:1px solid rgba(248,113,113,.3);color:#fca5a5;font-size:12.5px}
-.errbox svg{width:16px;height:16px;flex:none;margin-top:1px}
+.secnote.errbox{color:#fca5a5;font-size:12px;text-align:center}
+.secnote.errbox svg{color:currentColor}
 .cta{width:100%;margin-top:20px;border:0;border-radius:11px;padding:12px;font-size:14px;font-weight:600;color:#fff;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:8px;
   background:linear-gradient(180deg,var(--indigo-500),var(--indigo-600));box-shadow:0 8px 22px -8px rgba(79,70,229,.8);transition:filter .15s}
 .cta:hover:not(:disabled){filter:brightness(1.08)}

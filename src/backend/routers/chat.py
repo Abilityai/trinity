@@ -38,6 +38,7 @@ from services.chat_execution_service import ERROR_CODE_HEADER
 from services.execution_envelope import TaskExecutionErrorCode
 from database import db
 from utils.helpers import utc_now_iso
+from db.write_params import ExecutionResult
 
 logger = logging.getLogger(__name__)
 
@@ -92,7 +93,9 @@ def _raise_ephemeral_exhausted_410(agent_name: str, execution_id, exc) -> NoRetu
             db.update_execution_status(
                 execution_id=execution_id,
                 status=TaskExecutionStatus.FAILED,
-                error=f"ephemeral_exhausted: ghost agent budget spent ({exc.reason})",
+                result=ExecutionResult(
+                    error=f"ephemeral_exhausted: ghost agent budget spent ({exc.reason})",
+                ),
             )
         except Exception as e:
             logger.warning(
@@ -120,7 +123,9 @@ def _raise_circuit_open_503(agent_name: str, execution_id, exc: CircuitOpen) -> 
             db.update_execution_status(
                 execution_id=execution_id,
                 status=TaskExecutionStatus.FAILED,
-                error="circuit_open: agent unhealthy (dispatch breaker open)",
+                result=ExecutionResult(
+                    error="circuit_open: agent unhealthy (dispatch breaker open)",
+                ),
             )
         except Exception as e:
             logger.warning(

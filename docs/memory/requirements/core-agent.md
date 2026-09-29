@@ -1425,9 +1425,14 @@ bounding the table. OSS-core (Workspace rule above). Flow:
   re-derives it because an optimistic pin or delete mutates the list in place.
 - **FR-22 — Living with many** (AC 4): `CanvasPanel.vue`, shared by Agent
   Detail and the Workspace rail (one rendering layer, ent#475): search over
-  title and id once the list passes six, a height-bounded scrolling strip so a
-  long list does not cost the rail its other tabs, and an opt-in Manage mode
-  (age, stale mark, pin toggle, delete, bulk bar). Decidable rules are pure in
+  title and id once the list passes six, and an opt-in Manage mode (age,
+  stale mark, pin toggle, delete, bulk bar). **ent#724:** the canvas is chosen
+  from ONE fixed-height control row — a `BaseSelect` dropdown (pinned first,
+  long titles clamped with the full title on hover and in the header), search,
+  headroom and a Manage toggle — identical for 1 and 40 canvases, so the canvas
+  body never moves with the count (design-system principle 30). Manage opens a
+  bounded list below that row without moving it; agents are asked for canvas
+  titles of ≤ 60 characters with no provenance suffix (schema unchanged). Decidable rules are pure in
   `canvasUtils.js` (`sortCanvases`, `filterCanvases`, `selectionState`,
   `bulkDeletePrompt`, `bulkDeleteOutcome`, `canvasHeadroom`,
   `canvasSelectorVisible`, `canvasAutoSelect`, `canvasSearchVisible`) —

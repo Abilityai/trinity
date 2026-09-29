@@ -324,3 +324,44 @@ describe('#2624 the affordance is honest', () => {
     expect(s.following.value).toBe(true)
   })
 })
+
+describe('an empty chat is not a transcript (`enabled`)', () => {
+  // The new-chat empty state (identity, "Things you can ask", suggestions) sits
+  // in the same scroller. Pinning it to the bottom scrolled the agent's identity
+  // out of view and moved the hints ~190px every time the suggestions landed.
+  function setup(initial, active) {
+    const node = el(initial)
+    const on = ref(active)
+    return { node, on, ...useStickToBottom(ref(node), { enabled: () => on.value }) }
+  }
+
+  it('growth while disabled does not scroll', async () => {
+    const s = setup({ scrollTop: 0 }, false)
+    s.node.scrollHeight = 1400          // the suggestions arrived below the hints
+    await s.onArrive(0)
+    expect(s.node.scrollTop).toBe(0)
+  })
+
+  it('an explicit pin while disabled puts the reader at the TOP', async () => {
+    const s = setup({ scrollTop: 600 }, false)   // left over from the previous thread
+    await s.pinToBottom()
+    expect(s.node.scrollTop).toBe(0)
+    expect(s.following.value).toBe(true)
+  })
+
+  it('the first turn re-enables sticking to the bottom', async () => {
+    const s = setup({ scrollTop: 0 }, false)
+    s.on.value = true
+    s.node.scrollHeight = 1600
+    await s.onArrive(1)
+    expect(s.node.scrollTop).toBe(1600)
+  })
+
+  it('without the option nothing changes (every other surface)', async () => {
+    const node = el({ scrollTop: 0 })
+    const s = useStickToBottom(ref(node))
+    node.scrollHeight = 1400
+    await s.onArrive(1)
+    expect(node.scrollTop).toBe(1400)
+  })
+})

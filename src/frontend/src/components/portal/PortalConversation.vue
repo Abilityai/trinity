@@ -1238,7 +1238,12 @@ const {
   scrollToLatest,
   reset: resetFollowing,
   detach: detachFollowing,
-} = useStickToBottom(scrollEl)
+} = useStickToBottom(scrollEl, {
+  // An empty chat is not a transcript: it reads from the top, and a section that
+  // arrives late (the suggestions) grows downward without moving the hints or
+  // scrolling the agent's identity away. Sticking resumes with the first turn.
+  enabled: () => messages.value.length > 0 || sending.value,
+})
 // trinity-enterprise#610 (D11): the one-shot `?anchor=m:<id>|d:<id>` the
 // Inbox's "Open in chat" sets. Resolved after the history lands (messages) or
 // when "Delivered here" reports its cards (deliverables); stripped either way.

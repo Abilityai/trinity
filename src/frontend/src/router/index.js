@@ -337,6 +337,11 @@ const router = createRouter({
 // Cache for setup status check (avoid repeated API calls)
 let setupStatusCache = null
 let setupStatusCacheTime = 0
+// #3004: what else the first admin must give ('instance-id' or null). Read by
+// SetupPassword.vue at mount — this guard fetched it before /setup rendered, so
+// the claim field is there on first paint instead of appearing afterwards.
+// `undefined` means unknown (no successful fetch yet); the page then asks itself.
+let setupClaimRequired = undefined
 const SETUP_CACHE_DURATION = 5000 // 5 seconds
 
 async function checkSetupStatus() {
@@ -350,9 +355,11 @@ async function checkSetupStatus() {
     const response = await fetch('/api/setup/status')
     const data = await response.json()
     setupStatusCache = data.setup_completed
+    setupClaimRequired = data.claim_required ?? null
     setupStatusCacheTime = now
     return setupStatusCache
   } catch (e) {
+    setupClaimRequired = undefined
     console.error('Failed to check setup status:', e)
     // Assume setup is completed if check fails (don't block access)
     return true
@@ -455,6 +462,10 @@ router.afterEach((to) => {
   // string; this line still owns what the LABEL says.
   setBaseTitle(label ? `${BASE_TITLE} — ${label}` : `${BASE_TITLE} — Agent Orchestration`)
 })
+
+export function getSetupClaimRequired() {
+  return setupClaimRequired
+}
 
 // Clear setup cache on successful setup
 export function clearSetupCache() {
