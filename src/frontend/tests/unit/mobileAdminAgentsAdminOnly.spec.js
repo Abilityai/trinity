@@ -99,11 +99,75 @@ describe('/m — the agent list is admin-only (#3041)', () => {
     expect(w.find('load-failed-stub').exists()).toBe(true)
   })
 
+  it('Open the Queue lands on the Queue sub-tab even after Alerts was viewed', async () => {
+    const w = await mountView({ fleet: () => Promise.reject(forbidden()) })
+    const tabBtns = w.findAll('.tab-bar .tab-item')
+    await tabBtns[1].trigger('click'); await flushPromises()
+    await w.findAll('.sub-tab').find(b => b.text().startsWith('Alerts')).trigger('click'); await flushPromises()
+    await tabBtns[0].trigger('click'); await flushPromises()
+    await w.find('[data-testid="agents-admin-only-open-queue"]').trigger('click'); await flushPromises()
+    expect(w.find('.sub-tab.active').text().startsWith('Queue')).toBe(true)
+  })
+
+  it('a role granted meanwhile shows up on manual refresh', async () => {
+    let n = 0
+    const w = await mountView({
+      fleet: () => (n++ === 0 ? Promise.reject(forbidden())
+        : Promise.resolve({ data: { agents: [{ name: 'agent-a', status: 'running' }], summary: { total: 1, running: 1, stopped: 0, high_context: 0 } } })),
+    })
+    expect(w.find('[data-testid="agents-admin-only"]').exists()).toBe(true)
+    await w.find('.header-actions .header-btn').trigger('click'); await flushPromises()
+    expect(w.find('[data-testid="agents-admin-only"]').exists()).toBe(false)
+    expect(w.text()).toContain('agent-a')
+  })
+
+  it('the System tab poll stops asking once the answer is 403', async () => {
+    vi.useFakeTimers()
+    await mountView({ fleet: () => Promise.reject(forbidden()), tab: 'system' })
+    const before = fleetCalls()
+    await vi.advanceTimersByTimeAsync(31000)
+    expect(fleetCalls()).toBe(before)
+  })
+
+  it('a 403 on the System refresh sets admin-only even when the first load was a 500', async () => {
+    let answer = () => Promise.reject(Object.assign(new Error('boom'), { response: { status: 500 } }))
+    const w = await mountView({ fleet: () => answer(), tab: 'system' })
+    expect(w.find('[data-testid="fleet-admin-only"]').exists()).toBe(false)
+    answer = () => Promise.reject(forbidden())
+    await w.find('.header-actions .header-btn').trigger('click'); await flushPromises()
+    expect(w.find('[data-testid="fleet-admin-only"]').exists()).toBe(true)
+  })
+
+  it('a granted role clears the System notice on refresh', async () => {
+    let answer = () => Promise.reject(forbidden())
+    const w = await mountView({ fleet: () => answer(), tab: 'system' })
+    expect(w.find('[data-testid="fleet-admin-only"]').exists()).toBe(true)
+    answer = () => Promise.resolve({ data: { agents: [], summary: { total: 3, running: 2, stopped: 1, high_context: 0 } } })
+    await w.find('.header-actions .header-btn').trigger('click'); await flushPromises()
+    expect(w.find('[data-testid="fleet-admin-only"]').exists()).toBe(false)
+    expect(w.find('.health-grid').text()).toContain('3')
+  })
+
+  it('the admin-only fleet actions are not offered to a non-admin', async () => {
+    const w = await mountView({ fleet: () => Promise.reject(forbidden()), tab: 'system' })
+    expect(w.find('[data-testid="fleet-actions"]').exists()).toBe(false)
+    expect(w.text()).not.toContain('Emergency Stop')
+  })
+
   it('an admin sees the list exactly as before', async () => {
     const w = await mountView({
       fleet: () => Promise.resolve({ data: { agents: [{ name: 'agent-a', status: 'running' }], summary: { total: 1, running: 1, stopped: 0, high_context: 0 } } }),
     })
     expect(w.find('[data-testid="agents-admin-only"]').exists()).toBe(false)
     expect(w.text()).toContain('agent-a')
+  })
+
+  it('an admin still gets the fleet actions', async () => {
+    const w = await mountView({
+      fleet: () => Promise.resolve({ data: { agents: [], summary: { total: 0, running: 0, stopped: 0, high_context: 0 } } }),
+      tab: 'system',
+    })
+    expect(w.find('[data-testid="fleet-actions"]').exists()).toBe(true)
+    expect(w.text()).toContain('Emergency Stop')
   })
 })

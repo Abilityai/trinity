@@ -101,9 +101,9 @@
                boundary, not a failed load — say so, point at what this session
                can do, and offer no retry that can never succeed. -->
           <div v-if="fleetAdminOnly" class="empty-state" data-testid="agents-admin-only">
-            <p>The agent list is admin-only.</p>
-            <p class="mt-1">Ask an admin for access, or answer what your agents need from you in the Queue.</p>
-            <button type="button" class="chat-open-btn admin-only-action" data-testid="agents-admin-only-open-queue" @click="activeTab = 'ops'">Open the Queue</button>
+            <p>The fleet list is admin-only on mobile.</p>
+            <p class="mt-1">Your own agents are on the desktop dashboard. Ask an admin for access, or answer what your agents need from you in the Queue.</p>
+            <button type="button" class="chat-open-btn admin-only-action" data-testid="agents-admin-only-open-queue" @click="openQueue">Open the Queue</button>
           </div>
           <div v-else-if="agentsView.state === 'loading'" class="skeleton-rows" aria-busy="true"><div v-for="n in 3" :key="n" class="skeleton-row"></div><span class="sr-only">Loading agents...</span></div>
           <LoadFailed
@@ -438,7 +438,7 @@
             />
             <!-- #3041: same admin-gated endpoint as the Agents tab. -->
             <div v-if="fleetAdminOnly" class="empty-state" data-testid="fleet-admin-only">
-              Fleet health is admin-only. Ask an admin for access.
+              Fleet health and fleet actions are admin-only. Ask an admin for access.
             </div>
             <div v-else-if="fleetView.state === 'loading'" class="skeleton-rows" aria-busy="true"><div v-for="n in 3" :key="n" class="skeleton-row"></div><span class="sr-only">Loading...</span></div>
             <LoadFailed
@@ -470,8 +470,9 @@
             </div>
           </div>
 
-          <!-- Quick Actions -->
-          <div class="system-section">
+          <!-- Quick Actions — every one is admin-gated server-side (#3041):
+               hidden rather than offered as a confirm-then-403 dead end. -->
+          <div v-if="!fleetAdminOnly" class="system-section" data-testid="fleet-actions">
             <h2 class="section-title">Actions</h2>
             <div class="actions-grid">
               <button @click="confirmAction('emergency-stop')" class="action-btn action-danger" :disabled="actionLoading">
@@ -954,6 +955,12 @@ function loadAllData() {
   fetchAgents()
   fetchQueue()
   fetchNotifications()
+}
+
+// #3041: the Queue is a sub-tab of Ops — land on it, whatever sub-tab was last viewed.
+function openQueue() {
+  activeTab.value = 'ops'
+  activeOpsTab.value = 'queue'
 }
 
 async function refreshCurrentTab() {
