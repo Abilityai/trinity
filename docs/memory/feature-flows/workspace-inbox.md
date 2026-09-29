@@ -70,6 +70,10 @@ Sign-in / reload on bare /workspace
                entry our open pushed, else replaces the item away (a deep link never walks out)
       split: the tab's first row is a local PREVIEW — not ?item=, NOT a read, emitted as
                update:preview (§3g S5, T2); stacked: nothing selected
+    actionItems(openAsks, now)  Action's order is URGENCY (§3g C1, askUrgencyCompare): asks
+                               expiring within 24h first (soonest first — the A10 badge is
+                               the reason shown), then priority critical > high > medium > low
+                               (unknown = medium), then the OLDEST first; ties on id
     stableRows(fresh, visit)   rows keep their place for one TAB VISIT (§3g S1): a row that leaves
                                stays as a ghost (chat drawn read, ask drawn ended); a poll never
                                re-sorts; a new row goes in before its nearest fresh neighbour; a

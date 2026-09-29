@@ -677,7 +677,8 @@ describe('answering an ask in the pane (D8)', () => {
 
 describe('a selection restored from the URL (D8)', () => {
   it('a deep-linked ask is held in place once answered, exactly as a clicked one is', async () => {
-    store.asks = [ask('a1', { created_at: iso(1) }), ask('a2', { created_at: iso(20) })]
+    // §3g C1: Action is oldest-first among equals, so a2 (newer) is second.
+    store.asks = [ask('a1', { created_at: iso(20) }), ask('a2', { created_at: iso(1) })]
     store.asksLoaded = true
     store.answerAsk = vi.fn(async (id) => {
       const answered = { ...store.asks.find((a) => a.id === id), status: 'answered', ended_by: 'you', ended_at: new Date().toISOString() }

@@ -3540,7 +3540,7 @@ to localStorage in the clear.
 - **Three windows (tabs)**:
   | Tab | Membership | Source |
   |---|---|---|
-  | **Action** | asks addressed to me, pending (question, approval, alert), roster re-checked | the ONE asks list (`openAsks`) |
+  | **Action** | asks addressed to me, pending (question, approval, alert), roster re-checked; ordered by urgency — expiring within 24h first (soonest first), then priority (critical > high > medium > low), then the longest-waiting (§3g C1) | the ONE asks list (`openAsks`) |
   | **Unread** | chats with new arrivals — one row per chat, "N new", the latest arrival's excerpt; archived chats included | the sidebar's `threads` + `GET /chat-state?previews=true` |
   | **All** | every chat the sidebar lists, of any age (read or not; an unused Main is not listed; rooms wait for PR C), pending asks, and asks that ended in the last 7 days; its footer says the 7-day rule, the 200-ask read cap when hit, and — to a viewer with rooms — that rooms are not here yet (§3g D-4) | the same two lists |
 - **One unread model (AC 6)**: the unit of Unread is a **chat**, read through the existing

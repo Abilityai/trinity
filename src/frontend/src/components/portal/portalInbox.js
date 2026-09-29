@@ -140,12 +140,34 @@ function threadItem(t, previews) {
 
 const byAtDesc = (a, b) => ts(b.at) - ts(a.at) || String(b.id).localeCompare(String(a.id))
 
-// Action (D8): exactly `openAsks` — pending only — newest first.
-export function actionItems(openAsks) {
+// §3g C1 (Andrii 2026-09-29: a 24h bucket plus the A10 badge): Action is
+// ordered by urgency, not recency. Asks expiring within a day lead, soonest
+// first — the row's "Expires in …" badge is the reason it sits there; then
+// priority, an unknown one as medium; then the ask that has waited LONGEST.
+// Ties break on id so a poll can never swap two equal rows.
+export const PRIORITY_RANK = Object.freeze({ critical: 0, high: 1, medium: 2, low: 3 })
+const URGENT_EXPIRY_MS = DAY_MS
+const rankOf = (p) => (Object.prototype.hasOwnProperty.call(PRIORITY_RANK, p) ? PRIORITY_RANK[p] : PRIORITY_RANK.medium)
+function expiryWithinDay(a, now) {
+  const at = a && a.expires_at ? Date.parse(a.expires_at) : NaN
+  return Number.isFinite(at) && at - now <= URGENT_EXPIRY_MS ? at : null
+}
+export function askUrgencyCompare(a, b, now = Date.now()) {
+  const ea = expiryWithinDay(a, now)
+  const eb = expiryWithinDay(b, now)
+  if ((ea === null) !== (eb === null)) return ea === null ? 1 : -1
+  if (ea !== null && ea !== eb) return ea - eb
+  const pr = rankOf(a.priority) - rankOf(b.priority)
+  if (pr) return pr
+  return ts(a.created_at) - ts(b.created_at) || String(a.id).localeCompare(String(b.id))
+}
+
+// Action (D8): exactly `openAsks` — pending only — in urgency order (C1).
+export function actionItems(openAsks, now = Date.now()) {
   return (Array.isArray(openAsks) ? openAsks : [])
     .filter((a) => a && a.id && a.status === 'pending')
+    .sort((a, b) => askUrgencyCompare(a, b, now))
     .map(askItem)
-    .sort(byAtDesc)
 }
 
 // Unread (D1): one row per CHAT with arrivals. Archived chats stay (an archived
