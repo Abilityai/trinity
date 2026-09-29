@@ -2092,11 +2092,14 @@ watch(isInboxRoute, (on) => {
   if (on && store.isClientSignedIn && bootstrapResolved.value) refreshThreads()
 })
 
-// "Reply in chat" (D11): the chat, anchored, with the composer focused.
-async function replyInChat(url) {
+// "Reply in chat" (D11): the chat, anchored, with the composer focused. From a
+// message's arrow (sign-off round 6) it also carries a quote of that message,
+// handed over as a prefill — the "Ask about it" path, never a send.
+async function replyInChat(url, quote = '') {
   await router.push(url)
   await nextTick(); await nextTick()
-  focusConversationComposer()
+  if (quote) usePlaybook(quote)
+  else focusConversationComposer()
 }
 
 // ---- Cross-chat search (sidebar) ----------------------------------------------

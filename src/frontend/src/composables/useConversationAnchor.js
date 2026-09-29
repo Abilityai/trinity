@@ -29,9 +29,14 @@ import { ref, watch, nextTick, onScopeDispose } from 'vue'
 
 export const ANCHOR_QUERY_KEY = 'anchor'
 export const ANCHOR_MISSING_NOTICE = 'That message is further up'
-export const ANCHOR_HIGHLIGHT_MS = 1600
-// Token classes only (design contract): the focus-ring accent, both themes.
-export const ANCHOR_HIGHLIGHT_CLASSES = ['ring-2', 'ring-action-primary-500', 'dark:ring-action-primary-400', 'rounded-xl']
+export const ANCHOR_HIGHLIGHT_MS = 2400
+// Token classes only (design contract), both themes. A soft tint BEHIND the
+// message, not a ring round the row — a 2px frame read as a stray border
+// (sign-off). It holds, then fades out over ANCHOR_FADE_MS; reduced motion
+// drops the fade and the tint simply leaves.
+export const ANCHOR_HIGHLIGHT_CLASSES = ['bg-action-primary-50', 'dark:bg-action-primary-500/16', 'rounded-xl']
+export const ANCHOR_FADE_CLASSES = ['transition-colors', 'duration-1000', 'motion-reduce:transition-none']
+export const ANCHOR_FADE_MS = 1000
 
 /** `m:<id>` / `d:<id>` → `{kind: 'message'|'deliverable', id}`, else null. */
 export function parseAnchor(raw) {
@@ -58,6 +63,17 @@ function findByData(root, attr, key, id) {
  * @param {object|null} opts.route                              vue-router route (reactive)
  * @param {object|null} opts.router                             vue-router instance
  */
+// Scroll ONLY the thread's box so `target` sits ANCHOR_TOP_PAD below its top.
+// Never `scrollIntoView`: it scrolls every scrollable ancestor as well, and the
+// Workspace shell is `h-screen overflow-hidden` — hidden overflow still scrolls
+// programmatically, so the whole page slid up under a blank strip (sign-off).
+export const ANCHOR_TOP_PAD = 16
+export function scrollWithin(box, target) {
+  if (!box || !target) return
+  const delta = target.getBoundingClientRect().top - box.getBoundingClientRect().top - ANCHOR_TOP_PAD
+  box.scrollTop = Math.max(0, (box.scrollTop || 0) + delta)
+}
+
 export function useConversationAnchor({ scrollEl, detach, pinToBottom, route, router }) {
   const pending = ref(null)
   const notice = ref('')
@@ -82,8 +98,11 @@ export function useConversationAnchor({ scrollEl, detach, pinToBottom, route, ro
 
   function highlight(el) {
     clearTimeout(highlightTimer)
-    el.classList.add(...ANCHOR_HIGHLIGHT_CLASSES)
-    highlightTimer = setTimeout(() => el.classList.remove(...ANCHOR_HIGHLIGHT_CLASSES), ANCHOR_HIGHLIGHT_MS)
+    el.classList.add(...ANCHOR_FADE_CLASSES, ...ANCHOR_HIGHLIGHT_CLASSES)
+    highlightTimer = setTimeout(() => {
+      el.classList.remove(...ANCHOR_HIGHLIGHT_CLASSES)   // fades: the transition is still on
+      highlightTimer = setTimeout(() => el.classList.remove(...ANCHOR_FADE_CLASSES), ANCHOR_FADE_MS)
+    }, ANCHOR_HIGHLIGHT_MS)
   }
 
   async function settle(target) {
@@ -94,7 +113,7 @@ export function useConversationAnchor({ scrollEl, detach, pinToBottom, route, ro
       const details = target.closest?.('details')
       if (details && !details.open) details.open = true
       detach()
-      target.scrollIntoView?.({ block: 'start' })
+      scrollWithin(scrollEl.value, target)
       highlight(target)
     } else {
       notice.value = ANCHOR_MISSING_NOTICE

@@ -173,7 +173,7 @@
           @dismiss-read-error="readFailedKey = null"
           @back="back"
           @open-chat="(url) => url && $emit('open-chat', url)"
-          @reply="(url) => url && $emit('reply', url)"
+          @reply="(url, quote) => url && $emit('reply', url, quote)"
           @open-thread="(t) => $emit('open-chat', `/workspace/c/${t.id}`)"
         />
         <p v-else-if="!noRows" class="m-auto px-6 text-center text-sm text-gray-600 dark:text-gray-300" data-testid="inbox-pane-none">

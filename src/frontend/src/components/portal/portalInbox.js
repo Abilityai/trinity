@@ -547,3 +547,28 @@ export function paneHeading(item, agentLabel = '') {
   const chat = item?.is_main ? 'Main' : (item?.title || 'Chat')
   return `${agentLabel} · ${chat}`
 }
+
+// ---- reply to one message (sign-off round 6) ---------------------------------
+// The Inbox pane's arrow opens the chat AT a message and prefills the composer
+// with a quote of it, so the reply says what it answers. The quote is the
+// message's first paragraph as plain text (markdown marks dropped, a code
+// fence's body kept), one line, capped, then a blank line for the reply.
+export const REPLY_QUOTE_MAX = 160
+export function quoteForReply(content) {
+  const raw = String(content || '').replace(/```[^\n]*\n?/g, '').trim()
+  const para = raw.split(/\n\s*\n/).find((p) => p.trim()) || ''
+  const text = para
+    .replace(/!?\[([^\]]*)\]\([^)]*\)/g, '$1')
+    .replace(/[*_`~]+/g, '')
+    .replace(/^\s*(?:[-*+]|\d+\.|#+|>)\s+/gm, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+  if (!text) return ''
+  const cut = text.length > REPLY_QUOTE_MAX ? `${text.slice(0, REPLY_QUOTE_MAX - 1).trimEnd()}…` : text
+  return `> ${cut}\n\n`
+}
+export function messageReplyTarget(item, message) {
+  if (!item || item.type !== 'thread' || !item.id) return null
+  const base = `/workspace/c/${encodeURIComponent(item.id)}`
+  return message && message.id ? `${base}?anchor=${encodeURIComponent(`m:${message.id}`)}` : base
+}

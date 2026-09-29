@@ -67,13 +67,29 @@ function harness({ messageIds = [], turnIds = [], reportIds = [] } = {}) {
   return { Harness, get: () => api }
 }
 
+// Sign-off round 6: the anchor scrolls the THREAD's box only. `scrollIntoView`
+// scrolled every ancestor too — the `h-screen overflow-hidden` shell included —
+// and slid the whole Workspace up under a blank strip. So a landing is observed
+// as the target's rect being measured against the box, and scrollIntoView is
+// a spy that must never fire.
 let scrolled
+const realRect = Element.prototype.getBoundingClientRect
 beforeEach(() => {
   scrolled = []
-  Element.prototype.scrollIntoView = vi.fn(function scrollIntoView() { scrolled.push(this) })
+  Element.prototype.scrollIntoView = vi.fn()
+  Element.prototype.getBoundingClientRect = function rect() {
+    const t = this.dataset && (this.dataset.messageId || this.dataset.reportId)
+    if (t) scrolled.push(this)
+    return { top: t ? 500 : 100, bottom: 0, left: 0, right: 0, width: 0, height: 0 }
+  }
   globalThis.ResizeObserver = class { observe() {} disconnect() {} }
 })
-afterEach(() => { delete Element.prototype.scrollIntoView; vi.useRealTimers() })
+afterEach(() => {
+  expect(Element.prototype.scrollIntoView).not.toHaveBeenCalled()
+  delete Element.prototype.scrollIntoView
+  Element.prototype.getBoundingClientRect = realRect
+  vi.useRealTimers()
+})
 
 async function mountAt(url, shape) {
   const router = makeRouter()
@@ -105,6 +121,8 @@ describe('m: — a message anchor', () => {
 
     const target = wrapper.find('[data-message-id="m2"]').element
     expect(scrolled).toEqual([target])
+    // 500 (target) − 100 (box) − the 16px breathing room, from scrollTop 0.
+    expect(api.scrollEl.value.scrollTop).toBe(384)
     expect(api.stick.following.value).toBe(false)     // the observer will not re-pin
     for (const c of ANCHOR_HIGHLIGHT_CLASSES) expect(target.classList.contains(c)).toBe(true)
     expect(router.currentRoute.value.query).toEqual({ tab: 'x' })   // anchor stripped, rest kept
