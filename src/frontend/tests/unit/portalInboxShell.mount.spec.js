@@ -178,7 +178,7 @@ describe('D10 — selection scopes the rail, never activeAgentName', () => {
     expect(w.findComponent({ name: 'PortalRail' }).exists()).toBe(true)
   })
 
-  it('§3g A4: the rail is counted before it arrives, and not once its column is there', async () => {
+  it('§3g A4: the rail is counted before it arrives, and until its column has measured a width', async () => {
     arm()
     const { w } = await boot('/workspace/inbox')
     const inbox = () => w.findComponent({ name: 'PortalInbox' })
@@ -187,7 +187,56 @@ describe('D10 — selection scopes the rail, never activeAgentName', () => {
     inbox().vm.$emit('update:preview', 'thread:t1')
     await flushPromises()
     expect(w.findComponent({ name: 'PortalRail' }).exists()).toBe(true)
-    expect(inbox().props('railAllowance')).toBe(0)
+    // Round 3: a column that has not reported a width (it enters from 0) has
+    // lost the Inbox nothing yet — the old "0 once it exists" flipped the list
+    // mid-animation. The measured case is the next test.
+    expect(inbox().props('railAllowance')).toBeGreaterThanOrEqual(48)
+  })
+
+  it('§3g A4 (round 3): the allowance is the width the rail column has not grown into yet', async () => {
+    // A controllable ResizeObserver: the test says what each element measures.
+    const observers = []
+    const Real = globalThis.ResizeObserver
+    globalThis.ResizeObserver = class { constructor(cb) { this.cb = cb; this.els = []; observers.push(this) } observe(el) { this.els.push(el) } unobserve() {} disconnect() { this.els = [] } }
+    try {
+      arm()
+      const { w } = await boot('/workspace/inbox')
+      const inbox = () => w.findComponent({ name: 'PortalInbox' })
+      inbox().vm.$emit('update:preview', 'thread:t1')
+      await flushPromises()
+      const col = w.find('[data-testid="ws-rail-column"]').element
+      const ro = observers.find((o) => o.els.includes(col))
+      expect(ro).toBeTruthy() // the column is observed although it mounted late
+      const report = async (px) => { ro.cb([{ contentRect: { width: px } }]); await flushPromises() }
+      // Collapsed rail (the default): a 48px target.
+      await report(0)
+      expect(inbox().props('railAllowance')).toBe(48) // just entered: nothing lost yet
+      await report(20)
+      expect(inbox().props('railAllowance')).toBe(28)
+      await report(48)
+      expect(inbox().props('railAllowance')).toBe(0)
+    } finally {
+      globalThis.ResizeObserver = Real
+    }
+  })
+
+  it('§3g A4 (round 3): an OPEN rail with nothing selected keeps its column, with a way to collapse it', async () => {
+    // At 1280 an open rail stacks the Inbox; a stacked Inbox previews nothing;
+    // with no agent the rail had no tabs — so the rail, its strip and every
+    // control to close it vanished, and `open` stayed saved.
+    localStorage.setItem('trinity-workspace-rail', JSON.stringify({ open: true, tab: 'work' }))
+    arm()
+    const { w } = await boot('/workspace/inbox')
+    expect(w.findComponent({ name: 'PortalRail' }).exists()).toBe(false)
+    const ph = () => w.findComponent({ name: 'PortalRailPlaceholder' })
+    expect(ph().exists()).toBe(true)
+    expect(w.find('[data-testid="ws-rail-column"]').exists()).toBe(true)
+    // At the OPEN width (the one the Inbox counted), not the collapsed strip.
+    expect(w.find('[data-testid="ws-rail-column"]').element.closest('[style*="--ws-rail"]')?.getAttribute('style')).toMatch(/--ws-rail:\s*\d{3}px/)
+    ph().vm.$emit('collapse')
+    await flushPromises()
+    expect(ph().exists()).toBe(false)
+    expect(JSON.parse(localStorage.getItem('trinity-workspace-rail')).open).toBe(false)
   })
 
   it('no selection → no rail, and the reserved column is only held while loading', async () => {

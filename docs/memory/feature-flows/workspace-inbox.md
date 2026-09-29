@@ -56,7 +56,9 @@ Sign-in / reload on bare /workspace
                   action-primary-700 — the same two on the pinned row, the agent pills
                   (agent-ask-count / agent-unread-count), the chat rows (§3g A3b)
       layout (§3g A4): inboxLayout({width: useContainerWidth(root), allowance: Portal's
-               inboxRailAllowance — the rail's width until its column exists, then 0 —,
+               inboxRailAllowance — the rail width its column has not grown into yet
+               (target − measured; the rail enters from 0) —; an open rail with nothing
+               selected is PortalRailPlaceholder (collapse control, open width),
                phoneViewport, prev}) → split ≥ 720 (16px hysteresis; w-96 list ≥ 1100) |
                stacked (list → pane + Back; no preview); data-layout on the root; a flip
                keeps an opened item and focuses its heading (stacked) / row (split)

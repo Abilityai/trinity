@@ -408,9 +408,9 @@ export function resolveItem(key, { threads = [], asks = [], previews = {} } = {}
 // width a viewport query cannot see (1280 with the rail open leaves ~608px).
 // Split needs 720 (a 320 list + a 400 pane); from 1100 the list is 384 wide.
 // 16px of hysteresis stops a resize — or the rail arriving — from flapping it.
-// `allowance` is the rail's width while it is NOT yet a column (0 once it is):
-// counting it before it arrives is what keeps a preview that brings the rail in
-// from flipping the layout it was chosen in. An unmeasured container (width
+// `allowance` is the rail's width the Inbox has not lost yet
+// (`inboxRailAllowance`): counting it before it arrives is what keeps a
+// preview that brings the rail in from flipping the layout it was chosen in. An unmeasured container (width
 // ≤ 0) falls back on the viewport; a phone viewport is always stacked.
 export const SPLIT_MIN = 720
 export const SPLIT_HYSTERESIS = 16
@@ -423,6 +423,19 @@ export function inboxLayout({ width = 0, allowance = 0, phoneViewport = false, p
   const splitAt = prev === 'split' ? SPLIT_MIN - SPLIT_HYSTERESIS : SPLIT_MIN
   const mode = eff >= splitAt ? 'split' : 'stacked'
   return { mode, wide: mode === 'split' && eff >= WIDE_MIN }
+}
+
+// The rail's width the Inbox has not lost YET (round 3). The rail column ENTERS
+// from width 0 over 300ms, so "the column exists" is not "its width is gone":
+// counting 0 from the first frame let a 1440 Inbox measure ~1147 mid-animation,
+// pick the 384 list, then fall to 1099 and pick 320 again (a flip on every
+// load). `target` is the width the rail will render at (open width, or the
+// 48px strip); `measured` is what its column has grown to. With no column the
+// whole target is counted in advance, which is what stops a preview that
+// brings the rail in from flipping the layout it was chosen in.
+export function inboxRailAllowance({ target = 0, present = false, measured = 0 } = {}) {
+  const t = Number(target) || 0
+  return Math.max(0, t - (present ? (Number(measured) || 0) : 0))
 }
 
 // ---- The pane (D11) -------------------------------------------------------------

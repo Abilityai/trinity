@@ -617,7 +617,8 @@
         :leave-to-class="railEverHeldRail ? '!w-0' : ''"
       >
       <div
-        v-if="railHasColumn || railColumnReserved"
+        v-if="railHasColumn || railColumnReserved || inboxRailPlaceholder"
+        ref="railColEl"
         class="hidden sm:flex shrink-0 min-h-0 w-[var(--ws-rail,24rem)]"
         data-testid="ws-rail-column"
         :data-reserved="railColumnReserved && !railHasColumn ? 'true' : undefined"
@@ -671,6 +672,16 @@
           />
         </template>
       </PortalRail>
+      <!-- Round 3: an open rail on the Inbox before anything is selected. It
+           has no agent to show, but it keeps its column (the Inbox chose its
+           layout counting it) and the rail's own collapse control, so the
+           reader is never left with an open rail they cannot see or close. -->
+      <!-- `inboxRailPlaceholder` excludes `railHasColumn` itself, so the two
+           never both render (a plain v-if, like the voice canvas column). -->
+      <PortalRailPlaceholder
+        v-if="inboxRailPlaceholder"
+        @collapse="setRailOpen(false)"
+      />
       </div>
       </Transition>
     </div>
@@ -769,7 +780,7 @@ import PortalRoom from '@/components/portal/PortalRoom.vue'
 import PortalInbox from '@/components/portal/PortalInbox.vue'
 import {
   inboxLandingTarget, isInboxPath, inboxBranchVisible, inboxSelectedAgent, inboxCanvasCount,
-  sidebarThreadsOf, agentLabels,
+  sidebarThreadsOf, agentLabels, inboxRailAllowance as inboxRailAllowanceFor,
 } from '@/components/portal/portalInbox'
 import {
   partitionAttachments, fanOutPlan, carriedNotice, noticeIsProblem, mergeCarrySources,
@@ -779,9 +790,11 @@ import PortalAgentDetails from '@/components/portal/PortalAgentDetails.vue'
 import PortalSuggestions from '@/components/portal/PortalSuggestions.vue'
 import ColumnResizeHandle from '@/components/ColumnResizeHandle.vue'
 import { useColumnResize, RAIL_COLLAPSED } from '@/composables/useColumnResize'
+import { useContainerWidth } from '@/composables/useContainerWidth'
 import PortalSkeleton from '@/components/portal/PortalSkeleton.vue'
 import PortalThemeSwitch from '@/components/portal/PortalThemeSwitch.vue'
 import PortalRail from '@/components/portal/PortalRail.vue'
+import PortalRailPlaceholder from '@/components/portal/PortalRailPlaceholder.vue'
 import PortalRailStrip from '@/components/portal/PortalRailStrip.vue'
 import PortalVoiceCanvas from '@/components/portal/PortalVoiceCanvas.vue'
 import ConfirmDialog from '@/components/ConfirmDialog.vue'
@@ -1045,7 +1058,9 @@ function onVoiceCall(sig) {
 // auto-collapse below, which is the AC's tie-breaker when the viewport cannot
 // fit all three.
 const columns = useColumnResize({
-  railOpen: computed(() => railState.value.open && railVisible.value),
+  // Round 3: the Inbox's placeholder rail is an OPEN column (its width is the
+  // one the Inbox counted), so the grid renders it at the open width.
+  railOpen: computed(() => railState.value.open && (railVisible.value || inboxRailPlaceholder.value)),
   setRailOpen: (open) => { if (!open) setRailOpen(false) },
 })
 
@@ -1154,9 +1169,25 @@ const inboxCanvases = computed(() => inboxCanvasCount({
 // width is counted in advance (the width it will render at: the open width or
 // the 48px strip), so a preview that brings the rail in cannot flip the layout
 // it was chosen in. 0 once the column (or its reservation) is really there.
-const inboxRailAllowance = computed(() => ((railHasColumn.value || railColumnReserved.value)
-  ? 0
-  : (railState.value.open ? columns.effectiveRail.value : RAIL_COLLAPSED)))
+// Round 3: the allowance is what the column has NOT grown into yet — it enters
+// from 0 over RAIL_MOTION, and counting 0 from its first frame flipped the
+// Inbox's list 320 → 384 → 320 on every load at ~1400–1440px.
+const railColEl = ref(null)
+const railColMeasured = useContainerWidth(railColEl)
+const inboxRailAllowance = computed(() => inboxRailAllowanceFor({
+  target: railState.value.open ? columns.effectiveRail.value : RAIL_COLLAPSED,
+  present: !!(railHasColumn.value || railColumnReserved.value || inboxRailPlaceholder.value),
+  measured: railColMeasured.value,
+}))
+// Round 3: an OPEN rail on the Inbox with nothing selected has no agent, so no
+// tabs — the rail, its strip and the control to close it all vanished (at 1280
+// the open rail stacks the Inbox, and a stacked Inbox previews nothing, so
+// nothing would ever select an agent). The column stays, saying why it is
+// empty, with the rail's own collapse control.
+const inboxRailPlaceholder = computed(() => Boolean(
+  isInboxRoute.value && railState.value.open && !railHasColumn.value
+  && !railColumnReserved.value && !voiceCanvasHasColumn.value
+))
 
 // #2711 (review): has this column ever actually held the rail? A reservation
 // that is handed back without ever becoming a rail was a guess that did not pay

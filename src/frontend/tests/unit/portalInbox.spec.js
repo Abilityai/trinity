@@ -593,3 +593,34 @@ describe('Open in chat (D11)', () => {
     expect(openInChatTarget({ type: 'ask', id: 'a1' })).toBeNull()
   })
 })
+
+import { inboxRailAllowance } from '@/components/portal/portalInbox'
+
+describe('inboxRailAllowance — the rail width the Inbox has not lost YET (§3g A4, round 3)', () => {
+  // The rail column ENTERS from width 0 (a 300ms width transition). Treating
+  // "the column exists" as "the rail's width is gone" let a 1440 Inbox measure
+  // ~1147 mid-animation, choose the 384 list, then fall to 1099 and choose 320
+  // again: a 320 → 384 → 320 flip on every load (CLS 0.053, round-3 benchmark).
+  // The allowance is the target minus what the column has actually grown to,
+  // so the width the Inbox decides on (container − allowance) is constant
+  // through the whole animation.
+  it('no column: the whole target is counted in advance', () => {
+    expect(inboxRailAllowance({ target: 384, present: false, measured: 0 })).toBe(384)
+    expect(inboxRailAllowance({ target: 48, present: false, measured: 0 })).toBe(48)
+  })
+  it('a column mid-enter: only what it has not grown into yet', () => {
+    expect(inboxRailAllowance({ target: 384, present: true, measured: 0 })).toBe(384)
+    expect(inboxRailAllowance({ target: 48, present: true, measured: 12 })).toBe(36)
+    expect(inboxRailAllowance({ target: 384, present: true, measured: 384 })).toBe(0)
+  })
+  it('the width the Inbox decides on is constant through the enter animation', () => {
+    const row = 1147 // the Inbox + rail share at a 1440 viewport, sidebar aside
+    for (const grown of [0, 7, 22, 40, 48]) {
+      const container = row - grown
+      expect(container - inboxRailAllowance({ target: 48, present: true, measured: grown })).toBe(row - 48)
+    }
+  })
+  it('never negative (a column wider than its target, mid-drag)', () => {
+    expect(inboxRailAllowance({ target: 384, present: true, measured: 400 })).toBe(0)
+  })
+})

@@ -836,8 +836,12 @@ construction; `threadsLoaded` (latched on the first successful sessions read) an
 `store.sessionsFailed` gate the empty copy, the D7 twin of `asksLoaded`/`asksFailed`.
 Split vs stacked is the Inbox's CONTAINER width, not the viewport (§3g A4:
 `portalInbox.inboxLayout` over `composables/useContainerWidth.js`, split ≥ 720 with 16px
-hysteresis; `Portal.vue::inboxRailAllowance` counts the rail before its column exists so a
-preview cannot flip the layout). When split, the tab's first row is a local **preview** (so the rail column does not pop
+hysteresis; `Portal.vue::inboxRailAllowance` = `portalInbox.inboxRailAllowance` counts the
+rail width the column has NOT grown into yet — the whole target before it exists, then
+target − its measured width while it enters from 0 — so neither a preview that brings the
+rail in nor the rail's enter animation can flip the layout; an OPEN rail on the Inbox with
+nothing selected keeps its column as `PortalRailPlaceholder` with the collapse control,
+since with no agent the rail has no tabs and would otherwise vanish, uncloseable). When split, the tab's first row is a local **preview** (so the rail column does not pop
 in): never in the URL, never a read, told to the shell as `update:preview` so
 `inboxSelection = ?item= || preview` scopes the rail (§3g S5, T2). A chat is read only
 when the reader opened it (a click, or the initial `?item=`) AND the pane has emitted
