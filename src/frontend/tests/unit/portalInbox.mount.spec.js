@@ -151,6 +151,36 @@ describe('honest state — loading ≠ empty ≠ failed (principle 15)', () => {
     expect(has(w, 'inbox-row-ask:q1')).toBe(true)
   })
 
+  it('A11: All waits on the chats only — a failed asks read is a banner, never LoadFailed (§3g S3)', async () => {
+    store.asksFailed = true // first asks read failed; no ask data at all
+    const w = await mountInbox({ threads: [thread('t1', { last_message_at: iso(3) })] }, { query: { tab: 'all' } })
+    expect(has(w, 'inbox-list-failed')).toBe(false)
+    expect(has(w, 'inbox-row-thread:t1')).toBe(true)
+    const banner = w.find('[data-testid="inbox-asks-stale"]')
+    expect(banner.exists()).toBe(true)
+    expect(banner.text()).toContain("Couldn't load your asks — the chats below are current.")
+  })
+
+  it('A11: All renders its chats before the asks read has a verdict, and merges the asks in when they land', async () => {
+    const w = await mountInbox({ threads: [thread('t1', { last_message_at: iso(3) })] }, { query: { tab: 'all' } })
+    expect(has(w, 'inbox-list-loading')).toBe(false)
+    expect(has(w, 'inbox-row-thread:t1')).toBe(true)
+    store.asks = [ask('a1', { created_at: iso(1) })]
+    store.asksLoaded = true
+    await flushPromises()
+    expect(w.findAll('[data-inbox-row]').map((r) => r.attributes('data-inbox-row'))).toEqual(['ask:a1', 'thread:t1'])
+  })
+
+  it('A11: a failed asks REFRESH on All says the asks are stale, beside the rows', async () => {
+    store.asks = [ask('a1')]
+    store.asksLoaded = true
+    store.asksLoadedAt = NOW - 60_000
+    store.asksFailed = true
+    const w = await mountInbox({ threads: [thread('t1')] }, { query: { tab: 'all' } })
+    expect(w.find('[data-testid="inbox-asks-stale"]').text()).toContain("Couldn't refresh your asks")
+    expect(has(w, 'inbox-row-ask:a1')).toBe(true)
+  })
+
   it("a platform session's empty Action points at Operations (A9); a client's does not", async () => {
     store.asksLoaded = true
     const w = await mountInbox({ isPlatform: true }, { query: { tab: 'action' } })

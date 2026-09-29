@@ -155,6 +155,7 @@ table, no migration. The report publish may mint the addressee's Main
 |---|---|
 | Asks read 5xx / network, no data yet | Action shows `LoadFailed` with a retry |
 | Asks read fails after a good load | list kept, stale banner (`staleBannerMessage`) |
+| Asks read fails, on All (§3g S3 / A11) | All waits on the chats only: its chats render, and `inbox-asks-stale` sits above them — "Couldn't load your asks — the chats below are current." with no ask data yet, the stale-refresh line otherwise. Never `LoadFailed` over chats that loaded |
 | Asks 404/403 (not served) | `asksAbsent` counts as a verdict, so Action resolves to its empty state instead of a skeleton forever |
 | Sessions or previews read fails, no data yet | Unread/All `LoadFailed` |
 | Sessions or previews read fails after a good load | list kept, stale banner |

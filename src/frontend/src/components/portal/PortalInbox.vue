@@ -64,6 +64,14 @@
           data-testid="inbox-stale"
           @retry="retry"
         />
+        <InlineError
+          v-if="asksStale"
+          class="mx-3 mt-3"
+          :message="asksStaleText"
+          retryable
+          data-testid="inbox-asks-stale"
+          @retry="store.fetchAsks()"
+        />
         <!-- The list states its total on a line above the rows; that line's box is
              reserved in every other state too, so the list never jumps when
              its data lands (layout stability). Same box as PortalInboxList's. -->
@@ -254,17 +262,22 @@ const view = computed(() => {
   if (tab.value === 'unread') {
     return viewState({ hasLoaded: props.threadsLoaded, error: props.threadsFailed, count })
   }
-  return viewState({
-    hasLoaded: props.threadsLoaded && asksVerdict.value,
-    error: props.threadsFailed || store.asksFailed,
-    count,
-  })
+  // A11 (§3g S3): All waits on the CHATS only. Its ask rows merge in when the
+  // asks read lands (a new key goes in beside its neighbour, `stableRows`), and
+  // a failed asks read is a banner above the chats — never LoadFailed over
+  // chats that loaded fine.
+  return viewState({ hasLoaded: props.threadsLoaded, error: props.threadsFailed, count })
 })
+const asksStale = computed(() => tab.value === 'all' && store.asksFailed
+  && (view.value.state === 'ready' || view.value.state === 'empty'))
+const asksStaleText = computed(() => (store.asksLoaded
+  ? staleBannerMessage('your asks', store.asksLoadedAt)
+  : "Couldn't load your asks — the chats below are current."))
 // The thread list keeps no load time, so its banner says "the last data that
 // loaded" rather than inventing one.
 const staleText = computed(() => (tab.value === 'action'
   ? staleBannerMessage('your asks', store.asksLoadedAt)
-  : staleBannerMessage(tab.value === 'unread' ? 'your chats' : 'your inbox', null)))
+  : staleBannerMessage('your chats', null)))
 const failedTitle = computed(() => (tab.value === 'action' ? "Couldn't load your asks" : "Couldn't load your chats"))
 
 // A9: an owner is never the addressee of their own agents' asks, so a

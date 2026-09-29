@@ -3556,7 +3556,9 @@ to localStorage in the clear.
   roster payload, the viewer's own chat state and the asks list.
 - **Honest states**: loading ≠ empty ≠ failed ≠ stale, for asks and threads alike. The empty
   copy renders only after a successful read; a failed first read shows a retry; a failed
-  refresh keeps the list with a stale banner (§26.8, the asks read fails loud).
+  refresh keeps the list with a stale banner (§26.8, the asks read fails loud). All waits on
+  the chats only: its ask rows merge in when the asks read lands, and a failed asks read is a
+  banner above the chats, never a failed All (§3g S3 / A11).
 - **Phone**: list and pane are successive full-width states with an explicit Back (Esc too);
   nothing is auto-selected, so the landing starts no agent feed.
   On desktop the tab's first row is auto-selected (the rail column does not pop in on the
