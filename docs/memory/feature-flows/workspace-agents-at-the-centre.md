@@ -424,6 +424,7 @@ render** (ent#468 Option A), recorded on the issue.
   surface unmounted at the same instant the confirmation was created, so the
   message would have rendered for zero frames. Timers are cleared on unmount —
   this surface unmounts on every chat switch.
+- **The thread link is additive (#3055).** ent#429's "Open the conversation" button has its own `v-if`, and the controls are `<template v-if="!isEnded(ask)">`, so an ask attached to another chat (Main, for every addressed ask) stays answerable in a non-Main chat; `threadLink` (default `true`) lets a host drop the link. Pinned by `portalAskCard.mount.spec.js`.
 
 ## Tests
 
