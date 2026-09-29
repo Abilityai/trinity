@@ -952,6 +952,27 @@ describe('a phone reaches the menu from the Inbox (§3g A5)', () => {
   })
 })
 
+describe('an ask attached to a chat is answerable in the pane (#3055 / §3g L0)', () => {
+  // Ingestion attaches every addressed ask to Main, so every real ask has a
+  // chat_id — and the card's thread link once took the controls away. The
+  // pane keeps the link (the only way to the ask's chat until E1 lands) AND
+  // the controls.
+  it('a question with a chat shows its answer box and the link back', async () => {
+    store.asksLoaded = true
+    store.asks = [ask('q1', { chat_id: 'main-1' })]
+    const w = await mountInbox({}, { query: { tab: 'action', item: 'ask:q1' } })
+    expect(has(w, 'inbox-ask-input-q1')).toBe(true)
+    expect(has(w, 'inbox-ask-open-thread-q1')).toBe(true)
+  })
+  it('an approval with a chat shows its options and Send', async () => {
+    store.asksLoaded = true
+    store.asks = [ask('ap1', { kind: 'approval', options: ['Yes', 'No'], chat_id: 'main-1' })]
+    const w = await mountInbox({}, { query: { tab: 'action', item: 'ask:ap1' } })
+    expect(w.findAll('[data-testid="inbox-ask-option-ap1"]').length).toBe(2)
+    expect(has(w, 'inbox-ask-send-ap1')).toBe(true)
+  })
+})
+
 describe('round-3 list fixes', () => {
   it('an empty tab is one column: no "Pick something on the left" beside nothing to pick', async () => {
     store.asksLoaded = true
