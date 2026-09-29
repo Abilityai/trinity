@@ -60,9 +60,11 @@ const VARIANT_CLASSES = {
     'border-transparent ' +
     'bg-status-danger-600 hover:bg-status-danger-700 text-white ' +
     'dark:bg-status-danger-500 dark:hover:bg-status-danger-400',
+  // Dark ink is the 400 tier, not 500 (ent#610 §3g B7b): 500 measured 3.97:1
+  // on gray-900 and 3.29 on gray-800, under the AA floor for every ghost verb.
   ghost:
     'border-transparent ' +
-    'bg-transparent text-action-primary-600 dark:text-action-primary-500 ' +
+    'bg-transparent text-action-primary-600 dark:text-action-primary-400 ' +
     'hover:bg-action-primary-100 dark:hover:bg-action-primary-500/16',
 }
 

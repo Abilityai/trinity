@@ -162,6 +162,23 @@ describe('solid badges carrying white ink', () => {
   })
 })
 
+describe('BaseButton ghost ink (ent#610 §3g B7b)', () => {
+  it('the dark 400 tier clears AA on both surfaces a ghost verb sits on', () => {
+    expect(failures([
+      { name: 'ghost dark ink on gray-900', fg: colors.indigo[400], bg: G[900] },
+      { name: 'ghost dark ink on gray-800', fg: colors.indigo[400], bg: G[800] },
+      { name: 'ghost light ink on white', fg: colors.indigo[600], bg: WHITE },
+    ])).toEqual([])
+    expect(ratio(colors.indigo[400], G[900])).toBe(5.95)
+    expect(ratio(colors.indigo[400], G[800])).toBe(4.92)
+  })
+
+  it('records the 500 tier it replaced', () => {
+    expect(ratio(colors.indigo[500], G[900])).toBe(3.97)
+    expect(ratio(colors.indigo[500], G[800])).toBe(3.29)
+  })
+})
+
 describe('BaseBadge recipe (token-100 ground, token-700 ink)', () => {
   it('clears AA for every family in light', () => {
     const fams = [colors.green, colors.yellow, colors.red, colors.blue, colors.orange,
