@@ -350,6 +350,68 @@ class TestReviewFixes:
         assert st["last_successful_pull_at"] == st["last_pull_at"]
 
 
+class TestSecondReviewNits:
+    """PR #3021 re-review nits 4 and 5."""
+
+    def test_an_uncountable_branch_fails_the_pull_instead_of_reading_up_to_date(
+            self, world, monkeypatch):
+        agent, _, human = world
+        _human_push(human, "role.md", "role v2\n")
+        real = git_router.run_registered
+
+        def no_count(cmd, *a, **kw):
+            if cmd[1:3] == ["rev-list", "--left-right"]:
+                raise subprocess.TimeoutExpired(cmd, 10)
+            return real(cmd, *a, **kw)
+
+        monkeypatch.setattr(git_router, "run_registered", no_count)
+        result = git_router._run_pull_once(agent)
+
+        assert result["status"] == "failed"
+        assert "could not count commits" in result["error"]
+        assert _state(agent).get("last_successful_pull_at") is None
+
+    @staticmethod
+    def _merge_then_timeout(monkeypatch, *, lock=False):
+        """The git `merge` runs to completion, then the child "times out" —
+        the tree is left the way a kill mid-step can leave it."""
+        real = git_router.run_registered
+
+        def fake(cmd, *a, **kw):
+            if len(cmd) > 1 and cmd[1] == "merge" and "--abort" not in cmd:
+                real(cmd, *a, **kw)
+                if lock:
+                    (Path(kw["cwd"]) / ".git" / "index.lock").write_text("")
+                raise subprocess.TimeoutExpired(cmd, kw.get("timeout", 1))
+            return real(cmd, *a, **kw)
+
+        monkeypatch.setattr(git_router, "run_registered", fake)
+
+    def test_a_timed_out_step_on_a_clean_tree_is_reset(self, world, monkeypatch):
+        agent, _, human = world
+        before = _out(agent, "rev-parse", "HEAD")
+        _human_push(human, "role.md", "role v2\n")
+        self._merge_then_timeout(monkeypatch)
+
+        result = git_router._run_pull_once(agent)
+
+        assert result == {"status": "failed", "error": "git merge timed out"}
+        assert _out(agent, "rev-parse", "HEAD") == before
+        assert (agent / "role.md").read_text() == "role v1\n"
+
+    def test_a_reset_blocked_by_the_killed_childs_lock_says_so(self, world, monkeypatch):
+        agent, _, human = world
+        _human_push(human, "role.md", "role v2\n")
+        self._merge_then_timeout(monkeypatch, lock=True)
+
+        result = git_router._run_pull_once(agent)
+
+        assert result["status"] == "failed"
+        assert result["error"].startswith("git merge timed out")
+        assert "could not be reset" in result["error"]
+        assert "index.lock" in result["error"]
+
+
 class TestWorkingBranchReceivesMain:
     """PR #3021 ruling: a `trinity/*` agent only ever pulled its own branch, so
     human work pushed to `main` never arrived (invariant G3)."""
@@ -386,10 +448,62 @@ class TestWorkingBranchReceivesMain:
         result = git_router._run_pull_once(agent)
 
         assert result["status"] == "failed"
-        assert result["error"].startswith("merging main: ")
+        # PR #3021 re-review: git prints the conflict on STDOUT with an empty
+        # stderr, so the first stdout line ("Auto-merging notes.md") used to be
+        # recorded — an error that reads like progress.
+        assert result["error"] == "diverged: merge conflict with main (notes.md)"
+        assert _state(agent)["last_pull_error"] == result["error"]
         assert _out(agent, "rev-parse", "HEAD") == before
         assert not (agent / ".git" / "MERGE_HEAD").exists()
         assert (agent / "notes.md").read_text() == "notes — the agent's\n"
+
+    def test_a_failed_merge_abort_is_named_in_the_error(self, world, monkeypatch):
+        agent, _, human = world
+        self._on_working_branch(agent)
+        _human_push(human, "notes.md", "notes — human\n")
+        real = git_router.run_registered
+
+        def abort_fails(cmd, *a, **kw):
+            if cmd[1:3] == ["merge", "--abort"]:
+                return subprocess.CompletedProcess(cmd, 128, "", "fatal: could not reset index")
+            return real(cmd, *a, **kw)
+
+        monkeypatch.setattr(git_router, "run_registered", abort_fails)
+        result = git_router._run_pull_once(agent)
+
+        assert result["status"] == "failed"
+        assert result["error"].startswith("diverged: merge conflict with main (notes.md)")
+        assert "merge --abort failed" in result["error"]
+        assert "could not reset index" in result["error"]
+
+    def test_a_rebase_keeps_the_merge_the_pull_made(self, world):
+        """PR #3021 re-review: cycle 1 merges `main` into the working branch
+        (not pushed yet), then someone pushes to the agent's own branch. A plain
+        `git rebase` in cycle 2 flattened the merge — `main`'s commit came back
+        as a copy and `origin/main` stopped being an ancestor, so `behind_main`
+        kept reporting the agent as behind."""
+        agent, origin, human = world
+        self._on_working_branch(agent)
+        main_sha = _human_push(human, "role.md", "role v2 — from main\n")
+        assert git_router._run_pull_once(agent)["status"] == "success"  # the merge
+        assert _out(agent, "log", "--merges", "--format=%H")
+
+        _git(human, "fetch", "-q", "origin")
+        _git(human, "checkout", "-q", "-b", "wb", "origin/trinity/agent/1")
+        (human / "extra.md").write_text("pushed to the agent's branch\n")
+        _git(human, "add", "extra.md")
+        _git(human, "commit", "-q", "-m", "human: extra on the working branch")
+        _git(human, "push", "-q", "origin", "HEAD:trinity/agent/1")
+
+        result = git_router._run_pull_once(agent)
+
+        assert result["status"] == "success"
+        assert (agent / "extra.md").exists()
+        assert _out(agent, "log", "--merges", "--format=%H")
+        assert _git(agent, "merge-base", "--is-ancestor", main_sha, "HEAD",
+                    check=False).returncode == 0
+        subjects = _out(agent, "log", "--format=%s").splitlines()
+        assert subjects.count("human: role.md") == 1
 
 
 class TestLoopGate:

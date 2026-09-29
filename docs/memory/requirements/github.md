@@ -882,8 +882,12 @@
   - uncommitted edits stashed and re-applied explicitly
   - never discards local work: a conflict is aborted or undone, and recorded;
     an edit that could not be put back is named as kept in `git stash`
-  - never runs while an execution is in flight or queued, nor over unmerged
-    paths (and the push cycle never commits them)
+  - never STARTS while an execution is in flight or queued, nor over unmerged
+    paths (and the push cycle never commits them). The gate is check-then-act:
+    admission does not wait for a pull, so a turn accepted during the integrate
+    window (fast-forward or merge up to 60 s, rebase up to 120 s, plus the stash
+    steps) can read files while HEAD moves. Holding admission during a pull is a
+    follow-up.
 - **Flag:** per-agent `pull_sync_enabled` (both migration tracks), read live
   each cycle, with `GIT_SYNC_PULL` as the fallback; interval
   `GIT_SYNC_PULL_INTERVAL_SECONDS` (defaults to the push interval).

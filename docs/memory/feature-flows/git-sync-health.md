@@ -376,8 +376,14 @@ SessionStart hook, and the 2026-09-24 audit found agents up to 31 commits behind
     cycle does — a pull-only agent has no push cycle to do it.
   - Skipped while any execution is running **or queued** (`list_running()` +
     `list_pending_ids()`, #2433), checked again right before the tree is
-    touched; an unreadable registry counts as busy.
+    touched; an unreadable registry counts as busy. This gate is about
+    *starting*: turn admission does not wait on a pull, so a turn admitted
+    during the integrate window (up to 60 s for a merge, 120 s for a rebase)
+    can see HEAD move.
   - Refused while the index holds unmerged paths.
+  - Counts are strict (`_ahead_behind_vs`): a branch that can't be counted
+    against origin fails the pull (`could not count commits on …`) instead of
+    reading as up to date.
   - Fetches the **checked-out** branch: source-mode agents sit on their source
     branch, working-branch agents on theirs.
   - Nothing committed locally → a fast-forward. A local commit → a rebase,
@@ -386,7 +392,11 @@ SessionStart hook, and the 2026-09-24 audit found agents up to 31 commits behind
     (`_get_pull_branch`, `main`) **merged** in (`_integrate_source`) — only the
     agent writes its working branch, so without this human pushes to `main`
     never arrive. A merge, not a rebase: the branch is already pushed. A
-    conflict is aborted and recorded as `merging main: …`.
+    conflict is aborted and recorded as `diverged: merge conflict with main
+    (<files>)` (plus `merge --abort failed (…)` if the abort did). Every rebase
+    here and in the push cycle is `--rebase-merges`, so an unpushed merge of
+    `main` survives a later rebase onto the agent's own branch instead of being
+    flattened into copies of `main`'s commits.
 - **Uncommitted edits** (`_integrate_remote`) are stashed explicitly and
   re-applied. `--autostash` is deliberately not used: when the incoming commits
   touch the same files, its re-apply conflicts, leaves the edits *only in the
@@ -394,7 +404,10 @@ SessionStart hook, and the 2026-09-24 audit found agents up to 31 commits behind
   back to the pre-pull HEAD, where the stash applies cleanly. The result is
   recorded as `local edits conflict with incoming changes on <branch>`.
   Every exit (`_with_stash`) — a git child timing out included — either puts
-  the edits back or says `local edits are kept in \`git stash\``; a failed
+  the edits back or says `local edits are kept in \`git stash\``. A timed-out
+  step is reset to the pre-pull HEAD whether or not anything was stashed (a
+  killed merge can leave a half-updated tree or a `MERGE_HEAD`); a reset that
+  can't run says `the tree could not be reset to <sha> (…)`. A failed
   `reset --hard` stops there and says so. The push cycle refuses to stage over
   unmerged paths, so conflict markers left by such a failure are never
   committed and pushed.

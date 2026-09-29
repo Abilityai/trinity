@@ -797,10 +797,16 @@ def _rebase_onto_remote(home_dir: Path, branch: str) -> Optional[str]:
     Returns None on a clean rebase, else the error summary to record. Any
     failure is aborted, so the repo is back exactly where it was — a conflict is
     never resolved automatically, the remote never overwritten, nothing reset.
+
+    `--rebase-merges` (PR #3021 re-review): the pull cycle MERGES `main` into a
+    working branch, and a plain rebase drops merge commits — it replayed `main`'s
+    commits as copies, so `origin/main` stopped being an ancestor and the next
+    cycle merged `main` again on top of the duplicates. On a linear history the
+    flag changes nothing.
     """
     try:
         rebase = run_registered(
-            ["git", "rebase", "--autostash", f"origin/{branch}"],
+            ["git", "rebase", "--autostash", "--rebase-merges", f"origin/{branch}"],
             cwd=str(home_dir), timeout=120,
         )
     except subprocess.TimeoutExpired:
@@ -946,14 +952,20 @@ def _with_stash(home_dir: Path, branch: str, step) -> Optional[str]:
     except subprocess.TimeoutExpired as exc:
         verb = (exc.cmd or ["git", "command"])[1:2] or ["command"]
         err = f"git {verb[0]} timed out"
-        if stashed:
-            # Best effort back to the base the stash was taken on, then re-apply.
-            try:
-                if git("reset", "--hard", pre_head, timeout=30).returncode == 0 \
-                        and git("stash", "pop", timeout=30).returncode == 0:
-                    stashed = False
-            except subprocess.TimeoutExpired:
-                pass
+        # Back to the pre-pull HEAD whether or not anything was stashed: a
+        # killed merge can leave a half-updated tree or a MERGE_HEAD that the
+        # next push cycle would commit as the agent's own work (PR #3021
+        # re-review). Then re-apply the stash on the base it was taken from.
+        try:
+            git("merge", "--abort", timeout=30)  # no-op unless MERGE_HEAD exists
+            reset = git("reset", "--hard", pre_head, timeout=30)
+            if reset.returncode != 0:
+                err += (f"; the tree could not be reset to {pre_head[:12]} ("
+                        f"{_summarize_git_error(reset.stderr or reset.stdout or 'reset failed')})")
+            elif stashed and git("stash", "pop", timeout=30).returncode == 0:
+                stashed = False
+        except subprocess.TimeoutExpired:
+            err += f"; the tree could not be reset to {pre_head[:12]} (reset timed out)"
         return err + (kept if stashed else "")
 
 
@@ -987,11 +999,28 @@ def _integrate_source(home_dir: Path, branch: str, source: str) -> Optional[str]
         )
         if merge.returncode == 0:
             return None
-        run_registered(["git", "merge", "--abort"], cwd=str(home_dir), timeout=30)
-        return f"merging {source}: " + _summarize_git_error(
-            merge.stderr or merge.stdout or "merge failed")
+        # Git reports a conflict on STDOUT with an empty stderr, so the first
+        # output line is "Auto-merging <file>" — read the unmerged paths
+        # BEFORE the abort clears them (mirrors `_rebase_onto_remote`).
+        conflicted = _unmerged_paths(home_dir)
+        output = f"{merge.stdout or ''}\n{merge.stderr or ''}"
+        abort = run_registered(["git", "merge", "--abort"], cwd=str(home_dir), timeout=30)
+        if conflicted or "CONFLICT" in output:
+            files = f" ({', '.join(conflicted[:3])})" if conflicted else ""
+            err = f"diverged: merge conflict with {source}{files}"
+        else:
+            err = f"merging {source}: " + _summarize_git_error(
+                merge.stderr or merge.stdout or "merge failed")
+        if abort.returncode != 0:
+            err += ("; merge --abort failed ("
+                    + _summarize_git_error(abort.stderr or abort.stdout or "abort failed") + ")")
+        return err
 
     return _with_stash(home_dir, branch, step)
+
+
+class _PullCountError(Exception):
+    """The pull cycle could not count a branch against origin."""
 
 
 def _run_pull_once(home_dir: Path) -> Dict:
@@ -1004,9 +1033,11 @@ def _run_pull_once(home_dir: Path) -> Dict:
     the source branch (`_get_pull_branch`, normally `main`) is merged in, or
     human work pushed to `main` would never arrive (PR #3021 ruling).
 
-    - Never while an execution runs or is queued (a rebase under a turn changes
-      the files it is reading) — checked before the fetch and again right before
-      the tree is touched; an unreadable registry counts as busy.
+    - Never STARTS while an execution runs or is queued (a rebase under a turn
+      changes the files it is reading) — checked before the fetch and again
+      right before the tree is touched; an unreadable registry counts as busy.
+      Check-then-act: admission does not wait on a pull, so a turn admitted
+      during the integrate window can still see HEAD move.
     - Serialised with the push cycle and the operator git endpoints on
       `_REPO_LOCK`; a busy repo skips quietly (and unrecorded: every write to
       sync-state.json happens under that lock).
@@ -1062,10 +1093,18 @@ def _run_pull_once(home_dir: Path) -> Dict:
                 return _record_pull(home_dir, "failed", error=_summarize_git_error(
                     retry.stderr or retry.stdout or "fetch failed"))
 
-        ahead, behind = _compute_ahead_behind(home_dir, branch) if own_on_origin else (0, 0)
+        # Strict counts (`_ahead_behind_vs`): the best-effort helper's (0, 0) on
+        # a failure would record an "up to date" success (PR #3021 re-review).
+        def count(ref: str) -> tuple:
+            counts = _ahead_behind_vs(home_dir, ref)
+            if counts is None:
+                raise _PullCountError(ref)
+            return counts
+
+        ahead, behind = count(branch) if own_on_origin else (0, 0)
         source_behind = 0
         if source != branch:
-            _, source_behind = _compute_ahead_behind(home_dir, source)
+            _, source_behind = count(source)
         if behind == 0 and source_behind == 0:
             return _record_pull(home_dir, "success", behind=0)
 
@@ -1081,10 +1120,13 @@ def _run_pull_once(home_dir: Path) -> Dict:
             err = _integrate_source(home_dir, branch, source)
             if err:
                 return _record_pull(home_dir, "failed", behind=0, error=err)
-        after = _compute_ahead_behind(home_dir, branch)[1] if own_on_origin else 0
+        after = count(branch)[1] if own_on_origin else 0
         logger.info("pull: %s brought in %s commit(s) on %s and %s from %s",
                     home_dir, behind, branch, source_behind, source)
         return _record_pull(home_dir, "success", behind=after)
+    except _PullCountError as exc:
+        return _record_pull(home_dir, "failed", error=(
+            f"could not count commits on {exc} against origin"))
     except subprocess.CalledProcessError as exc:
         return _record_pull(home_dir, "failed", error=_summarize_git_error(
             exc.stderr or exc.stdout or str(exc)))
