@@ -312,6 +312,15 @@ def effect_service(idem_ops, monkeypatch):
     fake_database = types.ModuleType("database")
     fake_database.db = fake_db
     monkeypatch.setitem(sys.modules, "database", fake_database)
+    # #2392: the guard asks the stdlib-only pull_pilot leaf whether the agent
+    # is pull-mode. Register it directly so sibling fixtures that stub the
+    # `services` package still resolve it.
+    pp_spec = importlib.util.spec_from_file_location(
+        "services.pull_pilot", os.path.join(_backend_path, "services", "pull_pilot.py")
+    )
+    pull_pilot = importlib.util.module_from_spec(pp_spec)
+    pp_spec.loader.exec_module(pull_pilot)
+    monkeypatch.setitem(sys.modules, "services.pull_pilot", pull_pilot)
 
     path = os.path.join(_backend_path, "services", "idempotency_service.py")
     spec = importlib.util.spec_from_file_location("_idem_service_effect", path)

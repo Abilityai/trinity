@@ -140,6 +140,10 @@ _BUDGETED_ALERT_TYPES = frozenset({
     # tool, which an agent-scoped key may call on itself — so an agent CAN drive
     # the volume, which is the whole test the #1677 classification applies.
     "gitignore_untracked",
+    # #2392: an effect refused on a pull-mode agent for lack of an execution id.
+    # Budgeted because the agent drives the volume — every send it attempts
+    # without an id is one refusal.
+    "effect_unguarded",
 })
 
 # Shape guard for the episode alert's `last_triggered_by` triage field: a
@@ -188,6 +192,7 @@ _RESERVED_ID_PREFIXES = (
     "alert-budget-",     # this service's #1677 budget episode alert (deterministic
                          # bucketed id — reservation is what keeps the DB
                          # on-conflict dedup from being agent-pre-suppressible)
+    "effect-unguarded-", # idempotency_service refused-effect alarm (#2392)
     "db-backup-",        # db_backup_service failure/staleness alarms (#2216)
     "log-archive-",      # archive_storage unwritable-directory alarm (#2205)
     "sub-headroom-",     # subscription_headroom_alerts weekly-window alarm (ent#434)

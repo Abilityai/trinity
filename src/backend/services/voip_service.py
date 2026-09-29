@@ -150,7 +150,8 @@ class VoipService:
         at-least-once), the same number within the same execution replays the
         original {call_id, status, ...} instead of placing a second PSTN call.
         The router's boundary Idempotency-Key gate stays the OUTER layer.
-        Fail-open when ``execution_id`` is absent/invalid (old image).
+        Without a usable ``execution_id``: refused on a pull-mode agent, else
+        placed and logged as degraded (#2392).
         """
         if not self.is_available():
             raise HTTPException(status_code=404, detail="VoIP is not enabled")

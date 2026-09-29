@@ -198,6 +198,11 @@ async def place_voip_call(
             execution_id=request.execution_id,
             dedup_label=request.dedup_label,
         )
+    except idempotency_service.EffectUnguardedError as e:
+        # #2392: pull-mode agent, no usable execution id — nothing dialed, release
+        # the outer claim; refused, not retryable.
+        idempotency_service.fail(idem)
+        raise HTTPException(status_code=422, detail={"reason": "effect_unguarded", "message": str(e)})
     except idempotency_service.EffectInProgressError:
         # Concurrent duplicate dial for the same (execution, number) is mid-flight
         # (#1084). Release the outer trigger claim and surface a retryable 409.
