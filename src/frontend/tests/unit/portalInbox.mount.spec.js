@@ -1238,3 +1238,43 @@ describe('phone (D12)', () => {
     expect(router.currentRoute.value.query.item).toBeUndefined()
   })
 })
+
+describe('Action narrowed to one agent (§3g C2, ?from=)', () => {
+  const facetsTabs = (w) => w.find('[data-testid="inbox-agent-facets"]')
+  it('two agents waiting → the facet strip; ?from= narrows the rows', async () => {
+    store.asks = [ask('s1'), ask('r1', { agent_name: 'relay' }), ask('r2', { agent_name: 'relay' })]
+    store.asksLoaded = true
+    const w = await mountInbox({}, { query: { tab: 'action', from: 'relay' } })
+    expect(facetsTabs(w).exists()).toBe(true)
+    const keys = w.findAll('[data-inbox-row]').map((r) => r.attributes('data-inbox-row'))
+    expect(keys.sort()).toEqual(['ask:r1', 'ask:r2'])
+  })
+
+  it('choosing a facet writes ?from=; "All agents" removes it', async () => {
+    store.asks = [ask('s1'), ask('r1', { agent_name: 'relay' })]
+    store.asksLoaded = true
+    const w = await mountInbox({}, { query: { tab: 'action' } })
+    const strip = facetsTabs(w).findComponent({ name: 'OverflowTabs' })
+    strip.vm.$emit('update:modelValue', 'relay')
+    await flushPromises()
+    expect(router.currentRoute.value.query.from).toBe('relay')
+    expect(w.findAll('[data-inbox-row]').map((r) => r.attributes('data-inbox-row'))).toEqual(['ask:r1'])
+    facetsTabs(w).findComponent({ name: 'OverflowTabs' }).vm.$emit('update:modelValue', 'all-agents')
+    await flushPromises()
+    expect(router.currentRoute.value.query.from).toBeUndefined()
+  })
+
+  it('one agent → no strip; the other tabs never show it, and leaving Action drops ?from=', async () => {
+    store.asks = [ask('s1'), ask('s2')]
+    store.asksLoaded = true
+    const w = await mountInbox({}, { query: { tab: 'action' } })
+    expect(facetsTabs(w).exists()).toBe(false)
+    store.asks = [ask('s1'), ask('r1', { agent_name: 'relay' })]
+    await router.replace({ path: '/workspace/inbox', query: { tab: 'action', from: 'relay' } })
+    await flushPromises()
+    w.findComponent({ name: 'OverflowTabs' }).vm.$emit('update:modelValue', 'all')
+    await flushPromises()
+    expect(router.currentRoute.value.query.from).toBeUndefined()
+    expect(facetsTabs(w).exists()).toBe(false)
+  })
+})

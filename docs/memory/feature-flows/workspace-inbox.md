@@ -74,6 +74,14 @@ Sign-in / reload on bare /workspace
                                expiring within 24h first (soonest first — the A10 badge is
                                the reason shown), then priority critical > high > medium > low
                                (unknown = medium), then the OLDEST first; ties on id
+    agent facets (§3g C2)      Action only, when ≥ 2 agents are waiting: a second dense
+                               OverflowTabs strip (inbox-agent-facets, tablist "Asks by
+                               agent") — "All agents" (FROM_ALL) then each agent, most asks
+                               first, with its count; the choice is ?from=<agent> (never
+                               ?agent=, a stage key) → filterByAgent before stableRows; a new
+                               ?from= is a new visit; it holds while the agent has asks or its
+                               ended ask is selected (activeAgentFilter), then leaves the URL;
+                               a tab change drops it
     stableRows(fresh, visit)   rows keep their place for one TAB VISIT (§3g S1): a row that leaves
                                stays as a ghost (chat drawn read, ask drawn ended); a poll never
                                re-sorts; a new row goes in before its nearest fresh neighbour; a

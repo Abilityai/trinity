@@ -170,6 +170,42 @@ export function actionItems(openAsks, now = Date.now()) {
     .map(askItem)
 }
 
+// §3g C2: Action narrowed to one agent. The choice lives in `?from=<agent>` —
+// never `?agent=`, which is a stage key (it would open that agent's page). The
+// facets are a second dense strip, shown only when two or more agents are
+// waiting on you; "All agents" is a sentinel id, never an agent name.
+export const FROM_ALL = 'all-agents'
+export function normalizeFrom(v) {
+  return typeof v === 'string' && v && v !== FROM_ALL ? v : null
+}
+// Most asks first, then the name; an active filter whose agent has none left
+// keeps its facet (count-less) so it can still be cleared.
+export function agentFacets(rows, labels = {}, active = null) {
+  const counts = new Map()
+  for (const r of Array.isArray(rows) ? rows : []) {
+    if (r && r.agent_name) counts.set(r.agent_name, (counts.get(r.agent_name) || 0) + 1)
+  }
+  if (counts.size < 2 && !(active && !counts.has(active) && counts.size >= 1)) return []
+  const total = [...counts.values()].reduce((a, b) => a + b, 0)
+  const agents = [...counts.entries()]
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+    .map(([name, n]) => ({ id: name, label: (labels && labels[name]) || name, badge: n }))
+  if (active && !counts.has(active)) agents.push({ id: active, label: (labels && labels[active]) || active, badge: null })
+  return [{ id: FROM_ALL, label: 'All agents', badge: total }, ...agents]
+}
+export function filterByAgent(rows, from) {
+  if (!from) return rows
+  return (Array.isArray(rows) ? rows : []).filter((r) => r && r.agent_name === from)
+}
+// The filter holds while its agent still has asks — or while its just-ended
+// ask is the one on screen (the reader is looking at it); after that it clears
+// rather than leaving the reader on an empty, filtered tab.
+export function activeAgentFilter(from, rows, selected = null) {
+  if (!from) return null
+  if ((Array.isArray(rows) ? rows : []).some((r) => r && r.agent_name === from)) return from
+  return selected && selected.agent_name === from ? from : null
+}
+
 // Unread (D1): one row per CHAT with arrivals. Archived chats stay (an archived
 // chat is an ordinary tab and `totalUnread` counts it — dropping it would break
 // Σ "N new" == came). Rooms are excluded: their unread is 0 until PR C.

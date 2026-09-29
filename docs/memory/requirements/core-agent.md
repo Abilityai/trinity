@@ -3580,6 +3580,11 @@ to localStorage in the clear.
   confirm), one chat is read directly. Success is a toast ("Marked 28 chats read") and a new
   tab visit; a partial failure names how many failed and those chats keep their count (the S4
   rollback) (§3g A9).
+- **Action by agent (§3g C2, PR A2)**: when two or more agents are waiting on you, Action shows
+  a second strip — "All agents", then each agent with its count — and choosing one narrows the
+  tab to that agent's asks (`?from=<agent>`, so it survives a reload and can be linked). The
+  filter lasts while that agent still has asks or its just-answered ask is on screen, then
+  clears itself; switching tabs drops it.
 - **The ask card while answering (§3g L6, PR A2)**: picking an approval option moves focus to
   the note field (not on a touch screen, where it would pop the keyboard), so the Enter that
   follows sends instead of unselecting the option — still pick, then Send (#2375). A question
