@@ -86,6 +86,26 @@
       "description": "Vendored-mirror guard (trinity-enterprise#706, the #1088 precedent): src/scheduler/sync_freeze_policy.py is byte-identical to src/backend/services/sync_freeze_policy.py; the policy is a stdlib-only leaf with no relative imports (it must import in the scheduler image); the scheduler's SYNC_FAILURE_FREEZE_THRESHOLD is imported from the mirror, never re-assigned (one number)."
     },
     {
+      "file": "unit/test_3080_detect_mime_zip.py",
+      "feature": "#3080",
+      "added": "2026-09-29",
+      "categories": [
+        "backend",
+        "file-sharing"
+      ],
+      "description": "Outbound shared-file detect_mime() classifies a ZIP as application/zip when libmagic 5.46 reports application/octet-stream from a buffer; with real libmagic the buffer result equals libmagic's file-path result across 12 variants (deflated/stored/tiny/empty/zip64 ZIPs, DOCX/XLSX/PPTX, JAR, EPUB, ODT, APK), so ZIP-based formats keep their specific type; non-ZIP octet-stream unchanged, works without python-magic, executables still blocked; plus the shared utils.zip_signature helper."
+    },
+    {
+      "file": "unit/test_3079_base_image_codename_pin.py",
+      "feature": "#3079",
+      "added": "2026-09-29",
+      "categories": [
+        "backend",
+        "infrastructure"
+      ],
+      "description": "Static guard: every image Dockerfile (backend, scheduler, base-image) builds FROM a python tag that names a Debian codename (or a digest), so Docker Hub cannot move the base to a new Debian release under an unrelated rebuild (#1823 tzdata, #3046 libmagic 5.46); asserts that a codename is named, never which one. backend and scheduler must name the same codename (one tz database for the schedule validator and executor, #1472). Parser handles --platform, AS stages, alpineX.Y and digest pins."
+    },
+    {
       "file": "unit/test_human_only_principals.py",
       "feature": "#2996",
       "added": "2026-09-28",
