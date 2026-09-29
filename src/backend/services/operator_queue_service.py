@@ -205,6 +205,11 @@ _RESERVED_ID_PREFIXES = (
     "workspace-problem-",  # client_portal report-a-problem (ent#499) — reserved
                            # so an agent cannot pre-create the id of a complaint
                            # ABOUT ITSELF and silence it through ON CONFLICT
+    "portal-inbox-collision-",  # client_portal shared legacy inbox (ent#308).
+                           # Its text lists client addresses: reserved (#715) so
+                           # `is_platform_minted` keeps it out of the agent's file
+                           # and its resume turn, and so an agent cannot pre-create
+                           # the id and swallow the alert through ON CONFLICT
     # git_service per-Push sweep alert (#2529). Reserved for the #1632 reason
     # above, and — since ent#499 keyed `is_platform_minted` on this very tuple —
     # this listing is ALSO what keeps the alert out of the agent's own
@@ -277,6 +282,21 @@ def is_platform_minted(item) -> bool:
     else:
         candidate = getattr(item, "request_id", "") or getattr(item, "id", "") or ""
     return str(candidate).strip().lower().startswith(_RESERVED_ID_PREFIXES)
+
+
+# #715: the platform alarms whose TEXT is about a person — a Workspace client's
+# complaint (ent#499: their email and verbatim words, which ent#366 withholds from
+# the rated agent) and the client addresses behind a shared legacy inbox (ent#308,
+# whose id also carries an email slug). A subset of `_RESERVED_ID_PREFIXES`, so
+# no agent can mint a row into it.
+_ABOUT_A_PERSON_ID_PREFIXES = ("workspace-problem-", "portal-inbox-collision-")
+
+
+def is_about_a_person(item: dict) -> bool:
+    """Is this row one of the platform's heads-ups ABOUT a person (#715)? They
+    are the operator's: the queue's reads never return one to a machine key."""
+    candidate = item.get("request_id") or ""
+    return str(candidate).strip().lower().startswith(_ABOUT_A_PERSON_ID_PREFIXES)
 
 
 def _truncate_with_marker(text: str, max_len: int) -> str:
@@ -693,10 +713,11 @@ def _well_formed_queue(data) -> bool:
 
 
 def _deliver_into(req: dict, resp: dict) -> None:
+    # #715: never who answered — the agent's file carries the answer, not a
+    # person's email.
     req["status"] = "responded"
     req["response"] = resp["response"]
     req["response_text"] = resp.get("response_text")
-    req["responded_by"] = resp.get("responded_by_email")
     req["responded_at"] = resp.get("responded_at")
 
 
@@ -1907,8 +1928,7 @@ class OperatorQueueSyncService:
                     "created_at": resp.get("created_at", ""),
                     "response": resp["response"],
                     "response_text": resp.get("response_text"),
-                    "responded_by": resp.get("responded_by_email"),
-                    "responded_at": resp.get("responded_at"),
+                    "responded_at": resp.get("responded_at"),  # #715: never who
                 })
                 updated = True
                 delivered[resp["id"]] = resp
