@@ -55,6 +55,13 @@ def users_db(tmp_path, monkeypatch):
     return db
 
 
+def _users_mod(db):
+    """The `db.users` module the live `db` singleton actually uses. Another test
+    may evict and re-import `db.users`, so a fresh `from db.users import …` can
+    hand back a different class object than the one `db` raises or calls."""
+    return sys.modules[type(db._user_ops).__module__]
+
+
 def _make_user(db, email=None, role="user", username=None):
     from db_models import UserCreate
     username = username or f"user-{uuid.uuid4().hex[:8]}"
@@ -67,14 +74,14 @@ def _make_user(db, email=None, role="user", username=None):
 
 class TestUniqueAndOneWriter:
     def test_create_user_refuses_a_held_address_any_case(self, users_db):
-        from db.users import EmailInUseError
+        EmailInUseError = _users_mod(users_db).EmailInUseError
         a = _addr()
         _make_user(users_db, email=a)
         with pytest.raises(EmailInUseError):
             _make_user(users_db, email=a.upper())
 
     def test_update_user_refuses_a_held_address(self, users_db):
-        from db.users import EmailInUseError
+        EmailInUseError = _users_mod(users_db).EmailInUseError
         a = _addr()
         _make_user(users_db, email=a)
         other = _make_user(users_db, email=_addr())
@@ -87,7 +94,7 @@ class TestUniqueAndOneWriter:
         assert users_db.update_user(me["username"], {"email": a.upper()})["email"] == a
 
     def test_the_password_upsert_cannot_insert_a_duplicate(self, users_db):
-        from db.users import EmailInUseError
+        EmailInUseError = _users_mod(users_db).EmailInUseError
         taken = f"admin-{uuid.uuid4().hex[:6]}@example.com"
         _make_user(users_db, email=taken)
         with pytest.raises(EmailInUseError):
@@ -96,7 +103,8 @@ class TestUniqueAndOneWriter:
     def test_a_lost_race_on_the_index_is_the_same_refusal(self, users_db, monkeypatch):
         """Check-then-write can lose a race; the unique index is what holds, and
         its IntegrityError surfaces as EmailInUseError, never a 500."""
-        from db.users import EmailInUseError, UserOperations
+        users_mod = _users_mod(users_db)
+        EmailInUseError, UserOperations = users_mod.EmailInUseError, users_mod.UserOperations
         a = _addr()
         _make_user(users_db, email=a)
         other = _make_user(users_db, email=_addr())
@@ -226,7 +234,7 @@ class TestMigration:
         out = capsys.readouterr().out
         assert "binder" in out and "dup@example.com" not in out   # usernames logged, never the address
 
-    def test_the_alembic_copy_of_the_rule_is_the_sqlite_rule(self):
+    def test_the_alembic_copy_of_the_rule_is_the_sqlite_rule(self, monkeypatch):
         """A revision never imports app code, so it carries a frozen copy of the
         decision function — pinned identical in behaviour and in source."""
         import importlib.util
@@ -234,7 +242,8 @@ class TestMigration:
         path = _BACKEND / "migrations" / "versions" / "0081_ent720_email_identity.py"
         spec = importlib.util.spec_from_file_location("rev_ent720", path)
         rev = importlib.util.module_from_spec(spec)
-        sys.modules.setdefault("alembic.op", type(sys)("alembic.op"))
+        if "alembic.op" not in sys.modules:
+            monkeypatch.setitem(sys.modules, "alembic.op", type(sys)("alembic.op"))
         spec.loader.exec_module(rev)
         rows = [(1, "a", "X@e.com", "2"), (2, "b", "x@e.com", "1"), (3, "c", "y@e.com", "1"),
                 (4, "d", "x@E.com", "1"), (5, "e", "", "0")]

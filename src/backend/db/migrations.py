@@ -4792,7 +4792,14 @@ def _migrate_ent720_email_identity(cursor, conn):
     if not cursor.fetchone():
         return
     cursor.execute("UPDATE users SET email = NULL WHERE email IS NOT NULL AND TRIM(email) = ''")
-    cursor.execute("SELECT id, username, email, created_at FROM users WHERE email IS NOT NULL")
+    # Every real `users` table carries username + created_at; a reduced legacy
+    # shape (the #1160 boot fixture) lacks them, so read them only when present.
+    cursor.execute("PRAGMA table_info(users)")
+    cols = {r[1] for r in cursor.fetchall()}
+    name_col = "username" if "username" in cols else "CAST(id AS TEXT)"
+    created_col = "created_at" if "created_at" in cols else "''"
+    cursor.execute(
+        f"SELECT id, {name_col}, email, {created_col} FROM users WHERE email IS NOT NULL")
     losers = resolve_duplicate_emails(cursor.fetchall())
     for user_id, username in losers:
         cursor.execute("UPDATE users SET email = NULL WHERE id = ?", (user_id,))
