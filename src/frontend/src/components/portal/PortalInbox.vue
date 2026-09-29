@@ -53,7 +53,7 @@
         ref="listColEl"
         tabindex="-1"
         class="min-h-0 flex-col w-full sm:w-80 lg:w-96 shrink-0 sm:border-r border-gray-200 dark:border-gray-750 focus:outline-none"
-        :class="phone && selectedKey ? 'hidden sm:flex' : 'flex'"
+        :class="phone && selectedItem ? 'hidden sm:flex' : 'flex'"
         data-testid="inbox-list-column"
       >
         <InlineError
@@ -99,7 +99,7 @@
           v-else
           ref="listEl"
           :items="shownItems"
-          :total="total"
+          :head="head"
           :selected-key="selectedKey"
           :labels="labels"
           :label="`${tabLabel} items`"
@@ -107,7 +107,10 @@
         />
       </div>
 
-      <div class="min-w-0 flex-1 min-h-0 flex-col" :class="phone && !selectedKey ? 'hidden sm:flex' : 'flex'">
+      <!-- On a phone the columns follow the RESOLVED item, not the key: a key
+           that names a chat deleted elsewhere must show the list, never a
+           pane-less dead end with no Back. -->
+      <div class="min-w-0 flex-1 min-h-0 flex-col" :class="phone && !selectedItem ? 'hidden sm:flex' : 'flex'">
         <PortalInboxPane
           v-if="selectedItem"
           ref="paneEl"
@@ -141,7 +144,7 @@ import { useClientPortalStore } from '@/stores/clientPortal'
 import { viewState, staleBannerMessage } from '@/utils/loadingState'
 import {
   actionItems, unreadItems, allItems, inboxCounts, defaultInboxTab, normalizeInboxTab,
-  holdSelected,
+  stableRows, emptyVisit, isGhost, resolveItem, totalLabel,
 } from './portalInbox'
 
 const props = defineProps({
@@ -204,31 +207,42 @@ const baseItems = computed(() => {
 })
 
 const selectedKey = computed(() => (typeof route.query.item === 'string' ? route.query.item : null))
-// Principle 5: the row you opened stays put, drawn as it is now, until the
-// selection moves on.
-const held = ref(null)
+
+// Principle 5 (§3g S1): the rows of one TAB VISIT keep their place — a row
+// that leaves stays as a ghost drawn read / ended, a poll never re-sorts, and a
+// new row goes in beside its neighbour (`stableRows`). The visit is keyed by
+// tab, so a tab change starts a new one by construction; clicking the active
+// tab again and a completed bulk read start one explicitly. Not reactive
+// itself: the computed returns the next visit, which is kept here (re-applying
+// the same fresh list is a no-op, so a lazy re-evaluation is safe).
+let visit = { tab: null, ...emptyVisit() }
+const visitEpoch = ref(0)
+function newVisit() { visit = { tab: null, ...emptyVisit() }; visitEpoch.value++ }
 const live = {
   thread: (id) => props.threads.find((t) => (t.id || t.session_id) === id) || null,
   ask: (id) => store.asks.find((a) => a.id === id) || null,
 }
-const shownItems = computed(() => holdSelected(baseItems.value, held.value, selectedKey.value, live))
-// A selection restored from the URL (reload, deep link, Back in history) is held
-// exactly as a clicked one is, so answering it keeps its row in place (D8).
-watch([selectedKey, baseItems], ([k, items]) => {
-  if (!k || held.value?.item?.key === k) return
-  const index = items.findIndex((it) => it.key === k)
-  if (index >= 0) held.value = { item: items[index], index }
-}, { immediate: true })
-const total = computed(() => (tab.value === 'all' ? Math.max(all.value.total, shownItems.value.length) : shownItems.value.length))
+const shownItems = computed(() => {
+  visitEpoch.value // eslint-disable-line no-unused-expressions
+  const prev = visit.tab === tab.value ? visit : emptyVisit()
+  const out = stableRows(baseItems.value, prev, live)
+  visit = { tab: tab.value, ...out.visit }
+  return out.rows
+})
+// The head counts LIVE rows, never ghosts; with only ghosts left it says so.
+const liveCount = computed(() => shownItems.value.filter((it) => !isGhost(it)).length)
+const total = computed(() => (tab.value === 'all' ? Math.max(all.value.total, liveCount.value) : liveCount.value))
+const head = computed(() => (liveCount.value === 0 && shownItems.value.length
+  ? 'All caught up'
+  : totalLabel(total.value, liveCount.value)))
 
+// A selection the rendered rows do not hold (an old chat, a deep link) is
+// resolved from the shell's data by key — the one fallback, never a slice.
 const selectedItem = computed(() => {
   const k = selectedKey.value
   if (!k) return null
   return shownItems.value.find((it) => it.key === k)
-    || (held.value?.item?.key === k ? held.value.item : null)
-    || all.value.items.find((it) => it.key === k)
-    || unreadItems(props.threads, props.previews).find((it) => it.key === k)
-    || null
+    || resolveItem(k, { threads: props.threads, asks: store.asks, previews: props.previews })
 })
 
 // ---- per-tab honest state -------------------------------------------------------
@@ -284,6 +298,7 @@ const paneEl = ref(null)
 const listEl = ref(null)
 const listColEl = ref(null)
 let returnKey = null
+let returnIndex = 0
 
 function replaceQuery(patch) {
   const query = { ...route.query, ...patch }
@@ -292,10 +307,9 @@ function replaceQuery(patch) {
 }
 
 // An explicit open (click / Enter / Space). Opening a chat reads it: the shell's
-// `markRead`, once, AFTER the row's snapshot (with its first unread message id)
-// is held, so the pane can still show what was new.
+// `markRead`, once. The row keeps its place through the read (`stableRows`).
 async function open(it, { explicit = true } = {}) {
-  held.value = { item: it, index: Math.max(0, shownItems.value.findIndex((x) => x.key === it.key)) }
+  returnIndex = Math.max(0, shownItems.value.findIndex((x) => x.key === it.key))
   const navigated = replaceQuery({ tab: tab.value, item: it.key })
   if (!explicit) return
   if (it.type === 'thread') emit('mark-read', 'thread', it.id)
@@ -308,21 +322,22 @@ async function open(it, { explicit = true } = {}) {
   }
 }
 
+// A click on the active tab starts a new visit: the list re-sorts and its
+// ghosts go, which is the one way to ask for that without leaving the tab.
 function onTab(next) {
-  if (next === tab.value) return
-  held.value = null
+  if (next === tab.value) { newVisit(); return }
   replaceQuery({ tab: next, item: undefined })
 }
 
 // Back (D12). Focus can only land once the list column is shown again: the
 // navigation is awaited, then a tick, because focus() on a display:none element
-// is a no-op in a real browser. The row may have left the tab (a chat just read
-// off Unread) — then the row now in its place, else the list itself.
+// is a no-op in a real browser. The row keeps its place through a read (a
+// ghost), so it is normally still there; if it is not (deleted), the row now
+// in its place, else the list itself.
 async function back() {
-  const key = returnKey || held.value?.item?.key || selectedKey.value
-  const index = held.value?.index ?? 0
+  const key = returnKey || selectedKey.value
+  const index = returnIndex
   returnKey = null
-  held.value = null
   await replaceQuery({ item: undefined })
   await nextTick()
   const col = listColEl.value
@@ -334,6 +349,12 @@ async function back() {
   el.focus?.()
 }
 function onEsc() { if (phone.value && selectedKey.value) back() }
+// On a phone the pane IS the screen: if the open chat is deleted elsewhere the
+// pane has nothing to draw, so it goes Back for the reader — the list, focus on
+// the row now in its place — rather than leaving them on an empty column.
+watch(selectedItem, (it, prev) => {
+  if (phone.value && prev && !it && selectedKey.value) back()
+})
 
 // D10: on desktop the tab's first row is selected, so the rail column does not
 // pop in on the first click. Never on phone (a landing there costs no feed),
@@ -360,6 +381,9 @@ async function markAllRead() {
     if (failed) {
       markAllError.value = `${failed} of ${rows.length} ${rows.length === 1 ? 'chat' : 'chats'} couldn't be marked read. They keep their count — try again.`
     }
+    // A completed bulk read starts a new visit: the rows it read leave rather
+    // than lingering as ghosts.
+    else newVisit()
   } finally {
     markingAll.value = false
     emit('refresh')

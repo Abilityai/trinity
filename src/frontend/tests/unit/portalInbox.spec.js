@@ -242,7 +242,7 @@ describe('property: the Inbox and the sidebar never disagree (AC 1, D13)', () =>
 
 // ---- The shell's and the pane's seams (F3) ------------------------------------
 import {
-  isInboxPath, inboxBranchVisible, inboxSelectedAgent, holdSelected,
+  isInboxPath, inboxBranchVisible, inboxSelectedAgent, stableRows, emptyVisit, isGhost, resolveItem,
   paneWindow, openInChatTarget, agentLabels, PANE_TAIL,
 } from '@/components/portal/portalInbox'
 
@@ -280,36 +280,138 @@ describe('shell seams', () => {
   })
 })
 
-describe('holdSelected — the opened row stays in place (principle 5)', () => {
-  const t1 = { key: 'thread:t1', type: 'thread', id: 't1', n: 3 }
-  const t2 = { key: 'thread:t2', type: 'thread', id: 't2', n: 1 }
-  it('re-inserts a read chat at its old index, drawn read', () => {
-    const out = holdSelected([t2], { item: t1, index: 0 }, 'thread:t1', { thread: () => ({ unread: 0 }) })
-    expect(out.map((i) => i.key)).toEqual(['thread:t1', 'thread:t2'])
-    expect(out[0]).toMatchObject({ n: 0, readInPlace: true })
-  })
-  it('draws an ended ask as it is now', () => {
-    const a = { key: 'ask:a1', type: 'ask', id: 'a1', status: 'pending' }
-    const out = holdSelected([], { item: a, index: 3 }, 'ask:a1', { ask: () => ({ id: 'a1', status: 'expired' }) })
-    expect(out).toHaveLength(1)
-    expect(out[0]).toMatchObject({ status: 'expired', endedInPlace: true })
-  })
-  it('does nothing once the selection has moved, or while the row is still a member', () => {
-    expect(holdSelected([t2], { item: t1, index: 0 }, 'thread:t2')).toEqual([t2])
-    expect(holdSelected([t1, t2], { item: t1, index: 0 }, 'thread:t1')).toEqual([t1, t2])
-    expect(holdSelected([t2], null, 'thread:t1')).toEqual([t2])
+describe('stableRows — rows keep their place for one tab visit (§3g S1: A1, A7, A12)', () => {
+  const T = (id, over = {}) => ({ key: `thread:${id}`, type: 'thread', id, n: 1, ...over })
+  const A = (id, over = {}) => ({ key: `ask:${id}`, type: 'ask', id, status: 'pending', ...over })
+  const keys = (r) => r.rows.map((i) => i.key)
+  const liveAll = { thread: (id) => ({ id, unread: 0 }), ask: (id) => ({ id, status: 'answered' }) }
+
+  it('the first render is the fresh order', () => {
+    const r = stableRows([T('a'), T('b'), T('c')], emptyVisit(), liveAll)
+    expect(keys(r)).toEqual(['thread:a', 'thread:b', 'thread:c'])
+    expect(r.rows.every((i) => !isGhost(i))).toBe(true)
   })
 
-  it('a still-listed selected chat keeps the snapshot it was opened with (All, after the read)', () => {
-    const opened = { key: 'thread:t1', type: 'thread', id: 't1', n: 2, first_unread_message_id: 'm3',
-      latest: { kind: 'message', id: 'm4', at: 'x', excerpt: 'hi' } }
-    const rebuilt = { ...opened, n: 0, first_unread_message_id: null, latest: null }
-    const out = holdSelected([rebuilt], { item: opened, index: 0 }, 'thread:t1')
-    expect(out[0].first_unread_message_id).toBe('m3')
-    expect(out[0].latest).toEqual(opened.latest)
-    expect(out[0].n).toBe(0)
-    // Another selection releases the hold: the live item is drawn as it is.
-    expect(holdSelected([rebuilt], { item: opened, index: 0 }, 'thread:t2')).toEqual([rebuilt])
+  it('a row that leaves stays where it was, as a ghost drawn read (A12)', () => {
+    const v1 = stableRows([T('a'), T('b'), T('c')], emptyVisit(), liveAll).visit
+    const r = stableRows([T('a'), T('c')], v1, liveAll)
+    expect(keys(r)).toEqual(['thread:a', 'thread:b', 'thread:c'])
+    expect(r.rows[1]).toMatchObject({ readInPlace: true, n: 0 })
+    expect(isGhost(r.rows[1])).toBe(true)
+  })
+
+  it('an ask that leaves Action stays in place drawn as it ended', () => {
+    const v1 = stableRows([A('x'), A('y')], emptyVisit(), liveAll).visit
+    const r = stableRows([A('y')], v1, { ask: (id) => ({ id, status: 'expired' }) })
+    expect(keys(r)).toEqual(['ask:x', 'ask:y'])
+    expect(r.rows[0]).toMatchObject({ status: 'expired', endedInPlace: true })
+    // Gone from the asks list entirely: still drawn, ended.
+    const r2 = stableRows([A('y')], v1, { ask: () => null })
+    expect(r2.rows[0]).toMatchObject({ endedInPlace: true })
+  })
+
+  it('a re-sort in the fresh list does not move a kept row (A7: an answered ask on All)', () => {
+    const v1 = stableRows([A('a1'), T('t1'), A('a2')], emptyVisit(), liveAll).visit
+    // a2 was answered: its ended_at makes it the newest, so All re-sorts it first.
+    const r = stableRows([A('a2', { status: 'answered' }), A('a1'), T('t1')], v1, liveAll)
+    expect(keys(r)).toEqual(['ask:a1', 'thread:t1', 'ask:a2'])
+    expect(r.rows[2].status).toBe('answered') // drawn as it is now
+  })
+
+  it('a newer arrival on a kept row does not re-sort it; a new key goes in before its nearest fresh neighbour', () => {
+    const v1 = stableRows([T('a'), T('b'), T('c')], emptyVisit(), liveAll).visit
+    const r = stableRows([T('c', { n: 4 }), T('new'), T('a'), T('b')], v1, liveAll)
+    // `new` is followed by `a` in fresh order → it goes in before `a`.
+    expect(keys(r)).toEqual(['thread:new', 'thread:a', 'thread:b', 'thread:c'])
+    expect(r.rows[3].n).toBe(4)
+    const tail = stableRows([T('a'), T('b'), T('c'), T('z')], v1, liveAll)
+    expect(keys(tail)).toEqual(['thread:a', 'thread:b', 'thread:c', 'thread:z'])
+  })
+
+  it('a ghost with a new arrival lights up in place (T3)', () => {
+    const v1 = stableRows([T('a'), T('b')], emptyVisit(), liveAll).visit
+    const v2 = stableRows([T('b')], v1, liveAll).visit
+    const r = stableRows([T('b'), T('a', { n: 2 })], v2, liveAll)
+    expect(keys(r)).toEqual(['thread:a', 'thread:b'])
+    expect(isGhost(r.rows[0])).toBe(false)
+    expect(r.rows[0].n).toBe(2)
+  })
+
+  it('a deleted thread is dropped, not ghosted', () => {
+    const v1 = stableRows([T('a'), T('b')], emptyVisit(), liveAll).visit
+    const r = stableRows([T('b')], v1, { thread: () => null })
+    expect(keys(r)).toEqual(['thread:b'])
+  })
+
+  it('a kept chat whose refresh carries no preview keeps what was new (All, after the read)', () => {
+    const opened = T('t1', { n: 2, first_unread_message_id: 'm3', latest: { kind: 'message', id: 'm4', at: 'x', excerpt: 'hi' } })
+    const v1 = stableRows([opened], emptyVisit(), liveAll).visit
+    const r = stableRows([T('t1', { n: 0, first_unread_message_id: null, latest: null })], v1, liveAll)
+    expect(r.rows[0]).toMatchObject({ n: 0, first_unread_message_id: 'm3', latest: opened.latest })
+    // A fresh preview wins over the kept one.
+    const r2 = stableRows([T('t1', { n: 1, first_unread_message_id: 'm9', latest: null })], v1, liveAll)
+    expect(r2.rows[0].first_unread_message_id).toBe('m9')
+  })
+
+  it('a new visit forgets the ghosts', () => {
+    const v1 = stableRows([T('a'), T('b')], emptyVisit(), liveAll).visit
+    expect(keys(stableRows([T('b')], emptyVisit(), liveAll))).toEqual(['thread:b'])
+    expect(keys(stableRows([T('b')], v1, liveAll))).toEqual(['thread:a', 'thread:b'])
+  })
+
+  it('is idempotent: re-applying the same fresh list changes nothing', () => {
+    const v1 = stableRows([T('a'), T('b'), A('c')], emptyVisit(), liveAll).visit
+    const once = stableRows([A('c'), T('b')], v1, liveAll)
+    const twice = stableRows([A('c'), T('b')], once.visit, liveAll)
+    expect(keys(twice)).toEqual(keys(once))
+    expect(twice.visit.order).toEqual(once.visit.order)
+  })
+
+  it('tolerates junk', () => {
+    expect(stableRows(null, null).rows).toEqual([])
+    expect(stableRows([T('a')], undefined).rows.map((i) => i.key)).toEqual(['thread:a'])
+  })
+
+  it('property: every fresh key is shown exactly once, and kept rows keep their relative order', () => {
+    let seed = 7
+    const rnd = () => { seed = (seed * 1103515245 + 12345) % 2147483648; return seed / 2147483648 }
+    for (let run = 0; run < 300; run++) {
+      const pool = Array.from({ length: 12 }, (_, i) => T(`k${i}`))
+      const pick = () => pool.filter(() => rnd() < 0.6).sort(() => rnd() - 0.5)
+      let visit = emptyVisit()
+      let prev = []
+      for (let step = 0; step < 5; step++) {
+        const fresh = pick()
+        const r = stableRows(fresh, visit, liveAll)
+        const shown = keys(r)
+        expect(new Set(shown).size).toBe(shown.length)
+        for (const it of fresh) expect(shown).toContain(it.key)
+        const kept = prev.filter((k) => shown.includes(k))
+        expect(shown.filter((k) => kept.includes(k))).toEqual(kept)
+        visit = r.visit
+        prev = shown
+      }
+    }
+  })
+})
+
+describe('resolveItem — the one fallback for a selection outside the list', () => {
+  it('builds an old chat and an ask from the key, whatever the tab', () => {
+    const t = thread('old', { last_message_at: iso(40 * D), unread: 0 })
+    expect(resolveItem('thread:old', { threads: [t] })).toMatchObject({ key: 'thread:old', type: 'thread', id: 'old' })
+    const a = ask('a9', { status: 'answered', ended_at: iso(60 * D) })
+    expect(resolveItem('ask:a9', { asks: [a] })).toMatchObject({ key: 'ask:a9', type: 'ask', status: 'answered' })
+  })
+  it('carries the chat preview when there is one', () => {
+    const t = thread('t1', { unread: 2 })
+    const previews = { 'thread:t1': { latest: { kind: 'message', id: 'm2', at: iso(1), excerpt: 'x' }, first_unread_message_id: 'm1' } }
+    expect(resolveItem('thread:t1', { threads: [t], previews }).first_unread_message_id).toBe('m1')
+  })
+  it('null for an unknown or malformed key', () => {
+    expect(resolveItem('thread:gone', { threads: [] })).toBeNull()
+    expect(resolveItem('ask:gone', { asks: [] })).toBeNull()
+    expect(resolveItem('nonsense', {})).toBeNull()
+    expect(resolveItem(null, {})).toBeNull()
   })
 })
 

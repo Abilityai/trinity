@@ -49,15 +49,22 @@ Sign-in / reload on bare /workspace
                 asks/openAsks/asksLoaded/asksFailed/asksAbsent read from the clientPortal store)
     OverflowTabs  Action (needs) · Unread (came) · All          ?tab=&item= via router.replace
       desktop: the tab's first row is auto-selected — NOT a read; phone: nothing selected
-    PortalInboxList   bounded, stated total, rows are <button>s; outcome pill done / failed (icon + label)
+    stableRows(fresh, visit)   rows keep their place for one TAB VISIT (§3g S1): a row that leaves
+                               stays as a ghost (chat drawn read, ask drawn ended); a poll never
+                               re-sorts; a new row goes in before its nearest fresh neighbour; a
+                               deleted chat drops. New visit = tab change, re-click, bulk read.
+    selectedItem = the row, else resolveItem(key, threads/asks/previews) — never "Pick something"
+                   for an old chat; on a phone a key that resolves to nothing goes Back
+    PortalInboxList   bounded; the head counts LIVE rows ("All caught up" over ghosts only);
+                      rows are <button>s; outcome pill done / failed (icon + label)
     PortalInboxPane
       ask   → <PortalAsks :ask-ids="[id]" testid-prefix="inbox-ask"> → store.answerAsk → asks/router
       chat  → store.fetchHistory(agent, id, {limit: 50})  render from first_unread_message_id
               store.fetchSessionDeliverablesStrict → ReportRenderer (+ ReportSummary fallback)
                                                a failed read is LoadFailed, never "no deliverables"
               "N earlier arrivals — Open in chat" when the first unread is outside the 50
-              markRead('thread', id)           explicit open only (existing #557 cursor; row stays
-                                               selected, drawn read in place)
+              markRead('thread', id)           explicit open only (existing #557 cursor; the row
+                                               stays, drawn read in place, for the tab visit)
               Open in chat → /workspace/c/:id?anchor=m:<first_unread> | d:<report>
                              → PortalConversation + composables/useConversationAnchor.js
                                (data-message-id / data-report-id, useStickToBottom.detach(),
@@ -208,8 +215,8 @@ table, no migration. The report publish may mint the addressee's Main
 live stack with an admin whose email is on at least one agent's roster.
 
 **Test steps (manual):** sign in → lands on `/workspace/inbox`; the pinned row's two counts
-equal the agent rows; answer an ask in the pane → it stays in place drawn ended, then shows
-in All; open an Unread chat → the pane shows the arrivals, the badge clears in the sidebar
+equal the agent rows; answer an ask in the pane → it stays in place drawn ended until you leave the
+tab, then shows in All (where it does not move); open an Unread chat → the pane shows the arrivals, the badge clears in the sidebar
 too; a deliverable renders through `ReportRenderer`; `?agent=X` and `?new=1` still win;
 375 px and both themes.
 
@@ -226,7 +233,7 @@ an ask that ends while selected; a deep-linked `?item=`; previews read failing m
 | `tests/unit/test_ent557_unread_never_opened_chat.py`, `test_ent359_portal_chat_state.py`, `test_ent365_report_audience.py`, `test_ent457_portal_completion_report.py` | updated fixtures / retargets for the arm and the stamp |
 | `src/frontend/tests/unit/portalInbox.spec.js` | pure rules + the seeded count-parity property |
 | `src/frontend/tests/unit/portalInboxStore.spec.js` | `fetchChatState({previews})`, `markChatReadStrict` |
-| `src/frontend/tests/unit/portalInbox.mount.spec.js` | honest states, mark-read once, answer via store, Mark all read failures, phone Back + focus |
+| `src/frontend/tests/unit/portalInbox.mount.spec.js` | honest states, mark-read once, answer via store, Mark all read failures, phone Back + focus; §3g S1 rows keep their place (A1 click-then-read, A7 answer on All, A12 poll ghosts + "All caught up"), a deleted open chat goes Back on phone |
 | `src/frontend/tests/unit/portalInboxShell.mount.spec.js` | the stage chain (roster error, empty roster, no `PortalConversation`), selection never writes `activeAgentName` |
 | `src/frontend/tests/unit/portalSidebarInboxRow.spec.js` | the pinned row's counts and link |
 | `src/frontend/tests/unit/portalAsksTestidPrefix.mount.spec.js` | default ids unchanged, prefix over every id, disjoint id sets |

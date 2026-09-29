@@ -17,7 +17,7 @@
     <p
       class="shrink-0 px-4 pt-3 pb-2 text-[11px] font-semibold uppercase tracking-wide tabular-nums text-gray-500 dark:text-gray-400"
       data-testid="inbox-list-total"
-    >{{ totalText }}</p>
+    >{{ head }}</p>
     <ul class="flex-1 min-h-0 overflow-y-auto px-2 pb-2 space-y-1" :aria-label="label" data-testid="inbox-list">
       <li v-for="it in items" :key="it.key">
         <button
@@ -87,15 +87,16 @@
 </template>
 
 <script setup>
-import { computed } from 'vue'
 import BaseBadge from '@/components/base/BaseBadge.vue'
 import { relativeTime } from './portalUtils'
-import { newLabel, totalLabel } from './portalInbox'
+import { newLabel } from './portalInbox'
 import { formatLocalDateTime } from '@/utils/timestamps'
 
 const props = defineProps({
   items: { type: Array, default: () => [] },
-  total: { type: Number, default: 0 },
+  // The line above the rows — the container's, because it counts LIVE rows
+  // (a ghost is not a member of the tab) and knows the tab's full total.
+  head: { type: String, default: '' },
   selectedKey: { type: String, default: null },
   // agent name → the human-facing label (the roster's display_label).
   labels: { type: Object, default: () => ({}) },
@@ -103,7 +104,6 @@ const props = defineProps({
 })
 defineEmits(['open'])
 
-const totalText = computed(() => totalLabel(props.total, props.items.length))
 const labelFor = (name) => props.labels[name] || name || ''
 const relative = (iso) => relativeTime(iso)
 

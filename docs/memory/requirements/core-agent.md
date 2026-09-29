@@ -3545,7 +3545,9 @@ to localStorage in the clear.
   note, Send — never a one-tap Approve) and stays selected after an answer, shown ended in
   place. A chat renders its newest arrivals (from the first unread message) and its
   deliverables through `ReportRenderer` with the summary fallback. Opening a chat row marks it
-  read; the row stays selected and is drawn read in place until the selection changes. **Open
+  read; the row keeps its place, drawn read, for the rest of the tab visit (§3g S1: a row that
+  leaves any tab stays as a ghost — a chat drawn read, an ask drawn ended — and a poll never
+  re-sorts; leaving the tab, clicking it again or a completed Mark all read starts a new visit). **Open
   in chat** / **Reply in chat** open the chat at the first arrival (`?anchor=`), with the
   composer focused for Reply (A2 — no composer in the pane). **Mark all read** is secondary
   and reports how many failed.

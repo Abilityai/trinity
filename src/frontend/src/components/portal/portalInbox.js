@@ -219,39 +219,121 @@ export function inboxSelectedAgent({ item, threads = [], asks = [], agents = [] 
   return (Array.isArray(agents) ? agents : []).find((a) => a && a.name === name) || null
 }
 
-// ---- The list's in-place rule (principle 5) -----------------------------------
+// ---- The list's in-place rule (principle 5; §3g S1) ------------------------------
 //
-// Reading a chat zeroes its unread, and answering an ask ends it — either would
-// drop the row out of Unread / Action under the reader. The selected row stays
-// where it was, drawn in its NEW state (read, or ended), until the selection
-// changes. `held` is `{item, index}` captured when the row was selected; `live`
-// resolves the current thread / ask so the row is drawn as it is now.
-export function holdSelected(items, held, selectedKey, live = {}) {
-  const list = Array.isArray(items) ? items : []
-  if (!held || !held.item || !selectedKey || held.item.key !== selectedKey) return list
-  // Still listed (All keeps a read chat): draw the live row, but with the
-  // snapshot it was OPENED with — the refresh after the read carries no
-  // preview, and the pane would otherwise lose what was new under the reader.
-  if (list.some((it) => it.key === selectedKey)) {
-    const { type, first_unread_message_id: firstId, latest } = held.item
-    if (type !== 'thread' || (!firstId && !latest)) return list
-    return list.map((it) => (it.key !== selectedKey ? it : {
-      ...it,
-      ...(firstId ? { first_unread_message_id: firstId } : {}),
-      ...(latest ? { latest } : {}),
-    }))
+// Reading a chat zeroes its unread and answering an ask ends it — either drops
+// the row out of Unread / Action, and a poll can reorder or thin any tab under
+// the reader (A1, A7, A12). So the rows of one TAB VISIT keep their place:
+//   - a row that leaves the fresh list stays where it was as a GHOST — a chat
+//     drawn read (`readInPlace`), an ask drawn as it ended (`endedInPlace`);
+//   - a row still listed keeps its position however the fresh order moved;
+//   - a new key goes in before its nearest following neighbour in fresh order
+//     (after the last row when nothing follows it);
+//   - a ghost that comes back (a new arrival) lights up in place (T3);
+//   - a deleted thread is dropped, never ghosted.
+// The container starts a new visit when the tab changes, when the active tab is
+// clicked again, and after a completed bulk mark-read — the only moments the
+// list may re-sort under the reader.
+//
+// Pure and O(n): `visit` is `{ order: [key], snaps: {key: item} }` and is
+// returned updated rather than mutated, so re-applying the same fresh list is a
+// no-op (a lazily re-evaluated computed can call this more than once).
+
+export function emptyVisit() {
+  return { order: [], snaps: {} }
+}
+
+// A ghost is not a member of the tab any more; it is counted by nobody (the
+// list head counts live rows only).
+export function isGhost(it) {
+  return !!(it && it.ghost)
+}
+
+function ghostOf(snap, live) {
+  if (snap.type === 'thread') {
+    const t = live.thread ? live.thread(snap.id) : null
+    if (!t) return null // deleted
+    return { ...snap, n: Number(t.unread) || 0, readInPlace: true, ghost: true }
   }
-  const it = held.item
-  let drawn = it
-  if (it.type === 'thread') {
-    const t = live.thread ? live.thread(it.id) : null
-    drawn = { ...it, n: Number(t?.unread) || 0, readInPlace: true }
-  } else if (it.type === 'ask') {
-    const a = live.ask ? live.ask(it.id) : null
-    drawn = a ? { ...it, status: a.status, ask: a, endedInPlace: a.status !== 'pending' } : { ...it, endedInPlace: true }
+  if (snap.type === 'ask') {
+    const a = live.ask ? live.ask(snap.id) : null
+    return a
+      ? { ...snap, status: a.status, ask: a, endedInPlace: a.status !== 'pending', ghost: true }
+      : { ...snap, endedInPlace: true, ghost: true }
   }
-  const at = Math.max(0, Math.min(Number(held.index) || 0, list.length))
-  return [...list.slice(0, at), drawn, ...list.slice(at)]
+  return null
+}
+
+// A kept chat whose refresh carries no preview (the read cleared it) keeps what
+// was new, so the pane still shows it under the reader.
+function withKeptPreview(it, snap) {
+  if (it.type !== 'thread' || !snap || it.first_unread_message_id || it.latest) return it
+  if (!snap.first_unread_message_id && !snap.latest) return it
+  return {
+    ...it,
+    ...(snap.first_unread_message_id ? { first_unread_message_id: snap.first_unread_message_id } : {}),
+    ...(snap.latest ? { latest: snap.latest } : {}),
+  }
+}
+
+export function stableRows(fresh, visit, live = {}) {
+  const list = (Array.isArray(fresh) ? fresh : []).filter((it) => it && it.key)
+  const prevOrder = Array.isArray(visit?.order) ? visit.order : []
+  const snaps = (visit && visit.snaps) || {}
+  const freshBy = new Map(list.map((it) => [it.key, it]))
+  const prevSet = new Set(prevOrder)
+
+  // Each NEW key is anchored to the nearest following fresh key that was
+  // already placed; `null` = after everything.
+  const anchored = new Map() // anchor key | null → [new keys, fresh order]
+  let next = null
+  for (let i = list.length - 1; i >= 0; i--) {
+    const k = list[i].key
+    if (prevSet.has(k)) { next = k; continue }
+    if (!anchored.has(next)) anchored.set(next, [])
+    anchored.get(next).unshift(k)
+  }
+
+  const rows = []
+  const order = []
+  const nextSnaps = {}
+  const place = (k) => {
+    const it = freshBy.get(k)
+    if (it) {
+      const drawn = withKeptPreview(it, snaps[k])
+      rows.push(drawn)
+      order.push(k)
+      nextSnaps[k] = drawn
+      return
+    }
+    const snap = snaps[k]
+    if (!snap) return
+    const ghost = ghostOf(snap, live)
+    if (!ghost) return
+    rows.push(ghost)
+    order.push(k)
+    nextSnaps[k] = snap
+  }
+  for (const k of prevOrder) {
+    for (const nk of anchored.get(k) || []) place(nk)
+    place(k)
+  }
+  for (const nk of anchored.get(null) || []) place(nk)
+  return { rows, visit: { order, snaps: nextSnaps } }
+}
+
+// The one fallback for a selection the rendered rows do not hold — an old chat
+// (All stops at no age, but Unread and Action do not list it), a deep link, a
+// row past the window. Built from the shell's data by key, whatever the tab.
+export function resolveItem(key, { threads = [], asks = [], previews = {} } = {}) {
+  const parsed = parseItemKey(key)
+  if (!parsed) return null
+  if (parsed.type === 'thread') {
+    const t = (Array.isArray(threads) ? threads : []).find((x) => threadId(x) === parsed.id)
+    return t ? threadItem(t, previews) : null
+  }
+  const a = (Array.isArray(asks) ? asks : []).find((x) => x && x.id === parsed.id)
+  return a ? askItem(a) : null
 }
 
 // ---- The pane (D11) -------------------------------------------------------------

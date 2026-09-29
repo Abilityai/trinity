@@ -197,7 +197,7 @@ const props = defineProps({
   // trinity-enterprise#610 (D8): the Inbox pane renders ONE ask through this
   // same component rather than a second card. `askIds` narrows to those asks
   // and wins over `pendingOnly`: an ask that ends while it is selected stays
-  // drawn in place, as ended, until the selection changes (principle 5).
+  // drawn in place, as ended, for the Inbox's tab visit (§3g S1, principle 5).
   askIds: { type: Array, default: null },
   // trinity-enterprise#610 (D8): namespaces EVERY data-testid this component
   // emits, the static ones included, so two instances rendering the same ask

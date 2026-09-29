@@ -213,10 +213,18 @@ describe('reading a chat (D11)', () => {
     await w.find('[data-testid="inbox-pane-open"]').trigger('click')
     expect(w.emitted('open-chat')[1][0]).toBe(href)
 
-    // Selecting another chat releases the hold.
+    // §3g T1: what was new is kept for the TAB VISIT, not only while selected —
+    // reselecting t1 after another chat still anchors where it was new…
     await w.find('[data-testid="inbox-row-thread:t2"]').trigger('click')
     await flushPromises()
     await w.find('[data-testid="inbox-row-thread:t1"]').trigger('click')
+    await flushPromises()
+    await w.find('[data-testid="inbox-pane-open"]').trigger('click')
+    expect(w.emitted('open-chat').at(-1)[0]).toBe(href)
+    // …and leaving the tab forgets it: back on All, t1 opens at the bottom.
+    await router.replace({ path: '/workspace/inbox', query: { tab: 'unread' } })
+    await flushPromises()
+    await router.replace({ path: '/workspace/inbox', query: { tab: 'all', item: 'thread:t1' } })
     await flushPromises()
     await w.find('[data-testid="inbox-pane-open"]').trigger('click')
     expect(w.emitted('open-chat').at(-1)[0]).toBe('/workspace/c/t1')
@@ -245,8 +253,78 @@ describe('reading a chat (D11)', () => {
   })
 })
 
+describe('rows keep their place for one tab visit (§3g S1)', () => {
+  it('A1: a clicked Unread row survives its read landing before the route does', async () => {
+    // t2 is 40 days old: no 30-day All window can rescue it as a fallback.
+    const threads = [thread('t1', { unread: 2, last_message_at: iso(1) }), thread('t2', { unread: 3, last_message_at: iso(40 * 24 * 60) })]
+    const w = await mountInbox({ threads }, { query: { tab: 'unread' } })
+    const row = w.find('[data-testid="inbox-row-thread:t2"]')
+    row.element.focus()
+    row.trigger('click') // not awaited: the read lands first
+    await w.setProps({ threads: [threads[0], { ...threads[1], unread: 0 }] })
+    await flushPromises()
+    const again = w.find('[data-testid="inbox-row-thread:t2"]')
+    expect(again.exists()).toBe(true)
+    expect(again.attributes('aria-current')).toBe('true')
+    expect(has(w, 'inbox-pane-none')).toBe(false)
+    expect(has(w, 'inbox-pane')).toBe(true)
+    expect(document.activeElement?.getAttribute('data-inbox-row')).toBe('thread:t2')
+  })
+
+  it('A7: answering an ask on All does not move it', async () => {
+    store.asks = [ask('a1', { created_at: iso(1) }), ask('a2', { created_at: iso(30) })]
+    store.asksLoaded = true
+    store.answerAsk = vi.fn(async (id) => {
+      const answered = { ...store.asks.find((a) => a.id === id), status: 'answered', ended_by: 'you', ended_at: new Date().toISOString() }
+      store.asks = store.asks.map((a) => (a.id === id ? answered : a))
+      return answered
+    })
+    const threads = [thread('t1', { last_message_at: iso(10) })]
+    const w = await mountInbox({ threads }, { query: { tab: 'all', item: 'ask:a2' } })
+    const order = () => w.findAll('[data-inbox-row]').map((r) => r.attributes('data-inbox-row'))
+    expect(order()).toEqual(['ask:a1', 'thread:t1', 'ask:a2'])
+    await w.find('[data-testid="inbox-ask-input-a2"]').setValue('yes')
+    await w.find('[data-testid="inbox-ask-input-a2"]').element.form.dispatchEvent(new Event('submit'))
+    await flushPromises()
+    expect(store.answerAsk).toHaveBeenCalled()
+    expect(order()).toEqual(['ask:a1', 'thread:t1', 'ask:a2'])
+  })
+
+  it('A12: a poll that reads a row elsewhere keeps the order and ghosts it until the tab is left', async () => {
+    const threads = [
+      thread('t1', { unread: 1, last_message_at: iso(1) }),
+      thread('t2', { unread: 2, last_message_at: iso(5) }),
+      thread('t3', { unread: 1, last_message_at: iso(9) }),
+    ]
+    const w = await mountInbox({ threads }, { query: { tab: 'unread', item: 'thread:t1' } })
+    const order = () => w.findAll('[data-inbox-row]').map((r) => r.attributes('data-inbox-row'))
+    expect(order()).toEqual(['thread:t1', 'thread:t2', 'thread:t3'])
+
+    // Another device reads t2; the poll brings it back read.
+    await w.setProps({ threads: [threads[0], { ...threads[1], unread: 0 }, threads[2]] })
+    expect(order()).toEqual(['thread:t1', 'thread:t2', 'thread:t3'])
+    expect(has(w, 'inbox-row-read-thread:t2')).toBe(true)
+
+    // A newer arrival on t3 does not re-sort it.
+    await w.setProps({ threads: [threads[0], { ...threads[1], unread: 0 }, { ...threads[2], unread: 4, last_message_at: iso(0) }] })
+    expect(order()).toEqual(['thread:t1', 'thread:t2', 'thread:t3'])
+
+    // The last live rows go read: the head says so rather than counting ghosts.
+    await w.setProps({ threads: threads.map((t) => ({ ...t, unread: 0 })) })
+    expect(order()).toEqual(['thread:t1', 'thread:t2', 'thread:t3'])
+    expect(w.find('[data-testid="inbox-list-total"]').text()).toBe('All caught up')
+
+    // Leave the tab and come back: the ghosts are gone.
+    await router.replace({ path: '/workspace/inbox', query: { tab: 'all' } })
+    await flushPromises()
+    await router.replace({ path: '/workspace/inbox', query: { tab: 'unread' } })
+    await flushPromises()
+    expect(order()).toEqual([])
+  })
+})
+
 describe('answering an ask in the pane (D8)', () => {
-  it('goes through store.answerAsk, and the ended ask stays in place until the selection changes', async () => {
+  it('goes through store.answerAsk, and the ended ask stays in place until the tab is left (§3g T1)', async () => {
     store.asks = [ask('q1')]
     store.asksLoaded = true
     store.answerAsk = vi.fn(async (id) => {
@@ -266,7 +344,14 @@ describe('answering an ask in the pane (D8)', () => {
     expect(has(w, 'inbox-row-ask:q1')).toBe(true)
     expect(has(w, 'inbox-row-ended-ask:q1')).toBe(true)
 
-    // The selection moves on → it leaves.
+    // The selection moving on no longer drops it (T1: a ghost lives for the
+    // tab visit)…
+    await router.replace({ path: '/workspace/inbox', query: { tab: 'action' } })
+    await flushPromises()
+    expect(has(w, 'inbox-row-ended-ask:q1')).toBe(true)
+    // …leaving the tab does.
+    await router.replace({ path: '/workspace/inbox', query: { tab: 'all' } })
+    await flushPromises()
     await router.replace({ path: '/workspace/inbox', query: { tab: 'action' } })
     await flushPromises()
     expect(has(w, 'inbox-row-ask:q1')).toBe(false)
@@ -352,25 +437,39 @@ describe('phone (D12)', () => {
     } finally { spy.mockRestore() }
   })
 
-  it("Back after reading the chat off Unread focuses the row now in its place, else the list", async () => {
+  it('Back after reading the chat off Unread focuses that row, kept in place as read (§3g S1)', async () => {
     phone = true
     stubMatchMedia()
     const two = [thread('t1', { unread: 2 }), thread('t2', { unread: 1, last_message_at: iso(9) })]
     const w = await mountInbox({ threads: two }, { query: { tab: 'unread' } })
     await w.find('[data-testid="inbox-row-thread:t1"]').trigger('click')
     await flushPromises()
-    // The shell's read lands: t1 has nothing new any more.
+    // The shell's read lands: t1 has nothing new any more, and stays as a ghost.
     await w.setProps({ threads: [thread('t1', { unread: 0 }), two[1]] })
     await w.find('[data-testid="inbox-pane-back"]').trigger('click')
     await flushPromises()
+    expect(document.activeElement?.getAttribute('data-inbox-row')).toBe('thread:t1')
+    expect(has(w, 'inbox-row-read-thread:t1')).toBe(true)
+  })
+
+  it('an open chat deleted elsewhere goes Back: the row now in its place, else the list (§3g S1)', async () => {
+    phone = true
+    stubMatchMedia()
+    const two = [thread('t1', { unread: 2 }), thread('t2', { unread: 1, last_message_at: iso(9) })]
+    const w = await mountInbox({ threads: two }, { query: { tab: 'unread' } })
+    await w.find('[data-testid="inbox-row-thread:t1"]').trigger('click')
+    await flushPromises()
+    await w.setProps({ threads: [two[1]] }) // t1 deleted elsewhere: nothing to draw
+    await flushPromises()
+    expect(router.currentRoute.value.query.item).toBeUndefined()
     expect(document.activeElement?.getAttribute('data-inbox-row')).toBe('thread:t2')
 
     await w.find('[data-testid="inbox-row-thread:t2"]').trigger('click')
     await flushPromises()
-    await w.setProps({ threads: [thread('t1', { unread: 0 }), thread('t2', { unread: 0, last_message_at: iso(9) })] })
-    await w.find('[data-testid="inbox-pane-back"]').trigger('click')
+    await w.setProps({ threads: [] })
     await flushPromises()
     expect(document.activeElement?.getAttribute('data-testid')).toBe('inbox-list-column')
+    expect(w.find('[data-testid="inbox-list-column"]').classes()).not.toContain('hidden')
   })
 
   it('Esc goes back too', async () => {
