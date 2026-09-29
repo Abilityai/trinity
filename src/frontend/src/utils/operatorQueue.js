@@ -421,6 +421,57 @@ export function queueReaskBadges(item, items = []) {
  * plain object has no rows. Agent-authored: callers render the values as text,
  * never as markup.
  */
+/**
+ * trinity-enterprise#610 §3g L6 (E2 seam) — the parts of an ask's agent-authored
+ * brief that are shown: `why`, `recommendation`, `if_no_answer`, each a
+ * non-empty string, else absent. Nothing to show is `null`, so a card with no
+ * brief renders no brief block at all. The server stores and projects the
+ * brief (L8); this only decides what of it is displayable. Agent text: the
+ * renderer (PortalMarkdown → DOMPurify) is the XSS boundary.
+ *
+ * @param {{brief?: unknown}|undefined} item
+ * @returns {{why?: string, recommendation?: string, if_no_answer?: string}|null}
+ */
+const BRIEF_TEXT_FIELDS = Object.freeze(['why', 'recommendation', 'if_no_answer'])
+export function briefOf(item) {
+  const b = item?.brief
+  if (!b || typeof b !== 'object' || Array.isArray(b)) return null
+  const out = {}
+  for (const k of BRIEF_TEXT_FIELDS) {
+    if (typeof b[k] === 'string' && b[k].trim()) out[k] = b[k]
+  }
+  return Object.keys(out).length ? out : null
+}
+
+/**
+ * The brief's per-option consequence, for an APPROVAL's offered options only:
+ * a key that is not an offered option, or a value that is not a string, is
+ * dropped (the server filters too — this is the renderer's belt). A question or
+ * an alert has no impact line.
+ *
+ * @param {{kind?: string, type?: string, options?: unknown, brief?: unknown}} item
+ * @returns {Object<string, string>}
+ */
+export function briefImpactFor(item) {
+  const kind = item?.kind ?? item?.type
+  const impact = item?.brief?.impact
+  if (kind !== 'approval' || !impact || typeof impact !== 'object' || Array.isArray(impact)) return {}
+  const offered = new Set(optionsOf({ options: item.options }))
+  const out = {}
+  for (const [opt, text] of Object.entries(impact)) {
+    if (offered.has(opt) && typeof text === 'string' && text.trim()) out[opt] = text
+  }
+  return out
+}
+
+/** "If you don't answer by Oct 1, 3:00 PM" — or plainly, with no deadline. */
+export function ifNoAnswerLabel(expiresAt) {
+  const at = expiresAt ? Date.parse(expiresAt) : NaN
+  if (!Number.isFinite(at)) return "If you don't answer"
+  const when = new Date(at).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })
+  return `If you don't answer by ${when}`
+}
+
 export function proposalRows(proposal) {
   if (!proposal || typeof proposal !== 'object' || Array.isArray(proposal)) return []
   return Object.entries(proposal).map(([key, value]) => ({

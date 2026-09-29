@@ -74,6 +74,10 @@
            what the person is deciding. Kept on an ended ask, so it still says what
            was decided. -->
       <QueueProposal v-if="ask.proposal" :proposal="ask.proposal" class="mt-2" />
+      <!-- ent#610 §3g L6 (E2 seam): the agent's brief — Why now, then what it
+           recommends — after the proposal and before the options. Kept on an
+           ended ask, like the proposal: it says what the decision was about. -->
+      <QueueBrief :item="ask" part="lead" :agent-label="ask.agent_name" class="mt-2" />
 
       <!-- An ending is RENDERED, never silently dropped: an ask that simply
            vanishes reads as "answered" to the person who did not answer it.
@@ -116,20 +120,30 @@
              approval is select → optional note → explicit Send — never a
              one-tap irreversible answer; the tapped option only arms Send. -->
         <template v-if="controlsKind(ask) === 'approval'">
-          <div class="mt-2 flex flex-wrap gap-2">
+          <!-- ent#610 §3g L6: when the brief says what an option DOES
+               (impact), the options stack full-width — the label, then the
+               consequence as the button's description; otherwise chips. -->
+          <div class="mt-2 flex gap-2" :class="stacked(ask) ? 'flex-col' : 'flex-wrap'">
             <button
-              v-for="opt in optionsOf(ask)"
+              v-for="(opt, i) in optionsOf(ask)"
               :key="opt"
               type="button"
               :disabled="busyId === ask.id"
               class="rounded-lg border text-xs font-medium px-2.5 py-1.5 disabled:opacity-50"
-              :class="picks[ask.id] === opt
+              :class="[picks[ask.id] === opt
                 ? 'bg-action-primary-600 border-action-primary-600 text-white'
-                : CHIP_IDLE"
+                : CHIP_IDLE, stacked(ask) ? 'w-full text-left' : '']"
               :aria-pressed="picks[ask.id] === opt"
+              :aria-describedby="impactOf(ask)[opt] ? impactId(ask, i) : undefined"
               :data-testid="`${tid.prefix}-option-${ask.id}`"
               @click="pick(ask, opt)"
-            >{{ opt }}</button>
+            >
+              <template v-if="stacked(ask)">
+                <span class="block">{{ opt }}</span>
+                <span v-if="impactOf(ask)[opt]" :id="impactId(ask, i)" class="mt-0.5 block text-[12.5px] font-normal">{{ impactOf(ask)[opt] }}</span>
+              </template>
+              <template v-else>{{ opt }}</template>
+            </button>
           </div>
           <form class="mt-2 flex items-center gap-2" @submit.prevent="submit(ask)">
             <!-- ent#610 §3g B2: a pick moves focus here, so the Enter that
@@ -200,6 +214,10 @@
         </form>
         </template>
 
+        <!-- ent#610 §3g L6: what happens if nobody answers, beside the answer
+             row — only while the ask can still be answered. -->
+        <QueueBrief :item="ask" part="fallback" class="mt-2" />
+
         <p v-if="errors[ask.id]" class="mt-1.5 text-xs text-red-600 dark:text-red-400">{{ errors[ask.id] }}</p>
       </template>
     </div>
@@ -211,6 +229,7 @@ import { computed, nextTick, reactive, ref, onBeforeUnmount } from 'vue'
 import BaseBadge from '../base/BaseBadge.vue'
 import PortalMarkdown from './PortalMarkdown.vue'
 import QueueProposal from '../operator/QueueProposal.vue'
+import QueueBrief from '../operator/QueueBrief.vue'
 import { useClientPortalStore } from '@/stores/clientPortal'
 import {
   expiredLabel, askThreadLink, answerConfirmation, ANSWER_CONFIRMATION_MS,
@@ -222,6 +241,8 @@ import { respondRefusedAsDiverged, QUEUE_RESPONSE_DIVERGED } from '@/utils/opera
 import { queueEnding, queueEndingText } from '@/utils/operatorQueue'
 // trinity-enterprise#610 §3g B3/B5: the Workspace's badge and a question's quick picks.
 import { workspaceAskBadge, questionQuickPicks } from '@/utils/operatorQueue'
+// trinity-enterprise#610 §3g L6 (E2 seam): the brief's per-option consequence.
+import { briefImpactFor } from '@/utils/operatorQueue'
 import { formatLocalDateTime, formatRelativeTime } from '@/utils/timestamps'
 
 const DEFAULT_TESTID_PREFIX = 'portal-ask'
@@ -304,6 +325,10 @@ function pick(ask, opt) {
   if (!next || coarsePointer()) return
   nextTick(() => noteEls.get(ask.id)?.focus())
 }
+// E2 seam: an approval whose brief says what an option does stacks its options.
+const impactOf = (ask) => briefImpactFor(ask)
+const stacked = (ask) => Object.keys(impactOf(ask)).length > 0
+const impactId = (ask, i) => `${tid.value.prefix}-impact-${ask.id}-${i}`
 // B3: a quick pick FILLS the answer and focuses it; the person still sends.
 const quickPicks = (ask) => questionQuickPicks({ type: ask.kind, options: ask.options })
 function fillAnswer(ask, opt) {

@@ -111,7 +111,11 @@ Sign-in / reload on bare /workspace
               pointer) so Enter sends; a question's options are quick picks that FILL the
               answer (questionQuickPicks, ≤ 500 chars) and never send; the badge is
               workspaceAskBadge (queueSyncBadge minus "Unconfirmed"); after Send focus
-              lands on the answered card (tabindex=-1)
+              lands on the answered card (tabindex=-1); order inside the card: body
+              (PortalMarkdown) → QueueProposal → QueueBrief lead (Why now → "{agent}
+              recommends") → options (stacked with an impact hint when the brief has one)
+              → answer row → QueueBrief fallback ("If you don't answer by …") — the brief
+              is the E2 seam, fixture-tested; L8 supplies it
       chat  → store.fetchHistory(agent, id, {limit: 50})  render from first_unread_message_id
               store.fetchSessionDeliverablesStrict → ReportRenderer (+ ReportSummary fallback)
                                                a failed read is LoadFailed, never "no deliverables"
