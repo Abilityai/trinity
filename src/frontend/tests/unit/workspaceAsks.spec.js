@@ -258,6 +258,62 @@ describe('an unentitled build says nothing', () => {
     warn.mockRestore()
   })
 
+  // A 401 is not an outage, it is the end of the session. The 20s poll runs
+  // `fetchAsks`, never the roster, and `portalHttp`'s 401 interceptor acts only
+  // for a platform session, so for a portal-token client this branch is the
+  // ONLY thing that ends it. Counted as `asksFailed`, the expired client's list
+  // stayed on screen indefinitely.
+  it('a 401 on a portal-token session ends it, as the roster does, and drops the list', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    portalHttp.get.mockResolvedValueOnce({ data: [ask('a1')] })
+    await store.fetchAsks()
+    expect(store.asks.map((a) => a.id)).toEqual(['a1'])
+
+    portalHttp.get.mockRejectedValueOnce({ response: { status: 401 } })
+    const out = await store.fetchAsks()
+
+    expect(out).toEqual([])
+    expect(store.asks).toEqual([])
+    expect(store.askCount).toBe(0)
+    expect(store.asksFailed).toBe(false)
+    expect(store.portalToken).toBe(null)
+    expect(store.isClientSignedIn).toBe(false)
+    expect(store.sessionExpired).toBe(true)
+    expect(store.resumePath).toBe(window.location.pathname)
+    expect(localStorage.getItem('trinity.portalToken')).toBe(null)
+    // Not an outage: nothing to warn about.
+    expect(warn).not.toHaveBeenCalled()
+    warn.mockRestore()
+  })
+
+  it('a read that resolves after sign-out does not write the old list back', async () => {
+    let resolve
+    portalHttp.get.mockReturnValueOnce(new Promise((r) => { resolve = r }))
+    const inFlight = store.fetchAsks()
+
+    store.signOut()
+    resolve({ data: [ask('a1')] })
+    await inFlight
+
+    expect(store.asks).toEqual([])
+    expect(store.asksLoaded).toBe(false)
+    expect(store.asksAvailable).toBe(false)
+  })
+
+  it('a read that resolves after ANOTHER client signed in is dropped too', async () => {
+    let resolve
+    portalHttp.get.mockReturnValueOnce(new Promise((r) => { resolve = r }))
+    const inFlight = store.fetchAsks()
+
+    store.signOut()
+    store.portalToken = 'another-client'
+    resolve({ data: [ask('a1')] })
+    await inFlight
+
+    expect(store.asks).toEqual([])
+    expect(store.asksLoaded).toBe(false)
+  })
+
   it('does not poll at all when nobody is signed in', async () => {
     localStorage.clear()
     setActivePinia(createPinia())
