@@ -1,6 +1,17 @@
 {
   "test_files": [
     {
+      "file": "unit/test_ent671_env_backed_ops_forwarding.py",
+      "feature": "trinity-enterprise#671",
+      "added": "2026-09-29",
+      "categories": [
+        "config",
+        "compose",
+        "settings"
+      ],
+      "description": "Every config.ENV_BACKED_OPS_KEYS variable (METRICS_RETENTION_DAYS, METRICS_DAILY_POINT_CAP, INTER_AGENT_MAX_CHAIN_DEPTH) is forwarded exactly once by docker-compose.yml / .prod.yml / .hosted.yml with an EMPTY default (${VAR:-}), no other docker-compose*.yml supplies a default, and .env.example leaves each commented but documented - so `source: env` on GET /api/settings/retention means an operator set it and the Settings rows are not locked on every install."
+    },
+    {
       "file": "unit/test_ent671_retention_metric_rows.py",
       "feature": "trinity-enterprise#671",
       "added": "2026-09-29",

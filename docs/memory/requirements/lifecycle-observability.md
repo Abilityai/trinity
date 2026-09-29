@@ -989,6 +989,11 @@ row is read-only with an `env` badge naming the variable and what unsetting it
 does (the #2085 seeder then writes the code default as a row), and Save omits
 it. Save sends only the fields the operator changed, so saving one window never
 turns another knob's code default or env value into a stored row.
+`env` has to mean "an operator set the variable", so every compose file forwards
+the env-backed keys with an EMPTY default (`${METRICS_DAILY_POINT_CAP:-}`) and
+`.env.example` leaves them commented — a compose default or a copied example
+line made `env` the reported source on every install and locked both rows
+(`tests/unit/test_ent671_env_backed_ops_forwarding.py`).
 
 ### 47.9 Legacy `metrics.json` — retired as a source, named as a finding (ent#479)
 
