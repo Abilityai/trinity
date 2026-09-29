@@ -1,5 +1,5 @@
 """Address by role — an agent names a role, the platform resolves the person
-(trinity-enterprise#606; `prds/permission-layers.md` §5a).
+(abilityai/trinity-enterprise#606).
 
 One resolution rule (`services/role_addressing.resolve`) behind every outbound
 object an agent produces for a human: asks (the #611 sink), reports and
@@ -304,5 +304,162 @@ async def test_the_route_sends_to_the_resolved_person(ra, monkeypatch):
 
     monkeypatch.setattr(messages.proactive_message_service, "send_message", fake_send)
     _provide({"approver": [ALICE]})
-    await messages.send_proactive_message(_msg(to="approver"), AGENT)
+    await messages.send_proactive_message(_msg(to="approver"), AGENT, current_user=_agent_key())
     assert sent["recipient_email"] == ALICE
+
+
+def _agent_key():
+    from models import User
+    return User(id=1, username="owner", role="user", email=OWNER, agent_name=AGENT)
+
+
+def _human():
+    from models import User
+    return User(id=1, username="owner", role="user", email=OWNER)
+
+
+# ---------------------------------------------------------------------------
+# Messages: the deprecation log fires under the same condition as reports
+# ---------------------------------------------------------------------------
+
+def _deprecations(caplog):
+    return [r for r in caplog.records
+            if r.name == "services.role_addressing" and "deprecated" in r.getMessage()]
+
+
+def test_an_agent_key_messaging_by_email_is_logged_as_deprecated(ra, caplog):
+    from routers import messages
+    ra._deprecation_logged.clear()
+    with caplog.at_level("INFO", logger="services.role_addressing"):
+        messages._recipient(AGENT, _msg(recipient_email=ALICE), _agent_key())
+    assert len(_deprecations(caplog)) == 1
+
+
+def test_a_human_messaging_by_email_is_not_logged_as_deprecated(ra, caplog):
+    """Reports log only for an agent key; messages match — a person typing an
+    email is not the agent-side migration the log exists to track."""
+    from routers import messages
+    ra._deprecation_logged.clear()
+    with caplog.at_level("INFO", logger="services.role_addressing"):
+        messages._recipient(AGENT, _msg(recipient_email=ALICE), _human())
+    assert _deprecations(caplog) == []
+
+
+# ---------------------------------------------------------------------------
+# Messages: a role-addressed delivery failure names the role, never the person
+# (driven through the real route with an agent key)
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def route(ra, monkeypatch):
+    """POST /api/agents/{name}/messages as the agent's own key, over the real
+    proactive service with its collaborators (db, audit, rate limit) stubbed."""
+    from unittest.mock import MagicMock
+
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from routers import messages
+    from services import proactive_message_service as pms
+
+    svc_db = MagicMock()
+    svc_db.can_agent_message_email.return_value = True
+    svc_db.get_telegram_binding.return_value = {"id": 1}
+    svc_db.get_telegram_chat_link_by_verified_email.return_value = None
+    svc_db.get_all_slack_workspaces.return_value = [{"bot_token": None}]
+    svc_db.get_whatsapp_binding.return_value = {"id": 1}
+    svc_db.get_whatsapp_chat_link_by_verified_email.return_value = None
+    monkeypatch.setattr(pms, "db", svc_db)
+    monkeypatch.setattr(pms.proactive_message_service, "_check_rate_limit", lambda *a: True)
+
+    async def _no_audit(*a, **k):
+        return None
+
+    monkeypatch.setattr(pms.proactive_message_service, "_audit_send", _no_audit)
+
+    app = FastAPI()
+    app.include_router(messages.router)
+    # Override the objects the ROUTE holds (an earlier test may have re-imported
+    # `dependencies`), and stub the access check's db on that same module.
+    from fastapi.routing import APIRoute
+
+    def _walk(dep):
+        for sub in dep.dependencies:
+            yield sub
+            yield from _walk(sub)
+
+    for r in messages.router.routes:
+        if isinstance(r, APIRoute) and r.path.endswith("/messages"):
+            for d in _walk(r.dependant):
+                if getattr(d.call, "__name__", "") == "get_current_user":
+                    app.dependency_overrides[d.call] = _agent_key
+                if getattr(d.call, "__name__", "") == "get_authorized_agent_by_name":
+                    dep_db = d.call.__globals__["db"]
+                    monkeypatch.setattr(dep_db, "get_agent_owner", lambda name: "owner")
+                    monkeypatch.setattr(dep_db, "can_user_access_agent", lambda u, n: True)
+    _provide({"approver": [ALICE]})
+
+    def post(**body):
+        return TestClient(app).post(f"/api/agents/{AGENT}/messages", json={"text": "hi", **body})
+
+    return post, svc_db, pms
+
+
+def _no_person(resp):
+    text = resp.text
+    assert "@" not in text and ALICE not in text, text
+
+
+def test_a_role_addressed_message_to_someone_not_opted_in_names_only_the_role(route):
+    post, svc_db, _ = route
+    svc_db.can_agent_message_email.return_value = False
+    resp = post(to="approver", channel="telegram")
+    assert resp.status_code == 403
+    _no_person(resp)
+    assert resp.json()["detail"] == {
+        "code": "role_not_opted_in", "role": "approver",
+        "message": "The person in the approver role has not opted in to proactive "
+                   "messages from this agent."}
+
+
+# WhatsApp is not an accepted `channel` on this route (the request model
+# refuses it with 422), so it is unreachable here.
+@pytest.mark.parametrize("channel", ["telegram", "slack", "web", "auto"])
+def test_a_role_addressed_message_no_channel_reaches_names_only_the_role(route, channel):
+    post, _, _ = route
+    resp = post(to="approver", channel=channel)
+    assert resp.status_code == 404
+    _no_person(resp)
+    assert resp.json()["detail"]["code"] == "role_no_channel"
+    assert resp.json()["detail"]["role"] == "approver"
+
+
+def test_a_channel_error_carrying_the_email_never_reaches_a_role_addressed_caller(route, monkeypatch):
+    """The per-channel RecipientNotFoundError texts name the person (Telegram,
+    Slack, WhatsApp, web). Whatever text the service raises, a role-addressed
+    caller gets the role-only detail."""
+    post, _, pms = route
+
+    async def leaky(**kwargs):
+        raise pms.RecipientNotFoundError(
+            f"No Telegram user with verified email '{kwargs['recipient_email']}' for agent '{AGENT}'")
+
+    monkeypatch.setattr(pms.proactive_message_service, "send_message", leaky)
+    resp = post(to="approver", channel="telegram")
+    assert resp.status_code == 404
+    _no_person(resp)
+
+
+def test_an_email_addressed_message_keeps_its_existing_detail(route):
+    """The agent supplied the email itself, so naming it back discloses nothing."""
+    post, svc_db, _ = route
+    svc_db.can_agent_message_email.return_value = False
+    resp = post(recipient_email=ALICE, channel="telegram")
+    assert resp.status_code == 403
+    assert resp.json()["detail"] == (
+        f"Agent '{AGENT}' is not authorized to message '{ALICE}'. "
+        "Recipient must opt in via allow_proactive flag.")
+    svc_db.can_agent_message_email.return_value = True
+    resp = post(recipient_email=ALICE, channel="telegram")
+    assert resp.status_code == 404
+    assert resp.json()["detail"] == "No delivery channel available for recipient"

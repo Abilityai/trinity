@@ -1,5 +1,5 @@
 """Role addressing — an agent names a role, the platform resolves the person
-(trinity-enterprise#606; `prds/permission-layers.md` §5a).
+(abilityai/trinity-enterprise#606).
 
 Every outbound object an agent produces for a human — an ask, a report, a
 message — carries one field, ``to``, whose value is a **role**, never a person:

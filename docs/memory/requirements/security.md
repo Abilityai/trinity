@@ -619,7 +619,7 @@
 - **Status**: ✅ Implemented (trinity-enterprise#606)
 - **Requirement ID**: OPS-001-ADDRESS
 - **Priority**: P1
-- **Description**: Every outbound object an agent produces for a human — an ask, a report, a message — names **a role, never a person**: `to: primary | approver | viewer | operator`. The platform resolves the person through ONE rule, `services/role_addressing.resolve`, so an ask and a report to the same role reach the same people (`prds/permission-layers.md` §5a).
+- **Description**: Every outbound object an agent produces for a human — an ask, a report, a message — names **a role, never a person**: `to: primary | approver | viewer | operator`. The platform resolves the person through ONE rule, `services/role_addressing.resolve`, so an ask and a report to the same role reach the same people.
   - **Resolution:** a registered assignment provider's `people_for` answers first (an empty answer means nobody fills the role); otherwise the core defaults — `primary` → the agent's owner, `operator` → the operators (no person recorded), `approver` / `viewer` refused. No primary assigned → a `primary` ask goes to the operators.
   - **Refused by name, never dropped or defaulted:** `invalid_to`, `role_unassigned`; for reports and messages (one reader each) also `role_resolves_to_several` (with `count`), and for reports `role_unreachable` (the person is not on the agent's roster) — all **422**.
   - **Reports:** `ReportCreate.to`. `operator`, nobody, or the owner → operator-only (the owner reads the operator surface); otherwise the checked audience. `to` with `audience_email` → **422 `addressing_conflict`**. Neither → operator-only, unchanged.

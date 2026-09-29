@@ -617,15 +617,15 @@ def _address(agent_name: str, role: str) -> Tuple[List[str], Optional[str], bool
     The one resolution rule, `services/role_addressing.resolve` (ent#606) —
     shared with reports and messages so an ask and a report addressed to the
     same role reach the same people. Several people are recorded, but none
-    becomes the single Workspace addressee.
+    becomes the single Workspace addressee. `role` is already validated
+    against `ASK_ROLES` by `_validated_ask` (the only caller passes its output),
+    so the one refusal left to map is an unfilled role.
     """
     from services import role_addressing
 
     try:
         r = role_addressing.resolve(agent_name, role, owner_lookup=_owner_email)
-    except role_addressing.RoleRefused as e:
-        if e.code == "invalid_to":
-            raise AskRejected(422, "invalid_to", "Unknown role.", allowed=list(ASK_ROLES))
+    except role_addressing.RoleRefused:
         raise AskRejected(422, "role_unassigned",
                           f"Nobody fills the {role} role for this agent yet; address the ask to "
                           "primary or operator.", role=role)

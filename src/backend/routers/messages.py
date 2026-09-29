@@ -42,6 +42,7 @@ router = APIRouter(prefix="/api/agents", tags=["messages"])
 async def send_proactive_message(
     request: SendMessageRequest,
     agent_name: AuthorizedAgentByName,
+    current_user: User = Depends(get_current_user),
 ):
     """
     Send a proactive message to a user from this agent.
@@ -53,7 +54,7 @@ async def send_proactive_message(
     Rate limited to 10 messages per recipient per hour.
     """
 
-    recipient = _recipient(agent_name, request)
+    recipient = _recipient(agent_name, request, current_user)
     try:
         result = await proactive_message_service.send_message(
             agent_name=agent_name,
@@ -78,13 +79,18 @@ async def send_proactive_message(
         raise HTTPException(status_code=409, detail=str(e))
 
     except NotAuthorizedError as e:
-        raise HTTPException(status_code=403, detail=str(e))
+        raise HTTPException(status_code=403, detail=_role_only(
+            request, "role_not_opted_in",
+            "The person in the {role} role has not opted in to proactive messages "
+            "from this agent.") or str(e))
 
     except RateLimitedError as e:
         raise HTTPException(status_code=429, detail=str(e))
 
     except RecipientNotFoundError as e:
-        raise HTTPException(status_code=404, detail=str(e))
+        raise HTTPException(status_code=404, detail=_role_only(
+            request, "role_no_channel",
+            "No delivery channel reaches the person in the {role} role.") or str(e))
 
     except ChannelDeliveryError as e:
         raise HTTPException(status_code=502, detail=str(e))
@@ -94,7 +100,19 @@ async def send_proactive_message(
         raise HTTPException(status_code=500, detail="Internal error sending message")
 
 
-def _recipient(agent_name: str, request: SendMessageRequest) -> str:
+def _role_only(request: SendMessageRequest, code: str, message: str):
+    """A role-addressed delivery failure, described by the role alone (ent#606).
+
+    The service's own error text names the resolved person's email — fine when
+    the agent supplied that email itself, a disclosure when the agent only named
+    a role. Returns None for email-addressed sends so their detail is unchanged.
+    """
+    if not request.to:
+        return None
+    return {"code": code, "role": request.to, "message": message.format(role=request.to)}
+
+
+def _recipient(agent_name: str, request: SendMessageRequest, current_user: User = None) -> str:
     """The one person this message goes to (ent#606).
 
     `to` names a role, resolved by the same rule asks and reports use
@@ -104,7 +122,10 @@ def _recipient(agent_name: str, request: SendMessageRequest) -> str:
     works for two releases and is logged as deprecated.
     """
     if not request.to:
-        role_addressing.log_email_addressing(agent_name, "message")
+        # Same condition as reports: only an agent key choosing a person by
+        # email is the migration the log tracks; a human sender is not.
+        if current_user is not None and current_user.agent_name:
+            role_addressing.log_email_addressing(agent_name, "message")
         return request.recipient_email
     try:
         r = role_addressing.resolve(agent_name, request.to)
