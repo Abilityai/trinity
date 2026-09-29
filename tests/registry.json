@@ -3580,6 +3580,16 @@
         "migrations"
       ],
       "description": "The container's pull cycle (ent#703, invariant G3) on real repos with a human clone pushing underneath: behind+clean fast-forwards; a local commit is rebased on top; uncommitted edits survive a pull (stashed and re-applied); incoming changes colliding with uncommitted edits are UNDONE — same HEAD, same edits, empty stash, failure recorded (the autostash trap; red against a naive --autostash mutant); a rebase conflict is aborted and recorded; never while an execution runs, including one starting mid-cycle, and an unknown registry counts as busy; a busy repo is skipped without a state write; a pull never touches the push's fields. The loop gate reads the flag live on /git/pull-sync with the env fallback; the interval defaults to the push interval. Both migration tracks: columns + backfill only where auto-sync is on."
+    },
+    {
+      "file": "unit/test_ent705_cli_deploy_kind.py",
+      "feature": "trinity-enterprise#705",
+      "added": "2026-09-29",
+      "categories": [
+        "cli",
+        "git"
+      ],
+      "description": "`trinity deploy --repo` creates a deployment (trinity-enterprise#705): the CLI's POST /api/agents payload carries kind \"deployment\", so deploying a codebase never takes the agent default's working branch + auto-push. Static (AST) because the unit job does not install the CLI's own deps. The ownership rule itself (catalog template / owner != token login stays pull-only) is in test_1484_create_agent_characterization.py."
     }
   ]
 }
