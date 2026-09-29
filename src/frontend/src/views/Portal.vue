@@ -402,10 +402,11 @@
           </template>
           <template #empty>
             <PortalBriefing :agent="activeAgent" @use-playbook="usePlaybook">
-              <!-- ent#465: the top 3 suggestions for you and this agent, between
-                   its identity and its hints — platform sessions, 1:1 only;
-                   renders nothing when there is nothing to suggest. -->
-              <template #before-hints>
+              <!-- ent#465: the top 3 suggestions for you and this agent, below
+                   its hints (they load after them and change; the hints do
+                   not) — platform sessions, 1:1 only; renders nothing when
+                   there is nothing to suggest. -->
+              <template #after-hints>
                 <PortalSuggestions
                   v-if="store.isPlatformSession && activeAgent && !activeRoomIdFromRoute"
                   compact
