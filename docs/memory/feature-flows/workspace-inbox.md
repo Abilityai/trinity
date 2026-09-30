@@ -85,7 +85,9 @@ Sign-in / reload on bare /workspace
                                change drops it; choosing another agent closes an open ask
                                that is not theirs; counts are badgeVariant 'neutral' with a
                                badgeLabel ("Relay Bot, 2 asks"); the list head names the
-                               filter ("3 asks from Relay Bot") since its chip can sit in More
+                               filter ("3 asks from Relay Bot") since its chip can sit in More;
+                               the strip keeps the order the visit first drew (an answered ask
+                               moves a count, never a chip); a ?from= on another tab leaves the URL
     stableRows(fresh, visit)   rows keep their place for one TAB VISIT (§3g S1): a row that leaves
                                stays as a ghost (chat drawn read, ask drawn ended); a poll never
                                re-sorts; a new row goes in before its nearest fresh neighbour; a

@@ -329,7 +329,16 @@ const selectedAsk = computed(() => {
   return store.asks.find((a) => a.id === p.id) || null
 })
 const activeFrom = computed(() => activeAgentFilter(fromQuery.value, actionBase.value, selectedAsk.value))
-const facets = computed(() => (tab.value === 'action' ? agentFacets(actionBase.value, props.labels, activeFrom.value) : []))
+// A2 r1 (QA P2): the facets keep the order this Action visit first showed —
+// an answered ask moves a count, never a chip under the reader. Not reactive
+// (it only remembers what the last evaluation drew); leaving Action forgets it.
+let facetOrder = null
+const facets = computed(() => {
+  if (tab.value !== 'action') { facetOrder = null; return [] }
+  const f = agentFacets(actionBase.value, props.labels, activeFrom.value, facetOrder)
+  facetOrder = f.map((t) => t.id)
+  return f
+})
 // A2 r1 (Codex C4): narrowing to another agent closes an open ask that is not
 // theirs — else the pane keeps agent A's ask beside a list of agent B's.
 function onFrom(id) {
@@ -367,6 +376,11 @@ watch(previewKey, (k) => emit('update:preview', k || null))
 watch([fromQuery, activeFrom, asksVerdict], ([q, a, v]) => {
   if (q && !a && v) replaceQuery({ from: undefined })
 })
+// A2 r1 (QA N1): `?from=` narrows Action only — on another tab (a deep link,
+// a hand-edited URL) it is ignored, so it leaves the URL rather than lingering.
+watch(() => tab.value !== 'action' && route.query.from !== undefined, (stray) => {
+  if (stray) replaceQuery({ from: undefined })
+}, { immediate: true })
 onBeforeUnmount(() => emit('update:preview', null))
 
 // Principle 5 (§3g S1): the rows of one TAB VISIT keep their place — a row

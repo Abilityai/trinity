@@ -187,15 +187,20 @@ const facet = (id, label, n) => ({
   id, label, badge: n, badgeVariant: 'neutral',
   badgeLabel: n === null ? undefined : `${label}, ${plural(n, 'ask', 'asks')}`,
 })
-export function agentFacets(rows, labels = {}, active = null) {
+// `order` (A2 r1 QA P2): the ids this tab visit already showed, in place — an
+// answered ask changes a count, never a chip's position under the reader; an
+// agent new to the visit joins after them, by count.
+export function agentFacets(rows, labels = {}, active = null, order = null) {
   const counts = new Map()
   for (const r of Array.isArray(rows) ? rows : []) {
     if (r && r.agent_name) counts.set(r.agent_name, (counts.get(r.agent_name) || 0) + 1)
   }
   if (counts.size < 2 && !(active && !counts.has(active))) return []
   const total = [...counts.values()].reduce((a, b) => a + b, 0)
+  const at = new Map((Array.isArray(order) ? order : []).map((id, i) => [id, i]))
+  const pos = (name) => (at.has(name) ? at.get(name) : Infinity)
   const agents = [...counts.entries()]
-    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+    .sort((a, b) => (pos(a[0]) - pos(b[0])) || b[1] - a[1] || a[0].localeCompare(b[0]))
     .map(([name, n]) => facet(name, (labels && labels[name]) || name, n))
   if (active && !counts.has(active)) agents.push(facet(active, (labels && labels[active]) || active, null))
   return [facet(FROM_ALL, 'All agents', total), ...agents]

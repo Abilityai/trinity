@@ -53,6 +53,18 @@ describe('C2 — agent facets', () => {
     expect(listHeadLabel('action', [], 'Relay Bot')).toBe('All caught up')
   })
 
+  it('a visit keeps its facet order: answering an ask never reshuffles the strip (A2 r1 QA P2)', () => {
+    const rows = [row('a', 'scout'), row('b', 'scout'), row('c', 'relay')]
+    const first = agentFacets(rows)
+    expect(first.map((t) => t.id)).toEqual([FROM_ALL, 'scout', 'relay'])
+    // scout's two asks are answered down to one below relay's two: by count
+    // relay would jump ahead; with the visit's order it stays where it was.
+    const later = [row('a', 'scout'), row('c', 'relay'), row('d', 'relay'), row('e', 'nova')]
+    const kept = agentFacets(later, {}, null, first.map((t) => t.id))
+    expect(kept.map((t) => t.id)).toEqual([FROM_ALL, 'scout', 'relay', 'nova'])
+    expect(kept.find((t) => t.id === 'relay').badge).toBe(2)
+  })
+
   it('filterByAgent narrows; no filter is the identity', () => {
     const rows = [row('a', 'scout'), row('b', 'relay')]
     expect(filterByAgent(rows, 'relay').map((r) => r.id)).toEqual(['b'])

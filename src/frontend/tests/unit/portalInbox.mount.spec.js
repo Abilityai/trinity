@@ -1287,6 +1287,26 @@ describe('Action narrowed to one agent (§3g C2, ?from=)', () => {
     expect(router.currentRoute.value.query.item).toBe('ask:r1')
   })
 
+  it('the facet strip keeps its order while counts change under the reader (A2 r1 QA P2)', async () => {
+    store.asks = [ask('s1'), ask('s2'), ask('r1', { agent_name: 'relay' })]
+    store.asksLoaded = true
+    const w = await mountInbox({}, { query: { tab: 'action' } })
+    const order = () => facetsTabs(w).findComponent({ name: 'OverflowTabs' }).props('tabs').map((t) => t.id)
+    expect(order()).toEqual(['all-agents', 'scout', 'relay'])
+    store.asks = [ask('s1'), ask('r1', { agent_name: 'relay' }), ask('r2', { agent_name: 'relay' })]
+    await flushPromises()
+    expect(order()).toEqual(['all-agents', 'scout', 'relay'])
+  })
+
+  it('a ?from= on a tab it does not narrow leaves the URL (A2 r1 QA N1)', async () => {
+    store.asks = [ask('s1'), ask('r1', { agent_name: 'relay' })]
+    store.asksLoaded = true
+    await mountInbox({}, { query: { tab: 'all', from: 'relay' } })
+    await flushPromises()
+    expect(router.currentRoute.value.query.from).toBeUndefined()
+    expect(router.currentRoute.value.query.tab).toBe('all')
+  })
+
   it('one agent → no strip; the other tabs never show it, and leaving Action drops ?from=', async () => {
     store.asks = [ask('s1'), ask('s2')]
     store.asksLoaded = true

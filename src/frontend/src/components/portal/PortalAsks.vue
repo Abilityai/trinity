@@ -239,6 +239,7 @@
             type="submit"
             :disabled="busyId === ask.id || !String(drafts[ask.id] || '').trim()"
             :class="SEND"
+            :data-testid="`${tid.prefix}-send-${ask.id}`"
           >{{ busyId === ask.id ? 'Sending…' : 'Send' }}</button>
         </form>
         </template>
