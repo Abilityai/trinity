@@ -41,12 +41,13 @@ import PortalWork from '@/components/portal/PortalWork.vue'
 const ENDED = '2026-09-25T10:00:00.000000Z'
 // `chat_id` is the platform-stamped thread the ask was raised against. Main's
 // id here is deliberately NOT null: a null chat_id renders no link, which is
-// exactly how the round-1 review seed hid this bug.
+// exactly how the round-1 review seed hid this bug. `raised_in_turn`: only an
+// ask a chat turn raised links back to its chat (ent#610, the 09-30 ruling).
 const ask = (id, over = {}) => ({
   id, agent_name: 'scout', kind: 'approval', priority: 'medium',
   title: `Ask ${id}`, question: `Ask ${id}`, options: ['Yes', 'No'],
   created_at: '2026-09-20T10:00:00Z', expires_at: null, status: 'pending',
-  chat_id: 'main-1', sync: 'confirmed', aging: false, ended_at: null, ended_by: null, ...over,
+  chat_id: 'main-1', raised_in_turn: true, sync: 'confirmed', aging: false, ended_at: null, ended_by: null, ...over,
 })
 
 const tid = (w, id) => w.find(`[data-testid="${id}"]`)

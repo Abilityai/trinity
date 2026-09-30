@@ -392,18 +392,26 @@ describe('expiredLabel', () => {
 
 // --- the thread link, and the surface that never rendered (ent#429) -----------
 describe('askThreadLink', () => {
+  // ent#610 (the 09-30 ruling): a link needs an ask a chat TURN raised; a
+  // background ask's chat_id (Main) is only the reply target.
+  const turn = { raised_in_turn: true }
   it('links to the thread an ask was raised against', () => {
-    expect(askThreadLink({ chat_id: 'sess-1' }, null)).toBe('sess-1')
-    expect(askThreadLink({ chat_id: 'sess-1' }, 'sess-2')).toBe('sess-1')
+    expect(askThreadLink({ ...turn, chat_id: 'sess-1' }, null)).toBe('sess-1')
+    expect(askThreadLink({ ...turn, chat_id: 'sess-1' }, 'sess-2')).toBe('sess-1')
+  })
+
+  it('offers nothing for a background ask attached to Main', () => {
+    expect(askThreadLink({ chat_id: 'main-1', raised_in_turn: false }, null)).toBeNull()
+    expect(askThreadLink({ chat_id: 'main-1' }, null)).toBeNull()
   })
 
   it('offers nothing when the reader is already there', () => {
-    expect(askThreadLink({ chat_id: 'sess-1' }, 'sess-1')).toBeNull()
+    expect(askThreadLink({ ...turn, chat_id: 'sess-1' }, 'sess-1')).toBeNull()
   })
 
   it('offers nothing for a homeless ask', () => {
     // Pre-ent#429 rows, and any ask whose attachment could not be resolved.
-    expect(askThreadLink({ chat_id: null }, 'sess-1')).toBeNull()
+    expect(askThreadLink({ ...turn, chat_id: null }, 'sess-1')).toBeNull()
     expect(askThreadLink({}, null)).toBeNull()
     expect(askThreadLink(undefined, null)).toBeNull()
   })

@@ -1623,7 +1623,14 @@ export function expiredLabel(expiresAt, now = Date.now()) {
  * findable, not to restrict where it may be answered — and an ask the reader
  * can see but not reach is the failure this closes, not one it should create.
  */
+//
+// trinity-enterprise#610 (the 09-30 ruling, amended): only for an ask a chat
+// TURN raised (ent#734's `raised_in_turn`, the literal true). A background
+// ask's `chat_id` is Main only as the reply target — it is not drawn there, so
+// a link would send the reader to a chat where the ask is not. Its home is the
+// Inbox.
 export function askThreadLink(ask, currentSessionId = null) {
+  if (ask?.raised_in_turn !== true) return null
   const target = ask?.chat_id
   if (!target) return null
   if (currentSessionId && target === currentSessionId) return null
