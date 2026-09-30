@@ -164,9 +164,14 @@
                (or in an unsaved new chat with it). Quiet and gray beside the two
                pills — a state of the person's own work, not an obligation. -->
           <span v-if="hasDraftFor(a.name)" class="shrink-0 flex items-center" data-testid="agent-draft"><DraftMark /></span>
+          <!-- trinity-enterprise#610 (the 09-30 ruling, item 3): this is the
+               agent row's "needs you" mark — the same feed (`openAsks`) and
+               the same hover words as the pinned Inbox row's, so the two read
+               as one fact. -->
           <span
             v-if="askCountFor(a.name)"
             class="shrink-0 min-w-[1.25rem] px-1.5 h-5 rounded-full bg-status-urgent-700 text-white text-[11px] font-semibold flex items-center justify-center"
+            :title="askBadgeTitle(askCountFor(a.name))"
             data-testid="agent-ask-count"
           >{{ capCount(askCountFor(a.name)) }}</span>
           <span
@@ -334,7 +339,7 @@ import {
   signOutLabelFor,
   searchAgents, sidebarSearchState, searchEmptyLines,
   agentResultsLabel, agentToggleLabel, showAgentToggle, SEARCH_PLACEHOLDER,
-  WORKSPACE_INBOX,
+  WORKSPACE_INBOX, askBadgeTitle,
 } from './portalUtils'
 import { inboxCounts } from './portalInbox'
 import { capCount } from '@/utils/tabTitle'
