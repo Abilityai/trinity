@@ -3936,6 +3936,18 @@
         "security"
       ],
       "description": "Per source->subscriber hourly event-dispatch budget (fakeredis): cap, pair keying, no cross-source starvation, one alert per window, TTL always set, fail-open."
+    },
+    {
+      "file": "unit/test_ent727_cross_agent_metrics.py",
+      "feature": "abilityai/trinity-enterprise#727",
+      "added": "2026-09-30",
+      "categories": [
+        "backend",
+        "api",
+        "security",
+        "unit"
+      ],
+      "description": "Narrow cross-agent metrics read. The one predicate (self or an agent_permissions grant, directional), the hourly-deduped audit of who read whose numbers (source passed, marker set only after the row is written, written anyway when the marker store is down, never raises into the read), and get_objectives resolving an actual from the agent that serves a metric through the READER's grant: fail-closed with no viewer predicate, ambiguity decided before the viewer filter, a server the viewer cannot see treated as not served, local declaration wins; plus the objectives route passing the viewer predicate and auditing each serving agent. The /metrics and /definitions grant gate itself is in test_ent479_metrics_route.py."
     }
   ]
 }

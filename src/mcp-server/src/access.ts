@@ -310,7 +310,10 @@ export const TOOL_ACCESS_POLICY: Readonly<Record<string, ToolAccessPolicy>> = {
   report: { kind: "none", why: "self-published; the backend self-gates the path agent (#918)" },
   record_metrics: { kind: "none", why: "self-recorded; the backend self-gates the path agent (ent#478)" },
   refresh_metric_definitions: { kind: "none", why: "self-scoped; reconciles the calling agent's own template (ent#478)" },
-  get_metrics: { kind: "none", why: "self-scoped read; the backend self-gates the path agent (ent#479)" },
+  // ent#727: `agent` is the cross-agent read. Unlike the `baselined` rows, the
+  // backend RE-CHECKS this edge (routers/agent_files.py `_metric_read_gate`),
+  // so this route is closed for ent#629's purposes, not on its work list.
+  get_metrics: { kind: "enforce", param: "agent" },
   get_objectives: { kind: "none", why: "self-scoped read; the backend self-gates the path agent (ent#666)" },
   list_reports: { kind: "in-tool", how: REPORTS_GATE },
   get_report: { kind: "in-tool", how: "reports.ts resolves the report's agent, then " + REPORTS_GATE },

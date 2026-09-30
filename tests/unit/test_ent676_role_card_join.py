@@ -720,9 +720,12 @@ def doors(monkeypatch):
 
         @staticmethod
         def operator(agent=AGENT):
+            # `request` feeds only ent#727's cross-read audit, which fires for a
+            # served metric; the stubbed join returns none.
             return asyncio.run(operator_mod.get_agent_objectives(
                 agent, current_user=User(id=1, username="operator",
-                                         email="op@example.com", role="user")))
+                                         email="op@example.com", role="user"),
+                request=None))
 
     try:
         yield Doors

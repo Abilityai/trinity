@@ -1,4 +1,4 @@
-# mcp: files.ts (share_file → /shared-files) + pipelines.ts (list_agent_pipelines, get_agent_pipeline_state → /files) + metrics.ts (refresh_metric_definitions → /metrics/definitions/refresh, ent#478; get_metrics → /metrics, /metrics/definitions — ent#479 ships that tool; get_objectives → /objectives, ent#666; the definitions READ stays deliberately unexposed until then, not forgotten)
+# mcp: files.ts (share_file → /shared-files) + pipelines.ts (list_agent_pipelines, get_agent_pipeline_state → /files) + metrics.ts (refresh_metric_definitions → /metrics/definitions/refresh, ent#478; get_metrics → /metrics — ent#479, and another agent's with `agent` through a permission grant, ent#727; get_objectives → /objectives, ent#666; the definitions READ is deliberately unexposed — get_metrics carries each definition — not forgotten)
 """Agent file management, info, and folder endpoints."""
 import logging
 import os
@@ -12,6 +12,7 @@ from database import db
 from dependencies import get_current_user, AuthorizedAgentByName, reject_agent_principal, assert_agent_owner, is_interactive_principal
 from services.agent_auth import agent_httpx_client
 from services import (
+    metric_access_service,
     metric_read_service,
     objective_join_service,
     objectives_read_budget,
@@ -404,23 +405,23 @@ async def get_agent_metrics(
     an operator most wanted to know what it had been.
 
     Gate order (Invariant #8): the uniform-404 dependency decides access
-    first, then the agent self-gate — an agent-scoped key reads only its own
-    numbers (cross-agent reads are ent#80's grant, not an oversight here).
+    first, then the metric-read gate — an agent-scoped key reads its own
+    numbers, and another agent's only while it holds an `agent_permissions`
+    grant on it (ent#727, the edge `chat_with_agent` uses). A cross-agent read
+    is charged to the CALLER's rate budget and audited with the reader.
     """
-    # --- self-gate (after access, before any read: the `metric_points.py`
-    # spelling, so the write and the read agree on who "itself" is) ----------
-    if current_user.agent_name and current_user.agent_name != agent_name:
-        raise HTTPException(
-            status_code=403,
-            detail="Agent-scoped key may only read its own metrics",
-        )
+    reader = _metric_read_gate(current_user, agent_name)
 
     rate_limiter.enforce(
-        f"agent_metrics_read:{agent_name}",
+        f"agent_metrics_read_by:{reader}" if reader
+        else f"agent_metrics_read:{agent_name}",
         METRICS_READ_RATE_LIMIT,
         METRICS_READ_RATE_WINDOW,
         detail="Metric read rate limit exceeded for this agent.",
     )
+    if reader:
+        await _audit_cross_read(reader, agent_name, "metrics",
+                                current_user, request)
 
     policy = _metric_policy()
     findings, evaluated_at = _metric_findings(agent_name)
@@ -460,6 +461,7 @@ async def get_agent_metrics(
 @router.get("/{agent_name}/objectives", response_model=ObjectiveJoinRead)
 async def get_agent_objectives(
     agent_name: AuthorizedAgentByName,
+    request: Request,
     current_user: User = Depends(get_current_user),
 ):
     """What this agent is supposed to move, and where it is (ent#666).
@@ -499,8 +501,14 @@ async def get_agent_objectives(
         detail="Objective read rate limit exceeded for this agent.",
     )
 
+    # ent#727: a metric served by an agent THIS agent holds a grant on may
+    # resolve — but only where the principal asking may see that agent too.
+    def _can_view(target: str) -> bool:
+        return bool(db.can_user_access_agent(current_user.username, target))
+
     try:
-        return await objective_join_service.read_objective_join(agent_name)
+        result = await objective_join_service.read_objective_join(
+            agent_name, can_view=_can_view)
     except (OperationalError, DBAPIError) as e:
         logger.error("[Objectives] Read failed for %s: %s", agent_name, e)
         raise HTTPException(
@@ -508,6 +516,50 @@ async def get_agent_objectives(
             detail="metric_store_unavailable",
             headers={"Retry-After": "30"},
         )
+
+    served_by = {m.get("served_by")
+                 for o in result.get("objectives") or []
+                 for m in o.get("metrics") or []} - {None}
+    for target in sorted(served_by):
+        await _audit_cross_read(agent_name, target, "objectives",
+                                current_user, request)
+    return result
+
+
+def _metric_read_gate(current_user: User, agent_name: str) -> Optional[str]:
+    """The metric-read gate (ent#479 self-gate, widened by ent#727).
+
+    Returns the READER's agent name for a cross-agent read, None for a self
+    read or a principal that is not an agent key (JWT human, user key, the
+    system key — all already decided by the access dependency). Raises the
+    existing 403, message unchanged, when an agent key holds no grant.
+
+    This check is the enforcement, not MCP's `checkAgentEdge` in front of it:
+    an agent key resolves to its owner carrying the owner's access, so on an
+    admin-owned install the dependency admits every agent. Do not remove it as
+    redundant with the MCP layer.
+    """
+    reader = current_user.agent_name
+    if not reader or reader == agent_name:
+        return None
+    if not metric_access_service.can_read_agent_metrics(reader, agent_name):
+        logger.info("[Metrics] cross-agent read refused: %s -> %s (no grant)",
+                    reader, agent_name)
+        raise HTTPException(
+            status_code=403,
+            detail="Agent-scoped key may only read its own metrics",
+        )
+    return reader
+
+
+async def _audit_cross_read(reader: str, agent_name: str, route: str,
+                            current_user: User, request: Request) -> None:
+    await metric_access_service.audit_cross_agent_read(
+        reader, agent_name, route,
+        actor_user=current_user,
+        endpoint=request.scope["path"],
+        request_id=getattr(request.state, "request_id", None),
+    )
 
 
 def _metric_findings(agent_name: str):
@@ -544,6 +596,7 @@ async def get_agent_metric_definitions(
     agent_name: AuthorizedAgentByName,
     request: Request,
     include_retired: bool = False,
+    current_user: User = Depends(get_current_user),
 ):
     """The agent's DECLARED metric registry (ent#477).
 
@@ -556,8 +609,17 @@ async def get_agent_metric_definitions(
     Registered BEFORE nothing it could shadow: `/{agent_name}/metrics` is a
     sibling literal, not a catch-all, so ordering is not load-bearing here
     (Invariant #4 applies to `/{name}`-style parameterized prefixes).
+
+    Gated like `/metrics` (ent#727): reading what another agent DECLARES is
+    the same trust question as reading what it recorded, so an agent key
+    reads its own definitions or those of an agent it holds a grant on.
     """
     from services import metric_registry
+
+    reader = _metric_read_gate(current_user, agent_name)
+    if reader:
+        await _audit_cross_read(reader, agent_name, "definitions",
+                                current_user, request)
 
     definitions = metric_registry.list_metric_definitions(
         agent_name, include_retired=include_retired

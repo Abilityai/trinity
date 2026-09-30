@@ -4967,6 +4967,10 @@ class ObjectiveMetricRead(BaseModel):
     #: Declared by the OWNING role's agent, not by this one — a supporting
     #: agent cannot fix that and must not be told to.
     declared_elsewhere: bool
+    #: The granted agent whose registry and point store supplied this row's
+    #: number (ent#727) — set only when this agent does not declare the metric
+    #: and exactly one agent it holds an `agent_permissions` grant on does.
+    served_by: Optional[str] = None
     #: The REGISTRY's vocabulary and nothing else — `up_good` | `down_good` |
     #: `neutral` | `null` — so a direction-aware formatter needs no fourth
     #: case. An objective's declared `hold` resolves to `neutral`; what tells
@@ -5047,6 +5051,8 @@ class ObjectiveJoinSummary(BaseModel):
     stale: int = 0
     undeclared: int = 0
     declared_elsewhere: int = 0
+    #: Rows whose number came from a granted agent (`served_by`, ent#727).
+    served_elsewhere: int = 0
 
 
 class ObjectiveJoinRead(BaseModel):
