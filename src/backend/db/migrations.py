@@ -4780,6 +4780,28 @@ def _migrate_portal_messages_unread_index(cursor, conn):
     )
 
 
+def _migrate_execution_conversation_key(cursor, conn):
+    """#2843 — one turn per conversation at a time on the pull queue.
+
+    `schedule_executions.conversation_key` names the conversation a queued turn
+    continues; the partial unique index allows at most one `running` row per
+    (agent, key). Nullable, no backfill: existing rows carry no guard.
+    PostgreSQL half: Alembic `0083_execution_conversation_key`.
+    """
+    _safe_add_column(
+        cursor,
+        "schedule_executions",
+        "conversation_key",
+        "ALTER TABLE schedule_executions ADD COLUMN conversation_key TEXT",
+    )
+    cursor.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_executions_one_running_turn "
+        "ON schedule_executions(agent_name, conversation_key) "
+        "WHERE status = 'running' AND conversation_key IS NOT NULL"
+    )
+    conn.commit()
+
+
 def _migrate_agent_skill_sets(cursor, conn):
     """trinity-enterprise#530 — skill sets.
 
@@ -5053,4 +5075,5 @@ MIGRATIONS = [
     ("agent_skill_sets", _migrate_agent_skill_sets),
     ("portal_messages_unread_index", _migrate_portal_messages_unread_index),
     ("agent_sync_state_divergence", _migrate_agent_sync_state_divergence),
+    ("execution_conversation_key", _migrate_execution_conversation_key),
 ]
