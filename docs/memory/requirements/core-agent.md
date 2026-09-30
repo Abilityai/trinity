@@ -3303,8 +3303,9 @@ to localStorage in the clear.
   `status: active` objectives are on the card — the join's rule.
 - **One budget, two doors (trinity-enterprise#676).** The card's objective read
   draws on the same per-agent budget as `GET /api/agents/{name}/objectives`
-  (`agent_objectives_read:{name}`, 60/min), after a per-viewer cap of 20/min per
-  agent so one viewer cannot spend the agent's and the operator's read. An
+  (`agent_objectives_read:{name}`, 60/min), after a per-viewer cap of a third of
+  that limit per agent (20/min at the default, derived so it moves with the limit),
+  so one viewer cannot spend the agent's and the operator's read. An
   exhausted budget **never refuses the card**: the role, readiness and the owner's
   flip still answer, the objectives are left out with
   `objectives_error: objectives_rate_limited`, and no container fan-out happens.

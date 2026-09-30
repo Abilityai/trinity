@@ -676,7 +676,7 @@ def doors(monkeypatch):
 
     class Doors:
         limit = budget.OBJECTIVES_READ_RATE_LIMIT
-        viewer_limit = portal_router.PORTAL_ROLE_OBJECTIVES_VIEWER_LIMIT
+        viewer_limit = portal_router._role_objectives_viewer_limit()
         seen = cards
         limiter = budget.rate_limiter
 
@@ -743,6 +743,22 @@ def test_one_viewer_cannot_spend_the_whole_budget(doors):
     # …and none of those refused reads was charged to the shared budget: the
     # operator door still has everything the two viewers did not spend.
     for _ in range(doors.limit - doors.viewer_limit - 1):
+        doors.operator()
+    _raises(429, doors.operator)
+
+
+def test_the_viewer_cap_is_a_third_of_the_limit_whatever_the_operator_sets(
+        doors, monkeypatch):
+    """A fixed cap would let one viewer empty the budget the day an operator
+    lowered OBJECTIVES_READ_RATE_LIMIT to it; the cap moves with the limit."""
+    from services import objectives_read_budget as budget
+    monkeypatch.setattr(budget, "OBJECTIVES_READ_RATE_LIMIT", 12)
+
+    for _ in range(4):                    # 12 // 3
+        assert doors.card() is True
+    assert doors.card() is False          # the viewer's own cap
+    # The operator door still has the other two thirds.
+    for _ in range(12 - 4):
         doors.operator()
     _raises(429, doors.operator)
 

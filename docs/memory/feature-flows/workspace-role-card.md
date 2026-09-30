@@ -15,7 +15,7 @@ line reads from ent#500 when it lands.
 Info rail ──► PortalAgentRole.vue ──► GET /api/enterprise/client-portal/agents/{name}/role
                                           │  _require_roster (uniform 404)
                                           │  admit_objectives() — built here, called by the builder:
-                                          │    viewer cap  portal_role_objectives:{email}:{name}  20/min
+                                          │    viewer cap  portal_role_objectives:{email}:{name}  limit/3 (20/min)
                                           │    AND shared  objectives_read_budget.admit(name)     60/min
                                           │    (never raises — a refused read is a 200 without objectives)
                                           ▼
@@ -96,7 +96,8 @@ owner ──► Mark ready (ConfirmDialog) ──► POST …/role/readiness {st
   leaves the objectives out, says so, and performs no fan-out. The check is spent where the
   fan-out starts — the builder calls it after the role file — so an Info tab for an agent
   with no role, a stopped agent or a broken role file costs nothing. The viewer's own cap
-  (20/min per agent) is checked first, so one viewer spends at most a third of the shared
+  (a third of the limit per agent, 20/min at the default, derived so it follows the limit) is
+  checked first, so one viewer spends at most a third of the shared
   budget and a refused viewer spends none of it.
 - **Readiness is the owner's stamp (#663).** `x-role.status` is agent-writable, so a
   file that says `ready` proves nothing. The effective state is the platform record if

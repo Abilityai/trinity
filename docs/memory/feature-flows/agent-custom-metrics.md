@@ -397,7 +397,8 @@ second staleness rule with it (a 30-day bound over `metrics.json`'s
   owner's flip still answer. The agent's own `get_objectives` draws on this
   bucket, so a whole-card refusal would let an agent hide its owner's control.
   The portal door also spends a per-viewer cap first
-  (`portal_role_objectives:{email}:{name}`, 20/min). Which door calls which
+  (`portal_role_objectives:{email}:{name}`, a third of the limit, 20/min at
+  the default). Which door calls which
   function stays in the routers — it is transport (Invariant #1).
 
 Flow: [workspace-role-card.md](workspace-role-card.md).

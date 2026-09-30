@@ -1732,7 +1732,9 @@ carries the role, the readiness stamp and the owner's flip; refusing the whole
 card would let the agent hide its owner's control. So a refused card read is a
 200 without objectives (`objectives_error: objectives_rate_limited`) and without
 a fan-out. The card additionally takes a per-viewer cap
-(`portal_role_objectives:{email}:{name}`, 20/min) **before** the shared key, so
+(`portal_role_objectives:{email}:{name}`, a third of the limit — 20/min at the
+default, derived rather than fixed so a lowered limit lowers it too) **before** the
+shared key, so
 one Workspace viewer can spend at most a third of the budget and a refused
 viewer spends none of it.
 

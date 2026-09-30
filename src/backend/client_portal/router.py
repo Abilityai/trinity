@@ -161,12 +161,21 @@ PORTAL_FILE_DELETE_BURST_LIMIT = int(os.getenv("PORTAL_FILE_DELETE_BURST_LIMIT",
 
 # ent#676 — the role card's objective read draws on the per-AGENT budget it
 # shares with `GET /api/agents/{name}/objectives`
-# (`services/objectives_read_budget`). This per-VIEWER cap is spent first, so
-# one Workspace viewer takes at most a third of that shared budget and cannot
-# refuse the operator's read or the agent's own `get_objectives`. The card
-# loads once per open, so twenty a minute is far above a person's use.
-PORTAL_ROLE_OBJECTIVES_VIEWER_LIMIT = 20
-PORTAL_ROLE_OBJECTIVES_VIEWER_WINDOW = 60  # seconds
+# (`services/objectives_read_budget`). A per-VIEWER cap is spent first, so one
+# Workspace viewer takes at most a third of that shared budget and cannot
+# refuse the operator's read or the agent's own `get_objectives` on their own.
+# It is DERIVED from the shared limit, never a second number: a fixed cap would
+# let one viewer empty the budget the day an operator lowered
+# OBJECTIVES_READ_RATE_LIMIT to it. At the default 60 it is 20 a minute, far
+# above a person's use (the card loads once per open).
+PORTAL_ROLE_OBJECTIVES_VIEWER_SHARE = 3
+
+
+def _role_objectives_viewer_limit() -> int:
+    """A third of the shared objectives budget, at least one read."""
+    from services import objectives_read_budget
+    return max(1, objectives_read_budget.OBJECTIVES_READ_RATE_LIMIT
+               // PORTAL_ROLE_OBJECTIVES_VIEWER_SHARE)
 
 _CHAT_LIMIT_DETAIL = "Too many messages to this agent."
 _UPLOAD_LIMIT_DETAIL = "Too many uploads."
@@ -846,8 +855,8 @@ async def portal_agent_role(
         return (
             rate_limiter.check(
                 f"portal_role_objectives:{email}:{agent_name}",
-                PORTAL_ROLE_OBJECTIVES_VIEWER_LIMIT,
-                PORTAL_ROLE_OBJECTIVES_VIEWER_WINDOW,
+                _role_objectives_viewer_limit(),
+                objectives_read_budget.OBJECTIVES_READ_RATE_WINDOW,
             ).allowed
             and objectives_read_budget.admit(agent_name)
         )
