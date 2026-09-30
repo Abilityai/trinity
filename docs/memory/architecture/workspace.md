@@ -798,9 +798,9 @@ explicit session id still wins.
 **An ask raised during a chat turn is the exception (ent#734).** On the native path the
 raise carries the platform's execution id (#2392); `operator_queue_service._workspace_thread_for`
 asks `client_portal.service.chat_for_execution` first, which answers with the turn's own
-chat when the execution row is a Workspace chat turn (`triggered_by="public"`,
-`source_channel="portal"`) of the same agent and addressee and the session belongs to that
-pair — the link the portal creation sites already stamp (ent#457), so no column. Anything
+chat when the execution row is a still-running Workspace chat turn (`triggered_by="public"`,
+`source_channel="portal"`) of the same agent and addressee and the session belongs to
+that pair (a reset, archived Main included — it stays resumable) — the link the portal creation sites already stamp (ent#457), so no column. Anything
 else, including a schedule that DELIVERS into Main (portal stamp, `schedule` trigger) and
 every file-ingested ask, falls through to Main; a lookup failure falls through with a warning.
 

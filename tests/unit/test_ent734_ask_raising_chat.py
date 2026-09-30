@@ -261,3 +261,47 @@ def test_a_public_turn_on_another_channel_is_not_a_workspace_chat(world, real_db
     r = _raise(world, "t734-slack", platform_execution_id=turn)
 
     assert _thread(world, r) == _main(world.agent, OWNER) != chat
+
+
+def test_a_finished_turn_is_not_a_link(world, real_db):
+    """cso r1: the header is platform-set but the agent PROCESS can forge it with
+    its own key. An ask can only be raised by a turn that is still running, so a
+    finished turn of another chat (same addressee) must not attach the ask there."""
+    old_chat = _chat(world.agent, OWNER)
+    old_turn = _execution(real_db, world.agent, chat=old_chat)
+    real_db.update_execution_status(old_turn, "success")
+
+    r = _raise(world, "t734-stale", platform_execution_id=old_turn)
+
+    assert _thread(world, r) == _main(world.agent, OWNER) != old_chat
+
+
+def test_a_running_turn_in_an_archived_chat_keeps_that_chat(world, real_db):
+    """review r1 N4: a reset Main stays listed, readable and RESUMABLE
+    (`reset_main_session`), and Reset is refused mid-turn — so a running turn in
+    an archived chat is someone talking in a chat they can see, and its ask
+    belongs there, not in the new Main."""
+    from client_portal import db as portal_db
+    old_main = _main(world.agent, OWNER)
+    new_main = uuid.uuid4().hex
+    assert portal_db.archive_main_and_mint(world.agent, OWNER, main_id=old_main, new_id=new_main,
+                                           now="2026-09-30T01:00:00Z")
+    turn = _execution(real_db, world.agent, chat=old_main)
+
+    r = _raise(world, "t734-archived", platform_execution_id=turn)
+
+    assert _thread(world, r) == old_main != _main(world.agent, OWNER)
+
+
+def test_the_addressee_match_ignores_email_case(world, real_db, monkeypatch):
+    """review r1 N1: the row keeps the client's email as the turn was started;
+    the addressee resolves separately. Case must not decide the link."""
+    import services.ask_service as svc
+    mixed = "Owner-734@Example.COM"
+    monkeypatch.setattr(svc, "_owner_email", lambda agent: mixed)
+    chat = _chat(world.agent, mixed.lower())
+    turn = _execution(real_db, world.agent, chat=chat, client=mixed.lower())   # sides differ in case
+
+    r = _raise(world, "t734-case", platform_execution_id=turn)
+
+    assert _thread(world, r) == chat

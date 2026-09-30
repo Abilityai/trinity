@@ -309,7 +309,11 @@ def raise_ask(
     of this agent's own executions it is recorded as the ask's execution,
     winning over an agent-written `context.execution_id`; `manual`, an unknown
     id or another agent's changes nothing. Consumers (a project's asks) read
-    the turn from it, so an agent cannot place its ask in a chat it isn't in.
+    the turn from it, and ent#734 attaches an addressed ask to that turn's
+    Workspace chat. The header is platform-set, but the agent's own process can
+    send any of its executions' ids, so the guarantee is "one of this agent's
+    own turns" — never another agent's, and never (ent#734) another person's
+    chat or a finished turn's.
 
     `addressee` (ent#661) names exactly who is asked, bypassing role
     resolution. Only a `gate` raise may pass it (a platform decision such as an

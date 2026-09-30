@@ -370,12 +370,16 @@ def _workspace_thread_for(agent_name: str, email: str,
     """The chat an addressed ask attaches to, or None (ent#429).
 
     ent#734: `execution_id` is the RAISING execution as the PLATFORM knows it
-    (the native path's validated `X-Trinity-Execution-Id`, #2392) — never an
-    agent-written `context.execution_id`, which would let an agent name a chat
-    by citing one of its turns. When it is a Workspace chat turn of this same
-    (agent, addressee), the ask attaches to that chat; anything else — a
-    schedule, loop or gate run, no or an unknown execution, another person's
-    chat, a failed lookup — gets the pair's Main, exactly as before.
+    (the native path's `X-Trinity-Execution-Id`, #2392, validated as this
+    agent's own) — never an agent-written `context.execution_id`, which a model
+    could fill with any turn it has seen. When it is a RUNNING Workspace chat
+    turn of this same (agent, addressee), the ask attaches to
+    that chat; anything else — a schedule, loop or gate run, a finished, unknown
+    or foreign execution, another person's chat, a failed
+    lookup — gets the pair's Main, exactly as before. The header is set by the
+    platform but not unforgeable by the agent's own process, so the bound is
+    "one of this agent's live turns for this addressee", never another person's
+    conversation (`client_portal.service.chat_for_execution`).
 
     Resolved at RAISE time, never at render time: an ask raised by a scheduled
     run has no conversation of its own, and "we will work out where it belongs
