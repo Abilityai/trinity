@@ -313,9 +313,10 @@
           </div>
           <p
             v-else
-            class="flex items-baseline justify-center gap-1 min-w-0 text-xs max-sm:flex-wrap"
+            class="flex items-baseline justify-center gap-1 min-w-0 text-xs max-sm:flex-wrap rounded focus:outline-none focus-visible:ring-2 focus-visible:ring-action-primary-500/40 dark:focus-visible:ring-action-primary-400/40"
             :class="META_INK_CLASS"
             :title="item.line.plain"
+            tabindex="-1"
             data-testid="portal-chat-ask-ended"
           >
             <span class="shrink-0">{{ item.line.kind }}</span>
@@ -506,6 +507,10 @@
       aria-live="polite"
       data-testid="portal-anchor-notice"
     >{{ anchor.notice.value }}</p>
+    <!-- trinity-enterprise#610 (the team's ruling, 2026-10-01): an ask answered
+         here collapses into its muted row at once; the row's confirmation is
+         said here. Always mounted, so a screen reader hears the change. -->
+    <p class="sr-only" aria-live="polite" data-testid="portal-chat-ask-announce">{{ askAnnouncement }}</p>
     <PortalJumpToLatest :show="showJumpToLatest" :count="unreadBelow" @jump="scrollToLatest" />
     </div>
 
@@ -1107,6 +1112,15 @@ watch(
     const fresh = ids.filter((id) => !base.has(id))
     if (!sameChat || fresh.length) seenPendingAsks.value = new Set([...base, ...ids])
     if (sameChat && fresh.length) onMessagesArrived(fresh.length)
+    // An ask that waited on screen and has now ENDED: its card is already the
+    // muted row (askTileMode). Say so, and move focus there when the card took
+    // it down with it — never out of the composer or anywhere else it sits.
+    if (sameChat) {
+      const ended = old[1].filter((id) => !ids.includes(id))
+        .map((id) => chatTurnAskList.value.find((a) => a.id === id && a.status !== 'pending'))
+        .filter(Boolean)
+      if (ended.length) announceEnded(ended[ended.length - 1])
+    }
   },
   { immediate: true },
 )
@@ -2762,9 +2776,26 @@ const threadItems = computed(() => groupVoiceBlocks(messages.value))
 // placed among them by time, each as a card or a history row.
 const threadRows = computed(() => placeAsksInThread(threadItems.value, chatTurnAskList.value, { truncated: historyTruncated.value }).map((row) => (
   row.kind !== 'ask' ? row
-    : askTileMode(row.ask, seenPendingAsks.value) === 'card' ? { ...row, mode: 'card' }
+    : askTileMode(row.ask) === 'card' ? { ...row, mode: 'card' }
       : { ...row, mode: 'row', line: askHistoryLine(row.ask) }
 )))
+// The team's ruling (2026-10-01): the answered card collapses into its row, the
+// row's confirmation is announced, and focus lands on the row, not <body>.
+const askAnnouncement = ref('')
+async function announceEnded(ask) {
+  const line = askHistoryLine(ask)
+  askAnnouncement.value = `${line.kind}: ${line.plain} — ${line.ending}${line.when ? ` · ${line.when}` : ''}`
+  await nextTick()
+  if (typeof document === 'undefined') return
+  const at = document.activeElement
+  if (at && at !== document.body) return
+  const scope = scrollEl.value || document
+  const row = [...scope.querySelectorAll('[data-ask-id]')]
+    .find((n) => n.getAttribute('data-ask-id') === ask.id)
+    ?.querySelector('[data-testid="portal-chat-ask-ended"]')
+  row?.focus?.({ preventScroll: true })
+}
+
 // Round 2 (plan-design P1-B): an ask a turn raised is on the server before its
 // reply lands, and the reply may say "see the question above" — read the asks
 // then, instead of leaving the tile to the next 20 s poll.

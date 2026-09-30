@@ -59,10 +59,10 @@ beforeEach(() => { setActivePinia(createPinia()); axios.get.mockReset() })
 // answered stays drawn, ended, until you leave the chat" survives as the tile's
 // card/row choice.
 describe("the chat's asks are thread rows, not a row above the composer", () => {
-  it('askTileMode: a waiting ask is a card; so is one seen waiting during this visit', () => {
-    expect(askTileMode(ask('p'), new Set())).toBe('card')
-    expect(askTileMode(ask('done', { status: 'answered' }), new Set(['done']))).toBe('card')
-    expect(askTileMode(ask('old', { status: 'expired' }), new Set())).toBe('row')
+  it('askTileMode: a waiting ask is a card; any ended one is a row — the moment its answer is recorded (team ruling, 2026-10-01)', () => {
+    expect(askTileMode(ask('p'))).toBe('card')
+    expect(askTileMode(ask('done', { status: 'answered' }))).toBe('row')
+    expect(askTileMode(ask('old', { status: 'expired' }))).toBe('row')
   })
   it('there is no disclosure row and no toggle above the composer', () => {
     const conv = src('PortalConversation.vue')

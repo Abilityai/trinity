@@ -135,10 +135,10 @@ describe('where a tile sits', () => {
 })
 
 describe('card or history row', () => {
-  it('waiting → card; ended → row; ended but seen waiting on this visit → still the card', () => {
-    expect(askTileMode(ask('p'), new Set())).toBe('card')
-    expect(askTileMode(ask('d', { status: 'answered' }), new Set())).toBe('row')
-    expect(askTileMode(ask('d', { status: 'answered' }), new Set(['d']))).toBe('card')
+  it('waiting → card; ended → row, even one seen waiting on this visit (team ruling 2026-10-01: it collapses right away)', () => {
+    expect(askTileMode(ask('p'))).toBe('card')
+    expect(askTileMode(ask('d', { status: 'answered' }))).toBe('row')
+    expect(askTileMode(ask('d', { status: 'answered' }), new Set(['d']))).toBe('row')
   })
   it('the row says kind · title · ending with who · when', () => {
     const now = Date.parse('2026-09-30T12:00:00Z')
@@ -214,13 +214,56 @@ describe('the chat thread (mounted)', () => {
     expect(sequence()).toEqual(['m1', 'ask:done', 'm2', 'm3'])
   })
 
-  it('an ask answered while the chat is on screen keeps its card until you leave', async () => {
+  it('an ask answered while the chat is on screen collapses at once into the muted row, which says so aloud and takes focus', async () => {
+    // The team's ruling (2026-10-01, on #3101): follow the 09-30 ruling — when
+    // the answer is recorded the card collapses right away into the muted row;
+    // its confirmation ("Answered by you · just now") is announced via
+    // aria-live; focus moves to the row, never to <body>.
     store.asks = [ask('live')]
-    await open()
-    store.asks = [ask('live', { status: 'answered', ended_by: 'you', ended_at: '2026-09-30T10:20:00Z' })]
+    wrapper = shallowMount(PortalConversation, {
+      props: { agent: { name: 'scout', playbooks: [] }, sessionId: 's1' },
+      global: { renderStubDefaultSlot: true },
+      attachTo: document.body,
+    })
     await flushPromises()
-    expect(wrapper.findAllComponents(PortalAsks)).toHaveLength(1)
-    expect(wrapper.find('[data-testid="portal-chat-ask-ended"]').exists()).toBe(false)
+    const live = wrapper.find('[data-testid="portal-chat-ask-announce"]')
+    expect(live.exists()).toBe(true)
+    expect(live.attributes('aria-live')).toBe('polite')
+    expect(live.text()).toBe('')
+    document.activeElement?.blur?.()                           // the answered card unmounts under the focus
+    store.asks = [ask('live', { status: 'answered', ended_by: 'you', ended_at: new Date().toISOString() })]
+    await flushPromises()
+    expect(wrapper.findAllComponents(PortalAsks)).toHaveLength(0)
+    const row = wrapper.find('[data-testid="portal-chat-ask-ended"]')
+    expect(row.exists()).toBe(true)
+    expect(row.text()).toContain('Answered by you')
+    expect(row.text()).toContain('just now')
+    expect(wrapper.find('[data-testid="portal-chat-ask-announce"]').text()).toMatch(/Answered by you · just now/)
+    expect(document.activeElement).not.toBe(document.body)
+    expect(document.activeElement).toBe(row.element)
+  })
+
+  it('an ask that ends while you type in the composer never takes your focus', async () => {
+    store.asks = [ask('live')]
+    wrapper = shallowMount(PortalConversation, {
+      props: { agent: { name: 'scout', playbooks: [] }, sessionId: 's1' },
+      global: { renderStubDefaultSlot: true },
+      attachTo: document.body,
+    })
+    await flushPromises()
+    const field = document.createElement('textarea')
+    document.body.appendChild(field)
+    field.focus()
+    store.asks = [ask('live', { status: 'answered', ended_by: 'you', ended_at: new Date().toISOString() })]
+    await flushPromises()
+    expect(document.activeElement).toBe(field)
+    field.remove()
+  })
+
+  it('an ask that had already ended when the chat opened is not announced', async () => {
+    store.asks = [ask('old', { status: 'answered', ended_by: 'you', ended_at: '2026-09-30T10:06:00Z' })]
+    await open()
+    expect(wrapper.find('[data-testid="portal-chat-ask-announce"]').text()).toBe('')
   })
 
   it('above the composer there is no asks box and no "more asks" line', async () => {
@@ -291,7 +334,7 @@ describe('where a tile sits across live turns and clocks (round 2: review C2, co
 describe('the chat thread across chat switches and reads (round 2: review C1/I3, codex C3)', () => {
   const answered = (id, over = {}) => ask(id, { status: 'answered', ended_by: 'you', ended_at: '2026-09-30T10:20:00Z', ...over })
 
-  it('an ask answered right after switching to its chat keeps its card and confirmation', async () => {
+  it('an ask answered right after switching to its chat collapses and is announced (the switch kept it as seen)', async () => {
     store.asks = [ask('there', { chat_id: 's2' })]
     // The chat's own read still in flight: nothing but the switch and the
     // answer may decide the card (a resolving read would re-add the ids).
@@ -299,10 +342,11 @@ describe('the chat thread across chat switches and reads (round 2: review C1/I3,
     await open()
     await wrapper.setProps({ sessionId: 's2' })
     await flushPromises()
-    store.asks = [answered('there', { chat_id: 's2' })]
+    store.asks = [answered('there', { chat_id: 's2', ended_at: new Date().toISOString() })]
     await flushPromises()
-    expect(wrapper.findAllComponents(PortalAsks)).toHaveLength(1)
-    expect(wrapper.find('[data-testid="portal-chat-ask-ended"]').exists()).toBe(false)
+    expect(wrapper.findAllComponents(PortalAsks)).toHaveLength(0)
+    expect(wrapper.find('[data-testid="portal-chat-ask-ended"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="portal-chat-ask-announce"]').text()).toMatch(/Answered by you/)
   })
 
   it('answered, then away and back: one muted row that survived the switch', async () => {

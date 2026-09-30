@@ -77,11 +77,13 @@ export function placeAsksInThread(items, asks, { truncated = false } = {}) {
   return out
 }
 
-// A waiting ask is the answerable card. So is one that ended while this visit
-// watched it wait — the ent#468 confirmation sits on that card. Any other ended
-// ask is history: one muted row.
-export function askTileMode(ask, seenPending = new Set()) {
-  return ask?.status === 'pending' || seenPending.has(ask?.id) ? 'card' : 'row'
+// A waiting ask is the answerable card; an ended one is history, one muted
+// row — the moment its answer is recorded, even on the visit that answered it
+// (the team's ruling on #3101, 2026-10-01: the confirmation lives in the row,
+// announced, and focus moves to it). A failed answer leaves the ask waiting, so
+// its card stays open with the error.
+export function askTileMode(ask) {
+  return ask?.status === 'pending' ? 'card' : 'row'
 }
 
 // The history row: kind · title · ending (with who) · when. The kind is a noun
