@@ -32,6 +32,7 @@ from database import db
 from dependencies import (
     get_current_user,
     reject_agent_principal,
+    require_person,
     AuthorizedAgentByName,
     OwnedAgentByName,
 )
@@ -1214,6 +1215,7 @@ async def get_pull_sync_config(agent_name: AuthorizedAgentByName):
 async def set_pull_sync_config(
     agent_name: OwnedAgentByName,
     body: PullSyncToggle,
+    current_user: User = Depends(require_person),
 ):
     """trinity-enterprise#703: turn the container's pull cycle on or off; live
     on the agent's next pull cycle, no recreate."""
