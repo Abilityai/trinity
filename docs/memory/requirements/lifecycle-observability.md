@@ -1487,7 +1487,7 @@ could disagree — the role card (ent#527) computed its own gap from
 `metrics.json` with its own 30-day staleness rule while the tiles read the
 point store with the §49.1 rule. So there is **one join**, in
 `services/objective_join_service.py`, and every consumer — the role card, the
-project hub (ent#661), proactivity (ent#605) — calls it rather than growing
+project view (ent#661 v3), proactivity (ent#605) — calls it rather than growing
 its own. A second join anywhere is a defect regardless of whether it currently
 agrees.
 
@@ -1647,7 +1647,7 @@ it. Findings appear twice — flat in `findings[]` with `objective_id` / `metric
 | `objective_invalid` | the file is not a YAML mapping | fix the YAML; §3.4 names the fields |
 | `objective_unreadable` | the agent answered, but not with that file (retryable — a transport fault is not an author error) | retry |
 | `objective_id_duplicate` | two files declare one id | both are shown; give one its own id |
-| `objective_id_invalid` | a file's `id:` is not a valid id | the **file name** is used instead and the finding says so — a *missing* `id` falls back silently, an id the author wrote and this read refused does not, because ent#661 keys objectives by id across agents |
+| `objective_id_invalid` | a file's `id:` is not a valid id | the **file name** is used instead and the finding says so — a *missing* `id` falls back silently, an id the author wrote and this read refused does not, because the ent#661 v3 project view keys objectives by id across agents |
 | `objective_file_skipped` | a `*.yaml` in `objectives/` whose NAME is not a plain path segment (a space, a non-ASCII character) | rename it; the file is never fetched, and `source.objectives_skipped` counts them so "not there" can be told from "there under a name this read will not open" |
 | `objectives_read_timeout` | the fan-out exceeded `OBJECTIVES_READ_BUDGET_SEC` | retry; the agent is answering, just too slowly — `source.objectives_dir: "timeout"`, no objective joined |
 | `role_id_invalid` | `x-role.role` is not a valid id | fix `template.yaml`; no owned objective can match until then |
@@ -1802,11 +1802,11 @@ metric, every one `declared: false` with its `metric_undeclared` finding and
 | `GET /api/agents/{name}/objectives` | the operator/agent door |
 | MCP `get_objectives` | agent-scoped (no agent parameter), returns the route body verbatim, never throws |
 | Role card (ent#527, PR #2927) | calls `read_objective_join(agent, template=…, client=…)` **in process** behind its own roster gate — one implementation, two doors |
-| Project hub (ent#661) | composes `read_objective_files` (one file read) with `join_objectives` per participating agent over store-only reads — the agent door stays out of its loop |
+| Project view (ent#661 v3) | composes `read_objective_files` (one file read) with `join_objectives` per participating agent over store-only reads — the agent door stays out of its loop |
 | Proactivity (ent#605) | consumes `summary.behind` and per-row `gap.status == "behind" and not stale`; it owns the "never act on a stale number" rule and the pace maths |
 
 Deliberately **not** here: a platform-side copy of objective files; an
-objective-centric cross-agent read (ent#661's design pass, with cross-agent
+objective-centric cross-agent read (the ent#661 v3 project view, with cross-agent
 metric access owned by ent#80); a proactivity evaluator; a `metrics.json`
 fallback for `actual` (retired by §49's D-010); a projection cache.
 
