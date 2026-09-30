@@ -8,6 +8,7 @@
 import { z } from "zod";
 import { TrinityClient } from "../client.js";
 import type { McpAuthContext } from "../types.js";
+import { resolveExecutionId } from "./execution_id.js";
 
 /**
  * Create message tools with the given client
@@ -97,7 +98,7 @@ export function createMessageTools(
             "Your current execution_id — shown in the 'Execution Context' block of your system " +
             "prompt as '- **Execution ID**: <id>'. Pass it so a re-delivery of this turn does NOT " +
             "send a duplicate message (effect-scoped idempotency, #1084). Optional: if omitted, " +
-            "the send proceeds without dedup."
+            "the send proceeds without dedup. The platform normally supplies this automatically (#2392); this param is a fallback for older agent images."
           ),
         dedup_label: z.string().optional()
           .describe(
@@ -166,7 +167,7 @@ export function createMessageTools(
             text: params.text.trim(),
             channel: params.channel || "auto",
             reply_to_thread: params.reply_to_thread || false,
-            execution_id: params.execution_id,
+            execution_id: resolveExecutionId(authContext, params.execution_id),
             dedup_label: params.dedup_label,
           });
 

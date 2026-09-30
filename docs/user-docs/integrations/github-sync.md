@@ -53,6 +53,32 @@ One limit, reported rather than fixed: many default patterns are directory-form 
 
 Trinity reads the git status of every git-enabled agent once a minute. Each read runs a `git fetch` inside the agent, so on a large fleet you can poll less often by setting `SYNC_HEALTH_POLL_INTERVAL_SECONDS` in the backend's `.env` (default `60`; see [Single-Server Deployment → `.env` reference](../guides/deploying/single-server.md#observability)). When an agent's consecutive sync failures reach three, an alert lands in the [Operating Room](../operations/operating-room.md#sync-health-alerts).
 
+### What the sync state means
+
+Sync health measures whether the agent and its repository **agree**, not only whether the last push worked. Trinity computes one state per agent and every surface shows the same one: the dashboard dot, `GET /api/agents/sync-health`, `GET /api/agents/{name}/git/sync-state` and the `get_git_sync_state` MCP tool.
+
+| State | When |
+|-------|------|
+| **Red** | The last sync failed; or the agent has been ahead of or behind its repository for more than 24 hours; or it has had uncommitted changes for more than 24 hours; or auto-sync is on but no sync has run for 7 days |
+| **Yellow** | The agent has been ahead or behind for 24 hours or less |
+| **Green** | The agent and its repository agree |
+| **Gray** | Trinity has not observed the agent yet |
+
+Ahead and behind are counted against the agent's **own branch** on GitHub, not against `main`. Every entry carries a `reason` (for example `diverged 31 behind / 0 ahead for 26h`) and, when there is an obvious fix, a `recommendation` — `credential is read-only`, `push via git_sync strategy=pull_first`, `enable auto-sync`, `pull via git_pull`. Hover the dot to read both.
+
+An agent that tracks a shared branch with auto-sync off — a **deployment** of a codebase rather than an agent that owns its branch — is never red for being behind: being behind is normal for a deployment. It shows yellow instead.
+
+The ages start counting at the first check after the upgrade that introduced them, so an agent that was already out of step shows yellow for its first day and red after that.
+
+### Pausing schedules when sync is unhealthy
+
+With **freeze schedules if sync failing** on (`PUT /api/agents/{name}/git/freeze-schedules-if-failing`), the scheduler skips the agent's scheduled runs when either:
+
+- its git sync has failed on three consecutive checks, or
+- it is an agent that owns its branch (a working branch, or auto-sync on) and has been ahead of or behind its repository for more than 24 hours.
+
+Each skipped run appears in the execution history with the reason, for example *Git sync frozen: diverged 0 behind / 7 ahead for 26h*. A divergence pause also files one **Agent diverged from GitHub — schedules paused** notice in the Operating Room per episode. Schedules resume by themselves on the first scheduled run after the agent is back in step — push its work, or pull what it is missing. The divergence pause needs a recent check (within 15 minutes): if Trinity cannot reach the agent, it does not keep it paused on old information. Manual runs are never paused.
+
 The read is built to stay out of the agent's way:
 
 - **It takes no git lock.** The status read never takes the repository's `.git/index.lock`, so the agent's own `git add` or `git commit` cannot fail because Trinity was looking.

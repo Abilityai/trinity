@@ -733,8 +733,8 @@ CREATE TABLE operator_queue (
     expires_at TEXT,
     response TEXT,
     response_text TEXT,
-    responded_by_id TEXT,
-    responded_by_email TEXT,
+    responded_by_id TEXT,               -- withheld from machine keys on get/list (ent#715)
+    responded_by_email TEXT,            -- withheld from machine keys on get/list; never written into the agent's file (ent#715)
     responded_at TEXT,
     acknowledged_at TEXT,
     cleared_at TEXT,                    -- #1017: NULL = visible; set = hidden by Clear All (rows deleted by the #1142 retention sweep past operator_queue_retention_days)
@@ -746,7 +746,7 @@ CREATE TABLE operator_queue (
     delivery_detail TEXT,               -- #2915: conflict|http_<code>|unreachable|timeout|entry_missing|entry_changed|closed_by_filer|agent_not_running|platform_minted
     delivery_updated_at TEXT,           -- #2915
     divergence_acknowledged_at TEXT,    -- #2915 (PR #2989 review): the human answered a changed/closed item knowingly; the write-back delivers into the entry as it is now
-    addressed_to_email TEXT,            -- ent#364: the human this ask is for; NULL = operator ask. Validated at ingestion against the agent's roster, never trusted from the payload
+    addressed_to_email TEXT,            -- ent#364: the human this ask is for; NULL = operator ask. Validated at ingestion against the agent's roster, never trusted from the payload; withheld from machine keys on get/list (ent#715)
     -- trinity-enterprise#611 (SQLite `operator_queue_ask_object` / Alembic `0076_operator_queue_ask_object`; nullable, no backfill):
     disposition TEXT,                   -- answered|cancelled|expired — written in the SAME CAS UPDATE that flips `status`; NULL = ended before the ledger
     disposed_at TEXT,
@@ -789,10 +789,16 @@ CREATE TABLE agent_sync_state (
     pack_count INTEGER,                    -- #1595: packs from `git count-objects -v`
     loose_objects INTEGER,                 -- #1595: loose objects (gc-health signal)
     maintenance_failures INTEGER DEFAULT 0, -- #1595: consecutive failed maintenance attempts
+    diverged_since TEXT,                   -- ent#706: divergence episode start (ISO-Z; set once, cleared at 0/0)
+    dirty_files INTEGER,                   -- ent#706: porcelain change count
+    dirty_since TEXT,                      -- ent#706: dirt episode start (ISO-Z; cleared at 0)
+    last_successful_push_at TEXT,          -- ent#706: last push that landed (heartbeat or operator Push)
     last_check_at TEXT,
     updated_at TEXT NOT NULL,
     FOREIGN KEY (agent_name) REFERENCES agent_ownership(agent_name)
 );
+-- ent#706 columns: SQLite migration `agent_sync_state_divergence`, Alembic
+-- `0082_agent_sync_state_divergence`; nullable, no backfill.
 CREATE INDEX idx_sync_state_status
     ON agent_sync_state(last_sync_status, consecutive_failures);
 

@@ -1194,6 +1194,10 @@ TABLES = {
             pack_count INTEGER,
             loose_objects INTEGER,
             maintenance_failures INTEGER DEFAULT 0,
+            diverged_since TEXT,
+            dirty_files INTEGER,
+            dirty_since TEXT,
+            last_successful_push_at TEXT,
             last_check_at TEXT,
             updated_at TEXT NOT NULL,
             FOREIGN KEY (agent_name) REFERENCES agent_ownership(agent_name)
