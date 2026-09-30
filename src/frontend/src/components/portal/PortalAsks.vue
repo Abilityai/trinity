@@ -199,6 +199,10 @@ const props = defineProps({
   // computed over `store.asks`, never a narrowed fetch: `fetchAsks(agentName)`
   // replaces the shared list the sidebar badge reads.
   agentNames: { type: Array, default: null },
+  // ent#661 v3: or exactly these asks — a project's "Needs you" card. The ids
+  // come from the server's project read, which already applied the Inbox's
+  // own addressee rule; this only narrows the shared list, never widens it.
+  askIds: { type: Array, default: null },
   showAgent: { type: Boolean, default: false },
   // trinity-enterprise#611: only what is still waiting — the Work tab's
   // "Waiting on you". Every other rendering also shows asks that ended.
@@ -222,6 +226,10 @@ const errors = reactive({})
 const diverged = reactive({})   // #2915: ask id → the person has seen the divergence notice
 
 const allItems = computed(() => {
+  if (Array.isArray(props.askIds)) {
+    const ids = new Set(props.askIds)
+    return store.asks.filter((a) => ids.has(a.id))
+  }
   if (props.agentName) return store.asksForAgent(props.agentName)
   if (Array.isArray(props.agentNames)) {
     const names = new Set(props.agentNames.filter(Boolean))

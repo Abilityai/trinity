@@ -448,7 +448,7 @@ export function createOperatorQueueTools(
         ) as unknown as OperatorAskCreate;
         const apiClient = getClient(authContext);
         try {
-          const receipt = await apiClient.raiseAsk(agentName, body);
+          const receipt = await apiClient.raiseAsk(agentName, body, authContext?.executionId);
           return JSON.stringify(receipt, null, 2);
         } catch (error) {
           const refusal = askRefusal(error);

@@ -6,7 +6,7 @@ is it now, and is that number still true?". An objective (Tandem framework
 what that name means; the point store (ent#478) says what it currently reads;
 `metric_read_service.freshness` says whether to believe it. This module is the
 join of those four, and it is the only one — the role card (ent#527 / #2927),
-the project hub (ent#661) and proactivity (ent#605) all consume it rather than
+the project view (ent#661 v3) and proactivity (ent#605) all consume it rather than
 each growing their own.
 
 **Files are truth; this is a projection** (framework E7/E13). Objectives are
@@ -337,7 +337,7 @@ def parse_objective(
     if raw_id is not None and declared_id is None:
         # A MISSING id falling back to the filename is the deliberate,
         # documented behaviour. An id the author WROTE and that this read
-        # refused is different: ent#661 keys objectives by id across agents, so
+        # refused is different: the ent#661 v3 project view keys objectives by id across agents, so
         # the author has to learn the canonical id is not the one they typed.
         findings.append(_finding(
             "objective_id_invalid",
@@ -772,7 +772,7 @@ async def read_objective_files(
 ) -> Dict[str, Any]:
     """List, read and filter `<root>/objectives/*.yaml` through the agent door.
 
-    Exported so a cross-agent consumer (the ent#661 project hub) can do ONE
+    Exported so a cross-agent consumer (the ent#661 v3 project view) can do ONE
     file read and then compose `join_objectives` per agent over store-only
     reads, rather than putting the agent door inside its loop. Still one join.
 

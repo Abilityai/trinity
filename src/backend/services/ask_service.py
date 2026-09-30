@@ -298,9 +298,24 @@ def raise_ask(
     raised_by: str,
     channel: str,
     actor_user: Any = None,
+    addressee: Optional[str] = None,
+    platform_execution_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Raise an ask through the platform and return its receipt
     (trinity-enterprise#611).
+
+    `platform_execution_id` (ent#661 v3) is the raising turn as the platform
+    saw it — the MCP request's `X-Trinity-Execution-Id` (#2392). When it is one
+    of this agent's own executions it is recorded as the ask's execution,
+    winning over an agent-written `context.execution_id`; `manual`, an unknown
+    id or another agent's changes nothing. Consumers (a project's asks) read
+    the turn from it, so an agent cannot place its ask in a chat it isn't in.
+
+    `addressee` (ent#661) names exactly who is asked, bypassing role
+    resolution. Only a `gate` raise may pass it (a platform decision such as an
+    agent owner's consent must reach that owner, not whoever a provider maps
+    `primary` to); for an agent's raise it is a programming error, so an agent
+    can never choose who is asked.
 
     The seam the agent's MCP tool calls today, and the one a gate calls later
     with `raised_by="gate"`, `channel="gate"` and a `request_id` derived from the
@@ -338,6 +353,7 @@ def raise_ask(
         raise ValueError(f"raise_ask: unknown channel {channel!r}")
     if (raised_by == "gate") != (channel == "gate"):
         raise ValueError(f"raise_ask: channel {channel!r} does not go with raised_by {raised_by!r}")
+    named = _named_addressee(addressee, raised_by)
     norm = _validated_ask(ask, oqs, raised_by=raised_by)
     existing = db.get_operator_queue_item_for_agent_by_request_id(agent_name, norm["request_id"])
     if existing:
@@ -351,9 +367,15 @@ def raise_ask(
     predecessor = _predecessor(agent_name, norm["supersedes_expired"], raised_by)
     if norm["proposal"] is not None and predecessor is None:
         _refuse_unlinked_reask(agent_name, norm["proposal"], raised_by)
-    people, addressee, resolved = _address(agent_name, norm["to"])
+    if named:
+        people, addressee, resolved = [named], named, True
+    else:
+        people, addressee, resolved = _address(agent_name, norm["to"])
 
     context = dict(norm["context"])
+    turn = _platform_turn(agent_name, platform_execution_id)
+    if turn:
+        context["execution_id"] = turn
     if addressee:
         # The addressee's Main chat (ent#429/#523), resolved at raise time. Only
         # after the caps passed: attaching may create the chat.
@@ -421,6 +443,18 @@ def raise_ask(
         logger.warning("[AskService] could not schedule the raised announcement", exc_info=True)
     return _receipt(row, status="created", resolved=resolved,
                     supersedes_request_id=norm["supersedes_expired"])
+
+
+def _platform_turn(agent_name: str, execution_id: Optional[str]) -> Optional[str]:
+    """The platform-supplied turn id iff it is this agent's own execution — never raises."""
+    if not execution_id or execution_id == "manual":
+        return None
+    from services.idempotency_service import resolve_and_validate_execution
+    try:
+        return execution_id if resolve_and_validate_execution(execution_id, agent_name) is not None else None
+    except Exception:  # noqa: BLE001 — provenance never fails the ask
+        logger.warning("[AskService] turn lookup failed — ask stored without it", exc_info=True)
+        return None
 
 
 def _too_large(field: str, limit: int, unit: str) -> AskRejected:
@@ -609,6 +643,22 @@ def _refuse_unlinked_reask(agent_name: str, proposal: Dict[str, Any], raised_by:
                 "This repeats an action a timeout already denied. Say what is new, and set "
                 "supersedes_expired to that ask's request_id.",
                 expired_request_id=prior["request_id"])
+
+
+def _named_addressee(addressee: Optional[str], raised_by: str) -> Optional[str]:
+    """The lower-cased email a platform raise names, or None when none is named.
+
+    A programming error (`ValueError`), never a refusal: an agent's raise that
+    names anyone, or a named addressee that is not an email.
+    """
+    if addressee is None:
+        return None
+    if raised_by != "gate":
+        raise ValueError("raise_ask: only a gate raise may name its addressee")
+    email = str(addressee).strip().lower()
+    if "@" not in email:
+        raise ValueError("raise_ask: addressee must be an email")
+    return email
 
 
 def _address(agent_name: str, role: str) -> Tuple[List[str], Optional[str], bool]:
