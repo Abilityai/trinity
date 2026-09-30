@@ -213,6 +213,27 @@ def finding_codes(join: dict) -> list[str]:
     return codes
 
 
+#: The join's file-level failures: an objective file that would not read, would
+#: not parse, or was refused by name. Whose file it was is unknowable (it never
+#: parsed), so on the card they mean "the list may be missing some".
+_FILE_FAILURE_CODES = frozenset({
+    "objective_unreadable", "objective_invalid", "objective_file_skipped"})
+
+
+def objectives_partial(join: dict) -> bool:
+    """True when objectives joined but some objective files were not read.
+
+    The list on the card is then possibly incomplete, and it must not look
+    like a complete one (design-system principle 15). Never true for zero
+    objectives — `objectives_error` names that case.
+    """
+    if not join.get("objectives"):
+        return False
+    source = join.get("source") if isinstance(join.get("source"), dict) else {}
+    return (bool(set(finding_codes(join)) & _FILE_FAILURE_CODES)
+            or bool(source.get("objectives_unscanned")))
+
+
 def objectives_error(join: dict) -> Optional[str]:
     """Why the card shows NO objectives — or None when that is simply true.
 
@@ -332,6 +353,7 @@ async def build_role_card(agent_name: str, email: str, *, is_platform: bool,
         "seat": _text(xrole.get("seat"), 128),
         "objectives": [],
         "objectives_error": None,
+        "objectives_partial": False,
         "finding_codes": [],
         "readiness": effective_readiness(xrole.get("status"), stamp),
         # Platform viewers only: an external client can neither act on a held
@@ -375,6 +397,7 @@ async def build_role_card(agent_name: str, email: str, *, is_platform: bool,
     card["objectives"] = [portal_objective(o) for o in join.get("objectives") or []
                           if isinstance(o, dict)]
     card["objectives_error"] = objectives_error(join)
+    card["objectives_partial"] = objectives_partial(join)
     card["finding_codes"] = finding_codes(join)
     return card
 

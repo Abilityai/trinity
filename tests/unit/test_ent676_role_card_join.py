@@ -427,6 +427,26 @@ def test_no_objectives_is_named_unless_it_is_a_real_empty(join, expected):
     assert rc.objectives_error(join) == expected
 
 
+@pytest.mark.parametrize("join,expected", [
+    (_join_result(objectives=[{"id": "x"}]), False),
+    (_join_result(objectives=[{"id": "x"}],
+                  findings=[{"code": "metric_undeclared"}]), False),
+    (_join_result(objectives=[{"id": "x"}],
+                  findings=[{"code": "objective_unreadable"}]), True),
+    (_join_result(objectives=[{"id": "x"}],
+                  findings=[{"code": "objective_invalid"}]), True),
+    (_join_result(objectives=[{"id": "x"}],
+                  findings=[{"code": "objective_file_skipped"}]), True),
+    (_join_result(objectives=[{"id": "x"}],
+                  source={"objectives_dir": "read", "objectives_unscanned": 3}), True),
+    # Zero objectives is objectives_error's case, never "partial".
+    (_join_result(findings=[{"code": "objective_unreadable"}]), False),
+], ids=["complete", "row-finding-only", "file-unreadable", "file-invalid",
+        "name-refused", "beyond-the-scan", "none-joined"])
+def test_a_list_missing_some_files_is_marked_partial(join, expected):
+    assert rc.objectives_partial(join) is expected
+
+
 def test_card_level_findings_cross_as_distinct_codes_only():
     join = _join_result(findings=[
         {"code": "objective_invalid", "path": "canon/objectives/cfo.yaml",
@@ -548,6 +568,18 @@ def test_a_directory_whose_files_will_not_read_is_not_an_empty_list(build):
     assert card["objectives"] == []
     assert card["objectives_error"] == "objectives_unreadable"
     assert card["finding_codes"] == ["objective_unreadable"]
+
+
+def test_one_unreadable_file_beside_a_joined_objective_marks_the_list_partial(build):
+    card, _door, _store = build(Door(unreadable={"canon/objectives/q4-icp-demand.yaml"}))
+    assert [o["id"] for o in card["objectives"]] == ["q4-close-rate"]
+    assert card["objectives_partial"] is True
+    assert card["objectives_error"] is None
+
+
+def test_a_clean_read_is_not_partial(build):
+    card, _door, _store = build()
+    assert card["objectives"] and card["objectives_partial"] is False
 
 
 def test_an_agent_with_no_objective_files_is_a_real_empty(build):

@@ -3284,7 +3284,9 @@ to localStorage in the clear.
   parsed → the card says so (`role.error`), never an empty role; a stopped agent
   → "the agent is stopped; the card reads its files when it runs"; objectives
   that could not be read → one line saying so (`objectives_error`), never an
-  empty list dressed as "this agent has none".
+  empty list dressed as "this agent has none"; and when some objectives joined but
+  some objective files were not read → one line under the list saying it may be
+  incomplete (`objectives_partial`), never a partial list dressed as the whole.
 - **Freshness is honest, never optimistic (quality bar #4) — and it is the
   platform's one rule (trinity-enterprise#676).** A metric on the card is stale
   exactly when the join says so: a declared `cadence:` and no recorded point within

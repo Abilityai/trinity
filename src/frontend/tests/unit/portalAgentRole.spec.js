@@ -79,6 +79,7 @@ function card(over = {}) {
       ],
     }],
     objectives_error: null,
+    objectives_partial: false,
     finding_codes: [],
     readiness: { status: 'calibrating', changed_at: null, changed_by: null, source: 'template', unstamped_ready: false },
     walkthrough: { asks: 4, target: 10, rated_down: 1, unavailable: false },
@@ -225,6 +226,19 @@ describe('PortalAgentRole (mounted)', () => {
     const w = await mountWith(card({ objectives: [], objectives_error: null }))
     expect(w.find('[data-testid="portal-role-objectives-error"]').exists()).toBe(false)
     expect(w.text()).not.toContain('Objectives')
+  })
+
+  it('a list with objective files that failed to read says it may be incomplete', async () => {
+    const w = await mountWith(card({ objectives_partial: true }))
+    expect(w.findAll('[data-testid="portal-role-objective"]')).toHaveLength(1)   // what did load still shows
+    expect(w.get('[data-testid="portal-role-objectives-partial"]').text())
+      .toBe("Some objective files in the agent's canon couldn't be read, so this list may be incomplete.")
+    expect(w.find('[data-testid="portal-role-objectives-error"]').exists()).toBe(false)
+  })
+
+  it('a complete list carries no partial line', async () => {
+    const w = await mountWith(card())
+    expect(w.find('[data-testid="portal-role-objectives-partial"]').exists()).toBe(false)
   })
 
   it('objectives that did load never show the error line', async () => {

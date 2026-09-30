@@ -66,6 +66,13 @@
             </ul>
           </li>
         </ul>
+        <!-- Some objectives joined but some files were not read: a partial list
+             must not look like a complete one (principle 15). -->
+        <p v-if="card.objectives.length && card.objectives_partial"
+           class="mt-1.5 text-[12.5px] text-status-warning-700 dark:text-status-warning-300"
+           data-testid="portal-role-objectives-partial">
+          Some objective files in the agent's canon couldn't be read, so this list may be incomplete.
+        </p>
       </template>
 
       <!-- Your relationship (ent#500 when it lands; stated, never blank). -->

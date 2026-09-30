@@ -638,6 +638,10 @@ class PortalRoleCard(BaseModel):
     # objectives_rate_limited | agent_unreachable | objectives_timeout |
     # objectives_unreadable | objectives_incomplete. None = a real empty.
     objectives_error: Optional[str] = None
+    # ent#676 — objectives joined, but some objective files were not read (would
+    # not read or parse, refused by name, beyond the scan bound): the list may be
+    # missing some. Never set together with `objectives_error`.
+    objectives_partial: bool = False
     # The join's findings as distinct codes — never the sentences, paths or ids.
     finding_codes: list[str] = Field(default_factory=list)
     readiness: Optional[PortalRoleReadiness] = None

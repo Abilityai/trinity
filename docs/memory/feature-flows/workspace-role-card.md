@@ -87,6 +87,11 @@ owner ──► Mark ready (ConfirmDialog) ──► POST …/role/readiness {st
   agent with no objectives of its own. An agent whose objective files all read cleanly and
   none name it shows no objectives block, as before. A role file that fails to load stops
   the card before the objectives are read; the role-error line is what the viewer sees.
+- **A partial list says so.** When objectives joined but some objective files were not read
+  (would not read or parse, refused by name, beyond the scan bound), `objectives_partial`
+  is set and one line under the list says it may be incomplete. The same file-level codes
+  cannot be attributed to a role, so the line says "may". Added at PR #3132's review; the
+  claim-time ruling had covered only the zero-objectives case.
 - **One budget, two doors, and they fail differently.** The card's objective read draws on
   the bucket `GET /api/agents/{name}/objectives` draws on
   (`services/objectives_read_budget.py` — key, limit and window spelled once). The operator
