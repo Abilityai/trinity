@@ -306,7 +306,7 @@ def _owned_ask(item_id: str, email: str, is_platform: bool, *, strict: bool = Fa
     if (
         not item
         or (item.get("addressed_to_email") or "").lower() != email.lower()
-        or (item.get("type") or "question") not in _VISIBLE_KINDS
+        or item.get("type") not in _VISIBLE_KINDS
         or not _on_roster(item.get("agent_name") or "", email, is_platform, strict=strict)
     ):
         raise AskError(404, "not_found", "Ask not found")
@@ -460,8 +460,11 @@ ORIGIN_EXCERPT_MAX = 280
 RECENT_ANSWERS = 3
 RECENT_ANSWER_EXCERPT_MAX = 200
 _RECENT_SCAN = 100
-#: Triggers a person STARTS for an agent they own, never another client's turn.
-_OWNER_TRIGGERS = frozenset({"schedule", "scheduled", "manual"})
+#: Triggers the agent's own configuration fires, never a person's turn. NOT
+#: `manual`: that is the default for ANY accessor's own /task and a schedule's
+#: "Run now", so a manual run is shown only to the person who started it
+#: (A2 round 1, /cso + Codex C1).
+_OWNER_TRIGGERS = frozenset({"schedule", "scheduled"})
 
 
 def _aware(value):
@@ -491,8 +494,9 @@ def _live_when_filed(run: dict, filed_at) -> bool:
 
 
 def _viewer_owns_run(run: dict, email: str, agent: str) -> bool:
-    """A schedule or manual run is the agent's own; anything else must be the
-    viewer's — they started it, or it ran in a Workspace thread they hold."""
+    """A schedule run is the agent's own; anything else — a manual run
+    included — must be the viewer's: they started it, or it ran in a Workspace
+    thread they hold."""
     from config import PORTAL_SOURCE_CHANNEL
     from client_portal import db as portal_db
     if (run.get("triggered_by") or "").strip().lower() in _OWNER_TRIGGERS:
@@ -593,11 +597,16 @@ def _origin(item: dict, run: Optional[dict], email: str):
 def _recent_answers(item: dict, email: str):
     from client_portal.chat_previews import _arrival_excerpt
     from .models import WorkspaceAskAnswered
-    rows = db.list_operator_queue_items(
-        agent_name=item.get("agent_name"), addressed_to_email=email, status=None,
-        hide_ended_before=iso_cutoff(hours=ENDED_WINDOW_DAYS * 24), include_cleared=True,
-        limit=_RECENT_SCAN, types=_VISIBLE_KINDS,
-    ) or []
+    # One read per answered status, selected in SQL: pending rows sort first and
+    # `limit` applies before any Python filter, so a status=None scan reads
+    # "no recent answers" once an agent has _RECENT_SCAN pending asks (Codex C3).
+    rows = []
+    for status in sorted(_ANSWERED_STATUSES):
+        rows.extend(db.list_operator_queue_items(
+            agent_name=item.get("agent_name"), addressed_to_email=email, status=status,
+            hide_ended_before=iso_cutoff(hours=ENDED_WINDOW_DAYS * 24), include_cleared=True,
+            limit=_RECENT_SCAN, types=_VISIBLE_KINDS,
+        ) or [])
     mine = []
     for row in rows:
         if row.get("id") == item.get("id") or _status_of(row) != "answered":
@@ -627,15 +636,17 @@ def get_ask_context(item_id: str, email: str, is_platform: bool):
     roster or any read behind the context fails: a missing section would read as
     "there is no origin", which is a claim, not an outage."""
     from .models import WorkspaceAskContext
-    item = _owned_ask(item_id, email, is_platform, strict=True)
     try:
+        # Inside the try: an unreadable queue row is the same 503, not a 500
+        # (A2 round 1, Codex C2).
+        item = _owned_ask(item_id, email, is_platform, strict=True)
         run = _validated_run(item, email)
         return WorkspaceAskContext(
             origin=_origin(item, run, email),
             run=_run_view(run, is_platform) if run else None,
             recent_answers=_recent_answers(item, email),
         )
-    except AskError:
+    except (AskError, AsksUnavailable):
         raise
     except Exception as e:  # noqa: BLE001 — surfaced as a 503, never as an empty context
         logger.warning("[WorkspaceAsks] context read failed for %s", item_id, exc_info=True)

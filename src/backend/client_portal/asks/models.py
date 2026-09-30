@@ -111,7 +111,7 @@ class WorkspaceAskRun(BaseModel):
     audience checks pass. `label` names the schedule for a platform principal
     only ("Asked by the nightly-billing run"); a client reads "Asked during a
     scheduled run" (T12)."""
-    kind: str               # schedule | manual | turn | delegated | loop | other
+    kind: str               # schedule | manual | turn | delegated | loop | room | other
     label: str
     started_at: Optional[str] = None
 

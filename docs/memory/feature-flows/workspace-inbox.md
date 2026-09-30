@@ -195,7 +195,7 @@ GET /api/enterprise/client-portal/asks/{item_id}/context        (PR A2 §3g L7 �
                               roster outage → AsksUnavailable → 503 (answer_ask shares it, non-strict)
     _validated_run            db.get_execution(row.execution_id — AGENT-written): same agent AND
                               started_at ≤ created_at ≤ (completed_at|now)+300s (parsed) AND
-                              schedule/manual or the viewer's own (email / a thread they hold)
+                              a schedule run, or the viewer's own (email / a thread they hold) — manual too
     _run_view                 kind + label (schedule NAME for platform only, T12) + started_at
     _origin                   the run's portal thread if get_portal_session(chat, agent, email):
                               get_portal_messages(limit=3, before=created_at) → _arrival_excerpt(280);

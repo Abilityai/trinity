@@ -8,7 +8,8 @@ addressed to — a NEW read a portal token can reach, so every field is gated:
   via `context.execution_id`) names a run that (a) belongs to the ask's agent,
   (b) was LIVE when the ask was filed — `started_at <= created_at <=
   (completed_at or now) + grace`, compared as parsed timestamps (Invariant #16)
-  — and (c) was a schedule or manual trigger, or the viewer owns its source.
+  — and (c) was a schedule trigger, or the viewer owns its source (a `manual`
+  run included: that trigger is any accessor's /task, not the owner's).
   Otherwise `run is None`: an agent that names another client's run must not
   disclose it. The run's label names the schedule for a PLATFORM principal only.
 * **origin** carries an excerpt (the 3 messages before the ask) only when the
@@ -226,6 +227,20 @@ def test_a_run_outside_its_live_window_is_not_shown(ctx_db, email):
     assert _ctx(_ask(email, execution_id=graced), email).run is not None
 
 
+def test_a_manual_run_is_shown_only_to_the_person_who_started_it(ctx_db, email):
+    """`manual` is the default trigger for ANY accessor's own /task (and a
+    schedule's "Run now"), not "the owner's": an agent that names another
+    person's manual run must not show its kind or start time (A2 round 1, /cso +
+    Codex C1). Pinned against the viewer's own manual run, which is shown."""
+    theirs = _exec(ctx_db, triggered_by="manual", source_user_email=f"other-{email}")
+    assert _ctx(_ask(email, execution_id=theirs), email).run is None
+    anonymous = _exec(ctx_db, triggered_by="manual")
+    assert _ctx(_ask(email, execution_id=anonymous), email).run is None
+    mine = _exec(ctx_db, triggered_by="manual", source_user_email=email)
+    ctx = _ctx(_ask(email, execution_id=mine), email)
+    assert ctx.run is not None and ctx.run.kind == "manual"
+
+
 def test_a_run_of_another_agent_is_not_shown(ctx_db, email):
     run = _exec(ctx_db, agent=OTHER_AGENT)
     assert _ctx(_ask(email, execution_id=run), email).run is None
@@ -252,6 +267,52 @@ def test_recent_answers_are_the_viewers_own_from_this_agent_newest_first(ctx_db,
     assert [r.id for r in ctx.recent_answers] == list(reversed(mine))[:3]
     assert all(r.answer == "yes" for r in ctx.recent_answers)
     assert this not in [r.id for r in ctx.recent_answers]
+
+
+def test_an_answer_someone_else_gave_is_never_a_recent_answer(ctx_db, email):
+    """The `by == "you"` check is the ONLY thing keeping an operator's answer
+    text out of a client's context (the list projection never carries
+    `response`) — A2 round 1 /review P1."""
+    from database import db
+    theirs = _ask(email, title="Operator handled it")
+    db._operator_queue_ops.respond_to_item(theirs, "op-private-answer", None, None, "ops@example.com")
+    ctx = _ctx(_ask(email, title="This one"), email)
+    assert ctx.recent_answers == []
+    assert "op-private-answer" not in ctx.model_dump_json()
+
+
+def test_recent_answers_survive_a_full_page_of_pending_asks(ctx_db, email):
+    """Pending rows sort FIRST and `limit` applies before the "answered" filter,
+    so the scan must select answered rows in SQL — else 100+ pending asks from
+    one agent read as "no recent answers" (A2 round 1, Codex C3)."""
+    from client_portal.asks import service
+    answered = _ask(email, title="Answered long ago", created="2026-09-20T10:00:00.000000Z")
+    service.answer_ask(answered, email, is_platform=False, response="yes", response_text=None)
+    for i in range(service._RECENT_SCAN + 1):
+        _ask(email, title=f"pending {i}")
+    ctx = _ctx(_ask(email, title="This one"), email)
+    assert [r.id for r in ctx.recent_answers] == [answered]
+
+
+def test_recent_answers_order_by_when_they_ended_across_answer_kinds(ctx_db, email):
+    """`responded` and `acknowledged` are both answers, read one status at a
+    time; merged, the newest ending comes first whichever kind it is. The
+    acknowledged one is the OLDER here because that status is read first — so
+    only the sort puts the responded one ahead (pins the sort)."""
+    from sqlalchemy import text
+    from client_portal.asks import service
+    from utils.helpers import iso_cutoff   # inside the 7-day window, relative to now
+    older = _ask(email, title="acknowledged, older")
+    service.answer_ask(older, email, is_platform=False, response="yes", response_text=None)
+    newer = _ask(email, title="responded, newer")
+    service.answer_ask(newer, email, is_platform=False, response="yes", response_text=None)
+    with ctx_db.begin() as conn:
+        conn.execute(text("UPDATE operator_queue SET status='acknowledged', disposed_at=:t, "
+                          "responded_at=:t WHERE id=:id"), {"t": iso_cutoff(hours=48), "id": older})
+        conn.execute(text("UPDATE operator_queue SET disposed_at=:t, responded_at=:t WHERE id=:id"),
+                     {"t": iso_cutoff(hours=24), "id": newer})
+    ctx = _ctx(_ask(email, title="This one"), email)
+    assert [r.id for r in ctx.recent_answers] == [newer, older]
 
 
 # --- the route: door, uniform 404, 503, no cost / execution_id -----------------
@@ -307,6 +368,46 @@ def test_an_unreadable_roster_is_503_never_an_empty_context(ctx_db, email, roste
     r = _client(email).get(f"/api/enterprise/client-portal/asks/{ask}/context")
     assert r.status_code == 503
     assert r.json()["detail"]["code"] == "asks_unavailable"
+
+
+def test_an_unreadable_queue_row_is_503_not_a_500(ctx_db, email, monkeypatch):
+    """The ask read itself sits inside the 503 contract (A2 round 1, Codex C2)."""
+    from database import db
+    ask = _ask(email)
+    def boom(_id):
+        raise RuntimeError("db down")
+    monkeypatch.setattr(db, "get_operator_queue_item", boom)
+    r = _client(email).get(f"/api/enterprise/client-portal/asks/{ask}/context")
+    assert r.status_code == 503, r.text
+    assert r.json()["detail"]["code"] == "asks_unavailable"
+
+
+def test_a_failed_read_behind_the_context_is_503_never_a_missing_section(ctx_db, email, monkeypatch):
+    """A section that silently came back empty would read as "you never answered
+    this agent" — a claim, not an outage (pins the catch-all, /review P2)."""
+    from client_portal.asks import service
+    ask = _ask(email)
+    def boom(*a, **k):
+        raise RuntimeError("queue scan failed")
+    monkeypatch.setattr(service, "_recent_answers", boom)
+    r = _client(email).get(f"/api/enterprise/client-portal/asks/{ask}/context")
+    assert r.status_code == 503, r.text
+
+
+def test_the_answer_path_404s_on_a_kind_the_workspace_never_shows(ctx_db, email):
+    """`_owned_ask` gates the ANSWER path by the list's own kinds too: a
+    hand-made POST for an ask no list shows gets the uniform 404. An empty
+    `type` is not a question — the list's SQL `IN` hides it, so must this."""
+    from sqlalchemy import text
+    from client_portal.asks import service
+    hidden = _ask(email, kind="skill_not_found")
+    blank = _ask(email)
+    with ctx_db.begin() as conn:
+        conn.execute(text("UPDATE operator_queue SET type='' WHERE id=:id"), {"id": blank})
+    for item in (hidden, blank):
+        with pytest.raises(service.AskError) as e:
+            service.answer_ask(item, email, False, "yes", None)
+        assert e.value.status_code == 404
 
 
 def test_the_answer_path_still_404s_on_a_roster_outage(ctx_db, email, roster):
