@@ -238,6 +238,8 @@ Updates the API key setting. **Owner-only endpoint** - only the agent owner can 
 
 **Authentication**: Must be agent owner (checked via `db.can_user_share_agent()`)
 
+**Person-only (#2996)**: the route takes `Depends(require_person)` — a JWT session or the owner's own `user`-scoped key. Agent- and system-scoped keys (and every other key scope) get 403 `person_required` before the owner check, whatever agent they address. See requirements `auth.md` §2.8.
+
 **Service Logic** (`api_key.py:49-84`):
 ```python
 async def update_agent_api_key_setting_logic(agent_name: str, body: dict, current_user: User, request: Request) -> dict:

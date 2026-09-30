@@ -4795,7 +4795,7 @@ def _migrate_ent720_email_identity(cursor, conn):
 
     Idempotent; a fresh install whose tables do not exist yet on the first pass
     gets both from `db/schema.py`. PostgreSQL half: Alembic
-    `0082_ent720_email_identity` (same decision function, `resolve_duplicate_emails`).
+    `0083_ent720_email_identity` (same decision function, `resolve_duplicate_emails`).
     """
     cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='email_login_codes'")
     if cursor.fetchone():
@@ -4937,6 +4937,31 @@ def _migrate_auto_sync_enabled_backfill(cursor, conn):
         """
     )
     conn.commit()
+
+
+def _migrate_agent_sync_state_divergence(cursor, conn):
+    """Add the divergence / dirt episode columns to agent_sync_state (trinity-enterprise#706).
+
+    `diverged_since` / `dirty_since` are ISO-Z episode clocks the
+    SyncHealthService sets once and clears on a return to 0; `dirty_files` is
+    the porcelain change count the agent's status call already computed and
+    threw away; `last_successful_push_at` is the last push that landed. All
+    nullable with NO backfill: the clocks cannot be known retroactively, and
+    starting them at the first post-upgrade poll is the 24 h soak before any
+    divergence freeze can fire.
+    """
+    for column, sql_type in (
+        ("diverged_since", "TEXT"),
+        ("dirty_files", "INTEGER"),
+        ("dirty_since", "TEXT"),
+        ("last_successful_push_at", "TEXT"),
+    ):
+        _safe_add_column(
+            cursor,
+            "agent_sync_state",
+            column,
+            f"ALTER TABLE agent_sync_state ADD COLUMN {column} {sql_type}",
+        )
 
 
 MIGRATIONS = [
@@ -5090,5 +5115,6 @@ MIGRATIONS = [
     ("telegram_group_context", _migrate_telegram_group_context),
     ("agent_skill_sets", _migrate_agent_skill_sets),
     ("portal_messages_unread_index", _migrate_portal_messages_unread_index),
+    ("agent_sync_state_divergence", _migrate_agent_sync_state_divergence),
     ("ent720_email_identity", _migrate_ent720_email_identity),
 ]

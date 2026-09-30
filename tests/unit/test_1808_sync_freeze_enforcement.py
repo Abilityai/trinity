@@ -18,10 +18,13 @@ DB object is exercised directly against a temp SQLite file rather than mocked.
 
 from __future__ import annotations
 
+import asyncio
 import os
 import sqlite3
 import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -57,23 +60,55 @@ def _scheduler_database_module():
     return scheduler_database
 
 
-def _seed(db_path: Path, *, freeze: int, status: str | None, failures: int | None) -> None:
-    """Minimal schema + one agent's git config and sync state."""
+def _iso(dt: datetime) -> str:
+    return dt.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+
+
+def _seed(
+    db_path: Path,
+    *,
+    freeze: int,
+    status: str | None,
+    failures: int | None,
+    source_mode: int = 0,
+    auto_sync: int = 1,
+    ahead: int = 0,
+    behind: int = 0,
+    diverged_since: str | None = None,
+    last_check_at: str | None = "now",
+) -> None:
+    """Minimal schema + one agent's git config and sync state.
+
+    The columns are the ones the gate reads, named as in `db/schema.py`
+    (trinity-enterprise#706 added the divergence inputs). `last_check_at`
+    defaults to "now": every real row carries it, because the poller's upsert
+    stamps it on every write.
+    """
+    if last_check_at == "now":
+        last_check_at = _iso(datetime.now(timezone.utc) - timedelta(seconds=30))
     conn = sqlite3.connect(db_path)
     conn.execute(
         "CREATE TABLE agent_git_config (agent_name TEXT PRIMARY KEY, "
-        "freeze_schedules_if_sync_failing INTEGER DEFAULT 0)"
+        "freeze_schedules_if_sync_failing INTEGER DEFAULT 0, "
+        "source_mode INTEGER DEFAULT 0, auto_sync_enabled INTEGER DEFAULT 0)"
     )
     conn.execute(
         "CREATE TABLE agent_sync_state (agent_name TEXT PRIMARY KEY, "
-        "last_sync_status TEXT, consecutive_failures INTEGER)"
+        "last_sync_status TEXT, consecutive_failures INTEGER, "
+        "ahead_main INTEGER DEFAULT 0, behind_main INTEGER DEFAULT 0, "
+        "ahead_working INTEGER DEFAULT 0, behind_working INTEGER DEFAULT 0, "
+        "diverged_since TEXT, last_check_at TEXT)"
     )
     conn.execute(
-        "INSERT INTO agent_git_config VALUES (?, ?)", ("a1", freeze)
+        "INSERT INTO agent_git_config VALUES (?, ?, ?, ?)",
+        ("a1", freeze, source_mode, auto_sync),
     )
     if status is not None:
         conn.execute(
-            "INSERT INTO agent_sync_state VALUES (?, ?, ?)", ("a1", status, failures)
+            "INSERT INTO agent_sync_state (agent_name, last_sync_status, "
+            "consecutive_failures, ahead_working, behind_working, diverged_since, "
+            "last_check_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            ("a1", status, failures, ahead, behind, diverged_since, last_check_at),
         )
     conn.commit()
     conn.close()
@@ -124,11 +159,17 @@ def test_fails_open_when_the_query_breaks(tmp_path):
 
 
 def test_threshold_matches_the_backend(tmp_path):
-    """The scheduler's threshold must stay in step with the backend endpoint."""
+    """The scheduler's threshold must stay in step with the backend endpoint.
+
+    trinity-enterprise#706: both now read it from ONE policy module (vendored
+    byte-identically; parity in test_ent706_sync_policy_parity.py), and the
+    backend endpoint delegates to that module instead of restating the rule.
+    """
     threshold = _scheduler_database_module().SYNC_FAILURE_FREEZE_THRESHOLD
+    assert threshold == 3
     backend = (_REPO / "src" / "backend" / "routers" / "internal.py").read_text()
-    # internal.py expresses the same rule inline.
-    assert f">= {threshold}" in backend
+    assert "sync_health_view" in backend or "sync_freeze_policy" in backend
+    assert ">= 3" not in backend  # no second copy of the rule
 
 
 def test_mapping_only_rows_still_freeze(tmp_path, monkeypatch):
@@ -169,3 +210,169 @@ def test_mapping_only_rows_still_freeze(tmp_path, monkeypatch):
 
     monkeypatch.setattr(db, "get_connection", dict_row_connection)
     assert db.should_freeze_schedules("a1") is True
+
+
+# ---------------------------------------------------------------------------
+# trinity-enterprise#706: the freeze also keys on divergence age (work agents)
+# ---------------------------------------------------------------------------
+
+def _diverged_seed(db_path, *, age: timedelta, **kw):
+    kw.setdefault("freeze", 1)
+    _seed(
+        db_path,
+        status="success",
+        failures=0,
+        ahead=kw.pop("ahead", 7),
+        diverged_since=_iso(datetime.now(timezone.utc) - age) if age is not None else None,
+        **kw,
+    )
+
+
+def test_divergence_past_24h_freezes_a_work_agent(tmp_path):
+    db_path = tmp_path / "t.db"
+    _diverged_seed(db_path, age=timedelta(hours=24, seconds=1))
+    db = _db(db_path)
+    reason = db.sync_freeze_reason("a1")
+    assert reason is not None and reason.startswith("diverged 0 behind / 7 ahead for 24h")
+    assert db.should_freeze_schedules("a1") is True
+
+
+def test_divergence_under_24h_fires(tmp_path):
+    db_path = tmp_path / "t.db"
+    _diverged_seed(db_path, age=timedelta(hours=24) - timedelta(seconds=1))
+    assert _db(db_path).sync_freeze_reason("a1") is None
+
+
+def test_control_arm_no_divergence_clock_fires(tmp_path):
+    """The SAME row with diverged_since NULL fires — the freeze above comes
+    from divergence, not from anything ambient in the seed."""
+    db_path = tmp_path / "t.db"
+    _diverged_seed(db_path, age=None)
+    assert _db(db_path).sync_freeze_reason("a1") is None
+
+
+def test_a_deployment_never_divergence_freezes(tmp_path):
+    db_path = tmp_path / "t.db"
+    _diverged_seed(db_path, age=timedelta(hours=300), source_mode=1, auto_sync=0)
+    assert _db(db_path).sync_freeze_reason("a1") is None
+
+
+def test_fork_to_own_divergence_freezes(tmp_path):
+    db_path = tmp_path / "t.db"
+    _diverged_seed(db_path, age=timedelta(hours=30), source_mode=1, auto_sync=1)
+    assert _db(db_path).should_freeze_schedules("a1") is True
+
+
+def test_a_stale_observation_does_not_divergence_freeze(tmp_path):
+    """D6: fail open when the poller has not seen the agent for 15+ minutes."""
+    db_path = tmp_path / "t.db"
+    _diverged_seed(
+        db_path, age=timedelta(hours=30),
+        last_check_at=_iso(datetime.now(timezone.utc) - timedelta(minutes=16)),
+    )
+    assert _db(db_path).sync_freeze_reason("a1") is None
+
+
+def test_divergence_needs_the_owner_opt_in(tmp_path):
+    db_path = tmp_path / "t.db"
+    _diverged_seed(db_path, age=timedelta(hours=30), freeze=0)
+    assert _db(db_path).sync_freeze_reason("a1") is None
+
+
+def test_sync_failing_reason_names_the_failures(tmp_path):
+    db_path = tmp_path / "t.db"
+    _seed(db_path, freeze=1, status="failed", failures=4)
+    assert _db(db_path).sync_freeze_reason("a1").startswith(
+        "last sync failed (seen on 4 polls)")
+
+
+def test_mapping_only_rows_divergence_freeze(tmp_path, monkeypatch):
+    """The PG RealDictCursor shape (#300) for the new divergence columns."""
+    from contextlib import contextmanager
+
+    db_path = tmp_path / "t.db"
+    _diverged_seed(db_path, age=timedelta(hours=30))
+    db = _db(db_path)
+
+    class _DictRowCursor:
+        def __init__(self, cur):
+            self._cur = cur
+
+        def execute(self, sql, params=()):
+            self._cur.execute(sql, params)
+            return self
+
+        def fetchone(self):
+            row = self._cur.fetchone()
+            return None if row is None else dict(row)
+
+    @contextmanager
+    def dict_row_connection():
+        conn = sqlite3.connect(db_path)
+        conn.row_factory = sqlite3.Row
+        try:
+            yield type(
+                "Conn", (), {"cursor": lambda self: _DictRowCursor(conn.cursor())}
+            )()
+        finally:
+            conn.close()
+
+    monkeypatch.setattr(db, "get_connection", dict_row_connection)
+    assert db.should_freeze_schedules("a1") is True
+
+
+# ---------------------------------------------------------------------------
+# The service gate writes the reason into the skipped row
+# ---------------------------------------------------------------------------
+
+class _GateDB:
+    """Just enough of SchedulerDatabase to reach the #1808 gate."""
+
+    def __init__(self, reason):
+        self._reason = reason
+
+    def get_schedule(self, schedule_id):
+        return SimpleNamespace(id=schedule_id, agent_name="a1", enabled=True)
+
+    def get_autonomy_enabled(self, agent_name):
+        return True
+
+    def sync_freeze_reason(self, agent_name):
+        return self._reason
+
+
+def _gate_service(reason):
+    import src.scheduler.service as scheduler_service
+
+    svc = scheduler_service.SchedulerService(database=_GateDB(reason), lock_manager=object())
+    calls = []
+    svc._record_skipped_agent_schedule = lambda sid, skip_reason=None, event_reason=None: \
+        calls.append({"skip_reason": skip_reason, "event_reason": event_reason})
+    svc._advance_next_run_only = lambda schedule: None
+
+    async def _hold(schedule, triggered_by):
+        return False  # stop right after the freeze gate
+
+    svc._apply_readiness_gate = _hold
+    return svc, calls
+
+
+def test_the_skipped_row_carries_the_freeze_reason():
+    svc, calls = _gate_service("diverged 0 behind / 7 ahead for 26h")
+    asyncio.run(svc._execute_schedule_with_lock("s1", triggered_by="schedule"))
+    assert calls == [{
+        "skip_reason": "Git sync frozen: diverged 0 behind / 7 ahead for 26h",
+        "event_reason": "Git sync frozen (schedules paused)",
+    }]
+
+
+def test_control_arm_no_reason_no_skip_row():
+    svc, calls = _gate_service(None)
+    asyncio.run(svc._execute_schedule_with_lock("s1", triggered_by="schedule"))
+    assert calls == []
+
+
+def test_a_manual_trigger_is_never_frozen():
+    svc, calls = _gate_service("diverged 0 behind / 7 ahead for 26h")
+    asyncio.run(svc._execute_schedule_with_lock("s1", triggered_by="manual"))
+    assert calls == []

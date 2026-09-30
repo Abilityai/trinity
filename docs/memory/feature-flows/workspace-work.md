@@ -258,6 +258,7 @@ are patched in place, and every other host keeps the default markup.
 `tests/unit/test_2964_portal_work_title_fixture.py` (against `clean_title`) and
 `src/frontend/tests/unit/portalWorkTitle.spec.js` (against `previewTitle`) —
 the pre-read title mirror, row for row.
+`src/frontend/tests/unit/portalAskCard.mount.spec.js` — "Waiting on you" is answerable in place (#3055): an ask attached to another chat (every addressed ask lands in Main) shows its answer controls beside "Open the conversation"; the link has its own `v-if` and never replaces them.
 
 ## Residuals (stated)
 

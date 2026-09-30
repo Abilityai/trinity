@@ -51,16 +51,17 @@ The spec names the gates (`TARGET_ARCHITECTURE.md`, §Re-Delivery and Side-Effec
 > Default-on for effect-bearing agents is still gated on trace fidelity (#548/#333), `prior_trace`
 > injection (#1401), and **fail-closed `execution_id` injection**.
 
-**Two of those three are shipped.** The full remaining list, in order:
+**All three are built** (fail-closed injection by #2392). The full remaining list, in order:
 
 1. **Land Phase 4** — [#2532](https://github.com/abilityai/trinity/pull/2532). Rebased on `dev`, migration
    renumbered to `0059`, full unit suite matched against unmodified `dev` (same single pre-existing
    failure, 21 net new tests). Blocked only on review.
 2. **Fail-closed `execution_id` injection** — [#2392](https://github.com/abilityai/trinity/issues/2392).
-   **The policy is decided, not open**: the spec says fail-closed. What is missing is the build —
-   platform-side injection, reject + operator alarm when the id is still absent, and a regression test that
-   a re-delivered execution emits each effect once. *(Trace fidelity #548/#333 closed Aug/Jun; `prior_trace`
-   injection #1401 closed 2026-07-08; #1402 closed 2026-07-26.)*
+   The agent's MCP config sends each turn's id as `X-Trinity-Execution-Id`; on a pull-mode agent an effect
+   without a usable id is refused with an operator alarm, and a person's terminal session (`manual`) is sent
+   and logged. Pilots must run a base image with #2392, or every effect call whose model omits the id is
+   refused. *(Trace fidelity #548/#333 closed Aug/Jun; `prior_trace` injection #1401 closed 2026-07-08;
+   #1402 closed 2026-07-26.)*
 3. **A soak on an agent that actually emits.** The current pilot (`cornelius-oracle` on eu2) emits no
    messages, calls or shares — measured 2026-09-02: 219 `idempotency_keys` rows, all `agent:*`, zero
    `effect:*`. It has therefore never entered the code path item 2 protects, so a clean window on it is not

@@ -10,6 +10,7 @@
 import { z } from "zod";
 import { TrinityClient } from "../client.js";
 import type { McpAuthContext } from "../types.js";
+import { resolveExecutionId } from "./execution_id.js";
 
 export function createVoipTools(client: TrinityClient, requireApiKey: boolean) {
   const getClient = (authContext?: McpAuthContext): TrinityClient => {
@@ -63,7 +64,8 @@ export function createVoipTools(client: TrinityClient, requireApiKey: boolean) {
           .describe(
             "Your current execution_id — shown in the 'Execution Context' block of your system " +
             "prompt. Pass it so a re-delivery of this turn does NOT place a duplicate phone call " +
-            "(effect-scoped idempotency, #1084). Optional: if omitted, the call proceeds without dedup."
+            "(effect-scoped idempotency, #1084). Optional: if omitted, the call proceeds without dedup." +
+            " The platform normally supplies this automatically (#2392); this param is a fallback for older agent images."
           ),
         dedup_label: z.string().optional()
           .describe(
@@ -90,7 +92,7 @@ export function createVoipTools(client: TrinityClient, requireApiKey: boolean) {
             to_number: params.to_number,
             context: params.context,
             process_transcript: params.process_transcript ?? true,
-            execution_id: params.execution_id,
+            execution_id: resolveExecutionId(authContext, params.execution_id),
             dedup_label: params.dedup_label,
           });
           return JSON.stringify({ success: true, agent_name: agentName, ...result }, null, 2);

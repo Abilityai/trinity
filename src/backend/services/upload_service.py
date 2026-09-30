@@ -17,6 +17,7 @@ from typing import List, Optional, Tuple
 
 from services.docker_utils import container_put_archive, container_exec_run
 from services.platform_audit_service import platform_audit_service, AuditEventType
+from utils.zip_signature import is_zip_container
 
 logger = logging.getLogger(__name__)
 
@@ -27,9 +28,6 @@ try:
 except ImportError:
     _MAGIC_AVAILABLE = False
     logger.warning("[UPLOAD] python-magic not installed; MIME validation will trust declared MIME")
-
-# Local file header, empty archive, spanned archive
-_ZIP_SIGNATURES = (b"PK\x03\x04", b"PK\x05\x06", b"PK\x07\x08")
 
 # ---------------------------------------------------------------------------
 # Limits — channel adapter uses the larger set; web uses WEB_* constants
@@ -202,7 +200,7 @@ async def process_file_uploads(
 
         # Magic-byte MIME validation
         actual_mime = mimetype
-        if mimetype == "application/zip" and data.startswith(_ZIP_SIGNATURES):
+        if mimetype == "application/zip" and is_zip_container(data):
             # libmagic 5.46 (Debian trixie) detects ZIPs as application/octet-stream
             # from a buffer, so trust the container signature for a declared ZIP (#3046).
             pass
