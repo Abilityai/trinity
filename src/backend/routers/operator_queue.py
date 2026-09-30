@@ -128,7 +128,7 @@ def _actor(current_user: User, request: Request) -> ask_service.Actor:
         email=current_user.email or current_user.username,
         user=current_user,
         ip=request.client.host if request.client else None,
-        endpoint=str(request.url.path),
+        endpoint=request.scope["path"],
     )
 
 
@@ -241,7 +241,7 @@ async def clear_resolved_queue_items(
             actor_ip=request.client.host if request.client else None,
             target_type="operator_queue",
             target_id=body.agent_name,
-            endpoint=str(request.url.path),
+            endpoint=request.scope["path"],
             details={"cleared": cleared, "agent_name": body.agent_name},
         )
         if _websocket_manager:

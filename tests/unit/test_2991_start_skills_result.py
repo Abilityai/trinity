@@ -55,7 +55,7 @@ def start(monkeypatch):
     def run(lifecycle_result):
         monkeypatch.setattr(agents, "start_agent_internal", AsyncMock(return_value=lifecycle_result))
         request = SimpleNamespace(client=SimpleNamespace(host="127.0.0.1"),
-                                  url=SimpleNamespace(path=f"/api/agents/{AGENT}/start"))
+                                  scope={"path": f"/api/agents/{AGENT}/start"})
         user = SimpleNamespace(id=1, username="alice", role="admin")
         return asyncio.run(agents.start_agent_endpoint(AGENT, request, user))
 

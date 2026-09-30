@@ -219,7 +219,7 @@ async def update_anthropic_key(
             source="api",
             actor_user=current_user,
             actor_ip=request.client.host if request.client else None,
-            endpoint=str(request.url.path),
+            endpoint=request.scope["path"],
             request_id=getattr(request.state, "request_id", None),
             details={"setting": "anthropic_api_key", "action": "update"},
         )
@@ -286,7 +286,7 @@ async def _adopt_after_instance_key_removed(current_user: User, request: Request
         await adopt_for_credentialless_agents(
             actor_user=current_user,
             actor_ip=request.client.host if request.client else None,
-            endpoint=str(request.url.path),
+            endpoint=request.scope["path"],
             request_id=getattr(request.state, "request_id", None),
             trigger=TRIGGER_INSTANCE_KEY_DELETED,
         )
@@ -320,7 +320,7 @@ async def delete_anthropic_key(
                 source="api",
                 actor_user=current_user,
                 actor_ip=request.client.host if request.client else None,
-                endpoint=str(request.url.path),
+                endpoint=request.scope["path"],
                 request_id=getattr(request.state, "request_id", None),
                 details={"setting": "anthropic_api_key", "action": "delete"},
             )
@@ -446,7 +446,7 @@ async def update_github_pat(
             source="api",
             actor_user=current_user,
             actor_ip=request.client.host if request.client else None,
-            endpoint=str(request.url.path),
+            endpoint=request.scope["path"],
             request_id=getattr(request.state, "request_id", None),
             details={"setting": "github_pat", "action": "update"},
         )
@@ -485,7 +485,7 @@ async def delete_github_pat(
                 source="api",
                 actor_user=current_user,
                 actor_ip=request.client.host if request.client else None,
-                endpoint=str(request.url.path),
+                endpoint=request.scope["path"],
                 request_id=getattr(request.state, "request_id", None),
                 details={"setting": "github_pat", "action": "delete"},
             )

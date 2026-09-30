@@ -352,7 +352,7 @@ async def login(request: Request, form_data: OAuth2PasswordRequestForm = Depends
             event_action="login_failed",
             source="api",
             actor_ip=client_ip,
-            endpoint=str(request.url.path),
+            endpoint=request.scope["path"],
             request_id=getattr(request.state, "request_id", None),
             details={"method": "admin", "username": form_data.username},
         )
@@ -382,7 +382,7 @@ async def login(request: Request, form_data: OAuth2PasswordRequestForm = Depends
             actor_ip=client_ip,
             target_type="user",
             target_id=user["username"],
-            endpoint=str(request.url.path),
+            endpoint=request.scope["path"],
             request_id=getattr(request.state, "request_id", None),
             details={"method": "admin"},
         )
@@ -427,7 +427,7 @@ async def login(request: Request, form_data: OAuth2PasswordRequestForm = Depends
         actor_ip=client_ip,
         target_type="user",
         target_id=user["username"],
-        endpoint=str(request.url.path),
+        endpoint=request.scope["path"],
         request_id=getattr(request.state, "request_id", None),
         details={"method": "admin"},
     )
@@ -677,7 +677,7 @@ async def verify_email_login_code(request: Request):
             event_action="login_failed",
             source="api",
             actor_ip=client_ip,
-            endpoint=str(request.url.path),
+            endpoint=request.scope["path"],
             request_id=getattr(request.state, "request_id", None),
             details={"method": "email", "email": email},
         )
@@ -714,7 +714,7 @@ async def verify_email_login_code(request: Request):
             actor_ip=client_ip,
             target_type="user",
             target_id=user["username"],
-            endpoint=str(request.url.path),
+            endpoint=request.scope["path"],
             request_id=getattr(request.state, "request_id", None),
             details={"method": "email", "email": email},
         )
@@ -736,7 +736,7 @@ async def verify_email_login_code(request: Request):
         actor_ip=client_ip,
         target_type="user",
         target_id=user["username"],
-        endpoint=str(request.url.path),
+        endpoint=request.scope["path"],
         request_id=getattr(request.state, "request_id", None),
         details={"method": "email", "email": email},
     )

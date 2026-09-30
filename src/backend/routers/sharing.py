@@ -131,7 +131,7 @@ async def share_agent_endpoint(
         actor_ip=request.client.host if request.client else None,
         target_type="agent",
         target_id=agent_name,
-        endpoint=str(request.url.path),
+        endpoint=request.scope["path"],
         request_id=getattr(request.state, "request_id", None),
         details={"shared_with": share_request.email},
     )
@@ -172,7 +172,7 @@ async def unshare_agent_endpoint(
         actor_ip=request.client.host if request.client else None,
         target_type="agent",
         target_id=agent_name,
-        endpoint=str(request.url.path),
+        endpoint=request.scope["path"],
         request_id=getattr(request.state, "request_id", None),
         details={"removed_email": email},
     )
@@ -373,7 +373,7 @@ async def decide_access_request_endpoint(
         actor_ip=request.client.host if request.client else None,
         target_type="agent",
         target_id=agent_name,
-        endpoint=str(request.url.path),
+        endpoint=request.scope["path"],
         request_id=getattr(request.state, "request_id", None),
         details={"email": existing["email"], "access_request_id": request_id},
     )
