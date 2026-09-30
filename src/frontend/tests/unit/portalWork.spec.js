@@ -482,12 +482,15 @@ describe('ent#525 — the tab and the card are wired (source guards)', () => {
     expect(room).toContain("@open-work=\"emit('open-work')\"")
   })
 
-  it('the tab body reads a verdict, never a bare loading flag, and filters asks in a computed', () => {
+  it('the tab body reads a verdict, never a bare loading flag, and counts asks in a computed', () => {
     expect(tab).toContain("v-if=\"view.state === 'loading'\"")
     expect(tab).not.toMatch(/v-if="store\.loading"/)
     expect(tab).toContain('<LoadFailed')
     expect(tab).toContain('<InlineError')
-    expect(tab).toContain('<PortalAsks :agent-names="participants"')
+    // ent#610 (the 09-30 ruling): Work counts the asks and links to the Inbox;
+    // it never draws them (portalWorkAsksLine.spec.js mounts it).
+    expect(tab).not.toContain('<PortalAsks')
+    expect(tab).toContain('portal.openAsks')
     expect(tab).not.toContain('fetchAsks(')
     expect(tab).toContain('portal.isPlatformSession')
     expect(tab).toContain('groupByParticipant(')

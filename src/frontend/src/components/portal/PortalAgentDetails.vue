@@ -222,7 +222,8 @@ import PortalAgentDecisions from './PortalAgentDecisions.vue'
 import PortalSuggestions from './PortalSuggestions.vue'
 import { agentDisplayName } from '@/utils/agentName'
 import { capCount } from '@/utils/tabTitle'
-import { availabilityChip, threadTitle, MAIN_TAB_LABEL } from './portalUtils'
+import { availabilityChip, threadTitle, MAIN_TAB_LABEL, asksHomeRoute } from './portalUtils'
+import { useRouter } from 'vue-router'
 import { usePortalAgentPage } from '@/composables/usePortalAgentPage'
 
 const props = defineProps({
@@ -239,14 +240,16 @@ const props = defineProps({
 const emit = defineEmits(['open-thread', 'use-playbook', 'open-rail-tab', 'focus-composer'])
 
 const store = useClientPortalStore()
+const router = useRouter()
 const openReport = ref(null)
 const decisionsEl = ref(null)
 
 // ent#465: a suggestion's "Show …". Decisions live in this panel, so scroll to
-// them; asks are answered in the Work tab's "Waiting on you".
+// them; asks are answered in the Inbox, filtered to this agent (ent#610, the
+// 09-30 ruling — Work no longer lists them).
 function openSection(name) {
   if (name === 'decisions') decisionsEl.value?.scrollIntoView?.({ behavior: 'smooth', block: 'start' })
-  else if (name === 'asks') emit('open-rail-tab', 'work')
+  else if (name === 'asks') router.push(asksHomeRoute(props.agentName))
 }
 
 // The window is fixed here: this panel shows no windowed figure, and a second

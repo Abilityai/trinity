@@ -72,21 +72,24 @@ describe("the chat's asks are thread rows, not a row above the composer", () => 
   })
 })
 
-describe('Work leaves out the ask the Inbox pane already shows', () => {
-  it('PortalAsks excludeIds drops those asks from an agent-scoped list', () => {
+// Round 5 had Work skip the ask open in the Inbox pane, so one ask was never
+// drawn twice side by side. The 09-30 ruling removes the cause: Work draws no
+// ask (portalWorkAsksLine.spec.js), so there is nothing to skip, and the one
+// line it keeps counts the pane's ask too.
+describe('Work draws no ask, so nothing is drawn twice beside the Inbox pane', () => {
+  it('PortalAsks renders every ask it is given — the exclude list is gone', () => {
     const store = useClientPortalStore()
     store.asksAvailable = true
     store.asks = [ask('a1'), ask('a2')]
     const w = mount(PortalAsks, { props: { agentNames: ['scout'], pendingOnly: true, excludeIds: ['a1'] } })
-    expect(w.find('[data-testid="portal-ask-a1"]').exists()).toBe(false)
+    expect(w.find('[data-testid="portal-ask-a1"]').exists()).toBe(true)
     expect(w.find('[data-testid="portal-ask-a2"]').exists()).toBe(true)
   })
-  it('the shell passes the open ask to Work, and Work to its asks', () => {
+  it('the shell hands Work no open-ask list, and Work mounts no PortalAsks', () => {
     const work = src('PortalWork.vue')
-    expect(work).toMatch(/excludeAskIds/)
-    expect(work).toMatch(/:exclude-ids="excludeAskIds"/)
+    expect(work).not.toMatch(/excludeAskIds|<PortalAsks/)
     const shell = readFileSync(join(PORTAL, '..', '..', 'views', 'Portal.vue'), 'utf8')
-    expect((shell.match(/<PortalWork [^>]*:exclude-ask-ids="inboxOpenAskIds"/g) || []).length).toBe(2)
+    expect(shell).not.toMatch(/inboxOpenAskIds/)
   })
 })
 

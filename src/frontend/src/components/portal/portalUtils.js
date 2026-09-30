@@ -678,6 +678,19 @@ export const WORKSPACE_ROOT = '/workspace'
 // Inbox is a stage `shouldEscapeStage` leaves — the fail-closed rule holds.
 export const WORKSPACE_INBOX = '/workspace/inbox'
 
+// trinity-enterprise#610 (the 09-30 ruling, item 2): an agent's asks home, on
+// every door and for platform users and clients alike — the Inbox's Action tab
+// narrowed to that agent (§3g C2 `?from=`), or the whole tab when no one agent.
+export function asksHomeRoute(agentName = null) {
+  const query = { tab: 'action' }
+  if (agentName) query.from = agentName
+  return { path: WORKSPACE_INBOX, query }
+}
+export function asksWaitingLabel(n) {
+  const k = Number(n) || 0
+  return k > 0 ? `${k} waiting on you` : ''
+}
+
 export function shouldEscapeStage(path, query) {
   if (path && path.replace(/\/+$/, '') !== WORKSPACE_ROOT) return true
   if (!query) return false

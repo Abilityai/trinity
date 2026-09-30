@@ -22,6 +22,10 @@
  *     ent#468 confirmation is on it); an ask that had already ended is a row.
  *
  * Mounted (#2918): the real PortalConversation (shallow), store seams stubbed.
+ *
+ * @source-text-pin: one set guard — the conversation holds exactly ONE PortalAsks
+ * and it sits inside the thread loop; a mount proves the asks it was given, not
+ * that no second mount exists above the composer for asks it was not.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { shallowMount, flushPromises } from '@vue/test-utils'

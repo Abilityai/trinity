@@ -2,18 +2,22 @@
   The rail's Work tab body (trinity-enterprise#525 — ent#457's Activity, homed
   by the 2026-09-02 ruling as the first docked tab of the ent#474 rail).
 
-  Three sections, in the order a person needs them:
+  Two sections, in the order a person needs them:
 
-    Waiting on you   open asks of this chat's participants, answerable in
-                     place — the FOURTH rendering of the same operator-queue
-                     row (ent#428), a computed over `store.asks`, never a
-                     narrowed fetch (that replaces the list the sidebar reads)
     Now              a live card per in-flight job — Stop where the platform
                      would accept it, steps where the agent publishes them
     Earlier          bounded history: "N in the last 30 days · latest 3
                      shown", Show all expands inside the rail's own scroll
                      axis (principle 28); loop runs are one kind here, not a
                      second surface (ent#458 AC 3)
+
+  Asks are not drawn here (trinity-enterprise#610, the 2026-09-30 ruling —
+  round 5's "Work is the asks' home" is reversed): their home is the Inbox,
+  filtered to the agent, on every door. While any of this chat's agents waits on
+  you, ONE line says so and links there — on the Now heading's row, which is
+  always drawn, so the line arriving moves nothing (principle 30); in the empty
+  state, under the empty copy. It counts from the one store list the sidebar
+  reads (`portal.openAsks`), never a narrowed fetch.
 
   A room groups everything by participating agent, and an agent with nothing
   in flight still gets its row (the rail's own rule, `groupByParticipant`).
@@ -42,23 +46,27 @@
       <InlineError v-if="view.stale" :message="store.error" @dismiss="store.error = null" />
       <InlineError v-if="stopError" :message="stopError" @dismiss="stopError = ''" />
 
-      <!-- Waiting on you -->
-      <section v-if="asks.length" data-testid="portal-work-waiting">
-        <h3 :class="OVERLINE">Waiting on you</h3>
-        <PortalAsks :agent-names="participants" pending-only :show-agent="participants.length > 1" :current-session-id="chatId" :exclude-ids="excludeAskIds" @open-thread="(t) => $emit('open-thread', t)" />
-      </section>
-
       <!-- Empty: teaches the next action (principle 16). -->
-      <div v-if="view.state === 'empty' && !asks.length" class="py-8 text-center" data-testid="portal-work-empty">
+      <div v-if="view.state === 'empty'" class="py-8 text-center" data-testid="portal-work-empty">
         <p class="text-sm font-semibold">{{ emptyCopy.title }}</p>
         <p class="mt-1.5 text-xs text-gray-500 dark:text-gray-400 max-w-[36ch] mx-auto">{{ emptyCopy.body }}</p>
         <BaseButton v-if="emptyCopy.action" size="sm" variant="secondary" class="mt-4" @click="$emit('see-hints')">{{ emptyCopy.action }}</BaseButton>
+        <p v-if="waiting" class="mt-4 text-xs" data-testid="portal-work-waiting-line">
+          {{ waiting.label }} ·
+          <router-link :to="waiting.to" :class="INBOX_LINK" data-testid="portal-work-open-inbox">Open in Inbox</router-link>
+        </p>
       </div>
 
       <template v-else>
         <!-- Now -->
         <section data-testid="portal-work-now">
-          <h3 :class="OVERLINE">Now</h3>
+          <div class="flex items-baseline justify-between gap-3 mb-2" data-testid="portal-work-now-head">
+            <h3 :class="OVERLINE_ROW">Now</h3>
+            <p v-if="waiting" class="min-w-0 truncate text-xs" data-testid="portal-work-waiting-line">
+              {{ waiting.label }} ·
+              <router-link :to="waiting.to" :class="INBOX_LINK" data-testid="portal-work-open-inbox">Open in Inbox</router-link>
+            </p>
+          </div>
           <template v-if="participants.length > 1">
             <div v-for="[agent, list] in groupedNow" :key="agent" class="mb-3 last:mb-0">
               <div class="flex items-center gap-2 min-w-0 mb-1.5">
@@ -143,11 +151,11 @@ import BaseBadge from '@/components/base/BaseBadge.vue'
 import BaseButton from '@/components/base/BaseButton.vue'
 import LoadFailed from '@/components/LoadFailed.vue'
 import InlineError from '@/components/InlineError.vue'
-import PortalAsks from './PortalAsks.vue'
 import PortalAvatar from './PortalAvatar.vue'
 import PortalSkeleton from './PortalSkeleton.vue'
 import PortalWorkCard from './PortalWorkCard.vue'
 import { groupByParticipant, railEmptyCopy } from './portalRail'
+import { asksHomeRoute, asksWaitingLabel } from './portalUtils'
 import {
   EARLIER_PREVIEW, askAboutItPrefill, childrenForChat, earlierSlice, earlierSummary,
   liveElapsedSeconds, workView,
@@ -157,10 +165,8 @@ import { resolveActivityText } from '@/utils/workActivity'
 const props = defineProps({
   participants: { type: Array, default: () => [] },
   tab: { type: Object, default: null },
-  // The open thread in a 1:1 — scopes "Waiting on you" links and the children.
+  // The open thread in a 1:1 — scopes the children.
   chatId: { type: String, default: null },
-  // ent#610 sign-off: the ask the Inbox pane already shows — not repeated here.
-  excludeAskIds: { type: Array, default: () => [] },
 })
 const emit = defineEmits(['open-thread', 'see-hints', 'ask-about-it'])
 
@@ -177,11 +183,18 @@ const view = computed(() => workView({
   count: store.now.length + store.earlier.length,
 }))
 
-// ent#428: the same rows the sidebar counts, narrowed to this chat.
-const asks = computed(() => {
+// ent#428: the same rows the sidebar counts, narrowed to this chat's agents.
+// trinity-enterprise#610 (the 09-30 ruling): counted, never drawn — one line to
+// the Inbox, narrowed to the agent when only one of them is waiting on you.
+const waiting = computed(() => {
   const names = new Set(participants.value)
-  const skip = new Set(props.excludeAskIds || [])
-  return portal.asks.filter((a) => a.status === 'pending' && names.has(a.agent_name) && !skip.has(a.id))
+  const asks = (portal.openAsks || []).filter((a) => names.has(a.agent_name))
+  if (!asks.length) return null
+  const agents = new Set(asks.map((a) => a.agent_name))
+  return {
+    label: asksWaitingLabel(asks.length),
+    to: asksHomeRoute(agents.size === 1 ? asks[0].agent_name : null),
+  }
 })
 
 const expanded = ref(false)
@@ -238,4 +251,8 @@ function onAsk(item) {
 }
 
 const OVERLINE = 'text-[11px] font-semibold uppercase tracking-wide text-gray-400 mb-2'
+// The Now heading shares its row with the waiting line; the row owns the gap.
+const OVERLINE_ROW = OVERLINE.replace(' mb-2', '')
+// The Inbox link: a 44px target on a phone and the design-system ring (A2 round 1's rule).
+const INBOX_LINK = 'inline-flex items-center max-sm:min-h-11 text-action-primary-600 dark:text-action-primary-400 hover:underline rounded focus:outline-none focus-visible:ring-2 focus-visible:ring-action-primary-500/40 dark:focus-visible:ring-action-primary-400/40'
 </script>
