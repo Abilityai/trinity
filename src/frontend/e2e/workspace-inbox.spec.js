@@ -15,6 +15,19 @@ import { test, expect } from '@playwright/test'
  *
  * Arms 1 and 2 need only a signed-in session; arms 3 and 4 need an agent on
  * the roster and skip (never fail) without one (#2199).
+ *
+ * In CI (`frontend-e2e.yml`) every roster-gated test SKIPS, by construction,
+ * for two independent reasons (#3054 review):
+ *   - the workflow pins the e2e baseline at zero user agents
+ *     (`TRINITY_DEFAULT_SYSTEM_MANIFEST=disabled`), which other @smoke specs
+ *     and the contrast baseline depend on;
+ *   - its admin is bootstrapped from ADMIN_PASSWORD with no email, and
+ *     `portal_auth` 403s a platform principal without one, so `/my-agents` is
+ *     empty even if an agent existed (learnings.md, trinity#2559).
+ * Seeding one is a workflow change (an admin email plus an owned agent row
+ * that every other spec tolerates), not this spec's. Until then these arms
+ * are proven on a live stack with a seeded roster (`npm run test:e2e:smoke`
+ * against it). A green CI run here is NOT evidence for them.
  */
 
 async function firstRosterAgent(page) {
