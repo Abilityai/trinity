@@ -15,14 +15,19 @@ from __future__ import annotations
 
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
 
 from client_portal.portal_auth import PortalPrincipal, get_portal_principal
 from dependencies import PERSON_REQUIRED_DETAIL
 
 from . import service
 from .models import WorkspaceAsk, WorkspaceAskAnswer
-from .service import AskError
+from .service import AskError, AsksUnavailable
+
+# The 503 `asks_unavailable` Retry-After, in seconds (trinity-enterprise#610,
+# PR A0). It is the Workspace's asks poll interval (`Portal.vue::ASKS_POLL_MS`):
+# its next read is the retry anyway.
+ASKS_RETRY_AFTER_SECONDS = "20"
 
 router = APIRouter(
     prefix="/api/enterprise/client-portal/asks",
@@ -39,8 +44,13 @@ def _raise(e: AskError):
 
 @router.get("", response_model=List[WorkspaceAsk])
 def list_asks(
+    response: Response,
     agent_name: Optional[str] = Query(default=None),
     include_ended: bool = Query(default=False),
+    # #3059 — opt-in paging. The body stays a list so no current caller
+    # changes; the total and the next cursor travel as headers.
+    limit: int = Query(default=service.PAGE_MAX, ge=1, le=service.PAGE_MAX),
+    cursor: Optional[str] = Query(default=None, max_length=64),
     principal: PortalPrincipal = Depends(get_portal_principal),
 ):
     """Open asks addressed to the caller. `agent_name` narrows to the agent page.
@@ -50,9 +60,25 @@ def list_asks(
     stops being true. `include_ended` (trinity-enterprise#611) adds the asks that
     ended in the last 7 days, so a person sees how an ask ended instead of
     watching it vanish; the sidebar count stays pending-only on the client.
+
+    An unreadable queue or roster is **503 `asks_unavailable`**, never `[]`
+    (trinity-enterprise#610, PR A0): an empty list is a claim that nothing is
+    waiting, and the client keeps its last good list on this answer.
     """
-    return service.list_asks(principal.email, principal.is_platform, agent_name,
-                             include_ended=include_ended)
+    try:
+        page = service.list_asks_page(principal.email, principal.is_platform, agent_name,
+                                      include_ended=include_ended, limit=limit, cursor=cursor)
+    except AsksUnavailable:
+        raise HTTPException(status_code=503, detail={
+            "code": "asks_unavailable",
+            "message": "Couldn't load your asks — try again.",
+        }, headers={"Retry-After": ASKS_RETRY_AFTER_SECONDS})
+    except AskError as e:
+        _raise(e)
+    response.headers["X-Total-Count"] = str(page.total)
+    if page.next_cursor:
+        response.headers["X-Next-Cursor"] = page.next_cursor
+    return page.items
 
 
 @router.post("/{item_id}/answer", response_model=WorkspaceAsk)

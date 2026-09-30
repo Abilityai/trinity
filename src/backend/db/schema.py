@@ -1198,6 +1198,10 @@ TABLES = {
             pack_count INTEGER,
             loose_objects INTEGER,
             maintenance_failures INTEGER DEFAULT 0,
+            diverged_since TEXT,
+            dirty_files INTEGER,
+            dirty_since TEXT,
+            last_successful_push_at TEXT,
             last_pull_at TEXT,  -- trinity-enterprise#703: the container's pull cycle
             last_pull_status TEXT,
             behind_after_pull INTEGER,

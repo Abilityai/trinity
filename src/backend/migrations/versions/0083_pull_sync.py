@@ -9,14 +9,14 @@ last_pull_error / last_successful_pull_at / consecutive_pull_failures /
 consecutive_pull_skips`` (the pull cycle's outcome and health), then turns the pull on only where auto-sync is already
 on (operator ruling 2026-09-25).
 
-Revision ID: 0082_pull_sync
-Revises: 0081_portal_messages_unread_idx
+Revision ID: 0083_pull_sync
+Revises: 0082_agent_sync_state_divergence
 """
 from alembic import op
 
 
-revision = "0082_pull_sync"
-down_revision = "0081_portal_messages_unread_idx"
+revision = "0083_pull_sync"
+down_revision = "0082_agent_sync_state_divergence"
 branch_labels = None
 depends_on = None
 

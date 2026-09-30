@@ -1,0 +1,3 @@
+## 2026-09-29 — pitfall — Rerouting a guard through a new private helper detaches every test patch on the old seam
+**Context**: #2392 — `effect_guard` switched from `resolve_and_validate_execution` to a reason-returning private helper; seven test files monkeypatch the public name, and two `test_736` cases went red because their patch no longer reached the guard.
+**Lesson**: When a widely-patched public function gains a sibling that returns more, keep the caller routed through the public name and derive the extra on the path that needs it. Before changing which function a hot path calls, `grep -rn "<old_name>" tests/` — the patch count is the blast radius.
