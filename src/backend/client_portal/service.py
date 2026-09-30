@@ -45,6 +45,7 @@ from services.chat_title import (
 # #2157: the surface stamp written onto every portal execution — see
 # `config.PORTAL_SOURCE_CHANNEL` for why it exists and why it is not a channel.
 from config import PORTAL_SOURCE_CHANNEL
+from services import turn_context
 
 from . import db
 from .models import (
@@ -2942,12 +2943,20 @@ async def portal_chat(agent_name: str, message: str, email: str,
             "block id rather than rewriting the whole surface.\n\n"
         )
 
+    # ent#661 — lines other modules add to the turn (services/turn_context.py);
+    # "" in an OSS build. Resolved from THIS chat row and the principal, never
+    # from the request, and rides both arms for the same reason the canvas does.
+    turn_prefix = turn_context.collect(turn_context.TurnContext(
+        surface="thread", agent_name=agent_name, chat_id=session_id,
+        person_email=email, internal_audience=bool(include_owned)))
+
     # #2694 × ent#555 on a resumed turn: the voice delta comes first (it is
     # conversation the session never heard, so it reads as history), then the
-    # canvas on screen, then the file manifest, then what the client said.
-    # The cold message carries the replay in place of the delta.
-    cold_message = history_prefix + canvas_prefix + manifest_prefix + message
-    message = (delta_prefix + canvas_prefix + manifest_prefix + message) if resuming else cold_message
+    # turn context, then the canvas on screen, then the file manifest, then
+    # what the client said. The cold message carries the replay in place of
+    # the delta.
+    cold_message = history_prefix + turn_prefix + canvas_prefix + manifest_prefix + message
+    message = (delta_prefix + turn_prefix + canvas_prefix + manifest_prefix + message) if resuming else cold_message
 
     # ent#212: inject the client's durable per-user memory (MEM-001) + the #1205
     # public-channel custom instructions into the turn, so a delegated end user
