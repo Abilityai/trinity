@@ -87,6 +87,12 @@ owner ──► Mark ready (ConfirmDialog) ──► POST …/role/readiness {st
   agent with no objectives of its own. An agent whose objective files all read cleanly and
   none name it shows no objectives block, as before. A role file that fails to load stops
   the card before the objectives are read; the role-error line is what the viewer sees.
+- **No number from another agent (ent#727).** The join can resolve a metric an objective
+  names from an agent this one holds an `agent_permissions` grant on, but only through a
+  `can_view` that says who is looking. The card passes none, so the join's fail-closed
+  default holds on the Workspace: a viewer never sees a number served by an agent they may
+  not be rostered on, and `served_by` is not projected either. Pinned by
+  `test_the_card_never_resolves_another_agents_metric`.
 - **A partial list says so.** When objectives joined but some objective files were not read
   (would not read or parse, refused by name, beyond the scan bound), `objectives_partial`
   is set and one line under the list says it may be incomplete. The same file-level codes

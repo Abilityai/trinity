@@ -637,6 +637,57 @@ def test_a_card_that_reads_objectives_asks_once(build):
     assert card["objectives"] and asked == [True]
 
 
+class GrantingStore(Store):
+    """The store, plus an `agent_permissions` grant on another agent that DOES
+    declare the metric this agent's objective names but does not declare —
+    the ent#727 cross-agent case."""
+
+    OTHER = "revenue-agent"
+
+    def __init__(self):
+        super().__init__()
+        self.grant_reads = []
+
+    def get_permitted_agents(self, agent):
+        self.grant_reads.append(agent)
+        return [self.OTHER]
+
+    def is_agent_permitted(self, reader, target):
+        return target == self.OTHER
+
+    def list_metric_definitions(self, agent, include_retired=False):
+        if agent == self.OTHER:
+            return [_definition("ghost_metric")]
+        return super().list_metric_definitions(agent, include_retired)
+
+    def latest_metric_points(self, agent, names, per_metric_limit=200):
+        if agent == self.OTHER:
+            return [_point("ghost_metric", 99.0, _ago(minutes=1))]
+        return super().latest_metric_points(agent, names, per_metric_limit)
+
+
+def test_the_card_never_resolves_another_agents_metric(build):
+    """ent#727 lets the operator door read a metric from an agent this one
+    holds a grant on, but only through a `can_view` that says who is looking.
+    The Workspace card passes none, so the join's fail-closed default holds:
+    a viewer on a companion's roster never sees a number served by another
+    agent they may not be rostered on."""
+    store = GrantingStore()
+    card, door, _ = build(store=store)
+    row = _rows(card)["ghost_metric"]
+    assert row["actual"] is None
+    assert row["finding"] == {"code": "metric_undeclared"}
+    assert "served_by" not in row
+    assert store.grant_reads == []          # resolution was never attempted
+
+    # Non-vacuous: the same files and store DO resolve it when a viewer is named.
+    operator = asyncio.run(svc.read_objective_join(
+        AGENT, client=door, can_view=lambda target: True))
+    served = {m["name"]: m for o in operator["objectives"] for m in o["metrics"]}
+    assert served["ghost_metric"]["served_by"] == GrantingStore.OTHER
+    assert served["ghost_metric"]["actual"] == 99.0
+
+
 def test_the_response_model_carries_every_key_the_card_produces(build):
     """`response_model` is an allowlist: a key the builder emits and the model
     lacks is dropped from every response without an error."""
