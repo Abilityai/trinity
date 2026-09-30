@@ -62,6 +62,15 @@ users = Table(
     Column("last_login", Text),
     Column("suspended_at", Text),
     Column("github_pat_encrypted", Text),  # ent#162 — per-user GitHub PAT (AES-256-GCM envelope)
+    # ent#720 — a sign-in email belongs to ONE account. Declared here, not only
+    # in schema.py/Alembic, so autogenerate (#746) must not propose dropping it.
+    Index(
+        "idx_users_email_unique",
+        text("lower(email)"),
+        unique=True,
+        sqlite_where=text("email IS NOT NULL"),
+        postgresql_where=text("email IS NOT NULL"),
+    ),
 )
 
 subscription_credentials = Table(
@@ -194,6 +203,7 @@ email_login_codes = Table(
     Column("expires_at", Text),
     Column("verified", Integer),
     Column("used_at", Text),
+    Column("purpose", Text),  # ent#720: NULL = sign-in; 'email_bind:<user id>'
 )
 
 agent_schedules = Table(

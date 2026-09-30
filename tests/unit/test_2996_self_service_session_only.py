@@ -208,7 +208,12 @@ class TestKeysAreRefused:
 
 
 class TestSessionPathUnchanged:
-    def test_a_session_binds_a_new_email(self, world):
+    def test_a_session_binds_a_new_email(self, world, monkeypatch):
+        # ent#720: a bind needs the mailed code, except an admin on an install
+        # that cannot deliver mail (`console`). That exception is the codeless
+        # path this session-gate test exercises; the code path is ent#720's.
+        from services.settings_service import settings_service
+        monkeypatch.setattr(settings_service, "get_email_provider", lambda: "console")
         res = _call(world, "email", _jwt())
         assert res.status_code == 200, res.text
         assert _stored_email() == NEW_EMAIL

@@ -2644,14 +2644,20 @@ class DatabaseManager:
     def list_whitelist(self, limit: int = 100):
         return self._email_auth_ops.list_whitelist(limit)
 
-    def create_login_code(self, email: str, expiry_minutes: int = 10):
-        return self._email_auth_ops.create_login_code(email, expiry_minutes)
+    def create_login_code(self, email: str, expiry_minutes: int = 10, purpose=None):
+        return self._email_auth_ops.create_login_code(email, expiry_minutes, purpose=purpose)
 
-    def verify_login_code(self, email: str, code: str):
-        return self._email_auth_ops.verify_login_code(email, code)
+    def is_email_account_suspended(self, email: str) -> bool:
+        return self._user_ops.is_email_account_suspended(email)
+
+    def verify_login_code(self, email: str, code: str, purpose=None):
+        return self._email_auth_ops.verify_login_code(email, code, purpose=purpose)
 
     def count_recent_code_requests(self, email: str, minutes: int = 10):
         return self._email_auth_ops.count_recent_code_requests(email, minutes)
+
+    def count_recent_codes_for_purpose(self, purpose: str, minutes: int = 10):
+        return self._email_auth_ops.count_recent_codes_for_purpose(purpose, minutes)
 
     def cleanup_old_codes(self, days: int = 1):
         return self._email_auth_ops.cleanup_old_codes(days)

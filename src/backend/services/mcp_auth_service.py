@@ -227,6 +227,11 @@ def verify_login_code(email: str, code: str) -> Optional[dict]:
     if not user:
         logger.error("[#848] verified code but failed to resolve user for %s", email)
         return None
+    # ent#720: the same account-state rule as `/verify` + `get_current_user` —
+    # a suspended account is refused here, not handed an MCP key.
+    if user.get("suspended_at"):
+        logger.info("[ent#720] inline redeem refused: account suspended")
+        return None
 
     try:
         db.update_last_login(user["username"])
