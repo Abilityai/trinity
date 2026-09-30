@@ -2350,11 +2350,16 @@ export class TrinityClient {
    * receipt on a new ask and 200 with the first receipt on a replay. A refusal
    * (422 / 429 / 403) is thrown as an ApiError carrying the named code.
    */
-  async raiseAsk(agentName: string, body: OperatorAskCreate): Promise<OperatorAskReceipt> {
+  async raiseAsk(agentName: string, body: OperatorAskCreate, turn?: string): Promise<OperatorAskReceipt> {
+    // ent#661 v3: the raising turn as the platform saw it (#2392), so an ask
+    // raised in a project chat is found on the project.
     return this.request<OperatorAskReceipt>(
       "POST",
       `/api/agents/${encodeURIComponent(agentName)}/operator-queue`,
       body,
+      false,
+      undefined,
+      turn ? { "X-Trinity-Execution-Id": turn } : undefined,
     );
   }
 

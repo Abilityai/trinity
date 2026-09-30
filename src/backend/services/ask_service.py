@@ -299,9 +299,17 @@ def raise_ask(
     channel: str,
     actor_user: Any = None,
     addressee: Optional[str] = None,
+    platform_execution_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Raise an ask through the platform and return its receipt
     (trinity-enterprise#611).
+
+    `platform_execution_id` (ent#661 v3) is the raising turn as the platform
+    saw it — the MCP request's `X-Trinity-Execution-Id` (#2392). When it is one
+    of this agent's own executions it is recorded as the ask's execution,
+    winning over an agent-written `context.execution_id`; `manual`, an unknown
+    id or another agent's changes nothing. Consumers (a project's asks) read
+    the turn from it, so an agent cannot place its ask in a chat it isn't in.
 
     `addressee` (ent#661) names exactly who is asked, bypassing role
     resolution. Only a `gate` raise may pass it (a platform decision such as an
@@ -365,6 +373,9 @@ def raise_ask(
         people, addressee, resolved = _address(agent_name, norm["to"])
 
     context = dict(norm["context"])
+    turn = _platform_turn(agent_name, platform_execution_id)
+    if turn:
+        context["execution_id"] = turn
     if addressee:
         # The addressee's Main chat (ent#429/#523), resolved at raise time. Only
         # after the caps passed: attaching may create the chat.
@@ -432,6 +443,18 @@ def raise_ask(
         logger.warning("[AskService] could not schedule the raised announcement", exc_info=True)
     return _receipt(row, status="created", resolved=resolved,
                     supersedes_request_id=norm["supersedes_expired"])
+
+
+def _platform_turn(agent_name: str, execution_id: Optional[str]) -> Optional[str]:
+    """The platform-supplied turn id iff it is this agent's own execution — never raises."""
+    if not execution_id or execution_id == "manual":
+        return None
+    from services.idempotency_service import resolve_and_validate_execution
+    try:
+        return execution_id if resolve_and_validate_execution(execution_id, agent_name) is not None else None
+    except Exception:  # noqa: BLE001 — provenance never fails the ask
+        logger.warning("[AskService] turn lookup failed — ask stored without it", exc_info=True)
+        return None
 
 
 def _too_large(field: str, limit: int, unit: str) -> AskRejected:
