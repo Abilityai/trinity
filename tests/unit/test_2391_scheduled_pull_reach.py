@@ -424,7 +424,7 @@ class _FakeQueueDb:
     def get_max_backlog_depth(self, agent_name):
         return 50
 
-    def update_execution_to_queued(self, execution_id, metadata, queued_at):
+    def update_execution_to_queued(self, execution_id, metadata, queued_at, conversation_key=None):
         self.queued[execution_id] = metadata
         return True
 

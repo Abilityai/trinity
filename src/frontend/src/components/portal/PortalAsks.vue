@@ -77,14 +77,17 @@
         </template>
       </div>
 
-      <p class="mt-1 text-sm font-medium text-gray-900 dark:text-gray-100">{{ ask.title }}</p>
+      <p class="mt-1 text-sm font-medium text-gray-900 dark:text-gray-100">
+        <AskMarkdown :text="ask.title" inline :data-testid="`${tid.prefix}-title-${ask.id}`" />
+      </p>
       <!-- An agent writes its ask in markdown, as it writes its replies: the
-           body goes through the one sanitized renderer (PortalMarkdown →
-           DOMPurify), never printed as its syntax (ent#610 sign-off). -->
-      <PortalMarkdown
+           body goes through the one ask renderer (AskMarkdown → the app's
+           sanitiser, #3115 — the same on every surface), never printed as its
+           syntax (ent#610 sign-off). -->
+      <AskMarkdown
         v-if="ask.question && ask.question !== ask.title"
-        :content="ask.question"
-        class="mt-0.5 min-w-0 text-sm text-gray-600 dark:text-gray-300"
+        :text="ask.question"
+        class="mt-0.5 min-w-0 text-gray-600 dark:text-gray-300"
         :data-testid="`${tid.prefix}-question-${ask.id}`"
       />
       <!-- trinity-enterprise#611: the exact action this approval would run, which is
@@ -154,10 +157,12 @@
               :data-testid="`${tid.prefix}-option-${ask.id}`"
               @click="pick(ask, opt)"
             >
+              <!-- #3115: an option label is agent markdown, rendered inline (the
+                   value sent stays the raw string). -->
               <template v-if="stacked(ask)">
                 <!-- Label first: the 14px label size, then the consequence at
                      meta size in secondary ink (white on the picked arm). -->
-                <span class="block text-sm font-semibold">{{ opt }}</span>
+                <span class="block text-sm font-semibold"><AskMarkdown :text="opt" inline /></span>
                 <span
                   v-if="impactOf(ask)[opt]"
                   :id="impactId(ask, i)"
@@ -165,7 +170,7 @@
                   :class="picks[ask.id] === opt ? 'text-white' : 'text-gray-600 dark:text-gray-300'"
                 >{{ impactOf(ask)[opt] }}</span>
               </template>
-              <template v-else>{{ opt }}</template>
+              <AskMarkdown v-else :text="opt" inline />
             </button>
           </div>
           <form class="mt-2 flex items-center gap-2" @submit.prevent="submit(ask)">
@@ -217,7 +222,7 @@
             :aria-pressed="drafts[ask.id] === opt"
             :data-testid="`${tid.prefix}-pick-${ask.id}`"
             @click="fillAnswer(ask, opt)"
-          >{{ opt }}</button>
+          ><AskMarkdown :text="opt" inline /></button>
         </div>
         <form class="mt-2 flex items-center gap-2" @submit.prevent="submit(ask)">
           <input
@@ -251,7 +256,7 @@
 <script setup>
 import { computed, nextTick, reactive, ref, watch, onBeforeUnmount } from 'vue'
 import BaseBadge from '../base/BaseBadge.vue'
-import PortalMarkdown from './PortalMarkdown.vue'
+import AskMarkdown from '@/components/operator/AskMarkdown.vue'
 import QueueProposal from '../operator/QueueProposal.vue'
 import QueueBrief from '../operator/QueueBrief.vue'
 import { useClientPortalStore } from '@/stores/clientPortal'
@@ -296,6 +301,10 @@ const props = defineProps({
   // computed over `store.asks`, never a narrowed fetch: `fetchAsks(agentName)`
   // replaces the shared list the sidebar badge reads.
   agentNames: { type: Array, default: null },
+  // ent#661 v3: or exactly these asks — a project's "Needs you" card. The ids
+  // come from the server's project read, which already applied the Inbox's
+  // own addressee rule; this only narrows the shared list, never widens it.
+  askIds: { type: Array, default: null },
   showAgent: { type: Boolean, default: false },
   // trinity-enterprise#611: only what is still waiting — the Work tab's
   // "Waiting on you". Every other rendering also shows asks that ended.
@@ -383,6 +392,10 @@ function fillAnswer(ask, opt) {
 }
 
 const allItems = computed(() => {
+  if (Array.isArray(props.askIds)) {
+    const ids = new Set(props.askIds)
+    return store.asks.filter((a) => ids.has(a.id))
+  }
   if (props.agentName) return store.asksForAgent(props.agentName)
   if (Array.isArray(props.agentNames)) {
     const names = new Set(props.agentNames.filter(Boolean))

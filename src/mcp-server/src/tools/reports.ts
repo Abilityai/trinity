@@ -150,11 +150,20 @@ export function createReportTools(client: TrinityClient, requireApiKey: boolean)
         // is what every report was before this field existed. The backend
         // checks the address against YOUR OWN roster and refuses an address it
         // does not already share you with, so this cannot reach a stranger.
+        // ent#606 — name the ROLE the report is for; the platform resolves the
+        // person through your assignments. You never pick a person.
+        to: z.enum(["primary", "approver", "viewer", "operator"]).optional()
+          .describe(
+            "Optional. The role this report is FOR — primary (the person you serve), approver, " +
+            "viewer, or operator. The platform resolves who fills it; the report then appears as a " +
+            "deliverable on their agent page and (with execution_id) in the chat that produced it. " +
+            "operator, or omitting both `to` and audience_email, publishes an operator-only report. " +
+            "A role nobody fills, or that several people fill, is refused with a named reason."
+          ),
         audience_email: z.string().optional()
           .describe(
-            "Optional. The Workspace user this report is FOR — it then appears as a deliverable " +
-            "on their agent page, and (with execution_id) as a card in the chat that produced it. " +
-            "Must be someone this agent is already shared with. Omit for an operator-only report."
+            "Deprecated — use `to`. The Workspace user this report is FOR; must be someone this " +
+            "agent is already shared with. Not together with `to`."
           ),
         // Only meaningful alongside an audience: it places the card in the
         // right conversation. The backend resolves the session itself; the id
@@ -175,6 +184,7 @@ export function createReportTools(client: TrinityClient, requireApiKey: boolean)
           period_start?: string;
           period_end?: string;
           audience_email?: string;
+          to?: "primary" | "approver" | "viewer" | "operator";
           execution_id?: string;
         },
         context?: { session?: McpAuthContext }
@@ -205,6 +215,7 @@ export function createReportTools(client: TrinityClient, requireApiKey: boolean)
             period_start: params.period_start,
             period_end: params.period_end,
             audience_email: params.audience_email,
+            to: params.to,
             execution_id: params.execution_id,
           });
           return JSON.stringify(
@@ -215,8 +226,11 @@ export function createReportTools(client: TrinityClient, requireApiKey: boolean)
               report_type: result.report_type,
               created_at: result.created_at,
               // Echoed so an agent can tell an addressed deliverable from an
-              // operator-only one without re-reading it.
+              // operator-only one without re-reading it. A role is echoed as
+              // the role — the person it resolved to is never returned to an
+              // agent (ent#606: an agent names a role, never a person).
               addressed_to: params.audience_email ?? null,
+              addressed_to_role: params.to ?? null,
             },
             null,
             2

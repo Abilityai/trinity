@@ -874,6 +874,7 @@ class TestAccessGate:
              patch("adapters.whatsapp_adapter._clear_pending_login") as mock_clear:
             mock_db.get_whatsapp_binding.return_value = {"id": 1, "agent_name": "my-agent"}
             mock_db.verify_login_code.return_value = {"email": "user@example.com"}
+            mock_db.is_email_account_suspended.return_value = False  # ent#720: an active account
             mock_db.get_access_policy.return_value = {"require_email": True, "open_access": False}
             mock_db.email_has_agent_access.return_value = True
 
@@ -888,6 +889,22 @@ class TestAccessGate:
             mock_db.upsert_access_request.assert_not_called()
 
     @pytest.mark.unit
+    def test_verified_but_suspended_is_refused_and_not_recorded(self):
+        """ent#720: a suspended account is refused at redemption — the verified
+        email is NOT recorded, so neither open_access nor the router sees it."""
+        from adapters.whatsapp_adapter import WhatsAppAdapter
+        with patch("adapters.whatsapp_adapter.db") as mock_db, \
+             patch("adapters.whatsapp_adapter._get_pending_login", return_value="user@example.com"), \
+             patch("adapters.whatsapp_adapter._clear_pending_login"):
+            mock_db.get_whatsapp_binding.return_value = {"id": 1, "agent_name": "my-agent"}
+            mock_db.verify_login_code.return_value = {"email": "user@example.com"}
+            mock_db.is_email_account_suspended.return_value = True
+            mock_db.get_access_policy.return_value = {"require_email": True, "open_access": True}
+            reply = _run(WhatsAppAdapter().handle_command(_msg_with_text("/login 123456")))
+            assert "suspended" in reply.lower()
+            mock_db.set_whatsapp_verified_email.assert_not_called()
+
+    @pytest.mark.unit
     def test_verified_open_access_gets_all_clear(self):
         from adapters.whatsapp_adapter import WhatsAppAdapter
         with patch("adapters.whatsapp_adapter.db") as mock_db, \
@@ -895,6 +912,7 @@ class TestAccessGate:
              patch("adapters.whatsapp_adapter._clear_pending_login"):
             mock_db.get_whatsapp_binding.return_value = {"id": 1, "agent_name": "my-agent"}
             mock_db.verify_login_code.return_value = {"email": "user@example.com"}
+            mock_db.is_email_account_suspended.return_value = False  # ent#720: an active account
             mock_db.get_access_policy.return_value = {"require_email": False, "open_access": True}
             mock_db.email_has_agent_access.return_value = False
 
@@ -910,6 +928,7 @@ class TestAccessGate:
              patch("adapters.whatsapp_adapter._clear_pending_login"):
             mock_db.get_whatsapp_binding.return_value = {"id": 1, "agent_name": "my-agent"}
             mock_db.verify_login_code.return_value = {"email": "user@example.com"}
+            mock_db.is_email_account_suspended.return_value = False  # ent#720: an active account
             mock_db.get_access_policy.return_value = {"require_email": True, "open_access": False}
             mock_db.email_has_agent_access.return_value = False
 

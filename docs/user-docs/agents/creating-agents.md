@@ -30,7 +30,7 @@ A default install therefore shows starter templates plus whatever the registry o
 | `.mcp.json.template` | MCP config template with `${VAR}` placeholders for credential injection |
 | `.env.example` | Example credentials file listing required environment variables |
 
-All bundled templates ship the canonical `.gitignore`, so an agent created from one never auto-commits caches, virtualenvs, or local databases into its repository. An agent created from any GitHub repository with auto-sync on gets the same rules merged into its `.gitignore` right after creation, before the first sync cycle can commit runtime state or credential files.
+All bundled templates ship the canonical `.gitignore`, so an agent created from one never auto-commits caches, virtualenvs, or local databases into its repository. An agent created from any GitHub repository with auto-sync on gets the same rules merged into its `.gitignore` right after creation, before the first sync cycle can commit runtime state or credential files. `.claude/settings.json` is not on that list, so a template's project settings are committed; Trinity keeps a copy out of a commit only when its content would break other clones or carries a credential — see [GitHub Sync](../integrations/github-sync.md#what-happens-to-claudesettingsjson).
 
 **Runtime options** control which CLI the agent uses. An agent's runtime — Claude Code, OpenAI Codex, or Gemini CLI — is chosen via `runtime.type` in `template.yaml` (see [Agent Runtimes](agent-runtimes.md)):
 
@@ -67,6 +67,8 @@ When you create an agent, Trinity performs these steps in order:
 Once an agent is running, Trinity validates its workspace against best-practice conventions and surfaces the results in the **Overview** tab on the Agent Detail page. This is advisory — it never blocks creation or deployment.
 
 The check covers things like a present and valid `template.yaml`, a non-gitignored `.claude/` directory, defined playbooks, and accidentally committed secrets, grouped into findings ranked HARD / SOFT / INFO. Claude-specific checks (such as `CLAUDE.md` and `.claude/` skills) are skipped for Codex and Gemini agents.
+
+The panel headline counts only must-fix (HARD) findings: *N must-fix compatibility issues*, *No must-fix issues* followed by the number of recommendations, or *Compatible — all checks passing*. AI checks skipped for the same reason (for example, no Anthropic key) collapse into one line. A template with no `resources` block passes: the agent inherits the admin's fleet-wide default. A declared `resources` block is checked with the same rules agent creation uses, so the report accepts exactly the values creation accepts. Agents created from the bundled starters report no must-fix findings.
 
 The 9 gitignore-related findings offer a one-click **Fix** button: Trinity rewrites the agent's `.gitignore` in place. The change is uncommitted until the agent's next git sync. Re-run the analysis at any time with **Re-run analysis**.
 
@@ -133,9 +135,11 @@ When you create an agent from a repository you already have — rather than a cu
 
 | Intent | What happens | Git sync |
 |--------|--------------|----------|
-| **Clone** | The default. Trinity clones the repository and keeps it wired to that remote. | Yes — the agent pushes back to the source repo |
+| **Clone** | The default. Trinity clones the repository and keeps it wired to that remote. | Yes — on its own working branch when the repository is yours; otherwise pull-only (see below) |
 | **Fork** | Trinity forks the repository into your own GitHub account first (requires the template to declare `fork_to_own`). | Yes — to your fork, with `upstream` pointing at the original |
 | **Copy** | Trinity takes a one-time snapshot of the files, strips the `.git` history, and gives the agent a standalone workspace. | **No** — no remote, no token, no sync |
+
+**Clone: agent or deployment.** A cloned repository is treated as an **agent** by default: it gets a working branch it alone writes, auto-sync, and paused schedules while sync fails — but only when your GitHub account owns the repository, the token is your own (not the platform-wide one), and it can push. Otherwise the agent is created pull-only, and the create response's `git_mode.reason` says why. Pass `kind: "deployment"` to run a codebase pull-only on purpose. Details: [GitHub Sync → Creating an agent with sync](../integrations/github-sync.md#creating-an-agent-with-sync).
 
 **Copy** is the right choice when you want to start *from* someone's repository without staying attached to it. The agent gets the files and nothing else: no GitHub credentials are stored, no remote is configured, and the agent never appears on git-sync surfaces. If you later decide you do want a repository, use **Initialize GitHub Sync** on the agent's Git tab.
 
@@ -171,7 +175,7 @@ Idempotency-Key: <optional-unique-key>
 }
 ```
 
-`import_intent` accepts `fork`, `copy`, or `clone`, and applies only to `github:` templates. Omit it for the legacy behaviour. Supplying an `Idempotency-Key` makes a retried create safe: the same key within 24 hours replays the original response instead of creating a second agent, and a duplicate still in flight returns 409.
+`import_intent` accepts `fork`, `copy`, or `clone`, and applies only to `github:` templates. `kind` accepts `agent` (the default) or `deployment` and decides whether a `github:` agent gets a working branch; the response's `git_mode` carries the decision and its `reason`. Omit it for the legacy behaviour. Supplying an `Idempotency-Key` makes a retried create safe: the same key within 24 hours replays the original response instead of creating a second agent, and a duplicate still in flight returns 409.
 
 A copy-intent response carries an `import_snapshot` block recording the source repo, branch, commit SHA, and file count.
 
@@ -181,7 +185,7 @@ A copy-intent response carries an `import_snapshot` block recording the source r
 create_agent(name="my-agent", template="github:Org/repo@branch", import_intent="copy")
 ```
 
-The MCP tool accepts `copy` and `clone`. Fork stays UI/REST-only because it needs fork parameters.
+The MCP tool accepts `copy` and `clone`, and the same optional `kind` (`agent` or `deployment`). Fork stays UI/REST-only because it needs fork parameters.
 
 ### Fork-to-Own Templates
 

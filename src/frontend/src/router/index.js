@@ -300,6 +300,20 @@ export const routes = [
       hideHelpWidget: true,
     }
   },
+  {
+    // ent#661: Projects — the person's list across agents, and one project.
+    // Literal `projects` segment, safe beside `/c/`, `/r/`, `/a/` (ent#360).
+    path: '/workspace/projects',
+    name: 'WorkspaceProjects',
+    component: () => import('../views/Portal.vue'),
+    meta: { title: 'Workspace · Projects', hideHelpWidget: true }
+  },
+  {
+    path: '/workspace/projects/:projectId',
+    name: 'WorkspaceProject',
+    component: () => import('../views/Portal.vue'),
+    meta: { title: 'Workspace · Projects', hideHelpWidget: true }
+  },
   // ent#357 legacy paths. Function form so query AND hash survive the hop —
   // these URLs were handed to real clients by email, and a client landing on a
   // dead link has no way to report it. `/portal/c/:sessionId` keeps the thread.

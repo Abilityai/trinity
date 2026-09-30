@@ -616,6 +616,21 @@
 - **Files**: `src/backend/services/ask_service.py` (`raise_ask`), `src/backend/db/operator_queue.py` (`create_native_item`, `create_item_with_outcome`, the file-contract filter), `src/backend/routers/operator_queue.py` (`raise_my_ask`), `src/backend/models.py` (`OperatorAskCreate`), `src/backend/services/assignment_provider.py` (`people_for`), `src/backend/services/operator_queue_service.py` (the poller's side), `src/backend/services/platform_prompt_service.py`, `src/mcp-server/src/tools/operator_queue.ts` (`ask_operator`), `src/frontend/src/utils/operatorQueue.js` (`queueReaskBadges`, `proposalRows`) + `QueueCard.vue` / `ResolvedCard.vue` / `QueueProposal.vue` / `MobileAdmin.vue` / `PortalAsks.vue`, `src/backend/client_portal/asks/` (`WorkspaceAsk.proposal`)
 - **Tests**: `tests/unit/test_ent611_native_ask.py`, `tests/unit/test_ent611_native_ask_pg.py`, `tests/unit/test_1402_prompt_contract.py`, `tests/unit/test_1677_operator_alert_emitters.py` (G3), `src/mcp-server/src/operator_queue.test.ts`, `src/mcp-server/src/access-wiring.test.ts`, `src/frontend/tests/unit/operatorQueueReask.spec.js`, `operatorQueueProposal.spec.js`, `portalAskProposal.spec.js`, `mobileAdminProposal.spec.js`
 
+
+### 26.11 Address by Role — asks, reports, messages (OPS-001-ADDRESS)
+- **Status**: ✅ Implemented (trinity-enterprise#606)
+- **Requirement ID**: OPS-001-ADDRESS
+- **Priority**: P1
+- **Description**: Every outbound object an agent produces for a human — an ask, a report, a message — names **a role, never a person**: `to: primary | approver | viewer | operator`. The platform resolves the person through ONE rule, `services/role_addressing.resolve`, so an ask and a report to the same role reach the same people.
+  - **Resolution:** a registered assignment provider's `people_for` answers first (an empty answer means nobody fills the role); otherwise the core defaults — `primary` → the agent's owner, `operator` → the operators (no person recorded), `approver` / `viewer` refused. No primary assigned → a `primary` ask goes to the operators.
+  - **Refused by name, never dropped or defaulted:** `invalid_to`, `role_unassigned`; for reports and messages (one reader each) also `role_resolves_to_several` (with `count`), and for reports `role_unreachable` (the person is not on the agent's roster) — all **422**.
+  - **Reports:** `ReportCreate.to`. `operator`, nobody, or the owner → operator-only (the owner reads the operator surface); otherwise the checked audience. `to` with `audience_email` → **422 `addressing_conflict`**. Neither → operator-only, unchanged.
+  - **Messages:** `SendMessageRequest` takes exactly one of `to` (`primary | approver | viewer`) or `recipient_email`; `operator` is not a message recipient (the operators' door is an `ask_operator` alert).
+  - **The agent never sees the person:** the MCP `report` / `send_message` tools echo the role, never the resolved email.
+  - **Compatibility (two releases):** an agent-supplied `audience_email` / `recipient_email` is still honoured and logged as deprecated once per agent and surface.
+- **Files**: `src/backend/services/role_addressing.py`, `src/backend/services/ask_service.py` (`_address`), `src/backend/routers/reports.py` (`_report_audience`), `src/backend/routers/messages.py` (`_recipient`), `src/backend/models.py`, `src/mcp-server/src/tools/{reports,messages}.ts`
+- **Tests**: `tests/unit/test_ent606_role_addressing.py`
+
 ---
 
 ## 28. Agent Guardrails (GUARD-001)
@@ -625,7 +640,7 @@
 - **Requirement ID**: GUARD-001
 - **Priority**: HIGH
 - **Description**: Deterministic safety guardrails for autonomous agent execution. Prevents costly mistakes (destructive commands, credential leaks, runaway loops, unauthorized network access) through layered enforcement baked into the base image and agent-server.py — not relying on model compliance alone.
-- **Design Principle**: Trinity controls the base image, the agent server, and the deployment pipeline. Guardrails are injected infrastructure-level, not advisory. Agents cannot opt out.
+- **Design Principle**: Trinity controls the base image, the agent server, and the deployment pipeline. Guardrails are injected infrastructure-level, not advisory. Agents cannot opt out without `sudo`. The agent user holds `NOPASSWD:ALL` by design, so a `sudo` write can remove the registration; the Bash deny-list refuses the obvious spellings and `/health` reports the registration state per request (28.2.1, #3105).
 
 ### 28.2 Claude Code Hooks Injection (GUARD-002)
 - **Status**: ✅ Implemented (#140)
@@ -667,7 +682,7 @@
   admin-controlled managed-settings path, which takes precedence over user and
   project settings and sits outside the synced tree, closing the self-edit and
   inbound-git vectors together. Root-owned `0444` inside a root-owned `0755`
-  directory: the file cannot be rewritten and the directory cannot be used to
+  directory: without `sudo` the file cannot be rewritten and the directory cannot be used to
   replace it or shadow it with a `managed-settings.d` drop-in. No platform-owned
   `settings.json` is shipped into `~/.claude` at all any more, so there is nothing
   there to edit away.
@@ -675,8 +690,17 @@
   missing or writable, Claude Code simply runs no hooks — silently. `startup.sh`
   asserts both properties on every boot and logs `GUARDRAILS: ERROR …` (Vector
   captures it); it reports and continues rather than refusing to boot, so a
-  registration problem cannot become a fleet outage. An operator-visible signal on
-  `/health` (the `clone_status` pattern, #1439) is the tracked follow-up.
+  registration problem cannot become a fleet outage. The agent `/health` stats the
+  file on every request and reports `guardrails_registration`
+  (`ok`/`missing`/`not_root_owned`/`writable`, enum only, the `clone_status`
+  pattern from #1439), so a change after boot is visible (#3105).
+- **`sudo` route (#3105)**: `developer` holds `NOPASSWD:ALL` by design, so root
+  ownership stops accidental rewrites only. `bash_deny` refuses any `sudo` command
+  naming `/etc/claude-code`, `/opt/trinity` or `/etc/sudoers`, `visudo`, and root
+  shells (`sudo -i`/`-s`/`--login`/`--shell`, `sudo su`, `sudo <shell>` with no
+  script, bare `su`). A regex is a speed bump: variables, encodings or a script
+  file get past it. A `sudo` rewrite that keeps root:root `0444` reads `ok` on
+  `/health`.
 - **Interaction checked**: read-only mode (#887) no longer registers a hook of its
   own — it writes `~/.trinity/read-only-config.json`, which the baked
   `read-only-guard.py` reads — so there is exactly one live registration and the
@@ -684,9 +708,9 @@
   `read_only._remove_legacy_settings_hook` still cleans up pre-#887 leftovers.
 - **Both paths stay in the three write-deny lists**
   (`_FILE_WRITE_DENY_PATTERNS` / `guardrails-baseline.json::path_deny` /
-  `EDIT_PROTECTED_PATHS`) as defence in depth, not as the primary control. Note
-  `bash-guardrail.py` does **not** consult `path_deny`, so before this change the
-  Bash route to the registration was open even though the Edit route was denied.
+  `EDIT_PROTECTED_PATHS`) as defence in depth, not as the primary control. `bash-guardrail.py` does
+  **not** consult `path_deny`; the Bash route is covered by the `bash_deny` `sudo`
+  patterns (#3105).
 - **Legacy in-tree copy**: `~/.claude/settings.json` sits on the **durable home
   volume**, so rebuilding the image does not remove it from an existing agent —
   leaving a second registration (precedence-dependent) and a live #2036 leak

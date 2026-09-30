@@ -246,7 +246,8 @@ describe('A2 round 1 — the card while it is answered', () => {
   it("a stacked option reads label first: the label at the 14px label size, the consequence in secondary ink", () => {
     const w = mountAsks([ask('ap1', { brief: { impact: { Yes: 'Pays $4,120 today' } } })])
     const opt = tid(w, 'portal-ask-option-ap1')
-    const [label, hint] = opt.findAll('span')
+    const label = opt.find('span.block')                  // the label (its text rendered by AskMarkdown)
+    const hint = opt.find('[id^="portal-ask-impact-"]')   // the consequence
     expect(label.classes()).toEqual(expect.arrayContaining(['text-sm']))
     expect(hint.classes()).toEqual(expect.arrayContaining(['text-[12.5px]', 'text-gray-600', 'dark:text-gray-300']))
   })

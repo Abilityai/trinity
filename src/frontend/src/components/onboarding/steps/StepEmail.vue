@@ -26,21 +26,45 @@
         placeholder="you@company.com"
         autocomplete="email"
         :error="fieldError"
-        :disabled="saving"
-        help="No verification email is sent."
+        :disabled="saving || codeSent"
+        :help="codeSent ? '' : 'We\'ll email a 6-digit code to confirm the address is yours.'"
         data-testid="first-run-email-input"
       />
-      <BaseButton
-        type="submit"
-        variant="secondary"
-        size="sm"
-        :loading="saving"
-        loading-label="Saving…"
-        :disabled="!email.trim()"
-        data-testid="first-run-email-save"
-      >
-        Save email
-      </BaseButton>
+      <!-- ent#720: binding a sign-in email needs proof of the mailbox. -->
+      <BaseInput
+        v-if="codeSent"
+        v-model="code"
+        label="Confirmation code"
+        placeholder="6-digit code"
+        inputmode="numeric"
+        autocomplete="one-time-code"
+        :disabled="saving"
+        :help="`Sent to ${email.trim()}. It expires in 10 minutes.`"
+        data-testid="first-run-email-code"
+      />
+      <div class="flex items-center gap-2">
+        <BaseButton
+          type="submit"
+          variant="secondary"
+          size="sm"
+          :loading="saving"
+          :loading-label="codeSent ? 'Confirming…' : 'Saving…'"
+          :disabled="!email.trim() || (codeSent && code.trim().length !== 6)"
+          data-testid="first-run-email-save"
+        >
+          {{ codeSent ? 'Confirm email' : 'Save email' }}
+        </BaseButton>
+        <BaseButton
+          v-if="codeSent"
+          variant="ghost"
+          size="sm"
+          :disabled="saving"
+          data-testid="first-run-email-change"
+          @click="reset"
+        >
+          Use a different email
+        </BaseButton>
+      </div>
     </form>
     <InlineError v-if="saveError" class="mt-3" :message="saveError" @dismiss="saveError = ''" />
   </div>
@@ -52,6 +76,7 @@ import { useAuthStore } from '../../../stores/auth'
 import BaseButton from '../../base/BaseButton.vue'
 import BaseInput from '../../base/BaseInput.vue'
 import InlineError from '../../InlineError.vue'
+import { apiErrorMessage } from '../../../utils/apiError'
 import FirstRunStepHeader from '../FirstRunStepHeader.vue'
 
 const props = defineProps({ ctx: { type: Object, default: () => ({}) } })
@@ -69,9 +94,17 @@ const lead = computed(() =>
 )
 
 const email = ref('')
+const code = ref('')
+const codeSent = ref(false)
 const saving = ref(false)
 const fieldError = ref('')
 const saveError = ref('')
+
+function reset() {
+  codeSent.value = false
+  code.value = ''
+  saveError.value = ''
+}
 
 async function save() {
   const value = email.value.trim()
@@ -83,12 +116,16 @@ async function save() {
   saveError.value = ''
   saving.value = true
   try {
-    await auth.setOwnEmail(value)
+    const out = await auth.bindOwnEmail(value, codeSent.value ? code.value.trim() : null)
+    if (out.needsCode) {
+      codeSent.value = true
+      return
+    }
     email.value = ''
+    reset()
     emit('complete')
   } catch (e) {
-    const detail = e?.response?.data?.detail
-    saveError.value = typeof detail === 'string' ? detail : 'Could not save the email. Try again.'
+    saveError.value = apiErrorMessage(e, 'Could not save the email. Try again.')
   } finally {
     saving.value = false
   }

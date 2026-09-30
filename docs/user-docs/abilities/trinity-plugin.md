@@ -38,7 +38,7 @@ One command that concierges a newcomer through the whole path — it sequences t
 |-------|--------------|
 | **Orient** | What Trinity is, in plain terms, plus the current release |
 | **Choose your door** | Just looking · build my first agent · I already have agents · set up my instance |
-| **Get an instance** | Hands off to `/trinity:deploy-new-instance` (cloud, your server, or local Docker) — or takes the URL you already have |
+| **Get an instance** | Hands off to `/trinity:deploy-new-instance` (the DigitalOcean installer, your own server, or local Docker) — or takes the URL you already have |
 | **Connect + verify** | Hands off to `/trinity:connect`, then runs a live smoke test: fleet visible, instance healthy, docs assistant online |
 | **First agent alive** | Deploys via `/trinity:onboard` (or picks an existing agent) and exchanges a real message with it |
 
@@ -65,7 +65,9 @@ This:
 3. Provisions an MCP API key
 4. Writes `.mcp.json` pointing at `<instance-url>/mcp` — the production frontend serves that path, so it works on installs that expose only ports 80/443; it falls back to the MCP server's own port 8080 when the route is not served
 
-An account that requires a second factor stops after step 2: complete the sign-in in the web UI, create the key under **Settings → API Keys**, then re-run `/trinity:connect --force`. See [Authentication](../api-reference/authentication.md).
+An account that requires a second factor stops after step 2: complete the sign-in in the web UI, create the key under **Settings → MCP Keys**, then re-run `/trinity:connect --force`.
+
+No instance yet? `/trinity:connect` hands you to `/trinity:deploy-new-instance`. Trinity is self-hosted; there is no hosted instance to sign up for. See [Authentication](../api-reference/authentication.md).
 
 After connecting, Trinity MCP tools become available:
 
@@ -172,6 +174,8 @@ Examples:
 
 After firing, the skill starts a lightweight local watch by default — it polls the loop and reports run-by-run progress, stalls, and the final result. Say "fire and forget" to skip the watch; the remote loop runs either way and also appears on the agent's **Loops** tab in the Trinity web UI. Inside a deployed Trinity agent there is no watch — the wake-up tools it relies on are denied there — so poll with `/trinity:loop status` or a `set_reminder` instead.
 
+**A denial is a permission, not a typo.** The loop tools enforce the same agent-to-agent permissions as `chat_with_agent`. An agent-scoped key can loop itself and the agents it has been granted, nothing else; your own user key is unaffected. A refused status or stop call answers `Loop '<id>' not found or not accessible`, whether or not the loop exists. Do not retry under another name: ask the agent's owner to grant the permission.
+
 `local` runs the same Fixed or Until loop natively in your Claude Code session — no Trinity connection, no `loop_id`. Use it when the task lives on this machine or Trinity is unreachable; if the loop must outlive your session, it is remote.
 
 The loop mechanics — modes, template variables, stop signals, capacity, costs — are the platform's Sequential Agent Loops feature. See [Agent Loops](../automation/agent-loops.md) for the full guide.
@@ -193,6 +197,8 @@ The loop mechanics — modes, template variables, stop signals, capacity, costs 
 
 Analyzes the agent's purpose and data sources, proposes a set of metrics, and — after your approval — scaffolds an agent-specific `/update-dashboard` skill that keeps `dashboard.yaml` current. Declare that skill's cron in `template.yaml` `schedules:` to keep the agent's dashboard live.
 
+It also proposes which of those numbers to **declare** as business metrics, and writes or extends the `metrics:` block in `template.yaml` (name, type, label, a `cadence` that matches the schedule). The generated skill then records the same numbers as points with the `record_metrics` MCP tool after it writes the dashboard. That step is guarded: off Trinity it is skipped silently. A point for an undeclared metric comes back `metric_undeclared`. On an agent that is already deployed, an edit it makes to its own `template.yaml` is not seen by Trinity until you call `refresh_metric_definitions` or restart the agent, because auto-sync pushes and never pulls. Widgets can bind to a declared metric with `metric: <name>` and read the recorded series instead of a hand-typed value.
+
 The generated skill writes only widget types Trinity renders — `metric`, `status`, `progress`, `text`, `markdown`, `table`, `list`, `link`, `image`, `divider`, `spacer`; anything else is stripped by the agent. There is no chart type: trend lines and sparklines come from the platform, which records each `metric` and `progress` widget's value on every fetch, keyed by the widget's stable `id:` — so the skill gives those widgets an `id` (reordering unkeyed widgets orphans their history) and never emits YAML anchors, which Trinity's hardened loader rejects. See [Dynamic Dashboards](../advanced/dynamic-dashboards.md).
 
 ## Instance Provisioning: `/trinity:deploy-new-instance`
@@ -201,7 +207,7 @@ The generated skill writes only widget types Trinity renders — `metric`, `stat
 /trinity:deploy-new-instance
 ```
 
-Deploys a complete Trinity instance — on a cloud host, any server you can reach over SSH, or local Docker; fresh installs and existing instances both — and scaffolds a dedicated ops agent with 13 skills to manage it (health checks, updates, rollbacks, provisioning). It builds from source or pulls prebuilt images (`start.sh --hosted` with a pinned `TRINITY_IMAGE_TAG`), seeds the admin account from `.env` so there is no first-run setup screen, and needs only the frontend port opened in the firewall — the MCP server is reachable through it at `/mcp`. See [Deploying Trinity](../guides/deploying-trinity.md) and the [Trinity Ops Agent](../guides/deploying/ops-agent.md).
+Deploys a complete Trinity instance — through the DigitalOcean guided installer (which you run in your own terminal, so your password never passes through the session), on any server you can reach over SSH, or on local Docker; fresh installs and existing instances both — and scaffolds a dedicated ops agent with 13 skills to manage it (health checks, updates, rollbacks, provisioning). It builds from source or pulls prebuilt images (`start.sh --hosted` with a pinned `TRINITY_IMAGE_TAG`), seeds the admin account from `.env` so there is no first-run setup screen, and needs only the frontend port opened in the firewall — the MCP server is reachable through it at `/mcp`. See [Deploying Trinity](../guides/deploying-trinity.md) and the [Trinity Ops Agent](../guides/deploying/ops-agent.md).
 
 ## Alternative: Trinity CLI
 

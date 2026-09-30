@@ -174,6 +174,7 @@ class TestTheRoutesThisChangeGates:
         "routers/users.py::clear_my_github_pat",
         "routers/mcp_keys.py::create_mcp_api_key_endpoint",
         "routers/mcp_keys.py::ensure_default_mcp_api_key",
+        "routers/mcp_keys.py::list_mcp_api_keys_endpoint",
     ]
 
     @pytest.mark.parametrize("key", PERSON)

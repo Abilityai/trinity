@@ -45,6 +45,7 @@ from services.chat_title import (
 # #2157: the surface stamp written onto every portal execution — see
 # `config.PORTAL_SOURCE_CHANNEL` for why it exists and why it is not a channel.
 from config import PORTAL_SOURCE_CHANNEL
+from services import turn_context
 
 from . import db
 from .models import (
@@ -360,6 +361,28 @@ def _multi_agent_chat_available() -> bool:
     a second, weaker source of truth for a fact the build already fixes.
     """
     return True
+
+
+def _projects_available(is_platform: bool, email: str | None = None) -> bool:
+    """ent#661: may this principal use Workspace Projects?
+
+    Entitled, AND either a platform principal or an outside client invited to
+    one (asked through `services.portal_capabilities`, since the core does not
+    hold invitations). An uninvited outside client is never told the capability
+    exists. Fails closed — an unreadable registry hides the surface rather than
+    advertising routes that would 404.
+    """
+    try:
+        from services.entitlement_service import entitlement_service
+        if entitlement_service.is_entitled("projects") is not True:
+            return False
+    except Exception:  # noqa: BLE001 — a roster must never 500 over a capability bit
+        logger.warning("[ent#661] projects capability read failed", exc_info=True)
+        return False
+    if is_platform:
+        return True
+    from services import portal_capabilities
+    return portal_capabilities.has("projects", (email or "").strip().lower())
 
 
 def _default_voice_id() -> str | None:
@@ -1014,6 +1037,7 @@ async def get_roster(email: str | None, include_owned: bool = False) -> PortalRo
         client_email=(email or None),
         agents=cards,
         multi_agent_chat_available=multi_agent_chat,
+        projects_available=_projects_available(include_owned, email),
         realtime_voice=realtime_voice_capability(include_owned),
         # ent#403: instance-level, so it rides the roster rather than every card.
         # Empty for a non-platform principal — belt to the per-card braces: the
@@ -2995,17 +3019,25 @@ async def portal_chat(agent_name: str, message: str, email: str,
             "block id rather than rewriting the whole surface.\n\n"
         )
 
+    # ent#661 — lines other modules add to the turn (services/turn_context.py);
+    # "" in an OSS build. Resolved from THIS chat row and the principal, never
+    # from the request, and rides both arms for the same reason the canvas does.
+    turn_prefix = turn_context.collect(turn_context.TurnContext(
+        surface="thread", agent_name=agent_name, chat_id=session_id,
+        person_email=email, internal_audience=bool(include_owned)))
+
     # #2694 × ent#555 on a resumed turn: the voice delta comes first (it is
     # conversation the session never heard, so it reads as history), then the
-    # canvas on screen, then the file manifest, then what the client said.
-    # The cold message carries the replay in place of the delta.
+    # turn context, then the canvas on screen, then the file manifest, then
+    # what the client said. The cold message carries the replay in place of
+    # the delta.
     # ent#610 — the message this turn replies to, quoted, directly before what
     # the client said (after the canvas and files, which describe the screen).
     # On BOTH shapes: a resumed session remembers the thread but not which
     # message the person just pointed at, and the cold retry needs it as much.
     reply_prefix = reply_context or ""
-    cold_message = history_prefix + canvas_prefix + manifest_prefix + reply_prefix + message
-    message = (delta_prefix + canvas_prefix + manifest_prefix + reply_prefix + message) if resuming else cold_message
+    cold_message = history_prefix + turn_prefix + canvas_prefix + manifest_prefix + reply_prefix + message
+    message = (delta_prefix + turn_prefix + canvas_prefix + manifest_prefix + reply_prefix + message) if resuming else cold_message
 
     # ent#212: inject the client's durable per-user memory (MEM-001) + the #1205
     # public-channel custom instructions into the turn, so a delegated end user

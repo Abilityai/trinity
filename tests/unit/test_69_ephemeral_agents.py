@@ -498,7 +498,7 @@ async def test_acquire_gate_fails_open_on_db_error(gated_capacity, monkeypatch):
 
 
 def _req(method: str, path: str):
-    return SimpleNamespace(method=method, url=SimpleNamespace(path=path))
+    return SimpleNamespace(method=method, scope={"path": path})
 
 
 @pytest.fixture

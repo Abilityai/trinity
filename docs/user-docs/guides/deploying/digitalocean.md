@@ -7,7 +7,7 @@ Install Trinity on a DigitalOcean Droplet from your own terminal in about ten mi
 - You want Trinity on a server of its own, and you have a DigitalOcean account or can create one.
 - You want to choose the admin password yourself, before the server exists. Nobody else can claim the instance, because the admin account exists from first boot.
 
-The installer does not use the Marketplace image. It creates a stock Ubuntu Droplet and installs Trinity on first boot, so it works whether or not the Marketplace 1-Click is available to you. For the 1-Click itself, or for any other Linux server, see [Deploying Trinity](../deploying-trinity.md).
+The installer does not use the Marketplace image. It creates a stock Ubuntu Droplet and installs Trinity on first boot. Prefer no terminal at all? Trinity is also on the [DigitalOcean Marketplace](https://marketplace.digitalocean.com/apps/trinity) as a 1-Click image: you create the Droplet in the control panel and claim the admin account in your browser. See [Single Server → DigitalOcean 1-Click](single-server.md#digitalocean-marketplace-1-click). For any other Linux server, see [Deploying Trinity](../deploying-trinity.md).
 
 ## Pre-flight
 

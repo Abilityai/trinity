@@ -62,6 +62,8 @@ If the backend started with a **blank** `ADMIN_PASSWORD`, every page redirects t
 
 On the form, enter your **admin email** (required — it becomes your sign-in identity), a password (12+ characters with uppercase, lowercase, number, and special character; a live checklist guides you), confirm it, and optionally your company name and an opt-in to security and product update emails. Submitting signs you straight in and opens the Dashboard. The form disables itself permanently after the account is created, and the backend refuses it outright whenever a usable admin already exists — so an install that booted with `ADMIN_PASSWORD` set is never in this window.
 
+**Instance-ID claim.** An install whose `.env` sets `ADMIN_PASSWORD_SOURCE=instance-id` (the mode for an AWS EC2 image) adds one field to the form: the server's **EC2 instance ID**, found in the AWS console under **EC2 → Instances**. Provisioning stores that ID in a `setup-claim` file in the data directory, and the form works only when you enter the same ID. Any mismatch gets one answer, *That instance ID does not match this server.*, and repeated wrong guesses are rate-limited like failed logins. Email is optional on this path; without one, the admin signs in as `admin` with the password. The stored ID is deleted once the account exists. If the file is missing, every attempt is refused. Trinity's own install scripts do not write it — only an image that sets this mode does.
+
 On a claimed droplet, `.env` keeps `ADMIN_PASSWORD` blank on purpose — the password lives only in the database, and reboots and `start.sh --hosted` updates leave it alone. Forgot it? Set `ADMIN_PASSWORD` in `.env` and recreate the backend container (`./scripts/deploy/start.sh --hosted`, or `docker compose up -d backend`); `docker compose restart` does not re-read `.env`. The backend adopts the value on that boot.
 
 > **Security note:** on an install with no admin, the form is reachable without authentication until you use it — **anyone who can reach the URL can claim the instance**. Keep such an instance behind a tunnel, VPN, or firewall until the admin account exists. On a 1-Click droplet, open its URL right after creating it (first boot takes about ninety seconds) or restrict port 443 to your own IP until you have claimed it; if a droplet you have never opened shows the login page instead of the form, someone else got there first — destroy it and create another. Setting `ADMIN_PASSWORD` before first boot closes the window entirely.
@@ -176,7 +178,7 @@ curl -H "Authorization: Bearer YOUR_ACCESS_TOKEN" \
 The following endpoints do not require authentication:
 
 - `GET /api/auth/mode` -- Returns the current authentication mode and whether setup is complete.
-- `GET /api/setup/status` -- Returns whether initial setup is complete.
+- `GET /api/setup/status` -- Returns whether initial setup is complete, and `claim_required: "instance-id"` when the first-run form must also be given the EC2 instance ID (otherwise `null`).
 - `POST /api/setup/admin-password` -- The first-run form's endpoint; refuses (403) once a usable admin exists, and on a hosted compose whose blank password was not marked for browser claim.
 - `POST /api/token` -- The login endpoint itself.
 
