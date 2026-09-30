@@ -52,10 +52,19 @@ function explain(status: number | undefined, code: string | undefined, detailIsS
   if (status === 403 && code === "agent_key_required") {
     return "These tools act as an agent; call them from an agent context (an agent-scoped key).";
   }
+  if (status === 403 && code === "external_audience") {
+    return "Project tools are for internal conversations; someone outside the company is in this one. Don't share project details here.";
+  }
+  if (status === 403 && code === "turn_unknown") {
+    return "Project tools answer only inside a turn the platform can identify.";
+  }
   if (status === 403 && detailIsString) return "Projects are not licensed for this instance.";
   if (status === 404) return "Projects are not available on this platform.";
   return "Projects could not be reached.";
 }
+
+/** The platform-supplied turn id of this request (#2392) — never a tool parameter. */
+const turnOf = (context?: { session?: McpAuthContext }): string | undefined => context?.session?.executionId;
 
 export function createProjectTools(client: TrinityClient, requireApiKey: boolean) {
   const getClient = (authContext?: McpAuthContext): TrinityClient => {
@@ -103,7 +112,7 @@ export function createProjectTools(client: TrinityClient, requireApiKey: boolean
       parameters: z.object({}),
       execute: async (_params: unknown, context?: { session?: McpAuthContext }) => {
         try {
-          const projects = await getClient(context?.session).listMyProjects();
+          const projects = await getClient(context?.session).listMyProjects(turnOf(context));
           return JSON.stringify({ enabled: true, count: projects.length, projects }, null, 2);
         } catch (e) {
           const { status, code, message, detailIsString } = parseError(e);
@@ -129,7 +138,7 @@ export function createProjectTools(client: TrinityClient, requireApiKey: boolean
       }),
       execute: async (params: { project_id: string }, context?: { session?: McpAuthContext }) => {
         try {
-          const project = await getClient(context?.session).getMyProject(params.project_id);
+          const project = await getClient(context?.session).getMyProject(params.project_id, turnOf(context));
           return JSON.stringify({ success: true, ...(project as object) }, null, 2);
         } catch (e) {
           const { status, code, message, detailIsString } = parseError(e);
@@ -164,7 +173,7 @@ export function createProjectTools(client: TrinityClient, requireApiKey: boolean
       }),
       execute: async (p: { project_id: string; status?: string }, context?: { session?: McpAuthContext }) => {
         try {
-          const tasks = await getClient(context?.session).listProjectTasks(p.project_id, p.status || "open");
+          const tasks = await getClient(context?.session).listProjectTasks(p.project_id, p.status || "open", turnOf(context));
           return ok({ count: tasks.length, tasks });
         } catch (e) {
           return fail(e);
@@ -193,7 +202,7 @@ export function createProjectTools(client: TrinityClient, requireApiKey: boolean
         const { project_id, assignee, ...rest } = p;
         const body = assignee ? { ...rest, agent: assignee } : rest;
         try {
-          return ok(await getClient(context?.session).createProjectTask(project_id, body));
+          return ok(await getClient(context?.session).createProjectTask(project_id, body, turnOf(context)));
         } catch (e) {
           return fail(e);
         }
@@ -225,7 +234,7 @@ export function createProjectTools(client: TrinityClient, requireApiKey: boolean
         const { project_id, task_id, assignee, ...rest } = p;
         const body = assignee ? { ...rest, agent: assignee } : rest;
         try {
-          return ok(await getClient(context?.session).updateProjectTask(project_id, task_id, body));
+          return ok(await getClient(context?.session).updateProjectTask(project_id, task_id, body, turnOf(context)));
         } catch (e) {
           return fail(e);
         }
@@ -239,7 +248,7 @@ export function createProjectTools(client: TrinityClient, requireApiKey: boolean
       parameters: z.object({ project_id: projectId, task_id: taskId, body: z.string().min(1).max(4000) }),
       execute: async (p: { project_id: string; task_id: string; body: string }, context?: { session?: McpAuthContext }) => {
         try {
-          return ok(await getClient(context?.session).addProjectTaskNote(p.project_id, p.task_id, p.body));
+          return ok(await getClient(context?.session).addProjectTaskNote(p.project_id, p.task_id, p.body, turnOf(context)));
         } catch (e) {
           return fail(e);
         }
@@ -256,7 +265,7 @@ export function createProjectTools(client: TrinityClient, requireApiKey: boolean
       parameters: z.object({ project_id: projectId, limit: z.number().int().min(1).max(200).optional() }),
       execute: async (p: { project_id: string; limit?: number }, context?: { session?: McpAuthContext }) => {
         try {
-          const entries = await getClient(context?.session).getProjectLog(p.project_id, p.limit ?? 50);
+          const entries = await getClient(context?.session).getProjectLog(p.project_id, p.limit ?? 50, turnOf(context));
           return ok({ count: entries.length, entries });
         } catch (e) {
           return fail(e);
@@ -280,7 +289,7 @@ export function createProjectTools(client: TrinityClient, requireApiKey: boolean
       execute: async (p: { project_id: string; kind: string; body: string; task_id?: string }, context?: { session?: McpAuthContext }) => {
         const { project_id, ...body } = p;
         try {
-          return ok(await getClient(context?.session).addProjectLogEntry(project_id, body));
+          return ok(await getClient(context?.session).addProjectLogEntry(project_id, body, turnOf(context)));
         } catch (e) {
           return fail(e);
         }
@@ -301,7 +310,7 @@ export function createProjectTools(client: TrinityClient, requireApiKey: boolean
       }),
       execute: async (p: { project_id: string; kind: string; target_id: string }, context?: { session?: McpAuthContext }) => {
         try {
-          return ok(await getClient(context?.session).linkToProject(p.project_id, { kind: p.kind, target_id: p.target_id }));
+          return ok(await getClient(context?.session).linkToProject(p.project_id, { kind: p.kind, target_id: p.target_id }, turnOf(context)));
         } catch (e) {
           return fail(e);
         }

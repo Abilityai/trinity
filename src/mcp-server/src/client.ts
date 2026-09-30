@@ -3638,57 +3638,61 @@ export class TrinityClient {
   }
 
   // --- Workspace Projects (trinity-enterprise#661) ---------------------------
-  // Agent-key read routes: only projects the calling agent is ACTIVE on.
+  // Agent-key routes: only projects the calling agent is ACTIVE on, and only in
+  // a turn whose audience is internal. `turn` is the platform-supplied
+  // X-Trinity-Execution-Id of THIS request (#2392) — the backend decides the
+  // audience from that row, so it is forwarded, never chosen by the tool.
 
-  /** List the projects the calling key's agent works on. */
-  async listMyProjects(): Promise<Array<Record<string, unknown>>> {
-    const res = await this.request<{ projects: Array<Record<string, unknown>> }>(
-      "GET",
-      "/api/enterprise/projects/agent/projects",
-    );
-    return res.projects;
+  private projectRequest<T>(method: string, path: string, turn?: string, body?: unknown): Promise<T> {
+    return this.request<T>(method, path, body, false, undefined, turn ? { "X-Trinity-Execution-Id": turn } : undefined);
   }
 
-  /** Read one project the calling key's agent works on (uniform 404 otherwise). */
-  async getMyProject(projectId: string): Promise<Record<string, unknown>> {
-    return this.request("GET", `/api/enterprise/projects/agent/projects/${encodeURIComponent(projectId)}`);
-  }
-
-  // v2: the project's tasks, log and items — writes by an ACTIVE agent only.
   private projectPath(projectId: string, tail = ""): string {
     return `/api/enterprise/projects/agent/projects/${encodeURIComponent(projectId)}${tail}`;
   }
 
-  async listProjectTasks(projectId: string, status = "open"): Promise<Array<Record<string, unknown>>> {
-    const res = await this.request<{ tasks: Array<Record<string, unknown>> }>(
-      "GET", this.projectPath(projectId, `/tasks?status=${encodeURIComponent(status)}`));
+  /** List the projects the calling key's agent works on. */
+  async listMyProjects(turn?: string): Promise<Array<Record<string, unknown>>> {
+    const res = await this.projectRequest<{ projects: Array<Record<string, unknown>> }>(
+      "GET", "/api/enterprise/projects/agent/projects", turn);
+    return res.projects;
+  }
+
+  /** Read one project the calling key's agent works on (uniform 404 otherwise). */
+  async getMyProject(projectId: string, turn?: string): Promise<Record<string, unknown>> {
+    return this.projectRequest("GET", this.projectPath(projectId), turn);
+  }
+
+  async listProjectTasks(projectId: string, status = "open", turn?: string): Promise<Array<Record<string, unknown>>> {
+    const res = await this.projectRequest<{ tasks: Array<Record<string, unknown>> }>(
+      "GET", this.projectPath(projectId, `/tasks?status=${encodeURIComponent(status)}`), turn);
     return res.tasks;
   }
 
-  async createProjectTask(projectId: string, body: Record<string, unknown>): Promise<Record<string, unknown>> {
-    return this.request("POST", this.projectPath(projectId, "/tasks"), body);
+  async createProjectTask(projectId: string, body: Record<string, unknown>, turn?: string): Promise<Record<string, unknown>> {
+    return this.projectRequest("POST", this.projectPath(projectId, "/tasks"), turn, body);
   }
 
-  async updateProjectTask(projectId: string, taskId: string, body: Record<string, unknown>): Promise<Record<string, unknown>> {
-    return this.request("PATCH", this.projectPath(projectId, `/tasks/${encodeURIComponent(taskId)}`), body);
+  async updateProjectTask(projectId: string, taskId: string, body: Record<string, unknown>, turn?: string): Promise<Record<string, unknown>> {
+    return this.projectRequest("PATCH", this.projectPath(projectId, `/tasks/${encodeURIComponent(taskId)}`), turn, body);
   }
 
-  async addProjectTaskNote(projectId: string, taskId: string, body: string): Promise<Record<string, unknown>> {
-    return this.request("POST", this.projectPath(projectId, `/tasks/${encodeURIComponent(taskId)}/log`), { body });
+  async addProjectTaskNote(projectId: string, taskId: string, body: string, turn?: string): Promise<Record<string, unknown>> {
+    return this.projectRequest("POST", this.projectPath(projectId, `/tasks/${encodeURIComponent(taskId)}/log`), turn, { body });
   }
 
-  async getProjectLog(projectId: string, limit = 50): Promise<Array<Record<string, unknown>>> {
-    const res = await this.request<{ entries: Array<Record<string, unknown>> }>(
-      "GET", this.projectPath(projectId, `/log?limit=${limit}`));
+  async getProjectLog(projectId: string, limit = 50, turn?: string): Promise<Array<Record<string, unknown>>> {
+    const res = await this.projectRequest<{ entries: Array<Record<string, unknown>> }>(
+      "GET", this.projectPath(projectId, `/log?limit=${limit}`), turn);
     return res.entries;
   }
 
-  async addProjectLogEntry(projectId: string, body: Record<string, unknown>): Promise<Record<string, unknown>> {
-    return this.request("POST", this.projectPath(projectId, "/log"), body);
+  async addProjectLogEntry(projectId: string, body: Record<string, unknown>, turn?: string): Promise<Record<string, unknown>> {
+    return this.projectRequest("POST", this.projectPath(projectId, "/log"), turn, body);
   }
 
-  async linkToProject(projectId: string, body: Record<string, unknown>): Promise<Record<string, unknown>> {
-    return this.request("POST", this.projectPath(projectId, "/items"), body);
+  async linkToProject(projectId: string, body: Record<string, unknown>, turn?: string): Promise<Record<string, unknown>> {
+    return this.projectRequest("POST", this.projectPath(projectId, "/items"), turn, body);
   }
 
   // --- Role assignments (trinity-enterprise#500) ----------------------------

@@ -18,7 +18,7 @@ import { describe, it } from "node:test";
 import { strict as assert } from "node:assert";
 
 import { createProjectTools } from "./projects.js";
-import { ApiError } from "../client.js";
+import { ApiError, TrinityClient as RealClient } from "../client.js";
 import type { TrinityClient } from "../client.js";
 
 function apiError(status: number, detail: unknown): ApiError {
@@ -163,5 +163,53 @@ describe("ent#661 v2 — the assignee maps to the task's agent field", () => {
     } as Partial<TrinityClient>);
     await tools.create_project_task.execute({ project_id: "prj_1", title: "x", assignee: "scout" }, {});
     assert.deepEqual(calls[0], ["prj_1", { title: "x", agent: "scout" }]);
+  });
+});
+
+describe("ent#661 — the turn id rides every project call; the audience gate's refusal is honest", () => {
+  const session = { session: { executionId: "exec-42" } } as never;
+
+  it("each tool forwards the platform-supplied turn id, never a parameter", async () => {
+    const turns: unknown[] = [];
+    const rec = (i: number) => async (...args: unknown[]) => {
+      turns.push(args[i]);
+      return i === 0 ? [] : { ok: true };
+    };
+    const tools = makeTools({
+      listMyProjects: rec(0) as never,
+      getMyProject: rec(1) as never,
+      listProjectTasks: rec(2) as never,
+      getProjectLog: rec(2) as never,
+      addProjectLogEntry: rec(2) as never,
+    });
+    await tools.list_projects.execute({}, session);
+    await tools.get_project.execute({ project_id: PROJECT.id }, session);
+    await tools.list_project_tasks.execute({ project_id: PROJECT.id }, session);
+    await tools.get_project_log.execute({ project_id: PROJECT.id }, session);
+    await tools.add_project_log_entry.execute({ project_id: PROJECT.id, kind: "note", body: "x" }, session);
+    assert.deepEqual(turns, ["exec-42", "exec-42", "exec-42", "exec-42", "exec-42"]);
+  });
+
+  it("the client sends it as X-Trinity-Execution-Id, and nothing without one", async () => {
+    const client = new RealClient("http://localhost:8000");
+    const seen: unknown[] = [];
+    (client as unknown as { request: unknown }).request = async (...args: unknown[]) => {
+      seen.push(args[5]);
+      return { projects: [] };
+    };
+    await client.listMyProjects("exec-42");
+    await client.listMyProjects();
+    assert.deepEqual(seen, [{ "X-Trinity-Execution-Id": "exec-42" }, undefined]);
+  });
+
+  it("an outside audience is refused in words the agent can act on", async () => {
+    const tools = makeTools({
+      listMyProjects: async () => {
+        throw apiError(403, { code: "external_audience", message: "m" });
+      },
+    });
+    const out = JSON.parse(await tools.list_projects.execute({}, session));
+    assert.equal(out.enabled, false);
+    assert.match(out.message, /internal conversations/);
   });
 });
