@@ -55,9 +55,6 @@
 
     <p v-if="header?.description" class="text-sm text-gray-600 dark:text-gray-300">{{ header.description }}</p>
 
-    <!-- ent#527: the role card — rendered only when the agent carries a role. -->
-    <PortalAgentRole :agent-name="agentName" />
-
     <!-- ent#465: suggestions for you and this agent — platform sessions only
          (the server 404s a portal token; not mounting it means no request). -->
     <PortalSuggestions
@@ -67,6 +64,9 @@
       @open-section="openSection"
       @open-chat="$emit('focus-composer')"
     />
+
+    <!-- ent#527: the role card — rendered only when the agent carries a role. -->
+    <PortalAgentRole :agent-name="agentName" />
 
     <!-- ---------------------------- CHATS ------------------------------ -->
     <!-- The FULL list, which is what this panel is for: the tab strip shows
