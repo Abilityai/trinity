@@ -2385,6 +2385,49 @@ def ensure_thread_for_ask(agent_name: str, email: str) -> str:
     return _resolve_session_id(agent_name, email, None)
 
 
+def chat_for_execution(agent_name: str, email: str, execution_id: str) -> str | None:
+    """The Workspace chat `execution_id` is a turn of, iff that chat is
+    (agent_name, email)'s own — else None (ent#734).
+
+    Read off the execution row, which both portal turn-creation sites stamp at
+    creation (`source_channel_chat_id` = the session, `source_channel_client` =
+    the client — ent#457/#2426), so the link is written when the turn's row
+    is created rather than inferred later, and needs no column of its own.
+
+    `triggered_by == "public"` as well as the portal channel, because the
+    channel alone is not "a chat turn": `schedule_workspace_delivery` stamps the
+    same destination on a SCHEDULE row it delivers into Main, and a background
+    raise belongs to the Inbox only (the ent#610 amendment). A delegated child
+    inherits the stamp too (ent#265), under its own trigger. The session must
+    also belong to the pair, so a row can never place an ask in another
+    person's conversation. Raises like any other portal call; the caller owns
+    the fail-soft.
+
+    The turn must still be RUNNING (cso r1). The id arrives as a header the
+    platform sets, but the agent process holds its own key and can send any of
+    its executions' ids; only a live turn can be raising an ask. What remains
+    forgeable is bounded: another RUNNING turn of the same agent for the same
+    addressee — the #2392 trust level `turn_audience` already accepts. An
+    ARCHIVED chat is deliberately not excluded: a reset Main stays listed,
+    readable and resumable (`reset_main_session`), Reset is refused mid-turn,
+    so a running turn there is a person talking in a chat they can see.
+    """
+    from database import db as core_db
+    from models import TaskExecutionStatus
+    execution = core_db.get_execution(execution_id)
+    status = getattr(execution, "status", None)
+    if (execution is None or execution.agent_name != agent_name
+            or getattr(status, "value", status) != TaskExecutionStatus.RUNNING.value
+            or execution.triggered_by != "public"
+            or getattr(execution, "source_channel", None) != PORTAL_SOURCE_CHANNEL):
+        return None
+    chat_id = getattr(execution, "source_channel_chat_id", None)
+    client = (getattr(execution, "source_channel_client", None) or "").lower()
+    if not chat_id or not client or client != (email or "").lower():
+        return None
+    return chat_id if db.get_portal_session(chat_id, agent_name, client) else None
+
+
 def _one_line(content) -> str:
     """A row's content on ONE line. The line form `Who: text` is the whole
     contract of a context block, and a spoken row is text the platform wrote on

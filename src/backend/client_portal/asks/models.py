@@ -41,6 +41,10 @@ class WorkspaceAsk(BaseModel):
     ended_at: Optional[str] = None
     ended_by: Optional[str] = None
     chat_id: Optional[str] = None   # the thread it was attached to, when known
+    # ent#734: raised BY the turn serving `chat_id` (draw it as a tile there),
+    # as opposed to a background ask (schedule / loop / gate) whose `chat_id` is
+    # Main only as the reply target and which renders in no chat.
+    raised_in_turn: bool = False
     # #2915: what the platform last established about the agent's own copy of
     # this ask, COARSE on purpose — `confirmed | changed | closed | unconfirmed`.
     # A client never sees the reason (it names the operator's infrastructure)

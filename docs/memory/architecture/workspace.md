@@ -908,6 +908,18 @@ explicit session id still wins. A fourth case lands in Main at WRITE time, not t
 that function: an addressed report the agent publishes with no in-flight chat of its
 addressee (ent#610, `services/report_service.resolve_report_session`).
 
+**An ask raised during a chat turn is the exception (ent#734).** On the native path the
+raise carries the platform's execution id (#2392); `operator_queue_service._workspace_thread_for`
+asks `client_portal.service.chat_for_execution` first, which answers with the turn's own
+chat when the execution row is a still-running Workspace chat turn (`triggered_by="public"`,
+`source_channel="portal"`) of the same agent and addressee and the session belongs to
+that pair (a reset, archived Main included — it stays resumable) — the link the portal creation sites already stamp (ent#457), so no column. Anything
+else, including a schedule that DELIVERS into Main (portal stamp, `schedule` trigger) and
+every file-ingested ask, falls through to Main; a lookup failure falls through with a warning.
+Because Main is then both a chat-turn ask's home and a background ask's reply target, the
+row also carries `context.workspace_raised_in_turn` (platform-written, only on a turn match),
+projected as `WorkspaceAsk.raised_in_turn` — the fact the chat strip draws a tile from.
+
 **Reset needs no second reset primitive.** `POST …/sessions/main/reset` archives the
 current Main and mints a fresh one in ONE transaction (clear the flag before the insert,
 or the index refuses it), then writes one `role = 'system'` line in the new Main naming
