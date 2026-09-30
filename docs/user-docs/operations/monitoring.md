@@ -177,11 +177,18 @@ Healthy baseline: `drops_queue_full + clients_evicted + resyncs_sent` should be 
 
 ## For Agents
 
+### Git sync health on fleet health
+
+Each agent in the fleet health response carries a `sync` block with its git sync health: whether it is an **agent** or a **deployment**, whether auto-sync is on, how many commits it is ahead of and behind its own branch on GitHub, how many files are uncommitted, when its last push landed, how long it has been out of step, its state (green / yellow / red / unknown), a reason and a recommendation. Agents with no GitHub binding report `sync: null`. The response also totals the fleet in `sync_summary` (diverged, frozen, auto-sync off, dirty, red, yellow).
+
+A red agent gets an extra entry in its `issues` list — for example `sync: diverged 0 behind / 7 ahead for 26h — enable auto-sync`. Sync health never changes an agent's health status or the healthy/degraded counts. The reason never includes the raw git error text.
+
 Agents can query monitoring data through these MCP tools:
 
 | Tool | Description |
 |------|-------------|
-| `get_fleet_health()` | Fleet-wide health summary |
+| `get_fleet_health()` | Fleet-wide health summary, with each agent's git `sync` block and the fleet `sync_summary` |
+| `get_fleet_sync_audit()` | The fleet git sync audit: ahead/behind, dirty files, last push, state and recommendation per agent |
 | `get_agent_health(name)` | Individual agent health |
 | `trigger_health_check()` | Force an immediate health check |
 
@@ -189,7 +196,7 @@ Agents can query monitoring data through these MCP tools:
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `/api/monitoring/status` | GET | Fleet health summary (includes `heartbeat_*` fields) |
+| `/api/monitoring/status` | GET | Fleet health summary (includes `heartbeat_*` fields and a per-agent git `sync` block) |
 | `/api/monitoring/agents/{name}` | GET | Single-agent health detail |
 | `/api/monitoring/agents/{name}/check` | POST | Force immediate health check |
 | `/api/monitoring/enable` | POST | Start the health-check loop; persisted (admin) |

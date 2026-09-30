@@ -176,3 +176,123 @@ class TestBuildFleetSyncAudit:
         result = asyncio.run(build_fleet_sync_audit(agent_names=["a"]))
         assert [e["name"] for e in result["agents"]] == ["a"]
         assert result["summary"]["total"] == 1
+
+
+# ---------------------------------------------------------------------------
+# trinity-enterprise#707: the audit carries the #706 columns and the verdict
+# ---------------------------------------------------------------------------
+
+_LEAK = "remote: LEAKMARKER-707 fatal: unable to access"
+
+_NEW_707_KEYS = {
+    "ahead", "behind", "dirty_files", "diverged_since", "divergence_age_s",
+    "last_successful_push_at", "state", "reason", "recommendation", "binding",
+    "auto_sync_enabled", "frozen",
+}
+_PRE_707_KEYS = {
+    "name", "branch", "last_pushed_sha", "last_pushed_at", "local_head_sha",
+    "unpushed_commits", "dirty_tree", "duplicate_binding", "git_dir_bytes",
+}
+
+
+def _iso_ago(**delta):
+    from datetime import datetime, timedelta, timezone
+
+    return (datetime.now(timezone.utc) - timedelta(**delta)).strftime(
+        "%Y-%m-%dT%H:%M:%S.%fZ")
+
+
+def _observe(name, *, ahead=0, behind=0, dirty=0, diverged_hours=None,
+             status="success", failures=1, error=None):
+    from database import db
+
+    for _ in range(failures if status == "failed" else 1):
+        db.upsert_sync_state(
+            name, last_sync_status=status, last_error_summary=error,
+            last_sync_at=_iso_ago(minutes=5),
+            ahead_working=ahead, behind_working=behind, dirty_files=dirty,
+            diverged_since=_iso_ago(hours=diverged_hours) if diverged_hours else None,
+            last_successful_push_at="2026-09-26T09:30:00.000000Z",
+            last_check_at=_iso_ago(seconds=30),
+        )
+
+
+def _freeze(name, on=True):
+    from database import db
+
+    db.set_freeze_schedules_if_sync_failing(name, on)
+
+
+def _audit(names):
+    from services.fleet_audit_service import build_fleet_sync_audit
+
+    return asyncio.run(build_fleet_sync_audit(agent_names=names))
+
+
+class TestAuditCarriesTheSyncVerdict:
+    def test_every_old_key_kept_and_the_new_ones_added(self, seed):
+        seed("n-red")
+        _freeze("n-red")
+        _observe("n-red", ahead=7, dirty=12, diverged_hours=26)
+        entry = _audit(["n-red"])["agents"][0]
+        assert _PRE_707_KEYS | _NEW_707_KEYS <= set(entry)
+        assert (entry["ahead"], entry["behind"], entry["dirty_files"]) == (7, 0, 12)
+        assert entry["unpushed_commits"] == 7  # unchanged meaning
+        assert entry["diverged_since"] is not None
+        assert 26 * 3600 <= entry["divergence_age_s"] < 26 * 3600 + 60
+        assert entry["last_successful_push_at"] == "2026-09-26T09:30:00.000000Z"
+        assert (entry["state"], entry["binding"], entry["frozen"]) == ("red", "agent", True)
+        assert entry["reason"].startswith("diverged 0 behind / 7 ahead for 26h")
+        assert entry["auto_sync_enabled"] is True
+
+    def test_dirty_tree_comes_from_dirty_files(self, seed):
+        seed("d-dirty")
+        _observe("d-dirty", dirty=3)
+        seed("d-clean")
+        _observe("d-clean", dirty=0)
+        result = _audit(["d-dirty", "d-clean"])
+        by = {e["name"]: e for e in result["agents"]}
+        assert by["d-dirty"]["dirty_tree"] is True
+        assert by["d-clean"]["dirty_tree"] is False
+        assert result["summary"]["dirty"] == 1
+        assert result["summary"]["in_sync"] == 1
+
+    def test_summary_counts(self, seed):
+        seed("s-red")  # work agent, diverged 26 h, frozen
+        _freeze("s-red")
+        _observe("s-red", ahead=7, diverged_hours=26)
+        seed("s-yellow", source_mode=True)  # deployment behind — yellow
+        from database import db
+        db.set_git_auto_sync_enabled("s-yellow", False)
+        _observe("s-yellow", behind=31, diverged_hours=26)
+        seed("s-green")
+        _observe("s-green")
+        summary = _audit(["s-red", "s-yellow", "s-green"])["summary"]
+        assert {k: summary[k] for k in ("diverged", "frozen", "auto_sync_off", "red")} == {
+            "diverged": 2, "frozen": 1, "auto_sync_off": 1, "red": 1,
+        }
+        # Pre-#707 summary keys are unchanged.
+        assert summary["total"] == 3
+        assert summary["ahead"] == 1
+
+    def test_never_observed_agent_is_unknown_with_null_counts(self, seed):
+        seed("u-new")  # git config, no sync-state row
+        entry = _audit(["u-new"])["agents"][0]
+        assert entry["state"] == "unknown"
+        assert (entry["ahead"], entry["behind"], entry["dirty_files"]) == (None, None, None)
+        assert entry["unpushed_commits"] == 0  # the pre-#707 fallback
+        assert entry["dirty_tree"] is False
+
+    def test_no_raw_error_text(self, seed):
+        import json
+
+        seed("x-failed")
+        _observe("x-failed", status="failed", failures=3, error=_LEAK)
+        result = _audit(["x-failed"])
+        dumped = json.dumps(result)
+        assert "LEAKMARKER" not in dumped
+        assert "unable to access" not in dumped
+        entry = result["agents"][0]
+        assert entry["state"] == "red"
+        assert entry["reason"] == "last sync failed (seen on 3 polls)"
+        assert entry["recommendation"] == "push via git_sync strategy=pull_first"
