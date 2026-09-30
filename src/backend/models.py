@@ -966,6 +966,11 @@ class ReportCreate(BaseModel):
     # the router against the agent's own roster: an agent may hand a report to
     # someone it already talks to, never to an arbitrary address.
     audience_email: Optional[str] = Field(None, max_length=320)
+    # ent#606 — who the report is FOR, as a ROLE the platform resolves through
+    # the agent's assignments (`services/role_addressing`), never a person the
+    # agent picks. Mutually exclusive with `audience_email`, which stays accepted
+    # (deprecated) for two releases. Neither = operator-only, as before.
+    to: Optional[Literal["primary", "approver", "viewer", "operator"]] = None
     # The turn the agent is publishing from. Used ONLY to resolve which
     # Workspace chat the deliverable card belongs in, server-side — the session
     # is never accepted from the agent, or a report could be posted into a
@@ -3569,10 +3574,26 @@ class Reminder(ReminderSummary):
 
 
 class SendMessageRequest(BaseModel):
-    """Request to send a proactive message to a user."""
-    recipient_email: EmailStr = Field(
-        ...,
-        description="Verified email of the recipient. Must be in agent_sharing with allow_proactive=1."
+    """Request to send a proactive message to a user.
+
+    Address it with ``to`` — a ROLE the platform resolves through the agent's
+    assignments (ent#606) — or, deprecated, with ``recipient_email``. Exactly
+    one of the two.
+    """
+    recipient_email: Optional[EmailStr] = Field(
+        default=None,
+        description=(
+            "Deprecated — name a role with `to` instead. Verified email of the recipient. "
+            "Must be in agent_sharing with allow_proactive=1."
+        ),
+    )
+    to: Optional[Literal["primary", "approver", "viewer"]] = Field(
+        default=None,
+        description=(
+            "The role to message (ent#606): primary | approver | viewer. The platform "
+            "resolves the person. `operator` is not a message recipient — raise an "
+            "ask of type alert instead."
+        ),
     )
     text: str = Field(
         ...,
@@ -3605,6 +3626,12 @@ class SendMessageRequest(BaseModel):
             "messages to the same recipient in one turn. Default → at-most-one."
         ),
     )
+
+    @model_validator(mode="after")
+    def _one_address(self):
+        if bool(self.to) == bool(self.recipient_email):
+            raise ValueError("address the message with exactly one of `to` (a role) or recipient_email")
+        return self
 
 
 class SendMessageResponse(BaseModel):
