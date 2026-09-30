@@ -818,6 +818,13 @@ OPS_SETTINGS_DEFAULTS = {
     # value is refused before any model work. 8 matches ROOM_MAX_CHAIN_DEPTH;
     # the derivation errs toward over-refusal, so the default is generous.
     "inter_agent_max_chain_depth": "8",
+    # #2973: event-subscription dispatches one source agent may send one
+    # subscriber agent per one-hour Redis window, across all subscriptions
+    # between the two (an agent key can create subscriptions on itself, so a
+    # per-subscription cap multiplies; a per-subscriber cap lets one noisy
+    # source starve the rest). Chain depth bounds how deep a chain runs; this
+    # bounds how often.
+    "event_dispatch_max_fires_per_hour": "120",
 }
 
 
@@ -863,6 +870,7 @@ OPS_SETTINGS_VALIDATION = {
     "metrics_daily_point_cap": ("int", 0, 10_000_000),
     # #2806: the floor is 1, not 0 — no value may refuse every agent call.
     "inter_agent_max_chain_depth": ("int", 1, 32),
+    "event_dispatch_max_fires_per_hour": ("int", 1, 10_000),
 }
 
 

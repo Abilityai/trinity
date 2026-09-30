@@ -320,6 +320,18 @@ export function parseDepthRefusal(
   }
 }
 
+/**
+ * #2973: the `DepthRefusal` a thrown `ApiError` carries, or undefined. For the
+ * tools whose backend routes let the refusal propagate (loop start, schedule
+ * trigger, event emit) — each renders it as a result, like chat does.
+ */
+export function depthRefusalFromError(
+  error: unknown,
+  agent: string,
+): DepthRefusal | undefined {
+  return error instanceof ApiError ? parseDepthRefusal(error.status, error.body, agent) : undefined;
+}
+
 /** #2806: type guard for the refusal, shared by every tool that dispatches. */
 export function isDepthRefusal(value: unknown): value is DepthRefusal {
   return (value as { status?: unknown })?.status === INTER_AGENT_DEPTH_EXCEEDED;
