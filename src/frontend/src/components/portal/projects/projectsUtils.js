@@ -55,10 +55,18 @@ export function workOnItOptions(project, rosterNames) {
     })
 }
 
-/** Whether a chat header offers project controls, and which. */
+/**
+ * Whether a chat header offers project controls, and which. An invited
+ * outside client (v2.4) sees a linked chat's badge and Detach only — no
+ * "Project" button (guests don't create or file into projects) and no Wrap up
+ * (their chats carry no project context).
+ */
 export function chatProjectActions({ projectsAvailable, isPlatform, isMain, sessionId, project }) {
-  const show = projectsAvailable === true && isPlatform === true && !isMain && Boolean(sessionId)
-  return { show, linked: show && Boolean(project) }
+  const base = projectsAvailable === true && !isMain && Boolean(sessionId)
+  const platform = isPlatform === true
+  const linked = base && Boolean(project)
+  const show = base && (platform || linked)
+  return { show, linked, canAdd: show && platform, canWrapUp: linked && platform }
 }
 
 const CODE_MESSAGE = {
@@ -106,9 +114,97 @@ export function validateProjectForm(form) {
   else if (name.length > NAME_MAX) errors.name = `Keep the name to ${NAME_MAX} characters or fewer.`
   if (!goal) errors.goal = 'Say what the project is for, e.g. "Ship the self-serve plan to 50 customers."'
   else if (goal.length > GOAL_MAX) errors.goal = `Keep the goal to ${GOAL_MAX} characters or fewer.`
+  if (form?.steward === 'person' && !/^[^@\s]+@[^@\s]+$/.test(String(form?.steward_email || '').trim())) {
+    errors.steward = "Enter the steward's work email, e.g. name@your-company.com."
+  }
   const url = String(form?.tracker_url || '').trim()
   if (url && !/^https?:\/\/\S+$/i.test(url)) {
     errors.tracker_url = 'Use a full web link, e.g. https://github.com/your-org/repo/issues/12.'
   }
   return errors
+}
+
+/**
+ * The form's steward fields for a stored steward. `me` covers "not set" too:
+ * the server defaults a new project's steward to its creator.
+ */
+export function stewardFormValue(steward, myEmail) {
+  if (steward && steward.kind === 'agent') return { steward: `agent:${steward.ref}`, steward_email: '' }
+  if (steward && steward.kind === 'person' && steward.ref && steward.ref !== myEmail) {
+    return { steward: 'person', steward_email: steward.ref }
+  }
+  return { steward: 'me', steward_email: '' }
+}
+
+/** The API's steward for the form's fields; null leaves the server default. */
+export function stewardPayload(form, myEmail) {
+  if (String(form.steward || '').startsWith('agent:')) return { kind: 'agent', ref: form.steward.slice(6) }
+  if (form.steward === 'person') return { kind: 'person', ref: String(form.steward_email || '').trim().toLowerCase() }
+  return myEmail ? { kind: 'person', ref: myEmail } : null
+}
+
+// --- v2: tasks and the log ------------------------------------------------------
+
+export const TASK_STATUSES = ['active', 'blocked', 'needs-decision', 'paused', 'pending-verification', 'done']
+const TASK_STATUS_LABEL = {
+  active: 'Active', blocked: 'Blocked', 'needs-decision': 'Needs a decision', paused: 'Paused',
+  'pending-verification': 'Awaiting verification', done: 'Done',
+}
+export const TASK_STATUS_BADGE = Object.freeze({
+  active: 'info', blocked: 'danger', 'needs-decision': 'warning', paused: 'neutral',
+  'pending-verification': 'autonomous', done: 'success',
+})
+
+export function taskStatusLabel(status) {
+  return TASK_STATUS_LABEL[status] || 'Unknown'
+}
+
+/** Open = anything but awaiting verification or done (the PM standard's lattice). */
+export function isOpenTask(task) {
+  return !['pending-verification', 'done'].includes(task?.status)
+}
+
+/** What the status control offers: a done task can only be reopened. */
+export function taskStatusOptions(task) {
+  return task?.status === 'done' ? ['done', 'active'] : [...TASK_STATUSES]
+}
+
+export function groupTasks(tasks) {
+  const byId = (a, b) => String(a.id).localeCompare(String(b.id), undefined, { numeric: true })
+  const list = [...(tasks || [])].sort(byId)
+  return {
+    open: list.filter(isOpenTask),
+    verifying: list.filter((t) => t.status === 'pending-verification'),
+    done: list.filter((t) => t.status === 'done'),
+  }
+}
+
+export const LOG_KINDS = ['decision', 'deliverable', 'task', 'blocker', 'handoff', 'note']
+const LOG_KIND_LABEL = {
+  decision: 'Decision', deliverable: 'Deliverable', task: 'Task', blocker: 'Blocker', handoff: 'Hand-off', note: 'Note',
+}
+export const LOG_KIND_BADGE = Object.freeze({
+  decision: 'purple', deliverable: 'success', task: 'info', blocker: 'danger', handoff: 'warning', note: 'neutral',
+})
+
+export function logKindLabel(kind) {
+  return LOG_KIND_LABEL[kind] || 'Note'
+}
+
+/** "You", "scout (agent)", "Imported from corbin", or the email. */
+export function authorLabel(author, myEmail) {
+  const a = String(author || '')
+  if (a.startsWith('agent:')) return `${a.slice(6)} (agent)`
+  if (a.startsWith('import:')) return `Imported from ${a.slice(7)}`
+  if (myEmail && a === myEmail) return 'You'
+  return a || 'Unknown'
+}
+
+/** The fixed instruction Wrap up sends into a project chat (design §v2.6). */
+export function wrapUpPrompt(projectName) {
+  return `Please wrap up this conversation for the project "${projectName}". ` +
+    'Record what came out of it in the project log with add_project_log_entry — one entry per ' +
+    'meaningful outcome: each decision made, deliverable finished, blocker hit or hand-off. ' +
+    'Update the project tasks to match (create, move to pending-verification with your evidence, ' +
+    'or add notes), and skip anything that was only discussion. Then tell me briefly what you recorded.'
 }

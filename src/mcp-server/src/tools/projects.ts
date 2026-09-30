@@ -4,7 +4,10 @@
  * A project links the Workspace chats and rooms where a piece of work happens.
  * An agent's turn in a linked chat carries a one-line "[Project] …" note with
  * the project id; these tools let the agent read what that project is for.
- * Read-only by design: agents do not create or restructure projects.
+ * Agents never create or restructure a project. Since v2 they read the log and
+ * tasks, record outcomes in the log, keep tasks current, and put their own
+ * files / reports / decisions on the project — only on projects they are
+ * ACTIVE on (the backend answers anything else with a uniform 404).
  *
  * The backend returns only projects this agent is ACTIVE on — its owner
  * consented to the link — and never other people's chat titles or content.
@@ -67,6 +70,28 @@ export function createProjectTools(client: TrinityClient, requireApiKey: boolean
     return client;
   };
 
+  /** A write or read refusal as a structured result — never a throw. */
+  const fail = (e: unknown): string => {
+    const { status, code, message, detailIsString } = parseError(e);
+    const known = status === 404 && code === "project_not_found";
+    return JSON.stringify(
+      {
+        success: false,
+        error: known ? "No project with this id that you are working on." : (code ? message : explain(status, code, detailIsString)),
+        ...(code ? { code } : {}),
+        ...(known ? { not_found: true } : {}),
+      },
+      null,
+      2,
+    );
+  };
+
+  const ok = (payload: unknown) => JSON.stringify({ success: true, ...(payload as object) }, null, 2);
+
+  const projectId = z.string().min(1).max(64).describe("The project id, e.g. prj_0123456789abcdef.");
+  const taskId = z.string().min(1).max(16).describe("The task id, e.g. T-003.");
+  const statusEnum = z.enum(["active", "blocked", "needs-decision", "paused", "pending-verification", "done"]);
+
   return {
     // ========================================================================
     list_projects: {
@@ -122,6 +147,163 @@ export function createProjectTools(client: TrinityClient, requireApiKey: boolean
             null,
             2,
           );
+        }
+      },
+    },
+
+    // ========================================================================
+    list_project_tasks: {
+      name: "list_project_tasks",
+      description:
+        "List a project's tasks. By default only open ones (not done, not awaiting verification); " +
+        "pass status 'all', 'done' or a single status to see others. Each task has an id like T-003, " +
+        "a title, status, owner, the executing agent and priority.",
+      parameters: z.object({
+        project_id: projectId,
+        status: z.string().max(32).optional().describe("open (default), all, or one task status."),
+      }),
+      execute: async (p: { project_id: string; status?: string }, context?: { session?: McpAuthContext }) => {
+        try {
+          const tasks = await getClient(context?.session).listProjectTasks(p.project_id, p.status || "open");
+          return ok({ count: tasks.length, tasks });
+        } catch (e) {
+          return fail(e);
+        }
+      },
+    },
+
+    // ========================================================================
+    create_project_task: {
+      name: "create_project_task",
+      description:
+        "Add a task to a project you are working on. Give it a short title, and where you can an " +
+        "objective and a definition of done (a checklist). It gets the next id (T-NNN). Priority is " +
+        "set by people only; your tasks start at p2.",
+      parameters: z.object({
+        project_id: projectId,
+        title: z.string().min(1).max(200),
+        objective: z.string().max(4000).optional(),
+        done_definition: z.string().max(4000).optional().describe("Markdown checklist, e.g. '- [ ] Brief reviewed'."),
+        context: z.string().max(4000).optional(),
+        owner: z.string().max(320).optional().describe("Who is accountable (a person's email or a name)."),
+        assignee: z.string().max(320).optional().describe("The agent doing the work, if not you."),
+        waiting_on: z.string().max(320).optional(),
+      }),
+      execute: async (p: Record<string, string> & { project_id: string }, context?: { session?: McpAuthContext }) => {
+        const { project_id, assignee, ...rest } = p;
+        const body = assignee ? { ...rest, agent: assignee } : rest;
+        try {
+          return ok(await getClient(context?.session).createProjectTask(project_id, body));
+        } catch (e) {
+          return fail(e);
+        }
+      },
+    },
+
+    // ========================================================================
+    update_project_task: {
+      name: "update_project_task",
+      description:
+        "Update a project task. To claim a task is finished, set status 'pending-verification' and put " +
+        "your evidence in 'note' (it is logged as your done claim); a person or the project's steward " +
+        "then verifies it and sets 'done'. A done task can only be reopened by a person. You cannot " +
+        "change priority. Any 'note' is appended to the task's log.",
+      parameters: z.object({
+        project_id: projectId,
+        task_id: taskId,
+        status: statusEnum.optional(),
+        title: z.string().min(1).max(200).optional(),
+        owner: z.string().max(320).optional(),
+        assignee: z.string().max(320).optional().describe("The agent doing the work."),
+        waiting_on: z.string().max(320).optional(),
+        objective: z.string().max(4000).optional(),
+        done_definition: z.string().max(4000).optional(),
+        context: z.string().max(4000).optional(),
+        note: z.string().max(4000).optional().describe("Appended to the task log; your done claim when moving to pending-verification."),
+      }),
+      execute: async (p: Record<string, string> & { project_id: string; task_id: string }, context?: { session?: McpAuthContext }) => {
+        const { project_id, task_id, assignee, ...rest } = p;
+        const body = assignee ? { ...rest, agent: assignee } : rest;
+        try {
+          return ok(await getClient(context?.session).updateProjectTask(project_id, task_id, body));
+        } catch (e) {
+          return fail(e);
+        }
+      },
+    },
+
+    // ========================================================================
+    add_project_task_note: {
+      name: "add_project_task_note",
+      description: "Append a note to a task's log (progress, a waiting-on, a hand-off). The log is append-only.",
+      parameters: z.object({ project_id: projectId, task_id: taskId, body: z.string().min(1).max(4000) }),
+      execute: async (p: { project_id: string; task_id: string; body: string }, context?: { session?: McpAuthContext }) => {
+        try {
+          return ok(await getClient(context?.session).addProjectTaskNote(p.project_id, p.task_id, p.body));
+        } catch (e) {
+          return fail(e);
+        }
+      },
+    },
+
+    // ========================================================================
+    get_project_log: {
+      name: "get_project_log",
+      description:
+        "Read a project's log: the decisions, deliverables, task changes, blockers and hand-offs that " +
+        "people and agents recorded, oldest first within the page. get_project already includes the " +
+        "latest 20; use this for more.",
+      parameters: z.object({ project_id: projectId, limit: z.number().int().min(1).max(200).optional() }),
+      execute: async (p: { project_id: string; limit?: number }, context?: { session?: McpAuthContext }) => {
+        try {
+          const entries = await getClient(context?.session).getProjectLog(p.project_id, p.limit ?? 50);
+          return ok({ count: entries.length, entries });
+        } catch (e) {
+          return fail(e);
+        }
+      },
+    },
+
+    // ========================================================================
+    add_project_log_entry: {
+      name: "add_project_log_entry",
+      description:
+        "Record one meaningful outcome in the project log, which every person and agent on the project " +
+        "reads first. Write ONE entry per outcome — a decision made, a deliverable finished, a blocker, a " +
+        "hand-off — never one per turn, and never a transcript. Task status changes are logged for you.",
+      parameters: z.object({
+        project_id: projectId,
+        kind: z.enum(["decision", "deliverable", "blocker", "handoff", "note"]),
+        body: z.string().min(1).max(4000).describe("What happened and what it means, in a few sentences."),
+        task_id: z.string().max(16).optional().describe("The task this concerns, if any."),
+      }),
+      execute: async (p: { project_id: string; kind: string; body: string; task_id?: string }, context?: { session?: McpAuthContext }) => {
+        const { project_id, ...body } = p;
+        try {
+          return ok(await getClient(context?.session).addProjectLogEntry(project_id, body));
+        } catch (e) {
+          return fail(e);
+        }
+      },
+    },
+
+    // ========================================================================
+    link_to_project: {
+      name: "link_to_project",
+      description:
+        "Put something you produced on a project so its members can find it: a file you shared, a " +
+        "report you wrote, or a decision you recorded. Only your own items, and only on a project you " +
+        "are working on. Sharing with outside clients is a person's decision, not yours.",
+      parameters: z.object({
+        project_id: projectId,
+        kind: z.enum(["file", "report", "decision"]),
+        target_id: z.string().min(1).max(128).describe("The file, report or decision id."),
+      }),
+      execute: async (p: { project_id: string; kind: string; target_id: string }, context?: { session?: McpAuthContext }) => {
+        try {
+          return ok(await getClient(context?.session).linkToProject(p.project_id, { kind: p.kind, target_id: p.target_id }));
+        } catch (e) {
+          return fail(e);
         }
       },
     },

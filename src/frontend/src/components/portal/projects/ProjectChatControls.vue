@@ -1,5 +1,8 @@
 <!--
-  A chat's project controls in the conversation header (trinity-enterprise#661).
+  A chat's or room's project controls in its header (trinity-enterprise#661).
+  `kind` is `thread` (a 1:1 chat) or `room`. A room gets the same badge,
+  Detach and "Add to a project", but not "Make this a new project" (a project
+  is made from a 1:1 chat, whose agent it adds).
 
   Linked chat: a badge naming the project (opens it) and Detach.
   Unlinked chat: ONE header button, "Project", which opens a small dialog —
@@ -24,9 +27,17 @@
         <svg class="h-3.5 w-3.5 flex-none" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" :d="FOLDER" /></svg>
         <span class="truncate">{{ project.name }}</span>
       </button>
+      <BaseButton
+        v-if="actions.canWrapUp && kind === 'thread' && !project.archived_at"
+        size="sm"
+        variant="ghost"
+        data-testid="project-chat-wrapup"
+        title="Ask the agent to record this chat's outcomes in the project log and tasks"
+        @click="$emit('wrap-up', project)"
+      >Wrap up</BaseButton>
       <BaseButton size="sm" variant="ghost" :loading="busy" data-testid="project-chat-detach" @click="detach">Detach</BaseButton>
     </template>
-    <BaseButton v-else size="sm" variant="ghost" data-testid="project-chat-open" aria-label="Add this chat to a project" @click="dialogOpen = true">
+    <BaseButton v-else-if="actions.canAdd" size="sm" variant="ghost" data-testid="project-chat-open" aria-label="Add this chat to a project" @click="dialogOpen = true">
       <svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" :d="FOLDER" /></svg>
       <span class="hidden sm:inline">Project</span>
     </BaseButton>
@@ -34,19 +45,19 @@
 
     <BaseModal v-model="dialogOpen" labelledby="project-chat-title">
       <div class="space-y-4">
-        <h2 id="project-chat-title" class="text-lg font-semibold text-gray-900 dark:text-gray-100">Add this chat to a project</h2>
+        <h2 id="project-chat-title" class="text-lg font-semibold text-gray-900 dark:text-gray-100">Add this {{ kind === 'room' ? 'room' : 'chat' }} to a project</h2>
         <form v-if="candidates.length" class="flex items-start gap-2" @submit.prevent="addToProject">
           <BaseSelect id="project-chat-pick" v-model="picked" class="flex-1" aria-label="Project">
-            <option value="" disabled>Choose a project with {{ agentName }}…</option>
+            <option value="" disabled>{{ kind === 'room' ? 'Choose a project…' : `Choose a project with ${agentName}…` }}</option>
             <option v-for="p in candidates" :key="p.id" :value="p.id">{{ p.name }}</option>
           </BaseSelect>
           <BaseButton type="submit" :disabled="!picked" :loading="busy">Add</BaseButton>
         </form>
         <p v-else class="text-sm text-gray-600 dark:text-gray-300">
-          {{ agentName }} isn't on any project you can add to yet.
+          {{ kind === 'room' ? 'There is no open project you can add this room to yet.' : `${agentName} isn't on any project you can add to yet.` }}
         </p>
         <InlineError v-if="error" :message="error" @dismiss="error = ''" />
-        <div class="border-t border-gray-200 dark:border-gray-750 pt-4">
+        <div v-if="kind === 'thread'" class="border-t border-gray-200 dark:border-gray-750 pt-4">
           <BaseButton variant="secondary" data-testid="project-chat-make" @click="makeProject">Make this chat a new project</BaseButton>
         </div>
         <div class="flex justify-end">
@@ -56,9 +67,11 @@
     </BaseModal>
 
     <ProjectCreateModal
+      v-if="kind === 'thread'"
       v-model="createOpen"
-      :link-thread="{ id: sessionId, title: sessionTitle, agent: agentName }"
+      :link-thread="{ id: targetId, title: sessionTitle, agent: agentName }"
       :agents="rosterAgents"
+      :my-email="portal.clientEmail || ''"
       @created="onCreated"
     />
   </div>
@@ -78,12 +91,13 @@ import { chatProjectActions, projectErrorMessage } from './projectsUtils'
 const FOLDER = 'M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2V7z'
 
 const props = defineProps({
-  agentName: { type: String, required: true },
-  sessionId: { type: String, default: null },
+  kind: { type: String, default: 'thread' },          // 'thread' | 'room'
+  agentName: { type: String, default: '' },          // the chat's agent (thread only)
+  targetId: { type: String, default: null },         // session id | room id
   sessionTitle: { type: String, default: '' },
   isMain: { type: Boolean, default: false },
 })
-const emit = defineEmits(['open-project'])
+const emit = defineEmits(['open-project', 'wrap-up'])
 
 const store = useProjectsStore()
 const portal = useClientPortalStore()
@@ -93,21 +107,21 @@ const picked = ref('')
 const busy = ref(false)
 const error = ref('')
 
-const project = computed(() => (props.sessionId ? store.forLink('thread', props.sessionId) : null) || null)
+const project = computed(() => (props.targetId ? store.forLink(props.kind, props.targetId) : null) || null)
 const actions = computed(() => chatProjectActions({
   projectsAvailable: portal.projectsAvailable,
   isPlatform: portal.isPlatformSession,
   isMain: props.isMain,
-  sessionId: props.sessionId,
+  sessionId: props.targetId,
   project: project.value,
 }))
 const rosterAgents = computed(() => portal.agents.map((a) => a.name))
-const candidates = computed(() => store.list.filter((p) => !p.archived_at
-  && (p.agents || []).some((a) => a.agent_name === props.agentName && ['active', 'pending'].includes(a.state))))
+const candidates = computed(() => store.list.filter((p) => !p.archived_at && (props.kind === 'room'
+  || (p.agents || []).some((a) => a.agent_name === props.agentName && ['active', 'pending'].includes(a.state)))))
 
-watch(() => [props.sessionId, portal.projectsAvailable], () => {
-  if (!props.sessionId || !portal.projectsAvailable || !portal.isPlatformSession || props.isMain) return
-  if (store.forLink('thread', props.sessionId) === undefined) void store.fetchForLink('thread', props.sessionId)
+watch(() => [props.targetId, portal.projectsAvailable], () => {
+  if (!props.targetId || !portal.projectsAvailable || props.isMain) return
+  if (store.forLink(props.kind, props.targetId) === undefined) void store.fetchForLink(props.kind, props.targetId)
 }, { immediate: true })
 
 watch(dialogOpen, (open) => {
@@ -123,11 +137,11 @@ async function run(fn) {
   try { await fn() } catch (err) { error.value = projectErrorMessage(err) } finally { busy.value = false }
 }
 
-const detach = () => run(() => store.unlink(project.value.id, 'thread', props.sessionId))
+const detach = () => run(() => store.unlink(project.value.id, props.kind, props.targetId))
 
 const addToProject = () => run(async () => {
-  await store.link(picked.value, 'thread', props.sessionId)
-  await store.fetchForLink('thread', props.sessionId)
+  await store.link(picked.value, props.kind, props.targetId)
+  await store.fetchForLink(props.kind, props.targetId)
   dialogOpen.value = false
 })
 
@@ -137,6 +151,6 @@ function makeProject() {
 }
 
 async function onCreated() {
-  await store.fetchForLink('thread', props.sessionId)
+  await store.fetchForLink(props.kind, props.targetId)
 }
 </script>

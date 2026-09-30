@@ -129,7 +129,7 @@
           :current-session-id="activeSessionId"
           :current-room-id="activeRoomIdFromRoute"
           :is-platform-session="store.isPlatformSession"
-          :projects-available="store.projectsAvailable && store.isPlatformSession"
+          :projects-available="store.projectsAvailable"
           :projects-active="projectsRoute"
           :loading-roster="store.loading && !store.rosterLoaded"
           v-model:search="search"
@@ -175,7 +175,7 @@
             :current-session-id="activeSessionId"
             :current-room-id="activeRoomIdFromRoute"
             :is-platform-session="store.isPlatformSession"
-            :projects-available="store.projectsAvailable && store.isPlatformSession"
+            :projects-available="store.projectsAvailable"
             :projects-active="projectsRoute"
             :loading-roster="store.loading && !store.rosterLoaded"
             v-model:search="search"
@@ -274,6 +274,7 @@
           @participants-changed="onRoomParticipants"
           @work-state="onWorkState"
           @open-work="openRailOn('work')"
+          @open-project="openProjects"
         >
           <template #rail-strip>
             <PortalRailStrip v-if="railVisible" :tabs="railTabs" :signals="railSignals" @open="railSheetOpen = true" />

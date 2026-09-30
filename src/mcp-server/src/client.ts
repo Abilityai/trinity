@@ -3654,6 +3654,43 @@ export class TrinityClient {
     return this.request("GET", `/api/enterprise/projects/agent/projects/${encodeURIComponent(projectId)}`);
   }
 
+  // v2: the project's tasks, log and items — writes by an ACTIVE agent only.
+  private projectPath(projectId: string, tail = ""): string {
+    return `/api/enterprise/projects/agent/projects/${encodeURIComponent(projectId)}${tail}`;
+  }
+
+  async listProjectTasks(projectId: string, status = "open"): Promise<Array<Record<string, unknown>>> {
+    const res = await this.request<{ tasks: Array<Record<string, unknown>> }>(
+      "GET", this.projectPath(projectId, `/tasks?status=${encodeURIComponent(status)}`));
+    return res.tasks;
+  }
+
+  async createProjectTask(projectId: string, body: Record<string, unknown>): Promise<Record<string, unknown>> {
+    return this.request("POST", this.projectPath(projectId, "/tasks"), body);
+  }
+
+  async updateProjectTask(projectId: string, taskId: string, body: Record<string, unknown>): Promise<Record<string, unknown>> {
+    return this.request("PATCH", this.projectPath(projectId, `/tasks/${encodeURIComponent(taskId)}`), body);
+  }
+
+  async addProjectTaskNote(projectId: string, taskId: string, body: string): Promise<Record<string, unknown>> {
+    return this.request("POST", this.projectPath(projectId, `/tasks/${encodeURIComponent(taskId)}/log`), { body });
+  }
+
+  async getProjectLog(projectId: string, limit = 50): Promise<Array<Record<string, unknown>>> {
+    const res = await this.request<{ entries: Array<Record<string, unknown>> }>(
+      "GET", this.projectPath(projectId, `/log?limit=${limit}`));
+    return res.entries;
+  }
+
+  async addProjectLogEntry(projectId: string, body: Record<string, unknown>): Promise<Record<string, unknown>> {
+    return this.request("POST", this.projectPath(projectId, "/log"), body);
+  }
+
+  async linkToProject(projectId: string, body: Record<string, unknown>): Promise<Record<string, unknown>> {
+    return this.request("POST", this.projectPath(projectId, "/items"), body);
+  }
+
   // --- Role assignments (trinity-enterprise#500) ----------------------------
 
   /**

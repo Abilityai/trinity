@@ -56,8 +56,8 @@ describe('ent#661 projects — chat header actions', () => {
   const base = { projectsAvailable: true, isPlatform: true, isMain: false, sessionId: 's1' }
 
   it('offers make/add in a plain chat, detach in a linked one', () => {
-    expect(chatProjectActions({ ...base, project: null })).toEqual({ show: true, linked: false })
-    expect(chatProjectActions({ ...base, project: { id: 'p' } })).toEqual({ show: true, linked: true })
+    expect(chatProjectActions({ ...base, project: null })).toMatchObject({ show: true, linked: false })
+    expect(chatProjectActions({ ...base, project: { id: 'p' } })).toMatchObject({ show: true, linked: true })
   })
 
   it('never in Main, never for an outside client, never before a chat exists', () => {

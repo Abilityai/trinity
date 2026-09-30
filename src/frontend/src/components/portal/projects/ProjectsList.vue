@@ -12,11 +12,14 @@
     <header class="flex items-center gap-3">
       <h1 class="text-2xl font-bold text-gray-900 dark:text-gray-100">Projects</h1>
       <span class="flex-1"></span>
-      <BaseButton data-testid="projects-new" @click="createOpen = true">New project</BaseButton>
+      <template v-if="portal.isPlatformSession">
+        <BaseButton variant="secondary" data-testid="projects-import" @click="importOpen = true">Import</BaseButton>
+        <BaseButton data-testid="projects-new" @click="createOpen = true">New project</BaseButton>
+      </template>
     </header>
 
     <div class="flex flex-wrap items-center gap-3">
-      <OverflowTabs class="min-w-0" :tabs="FILTERS" :model-value="filter" dense @update:model-value="filter = $event" />
+      <OverflowTabs v-if="portal.isPlatformSession" class="min-w-0" :tabs="FILTERS" :model-value="filter" dense @update:model-value="filter = $event" />
       <BaseToggle v-model="showArchived" label="Show archived" />
       <span class="flex-1"></span>
       <BaseInput id="projects-search" v-model="query" class="w-full sm:w-64" placeholder="Search by name" aria-label="Search projects" />
@@ -40,8 +43,11 @@
         <p class="mx-auto mt-1.5 max-w-[48ch] text-sm text-gray-600 dark:text-gray-300">
           A project gathers the chats and rooms about one piece of work, like a launch or a hire, so any agent on it can pick up where things stand.
         </p>
-        <BaseButton class="mt-4" @click="createOpen = true">New project</BaseButton>
-        <p class="mt-3 text-xs text-gray-500 dark:text-gray-400">Or open a chat and choose "Make this a project".</p>
+        <template v-if="portal.isPlatformSession">
+          <BaseButton class="mt-4" @click="createOpen = true">New project</BaseButton>
+          <p class="mt-3 text-xs text-gray-500 dark:text-gray-400">Or open a chat and use the Project button, or import one an agent keeps in its files.</p>
+        </template>
+        <p v-else class="mt-3 text-xs text-gray-500 dark:text-gray-400">Projects you're invited to appear here.</p>
       </div>
 
       <p v-else-if="!visible.length" class="py-8 text-center text-sm text-gray-600 dark:text-gray-300">
@@ -59,7 +65,8 @@
             <div class="flex flex-wrap items-center gap-2">
               <span class="font-semibold text-gray-900 dark:text-gray-100">{{ p.name }}</span>
               <BaseBadge :variant="STATUS_BADGE[p.status] || 'neutral'" dot>{{ statusLabel(p.status) }}</BaseBadge>
-              <BaseBadge>{{ visibilityLabel(p.visibility) }}</BaseBadge>
+              <BaseBadge v-if="p.guest" variant="info">Guest</BaseBadge>
+              <BaseBadge v-else>{{ visibilityLabel(p.visibility) }}</BaseBadge>
               <BaseBadge v-if="p.archived_at" variant="locked">Archived</BaseBadge>
             </div>
             <p class="mt-1 line-clamp-2 text-sm text-gray-600 dark:text-gray-300">{{ p.goal }}</p>
@@ -76,7 +83,8 @@
       </p>
     </template>
 
-    <ProjectCreateModal v-model="createOpen" :agents="rosterAgents" @created="(p) => $emit('open', p.id)" />
+    <ProjectImportModal v-model="importOpen" :agents="rosterAgents" @imported="(p) => $emit('open', p.id)" />
+    <ProjectCreateModal v-model="createOpen" :agents="rosterAgents" :my-email="portal.clientEmail || ''" @created="(p) => $emit('open', p.id)" />
   </div>
 </template>
 
@@ -91,6 +99,7 @@ import SkeletonLoader from '@/components/SkeletonLoader.vue'
 import LoadFailed from '@/components/LoadFailed.vue'
 import InlineError from '@/components/InlineError.vue'
 import ProjectCreateModal from './ProjectCreateModal.vue'
+import ProjectImportModal from './ProjectImportModal.vue'
 import { useProjectsStore } from '@/stores/projects'
 import { useClientPortalStore } from '@/stores/clientPortal'
 import { viewState } from '@/utils/loadingState'
@@ -111,6 +120,7 @@ const filter = ref('all')
 const query = ref('')
 const showArchived = ref(false)
 const createOpen = ref(false)
+const importOpen = ref(false)
 
 const rosterAgents = computed(() => portal.agents.map((a) => a.name))
 const live = computed(() => store.list.filter((p) => showArchived.value || !p.archived_at))

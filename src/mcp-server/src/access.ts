@@ -422,6 +422,13 @@ export const TOOL_ACCESS_POLICY: Readonly<Record<string, ToolAccessPolicy>> = {
   // --- projects.ts ---
   list_projects: { kind: "none", why: "the calling agent's own active projects (ent#661)" },
   get_project: { kind: "none", why: "a project id; the backend answers only for a project the calling agent is active on (ent#661)" },
+  list_project_tasks: { kind: "none", why: "a project id; the backend answers only for a project the calling agent is active on (ent#661)" },
+  create_project_task: { kind: "none", why: "a project id; the backend answers only for a project the calling agent is active on (ent#661)" },
+  update_project_task: { kind: "none", why: "a project id; the backend answers only for a project the calling agent is active on (ent#661)" },
+  add_project_task_note: { kind: "none", why: "a project id; the backend answers only for a project the calling agent is active on (ent#661)" },
+  get_project_log: { kind: "none", why: "a project id; the backend answers only for a project the calling agent is active on (ent#661)" },
+  add_project_log_entry: { kind: "none", why: "a project id; the backend answers only for a project the calling agent is active on (ent#661)" },
+  link_to_project: { kind: "none", why: "a project id; the backend answers only for a project the calling agent is active on (ent#661)" },
   // --- assignments.ts --- get_agent_assignments is FENCED (not registered; 0.9.5 F1) —
   // the totality test forbids a row for an unregistered tool. Restore with the registration:
   //   get_agent_assignments: { kind: "baselined", owner: ENT629 + "; the route's 404 is uniform (ent#500)" },

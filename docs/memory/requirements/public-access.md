@@ -944,8 +944,10 @@ members and the agents that may work on it. The record and its rules are a
 private module; this section is the edition-agnostic surface it needs.
 
 - **FR-1 — Capability on the roster**: `projects_available` is true only when
-  the module is entitled AND the principal is a platform user. Fails closed on
-  an older backend, a failed read, or an outside client.
+  the module is entitled AND the principal is a platform user or an outside
+  client invited to a project (asked through the `portal_capabilities` seam,
+  since the core holds no invitations). Fails closed on an older backend, a
+  failed read, or an uninvited outside client.
 - **FR-2 — Turn-context seam**: a provider registry both Workspace composers
   call on every turn (chat: resumed and cold arms; room: ahead of the file
   manifest). The platform fills the context from the chat row or room,
@@ -956,7 +958,15 @@ private module; this section is the edition-agnostic surface it needs.
   project page (goal, status, steward, my chats, others' chats as a count only,
   agents with consent state, members, rooms), a rail tab for the current agent,
   and chat-header controls (link, detach, make a project) — never in Main.
-- **FR-5 — Agent reads over MCP**: `list_projects` / `get_project`, read-only,
-  license-blind (404 = no module, string 403 = unlicensed).
-- **Out of scope (v1)**: outside-client invites, a task list, a project log,
-  files by project, room-header link controls.
+- **FR-5 — Agent tools over MCP**: `list_projects` / `get_project` (with the
+  recent log and open tasks), `list_project_tasks`, `get_project_log`,
+  `create_project_task`, `update_project_task`, `add_project_task_note`,
+  `add_project_log_entry`, `link_to_project`. License-blind (404 = no module,
+  string 403 = unlicensed); an agent reaches only projects it is active on.
+- **FR-6 — v2 Workspace surface, gated on FR-1**: a project page with Tasks
+  (the ent#673 fields and status set), an append-only Log, and Files & reports
+  (link a file, report or decision you can already see; the creator may share
+  a file or report with guests); guest invites and a narrow guest view; a
+  one-shot import of a folder project from an agent; a room-header link
+  control; editing name, goal, steward and tracker; and **Wrap up** in a
+  linked chat, which asks the agent to record the chat's outcomes itself.

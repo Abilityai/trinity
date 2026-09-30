@@ -163,13 +163,15 @@ describe('ent#474 — the tab contract', () => {
   // ent#661 — Projects needs the platform door AND the roster capability. A
   // platform session that was not told it has the capability sees exactly the
   // tabs it saw before (the lines above are unchanged for that reason).
-  it('shows Projects only to a platform session with the capability', () => {
-    expect(tab('projects')).toMatchObject({ door: RAIL_DOORS.PLATFORM, capability: 'projects', icon: 'folder', empty: null })
+  it('shows Projects only to a session the roster gave the capability', () => {
+    expect(tab('projects')).toMatchObject({ door: RAIL_DOORS.AUDIENCE, capability: 'projects', icon: 'folder', empty: null })
     const withCap = { ...PLATFORM, capabilities: { projects: true } }
     expect(visibleTabs(ALL_TABS, withCap).map((t) => t.id)).toEqual(['work', 'loops', 'canvas', 'files', 'projects', 'info'])
     expect(tabPassesDoor(tab('projects'), PLATFORM)).toBe(false)
     expect(tabPassesDoor(tab('projects'), { ...PLATFORM, capabilities: { projects: 'true' } })).toBe(false)
-    expect(tabPassesDoor(tab('projects'), { ...CLIENT, capabilities: { projects: true } })).toBe(false)
+    // v2.4: an invited outside client gets the capability from its roster, and the tab.
+    expect(tabPassesDoor(tab('projects'), { ...CLIENT, capabilities: { projects: true } })).toBe(true)
+    expect(tabPassesDoor(tab('projects'), CLIENT)).toBe(false)
   })
 
   it('persists under the one approved key', () => {

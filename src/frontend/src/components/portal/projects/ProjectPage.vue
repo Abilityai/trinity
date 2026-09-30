@@ -42,11 +42,15 @@
           <div class="flex flex-wrap items-center gap-2">
             <h1 class="text-2xl font-bold text-gray-900 dark:text-gray-100 break-words">{{ p.name }}</h1>
             <BaseBadge :variant="STATUS_BADGE[p.status] || 'neutral'" dot>{{ statusLabel(p.status) }}</BaseBadge>
-            <BaseBadge>{{ visibilityLabel(p.visibility) }}</BaseBadge>
+            <BaseBadge v-if="!guest">{{ visibilityLabel(p.visibility) }}</BaseBadge>
+            <BaseBadge v-else variant="info">Guest</BaseBadge>
             <BaseBadge v-if="p.archived_at" variant="locked">Archived</BaseBadge>
           </div>
           <p class="max-w-3xl text-sm text-gray-700 dark:text-gray-300 whitespace-pre-line">{{ p.goal }}</p>
-          <p class="flex flex-wrap gap-x-4 gap-y-1 text-xs text-gray-500 dark:text-gray-400">
+          <p v-if="guest" class="text-xs text-gray-500 dark:text-gray-400" data-testid="project-guest-note">
+            You've been invited to this project. You see your own chats and what's been shared with you.
+          </p>
+          <p v-else class="flex flex-wrap gap-x-4 gap-y-1 text-xs text-gray-500 dark:text-gray-400">
             <span>Steward · {{ stewardLabel }}</span>
             <span>Created by {{ p.created_by === myEmail ? 'you' : p.created_by }}</span>
             <a v-if="p.tracker_url" :href="p.tracker_url" target="_blank" rel="noopener noreferrer" class="text-action-primary-600 dark:text-action-primary-400 hover:underline">Tracker</a>
@@ -66,7 +70,8 @@
             <option value="paused">Paused</option>
             <option value="done">Done</option>
           </BaseSelect>
-          <BaseButton variant="secondary" data-testid="project-members-open" @click="membersOpen = true">Members &amp; access</BaseButton>
+          <BaseButton v-if="p.can?.edit && !p.archived_at" variant="ghost" data-testid="project-edit" @click="editOpen = true">Edit</BaseButton>
+          <BaseButton v-if="!guest" variant="secondary" data-testid="project-members-open" @click="membersOpen = true">Members &amp; access</BaseButton>
           <BaseButton
             v-if="p.can?.archive"
             variant="ghost"
@@ -78,7 +83,13 @@
 
       <InlineError v-if="actionError" :message="actionError" @dismiss="actionError = ''" />
 
-      <div class="grid gap-4 lg:grid-cols-3">
+      <OverflowTabs v-if="!guest" :tabs="TABS" :model-value="tab" data-testid="project-tabs" @update:model-value="tab = $event" />
+
+      <ProjectTasks v-if="!guest && tab === 'tasks'" :project-id="p.id" :can-contribute="p.can?.contribute === true" :archived="Boolean(p.archived_at)" :my-email="myEmail" />
+      <ProjectLog v-if="!guest && tab === 'log'" :project-id="p.id" :can-contribute="p.can?.contribute === true" :archived="Boolean(p.archived_at)" :my-email="myEmail" />
+      <ProjectMaterial v-if="!guest && tab === 'material'" :project="p" :my-email="myEmail" :agents="usableAgents" />
+
+      <div v-show="guest || tab === 'overview'" class="grid gap-4 lg:grid-cols-3">
         <BaseCard class="lg:col-span-2">
           <h2 class="text-[11px] font-semibold uppercase tracking-wide text-gray-500 dark:text-gray-400">Work on it</h2>
           <p v-if="!options.length" class="mt-2 text-sm text-gray-600 dark:text-gray-300">
@@ -103,7 +114,7 @@
           </ul>
         </BaseCard>
 
-        <BaseCard>
+        <BaseCard v-if="!guest">
           <h2 class="text-[11px] font-semibold uppercase tracking-wide text-gray-500 dark:text-gray-400">Members</h2>
           <ul class="mt-2 space-y-1.5 text-sm">
             <li v-for="m in p.members" :key="m.email" class="flex items-center gap-2">
@@ -150,6 +161,11 @@
             </li>
           </ul>
         </BaseCard>
+
+        <!-- A guest's single view carries what was shared with them. -->
+        <div v-if="guest" class="lg:col-span-3">
+          <ProjectMaterial :project="p" guest :my-email="myEmail" />
+        </div>
       </div>
     </div>
 
@@ -160,6 +176,13 @@
       :my-email="myEmail"
       :roster-agents="rosterAgents"
       :owned-agents="ownedAgents"
+    />
+    <ProjectCreateModal
+      v-if="page.data"
+      v-model="editOpen"
+      :project="page.data"
+      :my-email="myEmail"
+      :agents="rosterAgents"
     />
     <ConfirmDialog
       v-model:visible="archiveConfirm"
@@ -185,6 +208,11 @@ import InlineError from '@/components/InlineError.vue'
 import ConfirmDialog from '@/components/ConfirmDialog.vue'
 import PortalAvatar from '@/components/portal/PortalAvatar.vue'
 import ProjectMembersModal from './ProjectMembersModal.vue'
+import ProjectCreateModal from './ProjectCreateModal.vue'
+import ProjectTasks from './ProjectTasks.vue'
+import ProjectLog from './ProjectLog.vue'
+import ProjectMaterial from './ProjectMaterial.vue'
+import OverflowTabs from '@/components/OverflowTabs.vue'
 import { useProjectsStore } from '@/stores/projects'
 import { useClientPortalStore } from '@/stores/clientPortal'
 import { viewState } from '@/utils/loadingState'
@@ -204,6 +232,14 @@ const emit = defineEmits(['back', 'open-thread', 'open-room'])
 const store = useProjectsStore()
 const portal = useClientPortalStore()
 const membersOpen = ref(false)
+const editOpen = ref(false)
+const TABS = [
+  { id: 'overview', label: 'Overview' },
+  { id: 'tasks', label: 'Tasks' },
+  { id: 'log', label: 'Log' },
+  { id: 'material', label: 'Files & reports' },
+]
+const tab = ref('overview')
 const archiveConfirm = ref(false)
 const actionError = ref('')
 const starting = ref('')
@@ -214,6 +250,10 @@ const view = computed(() => viewState({
 }))
 const p = computed(() => page.value.data || { members: [], agents: [], my_chats: [], rooms: [] })
 const rosterAgents = computed(() => portal.agents.map((a) => a.name))
+const guest = computed(() => p.value.guest === true)
+// The project's active agents this person can use — where "Add from…" looks.
+const usableAgents = computed(() => (p.value.agents || [])
+  .filter((a) => a.state === 'active' && rosterAgents.value.includes(a.agent_name)).map((a) => a.agent_name))
 const ownedAgents = computed(() => portal.agents.filter((a) => a.owned).map((a) => a.name))
 const options = computed(() => workOnItOptions(p.value, rosterAgents.value))
 const primaryOption = computed(() => options.value.find((o) => o.kind === 'reopen' || o.kind === 'new') || null)

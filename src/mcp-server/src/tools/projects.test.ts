@@ -95,3 +95,73 @@ describe("ent#661 projects — honest refusals, never a throw", () => {
     assert.equal(out.not_found, true);
   });
 });
+
+describe("ent#661 v2 — tasks, log and items", () => {
+  it("create_project_task forwards the body without the project id", async () => {
+    const calls: unknown[][] = [];
+    const tools = makeTools({
+      createProjectTask: async (pid: string, body: Record<string, unknown>) => {
+        calls.push([pid, body]);
+        return { id: "T-001", title: body.title };
+      },
+    } as Partial<TrinityClient>);
+    const out = JSON.parse(
+      await tools.create_project_task.execute({ project_id: "prj_1", title: "Draft" }, {}),
+    );
+    assert.deepEqual(calls[0], ["prj_1", { title: "Draft" }]);
+    assert.equal(out.success, true);
+    assert.equal(out.id, "T-001");
+  });
+
+  it("a refused done surfaces the backend's code, never a throw", async () => {
+    const tools = makeTools({
+      updateProjectTask: async () => {
+        throw apiError(403, { code: "done_needs_verification", message: "Move it to pending-verification." });
+      },
+    } as Partial<TrinityClient>);
+    const out = JSON.parse(
+      await tools.update_project_task.execute({ project_id: "prj_1", task_id: "T-001", status: "done" }, {}),
+    );
+    assert.equal(out.success, false);
+    assert.equal(out.code, "done_needs_verification");
+    assert.match(out.error, /pending-verification/);
+  });
+
+  it("a project the agent is not on reads as not_found", async () => {
+    const tools = makeTools({
+      addProjectLogEntry: async () => {
+        throw apiError(404, { code: "project_not_found", message: "Project not found." });
+      },
+    } as Partial<TrinityClient>);
+    const out = JSON.parse(
+      await tools.add_project_log_entry.execute({ project_id: "prj_x", kind: "decision", body: "x" }, {}),
+    );
+    assert.equal(out.not_found, true);
+  });
+
+  it("link_to_project sends only kind and target", async () => {
+    const calls: unknown[][] = [];
+    const tools = makeTools({
+      linkToProject: async (pid: string, body: Record<string, unknown>) => {
+        calls.push([pid, body]);
+        return body;
+      },
+    } as Partial<TrinityClient>);
+    await tools.link_to_project.execute({ project_id: "prj_1", kind: "file", target_id: "f1" }, {});
+    assert.deepEqual(calls[0], ["prj_1", { kind: "file", target_id: "f1" }]);
+  });
+});
+
+describe("ent#661 v2 — the assignee maps to the task's agent field", () => {
+  it("create_project_task sends assignee as agent", async () => {
+    const calls: unknown[][] = [];
+    const tools = makeTools({
+      createProjectTask: async (pid: string, body: Record<string, unknown>) => {
+        calls.push([pid, body]);
+        return {};
+      },
+    } as Partial<TrinityClient>);
+    await tools.create_project_task.execute({ project_id: "prj_1", title: "x", assignee: "scout" }, {});
+    assert.deepEqual(calls[0], ["prj_1", { title: "x", agent: "scout" }]);
+  });
+});

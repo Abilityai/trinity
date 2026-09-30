@@ -105,11 +105,13 @@
              the chat exists, and on a build without projects. -->
         <ProjectChatControls
           v-if="currentSessionId"
+          kind="thread"
           :agent-name="agent.name"
-          :session-id="currentSessionId"
+          :target-id="currentSessionId"
           :session-title="currentTitle"
           :is-main="isMainChat"
           @open-project="(id) => emit('open-project', id)"
+          @wrap-up="wrapUp"
         />
         <!-- ent#451: New chat lives in the header, with its hotkey (⌘J /
              Ctrl+J, ruled 2026-09-06). Starts a fresh thread with THIS agent —
@@ -760,6 +762,7 @@
 
 <script setup>
 import ProjectChatControls from './projects/ProjectChatControls.vue'
+import { wrapUpPrompt } from './projects/projectsUtils'
 import { ref, computed, watch, nextTick, onMounted, onBeforeUnmount } from 'vue'
 import { useClientPortalStore } from '@/stores/clientPortal'
 import { agentDisplayName } from '@/utils/agentName'
@@ -2682,6 +2685,16 @@ async function endVoiceCall() {
 // either is a break, not dead-code cleanup.
 // ent#551 QA: the shell ends the call through this when the person confirms
 // leaving the stage — the one path that ends a call from outside this component.
+// ent#661 v2.6 — Wrap up: an ordinary message from the person, asking the
+// agent to record this chat's outcomes in the project through its tools. It
+// goes through `send()` like anything typed, so it is visible in the thread
+// and the agent's log entries are attributed to the agent.
+function wrapUp(project) {
+  if (!project || sending.value) return
+  input.value = wrapUpPrompt(project.name)
+  void send()
+}
+
 defineExpose({ focusComposer, startVoiceCall, endVoiceCall })
 
 // ent#474 — the rail's Work signal for a 1:1, DERIVED from the in-flight flag

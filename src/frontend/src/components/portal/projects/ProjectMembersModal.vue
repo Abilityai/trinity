@@ -52,7 +52,26 @@
           />
           <BaseButton type="submit" variant="secondary" :loading="busy === 'member'" :disabled="!newMember.trim()">Add</BaseButton>
         </form>
-        <p v-if="canManage" class="mt-1 text-xs text-gray-500 dark:text-gray-400">People at your company only. Outside clients can't be added yet.</p>
+        <p v-if="canManage" class="mt-1 text-xs text-gray-500 dark:text-gray-400">People at your company. Invite outside clients below, as guests.</p>
+      </section>
+
+      <section data-testid="project-guests">
+        <h3 class="text-[11px] font-semibold uppercase tracking-wide text-gray-500 dark:text-gray-400">Guests (outside clients)</h3>
+        <p v-if="!(project.guests || []).length" class="mt-1 text-sm text-gray-500 dark:text-gray-400">No guests.</p>
+        <ul class="mt-1 divide-y divide-gray-100 dark:divide-gray-750">
+          <li v-for="g in project.guests || []" :key="g" class="flex items-center gap-2 py-2 text-sm">
+            <span class="min-w-0 flex-1 truncate text-gray-900 dark:text-gray-100">{{ g }}</span>
+            <BaseBadge variant="info">Guest</BaseBadge>
+            <BaseButton v-if="canManage" size="sm" variant="ghost" :data-testid="`remove-guest-${g}`" @click="confirmRemove('member', g)">Remove</BaseButton>
+          </li>
+        </ul>
+        <form v-if="canManage" class="mt-2 flex items-start gap-2" @submit.prevent="addGuest">
+          <BaseInput id="project-add-guest" v-model="newGuest" class="flex-1" type="email" placeholder="name@client.com" aria-label="Invite a guest by email" />
+          <BaseButton type="submit" variant="secondary" :loading="busy === 'guest'" :disabled="!newGuest.trim()">Invite</BaseButton>
+        </form>
+        <p v-if="canManage" class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+          A guest sees the name, goal and status, their own chats, and only files and reports you share with guests — never the log, tasks, decisions or members. They work with agents that are shared with them.
+        </p>
       </section>
 
       <section>
@@ -138,6 +157,7 @@ defineEmits(['update:modelValue'])
 const store = useProjectsStore()
 const newMember = ref('')
 const newAgent = ref('')
+const newGuest = ref('')
 const busy = ref('')
 const error = ref('')
 const confirm = ref({ open: false, kind: '', target: '', title: '', message: '', verb: '' })
@@ -162,6 +182,10 @@ async function run(kind, fn) {
 const addMember = () => run('member', async () => {
   await store.addMember(props.project.id, newMember.value.trim())
   newMember.value = ''
+})
+const addGuest = () => run('guest', async () => {
+  await store.addGuest(props.project.id, newGuest.value.trim())
+  newGuest.value = ''
 })
 const addAgent = () => run('agent', async () => {
   await store.addAgent(props.project.id, newAgent.value)

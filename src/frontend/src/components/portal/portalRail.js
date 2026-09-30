@@ -211,15 +211,16 @@ export const RAIL_TABS = Object.freeze([
   // pass never defined. A signalling tab without an empty state is therefore a
   // legal registry shape; `RAIL_SIGNAL_NONE` stays for a tab with neither.
   // ent#661 — Projects: the projects the current agent can work on, a filter
-  // of the person's Projects list. Platform door AND a roster capability
-  // (`capability`, checked fail-closed in `tabPassesDoor`): projects are an
-  // internal-only, entitled surface, so a platform session on a build without
-  // them never gets a tab whose body would 404. No registry empty state — the
-  // body states its own (it needs the store's verdict to tell empty from failed).
+  // of the person's Projects list. AUDIENCE door AND a roster capability
+  // (`capability`, checked fail-closed in `tabPassesDoor`). The capability is
+  // what decides who: a platform user on an entitled build, or an outside
+  // client INVITED to a project (v2.4) — the server narrows what a guest sees.
+  // A session without it never gets a tab whose body would 404. No registry
+  // empty state — the body states its own (it needs the store's verdict).
   Object.freeze({
     id: 'projects',
     label: 'Projects',
-    door: RAIL_DOORS.PLATFORM,
+    door: RAIL_DOORS.AUDIENCE,
     capability: 'projects',
     scope: RAIL_SCOPE_PARTICIPANTS,
     signal: RAIL_SIGNAL_NONE,

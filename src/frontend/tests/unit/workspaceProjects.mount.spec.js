@@ -52,6 +52,14 @@ const byTestId = (id) => document.querySelector(`[data-testid="${id}"]`)
 let portal
 let projects
 
+// jsdom has no ResizeObserver; OverflowTabs (the project page's tabs) measures
+// with one. Same inert stub as portalComposerDraft.spec.js.
+globalThis.ResizeObserver = globalThis.ResizeObserver || class {
+  observe() {}
+  unobserve() {}
+  disconnect() {}
+}
+
 beforeEach(() => {
   document.body.innerHTML = ''
   localStorage.clear()
@@ -106,7 +114,7 @@ describe('Members & access', () => {
 describe('chat header controls', () => {
   function header(props = {}) {
     return mount(ProjectChatControls, {
-      props: { agentName: 'scout', sessionId: 's1', sessionTitle: 'Pricing', isMain: false, ...props },
+      props: { kind: 'thread', agentName: 'scout', targetId: 's1', sessionTitle: 'Pricing', isMain: false, ...props },
       attachTo: document.body,
     })
   }

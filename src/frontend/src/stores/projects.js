@@ -126,9 +126,108 @@ export const useProjectsStore = defineStore('projects', () => {
     void fetchList()
   }
 
+  // --- v2: tasks, the log, items, guests, import -----------------------------------
+  // Reads return data for the calling panel to hold (they are per-project and
+  // short-lived); writes rethrow untouched, like the rest of this store.
+  const tasks = ref({})    // id → { rows, loaded, error }
+  const logs = ref({})     // id → { rows, loaded, error }
+
+  async function fetchTasks(id) {
+    const prev = tasks.value[id] || { rows: [], loaded: false, error: null }
+    try {
+      const { data } = await portalHttp.get(url(id, '/tasks'), { headers: headers(), params: { status: 'all' } })
+      tasks.value = { ...tasks.value, [id]: { rows: data.tasks || [], loaded: true, error: null } }
+    } catch (err) {
+      tasks.value = { ...tasks.value, [id]: { ...prev, error: projectErrorMessage(err) } }
+    }
+  }
+
+  async function fetchTask(id, taskId) {
+    const { data } = await portalHttp.get(url(id, `/tasks/${encodeURIComponent(taskId)}`), { headers: headers() })
+    return data
+  }
+
+  async function createTask(id, body) {
+    const { data } = await portalHttp.post(url(id, '/tasks'), body, { headers: headers() })
+    await Promise.all([fetchTasks(id), fetchLog(id)])
+    return data
+  }
+
+  async function updateTask(id, taskId, body) {
+    const { data } = await portalHttp.patch(url(id, `/tasks/${encodeURIComponent(taskId)}`), body, { headers: headers() })
+    await Promise.all([fetchTasks(id), fetchLog(id)])
+    return data
+  }
+
+  async function addTaskNote(id, taskId, body) {
+    await portalHttp.post(url(id, `/tasks/${encodeURIComponent(taskId)}/log`), { body }, { headers: headers() })
+  }
+
+  async function fetchLog(id) {
+    const prev = logs.value[id] || { rows: [], loaded: false, error: null }
+    try {
+      const { data } = await portalHttp.get(url(id, '/log'), { headers: headers(), params: { limit: 200 } })
+      logs.value = { ...logs.value, [id]: { rows: data.entries || [], loaded: true, error: null } }
+    } catch (err) {
+      logs.value = { ...logs.value, [id]: { ...prev, error: projectErrorMessage(err) } }
+    }
+  }
+
+  async function addLogEntry(id, body) {
+    const { data } = await portalHttp.post(url(id, '/log'), body, { headers: headers() })
+    await fetchLog(id)
+    return data
+  }
+
+  const addGuest = (id, email) =>
+    _write(id, () => portalHttp.post(url(id, '/guests'), { email }, { headers: headers() }))
+  const addItem = (id, kind, targetId, audience = 'members') =>
+    _write(id, () => portalHttp.post(url(id, '/items'), { kind, target_id: targetId, audience }, { headers: headers() }))
+  const setItemAudience = (id, kind, targetId, audience) =>
+    _write(id, () => portalHttp.patch(url(id, `/items/${kind}/${encodeURIComponent(targetId)}`), { audience }, { headers: headers() }))
+  const removeItem = (id, kind, targetId) =>
+    _write(id, () => portalHttp.delete(url(id, `/items/${kind}/${encodeURIComponent(targetId)}`), { headers: headers() }))
+
+  async function fetchReport(id, reportId) {
+    const { data } = await portalHttp.get(url(id, `/reports/${encodeURIComponent(reportId)}`), { headers: headers() })
+    return data
+  }
+
+  /**
+   * What this person could add to a project from one agent: their files,
+   * reports and decisions there. Read through the same Workspace routes the
+   * Files tab, the Info tab and the decisions panel use — directly, so the
+   * picker never writes the Workspace store's single-agent panel state.
+   */
+  async function myItems(agentName) {
+    const base = `/api/enterprise/client-portal/agents/${encodeURIComponent(agentName)}`
+    const get = (path) => portalHttp.get(`${base}${path}`, { headers: headers() }).then((r) => r.data)
+    const [files, reports, decisions] = await Promise.allSettled([
+      get('/documents'), get('/reports'), get('/decisions'),
+    ])
+    return {
+      files: files.status === 'fulfilled' ? (files.value.documents || []) : null,
+      reports: reports.status === 'fulfilled' ? (reports.value.reports || []) : null,
+      decisions: decisions.status === 'fulfilled' ? (decisions.value.decisions || []) : null,
+    }
+  }
+
+  async function importCandidates(agentName) {
+    const { data } = await portalHttp.get(`${BASE}/import/candidates`, { headers: headers(), params: { agent: agentName } })
+    return data.candidates || []
+  }
+
+  async function importProject(agentName, path) {
+    const { data } = await portalHttp.post(`${BASE}/import`, { agent_name: agentName, path }, { headers: headers() })
+    void fetchList()
+    return data
+  }
+
   return {
     list, listLoaded, listLoading, listError,
     fetchList, pageState, fetchProject, forLink, fetchForLink,
     create, update, setArchived, addMember, removeMember, addAgent, removeAgent, link, unlink,
+    tasks, logs, fetchTasks, fetchTask, createTask, updateTask, addTaskNote, fetchLog, addLogEntry,
+    addGuest, addItem, setItemAudience, removeItem, fetchReport, myItems, importCandidates, importProject,
   }
 })

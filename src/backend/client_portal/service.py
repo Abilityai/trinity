@@ -363,22 +363,26 @@ def _multi_agent_chat_available() -> bool:
     return True
 
 
-def _projects_available(is_platform: bool) -> bool:
+def _projects_available(is_platform: bool, email: str | None = None) -> bool:
     """ent#661: may this principal use Workspace Projects?
 
-    Entitled AND a platform principal: projects are internal-only, so an
-    outside client is never told the capability exists. Fails closed — an
-    unreadable registry hides the surface rather than advertising routes that
-    would 404.
+    Entitled, AND either a platform principal or an outside client invited to
+    one (asked through `services.portal_capabilities`, since the core does not
+    hold invitations). An uninvited outside client is never told the capability
+    exists. Fails closed — an unreadable registry hides the surface rather than
+    advertising routes that would 404.
     """
-    if not is_platform:
-        return False
     try:
         from services.entitlement_service import entitlement_service
-        return entitlement_service.is_entitled("projects") is True
+        if entitlement_service.is_entitled("projects") is not True:
+            return False
     except Exception:  # noqa: BLE001 — a roster must never 500 over a capability bit
         logger.warning("[ent#661] projects capability read failed", exc_info=True)
         return False
+    if is_platform:
+        return True
+    from services import portal_capabilities
+    return portal_capabilities.has("projects", (email or "").strip().lower())
 
 
 def _default_voice_id() -> str | None:
@@ -1033,7 +1037,7 @@ async def get_roster(email: str | None, include_owned: bool = False) -> PortalRo
         client_email=(email or None),
         agents=cards,
         multi_agent_chat_available=multi_agent_chat,
-        projects_available=_projects_available(include_owned),
+        projects_available=_projects_available(include_owned, email),
         realtime_voice=realtime_voice_capability(include_owned),
         # ent#403: instance-level, so it rides the roster rather than every card.
         # Empty for a non-platform principal — belt to the per-card braces: the
