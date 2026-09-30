@@ -123,7 +123,7 @@ Trinity uses two separate Redis passwords by design. `REDIS_BACKEND_PASSWORD` is
 
 | Variable | Notes |
 |---|---|
-| `ANTHROPIC_API_KEY` | Required for agents to run Claude. Can be left blank and configured in Settings after login (or connect a Claude subscription there). |
+| `ANTHROPIC_API_KEY` | Required for agents to run Claude. Can be left blank. The setup steps that open the first time you log in ask for a Claude subscription token or an Anthropic API key, and Trinity cannot run agents until one is set. |
 | `GITHUB_PAT` | Required to clone private GitHub template repos. |
 
 #### Required for production access

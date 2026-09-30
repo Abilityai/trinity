@@ -1210,7 +1210,8 @@ if [ "$MODEL_KEY_MISSING" = "1" ]; then
     echo ""
     echo "  ⚠️  No model API key detected in .env — agents can't run until you set one."
     echo "     Add ANTHROPIC_API_KEY=... (or GOOGLE_API_KEY / a Claude subscription"
-    echo "     token) to .env and re-run start.sh, or set it in Settings after login."
+    echo "     token) to .env and re-run start.sh, or connect Claude in the setup steps"
+    echo "     that open the first time you log in."
 fi
 echo ""
 # #2885: one ask, at the moment it just worked. Raw URL on its own line so it is
