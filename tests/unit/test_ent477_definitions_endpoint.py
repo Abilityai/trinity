@@ -84,8 +84,11 @@ def _async_raise(exc):
 
 
 def _get(include_retired=False, agent=AGENT):
+    # A human principal: ent#727 gates this read on the caller, and the
+    # owner reading its own agent is the path every test here means.
     return asyncio.run(agent_files.get_agent_metric_definitions(
-        agent, _request(), include_retired=include_retired))
+        agent, _request(), include_retired=include_retired,
+        current_user=_user(OWNER, 1)))
 
 
 def _refresh(agent=AGENT):

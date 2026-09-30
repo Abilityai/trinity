@@ -15,7 +15,8 @@
  * correctable mistake — and the 422 body carries a reason code per point
  * precisely so the agent can fix it and re-send.
  *
- * ent#479 adds `get_metrics` to this module (the read half), and ent#666
+ * ent#479 adds `get_metrics` to this module (the read half) — ent#727 lets it
+ * read another agent's numbers through a permission grant — and ent#666
  * adds `get_objectives` — the same numbers against the targets an objective
  * file sets for them, which is the ONE place a gap is computed.
  */
@@ -241,12 +242,14 @@ export function createMetricsTools(client: TrinityClient, requireApiKey: boolean
     },
 
     // ========================================================================
-    // get_metrics — read your own recorded metrics, with freshness (ent#479)
+    // get_metrics — read recorded metrics, with freshness (ent#479); another
+    // agent's when you hold a permission grant on it (ent#727)
     // ========================================================================
     getMetrics: {
       name: "get_metrics",
       description:
-        "Read YOUR recorded business metrics: what you declared, the latest value of each, " +
+        "Read recorded business metrics — YOURS by default, or another agent's with `agent`: " +
+        "what it declared, the latest value of each, " +
         "how fresh it is, and a bounded series for charting. Answers from the point store, " +
         "so it works whether or not you are mid-turn and whether or not you have a " +
         "dashboard.yaml. A metric is STALE when no point has arrived within 2x its declared " +
@@ -260,9 +263,20 @@ export function createMetricsTools(client: TrinityClient, requireApiKey: boolean
         "not `series[0]` — `chart` is the one series that matches `latest`: the fold " +
         "across every dimension for sum/avg, and for `last` the single series named by " +
         "`chart.dims` (basis: series), because a cross-series `last` is not one number. " +
-        "This tool reads only your own metrics — there is no agent parameter; another " +
-        "agent's numbers are not readable from here.",
+        "Pass `agent` to read ANOTHER agent's metrics: you must hold a permission grant on " +
+        "it — the same grant that lets you chat_with_agent it, configured by an operator in " +
+        "the Trinity UI. Without one the call is refused with `Access denied` (\"Permission " +
+        "denied: Agent '<you>' is not permitted to communicate with '<agent>'\") or " +
+        "`not_authorized`; that is not retryable. The answer has exactly the same shape and " +
+        "stale rule as your own read.",
       parameters: z.object({
+        agent: z
+          .string()
+          .optional()
+          .describe(
+            "Optional. Another agent whose metrics to read; omit for your own. Requires a " +
+              "permission grant on that agent (the one chat_with_agent uses).",
+          ),
         metric: z
           .string()
           .optional()
@@ -299,6 +313,7 @@ export function createMetricsTools(client: TrinityClient, requireApiKey: boolean
       }),
       execute: async (
         params: {
+          agent?: string;
           metric?: string;
           window?: string;
           since?: string;
@@ -309,20 +324,28 @@ export function createMetricsTools(client: TrinityClient, requireApiKey: boolean
       ) => {
         const authContext = context?.session;
         const apiClient = getClient(authContext);
+        const { agent, ...options } = params;
 
+        // A named target has already passed `checkAgentEdge` (the `enforce`
+        // row on `agent` in access.ts) and the backend re-checks the grant;
+        // an empty string reads as omitted there, and so it does here.
         let agentName: string;
-        try {
-          agentName = getAgentName(authContext, "get_metrics");
-        } catch (error) {
-          return JSON.stringify(
-            { success: false, error: error instanceof Error ? error.message : String(error) },
-            null,
-            2,
-          );
+        if (agent) {
+          agentName = agent;
+        } else {
+          try {
+            agentName = getAgentName(authContext, "get_metrics");
+          } catch (error) {
+            return JSON.stringify(
+              { success: false, error: error instanceof Error ? error.message : String(error) },
+              null,
+              2,
+            );
+          }
         }
 
         try {
-          const result = await apiClient.getAgentMetrics(agentName, params);
+          const result = await apiClient.getAgentMetrics(agentName, options);
           return JSON.stringify({ success: true, ...result }, null, 2);
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
