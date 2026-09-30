@@ -2,12 +2,15 @@
 
 Files are truth and the card is a projection, so the tests drive
 `build_role_card` with the agent door stubbed (a fake client serving
-`template.yaml`, the canon files and `/api/metrics`) and assert what crosses:
+`template.yaml` and the canon files) and the metric store faked, and assert
+what crosses:
 
 * no `x-role` → no card (the panel is unchanged, AC 5);
 * a role file that fails to load SAYS so (`role.error`), never an empty role;
-* objectives are the ones the role owns or this agent supports, with metric
-  value / target / freshness — stale is stale, never current (quality bar #4);
+* objectives are the ones the role owns or this agent supports, with each
+  metric's recorded value / target / freshness from the ONE objective ↔ metric
+  join (ent#676 — `test_ent676_role_card_join.py` owns that cut-over's detail)
+  — stale is stale, never current (quality bar #4);
 * readiness is the OWNER's stamp, never the template's word: a template that
   says `ready` with no stamp is `calibrating` + `unstamped_ready` (#663);
 * the flip is owner-only, named 403 for everyone else, and the agent can never
@@ -22,6 +25,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
+from urllib.parse import unquote
 
 import pytest
 
@@ -82,12 +86,11 @@ metrics: [{name: burn}]
 
 
 class FakeClient:
-    """The agent door: files by path, a listing, and the metrics endpoint."""
+    """The agent door: files by path (`read_file` for the card's own reads,
+    `/api/files/download` for the join's) and a directory listing."""
 
-    def __init__(self, files: dict, *, metrics=None, last_updated=None, broken=()):
+    def __init__(self, files: dict, *, broken=()):
         self.files = files
-        self.metrics = metrics or {}
-        self.last_updated = last_updated
         self.broken = set(broken)
 
     async def read_file(self, path):
@@ -98,25 +101,53 @@ class FakeClient:
         return {"success": True, "content": self.files[path]}
 
     async def get(self, path, **kw):
-        resp = SimpleNamespace(status_code=200)
-        if path == "/api/metrics":
-            resp.json = lambda: {"has_metrics": True, "values": self.metrics, "last_updated": self.last_updated}
-        elif path.startswith("/api/files?path=/home/developer/"):
+        resp = SimpleNamespace(status_code=200, text="")
+        if path.startswith("/api/files?path=/home/developer/"):
             directory = path.split("/home/developer/", 1)[1]
             names = sorted(p.split("/")[-1] for p in self.files if p.startswith(directory + "/"))
             resp.json = lambda: {"tree": [{"name": n, "type": "file"} for n in names]}
+        elif path.startswith("/api/files/download?path=") and unquote(path.split("path=", 1)[1]) in self.files:
+            resp.text = self.files[unquote(path.split("path=", 1)[1])]
         else:
             resp.status_code = 404
             resp.json = lambda: {}
         return resp
 
 
-def _wire(monkeypatch, client, *, state="running", stamp=None, owner=True, ratings=None, messages=None):
+def _ago(**delta):
+    return (datetime.now(timezone.utc) - timedelta(**delta)).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+
+
+class FakeStore:
+    """The declared-metric registry and the point store — what the objective
+    join reads the numbers from (ent#676). A list, not a database."""
+
+    def __init__(self, points=None, *, cadence_seconds=3600):
+        self.points = points or {}
+        self.cadence_seconds = cadence_seconds
+
+    def list_metric_definitions(self, agent, include_retired=False):
+        return [{"name": n, "type": "gauge", "label": n, "unit": None, "direction": "neutral",
+                 "aggregation": "last", "cadence_seconds": self.cadence_seconds, "status": "active",
+                 "retired_at": None, "dimensions": []}
+                for n in ("close_rate", "reply_rate")]
+
+    def latest_metric_points(self, agent, names, per_metric_limit=200):
+        return [{"metric": n, "ts": ts, "value_numeric": v, "value_text": None, "dims": None}
+                for n, (v, ts) in self.points.items() if n in set(names)]
+
+
+def _wire(monkeypatch, client, *, state="running", stamp=None, owner=True, ratings=None, messages=None,
+          store=None):
     import client_portal.role_card as rc
+    import database
     from services import docker_utils
     from services import agent_client as ac_mod
     monkeypatch.setattr(docker_utils, "agent_container_state_async", AsyncMock(return_value=state))
     monkeypatch.setattr(ac_mod, "get_agent_client", lambda name: client)
+    # The join resolves `database.db` at call time — stubbed by default so no
+    # card built here reaches a real store.
+    monkeypatch.setattr(database, "db", store or FakeStore())
     monkeypatch.setattr(rc.db, "get_agent_role_readiness", lambda a: stamp)
     monkeypatch.setattr(rc.portal_db, "get_owned_roster",
                         lambda email: [{"agent_name": AGENT}] if owner else [])
@@ -129,17 +160,18 @@ def _wire(monkeypatch, client, *, state="running", stamp=None, owner=True, ratin
 
 
 def _card(rc, *, is_platform=True):
-    return asyncio.run(rc.build_role_card(AGENT, EMAIL, is_platform=is_platform))
+    return asyncio.run(rc.build_role_card(AGENT, EMAIL, is_platform=is_platform,
+                                          objectives_admitted=True))
 
 
-def _full_client(**kw):
+def _full_client():
     return FakeClient({
         "template.yaml": TEMPLATE,
         "canon/roles/sales-lead.yaml": ROLE,
         "canon/objectives/q4-close-rate.yaml": OBJ_OWNED,
         "canon/objectives/q4-icp-demand.yaml": OBJ_SUPPORTED,
         "canon/objectives/other.yaml": OBJ_FOREIGN,
-    }, **kw)
+    })
 
 
 # --- no role → no card ----------------------------------------------------------
@@ -187,11 +219,17 @@ def test_a_transport_failure_on_the_role_file_is_named_too(monkeypatch):
 
 
 def test_a_traversal_shaped_canon_path_or_role_id_never_reaches_a_read(monkeypatch):
-    import client_portal.role_card as rc
-    assert rc.canon_root({"x-canon": {"clone_path": "../etc"}}) is None
-    assert rc.canon_root({"x-canon": {"clone_path": "canon/../x"}}) is None
-    assert rc.canon_root({}) == "canon"
-    assert rc.canon_root({"x-canon": {"clone_path": "shared/canon"}}) == "shared/canon"
+    # ent#676: the card validates the canon path with the JOIN's validator —
+    # one rule for what may reach a file read, so the rule is asserted through
+    # the card rather than on a second copy of it.
+    for clone_path in ("../etc", "canon/../x"):
+        client = FakeClient({"template.yaml": TEMPLATE.replace("clone_path: canon",
+                                                               f"clone_path: {clone_path}")})
+        role = _card(_wire(monkeypatch, client))["role"]
+        assert role["error"] == "canon_path_invalid" and role["path"] is None
+    shared = FakeClient({"template.yaml": TEMPLATE.replace("clone_path: canon", "clone_path: shared/canon"),
+                         "shared/canon/roles/sales-lead.yaml": ROLE})
+    assert _card(_wire(monkeypatch, shared))["role"]["path"] == "shared/canon/roles/sales-lead.yaml"
     bad = TEMPLATE.replace("role: sales-lead", "role: ../../secrets")
     rc2 = _wire(monkeypatch, FakeClient({"template.yaml": bad}))
     assert _card(rc2)["role"]["error"] == "role_id_invalid"
@@ -200,33 +238,43 @@ def test_a_traversal_shaped_canon_path_or_role_id_never_reaches_a_read(monkeypat
 # --- objectives + freshness -------------------------------------------------------
 
 def test_objectives_are_the_ones_the_role_owns_or_this_agent_supports(monkeypatch):
-    fresh = datetime.now(timezone.utc).isoformat()
-    rc = _wire(monkeypatch, _full_client(metrics={"close_rate": 0.27, "icp_fit_rate": 0.6}, last_updated=fresh))
+    fresh = _ago(minutes=1)
+    rc = _wire(monkeypatch, _full_client(), store=FakeStore({"close_rate": (0.27, fresh)}))
     objs = {o["id"]: o for o in _card(rc)["objectives"]}
     assert set(objs) == {"q4-close-rate", "q4-icp-demand"}      # `other` (cfo's) is not on this card
     assert objs["q4-close-rate"]["owned"] is True
     assert objs["q4-icp-demand"]["owned"] is False
     close = next(m for m in objs["q4-close-rate"]["metrics"] if m["name"] == "close_rate")
-    assert close == {"name": "close_rate", "direction": "up", "target": 0.3, "by": "2026-12-31",
-                     "value": 0.27, "as_of": fresh, "stale": False}
+    assert close == {"name": "close_rate", "type": "gauge", "unit": None, "target": 0.3,
+                     "actual": 0.27, "last_point_at": fresh, "stale": False, "freshness": "fresh",
+                     "gap": {"status": "behind"}, "finding": None}
 
 
-def test_a_stale_or_missing_metric_is_marked_stale_never_current(monkeypatch):
-    old = (datetime.now(timezone.utc) - timedelta(days=31)).isoformat()
-    rc = _wire(monkeypatch, _full_client(metrics={"close_rate": 0.27}, last_updated=old))
+def test_a_stale_metric_is_marked_stale_never_current_and_a_missing_one_says_so(monkeypatch):
+    old = _ago(hours=3)                                          # a 1h cadence: stale past 2h
+    rc = _wire(monkeypatch, _full_client(), store=FakeStore({"close_rate": (0.27, old)}))
     objs = {o["id"]: o for o in _card(rc)["objectives"]}
     rows = {m["name"]: m for m in objs["q4-close-rate"]["metrics"]}
-    assert rows["close_rate"]["stale"] is True and rows["close_rate"]["value"] == 0.27   # last value shown, as stale
-    assert rows["reply_rate"]["stale"] is True and rows["reply_rate"]["value"] is None  # never pushed
+    assert rows["close_rate"]["stale"] is True and rows["close_rate"]["actual"] == 0.27   # last value shown, as stale
+    # Declared but never recorded is its own answer — "no points", not a stale number.
+    assert rows["reply_rate"]["freshness"] == "no_points" and rows["reply_rate"]["actual"] is None
 
 
-def test_a_metric_with_no_freshness_stamp_at_all_is_stale(monkeypatch):
-    rc = _wire(monkeypatch, _full_client(metrics={"close_rate": 0.27}, last_updated=None))
+def test_a_metric_with_no_declared_cadence_is_never_stale(monkeypatch):
+    """The card's old rule called any number older than 30 days stale. The
+    platform's one rule cannot call a metric late when nobody promised a rhythm."""
+    ancient = _ago(days=400)
+    rc = _wire(monkeypatch, _full_client(),
+               store=FakeStore({"close_rate": (0.27, ancient)}, cadence_seconds=None))
     rows = {m["name"]: m for o in _card(rc)["objectives"] for m in o["metrics"]}
-    assert rows["close_rate"]["stale"] is True
+    assert rows["close_rate"]["stale"] is False
+    assert rows["close_rate"]["freshness"] == "no_cadence"
+    assert rows["close_rate"]["last_point_at"] == ancient       # the age is still on the card
 
 
 def test_the_staleness_rule_directly():
+    """ent#676: this rule now governs the role FILE's `review_by` and nothing
+    else — a metric's staleness is the join's, asserted above."""
     import client_portal.role_card as rc
     now = datetime(2026, 9, 21, tzinfo=timezone.utc)
     assert rc.is_stale(None, now=now)

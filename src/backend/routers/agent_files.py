@@ -11,7 +11,12 @@ from models import User
 from database import db
 from dependencies import get_current_user, AuthorizedAgentByName, reject_agent_principal, assert_agent_owner, is_interactive_principal
 from services.agent_auth import agent_httpx_client
-from services import metric_read_service, objective_join_service, rate_limiter
+from services import (
+    metric_read_service,
+    objective_join_service,
+    objectives_read_budget,
+    rate_limiter,
+)
 from services.docker_service import get_agent_container
 from services.docker_utils import container_reload
 from services.agent_service import (
@@ -60,14 +65,9 @@ router = APIRouter(prefix="/api/agents", tags=["agents"])
 METRICS_READ_RATE_LIMIT = int(os.getenv("METRICS_READ_RATE_LIMIT", "240"))
 METRICS_READ_RATE_WINDOW = 60  # seconds
 
-# The objective join gets its OWN, much lower ceiling (ent#666). `/metrics` is
-# store-only; this read contacts the container — a directory listing plus up to
-# a hundred small file reads through the agent door — so the 240/min copied
-# from a store read would let ten open cards drive an agent-server the platform
-# also needs for chat. 60/min per agent clears ten cards polling at 30 s with
-# room to spare.
-OBJECTIVES_READ_RATE_LIMIT = int(os.getenv("OBJECTIVES_READ_RATE_LIMIT", "60"))
-OBJECTIVES_READ_RATE_WINDOW = 60  # seconds
+# The objective join gets its OWN, much lower ceiling (ent#666): the key, the
+# limit and the window live in `services/objectives_read_budget.py`, because
+# the Workspace role card draws on the same bucket (ent#676).
 
 
 # ============================================================================
@@ -494,10 +494,8 @@ async def get_agent_objectives(
             detail="Agent-scoped key may only read its own objectives",
         )
 
-    rate_limiter.enforce(
-        f"agent_objectives_read:{agent_name}",
-        OBJECTIVES_READ_RATE_LIMIT,
-        OBJECTIVES_READ_RATE_WINDOW,
+    objectives_read_budget.enforce(
+        agent_name,
         detail="Objective read rate limit exceeded for this agent.",
     )
 

@@ -159,6 +159,15 @@ PORTAL_FILE_HOURLY_LIMIT = int(os.getenv("PORTAL_FILE_HOURLY_LIMIT", "100"))
 # them together would price the cheap verb at the expensive one's rate.
 PORTAL_FILE_DELETE_BURST_LIMIT = int(os.getenv("PORTAL_FILE_DELETE_BURST_LIMIT", "60"))
 
+# ent#676 — the role card's objective read draws on the per-AGENT budget it
+# shares with `GET /api/agents/{name}/objectives`
+# (`services/objectives_read_budget`). This per-VIEWER cap is spent first, so
+# one Workspace viewer takes at most a third of that shared budget and cannot
+# refuse the operator's read or the agent's own `get_objectives`. The card
+# loads once per open, so twenty a minute is far above a person's use.
+PORTAL_ROLE_OBJECTIVES_VIEWER_LIMIT = 20
+PORTAL_ROLE_OBJECTIVES_VIEWER_WINDOW = 60  # seconds
+
 _CHAT_LIMIT_DETAIL = "Too many messages to this agent."
 _UPLOAD_LIMIT_DETAIL = "Too many uploads."
 _RATING_LIMIT_DETAIL = "Too many ratings for this agent."
@@ -810,10 +819,33 @@ async def portal_agent_role(
 ):
     """The role card (ent#527): a projection of the agent's own files — role,
     objectives with metric freshness, readiness. `role: null` when the agent
-    carries no `x-role`. Roster-gated like every route here."""
+    carries no `x-role`. Roster-gated like every route here.
+
+    The objectives come from the one objective ↔ metric join (ent#666), which
+    fans out into the agent's container, so this door draws on the budget
+    `GET /api/agents/{name}/objectives` draws on (ent#676). Unlike that door it
+    never answers 429: the card also carries the role, the readiness stamp and
+    the owner's flip, and the agent itself can empty the shared bucket by
+    polling its own objectives. A refused read is a 200 without objectives
+    (`objectives_error: objectives_rate_limited`) and without a fan-out.
+    """
     email = principal.email
     _require_roster(agent_name, email, principal.is_platform)
-    return await role_card.build_role_card(agent_name, email, is_platform=principal.is_platform)
+    from services import objectives_read_budget, rate_limiter
+    # Order is load-bearing: the viewer's own cap first, so a viewer past it
+    # spends nothing from the budget the operator door and the agent share.
+    # Both keys are built after the roster gate, on the name it validated.
+    objectives_admitted = (
+        rate_limiter.check(
+            f"portal_role_objectives:{email}:{agent_name}",
+            PORTAL_ROLE_OBJECTIVES_VIEWER_LIMIT,
+            PORTAL_ROLE_OBJECTIVES_VIEWER_WINDOW,
+        ).allowed
+        and objectives_read_budget.admit(agent_name)
+    )
+    return await role_card.build_role_card(
+        agent_name, email, is_platform=principal.is_platform,
+        objectives_admitted=objectives_admitted)
 
 
 @router.get("/agents/{agent_name}/decisions", response_model=PortalSeatDecisions)

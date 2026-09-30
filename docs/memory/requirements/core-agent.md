@@ -3239,7 +3239,7 @@ to localStorage in the clear.
 ### 5.36 Workspace — the role card in Agent details: role, objectives with metric freshness, readiness (trinity-enterprise#527)
 - **Status**: ✅ Implemented (2026-09-21) — the Role + Readiness half; the relationship line waits for ent#500. OSS-core (Workspace).
 - **Requirement ID**: WORKSPACE_ROLE_CARD
-- **GitHub Issue**: abilityai/trinity-enterprise#527 (+ #663, the 1.0 gate on who flips readiness)
+- **GitHub Issue**: abilityai/trinity-enterprise#527 (+ #663, the 1.0 gate on who flips readiness; + #676, 2026-09-30, the objectives cut over to the ent#666 join)
 - **Description**: When a companion has a role (Tandem, ent#497), the Info rail's
   Agent details show a **Role** card: the role it fills, the objectives it owns or
   supports with each metric's latest value, target and freshness, the viewer's
@@ -3252,18 +3252,40 @@ to localStorage in the clear.
   `create-agent:role-companion` wizard, #511) and `x-canon.clone_path` (default
   `canon`); the role file `<canon>/roles/<id>.yaml` and `<canon>/objectives/*.yaml`
   (framework §3.4 grammar — `owner: role:<id>` or `supporting_agents` names this
-  agent); metric values from the agent's `metrics.json` through its own
-  `/api/metrics` (`last_updated` is the freshness stamp). Nothing is cached or
+  agent). The role file is the card's own read; the objectives and their numbers
+  are **not** — they come from the one objective ↔ metric join
+  (`objective_join_service.read_objective_join`, §50 of
+  `lifecycle-observability.md`), called in process with the template and the agent
+  client the card already holds (trinity-enterprise#676). Nothing is cached or
   copied platform-side. Every read is fail-soft and **named**: no `x-role` → no
   card at all (the panel is unchanged, AC 5); a role file that cannot be read or
   parsed → the card says so (`role.error`), never an empty role; a stopped agent
-  → "the agent is stopped; the card reads its files when it runs".
-- **Freshness is honest, never optimistic (quality bar #4).** A metric is `stale`
-  when its value is missing, when `metrics.json` carries no `last_updated`, or when
-  that stamp is older than the framework's 30-day staleness bound (§3.5); a stale
-  metric renders as stale beside its last value and age, never as current. A
-  per-metric cadence is the business-metrics workstream's to declare; until then
-  the bound is the one rule the framework already states.
+  → "the agent is stopped; the card reads its files when it runs"; objectives
+  that could not be read → one line saying so (`objectives_error`), never an
+  empty list dressed as "this agent has none".
+- **Freshness is honest, never optimistic (quality bar #4) — and it is the
+  platform's one rule (trinity-enterprise#676).** A metric on the card is stale
+  exactly when the join says so: a declared `cadence:` and no recorded point within
+  2× of it (§49.1, `metric_read_service.freshness`). The card computes no metric
+  staleness of its own; a stale metric renders as stale beside its last value,
+  never as current, a declared metric with no points says "no points yet", and a
+  metric with no cadence is never stale. The framework's 30-day bound (§3.5)
+  governs **files**: on the card it applies to the role file's `review_by` and to
+  nothing else.
+- **The client sees a projection, never the operator's read (trinity-enterprise#676,
+  TD-4).** Per objective: `id, statement, horizon, status, owned`. Per metric:
+  `name, target, actual, last_point_at, stale, freshness, type, unit, gap.status,
+  finding.code`. A finding crosses as its **code** and the Workspace renders its
+  own client-safe sentence per code; the join's remediation text, objective file
+  paths and `owner: role:<id>` stay on the operator door (the #78 auth-path invariant). Only
+  `status: active` objectives are on the card — the join's rule.
+- **One budget, two doors (trinity-enterprise#676).** The card's objective read
+  draws on the same per-agent budget as `GET /api/agents/{name}/objectives`
+  (`agent_objectives_read:{name}`, 60/min), after a per-viewer cap of 20/min per
+  agent so one viewer cannot spend the agent's and the operator's read. An
+  exhausted budget **never refuses the card**: the role, readiness and the owner's
+  flip still answer, the objectives are left out with
+  `objectives_error: objectives_rate_limited`, and no container fan-out happens.
 - **Readiness is a platform record, and only the agent owner writes it (#663,
   ruled 2026-09-20).** `x-role.status` in `template.yaml` is agent-writable, so it
   cannot be the thing that says a companion is `ready`. `agent_role_readiness`

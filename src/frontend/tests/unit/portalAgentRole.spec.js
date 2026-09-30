@@ -7,6 +7,12 @@
  * says stale; readiness shows who/when; the owner's flip goes through a
  * confirm and a refusal lands next to the control. Mounted against the real
  * store with HTTP mocked (#2918 — a regex over the SFC proves none of that).
+ *
+ * ent#676 — the objectives are the portal projection of the ONE objective ↔
+ * metric join: `actual` / `target` formatted by the declared type, `gap.status`
+ * as a badge, `freshness` from the backend's verdict (never recomputed here),
+ * a finding as the Workspace's own sentence for its code, and a NAMED line
+ * when the objectives could not be read — never an empty block.
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { mount, flushPromises } from '@vue/test-utils'
@@ -43,6 +49,17 @@ import PortalAgentRole from '@/components/portal/PortalAgentRole.vue'
 const AGENT = 'sales-companion'
 const URL = `/api/enterprise/client-portal/agents/${AGENT}/role`
 const fresh = new Date(Date.now() - 3600_000).toISOString()
+const hoursAgo = new Date(Date.now() - 3 * 3600_000).toISOString()
+const longAgo = new Date(Date.now() - 40 * 86400_000).toISOString()
+
+/** One projected metric row (the `PortalRoleMetric` shape). */
+function metric(name, over = {}) {
+  return {
+    name, type: 'gauge', unit: null, target: null, actual: null, last_point_at: null,
+    stale: false, freshness: null, gap: { status: 'not_computable' }, finding: null,
+    ...over,
+  }
+}
 
 function card(over = {}) {
   return {
@@ -53,10 +70,16 @@ function card(over = {}) {
     objectives: [{
       id: 'q4-close-rate', statement: 'Raise close rate this quarter.', horizon: 'quarter', status: 'active', owned: true,
       metrics: [
-        { name: 'close_rate', direction: 'up', target: 0.3, by: '2026-12-31', value: 0.27, as_of: fresh, stale: false },
-        { name: 'reply_rate', direction: 'up', target: 0.2, by: null, value: null, as_of: null, stale: true },
+        metric('close_rate', { type: 'percentage', unit: '%', target: 35, actual: 30, last_point_at: fresh, freshness: 'fresh', gap: { status: 'behind' } }),
+        metric('reply_rate', { type: 'percentage', unit: '%', target: 20, actual: 25, last_point_at: hoursAgo, stale: true, freshness: 'stale', gap: { status: 'ahead' } }),
+        metric('demo_count', { type: 'counter', target: 8, freshness: 'no_points' }),
+        metric('deal_size', { unit: 'k', target: 10, actual: 12, last_point_at: longAgo, freshness: 'no_cadence', gap: { status: 'ahead' } }),
+        metric('cycle_time', { type: 'duration', target: 3600, actual: 5400, last_point_at: fresh, freshness: 'fresh', gap: { status: 'behind' } }),
+        metric('ghost_metric', { type: null, target: 1, finding: { code: 'metric_undeclared' } }),
       ],
     }],
+    objectives_error: null,
+    finding_codes: [],
     readiness: { status: 'calibrating', changed_at: null, changed_by: null, source: 'template', unstamped_ready: false },
     walkthrough: { asks: 4, target: 10, rated_down: 1, unavailable: false },
     relationship: null,
@@ -88,12 +111,125 @@ describe('PortalAgentRole (mounted)', () => {
     expect(w.text()).toContain('Close ICP-fit pipeline.')
     expect(w.text()).toContain('canon/roles/sales-lead.yaml')
     expect(w.findAll('[data-testid="portal-role-objective"]')).toHaveLength(1)
-    expect(w.findAll('[data-testid="portal-role-metric"]')).toHaveLength(1)          // close_rate, fresh
+    expect(w.findAll('[data-testid="portal-role-metric"]')).toHaveLength(5)          // everything not stale
     expect(w.findAll('[data-testid="portal-role-metric-stale"]')).toHaveLength(1)    // reply_rate
     expect(w.get('[data-testid="portal-role-metric-stale"]').text()).toContain('stale')
     expect(w.get('[data-testid="portal-role-relationship"]').text()).toContain('no assignment recorded')
     expect(w.get('[data-testid="portal-role-walkthrough"]').text()).toContain('4 of 10 asks')
     expect(w.get('[data-testid="portal-role-walkthrough"]').text()).toContain('1 rated down')
+  })
+
+  // --- ent#676: the projection of the objective ↔ metric join ---------------
+
+  const row = (w, name) => w.findAll('[data-testid^="portal-role-metric"]')
+    .find((el) => el.element.tagName === 'LI' && el.text().startsWith(name))
+
+  it('shows actual against target, formatted by the declared type', async () => {
+    const w = await mountWith(card())
+    expect(row(w, 'close_rate').text()).toContain('30% / 35%')
+    expect(row(w, 'cycle_time').text()).toContain('1h 30m / 1h 0m')    // seconds, never "5400 / 3600"
+    expect(row(w, 'deal_size').text()).toContain('12 k / 10 k')
+    expect(row(w, 'demo_count').text()).toContain('— / 8')             // no number yet is a dash, never a zero
+  })
+
+  it('a text target reads as the author wrote it, and no target shows none', async () => {
+    const w = await mountWith(card({ objectives: [{ id: 'o', statement: 'S', owned: true, metrics: [
+      metric('stage', { type: 'status', target: 'won', actual: 'negotiating', last_point_at: fresh, freshness: 'fresh' }),
+      metric('bare', { actual: 3, last_point_at: fresh, freshness: 'fresh' }),
+    ] }] }))
+    expect(row(w, 'stage').text()).toContain('negotiating / won')
+    expect(row(w, 'bare').text()).toContain('3')
+    expect(row(w, 'bare').text()).not.toContain('/')
+  })
+
+  it.each([
+    ['behind', 'behind', 'warning'],
+    ['off_target', 'off target', 'warning'],
+    ['ahead', 'ahead', 'success'],
+    ['on_target', 'on target', 'success'],
+  ])('gap %s reads "%s" as a %s badge', async (status, label, tone) => {
+    const w = await mountWith(card({ objectives: [{ id: 'o', statement: 'S', owned: true, metrics: [
+      metric('m', { target: 10, actual: 7, last_point_at: fresh, freshness: 'fresh', gap: { status } }),
+    ] }] }))
+    const badge = w.get('[data-testid="portal-role-metric-gap"]')
+    expect(badge.text()).toBe(label)
+    expect(badge.classes().join(' ')).toContain(`status-${tone}`)
+  })
+
+  it('a gap that cannot be computed shows no gap badge', async () => {
+    const w = await mountWith(card())
+    expect(row(w, 'demo_count').find('[data-testid="portal-role-metric-gap"]').exists()).toBe(false)
+    expect(row(w, 'ghost_metric').find('[data-testid="portal-role-metric-gap"]').exists()).toBe(false)
+  })
+
+  it('freshness is the backend verdict: stale, no points yet, or the point time', async () => {
+    const w = await mountWith(card())
+    // Stale is orthogonal to the gap: both show, and the last value stays.
+    const stale = row(w, 'reply_rate')
+    expect(stale.text()).toContain('25% / 20%')
+    expect(stale.text()).toContain('ahead')
+    expect(stale.text()).toContain('stale')
+    expect(stale.text()).not.toContain('as of')
+    // Declared, never recorded: not late, not started.
+    expect(row(w, 'demo_count').text()).toContain('no points yet')
+    // Fresh shows when the point landed.
+    expect(row(w, 'close_rate').text()).toContain('as of 1h ago')
+    // No cadence declared is never stale, however old — the age still shows.
+    const noCadence = row(w, 'deal_size')
+    expect(noCadence.attributes('data-testid')).toBe('portal-role-metric')
+    expect(noCadence.text()).toContain('as of')
+    expect(noCadence.text()).not.toContain('stale')
+  })
+
+  it.each([
+    ['metric_undeclared', "isn't being measured yet"],
+    ['metric_not_declared_here', 'Another agent measures this one'],
+    ['metric_retired', 'no longer measured'],
+    ['direction_mismatch', 'disagree on which way is good'],
+    ['direction_undeclared', 'whether higher or lower is better'],
+    ['a_code_this_build_has_never_heard_of', "can't be compared with its target"],
+  ])('finding %s is the Workspace\'s own sentence, never a blank', async (code, copy) => {
+    const w = await mountWith(card({ objectives: [{ id: 'o', statement: 'S', owned: true, metrics: [
+      metric('m', { target: 1, finding: { code } }),
+    ] }] }))
+    const line = w.get('[data-testid="portal-role-metric-finding"]')
+    expect(line.text()).toContain(copy)
+    // A row with no point has no time to show — never a dangling "as of".
+    expect(row(w, 'm').text()).not.toContain('as of')
+  })
+
+  it('a row with no finding shows no finding line', async () => {
+    const w = await mountWith(card())
+    expect(row(w, 'close_rate').find('[data-testid="portal-role-metric-finding"]').exists()).toBe(false)
+    expect(w.findAll('[data-testid="portal-role-metric-finding"]')).toHaveLength(1)   // ghost_metric only
+  })
+
+  it.each([
+    ['objectives_rate_limited', 'being read a lot right now'],
+    ['objectives_timeout', 'took too long to answer'],
+    ['objectives_unreadable', "couldn't be read right now"],
+    ['agent_unreachable', 'stopped answering'],
+    ['objectives_incomplete', "Some objective files"],
+    ['a_code_this_build_has_never_heard_of', "couldn't be read"],
+  ])('no objectives because of %s says so instead of rendering nothing', async (code, copy) => {
+    const w = await mountWith(card({ objectives: [], objectives_error: code }))
+    expect(w.get('[data-testid="portal-role-objectives-error"]').text()).toContain(copy)
+    expect(w.findAll('[data-testid="portal-role-objective"]')).toHaveLength(0)
+    // The rest of the card is untouched — the owner can still flip readiness.
+    expect(w.get('[data-testid="portal-role-title"]').text()).toBe('Sales Lead')
+    expect(w.get('[data-testid="portal-role-readiness"]').text()).toContain('calibrating')
+    expect(w.find('[data-testid="portal-role-flip"]').exists()).toBe(true)
+  })
+
+  it('an agent that simply has no objectives shows no objectives block', async () => {
+    const w = await mountWith(card({ objectives: [], objectives_error: null }))
+    expect(w.find('[data-testid="portal-role-objectives-error"]').exists()).toBe(false)
+    expect(w.text()).not.toContain('Objectives')
+  })
+
+  it('objectives that did load never show the error line', async () => {
+    const w = await mountWith(card())
+    expect(w.find('[data-testid="portal-role-objectives-error"]').exists()).toBe(false)
   })
 
   it('a role file that failed to load says so, never an empty role', async () => {

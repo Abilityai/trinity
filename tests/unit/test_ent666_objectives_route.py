@@ -198,11 +198,14 @@ def test_the_rate_limit_is_its_own_knob_and_is_enforced(monkeypatch, ctx):
                             (key, limit, window)))
     _get(ctx)
 
+    # The key, limit and window are spelled once, in the budget module the
+    # Workspace role card also draws on (ent#676).
+    budget = route_mod.objectives_read_budget
     assert seen == [(f"agent_objectives_read:{AGENT}",
-                     route_mod.OBJECTIVES_READ_RATE_LIMIT,
-                     route_mod.OBJECTIVES_READ_RATE_WINDOW)]
-    assert route_mod.OBJECTIVES_READ_RATE_LIMIT == 60
-    assert (route_mod.OBJECTIVES_READ_RATE_LIMIT
+                     budget.OBJECTIVES_READ_RATE_LIMIT,
+                     budget.OBJECTIVES_READ_RATE_WINDOW)]
+    assert budget.OBJECTIVES_READ_RATE_LIMIT == 60
+    assert (budget.OBJECTIVES_READ_RATE_LIMIT
             < route_mod.METRICS_READ_RATE_LIMIT)
 
 

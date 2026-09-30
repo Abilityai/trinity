@@ -562,14 +562,36 @@ class PortalRoleReadiness(BaseModel):
     unstamped_ready: bool = False
 
 
+class PortalRoleMetricGap(BaseModel):
+    """Position relative to the target — never pace, and never the delta."""
+    status: str  # behind | on_target | ahead | off_target | not_computable
+
+
+class PortalRoleMetricFinding(BaseModel):
+    """ent#676 — a finding crosses to the Workspace as its CODE. The sentence
+    beside it on the operator door is remediation that names files a client
+    does not own; the Workspace renders its own copy per code."""
+    code: str
+
+
 class PortalRoleMetric(BaseModel):
+    """ent#676 — one objective metric as a Workspace client sees it: a
+    projection of the objective ↔ metric join (`ObjectiveMetricRead`), never
+    that model whole. A field added here is a disclosure decision."""
     name: str
-    direction: Optional[str] = None
+    # The registry's declared type and unit — what the card formats the two
+    # numbers with. None for a metric this agent does not declare.
+    type: Optional[str] = None
+    unit: Optional[str] = None
     target: Optional[float | int | str] = None
-    by: Optional[str] = None
-    value: Optional[float | int | str] = None
-    as_of: Optional[str] = None
-    stale: bool = True
+    actual: Optional[float | int | str] = None
+    last_point_at: Optional[str] = None
+    stale: bool = False
+    # fresh | stale | no_cadence | no_points — the platform's one stale rule
+    # (2× cadence); None for a metric this agent does not declare.
+    freshness: Optional[str] = None
+    gap: PortalRoleMetricGap
+    finding: Optional[PortalRoleMetricFinding] = None
 
 
 class PortalRoleObjective(BaseModel):
@@ -608,6 +630,12 @@ class PortalRoleCard(BaseModel):
     role: Optional[PortalRoleInfo] = None
     seat: Optional[str] = None
     objectives: list[PortalRoleObjective] = Field(default_factory=list)
+    # ent#676 — why `objectives` is empty when that is NOT simply true:
+    # objectives_rate_limited | agent_unreachable | objectives_timeout |
+    # objectives_unreadable | objectives_incomplete. None = a real empty.
+    objectives_error: Optional[str] = None
+    # The join's findings as distinct codes — never the sentences, paths or ids.
+    finding_codes: list[str] = Field(default_factory=list)
     readiness: Optional[PortalRoleReadiness] = None
     walkthrough: Optional[PortalRoleWalkthrough] = None
     # ent#500's assignment kind, when it lands; None renders as "no assignment recorded".

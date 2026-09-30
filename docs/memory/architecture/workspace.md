@@ -700,10 +700,19 @@ named, unknown id the uniform 404). Requirement §10.19 of `scheduling.md`; flow
 ## The role card — a projection of the agent's files, and the owner's readiness stamp (ent#527, #663)
 
 `client_portal/role_card.py` builds the Info rail's Role card from the agent's own
-container on every read (template `x-role` + `x-canon.clone_path`, `<canon>/roles/<id>.yaml`,
-`<canon>/objectives/*.yaml`, `/api/metrics` for values + `last_updated`) — never cached,
-never a second store; author-controlled ids/paths are validated before any read and every
-failure is named. Readiness is the one platform fact: `agent_role_readiness` is the agent
+container on every read (template `x-role` + `x-canon.clone_path`, `<canon>/roles/<id>.yaml`)
+— never cached, never a second store; author-controlled ids/paths are validated before any
+read and every failure is named. **The objectives are not the card's to compute (ent#676):**
+it calls the one objective ↔ metric join (`objective_join_service.read_objective_join`,
+handed the template and client it already holds) and serves a field-picking **projection** —
+a finding crosses as its code, never the operator's sentence, an objective file path or
+`owner: role:<id>`, and a field the join grows later reaches no client until it is added to
+the picker and the model. The card's objective read draws on the per-agent budget the
+operator's `/objectives` route draws on (`services/objectives_read_budget.py`), behind a
+per-viewer cap, and **never refuses the card**: a spent budget leaves the objectives out
+(`objectives_error`) so the role, the readiness stamp and the owner's flip still answer.
+`build_role_card` takes that verdict as a **required** `objectives_admitted` — a new caller
+that forgot it would reach the container fan-out unbounded. Readiness is the one platform fact: `agent_role_readiness` is the agent
 OWNER's stamp (`POST …/role/readiness`, owner check via `get_owned_roster`, agent never),
 and a template that claims `ready` without a stamp is shown as calibrating. Requirement
 §5.36 of `core-agent.md`; flow in `workspace-role-card.md`.
