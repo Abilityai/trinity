@@ -118,7 +118,7 @@ async def request_email_bind_code(
     await platform_audit_service.log(
         event_type=AuditEventType.AUTHENTICATION, event_action="email_bind_code_sent",
         source="api", actor_user=current_user, target_type="user", target_id=current_user.username,
-        endpoint=str(request.url.path), request_id=getattr(request.state, "request_id", None),
+        endpoint=request.scope["path"], request_id=getattr(request.state, "request_id", None),
     )
     return {"sent": True, "expires_in_seconds": code["expires_in_seconds"]}
 
@@ -177,7 +177,7 @@ async def update_my_email(
         event_type=AuditEventType.AUTHENTICATION,
         event_action="email_bound" if verified else "email_bind_unverified",
         source="api", actor_user=current_user, target_type="user", target_id=current_user.username,
-        endpoint=str(request.url.path), request_id=getattr(request.state, "request_id", None),
+        endpoint=request.scope["path"], request_id=getattr(request.state, "request_id", None),
         details={"verified": verified},
     )
     return {"success": True, "email": email, "verified": verified}
