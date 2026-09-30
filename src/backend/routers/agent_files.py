@@ -309,7 +309,7 @@ async def set_agent_permissions(
         actor_ip=request.client.host if request.client else None,
         target_type="agent",
         target_id=agent_name,
-        endpoint=str(request.url.path),
+        endpoint=request.scope["path"],
         request_id=getattr(request.state, "request_id", None),
         details={"targets": body.get("permissions") or body.get("targets")},
     )
@@ -335,7 +335,7 @@ async def add_agent_permission(
         actor_ip=request.client.host if request.client else None,
         target_type="agent",
         target_id=agent_name,
-        endpoint=str(request.url.path),
+        endpoint=request.scope["path"],
         request_id=getattr(request.state, "request_id", None),
         details={"target_agent": target_agent},
     )
@@ -361,7 +361,7 @@ async def remove_agent_permission(
         actor_ip=request.client.host if request.client else None,
         target_type="agent",
         target_id=agent_name,
-        endpoint=str(request.url.path),
+        endpoint=request.scope["path"],
         request_id=getattr(request.state, "request_id", None),
         details={"target_agent": target_agent},
     )

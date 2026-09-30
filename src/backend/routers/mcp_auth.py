@@ -159,7 +159,7 @@ async def verify_inline_login(
             event_action="login_failed",
             source="mcp",
             actor_ip=client_ip,
-            endpoint=str(request.url.path),
+            endpoint=request.scope["path"],
             request_id=getattr(request.state, "request_id", None),
             details={"method": "mcp_inline", "email": email},
         )
@@ -180,7 +180,7 @@ async def verify_inline_login(
         actor_ip=client_ip,
         target_type="user",
         target_id=user["username"],
-        endpoint=str(request.url.path),
+        endpoint=request.scope["path"],
         request_id=getattr(request.state, "request_id", None),
         details={"method": "mcp_inline", "email": email},
     )

@@ -66,7 +66,7 @@ def _user():
 def _request():
     return SimpleNamespace(
         client=SimpleNamespace(host="127.0.0.1"),
-        headers={}, url=SimpleNamespace(path="/"), state=SimpleNamespace(),
+        headers={}, scope={"path": "/"}, state=SimpleNamespace(),
         method="POST",
     )
 
