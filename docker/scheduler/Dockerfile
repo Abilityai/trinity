@@ -1,7 +1,7 @@
 # Trinity Scheduler Service Dockerfile
 # Standalone scheduler for agent task execution
 
-FROM python:3.13-slim
+FROM python:3.13-slim-trixie
 
 # Set working directory
 WORKDIR /app
@@ -9,9 +9,10 @@ WORKDIR /app
 # Install system dependencies
 #
 # `tzdata-legacy` carries the IANA *backward-compatibility links* (#1823). Debian
-# 13 "trixie" split them out of `tzdata`, and this image is `FROM python:3.13-slim`
+# 13 "trixie" split them out of `tzdata`, and this image was `FROM python:3.13-slim`
 # with no codename pin — so it silently migrated bookworm→trixie and lost
-# `/usr/share/zoneinfo/Europe/Kiev` (and every other legacy alias). This is the
+# `/usr/share/zoneinfo/Europe/Kiev` (and every other legacy alias). The codename
+# is now pinned (#3079). This is the
 # image that actually registers the CronTrigger: without the links a stored
 # legacy-alias schedule can never register, so it never fires and its
 # `next_run_at` freezes. Do NOT drop this when slimming the image —

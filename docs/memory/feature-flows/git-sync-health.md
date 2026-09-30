@@ -28,6 +28,16 @@ This flow adds:
 Per-agent opt-outs are available via API for both the auto-sync
 heartbeat and schedule-freeze behaviour.
 
+**trinity-enterprise#706 changed what "healthy" means.** Health used to
+measure whether the last push *succeeded*; an agent 15 commits ahead with
+auto-sync off never ran a heartbeat, never failed, and looked fine. It now
+measures whether the agent and its repository *agree*: the poller keeps a
+divergence clock (`diverged_since`), a dirt clock (`dirty_files` /
+`dirty_since`) and `last_successful_push_at`, one backend policy module
+(`services/sync_freeze_policy.py`) turns them into `state` / `reason` /
+`recommendation`, and the schedule freeze now also fires for a **work agent**
+diverged from origin for more than 24 h. See §2b and §5.
+
 ## User Stories
 
 - **Operator**: "Show me which agents haven't synced successfully in the
@@ -50,8 +60,10 @@ heartbeat and schedule-freeze behaviour.
 | **API** | `GET/PUT /api/agents/{name}/git/auto-sync` | Toggle the per-agent auto-sync flag |
 | **API** | `GET/PUT /api/agents/{name}/git/freeze-schedules-if-failing` | Toggle the freeze-schedules-on-sync-failure flag |
 | **API** | `GET /api/fleet/sync-audit` | Fleet-wide audit including `duplicate_binding` flag (admins see all; non-admins filtered) |
-| **API** | `GET /api/internal/agents/{name}/sync-health-status` | Internal endpoint for the scheduler to check freeze-on-failure |
+| **API** | `GET /api/internal/agents/{name}/sync-health-status` | The backend's read of the freeze decision (`should_freeze`, `freeze_reason`, `divergence_age_s`, `work_agent` — ent#706). The scheduler reads the DB directly with the vendored policy, not this endpoint |
 | **Operator Queue** | type=`sync_failing` | Inserted by `SyncHealthService` when `consecutive_failures` crosses 3 |
+| **Operator Queue** | type=`sync_diverged` | ent#706: one per divergence episode, only while a divergence freeze is in force (id `sync-diverged-{agent}-{diverged_since}`) |
+| **Scheduler** | `SchedulerDatabase.sync_freeze_reason` | ent#706: the cron gate's reason, written into the skipped row as `Git sync frozen: <reason>` |
 
 ## Data Model
 
@@ -73,10 +85,22 @@ git_dir_bytes BIGINT                     -- #1596: .git on-disk size (BIGINT sin
 pack_count INTEGER                       -- #1595: packs (count-objects -v)
 loose_objects INTEGER                    -- #1595: loose objects
 maintenance_failures INTEGER DEFAULT 0   -- #1595: failed maintenance streak
+diverged_since TEXT                      -- ent#706: divergence episode start (set once, cleared at 0/0)
+dirty_files INTEGER                      -- ent#706: porcelain change count (changes_count)
+dirty_since TEXT                         -- ent#706: dirt episode start (cleared at 0)
+last_successful_push_at TEXT             -- ent#706: last push that landed
 last_check_at TEXT
 updated_at TEXT NOT NULL
 FOREIGN KEY (agent_name) REFERENCES agent_ownership(agent_name)
 ```
+
+The four ent#706 columns come from the SQLite migration
+`agent_sync_state_divergence` and Alembic `0082_agent_sync_state_divergence`.
+They are nullable with **no backfill**: the clocks cannot be known
+retroactively, so they start at the first poll after upgrade — which is also
+the 24 h soak before any divergence freeze can fire. The upsert takes a `KEEP`
+sentinel for the two clocks (`db/sync_state.py`), because `_merged()` maps
+None to "unchanged" and a clock needs "clear" too.
 
 Index: `idx_sync_state_status` on `(last_sync_status, consecutive_failures)`.
 
@@ -514,6 +538,13 @@ SyncHealthService._poll_loop (SYNC_HEALTH_POLL_INTERVAL_SECONDS, default 60 s)
     │     │     pack_count / loose_objects / maintenance_failures →
     │     │     _coerce_nonneg_int (sync-state.json is agent-writable;
     │     │     reject strings/bools/objects/out-of-range at the boundary)
+    │     ├── ent#706 episode clocks from the RAW payload values
+    │     │     (_episode_clock): diverged_since set once on ahead/behind > 0,
+    │     │     cleared at ahead == 0 with behind 0 or None (no upstream),
+    │     │     KEPT when ahead is None; dirty_files = changes_count with
+    │     │     dirty_since the same way; last_successful_push_at = max(the
+    │     │     #3011 heartbeat field, agent_git_config.last_sync_at, stored)
+    │     │     — agent timestamps need an offset and must not be future
     │     ├── db.upsert_sync_state(...)
     │     ├── if consecutive_failures crossed 3:
     │     │     └── db.create_operator_queue_item(
@@ -523,12 +554,68 @@ SyncHealthService._poll_loop (SYNC_HEALTH_POLL_INTERVAL_SECONDS, default 60 s)
     │     │         "Git token can't push", says it will not recover on
     │     │         its own, and carries context.cause='push_denied' +
     │     │         context.remediation (grant Contents: write / `repo`)
+    │     ├── ent#706: sync_view(updated, config) → if the freeze cause is
+    │     │     divergence: db.create_operator_queue_item(type='sync_diverged',
+    │     │     id='sync-diverged-{agent}-{diverged_since}') — the conflict
+    │     │     target makes it ONE row per episode across polls, restarts
+    │     │     and a fail-open double leader; counts + recommendation only
     │     ├── #1595 git_bloat alerts (same edge-trigger pattern):
     │     │     ├── git_dir_bytes crossed GIT_DIR_ALERT_BYTES (10 GiB)
     │     │     └── maintenance_failures crossed 3
     │     └── #2742 WARNING on a newly observed lock_recovery / index_lock_stuck
     │           (log line only — no operator-queue item, no DB column)
 ```
+
+### 2b. The policy and the freeze (trinity-enterprise#706)
+
+`services/sync_freeze_policy.py::classify(row, cfg, now, push_denied=)` is the
+one rule. Stdlib only and never raises (the scheduler calls it on the fire
+path over agent-written numbers); vendored **byte-identically** to
+`src/scheduler/sync_freeze_policy.py` and pinned by
+`test_ent706_sync_policy_parity.py`. `services/sync_health_view.py::sync_view`
+is the backend's single call site; it resolves `git_service.is_push_denied`
+so the leaf stays pure.
+
+```
+work agent = source_mode = 0 OR auto_sync_enabled = 1     (fork-to-own keeps
+                                                            source_mode = 1)
+unknown  no row / never observed
+red      last sync failed                                  (any binding)
+         work agent diverged > 24 h
+         work agent dirty > 24 h
+         auto-sync on, no heartbeat for 7 d                 (fresh observation)
+yellow   work agent diverged <= 24 h
+         deployment diverged (any age) or dirty > 24 h      (never red on age)
+green    otherwise
+
+freeze = freeze_schedules_if_sync_failing AND (
+             sync_failing                                  (#1808, any binding)
+             OR (work agent AND diverged > 24 h AND last_check_at <= 15 min old))
+```
+
+The freshness clause fails open: the poller writes nothing for an unreachable
+agent (or a status call that 504s), so a stale `diverged_since` must never keep
+an agent frozen that may already have pushed. The row stays red and the reason
+says `(last observed 3h ago)`. `behind_main` (a push to `main` under a
+working branch) is information in the reason, never divergence.
+
+Enforcement, both over the one rule:
+
+```
+scheduler  _execute_schedule_with_lock (cron only)
+    └── db.sync_freeze_reason(agent)   # direct DB read, fail-OPEN on any error
+          ├── None  → fire
+          └── "diverged 0 behind / 7 ahead for 26h"
+                → _record_skipped_agent_schedule(skip_reason="Git sync frozen: <reason>")
+                  (one row per cron tick while frozen; retention prunes)
+                → _advance_next_run_only; un-freezes on the first tick after it clears
+backend    GET /api/internal/agents/{name}/sync-health-status
+                → pre-#706 keys unchanged + freeze_reason / divergence_age_s / work_agent
+```
+
+`sync_freeze_reason` returns a string, never a `(bool, reason)` tuple — a tuple
+is truthy, and a caller left on the old `if db.should_freeze_...` shape would
+freeze the whole fleet. `should_freeze_schedules` is its bool view.
 
 ### 2a. Agent status handler (#2742)
 
@@ -591,6 +678,13 @@ remote holds, and `behind_working` is `null`. A count that can't be computed is
 `null`, never 0: for example, the main tuple on a repo with no `main`. The
 backend stores `null` as 0 (`sync_health_service._coerce_counter`).
 
+**The working tuple is the divergence basis (ent#706).** `diverged_since` is
+decided from the RAW `ahead_working` / `behind_working` payload values, before
+that 0-coercion, so an uncomputable count never starts or clears the clock.
+When the clock is kept that way, the stored `ahead_working` / `behind_working`
+are kept too rather than coerced to 0, so a kept episode never reads
+"diverged 0 behind / 0 ahead" in its reason or its operator-queue item.
+
 Legacy `ahead` / `behind` in the response alias the main tuple so older
 clients keep working.
 
@@ -627,13 +721,20 @@ the data-loss setup.
 
 - `src/frontend/src/utils/syncHealth.js::classifySyncHealth(entry)` →
   `'green' | 'yellow' | 'red' | 'gray'`.
-- Rules:
-  - **gray**: `last_sync_status === 'never'` or no entry.
-  - **red**: `behind_working > 0`, OR `last_sync_status === 'failed'`, OR
-    last sync ≥ 7 days ago.
-  - **yellow**: 24 h ≤ last sync < 7 d (status success).
-  - **green**: last sync < 24 h AND status success AND
-    `behind_working === 0`.
+- **The backend owns the state (ent#706).** `GET /api/agents/sync-health`
+  serves each entry's `state` / `reason` / `recommendation` / `binding` /
+  `freeze` from `sync_view` (plus `dirty_files`, `divergence_age_s`,
+  `last_successful_push_at`; every pre-#706 key is unchanged). The helper maps
+  `state` to a colour (`unknown` or missing → gray) and `syncHealthLabel`
+  shows `reason — recommendation` on hover. It holds **no threshold** — the
+  24 h / 7 d / behind-is-red rules it used to compute are the backend's (§2b),
+  so the dot cannot disagree with the freeze.
+- Visible change: an agent ahead of origin with auto-sync off used to render
+  **gray** (it had never synced); it now renders the backend's yellow or red.
+- The batch reads through `db.list_sync_health_rows` — one query over
+  `agent_git_config` ⋈ live `agent_ownership` ⟕ `agent_sync_state`, the same
+  set the poller polls. An agent whose git sync is disabled (`sync_enabled = 0`)
+  now shows `unknown` rather than its last stale row.
 - `stores/agents.js::fetchSyncHealth()` calls `/api/agents/sync-health`
   on mount; `components/AgentListPanel.vue` (the Dashboard List mode —
   ent#260 retired the Agents page into it) renders the dot next to each
@@ -661,7 +762,15 @@ the data-loss setup.
 | `routers/git.py` | `/git/auto-sync`, `/git/freeze-schedules-if-failing`, `/git/sync-state` |
 | `routers/agents.py` | `GET /api/agents/sync-health` (batch) |
 | `routers/fleet.py` | `GET /api/fleet/sync-audit` (new router) |
-| `routers/internal.py` | `GET /api/internal/agents/{name}/sync-health-status` |
+| `routers/internal.py` | `GET /api/internal/agents/{name}/sync-health-status` (ent#706: via `sync_view`) |
+| `services/sync_freeze_policy.py` | ent#706: the one rule — `classify`, the constants, `format_age`; stdlib leaf |
+| `services/sync_health_view.py` | ent#706: `sync_view(row, config)` — the backend's single call into the policy |
+| `db/migrations.py`, `migrations/versions/0082_agent_sync_state_divergence.py`, `db/schema.py`, `db/tables.py` | ent#706: the four columns on both tracks |
+| `db/sync_state.py` | ent#706: `KEEP` sentinel, the new upsert kwargs, `list_health_rows` (the shared reader) |
+| `services/operator_queue_service.py` | ent#706: `sync-diverged-` in `_RESERVED_ID_PREFIXES` |
+| `src/scheduler/sync_freeze_policy.py` | ent#706: byte-identical mirror of the policy |
+| `src/scheduler/database.py` | ent#706: `sync_freeze_reason` (+ `should_freeze_schedules` as its bool view); the threshold is imported from the mirror |
+| `src/scheduler/service.py` | ent#706: the gate writes `Git sync frozen: <reason>` into the skipped row |
 | `main.py` | Starts `SyncHealthService` (staggered +5 s, PERF-269); registers `fleet_router` |
 
 ### Agent server
@@ -678,7 +787,7 @@ the data-loss setup.
 | File | Purpose |
 |------|---------|
 | `stores/agents.js` | `syncHealth` state + `fetchSyncHealth()` action |
-| `utils/syncHealth.js` | `classifySyncHealth`, `syncHealthColor`, `syncHealthLabel` |
+| `utils/syncHealth.js` | `classifySyncHealth`, `syncHealthColor`, `syncHealthLabel` — render the backend's `state` / `reason` (ent#706), no thresholds |
 | `components/AgentListPanel.vue` | Renders the dot + imports helpers + fetches on mount + 60s visibility-aware refresh (ent#260 — replaces the retired `views/Agents.vue`) |
 
 ## Testing
@@ -726,6 +835,29 @@ backend):
 
 Baseline: 75 passing tests added across the two PRs.
 
+trinity-enterprise#706 (divergence age and the freeze):
+
+- `tests/unit/test_ent706_sync_policy.py` — `classify`, one case per rule, the
+  24 h boundary at ± 1 s, fork-to-own vs deployment, the stale-observation
+  fail-open, aware / naive / offset timestamps agreeing, the recommendations.
+- `tests/unit/test_ent706_sync_policy_parity.py` — backend ↔ scheduler byte
+  parity; the policy is a stdlib leaf; the scheduler imports the threshold.
+- `tests/unit/test_ent706_sync_state_columns.py` — both migration tracks, the
+  SQLite migration run twice, and the upsert's set / keep / clear.
+- `tests/unit/test_ent706_divergence_tracking.py` — the real `_poll_cycle`:
+  the clocks, `last_successful_push_at`, and the one-item-per-episode alert
+  (two pollers → one row; a new episode → a second; **control arms**: freeze
+  flag off or a deployment → zero items).
+- `tests/unit/test_1808_sync_freeze_enforcement.py` — the scheduler gate on a
+  real SQLite file: divergence freezes at 24 h + 1 s, not at 24 h − 1 s;
+  **control arm**: the same row with `diverged_since` NULL fires; the skipped
+  row carries the reason.
+- `tests/unit/test_ent706_internal_sync_health.py`,
+  `tests/unit/test_ent706_sync_health_surfaces.py` — the three read surfaces
+  keep their old keys and add the verdict.
+- `src/frontend/tests/unit/syncHealth.spec.js` — the dot renders the backend
+  state and reason and holds no threshold.
+
 The `.gitignore` half of §0 has its own real-git suites (no Docker either — they
 run the SHIPPED builder commands against throwaway repositories, because the
 defects live in git's own last-match-wins and dir-descent semantics):
@@ -755,7 +887,8 @@ defects live in git's own last-match-wins and dir-descent semantics):
 | Auto-sync on/off per agent | `PUT /api/agents/{name}/git/auto-sync` body `{enabled: bool}` | `true` for non-source-mode GitHub-template agents |
 | Interval override | `GIT_SYNC_INTERVAL_SECONDS` env var in the agent container | 900 s (15 min) |
 | Fleet kill-switch | `GIT_SYNC_AUTO` env var (if missing/false the loop never starts) | `true` if the backend set it at creation **or** `auto_sync_enabled = 1` — re-derived as the OR of both on every container rebuild (ent#109) |
-| Freeze schedules when sync failing | `PUT /api/agents/{name}/git/freeze-schedules-if-failing` | `false` (opt-in) |
+| Freeze schedules when sync failing | `PUT /api/agents/{name}/git/freeze-schedules-if-failing` — since ent#706 it also freezes a **work agent** diverged from origin for more than 24 h (fresh observation). It is the only switch: there is no fleet kill switch and no env knob; the 24 h clock that starts at the first post-upgrade poll is the soak | `false` (opt-in) |
+| Divergence / dirt / no-heartbeat / freshness thresholds (ent#706) | Constants in `services/sync_freeze_policy.py` (and its scheduler mirror) — deliberately not env knobs, so the dashboard and the freeze cannot be configured apart | 24 h / 24 h / 7 d / 15 min |
 | Alert threshold | Hardcoded in `SyncHealthService.ALERT_THRESHOLD` | 3 consecutive failures |
 | Sync-health poll cadence (#2742) | `SYNC_HEALTH_POLL_INTERVAL_SECONDS` env var on the backend — read at **call** time (a property, not an import-time copy), and wired into `docker-compose.yml`, `docker-compose.prod.yml` and `.env.example` as `${VAR:-60}`. Prod compose launches standalone (no base merge, no `env_file:`), so the explicit `environment:` list is the only route in; `/validate-pr` caught all three missing on this branch (the #1056 packaging class), and `test_2742_sync_health_leader_lock.py::TestPollIntervalReachesTheContainer` now pins the form so unset and empty both land on the default | 60 s (**unchanged** — the knob ships, the default does not move) |
 | Stuck-lock report sensitivity (#2742) | `_STUCK_LOCK_MIN_SIGHTINGS` / `_STUCK_LOCK_MIN_AGE_SECONDS` module constants in `agent_server/routers/git.py` — deliberately **not** an env var: the tunable is the number of stable sightings, not a wall-clock age, because age measures the in-flight operation | 3 sightings / 900 s |
@@ -765,10 +898,28 @@ defects live in git's own last-match-wins and dir-descent semantics):
 - **`dirty_tree` in `/api/fleet/sync-audit` is always `false`** today.
   Populating it requires a live agent call per row; can land as a
   follow-up with `asyncio.gather`.
-- **`freeze_schedules_if_sync_failing` is read-only from the scheduler
-  side**. The config flag, API, and internal lookup endpoint are wired
-  but actual enforcement belongs in the dedicated `trinity-scheduler`
-  container's pre-execution check — separate follow-up.
+- ~~`freeze_schedules_if_sync_failing` is read-only from the scheduler
+  side~~ — enforced since #1808 (`SchedulerDatabase`), and since ent#706 it
+  also covers divergence.
+- **A failed `git status` inside the agent reads as a clean tree (ent#706).**
+  The agent's status handler returns `changes = []` when `git status` fails,
+  so `dirty_files` goes to 0 and `dirty_since` clears. Rare (the read is
+  lock-free since #2742); fixing it needs a base-image change.
+- **A fork-to-own or bound agent whose owner turned auto-sync off reads as a
+  deployment (ent#706)** and never divergence-freezes. `source_mode` stays 1
+  for those agents and the binding kind is not persisted; closing the gap
+  needs a persisted binding (overlaps trinity-enterprise#704).
+- **A starved pull cycles the freeze (ent#706).** An agent with auto-sync off
+  whose pull (trinity-enterprise#703) skips while executions run can sit
+  behind for > 24 h → freeze → cron stops → the pull lands → divergence clears
+  → the next tick fires: at most one short freeze window and one
+  `sync_diverged` item a day. It self-heals by design.
+- **Raising `SYNC_HEALTH_POLL_INTERVAL_SECONDS` above 15 minutes disables the
+  divergence freeze (ent#706)**: every observation is then stale, and the
+  freshness guard fails open. `sync_failing` still freezes.
+- **The agent writes every number the policy reads** (ahead / behind /
+  changes / push time), so a compromised agent can misreport them — the
+  existing #1595 trust model; the backend coerces types and ranges only.
 - **Auto-sync disabled for source-mode agents** by design. Source-mode
   tracks `main`, and auto-pushing to `main` would clobber protected
   branches. Source-mode agents still get sync-state tracking via the
@@ -850,7 +1001,7 @@ defects live in git's own last-match-wins and dir-descent semantics):
 - [github-repo-initialization.md](github-repo-initialization.md) —
   where instance IDs and working branches come from
 - [operating-room.md](operating-room.md) — the operator queue where
-  `sync_failing` entries surface
+  `sync_failing` and (ent#706) `sync_diverged` entries surface
 
 ## References
 

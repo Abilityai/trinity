@@ -114,6 +114,8 @@ export interface McpAuthContext extends Record<string, unknown> {
   // treated as least-privileged, never as `user`.
   scope: "user" | "agent" | "system" | "connector" | "portal_delegate" | "anonymous" | "ops";
   mcpApiKey?: string;    // The actual MCP API key (for user-scoped requests to Trinity backend)
+  // #2392: X-Trinity-Execution-Id of THIS request (turn id or "manual"); wins over an agent-supplied execution_id.
+  executionId?: string;
 
   // --- #848 inline email auth (anonymous scope only) ---------------------
   // Mutated IN PLACE by verify_login. FastMCP hands every tool the same auth
@@ -493,12 +495,15 @@ export interface OperatorQueueItem {
   expires_at?: string | null;
   response?: string | null;
   response_text?: string | null;
+  // A person's identity — withheld from agent, system and other machine keys
+  // (trinity-enterprise#715), as are `addressed_to_email`, `disposed_by_email`
+  // and `resolved_to`. Only a person's JWT or user-scoped key reads them.
   responded_by_id?: string | null;
   responded_by_email?: string | null;
   responded_at?: string | null;
   acknowledged_at?: string | null;
   // trinity-enterprise#611 — how the ask ended (NULL on a row that ended before
-  // the ledger: read `status`). `disposed_by_email` is withheld from agent keys.
+  // the ledger: read `status`).
   disposition?: string | null;        // answered | cancelled | expired
   disposed_at?: string | null;
   disposed_by?: string | null;        // person | timeout

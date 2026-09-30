@@ -9,14 +9,14 @@ Converted from raw sqlite3 to SQLAlchemy Core (#300) so it runs unchanged on
 both SQLite and PostgreSQL.
 """
 
-from typing import Dict, List, Optional
+from typing import Dict, Iterable, List, Optional
 
-from sqlalchemy import select, delete
+from sqlalchemy import and_, select, delete
 
 from utils.helpers import utc_now_iso
 
 from .engine import get_engine, make_insert
-from .tables import agent_sync_state
+from .tables import agent_git_config, agent_ownership, agent_sync_state
 
 # Keep in sync with agent_sync_state column order so row indexes match.
 _COLUMNS = (
@@ -35,6 +35,10 @@ _COLUMNS = (
     "pack_count",  # #1595: packs from `git count-objects -v`
     "loose_objects",  # #1595: loose objects (gc-health signal)
     "maintenance_failures",  # #1595: consecutive failed maintenance attempts
+    "diverged_since",  # trinity-enterprise#706: divergence episode clock (ISO-Z)
+    "dirty_files",  # trinity-enterprise#706: porcelain change count
+    "dirty_since",  # trinity-enterprise#706: dirt episode clock (ISO-Z)
+    "last_successful_push_at",  # trinity-enterprise#706: last push that landed
     "last_pull_at",  # trinity-enterprise#703: the container's pull cycle
     "last_pull_status",
     "behind_after_pull",
@@ -48,6 +52,22 @@ _COLUMNS = (
 
 # Non-key columns updated on conflict (everything except the agent_name PK).
 _UPSERT_SET_COLUMNS = tuple(c for c in _COLUMNS if c != "agent_name")
+
+
+class _Keep:
+    """Sentinel: leave an episode clock as it is (trinity-enterprise#706).
+
+    `diverged_since` / `dirty_since` need THREE caller intents — set, clear,
+    unchanged — and `_merged()` below maps None to "unchanged", so None alone
+    cannot mean "clear". For those two columns None means clear and KEEP means
+    unchanged.
+    """
+
+    def __repr__(self) -> str:
+        return "KEEP"
+
+
+KEEP = _Keep()
 
 
 def _row_to_dict(row) -> Dict:
@@ -70,6 +90,74 @@ class SyncStateOperations:
         with get_engine().connect() as conn:
             rows = conn.execute(stmt).mappings().all()
         return [_row_to_dict(r) for r in rows]
+
+    def list_health_rows(self, agent_names: Optional[Iterable[str]] = None) -> Dict[str, Dict]:
+        """Git config flags + sync-state row per live git-bound agent (trinity-enterprise#706).
+
+        ONE query — `agent_git_config` joined to `agent_ownership` (soft-deleted
+        agents excluded, the #1561 filter of `list_git_enabled_agents`) and
+        LEFT-joined to `agent_sync_state` — so every sync-health surface reads
+        the same set the poller polls. Returns
+        `{name: {"config": {...}, "state": {...} | None}}`; `state` is None for
+        an agent the poller has not written yet.
+
+        `agent_names` scopes the result (an empty iterable returns `{}`). The
+        scope is applied in Python rather than as an `IN (...)` list, which
+        needs no chunking under SQLite's host-parameter cap (#73); the table is
+        one row per git-bound agent, so the scan is fleet-sized.
+        """
+        scope = None if agent_names is None else set(agent_names)
+        if scope is not None and not scope:
+            return {}
+        state_cols = [agent_sync_state.c[col].label(f"s_{col}") for col in _COLUMNS]
+        stmt = (
+            select(
+                agent_git_config.c.agent_name,
+                agent_git_config.c.source_mode,
+                agent_git_config.c.auto_sync_enabled,
+                agent_git_config.c.freeze_schedules_if_sync_failing,
+                agent_git_config.c.created_at,
+                *state_cols,
+            )
+            .select_from(
+                agent_git_config.join(
+                    agent_ownership,
+                    agent_ownership.c.agent_name == agent_git_config.c.agent_name,
+                ).outerjoin(
+                    agent_sync_state,
+                    agent_sync_state.c.agent_name == agent_git_config.c.agent_name,
+                )
+            )
+            .where(
+                and_(
+                    agent_git_config.c.sync_enabled == 1,
+                    agent_ownership.c.deleted_at.is_(None),
+                )
+            )
+        )
+        result: Dict[str, Dict] = {}
+        with get_engine().connect() as conn:
+            for row in conn.execute(stmt).mappings():
+                name = row["agent_name"]
+                if scope is not None and name not in scope:
+                    continue
+                state = (
+                    {col: row[f"s_{col}"] for col in _COLUMNS}
+                    if row["s_agent_name"] is not None
+                    else None
+                )
+                result[name] = {
+                    "config": {
+                        "source_mode": bool(row["source_mode"]),
+                        "auto_sync_enabled": bool(row["auto_sync_enabled"]),
+                        "freeze_schedules_if_sync_failing": bool(
+                            row["freeze_schedules_if_sync_failing"]
+                        ),
+                        "created_at": row["created_at"],
+                    },
+                    "state": state,
+                }
+        return result
 
     def upsert(
         self,
@@ -95,11 +183,19 @@ class SyncStateOperations:
         consecutive_pull_failures: Optional[int] = None,
         consecutive_pull_skips: Optional[int] = None,
         last_check_at: Optional[str] = None,
+        diverged_since=KEEP,
+        dirty_since=KEEP,
+        dirty_files: Optional[int] = None,
+        last_successful_push_at: Optional[str] = None,
     ) -> Dict:
         """Upsert a sync-state row.
 
         consecutive_failures is maintained internally: incremented on
         `failed`, reset on `success`, untouched on `never`.
+
+        trinity-enterprise#706: `diverged_since` / `dirty_since` take KEEP
+        (the default — leave as is), None (clear) or an ISO string (set).
+        `dirty_files` / `last_successful_push_at` follow the `_merged()` rule.
         """
         now = utc_now_iso()
         existing = self.get(agent_name)
@@ -116,6 +212,11 @@ class SyncStateOperations:
             if new_value is not None:
                 return new_value
             return existing.get(field) if existing else None
+
+        def _clock(field: str, new_value):
+            if new_value is KEEP:
+                return existing.get(field) if existing else None
+            return new_value
 
         row = {
             "agent_name": agent_name,
@@ -138,6 +239,11 @@ class SyncStateOperations:
             # 0 is a meaningful reset here (post-success), not "unset" — it
             # passes _merged as-is; only a true None falls back to prior.
             "maintenance_failures": _merged("maintenance_failures", maintenance_failures) or 0,
+            "diverged_since": _clock("diverged_since", diverged_since),  # ent#706
+            "dirty_files": _merged("dirty_files", dirty_files),  # ent#706
+            "dirty_since": _clock("dirty_since", dirty_since),  # ent#706
+            "last_successful_push_at": _merged(  # ent#706
+                "last_successful_push_at", last_successful_push_at),
             # trinity-enterprise#703: the pull cycle's own outcome. It never
             # touches consecutive_failures — that counter is the PUSH health.
             "last_pull_at": _merged("last_pull_at", last_pull_at),

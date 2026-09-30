@@ -37,6 +37,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
 from database import db
+from services.role_readiness_gate import brief_is_held, is_seat_delivery_schedule
 
 from . import db as portal_db
 
@@ -336,18 +337,22 @@ def _brief_held(agent_name: str, stamp: Optional[dict]) -> bool:
     seat-delivery schedule and its stamp is not `ready`. Reads the stamp the
     gate reads, never the template. Fail-soft: an unreadable schedule list says
     nothing rather than a claim about a pause."""
-    if stamp and stamp.get("status") == "ready":
+    status = stamp.get("status") if stamp else None
+    if status == "ready":
         return False
     try:
         # Autonomy off stops every schedule before readiness is asked; saying
         # "paused until you mark it ready" then would promise a flip that
-        # starts nothing.
-        if not db.get_autonomy_enabled(agent_name):
+        # starts nothing. The rule itself is shared with the agents list
+        # (services/role_readiness_gate.brief_is_held) so the two never disagree.
+        autonomy = db.get_autonomy_enabled(agent_name)
+        if not autonomy:
             return False
-        return any(
-            s.enabled and (s.deliver_to_workspace_email or "").strip()
+        seated = any(
+            is_seat_delivery_schedule(s.enabled, s.deliver_to_workspace_email)
             for s in db.list_agent_schedules(agent_name)
         )
+        return brief_is_held(status, autonomy, seated)
     except Exception as e:  # noqa: BLE001
         logger.warning("role card: schedule read failed for %s: %s", agent_name, e)
         return False

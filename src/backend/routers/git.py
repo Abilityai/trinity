@@ -1244,12 +1244,21 @@ async def set_freeze_schedules_config(
 
 @router.get("/{agent_name}/git/sync-state")
 async def get_agent_sync_state(agent_name: AuthorizedAgentByName):
-    """Return the persisted sync-state row for this agent (#389)."""
+    """Return the persisted sync-state row for this agent (#389).
+
+    trinity-enterprise#706: plus the backend's verdict (`state`, `reason`,
+    `recommendation`, `binding`, `freeze`, the ages — `services/sync_health_view.py`).
+    MCP `get_git_sync_state` passes this JSON through unchanged.
+    """
+    from services.sync_health_view import sync_view
+
     row = db.get_sync_state(agent_name)
+    view = sync_view(row, db.get_git_config(agent_name))
     if row is None:
         return {
             "agent_name": agent_name,
             "last_sync_status": "never",
             "consecutive_failures": 0,
+            **view,
         }
-    return row
+    return {**row, **view}

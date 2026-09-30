@@ -4876,6 +4876,31 @@ def _migrate_auto_sync_enabled_backfill(cursor, conn):
     conn.commit()
 
 
+def _migrate_agent_sync_state_divergence(cursor, conn):
+    """Add the divergence / dirt episode columns to agent_sync_state (trinity-enterprise#706).
+
+    `diverged_since` / `dirty_since` are ISO-Z episode clocks the
+    SyncHealthService sets once and clears on a return to 0; `dirty_files` is
+    the porcelain change count the agent's status call already computed and
+    threw away; `last_successful_push_at` is the last push that landed. All
+    nullable with NO backfill: the clocks cannot be known retroactively, and
+    starting them at the first post-upgrade poll is the 24 h soak before any
+    divergence freeze can fire.
+    """
+    for column, sql_type in (
+        ("diverged_since", "TEXT"),
+        ("dirty_files", "INTEGER"),
+        ("dirty_since", "TEXT"),
+        ("last_successful_push_at", "TEXT"),
+    ):
+        _safe_add_column(
+            cursor,
+            "agent_sync_state",
+            column,
+            f"ALTER TABLE agent_sync_state ADD COLUMN {column} {sql_type}",
+        )
+
+
 def _migrate_pull_sync(cursor, conn):
     """The container's pull cycle (trinity-enterprise#703).
 
@@ -4891,7 +4916,7 @@ def _migrate_pull_sync(cursor, conn):
     working tree on upgrade; everyone else is off until toggled. New `github:`
     agents get it at creation. Runs once (schema_migrations).
 
-    Mirrored by the Alembic revision 0082_pull_sync.
+    Mirrored by the Alembic revision 0083_pull_sync.
     """
     _safe_add_column(
         cursor, "agent_git_config", "pull_sync_enabled",
@@ -5068,5 +5093,6 @@ MIGRATIONS = [
     ("telegram_group_context", _migrate_telegram_group_context),
     ("agent_skill_sets", _migrate_agent_skill_sets),
     ("portal_messages_unread_index", _migrate_portal_messages_unread_index),
+    ("agent_sync_state_divergence", _migrate_agent_sync_state_divergence),
     ("pull_sync", _migrate_pull_sync),
 ]
