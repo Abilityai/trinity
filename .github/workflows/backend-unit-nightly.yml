@@ -474,7 +474,14 @@ jobs:
             );
             const marker = '<!-- nightly-unit-suite -->';
             const artDir = path.join(process.env.GITHUB_WORKSPACE, 'nightly-artifacts');
-            const legDir = (pr, seed) => path.join(artDir, `nightly-pr-${pr}-seed-${seed}`);
+            // download-artifact extracts into `<path>/<name>/` only when the
+            // pattern matched MORE than one artifact; a lone match lands in
+            // `<path>` itself. The root holds files only in that case, so the
+            // fallback cannot mix two legs.
+            const legDir = (pr, seed) => {
+              const d = path.join(artDir, `nightly-pr-${pr}-seed-${seed}`);
+              return fs.existsSync(d) ? d : artDir;
+            };
 
             const expectedSeeds = (process.env.NIGHTLY_SEEDS || '').split(' ').filter(Boolean);
             const { legs: parsed, rejected } = legsFromMatrix(

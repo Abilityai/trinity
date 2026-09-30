@@ -136,6 +136,16 @@ def test_artifacts_are_not_extracted_into_the_workspace_root(wf):
 
 
 @pytest.mark.parametrize("wf", _pr_code_workflows(), ids=lambda p: p.name)
+def test_a_lone_artifact_is_still_found(wf):
+    """download-artifact extracts into `<path>/<name>/` only when the pattern
+    matched more than one artifact (`artifacts.length === 1 ? resolvedPath`
+    in its source). With one open PR the named directory never exists, and
+    without the fallback the comment job finds nothing and says nothing."""
+    code = _uncommented(_post_step(wf)["with"]["script"])
+    assert "fs.existsSync(d) ? d : artDir" in code
+
+
+@pytest.mark.parametrize("wf", _pr_code_workflows(), ids=lambda p: p.name)
 def test_the_verdict_module_is_checked_out_from_this_commit(wf):
     co = next(s for s in _comment_steps(wf)
               if str(s.get("uses", "")).startswith("actions/checkout"))

@@ -432,9 +432,15 @@ jobs:
               `${process.env.GITHUB_WORKSPACE}/scripts/ci/nightly-verdict.js`
             );
             const marker = process.env.MARKER;
-            const legDir = (pr) => path.join(
-              process.env.GITHUB_WORKSPACE, 'integration-artifacts', `integration-pr-${pr}`
-            );
+            const artDir = path.join(process.env.GITHUB_WORKSPACE, 'integration-artifacts');
+            // download-artifact extracts into `<path>/<name>/` only when the
+            // pattern matched MORE than one artifact; a lone match (one open
+            // PR, or a scoped dispatch) lands in `<path>` itself. The root
+            // holds files only in that case, so the fallback cannot mix PRs.
+            const legDir = (pr) => {
+              const d = path.join(artDir, `integration-pr-${pr}`);
+              return fs.existsSync(d) ? d : artDir;
+            };
             const { legs, rejected } = legsFromMatrix(
               JSON.parse(process.env.MATRIX || '{"include":[]}'),
               (pr) => {
