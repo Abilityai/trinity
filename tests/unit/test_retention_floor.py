@@ -328,7 +328,7 @@ def test_acknowledge_endpoint_is_callable_and_records_the_ack():
     body = RetentionAcknowledge(key="agent_soft_delete_retention_days", window_days=180)
     req = MagicMock()
     req.client = None
-    req.url.path = "/api/settings/retention/acknowledge"
+    req.scope = {"path": "/api/settings/retention/acknowledge"}
     req.state.request_id = None
 
     db = MagicMock()
@@ -362,7 +362,7 @@ def test_acknowledge_rejects_a_window_mismatch_with_409():
 
     acknowledge = _RS.acknowledge_retention_prune
     body = RetentionAcknowledge(key="agent_soft_delete_retention_days", window_days=999)
-    req = MagicMock(); req.client = None; req.url.path = "/x"; req.state.request_id = None
+    req = MagicMock(); req.client = None; req.scope = {"path": "/x"}; req.state.request_id = None
     db = MagicMock()
     db.get_setting_value.side_effect = lambda key, default="0": "180"
 

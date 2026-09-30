@@ -249,7 +249,7 @@ def test_the_generic_put_actually_refuses_the_metric_knobs(key):
 
     req = MagicMock()
     req.client = None
-    req.url.path = f"/api/settings/{key}"
+    req.scope = {"path": f"/api/settings/{key}"}
     req.state.request_id = None
 
     with pytest.raises(HTTPException) as exc:

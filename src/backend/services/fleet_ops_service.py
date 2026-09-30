@@ -462,7 +462,7 @@ async def restart_fleet_impl(
                 source="api",
                 actor_user=current_user,
                 actor_ip=request.client.host if request.client else None,
-                endpoint=str(request.url.path),
+                endpoint=request.scope["path"],
                 request_id=getattr(request.state, "request_id", None),
                 details={
                     "total": len(agents),
@@ -692,7 +692,7 @@ async def emergency_stop_impl(
         source="api",
         actor_user=current_user,
         actor_ip=request.client.host if request.client else None,
-        endpoint=str(request.url.path),
+        endpoint=request.scope["path"],
         request_id=getattr(request.state, "request_id", None),
         details={
             "schedules_paused": results["schedules_paused"],

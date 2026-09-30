@@ -78,7 +78,7 @@ async def create_mcp_api_key_endpoint(
             actor_ip=request.client.host if request.client else None,
             target_type="mcp_key",
             target_id=getattr(api_key, "id", None),
-            endpoint=str(request.url.path),
+            endpoint=request.scope["path"],
             request_id=getattr(request.state, "request_id", None),
             details={
                 "name": getattr(key_data, "name", None),
@@ -159,7 +159,7 @@ async def ensure_default_mcp_api_key(
             actor_ip=request.client.host if request.client else None,
             target_type="mcp_key",
             target_id=getattr(api_key, "id", None),
-            endpoint=str(request.url.path),
+            endpoint=request.scope["path"],
             request_id=getattr(request.state, "request_id", None),
             details={
                 "name": key_data.name,
@@ -221,7 +221,7 @@ async def revoke_mcp_api_key_endpoint(
         actor_ip=request.client.host if request.client else None,
         target_type="mcp_key",
         target_id=key_id,
-        endpoint=str(request.url.path),
+        endpoint=request.scope["path"],
         request_id=getattr(request.state, "request_id", None),
     )
 
@@ -253,7 +253,7 @@ async def delete_mcp_api_key_endpoint(
         actor_ip=request.client.host if request.client else None,
         target_type="mcp_key",
         target_id=key_id,
-        endpoint=str(request.url.path),
+        endpoint=request.scope["path"],
         request_id=getattr(request.state, "request_id", None),
     )
 

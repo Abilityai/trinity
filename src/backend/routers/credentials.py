@@ -215,7 +215,7 @@ async def get_agent_credential_requirements(
         actor_ip=request.client.host if request.client else None,
         target_type="agent",
         target_id=agent_name,
-        endpoint=str(request.url.path),
+        endpoint=request.scope["path"],
         request_id=getattr(request.state, "request_id", None),
         details={
             "state": report["state"],
@@ -433,7 +433,7 @@ async def inject_credentials(
         actor_ip=request.client.host if request.client else None,
         target_type="agent",
         target_id=agent_name,
-        endpoint=str(request.url.path),
+        endpoint=request.scope["path"],
         request_id=getattr(request.state, "request_id", None),
         details={"files": list(request_body.files.keys()) + list(request_body.files_b64.keys())},
     )
@@ -497,7 +497,7 @@ async def export_credentials(
             actor_ip=request.client.host if request.client else None,
             target_type="agent",
             target_id=agent_name,
-            endpoint=str(request.url.path),
+            endpoint=request.scope["path"],
             request_id=getattr(request.state, "request_id", None),
             details={"files_exported": files_exported},
         )
@@ -572,7 +572,7 @@ async def import_credentials(
             actor_ip=request.client.host if request.client else None,
             target_type="agent",
             target_id=agent_name,
-            endpoint=str(request.url.path),
+            endpoint=request.scope["path"],
             request_id=getattr(request.state, "request_id", None),
             details={"files_imported": list(files.keys())},
         )
