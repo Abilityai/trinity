@@ -4,7 +4,7 @@
 > Workspace shows it happening: a **live card** under the message (status,
 > elapsed, current step, the steps of a pipeline with the agent holding each,
 > Stop, Open in Work) and the rail's **Work** tab (Now · Earlier, plus one
-> "N waiting on you · Open in Inbox" line — ent#610, the 2026-09-30 ruling). The report-back contract itself — every terminal posts back into
+> "N ask(s) waiting on you · Open in Inbox" line — ent#610, the 2026-09-30 ruling; the same line is on Info for every principal). The report-back contract itself — every terminal posts back into
 > the chat that started it — is abilityai/trinity#2386 and lives in
 > `channel-completion-report.md`. The user-facing noun is **work**.
 >
@@ -29,8 +29,8 @@ Portal.vue (shell)
 │                        terminalCardItem → <PortalWorkCard> (from the durable verdict)  @ask-about-it → prefill
 ├─ <PortalRoom>          feed live rows with `chat_id` == the room (∩ server `working`) → <PortalWorkCard show-agent …/>
 │                        no row for the room yet → the server-derived "X is thinking…" line (#2792)
-└─ <PortalRail> #tab-work → <PortalWork>  Now · Earlier; while a participant waits on you: "N waiting on you · Open in Inbox"
-                          (counted from portal.openAsks, on the Now heading row / under the empty copy)
+└─ <PortalRail> #tab-work → <PortalWork>  Now · Earlier; while a participant waits on you: <PortalAsksWaitingLine> "N ask(s) waiting on you · Open in Inbox"
+                          (counted from portal.openAsks, in the top row in both the loaded and the empty state)
                           → asksHomeRoute(agent) = /workspace/inbox?tab=action&from=<agent> (no `from` when 2+ agents wait)
 stores/portalWork.js ──► GET /api/enterprise/client-portal/work?agents=a,b&chat_id=…
 utils/websocket.js: agent_activity (started + terminal) / loop_* for a participant → portalWork (debounced 2 s)
@@ -261,7 +261,7 @@ are patched in place, and every other host keeps the default markup.
 `src/frontend/tests/unit/portalWorkTitle.spec.js` (against `previewTitle`) —
 the pre-read title mirror, row for row.
 `src/frontend/tests/unit/portalAskCard.mount.spec.js` — an ask read from another chat is answerable in place (#3055): its answer controls sit beside "Open the conversation"; the link has its own `v-if` and never replaces them. (Work no longer draws asks — ent#610, the 2026-09-30 ruling.)
-`src/frontend/tests/unit/portalWorkAsksLine.spec.js` — Work draws no ask; one "N waiting on you · Open in Inbox" line with the real router's href (narrowed to one agent, whole Action tab for two); it counts the ask open in the Inbox pane (round 5's skip is undone); pending only; on the Now heading row and in the empty state; the briefing's asks suggestion and Info's asks link route to the Inbox.
+`src/frontend/tests/unit/portalWorkAsksLine.spec.js` — Work draws no ask; one "N ask(s) waiting on you · Open in Inbox" line with the real router's href (narrowed to one agent, whole Action tab for two); Work takes no exclude list; pending only; in the same top row in the loaded and empty states; Info mounts the same line for every principal (`portalAsksWaitingLine.mount.spec.js`); the briefing's asks suggestion and Info's asks link route to the Inbox.
 
 ## Residuals (stated)
 

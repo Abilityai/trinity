@@ -74,7 +74,8 @@ Sign-in / reload on bare /workspace
                                expiring within 24h first (soonest first — the A10 badge is
                                the reason shown), then priority critical > high > medium > low
                                (unknown = medium), then the OLDEST first; ties on id
-    agent facets (§3g C2)      Action only, when ≥ 2 agents are waiting: a second dense
+    agent facets (§3g C2)      Action only, when ≥ 1 agent is waiting (round 2: from one, so a
+                               second agent's ask never pushes the list down): a second dense
                                OverflowTabs strip (inbox-agent-facets, tablist "Asks by
                                agent") — "All agents" (FROM_ALL) then each agent, most asks
                                first, with its count; the choice is ?from=<agent> (never
@@ -87,7 +88,10 @@ Sign-in / reload on bare /workspace
                                badgeLabel ("Relay Bot, 2 asks"); the list head names the
                                filter ("3 asks from Relay Bot") since its chip can sit in More;
                                the strip keeps the order the visit first drew (an answered ask
-                               moves a count, never a chip); a ?from= on another tab leaves the URL
+                               moves a count, never a chip); a ?from= on another tab leaves the URL;
+                               a ?from= the page opens with whose agent has nothing left is dropped
+                               and the head says "Nothing waiting from X · …"; arriving with a
+                               ?from= while nothing holds focus focuses the list column
     stableRows(fresh, visit)   rows keep their place for one TAB VISIT (§3g S1): a row that leaves
                                stays as a ghost (chat drawn read, ask drawn ended); a poll never
                                re-sorts; a new row goes in before its nearest fresh neighbour; a
@@ -129,13 +133,14 @@ Sign-in / reload on bare /workspace
               is off in the pane — "Open the conversation" lives here): store.fetchAskContext
               (RETHROWS) → GET /asks/{id}/context; skeleton → LoadFailed dense (retry) in
               its slot, the controls above never depend on it (a failed read still offers
-              "Open the conversation" → the ask's own chat); the skeleton is the smallest
+              "Open the conversation" → the ask's own chat, for an in-turn ask only); the skeleton is the smallest
               loaded shape (4 lines, chrome fill); meta line askContextMeta ("Asked 8m ago
               during a scheduled run · started 09:00" — the clock for a schedule/manual run
-              only; expiry and priority are on the card); Where it came from (a verified
+              only; expiry and priority are on the card); Where it came from (a chat turn's verified
               thread: its title — "Main" for Main — + "Filed in your Main chat" when the
               ask was filed elsewhere, the 3 messages before the ask, Open “<chat>” →
-              ?anchor=m:<last>; else "Filed in your Main chat" → the chat) → Delivered in
+              ?anchor=m:<last>; else, for an in-turn ask, "Filed in …" → the chat; a
+              background ask has no origin section) → Delivered in
               that chat (verified only, fetchSessionDeliverablesStrict → ?anchor=d:<id>,
               read BEFORE the context paints; a failed read is LoadFailed dense with its own
               retry) → Your recent answers
