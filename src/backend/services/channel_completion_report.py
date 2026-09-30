@@ -532,9 +532,16 @@ def _resolve_portal(
 # trinity-enterprise#610: the platform-written outcome marker on the portal
 # message this module writes. The Inbox's done/failed pill is read from it —
 # never parsed out of the body, where any agent reply beginning "**Finished**"
-# would classify as a finished run. `source` is platform-written only (ent#534)
-# and every frontend reader compares it to 'voice', so these values are inert
-# everywhere else.
+# would classify as a finished run. `source` is platform-written only (ent#534).
+#
+# NOT inert on the agent's side (#3054 review): any non-NULL `source` takes the
+# row out of `client_portal.db._TYPED`. So the row is never the resumed-turn
+# cursor (`get_platform_rows_since_last_reply`), is replayed into the next
+# resumed turn's context, rides inside the cold history window without taking a
+# typed slot, and both blocks tell it as `[Background task report: …]`
+# (`client_portal.service._context_lines`). Deliberate: the agent's live session
+# never saw the background run, and this is how it learns it finished and what
+# it found. Frontend readers compare `source` to 'voice' only.
 COMPLETION_SOURCE_DONE = "completion:done"
 COMPLETION_SOURCE_FAILED = "completion:failed"
 

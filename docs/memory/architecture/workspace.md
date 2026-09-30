@@ -809,7 +809,12 @@ platform-written **`source = "completion:done" | "completion:failed"`** marker t
 `channel_completion_report` now stamps on its portal message; any other value
 (including every historic NULL row and an agent reply that merely begins
 "**Finished**") gives `null`. Every frontend reader of `source` compares it to
-`'voice'` only, so the new values are inert elsewhere.
+`'voice'` only. The marker is **not** inert on the agent's side: a non-NULL `source`
+takes the row out of `db._TYPED`, so it is never the resumed-turn cursor, it is
+replayed into the next resumed turn, and it rides the cold history window without
+taking a typed slot — both told as `[Background task report: …]` (deliberate: the
+live session never saw the background run; #3054 review, pinned in
+`test_ent610_inbox.py`).
 
 **An addressed report always has a chat.** See `observability.md` → Agent Reports:
 an addressed report with no in-flight chat **of the addressee**, published by the

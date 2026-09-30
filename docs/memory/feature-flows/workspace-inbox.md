@@ -196,7 +196,9 @@ table, no migration. The report publish may mint the addressee's Main
   Inbox reads no executions. Only runs **addressed into the Workspace** arrive (A8).
 - **The outcome pill is a platform marker.** `source="completion:*"` is written by the
   completion writer from the same status that picks its wording. Parsing the body would
-  make the pill agent-writable.
+  make the pill agent-writable. The marker also takes the row out of the typed window, so
+  the agent's next turn is told `[Background task report: …]` (resumed or cold), and the
+  row is never the resumed-turn cursor.
 - **Counts and previews from one statement**, so the number on a row and its excerpt can
   never disagree mid-poll.
 - **Sidebar parity by construction.** The Inbox reads `sidebarThreads`, the projection the
