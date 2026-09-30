@@ -3611,8 +3611,9 @@ to localStorage in the clear.
   rollback) (§3g A9).
 - **Where an ask lives (the 2026-09-30 ruling as amended, PR A2 on ent#734's data)**: an ask
   raised during a chat turn is a tile in THAT chat's thread, placed by server time among the
-  messages and answerable in place; once ended it is one muted row (kind · title · ending with
-  who · when) that stays in that chat's history for the queue's own retention — the chat reads
+  messages and answerable in place; once ended — at once when answered there, the confirmation
+  in the row, announced, focus on the row (team ruling on #3101, 2026-10-01) — it is one muted row
+  (kind · title · ending with who · when) that stays in that chat's history for the queue's own retention — the chat reads
   its own chat-turn asks (`GET …/asks?chat_id=`, no 7-day window). A background ask (schedule,
   loop, gate) is in no chat, only the Inbox; its `chat_id` (Main) is the reply target. Nothing
   sits between the thread and the composer (principle 30). Every door — Work for platform
