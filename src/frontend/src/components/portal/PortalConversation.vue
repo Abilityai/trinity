@@ -302,7 +302,7 @@
           <div v-if="item.mode === 'card'" class="flex items-start gap-2.5" data-testid="portal-chat-ask-tile">
             <PortalAvatar :name="agent.name" :avatar-url="agent.avatar_url" :size="28" class="mt-0.5" />
             <!-- `relative`: each card's sr-only text stays inside the thread's scroll box. -->
-            <div class="relative min-w-0 flex-1 max-w-[85%]">
+            <div class="relative min-w-0 flex-1 max-w-[min(85%,40rem)]">
               <PortalAsks
                 :ask-ids="[item.ask.id]"
                 :current-session-id="currentSessionId"
@@ -315,11 +315,12 @@
             v-else
             class="flex items-baseline justify-center gap-1 min-w-0 text-xs"
             :class="META_INK_CLASS"
+            :title="item.line.plain"
             data-testid="portal-chat-ask-ended"
           >
             <span class="shrink-0">{{ item.line.kind }}</span>
             <span aria-hidden="true">·</span>
-            <AskMarkdown :text="item.line.title" inline class="min-w-0 truncate" />
+            <AskMarkdown :text="item.line.title" inline class="min-w-0 truncate max-sm:whitespace-normal max-sm:line-clamp-2" />
             <span aria-hidden="true">·</span>
             <span class="shrink-0">{{ item.line.ending }}</span>
             <template v-if="item.line.when">
@@ -1033,7 +1034,7 @@ const PLATFORM_LINE_CLASS = 'my-3 text-center text-xs text-gray-400 dark:text-gr
 // Meta ink for a label beside a message (the block's "· spoken", a task's
 // "asked during a voice call"): tertiary in light, and gray-400 in dark — the
 // dark ink ladder's floor for meta text is gray-400, never gray-500.
-const META_INK_CLASS = 'text-gray-400 dark:text-gray-400'
+const META_INK_CLASS = 'text-gray-500 dark:text-gray-400'
 const input = ref('')
 // trinity-enterprise#657: the composer's text outlives this instance. The key
 // is the conversation's identity — the thread once known, the agent's unsaved
@@ -1066,15 +1067,47 @@ const isMainChat = computed(() => {
 // trinity-enterprise#610 (the 09-30 ruling, amended) × ent#734: the asks THIS
 // chat's own turns raised — rows of the thread (`threadRows`). Declared after
 // `currentSessionId`: the `immediate` watcher below reads it at setup.
-const chatTurnAskList = computed(() => chatTurnAsks(agentAsks.value, currentSessionId.value))
+// Round 2 (review I3, codex C3): the store's list keeps ended asks 7 days and
+// one page, so the chat also reads its own (`fetchChatTurnAsks`, no ended
+// window — the queue's retention is the bound, as the ruling says). The
+// store's rows are the fresher (the poll), so they win for the same id.
+const chatRead = ref({ sid: null, rows: [] })
+watch(currentSessionId, async (sid) => {
+  chatRead.value = { sid: null, rows: [] }
+  if (!sid) return
+  try {
+    const rows = await store.fetchChatTurnAsks(sid)
+    if (currentSessionId.value === sid) chatRead.value = { sid, rows }
+  } catch (e) {
+    console.warn('[workspace] chat asks unavailable:', e?.message || e)
+  }
+}, { immediate: true })
+const chatTurnAskList = computed(() => {
+  const sid = currentSessionId.value
+  const fresh = chatTurnAsks(agentAsks.value, sid)
+  if (chatRead.value.sid !== sid) return fresh
+  const have = new Set(fresh.map((a) => a.id))
+  return [...fresh, ...chatTurnAsks(chatRead.value.rows, sid).filter((a) => !have.has(a.id))]
+})
 // An ask seen waiting in this chat keeps its card (ended, with the ent#468
 // confirmation) after you answer it, until you leave the chat. Any other ended
-// ask is one muted history row.
+// ask is one muted history row. ONE watcher over (chat, waiting ids): two — a
+// reset on the chat and an add on the ids — ran add-then-reset on a switch, so
+// an ask answered before the next poll lost its card (review round 2, C1).
+// A new waiting tile in the chat you are on is an arrival, like a message: it
+// counts toward "jump to latest" while you read above (round 2, QA mobile F3).
 const seenPendingAsks = ref(new Set())
-watch(() => chatTurnAskList.value.filter((a) => a.status === 'pending').map((a) => a.id), (ids) => {
-  if (ids.some((id) => !seenPendingAsks.value.has(id))) seenPendingAsks.value = new Set([...seenPendingAsks.value, ...ids])
-}, { immediate: true })
-watch(currentSessionId, () => { seenPendingAsks.value = new Set() })
+watch(
+  () => [currentSessionId.value, chatTurnAskList.value.filter((a) => a.status === 'pending').map((a) => a.id)],
+  ([sid, ids], old) => {
+    const sameChat = old && old[0] === sid
+    const base = sameChat ? seenPendingAsks.value : new Set()
+    const fresh = ids.filter((id) => !base.has(id))
+    if (!sameChat || fresh.length) seenPendingAsks.value = new Set([...base, ...ids])
+    if (sameChat && fresh.length) onMessagesArrived(fresh.length)
+  },
+  { immediate: true },
+)
 
 // Archive this conversation and start the agent cold. No confirmation dialog
 // (operator, 2026-09-06) — nothing is lost, and the archived chat is one click
@@ -1421,7 +1454,8 @@ async function reattach(executionId, budgetSeconds, budgetReadAt) {
     if (data?.response) {
       // #2580: `id` + `myRating` from the persisted row, so a reattached reply is
       // rateable the moment it lands rather than on the next load.
-      messages.value.push(assistantRow({ content: data.response, id: data.id, my_rating: data.myRating }))
+      messages.value.push({ ...assistantRow({ content: data.response, id: data.id, my_rating: data.myRating }), at: data.at || null })
+      refreshAsksAfterTurn()
       // A reattached reply is still a reply the user just watched land, so it
       // has to announce itself like `deliver()` does. Without this the thread
       // keeps its server-side unread count and the sidebar badges the
@@ -1945,11 +1979,15 @@ async function deliver(text, { replyId = null } = {}) {
     // (the server used to mint that id inline and throw it away). Either way the
     // gate below is the id itself, never a flag that rose before it existed —
     // the 2026-09-07 ledger rule.
-    messages.value.push(assistantRow({
-      content: data.response || '(no response)',
-      id: data.id || data.message_id,
-      my_rating: data.myRating,
-    }))
+    messages.value.push({
+      ...assistantRow({
+        content: data.response || '(no response)',
+        id: data.id || data.message_id,
+        my_rating: data.myRating,
+      }),
+      at: data.at || null,
+    })
+    refreshAsksAfterTurn()
     terminalOutcome.value = null   // ent#525: the reply IS the outcome
     // ent#534: never narrate over a live voice call — the orb owns playback
     // then (the speaker toggle is hidden for the call's duration).
@@ -2341,9 +2379,10 @@ async function submitUserText(text, { replyId = null, replyExcerpt = '' } = {}) 
   const index = messages.value.push({
     role: 'user', content: text, failed: false, error: null,
     replyTo: replyId ? { messageId: replyId, excerpt: replyExcerpt } : null,
-    // trinity-enterprise#610: stamped as it is sent, so an ask this turn raises
-    // lands below it (`placeAsksInThread`); the reload brings the server's time.
-    at: new Date().toISOString(),
+    // trinity-enterprise#610: sent from here — placed at the newest server time
+    // before it, so an ask this turn raises lands below it without the browser's
+    // clock taking part (`placeAsksInThread`); the reload brings the server's time.
+    local: true,
   }) - 1
   // #2624: sending is an explicit intent to follow the bottom — it pins and
   // re-arms whatever the prior scroll position, so the reader is never handed
@@ -2719,11 +2758,17 @@ const voiceHeaderText = computed(() => voiceHeaderLine({
 const threadItems = computed(() => groupVoiceBlocks(messages.value))
 // trinity-enterprise#610: the thread's rows with this chat's chat-turn asks
 // placed among them by time, each as a card or a history row.
-const threadRows = computed(() => placeAsksInThread(threadItems.value, chatTurnAskList.value).map((row) => (
+const threadRows = computed(() => placeAsksInThread(threadItems.value, chatTurnAskList.value, { truncated: historyTruncated.value }).map((row) => (
   row.kind !== 'ask' ? row
     : askTileMode(row.ask, seenPendingAsks.value) === 'card' ? { ...row, mode: 'card' }
       : { ...row, mode: 'row', line: askHistoryLine(row.ask) }
 )))
+// Round 2 (plan-design P1-B): an ask a turn raised is on the server before its
+// reply lands, and the reply may say "see the question above" — read the asks
+// then, instead of leaving the tile to the next 20 s poll.
+function refreshAsksAfterTurn() {
+  store.fetchAsks().catch(() => {})
+}
 const rowKey = (item) => (
   item.kind === 'ask' ? `ask-${item.ask.id}` : item.kind === 'voice-call' ? `call-${item.callId}` : `m-${item.index}`
 )

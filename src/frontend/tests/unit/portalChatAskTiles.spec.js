@@ -143,7 +143,7 @@ describe('card or history row', () => {
   it('the row says kind · title · ending with who · when', () => {
     const now = Date.parse('2026-09-30T12:00:00Z')
     expect(askHistoryLine(ask('d', { status: 'answered', ended_by: 'you', ended_at: '2026-09-30T10:00:00Z' }), now))
-      .toEqual({ kind: 'Approval', title: 'Ask d', ending: 'Answered by you', when: '2h ago', at: '2026-09-30T10:00:00Z' })
+      .toEqual({ kind: 'Approval', title: 'Ask d', plain: 'Ask d', ending: 'Answered by you', when: '2h ago', at: '2026-09-30T10:00:00Z' })
     expect(askHistoryLine(ask('c', { kind: 'question', status: 'cancelled', ended_by: 'operator', ended_at: '2026-09-30T11:59:40Z' }), now))
       .toMatchObject({ kind: 'Question', ending: 'Cancelled by the operator', when: 'just now' })
     expect(askHistoryLine(ask('x', { status: 'expired', ended_at: '2026-09-30T11:00:00Z' }), now))
@@ -236,5 +236,142 @@ describe('the chat thread (mounted)', () => {
     expect(uses).toHaveLength(1)
     expect(CONVERSATION).toMatch(/v-for="\(item, k\) in threadRows"[\s\S]*<PortalAsks\b[\s\S]*<\/template>\s*\n\s*<!-- ent#525/)
     expect(CONVERSATION).not.toMatch(/splitChatAsks|chatAsksLabel|asksOpen/)
+  })
+})
+
+// ---- review round 2 (2026-09-30) -------------------------------------------
+
+describe('where a tile sits across live turns and clocks (round 2: review C2, codex C6/V1)', () => {
+  const keys = (rows) => rows.map((r) => (r.kind === 'ask' ? `ask:${r.ask.id}` : r.message.id))
+  // The person's own message, as the composer pushes it: no clock of its own
+  // (the browser's is not the server's), only the mark that it was sent here.
+  const sent = (id) => ({ kind: 'message', index: Number(id.slice(1)), message: { id, role: 'user', content: id, at: null, local: true } })
+
+  it("a second live turn's ask lands after the first turn's reply, not above it", () => {
+    const rows = [msg('m0', '2026-09-30T10:00:00Z', 'user'), msg('m1', '2026-09-30T10:01:00Z'), sent('m2')]
+    expect(keys(placeAsksInThread(rows, [ask('a', { created_at: '2026-09-30T10:05:10Z' })])))
+      .toEqual(['m0', 'm1', 'm2', 'ask:a'])
+  })
+  it('a sent message is placed by the server rows before it, so no browser clock can lift an ask above it', () => {
+    const rows = [msg('m0', '2026-09-30T09:00:00Z'), sent('m1')]
+    expect(keys(placeAsksInThread(rows, [ask('a', { created_at: '2026-09-30T10:00:00Z' })])))
+      .toEqual(['m0', 'm1', 'ask:a'])
+  })
+  it('an ask of an EARLIER turn still sits before the reply it came before', () => {
+    const rows = [msg('m0', '2026-09-30T10:00:00Z', 'user'), msg('m1', '2026-09-30T10:01:00Z'), sent('m2')]
+    expect(keys(placeAsksInThread(rows, [ask('a', { created_at: '2026-09-30T10:00:30Z' })])))
+      .toEqual(['m0', 'ask:a', 'm1', 'm2'])
+  })
+  it('while earlier messages are not shown, an ask older than the first shown row is not stacked on top', () => {
+    const rows = [msg('m5', '2026-09-30T10:00:00Z', 'user'), msg('m6', '2026-09-30T10:01:00Z')]
+    const asks = [ask('old', { created_at: '2026-09-29T10:00:00Z' }), ask('new', { created_at: '2026-09-30T10:00:30Z' })]
+    expect(keys(placeAsksInThread(rows, asks, { truncated: true }))).toEqual(['m5', 'ask:new', 'm6'])
+    expect(keys(placeAsksInThread(rows, asks))).toEqual(['ask:old', 'm5', 'ask:new', 'm6'])
+  })
+  it('the composer marks the sent message as sent here instead of stamping the browser clock', () => {
+    const send = CONVERSATION.slice(CONVERSATION.indexOf('async function submitUserText('))
+    const push = send.slice(0, send.indexOf(') - 1'))
+    expect(push).toMatch(/local: true/)
+    expect(push).not.toMatch(/at: new Date\(\)/)
+  })
+  it('a live reply carries the time the server stored it at', () => {
+    const pushes = CONVERSATION.match(/messages\.value\.push\(\{\s*\.\.\.assistantRow\([\s\S]*?\),\s*at: data\.at \|\| null/g) || []
+    expect(pushes).toHaveLength(2)
+  })
+})
+
+describe('the chat thread across chat switches and reads (round 2: review C1/I3, codex C3)', () => {
+  const answered = (id, over = {}) => ask(id, { status: 'answered', ended_by: 'you', ended_at: '2026-09-30T10:20:00Z', ...over })
+
+  it('an ask answered right after switching to its chat keeps its card and confirmation', async () => {
+    store.asks = [ask('there', { chat_id: 's2' })]
+    // The chat's own read still in flight: nothing but the switch and the
+    // answer may decide the card (a resolving read would re-add the ids).
+    store.fetchChatTurnAsks = vi.fn(() => new Promise(() => {}))
+    await open()
+    await wrapper.setProps({ sessionId: 's2' })
+    await flushPromises()
+    store.asks = [answered('there', { chat_id: 's2' })]
+    await flushPromises()
+    expect(wrapper.findAllComponents(PortalAsks)).toHaveLength(1)
+    expect(wrapper.find('[data-testid="portal-chat-ask-ended"]').exists()).toBe(false)
+  })
+
+  it('answered, then away and back: one muted row that survived the switch', async () => {
+    store.asks = [ask('live')]
+    await open()
+    store.asks = [answered('live')]
+    await flushPromises()
+    await wrapper.setProps({ sessionId: 's2' })
+    await flushPromises()
+    await wrapper.setProps({ sessionId: 's1' })
+    await flushPromises()
+    expect(wrapper.findAllComponents(PortalAsks)).toHaveLength(0)
+    expect(wrapper.find('[data-testid="portal-chat-ask-ended"]').exists()).toBe(true)
+  })
+
+  it("a chat keeps an ended ask the Inbox read no longer carries (the chat's own read)", async () => {
+    store.asks = []
+    store.fetchChatTurnAsks = vi.fn(async () => [answered('old', { created_at: '2026-06-01T10:03:00Z', ended_at: '2026-06-01T10:04:00Z' })])
+    await open()
+    expect(store.fetchChatTurnAsks).toHaveBeenCalledWith('s1')
+    expect(wrapper.find('[data-testid="portal-chat-ask-ended"]').exists()).toBe(true)
+  })
+
+  it("the store's fresher row wins over the chat read for the same ask", async () => {
+    store.asks = [answered('x')]                          // the poll saw it answered
+    store.fetchChatTurnAsks = vi.fn(async () => [ask('x')]) // the chat read, older: still waiting
+    await open()
+    expect(wrapper.findAllComponents(PortalAsks)).toHaveLength(0)
+    expect(wrapper.findAll('[data-testid="portal-chat-ask-ended"]')).toHaveLength(1)
+  })
+
+  it("a chat read that fails leaves the store's tiles in place", async () => {
+    store.asks = [ask('here')]
+    store.fetchChatTurnAsks = vi.fn(async () => { throw new Error('503') })
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    await open()
+    expect(wrapper.findAllComponents(PortalAsks)).toHaveLength(1)
+    expect(warn.mock.calls.some((c) => String(c[0]).includes('[workspace] chat asks unavailable'))).toBe(true)
+    warn.mockRestore()
+  })
+
+  it("a read for the chat you already left never lands in the one you're on", async () => {
+    let release
+    store.asks = []
+    store.fetchChatTurnAsks = vi.fn((sid) => (sid === 's1'
+      ? new Promise((r) => { release = () => r([answered('stale')]) })
+      : Promise.resolve([answered('mine', { chat_id: 's2' })])))
+    await open()
+    await wrapper.setProps({ sessionId: 's2' })
+    await flushPromises()
+    expect(wrapper.findAll('[data-testid="portal-chat-ask-ended"]')).toHaveLength(1)
+    release()                                             // s1's read lands late
+    await flushPromises()
+    const rows = wrapper.findAll('[data-testid="portal-chat-ask-ended"]')
+    expect(rows).toHaveLength(1)                          // s2's own history is still there
+    expect(rows[0].element.closest('[data-ask-id]').getAttribute('data-ask-id')).toBe('mine')
+  })
+
+  it('the history row is AA text in light (gray-500), and its full title is one hover away', async () => {
+    store.asks = [answered('done', { title: 'A **long** title' })]
+    await open()
+    const row = wrapper.find('[data-testid="portal-chat-ask-ended"]')
+    expect(row.classes()).toContain('text-gray-500')
+    expect(row.classes()).not.toContain('text-gray-400')
+    expect(row.attributes('title')).toBe('A long title')
+  })
+})
+
+// @source-text-pin (declared): the reply-landing paths and the stick-to-bottom
+// arrival need a live turn / a real scroll box that a shallow mount has neither of.
+describe('a turn landing reads the asks; a new tile is an arrival (round 2: plan-design P1-B, QA mobile F3)', () => {
+  it('both reply-landing paths read the asks, and the read is the store one the poll uses', () => {
+    expect((CONVERSATION.match(/\n\s*refreshAsksAfterTurn\(\)\n/g) || [])).toHaveLength(2)
+    const fn = CONVERSATION.slice(CONVERSATION.indexOf('function refreshAsksAfterTurn('))
+    expect(fn.slice(0, fn.indexOf('\n}'))).toMatch(/store\.fetchAsks\(\)/)
+  })
+  it('a waiting tile new to the chat on screen counts toward "jump to latest"', () => {
+    expect(CONVERSATION).toMatch(/if \(sameChat && fresh\.length\) onMessagesArrived\(fresh\.length\)/)
   })
 })

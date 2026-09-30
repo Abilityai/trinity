@@ -2162,6 +2162,20 @@ export const useClientPortalStore = defineStore('clientPortal', {
       }
     },
 
+    // trinity-enterprise#610 (the 09-30 ruling, amended): ONE chat's chat-turn
+    // asks, pending and ended with no ended window — an ended one stays in that
+    // chat's history for the queue's retention, past the 7 days `asks` carries.
+    // Returns the rows and writes nothing: `asks` stays the one list the counts
+    // read. Rethrows; the chat keeps what `asks` gives it when this fails.
+    async fetchChatTurnAsks(chatId) {
+      if (!this.isClientSignedIn || !chatId) return []
+      const { data } = await portalHttp.get('/api/enterprise/client-portal/asks', {
+        headers: this.authHeader,
+        params: { chat_id: chatId },
+      })
+      return Array.isArray(data) ? data : []
+    },
+
     // ent#525: the chat's work — what its participants are doing now and did
     // recently — one request for every participant. Platform door only: the
     // route 404s a portal token, and the rail never feeds the store for one.

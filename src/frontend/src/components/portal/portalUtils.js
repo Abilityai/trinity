@@ -2069,6 +2069,9 @@ export function replyFromHistory(messages, baseline) {
     response: last.content,
     id: last.id || null,
     myRating: last.my_rating || null,
+    // trinity-enterprise#610: the stored time, which places a chat-turn ask
+    // before this reply without the browser's clock (`placeAsksInThread`).
+    at: last.created_at || null,
   }
 }
 

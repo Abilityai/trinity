@@ -37,20 +37,36 @@ function rowTime(item) {
 }
 
 // The thread's rows with each ask placed by time: before the first row that is
-// strictly newer than the ask (a tie goes after the row). A row with no time of
-// its own is a reply this client just received, so it is the newest thing in the
-// thread: a live turn's ask lands above the reply it came before. (The client
-// stamps the person's own message when it sends it, so the ask lands below that.)
-export function placeAsksInThread(items, asks) {
+// strictly newer than the ask (a tie goes after the row). Only SERVER times are
+// compared — an ask's `created_at` is the server's, so the browser's clock never
+// takes part (review round 2: a clock 30 s ahead lifted the ask above the
+// message that raised it):
+//   - the person's own message, sent from here, carries no time but `local`: it
+//     sits at the newest server time before it, so an ask this turn raises lands
+//     below it and an ask of an earlier turn stays above it;
+//   - any other row with no time is a reply this client just received (one
+//     whose stored time did not come with it): the newest thing in the thread,
+//     so a live turn's ask lands above the reply it came before.
+// `truncated` (earlier messages are not shown): an ask older than the first row
+// shown belongs to the part that is not, so it is left out rather than stacked
+// on top with none of its conversation around it.
+export function placeAsksInThread(items, asks, { truncated = false } = {}) {
   const rows = Array.isArray(items) ? items : []
   if (!Array.isArray(asks) || !asks.length) return rows
-  const pending = asks
+  let pending = asks
     .map((a) => ({ a, at: ms(a.created_at) ?? -Infinity }))
     .sort((x, y) => (x.at - y.at) || String(x.a.id).localeCompare(String(y.a.id)))
+  if (truncated) {
+    const first = rows.map(rowTime).find((t) => t !== null)
+    if (first !== undefined) pending = pending.filter((p) => p.at >= first)
+  }
   const out = []
   let next = 0
+  let lastAt = -Infinity
   for (const item of rows) {
-    const at = rowTime(item) ?? Infinity
+    let at = rowTime(item)
+    if (at !== null) lastAt = Math.max(lastAt, at)
+    else at = item?.message?.local === true ? lastAt : Infinity
     while (next < pending.length && pending[next].at < at) {
       out.push({ kind: 'ask', ask: pending[next].a })
       next += 1
@@ -78,6 +94,8 @@ export function askHistoryLine(ask, now = Date.now()) {
   return {
     kind: HISTORY_KIND[ask?.kind] || queueTypeLabel(ask?.kind) || 'Question',
     title: ask?.title || '',
+    // The row clips the title on a phone; this is its hover/long-press text.
+    plain: (ask?.title || '').replace(/[*_`~]/g, ''),
     ending: queueEndingText(ending),
     when: at ? relativeTime(at, now) : '',
     at,
