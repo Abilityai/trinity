@@ -1,13 +1,15 @@
 <!--
   trinity-enterprise#610 sign-off round 8: "replying to" — the Codex-style tab
-  that sits on top of the composer (and, `removable: false`, above the sent
+  that sits on top of the composer (and, `placement="message"`, above the sent
   message). It shows a one-line excerpt; the agent is given the stored message
-  itself, quoted server-side from its id.
+  itself, quoted server-side from its id. A sent message's chip is removable only
+  while that message failed (#3054 review): a refused reply target must be
+  droppable, or Retry re-sends the same id into the same 422.
 -->
 <template>
   <div
     class="flex items-center gap-2 min-w-0 text-xs text-gray-600 dark:text-gray-300"
-    :class="removable
+    :class="placement === 'composer'
       ? 'mx-3 px-3 py-1.5 rounded-t-xl border border-b-0 border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-900'
       : 'justify-end'"
     data-testid="portal-reply-chip"
@@ -33,6 +35,7 @@
 defineProps({
   excerpt: { type: String, default: '' },
   removable: { type: Boolean, default: true },
+  placement: { type: String, default: 'composer' },
 })
 defineEmits(['remove'])
 </script>

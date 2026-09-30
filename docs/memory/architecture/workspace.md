@@ -873,7 +873,10 @@ thread's, else one uniform 422 (no existence oracle; loud, because a dropped rep
 context the person believes they gave). The quote is built server-side, capped at
 `REPLY_QUOTE_MAX_CHARS`, and rides `reply_prefix` directly before the client's text on
 BOTH the resumed and the cold message; the stored user row stays what was typed. Pinned by
-`tests/unit/test_ent610_reply_to_message.py` through the real prompt composition.
+`tests/unit/test_ent610_reply_to_message.py` through the real prompt composition. The 422
+has a way out: the sent message's chip is removable while that message is failed, and
+Retry then sends it as an ordinary turn (`dropReply`; mounted in
+`portalReplyRefused.mount.spec.js`). A delivered message's chip stays fixed.
 
 ## Agents at the centre — Main, Reset, and the one page (ent#523, ent#524)
 
