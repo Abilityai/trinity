@@ -444,12 +444,21 @@
     <!-- ent#364: asks this agent raised, immediately above the composer — the
          third rendering of the SAME row the sidebar counts and the agent page
          shows, so answering here clears it in both. Directly above the input
-         because it is a turn that is waiting on the person about to type. -->
-    <div v-if="agentAsks.length" class="shrink-0 px-3 sm:px-6 pt-2">
+         because it is a turn that is waiting on the person about to type.
+         #3115 (stopgap for the ent#610 ruling): PENDING ONLY. Since #3023 the
+         asks list carries ended asks for 7 days, and the strip piled every
+         answered tile above the composer of every chat with the agent. An
+         ended ask belongs to history (the Inbox), not to the strip.
+         The strip is not gated on a count here: PortalAsks decides its own
+         visibility, which includes the ent#468 "sent" confirmation that must
+         outlive the last pending ask — a parent `v-if` on the pending count
+         would unmount it the instant it appears. The top gap follows content. -->
+    <div class="shrink-0 px-3 sm:px-6 [&:has([data-testid=portal-asks])]:pt-2" data-testid="portal-ask-strip">
       <div class="max-w-[var(--ws-message-max,64rem)] mx-auto">
         <PortalAsks
           :agent-name="agent.name"
           :current-session-id="currentSessionId"
+          pending-only
           @open-thread="(t) => emit('open-thread', t)"
         />
       </div>
@@ -903,7 +912,6 @@ const store = useClientPortalStore()
 // `asksForAgent` compares against `a.agent_name`, so passing the object matched
 // nothing and this surface — the third of the three ent#364 promises — had never
 // rendered. It failed SILENTLY, as an empty list is a legitimate state.
-const agentAsks = computed(() => store.asksForAgent(props.agent.name))
 const messages = ref([])
 const currentSessionId = ref(props.sessionId)
 // ent#555 — the canvas the rail has open for THIS agent, or null.
