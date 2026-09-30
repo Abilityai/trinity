@@ -795,7 +795,7 @@ included (the inherited #557 property).
 hands its counts to `service.get_chat_state(email, unread=...)`, so the emitted
 `unread` values and the previews come from the same statement and instant; the
 cursorless-thread and row-cap logic is reused unchanged. Each thread with
-`unread > 0` gains `latest {kind, id, at, excerpt, outcome, title?, display_hint?}`
+`unread > 0` gains `latest {kind, id, at, excerpt, outcome}`
 and `first_unread_message_id`, only for sessions whose agent is on
 `roster_agent_names(email, include_owned=is_platform)`, bounded to the 100 most
 recent. The excerpt is credential-sanitised (`utils.credential_sanitizer`), then

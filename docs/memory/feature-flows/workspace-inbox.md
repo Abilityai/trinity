@@ -154,7 +154,7 @@ GET /api/enterprise/client-portal/chat-state?previews=true      (only while the 
       arm (ii) agent_reports addressed_to_email = me, stamped to a session I own, after the cursor
       → {sid: (n, latest, first_unread_message_id)}
     service.get_chat_state(email, unread={sid: n})   same counts, same instant
-    attach latest{kind,id,at,excerpt,outcome,title?,display_hint?} for roster agents, ≤100
+    attach latest{kind,id,at,excerpt,outcome} for roster agents, ≤100
       excerpt: credential-sanitised, markdown-stripped, ≤160; a deliverable's excerpt = its title
       response_model_exclude_none → no preview = keys absent; roster read failure → raises (fail loud)
 
