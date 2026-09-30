@@ -489,6 +489,18 @@ Writers are edge-triggered (`WHERE sync_state IS NULL OR != :v …`; the rowcoun
 
 **Guards.** G3 (`test_1677_operator_alert_emitters.py`) allowlists `raise_ask` and the two new facade methods with a justification; `test_1402_prompt_contract.py` pins that the prompt teaches `ask_operator` by its bare name before the file.
 
+### Which chat an addressed ask attaches to (trinity-enterprise#734)
+
+**Why.** Every addressed ask was filed under the pair's Main chat (ent#429/#523), because nothing at raise time knew which execution raised it. The ent#610 amendment (2026-09-30) splits asks in two: one raised during a chat turn belongs to that chat; one raised by a background process (schedule, loop, gate) renders in no chat and keeps `chat_id = Main` only as the reply target.
+
+**Flow.** `raise_my_ask` → `ask_service.raise_ask(…, platform_execution_id=X-Trinity-Execution-Id)` → `_platform_turn` (this agent's own execution, else None) → `operator_queue_service._workspace_thread_for(agent, addressee, execution_id=turn)` — the turn is passed for `raised_by="agent"` only → `client_portal.service.chat_for_execution(agent, addressee, turn)`, which reads the execution row and returns its `source_channel_chat_id` iff `triggered_by == "public"`, `source_channel == "portal"`, `source_channel_client` equals the addressee, and `get_portal_session(chat, agent, addressee)` finds the session. Otherwise, or on any exception (a warning, never a refusal), `ensure_thread_for_ask` → Main. The result is written as `context.workspace_session_id`, which `client_portal/asks/service.py::_project` exposes as `chat_id`.
+
+**The link already existed.** Both portal turn-creation sites (`start_portal_turn`, `_precreate_sync_execution`, plus `portal_chat`'s own `execute_task` for the cold retry) stamp `source_channel_chat_id` / `source_channel_client` at creation (ent#457/#2426), so nothing is recorded at dispatch and no column is added. `triggered_by` is checked as well as the channel because `schedule_workspace_delivery` stamps the same portal destination on a schedule row; a delegated child inherits the stamp (ent#265) under its own trigger.
+
+**Unchanged.** The file path: `_clamp_ingested_item` calls `_workspace_thread_for` with no execution — the file carries only what the agent wrote — so a file ask stays on Main. The ent#429 strip runs on both paths before the platform value is written.
+
+**Tests.** `tests/unit/test_ent734_ask_raising_chat.py` — chat turn → that chat; schedule / loop / agent / mcp / room / gate / no / unknown / foreign execution → Main; another addressee's chat and a session of another pair → Main; a `public` row under a non-portal channel → Main; an agent-planted `workspace_session_id` and an agent-cited `context.execution_id` never win; a lookup failure → Main + a warning.
+
 ### Ingestion caps (#1632)
 
 The agent-authored sync boundary is the only untrusted operator-queue producer (there is **no HTTP create** — every item flows through `db.create_operator_queue_item`, and platform callers create directly, bypassing `_sync_agent`; since #1677 that exemption is split into platform-only emitters, which stay direct, and agent-influenceable ones, which are budgeted — see "Platform exemption & emitter budget" below). #1402 makes this queue the approval channel for irreversible actions, so a compromised / prompt-injected agent flooding plausible "approve this" items causes operator fatigue → reflexive approval. The bound must stop a **hostile** agent (a rate-aware attacker), not just a runaway. All limits are env-tunable and generous by design (requirements §26.7).

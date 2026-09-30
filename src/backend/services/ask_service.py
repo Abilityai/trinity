@@ -377,9 +377,13 @@ def raise_ask(
     if turn:
         context["execution_id"] = turn
     if addressee:
-        # The addressee's Main chat (ent#429/#523), resolved at raise time. Only
-        # after the caps passed: attaching may create the chat.
-        thread = oqs._workspace_thread_for(agent_name, addressee)
+        # The chat the raising turn serves (ent#734), else the addressee's Main
+        # (ent#429/#523), resolved at raise time. Only after the caps passed:
+        # attaching may create Main. Only an AGENT's raise reads the turn: a
+        # gate's ask is a background ask, and belongs to the Inbox only
+        # (the ent#610 amendment of 2026-09-30).
+        thread = oqs._workspace_thread_for(
+            agent_name, addressee, execution_id=turn if raised_by == "agent" else None)
         if thread:
             context[oqs._WORKSPACE_THREAD_KEY] = thread
     item = {

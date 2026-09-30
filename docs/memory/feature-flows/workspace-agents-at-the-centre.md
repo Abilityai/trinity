@@ -119,6 +119,10 @@ designated; now there is, and a guess would scatter the agent's own messages
 across whichever chat the person happened to open last. An explicit
 `session_id` still wins.
 
+An ask raised DURING a chat turn is not homeless and skips this rule (ent#734):
+it attaches to the chat of the turn that raised it — see
+[operating-room.md](operating-room.md#which-chat-an-addressed-ask-attaches-to-trinity-enterprise734).
+
 ---
 
 ## Frontend

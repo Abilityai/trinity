@@ -630,6 +630,17 @@
 - **Files**: `src/backend/services/role_addressing.py`, `src/backend/services/ask_service.py` (`_address`), `src/backend/routers/reports.py` (`_report_audience`), `src/backend/routers/messages.py` (`_recipient`), `src/backend/models.py`, `src/mcp-server/src/tools/{reports,messages}.ts`
 - **Tests**: `tests/unit/test_ent606_role_addressing.py`
 
+### 26.12 An Ask Attaches to the Chat That Raised It (OPS-001-THREAD)
+- **Status**: ✅ Implemented (trinity-enterprise#734 — the data half; the chat tile and ended marker are trinity#3101)
+- **Requirement ID**: OPS-001-THREAD
+- **Priority**: P2
+- **Description**: An addressed ask carries `context.workspace_session_id` — the client-facing `chat_id` — resolved at RAISE time and written by the platform only (trinity-enterprise#429: an agent-authored value is stripped on both paths). Since the ent#610 amendment of 2026-09-30 it has two homes:
+  - **Raised during a Workspace chat turn → that chat.** When the RAISING execution — the native path's platform-injected `X-Trinity-Execution-Id` (#2392), validated as this agent's own — is a Workspace chat turn (`triggered_by="public"`, `source_channel="portal"`) whose stamped chat is a session of the same (agent, addressee), the ask attaches to that chat. The link is the one both portal turn-creation sites already stamp on the row (`source_channel_chat_id` / `source_channel_client`, ent#457/#2426), so no column is added.
+  - **Anything else → the pair's Main, unchanged** (ent#523): a schedule (including one that delivers into the Workspace, whose row carries the portal stamp under `triggered_by="schedule"`), a loop, a room turn, a delegated child, a gate raise, no or an unknown or a foreign execution, another addressee's chat, and every file-ingested ask (the file carries only an agent-written `context.execution_id`, which is never read for this — citing a turn would be naming a chat).
+  - **Fail-soft:** a failed lookup attaches the ask to Main and logs a warning; it never refuses the ask (the #1632 clamp contract).
+- **Files**: `src/backend/client_portal/service.py` (`chat_for_execution`), `src/backend/services/operator_queue_service.py` (`_workspace_thread_for`), `src/backend/services/ask_service.py` (`raise_ask`)
+- **Tests**: `tests/unit/test_ent734_ask_raising_chat.py`
+
 ---
 
 ## 28. Agent Guardrails (GUARD-001)

@@ -365,8 +365,17 @@ def _validated_addressee(agent_name: str, raw) -> Optional[str]:
 _WORKSPACE_THREAD_KEY = "workspace_session_id"
 
 
-def _workspace_thread_for(agent_name: str, email: str) -> Optional[str]:
+def _workspace_thread_for(agent_name: str, email: str,
+                          execution_id: Optional[str] = None) -> Optional[str]:
     """The chat an addressed ask attaches to, or None (ent#429).
+
+    ent#734: `execution_id` is the RAISING execution as the PLATFORM knows it
+    (the native path's validated `X-Trinity-Execution-Id`, #2392) — never an
+    agent-written `context.execution_id`, which would let an agent name a chat
+    by citing one of its turns. When it is a Workspace chat turn of this same
+    (agent, addressee), the ask attaches to that chat; anything else — a
+    schedule, loop or gate run, no or an unknown execution, another person's
+    chat, a failed lookup — gets the pair's Main, exactly as before.
 
     Resolved at RAISE time, never at render time: an ask raised by a scheduled
     run has no conversation of its own, and "we will work out where it belongs
@@ -380,6 +389,20 @@ def _workspace_thread_for(agent_name: str, email: str) -> Optional[str]:
     refusing the whole ask over it would lose the question entirely. Never
     raises — the #1632 clamp contract.
     """
+    if execution_id:
+        try:
+            from client_portal.service import chat_for_execution
+
+            chat = chat_for_execution(agent_name, email, execution_id)
+            if chat:
+                return chat
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "[OperatorQueue] could not resolve the chat of the turn that raised "
+                "an ask from %s; attaching it to Main (ent#734)",
+                agent_name,
+                exc_info=True,
+            )
     try:
         from client_portal.service import ensure_thread_for_ask
 
