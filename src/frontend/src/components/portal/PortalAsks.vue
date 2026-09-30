@@ -56,9 +56,16 @@
         >{{ queueSyncBadge(ask).label }}</BaseBadge>
       </div>
 
-      <p class="mt-1 text-sm font-medium text-gray-900 dark:text-gray-100">{{ ask.title }}</p>
-      <p v-if="ask.question && ask.question !== ask.title"
-         class="mt-0.5 text-sm text-gray-600 dark:text-gray-300 whitespace-pre-wrap">{{ ask.question }}</p>
+      <p class="mt-1 text-sm font-medium text-gray-900 dark:text-gray-100">
+        <AskMarkdown :text="ask.title" inline :data-testid="`portal-ask-title-${ask.id}`" />
+      </p>
+      <!-- #3115: the question is agent-written markdown — rendered, never shown raw. -->
+      <AskMarkdown
+        v-if="ask.question && ask.question !== ask.title"
+        :text="ask.question"
+        class="mt-0.5 text-gray-600 dark:text-gray-300"
+        :data-testid="`portal-ask-question-${ask.id}`"
+      />
       <!-- trinity-enterprise#611: the exact action this approval would run, which is
            what the person is deciding. Kept on an ended ask, so it still says what
            was decided. -->
@@ -111,7 +118,7 @@
               :aria-pressed="picks[ask.id] === opt"
               :data-testid="`portal-ask-option-${ask.id}`"
               @click="picks[ask.id] = picks[ask.id] === opt ? null : opt"
-            >{{ opt }}</button>
+            ><AskMarkdown :text="opt" inline /></button>
           </div>
           <form class="mt-2 flex items-center gap-2" @submit.prevent="submit(ask)">
             <input
@@ -181,6 +188,7 @@ import { queueSyncBadge, respondRefusedAsDiverged, QUEUE_RESPONSE_DIVERGED } fro
 // trinity-enterprise#611: the one ending rule, a third line for the same reason.
 import { queueEnding, queueEndingText } from '@/utils/operatorQueue'
 import { formatLocalDateTime, formatRelativeTime } from '@/utils/timestamps'
+import AskMarkdown from '@/components/operator/AskMarkdown.vue'
 
 const props = defineProps({
   // Omit to render every ask addressed to this user (chat/global); pass a name to
