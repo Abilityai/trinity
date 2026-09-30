@@ -316,11 +316,18 @@ class TestStrandedTriggersStayPushed:
             assert kw["overflow_policy"] == "queue_persistent", trigger
             assert kw["overflow_payload"] is not None, trigger
 
-    @pytest.mark.parametrize("trigger", ["manual", "mcp", "chat", "public", "voice"])
-    def test_interactive_triggers_are_untouched(self, pilot, trigger):
-        """Until #2842/#2843 land (#1989), a human turn keeps the synchronous
-        push path and today's Redis session lock."""
+    @pytest.mark.parametrize("trigger", ["manual", "mcp", "public", "voice"])
+    def test_interactive_triggers_are_queued(self, pilot, trigger):
+        """#3114: an interactive turn on a pilot reaches the durable queue too;
+        its sync caller waits on the row via ``dispatch_and_await_terminal``."""
         _, m = _run(triggered_by=trigger)
+        kw = _acquire_kwargs(m["capacity"])
+        assert kw["overflow_policy"] == "queue_persistent", trigger
+        assert kw["overflow_payload"] is not None, trigger
+
+    def test_chat_trigger_is_untouched(self, pilot):
+        """The UI ``/chat`` trigger keeps the push path (#3114)."""
+        _, m = _run(triggered_by="chat")
         assert _acquire_kwargs(m["capacity"])["overflow_policy"] == "reject"
 
 

@@ -1130,7 +1130,7 @@ async def _wake_agent(current_user, room_id: str, agent_name: str, chain_depth: 
     _broadcast("room_participant_state",
                {"room_id": room_id, "identity": agent_name, "state": "working"})
 
-    from services.task_execution_service import get_task_execution_service
+    from services.task_execution_service import dispatch_and_await_terminal
 
     # trinity-enterprise#363. Derived HERE, per wake, from membership — not
     # threaded down from `post_message`, which does hold the list: `_wake_agent`
@@ -1161,10 +1161,13 @@ async def _wake_agent(current_user, room_id: str, agent_name: str, chain_depth: 
     manifest_prefix, images = await _room_inbox_context(agent_name, client_email, delta)
 
     try:
-        result = await get_task_execution_service().execute_task(
+        # #3114: on a pull pilot the turn is queued under this room's key and
+        # awaited here.
+        result = await dispatch_and_await_terminal(
             agent_name=agent_name,
             message=manifest_prefix + _build_turn_prompt(room, agent_name, delta, cold, user_facing),
             triggered_by="room",
+            conversation_key=f"room:{room_id}",
             system_prompt=room_prompt,
             images=images or None,
             source_user_email=client_email,

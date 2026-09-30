@@ -663,6 +663,7 @@ class ChannelMessageRouter:
             result = await self._run_agent_task(
                 adapter, message, agent_name, bot_token, channel, is_group,
                 container, upload_dir, context_prompt, verified_email, image_data,
+                session_id=session_id,
             )
             if result is None:
                 return
@@ -795,6 +796,7 @@ class ChannelMessageRouter:
         context_prompt: str,
         verified_email: Optional[str],
         image_data: list,
+        session_id: Optional[str] = None,
     ):
         """Step 9: assemble public-channel execution params (source identity,
         MEM-001 memory injection, restricted tool set) and run the task.
@@ -853,12 +855,16 @@ class ChannelMessageRouter:
             public_allowed_tools = public_allowed_tools + [_VOICE_REPLY_TOOL]
 
         try:
-            task_execution_service = get_task_execution_service()
+            # #3114: on a pull pilot the turn is queued under this channel
+            # conversation's key and awaited here.
+            from services.task_execution_service import dispatch_and_await_terminal
 
-            result = await task_execution_service.execute_task(
+            result = await dispatch_and_await_terminal(
+                service=get_task_execution_service(),
                 agent_name=agent_name,
                 message=context_prompt,
                 triggered_by=channel,
+                conversation_key=f"channel:{session_id}" if session_id else None,
                 source_user_email=source_email,
                 timeout_seconds=None,  # Uses agent's configured timeout (TIMEOUT-001)
                 allowed_tools=public_allowed_tools,

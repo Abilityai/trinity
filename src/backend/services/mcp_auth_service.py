@@ -360,9 +360,10 @@ async def dispatch_chat(email: str, agent: str, message: str) -> "object":
     assert_email_may_reach_agent(email, agent)
     email = normalize_email(email)
 
-    from services.task_execution_service import get_task_execution_service
+    from services.task_execution_service import dispatch_and_await_terminal
 
-    result = await get_task_execution_service().execute_task(
+    # #3114: on a pull pilot the turn is queued and awaited here.
+    result = await dispatch_and_await_terminal(
         agent_name=agent,
         message=message,
         triggered_by=CHAT_TRIGGERED_BY,

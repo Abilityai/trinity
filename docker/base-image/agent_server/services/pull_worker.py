@@ -398,6 +398,12 @@ async def _run_and_report(
     session_id = payload.get("session_id")
     overrides = payload.get("task_overrides") or {}
     turn_timeout = _resolve_turn_timeout(overrides)
+    # #3114: a turn queued by the backend's `execute_task` carries the push
+    # payload's `persist_session` and `images`. Older rows carry neither, so
+    # persistence falls back to "a session id means resume and persist".
+    persist_session = payload.get("persist_session")
+    if persist_session is None:
+        persist_session = bool(session_id)
 
     agent_state.record_task_start()
     try:
@@ -410,7 +416,8 @@ async def _run_and_report(
             max_turns=overrides.get("max_turns"),
             execution_id=execution_id,
             resume_session_id=session_id,
-            persist_session=bool(session_id),
+            persist_session=bool(persist_session),
+            images=payload.get("images") or None,
         )
         body = _success_result_body(claim_token, response_text, raw_messages, metadata, ran_session_id)
         finish_success: Optional[bool] = True

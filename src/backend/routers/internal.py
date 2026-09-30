@@ -570,9 +570,13 @@ async def execute_task_internal(
         idempotency_service.complete(idem, request.execution_id, accepted)
         return accepted
 
-    # Synchronous mode (default, backward compatible)
+    # Synchronous mode (default, backward compatible). #3114: on a pull pilot
+    # the turn is queued and awaited here.
+    from services.task_execution_service import dispatch_and_await_terminal
+
     try:
-        result = await task_service.execute_task(
+        result = await dispatch_and_await_terminal(
+            service=task_service,
             agent_name=request.agent_name,
             message=request.message,
             triggered_by=request.triggered_by,

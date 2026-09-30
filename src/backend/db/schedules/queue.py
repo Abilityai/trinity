@@ -1,5 +1,6 @@
 """Persistent backlog (BACKLOG-001) + #1081 dark pull/lease/CAS seams."""
 
+import logging
 import secrets
 from datetime import datetime, timedelta, timezone
 from typing import AbstractSet, Optional, List, Dict
@@ -14,6 +15,8 @@ from ..tables import (
 )
 from models import TaskExecutionStatus
 from utils.helpers import utc_now_iso, to_utc_iso
+
+logger = logging.getLogger(__name__)
 
 class ScheduleQueueMixin:
     """Queued/backlog accessors + pull-lease reaper seams."""
@@ -219,6 +222,12 @@ class ScheduleQueueMixin:
                 return dict(row) if row else None
             except IntegrityError:
                 if attempt == 2:
+                    # #3114: three straight lost races on one conversation read
+                    # as an empty queue to the worker; log it so a stall shows.
+                    logger.info(
+                        "[Backlog] claim for %s lost the one-running-turn race "
+                        "3 times; returning no row this poll", agent_name,
+                    )
                     return None
                 if worker_id is not None:
                     stmt = stmt.values(claim_token=secrets.token_urlsafe(32))

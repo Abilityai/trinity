@@ -353,10 +353,10 @@ B6 runtime-verify on the rebuilt image · the ≥2-week soak (#856 / #1766, meas
 the producer never force-queued (a free slot still meant a push, so rows only queued on overflow) and the
 backend's own `drain_next` raced the agent's worker for whatever did queue. Two independent capacity
 counters meant up to 2x `max_parallel_tasks`, invisible to S-02. The flag is now a true either/or for
-autonomous triggers; interactive turns keep the synchronous path for now — a **migration state**, not a
-boundary. Open Question 7 was **decided 2026-09-16 (#1989)** in favour of the edge adapter: interactive
-chat joins the queue once #2842 (queue priority) and #2843 (one turn per conversation) land, after which
-the synchronous push dispatch path is deleted.
+autonomous triggers and, since #3114, every interactive trigger except `chat` (the UI `/chat` path, which
+still pushes). Open Question 7 (#1989) put interactive chat on the queue behind #2842 (queue priority)
+and #2843 (one turn per conversation); the synchronous push dispatch path is deleted once `chat` is
+routed too.
 
 ## 9. Soak measurement set (#1766)
 
@@ -464,10 +464,9 @@ WHERE agent_name = '<agent>'
   AND started_at::timestamptz > now() - interval '24 hours';
 ```
 
-Expected after the #1766 gate + #2391 + #2523 + #2524: **every autonomous
-trigger ~100% `pulled`; only the interactive ones (`manual`, `mcp`, `chat`,
-`public`, `session`, `voice`, `room`) stay `pushed`, by the Open Question 7 scope
-cut (#1989).** Confirm the split per trigger with:
+Expected after the #1766 gate + #2391 + #2523 + #2524 + #3114: **every
+trigger ~100% `pulled` except `chat` (the UI `/chat` path), which stays
+`pushed`.** Confirm the split per trigger with:
 
 ```sql
 SELECT triggered_by,

@@ -210,10 +210,12 @@ def test_narrowing_is_a_runtime_no_op_on_the_only_producer_that_consults_it(pilo
     only stops the predicate from claiming reach it does not have.
     """
     from services.task_execution_service import _AUTONOMOUS_TRIGGERS
-    from services.pull_pilot import pull_owns_dispatch
+    from services.pull_pilot import PULL_REACHABLE_NON_AUTONOMOUS, pull_owns_dispatch
 
     for trigger in ("self_task", "agent", "mcp", "manual", "event"):
-        before = trigger in _AUTONOMOUS_TRIGGERS  # the pre-#2048 predicate body
+        # The pre-#2048 predicate body, widened by #3114 to the interactive
+        # triggers (`mcp`, `manual` here) a pilot now pulls.
+        before = trigger in _AUTONOMOUS_TRIGGERS or trigger in PULL_REACHABLE_NON_AUTONOMOUS
         assert pull_owns_dispatch("pilot-a", trigger) is before, trigger
 
 
@@ -288,8 +290,9 @@ def test_a_reachable_trigger_is_not_reported(pilot, trigger):
 
 @pytest.mark.parametrize("trigger", ["manual", "mcp", "chat", "self_task", "voip"])
 def test_an_interactive_trigger_is_not_reported(pilot, trigger):
-    """Interactive turns are excluded from pull until #2842/#2843 land (#1989),
-    so they are a known migration state, not a gap, and must not be logged as one."""
+    """Interactive triggers are outside the autonomous set, so the stranded
+    diagnostic never names them: a pilot pulls them (#3114), except ``chat``,
+    which pushes by design."""
     assert pilot.note_unreachable_pull_trigger("pilot-a", trigger) is False
 
 

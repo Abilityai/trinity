@@ -38,7 +38,8 @@ Dispatch topology, not policy. `pull_pilot.PULL_REACHABLE_TRIGGERS` is the sourc
 |---|---|---|
 | **On `dev` today** | `agent`, `event`, `schedule`, `webhook`, `reminder`, `loop` | 6 of 9 |
 | **Adds with Phase 4** | `fan_out`, `a2a`, `operator_response` | → 9 of 9 |
-| **Pending** | interactive chat / Session-tab turns | claim order (#2842) and conversation guard (#2843) are in; producers not yet routed (decided 2026-09-16, #1989) |
+| **Interactive (#3114)** | `manual`, `mcp`, `session`, `public`, `voice`, `voip`, `room`, `user`, `paid`, `slack`, `telegram`, `whatsapp`, plus `validation` (`pull_pilot.PULL_REACHABLE_NON_AUTONOMOUS`) | routed on pilots; sync callers wait through `dispatch_and_await_terminal` |
+| **Pending** | `chat` — the UI `/chat` path (`dispatch_admission_service` → `chat_execution_service.run_chat_turn`) | still pushes on pilots; routed in a later change |
 | **Unreached, unclassified** | `retry` | in neither trigger set — #2845. 4.7% of `eu2` traffic; looks like an oversight, not a decision |
 
 `schedule` / `webhook` / `reminder` landed with #2391; `loop` with #2523. Before #2391 the pilot flag was
@@ -84,9 +85,21 @@ The spec names the gates (`TARGET_ARCHITECTURE.md`, §Re-Delivery and Side-Effec
    row whose `conversation_key` already has a `running` row is skipped, and the unique index
    `idx_executions_one_running_turn` stops two concurrent claimers. **No worker is reserved** for interactive
    arrivals: one of N held idle is 33% of a 3-worker agent. Multi-container affinity (`replica_count > 1`,
-   #927) is out of scope. The claim guard is the one mechanism for pulled turns: when session turns are routed
-   onto the queue, `session_turn_service`'s Redis `ResumeLock` is removed from that path, not kept beside it. Next: route the interactive producers onto the queue. Until then they still run on
-   the old path — a **migration state, not a design boundary**.
+   #927) is out of scope.
+
+   **Routed on pilots (#3114)** for every interactive trigger except `chat` (the UI `/chat` path, still
+   pushed). Sync callers (Session tab, Workspace, public links, channels, rooms, paid, MCP key auth,
+   validation, internal run-now) go through `task_execution_service.dispatch_and_await_terminal`: it waits up
+   to one agent execution timeout for a worker to claim the row, cancels it as FAILED/`CAPACITY` if none does,
+   then waits for the terminal. Each producer passes a `conversation_key` (`session:`, `public:`, `channel:`,
+   `room:`, `paid:`), which is what the claim guard serialises on. Images ride the queue in
+   `backlog_metadata`, which the #1449 retention sweep NULLs once the row is terminal. Live-stream proxies hold the SSE connection
+   while the row is queued.
+
+   **The Session-tab `ResumeLock` and the Workspace in-flight markers are retained** and span the queued
+   wait: their TTLs add `pull_pilot.pull_queue_allowance` (one agent timeout on a pilot). The lock also
+   keeps the cached resume id fresh across turns, which the claim guard does not do. The claim guard is the
+   only serialisation for rooms, public links and channels.
 
 ### The soak duration requirement is mis-cited — correct it when you touch it
 

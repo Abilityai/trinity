@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Any, Dict, Optional
+from typing import Any, AsyncIterator, Dict, Optional
 
 from models import TaskExecutionStatus
 
@@ -45,6 +45,17 @@ _fan_out_waiters: Dict[str, asyncio.Future] = {}
 # DB-poll cadence safety net for terminal flips that don't signal directly.
 # Module-level constant so tests can monkeypatch a tighter interval.
 SYNC_WAITER_POLL_INTERVAL = 5.0  # seconds
+
+# #3114: live-stream proxies on a pull pilot. A queued turn is unknown to the
+# agent until a worker claims it. The proxy holds the SSE connection open and
+# sends one comment line per tick. Module-level so tests
+# can shorten them.
+STREAM_QUEUED_POLL_INTERVAL = 1.0
+# After the claim the row is `running` a moment before the worker registers the
+# turn with the agent server; a 404 in that window is retried this often.
+STREAM_ATTACH_RETRIES = 5
+STREAM_ATTACH_RETRY_INTERVAL = 0.5
+STREAM_QUEUED_TICK = ": queued\n\n"
 
 # Anything that's NOT queued/running counts as terminal for sync waiter purposes.
 TERMINAL_TASK_STATUSES = frozenset(
@@ -210,3 +221,45 @@ async def wait_for_sync_terminal(
             poll_task.cancel()
         if not fut.done():
             fut.cancel()
+
+
+async def wait_while_queued(execution_id: str, budget: float) -> AsyncIterator[str]:
+    """Yield ``STREAM_QUEUED_TICK`` once per ``STREAM_QUEUED_POLL_INTERVAL``
+    while the execution row is ``queued``, for at most ``budget`` seconds (#3114).
+
+    Returns once the row left ``queued`` (claimed, terminal, gone) or the budget
+    is spent. ``budget <= 0`` returns at once without reading the row, so a
+    non-pilot's stream is untouched. A failed row read ends the hold: the
+    proxy then behaves as it did before.
+    """
+    if budget <= 0:
+        return
+    from database import db
+
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + budget
+    while True:
+        try:
+            row = db.get_execution(execution_id)
+        except Exception as exc:  # noqa: BLE001 — a DB blip must not kill the stream
+            logger.warning("[SyncWaiter] queued-hold read for %s failed: %s", execution_id, exc)
+            return
+        if row is None or row.status != TaskExecutionStatus.QUEUED:
+            return
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            return
+        yield STREAM_QUEUED_TICK
+        await asyncio.sleep(min(STREAM_QUEUED_POLL_INTERVAL, remaining))
+
+
+def execution_is_running(execution_id: str) -> bool:
+    """True when the row is ``running`` (#3114): an agent 404 then means the
+    claiming worker has not registered the turn yet. False on any read error."""
+    from database import db
+
+    try:
+        row = db.get_execution(execution_id)
+    except Exception:  # noqa: BLE001
+        return False
+    return row is not None and row.status == TaskExecutionStatus.RUNNING

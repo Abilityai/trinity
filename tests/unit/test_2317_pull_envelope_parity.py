@@ -129,6 +129,16 @@ _BACKEND_ONLY_KEYS = (
     "self_task_activity_id",
 )
 
+# Keys only a pull pilot's row carries a value for (#3114): `execute_task`
+# queues them and the claim envelope / claim-time prompt consume them. The
+# push drain never sees a pilot's row (#1766), so it has no counterpart.
+_PULL_ONLY_KEYS = (
+    "persist_session",
+    "schedule_context",
+    "attempt",
+    "images",
+)
+
 
 # ---------------------------------------------------------------------------
 # The shared fixture — built by the REAL producer, not by hand
@@ -303,15 +313,18 @@ def _applied_by_push(meta: Dict[str, Any], monkeypatch) -> Dict[str, Any]:
 # ===========================================================================
 class TestProducerKeyClassification:
     def test_producer_keys_are_exhaustively_classified(self, enqueued_metadata):
-        """Every key `enqueue` writes is either runtime-facing or backend-only.
+        """Every key `enqueue` writes is runtime-facing, backend-only, or
+        pull-only (#3114).
 
         A new key in `backlog_service.enqueue` reds this test until it is added
-        to one of the two tuples — which is the point at which someone has to
+        to one of the tuples — which is the point at which someone has to
         decide whether the pull envelope must carry it. Without this, a setting
         can be added to the producer and reach the push path only, silently
         (that is exactly how #2317 shipped).
         """
-        assert set(enqueued_metadata) == set(_RUNTIME_KEYS) | set(_BACKEND_ONLY_KEYS)
+        assert set(enqueued_metadata) == (
+            set(_RUNTIME_KEYS) | set(_BACKEND_ONLY_KEYS) | set(_PULL_ONLY_KEYS)
+        )
 
     def test_envelope_override_keys_are_real_producer_keys(self, enqueued_metadata):
         """The envelope's source list names keys the producer actually writes —
