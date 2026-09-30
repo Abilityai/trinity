@@ -268,6 +268,10 @@ class PortalRoster(BaseModel):
     # Defaults False so an older client, a partial payload or a failed read
     # never advertises an affordance that cannot work (the whole of this bug).
     multi_agent_chat_available: bool = False
+    # ent#661 — whether this principal may use Workspace Projects. Internal-only:
+    # False for every outside client whatever the build. Defaults False (fails
+    # closed on an older backend or a failed read).
+    projects_available: bool = False
     # ent#403 — the curated model list the composer offers. INSTANCE-level, like
     # the two fields above and for the same reason `realtime_voice` is: the
     # option list is identical for every agent, and putting it on each card would

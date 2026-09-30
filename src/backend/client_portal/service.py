@@ -363,6 +363,24 @@ def _multi_agent_chat_available() -> bool:
     return True
 
 
+def _projects_available(is_platform: bool) -> bool:
+    """ent#661: may this principal use Workspace Projects?
+
+    Entitled AND a platform principal: projects are internal-only, so an
+    outside client is never told the capability exists. Fails closed — an
+    unreadable registry hides the surface rather than advertising routes that
+    would 404.
+    """
+    if not is_platform:
+        return False
+    try:
+        from services.entitlement_service import entitlement_service
+        return entitlement_service.is_entitled("projects") is True
+    except Exception:  # noqa: BLE001 — a roster must never 500 over a capability bit
+        logger.warning("[ent#661] projects capability read failed", exc_info=True)
+        return False
+
+
 def _default_voice_id() -> str | None:
     """The platform default ElevenLabs voice (#2157), or None. Fail-soft: a
     settings miss just means "no fallback voice", never a broken roster."""
@@ -1015,6 +1033,7 @@ async def get_roster(email: str | None, include_owned: bool = False) -> PortalRo
         client_email=(email or None),
         agents=cards,
         multi_agent_chat_available=multi_agent_chat,
+        projects_available=_projects_available(include_owned),
         realtime_voice=realtime_voice_capability(include_owned),
         # ent#403: instance-level, so it rides the roster rather than every card.
         # Empty for a non-platform principal — belt to the per-card braces: the
