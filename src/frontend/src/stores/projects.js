@@ -223,11 +223,38 @@ export const useProjectsStore = defineStore('projects', () => {
     return data
   }
 
+  // --- v3: health, linked metrics, the steward digest --------------------------------
+  const setHealth = (id, state, note) =>
+    _write(id, () => portalHttp.post(url(id, '/health'), { state, note }, { headers: headers() }))
+  const linkMetric = (id, agentName, metric) =>
+    _write(id, () => portalHttp.post(url(id, '/metrics'), { agent_name: agentName, metric }, { headers: headers() }))
+  const unlinkMetric = (id, agentName, metric) =>
+    _write(id, () => portalHttp.delete(
+      url(id, `/metrics/${encodeURIComponent(agentName)}/${encodeURIComponent(metric)}`), { headers: headers() }))
+
+  async function metricOptions(id) {
+    const { data } = await portalHttp.get(url(id, '/metric-options'), { headers: headers() })
+    return data.agents || []
+  }
+
+  const stewarding = ref({ rows: [], loaded: false, loading: false, error: null })
+
+  async function fetchStewarding() {
+    stewarding.value = { ...stewarding.value, loading: true }
+    try {
+      const { data } = await portalHttp.get(`${BASE}/stewarding`, { headers: headers() })
+      stewarding.value = { rows: data.projects || [], loaded: true, loading: false, error: null }
+    } catch (err) {
+      stewarding.value = { ...stewarding.value, loading: false, error: projectErrorMessage(err) }
+    }
+  }
+
   return {
     list, listLoaded, listLoading, listError,
     fetchList, pageState, fetchProject, forLink, fetchForLink,
     create, update, setArchived, addMember, removeMember, addAgent, removeAgent, link, unlink,
     tasks, logs, fetchTasks, fetchTask, createTask, updateTask, addTaskNote, fetchLog, addLogEntry,
     addGuest, addItem, setItemAudience, removeItem, fetchReport, myItems, importCandidates, importProject,
+    setHealth, linkMetric, unlinkMetric, metricOptions, stewarding, fetchStewarding,
   }
 })

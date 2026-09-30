@@ -961,8 +961,13 @@ private module; this section is the edition-agnostic surface it needs.
 - **FR-5 — Agent tools over MCP**: `list_projects` / `get_project` (with the
   recent log and open tasks), `list_project_tasks`, `get_project_log`,
   `create_project_task`, `update_project_task`, `add_project_task_note`,
-  `add_project_log_entry`, `link_to_project`. License-blind (404 = no module,
-  string 403 = unlicensed); an agent reaches only projects it is active on.
+  `add_project_log_entry`, `link_to_project` (a file, report, decision or an
+  ask it raised), and for a steward agent `get_steward_digest` /
+  `set_project_health`. License-blind (404 = no module, string 403 =
+  unlicensed); an agent reaches only projects it is active on, and only in a
+  turn whose audience is internal: every call forwards the platform-supplied
+  `X-Trinity-Execution-Id` (#2392), never a tool parameter, and a refusal is a
+  coded 403 the agent can relay.
 - **FR-6 — v2 Workspace surface, gated on FR-1**: a project page with Tasks
   (the ent#673 fields and status set), an append-only Log, and Files & reports
   (link a file, report or decision you can already see; the creator may share
@@ -970,3 +975,17 @@ private module; this section is the edition-agnostic surface it needs.
   one-shot import of a folder project from an agent; a room-header link
   control; editing name, goal, steward and tracker; and **Wrap up** in a
   linked chat, which asks the agent to record the chat's outcomes itself.
+- **FR-7 — v3 hub surface, gated on FR-1**: on a project's Overview, its
+  health (on track / at risk / off track and a line, set by its steward or
+  creator), where it stands (tasks by status, and what needs attention, each
+  opening Tasks), the declared agent metrics a member picked (value, a small
+  trend, and the platform's one stale verdict), and **Needs you**: the
+  viewer's own open asks on the project, answered in place with the Inbox's
+  component (`PortalAsks` narrowed by `askIds` — it can only narrow the
+  viewer's own list), with everyone else's as a count. The Projects list shows
+  health and an attention count per row, and an **I steward** tab lists what
+  needs the steward across their projects. Guests see none of it. An ask an
+  agent raises over MCP records the raising turn from the same
+  platform-supplied `X-Trinity-Execution-Id` (only when it is that agent's own
+  execution, winning over an agent-written `context.execution_id`), which is
+  how an ask raised in a project's chat is found on the project.

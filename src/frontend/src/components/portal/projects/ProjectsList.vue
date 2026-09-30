@@ -20,12 +20,16 @@
 
     <div class="flex flex-wrap items-center gap-3">
       <OverflowTabs v-if="portal.isPlatformSession" class="min-w-0" :tabs="FILTERS" :model-value="filter" dense @update:model-value="filter = $event" />
-      <BaseToggle v-model="showArchived" label="Show archived" />
-      <span class="flex-1"></span>
-      <BaseInput id="projects-search" v-model="query" class="w-full sm:w-64" placeholder="Search by name" aria-label="Search projects" />
+      <template v-if="filter !== 'steward'">
+        <BaseToggle v-model="showArchived" label="Show archived" />
+        <span class="flex-1"></span>
+        <BaseInput id="projects-search" v-model="query" class="w-full sm:w-64" placeholder="Search by name" aria-label="Search projects" />
+      </template>
     </div>
 
-    <SkeletonLoader v-if="view.state === 'loading'" :count="4" height="4.5rem" gap="0.75rem" />
+    <ProjectsStewarding v-if="filter === 'steward'" @open="(id) => $emit('open', id)" />
+
+    <SkeletonLoader v-else-if="view.state === 'loading'" :count="4" height="4.5rem" gap="0.75rem" />
 
     <LoadFailed
       v-else-if="view.state === 'failed'"
@@ -68,11 +72,14 @@
               <BaseBadge v-if="p.guest" variant="info">Guest</BaseBadge>
               <BaseBadge v-else>{{ visibilityLabel(p.visibility) }}</BaseBadge>
               <BaseBadge v-if="p.archived_at" variant="locked">Archived</BaseBadge>
+              <BaseBadge v-if="p.health" :variant="HEALTH_BADGE[p.health] || 'neutral'" dot>{{ healthLabel(p.health) }}</BaseBadge>
             </div>
             <p class="mt-1 line-clamp-2 text-sm text-gray-600 dark:text-gray-300">{{ p.goal }}</p>
             <p class="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs text-gray-500 dark:text-gray-400">
               <span>{{ agentSummary(p) }}</span>
               <span><span class="tabular-nums">{{ p.my_chat_count }}</span> of your chats</span>
+              <span v-if="p.open_task_count"><span class="tabular-nums">{{ p.open_task_count }}</span> open {{ p.open_task_count === 1 ? 'task' : 'tasks' }}</span>
+              <span v-if="p.attention" class="font-medium text-status-warning-700 dark:text-status-warning-300" :data-testid="`project-row-attention-${p.id}`"><span class="tabular-nums">{{ p.attention }}</span> need attention</span>
               <span :title="formatLocalDateTime(p.updated_at)">Updated {{ formatRelativeTime(p.updated_at) }}</span>
             </p>
           </button>
@@ -100,16 +107,18 @@ import LoadFailed from '@/components/LoadFailed.vue'
 import InlineError from '@/components/InlineError.vue'
 import ProjectCreateModal from './ProjectCreateModal.vue'
 import ProjectImportModal from './ProjectImportModal.vue'
+import ProjectsStewarding from './ProjectsStewarding.vue'
 import { useProjectsStore } from '@/stores/projects'
 import { useClientPortalStore } from '@/stores/clientPortal'
 import { viewState } from '@/utils/loadingState'
 import { formatRelativeTime, formatLocalDateTime } from '@/utils/timestamps'
-import { STATUS_BADGE, statusLabel, visibilityLabel, filterProjects } from './projectsUtils'
+import { STATUS_BADGE, HEALTH_BADGE, healthLabel, statusLabel, visibilityLabel, filterProjects } from './projectsUtils'
 
 const FILTERS = [
   { id: 'all', label: 'All I can see' },
   { id: 'member', label: "I'm a member" },
   { id: 'company', label: 'Company' },
+  { id: 'steward', label: 'I steward' },
 ]
 
 defineEmits(['open'])

@@ -92,6 +92,14 @@
       <ProjectLog v-if="!guest && tab === 'log'" :project-id="p.id" :can-contribute="p.can?.contribute === true" :archived="Boolean(p.archived_at)" :my-email="myEmail" />
       <ProjectMaterial v-if="!guest && tab === 'material'" :project="p" :my-email="myEmail" :agents="usableAgents" />
 
+      <ProjectHub
+        v-if="!guest && tab === 'overview'"
+        :project="p"
+        :my-email="myEmail"
+        @open-tasks="tab = 'tasks'"
+        @open-thread="(t) => $emit('open-thread', t)"
+      />
+
       <div v-show="guest || tab === 'overview'" class="grid grid-cols-1 gap-4 lg:grid-cols-3">
         <BaseCard class="lg:col-span-2">
           <h2 class="text-[11px] font-semibold uppercase tracking-wide text-gray-500 dark:text-gray-400">Work on it</h2>
@@ -215,6 +223,7 @@ import ProjectCreateModal from './ProjectCreateModal.vue'
 import ProjectTasks from './ProjectTasks.vue'
 import ProjectLog from './ProjectLog.vue'
 import ProjectMaterial from './ProjectMaterial.vue'
+import ProjectHub from './ProjectHub.vue'
 import OverflowTabs from '@/components/OverflowTabs.vue'
 import { useProjectsStore } from '@/stores/projects'
 import { useClientPortalStore } from '@/stores/clientPortal'

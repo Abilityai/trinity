@@ -180,11 +180,14 @@ export function groupTasks(tasks) {
 }
 
 export const LOG_KINDS = ['decision', 'deliverable', 'task', 'blocker', 'handoff', 'note']
+// `status` is written by a health update (v3.3), never offered in the add form.
 const LOG_KIND_LABEL = {
   decision: 'Decision', deliverable: 'Deliverable', task: 'Task', blocker: 'Blocker', handoff: 'Hand-off', note: 'Note',
+  status: 'Status',
 }
 export const LOG_KIND_BADGE = Object.freeze({
   decision: 'purple', deliverable: 'success', task: 'info', blocker: 'danger', handoff: 'warning', note: 'neutral',
+  status: 'info',
 })
 
 export function logKindLabel(kind) {
@@ -217,4 +220,61 @@ const TASK_LOG_KIND_LABEL = {
 /** A task-log entry's kind in words ("Done claim", "Reopened"). */
 export function taskLogKindLabel(kind) {
   return TASK_LOG_KIND_LABEL[kind] || 'Note'
+}
+
+// --- v3: the hub (health, roll-up, metrics, steward digest) ----------------------
+
+export const HEALTH_STATES = ['on-track', 'at-risk', 'off-track']
+const HEALTH_LABEL = { 'on-track': 'On track', 'at-risk': 'At risk', 'off-track': 'Off track' }
+export const HEALTH_BADGE = Object.freeze({ 'on-track': 'success', 'at-risk': 'warning', 'off-track': 'danger' })
+
+export function healthLabel(state) {
+  return HEALTH_LABEL[state] || 'No health yet'
+}
+
+const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`
+
+/** "5 open · 1 blocked · 2 done" — statuses in the lattice's order, zero counts left out. */
+export function rollupLine(byStatus = {}) {
+  const parts = TASK_STATUSES.filter((st) => byStatus[st]).map((st) => `${byStatus[st]} ${taskStatusLabel(st).toLowerCase()}`)
+  return parts.join(' · ') || 'No tasks yet'
+}
+
+/**
+ * What needs the steward on one project, as short lines in the order a steward
+ * acts on them. Shared by the steward view and the project's roll-up card.
+ */
+export function attentionLines(item) {
+  const lines = []
+  const n = (list) => (Array.isArray(list) ? list.length : 0)
+  if (n(item.awaiting_verification)) lines.push({ key: 'verify', text: `${plural(n(item.awaiting_verification), 'task', 'tasks')} to verify` })
+  if (n(item.stuck)) lines.push({ key: 'stuck', text: `${plural(n(item.stuck), 'task', 'tasks')} blocked or waiting on a decision` })
+  if (n(item.stale)) lines.push({ key: 'stale', text: `${plural(n(item.stale), 'task', 'tasks')} untouched for a week` })
+  if (item.open_asks) lines.push({ key: 'asks', text: `${plural(item.open_asks, 'open ask', 'open asks')}` })
+  if (item.health_due) lines.push({ key: 'health', text: item.health ? 'Health update due' : 'No health update yet' })
+  if (item.quiet) lines.push({ key: 'quiet', text: 'Quiet for two weeks' })
+  return lines
+}
+
+/** SVG polyline points for a small trend, or '' when there's nothing to draw. */
+export function trendPoints(values, width = 96, height = 24, pad = 2) {
+  const v = (values || []).filter((x) => typeof x === 'number' && Number.isFinite(x))
+  if (v.length < 2) return ''
+  const min = Math.min(...v)
+  const max = Math.max(...v)
+  const span = max - min || 1
+  const step = (width - pad * 2) / (v.length - 1)
+  return v.map((x, i) => {
+    const px = pad + i * step
+    const py = max === min ? height / 2 : pad + (1 - (x - min) / span) * (height - pad * 2)
+    return `${Math.round(px * 10) / 10},${Math.round(py * 10) / 10}`
+  }).join(' ')
+}
+
+/** The metric tile's state line. The one stale rule decided `stale`; this only words it. */
+export function metricStateLabel(tile) {
+  if (tile.declared === false) return 'No longer declared'
+  if (tile.freshness === 'no_points' || !tile.latest) return 'Not measured yet'
+  if (tile.stale === true) return 'Stale'
+  return ''
 }
