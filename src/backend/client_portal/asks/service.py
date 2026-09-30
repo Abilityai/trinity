@@ -9,6 +9,7 @@ they do for an operator.
 from __future__ import annotations
 
 import base64
+import json
 import logging
 import re
 from dataclasses import dataclass, field
@@ -235,7 +236,7 @@ def _decode_cursor(cursor: Optional[str]) -> int:
 
 def list_asks_page(email: str, is_platform: bool, agent_name: Optional[str] = None,
                    include_ended: bool = False, limit: int = PAGE_MAX,
-                   cursor: Optional[str] = None) -> AsksPage:
+                   cursor: Optional[str] = None, chat_id: Optional[str] = None) -> AsksPage:
     """Asks addressed to `email`: open ones first, then — with `include_ended` —
     the ones that ended in the last `ENDED_WINDOW_DAYS`, most recent ending
     first (trinity-enterprise#611). Paged (#3059).
@@ -243,7 +244,15 @@ def list_asks_page(email: str, is_platform: bool, agent_name: Optional[str] = No
     Raises `AskError` for an unreadable cursor, and `AsksUnavailable` when the
     queue or the roster cannot be read (trinity-enterprise#610, PR A0) — an
     outage is never answered with an empty page, which the client would render
-    as "nothing is waiting"."""
+    as "nothing is waiting".
+
+    `chat_id` (trinity-enterprise#610, the 09-30 ruling amended) is ONE chat's
+    own read: the asks the platform stamped as raised in a turn of that chat
+    (ent#734), pending and ended with NO ended window and cleared rows kept —
+    an ended chat-turn ask stays in that chat's history for the queue's own
+    retention (trinity#1142), not the Inbox's 7 days. `include_ended` is
+    implied. The SQL match on the stored context is a prefilter; the parsed,
+    top-level platform keys decide (`_in_chat`)."""
     offset = _decode_cursor(cursor)
     limit = max(1, min(int(limit), PAGE_MAX))
     # Every filter the viewer's visibility depends on is a SQL condition,
@@ -263,6 +272,9 @@ def list_asks_page(email: str, is_platform: bool, agent_name: Optional[str] = No
         addressed_to_email=email,
         types=_VISIBLE_KINDS,
     )
+    if chat_id is not None:
+        filters.update(status=None, hide_ended_before=None, include_cleared=True,
+                       context_contains=_chat_turn_fragments(chat_id))
     try:
         # The roster predicate is unchanged — `_on_roster`, asked once per
         # AGENT, fail-closed per agent (ent#428) — it is just asked of the
@@ -280,9 +292,25 @@ def list_asks_page(email: str, is_platform: bool, agent_name: Optional[str] = No
         raise AsksUnavailable("queue unreadable") from e
 
     out = [_project(item, viewer_email=email) for item in items or []]
+    if chat_id is not None:
+        out = [a for a in out if _in_chat(a, chat_id)]
     end = offset + len(items or [])
     return AsksPage(items=out, total=total,
                     next_cursor=_encode_cursor(end) if end < total else None)
+
+
+def _chat_turn_fragments(chat_id: str) -> tuple:
+    """The two platform keys as the queue stores them (`json.dumps` of the
+    context, `db.operator_queue.create_item`), for the SQL prefilter."""
+    from services.operator_queue_service import _WORKSPACE_THREAD_KEY, _WORKSPACE_TURN_KEY
+    return (json.dumps({_WORKSPACE_THREAD_KEY: chat_id})[1:-1],
+            json.dumps({_WORKSPACE_TURN_KEY: True})[1:-1])
+
+
+def _in_chat(ask: WorkspaceAsk, chat_id: str) -> bool:
+    """The projection's own reading of the platform's TOP-LEVEL keys — a key
+    an agent nested deeper in its context matches the prefilter text, not this."""
+    return ask.raised_in_turn is True and ask.chat_id == chat_id
 
 
 def list_asks(email: str, is_platform: bool, agent_name: Optional[str] = None,
@@ -559,7 +587,14 @@ def _run_view(run: dict, is_platform: bool):
 def _origin(item: dict, run: Optional[dict], email: str):
     """The run's own thread with the messages before the ask — only when that
     thread is verified as the viewer's; else the ask's own chat (Main, for an
-    ingested ask) with no excerpt; else nothing."""
+    ingested ask) with no excerpt; else nothing.
+
+    trinity-enterprise#610 (the 09-30 ruling, amended): a background ask lives
+    in the Inbox only, and its `chat_id` (Main) is the reply target, not where
+    it came from. So only a chat TURN (`triggered_by == "public"`) verifies a
+    thread — a schedule delivering into the Workspace stamps the portal channel
+    and Main on its run too — and the ask's own chat is named only when the
+    platform stamped it as raised in a turn of that chat (ent#734)."""
     from config import PORTAL_SOURCE_CHANNEL
     from client_portal import db as portal_db
     from client_portal.chat_previews import _arrival_excerpt
@@ -567,7 +602,8 @@ def _origin(item: dict, run: Optional[dict], email: str):
     agent = item.get("agent_name") or ""
     if run:
         chat = run.get("source_channel_chat_id")
-        if chat and (run.get("source_channel") or "").strip().lower() == PORTAL_SOURCE_CHANNEL:
+        if (chat and (run.get("source_channel") or "").strip().lower() == PORTAL_SOURCE_CHANNEL
+                and (run.get("triggered_by") or "").strip().lower() == "public"):
             session = portal_db.get_portal_session(chat, agent, email)
             if session:
                 filed = item.get("created_at")
@@ -588,7 +624,7 @@ def _origin(item: dict, run: Optional[dict], email: str):
                 )
     context = item.get("context") if isinstance(item.get("context"), dict) else {}
     own = context.get("workspace_session_id")
-    if isinstance(own, str) and own:
+    if isinstance(own, str) and own and context.get("workspace_raised_in_turn") is True:
         session = portal_db.get_portal_session(own, agent, email)
         if session:
             return WorkspaceAskOrigin(

@@ -122,7 +122,7 @@ def _msg(engine, *, session_id, email, at, content, role="assistant", agent=AGEN
 
 
 def _ask(email, *, agent=AGENT, created="2026-09-29T09:10:00.000000Z", execution_id=None,
-         chat_id=None, kind="approval", title="Pay the vendor?"):
+         chat_id=None, kind="approval", title="Pay the vendor?", in_turn=False):
     from database import db
     from services.operator_queue_service import _clamp_ingested_item
     item = _clamp_ingested_item({
@@ -136,6 +136,8 @@ def _ask(email, *, agent=AGENT, created="2026-09-29T09:10:00.000000Z", execution
         ctx["execution_id"] = execution_id
     if chat_id:
         ctx["workspace_session_id"] = chat_id
+    if in_turn:
+        ctx["workspace_raised_in_turn"] = True   # ent#734: a turn of that chat raised it
     item["context"] = ctx or None
     item["created_at"] = created
     return db.create_operator_queue_item(agent, item)
@@ -176,12 +178,33 @@ def test_an_unverified_session_falls_back_to_the_asks_own_chat_with_no_excerpt(c
     _msg(ctx_db, session_id="s-theirs", email=other, at="2026-09-29T09:05:00.000000Z", content="secret")
     # A schedule run (valid for the viewer) whose chat stamp is someone else's thread.
     run = _exec(ctx_db, source_channel="portal", chat="s-theirs")
-    ask = _ask(email, execution_id=run, chat_id="s-main")
+    ask = _ask(email, execution_id=run, chat_id="s-main", in_turn=True)
     ctx = _ctx(ask, email)
     assert ctx.origin is not None
     assert ctx.origin.verified is False and ctx.origin.chat_id == "s-main" and ctx.origin.is_main is True
     assert ctx.origin.messages == []
     assert "secret" not in ctx.model_dump_json()
+
+
+def test_a_schedule_run_delivering_into_main_is_not_where_the_ask_came_from(ctx_db, email):
+    """ent#610 (the 09-30 ruling, amended) — a background ask lives in the Inbox
+    only; Main is its reply target, not its origin. A schedule that delivers into
+    the Workspace stamps the portal channel AND the pair's Main on its run, so
+    "the run's own portal thread" is Main — only a chat TURN verifies a thread."""
+    _session(ctx_db, "s-main", email, is_main=1, title="Q3 invoices")
+    _msg(ctx_db, session_id="s-main", email=email, at="2026-09-29T09:05:00.000000Z", content="unrelated")
+    run = _exec(ctx_db, triggered_by="schedule", source_channel="portal", chat="s-main")
+    ask = _ask(email, execution_id=run, chat_id="s-main")
+    ctx = _ctx(ask, email)
+    assert ctx.origin is None
+    assert "unrelated" not in ctx.model_dump_json()
+    assert ctx.run is not None and ctx.run.kind == "schedule"   # the run still says where it came from
+
+
+def test_a_background_ask_filed_into_main_has_no_chat_origin(ctx_db, email):
+    _session(ctx_db, "s-main", email, is_main=1)
+    ask = _ask(email, chat_id="s-main")                  # ingested: Main is only the reply target
+    assert _ctx(ask, email).origin is None
 
 
 def test_no_chat_at_all_is_no_origin(ctx_db, email):

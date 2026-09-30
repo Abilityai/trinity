@@ -52,6 +52,8 @@ def list_asks(
     # changes; the total and the next cursor travel as headers.
     limit: int = Query(default=service.PAGE_MAX, ge=1, le=service.PAGE_MAX),
     cursor: Optional[str] = Query(default=None, max_length=64),
+    # trinity-enterprise#610: one chat's chat-turn asks, ended ones with no window.
+    chat_id: Optional[str] = Query(default=None, min_length=1, max_length=128),
     principal: PortalPrincipal = Depends(get_portal_principal),
 ):
     """Open asks addressed to the caller. `agent_name` narrows to the agent page.
@@ -68,7 +70,8 @@ def list_asks(
     """
     try:
         page = service.list_asks_page(principal.email, principal.is_platform, agent_name,
-                                      include_ended=include_ended, limit=limit, cursor=cursor)
+                                      include_ended=include_ended, limit=limit, cursor=cursor,
+                                      chat_id=chat_id)
     except AsksUnavailable:
         raise HTTPException(status_code=503, detail={
             "code": "asks_unavailable",
