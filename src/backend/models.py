@@ -469,6 +469,11 @@ class User(BaseModel):
     # `X-Source-Agent` header is honoured for this one value and nothing else.
     # None on every other branch, JWT humans included.
     vouched_source_agent: Optional[str] = None
+    # #2973: the inter-agent chain depth (#2806) the backend computed when it
+    # dispatched an EVT-001 event, carried as a signed loopback claim so the
+    # subscriber's execution inherits it instead of starting a new root. Set
+    # only on a loopback JWT; None on every other branch.
+    loopback_chain_depth: Optional[int] = None
 
 
 class Token(BaseModel):
@@ -966,6 +971,11 @@ class ReportCreate(BaseModel):
     # the router against the agent's own roster: an agent may hand a report to
     # someone it already talks to, never to an arbitrary address.
     audience_email: Optional[str] = Field(None, max_length=320)
+    # ent#606 — who the report is FOR, as a ROLE the platform resolves through
+    # the agent's assignments (`services/role_addressing`), never a person the
+    # agent picks. Mutually exclusive with `audience_email`, which stays accepted
+    # (deprecated) for two releases. Neither = operator-only, as before.
+    to: Optional[Literal["primary", "approver", "viewer", "operator"]] = None
     # The turn the agent is publishing from. Used ONLY to resolve which
     # Workspace chat the deliverable card belongs in, server-side — the session
     # is never accepted from the agent, or a report could be posted into a
@@ -3004,10 +3014,27 @@ class CanaryStatusResponse(BaseModel):
 # =============================================================================
 
 
+# #3104: the payload reaches subscriber prompts via {{payload.*}}; bound it.
+EVENT_PAYLOAD_MAX_BYTES = 64 * 1024
+
+
 class EmitEventRequest(BaseModel):
     """Request body for emitting an event."""
     event_type: str  # Namespaced event type (e.g., "prediction.resolved")
     payload: Optional[dict] = None  # Structured data
+
+    @field_validator("payload")
+    @classmethod
+    def _bound_payload(cls, v):
+        if v is not None:
+            import json
+            # UTF-8 bytes: ASCII escapes would count "é" as 6 and reject valid payloads.
+            size = len(json.dumps(v, ensure_ascii=False, default=str).encode("utf-8"))
+            if size > EVENT_PAYLOAD_MAX_BYTES:
+                raise ValueError(
+                    f"payload is {size} bytes serialized; max {EVENT_PAYLOAD_MAX_BYTES}"
+                )
+        return v
 
 
 # =============================================================================
@@ -3569,10 +3596,26 @@ class Reminder(ReminderSummary):
 
 
 class SendMessageRequest(BaseModel):
-    """Request to send a proactive message to a user."""
-    recipient_email: EmailStr = Field(
-        ...,
-        description="Verified email of the recipient. Must be in agent_sharing with allow_proactive=1."
+    """Request to send a proactive message to a user.
+
+    Address it with ``to`` — a ROLE the platform resolves through the agent's
+    assignments (ent#606) — or, deprecated, with ``recipient_email``. Exactly
+    one of the two.
+    """
+    recipient_email: Optional[EmailStr] = Field(
+        default=None,
+        description=(
+            "Deprecated — name a role with `to` instead. Verified email of the recipient. "
+            "Must be in agent_sharing with allow_proactive=1."
+        ),
+    )
+    to: Optional[Literal["primary", "approver", "viewer"]] = Field(
+        default=None,
+        description=(
+            "The role to message (ent#606): primary | approver | viewer. The platform "
+            "resolves the person. `operator` is not a message recipient — raise an "
+            "ask of type alert instead."
+        ),
     )
     text: str = Field(
         ...,
@@ -3605,6 +3648,12 @@ class SendMessageRequest(BaseModel):
             "messages to the same recipient in one turn. Default → at-most-one."
         ),
     )
+
+    @model_validator(mode="after")
+    def _one_address(self):
+        if bool(self.to) == bool(self.recipient_email):
+            raise ValueError("address the message with exactly one of `to` (a role) or recipient_email")
+        return self
 
 
 class SendMessageResponse(BaseModel):
@@ -4265,6 +4314,16 @@ class UserRoleUpdate(BaseModel):
 
 class UpdateMyEmailRequest(BaseModel):
     email: str
+    # trinity-enterprise#720: the 6-digit code sent to `email` by
+    # `POST /api/users/me/email/code` — proof the caller holds the mailbox.
+    # Optional only for the audited admin transition on an install that cannot
+    # deliver mail; everywhere else a missing code is a 400.
+    code: Optional[str] = None
+
+
+class RequestEmailBindCodeRequest(BaseModel):
+    """`POST /api/users/me/email/code` — send a bind code to a NEW address (ent#720)."""
+    email: str
 
 
 class UserPreferenceWrite(BaseModel):
@@ -4908,6 +4967,10 @@ class ObjectiveMetricRead(BaseModel):
     #: Declared by the OWNING role's agent, not by this one — a supporting
     #: agent cannot fix that and must not be told to.
     declared_elsewhere: bool
+    #: The granted agent whose registry and point store supplied this row's
+    #: number (ent#727) — set only when this agent does not declare the metric
+    #: and exactly one agent it holds an `agent_permissions` grant on does.
+    served_by: Optional[str] = None
     #: The REGISTRY's vocabulary and nothing else — `up_good` | `down_good` |
     #: `neutral` | `null` — so a direction-aware formatter needs no fourth
     #: case. An objective's declared `hold` resolves to `neutral`; what tells
@@ -4988,6 +5051,8 @@ class ObjectiveJoinSummary(BaseModel):
     stale: int = 0
     undeclared: int = 0
     declared_elsewhere: int = 0
+    #: Rows whose number came from a granted agent (`served_by`, ent#727).
+    served_elsewhere: int = 0
 
 
 class ObjectiveJoinRead(BaseModel):

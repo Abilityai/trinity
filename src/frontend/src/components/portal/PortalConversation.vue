@@ -100,6 +100,19 @@
       <span v-else-if="!currentSessionId" class="hidden sm:inline min-w-0 flex-1 truncate text-sm text-gray-500 dark:text-gray-400">New chat</span>
 
       <div class="ml-auto flex items-center gap-1 shrink-0">
+        <!-- ent#661: the chat's project — its badge and Detach, or one
+             "Project" button. Hidden in Main, for an outside client, before
+             the chat exists, and on a build without projects. -->
+        <ProjectChatControls
+          v-if="currentSessionId"
+          kind="thread"
+          :agent-name="agent.name"
+          :target-id="currentSessionId"
+          :session-title="currentTitle"
+          :is-main="isMainChat"
+          @open-project="(id) => emit('open-project', id)"
+          @wrap-up="wrapUp"
+        />
         <!-- ent#451: New chat lives in the header, with its hotkey (⌘J /
              Ctrl+J, ruled 2026-09-06). Starts a fresh thread with THIS agent —
              the sidebar's button is the cross-agent one (the picker). -->
@@ -452,7 +465,11 @@
     <!-- ent#364: asks this agent raised, immediately above the composer — the
          third rendering of the SAME row the sidebar counts and the agent page
          shows, so answering here clears it in both. Directly above the input
-         because it is a turn that is waiting on the person about to type. -->
+         because it is a turn that is waiting on the person about to type.
+         #3115 (dev's stopgap for the ent#610 ruling) made the strip pending-
+         only; this is the ruling itself: `chatAskIds` (pinnedAskIds) holds only
+         asks seen PENDING here, so ended ones never pile up, while the one just
+         answered stays drawn in place with its ent#468 confirmation. -->
     <!-- ent#610 sign-off: Work is the asks' home, so a chat shows ONE row —
          "N asks waiting on you" — closed by default and expanding inline, like
          a "Delivered here" card. Only THIS chat's asks (splitChatAsks); open,
@@ -476,6 +493,7 @@
         <PortalAsks
           :ask-ids="chatAskIds"
           :current-session-id="currentSessionId"
+          pending-only
           @open-thread="(t) => emit('open-thread', t)"
         />
         </div>
@@ -805,6 +823,8 @@
 </template>
 
 <script setup>
+import ProjectChatControls from './projects/ProjectChatControls.vue'
+import { wrapUpPrompt } from './projects/projectsUtils'
 import { ref, computed, watch, nextTick, onMounted, onBeforeUnmount } from 'vue'
 import { useClientPortalStore } from '@/stores/clientPortal'
 import { agentDisplayName } from '@/utils/agentName'
@@ -932,7 +952,7 @@ const props = defineProps({
 // controls that raised them — the rail strip is the door to both now.
 // Declared emits are the component's contract, so a name left here after
 // its only `$emit` is deleted is a promise nothing keeps.
-const emit = defineEmits(['reply-done', 'switch-agent', 'session-adopted', 'sessions-changed', 'open-menu', 'toggle-star', 'escalate-to-room', 'open-thread', 'work-state', 'open-work', 'new-chat', 'main-reset', 'voice-call', 'voice-panel'])
+const emit = defineEmits(['reply-done', 'switch-agent', 'session-adopted', 'sessions-changed', 'open-menu', 'toggle-star', 'escalate-to-room', 'open-thread', 'work-state', 'open-work', 'new-chat', 'main-reset', 'voice-call', 'voice-panel', 'open-project'])
 
 // ent#451/#473: the active thread as the shell's list knows it. Null until the
 // list carries the thread (a just-adopted session lands on the next refresh),
@@ -2775,6 +2795,16 @@ async function endVoiceCall() {
 // either is a break, not dead-code cleanup.
 // ent#551 QA: the shell ends the call through this when the person confirms
 // leaving the stage — the one path that ends a call from outside this component.
+// ent#661 v2.6 — Wrap up: an ordinary message from the person, asking the
+// agent to record this chat's outcomes in the project through its tools. It
+// goes through `send()` like anything typed, so it is visible in the thread
+// and the agent's log entries are attributed to the agent.
+function wrapUp(project) {
+  if (!project || sending.value) return
+  input.value = wrapUpPrompt(project.name)
+  void send()
+}
+
 defineExpose({ focusComposer, startVoiceCall, endVoiceCall })
 
 // ent#474 — the rail's Work signal for a 1:1, DERIVED from the in-flight flag

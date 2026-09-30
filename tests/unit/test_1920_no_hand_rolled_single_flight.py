@@ -104,6 +104,8 @@ _ALLOWED = {
     "services/agent_service/ephemeral.py": "ephemeral:quota:{owner_id} counter seed — the discard LOCK now uses "
     "SingleFlightLock (#1920); this is a different, non-lock nx use",
     "services/heartbeat_service.py": "agent:heartbeat:seen:{name} liveness marker — not a lock",
+    "services/event_dispatch_service.py": "trinity:evt_fires:{source}:{subscriber}:alerted once-per-window alert "
+    "flag (#2973) — a once-guard, not a mutex: no release, no token, TTL-expiry with the budget window only",
 }
 
 # The sync-lock files #1920 adopted MUST no longer hand-roll a nx=True set.

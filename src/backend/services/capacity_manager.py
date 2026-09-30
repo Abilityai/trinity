@@ -355,7 +355,7 @@ class CapacityManager:
         # capacity counters. Skipping admission here makes the durable queue the
         # single entry point for this agent, so its worker pool IS its capacity
         # (#1081 Phase 5, pilot-scoped). `pull_owns_dispatch` excludes
-        # interactive triggers (temporary, until #2842/#2843 — #1989) and fails safe to
+        # interactive triggers (temporary, until they are routed — #1989) and fails safe to
         # push, so a non-pilot's path is byte-for-byte unchanged.
         from services.pull_pilot import pull_owns_dispatch
 

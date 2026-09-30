@@ -60,6 +60,23 @@ updates:
           - patch
           - minor
 
+  # Agent image (#3106): the exact pins in agent-image-requirements.txt only
+  # move by a deliberate bump, so this is their only bump channel — without it
+  # they would go stale past security releases with no signal.
+  - package-ecosystem: pip
+    directory: /docker/base-image
+    target-branch: dev
+    schedule:
+      interval: weekly
+    labels:
+      - dependencies
+      - docker
+    groups:
+      patch-and-minor:
+        update-types:
+          - patch
+          - minor
+
   # MCP server (TypeScript).
   - package-ecosystem: npm
     directory: /src/mcp-server

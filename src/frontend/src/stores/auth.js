@@ -291,9 +291,31 @@ export const useAuthStore = defineStore('auth', {
     // Bind a sign-in email to the current account (#82 / #2381), then re-read
     // the profile so `userEmail` — and every predicate reading it — updates in
     // place. Throws on failure; the caller owns the InlineError (ent#581).
-    async setOwnEmail(email) {
-      await axios.put('/api/users/me/email', { email }, { headers: this.authHeader })
+    //
+    // trinity-enterprise#720: a bind needs proof of the mailbox. Without a
+    // `code` this tries the bind once — which succeeds only for the audited
+    // admin transition on an install that cannot deliver mail — and when the
+    // server answers `code_required` it has the code sent and returns
+    // `{ needsCode: true }`; the caller then asks for it and calls again WITH
+    // the code. `{ bound: true }` once the email is on the account.
+    async bindOwnEmail(email, code = null) {
+      try {
+        await axios.put('/api/users/me/email', code ? { email, code } : { email }, { headers: this.authHeader })
+      } catch (e) {
+        const detail = e?.response?.data?.detail
+        if (!code && e?.response?.status === 400 && detail?.code === 'code_required') {
+          await axios.post('/api/users/me/email/code', { email }, { headers: this.authHeader })
+          return { needsCode: true }
+        }
+        throw e
+      }
       await this.fetchUserProfile()
+      return { bound: true }
+    },
+
+    // Re-send the bind code for `email` (ent#720).
+    async resendEmailBindCode(email) {
+      await axios.post('/api/users/me/email/code', { email }, { headers: this.authHeader })
     },
 
     // Login with username/password (for admin login)

@@ -99,6 +99,7 @@ class TestLoginGateBehavior:
             mock_db.get_telegram_binding.return_value = {"id": 1, "agent_name": "my-agent"}
             mock_get.return_value = "alice@example.com"
             mock_db.verify_login_code.return_value = {"email": "alice@example.com"}
+            mock_db.is_email_account_suspended.return_value = False  # ent#720: an active account
             mock_db.set_telegram_verified_email.return_value = None
             mock_db.get_access_policy.return_value = {
                 "require_email": True, "open_access": False, "group_auth_mode": "none"
@@ -122,6 +123,7 @@ class TestLoginGateBehavior:
             mock_db.get_telegram_binding.return_value = {"id": 1, "agent_name": "my-agent"}
             mock_get.return_value = "bob@example.com"
             mock_db.verify_login_code.return_value = {"email": "bob@example.com"}
+            mock_db.is_email_account_suspended.return_value = False  # ent#720: an active account
             mock_db.get_access_policy.return_value = {
                 "require_email": True, "open_access": True, "group_auth_mode": "none"
             }
@@ -142,6 +144,7 @@ class TestLoginGateBehavior:
             mock_db.get_telegram_binding.return_value = {"id": 1, "agent_name": "my-agent"}
             mock_get.return_value = "stranger@example.com"
             mock_db.verify_login_code.return_value = {"email": "stranger@example.com"}
+            mock_db.is_email_account_suspended.return_value = False  # ent#720: an active account
             mock_db.get_access_policy.return_value = {
                 "require_email": True, "open_access": False, "group_auth_mode": "none"
             }
@@ -165,6 +168,7 @@ class TestLoginGateBehavior:
             mock_db.get_telegram_binding.return_value = {"id": 1, "agent_name": "my-agent"}
             mock_get.return_value = "stranger@example.com"
             mock_db.verify_login_code.return_value = {"email": "stranger@example.com"}
+            mock_db.is_email_account_suspended.return_value = False  # ent#720: an active account
             mock_db.get_access_policy.return_value = {
                 "require_email": True, "open_access": False, "group_auth_mode": "none"
             }
@@ -176,6 +180,20 @@ class TestLoginGateBehavior:
             assert "pending approval" in reply.lower()
 
     @pytest.mark.smoke
+    def test_verified_but_suspended_is_refused_and_not_recorded(self, adapter, message):
+        """ent#720: redemption honours suspension, as `/verify` does."""
+        with patch("adapters.telegram_adapter.db") as mock_db, \
+             patch("adapters.telegram_adapter._get_pending_login") as mock_get, \
+             patch("adapters.telegram_adapter._clear_pending_login"):
+            mock_db.get_telegram_binding.return_value = {"id": 1, "agent_name": "my-agent"}
+            mock_get.return_value = "alice@example.com"
+            mock_db.verify_login_code.return_value = {"email": "alice@example.com"}
+            mock_db.is_email_account_suspended.return_value = True
+            mock_db.get_access_policy.return_value = {"require_email": True, "open_access": True}
+            reply = _run(adapter._handle_login_command(message, "/login 123456"))
+            assert "suspended" in reply.lower()
+            mock_db.set_telegram_verified_email.assert_not_called()
+
     def test_invalid_code_does_not_run_gate(self, adapter, message):
         """A bad code short-circuits; gate primitives must not be called."""
         with patch("adapters.telegram_adapter.db") as mock_db, \

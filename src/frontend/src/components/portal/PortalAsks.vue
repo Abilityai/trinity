@@ -56,14 +56,17 @@
         >{{ queueSyncBadge(ask).label }}</BaseBadge>
       </div>
 
-      <p class="mt-1 text-sm font-medium text-gray-900 dark:text-gray-100">{{ ask.title }}</p>
+      <p class="mt-1 text-sm font-medium text-gray-900 dark:text-gray-100">
+        <AskMarkdown :text="ask.title" inline :data-testid="`${tid.prefix}-title-${ask.id}`" />
+      </p>
       <!-- An agent writes its ask in markdown, as it writes its replies: the
-           body goes through the one sanitized renderer (PortalMarkdown →
-           DOMPurify), never printed as its syntax (ent#610 sign-off). -->
-      <PortalMarkdown
+           body goes through the one ask renderer (AskMarkdown → the app's
+           sanitiser, #3115 — the same on every surface), never printed as its
+           syntax (ent#610 sign-off). -->
+      <AskMarkdown
         v-if="ask.question && ask.question !== ask.title"
-        :content="ask.question"
-        class="mt-0.5 min-w-0 text-sm text-gray-600 dark:text-gray-300"
+        :text="ask.question"
+        class="mt-0.5 min-w-0 text-gray-600 dark:text-gray-300"
         :data-testid="`${tid.prefix}-question-${ask.id}`"
       />
       <!-- trinity-enterprise#611: the exact action this approval would run, which is
@@ -125,7 +128,7 @@
               :aria-pressed="picks[ask.id] === opt"
               :data-testid="`${tid.prefix}-option-${ask.id}`"
               @click="picks[ask.id] = picks[ask.id] === opt ? null : opt"
-            >{{ opt }}</button>
+            ><AskMarkdown :text="opt" inline /></button>
           </div>
           <form class="mt-2 flex items-center gap-2" @submit.prevent="submit(ask)">
             <input
@@ -184,7 +187,7 @@
 <script setup>
 import { computed, reactive, ref, onBeforeUnmount } from 'vue'
 import BaseBadge from '../base/BaseBadge.vue'
-import PortalMarkdown from './PortalMarkdown.vue'
+import AskMarkdown from '@/components/operator/AskMarkdown.vue'
 import QueueProposal from '../operator/QueueProposal.vue'
 import { useClientPortalStore } from '@/stores/clientPortal'
 import {
@@ -208,6 +211,10 @@ const props = defineProps({
   // computed over `store.asks`, never a narrowed fetch: `fetchAsks(agentName)`
   // replaces the shared list the sidebar badge reads.
   agentNames: { type: Array, default: null },
+  // ent#661 v3: or exactly these asks — a project's "Needs you" card. The ids
+  // come from the server's project read, which already applied the Inbox's
+  // own addressee rule; this only narrows the shared list, never widens it.
+  askIds: { type: Array, default: null },
   showAgent: { type: Boolean, default: false },
   // trinity-enterprise#611: only what is still waiting — the Work tab's
   // "Waiting on you". Every other rendering also shows asks that ended.
@@ -251,6 +258,10 @@ const errors = reactive({})
 const diverged = reactive({})   // #2915: ask id → the person has seen the divergence notice
 
 const allItems = computed(() => {
+  if (Array.isArray(props.askIds)) {
+    const ids = new Set(props.askIds)
+    return store.asks.filter((a) => ids.has(a.id))
+  }
   if (props.agentName) return store.asksForAgent(props.agentName)
   if (Array.isArray(props.agentNames)) {
     const names = new Set(props.agentNames.filter(Boolean))

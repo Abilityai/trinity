@@ -309,7 +309,7 @@ async def update_agent_default_access_policy(
             source="api",
             actor_user=current_user,
             actor_ip=request.client.host if request.client else None,
-            endpoint=str(request.url.path),
+            endpoint=request.scope["path"],
             request_id=getattr(request.state, "request_id", None),
             details={
                 "setting": "agent_default_require_email",
@@ -385,7 +385,7 @@ async def update_max_parallel_tasks_ceiling_setting(
         source="api",
         actor_user=current_user,
         actor_ip=request.client.host if request.client else None,
-        endpoint=str(request.url.path),
+        endpoint=request.scope["path"],
         request_id=getattr(request.state, "request_id", None),
         details={
             "setting": MAX_PARALLEL_TASKS_CEILING_KEY,

@@ -87,6 +87,8 @@ describe('testidPrefix — the default keeps every id byte-identical', () => {
       'portal-ask-ap1', 'portal-ask-option-ap1', 'portal-ask-note-ap1', 'portal-ask-send-ap1',
       'portal-ask-al1', 'portal-ask-ack-al1',
       'portal-ask-x1', 'portal-ask-ending',
+      // #3115: each title renders through AskMarkdown with its own id.
+      'portal-ask-title-q1', 'portal-ask-title-ap1', 'portal-ask-title-al1', 'portal-ask-title-x1',
     ]))
   })
 

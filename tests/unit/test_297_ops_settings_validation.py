@@ -284,7 +284,7 @@ class _Admin:
 
 class _Req:
     client = type("c", (), {"host": "127.0.0.1"})()
-    url = type("u", (), {"path": "/api/settings/ops/config"})()
+    scope = {"path": "/api/settings/ops/config"}
     state = type("s", (), {"request_id": "r1"})()
     headers: dict = {}
 

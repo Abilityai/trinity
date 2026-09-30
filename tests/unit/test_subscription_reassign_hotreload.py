@@ -306,7 +306,7 @@ def _stub_http_request():
     read only for audit context (client IP / path / request id)."""
     return types.SimpleNamespace(
         client=types.SimpleNamespace(host="127.0.0.1"),
-        url=types.SimpleNamespace(path="/api/subscriptions"),
+        scope={"path": "/api/subscriptions"},
         state=types.SimpleNamespace(request_id="req-1"),
     )
 
