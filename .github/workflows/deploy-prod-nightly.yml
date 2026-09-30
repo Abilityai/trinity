@@ -1,10 +1,11 @@
 name: Nightly Deploy to Prod
 
-# #2985: deploy origin/dev to the main internal instance once a night.
+# #2985: deploy the dev-green SHA (#2945) to the main internal instance nightly.
 # Same shape as deploy-dev.yml (read that file for the reasoning behind each
 # block); this copy only differs where prod needs it to:
 #   * no push trigger -- nightly + manual only
 #   * pre-deploy pg_dump, and the night is SKIPPED if an execution is running
+#     (3 skips in a row fail the run)
 #   * enterprise is mounted with the host's own deploy key (no PAT transport)
 #
 # `schedule` runs from the DEFAULT branch: this does not fire until the file
@@ -23,6 +24,9 @@ concurrency:
 
 jobs:
   deploy:
+    # Backstop only: a branch copy of this file can delete it. The real guard is
+    # the `production` environment's main-only deployment-branch rule.
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     # PROD_* secrets belong on this environment; restrict it to `main` in repo
     # settings so a branch workflow cannot read the prod SSH key.
@@ -47,45 +51,84 @@ jobs:
           command_timeout: 25m
           envs: ALWAYS_DEPLOY
           script: |
+            # No script-wide pipefail: `printf | grep -q` below takes SIGPIPE on
+            # boot logs over 64 KB and would go false-red. Scope it per pipeline.
             set -e
             cd ~/trinity
             COMPOSE_FILES="-f docker-compose.prod.yml -f docker-compose.prod.enterprise.yml"
             PSQL="sudo docker exec -i trinity-postgres psql -U trinity -d trinity -tA -c"
+            SKIPS_FILE=~/.trinity-deploy-skips
+            MAX_SKIPS=3
 
-            echo "=== Pull check ==="
-            git fetch --no-recurse-submodules origin dev
-            TARGET_SHA=$(git rev-parse origin/dev)
+            # A skip is green; MAX_SKIPS in a row fails the run so notify-failure
+            # files an issue instead of prod silently falling behind.
+            skip() {
+              N=$(( $(cat "$SKIPS_FILE" 2>/dev/null || echo 0) + 1 ))
+              echo "$N" > "$SKIPS_FILE"
+              if [ "$N" -ge "$MAX_SKIPS" ]; then
+                echo "::error::$1 -- deploy skipped ${N} nights in a row."
+                exit 1
+              fi
+              echo "::warning::$1 -- skipping tonight's deploy (${N}/${MAX_SKIPS})."
+              exit 0
+            }
+
+            # A backend recreate kills running executions. The 3h window skips
+            # rows left `running` by a crash, which would otherwise block forever.
+            check_in_flight() {
+              RUNNING=$($PSQL "SELECT count(*) FROM schedule_executions WHERE status='running' AND started_at::timestamptz > now() - interval '3 hours'")
+              if [ "${RUNNING:-0}" != "0" ]; then
+                skip "${RUNNING} execution(s) running"
+              fi
+            }
+
+            echo "=== Target ==="
+            # Deploy the newest SHA Tier 2 marked green (#2945), never the raw
+            # dev tip: the tip can be a merge nothing has tested yet.
+            git fetch --no-recurse-submodules origin dev "+refs/tags/dev-green:refs/tags/dev-green"
+            TARGET_SHA=$(git rev-parse 'refs/tags/dev-green^{commit}')
+            if ! git merge-base --is-ancestor "$TARGET_SHA" origin/dev; then
+              echo "::error::dev-green (${TARGET_SHA}) is not on origin/dev -- refusing to deploy."
+              exit 1
+            fi
             LAST_SHA=$(cat ~/.trinity-last-deployed-sha 2>/dev/null || echo "")
+            echo "Target: ${TARGET_SHA}  Previous: ${LAST_SHA:-none}"
             if [ "${ALWAYS_DEPLOY:-0}" != "1" ] && [ "$TARGET_SHA" = "$LAST_SHA" ]; then
-              echo "dev is already deployed at ${TARGET_SHA} -- nothing to do."
+              echo "dev-green is already deployed at ${TARGET_SHA} -- nothing to do."
+              rm -f "$SKIPS_FILE"
               exit 0
             fi
 
             echo "=== In-flight executions ==="
-            # A backend recreate kills running executions. The 3h window skips
-            # rows left `running` by a crash, which would otherwise block forever.
-            RUNNING=$($PSQL "SELECT count(*) FROM schedule_executions WHERE status='running' AND started_at::timestamptz > now() - interval '3 hours'")
-            if [ "${RUNNING:-0}" != "0" ]; then
-              echo "::warning::${RUNNING} execution(s) running -- skipping tonight's deploy."
-              exit 0
-            fi
+            # Checked here to avoid a wasted backup+build, and again right
+            # before `up -d`.
+            check_in_flight
 
             echo "=== Pre-deploy backup ==="
-            mkdir -p ~/backups
+            (umask 077; mkdir -p ~/backups)
+            find ~/backups -name 'trinity-pg-predeploy-*.sql.gz' -mtime +14 -delete
             DUMP=~/backups/trinity-pg-predeploy-$(date -u +%Y%m%d-%H%M%S).sql.gz
-            sudo docker exec trinity-postgres pg_dump -U trinity trinity | gzip > "$DUMP"
-            gzip -t "$DUMP" && [ -s "$DUMP" ]
+            # pipefail scoped to the dump: without it a failed pg_dump still
+            # leaves a valid, non-empty gzip.
+            ( set -o pipefail; umask 077; sudo docker exec trinity-postgres pg_dump -U trinity trinity | gzip > "$DUMP" ) \
+              || { echo "::error::pg_dump failed -- not deploying."; exit 1; }
+            if ! gzip -dc "$DUMP" | tail -n 5 | grep -q 'PostgreSQL database dump complete'; then
+              echo "::error::Pre-deploy dump ${DUMP} is incomplete -- not deploying."
+              exit 1
+            fi
             echo "Backup: $DUMP ($(du -h "$DUMP" | cut -f1))"
 
-            echo "=== Pull ==="
-            git checkout --no-recurse-submodules dev
-            git pull --ff-only --no-recurse-submodules origin dev
+            echo "=== Checkout ==="
+            git checkout --no-recurse-submodules --detach "$TARGET_SHA"
             echo "Version: $(git log -1 --oneline)"
+            # #1443: .gitmodules sets `update = none`; without this override
+            # the submodule update below is a silent no-op on a fresh host.
+            git config submodule.src/backend/enterprise.update checkout
             git submodule update --init --recursive src/backend/enterprise
             WANT=$(git rev-parse HEAD:src/backend/enterprise)
             HAVE=$(git -C src/backend/enterprise rev-parse HEAD)
             if [ "$WANT" != "$HAVE" ]; then
-              echo "::error::Enterprise submodule STALE: have ${HAVE}, dev records ${WANT}. Not deploying."
+              echo "::error::Enterprise submodule STALE: have ${HAVE}, target records ${WANT}. Not deploying."
               exit 1
             fi
 
@@ -100,27 +143,63 @@ jobs:
               BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
               docker compose ${COMPOSE_FILES} build --pull backend frontend mcp-server scheduler
 
+            echo "=== Reap stale compose backup containers (#2204) ==="
+            # A run killed mid-`up -d` leaves <12-hex>_<name> behind, and every
+            # later deploy then dies on "container name is already in use".
+            # Both guards matter under `set -e`: grep exits 1 on no match.
+            STALE=$(sudo docker ps -a --format '{{.Names}}' | grep -E '^[0-9a-f]{12}_trinity-' || true)
+            if [ -n "$STALE" ]; then
+              printf '%s\n' "$STALE" | xargs -r sudo docker rm -f
+            fi
+
+            echo "=== In-flight re-check ==="
+            check_in_flight
+
             echo "=== Restart ==="
             sudo docker compose ${COMPOSE_FILES} up -d backend frontend mcp-server scheduler
 
             echo "=== Health ==="
-            for i in $(seq 1 30); do
-              curl -sf http://localhost:8000/health >/dev/null && break
-              sleep 5
+            # Same block as deploy-dev.yml (#2995): `probe && echo` under
+            # `set -e` never fails the run.
+            for attempt in 1 2 3; do
+              if curl -fsS --max-time 30 http://localhost:8000/health >/dev/null; then
+                echo "Backend: OK"
+                break
+              fi
+              if [ "$attempt" -eq 3 ]; then
+                # Filtered: this run log is public.
+                sudo docker inspect -f '{{.State.Status}} health={{.State.Health.Status}} restarts={{.RestartCount}}' trinity-backend || true
+                sudo docker logs trinity-backend --tail 50 2>&1 | grep -iE 'error|exception|failed' | head -10 || true
+                echo "::error::backend /health probe failed 3 times after deploy -- see docker logs trinity-backend"
+                exit 1
+              fi
+              sleep 20
             done
-            curl -sf http://localhost:8000/health && echo " Backend: OK"
+            for c in trinity-scheduler trinity-mcp-server; do
+              for attempt in $(seq 1 12); do
+                H=$(sudo docker inspect "$c" --format='{{.State.Health.Status}}' 2>/dev/null || echo missing)
+                [ "$H" = "healthy" ] && break
+                sleep 5
+              done
+              echo "${c}: ${H}"
+              if [ "$H" != "healthy" ]; then
+                echo "::error::${c} not healthy after deploy (${H})"
+                exit 1
+              fi
+            done
 
             echo "=== Enterprise registration ==="
             BOOT_SINCE=$(sudo docker inspect -f '{{.State.StartedAt}}' trinity-backend)
             BOOT_LOG=$(sudo docker logs trinity-backend --since "$BOOT_SINCE" 2>&1 || true)
             if ! printf '%s\n' "$BOOT_LOG" | grep -q 'Trinity Enterprise modules registered'; then
-              echo "::error::Backend did not register enterprise modules -- running OSS-only."
-              printf '%s\n' "$BOOT_LOG" | grep -i 'enterprise' | tail -20
+              # No boot-log excerpt here: this run log is public.
+              echo "::error::Backend did not register enterprise modules -- running OSS-only. See docker logs trinity-backend on the host."
               exit 1
             fi
 
-            git rev-parse HEAD > ~/.trinity-last-deployed-sha
-            echo "=== Done: $(cat ~/.trinity-last-deployed-sha) ==="
+            echo "$TARGET_SHA" > ~/.trinity-last-deployed-sha
+            rm -f "$SKIPS_FILE"
+            echo "=== Done: ${TARGET_SHA} (previous: ${LAST_SHA:-none}, backup: ${DUMP}) ==="
 
   notify-failure:
     needs: deploy
@@ -146,4 +225,18 @@ jobs:
           fi
           gh issue create --repo "$GITHUB_REPOSITORY" --title "$TITLE" \
             --label "type-bug,priority-p1,theme-infrastructure" \
-            --body "Failed run: ${RUN_URL} (#2985). Read the last \`===\` header reached. Close once a run is green -- an open issue suppresses the next alert."
+            --body-file - <<EOF
+          Failed run: ${RUN_URL} (#2985). Read the last \`===\` header reached; the \`Target:\` line names the previous SHA.
+
+          Rollback on the host, if the new build is up but broken:
+          \`\`\`sh
+          cd ~/trinity
+          PREV=\$(cat ~/.trinity-last-deployed-sha)   # not overwritten by a failed run
+          git checkout --no-recurse-submodules --detach "\$PREV" && git submodule update --init src/backend/enterprise
+          sudo docker compose -f docker-compose.prod.yml -f docker-compose.prod.enterprise.yml up -d --build backend frontend mcp-server scheduler
+          # Only if a migration damaged data: restore the newest dump in ~/backups into an emptied database
+          # gunzip -c ~/backups/trinity-pg-predeploy-<ts>.sql.gz | sudo docker exec -i trinity-postgres psql -U trinity -d trinity
+          \`\`\`
+
+          Close once a run is green -- an open issue suppresses the next alert.
+          EOF
