@@ -208,3 +208,13 @@ export function wrapUpPrompt(projectName) {
     'Update the project tasks to match (create, move to pending-verification with your evidence, ' +
     'or add notes), and skip anything that was only discussion. Then tell me briefly what you recorded.'
 }
+
+const TASK_LOG_KIND_LABEL = {
+  created: 'Created', status: 'Status', reopened: 'Reopened', done_claim: 'Done claim',
+  note: 'Note', imported: 'Imported',
+}
+
+/** A task-log entry's kind in words ("Done claim", "Reopened"). */
+export function taskLogKindLabel(kind) {
+  return TASK_LOG_KIND_LABEL[kind] || 'Note'
+}

@@ -44,7 +44,7 @@
         help="One or two sentences. Every agent on the project reads this first."
         :error="errors.goal"
       />
-      <div class="grid gap-4 sm:grid-cols-2">
+      <div class="grid grid-cols-1 gap-4 sm:grid-cols-2">
         <BaseSelect id="project-steward" v-model="form.steward" label="Steward">
           <option value="me">You</option>
           <option value="person">Someone else…</option>

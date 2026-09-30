@@ -83,13 +83,16 @@
 
       <InlineError v-if="actionError" :message="actionError" @dismiss="actionError = ''" />
 
-      <OverflowTabs v-if="!guest" :tabs="TABS" :model-value="tab" data-testid="project-tabs" @update:model-value="tab = $event" />
+      <!-- A bounded box: OverflowTabs sizes its "More" menu from its own width. -->
+      <div v-if="!guest" class="w-full min-w-0">
+        <OverflowTabs :tabs="TABS" :model-value="tab" data-testid="project-tabs" @update:model-value="tab = $event" />
+      </div>
 
       <ProjectTasks v-if="!guest && tab === 'tasks'" :project-id="p.id" :can-contribute="p.can?.contribute === true" :archived="Boolean(p.archived_at)" :my-email="myEmail" />
       <ProjectLog v-if="!guest && tab === 'log'" :project-id="p.id" :can-contribute="p.can?.contribute === true" :archived="Boolean(p.archived_at)" :my-email="myEmail" />
       <ProjectMaterial v-if="!guest && tab === 'material'" :project="p" :my-email="myEmail" :agents="usableAgents" />
 
-      <div v-show="guest || tab === 'overview'" class="grid gap-4 lg:grid-cols-3">
+      <div v-show="guest || tab === 'overview'" class="grid grid-cols-1 gap-4 lg:grid-cols-3">
         <BaseCard class="lg:col-span-2">
           <h2 class="text-[11px] font-semibold uppercase tracking-wide text-gray-500 dark:text-gray-400">Work on it</h2>
           <p v-if="!options.length" class="mt-2 text-sm text-gray-600 dark:text-gray-300">

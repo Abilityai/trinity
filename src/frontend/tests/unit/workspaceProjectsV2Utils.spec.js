@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest'
 import {
   TASK_STATUSES, taskStatusLabel, TASK_STATUS_BADGE, taskStatusOptions, groupTasks,
   LOG_KINDS, logKindLabel, authorLabel, wrapUpPrompt, chatProjectActions, isOpenTask,
+  taskLogKindLabel,
 } from '@/components/portal/projects/projectsUtils'
 
 describe('ent#661 v2 — tasks', () => {
@@ -63,5 +64,16 @@ describe('ent#661 v2 — chat header for guests', () => {
   it('a platform user gets everything in a linked chat', () => {
     const a = chatProjectActions({ ...base, isPlatform: true, project: { id: 'p' } })
     expect(a).toMatchObject({ show: true, linked: true, canAdd: true, canWrapUp: true })
+  })
+})
+
+describe('taskLogKindLabel — every kind the backend writes has words', () => {
+  it('names each kind', () => {
+    expect(['created', 'status', 'reopened', 'done_claim', 'note', 'imported'].map(taskLogKindLabel))
+      .toEqual(['Created', 'Status', 'Reopened', 'Done claim', 'Note', 'Imported'])
+  })
+  it('an unknown kind reads as a note, never blank', () => {
+    expect(taskLogKindLabel('later')).toBe('Note')
+    expect(taskLogKindLabel(undefined)).toBe('Note')
   })
 })
