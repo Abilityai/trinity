@@ -46,12 +46,12 @@ const LIBRARY = [
   { name: 'research', description: 'live', deprecated: false, superseded_by: null },
 ]
 
-function respond({ assigned = [] } = {}) {
+function respond({ assigned = [], library = LIBRARY } = {}) {
   api.get.mockImplementation((url) => {
     if (url === '/api/skills/library/status') {
-      return Promise.resolve({ data: { configured: true, cloned: true, skill_count: LIBRARY.length } })
+      return Promise.resolve({ data: { configured: true, cloned: true, skill_count: library.length } })
     }
-    if (url === '/api/skills/library') return Promise.resolve({ data: LIBRARY })
+    if (url === '/api/skills/library') return Promise.resolve({ data: library })
     if (url === '/api/skills/assignments') {
       return Promise.resolve({
         data: {
@@ -104,6 +104,18 @@ describe('Library → Skills card', () => {
     const wrapper = await mountLibrary()
     expect(tid(wrapper, 'skill-deprecated-library-retired').exists()).toBe(true)
     expect(tid(wrapper, 'skill-superseded-library-retired').exists()).toBe(false)
+  })
+
+  it('renders an HTML-shaped successor as text, never as markup', async () => {
+    // The successor is library-authored text. A tag in it must reach the
+    // screen as characters — it is interpolated, never bound as HTML.
+    const html = '<img src=x onerror="window.__pwned=1">'
+    respond({ library: [{ name: 'shady', description: 'd', deprecated: true, superseded_by: html }] })
+    const wrapper = await mountLibrary()
+    const line = tid(wrapper, 'skill-superseded-library-shady')
+    expect(line.text()).toBe(`Superseded by ${html}`)
+    expect(line.find('img').exists()).toBe(false)
+    expect(window.__pwned).toBeUndefined()
   })
 
   it('leaves a live card unmarked, and every card in the grid', async () => {
