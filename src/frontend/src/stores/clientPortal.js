@@ -2126,7 +2126,7 @@ export const useClientPortalStore = defineStore('clientPortal', {
       try {
         // trinity-enterprise#611: the asks that ended in the last 7 days ride the
         // same list, so a person sees how an ask ended instead of watching it
-        // vanish; `openAsks` (the badge) and the Work tab stay pending-only.
+        // vanish; `openAsks` (the badges and the asks-waiting line) stays pending-only.
         const { data } = await portalHttp.get('/api/enterprise/client-portal/asks', {
           headers: this.authHeader,
           params: agentName ? { agent_name: agentName, include_ended: true } : { include_ended: true },

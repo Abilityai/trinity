@@ -42,9 +42,12 @@
         data-testid="inbox-ask-context-failed"
         @retry="load"
       />
-      <!-- No dead end: the way to the ask's own chat does not need this read. -->
+      <!-- No dead end: the way to the ask's own chat does not need this read.
+           Only an ask a chat turn raised HAS a chat of its own — a background
+           ask's `chat_id` (Main) is its reply target, and it renders in no chat
+           (the 09-30 ruling, amended; round 2, codex C4). -->
       <button
-        v-if="ask.chat_id"
+        v-if="ask.chat_id && ask.raised_in_turn === true"
         type="button"
         :class="[LINK, 'mt-2']"
         data-testid="inbox-ask-context-open-fallback"

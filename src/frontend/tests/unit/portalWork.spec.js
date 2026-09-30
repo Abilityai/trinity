@@ -402,10 +402,12 @@ describe('ent#525 — the tab and the card are wired (source guards)', () => {
   const card = src('components/portal/PortalWorkCard.vue')
   const ws = src('utils/websocket.js')
 
-  it('the Work body docks into BOTH rail mounts, and the shell hands it the chat id and the prefill path', () => {
+  it('the Work body docks into BOTH rail mounts, and the shell hands the rail store the chat id and Work the prefill path', () => {
     expect((shell.match(/<template #tab-work=/g) || []).length).toBe(2)
     expect((shell.match(/<PortalWork /g) || []).length).toBe(2)
-    expect(shell).toContain(':chat-id="railChatId"')
+    // ent#610 round 2 (review I2): Work's own `chatId` prop had no reader — the
+    // rail store (`chatId: railChatId`, below) is what scopes the children.
+    expect(shell).not.toContain(':chat-id="railChatId"')
     expect(shell).toContain('@ask-about-it="askAboutIt"')
     expect(shell).toMatch(/function askAboutIt\(text\) \{[\s\S]*usePlaybook\(text\)/)
     expect(shell).toContain("@open-work=\"openRailOn('work')\"")
@@ -489,8 +491,9 @@ describe('ent#525 — the tab and the card are wired (source guards)', () => {
     expect(tab).toContain('<InlineError')
     // ent#610 (the 09-30 ruling): Work counts the asks and links to the Inbox;
     // it never draws them (portalWorkAsksLine.spec.js mounts it).
-    expect(tab).not.toContain('<PortalAsks')
-    expect(tab).toContain('portal.openAsks')
+    expect(tab).not.toMatch(/<PortalAsks\b/)
+    // The line is ONE component, shared with Info (round 2); it reads openAsks.
+    expect(tab).toContain('<PortalAsksWaitingLine')
     expect(tab).not.toContain('fetchAsks(')
     expect(tab).toContain('portal.isPlatformSession')
     expect(tab).toContain('groupByParticipant(')

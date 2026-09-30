@@ -41,6 +41,12 @@
       </div>
     </div>
 
+    <!-- trinity-enterprise#610 (the 09-30 ruling, item 2): the agent's asks home
+         is the Inbox, filtered to it, "on every door" — for platform users and
+         clients alike. A client has no Work tab (a platform door), so this is
+         their door: the same one line Work draws, for every principal. -->
+    <PortalAsksWaitingLine :agent-names="[agentName]" testid-prefix="portal-info" />
+
     <!-- #2597: a failed REFRESH keeps everything on screen and says so beside
          it (ent#253) — the band's rule, applied to the panel that reads the
          same payload. Sits at the top of the panel body; ent#547 removed the
@@ -220,6 +226,7 @@ import PortalAgentMemory from './PortalAgentMemory.vue'
 import PortalAgentRole from './PortalAgentRole.vue'
 import PortalAgentDecisions from './PortalAgentDecisions.vue'
 import PortalSuggestions from './PortalSuggestions.vue'
+import PortalAsksWaitingLine from './PortalAsksWaitingLine.vue'
 import { agentDisplayName } from '@/utils/agentName'
 import { capCount } from '@/utils/tabTitle'
 import { availabilityChip, threadTitle, MAIN_TAB_LABEL, asksHomeRoute } from './portalUtils'
@@ -235,9 +242,10 @@ const props = defineProps({
 // control, not a button this body owns — a second X inside the column would
 // be a second way to do one thing, and the two would disagree about whether
 // the rail is shut or merely on another tab.
-// ent#465: `open-rail-tab` / `focus-composer` carry a suggestion's Accept to
-// the shell, which owns the rail and the composer.
-const emit = defineEmits(['open-thread', 'use-playbook', 'open-rail-tab', 'focus-composer'])
+// ent#465: `focus-composer` carries a suggestion's Accept to the shell, which
+// owns the composer. (The asks suggestion goes to the Inbox by route since the
+// 09-30 ruling, so `open-rail-tab` had no emitter left.)
+const emit = defineEmits(['open-thread', 'use-playbook', 'focus-composer'])
 
 const store = useClientPortalStore()
 const router = useRouter()

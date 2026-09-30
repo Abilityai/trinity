@@ -164,7 +164,8 @@
                (or in an unsaved new chat with it). Quiet and gray beside the two
                pills — a state of the person's own work, not an obligation. -->
           <span v-if="hasDraftFor(a.name)" class="shrink-0 flex items-center" data-testid="agent-draft"><DraftMark /></span>
-          <!-- trinity-enterprise#610 (the 09-30 ruling, item 3): this is the
+          <!-- trinity-enterprise#610 (the 09-30 ruling, item 3 — "D" in the
+               round-2 brief): this is the
                agent row's "needs you" mark — the same feed (`openAsks`) and
                the same hover words as the pinned Inbox row's, so the two read
                as one fact. -->
@@ -172,13 +173,21 @@
             v-if="askCountFor(a.name)"
             class="shrink-0 min-w-[1.25rem] px-1.5 h-5 rounded-full bg-status-urgent-700 text-white text-[11px] font-semibold flex items-center justify-center"
             :title="askBadgeTitle(askCountFor(a.name))"
+            aria-hidden="true"
             data-testid="agent-ask-count"
           >{{ capCount(askCountFor(a.name)) }}</span>
+          <!-- Round 2 (design F3): the two pills differ by colour alone, and a
+               title on a span inside a button is never read — each says what it
+               counts to a screen reader. -->
+          <span v-if="askCountFor(a.name)" class="sr-only">{{ askBadgeTitle(askCountFor(a.name)) }}</span>
           <span
             v-if="waitingFor(a.name)"
             class="shrink-0 min-w-[1.25rem] px-1.5 h-5 rounded-full bg-action-primary-700 text-white text-[11px] font-semibold flex items-center justify-center"
+            :title="`${waitingFor(a.name)} unread`"
+            aria-hidden="true"
             data-testid="agent-unread-count"
           >{{ capCount(waitingFor(a.name)) }}</span>
+          <span v-if="waitingFor(a.name)" class="sr-only">{{ waitingFor(a.name) }} unread</span>
         </button>
 
         <!-- #2159: ONE persistent button, never two v-if-alternated ones —

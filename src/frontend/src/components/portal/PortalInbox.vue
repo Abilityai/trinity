@@ -342,6 +342,7 @@ const facets = computed(() => {
 // A2 r1 (Codex C4): narrowing to another agent closes an open ask that is not
 // theirs — else the pane keeps agent A's ask beside a list of agent B's.
 function onFrom(id) {
+  droppedFrom.value = null
   const from = normalizeFrom(id)
   const sel = selectedAsk.value
   if (from && sel && sel.agent_name !== from) {
@@ -373,9 +374,22 @@ const selectedKey = computed(() => routeItem.value || previewKey.value)
 watch(previewKey, (k) => emit('update:preview', k || null))
 // §3g C2: a `?from=` that no longer narrows anything (its agent's asks are all gone and
 // none is on screen) leaves the URL, once the asks have a verdict.
+// Round 2 (QA mobile F5): the head says whose filter was dropped, until the
+// reader picks a tab or a facet.
+const droppedFrom = ref(null)
 watch([fromQuery, activeFrom, asksVerdict], ([q, a, v]) => {
-  if (q && !a && v) replaceQuery({ from: undefined })
-})
+  if (q && !a && v) { droppedFrom.value = q; replaceQuery({ from: undefined }) }
+}, { immediate: true })   // a ?from= the page OPENS with (a stale link, Back) is checked too
+// Round 2 (QA P2-3): a door that narrows the Inbox to an agent ("Open in
+// Inbox" in Work or Info) is a link; the page it leaves takes focus with it,
+// so it would land on the body. Focus the list, where the narrowed asks are —
+// only when nothing else holds focus (a facet click keeps its own).
+watch(fromQuery, async (q) => {
+  if (!q || typeof document === 'undefined') return
+  await nextTick()
+  const at = document.activeElement
+  if (!at || at === document.body) listColEl.value?.focus?.({ preventScroll: true })
+}, { immediate: true })
 // A2 r1 (QA N1): `?from=` narrows Action only — on another tab (a deep link,
 // a hand-edited URL) it is ignored, so it leaves the URL rather than lingering.
 watch(() => tab.value !== 'action' && route.query.from !== undefined, (stray) => {
@@ -441,8 +455,10 @@ async function showMore() {
 // The head counts LIVE rows, never ghosts, in units (§3g A8); with only ghosts
 // left it says "All caught up".
 const liveItems = computed(() => shownItems.value.filter((it) => !isGhost(it)))
+const labelOf = (name) => (props.labels && props.labels[name]) || name
 const head = computed(() => listHeadLabel(tab.value, liveItems.value,
-  activeFrom.value ? ((props.labels && props.labels[activeFrom.value]) || activeFrom.value) : null))
+  activeFrom.value ? labelOf(activeFrom.value) : null,
+  !activeFrom.value && droppedFrom.value ? labelOf(droppedFrom.value) : null))
 const headExact = computed(() => listHeadExact(tab.value, liveItems.value))
 
 // A selection the rendered rows do not hold (an old chat, a deep link) is
@@ -581,6 +597,7 @@ async function open(it) {
 // A click on the active tab starts a new visit: the list re-sorts and its
 // ghosts go, which is the one way to ask for that without leaving the tab.
 function onTab(next) {
+  droppedFrom.value = null
   if (next === tab.value) { newVisit(); return }
   replaceQuery({ tab: next, item: undefined, from: undefined })
 }

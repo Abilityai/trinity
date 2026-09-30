@@ -87,7 +87,7 @@ describe('Work draws no ask, so nothing is drawn twice beside the Inbox pane', (
   })
   it('the shell hands Work no open-ask list, and Work mounts no PortalAsks', () => {
     const work = src('PortalWork.vue')
-    expect(work).not.toMatch(/excludeAskIds|<PortalAsks/)
+    expect(work).not.toMatch(/excludeAskIds|<PortalAsks\b/)
     const shell = readFileSync(join(PORTAL, '..', '..', 'views', 'Portal.vue'), 'utf8')
     expect(shell).not.toMatch(/inboxOpenAskIds/)
   })

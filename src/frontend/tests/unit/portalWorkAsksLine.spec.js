@@ -94,8 +94,9 @@ describe('the route and the words', () => {
     expect(asksHomeRoute(null)).toEqual({ path: WORKSPACE_INBOX, query: { tab: 'action' } })
   })
   it('the line counts, in words', () => {
-    expect(asksWaitingLabel(1)).toBe('1 waiting on you')
-    expect(asksWaitingLabel(4)).toBe('4 waiting on you')
+    // Round 2 (plan-design G): the noun — "5 waiting on you" named nothing.
+    expect(asksWaitingLabel(1)).toBe('1 ask waiting on you')
+    expect(asksWaitingLabel(4)).toBe('4 asks waiting on you')
     expect(asksWaitingLabel(0)).toBe('')
   })
 })
@@ -106,21 +107,20 @@ describe('Work (mounted)', () => {
     await mountWork()
     expect(wrapper.findAllComponents(PortalAsks)).toHaveLength(0)
     expect(wrapper.find('[data-testid="portal-work-waiting"]').exists()).toBe(false)
-    expect(line().text()).toContain('2 waiting on you')
+    expect(line().text()).toContain('2 asks waiting on you')
     expect(link().text()).toBe('Open in Inbox')
     expect(link().attributes('href')).toBe('/workspace/inbox?tab=action&from=scout')
   })
 
-  it("counts the ask open in the Inbox pane too — Work no longer skips it", async () => {
-    store.asks = [ask('a1')]
-    await mountWork({ excludeAskIds: ['a1'] })
-    expect(line().text()).toContain('1 waiting on you')
+  it("counts every waiting ask — Work takes no exclude list (round 2, review I1: the old case passed a prop that no longer exists)", async () => {
+    expect(Object.keys(PortalWork.props || {})).not.toContain('excludeAskIds')
+    expect(Object.keys(PortalWork.props || {})).not.toContain('chatId')
   })
 
   it('a room with waiting asks from two agents links to the whole Action tab', async () => {
     store.asks = [ask('a1'), ask('b1', { agent_name: 'bard' }), ask('x1', { agent_name: 'outsider' })]
     await mountWork({ participants: ['scout', 'bard'] })
-    expect(line().text()).toContain('2 waiting on you')
+    expect(line().text()).toContain('2 asks waiting on you')
     expect(link().attributes('href')).toBe('/workspace/inbox?tab=action')
   })
 
@@ -141,12 +141,17 @@ describe('Work (mounted)', () => {
     expect(head.find('[data-testid="portal-work-waiting-line"]').exists()).toBe(true)
   })
 
-  it('an empty Work still says what waits, under its empty copy', async () => {
+  it('an empty Work says what waits in the SAME top row, not last under its copy (round 2, design F2 / QA N2)', async () => {
     store.asks = [ask('a1')]
     await mountWork()
     const empty = wrapper.find('[data-testid="portal-work-empty"]')
     expect(empty.exists()).toBe(true)
-    expect(empty.find('[data-testid="portal-work-waiting-line"]').exists()).toBe(true)
+    expect(empty.find('[data-testid="portal-work-waiting-line"]').exists()).toBe(false)
+    const head = wrapper.find('[data-testid="portal-work-now-head"]')
+    expect(head.find('[data-testid="portal-work-waiting-line"]').exists()).toBe(true)
+    // the row comes before the empty copy
+    const all = [...wrapper.element.querySelectorAll('[data-testid="portal-work-now-head"], [data-testid="portal-work-empty"]')]
+    expect(all.map((n) => n.getAttribute('data-testid'))).toEqual(['portal-work-now-head', 'portal-work-empty'])
   })
 })
 
@@ -157,6 +162,15 @@ describe('the other doors go to the Inbox too (source-asserted)', () => {
     expect(shell).toMatch(/if \(name === 'asks'\) \{ router\.push\(asksHomeRoute\(/)
     expect(shell).not.toMatch(/:exclude-ask-ids=/)
   })
+  it("Info draws the same line for EVERY principal — a client has no Work tab (round 2, client QA check 3)", () => {
+    const info = read('components/portal/PortalAgentDetails.vue')
+    const work = read('components/portal/PortalWork.vue')
+    expect(info).toMatch(/<PortalAsksWaitingLine\b[^>]*:agent-names="\[agentName\]"/)
+    expect(work).toMatch(/<PortalAsksWaitingLine\b/)
+    const tag = info.slice(info.indexOf('<PortalAsksWaitingLine'), info.indexOf('/>', info.indexOf('<PortalAsksWaitingLine')))
+    expect(tag).not.toMatch(/isPlatform|v-if/)
+  })
+
   it("Info's asks section link routes to the asks home", () => {
     const info = read('components/portal/PortalAgentDetails.vue')
     expect(info).toMatch(/name === 'asks'\) router\.push\(asksHomeRoute\(props\.agentName\)\)/)

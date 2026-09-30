@@ -142,7 +142,7 @@ describe("the Work tab's waiting line counts pending asks only (mounted)", () =>
     })
     await flushPromises()
     const pending = LIST.filter((a) => a.status === 'pending').length
-    expect(w.find('[data-testid="portal-work-waiting-line"]').text()).toContain(`${pending} waiting on you`)
+    expect(w.find('[data-testid="portal-work-waiting-line"]').text()).toContain(`${pending} ${pending === 1 ? 'ask' : 'asks'} waiting on you`)
     expect(w.findAll('[data-status]')).toHaveLength(0)
   })
 })

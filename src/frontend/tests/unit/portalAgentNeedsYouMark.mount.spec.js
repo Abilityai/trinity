@@ -113,4 +113,14 @@ describe('the needs-you mark on agent rows', () => {
     expect(pills[0].attributes('title')).toBe('2 asks are waiting on your answer')
     expect(pills[0].attributes('title')).toBe(w.find('[data-testid="sidebar-ask-count"]').attributes('title'))
   })
+
+  it('both pills say what they count to a screen reader, not only by colour (round 2, design F3 / plan-design F)', async () => {
+    store.asks = [ask('a1', 'scout'), ask('a2', 'scout')]
+    const w = await sidebar()
+    const row = rowOf(w, 'scout')
+    const spoken = row.findAll('.sr-only').map((n) => n.text())
+    expect(spoken).toContain('2 asks are waiting on your answer')
+    const unread = row.find('[data-testid="agent-unread-count"]')
+    if (unread.exists()) expect(spoken.some((t) => /unread/.test(t))).toBe(true)
+  })
 })

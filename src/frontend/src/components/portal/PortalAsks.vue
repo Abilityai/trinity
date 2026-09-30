@@ -285,30 +285,32 @@ const DEFAULT_TESTID_PREFIX = 'portal-ask'
 // (gray-600 measured 2.16:1). Colour stays on the mutually exclusive arms
 // below (#2662); CHIP_BASE carries none.
 const RING = 'focus:outline-none focus-visible:ring-2 focus-visible:ring-action-primary-500/40 dark:focus-visible:ring-action-primary-400/40'
-const CHIP_BASE = `rounded-lg border text-xs font-medium px-2.5 py-1.5 max-sm:min-h-11 disabled:opacity-50 ${RING}`
+// Round 2 (QA mobile F2): 44px on any touch screen, not only below `sm` — a
+// 768 tablet measured 28–34px, and the tile in the thread is where it answers.
+const CHIP_BASE = `rounded-lg border text-xs font-medium px-2.5 py-1.5 max-sm:min-h-11 [@media(pointer:coarse)]:min-h-11 disabled:opacity-50 ${RING}`
 const CHIP_IDLE = 'bg-white dark:bg-gray-900 border-gray-300 dark:border-gray-500 text-gray-700 dark:text-gray-200 hover:border-action-primary-500'
 // A quick pick that filled the answer: a light tint, never the solid armed
 // approval — it chose the text, it did not arm a send.
 const CHIP_CHOSEN = 'bg-action-primary-50 dark:bg-action-primary-500/16 border-action-primary-500 text-action-primary-700 dark:text-action-primary-300'
-const FIELD = 'flex-1 min-w-0 rounded-lg border border-gray-300 dark:border-gray-500 bg-white dark:bg-gray-900 px-2.5 py-1.5 text-sm max-sm:min-h-11 focus:outline-none focus:border-action-primary-500 focus:ring-[3px] focus:ring-action-primary-500/40 dark:focus:ring-action-primary-400/40'
-const SEND = `rounded-lg bg-action-primary-600 hover:bg-action-primary-700 disabled:opacity-50 text-white text-xs font-medium px-2.5 py-1.5 max-sm:min-h-11 ${RING}`
+const FIELD = 'flex-1 min-w-0 rounded-lg border border-gray-300 dark:border-gray-500 bg-white dark:bg-gray-900 px-2.5 py-1.5 text-sm max-sm:min-h-11 [@media(pointer:coarse)]:min-h-11 focus:outline-none focus:border-action-primary-500 focus:ring-[3px] focus:ring-action-primary-500/40 dark:focus:ring-action-primary-400/40'
+const SEND = `rounded-lg bg-action-primary-600 hover:bg-action-primary-700 disabled:opacity-50 text-white text-xs font-medium px-2.5 py-1.5 max-sm:min-h-11 [@media(pointer:coarse)]:min-h-11 ${RING}`
 
 const props = defineProps({
   // Omit to render every ask addressed to this user (chat/global); pass a name to
   // render one agent's (the agent page).
   agentName: { type: String, default: null },
-  // ent#525: or several — the rail's Work tab renders the asks of a chat's
-  // PARTICIPANTS ("Waiting on you"), the fourth rendering of the same row. A
-  // computed over `store.asks`, never a narrowed fetch: `fetchAsks(agentName)`
-  // replaces the shared list the sidebar badge reads.
+  // ent#525: or several agents' asks. (Work rendered its participants' asks
+  // here until the 09-30 ruling, trinity-enterprise#610; it now draws one line
+  // to the Inbox.) A computed over `store.asks`, never a narrowed fetch:
+  // `fetchAsks(agentName)` replaces the shared list the sidebar badge reads.
   agentNames: { type: Array, default: null },
   // ent#661 v3: or exactly these asks — a project's "Needs you" card. The ids
   // come from the server's project read, which already applied the Inbox's
   // own addressee rule; this only narrows the shared list, never widens it.
   askIds: { type: Array, default: null },
   showAgent: { type: Boolean, default: false },
-  // trinity-enterprise#611: only what is still waiting — the Work tab's
-  // "Waiting on you". Every other rendering also shows asks that ended.
+  // trinity-enterprise#611: only what is still waiting — a project's "Needs
+  // you" card. Every other rendering also shows asks that ended.
   pendingOnly: { type: Boolean, default: false },
   // The thread on screen, when there is one. Only used to suppress a link that
   // would go where the reader already is (ent#429).

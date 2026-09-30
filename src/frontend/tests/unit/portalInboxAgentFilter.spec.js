@@ -15,8 +15,12 @@ import {
 const row = (id, agent) => ({ key: `ask:${id}`, type: 'ask', id, agent_name: agent })
 
 describe('C2 — agent facets', () => {
-  it('none for one agent; "All agents" then each agent, most asks first, with counts', () => {
-    expect(agentFacets([row('a', 'scout'), row('b', 'scout')])).toEqual([])
+  it('one agent still draws the strip: it appearing when a second agent asks moved the list (round 2, codex C5)', () => {
+    expect(agentFacets([row('a', 'scout'), row('b', 'scout')]).map((t) => t.id)).toEqual([FROM_ALL, 'scout'])
+    expect(agentFacets([])).toEqual([])
+  })
+
+  it('"All agents" then each agent, most asks first, with counts', () => {
     const f = agentFacets([row('a', 'scout'), row('b', 'relay'), row('c', 'relay')], { relay: 'Relay Bot' })
     expect(f.map((t) => t.id)).toEqual([FROM_ALL, 'relay', 'scout'])
     expect(f[0]).toMatchObject({ label: 'All agents', badge: 3 })
@@ -51,6 +55,9 @@ describe('C2 — agent facets', () => {
     expect(listHeadLabel('action', items)).toBe('2 asks')
     expect(listHeadLabel('action', items, 'Relay Bot')).toBe('2 asks from Relay Bot')
     expect(listHeadLabel('action', [], 'Relay Bot')).toBe('All caught up')
+    // Round 2 (QA mobile F5): a ?from= whose agent has nothing left is dropped —
+    // the head says so in its own line, instead of silently listing everyone.
+    expect(listHeadLabel('action', items, null, 'Relay Bot')).toBe('Nothing waiting from Relay Bot · 2 asks from all agents')
   })
 
   it('a visit keeps its facet order: answering an ask never reshuffles the strip (A2 r1 QA P2)', () => {

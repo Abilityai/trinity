@@ -234,7 +234,15 @@ describe('the chat thread (mounted)', () => {
   it('the only PortalAsks in the conversation is the tile inside the thread loop', () => {
     const uses = CONVERSATION.match(/<PortalAsks\b/g) || []
     expect(uses).toHaveLength(1)
-    expect(CONVERSATION).toMatch(/v-for="\(item, k\) in threadRows"[\s\S]*<PortalAsks\b[\s\S]*<\/template>\s*\n\s*<!-- ent#525/)
+    // Anchored on structure, not a comment (round 2, review I1): the tile sits
+    // after the thread loop opens and before the thread's jump-to-latest control,
+    // which closes the thread region above the composer.
+    const loop = CONVERSATION.indexOf('in threadRows"')
+    const tile = CONVERSATION.indexOf('<PortalAsks')
+    const jump = CONVERSATION.indexOf('<PortalJumpToLatest')
+    expect(loop).toBeGreaterThan(-1)
+    expect(tile).toBeGreaterThan(loop)
+    expect(tile).toBeLessThan(jump)
     expect(CONVERSATION).not.toMatch(/splitChatAsks|chatAsksLabel|asksOpen/)
   })
 })

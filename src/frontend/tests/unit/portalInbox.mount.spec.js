@@ -1298,6 +1298,24 @@ describe('Action narrowed to one agent (§3g C2, ?from=)', () => {
     expect(order()).toEqual(['all-agents', 'scout', 'relay'])
   })
 
+  it('a ?from= with nothing left from that agent says so in the head, then leaves the URL (round 2, QA mobile F5)', async () => {
+    store.asks = [ask('s1')]
+    store.asksLoaded = true
+    const w = await mountInbox({ labels: { relay: 'Relay Bot' } }, { query: { tab: 'action', from: 'relay' } })
+    await flushPromises()
+    expect(router.currentRoute.value.query.from).toBeUndefined()
+    expect(w.find('[data-testid="inbox-list-total"]').text()).toContain('Nothing waiting from Relay Bot')
+  })
+
+  it('arriving by an "Open in Inbox" link puts focus on the list, not the page body (round 2, QA P2-3)', async () => {
+    store.asks = [ask('s1'), ask('r1', { agent_name: 'relay' })]
+    store.asksLoaded = true
+    document.body.focus()
+    const w = await mountInbox({}, { query: { tab: 'action', from: 'relay' } })
+    await flushPromises()
+    expect(document.activeElement).toBe(w.find('[data-testid="inbox-list-column"]').element)
+  })
+
   it('a ?from= on a tab it does not narrow leaves the URL (A2 r1 QA N1)', async () => {
     store.asks = [ask('s1'), ask('r1', { agent_name: 'relay' })]
     store.asksLoaded = true
@@ -1307,11 +1325,11 @@ describe('Action narrowed to one agent (§3g C2, ?from=)', () => {
     expect(router.currentRoute.value.query.tab).toBe('all')
   })
 
-  it('one agent → no strip; the other tabs never show it, and leaving Action drops ?from=', async () => {
+  it('one agent → the strip still, so a second agent asking moves nothing; other tabs never show it, and leaving Action drops ?from=', async () => {
     store.asks = [ask('s1'), ask('s2')]
     store.asksLoaded = true
     const w = await mountInbox({}, { query: { tab: 'action' } })
-    expect(facetsTabs(w).exists()).toBe(false)
+    expect(facetsTabs(w).exists()).toBe(true)
     store.asks = [ask('s1'), ask('r1', { agent_name: 'relay' })]
     await router.replace({ path: '/workspace/inbox', query: { tab: 'action', from: 'relay' } })
     await flushPromises()

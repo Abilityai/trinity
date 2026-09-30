@@ -195,7 +195,9 @@ export function agentFacets(rows, labels = {}, active = null, order = null) {
   for (const r of Array.isArray(rows) ? rows : []) {
     if (r && r.agent_name) counts.set(r.agent_name, (counts.get(r.agent_name) || 0) + 1)
   }
-  if (counts.size < 2 && !(active && !counts.has(active))) return []
+  // Round 2 (codex C5): from ONE agent, not two — the strip appearing when a
+  // second agent asked pushed an unchanged list down (principle 30).
+  if (counts.size < 1 && !(active && !counts.has(active))) return []
   const total = [...counts.values()].reduce((a, b) => a + b, 0)
   const at = new Map((Array.isArray(order) ? order : []).map((id, i) => [id, i]))
   const pos = (name) => (at.has(name) ? at.get(name) : Infinity)
@@ -294,8 +296,13 @@ export function newLabel(n) {
 const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`
 // `fromLabel` (§3g C2, A2 r1): Action narrowed to one agent says so — its facet
 // can sit in the strip's More menu, where nothing on screen would name it.
-export function listHeadLabel(tab, liveItems, fromLabel = null) {
+export function listHeadLabel(tab, liveItems, fromLabel = null, droppedLabel = null) {
   const items = Array.isArray(liveItems) ? liveItems : []
+  // Round 2 (QA mobile F5): a `?from=` whose agent had nothing left was dropped
+  // silently and the list showed everyone's — say it, in the head's own line.
+  if (droppedLabel && tab === 'action') {
+    return `Nothing waiting from ${droppedLabel} · ${items.length ? `${listHeadLabel(tab, items)} from all agents` : 'All caught up'}`
+  }
   if (!items.length) return 'All caught up'
   const chats = items.filter((it) => it && it.type === 'thread')
   const asks = items.filter((it) => it && it.type === 'ask')

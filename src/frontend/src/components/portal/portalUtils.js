@@ -688,7 +688,7 @@ export function asksHomeRoute(agentName = null) {
 }
 export function asksWaitingLabel(n) {
   const k = Number(n) || 0
-  return k > 0 ? `${k} waiting on you` : ''
+  return k > 0 ? `${k} ${k === 1 ? 'ask' : 'asks'} waiting on you` : ''
 }
 
 export function shouldEscapeStage(path, query) {

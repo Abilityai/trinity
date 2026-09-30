@@ -186,8 +186,14 @@ describe('A2 round 1 — what the context says, and how it loads', () => {
     expect(el(same, 'inbox-ask-context-filed').exists()).toBe(false)
   })
 
+  it('a background ask offers no way "to its chat" when the read fails — it lives in no chat (round 2, codex C4)', async () => {
+    const w = await mountCtx(vi.fn(async () => { throw new Error('503') }), ask({ chat_id: 's-main', raised_in_turn: false }))
+    expect(el(w, 'inbox-ask-context-failed').exists()).toBe(true)
+    expect(el(w, 'inbox-ask-context-open-fallback').exists()).toBe(false)
+  })
+
   it('a failed read still offers the way to the ask\'s chat', async () => {
-    const w = await mountCtx(vi.fn(async () => { throw new Error('503') }), ask({ chat_id: 's-main' }))
+    const w = await mountCtx(vi.fn(async () => { throw new Error('503') }), ask({ chat_id: 's-main', raised_in_turn: true }))
     expect(el(w, 'inbox-ask-context-failed').exists()).toBe(true)
     await el(w, 'inbox-ask-context-open-fallback').trigger('click')
     expect(w.emitted('open-chat')[0]).toEqual(['/workspace/c/s-main'])
