@@ -39,6 +39,14 @@
     {
       "pattern": "\\bshutdown\\s+-[hr]\\b|\\breboot\\s+-f\\b|\\bpoweroff\\b",
       "reason": "host shutdown"
+    },
+    {
+      "pattern": "(?s)\\A(?=.*\\bsudo\\b).*(?:/etc/claude-code|/opt/trinity|/etc/sudoers)|\\bvisudo\\b",
+      "reason": "sudo touching the guardrail registration, hooks or sudoers"
+    },
+    {
+      "pattern": "\\bsudo(?:\\s+(?:-[ugCDhprtUT](?:\\S+|\\s+\\S+)|--[a-z][\\w-]*(?:=\\S+)?|-(?![ugCDhprtUT])[a-zA-Z]+))*?\\s+(?:-[a-zA-Z]*[is][a-zA-Z]*|--login|--shell)(?=\\s|$)|\\bsudo(?:\\s+(?:-[ugCDhprtUT](?:\\S+|\\s+\\S+)|--[a-z][\\w-]*(?:=\\S+)?|-(?![ugCDhprtUT])[a-zA-Z]+))*?\\s+(?:/\\S*/)?su(?=\\s|$|[;&|)])|\\bsudo(?:\\s+(?:-[ugCDhprtUT](?:\\S+|\\s+\\S+)|--[a-z][\\w-]*(?:=\\S+)?|-(?![ugCDhprtUT])[a-zA-Z]+))*?\\s+(?:/\\S*/)?(?:bash|sh|zsh|dash|ksh|fish)(?=\\s*(?:$|[;&|)]|-[il]\\b|--login\\b))|(?:^|[;&|(])\\s*(?:/\\S*/)?su(?=\\s|$|[;&|)])",
+      "reason": "interactive root shell"
     }
   ],
   "path_deny": [
