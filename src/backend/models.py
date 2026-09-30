@@ -469,6 +469,11 @@ class User(BaseModel):
     # `X-Source-Agent` header is honoured for this one value and nothing else.
     # None on every other branch, JWT humans included.
     vouched_source_agent: Optional[str] = None
+    # #2973: the inter-agent chain depth (#2806) the backend computed when it
+    # dispatched an EVT-001 event, carried as a signed loopback claim so the
+    # subscriber's execution inherits it instead of starting a new root. Set
+    # only on a loopback JWT; None on every other branch.
+    loopback_chain_depth: Optional[int] = None
 
 
 class Token(BaseModel):
@@ -3009,10 +3014,27 @@ class CanaryStatusResponse(BaseModel):
 # =============================================================================
 
 
+# #3104: the payload reaches subscriber prompts via {{payload.*}}; bound it.
+EVENT_PAYLOAD_MAX_BYTES = 64 * 1024
+
+
 class EmitEventRequest(BaseModel):
     """Request body for emitting an event."""
     event_type: str  # Namespaced event type (e.g., "prediction.resolved")
     payload: Optional[dict] = None  # Structured data
+
+    @field_validator("payload")
+    @classmethod
+    def _bound_payload(cls, v):
+        if v is not None:
+            import json
+            # UTF-8 bytes: ASCII escapes would count "é" as 6 and reject valid payloads.
+            size = len(json.dumps(v, ensure_ascii=False, default=str).encode("utf-8"))
+            if size > EVENT_PAYLOAD_MAX_BYTES:
+                raise ValueError(
+                    f"payload is {size} bytes serialized; max {EVENT_PAYLOAD_MAX_BYTES}"
+                )
+        return v
 
 
 # =============================================================================
@@ -4291,6 +4313,16 @@ class UserRoleUpdate(BaseModel):
 
 
 class UpdateMyEmailRequest(BaseModel):
+    email: str
+    # trinity-enterprise#720: the 6-digit code sent to `email` by
+    # `POST /api/users/me/email/code` — proof the caller holds the mailbox.
+    # Optional only for the audited admin transition on an install that cannot
+    # deliver mail; everywhere else a missing code is a 400.
+    code: Optional[str] = None
+
+
+class RequestEmailBindCodeRequest(BaseModel):
+    """`POST /api/users/me/email/code` — send a bind code to a NEW address (ent#720)."""
     email: str
 
 

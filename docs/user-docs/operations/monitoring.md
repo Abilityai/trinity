@@ -76,6 +76,7 @@ A background service that automatically recovers stuck resources:
 - **Stale Redis slots** -- Orphaned slot reservations are released.
 - **Run frequency** -- Every 5 minutes, plus a one-shot sweep on backend restart.
 - **Startup recovery** -- Orphaned executions (container down, not in process registry, and not owned by a dispatcher in another worker) are marked `failed` immediately and their slots are released.
+- **Results recovered after a backend restart** -- A turn the backend was waiting on when it restarted is not failed just because the waiting connection died. The agent keeps each finished turn's result for up to 6 hours (the newest 50), and before marking such a row `failed` the watchdog asks the agent for it. If the agent has it, the execution is closed with its real result and cost, and a successful response opens with a *Recovered by the watchdog* notice. A chat thread that was waiting on that turn may not show the reply. Agents on an older base image keep the previous behaviour.
 
 A close the cleanup service fabricates records **no duration** — `duration_ms` is `NULL`, not a number computed from `started_at`. Earlier versions wrote a made-up duration, and on PostgreSQL a row older than about 25 days overflowed the column and rolled back the whole sweep, so nothing stale was ever closed again while the cycle still logged "complete". If you upgrade an instance in that state, the restart's startup recovery closes those rows; no manual SQL is needed.
 
@@ -95,6 +96,7 @@ The same cleanup service runs retention sweeps to keep the database lean. Settin
 | Terminal agent reminders (fired/cancelled/failed) deleted past | 90 days | `agent_reminders_retention_days` |
 | Subscription headroom probe history deleted past | 30 days | `subscription_headroom_retention_days` |
 | Subscription rate-limit / auth failure events deleted past | 30 days | `subscription_failure_event_retention_days` |
+| Recorded metric points deleted past | 365 days | `metrics_retention_days` (see [Declared Metrics](../advanced/dynamic-dashboards.md#declared-metrics)) |
 | Database backup files deleted past | 14 days | `backup_retention_days` (1–3650; the newest 3 are always kept) |
 | `audit_log` rows deleted past | 365 days | `AUDIT_LOG_RETENTION_DAYS` (floor 365, exempt) |
 
@@ -121,6 +123,8 @@ The approval is:
 - **Single-use** — the guard re-arms after the prune runs, so each over-threshold sweep needs its own approval.
 
 Agent-purge sweeps always require an acknowledgement because every one destroys data volumes.
+
+The recorded-metric-points sweep uses a larger threshold (100,000 rows, one agent-day at the default daily cap), because a busy fleet ages more than 1,000 points out of the window every cycle. It still stops for approval when you narrow the window and a large backlog expires at once, and one approval covers the whole backlog even when it takes several cycles to drain.
 
 #### Changing a window
 
@@ -189,7 +193,7 @@ Agents can query monitoring data through these MCP tools:
 |------|-------------|
 | `get_fleet_health()` | Fleet-wide health summary, with each agent's git `sync` block and the fleet `sync_summary` |
 | `get_fleet_sync_audit()` | The fleet git sync audit: ahead/behind, dirty files, last push, state and recommendation per agent |
-| `get_agent_health(name)` | Individual agent health |
+| `get_agent_health(name)` | Individual agent health, with an informational `metrics` block for the agent's declared metrics |
 | `trigger_health_check()` | Force an immediate health check |
 
 ### API Endpoints
@@ -197,7 +201,7 @@ Agents can query monitoring data through these MCP tools:
 | Endpoint | Method | Description |
 |----------|--------|-------------|
 | `/api/monitoring/status` | GET | Fleet health summary (includes `heartbeat_*` fields and a per-agent git `sync` block) |
-| `/api/monitoring/agents/{name}` | GET | Single-agent health detail |
+| `/api/monitoring/agents/{name}` | GET | Single-agent health detail. Carries an informational `metrics` block — how many metrics are declared and recorded, which are stale, have no cadence, or have no points, and the newest point time. It never changes the health status or the issues list, and is `null` if the metric store cannot be read |
 | `/api/monitoring/agents/{name}/check` | POST | Force immediate health check |
 | `/api/monitoring/enable` | POST | Start the health-check loop; persisted (admin) |
 | `/api/monitoring/disable` | POST | Stop the health-check loop; persisted (admin) |

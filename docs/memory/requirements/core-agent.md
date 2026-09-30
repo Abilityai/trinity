@@ -1916,8 +1916,14 @@ bounding the table. OSS-core (Workspace rule above). Flow:
 - **Recording**: a platform audit row (`event_type=execution`, `event_action=inter_agent_depth_exceeded`) and an `agent_collaboration` activity on the **caller**, opened and closed FAILED with the code. Both are best-effort; the refusal is raised whether or not they are written.
 - **MCP**: `chat_with_agent` (all branches) and `fan_out` return a structured `{"status": "inter_agent_depth_exceeded", "retryable": false, ...}` result instead of throwing `API error (403)` (see `requirements/mcp.md`).
 - **Named residuals** (the guarantee holds for a call made with an agent-scoped credential while the calling agent has a running execution): **(a)** a non-agent credential held by an agent (a hand-pasted user-scoped key, detected by #1854) resolves to the human owner and counts as a root; **(b)** agent-key calls with no running row (a web-terminal session, a spawned background process, an orphan after its row went terminal) count as depth 1, or max+1 over any other running rows. An exact parent link needs a platform-injected execution id (#2392).
-- **Deferred**: loops (`run_agent_loop`), schedule trigger (`trigger_schedule`) and agent-emitted events each start a new root at depth 0 and so do not inherit depth yet — follow-up #2973. A2A cross-instance chains are the peer's to bound.
-- **Tests**: `tests/unit/test_2806_inter_agent_depth.py`; keyed end-to-end `tests/journeys/test_j10_agent_calls_agent_journey.py::test_two_agents_cannot_bounce_a_call_between_each_other_forever`; invariant IA-04 in `docs/testing/orchestration-invariant-catalog.md`.
+- **New roots closed (#2973)**: four agent-initiated paths inherit the caller's depth instead of starting at 0, each refused at the max with the same 403 contract (mapped by an app-level exception handler, `error_handlers.inter_agent_depth_exceeded`):
+  - **Loops** — `POST /api/agents/{name}/loops` computes the depth at start and persists it on `agent_loops.chain_depth`; every iteration row carries it, because later iterations run after the starter's turn has ended.
+  - **Manual schedule trigger** — `POST /api/agents/{name}/schedules/{id}/trigger` sends `chain_depth` to the scheduler, which stamps the row; a retry keeps the original's depth. Cron ticks and webhooks stay roots.
+  - **Chat-session turns** — `POST /api/agents/{name}/sessions/{id}/message` runs the guard before the user message is persisted and passes the depth through `run_resumable_turn` to `execute_task`, which stamps the row it creates (both the first attempt and the cold retry).
+  - **Events** — `POST /api/events` and `POST /api/agents/{name}/emit-event` by an agent principal with at least one matching subscription compute the emitter's depth (an emit nobody listens to is never refused). The depth rides the EVT-001 loopback JWT as a signed `chain_depth` claim, minted whether or not the source is vouched, so an emit on another agent's behalf cannot launder it. A system `agent.task.*` terminal event carries the finished row's depth + 1 (the max when the row is unreadable). The loopback `/task` stamps the claim; a vouched loopback without a claim counts the vouched agent's running rows.
+- **Event dispatch budget (#2973, CSO Finding 3)**: Chain depth bounds how deep an event chain runs; this bounds how often one source agent can wake one subscriber (fan-out breadth, and loops re-entering through a #3116 root). Every EVT-001 dispatch spends one unit of the **source → subscriber pair's** hourly budget (Redis `INCR` + `EXPIRE NX` in one transaction, key `trinity:evt_fires:{source}:{subscriber}`, shared by every subscription between the two, since an agent key can subscribe itself; keyed per pair so one noisy source cannot starve a subscriber's other sources); past the ops setting `event_dispatch_max_fires_per_hour` (default 120, 1–10000) the dispatch is skipped and logged, and the first skip in a window raises one high-priority notification on the subscriber naming the source (a flag key, so a cap lowered mid-window still alerts once). `agent_events.subscriptions_triggered` counts matched subscriptions, including skipped ones. Fails open when Redis is unavailable.
+- **Deferred**: webhook tokens, agent-created cron schedules and self-reminders still start a new root (#3116). A2A cross-instance chains are the peer's to bound.
+- **Tests**: `tests/unit/test_2806_inter_agent_depth.py`, `tests/unit/test_2973_depth_new_roots.py`, `tests/unit/test_2973_event_dispatch_budget.py`, `src/mcp-server/src/tools/depth-refusal.test.ts`; keyed end-to-end `tests/journeys/test_j10_agent_calls_agent_journey.py::test_two_agents_cannot_bounce_a_call_between_each_other_forever`; invariant IA-04 in `docs/testing/orchestration-invariant-catalog.md`.
 
 ### 9.2 Agent Permissions
 - **Status**: ✅ Implemented (2025-12-10, Updated 2026-02-19)
@@ -2183,10 +2189,13 @@ issue if it's ever wanted. Also deferred: `data.json` caching/streaming.
   (no manual create/clone). Provisioned by
   `services/cornelius_agent_service.py::CorneliusAgentService.ensure_seeded()`.
 - **Key Features**:
-  - **Public source template** (#1656): provisioned via the ordinary `create_agent_internal` from
-    `github:Abilityai/cornelius` — an anonymous, source-mode clone with **no PAT**, on the
-    trinity-enterprise#123 tokenless public-repo path (`AgentConfig.source_mode` defaults `True`, which
-    that path requires). Carries `capabilities: [brain-orb]`, `CLAUDE.md`, `.trinity/brain-orb/` hooks,
+  - **Public source template** (#1656): provisioned from `github:Abilityai/cornelius` through the
+    **`routers/agents.py` facade** — not `services.agent_service.crud` directly, because the facade
+    injects `ws_manager` and the `agent_created` broadcast is a silent no-op without one (an already-open
+    browser is never told the agent exists). Same choice, same reason, as
+    `system_service._default_create_agent_fn` for the fleet seeder. An anonymous, source-mode clone with
+    **no PAT**, on the trinity-enterprise#123 tokenless public-repo path, pinned pull-only by
+    trinity-enterprise#705 (`kind="deployment"`, explicit `source_mode=True`). Carries `capabilities: [brain-orb]`, `CLAUDE.md`, `.trinity/brain-orb/` hooks,
     a pre-generated `resources/agent-visualization/data.json` seed graph so the orb renders immediately,
     `resources/local-brain-search/` (so `semantic_search` is real, not a keyword fallback), and the full
     `Brain/` vault the seed graph was exported from. Was a vendored
@@ -2194,6 +2203,17 @@ issue if it's ever wanted. Also deferred: `data.json` caching/streaming.
     and caused #1646 and #1656, so the bundle was deleted rather than re-vendored. **No offline
     fallback** — a fallback would only fire on a transient clone failure and would burn the durable
     `cornelius_seeded` flag on the degraded copy; leaving the flag unset to retry next boot is safer.
+  - **Past `fork_to_own: required`, by one narrow door**: the template declares it (2026-09-11) because
+    it pushes a personal knowledge base to `Brain/`, and an agent bound to the shared public upstream is
+    a path from a private vault into a public repo. The seeder cannot satisfy that gate — it runs at
+    first boot with no user present and no token to fork with — so from that date every fresh install
+    ended with the fleet trio only, an ERROR in the log and a high-priority `system-seed-cornelius-failed`
+    alert in the operator queue. What the gate prevents is a PUSH, and the pull-only pin above makes the
+    push unreachable, so `_apply_fork_to_own` stands aside for this one caller
+    (`allow_unforked_pull_only=True`). The flag is **not trusted on its own**: the gate re-derives the
+    pinned-pull-only shape itself, so a caller passing it while building a config that could push is
+    still refused. Seeder-only on purpose — anyone creating an agent themselves can be asked for a
+    token, and keeps the promise that `required` means the repo lands in an account they own.
   - **First-run-only**: a durable `cornelius_seeded` system-setting flag gates the seed — an operator who
     deletes Cornelius is **not** re-provisioned.
   - **Fresh-install-scoped**: skipped when any non-system agent already exists (`db.count_non_system_agents()`),
@@ -2203,8 +2223,10 @@ issue if it's ever wanted. Also deferred: `data.json` caching/streaming.
   - **Triggers**: the setup-completion handler (`routers/setup.py`, fresh installs, FastAPI BackgroundTask)
     + a `main.py` lifespan safety-net gated on `setup_completed && !cornelius_seeded` (upgrades). A Redis
     SETNX lock (`cornelius:provision`, fail-open, mirrors the #1464 leader-lock) guards the `--workers 2` race.
-- **Known deviation (local bundle)**: the default Cornelius is a LOCAL bundle, not github-native, so it has
-  **no git origin** — it won't auto-`git pull` upstream template updates. Durable ownership is deferred to
+- **Pull-only, and stays that way**: Cornelius clones the shared public upstream and tracks it read-only
+  (trinity-enterprise#703's pull heartbeat applies). It never pushes, so the knowledge base it builds
+  lives only on that server until the owner binds a repo of their own — `POST /api/agents/{name}/git/initialize`
+  accepts an agent with no existing binding, which is the upgrade path. Durable ownership remains
   fork-to-own (trinity-enterprise#109). No DB migration (`system_settings` is free-form KV). The Brain Orb was
   already fully OSS (flag-gated, not entitlement-gated), so no de-gating was needed.
 - **Flow**: `docs/memory/feature-flows/cornelius-default-agent.md`

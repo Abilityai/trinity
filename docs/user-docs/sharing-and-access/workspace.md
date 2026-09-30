@@ -12,6 +12,8 @@ Workspace lives at `/workspace` and ships in **every** build. The older `/portal
 - **Main** — The pinned chat every (you, agent) pair has. It is the first tab for every agent and the place the agent reaches you when nothing else names a chat: an agent-initiated message, a question it raises outside a conversation, or a scheduled brief.
 - **Rail** — The right-hand column beside the conversation. Its tabs are **Work**, **Loops**, **Canvas**, **Files** and **Info**.
 - **Briefing** — The panel on an empty chat headed **Things you can ask**, drawn from the agent's exposed playbooks or its template.
+- **Suggestions** — A short list headed **Suggested for you**, computed for you and the agent in front of you: what is waiting on you, and what you could do next. Platform users only.
+- **Seat** — You and one agent together. The agent's memory of you, and the decisions you and it record, belong to the seat.
 
 > **The Workspace is also where voice lives.** A voice call runs inside a Workspace chat, with the agent's canvas beside the orb. Start one from the call button in the composer, or from **Talk** on the agent's Agent Detail page — see [Voice Chat](../advanced/voice-chat.md).
 
@@ -66,7 +68,7 @@ Every other chat can be renamed in place — from the pencil beside its title in
 - **New chat** in the conversation header (or **⌘J** / **Ctrl+J**) starts a fresh chat with the agent in front of you.
 - Click an agent in the sidebar to return to the chat you were last in with it.
 - A direct link — `/workspace?agent=<name>` opens your most recent chat with that agent, and `?new=1` forces a fresh one. Linking to an agent you can't reach says so plainly rather than quietly opening a different one.
-- On an empty chat, click a card under **Things you can ask** — it pre-fills the composer and never sends on its own.
+- On an empty chat, click a card under **Things you can ask** — it pre-fills the composer and never sends on its own. A platform user also sees up to three **Suggested for you** rows below the hints (see [Suggestions](#suggestions)).
 
 ### The composer
 
@@ -81,6 +83,8 @@ One box: the message field on top, the controls in a row inside it. Enter sends;
 - **Send** becomes **Stop** while a turn runs.
 
 An agent that is stopped or unreachable is labelled above the field before you type; the message still sends, and the server's refusal is the answer.
+
+**Drafts.** Text you type but don't send survives switching to another agent, another chat tab or a room, and comes back exactly as you left it. Every chat and room that holds unsent text is marked **Draft** in the sidebar and on its tab — a draft typed into a new chat keeps its provisional **New chat** tab. Sending clears the draft; a stopped turn or a failed send that hands your words back makes them a draft again. **Reset** carries the draft onto the new Main. Drafts live in this browser, per person, and are shared between Workspace tabs. Signing out deletes them; a session that times out keeps them for when you sign back in.
 
 ### While the agent works
 
@@ -116,11 +120,11 @@ The rail sits beside the conversation, collapsed to a strip of icons by default;
 | **Loops** | Run and watch loops on the agent from here — see [Agent Loops](../automation/agent-loops.md) | Platform users |
 | **Canvas** | The agent's canvases (below) — see [Agent Canvas](../agents/agent-canvas.md). While there is none, **Ask for a canvas** pre-fills a request | Everyone; a client sees only canvases the agent published to its roster |
 | **Files** | Files you sent and files the agent shared | Everyone |
-| **Info** | The agent's context (below) | Everyone, in a 1:1 chat |
+| **Info** | The agent's context (below). Its dot lights when there are suggestions for you (*Info · 2 suggestions*) | Everyone, in a 1:1 chat |
 
 **Files.** Drop a file on the tab, or click to send one. In a room, **Send to** defaults to **Everyone in this chat (N agents)** — one copy per agent, the same as dropping the file on the room itself — and still lists each agent for a single recipient. The receipt names who got it (*Sent “shot.png” to analyst and sidekick.*). A file counts as sent only when every recipient got it; otherwise the error line names the file and the agents it missed. The list is grouped **Files you sent** / **Files from {agent}**. Click a name to preview it — images, Markdown and text up to 256 KB; ← and → step through the previewable files, Esc closes — or **Download** to save it. The bin icon deletes a file you sent, or removes a shared file from your list without touching the share. An agent's owner, signed in as a platform user, additionally gets **Delete for everyone**.
 
-**Canvas.** One canvas shows at a time; pick another from the chips above it, where a pinned canvas carries 📌 and comes first. Once an agent has more than six, **Search canvases…** filters them by title or id. The header states two facts and draws no conclusion from them — *Updated 2h ago · agent last ran 40m ago*. **PDF** prints the open canvas through the browser's own print dialog. An agent's owner (or an admin), signed in as a platform user, also gets **Manage**: each row shows its age, a pin toggle and **Delete**, and a checkbox per row feeds **Delete selected** with one confirmation naming the count; everyone else has a read-only panel. Sharing a canvas at a link is done from the agent's Canvas tab on Agent Detail, not from the rail — see [Agent Canvas](../agents/agent-canvas.md). The canvas you have open travels with each message you send from that chat, so *add a column to this* names the right one. It is context, not permission: the agent still reaches only the canvases it could already reach, and a canvas deleted mid-conversation resolves to nothing.
+**Canvas.** One canvas shows at a time; pick another from the dropdown in the control row above it, where a pinned canvas carries 📌 and comes first. Long titles are shortened in the list; the full title shows in the canvas header. With one canvas the dropdown is disabled rather than hidden, so the row looks the same for one canvas and for forty. Once an agent has more than six, **Search canvases…** filters them by title or id. The header states two facts and draws no conclusion from them — *Updated 2h ago · agent last ran 40m ago*. **PDF** prints the open canvas through the browser's own print dialog. An agent's owner (or an admin), signed in as a platform user, also gets **Manage** at the end of the row: it opens a list below the row, where each canvas shows its age, a pin toggle and **Delete**, and a checkbox per row feeds **Delete selected** with one confirmation naming the count. **Done** closes the list and returns to the canvas you had open. Everyone else has a read-only panel. Sharing a canvas at a link is done from the agent's Canvas tab on Agent Detail, not from the rail — see [Agent Canvas](../agents/agent-canvas.md). The canvas you have open travels with each message you send from that chat, so *add a column to this* names the right one. It is context, not permission: the agent still reaches only the canvases it could already reach, and a canvas deleted mid-conversation resolves to nothing.
 
 ### The agent's page is the conversation
 
@@ -129,11 +133,50 @@ Clicking an agent no longer opens a report about it. Its numbers sit in a band u
 | Section | Shows |
 |---------|-------|
 | Header | The agent's name and description, with health and availability as two separate facts |
+| **Suggested for you** | What is waiting on you and what you could do next — see [Suggestions](#suggestions). Platform users only |
+| **Role** | Shown only when the agent's template declares a role — see [The role card](#the-role-card) |
 | **Your chats** | The full list, unread counts included — Main shows as **Current conversation**, archived chats in grey |
 | **What it can do** | Capability cards; clicking one pre-fills the composer |
 | **Reports** | Structured reports the agent has published; expand one to read it — see [Agent Reports](../operations/agent-reports.md) |
+| **What it remembers about you** | The agent's notes about you, and a **Changes** list of the runs that rewrote them, with **Undo** |
+| **Decisions** | The seat's decision record — see [Decisions](#decisions) |
 
 It reports; it does not configure. There are no schedules, skills, logs, costs or model details here. A question the agent raised appears above the composer of the chat it belongs to, and answering it there tells you whether the agent is picking the work up — see [Approvals](../automation/approvals.md). Everything is read from stored data, so a stopped agent still renders. The old address `/workspace/a/{agent}` still works and lands in the chat.
+
+### Suggestions
+
+A platform user who opens an agent gets a short list headed **Suggested for you**, computed for them and that agent. It shows in full on the **Info** tab (up to five, with *Showing 5 of N* when there are more) and, on an empty chat, as up to three compact rows below **Things you can ask**. Each item names the signal it came from:
+
+| Suggestion | Signal |
+|------------|--------|
+| **Answer what this agent asked you** | *N questions waiting on you* |
+| **Review decisions past their date** | *N decisions past the review date* |
+| **Check "*schedule*"** | *Failed N runs in a row*, or *Enabled since … · has never run* |
+| **Re-enable or delete "*schedule*"** | *Disabled since … · it used to run* |
+| **Turn on autonomy, or pause these schedules** | *N schedules won't run — autonomy is off* |
+| **Pick up where you left off** | *Your last conversation was …* |
+| A playbook's title | *You haven't run /name yet* |
+
+Schedule suggestions appear only for the agent's owner or an admin. A playbook is suggested only if the agent exposes it, you have not run it with `/name`, and no enabled schedule already runs it. When you have never talked to the agent, the list says so — *You haven't talked to this agent yet — these are things it can do.* An agent with nothing to suggest says *Nothing to suggest right now.*
+
+Each item has two buttons. The accept button never sends anything: it pre-fills the composer, opens the section it names, focuses the chat, or opens the agent's schedules page in the main app in a new tab. **Dismiss** hides the item until its state changes — a schedule that keeps failing does not come back with every new failure, but one that recovers and fails again does. The Info tab's rail dot lights when there are suggestions, even with the rail collapsed.
+
+### The role card
+
+When the agent's template declares a role, the Info tab shows a **Role** card: the role and its mission, the objectives it owns or supports, and each objective's metrics with value, target and age. A metric is marked stale when it has no value, no update time, or an update older than 30 days — it shows beside its last value, never as current. The card also shows **Your relationship** to the agent and its **Readiness**: *calibrating* until the agent's owner presses **Mark ready** (and confirms), and **Back to calibrating** undoes it. Only the owner can change readiness; a template that claims `ready` on its own shows as calibrating. For an agent that declares a role, a scheduled brief addressed to a person does not fire on its schedule until the owner marks the agent ready; the run is recorded as skipped, with the reason. The card reads the agent's own files each time, so a stopped agent shows *The agent is stopped — the role card reads its files when it runs.* An agent without a role shows no card at all.
+
+### Decisions
+
+The **Decisions** section on the Info tab is a record of what you and the agent approved, deferred or killed, and why. Each decision records the outcome, what was decided, the alternatives that were live, the criterion that decided it, what would reverse it, and a **Review by** date. **Record a decision** opens the form; free prose belongs only in **Notes**, and a decision with no alternatives is refused as a note. Choosing **Direction — route to canon** as the scope keeps the record visible but outside the seat's evidence.
+
+On a decision that is still active:
+
+- **Reconfirm** moves its review date.
+- **Correct** records a new decision that replaces the old one.
+- **Reverse** needs a reason — what changed.
+- **Close** retires it, after a confirmation.
+
+Nothing is deleted. A decision past its review date shows as expired until someone reconfirms it. The seat's active decisions are read into every turn with that agent, so the agent reuses the criterion next time. You see and edit your own seat's decisions; the agent's owner sees and edits every seat's. The agent records decisions too, with the `record_decision` MCP tool.
 
 ### Dictation
 
@@ -190,7 +233,7 @@ Capability cards come from the agent's exposed playbooks where an operator has c
 
 ## For Agents
 
-Workspace is a client-facing shell over the platform's existing agent behavior, not a new agent capability, and no MCP tool targets it — an agent reaches the people in it through its replies, its [reports](../operations/agent-reports.md), its [questions](../automation/approvals.md) and its [canvas](../agents/agent-canvas.md). It is served by `/api/enterprise/client-portal/*` (the prefix is historical), authenticated by either a Workspace session token or a platform JWT, with every per-agent route scoped to the caller's roster. Agent-scoped MCP keys are refused.
+Workspace is a client-facing shell over the platform's existing agent behavior, not a new agent capability — an agent reaches the people in it through its replies, its [reports](../operations/agent-reports.md), its [questions](../automation/approvals.md) and its [canvas](../agents/agent-canvas.md). The one Workspace record an agent writes directly is the seat's decision record: `record_decision` records a decision for the person the current turn is for (the seat comes from the turn's `execution_id`, never from a parameter), and `list_seat_decisions` reads that seat's record back. Neither returns an email address. It is served by `/api/enterprise/client-portal/*` (the prefix is historical), authenticated by either a Workspace session token or a platform JWT, with every per-agent route scoped to the caller's roster. Agent-scoped MCP keys are refused.
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
@@ -200,7 +243,7 @@ Workspace is a client-facing shell over the platform's existing agent behavior, 
 | `/agents/{name}/sessions` | GET / POST | This agent's chats (the read mints Main if missing) / start an empty chat |
 | `/agents/{name}/sessions/main/reset` | POST | Archive Main and mint a fresh one; refused while a turn is in flight |
 | `/agents/{name}/sessions/{id}` | PATCH | Rename a chat — `{title}`, one line, ≤100 characters |
-| `/agents/{name}/history?session_id=&limit=` | GET | A chat's messages, the in-flight marker and the last turn's outcome |
+| `/agents/{name}/history?session_id=&limit=` | GET | A chat's messages, the in-flight marker and the last turn's outcome. No message carries its cost |
 | `/agents/{name}/chat` | POST | Send a turn and wait for the reply — the synchronous integration surface; accepts `session_id`, `new_thread`, `model` and `open_canvas_id` (the canvas on screen, passed as context; an id the caller cannot see resolves to nothing) |
 | `/agents/{name}/chat/stream` | POST | Begin a turn, returning an execution id to watch; same body |
 | `/agents/{name}/executions/{id}/stream` | GET | Live activity for one of your own turns (SSE) |
@@ -215,6 +258,14 @@ Workspace is a client-facing shell over the platform's existing agent behavior, 
 | `/agents/{name}/canvas/bulk-delete` | POST | Remove several — `{canvas_ids}`; reports the ids that existed |
 | `/agents/{name}/canvas/{id}/pin` | PUT | Pin or unpin — `{pinned}` (owner or admin) |
 | `/agents/{name}/ratings` | POST | Rate a message or a deliverable |
+| `/agents/{name}/suggestions` | GET | Suggestions for the caller and this agent — platform sessions only; a client token gets `404` |
+| `/agents/{name}/suggestions/feedback` | POST | `{key, action: accept \| dismiss}` for an item currently shown to the caller; `404` for any other key |
+| `/agents/{name}/role` | GET | The role card, read from the agent's files |
+| `/agents/{name}/role/readiness` | POST | `{status}` — `calibrating` or `ready`; the agent's owner only |
+| `/agents/{name}/memory` | GET | What the agent remembers about the caller, and the writes that changed it |
+| `/agents/{name}/memory/writes/{id}/undo` | POST | Revert the notes to before one write, latest first |
+| `/agents/{name}/decisions` | GET / POST | The seat decision record / record a decision |
+| `/agents/{name}/decisions/{id}/actions` | POST | `close`, `reverse` (with a reason), `reconfirm` (with a new date) or `supersede` an active decision; a decision that is no longer active returns `409` |
 | `/agents/{name}/voice/start` | POST | Start a voice call bound to a chat (platform users) |
 | `/agents/{name}/stt` | POST | Transcribe a recorded clip for dictation — returns `{text}`. `404` when dictation is unavailable; a provider error returns a sentence naming the cause (`503` key, permission or credits; `429` rate limit; `422` unreadable recording; `502` provider failure) |
 | `/chat-state` | GET | Star and unread state for every chat |
@@ -239,7 +290,9 @@ Asks and the Work tab have their own routes under the same prefix — see [Appro
 - **`/` playbooks are not offered in a room.** `@` is.
 - **Codex agents replay history** instead of resuming, so their continuity is text-only.
 - **A very long chat is windowed.** The thread shows the newest turns and says *Earlier messages in this chat aren't shown* when older ones were cut.
-- **No cost or model information** is shown on the agent's band or Info tab.
+- **No cost or model information** is shown on the agent's band or Info tab, and the chat history and chat reply routes return no turn cost to any caller.
+- **Suggestions are for platform users.** An external client sees no **Suggested for you** list. Suggestions are not offered in a room.
+- **Drafts stay in one browser.** Unsent text does not follow you to another device.
 
 ## See Also
 

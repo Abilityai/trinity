@@ -94,7 +94,10 @@ def _chain_caller(current_user) -> Optional[str]:
         return agent
     if getattr(current_user, "mcp_scope", None) == "system":
         return SYSTEM_AGENT_NAME
-    return None
+    # #2973: the EVT-001 loopback carries the emitting agent the backend
+    # vouched for; its dispatch is a hop from that agent, not a new root.
+    vouched = getattr(current_user, "vouched_source_agent", None)
+    return vouched if isinstance(vouched, str) and vouched else None
 
 
 async def _record_depth_refusal(*, exc, current_user, endpoint, x_via_mcp):
@@ -114,6 +117,10 @@ async def _record_depth_refusal(*, exc, current_user, endpoint, x_via_mcp):
         endpoint=endpoint,
         details={"depth": exc.depth, "max_depth": exc.max_depth},
     )
+    if exc.caller is None:
+        # #2973: an unvouched event loopback names no calling agent; the audit
+        # row above is the record, and there is no edge to draw.
+        return
     activity_id = await activity_service.track_activity(
         agent_name=exc.caller,
         activity_type=ActivityType.AGENT_COLLABORATION,
@@ -152,10 +159,19 @@ async def enforce_inter_agent_depth(
     query is NOT guarded: the row insert that follows would fail the same way.
     """
     caller = _chain_caller(current_user)
-    if caller is None:
+    # #2973: an EVT-001 loopback carries the depth the backend computed at
+    # emit (or the terminal row's depth + 1) as a signed claim. It must be read
+    # BEFORE the root early-return: an event emitted on another agent's behalf
+    # is not vouched, so it has no caller but still has a depth.
+    claimed = getattr(current_user, "loopback_chain_depth", None)
+    if isinstance(claimed, bool) or not isinstance(claimed, int):
+        claimed = None
+    if caller is None and claimed is None:
         return None
     max_depth = _max_chain_depth()
-    depth = 1 + db.get_max_running_chain_depth(caller)
+    depth = 1 + db.get_max_running_chain_depth(caller) if caller else 0
+    if claimed is not None:
+        depth = max(depth, claimed)
     if depth <= max_depth:
         return depth
     exc = InterAgentDepthExceeded(caller, target, depth, max_depth)

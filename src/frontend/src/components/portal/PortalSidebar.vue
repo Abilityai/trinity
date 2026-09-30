@@ -53,6 +53,10 @@
         New chat
       </button>
 
+      <!-- ent#661: the person's Projects list — shown only when the roster
+           says this principal has the capability (internal-only). -->
+      <PortalSidebarProjectsLink v-if="projectsAvailable" :active="projectsActive" @open="$emit('open-projects')" />
+
       <!-- Search -->
       <div class="relative">
         <svg class="w-4 h-4 text-gray-400 absolute left-3 top-2.5 pointer-events-none" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-4.35-4.35M17 11a6 6 0 11-12 0 6 6 0 0112 0z" /></svg>
@@ -337,6 +341,7 @@
 </template>
 
 <script setup>
+import PortalSidebarProjectsLink from './projects/PortalSidebarProjectsLink.vue'
 import { computed, ref } from 'vue'
 import PortalAvatar from './PortalAvatar.vue'
 import ChatRow from './PortalChatRow.vue'
@@ -365,6 +370,9 @@ const props = defineProps({
   currentSessionId: { type: String, default: null },
   currentRoomId: { type: String, default: null },
   isPlatformSession: { type: Boolean, default: false },
+  // ent#661 — the roster's capability, and whether a Projects page is on screen.
+  projectsAvailable: { type: Boolean, default: false },
+  projectsActive: { type: Boolean, default: false },
   // #2159: distinguishes "still loading" from "loaded, and you have none".
   loadingRoster: { type: Boolean, default: false },
   search: { type: String, default: '' },
@@ -376,7 +384,7 @@ const props = defineProps({
 })
 const emit = defineEmits([
   'new-chat', 'new-chat-with-agent', 'open-agent', 'open-thread', 'toggle-star',
-  'update:search', 'sign-out',
+  'update:search', 'sign-out', 'open-projects',
 ])
 
 const isSearching = computed(() => (props.search || '').trim().length >= 2)

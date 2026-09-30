@@ -12,14 +12,48 @@ resolved from ``DATABASE_URL`` via ``db/engine.py``. The public API of
 are unaffected.
 """
 
+import logging
+import secrets
 from typing import Optional, Dict, List, Any
 
-from sqlalchemy import insert, select, update
+from sqlalchemy import func, insert, select, update
+from sqlalchemy.exc import IntegrityError
 
 from .engine import get_engine
 from .tables import users
 from db_models import UserCreate
 from utils.helpers import utc_now_iso
+
+logger = logging.getLogger(__name__)
+
+# trinity-enterprise#720 — `users.email` is unique on its lower-cased value.
+# The index is created by both migration tracks and by `db/schema.py`.
+EMAIL_UNIQUE_INDEX = "idx_users_email_unique"
+
+
+class EmailInUseError(Exception):
+    """Another account already holds this sign-in email (ent#720).
+
+    Every sign-in path resolves the account by email ALONE, so two rows with
+    one address make "who is this person" a coin toss — and the second writer
+    inherits whatever is shared with the address. Raised by the one checked
+    write below, never by a caller's own pre-check."""
+
+    def __init__(self, email: str):
+        super().__init__("That email is already associated with another account")
+        self.email = email
+
+
+def normalize_email(email: Optional[str]) -> Optional[str]:
+    """The stored form of a sign-in email: trimmed, lower-cased, or None."""
+    email = (email or "").strip().lower()
+    return email or None
+
+
+def _is_email_conflict(exc: IntegrityError) -> bool:
+    """A lost race on the unique email index (not some other constraint)."""
+    text = str(getattr(exc, "orig", exc)).lower()
+    return EMAIL_UNIQUE_INDEX in text or "users.email" in text or "lower(email)" in text
 
 
 class UserOperations:
@@ -80,27 +114,87 @@ class UserOperations:
         return self._get_user_by_field("id", user_id)
 
     def get_user_by_email(self, email: str) -> Optional[Dict]:
-        """Get user by email address."""
-        return self._get_user_by_field("email", email)
+        """Get user by email address — case-insensitively, the way it is unique
+        (ent#720)."""
+        email = normalize_email(email)
+        if not email:
+            return None
+        stmt = select(*self._USER_COLUMNS).where(func.lower(users.c.email) == email)
+        with get_engine().connect() as conn:
+            row = conn.execute(stmt).mappings().first()
+        return self._row_to_user_dict(row) if row else None
+
+    # ---------------------------------------------------------------- ent#720
+    # THE writer of `users.email`. Every path that sets the column — insert or
+    # update — goes through `_insert_user` / `_update_user_row`, which normalise
+    # the address, refuse one another account holds, and turn a lost race on the
+    # unique index into the same refusal. `test_ent720_email_binding.py`
+    # enumerates the writers so a new one cannot bypass this.
+
+    @staticmethod
+    def _assert_email_free(conn, email: Optional[str], username: str) -> None:
+        if not email:
+            return
+        taken = conn.execute(
+            select(users.c.username).where(
+                func.lower(users.c.email) == email, users.c.username != username)
+        ).first()
+        if taken:
+            raise EmailInUseError(email)
+
+    def _insert_user(self, conn, values: Dict):
+        """Insert one users row through the email check. Returns the result."""
+        values = dict(values)
+        if "email" in values:
+            values["email"] = normalize_email(values["email"])
+            self._assert_email_free(conn, values["email"], values["username"])
+        try:
+            with conn.begin_nested():
+                return conn.execute(insert(users).values(**values))
+        except IntegrityError as exc:
+            if _is_email_conflict(exc):
+                raise EmailInUseError(values.get("email") or "") from exc
+            raise
+
+    def _update_user_row(self, conn, username: str, values: Dict):
+        """Update one users row through the email check. Returns the result."""
+        values = dict(values)
+        if "email" in values:
+            values["email"] = normalize_email(values["email"])
+            self._assert_email_free(conn, values["email"], username)
+        try:
+            with conn.begin_nested():
+                return conn.execute(update(users).where(users.c.username == username).values(**values))
+        except IntegrityError as exc:
+            if _is_email_conflict(exc):
+                raise EmailInUseError(values.get("email") or "") from exc
+            raise
+
+    def is_email_account_suspended(self, email: str) -> bool:
+        """True when the account holding this sign-in email is suspended
+        (ent#720) — the account-state rule the channel redeemers share with
+        `get_current_user`. No account → False (nothing to suspend)."""
+        user = self.get_user_by_email(email)
+        return bool(user and user.get("suspended_at"))
 
     def create_user(self, user_data: UserCreate) -> Dict:
         """Create a new user."""
         now = utc_now_iso()
         email = user_data.email or user_data.username  # Use username as email if not provided
 
-        stmt = insert(users).values(
-            username=user_data.username,
-            password_hash=user_data.password,
-            role=user_data.role,
-            auth0_sub=user_data.auth0_sub,
-            name=user_data.name,
-            picture=user_data.picture,
-            email=email,
-            created_at=now,
-            updated_at=now,
-        )
+        email = normalize_email(email)
         with get_engine().begin() as conn:
-            result = conn.execute(stmt)
+            result = self._insert_user(conn, dict(
+                username=user_data.username,
+                password_hash=user_data.password,
+                role=user_data.role,
+                auth0_sub=user_data.auth0_sub,
+                name=user_data.name,
+                picture=user_data.picture,
+                email=email,
+                created_at=now,
+                updated_at=now,
+            ))
             user_id = result.inserted_primary_key[0]
 
         return {
@@ -128,9 +222,8 @@ class UserOperations:
             return self.get_user_by_username(username)
 
         values["updated_at"] = utc_now_iso()
-        stmt = update(users).where(users.c.username == username).values(**values)
         with get_engine().begin() as conn:
-            conn.execute(stmt)
+            self._update_user_row(conn, username, values)
 
         return self.get_user_by_username(username)
 
@@ -159,17 +252,34 @@ class UserOperations:
                 return True
 
             # User doesn't exist - create it (for admin user during first-time setup)
-            result = conn.execute(
-                insert(users).values(
-                    username=username,
-                    password_hash=hashed_password,
-                    role="admin",
-                    email=username,
-                    created_at=now,
-                    updated_at=now,
-                )
-            )
+            result = self._insert_user(conn, dict(
+                username=username,
+                password_hash=hashed_password,
+                role="admin",
+                email=username,
+                created_at=now,
+                updated_at=now,
+            ))
             return result.rowcount > 0
+
+    def insert_email_user(self, email: str, role: str) -> Dict:
+        """Create the account an email sign-in resolves to (ent#720).
+
+        `username = email` as before — unless that username is already taken by
+        an account that has since re-bound away from this address, in which
+        case the new account gets a unique suffixed username. The insert used
+        to hit `username UNIQUE` and surface as an unhandled 500."""
+        email = normalize_email(email)
+        now = utc_now_iso()
+        username = email
+        with get_engine().begin() as conn:
+            if conn.execute(select(users.c.id).where(users.c.username == username)).first():
+                username = f"{email}~{secrets.token_hex(3)}"
+                logger.info("[ent#720] email sign-in username taken; created a suffixed username")
+            self._insert_user(conn, dict(
+                username=username, email=email, role=role, created_at=now, updated_at=now,
+            ))
+        return self.get_user_by_email(email)
 
     def update_last_login(self, username: str):
         """Update user's last login timestamp."""
@@ -198,9 +308,19 @@ class UserOperations:
                 user = self.get_user_by_username(user["username"])
             return user
 
-        # Try to find by email (username)
-        user = self.get_user_by_username(email)
+        # The HOLDER of the address first (ent#720): an account whose username
+        # is not its address (a re-bound one, a suffixed one) still owns this
+        # sign-in identity, and a second row for it is refused by the unique
+        # index. The legacy `username == email` match is only a fallback for a
+        # row with NO email — an account that re-bound AWAY from this address
+        # must not be handed it back through its old username.
+        user = self.get_user_by_email(email)
+        if not user:
+            legacy = self.get_user_by_username(email)
+            if legacy and not legacy.get("email"):
+                user = legacy
         if user:
+            email = user["username"]
             # Link auth0_sub to existing user
             stmt = (
                 update(users)

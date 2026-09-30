@@ -167,6 +167,18 @@
       "description": "Creating an MCP key requires a signed-in session: POST /api/mcp/keys (every scope) and POST /api/mcp/keys/ensure-default through the REAL get_current_user with seeded agent/system/connector/user key rows -> 403 and mcp_api_keys row count unchanged, no key_create audit row; JWT -> 200 with the secret and one key_create audit row (ensure-default included, target = new key id); admin JWT still creates ops/portal_delegate; non-admin JWT portal_delegate still 403; a user-scoped key asking an admin scope 403; existing user key -> ensure-default returns null, creates and audits nothing; the created key validates as its owner."
     },
     {
+      "file": "unit/test_mcp_key_listing_requires_session.py",
+      "feature": "ent#712",
+      "added": "2026-09-28",
+      "categories": [
+        "backend",
+        "auth",
+        "security",
+        "mcp-keys"
+      ],
+      "description": "GET /api/mcp/keys requires a signed-in session (INTERACTIVE, Depends(require_interactive)): agent/system/connector/user keys through the REAL get_current_user with seeded key rows, and connector/loopback-JWT/ops/portal_delegate/unknown-future-scope/missing-mcp_scope via an explicit principal dataclass -> 403. Signed-in admin -> every key with user_email (never the secret); signed-in user -> own keys only. Every route in routers/mcp_keys.py read off the router object and listed with its rule; a single-key read stays owner-scoped; /validate needs no session."
+    },
+    {
       "file": "unit/test_ent600_telegram_group_context.py",
       "feature": "ent#600",
       "added": "2026-09-11",
@@ -3904,6 +3916,27 @@
         "guard"
       ],
       "description": "Route census, live side: imports main in a SUBPROCESS and checks every registered non-enterprise APIRoute maps to a key the AST census found, and every stored METHOD /full/path (baseline + reviewed tables) is what the app registers (rule 7). Fails, never skips, on a failed import, unparseable output or zero routes."
+    },
+    {
+      "file": "unit/test_2973_depth_new_roots.py",
+      "feature": "#2973",
+      "added": "2026-09-30",
+      "categories": [
+        "backend",
+        "scheduler",
+        "security"
+      ],
+      "description": "Loop start, manual schedule trigger and agent event emit inherit the inter-agent chain depth (#2806) through their real routes with a minted agent bearer; loopback JWT claim, terminal-event depth, scheduler origin/insert/retry."
+    },
+    {
+      "file": "unit/test_2973_event_dispatch_budget.py",
+      "feature": "#2973",
+      "added": "2026-09-30",
+      "categories": [
+        "backend",
+        "security"
+      ],
+      "description": "Per source->subscriber hourly event-dispatch budget (fakeredis): cap, pair keying, no cross-source starvation, one alert per window, TTL always set, fail-open."
     }
   ]
 }

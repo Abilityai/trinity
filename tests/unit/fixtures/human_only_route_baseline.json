@@ -179,7 +179,6 @@
   "routers/loops.py::stop_loop": "POST /api/loops/{loop_id}/stop",
   "routers/mcp_keys.py::delete_mcp_api_key_endpoint": "DELETE /api/mcp/keys/{key_id}",
   "routers/mcp_keys.py::get_mcp_api_key_endpoint": "GET /api/mcp/keys/{key_id}",
-  "routers/mcp_keys.py::list_mcp_api_keys_endpoint": "GET /api/mcp/keys",
   "routers/mcp_keys.py::revoke_mcp_api_key_endpoint": "POST /api/mcp/keys/{key_id}/revoke",
   "routers/messages.py::get_proactive_shares": "GET /api/agents/{agent_name}/shares/proactive",
   "routers/messages.py::send_proactive_message": "POST /api/agents/{agent_name}/messages",

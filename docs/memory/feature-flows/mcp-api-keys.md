@@ -242,7 +242,7 @@ app.include_router(mcp_keys_router)
 | Method | Endpoint | Handler | Line | Description |
 |--------|----------|---------|------|-------------|
 | `POST` | `/api/mcp/keys` | `create_mcp_api_key_endpoint()` | `mcp_keys.py:25` | Create new API key — **signed-in session only** (`Depends(require_interactive)`, every scope) |
-| `GET` | `/api/mcp/keys` | `list_mcp_api_keys_endpoint()` | `mcp_keys.py:37-51` | List user's keys (admin sees all) |
+| `GET` | `/api/mcp/keys` | `list_mcp_api_keys_endpoint()` | `mcp_keys.py:97` | List user's keys (admin sees all) — **signed-in session only** (`Depends(require_interactive)`) |
 | `POST` | `/api/mcp/keys/ensure-default` | `ensure_default_mcp_api_key()` | `mcp_keys.py:114` | Auto-create default key — **signed-in session only**; audited as `key_create` |
 | `GET` | `/api/mcp/keys/{key_id}` | `get_mcp_api_key_endpoint()` | `mcp_keys.py:99-111` | Get single key details |
 | `POST` | `/api/mcp/keys/{key_id}/revoke` | `revoke_mcp_api_key_endpoint()` | `mcp_keys.py:114-126` | Revoke (deactivate) key |
@@ -275,12 +275,19 @@ strict as the principal it produces. The UI (`McpKeysTab.vue`) and the CLI
 (`trinity login`) both create keys on the login JWT.
 
 #### List API Keys (GET /api/mcp/keys)
+
+Signed-in session only (trinity-enterprise#712): `Depends(require_interactive)`,
+the same rule as creating a key, so every MCP key — the person's own `user` key
+included — gets a 403. The inventory has no machine consumer; the Settings → MCP
+Keys tab calls it with the JWT. A signed-in admin still gets every key with its
+owner's `user_email` (the tab renders it per row); nothing returns the secret.
+
 ```python
-# mcp_keys.py:37-51
+# mcp_keys.py:97
 @router.get("/keys", response_model=List[McpApiKey])
 async def list_mcp_api_keys_endpoint(
     request: Request,
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(require_interactive)  # JWT session only
 ):
     if current_user.role == "admin":
         keys = db.list_all_mcp_api_keys()  # Admin sees all
@@ -677,7 +684,7 @@ class User(BaseModel):
 curl -X POST http://localhost:8000/api/mcp/validate \
   -H "Authorization: Bearer trinity_mcp_YOUR_KEY_HERE"
 
-# List keys (requires JWT)
+# List keys (requires a JWT; an MCP key gets 403)
 curl http://localhost:8000/api/mcp/keys \
   -H "Authorization: Bearer YOUR_JWT_TOKEN"
 ```

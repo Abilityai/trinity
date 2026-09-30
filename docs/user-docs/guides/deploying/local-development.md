@@ -47,7 +47,7 @@ The only edit a local install needs is **`ADMIN_PASSWORD`**. Everything else bel
 
 | Variable | Purpose |
 |---|---|
-| `ANTHROPIC_API_KEY` | Lets agents use Claude. Can be left blank and configured in Settings after login; `start.sh` warns in its summary when no model key (`ANTHROPIC_API_KEY`, `GOOGLE_API_KEY` or `CLAUDE_CODE_OAUTH_TOKEN`) is set. |
+| `ANTHROPIC_API_KEY` | Lets agents use Claude. Can be left blank; the setup steps that open the first time you log in ask for it, and agents cannot run until one is set. `start.sh` warns in its summary when no model key (`ANTHROPIC_API_KEY`, `GOOGLE_API_KEY` or `CLAUDE_CODE_OAUTH_TOKEN`) is set. |
 | `EMAIL_PROVIDER` | How verification codes are sent. `.env.example` sets `console` (codes print to the backend log); the compose default when the line is absent is `resend`. |
 | `RESEND_API_KEY` | Required if `EMAIL_PROVIDER=resend`. |
 | `GITHUB_PAT` | Forwarded to the backend; needed to clone private template repos. |
