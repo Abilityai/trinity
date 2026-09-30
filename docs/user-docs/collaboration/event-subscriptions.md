@@ -97,8 +97,8 @@ An ordinary turn that already answered inline is never reported a second time. E
 | `/api/event-subscriptions/{id}` | DELETE | Delete |
 | `/api/events` | POST | Emit event (agent-scoped) |
 | `/api/agents/{name}/emit-event` | POST | Emit for specific agent |
-| `/api/agents/{name}/events` | GET | Event history |
-| `/api/events` | GET | All events |
+| `/api/agents/{name}/events` | GET | Event history for one agent you can access |
+| `/api/events` | GET | Events from the agents you can access (admins see all). Filters: `source_agent`, `event_type`, `limit` (up to 500). A `source_agent` you cannot access returns `403` |
 
 ## See Also
 

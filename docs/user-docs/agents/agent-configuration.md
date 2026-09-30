@@ -111,8 +111,9 @@ Controls which API key the agent uses for Claude.
 
 Choose the Claude model used for tasks and scheduled executions.
 
-- Available models lead with the current generation: **Opus 5**, **Fable 5.1** (most capable, best for the longest tasks) and **Sonnet 5** (fast and smart, with a 1M-token context window), followed by the prior Opus, Sonnet and Haiku generations. Fable 5 is still offered and still supported; it is simply no longer the latest in its tier.
+- Available models lead with the current generation: **Opus 5.5** (the most capable Opus, marked *(latest)*), **Fable 5.1** (most capable, best for the longest tasks) and **Sonnet 5** (fast and smart, with a 1M-token context window), followed by the prior Opus, Sonnet and Haiku generations. **Opus 5** and **Fable 5** are still offered and still supported; they are simply no longer the latest in their tiers.
 - Custom model input is supported.
+- If Claude Code refuses the model — an id it does not know, or one newer than the agent's Claude Code version — the run fails with error code `model_unsupported` (HTTP `400`) and the API's own message. It is not treated as an authentication failure, so the agent is not switched to another subscription or to the platform API key. Pick a supported model, or rebuild the base image so the agent runs a newer Claude Code.
 - Selection is persisted to `localStorage`; `model_used` is recorded in the execution audit trail.
 - **Platform default**: when an agent has no model override, executions use the platform default model configured in Settings → Platform. The UI now surfaces this fallback so empty selections aren't mistaken for failures.
 

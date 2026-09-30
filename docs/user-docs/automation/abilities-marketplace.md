@@ -53,9 +53,9 @@ The `trinity` plugin itself is also **provided by the platform**: Trinity's agen
 
 ## The 5 Plugins
 
-Versions and skill counts below are those published in the marketplace on 2026-09-14.
+Versions and skill counts below are those published in the marketplace on 2026-09-22.
 
-### create-agent — 6 skills (v2.0.0)
+### create-agent — 6 skills (v2.1.1)
 
 Create new Claude Code agents from an interview, or review, adjust, and clone existing ones.
 
@@ -71,9 +71,9 @@ Create new Claude Code agents from an interview, or review, adjust, and clone ex
 | `/create-agent:review` | Read-only audit of an existing agent — prioritized findings, no changes |
 | `/create-agent:adjust` | Apply best-practice improvements to an existing agent |
 
-The eight pre-built domain wizards (prospector, chief-of-staff, webmaster, recon, receptionist, ghostwriter, kb-agent, doctor) were retired in 2.0.0 — `custom` builds every one of those shapes from the same interview, and a knowledge base is `custom` plus `/agent-dev:add-memory`. Every agent `custom` creates includes `CLAUDE.md`, 2–4 starter skills, `template.yaml` (with `plugins:`, `schedules:`, and credential declarations), `dashboard.yaml`, and an onboarding tracker. Generated `CLAUDE.md` guidelines carry the playbook-call rule, and every generated schedule message is a one-line playbook call — `/create-agent:review` reports prose delegation between agents, and prose schedule messages, as findings.
+The eight pre-built domain wizards (prospector, chief-of-staff, webmaster, recon, receptionist, ghostwriter, kb-agent, doctor) were retired in 2.0.0 — `custom` builds every one of those shapes from the same interview, and a knowledge base is `custom` plus `/agent-dev:add-memory`. Every agent `custom` creates includes `CLAUDE.md`, 2–4 starter skills, `template.yaml` (with `plugins:`, `schedules:`, credential declarations, and a `metrics:` block for the agent's business KPIs), `dashboard.yaml`, and an onboarding tracker. The generated `/update-dashboard` writes `dashboard.yaml` and records the same numbers as metric points with the `record_metrics` MCP tool, skipping that step silently off Trinity. Generated `CLAUDE.md` guidelines carry the playbook-call rule, and every generated schedule message is a one-line playbook call — `/create-agent:review` reports prose delegation between agents, and prose schedule messages, as findings.
 
-### agent-dev — 30 skills (v1.16.1)
+### agent-dev — 30 skills (v1.16.5)
 
 Extend and develop existing agents: playbooks, memory, git-backed state, a full GitHub Issues dev cycle, long-running pipelines, cross-actor project management, a shared canonical-data layer, and multi-agent orchestration — plus tooling to assess and migrate an existing fleet.
 
@@ -117,6 +117,8 @@ Five more cover fleet-scale work:
 
 `agent-fleet-analysis` and `agent-fleet-migrate` are a pair: the first scans agents in **any** paradigm — Claude Code, n8n workflow exports, LangChain/CrewAI/AutoGen apps, hand-rolled loops — and produces a report plus an agent-executable work order; the second carries it out non-destructively into a fresh `fleet-migrated/` tree, leaving your sources untouched.
 
+**Skill-map governance.** `/agent-dev:add-orchestrator` also installs `/reconcile-skill-map`. It compares `fleet/skill-map.yaml` (which Library skills each agent should hold, with a rationale) against live assignments and applies approved additions one skill at a time, never removing a skill without a human decision.
+
 **Orchestrator maintenance.** `/agent-dev:add-orchestrator --check` is a read-only report comparing each orchestration skill installed in an agent against the bundled version — *upgrade available*, *hand-edited locally* (an overwrite would discard it), or *ahead of the bundle* (an overwrite would be a downgrade) — and the same check runs inside every overwrite prompt when you re-run the installer. Gated skills that run on a cron declare a `--autonomous` run mode; see [Playbook calls](#playbook-calls--the-unit-of-inter-agent-work).
 
 **Memory systems** (via `/agent-dev:add-memory`):
@@ -128,7 +130,7 @@ Five more cover fleet-scale work:
 | `json-state` | Structured state, counters, config |
 | `workspace` | Multi-session project tracking |
 
-### trinity — 7 skills (v2.9.0)
+### trinity — 7 skills (v2.11.1)
 
 Connect, deploy, operate, and sync agents on Trinity.
 
@@ -138,8 +140,8 @@ Connect, deploy, operate, and sync agents on Trinity.
 /trinity:onboard              # Per-agent: compatibility check + deploy (or onboard in place)
 /trinity:sync                 # Git-based sync between your repo and the deployed agent
 /trinity:loop                 # Run an agent in a sequential, bounded loop (remote or local)
-/trinity:create-dashboard     # Generate an /update-dashboard skill for dashboard.yaml
-/trinity:deploy-new-instance  # Deploy a Trinity instance + ops agent on any server
+/trinity:create-dashboard     # Generate an /update-dashboard skill; declares metrics: and records them
+/trinity:deploy-new-instance  # Deploy a Trinity instance (DigitalOcean installer, SSH server, or local Docker) + ops agent
 ```
 
 **`/trinity:start-here` is the recommended entry point.** Install just `trinity@abilityai` and run it: it walks you from "what is Trinity" through getting an instance, connecting MCP (with a live smoke test), and creating your first working agent, handing off to the other skills as needed. It's resumable, so you can stop and pick it up later.

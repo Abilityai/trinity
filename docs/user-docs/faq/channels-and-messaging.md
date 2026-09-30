@@ -42,6 +42,10 @@ Create a bot first: message @BotFather on Telegram, send `/newbot`, choose a nam
 
 Two settings control this. In Trinity, each group has a trigger mode: **Mention only** (the default — the bot responds to @mentions and replies) or **All messages**. For "all messages" to work, you must also disable Telegram's Privacy Mode via @BotFather (`/setprivacy` → Disable), because with Privacy Mode on, Telegram simply never delivers non-mention group messages to the bot. Critically, if the bot is already in the group, you must remove and re-add it after changing Privacy Mode — Telegram only applies the change to newly joined groups. See [Telegram Integration](../integrations/telegram-integration.md).
 
+## Does my Telegram agent know what the group said before it was tagged?
+
+Yes, when the bot can see the group's messages. The agent remembers who said what — the last 40 messages within 24 hours by default — and answers a tagged message in that context, so "@agent summarise what we decided" works without re-pasting the thread. Un-tagged messages are only remembered: the agent still speaks only per the group's trigger mode, and remembering costs no agent turn. With Privacy Mode on, the bot sees only tagged messages and replies; the group's status in the Sharing tab says which case applies and what to do. Turn **Group context** off for a group that should not be remembered, and what was already stored is deleted. See [Telegram Integration](../integrations/telegram-integration.md#group-context).
+
 ## Can users send voice messages to my Telegram bot?
 
 Yes. Voice notes are automatically transcribed with Gemini and delivered to the agent as text prefixed with a 🎙️ emoji — users just send voice notes normally. Limits: 5 minutes duration and 10 MB file size, and the platform needs a Gemini key (next question). If transcription fails or no key is configured, the agent receives a placeholder such as `[Voice message received — transcription failed]` instead, so the conversation still progresses. See [Telegram Integration](../integrations/telegram-integration.md).
