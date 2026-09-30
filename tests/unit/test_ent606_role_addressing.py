@@ -140,9 +140,9 @@ def publish(monkeypatch, ra):
     monkeypatch.setattr(cps, "agent_on_roster",
                         lambda agent, email, include_owned=False: roster["reachable"])
 
-    async def _call(**body):
+    async def _call(_user=None, **body):
         data = ReportCreate(**{"report_type": "recon.leads", "title": "T", "payload": {}, **body})
-        user = User(id=1, username=AGENT, role="user", email=None, agent_name=AGENT)
+        user = _user or User(id=1, username=AGENT, role="user", email=None, agent_name=AGENT)
         return await mod.create_report(data, AGENT, request=None, current_user=user)
 
     return _call, stored, roster
@@ -154,6 +154,29 @@ async def test_a_report_to_a_role_reaches_the_person_who_fills_it(publish):
     _provide({"primary": [ALICE]})
     await call(to="primary")
     assert stored["addressed_to_email"] == ALICE
+
+
+@pytest.mark.asyncio
+async def test_the_agent_never_reads_back_the_person_a_role_resolved_to(publish):
+    # The response body, not just the stored row: an agent key calling the REST
+    # route directly must not learn who fills the role.
+    from models import User
+    call, stored, _ = publish
+    _provide({"primary": [ALICE]})
+    agent = User(id=1, username=AGENT, role="user", email=None, agent_name=AGENT, mcp_scope="agent")
+    result = await call(_user=agent, to="primary")
+    assert stored["addressed_to_email"] == ALICE
+    assert result.addressed_to is None
+
+
+@pytest.mark.asyncio
+async def test_a_human_publishing_still_sees_the_audience(publish):
+    from models import User
+    call, _, _ = publish
+    _provide({"primary": [ALICE]})
+    human = User(id=1, username="owner", role="user", email=OWNER)
+    result = await call(_user=human, to="primary")
+    assert result.addressed_to == ALICE
 
 
 @pytest.mark.asyncio

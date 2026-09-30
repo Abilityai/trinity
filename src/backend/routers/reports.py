@@ -350,7 +350,10 @@ async def create_report(
     projected = {k: v for k, v in report.items() if k in Report.model_fields}
     if "addressed_to" not in projected and "addressed_to_email" in report:
         projected["addressed_to"] = report["addressed_to_email"]
-    return Report(**projected)
+    # Same redaction as the read routes: an agent-key caller must never read
+    # back the person a role resolved to (ent#606 — "the agent never sees the
+    # person"). A JWT human still sees the audience.
+    return Report(**_hide_audience(projected, current_user))
 
 
 @router.get("/agents/{name}/reports", response_model=List[ReportSummary])
