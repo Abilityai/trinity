@@ -51,7 +51,7 @@ export function createEventTools(
             "Use dot-separated words to namespace your events."
           ),
         payload: z.record(z.string(), z.unknown()).optional()
-          .describe("Structured data to include with the event. Subscribers can reference fields via {{payload.field}} in their message templates."),
+          .describe("Structured data to include with the event. Subscribers can reference fields via {{payload.field}} in their message templates. Max 64 KiB serialized."),
       }),
       execute: async (
         params: {
