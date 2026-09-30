@@ -3637,6 +3637,23 @@ export class TrinityClient {
     return this.request("POST", "/api/enterprise/credential-vault/fetch", body);
   }
 
+  // --- Workspace Projects (trinity-enterprise#661) ---------------------------
+  // Agent-key read routes: only projects the calling agent is ACTIVE on.
+
+  /** List the projects the calling key's agent works on. */
+  async listMyProjects(): Promise<Array<Record<string, unknown>>> {
+    const res = await this.request<{ projects: Array<Record<string, unknown>> }>(
+      "GET",
+      "/api/enterprise/projects/agent/projects",
+    );
+    return res.projects;
+  }
+
+  /** Read one project the calling key's agent works on (uniform 404 otherwise). */
+  async getMyProject(projectId: string): Promise<Record<string, unknown>> {
+    return this.request("GET", `/api/enterprise/projects/agent/projects/${encodeURIComponent(projectId)}`);
+  }
+
   // --- Role assignments (trinity-enterprise#500) ----------------------------
 
   /**
