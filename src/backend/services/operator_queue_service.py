@@ -723,8 +723,8 @@ def _comparable_addressee(value) -> Optional[str]:
 
 def _comparable_context(ctx) -> str:
     """The clamp's PURE half for `context` (#2989 review): non-dict → {}, the
-    platform's workspace-thread key stripped (the clamp writes it; it is never
-    agent content), and an oversize / unserialisable value → one sentinel — which
+    platform's workspace keys (`_PLATFORM_CONTEXT_KEYS` — the thread, ent#429,
+    and the raised-in-turn flag, ent#734) stripped (never agent content), and an oversize / unserialisable value → one sentinel — which
     is also what a row holds after ingest (`_truncated`). Compared as canonical
     JSON. Sized the way the clamp sizes it, so the cap is crossed on both sides
     at (very nearly) the same input."""
