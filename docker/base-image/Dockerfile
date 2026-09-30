@@ -213,16 +213,11 @@ ENV USER=developer
 USER developer
 WORKDIR /home/developer
 
+# #3106: exact pins, one file shared with startup.sh's boot-time repair, so a
+# rebuild is reproducible and a boot never takes an unvetted upstream release.
+COPY --chown=root:root ./agent-server-requirements.txt /opt/trinity/agent-server-requirements.txt
 RUN python3 -m pip install --user --upgrade pip && \
-    python3 -m pip install --user \
-        fastapi \
-        uvicorn \
-        httpx \
-        pydantic \
-        python-multipart \
-        pyyaml \
-        rich \
-        cryptography
+    python3 -m pip install --user -r /opt/trinity/agent-server-requirements.txt
 
 RUN mkdir -p /home/developer/.claude-agent
 

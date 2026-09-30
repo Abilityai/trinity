@@ -607,15 +607,13 @@ if [ "${AGENT_RUNTIME}" = "codex" ]; then
 fi
 
 # Ensure core agent-server dependencies are installed correctly
-# This prevents template repos from breaking the agent server with incompatible packages
+# This prevents template repos from breaking the agent server with incompatible packages.
+# #3106: reinstall the image's EXACT pins, never `--upgrade` unpinned — an
+# unpinned upgrade here took whatever PyPI published last on every boot, and
+# FastAPI 0.142 then stopped every OTEL-enabled agent's server from starting.
+# A no-op when the pins already hold; restores them when a template moved one.
 echo "Verifying agent-server dependencies..."
-python3 -m pip install --user --quiet --upgrade \
-    fastapi \
-    uvicorn \
-    httpx \
-    pydantic \
-    python-multipart \
-    pyyaml
+python3 -m pip install --user --quiet -r /opt/trinity/agent-server-requirements.txt
 
 # Start SSH if enabled
 if [ "${ENABLE_SSH}" = "true" ]; then
