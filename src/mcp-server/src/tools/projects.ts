@@ -301,16 +301,58 @@ export function createProjectTools(client: TrinityClient, requireApiKey: boolean
       name: "link_to_project",
       description:
         "Put something you produced on a project so its members can find it: a file you shared, a " +
-        "report you wrote, or a decision you recorded. Only your own items, and only on a project you " +
-        "are working on. Sharing with outside clients is a person's decision, not yours.",
+        "report you wrote, a decision you recorded, or an open ask you raised (an ask raised in a " +
+        "chat that is already on the project is found without this). Only your own items, and only on " +
+        "a project you are working on. Sharing with outside clients is a person's decision, not yours.",
       parameters: z.object({
         project_id: projectId,
-        kind: z.enum(["file", "report", "decision"]),
-        target_id: z.string().min(1).max(128).describe("The file, report or decision id."),
+        kind: z.enum(["file", "report", "decision", "ask"]),
+        target_id: z.string().min(1).max(128).describe("The file, report, decision or ask id."),
       }),
       execute: async (p: { project_id: string; kind: string; target_id: string }, context?: { session?: McpAuthContext }) => {
         try {
           return ok(await getClient(context?.session).linkToProject(p.project_id, { kind: p.kind, target_id: p.target_id }, turnOf(context)));
+        } catch (e) {
+          return fail(e);
+        }
+      },
+    },
+
+    // ======================================================================== v3
+    get_steward_digest: {
+      name: "get_steward_digest",
+      description:
+        "What needs you on the projects you steward: for each, its health and whether an update is " +
+        "due, tasks awaiting verification (verify or reopen them), tasks blocked or waiting on a " +
+        "decision, tasks untouched for a week, open asks, and whether it has gone quiet. Start a " +
+        "stewarding run here, then record health with set_project_health.",
+      parameters: z.object({}),
+      execute: async (_params: unknown, context?: { session?: McpAuthContext }) => {
+        try {
+          const projects = await getClient(context?.session).getStewardDigest(turnOf(context));
+          return JSON.stringify({ success: true, count: projects.length, projects }, null, 2);
+        } catch (e) {
+          return fail(e);
+        }
+      },
+    },
+
+    // ========================================================================
+    set_project_health: {
+      name: "set_project_health",
+      description:
+        "As a project's steward, record how it is going: on-track, at-risk or off-track, with one " +
+        "line saying why. It shows on the project and in the list, and is added to the project log. " +
+        "Update it at least every two weeks, and whenever it changes.",
+      parameters: z.object({
+        project_id: projectId,
+        state: z.enum(["on-track", "at-risk", "off-track"]),
+        note: z.string().max(280).optional().describe("One line: why, e.g. 'Vendor two weeks late.'"),
+      }),
+      execute: async (p: { project_id: string; state: string; note?: string }, context?: { session?: McpAuthContext }) => {
+        try {
+          return ok(await getClient(context?.session).setProjectHealth(
+            p.project_id, { state: p.state, note: p.note ?? "" }, turnOf(context)));
         } catch (e) {
           return fail(e);
         }

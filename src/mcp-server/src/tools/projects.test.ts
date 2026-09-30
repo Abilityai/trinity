@@ -213,3 +213,47 @@ describe("ent#661 — the turn id rides every project call; the audience gate's 
     assert.match(out.message, /internal conversations/);
   });
 });
+
+describe("ent#661 v3 — the steward's tools", () => {
+  const session = { session: { executionId: "exec-7" } } as never;
+
+  it("get_steward_digest returns the digest and forwards the turn", async () => {
+    const turns: unknown[] = [];
+    const tools = makeTools({
+      getStewardDigest: (async (turn?: string) => {
+        turns.push(turn);
+        return [{ project: { id: PROJECT.id }, attention: 2 }];
+      }) as never,
+    });
+    const out = JSON.parse(await tools.get_steward_digest.execute({}, session));
+    assert.equal(out.count, 1);
+    assert.deepEqual(turns, ["exec-7"]);
+  });
+
+  it("set_project_health sends state and note, and a refusal is structured", async () => {
+    const calls: unknown[][] = [];
+    const tools = makeTools({
+      setProjectHealth: (async (id: string, body: unknown, turn?: string) => {
+        calls.push([id, body, turn]);
+        return { health: { state: "at-risk" } };
+      }) as never,
+    });
+    await tools.set_project_health.execute({ project_id: PROJECT.id, state: "at-risk", note: "late" }, session);
+    assert.deepEqual(calls[0], [PROJECT.id, { state: "at-risk", note: "late" }, "exec-7"]);
+
+    const refused = makeTools({
+      setProjectHealth: (async () => {
+        throw apiError(403, { code: "not_permitted", message: "Only the project's steward or its creator sets its health." });
+      }) as never,
+    });
+    const out = JSON.parse(await refused.set_project_health.execute({ project_id: PROJECT.id, state: "on-track" }, session));
+    assert.equal(out.success, false);
+    assert.equal(out.code, "not_permitted");
+  });
+
+  it("link_to_project accepts an ask", async () => {
+    const tools = makeTools();
+    const kind = (tools.link_to_project.parameters as { shape: { kind: { options: string[] } } }).shape.kind.options;
+    assert.ok(kind.includes("ask"));
+  });
+});

@@ -3700,6 +3700,17 @@ export class TrinityClient {
     return this.projectRequest("POST", this.projectPath(projectId, "/items"), turn, body);
   }
 
+  // v3: the steward's digest and health.
+  async getStewardDigest(turn?: string): Promise<Array<Record<string, unknown>>> {
+    const res = await this.projectRequest<{ projects: Array<Record<string, unknown>> }>(
+      "GET", "/api/enterprise/projects/agent/stewarding", turn);
+    return res.projects;
+  }
+
+  async setProjectHealth(projectId: string, body: Record<string, unknown>, turn?: string): Promise<Record<string, unknown>> {
+    return this.projectRequest("POST", this.projectPath(projectId, "/health"), turn, body);
+  }
+
   // --- Role assignments (trinity-enterprise#500) ----------------------------
 
   /**
