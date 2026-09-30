@@ -313,14 +313,16 @@
           </div>
           <p
             v-else
-            class="flex items-baseline justify-center gap-1 min-w-0 text-xs"
+            class="flex items-baseline justify-center gap-1 min-w-0 text-xs max-sm:flex-wrap"
             :class="META_INK_CLASS"
             :title="item.line.plain"
             data-testid="portal-chat-ask-ended"
           >
             <span class="shrink-0">{{ item.line.kind }}</span>
-            <span aria-hidden="true">·</span>
-            <AskMarkdown :text="item.line.title" inline class="min-w-0 truncate max-sm:whitespace-normal max-sm:line-clamp-2" />
+            <!-- On a phone the title takes its own full line (below sm the
+                 fixed parts left it ~120px and it clipped even on two lines). -->
+            <span class="max-sm:hidden" aria-hidden="true">·</span>
+            <AskMarkdown :text="item.line.title" inline class="min-w-0 truncate max-sm:whitespace-normal max-sm:line-clamp-2 max-sm:basis-full max-sm:order-last max-sm:text-center" />
             <span aria-hidden="true">·</span>
             <span class="shrink-0">{{ item.line.ending }}</span>
             <template v-if="item.line.when">

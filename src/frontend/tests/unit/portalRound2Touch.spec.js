@@ -34,3 +34,15 @@ describe('touch targets and the keyboard', () => {
     expect(shell.slice(open, at)).toMatch(/\[@media\(max-width:639px\)_and_\(max-height:480px\)\]:hidden/)
   })
 })
+
+describe('the ended-ask row on a phone (round 2 re-check: the title got 122 of 351px and clipped)', () => {
+  it('wraps: kind · ending · when on one line, the title on its own full-width line', () => {
+    const conv = read('components/portal/PortalConversation.vue')
+    const at = conv.indexOf('data-testid="portal-chat-ask-ended"')
+    const row = conv.slice(conv.lastIndexOf('<p', at), conv.indexOf('</p>', at))
+    expect(row).toMatch(/class="[^"]*\bmax-sm:flex-wrap\b/)
+    expect(row).toMatch(/<AskMarkdown[^>]*class="[^"]*\bmax-sm:basis-full\b[^"]*\bmax-sm:order-last\b/)
+    // the dot between kind and title would sit beside the next dot once the title moves
+    expect(row).toMatch(/<span class="max-sm:hidden" aria-hidden="true">·<\/span>\s*<AskMarkdown/)
+  })
+})
