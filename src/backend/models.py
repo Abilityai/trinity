@@ -469,6 +469,11 @@ class User(BaseModel):
     # `X-Source-Agent` header is honoured for this one value and nothing else.
     # None on every other branch, JWT humans included.
     vouched_source_agent: Optional[str] = None
+    # #2973: the inter-agent chain depth (#2806) the backend computed when it
+    # dispatched an EVT-001 event, carried as a signed loopback claim so the
+    # subscriber's execution inherits it instead of starting a new root. Set
+    # only on a loopback JWT; None on every other branch.
+    loopback_chain_depth: Optional[int] = None
 
 
 class Token(BaseModel):

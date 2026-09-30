@@ -3905,6 +3905,27 @@
         "guard"
       ],
       "description": "Route census, live side: imports main in a SUBPROCESS and checks every registered non-enterprise APIRoute maps to a key the AST census found, and every stored METHOD /full/path (baseline + reviewed tables) is what the app registers (rule 7). Fails, never skips, on a failed import, unparseable output or zero routes."
+    },
+    {
+      "file": "unit/test_2973_depth_new_roots.py",
+      "feature": "#2973",
+      "added": "2026-09-30",
+      "categories": [
+        "backend",
+        "scheduler",
+        "security"
+      ],
+      "description": "Loop start, manual schedule trigger and agent event emit inherit the inter-agent chain depth (#2806) through their real routes with a minted agent bearer; loopback JWT claim, terminal-event depth, scheduler origin/insert/retry."
+    },
+    {
+      "file": "unit/test_2973_event_dispatch_budget.py",
+      "feature": "#2973",
+      "added": "2026-09-30",
+      "categories": [
+        "backend",
+        "security"
+      ],
+      "description": "Per source->subscriber hourly event-dispatch budget (fakeredis): cap, pair keying, no cross-source starvation, one alert per window, TTL always set, fail-open."
     }
   ]
 }

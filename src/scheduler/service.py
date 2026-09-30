@@ -1057,7 +1057,8 @@ class SchedulerService:
                 source_user_email=origin.user_email,
                 source_agent_name=origin.agent_name,
                 source_mcp_key_id=origin.mcp_key_id,
-                source_mcp_key_name=origin.mcp_key_name
+                source_mcp_key_name=origin.mcp_key_name,
+                chain_depth=origin.chain_depth,
             )
 
             if not execution:
@@ -1856,6 +1857,8 @@ class SchedulerService:
                     agent_name=original.source_agent_name,
                     mcp_key_id=original.source_mcp_key_id,
                     mcp_key_name=original.source_mcp_key_name,
+                    # #2973: a retry is the same hop, so it keeps the depth.
+                    chain_depth=original.chain_depth,
                 )
         except Exception as exc:
             logger.warning(
@@ -1876,7 +1879,8 @@ class SchedulerService:
             source_user_email=origin.user_email,
             source_agent_name=origin.agent_name,
             source_mcp_key_id=origin.mcp_key_id,
-            source_mcp_key_name=origin.mcp_key_name
+            source_mcp_key_name=origin.mcp_key_name,
+            chain_depth=origin.chain_depth,
         )
 
         if not retry_execution:

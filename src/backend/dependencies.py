@@ -302,6 +302,19 @@ PORTAL_SESSION_SCOPE = "portal_session"
 EVENT_LOOPBACK_SCOPE = "event_loopback"
 EVENT_LOOPBACK_ROUTE = re.compile(r"^/api/agents/[^/]+/task$")
 
+
+def _loopback_chain_depth(payload: dict) -> Optional[int]:
+    """The loopback's signed ``chain_depth`` claim (#2973), or None.
+
+    A non-int or non-positive value reads as absent rather than failing the
+    dispatch; only the backend mints this token, so that is a bug, not an attack.
+    """
+    value = payload.get("chain_depth")
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        return None
+    return value
+
+
 # RETIRED as a lifetime (ent#375). The session now slides: `_portal_session_policy()`
 # supplies an idle window and an absolute cap, and every consumer reads those.
 #
@@ -685,6 +698,8 @@ async def get_current_user(request: Request, token: str = Depends(oauth2_scheme)
             # ent#614: only a loopback token carries this, and only when the
             # backend derived the source from an agent-originated event.
             vouched_source_agent=(payload.get("source_agent") or None) if loopback else None,
+            # #2973: SECRET_KEY-signed, so only the backend could have set it.
+            loopback_chain_depth=_loopback_chain_depth(payload) if loopback else None,
         )
     except JWTError:
         # JWT failed, try MCP API key

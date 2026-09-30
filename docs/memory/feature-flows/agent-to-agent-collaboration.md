@@ -3,7 +3,7 @@
 **Status**: Implemented
 **Date**: 2025-11-29
 **Priority**: High
-**Last Updated**: 2026-09-22 (Chain-depth guard #2806 added)
+**Last Updated**: 2026-09-30 (Chain depth carried through loops, schedule triggers and events #2973)
 
 ---
 
@@ -316,7 +316,9 @@ Stops a call bouncing A→B→A→B… forever. Every agent-to-agent path goes t
 5. **Refused** (`depth > max`) → an `inter_agent_depth_exceeded` audit row and a FAILED `agent_collaboration` activity on the caller (both best-effort), then `InterAgentDepthExceeded` → router → **403** `{"detail": {"error": "inter_agent_depth_exceeded", depth, max_depth, caller, target, message}}` + `X-Trinity-Error-Code`. No execution row, no idempotency claim, no slot.
 6. **MCP** → `client.ts::parseDepthRefusal` turns that 403 into a `DepthRefusal` result; `runAgentChat` returns `{status: "inter_agent_depth_exceeded", retryable: false, ...}` to the calling model.
 
-Access (`get_authorized_agent`, uniform 404) resolves before the helper, so a depth 403 never discloses whether a target exists. Residuals and deferrals (non-agent keys held by agents, calls with no running row, loops/schedules/events): `requirements/core-agent.md` §9.1.1. Tests: `tests/unit/test_2806_inter_agent_depth.py`, `src/mcp-server/src/chat-depth.test.ts`, J10 `test_two_agents_cannot_bounce_a_call_between_each_other_forever`.
+7. **New roots (#2973)** → the same helper runs on `POST /api/agents/{name}/sessions/{id}/message` (depth passed to `execute_task(chain_depth=)`), `POST /api/agents/{name}/loops` (depth persisted on `agent_loops.chain_depth`, stamped on every iteration by `loop_service._dispatch_run`), `POST /api/agents/{name}/schedules/{id}/trigger` (depth forwarded to the scheduler in the trigger body; a retry keeps it), and both event-emit routes when at least one subscription matches (depth signed into the EVT-001 loopback JWT as `chain_depth` → `User.loopback_chain_depth`, read by the helper before its root early-return; `_chain_caller` also falls back to `vouched_source_agent`). These routes let the refusal propagate to the app-level handler `error_handlers.inter_agent_depth_exceeded` (same 403 body and header). `agent.task.*` terminal events carry the finished row's depth + 1.
+
+Access (`get_authorized_agent`, uniform 404) resolves before the helper, so a depth 403 never discloses whether a target exists. Residuals and deferrals (non-agent keys held by agents, calls with no running row, webhook/cron/reminder roots #3116): `requirements/core-agent.md` §9.1.1. Tests: `tests/unit/test_2806_inter_agent_depth.py`, `tests/unit/test_2973_depth_new_roots.py`, `src/mcp-server/src/chat-depth.test.ts`, `src/mcp-server/src/tools/depth-refusal.test.ts`, J10 `test_two_agents_cannot_bounce_a_call_between_each_other_forever`.
 
 ---
 

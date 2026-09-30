@@ -24,7 +24,7 @@
  */
 
 import { z } from "zod";
-import { TrinityClient } from "../client.js";
+import { TrinityClient, depthRefusalFromError } from "../client.js";
 import type { LoopStatus, McpAuthContext } from "../types.js";
 import { accessDenied, checkAgentEdge, resolveClient } from "../access.js";
 import type { DenyCallContext } from "../access.js";
@@ -256,6 +256,9 @@ export function createLoopTools(
           });
           return JSON.stringify({ success: true, ...result }, null, 2);
         } catch (error) {
+          // #2973: a chain-depth refusal is a result to stop on, not an error.
+          const refusal = depthRefusalFromError(error, agentName);
+          if (refusal) return JSON.stringify(refusal, null, 2);
           const msg = error instanceof Error ? error.message : String(error);
           console.error(`[run_agent_loop] error: ${msg}`);
           return JSON.stringify({ success: false, error: msg }, null, 2);

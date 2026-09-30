@@ -256,7 +256,8 @@ CREATE TABLE agent_loops (
     source_mcp_key_name TEXT,
     created_at TEXT NOT NULL,
     started_at TEXT,
-    completed_at TEXT
+    completed_at TEXT,
+    chain_depth INTEGER                          -- #2973: starter's inherited chain depth; NULL = root
 );
 CREATE INDEX idx_loops_agent ON agent_loops(agent_name);
 CREATE INDEX idx_loops_status ON agent_loops(status);

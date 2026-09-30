@@ -9,7 +9,7 @@
  */
 
 import { z } from "zod";
-import { TrinityClient } from "../client.js";
+import { TrinityClient, depthRefusalFromError } from "../client.js";
 import type { McpAuthContext } from "../types.js";
 
 /**
@@ -84,6 +84,9 @@ export function createEventTools(
             created_at: result.created_at,
           }, null, 2);
         } catch (error) {
+          // #2973: a chain-depth refusal is a result to stop on, not an error.
+          const refusal = depthRefusalFromError(error, `event:${params.event_type.trim()}`);
+          if (refusal) return JSON.stringify(refusal, null, 2);
           const errorMessage = error instanceof Error ? error.message : String(error);
           console.error(`[emit_event] Error: ${errorMessage}`);
           return JSON.stringify({ success: false, error: errorMessage }, null, 2);
