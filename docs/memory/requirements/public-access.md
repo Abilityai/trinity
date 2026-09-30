@@ -935,3 +935,28 @@ spoken replies (#2157) stay as composer affordances.
   frame after persistence tells the client when to reload; End always works.
 - **FR-9 — Out of scope**: rooms; acting as the agent (#535); the external
   projection (#285/#446); provider choice (#354, seam kept provider-neutral).
+
+### 48.4 Workspace Projects — the open-core surface (trinity-enterprise#661)
+
+**Description**: An internal user runs sustained work as a **project**: a
+record that links the Workspace chats and rooms where the work happens, with
+members and the agents that may work on it. The record and its rules are a
+private module; this section is the edition-agnostic surface it needs.
+
+- **FR-1 — Capability on the roster**: `projects_available` is true only when
+  the module is entitled AND the principal is a platform user. Fails closed on
+  an older backend, a failed read, or an outside client.
+- **FR-2 — Turn-context seam**: a provider registry both Workspace composers
+  call on every turn (chat: resumed and cold arms; room: ahead of the file
+  manifest). The platform fills the context from the chat row or room,
+  including whether the audience is internal. No provider → no change.
+- **FR-3 — Addressed gate asks**: a platform (`gate`) raise may name exactly
+  one addressee; an agent's raise may not.
+- **FR-4 — Workspace UI, gated on FR-1**: a Projects list across agents, a
+  project page (goal, status, steward, my chats, others' chats as a count only,
+  agents with consent state, members, rooms), a rail tab for the current agent,
+  and chat-header controls (link, detach, make a project) — never in Main.
+- **FR-5 — Agent reads over MCP**: `list_projects` / `get_project`, read-only,
+  license-blind (404 = no module, string 403 = unlicensed).
+- **Out of scope (v1)**: outside-client invites, a task list, a project log,
+  files by project, room-header link controls.
