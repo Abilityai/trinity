@@ -795,6 +795,12 @@ class SkillInfo(BaseModel):
     # version of this skill than a given source intended — AC#4 requires that be
     # visible, never a silent overwrite.
     shadowed_by: List[Dict[str, str]] = Field(default_factory=list)
+    # trinity-enterprise#672 lifecycle. A deprecated skill stays listed and
+    # assignable — flagged, never hidden. `superseded_by` is the library
+    # author's text (one printable line, <= 200 chars), NOT a resolved skill
+    # name, and is None unless `deprecated` is true.
+    deprecated: bool = False
+    superseded_by: Optional[str] = None
 
 
 class AgentSkillsUpdate(BaseModel):
