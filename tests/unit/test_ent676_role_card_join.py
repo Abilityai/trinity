@@ -261,9 +261,15 @@ def build(monkeypatch):
     monkeypatch.setattr(rc, "_is_owner", lambda *a: True)
     monkeypatch.setattr(rc, "_brief_held", lambda agent, stamp: False)
 
-    def _build(door=None, store=None, *, admitted=True):
+    def _build(door=None, store=None, *, admitted=True, asked=None):
         door = door or Door()
         store = store or Store()
+        asked = asked if asked is not None else []
+
+        def admit():
+            asked.append(True)
+            return admitted
+
         monkeypatch.setattr(agent_client_mod, "get_agent_client",
                             lambda name: door)
         # The join (and `latest_by_metric` under it) resolves `database.db` at
@@ -271,7 +277,7 @@ def build(monkeypatch):
         # reaches it (patch where the code resolves, learnings 2026-08-10).
         monkeypatch.setattr(sys.modules["database"], "db", store)
         card = asyncio.run(rc.build_role_card(
-            AGENT, VIEWER, is_platform=True, objectives_admitted=admitted))
+            AGENT, VIEWER, is_platform=True, admit_objectives=admit))
         return card, door, store
 
     return _build
@@ -570,6 +576,35 @@ def test_a_role_file_that_failed_reads_no_objectives(build):
     assert card["objectives_error"] is None
 
 
+@pytest.mark.parametrize("files,state", [
+    ({"template.yaml": "name: plain\n"}, "running"),            # no role
+    ({"template.yaml": TEMPLATE}, "running"),                     # role file missing
+    ({"template.yaml": TEMPLATE.replace("role: sales-lead", "role: ../x")}, "running"),
+    (None, "stopped"),
+], ids=["no-role", "role-file-missing", "role-id-invalid", "stopped"])
+def test_a_card_that_reads_no_objectives_spends_no_budget(build, monkeypatch,
+                                                          files, state):
+    """The budget bounds the container fan-out, so only a card that is about
+    to do one may spend it — not every Info-tab open."""
+    from services import docker_utils
+
+    async def _state(name):
+        return state
+    asked = []
+    door = Door(files) if files is not None else Door()
+    if state != "running":
+        # `build` installs a running agent; override it after, for this case.
+        monkeypatch.setattr(docker_utils, "agent_container_state_async", _state)
+    build(door, asked=asked)
+    assert asked == []
+
+
+def test_a_card_that_reads_objectives_asks_once(build):
+    asked = []
+    card, _door, _store = build(asked=asked)
+    assert card["objectives"] and asked == [True]
+
+
 def test_the_response_model_carries_every_key_the_card_produces(build):
     """`response_model` is an allowlist: a key the builder emits and the model
     lacks is dropped from every response without an error."""
@@ -626,8 +661,9 @@ def doors(monkeypatch):
 
     cards = []
 
-    async def _build(agent_name, email, *, is_platform, objectives_admitted):
-        cards.append((agent_name, email, objectives_admitted))
+    async def _build(agent_name, email, *, is_platform, admit_objectives):
+        # The real builder asks once, after the role file; so does this one.
+        cards.append((agent_name, email, admit_objectives()))
         return {"agent_name": agent_name, "role": None}
 
     monkeypatch.setattr(portal_router.role_card, "build_role_card", _build)

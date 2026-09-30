@@ -161,7 +161,7 @@ def _wire(monkeypatch, client, *, state="running", stamp=None, owner=True, ratin
 
 def _card(rc, *, is_platform=True):
     return asyncio.run(rc.build_role_card(AGENT, EMAIL, is_platform=is_platform,
-                                          objectives_admitted=True))
+                                          admit_objectives=lambda: True))
 
 
 def _full_client():

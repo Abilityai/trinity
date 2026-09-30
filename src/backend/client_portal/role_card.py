@@ -43,7 +43,7 @@ from __future__ import annotations
 import logging
 import re
 from datetime import datetime, timedelta, timezone
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from database import db
 from services.role_readiness_gate import brief_is_held, is_seat_delivery_schedule
@@ -268,17 +268,20 @@ async def _read_yaml(client, path: str) -> tuple[Optional[dict], Optional[str]]:
 # ---------------------------------------------------------------------------
 
 async def build_role_card(agent_name: str, email: str, *, is_platform: bool,
-                          objectives_admitted: bool) -> dict:
+                          admit_objectives: Callable[[], bool]) -> dict:
     """Everything the Role card shows, or `{"role": None}` when the agent has no role.
 
     The relationship line reads from ent#500's assignments when they land;
     until then it is `None`, which the client renders as "no assignment
     recorded" rather than blank.
 
-    `objectives_admitted` is the router's verdict on the objective-read budget
-    (`services/objectives_read_budget`). It is required, never defaulted: a
-    caller that forgot it would reach the container fan-out unbounded. False
-    leaves the objectives out and says so; the rest of the card still answers.
+    `admit_objectives` is the router's check against the objective-read budget
+    (`services/objectives_read_budget`), called here — once, and only when the
+    objectives are about to be read — so a card that stops earlier (no role, a
+    stopped agent, a role file that failed) spends nothing. It is required,
+    never defaulted: a caller that forgot it would reach the container fan-out
+    unbounded. False leaves the objectives out and says so; the rest of the
+    card still answers.
     """
     from services import docker_utils
     from services.agent_client import get_agent_client
@@ -354,7 +357,7 @@ async def build_role_card(agent_name: str, email: str, *, is_platform: bool,
         "stale": is_stale(_text(role.get("review_by"), 32)) if role.get("review_by") else False,
     })
 
-    if not objectives_admitted:
+    if not admit_objectives():
         card["objectives_error"] = "objectives_rate_limited"
         return card
 

@@ -711,8 +711,10 @@ the picker and the model. The card's objective read draws on the per-agent budge
 operator's `/objectives` route draws on (`services/objectives_read_budget.py`), behind a
 per-viewer cap, and **never refuses the card**: a spent budget leaves the objectives out
 (`objectives_error`) so the role, the readiness stamp and the owner's flip still answer.
-`build_role_card` takes that verdict as a **required** `objectives_admitted` — a new caller
-that forgot it would reach the container fan-out unbounded. Readiness is the one platform fact: `agent_role_readiness` is the agent
+`build_role_card` takes the check as a **required** `admit_objectives` callable and calls it
+only when the objectives are about to be read, so a card that stops earlier (no role, a
+stopped agent, a broken role file) spends nothing; a new caller that forgot it would reach
+the container fan-out unbounded. Readiness is the one platform fact: `agent_role_readiness` is the agent
 OWNER's stamp (`POST …/role/readiness`, owner check via `get_owned_roster`, agent never),
 and a template that claims `ready` without a stamp is shown as calibrating. Requirement
 §5.36 of `core-agent.md`; flow in `workspace-role-card.md`.

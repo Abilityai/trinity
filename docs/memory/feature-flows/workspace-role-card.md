@@ -14,18 +14,20 @@ line reads from ent#500 when it lands.
 ```
 Info rail ──► PortalAgentRole.vue ──► GET /api/enterprise/client-portal/agents/{name}/role
                                           │  _require_roster (uniform 404)
-                                          │  objectives_admitted =
+                                          │  admit_objectives() — built here, called by the builder:
                                           │    viewer cap  portal_role_objectives:{email}:{name}  20/min
                                           │    AND shared  objectives_read_budget.admit(name)     60/min
                                           │    (never raises — a refused read is a 200 without objectives)
                                           ▼
-                                    client_portal/role_card.build_role_card(objectives_admitted=…)
+                                    client_portal/role_card.build_role_card(admit_objectives=…)
                                           │  docker state  ── not running → {unavailable, readiness(stamp)}
                                           │  agent door (get_agent_client):
                                           │    read_file template.yaml   → x-role {role, status, seat}, x-canon.clone_path
                                           │    read_file <canon>/roles/<id>.yaml
                                           │  db.get_agent_role_readiness (the owner's stamp)
-                                          │  not admitted ── objectives_error: objectives_rate_limited, no fan-out
+                                          │  admit_objectives() — only here, after the role file; any earlier
+                                          │    return (no role, stopped, role-file error) spends nothing
+                                          │  refused ── objectives_error: objectives_rate_limited, no fan-out
                                           ▼
                                     objective_join_service.read_objective_join(agent, template=, client=)
                                           │  the ONE join (ent#666): objectives listing + files through the
@@ -91,7 +93,9 @@ owner ──► Mark ready (ConfirmDialog) ──► POST …/role/readiness {st
   door answers 429; the card never does. It also carries the role, the readiness stamp and
   the owner's flip, and the agent can empty the bucket by polling its own `get_objectives`,
   so refusing the whole card would let an agent hide its owner's control. A refused read
-  leaves the objectives out, says so, and performs no fan-out. The viewer's own cap
+  leaves the objectives out, says so, and performs no fan-out. The check is spent where the
+  fan-out starts — the builder calls it after the role file — so an Info tab for an agent
+  with no role, a stopped agent or a broken role file costs nothing. The viewer's own cap
   (20/min per agent) is checked first, so one viewer spends at most a third of the shared
   budget and a refused viewer spends none of it.
 - **Readiness is the owner's stamp (#663).** `x-role.status` is agent-writable, so a

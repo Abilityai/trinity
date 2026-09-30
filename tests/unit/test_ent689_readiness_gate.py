@@ -219,9 +219,9 @@ class TestRoleCard:
         monkeypatch.setattr(role_card, "_is_owner", lambda *a: False)
         monkeypatch.setattr(role_card, "_brief_held", lambda agent, stamp: True)
         client = await role_card.build_role_card(AGENT, "client@example.com", is_platform=False,
-                                                 objectives_admitted=True)
+                                                 admit_objectives=lambda: True)
         platform = await role_card.build_role_card(AGENT, "user@example.com", is_platform=True,
-                                                   objectives_admitted=True)
+                                                   admit_objectives=lambda: True)
         assert client["brief_held"] is False and platform["brief_held"] is True
 
     def test_brief_held_says_nothing_when_schedules_are_unreadable(self, monkeypatch):

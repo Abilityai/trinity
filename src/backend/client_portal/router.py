@@ -828,24 +828,33 @@ async def portal_agent_role(
     the owner's flip, and the agent itself can empty the shared bucket by
     polling its own objectives. A refused read is a 200 without objectives
     (`objectives_error: objectives_rate_limited`) and without a fan-out.
+
+    The budget is spent where the fan-out starts, not at this door: the
+    builder calls `admit_objectives` only after the role file has been read,
+    so opening the Info tab of an agent with no role, a stopped agent or a
+    broken role file costs nothing from either bucket.
     """
     email = principal.email
     _require_roster(agent_name, email, principal.is_platform)
     from services import objectives_read_budget, rate_limiter
-    # Order is load-bearing: the viewer's own cap first, so a viewer past it
-    # spends nothing from the budget the operator door and the agent share.
-    # Both keys are built after the roster gate, on the name it validated.
-    objectives_admitted = (
-        rate_limiter.check(
-            f"portal_role_objectives:{email}:{agent_name}",
-            PORTAL_ROLE_OBJECTIVES_VIEWER_LIMIT,
-            PORTAL_ROLE_OBJECTIVES_VIEWER_WINDOW,
-        ).allowed
-        and objectives_read_budget.admit(agent_name)
-    )
+
+    def admit_objectives() -> bool:
+        # Order is load-bearing: the viewer's own cap first, so a viewer past
+        # it spends nothing from the budget the operator door and the agent
+        # share. Both keys are built after the roster gate, on the name it
+        # validated. Neither check raises.
+        return (
+            rate_limiter.check(
+                f"portal_role_objectives:{email}:{agent_name}",
+                PORTAL_ROLE_OBJECTIVES_VIEWER_LIMIT,
+                PORTAL_ROLE_OBJECTIVES_VIEWER_WINDOW,
+            ).allowed
+            and objectives_read_budget.admit(agent_name)
+        )
+
     return await role_card.build_role_card(
         agent_name, email, is_platform=principal.is_platform,
-        objectives_admitted=objectives_admitted)
+        admit_objectives=admit_objectives)
 
 
 @router.get("/agents/{agent_name}/decisions", response_model=PortalSeatDecisions)

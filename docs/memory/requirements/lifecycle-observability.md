@@ -1725,7 +1725,8 @@ needs for chat.
 window are spelled once, in `services/objectives_read_budget.py`, and every door
 to the container fan-out draws on it: this route (and MCP `get_objectives`
 through it) with `enforce` — a 429 + `Retry-After` — and the Workspace role card
-with `admit`, which never raises. The two doors fail differently on purpose. An
+with `admit`, which never raises and is asked only once the card is about to read
+the objectives (after the role file), so a card that reads none spends none. The two doors fail differently on purpose. An
 agent polling its own objectives can empty the bucket, and the role card also
 carries the role, the readiness stamp and the owner's flip; refusing the whole
 card would let the agent hide its owner's control. So a refused card read is a

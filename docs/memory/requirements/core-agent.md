@@ -3308,6 +3308,9 @@ to localStorage in the clear.
   exhausted budget **never refuses the card**: the role, readiness and the owner's
   flip still answer, the objectives are left out with
   `objectives_error: objectives_rate_limited`, and no container fan-out happens.
+  The budget is spent only when the objectives are about to be read: opening the
+  Info tab of an agent with no role, a stopped agent or a role file that failed
+  costs nothing from either bucket.
 - **Readiness is a platform record, and only the agent owner writes it (#663,
   ruled 2026-09-20).** `x-role.status` in `template.yaml` is agent-writable, so it
   cannot be the thing that says a companion is `ready`. `agent_role_readiness`
