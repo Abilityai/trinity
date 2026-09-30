@@ -213,7 +213,10 @@ def test_the_limiter_is_keyed_on_the_validated_name(monkeypatch, ctx):
     """After the access gate, never before: an unvalidated path param in a
     limiter key is a key-amplification surface."""
     order = []
-    monkeypatch.setattr(route_mod.rate_limiter, "enforce",
+    # The seam the route calls (ent#676 moved the key into the budget leaf):
+    # patching `rate_limiter.enforce` beneath it would go vacuous the day the
+    # leaf stopped delegating to it.
+    monkeypatch.setattr(route_mod.objectives_read_budget, "enforce",
                         lambda *a, **k: order.append("limiter"))
     ctx.users["user"] = User(id=3, username="other", email="o@agents.local",
                              role="user", agent_name="other-agent")

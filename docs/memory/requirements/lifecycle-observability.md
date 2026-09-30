@@ -1716,9 +1716,10 @@ Gate order (Invariant #8), copied verbatim from `/metrics`:
 
 `OBJECTIVES_READ_RATE_LIMIT` (env, default **60**/min per agent, window 60 s)
 is its **own** knob, not `/metrics`'s 240. That route is store-only; this one
-drives a container. Ten open role cards polling at 30 s is 20/min, so 60 clears
-normal traffic with room and still stops a loop from pinning an agent-server the
-platform also needs for chat.
+drives a container. The Workspace role card draws on the same bucket (below) but
+loads once per open and never polls, so 60 clears normal traffic from both doors
+with room and still stops a loop from pinning an agent-server the platform also
+needs for chat.
 
 **One budget, every door (trinity-enterprise#676).** The key, the limit and the
 window are spelled once, in `services/objectives_read_budget.py`, and every door

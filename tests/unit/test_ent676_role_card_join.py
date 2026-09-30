@@ -612,6 +612,9 @@ def doors(monkeypatch):
     # The operator route must hold the same budget module the portal route
     # resolves, or the two doors would be two buckets that merely share a name.
     assert operator_mod.objectives_read_budget is budget
+    # The expectations below are arithmetic on the limit; pin it so an
+    # environment that tunes OBJECTIVES_READ_RATE_LIMIT cannot move them.
+    monkeypatch.setattr(budget, "OBJECTIVES_READ_RATE_LIMIT", 60)
     for limiter in {id(m): m for m in (rate_limiter, budget.rate_limiter)}.values():
         monkeypatch.setattr(limiter, "_get_redis", lambda: None)
         limiter.clear_inprocess()

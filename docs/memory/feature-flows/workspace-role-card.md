@@ -73,13 +73,18 @@ owner ──► Mark ready (ConfirmDialog) ──► POST …/role/readiness {st
   `finding_codes` — distinct codes, nothing else, because a file-level finding can name
   another role's file. A key the join grows later reaches no client until it is added to
   the picker and to `PortalRoleMetric`; the tests pin both key sets as literals.
-- **No objectives is only ever silent when it is true.** `objectives_error` names every
-  other way of arriving at zero: `objectives_rate_limited` (the budget), `agent_unreachable`
-  (the door died mid-read), `objectives_timeout`, `objectives_unreadable` (the directory
-  would not list, every file read failed, or the join raised — a store outage is caught,
-  logged with its traceback, and named), `objectives_incomplete` (files that would not
-  parse, were refused by name, or lay beyond the scan bound). An agent with no objective
-  files, or none that name it, shows no objectives block — as before.
+- **No objectives is silent only when nothing went wrong reading them.** `objectives_error`
+  names every other way of arriving at zero: `objectives_rate_limited` (the budget),
+  `agent_unreachable` (the door died mid-read), `objectives_timeout`,
+  `objectives_unreadable` (the directory would not list, an objective file failed to read
+  and none of this agent's objectives joined, or the join raised — a store outage is
+  caught, logged with its traceback, and named), `objectives_incomplete` (a file would not
+  parse, was refused by name, or lay beyond the scan bound). File-level failures cannot be
+  attributed to a role (whose file it was is unknowable when it never parsed), so in a
+  shared canon another role's broken file can put the `objectives_incomplete` line on an
+  agent with no objectives of its own. An agent whose objective files all read cleanly and
+  none name it shows no objectives block, as before. A role file that fails to load stops
+  the card before the objectives are read; the role-error line is what the viewer sees.
 - **One budget, two doors, and they fail differently.** The card's objective read draws on
   the bucket `GET /api/agents/{name}/objectives` draws on
   (`services/objectives_read_budget.py` — key, limit and window spelled once). The operator
