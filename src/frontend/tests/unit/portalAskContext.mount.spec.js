@@ -83,9 +83,16 @@ async function mountCtx(ctx, a = ask()) {
 }
 
 describe('askContextMeta — one line', () => {
-  it('folds the run, the expiry and the priority into the asked-at line', () => {
+  // A2 round 1: the expiry and the priority moved to the card's header (the
+  // pane's `showUrgency`), where the person decides; the run's clock says it
+  // is the run's START, and a chat turn has none (its time is the chat's).
+  it('folds the run into the asked-at line; the clock is the run\'s start', () => {
     const parts = askContextMeta(ask(), RUN, NOW, (iso) => (iso ? '09:00' : ''))
-    expect(parts).toEqual(['Asked 8m ago during a scheduled run · 09:00', 'expires in 5h', 'High priority'])
+    expect(parts).toEqual(['Asked 8m ago during a scheduled run', 'started 09:00'])
+  })
+  it('a chat turn has no clock; expiry and priority are never here', () => {
+    const turn = { kind: 'turn', label: 'Asked during your chat', started_at: '2026-09-29T09:00:00Z' }
+    expect(askContextMeta(ask({ priority: 'critical' }), turn, NOW, () => '09:00')).toEqual(['Asked 8m ago during your chat'])
   })
   it('with no run, no near expiry and a medium priority it is just when', () => {
     expect(askContextMeta(ask({ expires_at: null, priority: 'medium' }), null, NOW)).toEqual(['Asked 8m ago'])
@@ -149,6 +156,81 @@ describe('PortalAskContext (mounted)', () => {
   })
 })
 
+describe('A2 round 1 — what the context says, and how it loads', () => {
+  it('a newer ask wins: a read that resolves late for the previous ask is dropped', async () => {
+    const pending = {}
+    store.fetchAskContext = vi.fn((id) => new Promise((r) => { pending[id] = r }))
+    wrapper = mount(PortalAskContext, { props: { ask: ask({ id: 'a1' }) }, attachTo: document.body })
+    await flushPromises()
+    await wrapper.setProps({ ask: ask({ id: 'a2' }) })
+    await flushPromises()
+    pending.a2({ origin: { ...MAIN, title: 'Second' }, run: null, recent_answers: [] })
+    await flushPromises()
+    pending.a1({ origin: VERIFIED, run: RUN, recent_answers: ANSWERS })
+    await flushPromises()
+    expect(el(wrapper, 'inbox-ask-context-answers').exists()).toBe(false)
+    expect(wrapper.findAll('[data-testid="inbox-ask-context-message"]')).toHaveLength(0)
+  })
+
+  it('a verified Main origin is called "Main", never its generated title', async () => {
+    const w = await mountCtx({ origin: { ...VERIFIED, is_main: true, title: 'Q3 invoices' }, run: RUN, recent_answers: [] })
+    expect(el(w, 'inbox-ask-context-origin-title').text()).toBe('Main')
+  })
+
+  it('an origin that is not where the ask was filed says both, and the link names the chat', async () => {
+    const w = await mountCtx({ origin: VERIFIED, run: RUN, recent_answers: [] }, ask({ chat_id: 's-main' }))
+    expect(el(w, 'inbox-ask-context-filed').text()).toBe('Filed in your Main chat')
+    expect(el(w, 'inbox-ask-context-open').text()).toBe('Open “September close”')
+    // Filed where it was raised: nothing extra to say.
+    const same = await mountCtx({ origin: VERIFIED, run: RUN, recent_answers: [] }, ask({ chat_id: 's-run' }))
+    expect(el(same, 'inbox-ask-context-filed').exists()).toBe(false)
+  })
+
+  it('a failed read still offers the way to the ask\'s chat', async () => {
+    const w = await mountCtx(vi.fn(async () => { throw new Error('503') }), ask({ chat_id: 's-main' }))
+    expect(el(w, 'inbox-ask-context-failed').exists()).toBe(true)
+    await el(w, 'inbox-ask-context-open-fallback').trigger('click')
+    expect(w.emitted('open-chat')[0]).toEqual(['/workspace/c/s-main'])
+  })
+
+  it('the context paints once, with what was delivered — never a second jump', async () => {
+    let release
+    store.fetchSessionDeliverablesStrict = vi.fn(() => new Promise((r) => { release = r }))
+    const w = await mountCtx({ origin: VERIFIED, run: RUN, recent_answers: ANSWERS })
+    expect(el(w, 'inbox-ask-context-loading').exists()).toBe(true)
+    expect(el(w, 'inbox-ask-context-answers').exists()).toBe(false)
+    release([{ id: 'r1', title: 'September invoice run' }])
+    await flushPromises()
+    expect(el(w, 'inbox-ask-context-delivered').exists()).toBe(true)
+    expect(el(w, 'inbox-ask-context-answers').exists()).toBe(true)
+  })
+
+  it('a failed deliverables read is LoadFailed with its own retry, the rest of the context stays', async () => {
+    let fail = true
+    store.fetchSessionDeliverablesStrict = vi.fn(async () => { if (fail) throw new Error('503'); return [{ id: 'r1', title: 'Run' }] })
+    const w = await mountCtx({ origin: VERIFIED, run: RUN, recent_answers: ANSWERS })
+    expect(el(w, 'inbox-ask-context-answers').exists()).toBe(true)
+    const failed = el(w, 'inbox-ask-context-delivered-failed')
+    expect(failed.exists()).toBe(true)
+    fail = false
+    await failed.find('button').trigger('click')
+    await flushPromises()
+    expect(el(w, 'inbox-ask-context-delivered').exists()).toBe(true)
+  })
+
+  it('the skeleton is the loaded context\'s shape (lines, not a card), in an opaque dark chrome fill', async () => {
+    store.fetchAskContext = vi.fn(() => new Promise(() => {}))
+    wrapper = mount(PortalAskContext, { props: { ask: ask() }, attachTo: document.body })
+    await flushPromises()
+    const bars = el(wrapper, 'inbox-ask-context-loading').findAll('.animate-pulse')
+    expect(bars.length).toBe(4)
+    for (const b of bars) {
+      expect(b.classes()).toContain('dark:bg-gray-750')
+      expect(b.classes().some((k) => /^h-(1[0-9]|[2-9][0-9])$/.test(k))).toBe(false)   // no card-tall block
+    }
+  })
+})
+
 describe('in the Inbox pane', () => {
   const item = (a) => ({ key: `ask:${a.id}`, type: 'ask', id: a.id, agent_name: a.agent_name, title: a.title, status: a.status, ask: a })
   it('the context sits BELOW the card; the controls render even when the context fails; no second thread link', async () => {
@@ -168,5 +250,15 @@ describe('in the Inbox pane', () => {
     expect(el(wrapper, 'inbox-ask-context-failed').exists()).toBe(true)
     // "Open the conversation" now lives in the context below (bdb2418e7's note).
     expect(el(wrapper, 'inbox-ask-open-thread-a1').exists()).toBe(false)
+  })
+
+  it('the pane card carries the priority and the expiry in its header (A2 round 1)', async () => {
+    const a = ask({ priority: 'critical' })
+    store.asks = [a]
+    store.fetchAskContext = vi.fn(async () => ({ origin: null, run: null, recent_answers: [] }))
+    wrapper = mount(PortalInboxPane, { props: { item: item(a) }, global: { stubs: { 'router-link': true } }, attachTo: document.body })
+    await flushPromises()
+    expect(el(wrapper, 'inbox-ask-priority-a1').text()).toBe('Critical')
+    expect(el(wrapper, 'inbox-ask-expiry-a1').text()).toBe('Expires in 5h')
   })
 })

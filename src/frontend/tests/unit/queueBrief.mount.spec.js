@@ -65,10 +65,10 @@ beforeEach(() => {
 })
 afterEach(() => { wrapper?.unmount(); wrapper = null; delete window.__briefXss })
 
-function mountAsks(asks) {
+function mountAsks(asks, props = {}) {
   store.asks = asks
   store.asksAvailable = true
-  wrapper = mount(PortalAsks, { props: { agentName: 'scout' }, attachTo: document.body })
+  wrapper = mount(PortalAsks, { props: { agentName: 'scout', ...props }, attachTo: document.body })
   return wrapper
 }
 const el = (w, id) => w.find(`[data-testid="${id}"]`)
@@ -86,9 +86,19 @@ describe('briefOf / briefImpactFor — what of a brief is shown', () => {
     expect(briefImpactFor(ask('q', { kind: 'question' }))).toEqual({})
     expect(briefImpactFor(ask('b', { brief: { impact: { approve: { nested: 1 } } } }))).toEqual({})
   })
+  it('an option named like an Object builtin reads as having no impact (A2 round 1)', () => {
+    const impact = briefImpactFor(ask('c', { options: ['constructor', 'toString'], brief: { impact: {} } }))
+    expect(impact.constructor).toBeUndefined()
+    expect(impact.toString).toBeUndefined()
+  })
 })
 
 describe('QueueBrief inside the ask card (mounted)', () => {
+  it('the recommendation names the agent by its display name when the surface has one (A2 round 1)', () => {
+    const w = mountAsks([ask('a1')], { agentLabel: 'Scout Bot' })
+    expect(el(w, 'queue-brief-recommendation').text()).toContain('Scout Bot recommends')
+  })
+
   it('renders in the decided order around the proposal and the options', () => {
     const w = mountAsks([ask('a1')])
     const q = el(w, 'portal-ask-question-a1').element

@@ -410,18 +410,6 @@ export function queueReaskBadges(item, items = []) {
 }
 
 /**
- * trinity-enterprise#611 — the rows of an ask's `proposal`: the exact action a
- * person is asked to approve. The prompt tells agents to put it there "so the
- * operator can verify what they are approving", so every card that offers the
- * decision renders these rows (components/operator/QueueProposal.vue).
- *
- * One row per top-level field, in the order the agent wrote them. Text is shown
- * verbatim; any other value (a number, a boolean, null, a nested object or
- * list) as compact JSON, so nothing is summarised away. Anything that is not a
- * plain object has no rows. Agent-authored: callers render the values as text,
- * never as markup.
- */
-/**
  * trinity-enterprise#610 §3g L6 (E2 seam) — the parts of an ask's agent-authored
  * brief that are shown: `why`, `recommendation`, `if_no_answer`, each a
  * non-empty string, else absent. Nothing to show is `null`, so a card with no
@@ -457,7 +445,9 @@ export function briefImpactFor(item) {
   const impact = item?.brief?.impact
   if (kind !== 'approval' || !impact || typeof impact !== 'object' || Array.isArray(impact)) return {}
   const offered = new Set(optionsOf({ options: item.options }))
-  const out = {}
+  // No prototype: an option literally named `constructor` must read as absent,
+  // not as Object's native function (A2 round 1, /cso nit).
+  const out = Object.create(null)
   for (const [opt, text] of Object.entries(impact)) {
     if (offered.has(opt) && typeof text === 'string' && text.trim()) out[opt] = text
   }
@@ -472,6 +462,18 @@ export function ifNoAnswerLabel(expiresAt) {
   return `If you don't answer by ${when}`
 }
 
+/**
+ * trinity-enterprise#611 — the rows of an ask's `proposal`: the exact action a
+ * person is asked to approve. The prompt tells agents to put it there "so the
+ * operator can verify what they are approving", so every card that offers the
+ * decision renders these rows (components/operator/QueueProposal.vue).
+ *
+ * One row per top-level field, in the order the agent wrote them. Text is shown
+ * verbatim; any other value (a number, a boolean, null, a nested object or
+ * list) as compact JSON, so nothing is summarised away. Anything that is not a
+ * plain object has no rows. Agent-authored: callers render the values as text,
+ * never as markup.
+ */
 export function proposalRows(proposal) {
   if (!proposal || typeof proposal !== 'object' || Array.isArray(proposal)) return []
   return Object.entries(proposal).map(([key, value]) => ({

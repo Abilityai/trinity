@@ -3592,9 +3592,13 @@ to localStorage in the clear.
   the note field (not on a touch screen, where it would pop the keyboard), so the Enter that
   follows sends instead of unselecting the option — still pick, then Send (#2375). A question
   the agent offered options for shows them as quick picks that fill the answer box and never
-  send (an option over the answer's 500-character limit is left out, never cut). "Unconfirmed"
-  is never shown in the Workspace — it is the platform's own bookkeeping; every other sync
-  state still is (`workspaceAskBadge`). After Send, focus lands on the answered card.
+  send (an option over the answer's 500-character limit is left out, never cut); the pick
+  that filled the answer shows as chosen, and on a touch screen it does not pop the keyboard
+  either. "Unconfirmed" is never shown in the Workspace — it is the platform's own
+  bookkeeping; every other sync state still is (`workspaceAskBadge`). After Send, focus lands
+  on the answered card; a second Enter while the answer is on its way sends nothing. In the
+  Inbox pane the card's header carries the priority and the expiry (the row's badges), where
+  the person decides — its context below the answer row does not repeat them.
 - **Open canvas (§3g C10)**: the pane offers "Open canvas" — on a chat or an ask — only when
   the item's agent has a canvas this viewer can see; it opens the rail on that canvas.
 - **Long tabs page (§3g SM / C4)**: every tab renders 50 rows, states "Showing 50 of 212", and

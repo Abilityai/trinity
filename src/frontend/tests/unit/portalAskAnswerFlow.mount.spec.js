@@ -144,7 +144,10 @@ describe('B2 — a pick moves to the note; Enter sends', () => {
     expect(document.activeElement).not.toBe(tid(w, 'portal-ask-note-ap1').element)
   })
 
-  it('Enter in the note sends the picked option', async () => {
+  // jsdom has no implicit submission (Enter in a field → the form's submit), so
+  // this drives the form's submit — what that Enter fires in a browser. The
+  // key itself is proven in the live walk (A2 round 1, Codex C6).
+  it("the note's form submit (what Enter fires there) sends the picked option", async () => {
     const answer = vi.spyOn(store, 'answerAsk').mockResolvedValue({})
     const w = mountAsks([ask('ap1')])
     await tid(w, 'portal-ask-option-ap1').trigger('click')
@@ -168,5 +171,83 @@ describe('after Send — focus lands on the answered card', () => {
     await nextTick()
     expect(tid(w, 'portal-ask-send-ap1').exists()).toBe(false)
     expect(document.activeElement).toBe(tid(w, 'portal-ask-ap1').element)
+  })
+})
+
+describe('A2 round 1 — the card while it is answered', () => {
+  it('a quick pick does not pop the keyboard on a coarse pointer (like an approval pick)', async () => {
+    window.matchMedia = (q) => ({ matches: q.includes('coarse'), media: q, addEventListener() {}, removeEventListener() {} })
+    const w = mountAsks([ask('q1', { kind: 'question', options: ['Monday', 'Friday'] })])
+    const chip = w.findAll('[data-testid="portal-ask-pick-q1"]')[0]
+    chip.element.focus()
+    await chip.trigger('click')
+    await nextTick()
+    expect(tid(w, 'portal-ask-input-q1').element.value).toBe('Monday')
+    expect(document.activeElement).not.toBe(tid(w, 'portal-ask-input-q1').element)
+  })
+
+  it('the quick pick that filled the answer shows as chosen, and stops when the answer is edited', async () => {
+    const w = mountAsks([ask('q1', { kind: 'question', options: ['Monday', 'Friday'] })])
+    const picks = () => w.findAll('[data-testid="portal-ask-pick-q1"]')
+    expect(picks().map((b) => b.attributes('aria-pressed'))).toEqual(['false', 'false'])
+    await picks()[1].trigger('click')
+    expect(picks().map((b) => b.attributes('aria-pressed'))).toEqual(['false', 'true'])
+    expect(picks()[1].attributes('class')).not.toEqual(picks()[0].attributes('class'))
+    await tid(w, 'portal-ask-input-q1').setValue('Friday, after 3pm')
+    expect(picks().map((b) => b.attributes('aria-pressed'))).toEqual(['false', 'false'])
+  })
+
+  it('chips, fields, Send and the answered card carry the design-system focus ring, not the browser outline', () => {
+    const w = mountAsks([ask('ap1'), ask('q1', { kind: 'question', options: ['Monday'] })])
+    const ring = 'focus-visible:ring-2'
+    for (const id of ['portal-ask-option-ap1', 'portal-ask-send-ap1', 'portal-ask-pick-q1', 'portal-ask-ap1']) {
+      expect(tid(w, id).classes(), id).toEqual(expect.arrayContaining(['focus:outline-none', ring]))
+    }
+    for (const id of ['portal-ask-note-ap1', 'portal-ask-input-q1']) {
+      expect(tid(w, id).classes(), id).toEqual(expect.arrayContaining(['focus:outline-none', 'focus:border-action-primary-500']))
+    }
+  })
+
+  it('an idle chip and a field keep a 3:1 outline on the dark amber card (gray-500, never gray-600)', () => {
+    const w = mountAsks([ask('ap1'), ask('q1', { kind: 'question', options: ['Monday'] })])
+    for (const id of ['portal-ask-option-ap1', 'portal-ask-pick-q1', 'portal-ask-note-ap1', 'portal-ask-input-q1']) {
+      const cls = tid(w, id).classes()
+      expect(cls, id).toContain('dark:border-gray-500')
+      expect(cls, id).not.toContain('dark:border-gray-600')
+    }
+  })
+
+  it('a second submit while the first is in flight sends nothing (Enter is now the main path)', async () => {
+    let release
+    const answer = vi.spyOn(store, 'answerAsk').mockImplementation(() => new Promise((r) => { release = r }))
+    const w = mountAsks([ask('ap1')])
+    await tid(w, 'portal-ask-option-ap1').trigger('click')
+    const form = tid(w, 'portal-ask-note-ap1').element.form
+    form.dispatchEvent(new Event('submit'))
+    form.dispatchEvent(new Event('submit'))
+    await flushPromises()
+    expect(answer).toHaveBeenCalledTimes(1)
+    release({})
+    await flushPromises()
+  })
+
+  it('with showUrgency the card header carries the priority and the expiry (the Inbox pane)', () => {
+    const soon = new Date(Date.now() + 2 * 60 * 60 * 1000 + 60_000).toISOString()
+    const a = ask('ap1', { priority: 'critical', expires_at: soon })
+    const w = mountAsks([a], { agentName: null, askIds: ['ap1'], showUrgency: true })
+    expect(tid(w, 'portal-ask-priority-ap1').text()).toBe('Critical')
+    expect(tid(w, 'portal-ask-expiry-ap1').text()).toBe('Expires in 2h')
+    w.unmount()
+    const plain = mountAsks([a], { agentName: null, askIds: ['ap1'] })
+    expect(tid(plain, 'portal-ask-priority-ap1').exists()).toBe(false)
+    expect(tid(plain, 'portal-ask-expiry-ap1').exists()).toBe(false)
+  })
+
+  it("a stacked option reads label first: the label at the 14px label size, the consequence in secondary ink", () => {
+    const w = mountAsks([ask('ap1', { brief: { impact: { Yes: 'Pays $4,120 today' } } })])
+    const opt = tid(w, 'portal-ask-option-ap1')
+    const [label, hint] = opt.findAll('span')
+    expect(label.classes()).toEqual(expect.arrayContaining(['text-sm']))
+    expect(hint.classes()).toEqual(expect.arrayContaining(['text-[12.5px]', 'text-gray-600', 'dark:text-gray-300']))
   })
 })

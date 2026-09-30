@@ -149,6 +149,8 @@
           :ask-ids="[item.id]"
           testid-prefix="inbox-ask"
           :thread-link="false"
+          show-urgency
+          :agent-label="agentLabel"
           @open-thread="(t) => $emit('open-thread', t)"
         />
         <PortalAskContext

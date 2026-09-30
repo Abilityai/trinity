@@ -80,8 +80,12 @@ Sign-in / reload on bare /workspace
                                first, with its count; the choice is ?from=<agent> (never
                                ?agent=, a stage key) → filterByAgent before stableRows; a new
                                ?from= is a new visit; it holds while the agent has asks or its
-                               ended ask is selected (activeAgentFilter), then leaves the URL;
-                               a tab change drops it
+                               ended ask is selected (activeAgentFilter), then leaves the URL
+                               (its strip stays while it holds, even at zero asks); a tab
+                               change drops it; choosing another agent closes an open ask
+                               that is not theirs; counts are badgeVariant 'neutral' with a
+                               badgeLabel ("Relay Bot, 2 asks"); the list head names the
+                               filter ("3 asks from Relay Bot") since its chip can sit in More
     stableRows(fresh, visit)   rows keep their place for one TAB VISIT (§3g S1): a row that leaves
                                stays as a ghost (chat drawn read, ask drawn ended); a poll never
                                re-sorts; a new row goes in before its nearest fresh neighbour; a
@@ -111,7 +115,10 @@ Sign-in / reload on bare /workspace
               pointer) so Enter sends; a question's options are quick picks that FILL the
               answer (questionQuickPicks, ≤ 500 chars) and never send; the badge is
               workspaceAskBadge (queueSyncBadge minus "Unconfirmed"); after Send focus
-              lands on the answered card (tabindex=-1); order inside the card: body
+              lands on the answered card (tabindex=-1, focus ring); a submit while one is
+              in flight is dropped; the pane passes show-urgency (priority + expiry
+              badges in the card header, portalAskUrgency's row rule, 30 s clock) and
+              agent-label ("<display name> recommends"); order inside the card: body
               (PortalMarkdown) → QueueProposal → QueueBrief lead (Why now → "{agent}
               recommends") → options (stacked with an impact hint when the brief has one)
               → answer row → QueueBrief fallback ("If you don't answer by …") — the brief
@@ -119,12 +126,17 @@ Sign-in / reload on bare /workspace
             → <PortalAskContext :ask> BELOW the card (§3g L7, E1; the card's thread link
               is off in the pane — "Open the conversation" lives here): store.fetchAskContext
               (RETHROWS) → GET /asks/{id}/context; skeleton → LoadFailed dense (retry) in
-              its slot, the controls above never depend on it; meta line askContextMeta
-              ("Asked 8m ago during a scheduled run · 09:00 · expires in 5h · High
-              priority"); Where it came from (a verified thread: title + the 3 messages
-              before the ask, Open the conversation → ?anchor=m:<last>; else "Filed in your
-              Main chat" → the chat) → Delivered in that chat (verified only,
-              fetchSessionDeliverablesStrict → ?anchor=d:<id>) → Your recent answers
+              its slot, the controls above never depend on it (a failed read still offers
+              "Open the conversation" → the ask's own chat); the skeleton is the smallest
+              loaded shape (4 lines, chrome fill); meta line askContextMeta ("Asked 8m ago
+              during a scheduled run · started 09:00" — the clock for a schedule/manual run
+              only; expiry and priority are on the card); Where it came from (a verified
+              thread: its title — "Main" for Main — + "Filed in your Main chat" when the
+              ask was filed elsewhere, the 3 messages before the ask, Open “<chat>” →
+              ?anchor=m:<last>; else "Filed in your Main chat" → the chat) → Delivered in
+              that chat (verified only, fetchSessionDeliverablesStrict → ?anchor=d:<id>,
+              read BEFORE the context paints; a failed read is LoadFailed dense with its own
+              retry) → Your recent answers
       chat  → store.fetchHistory(agent, id, {limit: 50})  render from first_unread_message_id
               store.fetchSessionDeliverablesStrict → ReportRenderer (+ ReportSummary fallback)
                                                a failed read is LoadFailed, never "no deliverables"

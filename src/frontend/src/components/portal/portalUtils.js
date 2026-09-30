@@ -1684,11 +1684,12 @@ export function chatAsksLabel(n) {
 // home, round 5) is a PLATFORM-door rail tab — a client's rail never renders
 // it, so the link opened nothing for them. A client goes to the Inbox's Action
 // tab narrowed to this agent (`?from=`, §3g C2), which lists exactly those asks.
+// One sentence for both doors (reconcile row 26, A2 round 1): only the link differs.
 export function chatAsksElsewhere({ n = 0, agentName = null, isPlatform = false } = {}) {
   if (!n) return null
   if (isPlatform) {
     return {
-      text: `${n} more ${n === 1 ? 'ask is' : 'asks are'} waiting in other chats`,
+      text: `${n} more ${n === 1 ? 'ask' : 'asks'} from this agent`,
       action: 'Open in Work',
       to: null,
     }

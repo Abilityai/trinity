@@ -492,10 +492,10 @@
         <router-link
           v-if="asksElsewhere.to"
           :to="asksElsewhere.to"
-          class="text-action-primary-600 dark:text-action-primary-400 hover:underline"
+          :class="ASKS_ELSEWHERE_LINK"
           data-testid="portal-chat-asks-open-inbox"
         >{{ asksElsewhere.action }}</router-link>
-        <button v-else type="button" class="text-action-primary-600 dark:text-action-primary-400 hover:underline" @click="emit('open-work')">{{ asksElsewhere.action }}</button>
+        <button v-else type="button" :class="ASKS_ELSEWHERE_LINK" @click="emit('open-work')">{{ asksElsewhere.action }}</button>
       </p>
     </div>
 
@@ -1062,6 +1062,8 @@ watch(() => chatAsks.value.here.filter((a) => a.status === 'pending').map((a) =>
 }, { immediate: true })
 watch(currentSessionId, () => { seenPendingAsks.value = new Set(); asksOpen.value = false })
 const chatAskIds = computed(() => pinnedAskIds(chatAsks.value.here, seenPendingAsks.value))
+// A2 round 1: a 44px target on a phone and the design-system ring (it was 76×16).
+const ASKS_ELSEWHERE_LINK = 'inline-flex items-center max-sm:min-h-11 text-action-primary-600 dark:text-action-primary-400 hover:underline rounded focus:outline-none focus-visible:ring-2 focus-visible:ring-action-primary-500/40 dark:focus-visible:ring-action-primary-400/40'
 const asksElsewhere = computed(() => chatAsksElsewhere({
   n: chatAsks.value.elsewhere.length, agentName: props.agent?.name, isPlatform: store.isPlatformSession === true,
 }))

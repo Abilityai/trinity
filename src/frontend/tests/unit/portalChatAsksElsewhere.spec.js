@@ -33,9 +33,9 @@ describe('chatAsksElsewhere', () => {
     })
   })
 
-  it('a platform reader keeps Work', () => {
+  it('a platform reader keeps Work — with the same words for the same count (reconcile row 26)', () => {
     expect(chatAsksElsewhere({ n: 1, agentName: 'scout', isPlatform: true })).toEqual({
-      text: '1 more ask is waiting in other chats',
+      text: '1 more ask from this agent',
       action: 'Open in Work',
       to: null,
     })
