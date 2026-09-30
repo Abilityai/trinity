@@ -345,6 +345,8 @@ agent_loops = Table(
     # already persisted here or derivable from `agent_loop_runs`.
     Column("next_run_at", Text),        # ISO-Z; NULL = not waiting on a delay
     Column("stop_requested_at", Text),  # ISO-Z; replaces the in-memory should_stop
+    # #2973 — the starter's inherited chain depth, stamped on every iteration row.
+    Column("chain_depth", Integer),
 )
 
 agent_loop_runs = Table(

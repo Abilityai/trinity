@@ -783,6 +783,8 @@ runs the same access gate, so ownership/sharing is never bypassed.
   answer `{"status": "inter_agent_depth_exceeded", "agent", "depth", "max_depth",
   "retryable": false, "message"}` so the calling model reads "stop, do not retry or re-route".
   A 403 without that code (access denial, SELF-EXEC-001) still throws as before.
+  Since #2973 `run_agent_loop`, `trigger_agent_schedule` and `emit_event` return the same
+  refusal object (`client.ts::depthRefusalFromError`).
 - **FR-6 — Surfacing**: `mcp_exposed` is exposed on `GET /api/agents` / MCP `list_agents`. A
   Settings-tab toggle ("Expose via MCP") shows the computed tool name and up-to-poll-interval
   latency copy.

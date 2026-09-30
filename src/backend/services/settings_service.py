@@ -89,6 +89,7 @@ OPS_SETTINGS_DESCRIPTIONS = {
     "metrics_retention_days": "Days to retain recorded metric points (default: 365, bounds 0-3650; 0 disables the sweep and keeps them forever). Bootstrap via METRICS_RETENTION_DAYS until a value is saved here (trinity-enterprise#478)",
     "metrics_daily_point_cap": "Maximum metric points one agent may record per UTC day (default: 100000, bounds 0-10000000; 0 is unlimited). Bootstrap via METRICS_DAILY_POINT_CAP until a value is saved here (trinity-enterprise#478)",
     "inter_agent_max_chain_depth": "Maximum agent-to-agent hops in one call chain (default: 8, bounds 1-32). A hop past it is refused with 403 inter_agent_depth_exceeded before any model work. Bootstrap via INTER_AGENT_MAX_CHAIN_DEPTH until a value is saved here (#2806)",
+    "event_dispatch_max_fires_per_hour": "Maximum event-subscription dispatches from one source agent to one subscriber agent per hour, across all subscriptions between them (default: 120, bounds 1-10000). Dispatches past it are skipped and the subscriber gets one alert per window (#2973)",
 }
 
 

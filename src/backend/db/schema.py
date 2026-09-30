@@ -336,7 +336,8 @@ TABLES = {
             started_at TEXT,
             completed_at TEXT,
             next_run_at TEXT,
-            stop_requested_at TEXT
+            stop_requested_at TEXT,
+            chain_depth INTEGER
         )
     """,
 

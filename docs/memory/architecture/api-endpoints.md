@@ -414,7 +414,7 @@ All four require `X-Internal-Secret` **AND** `MCP_INLINE_AUTH_ENABLED`; with the
 ### Sequential Agent Loops (#740)
 | Method | Path | Auth | Description |
 |--------|------|------|-------------|
-| POST | `/api/agents/{name}/loops` | JWT/MCP | Start loop; 202 with `{loop_id, status, agent_name, max_runs}`. Body: `message` (template), `max_runs` (1–100, required), `stop_signal`, `delay_seconds`, `timeout_per_run`, `max_duration_seconds`, `max_cost_usd`, `no_progress_threshold` (0 disables; default 3; `1` → 422), `on_failure` (`abort` default \| `continue`, #1167), `max_consecutive_failures` (continue-mode cutoff, default 3), `model`, `allowed_tools` |
+| POST | `/api/agents/{name}/loops` | JWT/MCP | Start loop; 202 with `{loop_id, status, agent_name, max_runs}`. An agent-principal start past `inter_agent_max_chain_depth` → 403 `inter_agent_depth_exceeded` (#2973). Body: `message` (template), `max_runs` (1–100, required), `stop_signal`, `delay_seconds`, `timeout_per_run`, `max_duration_seconds`, `max_cost_usd`, `no_progress_threshold` (0 disables; default 3; `1` → 422), `on_failure` (`abort` default \| `continue`, #1167), `max_consecutive_failures` (continue-mode cutoff, default 3), `model`, `allowed_tools` |
 | GET | `/api/agents/{name}/loops` | JWT/MCP | List loops (`?status=`, `?limit=` 1–200 default 50) |
 | GET | `/api/loops/{loop_id}` | JWT/MCP | Status + per-run summaries + last full response; 404 unknown, 403 if caller neither initiator nor agent-accessor |
 | POST | `/api/loops/{loop_id}/stop` | JWT/MCP | Graceful stop → `{status: "stopping" \| "already_done"}` |
