@@ -307,7 +307,7 @@
                 :ask-ids="[item.ask.id]"
                 :current-session-id="currentSessionId"
                 :thread-link="false"
-                testid-prefix="portal-chat-ask"
+                testid-prefix="portal-tile-ask"
               />
             </div>
           </div>

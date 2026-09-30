@@ -198,6 +198,9 @@ describe('the chat thread (mounted)', () => {
     expect(card).toHaveLength(1)
     expect(card[0].props('askIds')).toEqual(['here'])
     expect(card[0].props('threadLink')).toBe(false)
+    // Its own testid namespace: `portal-chat-ask` would make the card's root
+    // `portal-chat-asks`, the retired pinned box's address.
+    expect(card[0].props('testidPrefix')).toBe('portal-tile-ask')
   })
 
   it('an ask that had already ended is one muted history row, not a card', async () => {
