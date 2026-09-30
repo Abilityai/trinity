@@ -14,7 +14,7 @@
  * a finding as the Workspace's own sentence for its code, and a NAMED line
  * when the objectives could not be read — never an empty block.
  */
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { mount, flushPromises } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 
@@ -45,6 +45,7 @@ vi.mock('@/api', () => ({ default: { get: vi.fn(), post: vi.fn(), put: vi.fn(), 
 import axios from 'axios'
 import { useClientPortalStore } from '@/stores/clientPortal'
 import PortalAgentRole from '@/components/portal/PortalAgentRole.vue'
+import PortalAgentDetails from '@/components/portal/PortalAgentDetails.vue'
 
 const AGENT = 'sales-companion'
 const URL = `/api/enterprise/client-portal/agents/${AGENT}/role`
@@ -306,5 +307,44 @@ describe('PortalAgentRole (mounted)', () => {
     await flushPromises()
     expect(w.text()).toContain("Only the agent's owner can change its readiness")
     expect(store.roleFlipping).toBe(false)
+  })
+})
+
+/**
+ * ent#527 placement, decided at the ent#676 eyeball: in the Info tab the Role
+ * block reads directly after the agent's description and BEFORE "Suggested for
+ * you" — identity, then purpose and state, then actions. Mounted through the
+ * real panel, because where a block sits is a fact about the rendered DOM.
+ */
+describe('PortalAgentDetails — where the Role block sits (mounted)', () => {
+  // Every other read the panel makes fails here: each block has its own failed
+  // state, and only the order of the two sections is under test.
+  async function mountPanel(rolePayload) {
+    axios.get.mockImplementation((url) => (
+      url === URL ? Promise.resolve({ data: rolePayload }) : Promise.reject(new Error('not under test'))
+    ))
+    const w = mount(PortalAgentDetails, { props: { agentName: AGENT }, attachTo: document.body })
+    await flushPromises()
+    return w
+  }
+  // `clearAllMocks` keeps implementations; drop this one so it cannot outlive the block.
+  afterEach(() => { axios.get.mockReset() })
+
+  it('a companion with a role shows the Role block before the suggestions', async () => {
+    const w = await mountPanel(card())
+    const role = w.get('[data-testid="portal-agent-role"]').element
+    const suggestions = w.get('[data-testid="portal-suggestions"]').element
+    // `role` comes first ⇔ `suggestions` FOLLOWS it in document order.
+    expect(role.compareDocumentPosition(suggestions) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    // …and it still sits above the chats, as it always did.
+    const headings = w.findAll('h2').map((h) => h.text())
+    expect(headings.indexOf('Role')).toBeLessThan(headings.indexOf('Suggested for you'))
+    expect(headings.indexOf('Suggested for you')).toBeLessThan(headings.indexOf('Your chats'))
+  })
+
+  it('an agent with no role has no Role block, and the panel starts with the suggestions', async () => {
+    const w = await mountPanel({ agent_name: AGENT, role: null })
+    expect(w.find('[data-testid="portal-agent-role"]').exists()).toBe(false)
+    expect(w.findAll('h2').map((h) => h.text())[0]).toBe('Suggested for you')
   })
 })
