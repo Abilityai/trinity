@@ -1,17 +1,18 @@
-# Agent-server dependencies, exact-pinned (#3106).
+# What the agent server needs, as FLOORS — used by startup.sh's per-boot
+# repair (#3106).
 #
-# ONE list, used twice: by the image build (Dockerfile) and by startup.sh's
-# per-boot repair, which reinstalls these exact versions if a template changed
-# them. It used to run `pip install --upgrade` unpinned on every boot, so each
-# container start took whatever PyPI had published last — FastAPI 0.142 then
-# took down every OTEL-enabled agent. Bump a pin deliberately, with a rebuild,
-# the way CLAUDE_CODE_VERSION is bumped (#3012).
-fastapi==0.141.1
-starlette==1.7.0
-uvicorn==0.54.0
-httpx==0.28.1
-pydantic==2.13.5
-python-multipart==0.0.32
-pyyaml==6.0.3
-rich==15.0.0
-cryptography==50.0.1
+# The agent server and template code share ~/.local. The repair installs a
+# package that is missing or older than its floor, and leaves a newer one
+# alone, so a template's own dependency upgrades survive a restart. It never
+# runs `--upgrade`: the old unpinned per-boot upgrade took PyPI's latest on
+# every start, and FastAPI 0.142 then stopped every OTEL-enabled agent's
+# server. A newer FastAPI is safe now (agent_server/fastapi_options.py).
+#
+# Floors must stay at or below the exact pins in agent-image-requirements.txt,
+# so a fresh container's repair is a no-op (tested).
+fastapi>=0.141.1
+uvicorn>=0.54.0
+httpx>=0.28.1
+pydantic>=2.13.5
+python-multipart>=0.0.32
+pyyaml>=6.0.3

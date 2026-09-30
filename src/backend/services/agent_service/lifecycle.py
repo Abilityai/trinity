@@ -1110,6 +1110,14 @@ async def recreate_container_with_updated_config(
     # recreate whenever the running token is missing or stale.
     env_vars['TRINITY_AGENT_AUTH_TOKEN'] = derive_agent_token(agent_name)
 
+    # #3106: this path replays the OLD Config.Env, so an agent created before
+    # OTEL_SDK_DISABLED was injected at create would never gain it on restart,
+    # drift self-heal or a rebuild pass. Same rule as create: where Claude
+    # Code's OTEL env is present, opt FastAPI's auto-telemetry out. setdefault,
+    # so a value an operator set on purpose is kept.
+    if 'OTEL_EXPORTER_OTLP_PROTOCOL' in env_vars:
+        env_vars.setdefault('OTEL_SDK_DISABLED', 'true')
+
     # #1081 G2 / #307 / #1083: re-ensure the agent→backend callback URL on
     # recreate. crud.py sets TRINITY_BACKEND_URL only at FRESH create (~#595);
     # recreate seeds env from the OLD container and would otherwise DROP it for a

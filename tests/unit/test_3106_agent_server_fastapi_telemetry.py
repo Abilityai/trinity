@@ -73,36 +73,70 @@ def test_main_builds_the_app_with_the_options():
 
 
 # --------------------------------------------------------------------- (b)
+#
+# Two files, two jobs. The IMAGE build installs exact pins (reproducible
+# rebuilds, the #3012 lesson). The BOOT repair installs floors for the server's
+# own packages only: it installs what is missing or too old and never
+# downgrades a newer version a template brought for its own code — the
+# agent server and template code share ~/.local.
 
-_PIN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*==\d+(\.\d+)*$")
+_IMAGE = _BASE / "agent-image-requirements.txt"
+_PIN = re.compile(r"^([A-Za-z0-9][A-Za-z0-9._-]*)==(\d+(?:\.\d+)*)$")
+_FLOOR = re.compile(r"^([A-Za-z0-9][A-Za-z0-9._-]*)>=(\d+(?:\.\d+)*)$")
+_SERVER_PACKAGES = {"fastapi", "uvicorn", "httpx", "pydantic", "python-multipart", "pyyaml"}
 
 
-def _requirements() -> list[str]:
-    lines = [l.split("#", 1)[0].strip() for l in _REQS.read_text().splitlines()]
+def _lines(path: Path) -> list[str]:
+    lines = [l.split("#", 1)[0].strip() for l in path.read_text().splitlines()]
     return [l for l in lines if l]
 
 
-def test_every_agent_server_dependency_is_exact_pinned():
-    reqs = _requirements()
-    names = {r.split("==")[0].lower() for r in reqs}
-    assert {"fastapi", "starlette", "uvicorn", "httpx", "pydantic",
-            "python-multipart", "pyyaml"} <= names
-    for r in reqs:
-        assert _PIN.match(r), f"{r!r} is not an exact pin"
+def _pins() -> dict[str, str]:
+    out = {}
+    for line in _lines(_IMAGE):
+        m = _PIN.match(line)
+        assert m, f"{line!r} in {_IMAGE.name} is not an exact pin"
+        out[m.group(1).lower()] = m.group(2)
+    return out
+
+
+def _floors() -> dict[str, str]:
+    out = {}
+    for line in _lines(_REQS):
+        m = _FLOOR.match(line)
+        assert m, f"{line!r} in {_REQS.name} must be a plain floor (name>=x.y.z)"
+        out[m.group(1).lower()] = m.group(2)
+    return out
+
+
+def _v(version: str) -> tuple[int, ...]:
+    return tuple(int(p) for p in version.split("."))
+
+
+def test_the_image_pins_every_package_exactly():
+    assert _SERVER_PACKAGES | {"starlette", "rich", "cryptography"} <= set(_pins())
+
+
+def test_the_boot_repair_covers_exactly_the_server_packages_as_floors():
+    assert set(_floors()) == _SERVER_PACKAGES
+
+
+def test_every_floor_is_satisfied_by_the_image_pin():
+    """A fresh container must boot with the boot repair as a no-op."""
+    pins = _pins()
+    for name, floor in _floors().items():
+        assert _v(pins[name]) >= _v(floor), f"{name}: image pins {pins[name]} below floor {floor}"
 
 
 def test_fastapi_stays_below_the_auto_telemetry_release():
-    """(a) already makes 0.142+ safe; this keeps the pin on the line the
+    """(a) already makes 0.142+ safe; this keeps the image on the line the
     agent server was validated against until someone bumps it on purpose."""
-    fastapi = next(r for r in _requirements() if r.lower().startswith("fastapi=="))
-    major, minor = (int(p) for p in fastapi.split("==")[1].split(".")[:2])
-    assert (major, minor) < (0, 142)
+    assert _v(_pins()["fastapi"])[:2] < (0, 142)
 
 
-def test_the_image_installs_from_the_pin_file():
+def test_the_image_installs_from_the_exact_pins():
     text = (_BASE / "Dockerfile").read_text()
-    assert "agent-server-requirements.txt" in text
-    assert re.search(r"pip install --user[^\n]*-r /opt/trinity/agent-server-requirements\.txt", text)
+    assert re.search(r"pip install --user[^\n]*-r /opt/trinity/agent-image-requirements\.txt", text)
 
 
 def _pip_install_commands(text: str) -> list[str]:
@@ -110,12 +144,13 @@ def _pip_install_commands(text: str) -> list[str]:
     return [l.strip() for l in joined.splitlines() if "pip install" in l and not l.strip().startswith("#")]
 
 
-def test_the_boot_repair_is_pinned_and_never_upgrades_unpinned():
+def test_the_boot_repair_uses_floors_and_never_upgrades():
     cmds = _pip_install_commands((_BASE / "startup.sh").read_text())
     assert cmds, "startup.sh should still repair the agent-server dependencies"
     for cmd in cmds:
         assert "--upgrade" not in cmd, f"unpinned upgrade at boot: {cmd}"
         assert "-r /opt/trinity/agent-server-requirements.txt" in cmd, cmd
+        assert "agent-image-requirements" not in cmd, f"exact pins at boot would downgrade: {cmd}"
 
 
 # --------------------------------------------------------------------- (c)
@@ -141,3 +176,73 @@ def test_every_otel_injection_also_disables_the_sdk_auto_configuration():
     for path, fn, body in found:
         assert re.search(r"\[['\"]OTEL_SDK_DISABLED['\"]\]\s*=\s*['\"]true['\"]", body), (
             f"{path}::{fn} injects the OTEL env without OTEL_SDK_DISABLED=true (#3106)")
+
+
+# ------------------------------------------------- (c) on the recreate path
+#
+# A recreate replays the OLD container's Config.Env, so an agent created before
+# this fix never gained the flag on restart / drift self-heal / rebuild pass —
+# the window where the backend is updated but the base image is not yet
+# rebuilt. Driven through the real lifecycle seam (the #1854 harness shape).
+
+def _recreate_env(monkeypatch, old_env):
+    import asyncio
+    from types import SimpleNamespace
+
+    from services.agent_service import lifecycle
+
+    captured = {}
+
+    async def _fake_provision(agent_name, **kw):
+        captured.update(kw)
+        return SimpleNamespace(name=f"agent-{agent_name}")
+
+    old = SimpleNamespace(
+        attrs={
+            "Config": {"Env": list(old_env), "Image": "trinity-agent-base:latest",
+                       "Labels": {"trinity.ssh-port": "2222"}},
+            "HostConfig": {"RestartPolicy": {}},
+            "Mounts": [],
+        },
+        status="running",
+    )
+    monkeypatch.setattr(lifecycle, "_provision_folders_and_run_agent_container", _fake_provision)
+    monkeypatch.setattr(lifecycle, "validate_base_image", lambda image: None)
+    monkeypatch.setattr(lifecycle, "get_agent_full_capabilities", lambda: False)
+    monkeypatch.setattr(lifecycle, "get_agent_default_resources", lambda: {"cpu": "2", "memory": "4g"})
+
+    async def _noop(*a, **kw):
+        return None
+    monkeypatch.setattr(lifecycle, "container_stop", _noop)
+    monkeypatch.setattr(lifecycle, "container_remove", _noop)
+
+    async def _img(_i):
+        return SimpleNamespace(labels={})
+    monkeypatch.setattr(lifecycle, "image_get", _img)
+    for name, val in (
+        ("get_agent_subscription_id", None), ("get_resource_limits", None),
+        ("get_guardrails_config", None), ("get_agent_github_pat", None),
+        ("get_git_config", None), ("get_public_mount_path", "/home/developer/public"),
+    ):
+        monkeypatch.setattr(lifecycle.db, name, (lambda v: (lambda *a, **k: v))(val))
+
+    asyncio.run(lifecycle.recreate_container_with_updated_config("scout", old, "system"))
+    return captured["env_vars"]
+
+
+def test_a_recreated_otel_agent_gains_the_flag(monkeypatch):
+    env = _recreate_env(monkeypatch, ["AGENT_NAME=scout", "OTEL_EXPORTER_OTLP_PROTOCOL=grpc",
+                                      "OTEL_METRICS_EXPORTER=otlp"])
+    assert env["OTEL_SDK_DISABLED"] == "true"
+    assert env["OTEL_EXPORTER_OTLP_PROTOCOL"] == "grpc"   # Claude Code's metrics untouched
+
+
+def test_a_recreated_agent_without_otel_is_left_alone(monkeypatch):
+    env = _recreate_env(monkeypatch, ["AGENT_NAME=scout"])
+    assert "OTEL_SDK_DISABLED" not in env
+
+
+def test_an_explicit_operator_value_is_kept(monkeypatch):
+    env = _recreate_env(monkeypatch, ["AGENT_NAME=scout", "OTEL_EXPORTER_OTLP_PROTOCOL=grpc",
+                                      "OTEL_SDK_DISABLED=false"])
+    assert env["OTEL_SDK_DISABLED"] == "false"
