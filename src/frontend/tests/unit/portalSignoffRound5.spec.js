@@ -40,7 +40,7 @@ import PortalAsks from '@/components/portal/PortalAsks.vue'
 import PortalSuggestions from '@/components/portal/PortalSuggestions.vue'
 import OverflowTabs from '@/components/OverflowTabs.vue'
 import { infoSignalFrom } from '@/components/portal/portalRail'
-import { pinnedAskIds, chatAsksLabel } from '@/components/portal/portalUtils'
+import { askTileMode } from '@/components/portal/portalChatAsks'
 
 const PORTAL = join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'src', 'components', 'portal')
 const src = (rel) => readFileSync(join(PORTAL, rel), 'utf8')
@@ -54,23 +54,21 @@ const ask = (id, over = {}) => ({
 
 beforeEach(() => { setActivePinia(createPinia()); axios.get.mockReset() })
 
-describe('the chat pins its asks behind one closed row', () => {
-  it('pinnedAskIds: pending asks, plus any seen pending during this visit', () => {
-    const here = [ask('p'), ask('done', { status: 'answered' }), ask('old', { status: 'expired' })]
-    expect(pinnedAskIds(here, new Set())).toEqual(['p'])
-    expect(pinnedAskIds(here, new Set(['done']))).toEqual(['p', 'done'])
+// The 09-30 ruling (amended) replaced round 5's closed "N asks waiting on you"
+// row with a tile per chat-turn ask inside the thread. Round 5's "an ask you just
+// answered stays drawn, ended, until you leave the chat" survives as the tile's
+// card/row choice.
+describe("the chat's asks are thread rows, not a row above the composer", () => {
+  it('askTileMode: a waiting ask is a card; so is one seen waiting during this visit', () => {
+    expect(askTileMode(ask('p'), new Set())).toBe('card')
+    expect(askTileMode(ask('done', { status: 'answered' }), new Set(['done']))).toBe('card')
+    expect(askTileMode(ask('old', { status: 'expired' }), new Set())).toBe('row')
   })
-  it('the row says how many are waiting', () => {
-    expect(chatAsksLabel(1)).toBe('1 ask waiting on you')
-    expect(chatAsksLabel(3)).toBe('3 asks waiting on you')
-    expect(chatAsksLabel(0)).toBe('No asks waiting on you')
-  })
-  it('the row is a toggle that starts closed and gates the cards', () => {
+  it('there is no disclosure row and no toggle above the composer', () => {
     const conv = src('PortalConversation.vue')
-    expect(conv).toMatch(/const asksOpen = ref\(false\)/)
-    expect(conv).toMatch(/<details :open="asksOpen" @toggle="asksOpen = \$event\.target\.open">/)
-    expect(conv).toMatch(/<summary[^>]*data-testid="portal-chat-asks-toggle"/)
-    expect(conv).toMatch(/v-if="asksOpen"[^>]*>\s*<PortalAsks/)
+    expect(conv).not.toMatch(/asksOpen/)
+    expect(conv).not.toMatch(/data-testid="portal-chat-asks-toggle"/)
+    expect(conv).not.toMatch(/asks waiting on you/)
   })
 })
 

@@ -10,8 +10,11 @@
  *     absolute `sr-only` kind escaped it and stretched the PAGE to the list's
  *     full height: the whole shell scrolled away under a blank tail.
  *  4. A chat pinned EVERY ask its agent had above the composer, uncapped —
- *     seven cards crushed the conversation to nothing. It pins this chat's
- *     asks (Main also takes the unattached), capped, and names the rest.
+ *     seven cards crushed the conversation to nothing. Round 4 pinned only this
+ *     chat's asks, capped; the 09-30 ruling (amended) goes further: nothing sits
+ *     above the composer, a chat draws only the asks its OWN turns raised, as
+ *     rows of its thread (portalChatAskTiles.spec.js), and Main no longer takes
+ *     an unattached or background ask — the Inbox is their home.
  *
  * @source-text-pin: 3 and 4's height cap are LAYOUT (a containing block, a
  * max-height scroll box) — jsdom computes no layout, so a mount cannot see them;
@@ -45,7 +48,7 @@ vi.mock('axios', () => {
 import { useClientPortalStore } from '@/stores/clientPortal'
 import PortalAsks from '@/components/portal/PortalAsks.vue'
 import { paneHeading } from '@/components/portal/portalInbox'
-import { splitChatAsks } from '@/components/portal/portalUtils'
+import { chatTurnAsks } from '@/components/portal/portalChatAsks'
 
 const PORTAL = join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'src', 'components', 'portal')
 const src = (rel) => readFileSync(join(PORTAL, rel), 'utf8')
@@ -105,28 +108,25 @@ describe('3 — the Inbox list scroll box contains its rows', () => {
   })
 })
 
-describe('4 — which asks a chat pins', () => {
+describe('4 — which asks a chat draws (the 09-30 ruling, amended)', () => {
   const asks = [
-    ask('here', { chat_id: 's1' }),
-    ask('main', { chat_id: 'main-1' }),
+    ask('here', { chat_id: 's1', raised_in_turn: true }),
+    ask('main', { chat_id: 'main-1', raised_in_turn: true }),
+    ask('bg', { chat_id: 'main-1', raised_in_turn: false }),
     ask('loose', { chat_id: null }),
-    ask('done', { chat_id: 'main-1', status: 'answered' }),
+    ask('done', { chat_id: 'main-1', status: 'answered', raised_in_turn: true }),
   ]
-  it('a non-Main chat pins only its own; the rest that still wait are counted', () => {
-    const { here, elsewhere } = splitChatAsks(asks, { sessionId: 's1', isMain: false })
-    expect(here.map((a) => a.id)).toEqual(['here'])
-    expect(elsewhere.map((a) => a.id)).toEqual(['main', 'loose'])
+  it('a non-Main chat draws only its own chat-turn asks', () => {
+    expect(chatTurnAsks(asks, 's1').map((a) => a.id)).toEqual(['here'])
   })
-  it('Main also takes an unattached ask; an ended one elsewhere is not "waiting"', () => {
-    const { here, elsewhere } = splitChatAsks(asks, { sessionId: 'main-1', isMain: true })
-    expect(here.map((a) => a.id)).toEqual(['main', 'loose', 'done'])
-    expect(elsewhere.map((a) => a.id)).toEqual(['here'])
+  it('Main draws its own chat-turn asks, ended ones included (history); never a background or unattached one', () => {
+    expect(chatTurnAsks(asks, 'main-1').map((a) => a.id)).toEqual(['main', 'done'])
   })
-  it('the pinned block is height-capped and the conversation passes only this chat\'s ids', () => {
+  it('nothing is pinned above the composer: no capped box, no "elsewhere" line', () => {
     const conv = src('PortalConversation.vue')
-    expect(conv).toMatch(/data-testid="portal-chat-asks"/)
-    expect(conv).toMatch(/max-h-\[\d+vh\][^"]*overflow-y-auto|overflow-y-auto[^"]*max-h-\[\d+vh\]/)
-    expect(conv).toMatch(/:ask-ids="chatAskIds"/)
-    expect(conv).toMatch(/data-testid="portal-chat-asks-elsewhere"/)
+    expect(conv).not.toMatch(/data-testid="portal-chat-asks"/)
+    expect(conv).not.toMatch(/max-h-\[\d+vh\]/)
+    expect(conv).not.toMatch(/data-testid="portal-chat-asks-elsewhere"/)
+    expect(conv).toMatch(/:ask-ids="\[item\.ask\.id\]"/)
   })
 })

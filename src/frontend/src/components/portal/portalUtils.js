@@ -1630,56 +1630,6 @@ export function askThreadLink(ask, currentSessionId = null) {
   return target
 }
 
-// trinity-enterprise#610 sign-off: which of an agent's asks a chat PINS above
-// its composer. Pinning all of them, uncapped, let seven cards crush the
-// conversation to nothing. A chat pins the asks raised against it — Main also
-// takes the unattached ones, which have nowhere else to live — and the rest
-// that still wait are counted, one link away in Work. An ask that ended in
-// another chat is not waiting, so it is not counted.
-// Sign-off round 5: the chat's asks row. Pending asks, plus any that were
-// pending while this chat was on screen — an ask you just answered stays drawn,
-// ended, with its confirmation, until you leave the chat.
-export function pinnedAskIds(here, seenPending = new Set()) {
-  return (here || []).filter((a) => a.status === 'pending' || seenPending.has(a.id)).map((a) => a.id)
-}
-export function chatAsksLabel(n) {
-  if (!n) return 'No asks waiting on you'
-  return n === 1 ? '1 ask waiting on you' : `${n} asks waiting on you`
-}
-
-// ent#610 PR A2 §3g B1: where the chat's "N more" line leads. Work (the asks'
-// home, round 5) is a PLATFORM-door rail tab — a client's rail never renders
-// it, so the link opened nothing for them. A client goes to the Inbox's Action
-// tab narrowed to this agent (`?from=`, §3g C2), which lists exactly those asks.
-// One sentence for both doors (reconcile row 26, A2 round 1): only the link differs.
-export function chatAsksElsewhere({ n = 0, agentName = null, isPlatform = false } = {}) {
-  if (!n) return null
-  if (isPlatform) {
-    return {
-      text: `${n} more ${n === 1 ? 'ask' : 'asks'} from this agent`,
-      action: 'Open in Work',
-      to: null,
-    }
-  }
-  return {
-    text: `${n} more ${n === 1 ? 'ask' : 'asks'} from this agent`,
-    action: 'Open in Inbox',
-    to: { path: WORKSPACE_INBOX, query: { tab: 'action', from: agentName } },
-  }
-}
-
-export function splitChatAsks(asks, { sessionId = null, isMain = false } = {}) {
-  const here = []
-  const elsewhere = []
-  for (const a of asks || []) {
-    const onThis = a.chat_id ? (!!sessionId && a.chat_id === sessionId) : isMain
-    if (onThis) here.push(a)
-    else if (a.status === 'pending') elsewhere.push(a)
-  }
-  return { here, elsewhere }
-}
-
-
 // ---- ent#365: deliverables ------------------------------------------------
 
 // The badge on a deliverable card. Keyed off the report's `display_hint`, which

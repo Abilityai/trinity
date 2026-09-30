@@ -292,9 +292,44 @@
           :class="PLATFORM_LINE_CLASS"
           data-testid="portal-history-truncated"
         >Earlier messages in this chat aren't shown</p>
-        <template v-for="(item, k) in threadItems" :key="item.kind === 'voice-call' ? `call-${item.callId}` : `m-${item.index}`">
+        <template v-for="(item, k) in threadRows" :key="rowKey(item)">
+        <!-- trinity-enterprise#610 (the 09-30 ruling, amended) × ent#734: an
+             ask this chat's own turn raised is a row of the thread, placed by
+             time (portalChatAsks). While it waits it is the one ask card,
+             answerable here; once ended it is one muted line of history. A
+             background ask never reaches this loop — its home is the Inbox. -->
+        <div v-if="item.kind === 'ask'" :data-ask-id="item.ask.id">
+          <div v-if="item.mode === 'card'" class="flex items-start gap-2.5" data-testid="portal-chat-ask-tile">
+            <PortalAvatar :name="agent.name" :avatar-url="agent.avatar_url" :size="28" class="mt-0.5" />
+            <!-- `relative`: each card's sr-only text stays inside the thread's scroll box. -->
+            <div class="relative min-w-0 flex-1 max-w-[85%]">
+              <PortalAsks
+                :ask-ids="[item.ask.id]"
+                :current-session-id="currentSessionId"
+                :thread-link="false"
+                testid-prefix="portal-chat-ask"
+              />
+            </div>
+          </div>
+          <p
+            v-else
+            class="flex items-baseline justify-center gap-1 min-w-0 text-xs"
+            :class="META_INK_CLASS"
+            data-testid="portal-chat-ask-ended"
+          >
+            <span class="shrink-0">{{ item.line.kind }}</span>
+            <span aria-hidden="true">·</span>
+            <AskMarkdown :text="item.line.title" inline class="min-w-0 truncate" />
+            <span aria-hidden="true">·</span>
+            <span class="shrink-0">{{ item.line.ending }}</span>
+            <template v-if="item.line.when">
+              <span aria-hidden="true">·</span>
+              <time class="shrink-0" :datetime="item.line.at" :title="formatLocalDateTime(item.line.at)">{{ item.line.when }}</time>
+            </template>
+          </p>
+        </div>
         <details
-          v-if="item.kind === 'voice-call'"
+          v-else-if="item.kind === 'voice-call'"
           class="rounded-xl border border-gray-200 dark:border-gray-800 bg-gray-50 dark:bg-gray-950"
           data-testid="portal-voice-call-block"
           :data-message-ids="item.turns.map((t) => t.id).filter(Boolean).join(' ') || undefined"
@@ -471,61 +506,11 @@
     <PortalJumpToLatest :show="showJumpToLatest" :count="unreadBelow" @jump="scrollToLatest" />
     </div>
 
-    <!-- ent#364: asks this agent raised, immediately above the composer — the
-         third rendering of the SAME row the sidebar counts and the agent page
-         shows, so answering here clears it in both. Directly above the input
-         because it is a turn that is waiting on the person about to type.
-         #3115 (dev's stopgap for the ent#610 ruling) made the strip pending-
-         only; this is the ruling itself: `chatAskIds` (pinnedAskIds) holds only
-         asks seen PENDING here, so ended ones never pile up, while the one just
-         answered stays drawn in place with its ent#468 confirmation. -->
-    <!-- ent#610 sign-off: Work is the asks' home, so a chat shows ONE row —
-         "N asks waiting on you" — closed by default and expanding inline, like
-         a "Delivered here" card. Only THIS chat's asks (splitChatAsks); open,
-         they sit in a box capped at a third of the screen with its own scroll,
-         a sibling of the thread's scroll region, never nested in it. The rest
-         are one line away in Work. `relative` keeps each card's sr-only text
-         inside the box. -->
-    <div v-if="agentAsks.length" class="shrink-0 px-3 sm:px-6 pt-2">
-      <BaseCard v-if="chatAskIds.length" flush class="max-w-[var(--ws-message-max,64rem)] mx-auto" data-testid="portal-chat-asks">
-        <!-- A native disclosure: the browser owns the expanded state and its
-             semantics (no aria on this file — the composer's no-combobox guard). -->
-        <details :open="asksOpen" @toggle="asksOpen = $event.target.open">
-        <summary
-          class="w-full px-3.5 py-2.5 flex items-center gap-3 text-left text-sm font-medium cursor-pointer select-none list-none [&::-webkit-details-marker]:hidden"
-          data-testid="portal-chat-asks-toggle"
-        >
-          <span class="min-w-0 flex-1">{{ chatAsksLabel(chatAsksPending) }}</span>
-          <svg class="w-4 h-4 shrink-0 transition" :class="{ 'rotate-180': asksOpen }" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" /></svg>
-        </summary>
-        <div v-if="asksOpen" class="relative max-h-[33vh] overflow-y-auto px-3.5 pb-3">
-        <PortalAsks
-          :ask-ids="chatAskIds"
-          :current-session-id="currentSessionId"
-          pending-only
-          @open-thread="(t) => emit('open-thread', t)"
-        />
-        </div>
-        </details>
-      </BaseCard>
-      <!-- ent#610 PR A2 §3g B1: Work is a platform-door tab, so a client is
-           sent to the Inbox's Action narrowed to this agent (chatAsksElsewhere). -->
-      <p
-        v-if="asksElsewhere"
-        class="max-w-[var(--ws-message-max,64rem)] mx-auto pt-1 text-xs"
-        data-testid="portal-chat-asks-elsewhere"
-      >
-        {{ asksElsewhere.text }} ·
-        <router-link
-          v-if="asksElsewhere.to"
-          :to="asksElsewhere.to"
-          :class="ASKS_ELSEWHERE_LINK"
-          data-testid="portal-chat-asks-open-inbox"
-        >{{ asksElsewhere.action }}</router-link>
-        <button v-else type="button" :class="ASKS_ELSEWHERE_LINK" @click="emit('open-work')">{{ asksElsewhere.action }}</button>
-      </p>
-    </div>
-
+    <!-- trinity-enterprise#610 (the 09-30 ruling): nothing of variable height
+         sits between the thread and the composer (principle 30). The asks box
+         that was pinned here (ent#364 → #3115 → PR A's closed disclosure row)
+         and the line under it are gone: an ask this chat raised is a
+         row of the thread above, and every other ask lives in the Inbox. -->
     <!-- ent#474: the rail's mobile collapsed form — a strip above the
          composer, supplied by the shell, which owns the rail's tabs and
          signals. Renders nothing above `sm`, where the column beside the
@@ -855,7 +840,9 @@ import PortalStarButton from './PortalStarButton.vue'
 import PortalEditableTitle from './PortalEditableTitle.vue'
 import PortalChatTabs from './PortalChatTabs.vue'
 import { newChatHotkeyLabel, MAIN_TAB_LABEL, composerAvailabilityNotice, assistantRow, replyFromHistory, replyBaseline, readReplyBaseline } from './portalUtils'
-import { splitChatAsks, pinnedAskIds, chatAsksLabel, chatAsksElsewhere } from './portalUtils'
+import { chatTurnAsks, placeAsksInThread, askTileMode, askHistoryLine } from './portalChatAsks'
+import AskMarkdown from '@/components/operator/AskMarkdown.vue'
+import { formatLocalDateTime } from '@/utils/timestamps'
 import { usePortalFileDrop, attachmentState } from '@/composables/usePortalFileDrop'
 import { useStickToBottom } from '@/composables/useStickToBottom'
 import { useConversationAnchor } from '@/composables/useConversationAnchor'
@@ -866,7 +853,6 @@ import { draftKeyFor, shouldFocusOnRestore } from './portalDrafts'
 import PortalTypeahead from './PortalTypeahead.vue'
 import PortalJumpToLatest from './PortalJumpToLatest.vue'
 import PortalAsks from './PortalAsks.vue'
-import BaseCard from '@/components/base/BaseCard.vue'
 import PortalReplyChip from './PortalReplyChip.vue'
 import PortalDeliverables from './PortalDeliverables.vue'
 import PortalSkeleton from './PortalSkeleton.vue'
@@ -1077,26 +1063,18 @@ const isMainChat = computed(() => {
   return !!row?.is_main
 })
 
-// ent#610 sign-off: the chat's asks row. Declared after `currentSessionId`
-// and `isMainChat`: its `immediate` watcher reads both at setup.
-const chatAsks = computed(() => splitChatAsks(agentAsks.value, {
-  sessionId: currentSessionId.value, isMain: isMainChat.value,
-}))
-// An ask seen pending in this chat stays drawn (ended) after you answer it,
-// until you leave the chat; the row starts closed on every chat.
+// trinity-enterprise#610 (the 09-30 ruling, amended) × ent#734: the asks THIS
+// chat's own turns raised — rows of the thread (`threadRows`). Declared after
+// `currentSessionId`: the `immediate` watcher below reads it at setup.
+const chatTurnAskList = computed(() => chatTurnAsks(agentAsks.value, currentSessionId.value))
+// An ask seen waiting in this chat keeps its card (ended, with the ent#468
+// confirmation) after you answer it, until you leave the chat. Any other ended
+// ask is one muted history row.
 const seenPendingAsks = ref(new Set())
-const asksOpen = ref(false)
-watch(() => chatAsks.value.here.filter((a) => a.status === 'pending').map((a) => a.id), (ids) => {
+watch(() => chatTurnAskList.value.filter((a) => a.status === 'pending').map((a) => a.id), (ids) => {
   if (ids.some((id) => !seenPendingAsks.value.has(id))) seenPendingAsks.value = new Set([...seenPendingAsks.value, ...ids])
 }, { immediate: true })
-watch(currentSessionId, () => { seenPendingAsks.value = new Set(); asksOpen.value = false })
-const chatAskIds = computed(() => pinnedAskIds(chatAsks.value.here, seenPendingAsks.value))
-// A2 round 1: a 44px target on a phone and the design-system ring (it was 76×16).
-const ASKS_ELSEWHERE_LINK = 'inline-flex items-center max-sm:min-h-11 text-action-primary-600 dark:text-action-primary-400 hover:underline rounded focus:outline-none focus-visible:ring-2 focus-visible:ring-action-primary-500/40 dark:focus-visible:ring-action-primary-400/40'
-const asksElsewhere = computed(() => chatAsksElsewhere({
-  n: chatAsks.value.elsewhere.length, agentName: props.agent?.name, isPlatform: store.isPlatformSession === true,
-}))
-const chatAsksPending = computed(() => chatAsks.value.here.filter((a) => a.status === 'pending').length)
+watch(currentSessionId, () => { seenPendingAsks.value = new Set() })
 
 // Archive this conversation and start the agent cold. No confirmation dialog
 // (operator, 2026-09-06) — nothing is lost, and the archived chat is one click
@@ -1331,13 +1309,16 @@ async function loadThread(sessionId) {
     // #2580: through the shared mapper, which is what keeps this site and the
     // two live-turn sites agreeing about the row's shape. A user row keeps its
     // own role; only the assistant shape is shared.
-    messages.value = (msgs || []).map((m) => (
-      m.role === 'assistant'
+    // trinity-enterprise#610: `at` is the row's persisted time, which is what
+    // places a chat-turn ask among the messages (`threadRows`).
+    messages.value = (msgs || []).map((m) => ({
+      ...(m.role === 'assistant'
         ? assistantRow(m)
         // ent#534: spoken rows and the call they belong to — folded by `threadItems`.
         : { role: m.role, content: m.content, id: m.id, myRating: m.my_rating || null,
-            source: m.source || null, voiceCallId: m.voice_call_id || null }
-    ))
+            source: m.source || null, voiceCallId: m.voice_call_id || null }),
+      at: m.created_at || null,
+    }))
     inFlight = inFlightExecutionId
     inFlightBudget = inFlightWaitBudgetSeconds
     outcome = lastTurnOutcome
@@ -2360,6 +2341,9 @@ async function submitUserText(text, { replyId = null, replyExcerpt = '' } = {}) 
   const index = messages.value.push({
     role: 'user', content: text, failed: false, error: null,
     replyTo: replyId ? { messageId: replyId, excerpt: replyExcerpt } : null,
+    // trinity-enterprise#610: stamped as it is sent, so an ask this turn raises
+    // lands below it (`placeAsksInThread`); the reload brings the server's time.
+    at: new Date().toISOString(),
   }) - 1
   // #2624: sending is an explicit intent to follow the bottom — it pins and
   // re-arms whatever the prior scroll position, so the reader is never handed
@@ -2733,6 +2717,16 @@ const voiceHeaderText = computed(() => voiceHeaderLine({
 }))
 // The thread, with each voice call's rows folded into one block.
 const threadItems = computed(() => groupVoiceBlocks(messages.value))
+// trinity-enterprise#610: the thread's rows with this chat's chat-turn asks
+// placed among them by time, each as a card or a history row.
+const threadRows = computed(() => placeAsksInThread(threadItems.value, chatTurnAskList.value).map((row) => (
+  row.kind !== 'ask' ? row
+    : askTileMode(row.ask, seenPendingAsks.value) === 'card' ? { ...row, mode: 'card' }
+      : { ...row, mode: 'row', line: askHistoryLine(row.ask) }
+)))
+const rowKey = (item) => (
+  item.kind === 'ask' ? `ask-${item.ask.id}` : item.kind === 'voice-call' ? `call-${item.callId}` : `m-${item.index}`
+)
 
 // The shell reads these to swap the rail for the canvas column and to refuse
 // chat navigation while the call is on.

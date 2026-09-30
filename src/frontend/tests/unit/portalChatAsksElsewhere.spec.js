@@ -1,58 +1,83 @@
+// @vitest-environment jsdom
 /**
- * trinity-enterprise#610 PR A2, §3g L6 B1 residual — the chat's "N more asks"
- * line must lead somewhere EVERY reader can go.
+ * trinity-enterprise#610 PR A2 — the chat's "N more asks" line, retired by the
+ * 2026-09-30 ruling (as amended the same day).
  *
- * Sign-off round 4 pointed it at the rail's Work tab ("Open in Work"). Work is a
- * platform-door tab (`RAIL_DOORS.PLATFORM`): for an external client the rail
- * never renders it, so the link opened nothing. A client now goes to the Inbox's
- * Action tab narrowed to this agent (§3g C2 `?from=`), which lists exactly those
- * asks; a platform reader keeps Work (Andrii's round-5 ruling: Work is the asks'
- * home).
- *
- * @source-text-pin: PortalConversation.vue has no mount harness (it needs the
- * whole shell: store, router, stick-to-bottom, voice, rail slots); the rule is
- * proven on the pure helper, and the read only pins that the template WIRES it
- * (router-link for the client arm, the emit for Work).
+ * History: sign-off round 4 put a line under the chat's pinned asks box —
+ * "N more asks from this agent · Open in Work" — and §3g B1 (A2 round 1) sent a
+ * client to the Inbox instead, because Work is a platform-door tab. The ruling
+ * removes the premise: a chat draws only the asks ITS OWN turns raised, as rows
+ * of its thread, and every other ask — another chat's, a background one — lives
+ * in the Inbox (the sidebar's "needs you" mark and pinned Inbox row lead there).
+ * So the chat names no other ask at all, and nothing sits above its composer
+ * (principle 30).
  */
-import { describe, it, expect } from 'vitest'
-import { readFileSync } from 'node:fs'
-import { fileURLToPath } from 'node:url'
-import { chatAsksElsewhere, WORKSPACE_INBOX } from '@/components/portal/portalUtils'
-import { RAIL_TABS, RAIL_DOORS } from '@/components/portal/portalRail'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
+import { shallowMount, flushPromises } from '@vue/test-utils'
+import { createPinia, setActivePinia } from 'pinia'
+import * as portalUtils from '@/components/portal/portalUtils'
 
-describe('chatAsksElsewhere', () => {
-  it('Work is a platform-only tab — the premise of the fix', () => {
-    expect(RAIL_TABS.find((t) => t.id === 'work').door).toBe(RAIL_DOORS.PLATFORM)
+vi.mock('axios', () => {
+  const mk = () => ({
+    get: vi.fn(() => Promise.resolve({ data: {} })), post: vi.fn(() => Promise.resolve({ data: {} })),
+    put: vi.fn(), patch: vi.fn(), delete: vi.fn(),
+    interceptors: { request: { use: vi.fn() }, response: { use: vi.fn() } },
+    defaults: { headers: { common: {} } },
   })
-
-  it('a client is sent to the Inbox, narrowed to this agent', () => {
-    expect(chatAsksElsewhere({ n: 3, agentName: 'scout', isPlatform: false })).toEqual({
-      text: '3 more asks from this agent',
-      action: 'Open in Inbox',
-      to: { path: WORKSPACE_INBOX, query: { tab: 'action', from: 'scout' } },
-    })
-  })
-
-  it('a platform reader keeps Work — with the same words for the same count (reconcile row 26)', () => {
-    expect(chatAsksElsewhere({ n: 1, agentName: 'scout', isPlatform: true })).toEqual({
-      text: '1 more ask from this agent',
-      action: 'Open in Work',
-      to: null,
-    })
-  })
-
-  it('nothing elsewhere → nothing to say', () => {
-    expect(chatAsksElsewhere({ n: 0, agentName: 'scout', isPlatform: false })).toBeNull()
-  })
+  return {
+    default: Object.assign(
+      { get: vi.fn(() => Promise.resolve({ data: {} })), post: vi.fn(), put: vi.fn(), delete: vi.fn(), create: mk },
+      { interceptors: { request: { use: vi.fn() }, response: { use: vi.fn() } },
+        defaults: { headers: { common: {} } } },
+    ),
+  }
 })
 
-describe('PortalConversation renders the rule (source-asserted: no mount harness exists for it)', () => {
-  const sfc = readFileSync(
-    fileURLToPath(new URL('../../src/components/portal/PortalConversation.vue', import.meta.url)), 'utf8',
-  )
-  it('the line comes from chatAsksElsewhere; a client link is a router-link, Work stays an emit', () => {
-    expect(sfc).toMatch(/chatAsksElsewhere\(/)
-    expect(sfc).toMatch(/<router-link[\s\S]{0,200}v-if="asksElsewhere\.to"[\s\S]{0,200}:to="asksElsewhere\.to"/)
-    expect(sfc).toMatch(/@click="emit\('open-work'\)"/)
+import PortalConversation from '@/components/portal/PortalConversation.vue'
+import { useClientPortalStore } from '@/stores/clientPortal'
+
+globalThis.ResizeObserver = globalThis.ResizeObserver || class {
+  observe() {}
+  unobserve() {}
+  disconnect() {}
+}
+
+const ask = (id, over = {}) => ({
+  id, agent_name: 'scout', kind: 'question', title: `Ask ${id}`, question: '?', options: null,
+  status: 'pending', created_at: '2026-09-30T10:00:00Z', chat_id: 's2', raised_in_turn: true, ...over,
+})
+
+let wrapper
+beforeEach(() => { setActivePinia(createPinia()) })
+afterEach(() => { wrapper?.unmount(); wrapper = null })
+
+describe("a chat names no ask that isn't its own", () => {
+  it.each([
+    ['another chat raised', ask('other')],
+    ['a background process raised (Main as reply target)', ask('bg', { chat_id: 'main', raised_in_turn: false })],
+    ['has no chat', ask('loose', { chat_id: null, raised_in_turn: false })],
+  ])('an ask %s: no tile, no count, no link in this chat', async (_label, a) => {
+    for (const platform of [false, true]) {
+      const store = useClientPortalStore()
+      store.asksAvailable = true
+      store.asksLoaded = true
+      store.isPlatformSession = platform
+      store.asks = [a]
+      store.fetchHistory = vi.fn(async () => ({ sessionId: 's1', messages: [{ id: 'm1', role: 'user', content: 'hi', created_at: '2026-09-30T09:00:00Z' }] }))
+      wrapper = shallowMount(PortalConversation, {
+        props: { agent: { name: 'scout', playbooks: [] }, sessionId: 's1' },
+        global: { renderStubDefaultSlot: true },
+      })
+      await flushPromises()
+      expect(wrapper.find('[data-ask-id]').exists()).toBe(false)
+      expect(wrapper.find('[data-testid="portal-chat-asks-elsewhere"]').exists()).toBe(false)
+      expect(wrapper.text()).not.toMatch(/more asks? from this agent|Open in Work/)
+      wrapper.unmount(); wrapper = null
+    }
+  })
+
+  it('the helper that wrote the line is gone with it', () => {
+    expect(portalUtils.chatAsksElsewhere).toBeUndefined()
+    expect(portalUtils.splitChatAsks).toBeUndefined()
   })
 })
