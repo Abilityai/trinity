@@ -1,0 +1,105 @@
+{
+ "version": "1.1",
+ "date": "2026-09-14",
+ "mode": "diff",
+ "scope": "all",
+ "confidence_gate": 8,
+ "branch": "feature/614-source-agent-attribution",
+ "pr": "abilityai/trinity#2788",
+ "issue": "abilityai/trinity-enterprise#614",
+ "phases_run": [
+  0,
+  1,
+  2,
+  3,
+  4,
+  5,
+  6,
+  7,
+  8,
+  9,
+  10,
+  11,
+  12,
+  13,
+  14
+ ],
+ "attack_surface": {
+  "new_endpoints": [],
+  "changed_endpoints": [
+   "POST /api/agents/{name}/chat",
+   "POST /api/agents/{name}/task",
+   "POST /api/agents/{name}/fan-out",
+   "POST /api/agents/{name}/loops",
+   "POST /api/agents/{name}/reminders",
+   "POST /api/agents/{name}/schedules/{id}/trigger",
+   "POST /api/agents/{name}/emit-event",
+   "POST /api/agents/emit-event"
+  ],
+  "new_auth_primitives": [
+   "dependencies.resolve_source_agent",
+   "EVENT_LOOPBACK_SCOPE JWT claim + route fence in get_current_user",
+   "User.vouched_source_agent"
+  ],
+  "new_db_reads": [],
+  "new_redis_keys": [],
+  "new_prompt_surfaces": [],
+  "widened_prompt_surfaces": [],
+  "dependency_workflow_docker_changes": [],
+  "mcp_server_changes": [
+   "tools/schedules.ts: X-Source-Agent sent only for scope=agent"
+  ],
+  "new_test_files": [
+   "tests/unit/test_ent614_source_agent_attribution.py"
+  ],
+  "doc_files": 10
+ },
+ "findings": [],
+ "appendix": [
+  {
+   "id": "A1",
+   "severity": "LOW",
+   "confidence": 8,
+   "status": "PARTIAL \u2014 verified latent by fresh-context subagent; not reachable on the shipped path",
+   "category": "audit-integrity / repudiation (SEC-001 actor join)",
+   "file": "src/backend/services/dispatch_admission_service.py (_audit_chat_started, _audit_idempotent_replay); src/backend/routers/fan_out.py",
+   "summary": "The three agent-branch audit sites now pass actor_email=getattr(current_user,'email') unconditionally, documented as 'the key OWNER'. That premise holds for an agent-scoped MCP key but not for the EVT-001 loopback principal, whose JWT is sub='admin': a loopback dispatch that reached one of these sites would write actor_type='agent' joined to the admin human, who did not act.",
+   "why_not_a_finding": "The loopback token is fenced to POST /api/agents/{name}/task; _audit_chat_started is /chat-only, and the /task replay row is gated on an Idempotency-Key the loopback never sends. No SEC-001 row is written for a loopback dispatch today.",
+   "trigger": "Adding an Idempotency-Key to trigger_subscription (Invariant #18 pushes every trigger boundary toward one) makes a duplicate loopback dispatch write the misattributed row.",
+   "recommendation": "Pass actor_email=None (or the vouched agent's owner email) when current_user.vouched_source_agent supplied the identity; add a loopback audit-row assertion. One line plus one test; can land as a follow-up.",
+   "pre_existing_note": "The execution row's source_user_email is already the admin email on the loopback path on dev (sub='admin' predates this PR); different table, out of diff."
+  }
+ ],
+ "verification": {
+  "P2_secrets": "0 secret-shaped strings in non-test added lines across merge-base..head; no .env, workflow, requirements, lockfile, Dockerfile or compose changes; only emails are *@e.com fixtures in the new test file",
+  "P6_loopback": "JWT scope claim is SECRET_KEY-signed (backend-only), fenced at get_current_user to POST /api/agents/{name}/task before revocation and user lookup (fail-closed); previously an unrestricted 5-minute admin bearer",
+  "P6_vouching": "emit_event derives source_agent from current_user.agent_name for agent keys and vouches only then; emit_event_for_agent vouches only when current_user.agent_name == path name (read-access route); #1578 terminals are system-derived",
+  "P9_A01": "resolve_source_agent is an allowlist over identity (agent_name or vouched_source_agent); falsy check precedes getattr; getattr default is unprivileged; mismatch and non-agent principals both 403 with the same message regardless of target existence (no enumeration differential)",
+  "P9_A09": "every refusal logs endpoint, truncated header, principal id and mcp_scope; agent-branch audit rows now carry owner email and presented credential",
+  "coverage": "all six OSS backend readers routed through the helper (AST guard pins the set; enterprise submodule has no readers); all four MCP client senders gated on scope=agent at head; frontend never sends the header",
+  "tests_local": "404 passed at PR head across the new file, five adapted files, and the 1310/293/186/models-centralized guards"
+ },
+ "supply_chain_summary": {
+  "python": "no change",
+  "node": "no change"
+ },
+ "filter_stats": {
+  "candidates": 1,
+  "verified_findings": 0,
+  "appendix": 1,
+  "hard_excluded": 0
+ },
+ "totals": {
+  "critical": 0,
+  "high": 0,
+  "medium": 0,
+  "low": 0
+ },
+ "trend": {
+  "prior_report": "cso-diff-2026-09-13-2339-testing-docs",
+  "resolved": 0,
+  "persistent": 0,
+  "new": 0,
+  "direction": "flat"
+ }
+}
