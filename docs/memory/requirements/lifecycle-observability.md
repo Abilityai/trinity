@@ -341,6 +341,41 @@ password) is **Phase 2**, gated on a configured email provider and the existing
   (own-account scoped; 409 if the email belongs to another account), surfaced as
   an **Admin sign-in email** card in Settings → General. No verification email is
   sent; existing `admin`+password login keeps working until/unless an email is set.
+- **FR-4 — A sign-in email is proven, unique, and written in one place
+  (trinity-enterprise#720, residual of #711).** Every sign-in path resolves the
+  account by email alone, so whoever holds an email on a `users` row holds that
+  identity — what is shared with the address, its Workspace threads, and the
+  real person's next sign-in.
+  - **Mailbox proof to bind.** `PUT /api/users/me/email` requires `{email, code}`,
+    where the code was sent to the NEW address by
+    `POST /api/users/me/email/code` (same rate limits as sign-in codes). Bind
+    codes live in `email_login_codes` with `purpose='email_bind'` and are tied to
+    the requesting account; a bind code never signs anyone in and a sign-in code
+    never binds. Missing/wrong/expired code → 400 `invalid_code`.
+  - **The one no-proof bind** is the #82 transition (FR-3) on an install that
+    cannot deliver mail (provider `console`): an **interactive admin** session may
+    bind without a code, audited as `email_bind_unverified`. Anyone else on such an
+    install gets 409 `email_verification_unavailable`. First-run setup (FR-2) is
+    unchanged — it binds before any provider can exist.
+  - **Unique.** `users.email` is unique on its lower-cased value (NULL allowed):
+    `idx_users_email_unique ON users(lower(email)) WHERE email IS NOT NULL`, on both
+    migration tracks. Pre-existing duplicates are resolved first: per address the
+    EARLIEST-created account keeps it; the others are set to NULL and logged by
+    username only.
+  - **One writer.** Every write of `users.email` (setup, the bind route,
+    `create_user`, `update_user`, the password upsert, Auth0, email sign-in
+    creation) goes through `db/users.py`'s checked write, which refuses an address
+    another account holds (`EmailInUseError` → 409 `email_in_use`) and maps a lost
+    race on the unique index to the same refusal. A test enumerates the writers.
+  - **A reclaimed username is not a 500.** Email sign-in creates the account with
+    `username = email`; when that username is already taken (an account that has
+    since re-bound away from the address), the new account gets a unique suffixed
+    username instead of an unhandled IntegrityError.
+  - **Redeemers honour suspension.** The Telegram, WhatsApp and MCP-inline code
+    redeemers and `email_has_agent_access` refuse an address whose account is
+    suspended (`users.suspended_at`), the same account-state rule `/verify` and
+    `get_current_user` apply. (Second-factor on those channels is out of scope:
+    they cannot present a challenge; tracked as a follow-up.)
 
 ---
 
