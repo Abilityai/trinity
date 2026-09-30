@@ -284,11 +284,14 @@ or toggling it repacks nothing; and in the overflow-menu row it gets its **own**
 
 **Opt-in counter and tab semantics (ent#610 §3g L1).** Three fields, each off by default
 and each rendering the pre-existing DOM byte-for-byte when off:
-- `tab.badgeVariant` — `success` (default: the tinted pill) · `urgent` · `primary`. The
-  last two are **solid white on the 700 tier** (white on status-urgent-700 5.18:1, on
-  action-primary-700 7.90:1): a *counter* is solid, a per-row *fact* is tinted (the
-  counter-vs-label rule). One class arm per variant, never two colours of a property in
-  one string (#2662).
+- `tab.badgeVariant` — `success` (default: the tinted pill) · `urgent` · `primary` ·
+  `neutral`. `urgent` and `primary` are **solid white on the 700 tier** (white on
+  status-urgent-700 5.18:1, on action-primary-700 7.90:1): a *counter* is solid, a per-row
+  *fact* is tinted (the counter-vs-label rule). `neutral` (ent#610 PR A2) is the gray tint
+  (gray-700 on gray-100 / gray-300 on gray-750) for a *share* of a count that is no
+  event's outcome — the Inbox's per-agent facets, which in success-green read as "done"
+  beside the urgent Action count. One class arm per variant, never two colours of a
+  property in one string (#2662).
 - `tab.badgeLabel` — the tab's `aria-label` when the bare count would be read as
   "Action 21"; the badge is then `aria-hidden`. Neither field changes a tab's width, so
   neither enters `tabsSignature`.

@@ -330,8 +330,17 @@ const selectedAsk = computed(() => {
 })
 const activeFrom = computed(() => activeAgentFilter(fromQuery.value, actionBase.value, selectedAsk.value))
 const facets = computed(() => (tab.value === 'action' ? agentFacets(actionBase.value, props.labels, activeFrom.value) : []))
+// A2 r1 (Codex C4): narrowing to another agent closes an open ask that is not
+// theirs — else the pane keeps agent A's ask beside a list of agent B's.
 function onFrom(id) {
-  replaceQuery({ from: normalizeFrom(id) || undefined })
+  const from = normalizeFrom(id)
+  const sel = selectedAsk.value
+  if (from && sel && sel.agent_name !== from) {
+    previewFor.value = { tab: null, key: null }
+    replaceQuery({ from, item: undefined })
+    return
+  }
+  replaceQuery({ from: from || undefined })
 }
 
 const baseItems = computed(() => {
@@ -418,7 +427,8 @@ async function showMore() {
 // The head counts LIVE rows, never ghosts, in units (§3g A8); with only ghosts
 // left it says "All caught up".
 const liveItems = computed(() => shownItems.value.filter((it) => !isGhost(it)))
-const head = computed(() => listHeadLabel(tab.value, liveItems.value))
+const head = computed(() => listHeadLabel(tab.value, liveItems.value,
+  activeFrom.value ? ((props.labels && props.labels[activeFrom.value]) || activeFrom.value) : null))
 const headExact = computed(() => listHeadExact(tab.value, liveItems.value))
 
 // A selection the rendered rows do not hold (an old chat, a deep link) is

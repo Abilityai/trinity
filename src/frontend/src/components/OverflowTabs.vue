@@ -59,7 +59,8 @@ const props = defineProps({
   // `badgeVariant` (ent#610 §3g A3a) picks the count's colour: `success` (the
   // default, the tinted pill every strip has always had), or `urgent` /
   // `primary` — SOLID white ink on the 700 tier (5.18 / 7.90:1), because a
-  // counter is solid and a per-row fact is tinted (design-system.md).
+  // counter is solid and a per-row fact is tinted (design-system.md) — or
+  // `neutral`, a gray tint for a share of a count that is no event's outcome.
   // `badgeLabel` (A8c) is the tab's accessible name when the bare count would
   // be read as "Action 21"; the badge is then aria-hidden. Neither changes the
   // tab's width, so neither is in the re-measure key.
@@ -127,6 +128,9 @@ const BADGE_TONES = {
   success: 'bg-status-success-100 dark:bg-status-success-900/50 text-status-success-700 dark:text-status-success-300',
   urgent: 'bg-status-urgent-700 text-white',
   primary: 'bg-action-primary-700 text-white',
+  // A share of a count (the Inbox's per-agent facets, ent#610 A2): a fact about
+  // the set, not the outcome of an event, so it is gray, never `status-*`.
+  neutral: 'bg-gray-100 dark:bg-gray-750 text-gray-700 dark:text-gray-300',
 }
 const badgeTone = (tab) => BADGE_TONES[tab.badgeVariant] || BADGE_TONES.success
 // #3060: the reserved badge's footprint — one literal, used by both rows.

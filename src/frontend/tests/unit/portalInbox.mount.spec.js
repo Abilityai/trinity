@@ -1271,6 +1271,22 @@ describe('Action narrowed to one agent (§3g C2, ?from=)', () => {
     expect(router.currentRoute.value.query.from).toBeUndefined()
   })
 
+  it("narrowing to another agent drops the open ask that isn't theirs (A2 r1, Codex C4)", async () => {
+    store.asks = [ask('s1'), ask('r1', { agent_name: 'relay' })]
+    store.asksLoaded = true
+    const w = await mountInbox({}, { query: { tab: 'action', item: 'ask:s1' } })
+    facetsTabs(w).findComponent({ name: 'OverflowTabs' }).vm.$emit('update:modelValue', 'relay')
+    await flushPromises()
+    expect(router.currentRoute.value.query.from).toBe('relay')
+    expect(router.currentRoute.value.query.item).toBeUndefined()
+    // …and an open ask that IS theirs stays open.
+    await router.replace({ path: '/workspace/inbox', query: { tab: 'action', item: 'ask:r1' } })
+    await flushPromises()
+    facetsTabs(w).findComponent({ name: 'OverflowTabs' }).vm.$emit('update:modelValue', 'relay')
+    await flushPromises()
+    expect(router.currentRoute.value.query.item).toBe('ask:r1')
+  })
+
   it('one agent → no strip; the other tabs never show it, and leaving Action drops ?from=', async () => {
     store.asks = [ask('s1'), ask('s2')]
     store.asksLoaded = true

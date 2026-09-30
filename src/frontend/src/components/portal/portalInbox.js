@@ -179,19 +179,26 @@ export function normalizeFrom(v) {
   return typeof v === 'string' && v && v !== FROM_ALL ? v : null
 }
 // Most asks first, then the name; an active filter whose agent has none left
-// keeps its facet (count-less) so it can still be cleared.
+// keeps its facet (count-less) so it can still be cleared — even when no asks
+// are left at all (A2 r1, Codex C5: the strip vanished while `?from=` held).
+// Counts are NEUTRAL: a per-agent share of Action's urgent count, not an
+// outcome, and each tab names what it counts (A2 r1 design P1).
+const facet = (id, label, n) => ({
+  id, label, badge: n, badgeVariant: 'neutral',
+  badgeLabel: n === null ? undefined : `${label}, ${plural(n, 'ask', 'asks')}`,
+})
 export function agentFacets(rows, labels = {}, active = null) {
   const counts = new Map()
   for (const r of Array.isArray(rows) ? rows : []) {
     if (r && r.agent_name) counts.set(r.agent_name, (counts.get(r.agent_name) || 0) + 1)
   }
-  if (counts.size < 2 && !(active && !counts.has(active) && counts.size >= 1)) return []
+  if (counts.size < 2 && !(active && !counts.has(active))) return []
   const total = [...counts.values()].reduce((a, b) => a + b, 0)
   const agents = [...counts.entries()]
     .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
-    .map(([name, n]) => ({ id: name, label: (labels && labels[name]) || name, badge: n }))
-  if (active && !counts.has(active)) agents.push({ id: active, label: (labels && labels[active]) || active, badge: null })
-  return [{ id: FROM_ALL, label: 'All agents', badge: total }, ...agents]
+    .map(([name, n]) => facet(name, (labels && labels[name]) || name, n))
+  if (active && !counts.has(active)) agents.push(facet(active, (labels && labels[active]) || active, null))
+  return [facet(FROM_ALL, 'All agents', total), ...agents]
 }
 export function filterByAgent(rows, from) {
   if (!from) return rows
@@ -280,12 +287,14 @@ export function newLabel(n) {
 // Counts LIVE rows (a ghost is not a member); the "new" sum is the same message
 // count the tab badge and the sidebar show (D13), capped like them.
 const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`
-export function listHeadLabel(tab, liveItems) {
+// `fromLabel` (§3g C2, A2 r1): Action narrowed to one agent says so — its facet
+// can sit in the strip's More menu, where nothing on screen would name it.
+export function listHeadLabel(tab, liveItems, fromLabel = null) {
   const items = Array.isArray(liveItems) ? liveItems : []
   if (!items.length) return 'All caught up'
   const chats = items.filter((it) => it && it.type === 'thread')
   const asks = items.filter((it) => it && it.type === 'ask')
-  if (tab === 'action') return plural(asks.length, 'ask', 'asks')
+  if (tab === 'action') return plural(asks.length, 'ask', 'asks') + (fromLabel ? ` from ${fromLabel}` : '')
   if (tab === 'unread') {
     const fresh = chats.reduce((sum, it) => sum + (Number(it.n) || 0), 0)
     return `${plural(chats.length, 'chat', 'chats')} · ${capCount(fresh) || 0} new`

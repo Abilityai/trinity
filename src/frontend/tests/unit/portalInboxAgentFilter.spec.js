@@ -9,7 +9,7 @@
  */
 import { describe, it, expect } from 'vitest'
 import {
-  agentFacets, filterByAgent, activeAgentFilter, normalizeFrom, FROM_ALL,
+  agentFacets, filterByAgent, activeAgentFilter, normalizeFrom, FROM_ALL, listHeadLabel,
 } from '@/components/portal/portalInbox'
 
 const row = (id, agent) => ({ key: `ask:${id}`, type: 'ask', id, agent_name: agent })
@@ -28,6 +28,29 @@ describe('C2 — agent facets', () => {
     const f = agentFacets([row('a', 'scout')], {}, 'relay')
     expect(f.map((t) => t.id)).toEqual([FROM_ALL, 'scout', 'relay'])
     expect(f[2].badge).toBeNull()
+  })
+
+  it('an active filter keeps its strip even when NO asks are left (A2 r1, Codex C5)', () => {
+    // relay's last ask was just answered and is still selected: the filter holds
+    // (activeAgentFilter), so the strip must too — or it cannot be cleared.
+    const f = agentFacets([], {}, 'relay')
+    expect(f.map((t) => t.id)).toEqual([FROM_ALL, 'relay'])
+    expect(f[0].badge).toBe(0)
+  })
+
+  it('facet counts are neutral and name what they count (A2 r1 design P1: green read as "done")', () => {
+    const f = agentFacets([row('a', 'scout'), row('b', 'relay'), row('c', 'relay')], { relay: 'Relay Bot' })
+    expect(f.every((t) => t.badgeVariant === 'neutral')).toBe(true)
+    expect(f[0].badgeLabel).toBe('All agents, 3 asks')
+    expect(f[1].badgeLabel).toBe('Relay Bot, 2 asks')
+    expect(f[2].badgeLabel).toBe('scout, 1 ask')
+  })
+
+  it('the list heading names the agent it is narrowed to (A2 r1: the chip can sit in More)', () => {
+    const items = [{ type: 'ask', id: 'a' }, { type: 'ask', id: 'b' }]
+    expect(listHeadLabel('action', items)).toBe('2 asks')
+    expect(listHeadLabel('action', items, 'Relay Bot')).toBe('2 asks from Relay Bot')
+    expect(listHeadLabel('action', [], 'Relay Bot')).toBe('All caught up')
   })
 
   it('filterByAgent narrows; no filter is the identity', () => {
