@@ -23,7 +23,7 @@ cp .env.example .env
 
 Then open the directory in Claude Code. The repo ships with its own `.claude/skills/` so all the ops commands shown below work out of the box.
 
-If you have the [abilities](https://github.com/abilityai/abilities) `trinity` plugin installed, `/trinity:deploy` does this for you: it walks through deploying Trinity (cloud, remote SSH server, or localhost) or connecting to an existing instance, then clones this repo into a per-instance directory with `.env` already filled in.
+If you have the [abilities](https://github.com/abilityai/abilities) `trinity` plugin installed, `/trinity:deploy-new-instance` does this for you: it walks through deploying Trinity (the DigitalOcean installer, a remote SSH server, or local Docker) or connecting to an existing instance, then clones this repo into a per-instance directory with `.env` already filled in.
 
 ## Configuration
 
@@ -100,7 +100,7 @@ In order, the script:
 3. **Pulls** the latest code from `TRINITY_BRANCH` (default `main`).
 4. **Updates the containers.** On a source-built install it rebuilds the platform images (`backend`, `frontend`, `mcp-server`, `scheduler`) and runs `docker compose up -d`. On a hosted install it runs `start.sh --hosted --unattended`.
 5. **Sweeps agent restart policies.** Agent containers created by older releases are moved to `unless-stopped`, so they come back after a host reboot. A stopped agent stays stopped.
-6. **Verifies.** It checks backend and scheduler health, and whether the running `version` matches the image it runs in, so a stale platform image is called out rather than missed. It also warns if the PostgreSQL migration history has more than one head, which stops schema migrations from applying.
+6. **Verifies.** It checks backend and scheduler health, and whether the running `version` matches the image it runs in, so a stale platform image is called out rather than missed. It also warns if the PostgreSQL migration history has more than one head, which stops schema migrations from applying. Finally, it reads the backend's report on moving GitHub tokens out of agents' git remotes. If any remote was rewritten, it reminds you to rotate the platform GitHub token, and it names any agent the cleanup could not finish. See [Upgrading → GitHub token out of agent remotes](upgrading.md#github-token-out-of-agent-remotes-automatic-then-rotate).
 
 It does **not** rebuild the agent base image on a source-built install. That image changes rarely, and rebuilding it forces every agent to be re-deployed. The script tells you when the pulled range touched it, or on a hosted install that a new one was pulled. Agents adopt a new base image on a cold stop and start, and `/rebuild-agent` rolls it out to agents.
 

@@ -57,6 +57,8 @@ jobs:
       - id: list
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # #3103: through env, never interpolated into the script body.
+          ONLY_PR: ${{ inputs.pr_number }}
         run: |
           set -euo pipefail
           # #2462: a manual dispatch may scope the sweep to ONE PR. The
@@ -70,17 +72,27 @@ jobs:
           # closed, targets another base, or does not exist then yields an
           # empty set and the honest `has_prs=false` path, rather than a matrix
           # leg that fails deep inside the merge step.
-          only='${{ inputs.pr_number }}'
+          only="${ONLY_PR:-}"
           prs=$(gh pr list \
             --repo "${{ github.repository }}" \
             --base dev \
             --state open \
             --limit 50 \
-            --json number,headRefName,headRefOid)
+            --json number,headRefName,headRefOid,isCrossRepository)
           if [ -n "$only" ]; then
             prs=$(echo "$prs" | jq -c --argjson only "$only" '[.[] | select(.number == $only)]')
             echo "Scoped to PR #$only: $(echo "$prs" | jq 'length') match(es)"
           fi
+          # #3103: fork PRs are excluded, as in integration-nightly.yml. The
+          # test job merges and runs PR code in a scheduled job, which skips
+          # GitHub's approve-and-run gate for first-time contributors and runs
+          # in the `main` cache scope. Logged, not silent: a skipped fork is a
+          # coverage gap and must look like one.
+          forks=$(echo "$prs" | jq -r '[.[] | select(.isCrossRepository)] | map(.number|tostring) | join(", ")')
+          if [ -n "$forks" ]; then
+            echo "::warning::skipping fork PR(s) $forks — untrusted code is not run in the scheduled unit nightly"
+          fi
+          prs=$(echo "$prs" | jq -c '[.[] | select(.isCrossRepository | not)]')
           count=$(echo "$prs" | jq 'length')
           if [ "$count" = "0" ]; then
             echo "has_prs=false" >> "$GITHUB_OUTPUT"
@@ -215,11 +227,12 @@ jobs:
             fi
           fi
 
+      # #3103: no `cache: 'pip'`. This step runs after the PR merge, so the
+      # post-step would save a `main`-scoped cache populated after PR code ran,
+      # and the required PR checks restore that prefix.
       - uses: actions/setup-python@v7
         with:
           python-version: '3.13'
-          cache: 'pip'
-          cache-dependency-path: tests/requirements-test.txt
 
       - name: Install test dependencies
         run: |
@@ -316,7 +329,7 @@ jobs:
           # ALL-CLEAR on a regression detector, which nothing corrects.
           #
           # Writing no file is the honest answer: the comment job enumerates
-          # `status-pr*.json` and requires one per seed (#2462), so a missing
+          # one status per matrix leg (#2462, #3103), so a missing
           # one means this PR is reported as UNVERIFIED and any existing sticky
           # is left exactly as it was — never overwritten with a tick.
           if [ -z "$merge_conflict" ]; then
@@ -415,22 +428,15 @@ jobs:
           sparse-checkout: scripts/ci
           sparse-checkout-cone-mode: false
 
+      # #3103: one directory per artifact, OUTSIDE the workspace root. An
+      # artifact is producible by PR code (it can read the runner's upload
+      # token), and extracting into the root would let it overwrite the trusted
+      # scripts/ci/nightly-verdict.js before `require()` loads it.
       - name: Download all nightly artifacts
         uses: actions/download-artifact@v8
         with:
           pattern: nightly-pr-*
-          merge-multiple: true
-
-      - name: List artifacts
-        id: list
-        run: |
-          set -euo pipefail
-          ls -la
-          # Enumerate status JSONs so the next step can iterate.
-          paths=$(ls status-pr*.json 2>/dev/null || true)
-          echo "paths<<EOF" >> "$GITHUB_OUTPUT"
-          echo "$paths" >> "$GITHUB_OUTPUT"
-          echo "EOF" >> "$GITHUB_OUTPUT"
+          path: nightly-artifacts
 
       # #2029 considered a second, coarser belt here — gating this step on
       # `needs.test.result == 'success'` — and it is deliberately NOT applied.
@@ -440,9 +446,9 @@ jobs:
       # is just as wrong and affects PRs that were fine.
       #
       # The per-leg guard in `Write status JSON` is precise: a leg with no
-      # verdict writes no file, the script below enumerates what exists, and
-      # #2462's completeness rule means the affected PR is reported unverified
-      # rather than given a tick on a partial answer.
+      # verdict writes no file, the script below reads one status per matrix
+      # leg (#3103), and #2462's completeness rule means the affected PR is
+      # reported unverified rather than given a tick on a partial answer.
       #
       # What #2029 could not have anticipated is the all-legs-failed case,
       # which under the old 25-minute budget was EVERY night for twelve nights:
@@ -452,7 +458,9 @@ jobs:
       - name: Post or update sticky comment per PR
         uses: actions/github-script@v9
         env:
-          PATHS: ${{ steps.list.outputs.paths }}
+          # #3103: the trusted leg list. PR number, seed and head SHA come from
+          # here, built before any PR code ran; artifacts only supply verdicts.
+          MATRIX: ${{ needs.discover.outputs.matrix }}
           # Passed explicitly rather than relied on from the workflow-level
           # env, so the completeness rule below reads its seed set from the
           # same place `discover` builds the matrix from, visibly.
@@ -461,13 +469,31 @@ jobs:
           script: |
             const fs = require('fs');
             const path = require('path');
-            const { verdictFor, groupByPr } = require(
+            const { verdictFor, groupByPr, legsFromMatrix } = require(
               `${process.env.GITHUB_WORKSPACE}/scripts/ci/nightly-verdict.js`
             );
             const marker = '<!-- nightly-unit-suite -->';
+            const artDir = path.join(process.env.GITHUB_WORKSPACE, 'nightly-artifacts');
+            // download-artifact extracts into `<path>/<name>/` only when the
+            // pattern matched MORE than one artifact; a lone match lands in
+            // `<path>` itself. The root holds files only in that case, so the
+            // fallback cannot mix two legs.
+            const legDir = (pr, seed) => {
+              const d = path.join(artDir, `nightly-pr-${pr}-seed-${seed}`);
+              return fs.existsSync(d) ? d : artDir;
+            };
 
-            const paths = (process.env.PATHS || '').split('\n').map(s => s.trim()).filter(Boolean);
             const expectedSeeds = (process.env.NIGHTLY_SEEDS || '').split(' ').filter(Boolean);
+            const { legs: parsed, rejected } = legsFromMatrix(
+              JSON.parse(process.env.MATRIX || '{"include":[]}'),
+              (pr, seed) => {
+                const p = path.join(legDir(pr, seed), `status-pr${pr}-${seed}.json`);
+                return fs.existsSync(p) ? fs.readFileSync(p, 'utf8') : null;
+              }
+            );
+            for (const r of rejected) {
+              core.warning(`PR #${r.pr} seed ${r.seed}: status rejected — ${r.reason}`);
+            }
 
             // #2462: a sweep that produced NOTHING while PRs were open is the
             // exact signature of the twelve dead nights — every leg capped, no
@@ -475,10 +501,13 @@ jobs:
             // must not exit 0. A run where every PR merge-conflicted still
             // writes a status per leg, so zero files with PRs present can only
             // mean the legs themselves died.
-            if (paths.length === 0) {
+            //
+            // #3103: counted AFTER validation. A sweep whose every status was
+            // rejected has said nothing, and must fail the same way.
+            if (parsed.length === 0) {
               core.setFailed(
-                'Nightly produced no status artifacts while open PRs existed — every test leg failed ' +
-                'or was cancelled. This is the #2462 signature; check the test job durations.'
+                'Nightly produced no accepted status artifacts while open PRs existed — every test leg ' +
+                'failed, was cancelled, or was rejected. This is the #2462 signature; check the test job durations.'
               );
               return;
             }
@@ -486,14 +515,6 @@ jobs:
             // #2462: legs are per (PR, seed) now, so a PR's verdict is the
             // union of its seeds. Group first, then decide — and the deciding
             // lives in scripts/ci/nightly-verdict.js, which a test executes.
-            const parsed = [];
-            for (const p of paths) {
-              try {
-                parsed.push(JSON.parse(fs.readFileSync(p, 'utf8')));
-              } catch (err) {
-                core.warning(`Failed to read ${p}: ${err.message}`);
-              }
-            }
             const byPr = groupByPr(parsed);
 
             for (const [pr, legs] of byPr) {
@@ -514,7 +535,7 @@ jobs:
                   head_sha: verdict.headSha,
                 };
                 const regressed = (verdict.regressed || []).map(
-                  l => ({ ...l, diffPath: `diff-pr${pr}-${l.seed}.md` })
+                  l => ({ ...l, diffPath: path.join(legDir(pr, l.seed), `diff-pr${pr}-${l.seed}.md`) })
                 );
 
                 let body;

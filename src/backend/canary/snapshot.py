@@ -266,6 +266,9 @@ class AgentSnapshot:
     # `claude_session_id` per running id (str or None); used by E-05 to detect
     # dispatched rows that never acquired a backing session.
     running_claude_session_ids: Dict[str, Optional[str]] = field(default_factory=dict)
+    # #2843: conversations with a running turn. A queued row of one of these is
+    # waiting on its own conversation, not on a worker (B-02/B-08 skip it).
+    running_conversation_keys: Set[str] = field(default_factory=set)
     # Queued id-set from `_collect_executions` (engine seam since #1540). Consumed
     # by B-02 and E-02. **No longer B-01's Side B** (#1450): B-01 uses the
     # dedicated `queued_ids_via_engine` below (an independent `SELECT id` code
@@ -559,6 +562,7 @@ def _collect_executions(agent_name: str) -> Dict[str, Any]:
         "claude_session_ids": {},
         "lease_expires_at": {},
         "queued_meta": {},
+        "running_conversation_keys": set(),
     }
     with get_engine().connect() as conn:
         # `claude_session_id` may not exist in the minimal test DDLs (or a
@@ -577,7 +581,10 @@ def _collect_executions(agent_name: str) -> Dict[str, Any]:
         # queued metadata at all. Guard on BOTH (they land together in
         # BACKLOG-001) so a partial DDL degrades to older-image fail-open.
         has_queued_meta = "queued_at" in cols and "backlog_metadata" in cols
+        has_conv_col = "conversation_key" in cols
         select_cols = [c.id, c.status, c.started_at]
+        if has_conv_col:
+            select_cols.append(c.conversation_key)
         if has_session_col:
             select_cols.append(c.claude_session_id)
         if has_lease_col:
@@ -601,6 +608,8 @@ def _collect_executions(agent_name: str) -> Dict[str, Any]:
                 out["lease_expires_at"][row["id"]] = (
                     row["lease_expires_at"] if has_lease_col else None
                 )
+                if has_conv_col and row["conversation_key"]:
+                    out["running_conversation_keys"].add(row["conversation_key"])
             elif row["status"] == "queued":
                 out["queued"].add(row["id"])
                 if has_queued_meta:
@@ -610,6 +619,7 @@ def _collect_executions(agent_name: str) -> Dict[str, Any]:
                     out["queued_meta"][row["id"]] = {
                         "queued_at": row["queued_at"],
                         "backlog_metadata": row["backlog_metadata"],
+                        "conversation_key": row["conversation_key"] if has_conv_col else None,
                     }
     return out
 
@@ -1510,6 +1520,7 @@ def collect_snapshot() -> Snapshot:
                 running_started_at=execs.get("started_at", {}),
                 running_claude_session_ids=execs.get("claude_session_ids", {}),
                 running_lease_expires_at=execs.get("lease_expires_at", {}),
+                running_conversation_keys=execs.get("running_conversation_keys", set()),
                 queued_exec_ids=execs["queued"],
                 queued_meta=execs.get("queued_meta", {}),
                 queued_count_via_service=queued_via_service,

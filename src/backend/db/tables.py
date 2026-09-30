@@ -296,6 +296,18 @@ schedule_executions = Table(
     Column("open_canvas_id", Text),
     # #2806 — agent-to-agent hops from a non-agent root; NULL = root (0).
     Column("chain_depth", Integer),
+    # #2843 — the conversation this turn continues. Declared here, not only in
+    # schema.py/Alembic: the unique index IS the one-turn-per-conversation rule
+    # (the pull claim relies on its IntegrityError), so autogenerate must not
+    # propose dropping it.
+    Column("conversation_key", Text),
+    Index(
+        "idx_executions_one_running_turn",
+        "agent_name", "conversation_key",
+        unique=True,
+        sqlite_where=text("status = 'running' AND conversation_key IS NOT NULL"),
+        postgresql_where=text("status = 'running' AND conversation_key IS NOT NULL"),
+    ),
 )
 
 agent_loops = Table(

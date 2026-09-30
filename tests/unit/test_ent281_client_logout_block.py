@@ -415,7 +415,7 @@ class _Req:
         host = "10.0.0.1"
 
     client = _C()
-    url = type("U", (), {"path": "/api/enterprise/client-portal/x"})()
+    scope = {"path": "/api/enterprise/client-portal/x"}
 
     class _S:
         request_id = "req-1"

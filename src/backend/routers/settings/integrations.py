@@ -246,7 +246,7 @@ async def update_skills_library_automation_setting(
             source="api",
             actor_user=current_user,
             actor_ip=request.client.host if request.client else None,
-            endpoint=str(request.url.path),
+            endpoint=request.scope["path"],
             request_id=getattr(request.state, "request_id", None),
             details={"setting": "skills_library_automation", "changed": changed},
         )
@@ -328,7 +328,7 @@ async def update_proactive_rate_limits_setting(
             source="api",
             actor_user=current_user,
             actor_ip=request.client.host if request.client else None,
-            endpoint=str(request.url.path),
+            endpoint=request.scope["path"],
             request_id=getattr(request.state, "request_id", None),
             details={"setting": "proactive_rate_limits", "action": "update", "updated": updated},
         )
@@ -443,7 +443,7 @@ async def update_brain_orb_settings(
             source="api",
             actor_user=current_user,
             actor_ip=request.client.host if request.client else None,
-            endpoint=str(request.url.path),
+            endpoint=request.scope["path"],
             request_id=getattr(request.state, "request_id", None),
             details={
                 "setting": "brain_orb_flags",
@@ -576,7 +576,7 @@ async def update_elevenlabs_settings(
             source="api",
             actor_user=current_user,
             actor_ip=request.client.host if request.client else None,
-            endpoint=str(request.url.path),
+            endpoint=request.scope["path"],
             request_id=getattr(request.state, "request_id", None),
             details={
                 "setting": "elevenlabs",
@@ -658,7 +658,7 @@ async def upsert_a2a_outbound_endpoint(
         source="api",
         actor_user=current_user,
         actor_ip=request.client.host if request.client else None,
-        endpoint=str(request.url.path),
+        endpoint=request.scope["path"],
         request_id=getattr(request.state, "request_id", None),
         details={
             "setting": "a2a_outbound_endpoints",
@@ -696,7 +696,7 @@ async def remove_a2a_outbound_endpoint(
         source="api",
         actor_user=current_user,
         actor_ip=request.client.host if request.client else None,
-        endpoint=str(request.url.path),
+        endpoint=request.scope["path"],
         request_id=getattr(request.state, "request_id", None),
         details={
             "setting": "a2a_outbound_endpoints",

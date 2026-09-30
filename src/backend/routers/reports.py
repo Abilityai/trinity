@@ -151,6 +151,49 @@ def _report_or_404(report_id: str, current_user: User) -> dict:
     return report
 
 
+def _report_audience(name: str, data: ReportCreate, current_user: User):
+    """`(audience_email, by_role)` for a report (ent#606).
+
+    `to` names a role and the platform resolves the person
+    (`services/role_addressing`, the rule asks use too). `operator`, or a role
+    that resolves to nobody or to the agent's OWNER, is an operator-only report:
+    the owner reads reports on the operator surface, and the audience column is
+    for someone else (`include_owned=False` below). Several people cannot share
+    one report's single audience, so that is refused by name rather than
+    delivered to one of them. `audience_email` still works, deprecated.
+    """
+    from services import role_addressing
+
+    if data.to and data.audience_email:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={"code": "addressing_conflict",
+                    "message": "Name a role with `to` or an address with audience_email, not both."},
+        )
+    if not data.to:
+        if data.audience_email and current_user.agent_name:
+            role_addressing.log_email_addressing(name, "report")
+        return data.audience_email, False
+    try:
+        r = role_addressing.resolve(name, data.to)
+    except role_addressing.RoleRefused as e:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={"code": e.code, "role": e.role,
+                    "message": e.message + " Address the report to primary or operator."},
+        )
+    if len(r.people) > 1:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={"code": "role_resolves_to_several", "role": data.to, "count": len(r.people),
+                    "message": f"{len(r.people)} people fill the {data.to} role and a report has "
+                               "one reader — address it to primary, or raise an ask."},
+        )
+    if not r.single or r.single == role_addressing.owner_email(name):
+        return None, True
+    return r.single, True
+
+
 @router.post("/agents/{name}/reports", response_model=Report, status_code=201)
 async def create_report(
     data: ReportCreate,
@@ -234,7 +277,7 @@ async def create_report(
     # The publish therefore gates on the SAME predicate the reader uses. Import
     # is local: `client_portal` is a sibling package and a module-level import
     # here would couple the reports router to it at load time.
-    audience = data.audience_email
+    audience, by_role = _report_audience(name, data, current_user)
     if audience:
         try:
             from client_portal.service import agent_on_roster
@@ -247,6 +290,15 @@ async def create_report(
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail="Could not verify the report audience — try again.",
+            )
+        if not reachable and by_role:
+            # The role resolved to someone this agent does not serve on its
+            # roster — an assignment without a share. Named, never dropped.
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail={"code": "role_unreachable", "role": data.to,
+                        "message": f"The person in the {data.to} role is not a client of "
+                                   "this agent yet — share the agent with them first."},
             )
         if not reachable:
             raise HTTPException(
@@ -298,7 +350,10 @@ async def create_report(
     projected = {k: v for k, v in report.items() if k in Report.model_fields}
     if "addressed_to" not in projected and "addressed_to_email" in report:
         projected["addressed_to"] = report["addressed_to_email"]
-    return Report(**projected)
+    # Same redaction as the read routes: an agent-key caller must never read
+    # back the person a role resolved to (ent#606 — "the agent never sees the
+    # person"). A JWT human still sees the audience.
+    return Report(**_hide_audience(projected, current_user))
 
 
 @router.get("/agents/{name}/reports", response_model=List[ReportSummary])

@@ -2,9 +2,11 @@
 
 import secrets
 from datetime import datetime, timedelta, timezone
-from typing import Optional, List, Dict
+from typing import AbstractSet, Optional, List, Dict
 
-from sqlalchemy import select, update, and_, func
+from sqlalchemy import select, update, and_, func, case, exists
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import aliased
 
 from ..engine import get_engine
 from ..tables import (
@@ -21,7 +23,11 @@ class ScheduleQueueMixin:
     # =========================================================================
 
     def update_execution_to_queued(
-        self, execution_id: str, backlog_metadata: str, queued_at: str
+        self,
+        execution_id: str,
+        backlog_metadata: str,
+        queued_at: str,
+        conversation_key: Optional[str] = None,
     ) -> bool:
         """Transition an execution row to QUEUED state and attach its backlog metadata.
 
@@ -33,6 +39,9 @@ class ScheduleQueueMixin:
             execution_id: Execution row to transition.
             backlog_metadata: JSON string capturing the full request context.
             queued_at: ISO timestamp (used as the FIFO ordering key).
+            conversation_key: The conversation this turn continues (#2843).
+                At most one ``running`` row per (agent, key) — enforced by the
+                ``idx_executions_one_running_turn`` unique index. None ⇒ no guard.
 
         Returns:
             True if the row was moved to QUEUED, False if it is missing or no
@@ -58,6 +67,7 @@ class ScheduleQueueMixin:
                     status=TaskExecutionStatus.QUEUED,
                     queued_at=queued_at,
                     backlog_metadata=backlog_metadata,
+                    conversation_key=conversation_key,
                     # reset started_at so drain records a clean run window
                     started_at=queued_at,
                 )
@@ -69,8 +79,9 @@ class ScheduleQueueMixin:
         agent_name: str,
         worker_id: Optional[str] = None,
         lease_seconds: Optional[int] = None,
+        interactive_triggers: Optional[AbstractSet[str]] = None,
     ) -> Optional[Dict]:
-        """Atomically claim the oldest QUEUED execution for an agent.
+        """Atomically claim the next QUEUED execution for an agent.
 
         Uses a single SQL UPDATE with a subquery that selects the oldest row
         by queued_at, filtered WHERE status='queued'. RETURNING gives us the
@@ -92,6 +103,21 @@ class ScheduleQueueMixin:
             lease_seconds: Lease TTL in seconds (worker path only). The caller
                 supplies ``execution_timeout_seconds + SLOT_TTL_BUFFER`` to match
                 the slot-TTL convention.
+            interactive_triggers: Pull claim only (#2842). Rows whose
+                ``triggered_by`` is in this set are claimed before every other
+                row, oldest first within each group. Strict precedence, no
+                anti-starvation rule: steady chat that keeps every worker busy
+                is answered by raising the agent's worker count. None ⇒ plain
+                oldest-first, exactly as before.
+
+        Pull claims (``worker_id`` set) also skip any row whose
+        ``conversation_key`` already has a ``running`` row for this agent
+        (#2843), so two turns of one conversation never run at once and a busy
+        conversation does not block the rest of the queue. The skip reads
+        committed state; two concurrent claimers of one conversation are
+        stopped by the ``idx_executions_one_running_turn`` unique index and the
+        loser retries. The guard is the row's own status, so every exit
+        (terminal, lease expiry, requeue) releases it.
 
         Returns:
             Dict of the claimed row (id, agent_name, message, backlog_metadata,
@@ -108,16 +134,29 @@ class ScheduleQueueMixin:
         # claimers lock DISTINCT head rows; SQLite serialises writers and does
         # not support the clause, so it is applied on Postgres only — the outer
         # status re-check below is the cross-dialect backstop.
-        oldest_queued_select = (
-            select(schedule_executions.c.id)
-            .where(
-                and_(
-                    schedule_executions.c.status == TaskExecutionStatus.QUEUED,
-                    schedule_executions.c.agent_name == agent_name,
+        se = schedule_executions
+        conditions = [
+            se.c.status == TaskExecutionStatus.QUEUED,
+            se.c.agent_name == agent_name,
+        ]
+        if worker_id is not None:
+            running = aliased(se)
+            conditions.append(
+                ~exists().where(
+                    and_(
+                        running.c.agent_name == agent_name,
+                        running.c.status == TaskExecutionStatus.RUNNING,
+                        running.c.conversation_key == se.c.conversation_key,
+                    )
                 )
             )
-            .order_by(schedule_executions.c.queued_at.asc())
-            .limit(1)
+        order_by = [se.c.queued_at.asc()]
+        if interactive_triggers:
+            order_by.insert(
+                0, case((se.c.triggered_by.in_(sorted(interactive_triggers)), 0), else_=1)
+            )
+        oldest_queued_select = (
+            select(se.c.id).where(and_(*conditions)).order_by(*order_by).limit(1)
         )
         if get_engine().dialect.name == "postgresql":
             oldest_queued_select = oldest_queued_select.with_for_update(
@@ -170,9 +209,20 @@ class ScheduleQueueMixin:
                 schedule_executions.c.redelivery_count,
             )
         )
-        with get_engine().begin() as conn:
-            row = conn.execute(stmt).mappings().first()
-        return dict(row) if row else None
+        # A lost race on one conversation (#2843) raises IntegrityError on the
+        # unique index; the retry's NOT EXISTS sees the winner and takes another
+        # row. Each retry needs a fresh concurrent winner, so 3 is plenty.
+        for attempt in range(3):
+            try:
+                with get_engine().begin() as conn:
+                    row = conn.execute(stmt).mappings().first()
+                return dict(row) if row else None
+            except IntegrityError:
+                if attempt == 2:
+                    return None
+                if worker_id is not None:
+                    stmt = stmt.values(claim_token=secrets.token_urlsafe(32))
+        return None
 
     def release_claim_to_queued(self, execution_id: str) -> bool:
         """Release a claimed row back to QUEUED state.

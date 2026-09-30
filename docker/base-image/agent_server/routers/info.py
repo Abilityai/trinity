@@ -105,6 +105,29 @@ def _clone_status() -> str:
     return "ok"
 
 
+GUARDRAIL_REGISTRATION = "/etc/claude-code/managed-settings.json"
+
+
+def _guardrails_registration() -> str:
+    """#3105: per-request check that the guardrail hook registration is intact.
+
+    startup.sh checks once at boot, but `developer` holds NOPASSWD sudo, so the
+    file can be removed or loosened later in the container's life. Claude Code
+    then runs no hooks and logs nothing. Enum only, like `clone_status`.
+    A sudo rewrite that keeps root:root 0444 still reads "ok"; the bash_deny
+    sudo patterns are the other half of this control.
+    """
+    try:
+        st = os.stat(GUARDRAIL_REGISTRATION)
+    except OSError:
+        return "missing"
+    if st.st_uid != 0:
+        return "not_root_owned"
+    if os.access(GUARDRAIL_REGISTRATION, os.W_OK):
+        return "writable"
+    return "ok"
+
+
 @router.get("/")
 async def root():
     """Root endpoint - no UI, just API info"""
@@ -191,6 +214,9 @@ async def health_check():
         # reporting a running-but-empty agent as healthy. Enum only — no
         # agent-controlled strings on this unauthenticated endpoint.
         "clone_status": _clone_status(),
+        # #3105: "ok"|"missing"|"not_root_owned"|"writable" — stat of the
+        # guardrail registration on every request, not only at boot.
+        "guardrails_registration": _guardrails_registration(),
         "diagnostics": _diagnostics(),
     }
 

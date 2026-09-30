@@ -40,9 +40,9 @@ claude plugin install create-agent@abilityai
 
 | Plugin | Version | Skills | Purpose | Key Skills |
 |--------|---------|--------|---------|------------|
-| [create-agent](create-agent-plugin.md) | 2.0.0 | 6 | Agent creation — interview-driven, any domain | `/create-agent:custom`, `/create-agent:review` |
-| [agent-dev](agent-dev-plugin.md) | 1.16.1 | 30 | Extend existing agents, and work fleet-wide | `/agent-dev:create-playbook`, `/agent-dev:add-memory`, `/agent-dev:add-project-management`, `/agent-dev:add-orchestrator`, `/agent-dev:add-canon`, `/agent-dev:agent-fleet-analysis` |
-| [trinity](trinity-plugin.md) | 2.9.0 | 7 | Deploy to and operate on Trinity | `/trinity:start-here`, `/trinity:connect`, `/trinity:onboard`, `/trinity:sync`, `/trinity:loop` |
+| [create-agent](create-agent-plugin.md) | 2.1.1 | 6 | Agent creation — interview-driven, any domain | `/create-agent:custom`, `/create-agent:review` |
+| [agent-dev](agent-dev-plugin.md) | 1.16.5 | 30 | Extend existing agents, and work fleet-wide | `/agent-dev:create-playbook`, `/agent-dev:add-memory`, `/agent-dev:add-project-management`, `/agent-dev:add-orchestrator`, `/agent-dev:add-canon`, `/agent-dev:agent-fleet-analysis` |
+| [trinity](trinity-plugin.md) | 2.11.1 | 7 | Deploy to and operate on Trinity | `/trinity:start-here`, `/trinity:connect`, `/trinity:onboard`, `/trinity:sync`, `/trinity:loop` |
 | [dev-methodology](dev-methodology-plugin.md) | 1.2.1 | 24 | Development workflow | `/dev-methodology:implement`, `/dev-methodology:validate-pr` |
 | [utilities](utilities-plugin.md) | 1.2.2 | 7 | Ops and productivity | `/utilities:safe-deploy`, `/utilities:docker-ops` |
 

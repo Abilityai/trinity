@@ -88,7 +88,7 @@ The signed URL is the only credential a download needs: it is not tied to a chat
 | `/api/agents/{name}/file-sharing` | GET | File sharing status and quota |
 | `/api/agents/{name}/file-sharing` | PUT | Enable or disable file sharing (owner/admin) |
 | `/api/agents/{name}/shared-files` | POST | Mint a download URL for a file in `/home/developer/public/` |
-| `/api/agents/{name}/shared-files` | GET | List active shared files |
+| `/api/agents/{name}/shared-files` | GET | List active shared files. A signed-in person sees who each file is for; an agent or other key-authenticated caller gets the rows with `addressed_to`, `addressed_to_channel` and `audience_source` withheld, so it cannot tell who a file was for or whether it was addressed at all |
 | `/api/agents/{name}/shared-files/{id}` | DELETE | Revoke a shared file |
 | `/api/files/{file_id}` | GET/HEAD | Public download — query param `?sig={token}`; supports `Range` requests; `?download=1` forces a download |
 

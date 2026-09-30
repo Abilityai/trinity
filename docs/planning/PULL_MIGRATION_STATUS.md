@@ -38,7 +38,7 @@ Dispatch topology, not policy. `pull_pilot.PULL_REACHABLE_TRIGGERS` is the sourc
 |---|---|---|
 | **On `dev` today** | `agent`, `event`, `schedule`, `webhook`, `reminder`, `loop` | 6 of 9 |
 | **Adds with Phase 4** | `fan_out`, `a2a`, `operator_response` | → 9 of 9 |
-| **Pending** | interactive chat / Session-tab turns | joins the queue once #2842 + #2843 land (decided 2026-09-16, #1989) |
+| **Pending** | interactive chat / Session-tab turns | claim order (#2842) and conversation guard (#2843) are in; producers not yet routed (decided 2026-09-16, #1989) |
 | **Unreached, unclassified** | `retry` | in neither trigger set — #2845. 4.7% of `eu2` traffic; looks like an oversight, not a decision |
 
 `schedule` / `webhook` / `reminder` landed with #2391; `loop` with #2523. Before #2391 the pilot flag was
@@ -78,8 +78,15 @@ The spec names the gates (`TARGET_ARCHITECTURE.md`, §Re-Delivery and Side-Effec
    synchronous push path is deleted afterwards. Two pieces gate the move —
    [#2842](https://github.com/abilityai/trinity/issues/2842) (interactive turns jump the queue, so a person's
    wait is no worse than today) and [#2843](https://github.com/abilityai/trinity/issues/2843) (one turn per
-   conversation at a time, so two workers never resume one transcript). Until both land, interactive turns
-   still run on the old path — that is a **migration state, not a design boundary**.
+   conversation at a time, so two workers never resume one transcript). Both are in the pull claim:
+   interactive triggers (`pull_pilot.INTERACTIVE_TRIGGERS`) are claimed first with strict precedence and **no
+   anti-starvation rule** (steady chat that fills every worker is answered by raising the worker count); a
+   row whose `conversation_key` already has a `running` row is skipped, and the unique index
+   `idx_executions_one_running_turn` stops two concurrent claimers. **No worker is reserved** for interactive
+   arrivals: one of N held idle is 33% of a 3-worker agent. Multi-container affinity (`replica_count > 1`,
+   #927) is out of scope. The claim guard is the one mechanism for pulled turns: when session turns are routed
+   onto the queue, `session_turn_service`'s Redis `ResumeLock` is removed from that path, not kept beside it. Next: route the interactive producers onto the queue. Until then they still run on
+   the old path — a **migration state, not a design boundary**.
 
 ### The soak duration requirement is mis-cited — correct it when you touch it
 

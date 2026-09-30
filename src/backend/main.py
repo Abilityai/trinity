@@ -1284,6 +1284,14 @@ async def add_security_headers(request: Request, call_next):
     return response
 
 
+# #3102 — reject a Host header that would shift the Host-built request URL.
+# Registered LAST so it runs FIRST (add_middleware prepends); keep every other
+# middleware above this line. Pure ASGI, so WebSocket handshakes are covered too.
+from utils.host_header import HostHeaderGuard
+
+app.add_middleware(HostHeaderGuard)
+
+
 # Include all routers
 app.include_router(auth_router)
 app.include_router(agents_router)

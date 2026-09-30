@@ -92,7 +92,7 @@ async def set_agent_autonomy_status(
         actor_ip=request.client.host if request.client else None,
         target_type="agent",
         target_id=agent_name,
-        endpoint=str(request.url.path),
+        endpoint=request.scope["path"],
         request_id=getattr(request.state, "request_id", None),
         details={"enabled": bool(body.get("enabled"))},
     )
@@ -247,7 +247,7 @@ async def set_agent_resources(
         actor_ip=request.client.host if request.client else None,
         target_type="agent",
         target_id=agent_name,
-        endpoint=str(request.url.path),
+        endpoint=request.scope["path"],
         request_id=getattr(request.state, "request_id", None),
         details={
             "memory": memory,
@@ -657,7 +657,7 @@ async def set_public_channel_model(
         actor_ip=request.client.host if request.client else None,
         target_type="agent",
         target_id=agent_name,
-        endpoint=str(request.url.path),
+        endpoint=request.scope["path"],
         request_id=getattr(request.state, "request_id", None),
         details={"public_channel_model": model},  # None = cleared
     )

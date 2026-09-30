@@ -296,6 +296,9 @@ TABLES = {
             open_canvas_id TEXT,
             -- #2806: agent-to-agent hops from a non-agent root. NULL = root (0).
             chain_depth INTEGER,
+            -- #2843: the conversation this turn continues; at most one running
+            -- row per (agent, key). NULL = no conversation guard.
+            conversation_key TEXT,
             FOREIGN KEY (schedule_id) REFERENCES agent_schedules(id)
         )
     """,
@@ -2321,6 +2324,11 @@ INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_executions_queued "
     "ON schedule_executions(agent_name, queued_at) "
     "WHERE status = 'queued'",
+    # #2843: one turn per conversation at a time. The pull claim relies on the
+    # IntegrityError this raises when two workers claim one conversation at once.
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_executions_one_running_turn "
+    "ON schedule_executions(agent_name, conversation_key) "
+    "WHERE status = 'running' AND conversation_key IS NOT NULL",
     "CREATE INDEX IF NOT EXISTS idx_executions_pending_retry "
     "ON schedule_executions(retry_scheduled_at) "
     "WHERE retry_scheduled_at IS NOT NULL AND status = 'pending_retry'",

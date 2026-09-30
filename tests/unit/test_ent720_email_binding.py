@@ -242,7 +242,7 @@ class TestMigration:
         decision function — pinned identical in behaviour and in source."""
         import importlib.util
         from db.migrations import resolve_duplicate_emails
-        path = _BACKEND / "migrations" / "versions" / "0083_ent720_email_identity.py"
+        path = _BACKEND / "migrations" / "versions" / "0084_ent720_email_identity.py"
         spec = importlib.util.spec_from_file_location("rev_ent720", path)
         rev = importlib.util.module_from_spec(spec)
         if "alembic.op" not in sys.modules:
@@ -253,7 +253,7 @@ class TestMigration:
         assert rev._resolve_duplicate_emails(rows) == resolve_duplicate_emails(rows)
         body = lambda f: inspect.getsource(f).split(":", 1)[1]
         assert body(rev._resolve_duplicate_emails) == body(resolve_duplicate_emails)
-        assert rev.down_revision == "0082_agent_sync_state_divergence"
+        assert rev.down_revision == "0083_execution_conversation_key"
 
 
 # =============================================================================

@@ -93,6 +93,7 @@
   | `PUT /api/users/me/email` (ent#711) | INTERACTIVE |
   | `PUT` / `DELETE /api/users/me/github-pat` (a credential future agent creations inherit, ent#162) | INTERACTIVE |
   | `POST /api/mcp/keys` (every scope), `POST /api/mcp/keys/ensure-default` | INTERACTIVE (security.md §20.10) |
+  | `GET /api/mcp/keys` (trinity-enterprise#712 — the key inventory; no machine consumer) | INTERACTIVE |
 
 - **Refusal**: 403. PERSON routes return `HUMAN_ONLY_DETAIL` (`{"code": "person_required", ...}`, the same machine code as ent#611's ask endings, whose own detail is unchanged); INTERACTIVE routes return `reject_non_interactive_principal`'s existing detail. The refusal depends only on the principal, never on whether the addressed agent exists, so answering 403 before a path's 404 is not an enumeration oracle (#186).
 - **Still working**: the owner's `user` key and ops tooling on a `user` key keep the PERSON routes; the UI and CLI use JWTs everywhere; heartbeat, the result callback, reports and notifications do not use these gates; `trinity-system` keeps `require_admin` (#2323) and has no caller of the routes above.

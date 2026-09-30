@@ -4780,6 +4780,28 @@ def _migrate_portal_messages_unread_index(cursor, conn):
     )
 
 
+def _migrate_execution_conversation_key(cursor, conn):
+    """#2843 — one turn per conversation at a time on the pull queue.
+
+    `schedule_executions.conversation_key` names the conversation a queued turn
+    continues; the partial unique index allows at most one `running` row per
+    (agent, key). Nullable, no backfill: existing rows carry no guard.
+    PostgreSQL half: Alembic `0083_execution_conversation_key`.
+    """
+    _safe_add_column(
+        cursor,
+        "schedule_executions",
+        "conversation_key",
+        "ALTER TABLE schedule_executions ADD COLUMN conversation_key TEXT",
+    )
+    cursor.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_executions_one_running_turn "
+        "ON schedule_executions(agent_name, conversation_key) "
+        "WHERE status = 'running' AND conversation_key IS NOT NULL"
+    )
+    conn.commit()
+
+
 def _migrate_ent720_email_identity(cursor, conn):
     """trinity-enterprise#720 — a sign-in email is unique, and a code has a purpose.
 
@@ -4795,7 +4817,7 @@ def _migrate_ent720_email_identity(cursor, conn):
 
     Idempotent; a fresh install whose tables do not exist yet on the first pass
     gets both from `db/schema.py`. PostgreSQL half: Alembic
-    `0083_ent720_email_identity` (same decision function, `resolve_duplicate_emails`).
+    `0084_ent720_email_identity` (same decision function, `resolve_duplicate_emails`).
     """
     cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='email_login_codes'")
     if cursor.fetchone():
@@ -5116,5 +5138,6 @@ MIGRATIONS = [
     ("agent_skill_sets", _migrate_agent_skill_sets),
     ("portal_messages_unread_index", _migrate_portal_messages_unread_index),
     ("agent_sync_state_divergence", _migrate_agent_sync_state_divergence),
+    ("execution_conversation_key", _migrate_execution_conversation_key),
     ("ent720_email_identity", _migrate_ent720_email_identity),
 ]

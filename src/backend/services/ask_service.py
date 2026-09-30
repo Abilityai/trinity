@@ -614,46 +614,30 @@ def _refuse_unlinked_reask(agent_name: str, proposal: Dict[str, Any], raised_by:
 def _address(agent_name: str, role: str) -> Tuple[List[str], Optional[str], bool]:
     """`(resolved_to, addressed_to_email, resolved)` for a role.
 
-    A registered provider answers first (`assignment_provider.people_for`); with
-    no answer the core defaults hold: `primary` → the agent's owner (their
-    Workspace Main chat); `operator` → the operators, no person recorded;
-    `approver` / `viewer` → refused until someone fills them. A provider that
-    answers "nobody" (`[]`) for `primary` sends the ask to the operators — the
-    ent#606 ruling: an ask to primary falls back to operator when no primary is
-    assigned, and the owner stands in only when no provider answers at all. An
-    owner with no email makes a `primary` ask an operator ask too; either way the
-    receipt says so (`resolved: false`). Several people are recorded, but none
-    becomes the single Workspace addressee.
+    The one resolution rule, `services/role_addressing.resolve` (ent#606) —
+    shared with reports and messages so an ask and a report addressed to the
+    same role reach the same people. Several people are recorded, but none
+    becomes the single Workspace addressee. `role` is already validated
+    against `ASK_ROLES` by `_validated_ask` (the only caller passes its output),
+    so the one refusal left to map is an unfilled role.
     """
-    from services import assignment_provider
+    from services import role_addressing
 
-    people = assignment_provider.resolve_role_people(agent_name, role)
-    if people:
-        return people, (people[0] if len(people) == 1 else None), True
-    if role == "primary":
-        if people is not None:   # the provider answered: nobody fills primary
-            return [], None, False
-        owner = _owner_email(agent_name)
-        return ([owner], owner, True) if owner else ([], None, False)
-    if role == "operator":
-        return [], None, True
-    raise AskRejected(422, "role_unassigned",
-                      f"Nobody fills the {role} role for this agent yet; address the ask to "
-                      "primary or operator.", role=role)
+    try:
+        r = role_addressing.resolve(agent_name, role, owner_lookup=_owner_email)
+    except role_addressing.RoleRefused:
+        raise AskRejected(422, "role_unassigned",
+                          f"Nobody fills the {role} role for this agent yet; address the ask to "
+                          "primary or operator.", role=role)
+    return r.people, r.single, r.resolved
 
 
 def _owner_email(agent_name: str) -> Optional[str]:
-    """The agent owner's email, or None when there is none (the default admin
-    often has none). Unreadable ⇒ None: an operator ask, never a guess."""
-    try:
-        owner = db.get_agent_owner(agent_name)
-        username = (owner or {}).get("owner_username")
-        user = db.get_user_by_username(username) if username else None
-        email = ((user or {}).get("email") or "").strip().lower()
-    except Exception:  # noqa: BLE001
-        logger.warning("[AskService] owner lookup failed for %s", agent_name, exc_info=True)
-        return None
-    return email if "@" in email else None
+    """The agent owner's email (`role_addressing.owner_email`). Kept as this
+    module's own name so the ask tests' patches keep a target that is read."""
+    from services import role_addressing
+
+    return role_addressing.owner_email(agent_name)
 
 
 def _rate_allowed(agent_name: str, oqs) -> bool:

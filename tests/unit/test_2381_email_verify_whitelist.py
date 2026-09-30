@@ -34,12 +34,12 @@ def _auth():
 
 
 class _Req:
-    """The handler reads client.host, url.path, state and json()."""
+    """The handler reads client.host, scope["path"], state and json()."""
 
     def __init__(self, email, code):
         self._body = {"email": email, "code": code}
         self.client = SimpleNamespace(host="203.0.113.9")
-        self.url = SimpleNamespace(path="/api/auth/email/verify")
+        self.scope = {"path": "/api/auth/email/verify"}
         self.state = SimpleNamespace(request_id="req-1")
 
     async def json(self):

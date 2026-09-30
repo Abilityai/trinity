@@ -735,7 +735,7 @@ Like sign-in, it fails open when Redis is unavailable.
 **Uniqueness**: `idx_users_email_unique ON users(lower(email)) WHERE email IS
 NOT NULL`, and every `users.email` write goes through one checked writer that
 raises `EmailInUseError`. The `ent720_email_identity` migration (SQLite) /
-Alembic `0083_ent720_email_identity` (PostgreSQL) resolves pre-existing
+Alembic `0084_ent720_email_identity` (PostgreSQL) resolves pre-existing
 duplicates first: per address the **earliest-created** account keeps it, every
 other account's email is set to `NULL`, and the migration log names those
 accounts by username (never the address). Their owners lose email sign-in to
