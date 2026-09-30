@@ -225,7 +225,19 @@ class CorneliusAgentService:
             kind="deployment",
             source_mode=True,
         )
-        await create_agent_internal(config, admin_user, request=None)
+        # The template declares `fork_to_own: required` (2026-09-11), which the
+        # clone path enforces by 400 for any caller that does not fork. The
+        # seeder structurally cannot: it runs at first boot with no user present
+        # and no token to fork with, so before this door every fresh install
+        # ended with three agents and a "Cornelius seed failed" alert.
+        #
+        # What makes the door safe is the pin above, not the flag: the gate
+        # exists to stop a push into the shared upstream, and a pull-only agent
+        # has none. `_apply_fork_to_own` re-checks that shape itself, so this
+        # flag cannot open the gate for a create that could push.
+        await create_agent_internal(
+            config, admin_user, request=None, allow_unforked_pull_only=True,
+        )
 
     def _agent_is_present(self) -> bool:
         """Is a Cornelius actually claiming the name? (#1790)

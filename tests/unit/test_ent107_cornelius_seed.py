@@ -302,10 +302,13 @@ def test_provision_builds_local_template_config(monkeypatch):
     (no PAT / network path)."""
     captured = {}
 
-    async def fake_create(config, current_user, request=None):
+    async def fake_create(
+        config, current_user, request=None, allow_unforked_pull_only=False
+    ):
         captured["config"] = config
         captured["request"] = request
         captured["user"] = current_user
+        captured["allow_unforked_pull_only"] = allow_unforked_pull_only
         return MagicMock()
 
     fake_crud = types.ModuleType("services.agent_service.crud")
@@ -321,6 +324,12 @@ def test_provision_builds_local_template_config(monkeypatch):
     # only — `_gate_tokenless_request` 400s a non-source-mode request. The seeder
     # relies on the AgentConfig default rather than setting it, so pin the default.
     assert captured["config"].source_mode is True
+    # The template declares `fork_to_own: required`, so the clone path 400s any
+    # caller that does not fork — which the seeder, running at first boot with no
+    # user and no token, structurally cannot. The door is pinned to the pull-only
+    # shape above; pin the flag too, so removing it fails here rather than at a
+    # fresh install nobody is watching.
+    assert captured["allow_unforked_pull_only"] is True
     assert captured["request"] is None
     assert captured["user"].username == "admin"
 
