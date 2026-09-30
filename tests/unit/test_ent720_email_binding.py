@@ -493,6 +493,50 @@ class TestBindGuessCap:
         assert api["otp"].get(f"otp_attempts:bind:{me['id']}:{new}") is None
 
 
+class TestBindRequestsNeverStarveSignIn:
+    """Bind-code requests and sign-in-code requests are separate allowances.
+
+    Sign-in (`routers/auth.py`) and the MCP code request count an address's
+    recent codes against a 3-per-10-min limit. If bind rows counted too, any
+    signed-in user could request bind codes for SOMEONE ELSE's address and
+    keep its owner's sign-in codes suppressed. So sign-in counts sign-in codes
+    only, and the bind route limits the CALLER, across every address."""
+
+    def test_another_accounts_bind_requests_leave_the_sign_in_allowance_whole(self, api):
+        victim = _addr("victim")
+        attacker = _make_user(api["db"], email=_addr("attacker"))
+        c = api["as"](attacker)
+        for _ in range(3):
+            assert c.post("/api/users/me/email/code", json={"email": victim}).status_code == 200
+        # The counter routers/auth.py and mcp_auth_service consult, called as they call it.
+        assert api["db"].count_recent_code_requests(victim, minutes=10) == 0
+        api["db"].create_login_code(victim)
+        assert api["db"].count_recent_code_requests(victim, minutes=10) == 1
+
+    def test_the_bind_limit_is_per_caller_across_addresses(self, api):
+        me = _make_user(api["db"], email=_addr("me"))
+        c = api["as"](me)
+        codes = [c.post("/api/users/me/email/code", json={"email": _addr(f"n{i}")}).status_code
+                 for i in range(4)]
+        assert codes == [200, 200, 200, 429]
+
+    def test_one_account_cannot_spend_anothers_bind_allowance(self, api):
+        new = _addr("new")
+        alice = _make_user(api["db"], email=_addr("alice"))
+        bob = _make_user(api["db"], email=_addr("bob"))
+        ca = api["as"](alice)
+        for _ in range(3):
+            ca.post("/api/users/me/email/code", json={"email": new})
+        assert api["as"](bob).post("/api/users/me/email/code", json={"email": new}).status_code == 200
+
+    def test_sign_in_codes_do_not_spend_a_bind_allowance(self, api):
+        me = _make_user(api["db"], email=_addr("me"))
+        new = _addr("new")
+        for _ in range(3):
+            api["db"].create_login_code(new)
+        assert api["as"](me).post("/api/users/me/email/code", json={"email": new}).status_code == 200
+
+
 class TestNoDeliveryInstall:
     """The #82 transition on an install that cannot deliver mail (provider console)."""
 

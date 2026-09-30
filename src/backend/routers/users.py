@@ -102,11 +102,14 @@ async def request_email_bind_code(
     if not _email_can_be_delivered() and current_user.role != "admin":
         _refuse(409, "email_verification_unavailable",
                 "Email verification isn't available on this instance yet. Ask an admin to configure email.")
-    if db.count_recent_code_requests(email, minutes=_BIND_CODE_MINUTES) >= _BIND_CODE_MAX_PER_WINDOW:
-        _refuse(429, "too_many_codes", "Too many codes requested for that address. Try again in a few minutes.")
+    # The allowance belongs to the CALLER, across every address: counting the
+    # address instead would let one account spend another's bind allowance,
+    # and bind rows counted by sign-in would suppress the owner's sign-in codes.
+    purpose = _bind_purpose(current_user.id)
+    if db.count_recent_codes_for_purpose(purpose, minutes=_BIND_CODE_MINUTES) >= _BIND_CODE_MAX_PER_WINDOW:
+        _refuse(429, "too_many_codes", "Too many codes requested. Try again in a few minutes.")
 
-    code = db.create_login_code(email, expiry_minutes=_BIND_CODE_MINUTES,
-                                purpose=_bind_purpose(current_user.id))
+    code = db.create_login_code(email, expiry_minutes=_BIND_CODE_MINUTES, purpose=purpose)
     from services.email_service import EmailService
     sent = await EmailService().send_verification_code(
         email, code["code"], context_label="Trinity sign-in email confirmation")

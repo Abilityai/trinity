@@ -247,11 +247,31 @@ class EmailAuthOperations:
             }
 
     def count_recent_code_requests(self, email: str, minutes: int = 10) -> int:
-        """Count how many code requests were made for this email recently."""
+        """Count recent SIGN-IN code requests for this email (`purpose IS NULL`).
+
+        ent#720: bind codes are excluded. Counting them would let any signed-in
+        user request bind codes for someone else's address and keep its owner's
+        sign-in codes suppressed; the bind route limits its caller instead
+        (`count_recent_codes_for_purpose`)."""
         cutoff = (datetime.utcnow() - timedelta(minutes=minutes)).isoformat()
         stmt = select(func.count().label("count")).where(
             and_(
                 func.lower(email_login_codes.c.email) == email.lower(),
+                email_login_codes.c.purpose.is_(None),
+                email_login_codes.c.created_at > cutoff,
+            )
+        )
+        with get_engine().connect() as conn:
+            result = conn.execute(stmt).mappings().first()
+        return result["count"] if result else 0
+
+    def count_recent_codes_for_purpose(self, purpose: str, minutes: int = 10) -> int:
+        """Count recent codes minted for one purpose, across every address (ent#720:
+        the per-account bind allowance, `email_bind:<user id>`)."""
+        cutoff = (datetime.utcnow() - timedelta(minutes=minutes)).isoformat()
+        stmt = select(func.count().label("count")).where(
+            and_(
+                email_login_codes.c.purpose == purpose,
                 email_login_codes.c.created_at > cutoff,
             )
         )

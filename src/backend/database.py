@@ -2656,6 +2656,9 @@ class DatabaseManager:
     def count_recent_code_requests(self, email: str, minutes: int = 10):
         return self._email_auth_ops.count_recent_code_requests(email, minutes)
 
+    def count_recent_codes_for_purpose(self, purpose: str, minutes: int = 10):
+        return self._email_auth_ops.count_recent_codes_for_purpose(purpose, minutes)
+
     def cleanup_old_codes(self, days: int = 1):
         return self._email_auth_ops.cleanup_old_codes(days)
 
