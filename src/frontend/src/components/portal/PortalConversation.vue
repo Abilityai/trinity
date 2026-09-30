@@ -337,8 +337,17 @@
           <PortalAvatar v-if="item.message.role !== 'user'" :name="agent.name" :avatar-url="agent.avatar_url" :size="28" class="mt-0.5" />
           <div v-if="item.message.role === 'user'" class="max-w-[85%] flex flex-col items-end gap-1">
             <!-- ent#610 round 8: what this message replied to (this visit —
-                 the stored row keeps only what was typed). -->
-            <PortalReplyChip v-if="item.message.replyTo" :excerpt="item.message.replyTo.excerpt" :removable="false" class="max-w-full" />
+                 the stored row keeps only what was typed). Removable only while
+                 the message failed (#3054 review): the server refuses a reply
+                 target it cannot prove, and Retry must be able to send without it. -->
+            <PortalReplyChip
+              v-if="item.message.replyTo"
+              :excerpt="item.message.replyTo.excerpt"
+              placement="message"
+              :removable="!!item.message.failed"
+              class="max-w-full"
+              @remove="dropReply(item.index)"
+            />
             <div
               class="rounded-2xl rounded-br-md px-3.5 py-3 text-sm leading-relaxed whitespace-pre-wrap"
               :class="item.message.failed ? 'bg-status-danger-50 dark:bg-status-danger-900/30 text-status-danger-800 dark:text-status-danger-200 ring-1 ring-status-danger-300 dark:ring-status-danger-800' : 'bg-action-primary-600 text-white'"
@@ -2411,6 +2420,13 @@ function settleDelivery(index, text, res) {
                             message: res?.error || 'Something went wrong.',
                             retryable: res?.retryable ?? !res?.lost, execution_id: lastDeliveredExecutionId.value }
   return { ok: false, error: res?.error, lost: res?.lost }
+}
+
+// #3054 review: a failed message lets go of what it replied to, so the next
+// Retry is an ordinary turn. Only a failed one — a delivered reply is history.
+function dropReply(i) {
+  const msg = messages.value[i]
+  if (msg && msg.failed) msg.replyTo = null
 }
 
 async function retry(i) {

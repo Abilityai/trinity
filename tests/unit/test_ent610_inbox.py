@@ -665,6 +665,98 @@ async def test_the_completion_writer_stamps_its_outcome_marker(inbox_db, monkeyp
     assert rows[0]["content"].startswith("**Finished**" if status == "success" else "**Didn't finish**")
 
 
+# --- ...and what the agent is told about it (#3054 review item 1) -----------
+#
+# The marker takes the completion row out of `_TYPED`. Decided (Andrii,
+# 2026-09-30): KEEP what that does — the agent is told its background task
+# finished and what it found, on BOTH paths a turn can take — and pin it. The
+# row is platform-written, so it is told as a bracketed platform note, never as
+# the agent's own words, and it is never the resumed-turn cursor (a cursor there
+# would erase a call's spoken rows from the next delta, the #2694 loss).
+
+_LATER = "2099-01-01T00:00:00Z"   # after the real writer's `utc_now_iso()`
+
+
+def _typed_row(engine, sid, role, at, content):
+    _msg(engine, session_id=sid, email=ALICE, at=at, role=role, content=content)
+
+
+@pytest.mark.asyncio
+async def test_a_completion_row_is_never_the_resumed_turns_cursor(inbox_db, monkeypatch):
+    from client_portal import db as pdb
+    from client_portal import service as portal_service
+    monkeypatch.setattr(portal_service, "get_turn_inflight", lambda sid: None)
+    _session(inbox_db, "s-a", ALICE)
+    _typed_row(inbox_db, "s-a", "user", "2026-09-01T00:00:00Z", "start it")
+    _typed_row(inbox_db, "s-a", "assistant", "2026-09-01T00:00:01Z", "started")
+    _msg(inbox_db, session_id="s-a", email=ALICE, at="2026-09-01T00:00:02Z",
+         role="user", content="call me when it lands", source="voice")
+
+    await _deliver_completion("success")
+
+    rows = pdb.get_platform_rows_since_last_reply(AGENT, ALICE, "s-a")
+    # The spoken row BEFORE the completion survives: the completion did not
+    # become the cursor. And the completion itself is in the delta.
+    assert [(r["content"], r["source"]) for r in rows] == [
+        ("call me when it lands", "voice"),
+        ("**Finished**\n\nThe leads are in.", "completion:done"),
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status, head", [
+    ("success", "**Finished**"), ("failed", "**Didn't finish** — failed"),
+])
+async def test_a_resumed_turn_is_told_its_background_task_came_back(
+        inbox_db, monkeypatch, status, head):
+    from client_portal import db as pdb
+    from client_portal import service as portal_service
+    monkeypatch.setattr(portal_service, "get_turn_inflight", lambda sid: None)
+    _session(inbox_db, "s-a", ALICE)
+    _typed_row(inbox_db, "s-a", "user", "2026-09-01T00:00:00Z", "start it")
+    _typed_row(inbox_db, "s-a", "assistant", "2026-09-01T00:00:01Z", "started")
+
+    await _deliver_completion(status)
+
+    delta = portal_service._format_voice_delta(
+        pdb.get_platform_rows_since_last_reply(AGENT, ALICE, "s-a"))
+    lines = delta.splitlines()
+    assert lines[0] == portal_service.VOICE_DELTA_HEADER
+    assert lines[1:] == [f"[Background task report: {head} The leads are in.]"]
+    # A platform note, never the agent's own words or a spoken line.
+    body = "\n".join(lines[1:])
+    assert "You:" not in body and "(voice)" not in body
+    # The header no longer claims every line was spoken.
+    assert "(voice)" in portal_service.VOICE_DELTA_HEADER
+
+
+@pytest.mark.asyncio
+async def test_the_cold_window_carries_the_completion_without_spending_a_typed_slot(
+        inbox_db, monkeypatch):
+    """The cold turn's only continuity is `get_portal_thread_window`. The
+    completion rides inside the typed span like a spoken row, and it does not
+    take one of the ``typed_limit`` slots."""
+    from client_portal import db as pdb
+    from client_portal import service as portal_service
+    monkeypatch.setattr(portal_service, "get_turn_inflight", lambda sid: None)
+    _session(inbox_db, "s-a", ALICE)
+    _typed_row(inbox_db, "s-a", "user", "2026-09-01T00:00:00Z", "oldest")
+    _typed_row(inbox_db, "s-a", "assistant", "2026-09-01T00:00:01Z", "kept")
+
+    await _deliver_completion("success")
+
+    _typed_row(inbox_db, "s-a", "user", _LATER, "did it land?")
+    _typed_row(inbox_db, "s-a", "assistant", "2099-01-01T00:00:01Z", "yes")
+
+    rows = pdb.get_portal_thread_window(AGENT, ALICE, "s-a", typed_limit=3).rows
+    assert [r["content"] for r in rows] == [
+        "kept", "**Finished**\n\nThe leads are in.", "did it land?", "yes",
+    ]
+    context = portal_service._format_history_context(rows)
+    assert "[Background task report: **Finished** The leads are in.]" in context
+    assert "You: **Finished**" not in context
+
+
 # ===========================================================================
 # 4. Previews ride the chat-state read (D5): one statement, no cost, roster-scoped
 # ===========================================================================
@@ -714,15 +806,17 @@ def test_the_latest_arrival_is_the_newest_and_the_first_unread_is_the_earliest_m
     e = _entry(_previews(), "s-a")
     assert e["unread"] == 3
     assert e["first_unread_message_id"] == m1
+    # #3054 review: no `title`/`display_hint` — no Inbox component read them; the
+    # excerpt already IS the (sanitised) title.
     assert e["latest"] == {"kind": "deliverable", "id": rid, "at": "2026-09-10T12:00:00Z",
-                           "excerpt": "Weekly leads", "outcome": None,
-                           "title": "Weekly **leads**", "display_hint": "table"}
+                           "excerpt": "Weekly leads", "outcome": None}
 
 
 def test_a_deliverable_title_is_redacted_like_its_excerpt(inbox_db, roster):
     """/cso round 3: `latest.excerpt` was the title through `sanitize_text`
     while `latest.title` shipped the same string raw, undoing the redaction
-    inside one object."""
+    inside one object. `latest.title` is gone now (#3054 review); the excerpt
+    is the only copy of the title and stays redacted."""
     _session(inbox_db, "s-a", ALICE)
     _read(ALICE, "s-a", "2026-09-10T09:00:00Z")
     key = "sk-ant-" + "a1B2c3D4e5F6g7H8i9J0k1L2"
@@ -731,8 +825,8 @@ def test_a_deliverable_title_is_redacted_like_its_excerpt(inbox_db, roster):
 
     latest = _entry(_previews(), "s-a")["latest"]
     assert key not in latest["excerpt"]
-    assert key not in latest["title"]
-    assert latest["title"].startswith("Leads for ")
+    assert latest["excerpt"].startswith("Leads for ")
+    assert "title" not in latest and "display_hint" not in latest
 
 
 def test_a_chat_whose_only_arrivals_are_deliverables_has_no_first_unread_message(inbox_db, roster):

@@ -198,7 +198,7 @@ GET /api/enterprise/client-portal/chat-state?previews=true      (only while the 
       arm (ii) agent_reports addressed_to_email = me, stamped to a session I own, after the cursor
       → {sid: (n, latest, first_unread_message_id)}
     service.get_chat_state(email, unread={sid: n})   same counts, same instant
-    attach latest{kind,id,at,excerpt,outcome,title?,display_hint?} for roster agents, ≤100
+    attach latest{kind,id,at,excerpt,outcome} for roster agents, ≤100
       excerpt: credential-sanitised, markdown-stripped, ≤160; a deliverable's excerpt = its title
       response_model_exclude_none → no preview = keys absent; roster read failure → raises (fail loud)
 
@@ -255,7 +255,9 @@ table, no migration. The report publish may mint the addressee's Main
   Inbox reads no executions. Only runs **addressed into the Workspace** arrive (A8).
 - **The outcome pill is a platform marker.** `source="completion:*"` is written by the
   completion writer from the same status that picks its wording. Parsing the body would
-  make the pill agent-writable.
+  make the pill agent-writable. The marker also takes the row out of the typed window, so
+  the agent's next turn is told `[Background task report: …]` (resumed or cold), and the
+  row is never the resumed-turn cursor.
 - **Counts and previews from one statement**, so the number on a row and its excerpt can
   never disagree mid-poll.
 - **Sidebar parity by construction.** The Inbox reads `sidebarThreads`, the projection the

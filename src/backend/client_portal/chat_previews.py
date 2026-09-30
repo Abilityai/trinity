@@ -99,9 +99,6 @@ def _project(latest: dict) -> dict:
             "at": latest["at"],
             "excerpt": _arrival_excerpt(latest.get("title")),
             "outcome": None,
-            # Redacted like the excerpt (/cso round 3) — the raw title undid it.
-            "title": sanitize_text(latest["title"]) if latest.get("title") else latest.get("title"),
-            "display_hint": latest.get("display_hint"),
         }
     return {
         "kind": "message",

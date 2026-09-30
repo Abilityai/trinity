@@ -1243,9 +1243,9 @@ def unread_arrivals_with_latest(client_email: str) -> dict[str, dict]:
     the session (a property test pins the equality).
 
     Returns ``{session_id: {"n", "latest", "first_unread_message_id"}}`` where
-    ``latest`` = ``{kind, id, at, agent_name, content, source, title,
-    display_hint}``. ``content``/``source`` are set only for a message and
-    ``title``/``display_hint`` only for a deliverable. Deliberately NO ``cost``
+    ``latest`` = ``{kind, id, at, agent_name, content, source, title}``.
+    ``content``/``source`` are set only for a message and ``title`` (the
+    excerpt's source) only for a deliverable. Deliberately NO ``cost``
     column is selected — a portal message carries one, and AC 7 keeps it out of
     every projection #610 adds. The window ordering ``at DESC, id DESC`` makes
     "latest" deterministic on a timestamp tie. ``first_unread_message_id`` is
@@ -1256,7 +1256,7 @@ def unread_arrivals_with_latest(client_email: str) -> dict[str, dict]:
         "       w.kind AS kind, w.agent_name AS agent_name, "
         "       w.first_message_id AS first_message_id, "
         "       m2.content AS content, m2.source AS source, "
-        "       r2.title AS title, r2.display_hint AS display_hint "
+        "       r2.title AS title "
         "FROM ("
         "  SELECT a.session_id, a.id, a.at, a.kind, a.agent_name, "
         "         COUNT(*) OVER (PARTITION BY a.session_id) AS n, "
@@ -1294,7 +1294,6 @@ def unread_arrivals_with_latest(client_email: str) -> dict[str, dict]:
                     "content": r["content"] if is_msg else None,
                     "source": r["source"] if is_msg else None,
                     "title": None if is_msg else r["title"],
-                    "display_hint": None if is_msg else r["display_hint"],
                 },
             }
     return out

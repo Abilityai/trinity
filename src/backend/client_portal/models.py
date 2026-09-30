@@ -765,8 +765,7 @@ class PortalChatArrival(BaseModel):
     addressed to the viewer). ``excerpt`` is plain text, markdown stripped, at
     most 160 chars (a deliverable's is its title). ``outcome`` is ``done`` /
     ``failed`` only for a platform-written run-completion message — read from
-    the ``source`` marker, never the body — else null. ``title`` and
-    ``display_hint`` are set for a deliverable only.
+    the ``source`` marker, never the body — else null.
 
     Deliberately NO ``cost`` / ``execution_id``: AC 7 — nothing #610 adds
     projects run cost or execution detail to a Workspace viewer.
@@ -776,8 +775,6 @@ class PortalChatArrival(BaseModel):
     at: Optional[str] = None
     excerpt: Optional[str] = None
     outcome: Optional[str] = None
-    title: Optional[str] = None
-    display_hint: Optional[str] = None
 
 
 class PortalChatStateEntry(BaseModel):

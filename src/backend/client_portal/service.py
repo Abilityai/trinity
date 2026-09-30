@@ -46,6 +46,7 @@ from services.chat_title import (
 # `config.PORTAL_SOURCE_CHANNEL` for why it exists and why it is not a channel.
 from config import PORTAL_SOURCE_CHANNEL
 from services import turn_context
+from services.channel_completion_report import COMPLETION_SOURCE_DONE, COMPLETION_SOURCE_FAILED
 
 from . import db
 from .models import (
@@ -1817,10 +1818,18 @@ _HISTORY_TYPED_TURNS = 100
 _SPOKEN_CONTEXT_MAX_CHARS = 24_000
 # The one line above a resumed turn's delta (#2694). Read by the tests.
 VOICE_DELTA_HEADER = (
-    "[What happened in this chat since your last reply — spoken in a voice call, "
-    "not typed; bracketed lines are the platform's own notes. Context only; the "
-    "client's new message follows below]"
+    "[What happened in this chat since your last reply — (voice) lines were spoken "
+    "in a voice call, not typed; bracketed lines are the platform's own notes. "
+    "Context only; the client's new message follows below]"
 )
+
+# ent#610 (#3054 review): the platform's report of a finished background task
+# (`channel_completion_report`) carries one of these markers, so it is NOT a
+# typed row (`db._TYPED`). It is never the resumed-turn cursor and is replayed
+# in both context blocks, told as the platform's note — the agent learns its
+# task came back and what it found, without being handed platform text as its
+# own words.
+_COMPLETION_SOURCES = frozenset({COMPLETION_SOURCE_DONE, COMPLETION_SOURCE_FAILED})
 
 
 _TITLE_MAX_CHARS = 60  # matches the sidebar's truncation width
@@ -2420,6 +2429,8 @@ def _context_lines(rows: list[dict], spoken_budget: int) -> list[str]:
       ent#523 skipped these outright so the platform's line could not be
       replayed as the agent's words; a marker keeps that guarantee and stops
       hiding from the agent that a call ended or that Main was reset;
+    * a background task's completion report (ent#610 marker) →
+      ``[Background task report: …]``, for the same reason;
     * spoken rows beyond the budget are dropped oldest-first, and every cut is
       named where the call's kept rows begin — a count only, no pointer to a
       place the agent cannot read.
@@ -2434,6 +2445,9 @@ def _context_lines(rows: list[dict], spoken_budget: int) -> list[str]:
         role = m.get("role")
         if role == "system":
             lines.append(f"[{content}]")
+            continue
+        if m.get("source") in _COMPLETION_SOURCES:
+            lines.append(f"[Background task report: {content}]")
             continue
         spoken = m.get("source") == "voice"
         if spoken:

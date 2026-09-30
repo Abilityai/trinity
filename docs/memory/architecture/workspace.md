@@ -795,7 +795,7 @@ included (the inherited #557 property).
 hands its counts to `service.get_chat_state(email, unread=...)`, so the emitted
 `unread` values and the previews come from the same statement and instant; the
 cursorless-thread and row-cap logic is reused unchanged. Each thread with
-`unread > 0` gains `latest {kind, id, at, excerpt, outcome, title?, display_hint?}`
+`unread > 0` gains `latest {kind, id, at, excerpt, outcome}`
 and `first_unread_message_id`, only for sessions whose agent is on
 `roster_agent_names(email, include_owned=is_platform)`, bounded to the 100 most
 recent. The excerpt is credential-sanitised (`utils.credential_sanitizer`), then
@@ -809,7 +809,12 @@ platform-written **`source = "completion:done" | "completion:failed"`** marker t
 `channel_completion_report` now stamps on its portal message; any other value
 (including every historic NULL row and an agent reply that merely begins
 "**Finished**") gives `null`. Every frontend reader of `source` compares it to
-`'voice'` only, so the new values are inert elsewhere.
+`'voice'` only. The marker is **not** inert on the agent's side: a non-NULL `source`
+takes the row out of `db._TYPED`, so it is never the resumed-turn cursor, it is
+replayed into the next resumed turn, and it rides the cold history window without
+taking a typed slot — both told as `[Background task report: …]` (deliberate: the
+live session never saw the background run; #3054 review, pinned in
+`test_ent610_inbox.py`).
 
 **An addressed report always has a chat.** See `observability.md` → Agent Reports:
 an addressed report with no in-flight chat **of the addressee**, published by the
@@ -868,7 +873,10 @@ thread's, else one uniform 422 (no existence oracle; loud, because a dropped rep
 context the person believes they gave). The quote is built server-side, capped at
 `REPLY_QUOTE_MAX_CHARS`, and rides `reply_prefix` directly before the client's text on
 BOTH the resumed and the cold message; the stored user row stays what was typed. Pinned by
-`tests/unit/test_ent610_reply_to_message.py` through the real prompt composition.
+`tests/unit/test_ent610_reply_to_message.py` through the real prompt composition. The 422
+has a way out: the sent message's chip is removable while that message is failed, and
+Retry then sends it as an ordinary turn (`dropReply`; mounted in
+`portalReplyRefused.mount.spec.js`). A delivered message's chip stays fixed.
 
 ## Agents at the centre — Main, Reset, and the one page (ent#523, ent#524)
 
