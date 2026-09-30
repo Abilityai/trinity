@@ -311,9 +311,13 @@ def test_provision_builds_local_template_config(monkeypatch):
         captured["allow_unforked_pull_only"] = allow_unforked_pull_only
         return MagicMock()
 
-    fake_crud = types.ModuleType("services.agent_service.crud")
-    fake_crud.create_agent_internal = fake_create
-    monkeypatch.setitem(sys.modules, "services.agent_service.crud", fake_crud)
+    # The ROUTERS facade, not the service module: that is the door the seeder
+    # takes, and the reason it takes it is that the facade injects `ws_manager`.
+    # Patching the service module here would pass while the seeder quietly
+    # stopped broadcasting.
+    fake_router = types.ModuleType("routers.agents")
+    fake_router.create_agent_internal = fake_create
+    monkeypatch.setitem(sys.modules, "routers.agents", fake_router)
 
     admin = cas.User(id=1, username="admin", email="a@example.com", role="admin")
     asyncio.run(svc._provision(admin))
@@ -380,3 +384,26 @@ def test_fresh_none_preserves_legacy_count_path(env):
     env.provision.assert_not_awaited()
     assert env.settings.get("cornelius_seeded") == "true"
     assert result["action"] == "skipped_not_fresh"
+
+
+def test_provision_goes_through_the_broadcasting_facade(monkeypatch):
+    """The seeder must take the routers facade, which injects `ws_manager`.
+
+    `crud._broadcast_agent_created` is a no-op without one, so the service door
+    creates the agent and tells nobody — an already-open browser never learns
+    Cornelius exists and the dashboard stays empty until something else refetches.
+    `system_service._default_create_agent_fn` documents the same choice for the
+    fleet seeder. Assert the door, not just the outcome: a test that patched the
+    service module would pass while the broadcast silently stopped.
+    """
+    import inspect
+
+    src = inspect.getsource(type(svc)._provision)
+    assert "from routers.agents import create_agent_internal" in src
+    assert "from services.agent_service.crud import create_agent_internal" not in src
+
+    from routers.agents import create_agent_internal as facade
+
+    # The facade must accept the seeder's door, or the call raises TypeError at
+    # first boot — the one place nobody is watching.
+    assert "allow_unforked_pull_only" in inspect.signature(facade).parameters
