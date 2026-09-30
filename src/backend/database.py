@@ -1746,6 +1746,9 @@ class DatabaseManager:
     def get_agent_schedule_names(self, agent_name: str):
         return self._schedule_ops.get_agent_schedule_names(agent_name)
 
+    def get_workspace_delivery_schedules_for_agents(self, agent_names):
+        return self._schedule_ops.get_workspace_delivery_schedules_for_agents(agent_names)
+
     def find_active_schedules_exceeding_timeout(self, agent_name: str, ceiling_seconds: int):
         return self._schedule_ops.find_active_schedules_exceeding_timeout(
             agent_name, ceiling_seconds
@@ -2049,6 +2052,9 @@ class DatabaseManager:
 
     def list_sync_states(self):
         return self._sync_state_ops.list_all()
+
+    def list_sync_health_rows(self, agent_names=None):
+        return self._sync_state_ops.list_health_rows(agent_names)
 
     def upsert_sync_state(self, agent_name: str, **fields):
         return self._sync_state_ops.upsert(agent_name, **fields)
@@ -2737,6 +2743,9 @@ class DatabaseManager:
 
     def set_agent_role_readiness(self, agent_name: str, status: str, changed_by: str):
         return self._role_readiness_ops.set_role_readiness(agent_name, status, changed_by)
+
+    def get_role_readiness_for_agents(self, agent_names):
+        return self._role_readiness_ops.get_role_readiness_for_agents(agent_names)
 
     # Seat decisions (delegated to db/seat_decisions.py) — ent#638 / R25.
     # Explicit signatures on purpose (learnings 2026-09-01: a kwarg the mixin

@@ -300,6 +300,14 @@ export const useClientPortalStore = defineStore('clientPortal', {
     // sync step, and three separate queries is how that stops being true.
     asks: [],
     asksAvailable: false,   // false when the backend does not serve /asks (404/403)
+    // trinity-enterprise#610 (PR A0): the read's honesty. `asksLoaded` latches on
+    // the first success; `asksFailed` is the LAST read's verdict for anything but
+    // 404/403 (a 5xx, 503 `asks_unavailable`, a network error) — the list keeps
+    // what it last knew, so a surface can say "couldn't refresh" instead of
+    // claiming nothing is waiting. `asksLoadedAt` feeds the stale banner.
+    asksLoaded: false,
+    asksFailed: false,
+    asksLoadedAt: null,
     // Where the user was when it expired, so re-authenticating returns them
     // there instead of the roster root.
     resumePath: null,
@@ -599,6 +607,14 @@ export const useClientPortalStore = defineStore('clientPortal', {
       // client signing in on the same browser must not inherit this list.
       this.modelOptions = []
       this.rosterLoaded = false
+      // trinity-enterprise#610 (PR A0): a failed read keeps the last good list,
+      // so the list must not outlive the session it belongs to — or the next
+      // client's first failed read shows them the previous client's asks.
+      this.asks = []
+      this.asksAvailable = false
+      this.asksLoaded = false
+      this.asksFailed = false
+      this.asksLoadedAt = null
       // #2261: the primitive clears the suppression; `endSession({expired})`
       // re-arms it immediately afterwards. Keeping the clear HERE is what stops
       // a marker from outliving the session it was about.
@@ -2089,13 +2105,33 @@ export const useClientPortalStore = defineStore('clientPortal', {
     // store onto a dedicated instance so a workspace request can never inherit
     // the platform JWT from `axios.defaults`.
     //
-    // Degrades to silence. Asks are OSS core since ent#428, so a CURRENT backend
-    // always serves this; against an OLDER one — which either predates the
-    // surface or still gates it behind the entitlement it used to carry — the
+    // Absence degrades to silence. Asks are OSS core since ent#428, so a CURRENT
+    // backend always serves this; against an OLDER one — which either predates
+    // the surface or still gates it behind the entitlement it used to carry — the
     // 404/403 is not an error worth showing a client. `asksAvailable` stays
     // false and every surface renders nothing.
+    //
+    // A FAILURE is not absence (trinity-enterprise#610, PR A0). Anything else —
+    // 5xx, 503 `asks_unavailable`, network — sets `asksFailed`, keeps the last
+    // good list and leaves `asksAvailable` alone: clearing either would blank
+    // every PortalAsks surface and zero the badge, i.e. "nothing needs you"
+    // during an outage (#2915; the contract's "never overwrite the data with a
+    // synthetic empty payload in a catch", ent#253).
+    //
+    // A 401 is neither: the SESSION ended. It goes through `endSession` exactly
+    // as the roster fetch's 401 does (ent#375), which clears the list via
+    // `signOut()`. Folding it into `asksFailed` kept the previous client's list
+    // on screen: the 20s poll runs this and `refreshThreads`, never the roster,
+    // and `portalHttp`'s 401 interceptor acts only for a platform session — so
+    // for a portal-token client nothing else would ever end it.
+    //
+    // A read that resolves after the session it was issued under has ended
+    // (sign-out, expiry, another client signing in) is dropped: writing it
+    // would put that session's asks back into the store the sign-out cleared.
     async fetchAsks(agentName = null) {
       if (!this.isClientSignedIn) return []
+      const issuedUnder = this.portalToken
+      const stale = () => this.portalToken !== issuedUnder || !this.isClientSignedIn
       try {
         // trinity-enterprise#611: the asks that ended in the last 7 days ride the
         // same list, so a person sees how an ask ended instead of watching it
@@ -2104,16 +2140,32 @@ export const useClientPortalStore = defineStore('clientPortal', {
           headers: this.authHeader,
           params: agentName ? { agent_name: agentName, include_ended: true } : { include_ended: true },
         })
+        if (stale()) return []
         this.asks = Array.isArray(data) ? data : []
         this.asksAvailable = true
+        this.asksLoaded = true
+        this.asksFailed = false
+        this.asksLoadedAt = Date.now()
         return this.asks
       } catch (err) {
-        this.asksAvailable = false
-        if (![403, 404].includes(err.response?.status)) {
-          console.warn('[workspace] asks unavailable:', err?.message || err)
+        if (stale()) return []
+        if (err.response?.status === 401 && this.portalToken) {
+          this.endSession({
+            expired: true,
+            resumePath: typeof window !== 'undefined' ? window.location.pathname : null,
+          })
+          return []
         }
-        this.asks = []
-        return []
+        if ([403, 404].includes(err.response?.status)) {
+          this.asksAvailable = false
+          this.asksLoaded = false
+          this.asksFailed = false
+          this.asks = []
+          return []
+        }
+        console.warn('[workspace] asks unavailable:', err?.message || err)
+        this.asksFailed = true
+        return this.asks
       }
     },
 

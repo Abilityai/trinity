@@ -48,7 +48,6 @@ Each agent maintains a file at `~/.trinity/operator-queue.json` in their workspa
       "expires_at": "2026-03-07T11:00:00Z",
       "response": null,
       "response_text": null,
-      "responded_by": null,
       "responded_at": null
     }
   ]
@@ -71,7 +70,7 @@ Each agent maintains a file at `~/.trinity/operator-queue.json` in their workspa
 | `expires_at` | ISO 8601 | No | Optional deadline. Platform marks as expired if no response by this time. |
 | `response` | string | No | For `approval`: the selected option. For `question`: freeform text. For `alert`: `"acknowledged"`. Written by platform. |
 | `response_text` | string | No | Optional additional notes from the operator (for approvals that need explanation). Written by platform. |
-| `responded_by` | string | No | Email of the operator who responded. Written by platform. |
+| `responded_by` | string | No | No longer written (trinity-enterprise#715): the platform writes the answer, never who gave it. An entry written before keeps its old value. |
 | `responded_at` | ISO 8601 | No | When the operator responded. Written by platform. |
 
 ### 1.2 Request Types
@@ -143,7 +142,7 @@ Each agent maintains a file at `~/.trinity/operator-queue.json` in their workspa
 
 1. **Active items only** — The file should contain only `pending` and `responded` (not yet processed by agent) items, plus up to 3 most recent `acknowledged` items for immediate context.
 2. **Agent writes** `pending` entries when it needs something.
-3. **Platform writes** `responded` status with `response`, `responded_by`, `responded_at` fields.
+3. **Platform writes** `responded` status with `response`, `response_text`, `responded_at` fields (never who answered — trinity-enterprise#715).
 4. **Agent reads** responses, acts on them, then updates status to `acknowledged`.
 5. **Agent cleans up** — removes `acknowledged` items older than the 3 most recent. The DB is the permanent record.
 
@@ -288,9 +287,7 @@ New events broadcast via existing WebSocket infrastructure:
   "type": "operator_queue_responded",
   "data": {
     "id": "req-20260307-001",
-    "agent_name": "deploy-agent",
-    "responded_by_email": "eugene@ability.ai",
-    "response": "approve"
+    "agent_name": "deploy-agent"
   }
 }
 ```

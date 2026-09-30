@@ -18,7 +18,7 @@ from models import (
 from database import db
 from dependencies import get_current_user, AuthorizedAgentByName, assert_agent_owner
 from db_models import User
-from services.idempotency_service import EffectInProgressError
+from services.idempotency_service import EffectInProgressError, EffectUnguardedError
 from services.proactive_message_service import (
     proactive_message_service,
     NotAuthorizedError,
@@ -69,6 +69,10 @@ async def send_proactive_message(
             message_id=result.message_id,
             error=result.error,
         )
+
+    except EffectUnguardedError as e:
+        # #2392: pull-mode agent, no usable execution id — refused, not retryable.
+        raise HTTPException(status_code=422, detail={"reason": "effect_unguarded", "message": str(e)})
 
     except EffectInProgressError as e:
         # A concurrent duplicate send for the same (execution, recipient, channel)

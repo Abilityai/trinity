@@ -11,14 +11,14 @@ autonomy switch, the clock) are ANDed at read time, never materialised here.
 
 ``agent_name`` is a CASCADE entry in ``db/agent_cleanup.py``.
 
-Revision ID: 0082_seat_ask_class_state
-Revises: 0081_portal_messages_unread_idx
+Revision ID: 0083_seat_ask_class_state
+Revises: 0082_agent_sync_state_divergence
 """
 from alembic import op
 import sqlalchemy as sa
 
-revision = "0082_seat_ask_class_state"
-down_revision = "0081_portal_messages_unread_idx"
+revision = "0083_seat_ask_class_state"
+down_revision = "0082_agent_sync_state_divergence"
 branch_labels = None
 depends_on = None
 

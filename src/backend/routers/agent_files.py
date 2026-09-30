@@ -46,7 +46,7 @@ from services.agent_shared_files_service import (
     build_download_url,
     MAX_AGENT_QUOTA_BYTES,
 )
-from services.idempotency_service import EffectInProgressError
+from services.idempotency_service import EffectInProgressError, EffectUnguardedError
 from services.platform_audit_service import platform_audit_service, AuditEventType
 
 logger = logging.getLogger(__name__)
@@ -793,6 +793,9 @@ async def share_agent_file(
             # whatever execution id they cite, they are not an agent in a turn.
             actor_is_agent=bool(actor_agent),
         )
+    except EffectUnguardedError as e:
+        # #2392: pull-mode agent, no usable execution id — refused, not retryable.
+        raise HTTPException(status_code=422, detail={"reason": "effect_unguarded", "message": str(e)})
     except EffectInProgressError as e:
         # Concurrent duplicate share for the same (execution, file) is mid-flight
         # (#1084). Retryable — never a silent skip-and-succeed.

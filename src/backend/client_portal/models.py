@@ -348,9 +348,13 @@ class PortalChatRequest(BaseModel):
 
 class PortalChatResponse(BaseModel):
     """The agent's reply to a portal chat turn. ``session_id`` echoes the thread
-    the turn landed in, so a client that sent none learns which session was used."""
+    the turn landed in, so a client that sent none learns which session was used.
+
+    No ``cost`` (#3063): external clients never see a turn's cost, and this
+    synchronous route is the streaming path's fallback. The service still
+    returns it for internal accounting; not declaring it is what keeps it off
+    the wire (``response_model`` drops undeclared keys)."""
     response: str
-    cost: Optional[float] = None
     session_id: Optional[str] = None
     # #2580: the persisted row's id, so the caller can rate the reply it was just
     # given instead of waiting for a reload to learn what to point at. The
@@ -912,7 +916,11 @@ class PortalHistoryMessage(BaseModel):
     id: Optional[str] = None
     role: str                       # 'user' | 'assistant'
     content: str
-    cost: Optional[float] = None
+    # #3063: no `cost`. The row stores it, but a turn's cost is never a
+    # Workspace field — the viewer may be an external client and the contract
+    # excludes costs outright (the Work projection's rule). Undeclared here, the
+    # route's `response_model` strips it for every principal; nothing in the
+    # client read it.
     created_at: Optional[str] = None
     # The caller's OWN rating of this message, if any — never anyone else's.
     # Present so a reload shows the thumb the person already gave.

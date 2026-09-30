@@ -1,6 +1,111 @@
 {
   "test_files": [
     {
+      "file": "unit/test_ent706_sync_health_surfaces.py",
+      "feature": "ent#706",
+      "added": "2026-09-27",
+      "categories": [
+        "backend",
+        "unit",
+        "git-sync",
+        "api"
+      ],
+      "description": "The sync-health read surfaces carry the backend's verdict (trinity-enterprise#706); real DB via db_harness, handlers called directly with the Docker-backed accessibility lookup stubbed. Shared reader db.list_sync_health_rows: config flags + sync-state row per live git-bound agent in one query, soft-deleted and sync_enabled=0 agents excluded, state None before the first poll, scoped by name, empty scope -> {}. GET /api/agents/sync-health: every pre-#706 key kept with its meaning plus state / reason / recommendation / binding / dirty_files / divergence_age_s / last_successful_push_at / freeze; a work agent diverged 26 h is red + frozen with the issue's reason string, a deployment the same age is yellow and not frozen, an agent with no git binding is unknown with the old defaults; scoped to accessible agents. GET /api/agents/{name}/git/sync-state: the raw row (new columns included) plus the verdict; no row -> the old minimal dict plus state unknown."
+    },
+    {
+      "file": "unit/test_ent706_internal_sync_health.py",
+      "feature": "ent#706",
+      "added": "2026-09-27",
+      "categories": [
+        "backend",
+        "unit",
+        "git-sync",
+        "scheduling"
+      ],
+      "description": "GET /api/internal/agents/{name}/sync-health-status after trinity-enterprise#706 (real DB via db_harness, handler called directly): the pre-#706 keys (agent_name, freeze_schedules_if_sync_failing, sync_failing, should_freeze, consecutive_failures) keep their names and meaning; a work agent diverged 7 ahead for 26 h with a fresh observation reports should_freeze with freeze_reason 'diverged 0 behind / 7 ahead for 26h', divergence_age_s ~26 h and work_agent; three failed polls still freeze as sync_failing with the failed-sync reason; control arm: an in-sync row does not freeze and carries no reason; an agent with no git binding is not frozen and is not a work agent."
+    },
+    {
+      "file": "unit/test_1808_sync_freeze_enforcement.py",
+      "feature": "#1808, ent#706",
+      "added": "2026-09-27",
+      "categories": [
+        "scheduler",
+        "unit",
+        "git-sync",
+        "reliability"
+      ],
+      "description": "The scheduler's own freeze gate, on a real temp SQLite through SchedulerDatabase (src/scheduler cannot import the backend). #1808: opted-in + 3+ failed polls freezes; below threshold, not opted in, no sync row and an unknown agent fire; a broken/missing table FAILS OPEN; mapping-only (PG RealDictCursor-shaped) rows still freeze; the threshold is the one policy module's (the backend endpoint no longer restates the rule). trinity-enterprise#706: sync_freeze_reason — a work agent diverged 24 h + 1 s on a fresh observation freezes with 'diverged 0 behind / 7 ahead for 24h' (should_freeze True), 24 h - 1 s fires, control arm diverged_since NULL on the same row fires, a deployment never divergence-freezes, fork-to-own (source_mode=1, auto_sync=1) does, a 16-minute-stale observation fails open, the owner opt-in is required, the sync_failing reason names its polls, and the mapping-only row shape freezes on divergence too. The SchedulerService gate (fake DB, real _execute_schedule_with_lock) writes 'Git sync frozen: <reason>' as the skipped row's skip_reason; control arm: no reason, no skip row; a manual trigger is never frozen."
+    },
+    {
+      "file": "unit/test_ent706_divergence_tracking.py",
+      "feature": "ent#706",
+      "added": "2026-09-27",
+      "categories": [
+        "backend",
+        "unit",
+        "git-sync",
+        "reliability"
+      ],
+      "description": "The SyncHealthService poller keeps the trinity-enterprise#706 columns, driven through the REAL _poll_cycle on a real DB (db_harness) with only /api/git/status faked. diverged_since: set once on the first ahead/behind > 0 poll and unchanged across later polls with different counts; cleared at (0, 0) AND at (0, None) (no upstream, #2105); an uncomputable ahead neither starts nor clears it; a known behind with unknown ahead starts it. dirty_files/dirty_since from changes_count: set-once / clear at 0; garbage (str, negative, bool, > int4) keeps both prior values; dirt never starts the divergence clock. last_successful_push_at: the later of the heartbeat's own #3011 record and an operator Push (agent_git_config.last_sync_at), either direction; an image older than #3011 (key absent) falls back to a success cycle but not a failed one; a #3011 image that never pushed (key present, None) does not; the agent value is validated (garbage, naive, future, non-str rejected); monotonic. An unreachable agent changes nothing. The sync_diverged operator-queue item: exactly one across repeated polls of an aged episode (id sync-diverged-{agent}-{diverged_since}, high priority, reason in the question, counts + recommendation in context, NO last_error_summary); two SyncHealthService instances (fail-open double leader) converge on one; a new episode after a clear gets a second; control arms: the same aged seed with the freeze flag off, or as a deployment, raises ZERO; the prefix is platform-reserved."
+    },
+    {
+      "file": "unit/test_ent706_sync_state_columns.py",
+      "feature": "ent#706",
+      "added": "2026-09-27",
+      "categories": [
+        "backend",
+        "unit",
+        "database",
+        "migrations",
+        "git-sync"
+      ],
+      "description": "The four trinity-enterprise#706 columns on agent_sync_state (diverged_since, dirty_files, dirty_since, last_successful_push_at), both tracks (Invariant #9): the SQLite migration adds them to the pre-#706 table, runs twice as a no-op and backfills nothing; it is registered once in MIGRATIONS; schema.py DDL and the tables.py Core table carry them; the Alembic revision's id equals its filename, its down_revision is a real revision, and it ADD COLUMN IF NOT EXISTS / DROP COLUMN IF EXISTS each of the four. The upsert's three-way clock semantics (db_harness, SQLite + PG when TEST_POSTGRES_URL): the episode clocks default to KEEP across a partial upsert (and KEEP is the explicit spelling), None CLEARS them, and dirty_files = 0 is stored rather than dropped. KEEP is read from the live ops object's upsert.__globals__ (module-identity gotcha under sibling db.* eviction)."
+    },
+    {
+      "file": "unit/test_ent706_sync_policy.py",
+      "feature": "ent#706",
+      "added": "2026-09-27",
+      "categories": [
+        "backend",
+        "unit",
+        "git-sync",
+        "reliability"
+      ],
+      "description": "The one sync-health policy (trinity-enterprise#706, services/sync_freeze_policy.py::classify), table-driven: unknown (no row / never observed); green in sync; one failed poll red not frozen; sync_failing (3 polls) freezes ANY binding and ignores observation freshness (#1808 unchanged); the failed reason carries at most 120 chars of error; the 24 h boundary at +/-1 s (yellow/runs vs red/frozen, divergence_age_s = 86401, freeze_reason names the divergence clause); freeze flag off -> red not frozen; a deployment behind 31 for 26 h is yellow and never freezes; fork-to-own (source_mode=1, auto_sync=1) freezes, source_mode=1 auto_sync=0 never does; a stale observation (16 min) stays red but does not freeze and names its age, 14 min freezes; aware Z, naive string, naive datetime and +03:00 offset give the same verdict; garbage timestamps degrade; behind_main is information only; dirt 24 h +/- 1 s (red not frozen for a work agent, yellow for a deployment, not a state under 24 h); the 7-day no-heartbeat floor (9 d red, 6 d not, never-heartbeat measured from the binding's creation, auto-sync off exempt); first red names the reason and the rest append; the recommendation mapping incl. push_denied / source-mode refusal; the constants; hostile types never raise. Non-ambient pins throughout."
+    },
+    {
+      "file": "unit/test_ent706_sync_policy_parity.py",
+      "feature": "ent#706",
+      "added": "2026-09-27",
+      "categories": [
+        "backend",
+        "scheduler",
+        "unit",
+        "git-sync"
+      ],
+      "description": "Vendored-mirror guard (trinity-enterprise#706, the #1088 precedent): src/scheduler/sync_freeze_policy.py is byte-identical to src/backend/services/sync_freeze_policy.py; the policy is a stdlib-only leaf with no relative imports (it must import in the scheduler image); the scheduler's SYNC_FAILURE_FREEZE_THRESHOLD is imported from the mirror, never re-assigned (one number)."
+    },
+    {
+      "file": "unit/test_3080_detect_mime_zip.py",
+      "feature": "#3080",
+      "added": "2026-09-29",
+      "categories": [
+        "backend",
+        "file-sharing"
+      ],
+      "description": "Outbound shared-file detect_mime() classifies a ZIP as application/zip when libmagic 5.46 reports application/octet-stream from a buffer; with real libmagic the buffer result equals libmagic's file-path result across 12 variants (deflated/stored/tiny/empty/zip64 ZIPs, DOCX/XLSX/PPTX, JAR, EPUB, ODT, APK), so ZIP-based formats keep their specific type; non-ZIP octet-stream unchanged, works without python-magic, executables still blocked; plus the shared utils.zip_signature helper."
+    },
+    {
+      "file": "unit/test_3079_base_image_codename_pin.py",
+      "feature": "#3079",
+      "added": "2026-09-29",
+      "categories": [
+        "backend",
+        "infrastructure"
+      ],
+      "description": "Static guard: every image Dockerfile (backend, scheduler, base-image) builds FROM a python tag that names a Debian codename (or a digest), so Docker Hub cannot move the base to a new Debian release under an unrelated rebuild (#1823 tzdata, #3046 libmagic 5.46); asserts that a codename is named, never which one. backend and scheduler must name the same codename (one tz database for the schedule validator and executor, #1472). Parser handles --platform, AS stages, alpineX.Y and digest pins."
+    },
+    {
       "file": "unit/test_human_only_principals.py",
       "feature": "#2996",
       "added": "2026-09-28",
@@ -3434,7 +3539,7 @@
         "access-control",
         "transport"
       ],
-      "description": "The loop-tool gate is WIRED where server.ts registers it, proved the way an agent reaches it: a real createServer in key mode, a real MCP client presenting an agent-scoped key over streamable HTTP, and a stub backend that answers key validation + the permission-edge read and COUNTS every POST /api/agents/<target>/loops (ent#628 -- no edge: refusal and zero loop starts; edge: the loop starts; self loop: no edge and no permission read). The stub also RECORDS every fire-and-forget POST /api/internal/audit, so the two #2807 cases prove the denial label over the wire: a refused start's row says success:false/denied:true with the reason and target, and deny-then-allow on ONE session leaves no stale marker on the permitted call. #2952: every call through asAgent().call drains ITS OWN audit row before returning and checks it for position (a call counter) AND identity (a per-session bearer the stub echoes back as key_name) -- the previous finder matched `(tool, index-after-length)` and read the prior test's late row on a busy host. A change to withAudit's one-row-per-call breaks this file on purpose (loud precondition); subtests must stay sequential (node:test default). trinity-enterprise#611: a second suite drives get_my_ask over the same real transport against a stub that answers key validation by bearer and records every readback — an agent key is served its OWN agent and no other, a person's user-scoped key is refused before the backend is asked anything, and the orchestrator's system key reads as trinity-system. trinity-enterprise#611 PR B: ask_operator over the same real transport \u2014 an agent key raises as its own agent with exactly the declared fields in the body, an agent_name argument neither aims the raise at a sibling nor reaches the backend, a person's user-scoped key is refused before any backend call, the system key raises as trinity-system, and a named 422 reaches the caller with its code and extras."
+      "description": "The loop-tool gate is WIRED where server.ts registers it, proved the way an agent reaches it: a real createServer in key mode, a real MCP client presenting an agent-scoped key over streamable HTTP, and a stub backend that answers key validation + the permission-edge read and COUNTS every POST /api/agents/<target>/loops (ent#628 -- no edge: refusal and zero loop starts; edge: the loop starts; self loop: no edge and no permission read). The stub also RECORDS every fire-and-forget POST /api/internal/audit, so the two #2807 cases prove the denial label over the wire: a refused start's row says success:false/denied:true with the reason and target, and deny-then-allow on ONE session leaves no stale marker on the permitted call. #2952: every call through asAgent().call drains ITS OWN audit row before returning and checks it for position (a call counter) AND identity (a per-session bearer the stub echoes back as key_name) -- the previous finder matched `(tool, index-after-length)` and read the prior test's late row on a busy host. A change to withAudit's one-row-per-call breaks this file on purpose (loud precondition); subtests must stay sequential (node:test default). trinity-enterprise#611: a second suite drives get_my_ask over the same real transport against a stub that answers key validation by bearer and records every readback — an agent key is served its OWN agent and no other, a person's user-scoped key is refused before the backend is asked anything, and the orchestrator's system key reads as trinity-system. trinity-enterprise#611 PR B: ask_operator over the same real transport — an agent key raises as its own agent with exactly the declared fields in the body, an agent_name argument neither aims the raise at a sibling nor reaches the backend, a person's user-scoped key is refused before any backend call, the system key raises as trinity-system, and a named 422 reaches the caller with its code and extras."
     },
     {
       "file": "unit/test_2915_operator_queue_sync_honesty.py",
@@ -3476,7 +3581,7 @@
         "typescript",
         "access-control"
       ],
-      "description": "Operator-queue MCP tools: the #1101 agent-scope post-filter (pure), the #1104 respond gate and proxy (stub client), and trinity-enterprise#611 get_my_ask — identity from the key (resolveActingAgent), no agent-target parameter, the system key reads as trinity-system, user / connector / agent-less system keys refused before any backend call, backend refusals returned as structured errors, the description teaching the rider — plus the person-only wording on respond_to_operator_queue. node:test. PR B: ask_operator \u2014 raises as the key's agent (the system key as trinity-system; user / connector / agent-less system keys refused before any backend call), declares no agent-shaped parameter, forwards ONLY the declared fields whatever else the arguments carry, returns a 422 / 429 refusal as its named code and extras, keeps an unnamed validation error or a transport failure structured, and its description teaches idempotency, the re-ask link and the readback without the mcp__trinity__ prefix."
+      "description": "Operator-queue MCP tools: the #1101 agent-scope post-filter (pure), the #1104 respond gate and proxy (stub client), and trinity-enterprise#611 get_my_ask — identity from the key (resolveActingAgent), no agent-target parameter, the system key reads as trinity-system, user / connector / agent-less system keys refused before any backend call, backend refusals returned as structured errors, the description teaching the rider — plus the person-only wording on respond_to_operator_queue. node:test. PR B: ask_operator — raises as the key's agent (the system key as trinity-system; user / connector / agent-less system keys refused before any backend call), declares no agent-shaped parameter, forwards ONLY the declared fields whatever else the arguments carry, returns a 422 / 429 refusal as its named code and extras, keeps an unnamed validation error or a transport failure structured, and its description teaches idempotency, the re-ask link and the readback without the mcp__trinity__ prefix."
     },
     {
       "file": "unit/test_ent611_native_ask.py",
@@ -3499,6 +3604,17 @@
         "database"
       ],
       "description": "The native ask create is atomic per agent on BOTH backends (trinity-enterprise#611, PR B): `requires_postgres` + the db_backend harness, so schema-parity CI runs it on real PostgreSQL. Each create is held inside its critical section (after the count, before the insert) so racers overlap deterministically: six creates at the cap admit exactly one, six retries of one id make one row, one agent's full queue never holds back another's, and the file create reports whether its ON CONFLICT DO NOTHING insert happened. Removing the pg_advisory_xact_lock / BEGIN IMMEDIATE turns the matching backend red on every run."
+    },
+    {
+      "file": "unit/test_ent715_queue_person_fields.py",
+      "feature": "trinity-enterprise#715",
+      "added": "2026-09-29",
+      "categories": [
+        "backend",
+        "unit",
+        "security"
+      ],
+      "description": "The operator queue stops handing a person's email to a machine key (trinity-enterprise#715). GET /api/operator-queue, /{id} and /agents/{name} give every non-person principal (agent, system, ops, connector, portal_delegate, a user scope carrying an agent identity, an unknown scope) exactly the allowlisted machine key set, pinned as a literal on file and native rows whose person fields are all non-null; a person (JWT, user key) reads every field, which is also the classification guard (a new column fails until classified). One arm presents a real minted agent key with no overrides. The platform's heads-ups about a person (the ent#499 problem report, the ent#308 inbox collision), raised through their real emitters, are never listed to a machine and 404 on the item route, while a person still reads them; both are platform alarms, and every prefix the reads treat as about a person is a reserved prefix (so the file write-back and the resume wake treat it as a platform alarm too). The file write-back names no person on delivery or reconstruction, and an answered collision alert is never written into the agent's file. The clear-resolved /ws trigger is the count only. The composed prompt no longer promises responded_by. Call-site mutations red: the allowlist, the row filter, the item 404, both write-back lines, the reserved prefix, the trigger, the prompt, and a new unclassified column."
     },
     {
       "file": "unit/test_2845_retry_trigger_sets.py",
@@ -3670,6 +3786,86 @@
         "git"
       ],
       "description": "`trinity deploy --repo` creates a deployment (trinity-enterprise#705): the CLI's POST /api/agents payload carries kind \"deployment\", so deploying a codebase never takes the agent default's working branch + auto-push. Static (AST) because the unit job does not install the CLI's own deps. The ownership rule itself (catalog template / owner != token login stays pull-only) is in test_1484_create_agent_characterization.py."
+    },
+    {
+      "file": "unit/test_ent610_asks_unavailable.py",
+      "feature": "trinity-enterprise#610",
+      "added": "2026-09-28",
+      "categories": [
+        "backend",
+        "workspace"
+      ],
+      "description": "Workspace asks read fails loud (ent#610 PR A0): a fault in any of the three queue reads (agent set, count, page — #3059) and an unreadable roster each raise AsksUnavailable and the route answers 503 asks_unavailable with Retry-After: 20 (never []); a genuinely off-roster agent is still dropped with a 200; answer_ask stays a uniform 404 on a roster outage (Invariant #8); the suggestions build still degrades to no ask ids through its own attempt() (a guard for the new raise path; it also passes pre-fix). The app is a module-scoped fixture. Mutation: revert the raise to return an empty page (9 red across this file and test_ent428)."
+    },
+    {
+      "file": "unit/test_ent527_readiness_on_lists.py",
+      "feature": "abilityai/trinity-enterprise#527",
+      "added": "2026-09-28",
+      "categories": [
+        "backend",
+        "database"
+      ],
+      "description": "ent#527 rider (ruling 2026-09-24): the owner's readiness stamp on the agents list and the fleet grid. One batched read on a real database returns only stamped agents, names a rollout seed as such, never carries who flipped it, skips an unknown state and does not query for an empty list; GET /api/agents attaches it per agent from that one read, None when unstamped. brief_held rides next to it: the role card's shared predicates (is_seat_delivery_schedule, brief_is_held), one batched schedule read over the calibrating+autonomy candidates only, fail-soft to no claim, so the list's calibrating tooltip never says a brief is paused when the card would not."
+    },
+    {
+      "file": "unit/test_2996_owner_config_person_only.py",
+      "feature": "#2996",
+      "added": "2026-09-28",
+      "categories": [
+        "backend",
+        "auth",
+        "security",
+        "agent-config"
+      ],
+      "description": "PUT /autonomy and the 8 other agent_config writes (api-key-setting, read-only, resources, capabilities, capacity, timeout, public-channel-model, guardrails) take Depends(require_person). Real get_current_user with seeded key rows: agent key (own agent and a sibling) and system key -> 403 person_required with the stored value unchanged from a non-ambient seed; owner JWT, admin JWT and the owner's user key -> 2xx with the stored value changed. Override with an explicit principal dataclass (never MagicMock) for ops, portal_delegate, connector, an unknown future scope, a user scope carrying an agent identity, the loopback JWT, and a principal missing mcp_scope. Refusal does not disclose agent existence; reads stay open; every write in the file is person-gated."
+    },
+    {
+      "file": "unit/test_2996_self_service_session_only.py",
+      "feature": "ent#711",
+      "added": "2026-09-28",
+      "categories": [
+        "backend",
+        "auth",
+        "security",
+        "users"
+      ],
+      "description": "PUT /api/users/me/email and PUT/DELETE /api/users/me/github-pat take Depends(require_interactive): agent, system and the person's own user key -> 403 with users.email and the encrypted PAT column unchanged; override kinds refused by the route gate; JWT path unchanged (bind, 400 malformed, 409 taken, PAT set/clear, status read)."
+    },
+    {
+      "file": "unit/test_2996_agent_schedule_tools_unchanged.py",
+      "feature": "#2996",
+      "added": "2026-09-28",
+      "categories": [
+        "backend",
+        "auth",
+        "schedules",
+        "regression"
+      ],
+      "description": "Regression pin for the human-only rule's boundary: an agent's own key, through the REAL get_current_user with a seeded agent key row, still creates (201), disables and enables (200) its own schedule — the MCP create/enable/disable_schedule tools are the agent's use, bounded by the person-only autonomy grant. Asserts the stored schedule state moves on each call."
+    },
+    {
+      "file": "unit/test_2996_human_only_routes.py",
+      "feature": "#2996",
+      "added": "2026-09-28",
+      "categories": [
+        "backend",
+        "auth",
+        "security",
+        "guard"
+      ],
+      "description": "Route census (Invariant #8): every OSS HTTP route, every method, resolves to exactly one policy class (interactive / person / admin_widened / admin_tier / portal from code; agent_callable / own_auth / delegated from reviewed tables; or the frozen human_only_route_baseline.json). Ratchet rules: unclassified fails, stale entry fails, gated baseline entry fails, exact FROZEN_BASELINE_COUNT, key in two lists fails, duplicate key fails. Gates count only as Depends or as the handler's first statement on its principal, imported unaliased from dependencies. Websocket routes pinned as a literal set. Self-tests plant sources in a temp tree to show each rule bites. Walker: tests/unit/_route_census.py (pure-stdlib AST, rglob over src/backend minus enterprise/)."
+    },
+    {
+      "file": "unit/test_2996_route_census_runtime.py",
+      "feature": "#2996",
+      "added": "2026-09-28",
+      "categories": [
+        "backend",
+        "auth",
+        "security",
+        "guard"
+      ],
+      "description": "Route census, live side: imports main in a SUBPROCESS and checks every registered non-enterprise APIRoute maps to a key the AST census found, and every stored METHOD /full/path (baseline + reviewed tables) is what the app registers (rule 7). Fails, never skips, on a failed import, unparseable output or zero routes."
     }
   ]
 }

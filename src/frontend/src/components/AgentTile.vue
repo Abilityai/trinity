@@ -29,6 +29,17 @@
             @click="viewDetails"
           >{{ agentNameParts(agent).primary }}</span>
           <RuntimeBadge :runtime="agent.runtime || 'claude-code'" :show-label="false" class="flex-none" />
+          <!-- ent#527 rider (ruling 2026-09-24): the owner's readiness stamp on a
+               role companion, same words and variants as the role card. Only a
+               stamp renders — no stamp, no badge (see utils/readinessBadge.js). -->
+          <BaseBadge
+            v-if="readiness"
+            :variant="readiness.variant"
+            dot
+            class="flex-none"
+            :title="readiness.title"
+            data-testid="readiness-badge"
+          >{{ readiness.label }}</BaseBadge>
           <span
             v-if="isSystemAgent"
             class="sys-badge"
@@ -195,6 +206,8 @@ import { useRouter } from 'vue-router'
 import { formatCostCompact } from '../composables/useFormatters'
 import AgentAvatar from './AgentAvatar.vue'
 import RuntimeBadge from './RuntimeBadge.vue'
+import BaseBadge from './base/BaseBadge.vue'
+import { readinessBadge } from '../utils/readinessBadge'
 import { agentNameParts, agentNameTooltip } from '../utils/agentName'
 import { pressureBadge, isSubscriptionFunded } from '../utils/subscriptionPressure'
 import RunningStateToggle from './RunningStateToggle.vue'
@@ -230,6 +243,7 @@ const gridStore = useFleetGridStore()
 
 const name = computed(() => props.agent.name)
 const isSystemAgent = computed(() => props.agent.is_system === true)
+const readiness = computed(() => readinessBadge(props.agent.readiness, props.agent.brief_held))
 
 // ent#139/#2104 — agent-class variant. Keyed off the runner's FIXED NAME
 // (`trinity-skill-runner` is a fixed-name singleton, RUNNER_AGENT_NAME in the
