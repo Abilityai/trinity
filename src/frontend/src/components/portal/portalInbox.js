@@ -303,7 +303,7 @@ export function listHeadLabel(tab, liveItems, fromLabel = null, droppedLabel = n
   if (droppedLabel && tab === 'action') {
     return `Nothing waiting from ${droppedLabel} · ${items.length ? `${listHeadLabel(tab, items)} from all agents` : 'All caught up'}`
   }
-  if (!items.length) return 'All caught up'
+  if (!items.length) return fromLabel && tab === 'action' ? `Nothing waiting from ${fromLabel}` : 'All caught up'
   const chats = items.filter((it) => it && it.type === 'thread')
   const asks = items.filter((it) => it && it.type === 'ask')
   if (tab === 'action') return plural(asks.length, 'ask', 'asks') + (fromLabel ? ` from ${fromLabel}` : '')

@@ -3625,8 +3625,10 @@ to localStorage in the clear.
   then each agent with its count), and choosing one narrows the tab to that agent's asks
   (`?from=<agent>`, so it survives a reload and can be linked). The filter lasts while that
   agent still has asks or its just-answered ask is on screen, then clears itself; switching
-  tabs drops it. A `?from=` the page opens with whose agent has nothing left is dropped, and
-  the list head says so ("Nothing waiting from X · …"). Arriving by an "Open in Inbox" link
+  tabs drops it. A `?from=` the page OPENS with is kept even when that agent has nothing
+  waiting (Andrii's sign-off, 2026-10-01): the list says "Nothing is waiting on you from X."
+  with "Show all agents"; only a filter answered down to nothing during the visit clears, the
+  head saying "Nothing waiting from X · …". Arriving by an "Open in Inbox" link
   puts focus on the list.
 - **The ask card while answering (§3g L6, PR A2)**: picking an approval option moves focus to
   the note field (not on a touch screen, where it would pop the keyboard), so the Enter that

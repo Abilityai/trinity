@@ -89,8 +89,10 @@ Sign-in / reload on bare /workspace
                                filter ("3 asks from Relay Bot") since its chip can sit in More;
                                the strip keeps the order the visit first drew (an answered ask
                                moves a count, never a chip); a ?from= on another tab leaves the URL;
-                               a ?from= the page opens with whose agent has nothing left is dropped
-                               and the head says "Nothing waiting from X · …"; arriving with a
+                               a ?from= the page OPENS with is kept even with nothing waiting (empty
+                               state "Nothing is waiting on you from X." + "Show all agents"); one
+                               answered down to nothing mid-visit clears, the head saying
+                               "Nothing waiting from X · …"; arriving with a
                                ?from= while nothing holds focus focuses the list column
     stableRows(fresh, visit)   rows keep their place for one TAB VISIT (§3g S1): a row that leaves
                                stays as a ghost (chat drawn read, ask drawn ended); a poll never

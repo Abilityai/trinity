@@ -137,7 +137,7 @@
         />
         <div v-else-if="view.state === 'empty'" class="px-4 pt-6 text-center" data-testid="inbox-empty">
           <p class="text-sm font-medium text-gray-900 dark:text-gray-100">{{ empty.title }}</p>
-          <p class="mt-1 text-[12.5px] text-gray-600 dark:text-gray-300">{{ empty.body }}</p>
+          <p v-if="empty.body" class="mt-1 text-[12.5px] text-gray-600 dark:text-gray-300">{{ empty.body }}</p>
           <router-link
             v-if="empty.link"
             :to="empty.link.to"
@@ -328,7 +328,14 @@ const selectedAsk = computed(() => {
   if (!p || p.type !== 'ask') return null
   return store.asks.find((a) => a.id === p.id) || null
 })
-const activeFrom = computed(() => activeAgentFilter(fromQuery.value, actionBase.value, selectedAsk.value))
+const rawFrom = computed(() => activeAgentFilter(fromQuery.value, actionBase.value, selectedAsk.value))
+// Andrii's sign-off (2026-10-01): a ?from= the page OPENS on (a link, a typed
+// URL, Back) is kept even when that agent has nothing waiting — the list says
+// so and offers everyone. Only a filter answered down to nothing DURING the
+// visit clears (round 1), so the reader is not left on an empty tab mid-flow.
+const keptFrom = ref(null)
+const checkedFrom = ref(null)
+const activeFrom = computed(() => (fromQuery.value && keptFrom.value === fromQuery.value ? fromQuery.value : rawFrom.value))
 // A2 r1 (QA P2): the facets keep the order this Action visit first showed —
 // an answered ask moves a count, never a chip under the reader. Not reactive
 // (it only remembers what the last evaluation drew); leaving Action forgets it.
@@ -343,6 +350,7 @@ const facets = computed(() => {
 // theirs — else the pane keeps agent A's ask beside a list of agent B's.
 function onFrom(id) {
   droppedFrom.value = null
+  keptFrom.value = null
   const from = normalizeFrom(id)
   const sel = selectedAsk.value
   if (from && sel && sel.agent_name !== from) {
@@ -377,9 +385,15 @@ watch(previewKey, (k) => emit('update:preview', k || null))
 // Round 2 (QA mobile F5): the head says whose filter was dropped, until the
 // reader picks a tab or a facet.
 const droppedFrom = ref(null)
-watch([fromQuery, activeFrom, asksVerdict], ([q, a, v]) => {
-  if (q && !a && v) { droppedFrom.value = q; replaceQuery({ from: undefined }) }
-}, { immediate: true })   // a ?from= the page OPENS with (a stale link, Back) is checked too
+watch([fromQuery, rawFrom, asksVerdict], ([q, a, v]) => {
+  if (!q || !v) return
+  if (checkedFrom.value !== q) {          // arriving on this filter: keep it, even empty
+    checkedFrom.value = q
+    if (!a) keptFrom.value = q
+    return
+  }
+  if (!a && keptFrom.value !== q) { droppedFrom.value = q; replaceQuery({ from: undefined }) }
+}, { immediate: true })
 // Round 2 (QA P2-3): a door that narrows the Inbox to an agent ("Open in
 // Inbox" in Work or Info) is a link; the page it leaves takes focus with it,
 // so it would land on the body. Focus the list, where the narrowed asks are —
@@ -500,6 +514,13 @@ const failedTitle = computed(() => (tab.value === 'action' ? "Couldn't load your
 // A9: an owner is never the addressee of their own agents' asks, so a
 // platform session's empty Action points at the door where operator asks live.
 const empty = computed(() => {
+  if (tab.value === 'action' && activeFrom.value) {
+    return {
+      title: `Nothing is waiting on you from ${labelOf(activeFrom.value)}.`,
+      body: '',
+      link: { to: { path: route.path, query: { tab: 'action' } }, label: 'Show all agents' },
+    }
+  }
   if (tab.value === 'action') {
     return props.isPlatform
       ? {
@@ -598,6 +619,7 @@ async function open(it) {
 // ghosts go, which is the one way to ask for that without leaving the tab.
 function onTab(next) {
   droppedFrom.value = null
+  keptFrom.value = null
   if (next === tab.value) { newVisit(); return }
   replaceQuery({ tab: next, item: undefined, from: undefined })
 }

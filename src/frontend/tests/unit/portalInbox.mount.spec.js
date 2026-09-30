@@ -1298,13 +1298,33 @@ describe('Action narrowed to one agent (§3g C2, ?from=)', () => {
     expect(order()).toEqual(['all-agents', 'scout', 'relay'])
   })
 
-  it('a ?from= with nothing left from that agent says so in the head, then leaves the URL (round 2, QA mobile F5)', async () => {
+  it('opening a ?from= on an agent with nothing waiting KEEPS the filter and says so, with a way to everyone (Andrii, 2026-10-01)', async () => {
     store.asks = [ask('s1')]
     store.asksLoaded = true
     const w = await mountInbox({ labels: { relay: 'Relay Bot' } }, { query: { tab: 'action', from: 'relay' } })
     await flushPromises()
+    expect(router.currentRoute.value.query.from).toBe('relay')                 // not rewritten
+    expect(w.findAll('[data-inbox-row]')).toHaveLength(0)                       // scout's ask is not listed
+    const empty = w.find('[data-testid="inbox-empty"]')
+    expect(empty.text()).toContain('Nothing is waiting on you from Relay Bot')
+    const all = w.find('[data-testid="inbox-empty-link"]')
+    expect(all.text()).toBe('Show all agents')
+    expect(all.attributes('href')).toBe('/workspace/inbox?tab=action')
+    const strip = w.find('[data-testid="inbox-agent-facets"]').findComponent({ name: 'OverflowTabs' })
+    expect(strip.props('modelValue')).toBe('relay')                            // its facet stays chosen
+  })
+
+  it('a filter whose agent is answered down to nothing DURING the visit still clears, and the head says why', async () => {
+    store.asks = [ask('s1'), ask('r1', { agent_name: 'relay' })]
+    store.asksLoaded = true
+    const w = await mountInbox({ labels: { relay: 'Relay Bot' } }, { query: { tab: 'action', from: 'relay' } })
+    await flushPromises()
+    expect(router.currentRoute.value.query.from).toBe('relay')
+    // relay's last ask leaves the list (answered elsewhere, not the one on screen)
+    store.asks = [ask('s1')]
+    await flushPromises()
     expect(router.currentRoute.value.query.from).toBeUndefined()
-    expect(w.find('[data-testid="inbox-list-total"]').text()).toContain('Nothing waiting from Relay Bot')
+    expect(w.find('[data-testid="inbox-list-total"]').text()).toContain('Nothing waiting from Relay Bot ·')
   })
 
   it('arriving by an "Open in Inbox" link puts focus on the list, not the page body (round 2, QA P2-3)', async () => {

@@ -54,7 +54,10 @@ describe('C2 — agent facets', () => {
     const items = [{ type: 'ask', id: 'a' }, { type: 'ask', id: 'b' }]
     expect(listHeadLabel('action', items)).toBe('2 asks')
     expect(listHeadLabel('action', items, 'Relay Bot')).toBe('2 asks from Relay Bot')
-    expect(listHeadLabel('action', [], 'Relay Bot')).toBe('All caught up')
+    // Andrii's sign-off (2026-10-01): a filter kept on an agent with nothing
+    // waiting says so, rather than the generic "All caught up".
+    expect(listHeadLabel('action', [], 'Relay Bot')).toBe('Nothing waiting from Relay Bot')
+    expect(listHeadLabel('action', [])).toBe('All caught up')
     // Round 2 (QA mobile F5): a ?from= whose agent has nothing left is dropped —
     // the head says so in its own line, instead of silently listing everyone.
     expect(listHeadLabel('action', items, null, 'Relay Bot')).toBe('Nothing waiting from Relay Bot · 2 asks from all agents')
