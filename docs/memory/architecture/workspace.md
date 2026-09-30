@@ -796,7 +796,7 @@ brief (ent#498) — all three already funnel through it via `ensure_thread_for_a
 explicit session id still wins.
 
 **An ask raised during a chat turn is the exception (ent#734).** On the native path the
-raise carries the platform's execution id (#2392); `operator_queue_service._workspace_thread_for`
+raise carries the platform's execution id (#2392); `operator_queue_service._workspace_attachment`
 asks `client_portal.service.chat_for_execution` first, which answers with the turn's own
 chat when the execution row is a still-running Workspace chat turn (`triggered_by="public"`,
 `source_channel="portal"`) of the same agent and addressee and the session belongs to
@@ -805,7 +805,8 @@ else, including a schedule that DELIVERS into Main (portal stamp, `schedule` tri
 every file-ingested ask, falls through to Main; a lookup failure falls through with a warning.
 Because Main is then both a chat-turn ask's home and a background ask's reply target, the
 row also carries `context.workspace_raised_in_turn` (platform-written, only on a turn match),
-projected as `WorkspaceAsk.raised_in_turn` — the fact the chat strip draws a tile from.
+projected as `WorkspaceAsk.raised_in_turn` — the fact a chat strip needs to draw a tile
+(trinity#3101 is the consumer; no frontend reads it yet).
 
 **Reset needs no second reset primitive.** `POST …/sessions/main/reset` archives the
 current Main and mints a fresh one in ONE transaction (clear the flag before the insert,
