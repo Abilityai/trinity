@@ -213,16 +213,13 @@ ENV USER=developer
 USER developer
 WORKDIR /home/developer
 
+# #3106: the build installs EXACT pins (reproducible rebuilds, no unvetted
+# upstream release); startup.sh's per-boot repair uses the floors in
+# agent-server-requirements.txt, so it never downgrades a template's packages.
+COPY --chown=root:root ./agent-image-requirements.txt /opt/trinity/agent-image-requirements.txt
+COPY --chown=root:root ./agent-server-requirements.txt /opt/trinity/agent-server-requirements.txt
 RUN python3 -m pip install --user --upgrade pip && \
-    python3 -m pip install --user \
-        fastapi \
-        uvicorn \
-        httpx \
-        pydantic \
-        python-multipart \
-        pyyaml \
-        rich \
-        cryptography
+    python3 -m pip install --user -r /opt/trinity/agent-image-requirements.txt
 
 RUN mkdir -p /home/developer/.claude-agent
 

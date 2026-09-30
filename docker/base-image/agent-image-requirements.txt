@@ -1,0 +1,19 @@
+# What the agent image installs at BUILD time, exact-pinned (#3106).
+#
+# Exact so a rebuild is reproducible and never takes an unvetted upstream
+# release — the lesson of #3012 (Claude Code) and #3106 (FastAPI 0.142, whose
+# auto-telemetry took down every OTEL-enabled agent). Bump deliberately, with a
+# rebuild; Dependabot proposes the bumps (.github/dependabot.yml).
+#
+# The per-boot repair does NOT use this file: it uses the floors in
+# agent-server-requirements.txt, so it never downgrades a newer version a
+# template installed for its own code.
+fastapi==0.141.1
+starlette==1.7.0
+uvicorn==0.54.0
+httpx==0.28.1
+pydantic==2.13.5
+python-multipart==0.0.32
+pyyaml==6.0.3
+rich==15.0.0
+cryptography==50.0.1

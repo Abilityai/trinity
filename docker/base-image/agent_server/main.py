@@ -12,6 +12,7 @@ import logging
 
 from fastapi import FastAPI
 
+from .fastapi_options import fastapi_app_options
 from .middleware.auth import AgentAuthMiddleware
 from .routers import (
     chat_router,
@@ -54,10 +55,13 @@ logger = logging.getLogger(__name__)
 # branches below dump automatically at the instant they notice.
 _enable_thread_diagnostics()
 
+# #3106: `**fastapi_app_options` opts out of FastAPI's auto-telemetry, which
+# reads the OTEL_* env injected for Claude Code and refused to start on it.
 app = FastAPI(
     title="Claude Agent API",
     description="Internal API for Claude Code agent (not exposed externally)",
-    version="2.0.0"
+    version="2.0.0",
+    **fastapi_app_options(FastAPI),
 )
 
 # #1159: per-agent inbound auth. Every backend→agent call carries a derived
