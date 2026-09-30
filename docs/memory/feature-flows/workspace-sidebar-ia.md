@@ -269,15 +269,18 @@ Three decisions worth keeping:
 * **No re-sorting.** Ordering by availability would make rows jump as agents
   start and stop; the design system's layout-stability rule forbids that, and the
   top-5 fold is #2159's design.
-* **Reserve the chip's footprint**, so a row does not reflow when an agent's
-  state changes between refreshes — but **for the list, not for every row**
-  (#2641). `availabilityChip()` answers null for everything except `stopped` and
+* **Reserve nothing for the chip** (ent#610 sign-off round 7, superseding #2641's
+  list-level reservation, whose `reservesAvailabilitySlot` helper was removed in the
+  #3054 review). The chip now renders on the row's second line, under the name, so
+  the meta strip holds no slot and no row pays for another row's state. History of
+  the #2641 step, kept for its reasoning: it reserved the footprint **for the list,
+  not for every row**. `availabilityChip()` answers null for everything except `stopped` and
   `unavailable`, so on a fleet where everything is running — the normal case —
   the 72px strip rendered empty on *every* row. That produced two visible
   defects from one fact: the dates stopped 72px short of the row's right edge,
   and 72px per row came out of the only element that wanted it, so names
-  truncated (`Chief ...`) beside a blank strip. `reservesAvailabilitySlot(rows)`
-  now decides it once per render, over the rows actually **rendered** — a
+  truncated (`Chief ...`) beside a blank strip. A list-level predicate
+  then decided it once per render, over the rows actually **rendered** — a
   stopped agent hidden by search or the collapse limit must not reserve width on
   a list that shows no chip. The whole `<span>` goes when nothing reserves it,
   not just its width: a zero-width flex child still sits between the date and
