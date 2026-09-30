@@ -33,7 +33,7 @@ def _user(connector_agent=None, mcp_scope=None, role="creator"):
 
 
 def _fake_request(method, path):
-    return SimpleNamespace(method=method, url=SimpleNamespace(path=path))
+    return SimpleNamespace(method=method, scope={"path": path})
 
 
 class TestConnectorScope:

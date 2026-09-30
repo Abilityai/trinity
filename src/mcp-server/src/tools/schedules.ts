@@ -5,7 +5,7 @@
  */
 
 import { z } from "zod";
-import { ApiError, TrinityClient } from "../client.js";
+import { ApiError, TrinityClient, depthRefusalFromError } from "../client.js";
 import type { McpAuthContext } from "../types.js";
 import { accessDenied } from "../access.js";
 
@@ -651,6 +651,9 @@ export function createScheduleTools(
                 "Poll list_recent_executions for the run in flight.",
             }, null, 2);
           }
+          // #2973: a chain-depth refusal is a result to stop on, not an error.
+          const refusal = depthRefusalFromError(error, agent_name);
+          if (refusal) return JSON.stringify(refusal, null, 2);
           throw error;
         }
 

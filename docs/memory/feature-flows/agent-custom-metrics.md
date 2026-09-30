@@ -348,7 +348,7 @@ objectives/<id>.yaml  ──┐                    (Tandem §3.4, in the agent's
         ┌───────────────┴───────────────────────────────────────┐
         ▼                        ▼                              ▼
  GET /api/agents/          MCP get_objectives          role card (ent#527) /
-   {name}/objectives         (agent-scoped)            hub (ent#661) /
+   {name}/objectives         (agent-scoped)            project view (ent#661 v3) /
                                                        proactivity (ent#605)
                                                        — in process, no second join
 ```

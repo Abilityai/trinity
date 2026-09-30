@@ -358,7 +358,7 @@ async def portal_auth_exchange(
         actor_ip=request.client.host if request.client else None,
         target_type="portal_client",
         target_id=email or None,
-        endpoint=str(request.url.path),
+        endpoint=request.scope["path"],
         request_id=getattr(request.state, "request_id", None),
         details={"granted": bool(token)},
     )
@@ -442,7 +442,7 @@ async def _audit_client_control(request: Request, current_user: User, action: st
         actor_ip=request.client.host if request.client else None,
         target_type="portal_client",
         target_id=email,
-        endpoint=str(request.url.path),
+        endpoint=request.scope["path"],
         request_id=getattr(request.state, "request_id", None),
         details=outcome,
     )
@@ -1059,7 +1059,7 @@ async def _audit_canvas_change(request: Request, principal: PortalPrincipal, *,
         actor_ip=request.client.host if request.client else None,
         target_type="agent",
         target_id=agent_name,
-        endpoint=str(request.url.path),
+        endpoint=request.scope["path"],
         request_id=getattr(request.state, "request_id", None),
         details=details,
     )
@@ -1837,7 +1837,7 @@ async def _audit_file_event(request: Request, principal: PortalPrincipal,
             target_type="agent",
             target_id=agent_name,
             details=details,
-            endpoint=str(request.url.path),
+            endpoint=request.scope["path"],
             request_id=getattr(request.state, "request_id", None),
         )
     except Exception as e:  # noqa: BLE001 — audit is best-effort

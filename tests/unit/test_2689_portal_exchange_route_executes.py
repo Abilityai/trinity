@@ -70,7 +70,7 @@ def delegate_db(tmp_path, monkeypatch):
 def _request():
     return SimpleNamespace(
         client=SimpleNamespace(host="10.0.0.1"),
-        url=SimpleNamespace(path="/api/enterprise/client-portal/auth/exchange"),
+        scope={"path": "/api/enterprise/client-portal/auth/exchange"},
         state=SimpleNamespace(request_id="req-2689"),
     )
 

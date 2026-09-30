@@ -13,7 +13,7 @@ gate and map errors. Only a person ends an ask (`reject_non_person_principal`).
 
 import json
 from typing import Any, Dict, List, Optional, Set
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, Response
 from models import (
     BulkCancelRequest,
     ClearResolvedRequest,
@@ -128,7 +128,7 @@ def _actor(current_user: User, request: Request) -> ask_service.Actor:
         email=current_user.email or current_user.username,
         user=current_user,
         ip=request.client.host if request.client else None,
-        endpoint=str(request.url.path),
+        endpoint=request.scope["path"],
     )
 
 
@@ -241,7 +241,7 @@ async def clear_resolved_queue_items(
             actor_ip=request.client.host if request.client else None,
             target_type="operator_queue",
             target_id=body.agent_name,
-            endpoint=str(request.url.path),
+            endpoint=request.scope["path"],
             details={"cleared": cleared, "agent_name": body.agent_name},
         )
         if _websocket_manager:
@@ -446,6 +446,7 @@ async def raise_my_ask(
     response: Response,
     name: str = Depends(get_self_acting_agent),
     current_user: User = Depends(get_current_user),
+    x_trinity_execution_id: Optional[str] = Header(None, max_length=128),
 ):
     """An agent asks a person for a decision — one call, validated here, stored,
     broadcast, and answered with a receipt. No file is written.
@@ -463,6 +464,8 @@ async def raise_my_ask(
             raised_by="agent",
             channel="mcp",
             actor_user=current_user,
+            # ent#661 v3: the raising turn as the platform saw it (#2392).
+            platform_execution_id=x_trinity_execution_id,
         )
     except ask_service.AskRejected as e:
         raise HTTPException(

@@ -78,7 +78,7 @@ async def create_mcp_api_key_endpoint(
             actor_ip=request.client.host if request.client else None,
             target_type="mcp_key",
             target_id=getattr(api_key, "id", None),
-            endpoint=str(request.url.path),
+            endpoint=request.scope["path"],
             request_id=getattr(request.state, "request_id", None),
             details={
                 "name": getattr(key_data, "name", None),
@@ -97,9 +97,13 @@ async def create_mcp_api_key_endpoint(
 @router.get("/keys", response_model=List[McpApiKey])
 async def list_mcp_api_keys_endpoint(
     request: Request,
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(require_interactive)
 ):
-    """List all MCP API keys for the current user."""
+    """List MCP API keys: the caller's own, or every key for an admin.
+
+    Signed-in session only, like creating one: the inventory has no machine
+    consumer, so every MCP key (the person's own `user` key included) gets a 403.
+    """
     try:
         if current_user.role == "admin":
             keys = db.list_all_mcp_api_keys()
@@ -159,7 +163,7 @@ async def ensure_default_mcp_api_key(
             actor_ip=request.client.host if request.client else None,
             target_type="mcp_key",
             target_id=getattr(api_key, "id", None),
-            endpoint=str(request.url.path),
+            endpoint=request.scope["path"],
             request_id=getattr(request.state, "request_id", None),
             details={
                 "name": key_data.name,
@@ -221,7 +225,7 @@ async def revoke_mcp_api_key_endpoint(
         actor_ip=request.client.host if request.client else None,
         target_type="mcp_key",
         target_id=key_id,
-        endpoint=str(request.url.path),
+        endpoint=request.scope["path"],
         request_id=getattr(request.state, "request_id", None),
     )
 
@@ -253,7 +257,7 @@ async def delete_mcp_api_key_endpoint(
         actor_ip=request.client.host if request.client else None,
         target_type="mcp_key",
         target_id=key_id,
-        endpoint=str(request.url.path),
+        endpoint=request.scope["path"],
         request_id=getattr(request.state, "request_id", None),
     )
 

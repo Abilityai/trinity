@@ -273,7 +273,7 @@ def _put_public_url(monkeypatch, value: str):
     body = types.SimpleNamespace(value=value, description=None)
     request = types.SimpleNamespace(
         client=types.SimpleNamespace(host="127.0.0.1"),
-        url=types.SimpleNamespace(path="/api/settings/public_chat_url"),
+        scope={"path": "/api/settings/public_chat_url"},
         state=types.SimpleNamespace(),
     )
     user = types.SimpleNamespace(id=1, username="admin", role="admin", mcp_scope=None, agent_name=None)

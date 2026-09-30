@@ -341,6 +341,41 @@ password) is **Phase 2**, gated on a configured email provider and the existing
   (own-account scoped; 409 if the email belongs to another account), surfaced as
   an **Admin sign-in email** card in Settings → General. No verification email is
   sent; existing `admin`+password login keeps working until/unless an email is set.
+- **FR-4 — A sign-in email is proven, unique, and written in one place
+  (trinity-enterprise#720, residual of #711).** Every sign-in path resolves the
+  account by email alone, so whoever holds an email on a `users` row holds that
+  identity — what is shared with the address, its Workspace threads, and the
+  real person's next sign-in.
+  - **Mailbox proof to bind.** `PUT /api/users/me/email` requires `{email, code}`,
+    where the code was sent to the NEW address by
+    `POST /api/users/me/email/code` (same rate limits as sign-in codes). Bind
+    codes live in `email_login_codes` with `purpose='email_bind'` and are tied to
+    the requesting account; a bind code never signs anyone in and a sign-in code
+    never binds. Missing/wrong/expired code → 400 `invalid_code`.
+  - **The one no-proof bind** is the #82 transition (FR-3) on an install that
+    cannot deliver mail (provider `console`): an **interactive admin** session may
+    bind without a code, audited as `email_bind_unverified`. Anyone else on such an
+    install gets 409 `email_verification_unavailable`. First-run setup (FR-2) is
+    unchanged — it binds before any provider can exist.
+  - **Unique.** `users.email` is unique on its lower-cased value (NULL allowed):
+    `idx_users_email_unique ON users(lower(email)) WHERE email IS NOT NULL`, on both
+    migration tracks. Pre-existing duplicates are resolved first: per address the
+    EARLIEST-created account keeps it; the others are set to NULL and logged by
+    username only.
+  - **One writer.** Every write of `users.email` (setup, the bind route,
+    `create_user`, `update_user`, the password upsert, Auth0, email sign-in
+    creation) goes through `db/users.py`'s checked write, which refuses an address
+    another account holds (`EmailInUseError` → 409 `email_in_use`) and maps a lost
+    race on the unique index to the same refusal. A test enumerates the writers.
+  - **A reclaimed username is not a 500.** Email sign-in creates the account with
+    `username = email`; when that username is already taken (an account that has
+    since re-bound away from the address), the new account gets a unique suffixed
+    username instead of an unhandled IntegrityError.
+  - **Redeemers honour suspension.** The Telegram, WhatsApp and MCP-inline code
+    redeemers and `email_has_agent_access` refuse an address whose account is
+    suspended (`users.suspended_at`), the same account-state rule `/verify` and
+    `get_current_user` apply. (Second-factor on those channels is out of scope:
+    they cannot present a challenge; tracked as a follow-up.)
 
 ---
 
@@ -1487,7 +1522,7 @@ could disagree — the role card (ent#527) computed its own gap from
 `metrics.json` with its own 30-day staleness rule while the tiles read the
 point store with the §49.1 rule. So there is **one join**, in
 `services/objective_join_service.py`, and every consumer — the role card, the
-project hub (ent#661), proactivity (ent#605) — calls it rather than growing
+project view (ent#661 v3), proactivity (ent#605) — calls it rather than growing
 its own. A second join anywhere is a defect regardless of whether it currently
 agrees.
 
@@ -1647,7 +1682,7 @@ it. Findings appear twice — flat in `findings[]` with `objective_id` / `metric
 | `objective_invalid` | the file is not a YAML mapping | fix the YAML; §3.4 names the fields |
 | `objective_unreadable` | the agent answered, but not with that file (retryable — a transport fault is not an author error) | retry |
 | `objective_id_duplicate` | two files declare one id | both are shown; give one its own id |
-| `objective_id_invalid` | a file's `id:` is not a valid id | the **file name** is used instead and the finding says so — a *missing* `id` falls back silently, an id the author wrote and this read refused does not, because ent#661 keys objectives by id across agents |
+| `objective_id_invalid` | a file's `id:` is not a valid id | the **file name** is used instead and the finding says so — a *missing* `id` falls back silently, an id the author wrote and this read refused does not, because the ent#661 v3 project view keys objectives by id across agents |
 | `objective_file_skipped` | a `*.yaml` in `objectives/` whose NAME is not a plain path segment (a space, a non-ASCII character) | rename it; the file is never fetched, and `source.objectives_skipped` counts them so "not there" can be told from "there under a name this read will not open" |
 | `objectives_read_timeout` | the fan-out exceeded `OBJECTIVES_READ_BUDGET_SEC` | retry; the agent is answering, just too slowly — `source.objectives_dir: "timeout"`, no objective joined |
 | `role_id_invalid` | `x-role.role` is not a valid id | fix `template.yaml`; no owned objective can match until then |
@@ -1816,11 +1851,11 @@ metric, every one `declared: false` with its `metric_undeclared` finding and
 | `GET /api/agents/{name}/objectives` | the operator/agent door |
 | MCP `get_objectives` | agent-scoped (no agent parameter), returns the route body verbatim, never throws |
 | Role card (ent#527; cut over in ent#676) | calls `read_objective_join(agent, template=…, client=…)` **in process** behind its own roster gate and the shared budget (§50.6) — one implementation, two doors. It serves a slim client projection (codes, never the operator sentences; `core-agent.md` §5.36) |
-| Project hub (ent#661) | composes `read_objective_files` (one file read) with `join_objectives` per participating agent over store-only reads — the agent door stays out of its loop |
+| Project view (ent#661 v3) | composes `read_objective_files` (one file read) with `join_objectives` per participating agent over store-only reads — the agent door stays out of its loop |
 | Proactivity (ent#605) | consumes `summary.behind` and per-row `gap.status == "behind" and not stale`; it owns the "never act on a stale number" rule and the pace maths |
 
 Deliberately **not** here: a platform-side copy of objective files; an
-objective-centric cross-agent read (ent#661's design pass, with cross-agent
+objective-centric cross-agent read (the ent#661 v3 project view, with cross-agent
 metric access owned by ent#80); a proactivity evaluator; a `metrics.json`
 fallback for `actual` (retired by §49's D-010); a projection cache.
 

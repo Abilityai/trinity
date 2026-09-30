@@ -67,6 +67,7 @@ There is no API or MCP endpoint to switch an agent's runtime after creation. See
 - **The headless tool denial reaches an agent on its next container recreate** after the base image is rebuilt; the prompt guidance reaches every agent as soon as the platform is updated.
 - **No runtime switch after creation.** Recreate the agent from a different template to change runtimes — a post-creation runtime-switch endpoint is planned.
 - **Codex cost is estimated**, not metered exactly.
+- **Claude Code is pinned in the base image.** A model newer than the pinned Claude Code version is refused, and the run fails with `model_unsupported` rather than an auth error (see [Model Selection](agent-configuration.md#model-selection)). Rebuild the base image after upgrading Trinity so agents pick up the newer CLI.
 - **Codex vision/image input and SSE streaming are out of scope** for the current release (planned).
 
 ## See Also

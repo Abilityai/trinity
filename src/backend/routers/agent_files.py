@@ -309,7 +309,7 @@ async def set_agent_permissions(
         actor_ip=request.client.host if request.client else None,
         target_type="agent",
         target_id=agent_name,
-        endpoint=str(request.url.path),
+        endpoint=request.scope["path"],
         request_id=getattr(request.state, "request_id", None),
         details={"targets": body.get("permissions") or body.get("targets")},
     )
@@ -335,7 +335,7 @@ async def add_agent_permission(
         actor_ip=request.client.host if request.client else None,
         target_type="agent",
         target_id=agent_name,
-        endpoint=str(request.url.path),
+        endpoint=request.scope["path"],
         request_id=getattr(request.state, "request_id", None),
         details={"target_agent": target_agent},
     )
@@ -361,7 +361,7 @@ async def remove_agent_permission(
         actor_ip=request.client.host if request.client else None,
         target_type="agent",
         target_id=agent_name,
-        endpoint=str(request.url.path),
+        endpoint=request.scope["path"],
         request_id=getattr(request.state, "request_id", None),
         details={"target_agent": target_agent},
     )
@@ -467,7 +467,7 @@ async def get_agent_objectives(
     One read of target vs actual with freshness: the objective files in the
     agent's own canon (framework §3.4) joined to the declared-metric registry
     (ent#477) and the point store (ent#478), judged by the ONE stale rule
-    (ent#479). The role card, the project hub and proactivity all consume this
+    (ent#479). The role card, the project view (ent#661 v3) and proactivity all consume this
     — a second join anywhere is the defect ent#476 exists to remove.
 
     **Not store-only.** Unlike `/metrics`, this reads the objective FILES

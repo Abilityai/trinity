@@ -257,8 +257,9 @@
                 </div>
                 <!-- The API field is `type`; a read of a misnamed field here rendered a blank line for months (issue 2370). -->
                 <div class="ops-card-type" data-testid="queue-type">{{ queueTypeLabel(item.type) }}</div>
-                <p v-if="item.title && item.title !== item.question" class="ops-card-title" data-testid="queue-title">{{ item.title }}</p>
-                <p class="ops-card-message">{{ item.message || item.question || item.description }}</p>
+                <p v-if="item.title && item.title !== item.question" class="ops-card-title" data-testid="queue-title"><AskMarkdown :text="item.title" inline /></p>
+                <!-- #3115: agent-written markdown, rendered — never shown raw. -->
+                <AskMarkdown class="ops-card-message" :text="item.message || item.question || item.description" :prose="false" data-testid="queue-message" />
                 <!-- trinity-enterprise#611: the exact action this approval would run,
                      on the same card that offers the decision (desktop parity). -->
                 <QueueProposal v-if="item.proposal" :proposal="item.proposal" class="mt-2" />
@@ -283,11 +284,11 @@
                       :aria-pressed="selectedOptions[item.id] === opt ? 'true' : 'false'"
                       :disabled="respondingItems[item.id]"
                       @click="selectOption(item.id, opt)"
-                    >{{ opt }}</button>
+                    ><AskMarkdown :text="opt" inline /></button>
                   </div>
                   <div v-if="selectedOptions[item.id]" class="ops-approval-form" data-testid="queue-approval-form">
                     <p class="ops-card-body" role="status" data-testid="queue-consequence">
-                      Sending <strong>{{ selectedOptions[item.id] }}</strong> to {{ item.agent_name }} — it reads this as your decision on its next run.
+                      Sending <strong><AskMarkdown :text="selectedOptions[item.id]" inline /></strong> to {{ item.agent_name }} — it reads this as your decision on its next run.
                     </p>
                     <input
                       v-model="responseTexts[item.id]"
@@ -374,7 +375,7 @@
                     >{{ queueEnding(item).label }}</span>
                   </div>
                   <div class="ops-card-type">{{ queueEndingText(queueEnding(item)) }}</div>
-                  <p class="ops-card-message">{{ item.title }}</p>
+                  <p class="ops-card-message"><AskMarkdown :text="item.title" inline /></p>
                 </div>
               </div>
             </div>
@@ -647,6 +648,7 @@ import { http } from '../utils/boundedHttp'
 import { useAuthStore } from '../stores/auth'
 import { useAgentsStore } from '../stores/agents'
 import { agentNameTooltip } from '../utils/agentName'
+import AskMarkdown from '../components/operator/AskMarkdown.vue'
 import { apiErrorMessage } from '../utils/apiError'
 import { viewState, staleBannerMessage, listFrom } from '../utils/loadingState'
 import {

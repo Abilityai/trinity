@@ -54,3 +54,23 @@ async def validation_error_without_input(
             entry["msg"] = sanitize_text(entry["msg"])
         safe.append(entry)
     return JSONResponse(status_code=422, content={"detail": jsonable_encoder(safe)})
+
+
+async def inter_agent_depth_exceeded(request: Request, exc) -> JSONResponse:
+    """The named 403 for a chain-depth refusal (#2806, #2973).
+
+    Same body and header as ``routers/chat.py::_raise_depth_exceeded_403``, for
+    the routes that let ``InterAgentDepthExceeded`` propagate (loop start,
+    schedule trigger, event emit). Each of those calls the guard after its
+    access dependency has answered, so the 403 discloses nothing about whether
+    a target exists (Invariant #8).
+    """
+    # Lazy: chat_execution_service pulls in the dispatch stack.
+    from services.chat_execution_service import ERROR_CODE_HEADER
+
+    detail = exc.detail()
+    return JSONResponse(
+        status_code=403,
+        content={"detail": detail},
+        headers={ERROR_CODE_HEADER: detail["error"]},
+    )
