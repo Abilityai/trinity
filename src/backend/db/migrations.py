@@ -4231,6 +4231,25 @@ def _migrate_execution_chain_depth(cursor, conn):
     conn.commit()
 
 
+def _migrate_loop_chain_depth(cursor, conn):
+    """#2973 — the inter-agent chain depth a loop inherits from its starter.
+
+    Captured when an agent principal starts the loop and stamped on every
+    iteration's execution row, because later iterations run after the
+    starter's own turn has ended and its running rows can no longer be read.
+    NULL on a loop started by a human (a root). Nullable, no backfill.
+
+    Mirrored by the Alembic revision 0084_agent_loops_chain_depth.
+    """
+    _safe_add_column(
+        cursor,
+        "agent_loops",
+        "chain_depth",
+        "ALTER TABLE agent_loops ADD COLUMN chain_depth INTEGER",
+    )
+    conn.commit()
+
+
 def _migrate_agent_canvas_shares_table(cursor, conn):
     """ent#554 — share links for a canvas.
 
@@ -5076,4 +5095,5 @@ MIGRATIONS = [
     ("portal_messages_unread_index", _migrate_portal_messages_unread_index),
     ("agent_sync_state_divergence", _migrate_agent_sync_state_divergence),
     ("execution_conversation_key", _migrate_execution_conversation_key),
+    ("loop_chain_depth", _migrate_loop_chain_depth),
 ]
