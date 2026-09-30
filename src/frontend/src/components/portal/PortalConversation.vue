@@ -100,6 +100,17 @@
       <span v-else-if="!currentSessionId" class="hidden sm:inline min-w-0 flex-1 truncate text-sm text-gray-500 dark:text-gray-400">New chat</span>
 
       <div class="ml-auto flex items-center gap-1 shrink-0">
+        <!-- ent#661: the chat's project — its badge and Detach, or one
+             "Project" button. Hidden in Main, for an outside client, before
+             the chat exists, and on a build without projects. -->
+        <ProjectChatControls
+          v-if="currentSessionId"
+          :agent-name="agent.name"
+          :session-id="currentSessionId"
+          :session-title="currentTitle"
+          :is-main="isMainChat"
+          @open-project="(id) => emit('open-project', id)"
+        />
         <!-- ent#451: New chat lives in the header, with its hotkey (⌘J /
              Ctrl+J, ruled 2026-09-06). Starts a fresh thread with THIS agent —
              the sidebar's button is the cross-agent one (the picker). -->
@@ -748,6 +759,7 @@
 </template>
 
 <script setup>
+import ProjectChatControls from './projects/ProjectChatControls.vue'
 import { ref, computed, watch, nextTick, onMounted, onBeforeUnmount } from 'vue'
 import { useClientPortalStore } from '@/stores/clientPortal'
 import { agentDisplayName } from '@/utils/agentName'
@@ -867,7 +879,7 @@ const props = defineProps({
 // controls that raised them — the rail strip is the door to both now.
 // Declared emits are the component's contract, so a name left here after
 // its only `$emit` is deleted is a promise nothing keeps.
-const emit = defineEmits(['switch-agent', 'session-adopted', 'sessions-changed', 'open-menu', 'toggle-star', 'escalate-to-room', 'open-thread', 'work-state', 'open-work', 'new-chat', 'main-reset', 'voice-call', 'voice-panel'])
+const emit = defineEmits(['switch-agent', 'session-adopted', 'sessions-changed', 'open-menu', 'toggle-star', 'escalate-to-room', 'open-thread', 'work-state', 'open-work', 'new-chat', 'main-reset', 'voice-call', 'voice-panel', 'open-project'])
 
 // ent#451/#473: the active thread as the shell's list knows it. Null until the
 // list carries the thread (a just-adopted session lands on the next refresh),

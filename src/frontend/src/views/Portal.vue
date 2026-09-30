@@ -129,6 +129,8 @@
           :current-session-id="activeSessionId"
           :current-room-id="activeRoomIdFromRoute"
           :is-platform-session="store.isPlatformSession"
+          :projects-available="store.projectsAvailable && store.isPlatformSession"
+          :projects-active="projectsRoute"
           :loading-roster="store.loading && !store.rosterLoaded"
           v-model:search="search"
           :searching="searching"
@@ -138,6 +140,7 @@
           @new-chat-with-agent="newChatWithAgent"
           @open-agent="openAgentPage"
           @open-thread="openThread"
+          @open-projects="openProjects(null)"
           @toggle-star="toggleStar"
           @sign-out="onSignOut"
         />
@@ -172,6 +175,8 @@
             :current-session-id="activeSessionId"
             :current-room-id="activeRoomIdFromRoute"
             :is-platform-session="store.isPlatformSession"
+            :projects-available="store.projectsAvailable && store.isPlatformSession"
+            :projects-active="projectsRoute"
             :loading-roster="store.loading && !store.rosterLoaded"
             v-model:search="search"
             :searching="searching"
@@ -181,6 +186,7 @@
             @new-chat-with-agent="(n) => { mobileNav = false; newChatWithAgent(n) }"
             @open-agent="(n) => { mobileNav = false; openAgentPage(n) }"
             @open-thread="(t) => { mobileNav = false; openThread(t) }"
+            @open-projects="openProjects(null)"
             @toggle-star="toggleStar"
             @sign-out="onSignOut"
           />
@@ -321,6 +327,32 @@
           </template>
         </div>
 
+        <!-- ent#661: Projects. Placed BEFORE the conversation branch for the
+             same reason as the room branches above: `activeAgent` defaults to
+             the first roster entry, so falling through would open that agent's
+             chat under a projects URL. Rendered only when the roster said this
+             principal has the capability; otherwise the next branch says so. -->
+        <PortalProjects
+          v-else-if="projectsRoute && store.projectsAvailable"
+          :project-id="activeProjectId"
+          :my-email="store.clientEmail || ''"
+          @open-menu="mobileNav = true"
+          @navigate="openProjects"
+          @open-thread="openThread"
+          @open-room="openRoom"
+        >
+          <template #header-end>
+            <PortalThemeSwitch />
+          </template>
+        </PortalProjects>
+        <div v-else-if="projectsRoute" :class="STAGE_WRAP" data-testid="projects-unavailable">
+          <p :class="STAGE_TITLE">Projects aren't available here</p>
+          <p :class="STAGE_BODY">
+            They're not enabled on this instance, or not for your account. Ask an administrator if you expected them.
+          </p>
+          <button :class="STAGE_ACTION" @click="router.push('/workspace')">Back to chats</button>
+        </div>
+
         <PortalConversation
           v-else-if="activeAgent"
           ref="conversationRef"
@@ -343,6 +375,7 @@
           @open-thread="openThread"
           @work-state="onWorkState"
           @open-work="openRailOn('work')"
+          @open-project="openProjects"
           @main-reset="onMainReset"
           @voice-call="onVoiceCall"
           @voice-panel="(v) => { voicePanelVersion = v }"
@@ -632,6 +665,10 @@
         <template #tab-files="{ participants }">
           <PortalRailFiles :participants="participants" />
         </template>
+        <!-- ent#661: Projects — door PLATFORM + the roster capability. -->
+        <template #tab-projects="{ participants }">
+          <PortalRailProjects :participants="participants" :current-project-id="railProjectId" @open-projects="openProjects" />
+        </template>
         <!-- ent#547: Info — the one docked tab whose body owns its own reads
              rather than taking a shell-fed store (see `feedsFor`). Its door is
              SOLO_AGENT, so `participants` here is always exactly one name and
@@ -680,6 +717,9 @@
       </template>
       <template #tab-files="{ participants }">
         <PortalRailFiles :participants="participants" />
+      </template>
+      <template #tab-projects="{ participants }">
+        <PortalRailProjects :participants="participants" :current-project-id="railProjectId" @open-projects="(id) => { railSheetOpen = false; openProjects(id) }" />
       </template>
       <!-- ent#547: the sheet needs its OWN `#tab-info`. A slot supplied to the
            column mount alone would leave a phone on the registry's generic empty
@@ -741,6 +781,9 @@ import PortalLoops from '@/components/portal/PortalLoops.vue'
 import PortalRailCanvas from '@/components/portal/PortalRailCanvas.vue'
 import PortalWork from '@/components/portal/PortalWork.vue'
 import PortalRailFiles from '@/components/portal/PortalRailFiles.vue'
+import PortalProjects from '@/components/portal/projects/PortalProjects.vue'
+import PortalRailProjects from '@/components/portal/projects/PortalRailProjects.vue'
+import { useProjectsStore } from '@/stores/projects'
 import PortalCodeInput from '@/components/portal/PortalCodeInput.vue'
 import PortalAgentPicker from '@/components/portal/PortalAgentPicker.vue'
 import PortalRoom from '@/components/portal/PortalRoom.vue'
@@ -900,6 +943,12 @@ const activeSessionId = computed(() => route.params.sessionId || null)
 const activeRoomIdFromRoute = computed(() => route.params.roomId || null)
 // ent#360: `/workspace/a/:agentName`.
 const activeAgentPageName = computed(() => route.params.agentName || null)
+// ent#661: `/workspace/projects` and `/workspace/projects/:projectId`.
+const projectsRoute = computed(() => route.name === 'WorkspaceProjects' || route.name === 'WorkspaceProject')
+const activeProjectId = computed(() => route.params.projectId || null)
+// A stage page that never carries a rail: the agent page (ent#360) and the
+// Projects pages (ent#661). Both rail rules read it as their `agentPage`.
+const railFreePage = computed(() => activeAgentPageName.value || (projectsRoute.value ? 'projects' : null))
 const activeAgent = computed(() => {
   // Never substitute a different agent for one the caller asked for by name.
   if (unreachableAgent.value) return null
@@ -1063,12 +1112,13 @@ const railParticipants = computed(() => railParticipantsFor({
 const railTabs = computed(() => visibleTabs(RAIL_TABS, {
   isPlatform: store.isPlatformSession,
   participants: railParticipants.value,
+  capabilities: { projects: store.projectsAvailable },
 }))
 // Keyed on the route and the stage VERDICT — synchronous facts — never on data
 // still arriving (a room's participants land with its own fetch), so a live
 // update cannot flicker the rail in and out.
 const railVisible = computed(() => railVisibleFor({
-  agentPage: activeAgentPageName.value,
+  agentPage: railFreePage.value,
   stageState: stage.value.state,
   roomId: activeRoomIdFromRoute.value,
   roomsAvailable: store.multiAgentChatAvailable,
@@ -1093,7 +1143,7 @@ const RAIL_MOTION = 'transition-[width] duration-300 ease-out overflow-hidden '
 
 const railColumnReserved = computed(() => Boolean(
   railColumnReservedFor({
-    agentPage: activeAgentPageName.value,
+    agentPage: railFreePage.value,
     stageState: stage.value.state,
     roomId: activeRoomIdFromRoute.value,
   }) && !voiceCanvasHasColumn.value
@@ -1489,6 +1539,23 @@ const STAGE_ICON = 'w-10 h-10 text-gray-300 dark:text-gray-700 mb-3'
 const STAGE_TITLE = 'text-sm text-gray-700 dark:text-gray-300 font-medium'
 const STAGE_BODY = 'mt-1 text-xs text-gray-500 dark:text-gray-400 max-w-xs'
 const STAGE_ACTION = 'mt-3 text-sm text-action-primary-600 hover:underline'
+
+// ent#661 — the Projects list (id null) or one project. Leaving a call asks
+// first, like every other exit from the stage.
+function openProjects(id) {
+  if (guardLeaveCall(() => openProjects(id))) return
+  mobileNav.value = false
+  router.push(id ? `/workspace/projects/${encodeURIComponent(id)}` : '/workspace/projects')
+}
+// The project the chat on screen is in, for the rail tab's "This chat" mark.
+// Read from the store's per-chat cache, which the chat header fills.
+const projectsStore = useProjectsStore()
+const railProjectId = computed(() => {
+  const roomId = activeRoomIdFromRoute.value
+  const sid = activeSessionId.value || pendingSession.value
+  const hit = roomId ? projectsStore.forLink('room', roomId) : (sid ? projectsStore.forLink('thread', sid) : null)
+  return hit?.id || null
+})
 
 function openRoom(roomId) {
   if (!roomId) return
