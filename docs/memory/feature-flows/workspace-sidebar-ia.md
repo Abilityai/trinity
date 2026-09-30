@@ -238,6 +238,8 @@ renders nothing rather than a `(0)`.
 | per agent | the agent row in the agents block | which agent is waiting |
 | total | the pinned **Inbox** row (ent#610; the wordmark until then) | the agents block now occupies the top of a *scrolling* region, so a fleet-wide signal parked there scrolls away; the Inbox row sits in the non-scrolling top block for the same reason |
 
+**The agent row's "needs you" mark (ent#610, the 2026-09-30 ruling).** The per-agent ask pill (`agent-ask-count`, #2424) IS the ruling's mark: `asksByAgent(openAsks)` — the same pending, addressed-to-you feed the Inbox row counts, chat-turn and background asks alike — sitting before the unread pill, titled in the Inbox row's words (`askBadgeTitle`). The rows' marks sum to the Inbox row's number (`portalAgentNeedsYouMark.mount.spec.js`).
+
 **The pinned Inbox row (ent#610).** The two fleet-wide counts — asks waiting on you
 (`askCount`, `data-testid="sidebar-ask-count"`, unchanged address) and what came back
 (`totalUnread(sidebarThreads)`, `sidebar-unread-count`) — moved from the brand head to a

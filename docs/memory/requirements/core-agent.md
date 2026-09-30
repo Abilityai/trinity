@@ -1843,9 +1843,10 @@ bounding the table. OSS-core (Workspace rule above). Flow:
   a composer prefill that names the job, never a send. Stop works after a
   reload (`reattach` sets the execution id).
 - **AC-4 — the Work tab** (`PortalWork`, docked into `#tab-work` in both rail
-  mounts): *Waiting on you* = `PortalAsks` over `store.asks` filtered to the
-  participants (the fourth rendering of the same operator-queue row, ent#428;
-  a computed, never a narrowed fetch); *Now* = a card per live row with Stop
+  mounts): since the ent#610 ruling (2026-09-30) no asks — one line "N waiting
+  on you · Open in Inbox" while a participant's ask waits (counted from the
+  store's `openAsks`, a computed, never a narrowed fetch), to the Inbox's
+  Action tab `?from=<agent>`; *Now* = a card per live row with Stop
   where `can_stop`; *Earlier* = "N in the last 30 days · latest 3 shown", Show
   all expands in place inside the rail's own scroll axis, "30+" when the
   server's page is full (principle 28).
