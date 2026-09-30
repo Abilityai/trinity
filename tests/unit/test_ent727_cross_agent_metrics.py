@@ -207,6 +207,55 @@ async def test_a_polled_read_is_audited_once_per_hour_per_pair_and_route(audit):
 
 
 @pytest.mark.asyncio
+async def test_an_agent_key_read_is_filed_as_the_agent_not_its_owner(audit):
+    """`_resolve_actor` ranks `actor_user` above `actor_agent_name`, and an
+    agent key resolves to its OWNER — passing the principal would file the
+    agent's cross read as the owner's own act (the dependencies.py
+    `capability_refusal` trap). The agent is the actor; the key rides along."""
+    principal = models_mod.User(
+        id=7, username="owner", email="owner@example.com", role="user",
+        agent_name=READER, mcp_key_id="key-7", mcp_key_name="reader-key",
+        mcp_scope="agent")
+    await access.audit_cross_agent_read(READER, SERVER, "metrics",
+                                        actor_user=principal)
+    [row] = audit["rows"]
+    assert row.get("actor_user") is None
+    assert row["actor_agent_name"] == READER
+    assert row["actor_email"] == "owner@example.com"
+    assert (row["mcp_key_id"], row["mcp_key_name"], row["mcp_scope"]) == (
+        "key-7", "reader-key", "agent")
+
+
+@pytest.mark.asyncio
+async def test_a_human_viewing_objectives_is_filed_as_the_human(audit):
+    """The objectives route reads through the PATH agent's grant, but the one
+    looking may be a person in the UI. The row names the person as the actor;
+    the grant holder stays in `details.reader_agent`."""
+    human = models_mod.User(id=1, username="operator",
+                            email="op@example.com", role="user")
+    await access.audit_cross_agent_read(READER, SERVER, "objectives",
+                                        actor_user=human)
+    [row] = audit["rows"]
+    assert row["actor_user"] is human
+    assert row.get("actor_agent_name") is None
+    assert row["details"]["reader_agent"] == READER
+
+
+@pytest.mark.asyncio
+async def test_the_hourly_dedup_is_per_actor(audit):
+    """Two people viewing the same objectives each get a row — deduplicating
+    on (reader, target, route) alone would hide the second viewer."""
+    a = models_mod.User(id=1, username="a", email="a@example.com", role="user")
+    b = models_mod.User(id=2, username="b", email="b@example.com", role="user")
+    for _ in range(3):
+        await access.audit_cross_agent_read(READER, SERVER, "objectives",
+                                            actor_user=a)
+    await access.audit_cross_agent_read(READER, SERVER, "objectives",
+                                        actor_user=b)
+    assert [r["actor_user"].username for r in audit["rows"]] == ["a", "b"]
+
+
+@pytest.mark.asyncio
 async def test_a_failed_write_does_not_silence_auditing_for_an_hour(audit):
     audit["return"] = None  # `log` returns None when the row was not written
     await access.audit_cross_agent_read(READER, SERVER, "metrics")

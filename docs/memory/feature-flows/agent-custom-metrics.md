@@ -271,7 +271,7 @@ delete the file.
 |---|---|
 | Gate | `AuthorizedAgentByName` (uniform 404 — Invariant #8/#186), **then** the metric-read gate (`_metric_read_gate` → `metric_access_service.can_read_agent_metrics`): an agent-scoped key reads its own numbers, or another agent's while it holds an `agent_permissions` grant on it (ent#727 — the edge `chat_with_agent` uses); otherwise 403. `/metrics/definitions` carries the same gate. |
 | Rate limit | 240/min per agent — clears N tabs at a 30 s poll, stops a loop. A cross-agent read is charged to the **reader** (`agent_metrics_read_by:{reader}`), so a fan-out never spends the target's budget |
-| Audit | A cross-agent read (metrics, definitions, or an objective row served elsewhere) writes one `authorization`/`metrics_cross_agent_read` row per (reader, target, route) per hour; marker set only after the row is written |
+| Audit | A cross-agent read (metrics, definitions, or an objective row served elsewhere) writes one `authorization`/`metrics_cross_agent_read` row per (reader, target, route, actor) per hour; marker set only after the row is written |
 | Window | `auto` (default) · `24h` · `7d` · `30d` · `90d`, or `since`/`until`. `auto` = `max(24h, 12 × cadence)` capped at 90 d, because a cadence ranges 60 s–1 y and a fixed 24 h shows a weekly metric four points |
 | Filters | `metric=<declared name>` · `include_retired` · `series_limit` (≤ 2000, single-metric path) |
 | Errors | 422 `window_invalid` · 422 `metric_undeclared` (retired names get "retired at T — pass `include_retired=true`") · 503 `metric_store_unavailable` + `Retry-After: 30` |

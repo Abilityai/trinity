@@ -1930,9 +1930,12 @@ granted callers can each read a target at 240/min — it is an indexed store rea
 ### 51.4 Audit — who read whose numbers
 
 A cross-agent read writes an `authorization` / `metrics_cross_agent_read` row
-(`details: {reader_agent, target_agent, route}`) **once per (reader, target, route)
+(`details: {reader_agent, target_agent, route}`) **once per (reader, target, route, actor)
 per hour** — `audit_log` is append-only for 365 days, and a polled read would
-otherwise write up to 240 rows a minute per pair. The dedup marker is set only
+otherwise write up to 240 rows a minute per pair. The actor is whoever asked:
+an agent key is filed as the agent (owner as `actor_email`, key named), never as
+its owner; a person viewing objectives through the path agent's grant is filed as
+that person, with the grant holder in `details.reader_agent`. The dedup marker is set only
 after the row is written, so a failed write never silences auditing for an hour;
 if the marker store is unreachable the row is written anyway. Every cross-agent
 read and every refused one is also a structured log line. An audit failure never
@@ -1972,7 +1975,7 @@ server read is audited like §51.4 with `route: "objectives"`.
 - [ ] Granted agent key reads `/metrics` and `/metrics/definitions` of the target; same shape as a self read
 - [ ] No grant → 403 with the existing message; human / system paths unchanged; uniform 404 still first
 - [ ] Cross-agent read rate-limited on the caller's key; target's key untouched
-- [ ] Cross-agent read audited once per hour per (reader, target, route); read survives an audit failure
+- [ ] Cross-agent read audited once per hour per (reader, target, route, actor); read survives an audit failure
 - [ ] Stopped target answers like a running one
 - [ ] MCP `get_metrics` accepts optional `agent`; policy row is `enforce` on `agent`
 - [ ] `get_objectives` returns `actual` + `served_by` for a metric served by a granted agent; ambiguous → named finding
