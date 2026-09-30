@@ -164,6 +164,7 @@ On a **fresh install** (no non-system agents yet), Trinity auto-seeds a bundled 
 | `list_systems()` | List all deployed systems |
 | `restart_system(name)` | Restart all agents in a system (creator role, human callers only — refused for an agent key) |
 | `get_system_manifest(name)` | Export the system as a redeployable YAML manifest |
+| `teardown_system(system_name, dry_run?, agents?)` | Remove a deployed system's agents. Previews by default (`dry_run` is `true` unless you set it to `false`). Needs a matching entitlement; without it the tool reports that the capability is not available (`404`/`403`) instead of failing |
 
 ### API Endpoints
 
@@ -178,6 +179,11 @@ On a **fresh install** (no non-system agents yet), Trinity auto-seeds a bundled 
 | `/api/systems/{system_name}/manifest` | GET | Export the system as a YAML manifest |
 
 See the [Backend API Docs](http://localhost:8000/docs) for full request/response schemas.
+
+## Limitations
+
+- A community build has no un-deploy: remove a system's agents one by one. Removing a whole system (the **Remove a deployed system** panel under Library → Systems, and `teardown_system`) needs a matching entitlement.
+- Re-running a manifest after a partial deploy creates `_N`-suffixed duplicates rather than reusing the survivors.
 
 ## See Also
 

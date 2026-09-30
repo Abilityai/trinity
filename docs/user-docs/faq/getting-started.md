@@ -16,7 +16,7 @@ Clone the repository from GitHub, copy `.env.example` to `.env`, set `ADMIN_PASS
 
 ## Can I use Trinity without hosting it myself?
 
-Not as a hosted service: Trinity is self-hosted, and there is no managed Trinity hosting offering at the moment. The least infrastructure work is a server of your own. The DigitalOcean installer creates a Droplet with HTTPS from one command in your terminal, and `./scripts/deploy/start.sh --hosted` runs prebuilt images on any Linux VM, so nothing is built on the server. Self-hosting is free and keeps all data inside your own perimeter. See [Deploying Trinity](../guides/deploying-trinity.md) and [Deploy on DigitalOcean](../guides/deploying/digitalocean.md).
+Not as a hosted service: Trinity is self-hosted, and there is no managed Trinity hosting offering at the moment. The least infrastructure work is a server of your own. The Trinity 1-Click on the DigitalOcean Marketplace needs no terminal at all, the DigitalOcean installer creates a Droplet with HTTPS from one command in your terminal, and `./scripts/deploy/start.sh --hosted` runs prebuilt images on any Linux VM, so nothing is built on the server. Self-hosting is free and keeps all data inside your own perimeter. See [Deploying Trinity](../guides/deploying-trinity.md) and [Deploy on DigitalOcean](../guides/deploying/digitalocean.md).
 
 ## What happens the first time I open Trinity in my browser?
 
@@ -61,7 +61,7 @@ The web UI is at http://localhost, the backend API with interactive Swagger docs
 
 ## How is the web UI organized?
 
-The top navigation has five entries. **Dashboard** is the fleet, in three interchangeable views — Timeline, Grid, and List — with `v` to cycle the view and `/` to type-filter by name; there is no separate Agents page (`/agents` redirects to the Dashboard's List mode). **Library** holds everything installable: agent templates, systems, and the shared skills library. **Operations** is the operator queue, notifications, health, and executions. **Settings** holds platform configuration. **Workspace** is the chat app — one continuous conversation per agent — and opens in its own browser tab so the console page you were on stays put. Clicking an agent opens its detail page, whose header has **Start/Stop**, **Autonomy**, **Workspace**, and **Talk** (a voice call that opens in the Workspace); there is no browser terminal tab — shell access is by SSH. See [Using Trinity](../guides/using-trinity.md).
+The top navigation has five entries. **Dashboard** is the fleet, in three interchangeable views — Timeline, Grid, and List — with `v` to cycle the view and `/` to type-filter by name; there is no separate Agents page (`/agents` redirects to the Dashboard's List mode). **Library** holds everything installable: agent templates, systems, and the shared skills library. **Operations** is the operator queue, notifications, health, and executions. **Settings** holds platform configuration. **Workspace** is the chat app — one continuous conversation per agent — and opens in its own browser tab so the console page you were on stays put. Clicking an agent opens its detail page, whose header has **Start/Stop**, **Autonomy**, **Workspace**, and **Talk** (a voice call that opens in the Workspace); there is no browser terminal tab — shell access is by SSH. On a narrow window, top navigation links that do not fit move into a counted **N more** menu, and Settings and Operations tabs into a **More** menu, instead of scrolling out of sight. See [Using Trinity](../guides/using-trinity.md).
 
 ## How do I create my first agent?
 

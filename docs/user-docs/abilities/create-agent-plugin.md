@@ -45,7 +45,7 @@ The wizard creates a complete agent directory:
 ```
 my-agent/
 ├── CLAUDE.md              # Agent identity and instructions (carries the playbook-call rule)
-├── template.yaml          # Trinity metadata: resources, credentials:, schedules:, plugins:
+├── template.yaml          # Trinity metadata: resources, credentials:, schedules:, plugins:, metrics:
 ├── .env.example           # Required environment variables
 ├── .mcp.json.template     # MCP server configuration template (${VAR} in env blocks only)
 ├── dashboard.yaml         # Metrics dashboard definition
@@ -60,6 +60,7 @@ Three conventions the wizard bakes in, so the agent is deployable as generated:
 
 - **`template.yaml` declares everything Trinity materializes at creation** — the credentials the agent needs (so the guided credential checklist is populated), its recommended `schedules:`, and the `plugins:` it depends on (the scaffold declares the plugins it already tells you to install, `trinity@abilityai` at minimum, so the selection survives a rebuild). See [Creating Agents](../agents/creating-agents.md).
 - **Schedules are one-line playbook calls** — a generated schedule message is `/daily-briefing`, never a prose description of the work; the human-readable intent lives in the schedule's `purpose:` field. Cron times default to UTC (the container clock) with canonical IANA zone names.
+- **Business metrics are declared, then recorded** — the scaffold adds a `metrics:` block to `template.yaml` for the KPIs the agent's domain actually produces, with a `cadence` that matches the `/update-dashboard` schedule. The generated `/update-dashboard` computes the numbers once, writes `dashboard.yaml`, and records the same numbers as points with the `record_metrics` MCP tool. Off Trinity, or when the tool refuses, it skips that step silently and the dashboard write still succeeds. A dashboard widget can bind to a declared metric with `metric: <name>` instead of carrying a hand-typed value.
 - **Delegation is by playbook call** — the generated `CLAUDE.md` guidelines tell the agent to hand work to other agents only by invoking a named playbook, one line, on any transport. See [Playbook calls](../automation/abilities-marketplace.md#playbook-calls--the-unit-of-inter-agent-work).
 
 ## Usage Examples

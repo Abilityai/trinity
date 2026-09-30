@@ -120,7 +120,7 @@ The **Logs** tab on the Agent Detail page shows the container's stdout/stderr in
 
 ## What is the compatibility report on the Overview tab, and can Trinity fix what it finds?
 
-Once an agent is running, Trinity checks its workspace against a catalogue of best-practice conventions — a valid `template.yaml`, a non-gitignored `.claude/` directory, defined playbooks, accidentally committed secrets, and more — and shows the findings in the Agent Detail **Overview** tab, ranked HARD / SOFT / INFO. It also reports whether the platform-provided Trinity plugin is present and, if not, why it was withheld. It is purely advisory and never blocks creation or deployment; Claude-specific checks are skipped for Codex and Gemini agents. The nine gitignore-related findings offer a one-click **Fix** button that rewrites the agent's `.gitignore` in place — the change stays uncommitted until the agent's next git sync. Use **Re-run analysis** to re-check at any time. See [Creating Agents](../agents/creating-agents.md#compatibility-validation).
+Once an agent is running, Trinity checks its workspace against a catalogue of best-practice conventions — a valid `template.yaml`, a non-gitignored `.claude/` directory, defined playbooks, accidentally committed secrets, and more — and shows the findings in the Agent Detail **Overview** tab, ranked HARD / SOFT / INFO. It also reports whether the platform-provided Trinity plugin is present and, if not, why it was withheld. It is purely advisory and never blocks creation or deployment; Claude-specific checks are skipped for Codex and Gemini agents. The nine gitignore-related findings offer a one-click **Fix** button that rewrites the agent's `.gitignore` in place — the change stays uncommitted until the agent's next git sync. Use **Re-run analysis** to re-check at any time. The headline counts only must-fix findings, and a template with no `resources` block passes because the agent inherits the fleet-wide default. See [Creating Agents](../agents/creating-agents.md#compatibility-validation).
 
 ## Is there a limit on how many canvases an agent can hold?
 
@@ -128,7 +128,15 @@ Yes: each agent can hold 100 canvases (`CANVAS_MAX_PER_AGENT` in `.env`, default
 
 ## I already have a GitHub repo — how do I turn it into an agent?
 
-Create an agent from it and pick an **import intent**. **Clone** (the default) keeps the agent wired to that remote and pushes back to it. **Fork** forks it into your own GitHub account first, with `upstream` pointing at the original. **Copy** takes a one-time snapshot of the files, strips the git history, and gives the agent a standalone workspace with no remote, no token, and no sync. Copy is the right choice when you want to start *from* someone's repository without staying attached to it. After creation the dialog runs the compatibility check inline and shows the result before you leave. See [Creating Agents](../agents/creating-agents.md).
+Create an agent from it and pick an **import intent**. **Clone** (the default) keeps the agent wired to that remote; it pushes back on its own working branch when the repository is yours, and is pull-only otherwise. **Fork** forks it into your own GitHub account first, with `upstream` pointing at the original. **Copy** takes a one-time snapshot of the files, strips the git history, and gives the agent a standalone workspace with no remote, no token, and no sync. Copy is the right choice when you want to start *from* someone's repository without staying attached to it. After creation the dialog runs the compatibility check inline and shows the result before you leave. See [Creating Agents](../agents/creating-agents.md).
+
+## Why was my new agent created pull-only instead of getting its own working branch?
+
+An agent gets a working branch, auto-sync, and paused schedules while sync fails only when the repository is yours: not a shared catalog template, owned by the GitHub account your token belongs to, reached with your own token rather than the platform-wide one, and a push check passes. An organization's repository stays pull-only by default, even when your token can write to it. The create response's `git_mode.reason` names which condition failed and how to fix it — usually "add your own GitHub token" or "fork it to your own repository". A `kind: "deployment"` create, including `trinity deploy --repo`, is always pull-only. See [GitHub Sync](../integrations/github-sync.md#creating-an-agent-with-sync).
+
+## How do I turn my agent's auto-sync on or off?
+
+Open the agent's **Settings** tab and use the **Git sync** section: **Auto-sync to GitHub every 15 minutes**, and **Pause schedules while sync is failing**. Both apply on the next cycle with no restart, because the agent reads the auto-sync setting at the start of every cycle. The same switches are `PUT /api/agents/{name}/git/auto-sync` and `PUT /api/agents/{name}/git/freeze-schedules-if-failing`. An agent with no GitHub repository shows a note pointing you to the **Git** tab. See [GitHub Sync](../integrations/github-sync.md#turning-auto-sync-on-or-off).
 
 ## My agent was created from a public template and can't push anywhere. Can I fix that without recreating it?
 
@@ -137,6 +145,10 @@ Yes — use **Bind to your own repo** on the agent's **Git** tab. Trinity create
 ## Why did a Push untrack some of my agent's files, and where do I see what changed?
 
 Before every push Trinity rebuilds the agent's `.gitignore` around its own rules — managed defaults (caches, virtualenvs, local databases, generated content) above your rules, and a non-overridable protected floor (credential files, the agent's `.trinity/` state) below them — and then untracks anything the rules now cover. Because git is last-match-wins, a `!negation` you wrote keeps winning over the defaults, so a file you chose to keep is never silently dropped; the one exception is a negation *beneath* a directory-form pattern such as `node_modules/`, which git never descends into — those are reported as shadowed rather than fixed. The push then tells you what it did: the sync response and the `git_sync` MCP result carry `removed_paths`, `unignored_paths`, and `shadowed_negations`, the Git tab's toast and the commit message state the counts and paths, and when the tracked set actually changed Trinity also files an operator-queue notice, so an unattended scheduled sync can't untrack files for weeks unnoticed. A newly un-ignored path that was a secret is already in the remote's history — rotate it and remove the rule. See [GitHub Sync](../integrations/github-sync.md#what-a-push-does-to-gitignore).
+
+## Does my agent's `.claude/settings.json` get committed to its repository?
+
+Yes, normally. It is not gitignored, so a template's project settings and the hooks a plugin registers travel with the repository. Trinity checks the content on every commit it makes and keeps the file out when the staged copy registers hooks under `/opt/trinity/`, carries a credential-bearing key such as `env` or `apiKeyHelper`, or is not valid JSON. It then keeps the last committed copy (or untracks the file when there is no usable one) and never touches the copy on the agent's disk. See [GitHub Sync](../integrations/github-sync.md#what-happens-to-claudesettingsjson).
 
 ## Why does my agent's `.gitignore` contain rules I never wrote, right after creation?
 

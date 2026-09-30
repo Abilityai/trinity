@@ -1,6 +1,6 @@
 # agent-dev Plugin
 
-Development tools for extending existing agents — skills, memory systems, git-backed state, a GitHub Issues development cycle, cross-actor project management, long-running pipelines, multi-agent orchestration, a shared canonical-data layer, and fleet analysis and migration. Thirty skills in v1.16.1.
+Development tools for extending existing agents — skills, memory systems, git-backed state, a GitHub Issues development cycle, cross-actor project management, long-running pipelines, multi-agent orchestration, a shared canonical-data layer, and fleet analysis and migration. Thirty skills in v1.16.5.
 
 Two kinds of skill live here. **Installers** (`add-*`) put a capability into an agent. **Runtime skills** are what the agent then runs — the nine backlog-workflow skills and the five `project-*` skills. Each runtime skill is authored once in this plugin; the installers copy it in at install time (they embed nothing of their own), and the same files are mirrored into the community skills catalog Trinity ships with (`trinity-skills`), so a deployed agent can also receive them by [assignment](../automation/skills-and-playbooks.md) without running the installer.
 
@@ -183,7 +183,8 @@ Makes any agent a system-aware orchestrator of other agents. Two modes, picked b
 | `/discover-agents` | Discover the fleet (from the live Trinity instance and/or a repo list) into a descriptive `fleet/system-map.yaml` — including each agent's pipelines and canon declarations |
 | `/compose-system` | Turn the map into a Trinity system manifest and deploy it; members are declared as `github:Org/repo` so the fleet is reproducible from source, and a spec-less repo gets a post-deploy `/trinity:onboard in-place` playbook call |
 | `/orchestrate` | Route work to the right agent, fan N tasks out to one agent (many agents run as parallel per-agent dispatches), chain ordered steps, open a room, wire standing event reactions, or roll out an ephemeral agent for a one-off job — via Trinity MCP |
-| `/sync-fleet-to-head` | Non-destructively bring in-scope agents to their GitHub HEAD |
+| `/sync-fleet-to-head` | Non-destructively bring in-scope agents to their GitHub HEAD. Every in-scope agent is attempted on every run; a permission denial is reported with its verbatim error as a regression, never silently skipped |
+| `/reconcile-skill-map` | Compare `fleet/skill-map.yaml` — which Library skills each agent should hold, each with a rationale — against the agent's live assignments. Applies approved additions one skill at a time with `assign_skill_to_agent`, never with the replace-all `set_agent_skills`, and never removes a skill without a human decision. A library skill that would overwrite an agent's own skill of the same name is reported as a decision, never forced |
 | `/profile-fleet` | Interview and introspect agents, reconcile reality against the fleet narrative |
 | `/fleet-reconcile` | Fold already-verified deltas into every doc surface behind one gate |
 | `/project-init`, `/project-steward` *(opt-in)* | The project-management layer: create or adopt a managed project, and an autonomous steward that dispatches labeled work, escalates stalls, ages the operator's open loops, and writes a daily digest |
