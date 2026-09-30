@@ -386,10 +386,12 @@ def raise_ask(
         # attaching may create Main. Only an AGENT's raise reads the turn: a
         # gate's ask is a background ask, and belongs to the Inbox only
         # (the ent#610 amendment of 2026-09-30).
-        thread = oqs._workspace_thread_for(
+        thread, in_turn = oqs._workspace_attachment(
             agent_name, addressee, execution_id=turn if raised_by == "agent" else None)
         if thread:
             context[oqs._WORKSPACE_THREAD_KEY] = thread
+        if thread and in_turn:
+            context[oqs._WORKSPACE_TURN_KEY] = True
     item = {
         "id": norm["request_id"],
         "type": norm["type"],
@@ -529,8 +531,9 @@ def _validated_ask(ask: Any, oqs, *, raised_by: str = "agent") -> Dict[str, Any]
     if not isinstance(context, Mapping):
         raise AskRejected(422, "invalid_context", "context must be an object.")
     # The workspace thread is platform-written: an agent that could author it
-    # would choose which conversation its ask claims to belong to (ent#429).
-    context = {k: v for k, v in context.items() if k != oqs._WORKSPACE_THREAD_KEY}
+    # would choose which conversation its ask claims to belong to (ent#429), and
+    # whether it is drawn in that chat at all (ent#734).
+    context = {k: v for k, v in context.items() if k not in oqs._PLATFORM_CONTEXT_KEYS}
     context_bytes = oqs._json_bytes(context)
     if context_bytes is None:
         raise AskRejected(422, "invalid_context", "context must serialize as JSON.")
@@ -733,7 +736,7 @@ def _differs(row: Dict[str, Any], norm: Dict[str, Any], oqs) -> List[str]:
     An ask-specific comparison: the file fingerprint's addressee arm would call
     every `primary` ask different (the owner is never on its own roster)."""
     stored_context = row.get("context") if isinstance(row.get("context"), dict) else {}
-    stored_context = {k: v for k, v in stored_context.items() if k != oqs._WORKSPACE_THREAD_KEY}
+    stored_context = {k: v for k, v in stored_context.items() if k not in oqs._PLATFORM_CONTEXT_KEYS}
     expires = norm["expires_at"]
     pairs = {
         "title": (norm["title"], row.get("title")),

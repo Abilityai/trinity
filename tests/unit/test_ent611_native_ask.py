@@ -326,7 +326,7 @@ def ask(real_db, monkeypatch):
     monkeypatch.setattr(svc, "platform_audit_service", _Audit())
     monkeypatch.setattr(svc, "_websocket_manager", _WS())
     monkeypatch.setattr(svc, "_owner_email", lambda agent: state["owner"])
-    monkeypatch.setattr(oqs, "_workspace_thread_for", lambda agent, email, **_: f"thread-{email}")
+    monkeypatch.setattr(oqs, "_workspace_attachment", lambda agent, email, **_: (f"thread-{email}", False))
     monkeypatch.setattr(real_db, "get_operator_resume_enabled", lambda agent: state["opted_in"], raising=False)
     monkeypatch.setattr(oqs.rate_limiter, "check",
                         lambda *a, **k: RateLimitResult(state["rate_ok"], 10, 0, 60))

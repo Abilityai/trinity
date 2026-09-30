@@ -20,7 +20,7 @@ belongs to a different person than the one it asks.
 
 Requirement: docs/memory/requirements/security.md §26 (ent#429 / ent#734)
 Harness: the ent#611 `ask` fixture over the real per-process SQLite, with the
-REAL `_workspace_thread_for` restored (the fixture stubs it). Agent names are
+REAL `_workspace_attachment` restored (the fixture stubs it). Agent names are
 unique to this file.
 """
 
@@ -38,7 +38,7 @@ import services.operator_queue_service as oqs
 pytestmark = pytest.mark.unit
 
 # Captured at import, before the `ask` fixture swaps in its stub.
-_REAL_THREAD_FOR = oqs._workspace_thread_for
+_REAL = {name: getattr(oqs, name, None) for name in ("_workspace_thread_for", "_workspace_attachment")}
 
 OTHER = "someone-else-734@example.com"
 
@@ -48,7 +48,9 @@ def world(ask, monkeypatch):
     """The `ask` fixture, with the real chat resolution put back and a fresh
     agent name per test (the database outlives the test, and Main is unique
     per pair)."""
-    monkeypatch.setattr(oqs, "_workspace_thread_for", _REAL_THREAD_FOR)
+    for name, real in _REAL.items():
+        if real is not None:
+            monkeypatch.setattr(oqs, name, real)
     ask.agent = f"agent-734-{uuid.uuid4().hex[:8]}"
     return ask
 
@@ -305,3 +307,106 @@ def test_the_addressee_match_ignores_email_case(world, real_db, monkeypatch):
     r = _raise(world, "t734-case", platform_execution_id=turn)
 
     assert _thread(world, r) == chat
+
+
+
+# --- raised in a turn vs raised in the background (ent#734 r2) -----------------
+#
+# A chat-turn ask raised in MAIN and a background ask (schedule / loop / gate)
+# both carry `chat_id = Main`, but the ent#610 amendment draws the first as a
+# tile in Main and the second in NO chat. So the row carries one more
+# platform-written fact, `context.workspace_raised_in_turn`, true only when the
+# raising turn's chat matched — and the client projection names it.
+
+def _ctx(ask, receipt):
+    return ask.db.get_operator_queue_item(receipt["id"])["context"] or {}
+
+
+def _projected(ask, receipt):
+    from client_portal.asks.service import _project
+    return _project(ask.db.get_operator_queue_item(receipt["id"]))
+
+
+def test_a_chat_turn_ask_in_main_is_marked_raised_in_turn(world, real_db):
+    main = _main(world.agent, OWNER)
+    turn = _execution(real_db, world.agent, chat=main)
+
+    r = _raise(world, "t734-main-turn", platform_execution_id=turn)
+
+    assert _ctx(world, r)["workspace_session_id"] == main
+    assert _ctx(world, r)["workspace_raised_in_turn"] is True
+    assert _projected(world, r).raised_in_turn is True
+    assert _projected(world, r).chat_id == main
+
+
+def test_a_scheduled_ask_is_not_marked_raised_in_turn(world, real_db):
+    main = _main(world.agent, OWNER)
+    run = _execution(real_db, world.agent, triggered_by="schedule", chat=main)
+
+    r = _raise(world, "t734-main-sched", platform_execution_id=run)
+
+    assert _ctx(world, r)["workspace_session_id"] == main
+    assert "workspace_raised_in_turn" not in _ctx(world, r)
+    assert _projected(world, r).raised_in_turn is False
+
+
+def test_an_agent_supplied_raised_in_turn_is_stripped_on_the_native_path(world, real_db):
+    r = _raise(world, "t734-planted-turn",
+               body={"context": {"workspace_raised_in_turn": True, "keep": 1}})
+
+    assert "workspace_raised_in_turn" not in _ctx(world, r)
+    assert _ctx(world, r)["keep"] == 1
+    assert _projected(world, r).raised_in_turn is False
+
+
+def test_an_agent_supplied_raised_in_turn_is_stripped_on_the_file_path(world, monkeypatch):
+    monkeypatch.setattr(oqs, "_validated_addressee", lambda agent, raw: raw)
+
+    out = oqs._clamp_ingested_item(
+        {"id": "f734-turn", "title": "t", "question": "q", "addressed_to_email": OWNER,
+         "context": {"workspace_raised_in_turn": True}},
+        world.agent,
+    )
+
+    assert "workspace_raised_in_turn" not in out["context"]
+
+
+def test_a_replay_does_not_call_the_platform_flag_a_difference(world, real_db):
+    """`differs` compares the agent's content; a platform-written key on the
+    stored row is not something the agent's retry changed. The body cites the
+    same `execution_id` the platform stamps (ent#661), so only the
+    `workspace_*` keys differ between the stored and the retried context."""
+    main = _main(world.agent, OWNER)
+    turn = _execution(real_db, world.agent, chat=main)
+    body = {"context": {"execution_id": turn}}
+    _raise(world, "t734-replay", platform_execution_id=turn, body=dict(body))
+
+    again = _raise(world, "t734-replay", platform_execution_id=turn, body=dict(body))
+
+    assert again["status"] == "replayed"
+    assert "context" not in again.get("differs", [])
+
+
+@pytest.mark.parametrize("stored, expected", [
+    ({"workspace_raised_in_turn": True}, True),
+    ({"workspace_raised_in_turn": "true"}, False),   # only the platform's bool counts
+    ({"workspace_raised_in_turn": 1}, False),
+    ({}, False),
+])
+def test_the_projection_reads_only_a_real_true(stored, expected):
+    from client_portal.asks.service import _project
+    row = {"id": "x", "agent_name": "a", "type": "question", "title": "t", "question": "q",
+           "created_at": "2026-09-30T00:00:00Z", "status": "pending", "context": stored}
+
+    assert _project(row).raised_in_turn is expected
+
+
+def test_the_file_sync_does_not_read_the_platform_flag_as_a_rewrite():
+    """#2915's change detector compares the agent's file entry with the stored
+    row. A flag the agent planted was stripped at ingest, so it is on the entry
+    but not the row — and must not report `context` as rewritten every cycle."""
+    req = {"id": "f", "type": "question", "title": "t", "question": "q",
+           "context": {"k": 1, "workspace_raised_in_turn": True}}
+    row = {"type": "question", "title": "t", "question": "q", "context": {"k": 1}}
+
+    assert "context" not in oqs.changed_fields(row, req)
