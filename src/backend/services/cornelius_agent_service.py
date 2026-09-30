@@ -210,8 +210,14 @@ class CorneliusAgentService:
         `request=None` — the HTTP request object is not dereferenced by the create
         path (verified).
         """
+        # The routers FACADE, not `services.agent_service.crud` directly: the
+        # facade injects `ws_manager`, and without one the `agent_created`
+        # broadcast is a silent no-op — an already-open browser is never told
+        # this agent exists. `system_service._default_create_agent_fn` documents
+        # the same choice for the fleet seeder; taking the service door here
+        # made Cornelius the one seeded agent that announced nothing.
         # Imported lazily to avoid a router/service import cycle at module load.
-        from services.agent_service.crud import create_agent_internal
+        from routers.agents import create_agent_internal
 
         config = AgentConfig(
             name=CORNELIUS_AGENT_NAME,
