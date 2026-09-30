@@ -298,9 +298,16 @@ def raise_ask(
     raised_by: str,
     channel: str,
     actor_user: Any = None,
+    addressee: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Raise an ask through the platform and return its receipt
     (trinity-enterprise#611).
+
+    `addressee` (ent#661) names exactly who is asked, bypassing role
+    resolution. Only a `gate` raise may pass it (a platform decision such as an
+    agent owner's consent must reach that owner, not whoever a provider maps
+    `primary` to); for an agent's raise it is a programming error, so an agent
+    can never choose who is asked.
 
     The seam the agent's MCP tool calls today, and the one a gate calls later
     with `raised_by="gate"`, `channel="gate"` and a `request_id` derived from the
@@ -338,6 +345,7 @@ def raise_ask(
         raise ValueError(f"raise_ask: unknown channel {channel!r}")
     if (raised_by == "gate") != (channel == "gate"):
         raise ValueError(f"raise_ask: channel {channel!r} does not go with raised_by {raised_by!r}")
+    named = _named_addressee(addressee, raised_by)
     norm = _validated_ask(ask, oqs, raised_by=raised_by)
     existing = db.get_operator_queue_item_for_agent_by_request_id(agent_name, norm["request_id"])
     if existing:
@@ -351,7 +359,10 @@ def raise_ask(
     predecessor = _predecessor(agent_name, norm["supersedes_expired"], raised_by)
     if norm["proposal"] is not None and predecessor is None:
         _refuse_unlinked_reask(agent_name, norm["proposal"], raised_by)
-    people, addressee, resolved = _address(agent_name, norm["to"])
+    if named:
+        people, addressee, resolved = [named], named, True
+    else:
+        people, addressee, resolved = _address(agent_name, norm["to"])
 
     context = dict(norm["context"])
     if addressee:
@@ -609,6 +620,22 @@ def _refuse_unlinked_reask(agent_name: str, proposal: Dict[str, Any], raised_by:
                 "This repeats an action a timeout already denied. Say what is new, and set "
                 "supersedes_expired to that ask's request_id.",
                 expired_request_id=prior["request_id"])
+
+
+def _named_addressee(addressee: Optional[str], raised_by: str) -> Optional[str]:
+    """The lower-cased email a platform raise names, or None when none is named.
+
+    A programming error (`ValueError`), never a refusal: an agent's raise that
+    names anyone, or a named addressee that is not an email.
+    """
+    if addressee is None:
+        return None
+    if raised_by != "gate":
+        raise ValueError("raise_ask: only a gate raise may name its addressee")
+    email = str(addressee).strip().lower()
+    if "@" not in email:
+        raise ValueError("raise_ask: addressee must be an email")
+    return email
 
 
 def _address(agent_name: str, role: str) -> Tuple[List[str], Optional[str], bool]:
