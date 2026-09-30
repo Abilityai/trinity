@@ -3009,10 +3009,27 @@ class CanaryStatusResponse(BaseModel):
 # =============================================================================
 
 
+# #3104: the payload reaches subscriber prompts via {{payload.*}}; bound it.
+EVENT_PAYLOAD_MAX_BYTES = 64 * 1024
+
+
 class EmitEventRequest(BaseModel):
     """Request body for emitting an event."""
     event_type: str  # Namespaced event type (e.g., "prediction.resolved")
     payload: Optional[dict] = None  # Structured data
+
+    @field_validator("payload")
+    @classmethod
+    def _bound_payload(cls, v):
+        if v is not None:
+            import json
+            # UTF-8 bytes: ASCII escapes would count "é" as 6 and reject valid payloads.
+            size = len(json.dumps(v, ensure_ascii=False, default=str).encode("utf-8"))
+            if size > EVENT_PAYLOAD_MAX_BYTES:
+                raise ValueError(
+                    f"payload is {size} bytes serialized; max {EVENT_PAYLOAD_MAX_BYTES}"
+                )
+        return v
 
 
 # =============================================================================

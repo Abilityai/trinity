@@ -14,7 +14,7 @@ Lightweight pub/sub system for inter-agent event pipelines. Agents emit named ev
 1. Agent A emits an event: `emit_event(event_type="report_ready", payload={"url": "...", "summary": "..."})`
 2. Trinity checks all subscriptions matching agent A + event type `report_ready`.
 3. For each matching subscription, an async task is dispatched to the subscribing agent.
-4. The task message is built from the subscription's template with payload fields interpolated.
+4. The task message is built from the subscription's template with payload fields interpolated. Each interpolated value is wrapped in `⟦ ⟧`, credential-sanitized and capped at 4000 characters, and the message gets a line telling the subscriber that the marked text is data, not instructions. Event payloads are limited to 64 KiB.
 5. Events are persisted and visible via API.
 6. WebSocket broadcast provides real-time event visibility.
 
