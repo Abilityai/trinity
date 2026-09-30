@@ -53,6 +53,10 @@ from services.chat_signals import InterAgentDepthExceeded  # noqa: E402
 
 pytestmark = pytest.mark.unit
 
+import routers.sessions as _SESSIONS_MOD  # noqa: E402
+
+_REAL_SESSION_OR_404 = _SESSIONS_MOD._session_or_404
+
 KEY = "inter_agent_max_chain_depth"
 OWNER = "nr-owner"
 A, B = "nr-a", "nr-b"
@@ -584,3 +588,68 @@ def test_2973_execute_task_stamps_the_depth_on_the_row_it_creates(world, monkeyp
             )
         )
     assert seen["fields"].chain_depth == 3
+
+
+def test_2973_a_foreign_or_missing_session_is_404_before_the_depth_403(session_client, monkeypatch):
+    """Invariant #8: the session lookup answers first, so the depth 403 never
+    tells an agent at the max that a session id exists."""
+    import routers.sessions as _SESSIONS
+
+    monkeypatch.setattr(_SESSIONS, "_session_or_404", _REAL_SESSION_OR_404)
+    _set_max(1)
+    _running_row(A, 5)
+    resp = session_client.client.post(
+        f"/api/agents/{B}/sessions/no-such-session/message", json={"message": "hi"}, headers=_bearer()
+    )
+    assert resp.status_code == 404, resp.text
+    assert "X-Trinity-Error-Code" not in resp.headers
+
+
+def test_2973_the_cold_retry_keeps_the_depth(world, monkeypatch):
+    """`run_resumable_turn` re-issues `execute_task` once when the resume
+    JSONL is missing; that second row must carry the same depth."""
+    import contextlib
+
+    import services.session_turn_service as _STS
+    import services.task_execution_service as _TES
+
+    calls = []
+
+    async def _execute_task(**kw):
+        calls.append(kw)
+        if len(calls) == 1:
+            return SimpleNamespace(status="failed", error=_STS.RESUME_NOT_FOUND_MARKERS[0], session_id=None)
+        return SimpleNamespace(status="success", error=None, session_id="new-uuid")
+
+    @contextlib.asynccontextmanager
+    async def _no_lock(*a, **kw):
+        yield
+
+    monkeypatch.setattr(_STS, "ResumeLock", _no_lock)
+    monkeypatch.setattr(_STS, "supports_session_resume", lambda _a: True)
+    monkeypatch.setattr(_TES, "get_task_execution_service", lambda: SimpleNamespace(execute_task=_execute_task))
+    turn = asyncio.run(
+        _STS.run_resumable_turn(
+            agent_name=B, session_key="s1", message="m", cached_uuid="stale-uuid",
+            triggered_by="session", lock_ttl=30, chain_depth=4,
+        )
+    )
+    assert turn.fallback_fired
+    assert [c.get("chain_depth") for c in calls] == [4, 4]
+
+
+def test_2973_the_budget_alert_writes_a_notification_on_the_subscriber(world, monkeypatch):
+    import services.monitoring_alerts as _MA
+    from db.engine import get_engine
+    from sqlalchemy import text
+
+    svc = _MA.MonitoringAlertService()
+    monkeypatch.setattr(svc, "_broadcast_alert", AsyncMock())
+    notification_id = asyncio.run(svc.alert_event_dispatch_budget_exhausted(B, A, 120))
+    with get_engine().connect() as conn:
+        row = conn.execute(
+            text("SELECT agent_name, priority, notification_type FROM agent_notifications WHERE id = :i"),
+            {"i": notification_id},
+        ).first()
+    assert tuple(row) == (B, "high", "alert")
+    svc._broadcast_alert.assert_awaited_once()

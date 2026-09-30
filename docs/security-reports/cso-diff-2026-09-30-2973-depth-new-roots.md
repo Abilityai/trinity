@@ -3,8 +3,9 @@
 **Mode**: diff (all phases) · **Confidence gate**: 8/10 · **Branch**: `feature/2973-chain-depth-laundering` → `dev` · **Audited**: working-tree diff against `origin/dev`.
 
 ## Architecture (Phase 0)
-Extends the #2806 chain-depth guard to three agent-initiated paths that used to start a depth-0 root:
+Extends the #2806 chain-depth guard to four agent-initiated paths that used to start a depth-0 root:
 - **Loop start**: depth stored on `agent_loops.chain_depth` (nullable, SQLite + Alembic `0084`) and stamped on every iteration.
+- **Chat-session turn**: depth passed through `run_resumable_turn` to `execute_task` (both attempts).
 - **Manual schedule trigger**: `chain_depth` forwarded in the backend→scheduler body. The scheduler is on the platform network only.
 - **Agent event emit**: depth carried as a `SECRET_KEY`-signed `chain_depth` claim in the EVT-001 loopback JWT.
 
