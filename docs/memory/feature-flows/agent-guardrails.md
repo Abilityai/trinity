@@ -264,7 +264,7 @@ Runs as **root** via `sudo` from `startup.sh`. Reads baseline + `$AGENT_GUARDRAI
 
 Immutable, root-owned `0444`. Contents:
 
-- **`bash_deny`** (10 regex+reason rules): recursive root/home delete, `chmod 777`, pipe-to-shell, git force-push, `kill -9 1`, raw `dd of=/dev/sd…`, `mkfs.*`, fork bomb, read-only-config tamper, host shutdown/reboot/poweroff.
+- **`bash_deny`** (12 regex+reason rules): recursive root/home delete, `chmod 777`, pipe-to-shell, git force-push, `kill -9 1`, raw `dd of=/dev/sd…`, `mkfs.*`, fork bomb, read-only-config tamper, host shutdown/reboot/poweroff, `sudo` naming `/etc/claude-code`/`/opt/trinity`/`/etc/sudoers` or `visudo`, root shells (`sudo -i`/`-s`/`--login`/`--shell`, `sudo su`, `sudo <shell>` with no script, bare `su`) (#3105).
 - **`path_deny`** (12 globs): `.env`, `.env.*`, `.mcp.json`, `.credentials.enc`, `~/.ssh/*`, `~/.aws/*`, `~/.gcp/*`, `~/.claude/settings.json`, `~/.claude/settings.local.json`, `~/.trinity/read-only-config.json`, `/opt/trinity/*`, `/etc/claude-code/*`.
 - **`credential_patterns`** (9): Anthropic key/OAuth, OpenAI, GitHub PAT (classic + fine-grained), AWS access key, Slack bot/user token, Google API key.
 - **Budgets**: `max_turns_chat: 50`, `max_turns_task: 50`, `execution_timeout_sec: 1800`.
@@ -304,8 +304,8 @@ See [read-only-mode.md](read-only-mode.md).
 ## Security Properties
 
 1. **Baseline immutable** — image-baked, root-owned `0444`; agent cannot read-modify-write it.
-2. **Runtime config root-generated** — written by `sudo` at boot, `0444`; agent process cannot rewrite it post-start.
-3. **Hooks tamper-proof** — in `/opt/trinity/*` (path-denied) and registered in `~/.claude/settings.json` (also path-denied).
+2. **Runtime config root-generated** — written by `sudo` at boot, `0444`; agent process cannot rewrite it post-start without `sudo` (`developer` holds `NOPASSWD:ALL`; `bash_deny` refuses the obvious `sudo` spellings, #3105).
+3. **Hooks tamper-resistant** — in `/opt/trinity/*` (path-denied) and registered in root-owned `/etc/claude-code/managed-settings.json` (also path-denied; ent#345). `sudo` can still rewrite both; `bash_deny` refuses the obvious spellings and agent `/health` reports `guardrails_registration` per request (#3105).
 4. **Override scope minimal** — numeric caps + literal substrings only; regex and credential scanner are platform-owned.
 5. **Fail-closed everywhere** — bad stdin, bad config, or any uncaught hook exception → deny (exit 2).
 6. **No value leakage** — credential scanner logs pattern *names*, never matched secrets.
