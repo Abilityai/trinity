@@ -1985,10 +1985,11 @@ print(json.dumps(out))
         for a deprecated name and carrying lifecycle codes only (an injection's
         dep warnings stay on the sync result, where they have always been).
 
-        The library read (git I/O) runs BESIDE delivery, started first: it
-        neither delays the delivery it has nothing to do with, nor — being done
-        long before any delivery outcome — sits between the delivery budget's
-        verdict and the response.
+        The library read (git I/O) runs BESIDE delivery, started first, so it
+        never delays delivery. A slow delivery (the budget-bound `in_progress`
+        path) finds it long finished; a fast outcome (`pending_start`,
+        `docker_unavailable`) waits for it before answering — normally a cached
+        listing read.
         """
         notes_task = asyncio.ensure_future(
             asyncio.to_thread(self._deprecation_notes, requested)
