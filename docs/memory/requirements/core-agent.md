@@ -2183,10 +2183,13 @@ issue if it's ever wanted. Also deferred: `data.json` caching/streaming.
   (no manual create/clone). Provisioned by
   `services/cornelius_agent_service.py::CorneliusAgentService.ensure_seeded()`.
 - **Key Features**:
-  - **Public source template** (#1656): provisioned via the ordinary `create_agent_internal` from
-    `github:Abilityai/cornelius` — an anonymous, source-mode clone with **no PAT**, on the
-    trinity-enterprise#123 tokenless public-repo path (`AgentConfig.source_mode` defaults `True`, which
-    that path requires). Carries `capabilities: [brain-orb]`, `CLAUDE.md`, `.trinity/brain-orb/` hooks,
+  - **Public source template** (#1656): provisioned from `github:Abilityai/cornelius` through the
+    **`routers/agents.py` facade** — not `services.agent_service.crud` directly, because the facade
+    injects `ws_manager` and the `agent_created` broadcast is a silent no-op without one (an already-open
+    browser is never told the agent exists). Same choice, same reason, as
+    `system_service._default_create_agent_fn` for the fleet seeder. An anonymous, source-mode clone with
+    **no PAT**, on the trinity-enterprise#123 tokenless public-repo path, pinned pull-only by
+    trinity-enterprise#705 (`kind="deployment"`, explicit `source_mode=True`). Carries `capabilities: [brain-orb]`, `CLAUDE.md`, `.trinity/brain-orb/` hooks,
     a pre-generated `resources/agent-visualization/data.json` seed graph so the orb renders immediately,
     `resources/local-brain-search/` (so `semantic_search` is real, not a keyword fallback), and the full
     `Brain/` vault the seed graph was exported from. Was a vendored
@@ -2194,6 +2197,17 @@ issue if it's ever wanted. Also deferred: `data.json` caching/streaming.
     and caused #1646 and #1656, so the bundle was deleted rather than re-vendored. **No offline
     fallback** — a fallback would only fire on a transient clone failure and would burn the durable
     `cornelius_seeded` flag on the degraded copy; leaving the flag unset to retry next boot is safer.
+  - **Past `fork_to_own: required`, by one narrow door**: the template declares it (2026-09-11) because
+    it pushes a personal knowledge base to `Brain/`, and an agent bound to the shared public upstream is
+    a path from a private vault into a public repo. The seeder cannot satisfy that gate — it runs at
+    first boot with no user present and no token to fork with — so from that date every fresh install
+    ended with the fleet trio only, an ERROR in the log and a high-priority `system-seed-cornelius-failed`
+    alert in the operator queue. What the gate prevents is a PUSH, and the pull-only pin above makes the
+    push unreachable, so `_apply_fork_to_own` stands aside for this one caller
+    (`allow_unforked_pull_only=True`). The flag is **not trusted on its own**: the gate re-derives the
+    pinned-pull-only shape itself, so a caller passing it while building a config that could push is
+    still refused. Seeder-only on purpose — anyone creating an agent themselves can be asked for a
+    token, and keeps the promise that `required` means the repo lands in an account they own.
   - **First-run-only**: a durable `cornelius_seeded` system-setting flag gates the seed — an operator who
     deletes Cornelius is **not** re-provisioned.
   - **Fresh-install-scoped**: skipped when any non-system agent already exists (`db.count_non_system_agents()`),
@@ -2203,8 +2217,10 @@ issue if it's ever wanted. Also deferred: `data.json` caching/streaming.
   - **Triggers**: the setup-completion handler (`routers/setup.py`, fresh installs, FastAPI BackgroundTask)
     + a `main.py` lifespan safety-net gated on `setup_completed && !cornelius_seeded` (upgrades). A Redis
     SETNX lock (`cornelius:provision`, fail-open, mirrors the #1464 leader-lock) guards the `--workers 2` race.
-- **Known deviation (local bundle)**: the default Cornelius is a LOCAL bundle, not github-native, so it has
-  **no git origin** — it won't auto-`git pull` upstream template updates. Durable ownership is deferred to
+- **Pull-only, and stays that way**: Cornelius clones the shared public upstream and tracks it read-only
+  (trinity-enterprise#703's pull heartbeat applies). It never pushes, so the knowledge base it builds
+  lives only on that server until the owner binds a repo of their own — `POST /api/agents/{name}/git/initialize`
+  accepts an agent with no existing binding, which is the upgrade path. Durable ownership remains
   fork-to-own (trinity-enterprise#109). No DB migration (`system_settings` is free-form KV). The Brain Orb was
   already fully OSS (flag-gated, not entitlement-gated), so no de-gating was needed.
 - **Flow**: `docs/memory/feature-flows/cornelius-default-agent.md`
