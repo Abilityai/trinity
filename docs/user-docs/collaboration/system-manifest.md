@@ -68,7 +68,7 @@ when either applies:
   deployment may still be running. **Check your agent list before retrying**, because
   deploying twice creates duplicate agents.
 
-Unrecognised keys are reported as warnings rather than silently ignored — at the top level and inside an agent entry alike (`credentials:`, `skills:`, and `display_label:` are the ones people try first; the manifest does not carry them). Preview and deploy resolve the same default resources, so a preview that passes on the fleet default will not fail at deploy because the two disagreed.
+Unrecognised keys are reported as warnings rather than silently ignored — at the top level and inside an agent entry alike (`credentials:`, `skills:`, and `display_label:` are the ones people try first; the manifest does not carry them). The per-agent guardrails — `disallowed_tools`, `extra_path_deny`, `extra_bash_deny` — are not manifest keys either: a manifest that declares them gets an unknown-key warning and configures nothing, so set them on the agent after deploy ([Agent Guardrails](../agents/agent-guardrails.md)). Preview and deploy resolve the same default resources, so a preview that passes on the fleet default will not fail at deploy because the two disagreed.
 
 Two known limits of the preview, both deliberate:
 
