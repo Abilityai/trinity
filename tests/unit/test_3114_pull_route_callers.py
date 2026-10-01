@@ -532,6 +532,8 @@ def _stream_env(monkeypatch, router_mod, pilot: bool):
     monkeypatch.setenv("PULL_MODE_PILOT_AGENTS", AGENT if pilot else "")
     _timeouts(monkeypatch, TURN)
     monkeypatch.setattr(database.db, "get_execution", lambda eid: row)
+    # "running" here stands for a claimed row (lease set).
+    monkeypatch.setattr(database.db, "execution_awaits_claim", lambda eid: row.status == "queued")
     monkeypatch.setattr(sync_waiter, "STREAM_QUEUED_POLL_INTERVAL", 0.01)
     monkeypatch.setattr(sync_waiter, "STREAM_ATTACH_RETRY_INTERVAL", 0.01)
     monkeypatch.setattr(router_mod, "get_agent_container",
