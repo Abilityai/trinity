@@ -1187,6 +1187,9 @@ class BusinessStatus(str, Enum):
     VALIDATED = "validated"                     # Validation passed
     FAILED_VALIDATION = "failed_validation"    # Validation found incomplete/incorrect work
     SKIPPED = "skipped"                        # Validation not configured for this schedule
+    # #2959: the run left nothing to inspect (empty response), so no verdict
+    # was possible. Never files the "Validation Failed" alert; never a PASS.
+    VALIDATION_UNAVAILABLE = "validation_unavailable"
 
 
 class QueueItemStatus(str, Enum):
@@ -3931,7 +3934,7 @@ class ExecutionSummary(BaseModel):
     # Fan-out linkage (small) - FANOUT-001
     fan_out_id: Optional[str] = None
     # Validation tracking (small) - VALIDATE-001
-    business_status: Optional[str] = None  # pending_validation, validated, failed_validation, skipped
+    business_status: Optional[str] = None  # pending_validation, validated, failed_validation, validation_unavailable, skipped
     validation_execution_id: Optional[str] = None
     # Auto-compact observability (Bundle B) - small JSON list
     compact_metadata: Optional[str] = None
