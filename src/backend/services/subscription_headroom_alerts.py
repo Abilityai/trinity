@@ -82,7 +82,8 @@ THRESHOLD_SETTING = "subscription_headroom_alert_threshold_pct"
 DEFAULT_THRESHOLD_PCT = 75
 # 0 disables the alerts entirely (the `operator_queue_retention_days` idiom).
 # Below 50 a weekly window is barely started and every fleet would alarm; at
-# 100 the alert is unreachable given the provider's 1-decimal rounding.
+# 100 the alert fires only at the cap itself — a figure a plan that blocks at
+# its limit may never report (only an overage plan reads past it, #2419).
 MIN_THRESHOLD_PCT = 50
 MAX_THRESHOLD_PCT = 99
 

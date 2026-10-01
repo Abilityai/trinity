@@ -50,8 +50,11 @@ from typing import Dict, Optional
 
 from database import db
 from redis_breaker_util import get_breaker_redis
+from services import git_service
+from services import sync_freeze_policy
+from services.sync_health_view import sync_view
 from services.agent_client import AgentClient
-from utils.helpers import parse_iso_timestamp, utc_now_iso
+from utils.helpers import parse_iso_timestamp, to_utc_iso, utc_now_iso
 
 logger = logging.getLogger(__name__)
 
@@ -95,6 +98,11 @@ def _poll_interval_seconds() -> int:
 # each crossing fires exactly once per episode (the sync_failing pattern).
 GIT_DIR_ALERT_BYTES = int(os.getenv("GIT_DIR_ALERT_BYTES", str(10 * 1024**3)))
 MAINTENANCE_FAILURES_ALERT_THRESHOLD = 3
+
+# trinity-enterprise#706: id prefix of the one-per-episode divergence-freeze
+# item. Platform-reserved in operator_queue_service._RESERVED_ID_PREFIXES, so an
+# agent cannot pre-create the id and silence the alarm about itself.
+SYNC_DIVERGED_ALERT_PREFIX = "sync-diverged-"
 
 
 # PostgreSQL column ceilings. `Integer` is int4 there (SQLite's INTEGER is 64-bit
@@ -231,6 +239,80 @@ def _coerce_lock_stuck(value):
         return None
     return {k: v for k, v in coerced.items() if v is not None}
 
+def _coerce_agent_timestamp(value) -> Optional[datetime]:
+    """An agent-authored ISO timestamp as aware UTC, or None (trinity-enterprise#706).
+
+    The `_coerce_lock_recovery` posture for a value that becomes a column: a
+    bounded string with an EXPLICIT offset (our writer always stamps one, so a
+    naive value did not come from us), parseable, and not in the future beyond
+    the same grace. A far-future value would otherwise win every `max()` below
+    forever. Never raises.
+    """
+    if not isinstance(value, str) or not (0 < len(value) <= 64):
+        return None
+    if not (value.endswith("Z") or _ISO_OFFSET_RE.search(value)):
+        return None
+    try:
+        parsed = parse_iso_timestamp(value)
+        now = datetime.now(timezone.utc)
+        if parsed > now + timedelta(seconds=_LOCK_RECOVERY_FUTURE_GRACE_SECONDS):
+            return None
+    except (ValueError, TypeError, OverflowError):
+        return None
+    return parsed
+
+
+def _config_value(config, key: str):
+    """Read a git-config field from the model the poller gets, or a dict."""
+    if isinstance(config, dict):
+        return config.get(key)
+    return getattr(config, key, None)
+
+
+def _last_successful_push_at(sync_state: dict, config, prior: Optional[dict]) -> Optional[str]:
+    """The last push that landed, monotonic (trinity-enterprise#706).
+
+    The later of: the heartbeat's own record (`last_successful_push_at`, #3011);
+    an operator Push (`agent_git_config.last_sync_at`, stamped only on success);
+    and the value already stored. An agent image older than #3011 has no such
+    key at all, so its last `success` cycle stands in. A #3011 image that has
+    never pushed carries the key as None and does NOT fall back — a
+    success-status cycle there is not evidence that anything was pushed.
+    """
+    candidates = []
+    if "last_successful_push_at" in sync_state:
+        candidates.append(_coerce_agent_timestamp(sync_state.get("last_successful_push_at")))
+    elif sync_state.get("last_sync_status") == "success":
+        candidates.append(_coerce_agent_timestamp(sync_state.get("last_sync_at")))
+    operator_push = _config_value(config, "last_sync_at")
+    if isinstance(operator_push, datetime):
+        candidates.append(
+            operator_push if operator_push.tzinfo else operator_push.replace(tzinfo=timezone.utc)
+        )
+    stored = (prior or {}).get("last_successful_push_at")
+    if isinstance(stored, str):
+        try:
+            candidates.append(parse_iso_timestamp(stored))
+        except ValueError:
+            pass
+    valid = [c for c in candidates if c is not None]
+    return to_utc_iso(max(valid)) if valid else None
+
+
+def _episode_clock(prior_value, *, active: bool, known: bool, now: str):
+    """Set-once / clear / keep for `diverged_since` and `dirty_since` (#706).
+
+    Returns the value to store: the prior start while the episode continues, a
+    fresh `now` when one begins, None when it ends, and the prior value
+    untouched when the observation could not be computed.
+    """
+    if active:
+        return prior_value or now
+    if not known:
+        return prior_value
+    return None
+
+
 # WebSocket manager injected from main.py (optional, mirrors operator-queue pattern).
 _websocket_manager = None
 
@@ -262,6 +344,11 @@ class SyncHealthService:
         # far-future `at` would flood the log for the life of the process.
         self._last_lock_recovery: Dict[str, Dict] = {}
         self._lock_stuck_agents: set = set()
+        # trinity-enterprise#706: the last sync_diverged item id this process
+        # raised per agent — only to skip a redundant INSERT every poll while a
+        # freeze lasts. The DB's (agent_name, request_id) conflict target is
+        # what makes it one item per episode across restarts and workers.
+        self._diverged_alerted: Dict[str, str] = {}
 
     @property
     def poll_interval(self) -> int:
@@ -437,6 +524,36 @@ class SyncHealthService:
             sync_state.get("maintenance_failures")
         )
 
+        # trinity-enterprise#706: the divergence and dirt episode clocks. The
+        # decision reads the RAW values, so an uncomputable count (None) is
+        # never mistaken for 0. `behind is None` with a known `ahead == 0` is
+        # "no upstream" (#2105) — nothing on origin to be behind — and clears.
+        # The prior value is passed explicitly for "keep" (no sentinel), so a
+        # set-once start survives any number of polls.
+        now_iso = utc_now_iso()
+        ahead_raw = _coerce_nonneg_int(payload.get("ahead_working"))
+        behind_raw = _coerce_nonneg_int(payload.get("behind_working"))
+        diverged_since = _episode_clock(
+            (prior or {}).get("diverged_since"),
+            active=bool(ahead_raw) or bool(behind_raw),
+            known=ahead_raw is not None,
+            now=now_iso,
+        )
+        # A clock KEPT because the tuple was uncomputable keeps the counts that
+        # started it: `_coerce_counter` reads the unknown as 0, which would sit
+        # next to a live `diverged_since` and freeze with "0 behind / 0 ahead".
+        # None is `upsert`'s "keep the prior value" (#706 /review).
+        keep_working_counts = (
+            ahead_raw is None and not behind_raw and diverged_since is not None
+        )
+        dirty_files = _coerce_nonneg_int(payload.get("changes_count"))
+        dirty_since = _episode_clock(
+            (prior or {}).get("dirty_since"),
+            active=bool(dirty_files),
+            known=dirty_files is not None,
+            now=now_iso,
+        )
+
         updated = db.upsert_sync_state(
             agent_name,
             last_sync_at=last_sync_at,
@@ -447,19 +564,35 @@ class SyncHealthService:
             # #2827: coerced like their siblings — these four went in raw.
             ahead_main=_coerce_counter(payload, "ahead_main", "ahead"),
             behind_main=_coerce_counter(payload, "behind_main", "behind"),
-            ahead_working=_coerce_counter(payload, "ahead_working"),
-            behind_working=_coerce_counter(payload, "behind_working"),
+            ahead_working=(
+                None if keep_working_counts
+                else _coerce_counter(payload, "ahead_working")),
+            behind_working=(
+                None if keep_working_counts
+                else _coerce_counter(payload, "behind_working")),
             git_dir_bytes=git_dir_bytes,  # #1596 bloat observability
             pack_count=pack_count,  # #1595
             loose_objects=loose_objects,  # #1595
             maintenance_failures=maintenance_failures,  # #1595
-            last_check_at=utc_now_iso(),
+            diverged_since=diverged_since,  # trinity-enterprise#706
+            dirty_files=dirty_files,  # #706: None (garbage/absent) keeps the prior
+            dirty_since=dirty_since,  # #706
+            last_successful_push_at=_last_successful_push_at(  # #706
+                sync_state, config, prior),
+            last_check_at=now_iso,
         )
 
         # Edge-triggered alert: only emit when we cross the threshold.
         new_failures = updated["consecutive_failures"]
         if prior_failures < ALERT_THRESHOLD <= new_failures:
             self._emit_sync_failing_alert(agent_name, updated)
+
+        # trinity-enterprise#706: a divergence freeze is in force → one
+        # sync_diverged item for the episode. Rule 2 (sync_failing) already
+        # has its own item above, so only the divergence cause raises this.
+        verdict = sync_view(updated, config)
+        if verdict["freeze_cause"] == "divergence":
+            self._emit_sync_diverged_alert(agent_name, updated, verdict)
 
         # #2742: a self-healed wedge, announced once. No operator-queue item
         # and no DB column — the boot reap already fixed it, so this is a log
@@ -545,22 +678,42 @@ class SyncHealthService:
         now = utc_now_iso()
         last_sync_at = state.get("last_sync_at") or now
         item_id = f"sync-failing-{agent_name}-{now}"
+        error = state.get("last_error_summary") or ""
+        failures = state["consecutive_failures"]
+        context = {
+            "last_error_summary": error,
+            "last_sync_at": last_sync_at,
+            "consecutive_failures": failures,
+        }
+        # #2107: a refused push is not a flaky one — it fails identically every
+        # cycle until someone changes the token, so name the cause and the fix
+        # instead of a count that reads the same at 3 as at 64.
+        if git_service.is_push_denied(error):
+            title = "Git token can't push"
+            question = (
+                f"{agent_name}'s GitHub token can read its repository but is not "
+                f"allowed to push, so none of its work is being saved "
+                f"({failures} syncs refused). This will not recover on its own."
+            )
+            context["cause"] = "push_denied"
+            context["remediation"] = (
+                "Give the agent's GitHub token write access to the repository "
+                "(fine-grained token: Contents: Read and write; classic token: "
+                "the `repo` scope), or set a per-agent token that has it. The "
+                "next sync pushes everything that is waiting."
+            )
+        else:
+            title = "Git sync failing"
+            question = f"{agent_name}'s git sync has failed {failures} times in a row."
         item = {
             "id": item_id,
             "agent_name": agent_name,
             "type": "sync_failing",
             "status": "pending",
             "priority": "high",
-            "title": "Git sync failing",
-            "question": (
-                f"{agent_name}'s git sync has failed "
-                f"{state['consecutive_failures']} times in a row."
-            ),
-            "context": {
-                "last_error_summary": state.get("last_error_summary") or "",
-                "last_sync_at": last_sync_at,
-                "consecutive_failures": state["consecutive_failures"],
-            },
+            "title": title,
+            "question": question,
+            "context": context,
             "created_at": now,
         }
         try:
@@ -571,6 +724,51 @@ class SyncHealthService:
             )
         except Exception:
             logger.exception("failed to emit sync_failing alert")
+
+    def _emit_sync_diverged_alert(self, agent_name: str, state: Dict, verdict: Dict) -> None:
+        """trinity-enterprise#706: one operator-queue item per divergence episode.
+
+        The id is deterministic per episode (`diverged_since` is set once), so
+        every repeat poll, a restart and a fail-open double leader converge on
+        ONE row via create_item's `(agent_name, request_id)` conflict target —
+        the `alert-budget-` precedent, with no new column. Not auto-resolved
+        when the episode ends; a new episode has a new id. The context carries
+        counts and the recommendation, never agent-authored error text.
+        """
+        diverged_since = state.get("diverged_since")
+        item_id = f"{SYNC_DIVERGED_ALERT_PREFIX}{agent_name}-{diverged_since}"
+        if self._diverged_alerted.get(agent_name) == item_id:
+            return
+        age = sync_freeze_policy.format_age(verdict["divergence_age_s"] or 0)
+        item = {
+            "id": item_id,
+            "agent_name": agent_name,
+            "type": "sync_diverged",
+            "status": "pending",
+            "priority": "high",
+            "title": f"Agent diverged from GitHub for {age} — schedules paused",
+            "question": (
+                f"{agent_name}: {verdict['freeze_reason']}. Its scheduled runs are "
+                "paused until it is back in step with its repository."
+            ),
+            "context": {
+                "ahead": state.get("ahead_working") or 0,
+                "behind": state.get("behind_working") or 0,
+                "dirty_files": state.get("dirty_files"),
+                "diverged_since": diverged_since,
+                "divergence_age_s": verdict["divergence_age_s"],
+                "recommendation": verdict["recommendation"],
+            },
+            "created_at": utc_now_iso(),
+        }
+        try:
+            db.create_operator_queue_item(agent_name, item)
+            self._diverged_alerted[agent_name] = item_id
+            logger.warning(
+                "sync_diverged raised for %s (%s)", agent_name, verdict["freeze_reason"]
+            )
+        except Exception:
+            logger.exception("failed to emit sync_diverged alert")
 
     def _emit_git_bloat_alert(self, agent_name: str, state: Dict, *, reason: str) -> None:
         """#1595: operator-queue entry for repo bloat / failing maintenance.

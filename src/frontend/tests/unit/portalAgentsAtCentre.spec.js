@@ -13,6 +13,7 @@ import { readFileSync } from 'fs'
 import { fileURLToPath } from 'url'
 
 import { stripComments } from './helpers/stripComments'
+import { sidebarThreadsOf } from '@/components/portal/portalInbox'
 
 import {
   agentChatTabs,
@@ -191,7 +192,13 @@ describe('ent#523 — roster order and preview', () => {
     // would put a row under every agent the person never talked to. Filtered
     // for the SIDEBAR only — the tab strip must show Main from the first visit.
     expect(PORTAL).toMatch(/const sidebarThreads = computed\(/)
-    expect(PORTAL).toMatch(/t\.is_main && !t\.last_message_at/)
+    // trinity-enterprise#610 (D13): the predicate moved into the pure
+    // `sidebarThreadsOf`, which the Inbox's counts share; its behaviour is
+    // proven in portalInbox.spec.js (an unused Main is dropped, every thread
+    // with an arrival survives).
+    expect(PORTAL).toMatch(/sidebarThreadsOf\(threads\.value\)/)
+    expect(sidebarThreadsOf([{ is_main: true, last_message_at: null }, { is_main: true, last_message_at: 'x' }]))
+      .toEqual([{ is_main: true, last_message_at: 'x' }])
     expect(PORTAL).toMatch(/:threads="sidebarThreads"/)
     // The conversation still gets the full list.
     expect(PORTAL).toMatch(/<PortalConversation[\s\S]{0,600}:threads="threads"/)

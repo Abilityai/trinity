@@ -74,9 +74,9 @@
              evidence and is not. Carried over from the agent page unchanged. -->
         <div v-if="ratings.total || ratings.unavailable">
           <div class="text-lg font-semibold tabular-nums leading-tight">
-            <span class="text-status-success-600 dark:text-status-success-400">{{ ratings.up }}</span>
+            <span class="text-status-success-700 dark:text-status-success-400">{{ ratings.up }}</span>
             <span class="text-gray-300 dark:text-gray-600"> / </span>
-            <span class="text-status-warning-600 dark:text-status-warning-400">{{ ratings.down }}</span>
+            <span class="text-status-warning-700 dark:text-status-warning-400">{{ ratings.down }}</span>
           </div>
           <div class="text-[11px] text-gray-500 dark:text-gray-400">{{ ratingsCaption }}</div>
         </div>
@@ -187,8 +187,10 @@ const ratingsCaption = computed(() => (
 ))
 
 // A rate that has never been measured is `—`, not `0%`: zero is a claim about
-// performance, and no runs is a claim about nothing.
+// performance, and no runs is a claim about nothing. `success_rate` and
+// `first_try.rate` are RATIOS in 0..1 (db/schedules/analytics.py), so they
+// are scaled to a percent here, as every other surface does (#3138).
 function pct(v) {
-  return typeof v === 'number' && Number.isFinite(v) ? `${Math.round(v)}%` : '—'
+  return typeof v === 'number' && Number.isFinite(v) ? `${Math.round(v * 100)}%` : '—'
 }
 </script>

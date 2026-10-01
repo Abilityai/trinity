@@ -458,13 +458,7 @@ class ChatOperations:
         user_email: str,
         role: str,
         content: str,
-        cost: Optional[float] = None,
-        context_used: Optional[int] = None,
-        context_max: Optional[int] = None,
-        tool_calls: Optional[str] = None,
-        execution_time_ms: Optional[int] = None,
-        subscription_id: Optional[str] = None,
-        output_tokens: Optional[int] = None
+        fields: Optional[ChatMessageFields] = None,  # #1482: cost/context/tool_calls/timing/source/subscription_id/output_tokens
     ) -> ChatMessage:
         """Add a message to a chat session and update session stats."""
 

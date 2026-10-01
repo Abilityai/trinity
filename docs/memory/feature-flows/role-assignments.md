@@ -156,6 +156,13 @@ inheriting disclosure.
 
 ## MCP — `get_agent_assignments`
 
+> **Fenced in 0.9.5 (release work-order F1).** The module, its client method and its
+> unit tests are in the tree, but `server.ts` does not register `createAssignmentTools`
+> and `access.ts` carries no policy row (the totality test forbids one for an
+> unregistered tool); `tool-visibility.test.ts` pins the *absence*. The layer itself is
+> back to `status-in-progress` on ent#500. Everything below describes the tool as built,
+> for when the registration returns.
+
 The third surface (Invariant #13): `src/mcp-server/src/tools/assignments.ts` +
 `client.getAgentAssignments` + one `toolGroups` entry under `operatorOnly`.
 

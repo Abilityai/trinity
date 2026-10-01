@@ -1,6 +1,6 @@
 # MCP Server
 
-Trinity's MCP server exposes 130 tools across 33 modules for agent orchestration via the Model Context Protocol, enabling programmatic control from Claude Code, other MCP clients, or agent-to-agent communication. 125 of them are the operator tool set; three consumption-only tools are visible only to connector keys, and two sign-in tools are registered only when inline email auth is enabled. A few operator tools are enterprise-gated and return `"disabled"` (or a `not available` result) where not entitled.
+Trinity's MCP server exposes 142 tools across 35 modules for agent orchestration via the Model Context Protocol, enabling programmatic control from Claude Code, other MCP clients, or agent-to-agent communication. 137 of them are the operator tool set; three consumption-only tools are visible only to connector keys, and two sign-in tools are registered only when inline email auth is enabled. A few operator tools are enterprise-gated and return `"disabled"` (or a `not available` result) where not entitled.
 
 > 📺 **Watch:** [From Zero to Deployed AI Agent — MCP setup](https://youtu.be/-TSZyekDS6o) *(Apr 2026)* · [all videos](../videos.md)
 
@@ -67,13 +67,14 @@ The URL Trinity advertises — in the MCP Keys page's connection snippet and in 
 |--------|-------|-------------|
 | `agents.ts` | 22 | Agent lifecycle, credentials, SSH, local deploy, GitHub sync, per-agent PAT, runtime-data export/import, compatibility report |
 | `chat.ts` | 4 | `chat_with_agent`, `get_chat_history`, `get_agent_logs`, `fan_out` — chat and parallel dispatch, all gateway-timeout safe |
-| `executions.ts` | 4 | `list_recent_executions`, `get_execution_result`, `get_fan_out_result`, `get_agent_activity_summary` — execution queries, polling for async tasks and fan-out batches, activity monitoring |
-| `schedules.ts` | 8 | Schedule CRUD and execution history |
-| `skills.ts` | 9 | Skill management and assignment, plus the skill-runner tools `run_skill` and `list_runnable_skills` (enterprise-gated — return `"disabled"` in community builds) |
+| `executions.ts` | 5 | `list_recent_executions`, `get_execution_result`, `get_fan_out_result`, `get_agent_activity_summary`, `search_executions` — execution queries, polling for async tasks and fan-out batches, activity monitoring; `search_executions` needs a matching entitlement and is never offered to agent keys |
+| `schedules.ts` | 8 | Schedule CRUD (including retries, post-run validation and Workspace delivery) and execution history |
+| `skills.ts` | 11 | Skill management and assignment (including skill sets: `list_skill_sets`, `unassign_skill_set`), plus the skill-runner tools `run_skill` and `list_runnable_skills` (enterprise-gated — return `"disabled"` in community builds) |
 | `tags.ts` | 5 | Agent tagging |
-| `systems.ts` | 4 | `deploy_system`, `list_systems`, `restart_system`, `get_system_manifest` — see [System Manifest](../collaboration/system-manifest.md) |
+| `systems.ts` | 5 | `deploy_system`, `list_systems`, `restart_system`, `get_system_manifest`, `teardown_system` (needs a matching entitlement; previews by default) — see [System Manifest](../collaboration/system-manifest.md) |
 | `subscriptions.ts` | 6 | Subscription management |
-| `monitoring.ts` | 3 | Fleet health |
+| `monitoring.ts` | 4 | `get_fleet_health`, `get_fleet_sync_audit`, `get_agent_health`, `trigger_health_check` — fleet health, git sync health, and the fleet sync audit (see [Monitoring](../operations/monitoring.md)) |
+| `metrics.ts` | 4 | `record_metrics`, `get_metrics`, `get_objectives`, `refresh_metric_definitions` — the calling agent's declared business metrics and objectives (see [Dynamic Dashboards](../advanced/dynamic-dashboards.md#declared-metrics)) |
 | `nevermined.ts` | 4 | Payment configuration |
 | `notifications.ts` | 1 | `send_notification` — agent-to-platform notifications (`alert`, `info`, `status`, `completion`, `question`) |
 | `events.ts` | 4 | Agent event pub/sub |
@@ -83,9 +84,10 @@ The URL Trinity advertises — in the MCP Keys page's connection snippet and in 
 | `voice.ts` | 1 | `send_voice_reply` — speak one reply of the current channel turn as a voice note (see [Voice Replies](../advanced/voice-replies.md)) |
 | `files.ts` | 1 | `share_file` — publish file to a signed download URL |
 | `memory.ts` | 1 | `write_user_memory` — per-user memory blob, isolated server-side |
+| `decisions.ts` | 2 | `record_decision`, `list_seat_decisions` — record why something was approved, deferred or killed for the seat an agent serves, and read that seat's standing decisions back |
 | `loops.ts` | 3 | `run_agent_loop`, `get_loop_status`, `stop_loop` — sequential bounded task loops |
 | `voip.ts` | 1 | `call_user` — outbound phone call (flag-gated, requires a per-agent voice binding) |
-| `operator_queue.ts` | 3 | `list_operator_queue`, `get_operator_queue_item`, `respond_to_operator_queue` — read and resolve Operating Room queue items |
+| `operator_queue.ts` | 5 | `list_operator_queue`, `get_operator_queue_item`, `respond_to_operator_queue`, `get_my_ask`, `ask_operator` — read and resolve Operating Room queue items; an agent raises its own asks and reads them back |
 | `reminders.ts` | 3 | `set_reminder`, `list_reminders`, `cancel_reminder` — durable one-shot deferred self-triggers |
 | `rooms.ts` | 5 | `create_room`, `list_rooms`, `read_room`, `post_to_room`, `close_room` — multi-agent rooms (see [Rooms](../collaboration/rooms.md)) |
 | `canvas.ts` | 5 | `set_canvas`, `patch_canvas`, `get_canvas`, `list_canvases`, `clear_canvas` — the agent's durable render surface in the Workspace (see [Agent Canvas](../agents/agent-canvas.md)) |
@@ -95,7 +97,7 @@ The URL Trinity advertises — in the MCP Keys page's connection snippet and in 
 | `a2a.ts` | 7 | A2A management plane — per-agent exposure and card, inbound allow-list, outbound endpoint registry (entitlement-gated; see [A2A Protocol](a2a-protocol.md)) |
 | `a2a_call.ts` | 2 | `call_a2a_agent`, `get_a2a_task` — task a registered external A2A agent by endpoint name and poll it |
 | `credential_vault.ts` | 2 | `list_available_credentials`, `fetch_credential` — pull a granted vault credential by name at runtime (see [Credential Management](../credentials/credential-management.md#credential-vault)) |
-| `assignments.ts` | 1 | `get_agent_assignments` — read who an agent works for (read-only; degrades to a not-available result where unsupported) |
+| `assignments.ts` | 0 (fenced) | `get_agent_assignments` is built but **not registered** in 0.9.5 — it returns with the assignments layer |
 | `connector.ts` | 3 | `list_playbooks`, `run_playbook`, `ask` — the consumption-only set a **connector key** sees; operator tools stay hidden from connector keys |
 | `auth.ts` | 2 | `request_login`, `verify_login` — registered only when inline email auth is on, advertised only to keyless sessions |
 
@@ -144,15 +146,22 @@ These routes are owner-only and reachable only from an interactive (browser) ses
 | `/api/agents/{name}/mcp-key/verify` | POST | Probe the container's actual configuration |
 | `/api/agents/{name}/mcp-key/regenerate` | POST | Rotate and deliver a new key |
 
+### Refused Calls
+
+When a tool refuses a call because the caller may not reach the target agent, it returns a result rather than a transport error: `{"error": "Access denied", "reason": "..."}` (some tools also carry `success: false`). When an agent-scoped key names an agent it has no permission for, `chat_with_agent`, `fan_out` and `run_agent_loop` give the reason `Permission denied: Agent '<caller>' is not permitted to communicate with '<target>'`. Tools addressed by an id rather than an agent name — `get_loop_status` and `stop_loop` — answer a uniform `Loop '<id>' not found or not accessible` instead, so the reply never reveals whose loop it is.
+
+Every refusal is recorded in the audit log as a refusal, not as a successful call: the `mcp_operation` entry carries `success: false`, `denied: true`, and the reason. A backend `403` that surfaces through a tool is marked `denied` too. See [Audit Trail](../operations/audit-trail.md#refused-mcp-calls).
+
 ### Key Tools Worth Knowing
 
 | Tool | Why it exists |
 |------|---------------|
 | `chat_with_agent` | Send a message to another agent. **Gateway-timeout safe in every sync mode** — sequential chat (`parallel=false`) and the sync task route (`parallel=true, async=false`) alike: if the call exceeds `MCP_CHAT_TIMEOUT_MS` (default 25s), it returns `{status: "queued_timeout", agent, execution_id, message}` so the caller polls `get_execution_result` instead of duplicate-queueing the request. The receipt is only issued when the running execution can be attributed to *your* call unambiguously; otherwise the error says so and names `list_recent_executions`. Calls carry a deterministic idempotency key, so an identical re-send dedupes server-side and answers with the original `execution_id` — a **reworded** re-send is a new call and dispatches a second execution. For work you know will outlive the gateway, use `parallel=true, async=true` from the start. See [Agent Network](../collaboration/agent-network.md) for the async pattern. |
-| `fan_out` | Dispatch N independent tasks to an agent in parallel and collect all the results. **Gateway-timeout safe**: a batch runs longer than any single task in it, so this is the tool most likely to outlive the 25s ceiling — when it does, it returns `{status: "fan_out_timeout", agent, fan_out_id, execution_ids, task_count, message}` and the batch keeps running. Poll `get_fan_out_result(agent_name, fan_out_id)`. Re-sending the *identical* call is deduplicated server-side and answers with the same batch; **rewording it dispatches all N tasks again**. See [Fan-Out](../automation/fan-out.md). |
-| `get_fan_out_result` | Poll a fan-out batch: `running` while any task can still change, then `completed`, `partial` (some succeeded — normal for a best-effort batch) or `failed`, with per-task status and results. |
-| `run_agent_loop` | Run the same task against an agent repeatedly (bounded, sequential), with templated messages and an optional stop signal. Poll with `get_loop_status`; stop gracefully with `stop_loop`. See [Agent Loops](../automation/agent-loops.md). |
+| `fan_out` | Dispatch N independent tasks to an agent in parallel and collect all the results. **Gateway-timeout safe**: a batch runs longer than any single task in it, so this is the tool most likely to outlive the 25s ceiling — when it does, it returns `{status: "fan_out_timeout", agent, fan_out_id, execution_ids, task_count, message}` and the batch keeps running. Poll `get_fan_out_result(agent_name, fan_out_id)`. Re-sending the *identical* call is deduplicated server-side and answers with the same batch; **rewording it dispatches all N tasks again**. For a batch you know will run long, pass `async_mode: true`: the tool returns `{fan_out_id, status: "accepted"}` at once and you poll. `timeout_seconds` bounds only the wait — tasks still open at the deadline report `running` and keep going. See [Fan-Out](../automation/fan-out.md). |
+| `get_fan_out_result` | Poll a fan-out batch: `running` while any task can still change, then `completed`, `partial` (some succeeded — normal for a best-effort batch) or `failed`, with per-task status and results. Each result carries the `task_id` you gave the task. |
+| `run_agent_loop` | Run the same task against an agent repeatedly (bounded, sequential), with templated messages and an optional stop signal. Poll with `get_loop_status`; stop gracefully with `stop_loop`. An agent-scoped key can loop only on itself or on agents it has permission to call — the same rule as `chat_with_agent` — and the refusal happens before any loop starts. `get_loop_status` and `stop_loop` apply the same rule to the loop's agent. See [Agent Loops](../automation/agent-loops.md). |
 | `list_operator_queue` | Read the Operating Room queue (approvals, questions, alerts). Agent-scoped keys see only the calling agent plus its permitted agents. Resolve an item with `respond_to_operator_queue`. |
+| `ask_operator` | Raise an approval, question or alert as the calling agent. It is checked at once and answered with a receipt; asking again with the same id returns the first receipt. Read how it ended with `get_my_ask`. |
 | `set_reminder` | Schedule a durable one-shot deferred self-trigger — the agent re-invokes itself later with a message it picks. Survives restarts; list with `list_reminders`, cancel with `cancel_reminder`. |
 | `run_skill` | Run a named skill headlessly (enterprise-gated; returns `"disabled"` in community builds). Discover runnable skills with `list_runnable_skills`. |
 | `create_room` | Open a shared multi-agent room and post/read messages (`post_to_room` / `read_room` / `list_rooms` / `close_room`). Rooms are bounded by message, cost, and time budgets — [Rooms](../collaboration/rooms.md) owns the budget defaults. Against an older backend that does not serve rooms the tools return a `shared_sessions_not_enabled` result. |
@@ -161,10 +170,11 @@ These routes are owner-only and reachable only from an interactive (browser) ses
 | `call_user` | Place an outbound phone call to a user and hold a voice conversation. Server-gated: works only when VoIP is enabled platform-wide and the agent has a voice binding; rate-limited and daily-capped. See [VoIP Telephony](../advanced/voip-telephony.md). |
 | `share_file` | The agent drops a file into `/home/developer/public/` and calls this tool to mint a signed, expiring download URL (universal — works for web, Slack, Telegram, WhatsApp, email). |
 | `write_user_memory` | Per-user memory blob in an isolated store. Trinity resolves the user's email from `execution_id` server-side, so an agent cannot accidentally cross-write another user's memory. |
-| `send_message` | Proactive message to a specific user by verified email. Rate-limited and audit-logged. |
+| `send_message` | Proactive message to a person, addressed by role (`to`: `primary`, `approver`, `viewer`); the platform resolves who fills it. `recipient_email` is deprecated. Rate-limited and audit-logged. |
 | `send_group_message` | Proactive message to a channel group (Slack channel, Telegram chat). Discovered via `list_channel_groups`. |
 | `ask_trinity` | Grounded Q&A about Trinity itself, answered from the documentation. Pass the `session_id` it returns to ask follow-ups; the tool tells you when a session reset dropped your context. Also available standalone as the `trinity-docs-mcp` npx package, with no Trinity instance or API key required. |
-| `report` | Publish a structured report (table, KPI set, markdown, timeline). Read them back with `list_reports` / `get_report`. See [Agent Reports](../operations/agent-reports.md). |
+| `record_metrics` | Record observations of the agent's declared business metrics as data. A batch is all-or-nothing, with a reason code per bad point; declare a metric in `template.yaml` first and call `refresh_metric_definitions`. Read back with `get_metrics`, and targets vs actuals with `get_objectives`. See [Dynamic Dashboards](../advanced/dynamic-dashboards.md#declared-metrics). |
+| `report` | Publish a structured report (table, KPI set, markdown, timeline); `to` addresses it to a role's person. Read them back with `list_reports` / `get_report`. See [Agent Reports](../operations/agent-reports.md). |
 
 ## For Agents
 
@@ -191,7 +201,9 @@ These routes are owner-only and reachable only from an interactive (browser) ses
 - Agent-scoped keys cannot access tools outside their assigned agent (plus explicitly permitted agents).
 - MCP clients must be manually reconnected after a backend restart.
 - `chat_with_agent` and `fan_out` sync modes cap at `MCP_CHAT_TIMEOUT_MS` (default 25s). Longer calls switch to poll-mode via the returned `execution_id` (or `fan_out_id`); a receipt is issued only when the running work can be attributed to your call unambiguously.
+- A `model` passed to `chat_with_agent` (it applies with `parallel=true`) must look like a model id — a short alias such as `sonnet` or a full id such as `claude-sonnet-4-6`. Anything else is refused with `422` before the task starts. See [Chat API](../api-reference/chat-api.md#model-override).
 - Fan-out is self-only: an agent fans out to itself, not to another agent.
+- `chat_with_agent` and `fan_out` stop at the agent-to-agent chain-depth limit (default 8 hops) and return a result marked `retryable: false`. See [Agent Network](../collaboration/agent-network.md#concepts).
 
 ## See Also
 

@@ -102,32 +102,23 @@ DEFAULT_BRANCH_REGISTERED_EVENTS: frozenset[str] = frozenset({
 # itself at the release cut instead of rotting. Expect that test to go red on
 # `main`'s push CI once the release lands: that is the prune order, by design.
 ACCEPTED_UNTIL_RELEASE: dict[tuple[str, str], str] = {
-    ("deploy-dev.yml", "schedule"): (
-        "the nightly --no-cache rebuild floor; the file's own comment records that "
-        "this cron is a SUPPLEMENT to the push trigger and starts at the next release"
-    ),
-    ("alembic-head-watch.yml", "schedule"): (
-        "the 6-hourly dropped-run backstop; the header says `main` only, and the "
-        "push/pull_request arms of the same workflow cover PRs meanwhile"
-    ),
-    ("journey-smoke.yml", "workflow_dispatch"): (
-        "manual dispatch of the journey smoke is unavailable until release; the "
-        "pull_request arm is what gates PRs and is live on dev"
-    ),
-    # The three below were FOUND by this guard on its first run — none of them
-    # is recorded anywhere else. Same decision: accepted until the release cut.
-    ("deploy-dev.yml", "workflow_dispatch"): (
-        "the manual `no_cache` rebuild button; unavailable until release, and the "
-        "push arm still deploys every dev merge"
-    ),
-    ("alembic-head-watch.yml", "workflow_dispatch"): (
-        "manual single-PR evaluation; unavailable until release, the push and "
-        "pull_request arms are live"
-    ),
-    ("publish-images.yml", "workflow_dispatch"): (
-        "manual image build by ref; a release publishes via `push: tags`, which "
-        "reads the file at the TAGGED commit and so already works from dev"
-    ),
+    # Pruned at the v0.9.5 release cut (2026-09-21): every gap recorded here
+    # — deploy-dev `schedule` + `workflow_dispatch`, alembic-head-watch
+    # `schedule` + `workflow_dispatch`, journey-smoke `workflow_dispatch`,
+    # publish-images `workflow_dispatch` — is now declared on `main`, and the
+    # guard below said so on every run since. Add a row only for a NEW
+    # divergence, with its reason.
+    #
+    # #2945 (2026-09-22): two NEW workflows. Both fire from `dev` today through
+    # their `push` trigger where they have one; the default-branch-registered
+    # events below are inert until the next release cut carries the files to
+    # `main`. Consequence, stated so nobody waits for a nightly that cannot yet
+    # run: `dev-nightly.yml` does NOT run at all until then (Tier 3 is the
+    # release cut's gain, not this PR's), and `dev-ci-status.yml`'s manual
+    # re-evaluation is unavailable, while its per-push verdict works from day one.
+    ("dev-nightly.yml", "schedule"): "new file; nightly on dev starts at the next release cut",
+    ("dev-nightly.yml", "workflow_dispatch"): "new file; manual run available once on main",
+    ("dev-ci-status.yml", "workflow_dispatch"): "new file; the push trigger is the live path, dispatch is re-evaluation only",
 }
 
 

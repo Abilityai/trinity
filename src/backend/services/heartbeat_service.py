@@ -141,6 +141,39 @@ def clear_heartbeat(agent_name: str) -> None:
 # ---------------------------------------------------------------------------
 # Read path
 # ---------------------------------------------------------------------------
+def read_execution_activity(agent_name: str) -> Dict[str, Dict]:
+    """The per-execution activity the agent's LAST beat carried, keyed by
+    execution id (trinity-enterprise#620): `{tool, summary, since, ts}`.
+
+    Empty when there is no beat, the beat expired (15 s TTL — a dead agent's
+    line disappears on its own), or the image predates #620. `ts` is the
+    beat's server receive time so a reader can age the line. The values are
+    agent-authored: bounded at the model on the way in, sanitised and
+    roster-masked by the Work read on the way out — never rendered raw.
+    """
+    payload = read_heartbeat(agent_name)
+    if not payload:
+        return {}
+    entries = payload.get("executions")
+    if not isinstance(entries, list):
+        return {}
+    ts = payload.get("ts")
+    out: Dict[str, Dict] = {}
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        eid = entry.get("execution_id")
+        if not isinstance(eid, str) or not eid:
+            continue
+        out[eid] = {
+            "tool": entry.get("tool") if isinstance(entry.get("tool"), str) else None,
+            "summary": entry.get("summary") if isinstance(entry.get("summary"), str) else None,
+            "since": entry.get("since") if isinstance(entry.get("since"), str) else None,
+            "ts": ts,
+        }
+    return out
+
+
 def read_heartbeat(agent_name: str) -> Optional[Dict]:
     """Return the last heartbeat payload, or None if missing/expired/malformed."""
     redis = _get_redis()

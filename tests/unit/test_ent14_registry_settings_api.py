@@ -19,7 +19,11 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-import routers.settings as rs
+import routers.settings as rs  # the composed router
+# #1028: the template-registry handlers live in the package's `templates`
+# module; collaborator patches must land there (a patch on the package
+# would raise — deliberately, so it cannot silently test nothing).
+import routers.settings.templates as rs_templates
 from dependencies import get_current_user
 
 DEFAULT_URL = "https://raw.githubusercontent.com/Abilityai/trinity-templates/main/registry.yaml"
@@ -85,10 +89,10 @@ def env(monkeypatch):
     app.dependency_overrides[get_current_user] = lambda: principal["user"]
 
     settings = _Settings()
-    monkeypatch.setattr(rs, "settings_service", settings)
+    monkeypatch.setattr(rs_templates, "settings_service", settings)
 
     audit = AsyncMock(return_value=None)
-    monkeypatch.setattr(rs.platform_audit_service, "log", audit)
+    monkeypatch.setattr(rs_templates.platform_audit_service, "log", audit)
 
     import services.template_registry_service as trs
     monkeypatch.setattr(
@@ -338,7 +342,7 @@ def test_the_generic_DELETE_refuses_every_registry_key(env, key):
 
 def test_an_unrelated_key_still_flows_through_the_catch_all(env, monkeypatch):
     """The blocklist must be a blocklist, not a wholesale closure of the route."""
-    monkeypatch.setattr(rs.db, "delete_setting", lambda key: True)
+    monkeypatch.setattr(rs_templates.db, "delete_setting", lambda key: True)
     assert env.client.delete("/api/settings/some_unrelated_key").status_code == 200
 
 

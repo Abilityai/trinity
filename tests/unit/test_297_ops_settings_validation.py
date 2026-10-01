@@ -188,8 +188,20 @@ def test_the_code_defaults_all_validate(cfg):
 # The generic catch-all no longer accepts retention windows
 # ---------------------------------------------------------------------------
 
+# #1028: `routers/settings.py` is a package, so a single "read the settings
+# source" helper no longer says what it reads. These three assertions are about
+# two different modules — the catch-all's blocklist, and the validated
+# `/ops/config` handler — and conflating them is how a source-grep test starts
+# passing against text that has nothing to do with its subject.
+
 def _blocked_keys_in_generic_put() -> str:
-    return (_BACKEND / "routers" / "settings.py").read_text()
+    """The `/{key}` catch-all, which blocks the validated keys."""
+    return (_BACKEND / "routers" / "settings" / "generic.py").read_text()
+
+
+def _ops_config_source() -> str:
+    """The validated `/ops/config` + `/ops/reset` handlers."""
+    return (_BACKEND / "routers" / "settings" / "ops.py").read_text()
 
 
 def test_generic_put_routes_retention_windows_to_the_validated_endpoint():
@@ -209,13 +221,22 @@ def test_generic_put_routes_retention_windows_to_the_validated_endpoint():
     # ent#433 added two: subscription_headroom_retention_days (new probe-history
     # table) and subscription_failure_event_retention_days (which converted a
     # hardcoded 24h sweep into a real window).
-    assert len(RETENTION_OPS_KEYS) == 11
+    # trinity-enterprise#478 added metrics_retention_days (recorded points).
+    assert len(RETENTION_OPS_KEYS) == 12
+
+    # And the redirect is no longer a hand-maintained subset: EVERY validated
+    # ops key has exactly one write path, so a key minted tomorrow inherits the
+    # refusal instead of waiting for someone to remember this list (E4).
+    from config import OPS_SETTINGS_VALIDATION
+
+    assert "if key in OPS_SETTINGS_VALIDATION:" in src
+    assert "metrics_daily_point_cap" in OPS_SETTINGS_VALIDATION
 
 
 def test_the_validated_endpoint_checks_before_it_writes():
     """All-or-nothing: a partial apply leaves some windows moved and some not,
     with no way to tell which from the response."""
-    src = _blocked_keys_in_generic_put()
+    src = _ops_config_source()
     marker = "# Validate EVERYTHING before writing ANYTHING."
     assert marker in src
     validate_at = src.index(marker)
@@ -227,7 +248,7 @@ def test_ops_config_writes_are_audited():
     """ent#297 lists the audit surface in its blast radius. Neither /ops/config
     nor the generic PUT's sibling /ops/reset logged anything, so the one route
     that could shrink a retention window was also the one that left no trace."""
-    src = _blocked_keys_in_generic_put()
+    src = _ops_config_source()
     assert 'event_action="ops_settings_change"' in src
     assert '"retention_windows_changed"' in src
 
@@ -263,7 +284,7 @@ class _Admin:
 
 class _Req:
     client = type("c", (), {"host": "127.0.0.1"})()
-    url = type("u", (), {"path": "/api/settings/ops/config"})()
+    scope = {"path": "/api/settings/ops/config"}
     state = type("s", (), {"request_id": "r1"})()
     headers: dict = {}
 
@@ -271,7 +292,11 @@ class _Req:
 @pytest.fixture
 def settings_router(monkeypatch):
     try:
-        from routers import settings as mod
+        # #1028: `routers/settings.py` is a package now. This names the module
+        # that owns the handler — the collaborators below are deliberately not
+        # re-exported on the package, so a stale patch raises instead of
+        # applying to a module nobody reads.
+        from routers.settings import ops as mod
     except ImportError:  # pragma: no cover
         pytest.skip("backend venv required")
 
@@ -380,7 +405,8 @@ def test_generic_put_refuses_a_retention_window_for_real(settings_router, key):
     mod, written, _ = settings_router
 
     with pytest.raises(HTTPException) as exc:
-        asyncio.run(mod.update_setting(
+        from routers.settings.generic import update_setting
+        asyncio.run(update_setting(
             key=key,
             body=SystemSettingUpdate(value="1"),
             request=_Req(),

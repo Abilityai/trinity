@@ -978,37 +978,51 @@ class SchedulerService:
 
         # #1808: git-sync freeze gate. The owner opted in via
         # `freeze_schedules_if_sync_failing` (#389) so the agent stops doing
-        # autonomous work while its repo is broken — until now the flag was
-        # stored, reported back as enabled, and never enforced, and
-        # docs/user-docs/faq/troubleshooting.md told users it worked.
+        # autonomous work while its repo is broken — until #1808 the flag was
+        # stored, reported back as enabled, and never enforced.
+        # trinity-enterprise#706: the gate also fires when a WORK agent has
+        # been diverged from origin for more than 24 h (on a fresh
+        # observation), and the reason is carried into the skipped row.
         #
         # Cron only: a manual trigger is an operator explicitly asking, exactly
         # like the autonomy gate above.
         #
-        # Unlike the autonomy branch this DOES record a skipped execution row.
-        # Autonomy-off is a static config gate on a default-OFF fleet, so a row
-        # per tick would flood the table; a sync freeze needs BOTH an opt-in
-        # toggle AND 3+ consecutive real sync failures, so the row count is
-        # bounded and it is exactly the signal an operator needs to see. Uses
-        # the same audit path as the max_instances skip.
-        if triggered_by == "schedule" and self.db.should_freeze_schedules(schedule.agent_name):
+        # Unlike the autonomy branch this DOES record a skipped execution row:
+        # one per cron tick for as long as the freeze lasts. That is not
+        # "bounded" — a push-denied agent can fail for days, and a diverged one
+        # stays frozen until someone pushes — but each row IS the operator's
+        # signal, it needs an opt-in to exist at all, and execution retention
+        # prunes it. Uses the same audit path as the max_instances skip.
+        freeze_reason = (
+            self.db.sync_freeze_reason(schedule.agent_name)
+            if triggered_by == "schedule"
+            else None
+        )
+        if freeze_reason:
             logger.warning(
-                f"Schedule {schedule_id} skipped: agent {schedule.agent_name} git sync is "
-                f"failing and freeze_schedules_if_sync_failing is enabled"
+                f"Schedule {schedule_id} skipped: agent {schedule.agent_name} "
+                f"git sync frozen ({freeze_reason})"
             )
             self._record_skipped_agent_schedule(
                 schedule_id,
-                skip_reason=(
-                    "Git sync is failing and freeze_schedules_if_sync_failing is "
-                    "enabled for this agent"
-                ),
-                event_reason="Git sync failing (schedules frozen)",
+                skip_reason=f"Git sync frozen: {freeze_reason}",
+                event_reason="Git sync frozen (schedules paused)",
             )
             # Same projection advance as the autonomy branch (#1472) so the
             # schedule never renders a receding "Next: Nd ago" while frozen.
             self._advance_next_run_only(schedule)
             self._abandon_precreated_execution(
-                execution, "Git sync started failing before the run started"
+                execution, f"Git sync frozen before the run started: {freeze_reason}"
+            )
+            return
+
+        # Readiness gate (trinity-enterprise#689): a calibrating companion's cron
+        # seat brief is held until its owner marks it ready. Same shape as the
+        # pre-check: cron only, a skipped row with the reason, fail-open. Asked
+        # BEFORE the pre-check, so a held brief never runs the agent's hook.
+        if not await self._apply_readiness_gate(schedule, triggered_by):
+            self._abandon_precreated_execution(
+                execution, "Held: the companion is not marked ready"
             )
             return
 
@@ -1043,7 +1057,8 @@ class SchedulerService:
                 source_user_email=origin.user_email,
                 source_agent_name=origin.agent_name,
                 source_mcp_key_id=origin.mcp_key_id,
-                source_mcp_key_name=origin.mcp_key_name
+                source_mcp_key_name=origin.mcp_key_name,
+                chain_depth=origin.chain_depth,
             )
 
             if not execution:
@@ -1093,31 +1108,12 @@ class SchedulerService:
 
         if not decision.get("fire", True):
             reason = decision.get("reason") or "pre-check returned fire=false"
-            skipped = self.db.create_skipped_execution(
-                schedule_id=schedule.id,
-                agent_name=schedule.agent_name,
-                message=schedule.message,
-                triggered_by=triggered_by,
-                skip_reason=f"pre-check: {reason}",
+            await self._record_gate_skip(
+                schedule, triggered_by, skip_reason=f"pre-check: {reason}", reason=reason,
             )
             logger.info(
                 f"Schedule {schedule.name} skipped by pre-check: {reason}"
             )
-            now = datetime.utcnow()
-            next_run = self._get_next_run_time(
-                schedule.cron_expression, schedule.timezone
-            )
-            self.db.update_schedule_run_times(
-                schedule.id, last_run_at=now, next_run_at=next_run
-            )
-            await self._publish_event({
-                "type": "schedule_execution_skipped",
-                "agent": schedule.agent_name,
-                "schedule_id": schedule.id,
-                "execution_id": skipped.id if skipped else None,
-                "schedule_name": schedule.name,
-                "reason": reason,
-            })
             return False, effective_message
 
         override = decision.get("message")
@@ -1128,6 +1124,81 @@ class SchedulerService:
                 f"({len(override)} chars)"
             )
         return True, effective_message
+
+    async def _record_gate_skip(self, schedule, triggered_by: str, *, skip_reason: str, reason: str) -> None:
+        """One skip recording for every pre-dispatch gate (#454 pre-check,
+        ent#689 readiness): a skipped execution carrying the reason, the run
+        times advanced, and the skipped event — so the gates cannot drift."""
+        skipped = self.db.create_skipped_execution(
+            schedule_id=schedule.id,
+            agent_name=schedule.agent_name,
+            message=schedule.message,
+            triggered_by=triggered_by,
+            skip_reason=skip_reason,
+        )
+        now = datetime.utcnow()
+        next_run = self._get_next_run_time(
+            schedule.cron_expression, schedule.timezone
+        )
+        self.db.update_schedule_run_times(
+            schedule.id, last_run_at=now, next_run_at=next_run
+        )
+        await self._publish_event({
+            "type": "schedule_execution_skipped",
+            "agent": schedule.agent_name,
+            "schedule_id": schedule.id,
+            "execution_id": skipped.id if skipped else None,
+            "schedule_name": schedule.name,
+            "reason": reason,
+        })
+
+    async def _apply_readiness_gate(self, schedule, triggered_by: str) -> bool:
+        """Readiness gate on a companion's proactive brief (trinity-enterprise#689).
+
+        Asked only for a cron fire (`triggered_by == "schedule"`) of a schedule
+        that delivers to a Workspace seat. Returns False — after recording the
+        skip — only on an explicit `fire: false` from the backend; every other
+        outcome (no seat, error, timeout, malformed answer) fires.
+        """
+        if triggered_by != "schedule" or not (getattr(schedule, "deliver_to_workspace_email", None) or "").strip():
+            return True
+        decision = await self._run_readiness_check(schedule.agent_name)
+        if decision is None or decision.get("fire", True) is not False:
+            return True
+        reason = decision.get("reason") or "held: the companion is not marked ready"
+        await self._record_gate_skip(schedule, triggered_by, skip_reason=reason, reason=reason)
+        logger.info(f"Schedule {schedule.name} held by the readiness gate: {reason}")
+        return False
+
+    async def _run_readiness_check(self, agent_name: str) -> Optional[dict]:
+        """The backend's readiness verdict, or None (fail-open) on any error."""
+        headers = {}
+        if config.internal_api_secret:
+            headers["X-Internal-Secret"] = config.internal_api_secret
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.get(
+                    f"{config.backend_url}/api/internal/agents/{agent_name}/brief-readiness",
+                    headers=headers,
+                    timeout=config.readiness_check_timeout,
+                )
+        except Exception as e:
+            logger.warning(
+                f"[readiness] backend call for {agent_name} failed "
+                f"({_describe_exception(e)}) — fail-open"
+            )
+            return None
+        if response.status_code != 200:
+            logger.warning(
+                f"[readiness] backend returned {response.status_code} for {agent_name} — fail-open"
+            )
+            return None
+        try:
+            data = response.json()
+        except Exception as e:
+            logger.warning(f"[readiness] malformed backend response for {agent_name} ({e}) — fail-open")
+            return None
+        return data if isinstance(data, dict) else None
 
     async def _dispatch_and_record_outcome(self, schedule, execution, effective_message: str, triggered_by: str):
         """Dispatch the schedule to the backend's TaskExecutionService (same path
@@ -1630,6 +1701,20 @@ class SchedulerService:
             logger.debug(f"Execution {execution.id} status '{execution.status}' is not retriable")
             return
 
+        # #2845 / #2514: a row the backend's lease reaper poison-parked has
+        # already been delivered to the cap and handed to an operator ("re-trigger
+        # manually if appropriate"). Retrying it restarts that budget on a new row
+        # — and now that retries are pulled, each retry can be delivered to the
+        # cap and parked again, one high-priority alert per attempt. The tag is
+        # the reaper's own error prefix (`lease_reaper_service._POISON_LEASE_TAG`;
+        # the scheduler cannot import the backend, so it is repeated here).
+        if (execution.error or "").startswith("poison_lease"):
+            logger.info(
+                f"Execution {execution.id} was poison-parked by the lease reaper; "
+                "not retrying — it is with the operator"
+            )
+            return
+
         # Get the schedule to check retry configuration
         schedule = self.db.get_schedule(execution.schedule_id)
         if not schedule:
@@ -1772,6 +1857,8 @@ class SchedulerService:
                     agent_name=original.source_agent_name,
                     mcp_key_id=original.source_mcp_key_id,
                     mcp_key_name=original.source_mcp_key_name,
+                    # #2973: a retry is the same hop, so it keeps the depth.
+                    chain_depth=original.chain_depth,
                 )
         except Exception as exc:
             logger.warning(
@@ -1792,7 +1879,8 @@ class SchedulerService:
             source_user_email=origin.user_email,
             source_agent_name=origin.agent_name,
             source_mcp_key_id=origin.mcp_key_id,
-            source_mcp_key_name=origin.mcp_key_name
+            source_mcp_key_name=origin.mcp_key_name,
+            chain_depth=origin.chain_depth,
         )
 
         if not retry_execution:
@@ -1812,10 +1900,15 @@ class SchedulerService:
             )
         except Exception as e:
             logger.error(f"Retry execution failed for {retry_execution.id}: {e}")
+            # #2845: only a row still `running` is ours to fail. On a pull pilot
+            # the backend may already have handed it to the durable queue before
+            # this dispatch timed out; failing a `queued` row strands work no
+            # worker can claim. Same guard as the cron path's exception handler.
             self.db.update_execution_status(
                 execution_id=retry_execution.id,
                 status=ExecutionStatus.FAILED,
-                error=_describe_exception(e)[:2000]  # #1022: never blank
+                error=_describe_exception(e)[:2000],  # #1022: never blank
+                expected_status=ExecutionStatus.RUNNING,
             )
 
     def _recover_pending_retries(self):

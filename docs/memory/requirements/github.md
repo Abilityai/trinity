@@ -16,6 +16,8 @@
 ### 11.2 GitHub Repository Initialization
 - **Status**: ✅ Implemented
 - **Description**: Initialize GitHub sync for existing agents
+- **Repo root (#2938)**: a repository that does not exist yet is always created at `/home/developer` — the one root the agent server's git router reads — whatever `workspace/` holds; an existing repo (a legacy workspace-rooted one included) stays where `git rev-parse --show-toplevel` finds it — and because the agent server reads only `/home/developer`, the post-init verify then refuses a workspace-rooted one with a 400 and rolls the config back (before #2938 that case returned 200 and reported "not enabled" forever). The pre-#2075 "populated `workspace/` ⇒ legacy root" content heuristic is retired: it created a template's repo where Sync / Log / the git panel could never see it.
+- **Verified where it is consumed (#2938)**: init is confirmed through the agent server's own `GET /api/git/status` after the backend's `git rev-parse --git-dir`; `git_enabled: false` there fails the init with a named reason (400, config row rolled back), an unanswerable probe warns and keeps the backend verdict. A backend-only check cannot catch a mis-rooted repo, since it runs in the directory the backend chose.
 - **Flow**: `docs/memory/feature-flows/github-repo-initialization.md`
 
 ### 11.3 Operator-Readable Conflict Diagnosis (S5)
@@ -74,6 +76,7 @@
   - `SyncHealthService` emits `sync_failing` operator-queue entries at `consecutive_failures ≥ 3` (leader-leased across uvicorn workers, #2742 — `synchealth:leader`, fail-open. Note the counter is per *poll*, not per worker, so one leader instead of two **doubles** time-to-`sync_failing` from ~90 s to ~180 s; cadence knob `SYNC_HEALTH_POLL_INTERVAL_SECONDS`, default unchanged at 60 s)
   - `GET /api/agents/sync-health` (batch) + dashboard dot
   - `GET /api/fleet/sync-audit` with `duplicate_binding` flag (§P5 query)
+  - **Amended by §11.19 (trinity-enterprise#706):** health measures whether the agent and its repository *agree*, not only whether the last push succeeded. The state (green / yellow / red / unknown), its reason and the thresholds are computed by the backend from one policy module and served to every surface; `utils/syncHealth.js` no longer owns a threshold. The schedule freeze keys on divergence age for work agents as well as on `sync_failing`.
 - **Flow**: `docs/memory/feature-flows/git-sync-health.md`
 - **Upstream**: Epic #381 — sub-issues #389 (S1), #390 (S6)
 
@@ -88,7 +91,7 @@
   - Concurrent-writer safety: `repack -A -d -l --unpack-unreachable=1.hour.ago` + `gc --prune=1.hour.ago` (never `--prune=now`); `pack.threads=1` + `pack.windowMemory=128m` RSS bound
   - Stale-lock hygiene: startup reap (`index.lock`, `gc.pid`, `maintenance.lock`, ref/reflog locks) + per-cycle age-gated reap incl. abandoned `tmp_pack_*`. **#2742 makes the startup reap speak** (it was `rm -f`, silent whether or not it removed anything): it now tests-then-removes, echoes a line naming each lock it cleared, and drops a marker the agent server converts into `sync_state.last_lock_recovery` → the `lock_recovery` field on `GET /api/git/status`, so a self-healed wedge reaches the platform instead of vanishing. It also now reaps `index.lock` under `<gitdir>/modules/*` and `<gitdir>/worktrees/*` — covered by nothing before, so a submodule or linked-worktree wedge survived every restart.
   - Signal: `pack_count`/`loose_objects`/`maintenance_failures` in sync-state → `agent_sync_state` (agent-supplied ints coerced at the boundary) → `GET /api/agents/sync-health`; edge-triggered `git_bloat` operator alerts (`GIT_DIR_ALERT_BYTES` default 10 GiB; 3 consecutive maintenance failures)
-  - **Lock-free status read (#2742)**: `GET /api/git/status` — the surface the 60 s `SyncHealthService` poll drives — runs `git --no-optional-locks status --porcelain`, so the poll no longer takes `.git/index.lock` ~2×/min in every agent workspace (the flag is scoped to THIS one call site; the auto-sync commit path and the `sync`/`pull` bodies legitimately want the index writeback and keep the plain form). Every status child now routes through `run_registered`, so a sweep tick straddling the 30 s `git fetch` can no longer orphan ref litter. The handler is computed in ONE worker thread behind a loop-level single-flight, so concurrent callers (poller + UI git panel + MCP `get_git_status`) coalesce onto one computation and one `git fetch origin` — and the response carries `computed_at`, because coalescing is bounded staleness and a follower can be served a snapshot up to one leader-run old.
+  - **Lock-free status read (#2742)**: `GET /api/git/status` — the surface the 60 s `SyncHealthService` poll drives — runs `git --no-optional-locks status --porcelain -z`, so the poll no longer takes `.git/index.lock` ~2×/min in every agent workspace (the flag is scoped to THIS one call site; the auto-sync commit path and the `sync`/`pull` bodies legitimately want the index writeback and keep the plain form). Every status child now routes through `run_registered`, so a sweep tick straddling the 30 s `git fetch` can no longer orphan ref litter. The handler is computed in ONE worker thread behind a loop-level single-flight, so concurrent callers (poller + UI git panel + MCP `get_git_status`) coalesce onto one computation and one `git fetch origin` — and the response carries `computed_at`, because coalescing is bounded staleness and a follower can be served a snapshot up to one leader-run old.
   - **Stuck-lock report, never a runtime delete (#2742)**: a currently-present `index.lock` is *observed* and surfaced as `index_lock_stuck`, never unlinked. A 0-byte lock is the signature of a **live** `git add` for ~100 % of its life (measured: 29 s at 60 000 files; 155 s under a `clean` filter), `st_mtime` is stamped at create and never advances, so neither size nor age separates *abandoned* from *busy* — and a wrong unlink promotes another git's in-flight file onto `.git/index`, a permanent 0-byte-index wedge that no Trinity path clears. Detection is therefore a **two-point inode-stability** observation (same `st_ino`/`st_mtime_ns`/`st_size` unchanged across ≥3 ticks spanning ≥15 min), which is also immune to a forward clock step; the tunable is the number of stable sightings, not a wall-clock age. The observer resolves the real gitdir (`.git` is a FILE for a worktree or submodule) and covers `<gitdir>/index.lock`, `<gitdir>/modules/*/index.lock` and `<gitdir>/worktrees/*/index.lock`. It takes no repo lock (an `lstat` needs none, and holding one would make a status poll a new source of 409 `agent_busy`) and is wrapped in its own `except OSError` — an observability path must never be able to 500 the feed it feeds.
 - **Rollout**: base-image rebuild + agent recreate required; recovery of pre-existing bloated fleets is ops-side (trinity-ops-agent#127) using the tunable budget + memory bounds
 - **Flow**: `docs/memory/feature-flows/git-sync-health.md`
@@ -573,7 +576,9 @@
   requires it and `credential_requirements_service` reads it, so an agent that ships
   one lost it on its first Push and then failed its own compatibility contract — and
   **`.claude/settings.json`**, whose negation was the escape hatch #2036's own
-  rationale offered. `#1703` (repo root ≡ `$HOME`) retires this whole layer
+  rationale offered (since trinity-enterprise#708 no negation is needed: the file
+  is no longer a canonical ignore, and only a copy carrying container paths or
+  credential-bearing keys is kept out of a commit). `#1703` (repo root ≡ `$HOME`) retires this whole layer
   structurally; until then this is the correctness fix, designed as the steady state
   because #1703 is P3, unassigned and a decision issue first.
 - **Key Features**:
@@ -810,5 +815,94 @@
 - **Flow**: `docs/memory/feature-flows/github-sync.md`,
   `docs/memory/feature-flows/github-repo-initialization.md`
 - **GitHub Issue**: abilityai/trinity-enterprise#615
+
+---
+
+### 11.17 An Agent Created as an Agent Owns Its Repository (trinity-enterprise#705)
+
+- **Status**: 🚧 In review (PR #3020). #3016, #3017 and #3018 have landed.
+- **Ruling (2026-09-24):** *the repository is the agent; the container is a cache of it.*
+  The 2026-09-24 fleet audit found every git-bound agent with auto-sync off and
+  work on container disks that existed nowhere else.
+- **Create-time `kind`:** `agent` (the default) or `deployment`, on
+  `POST /api/agents` and MCP `create_agent`. The UI half of the choice is
+  trinity-enterprise#704. An **explicit `source_mode` always wins for the
+  mode**. Every auto-pushing agent, including an explicit working branch and
+  fork-to-own, also gets freeze-on-failure; a `deployment` never does.
+- **An agent** gets a working branch (`trinity/<agent>/<id>`) it alone writes,
+  `auto_sync_enabled=1` and `freeze_schedules_if_sync_failing=1`. It only gets
+  them **only when the repo is its creator's own and the token can push to
+  it**: the token must be the creator's (`per_user`; `per_agent` is accepted for
+  future callers, but no create path resolves it today), the template must not
+  be a catalog template, the repo's owner must equal the token's GitHub login
+  (`GET /user`, case-insensitive), and the #2107 receive-pack probe must say
+  `ok`. Being able to push is not owning the repo (PR #3020 ruling, the ent#162
+  class): the global platform PAT never qualifies, and neither does a creator's
+  own token that can write an org's shared template (a classic `repo` PAT or an
+  org-wide fine-grained token). An org-owned repo therefore stays pull-only by
+  default; an explicit `source_mode=false` still asks for a working branch.
+- **Stays pull-only, with the reason on the create response's `git_mode`:**
+  - a deployment
+  - an ephemeral ghost (ent#69)
+  - no token (ent#123; not a 400)
+  - only the platform-wide token (never probed)
+  - a catalog template (shared by definition; never probed)
+  - a repo the token's login does not own, or a login that could not be read
+    (never probed; the reason points to fork-to-own)
+  - a refused probe (a template someone else owns — never branches pushed
+    into it, the ent#162 class; the reason points to fork-to-own)
+  - an unverifiable probe
+- **Fork-to-own** gets the trio (it owns its fork). **Cornelius** is pinned
+  pull-only: it is built from a shared public upstream.
+- **Other create paths:** `trinity deploy --repo` sends `kind: "deployment"` (it
+  deploys a codebase). System manifests gain a per-agent `kind` with
+  trinity-enterprise#704 (PR #3022); until then a manifest agent takes the
+  default, which the ownership rule above already keeps off shared templates.
+- **Not changed:**
+  - existing agents (the default applies to new creates; migration is per
+    agent and explicit — runbook `docs/migrations/AGENT_WORKING_BRANCH_DEFAULT_2026-09.md`)
+  - freeze paging (the `sync_failing` item). Until trinity-enterprise#706
+    adds divergence age, the freeze trips on today's trigger: 3 consecutive
+    failed syncs (about 45 minutes at the 15-minute cadence), including a
+    rebase conflict, which needs a human anyway
+  - the pull cycle — on when trinity-enterprise#703 lands
+  - divergence-age freeze semantics — trinity-enterprise#706
+- **Edition**: open-core (operator ruling 2026-09-25): defaults on the existing
+  open-source create and sync paths.
+- **Flow**: `docs/memory/feature-flows/github-sync.md`
+- **GitHub Issue**: abilityai/trinity-enterprise#705
+
+---
+
+### 11.19 Divergence Age and the Divergence Freeze (trinity-enterprise#706)
+- **Status**: ✅ Implemented (2026-09-27) — the rule and the per-agent surfaces (trinity-enterprise#706); the fleet-health, fleet-audit, MCP and agent-card surfaces (trinity-enterprise#707)
+- **Problem**: sync health measured whether the last push *succeeded*. An agent 15 commits ahead with auto-sync off never ran a heartbeat, so it never failed, and it rendered as healthy. The schedule freeze (#1808) fired only after three failed syncs, so a work agent whose repository had silently stopped receiving its work kept running on cron indefinitely.
+- **Persisted on `agent_sync_state`** (all nullable, no backfill — the clocks start at the first poll after upgrade, which is also the 24 h soak before any divergence freeze can fire):
+  - `diverged_since` — the first poll at which the working tuple (origin on the agent's *own* branch, #2105) showed `ahead > 0 or behind > 0`. Set once, cleared when both are known 0 (a known `ahead == 0` with `behind` unknown means "no upstream" and also clears). An uncomputable `ahead` neither starts nor clears it.
+  - `dirty_files` — the porcelain change count the status call already computes (ignored paths excluded, untracked included).
+  - `dirty_since` — the first poll at which `dirty_files > 0`; cleared at 0. A separate episode from divergence (no carry-over when the dirt becomes a commit).
+  - `last_successful_push_at` — the later of the heartbeat's own record (#3011) and an operator Push (`agent_git_config.last_sync_at`); on an agent image older than #3011, the last `success` cycle. Monotonic; a future or unparseable agent value is rejected.
+- **One policy, one module**: `services/sync_freeze_policy.py` (stdlib only), vendored byte-identically to `src/scheduler/sync_freeze_policy.py` with a parity test. Constants, not env knobs: 3 failed polls, 24 h divergence, 24 h dirt, 7-day no-heartbeat floor, 15-minute observation freshness.
+- **Work agent** = `source_mode = 0 OR auto_sync_enabled = 1` (a working branch, or fork-to-own / bound-to-own that auto-syncs). Everything else is a *deployment*. Known gap: a fork-to-own or bound agent whose owner turned auto-sync off reads as a deployment.
+- **State rules** (first red names the reason; the rest append):
+  - `unknown` — no row, or never observed.
+  - `red` — the last sync failed (any binding); a work agent diverged for more than 24 h; a work agent dirty for more than 24 h; auto-sync on with no heartbeat for 7 days (measured from the git binding's creation when no heartbeat was ever recorded).
+  - `yellow` — a work agent diverged for 24 h or less; a deployment diverged at any age, or dirty for more than 24 h. A deployment is never red on age and never freezes: a deployment being behind is normal.
+  - `green` — otherwise.
+  - The reason is operator-readable (`diverged 31 behind / 0 ahead for 26h`, `last sync failed (seen on 3 polls)`, `dirty: 791 files uncommitted for 30h`, `auto-sync on, no heartbeat for 9d`), and a stale observation (last poll older than 15 minutes) is named in it. A recommendation names the fix (`credential is read-only`, `push via git_sync strategy=pull_first`, `deployment: turn auto-sync off`, `enable auto-sync`, `pull via git_pull`).
+- **The freeze**: `should_freeze = freeze_schedules_if_sync_failing AND (sync_failing OR (work agent AND diverged > 24 h AND the observation is fresh))`. `sync_failing` is unchanged from #1808 and applies to any binding. The freshness guard fails open: the poller writes nothing for an unreachable agent, so a stale `diverged_since` must never keep an agent frozen after it may already have pushed. Enforced in two places that share the module: `GET /api/internal/agents/{name}/sync-health-status` (existing keys unchanged, plus `freeze_reason`, `divergence_age_s`, `work_agent`) and the scheduler's own DB gate, which stays fail-open and writes the reason into the skipped execution's `skip_reason`. Un-freezing is automatic: both points read live state, so the next cron tick after divergence clears fires.
+- **One operator-queue item per episode**: when a divergence freeze is in force, the poller (inside its leader lease) raises one `sync_diverged` item with the deterministic id `sync-diverged-{agent}-{diverged_since}`; the `(agent_name, request_id)` conflict target collapses repeat polls, restarts and a fail-open double leader onto one row. The prefix is platform-reserved so an agent cannot pre-create the id and silence its own alarm. The item carries counts, the episode start and the recommendation — never raw error text. It is not auto-resolved; a new episode gets a new id. No item for red-but-not-frozen.
+- **Surfaces (this slice)**: `GET /api/agents/sync-health` and `GET /api/agents/{name}/git/sync-state` (and therefore MCP `get_git_sync_state`, a pass-through) carry `state`, `reason`, `recommendation`, `binding`, `freeze`, the ages and the new columns; pre-existing keys are unchanged. The dashboard dot renders the backend's state and shows the reason on hover. The fleet surfaces follow below.
+- **Fleet surfaces (trinity-enterprise#707)** — read path only; the poller and the rule are unchanged, and every surface reads the same shared query (`db.list_sync_health_rows`) and the same verdict:
+  - **Fleet health** (`GET /api/monitoring/status`, MCP `get_fleet_health`): each agent carries a `sync` block — `binding` (agent / deployment), `auto_sync_enabled`, `ahead`, `behind` (origin on the agent's own branch), `dirty_files`, `last_successful_push_at`, `divergence_age_s`, `state`, `reason`, `recommendation`, `frozen` — or `sync: null` when the agent has no git binding. The response gains `sync_summary` = `{git_bound, diverged, frozen, auto_sync_off, dirty, red, yellow}`. A red agent gains one `issues[]` entry, `sync: <reason> — <recommendation>`, so every existing consumer of that list sees it. Sync is an **annotation** (the heartbeat precedent): it never changes an agent's `status`, the fleet sort, or the healthy/degraded/unhealthy counts. A fault in the sync read degrades to `sync: null` / `sync_summary: null`, never to the "aggregation failed" payload.
+  - **Fleet sync audit** (`GET /api/fleet/sync-audit`, and new MCP `get_fleet_sync_audit`): the pre-#707 entry and summary keys are unchanged, except that `dirty_tree` is now real (`dirty_files > 0`) instead of a hard-coded `false`, so the summary's `in_sync` / `dirty` are real too. Each entry adds `ahead`, `behind`, `dirty_files`, `diverged_since`, `divergence_age_s`, `last_successful_push_at`, `state`, `reason`, `recommendation`, `binding`, `auto_sync_enabled`, `frozen`; the summary adds `diverged`, `frozen`, `auto_sync_off`, `red`.
+  - **Access**: both are scoped by the caller's accessible agents — admins see every agent, others their owned and shared agents. An agent-scoped MCP key resolves to its owner and sees the owner's set: an orchestrator's fleet sweep runs as an agent, and the same key already lists those agents through `get_fleet_health`.
+  - **No raw error text**: a surface's `reason` names what is wrong in platform words (`last sync failed (seen on 3 polls)`) and never carries the agent-written git error. The raw `last_error_summary` stays only on the per-agent reads it was already on (`GET /api/agents/{name}/git/sync-state`, the dashboard batch), where the caller already holds access to that one agent.
+  - **Agent card** (Fleet grid tile and Agent Detail → Overview): one sync chip / line — `↑ahead ↓behind · N dirty · pushed <age> ago` — in the state colour (red / yellow / green; nothing for an agent with no observation), with the reason and recommendation on hover. It replaces the tile's `sync failing ×N` and `git ✓` chips, so the chip strip does not grow. The Overview attention count still counts failed syncs.
+- **Supersedes**: trinity-enterprise#142's dirty-tree advisory, by the persisted `dirty_files`.
+- **Known limitations**: a failed `git status` inside the agent reads as a clean tree and clears `dirty_since` (agent-side; needs a base-image change). The agent writes every one of these numbers, so a compromised agent can misreport them (the existing #1595 trust model). With `SYNC_HEALTH_POLL_INTERVAL_SECONDS` raised above 15 minutes every observation is stale and the divergence freeze cannot fire (`sync_failing` still can).
+- **Source of truth**: `services/sync_freeze_policy.py` (+ scheduler mirror), `services/sync_health_service.py`, `services/sync_health_view.py`, `db/sync_state.py`, `routers/internal.py`, `src/scheduler/database.py::sync_freeze_reason`; #707: `routers/monitoring.py::get_fleet_status`, `services/fleet_audit_service.py`, MCP `tools/monitoring.ts`, `utils/syncHealth.js::formatSyncSummary`.
+- **Flow**: `docs/memory/feature-flows/git-sync-health.md`
+- **GitHub Issue**: abilityai/trinity-enterprise#706, abilityai/trinity-enterprise#707
 
 ---

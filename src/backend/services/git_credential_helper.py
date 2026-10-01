@@ -275,6 +275,8 @@ gitmodules_hits=0
 helper_ok=0
 competing=0
 root_readable=0
+root_traversable=0
+git_present=0
 
 # `safe.directory=*`: this runs as root against a repo owned by `developer`.
 # Non-secret, and `-c` is protected configuration, so git honours it.
@@ -342,7 +344,24 @@ GIT_DIR_ABS=$(g -C "${ROOT}" rev-parse --absolute-git-dir 2>/dev/null) || GIT_DI
 # zeros, i.e. success, on exactly the hardened installs that will act on it.
 # `test -r/-x` goes through access(2), which honours the missing capability,
 # so this is the real answer and not an assumption.
-if [ -d "${GIT_DIR_ABS}" ] && [ -r "${GIT_DIR_ABS}" ] && [ -x "${GIT_DIR_ABS}" ]; then
+#
+# `root_readable` alone cannot say WHY it is 0 (#2930). Two more probes split
+# the cases, because only one of them is an operator's problem:
+#   * `root_traversable` — can this exec look inside ROOT at all? This is the
+#     capability question, and it is answered on ROOT rather than on the repo
+#     because a missing DAC_OVERRIDE fails the `-d` test below too, making an
+#     absent repo and an unreachable one identical.
+#   * `git_present` — is there a repository here? An agent from a `local:`
+#     template has none, and "nothing to sweep" is not a finding.
+if [ -r "${ROOT}" ] && [ -x "${ROOT}" ]; then
+    root_traversable=1
+fi
+
+if [ -d "${GIT_DIR_ABS}" ]; then
+    git_present=1
+fi
+
+if [ "${git_present}" = 1 ] && [ -r "${GIT_DIR_ABS}" ] && [ -x "${GIT_DIR_ABS}" ]; then
     root_readable=1
 fi
 
@@ -495,8 +514,8 @@ fi
 competing=$(g -C "${ROOT}" config --get-all credential.helper 2>/dev/null | grep -v '^trinity$' | grep -c . || true)
 [ -n "${competing}" ] || competing=0
 
-printf 'TRINITY_SCRUB_REPORT remotes_scrubbed=%s harvested=%s seeded=%s refused=%s gitmodules_hits=%s helper_ok=%s competing_helpers=%s root_readable=%s\n' \
-    "${scrubbed}" "${harvested}" "${seeded}" "${refused}" "${gitmodules_hits}" "${helper_ok}" "${competing}" "${root_readable}"
+printf 'TRINITY_SCRUB_REPORT remotes_scrubbed=%s harvested=%s seeded=%s refused=%s gitmodules_hits=%s helper_ok=%s competing_helpers=%s root_readable=%s root_traversable=%s git_present=%s\n' \
+    "${scrubbed}" "${harvested}" "${seeded}" "${refused}" "${gitmodules_hits}" "${helper_ok}" "${competing}" "${root_readable}" "${root_traversable}" "${git_present}"
 """
 
 
@@ -604,6 +623,10 @@ _REPORT_FIELDS = (
     "helper_ok",
     "competing_helpers",
     "root_readable",
+    # #2930. An older report carries neither, and both default to 0 — which
+    # routes an unparsed report to the alarm, the pre-#2930 behaviour.
+    "root_traversable",
+    "git_present",
 )
 
 # The env name the sweep reads a caller-supplied credential from. It travels in

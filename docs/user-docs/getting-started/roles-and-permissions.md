@@ -33,7 +33,7 @@ Admins can change a user's role at any time via Settings.
 |--------|---------------|
 | Create agents | creator or above |
 | Delete agents | Owner or admin |
-| Configure agent settings | Owner or admin |
+| Configure agent settings (autonomy, resources, capacity, timeout, guardrails, read-only mode and similar) | Owner or admin, **a person only** — a browser session or the person's own API key, never an agent's key |
 | Run tasks and schedules | operator or above (with access) |
 | Chat with shared agents | Any authenticated user |
 | Use public links | Anyone (no auth required) |
@@ -43,16 +43,19 @@ Admins can change a user's role at any time via Settings.
 | Turn usage sharing on or off | Admin, **human only** |
 | Mint a **Portal delegate** MCP key | Admin, **human only** |
 | Mint an **Ops (read-only)** MCP key | Admin, **interactive browser session only** — no key of any scope can mint one |
+| Create any MCP key | Any user, **signed-in session only** — no key of any scope can create one |
+| Change your own sign-in email or personal GitHub token | Any user, **signed-in session only** |
 
 ### Role is not the same as "human"
 
 An MCP API key resolves to the user who created it and **carries that user's role**. Because an agent's own key is created under its owner, an agent operating on a default admin-owned installation would otherwise satisfy any check that asks only "is this caller an admin?".
 
-Three rules close that gap:
+Four rules close that gap:
 
 - **An agent-scoped key never satisfies an admin gate.** Every admin-only endpoint rejects agent principals itself, so a new admin endpoint is protected without anyone remembering to add a check. What an agent's key *can* do is act on its own agent (heartbeats, reports, result callbacks) and whatever its owner has shared with it.
 - **Admin gates are an allowlist over key scopes.** Only a browser session, a standard (`user`) key, and the system agent's key can pass one. Any other scope — including one that does not exist yet — is refused.
 - **Endpoints whose blast radius is operator-scale require a human caller** in addition to the role — an API key of any scope is rejected there. See [Authentication](../api-reference/authentication.md) for the list.
+- **Owner-level grants require a person too.** An agent's configuration writes (autonomy, resources, guardrails and the rest) refuse agent-scoped and system keys even when the owner is an admin, so an agent cannot switch on its own unattended schedules or raise its own limits.
 
 For monitoring integrations that must keep working under enforced two-factor, an admin can mint a bounded **Ops (read-only)** key instead of handing out an unbounded personal one. It reaches a fixed set of read endpoints (fleet health, telemetry, roster and capacity, execution history, subscription usage) and nothing else, gets no MCP tools, and every call it makes is attributed to that key in the audit log. It stays bound to the account that minted it: if that admin is demoted or suspended, the key stops working — so mint it under a service account that is not offboarded with a person. Scopes are described in [Authentication → MCP key scopes](../api-reference/authentication.md#mcp-key-scopes).
 

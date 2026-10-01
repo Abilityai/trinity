@@ -5,6 +5,7 @@
  */
 
 import type {
+  StartAgentResult,
   Agent,
   AgentConfig,
   ChatResponse,
@@ -21,6 +22,9 @@ import type {
   ScheduleToggleResult,
   ScheduleTriggerResult,
   ActivityTimelineResponse,
+  OperatorQueueAskReadback,
+  OperatorAskCreate,
+  OperatorAskReceipt,
   OperatorQueueItem,
   OperatorQueueListResponse,
   CompatibilityReport,
@@ -30,6 +34,8 @@ import type {
   FanOutDispatchResult,
   FanOutTimeoutReceipt,
   LoopStatus,
+  ExecutionSearchParams,
+  ExecutionSearchResult,
 } from "./types.js";
 
 /**
@@ -262,8 +268,103 @@ export function extractIdempotencyExecutionId(body: string): string | undefined 
   }
 }
 
+/**
+ * #2806: the backend refused an agent-to-agent hop past the chain-depth limit
+ * (403, `detail.error === "inter_agent_depth_exceeded"`). Returned as a RESULT
+ * rather than thrown, so the calling model reads "stop, do not retry or
+ * re-route" instead of an opaque `API error (403)` it cannot tell apart from an
+ * access denial.
+ */
+export interface DepthRefusal {
+  status: "inter_agent_depth_exceeded";
+  agent: string;
+  depth?: number;
+  max_depth?: number;
+  retryable: false;
+  message: string;
+}
+
+export const INTER_AGENT_DEPTH_EXCEEDED = "inter_agent_depth_exceeded";
+
+/**
+ * #2806: a `DepthRefusal` from a non-2xx response, or undefined for anything
+ * else — including a 403 WITHOUT the code (access denial, SELF-EXEC-001), which
+ * must keep throwing. Read defensively, like `extractIdempotencyExecutionId`:
+ * this runs on an error path, and a parser that throws would replace a clean
+ * refusal with a crash.
+ */
+export function parseDepthRefusal(
+  status: number,
+  body: string,
+  agent: string,
+): DepthRefusal | undefined {
+  if (status !== 403) return undefined;
+  try {
+    const parsed = JSON.parse(body) as unknown;
+    const d = ((parsed as { detail?: unknown })?.detail ?? parsed) as Record<string, unknown>;
+    if (d?.error !== INTER_AGENT_DEPTH_EXCEEDED) return undefined;
+    return {
+      status: INTER_AGENT_DEPTH_EXCEEDED,
+      agent,
+      depth: typeof d.depth === "number" ? d.depth : undefined,
+      max_depth: typeof d.max_depth === "number" ? d.max_depth : undefined,
+      retryable: false,
+      message:
+        typeof d.message === "string" && d.message
+          ? d.message
+          : "Inter-agent chain depth limit reached. Do not retry this call or route it " +
+            "through another agent; finish your turn and report back to your caller.",
+    };
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * #2973: the `DepthRefusal` a thrown `ApiError` carries, or undefined. For the
+ * tools whose backend routes let the refusal propagate (loop start, schedule
+ * trigger, event emit) — each renders it as a result, like chat does.
+ */
+export function depthRefusalFromError(
+  error: unknown,
+  agent: string,
+): DepthRefusal | undefined {
+  return error instanceof ApiError ? parseDepthRefusal(error.status, error.body, agent) : undefined;
+}
+
+/** #2806: type guard for the refusal, shared by every tool that dispatches. */
+export function isDepthRefusal(value: unknown): value is DepthRefusal {
+  return (value as { status?: unknown })?.status === INTER_AGENT_DEPTH_EXCEEDED;
+}
+
 /** Bound for #848 inline-auth control-plane calls (not chat). */
 const INLINE_AUTH_TIMEOUT_MS = Number(process.env.MCP_INLINE_AUTH_TIMEOUT_MS || 15000);
+
+/** One agent's git sync health on fleet health (trinity-enterprise#707). */
+export interface FleetAgentSync {
+  binding: "agent" | "deployment";
+  auto_sync_enabled: boolean;
+  ahead: number | null;
+  behind: number | null;
+  dirty_files: number | null;
+  last_successful_push_at: string | null;
+  divergence_age_s: number | null;
+  state: "green" | "yellow" | "red" | "unknown";
+  reason: string;
+  recommendation: string | null;
+  frozen: boolean;
+}
+
+/** Fleet sync totals over the caller's git-bound agents (trinity-enterprise#707). */
+export interface FleetSyncSummary {
+  git_bound: number;
+  diverged: number;
+  frozen: number;
+  auto_sync_off: number;
+  dirty: number;
+  red: number;
+  yellow: number;
+}
 
 export class TrinityClient {
   private baseUrl: string;
@@ -659,8 +760,8 @@ export class TrinityClient {
   /**
    * Start a stopped agent
    */
-  async startAgent(name: string): Promise<{ message: string }> {
-    return this.request<{ message: string }>(
+  async startAgent(name: string): Promise<StartAgentResult> {
+    return this.request<StartAgentResult>(
       "POST",
       `/api/agents/${encodeURIComponent(name)}/start`
     );
@@ -849,6 +950,7 @@ export class TrinityClient {
     | ChatResponse
     | { error: string; queue_status: "busy" | "queue_full"; retry_after: number; agent: string; details?: Record<string, unknown> }
     | { status: "queued_timeout"; agent: string; execution_id: string; message: string }
+    | DepthRefusal
   > {
     // Prepare headers
     const headers: Record<string, string> = {
@@ -982,6 +1084,11 @@ export class TrinityClient {
           return this.inFlightReplayReceipt(name, executionId);
         }
       }
+      const refusal = parseDepthRefusal(response.status, error, name);
+      if (refusal) {
+        debugLog(`[chat] chain-depth refusal on '${name}' (depth ${refusal.depth} > ${refusal.max_depth}) (#2806)`);
+        return refusal;
+      }
       throw new Error(`API error (${response.status}): ${error}`);
     }
 
@@ -1111,6 +1218,7 @@ export class TrinityClient {
     // #2661: sync mode may answer with the gateway-timeout receipt (same shape
     // chat() returns for #914) instead of a completed ChatResponse.
     | { status: "queued_timeout"; agent: string; execution_id: string; message: string }
+    | DepthRefusal
   > {
     // Prepare headers
     const headers: Record<string, string> = {
@@ -1246,6 +1354,11 @@ export class TrinityClient {
           debugLog(`[task] 409 in-flight replay on '${name}' -> execution_id=${executionId} (#2661)`);
           return this.inFlightReplayReceipt(name, executionId);
         }
+      }
+      const refusal = parseDepthRefusal(response.status, error, name);
+      if (refusal) {
+        debugLog(`[task] chain-depth refusal on '${name}' (depth ${refusal.depth} > ${refusal.max_depth}) (#2806)`);
+        return refusal;
       }
       throw new Error(`API error (${response.status}): ${error}`);
     }
@@ -1391,7 +1504,7 @@ export class TrinityClient {
     sourceAgent?: string,
     mcpKeyInfo?: { keyId?: string; keyName?: string },
     idempotencyKey?: string
-  ): Promise<FanOutDispatchResult | FanOutTimeoutReceipt> {
+  ): Promise<FanOutDispatchResult | FanOutTimeoutReceipt | DepthRefusal> {
     const headers: Record<string, string> = {
       "Content-Type": "application/json",
       ...(this.token && { Authorization: `Bearer ${this.token}` }),
@@ -1518,6 +1631,11 @@ export class TrinityClient {
 
     if (!response.ok) {
       const error = await response.text();
+      const refusal = parseDepthRefusal(response.status, error, name);
+      if (refusal) {
+        debugLog(`[fanOut] chain-depth refusal on '${name}' (depth ${refusal.depth} > ${refusal.max_depth}) (#2806)`);
+        return refusal;
+      }
       throw new Error(`API error (${response.status}): ${error}`);
     }
 
@@ -1769,6 +1887,31 @@ export class TrinityClient {
   }
 
   /**
+   * Search the execution corpus (enterprise `execution_search`, ent#653).
+   *
+   * Proxies `GET /api/enterprise/execution-search`. The route is
+   * entitlement-gated and refuses agent-scoped keys; an OSS build has no
+   * route at all (404) — the tool turns both into an honest envelope.
+   */
+  async searchExecutions(params: ExecutionSearchParams): Promise<ExecutionSearchResult> {
+    const qs = new URLSearchParams();
+    qs.set("q", params.query);
+    if (params.mode) qs.set("mode", params.mode);
+    if (params.agents && params.agents.length > 0) qs.set("agents", params.agents.join(","));
+    if (params.fields && params.fields.length > 0) qs.set("fields", params.fields.join(","));
+    if (params.status) qs.set("status", params.status);
+    if (params.triggered_by) qs.set("triggered_by", params.triggered_by);
+    if (params.hours !== undefined) qs.set("hours", String(params.hours));
+    if (params.limit !== undefined) qs.set("limit", String(params.limit));
+    if (params.offset !== undefined) qs.set("offset", String(params.offset));
+    if (params.context !== undefined) qs.set("context", String(params.context));
+    return this.request<ExecutionSearchResult>(
+      "GET",
+      `/api/enterprise/execution-search?${qs.toString()}`
+    );
+  }
+
+  /**
    * Get all executions for an agent across all schedules
    */
   async getAgentExecutions(
@@ -1935,6 +2078,7 @@ export class TrinityClient {
       // the backend validates the address against the agent's roster and
       // resolves the chat itself.
       audience_email?: string;
+      to?: "primary" | "approver" | "viewer" | "operator";
       execution_id?: string;
     }
   ): Promise<{
@@ -1948,6 +2092,97 @@ export class TrinityClient {
       "POST",
       `/api/agents/${encodeURIComponent(agentName)}/reports`,
       data
+    );
+  }
+
+  // =========================================================================
+  // Declared business metrics (trinity-enterprise#478)
+  // =========================================================================
+
+  /**
+   * Record a batch of metric points as `agentName`.
+   *
+   * The agent name comes from the MCP auth context, never from tool input; the
+   * backend self-gates it again on its own side.
+   */
+  async recordMetrics(
+    agentName: string,
+    data: {
+      points: Array<{
+        metric: string;
+        value: number | string;
+        ts?: string;
+        dims?: Record<string, string>;
+      }>;
+      idempotency_key?: string;
+      execution_id?: string;
+    }
+  ): Promise<{
+    success: boolean;
+    agent_name: string;
+    recorded: number;
+    deduplicated: number;
+    replayed: boolean;
+    points: Array<{ index: number; ts: string; idempotency_key: string }>;
+  }> {
+    return this.request(
+      "POST",
+      `/api/agents/${encodeURIComponent(agentName)}/metrics/points`,
+      data
+    );
+  }
+
+  /**
+   * Read the calling agent's recorded metrics with freshness (ent#479).
+   *
+   * Query knobs only — the agent is in the PATH and the backend self-gates it,
+   * so there is nothing here that could point the read at another agent.
+   */
+  async getAgentMetrics(
+    agentName: string,
+    options: {
+      metric?: string;
+      window?: string;
+      since?: string;
+      until?: string;
+      include_retired?: boolean;
+      series_limit?: number;
+    } = {}
+  ): Promise<Record<string, unknown>> {
+    const params = new URLSearchParams();
+    if (options.metric) params.set("metric", options.metric);
+    if (options.window) params.set("window", options.window);
+    if (options.since) params.set("since", options.since);
+    if (options.until) params.set("until", options.until);
+    if (options.include_retired) params.set("include_retired", "true");
+    if (options.series_limit) params.set("series_limit", String(options.series_limit));
+    const query = params.toString();
+    return this.request(
+      "GET",
+      `/api/agents/${encodeURIComponent(agentName)}/metrics${query ? `?${query}` : ""}`
+    );
+  }
+
+  async getAgentObjectives(agentName: string): Promise<Record<string, unknown>> {
+    return this.request(
+      "GET",
+      `/api/agents/${encodeURIComponent(agentName)}/objectives`
+    );
+  }
+
+  /**
+   * Re-read the agent's template.yaml and reconcile its declared metrics.
+   *
+   * The remedy named by `record_metrics`'s `metric_undeclared` hint, so it has
+   * to be reachable from the same place the hint is read (ent#478, TD-4).
+   */
+  async refreshMetricDefinitions(
+    agentName: string
+  ): Promise<Record<string, unknown>> {
+    return this.request(
+      "POST",
+      `/api/agents/${encodeURIComponent(agentName)}/metrics/definitions/refresh`,
+      {}
     );
   }
 
@@ -2135,6 +2370,39 @@ export class TrinityClient {
   }
 
   /**
+   * An agent's own ask, by the request_id it chose (trinity-enterprise#611).
+   * Proxies GET /api/agents/{name}/operator-queue/{request_id}: the backend
+   * answers only the agent's own key (or the system key as trinity-system)
+   * with a redacted projection, and still after Clear All.
+   */
+  async getMyAsk(agentName: string, requestId: string): Promise<OperatorQueueAskReadback> {
+    return this.request<OperatorQueueAskReadback>(
+      "GET",
+      `/api/agents/${encodeURIComponent(agentName)}/operator-queue/${encodeURIComponent(requestId)}`,
+    );
+  }
+
+  /**
+   * Raise an ask as the agent itself (trinity-enterprise#611). Proxies
+   * POST /api/agents/{name}/operator-queue: the backend answers only the
+   * agent's own key (or the system key as trinity-system), 201 with the
+   * receipt on a new ask and 200 with the first receipt on a replay. A refusal
+   * (422 / 429 / 403) is thrown as an ApiError carrying the named code.
+   */
+  async raiseAsk(agentName: string, body: OperatorAskCreate, turn?: string): Promise<OperatorAskReceipt> {
+    // ent#661 v3: the raising turn as the platform saw it (#2392), so an ask
+    // raised in a project chat is found on the project.
+    return this.request<OperatorAskReceipt>(
+      "POST",
+      `/api/agents/${encodeURIComponent(agentName)}/operator-queue`,
+      body,
+      false,
+      undefined,
+      turn ? { "X-Trinity-Execution-Id": turn } : undefined,
+    );
+  }
+
+  /**
    * Respond to (resolve) a pending operator-queue item (OPS-001, #1104).
    * Proxies POST /api/operator-queue/{id}/respond. The backend 400s if the
    * item is not in a respondable (`pending`) state — surfaced as a thrown
@@ -2142,7 +2410,7 @@ export class TrinityClient {
    */
   async respondToOperatorQueueItem(
     itemId: string,
-    body: { response: string; response_text?: string },
+    body: { response: string; response_text?: string; acknowledge_divergence?: boolean },
   ): Promise<OperatorQueueItem> {
     return this.request<OperatorQueueItem>(
       "POST",
@@ -2168,6 +2436,7 @@ export class TrinityClient {
       expires_in?: number;
       execution_id?: string;
       dedup_label?: string;
+      audience_email?: string;
     }
   ): Promise<{
     file_id: string;
@@ -2175,6 +2444,9 @@ export class TrinityClient {
     expires_at: string;
     size_bytes: number;
     mime_type?: string;
+    visible_to_requester?: boolean | null;
+    visibility_note?: string | null;
+    addressed_to?: string | null;
   }> {
     return this.request(
       "POST",
@@ -2193,7 +2465,8 @@ export class TrinityClient {
   async sendUserMessage(
     agentName: string,
     data: {
-      recipient_email: string;
+      recipient_email?: string;
+      to?: "primary" | "approver" | "viewer";
       text: string;
       channel?: "auto" | "telegram" | "slack" | "web";
       reply_to_thread?: boolean;
@@ -2296,6 +2569,44 @@ export class TrinityClient {
       "POST",
       `/api/agents/${encodeURIComponent(agentName)}/user-memory`,
       data
+    );
+  }
+
+  // ============================================================================
+  // Seat Decision Record (trinity-enterprise#638, R25)
+  // ============================================================================
+
+  /**
+   * Record a decision for the seat an execution serves. The seat is resolved
+   * server-side from `execution_id`; `idempotencyKey` makes a transport retry
+   * record once (Invariant #18).
+   */
+  async recordSeatDecision(
+    agentName: string,
+    data: Record<string, unknown>,
+    idempotencyKey?: string
+  ): Promise<{ success: boolean; decision: Record<string, unknown>; hint?: string | null; replayed?: boolean }> {
+    return this.request(
+      "POST",
+      `/api/agents/${encodeURIComponent(agentName)}/decisions`,
+      data,
+      false,
+      undefined,
+      idempotencyKey ? { "Idempotency-Key": idempotencyKey } : undefined
+    );
+  }
+
+  /** The seat's standing decisions + evidence stats (no person emails). */
+  async listSeatDecisions(
+    agentName: string,
+    executionId: string,
+    includeHistory: boolean = false
+  ): Promise<{ agent_name: string; decisions: Record<string, unknown>[]; stats: Record<string, unknown> }> {
+    const q = new URLSearchParams({ execution_id: executionId });
+    if (includeHistory) q.set("include_history", "true");
+    return this.request(
+      "GET",
+      `/api/agents/${encodeURIComponent(agentName)}/decisions?${q.toString()}`
     );
   }
 
@@ -2576,9 +2887,24 @@ export class TrinityClient {
       runtime_available?: boolean;
       last_check_at?: string;
       issues: string[];
+      // trinity-enterprise#707: null when the agent has no git binding.
+      sync?: FleetAgentSync | null;
     }>;
+    sync_summary?: FleetSyncSummary | null;
   }> {
     return this.request("GET", "/api/monitoring/status");
+  }
+
+  /**
+   * Fleet git sync audit (#390, trinity-enterprise#707): per-agent sync state,
+   * the divergence columns and the policy's verdict. The backend scopes the
+   * rows to the caller's accessible agents (admins: all).
+   */
+  async getFleetSyncAudit(): Promise<{
+    agents: Array<Record<string, unknown>>;
+    summary: Record<string, number>;
+  }> {
+    return this.request("GET", "/api/fleet/sync-audit");
   }
 
   /**
@@ -2620,6 +2946,18 @@ export class TrinityClient {
     recent_alerts: unknown[];
     uptime_percent_24h?: number;
     avg_latency_24h_ms?: number;
+    // ent#479: informational declared-metric freshness. `null` means the store
+    // could not be read, NOT that the agent declared nothing.
+    metrics?: {
+      declared: number;
+      with_points: number;
+      stale: string[];
+      no_cadence: string[];
+      no_points: string[];
+      retired_with_points: string[];
+      last_point_at: string | null;
+      rule: string;
+    } | null;
   }> {
     return this.request(
       "GET",
@@ -2876,6 +3214,11 @@ export class TrinityClient {
     is_active: boolean;
     created_at: string;
     updated_at: string;
+    // ent#600: group conversation context (TelegramGroupConfigResponse)
+    context_enabled: boolean;
+    context_status: "all_messages" | "tagged_only" | "unconfirmed" | "off";
+    context_hint: string | null;
+    last_untagged_seen_at: string | null;
   }>> {
     return this.request(
       "GET",
@@ -3352,6 +3695,75 @@ export class TrinityClient {
     execution_id?: string;
   }): Promise<{ name: string; kind: string; value: string }> {
     return this.request("POST", "/api/enterprise/credential-vault/fetch", body);
+  }
+
+  // --- Workspace Projects (trinity-enterprise#661) ---------------------------
+  // Agent-key routes: only projects the calling agent is ACTIVE on, and only in
+  // a turn whose audience is internal. `turn` is the platform-supplied
+  // X-Trinity-Execution-Id of THIS request (#2392) — the backend decides the
+  // audience from that row, so it is forwarded, never chosen by the tool.
+
+  private projectRequest<T>(method: string, path: string, turn?: string, body?: unknown): Promise<T> {
+    return this.request<T>(method, path, body, false, undefined, turn ? { "X-Trinity-Execution-Id": turn } : undefined);
+  }
+
+  private projectPath(projectId: string, tail = ""): string {
+    return `/api/enterprise/projects/agent/projects/${encodeURIComponent(projectId)}${tail}`;
+  }
+
+  /** List the projects the calling key's agent works on. */
+  async listMyProjects(turn?: string): Promise<Array<Record<string, unknown>>> {
+    const res = await this.projectRequest<{ projects: Array<Record<string, unknown>> }>(
+      "GET", "/api/enterprise/projects/agent/projects", turn);
+    return res.projects;
+  }
+
+  /** Read one project the calling key's agent works on (uniform 404 otherwise). */
+  async getMyProject(projectId: string, turn?: string): Promise<Record<string, unknown>> {
+    return this.projectRequest("GET", this.projectPath(projectId), turn);
+  }
+
+  async listProjectTasks(projectId: string, status = "open", turn?: string): Promise<Array<Record<string, unknown>>> {
+    const res = await this.projectRequest<{ tasks: Array<Record<string, unknown>> }>(
+      "GET", this.projectPath(projectId, `/tasks?status=${encodeURIComponent(status)}`), turn);
+    return res.tasks;
+  }
+
+  async createProjectTask(projectId: string, body: Record<string, unknown>, turn?: string): Promise<Record<string, unknown>> {
+    return this.projectRequest("POST", this.projectPath(projectId, "/tasks"), turn, body);
+  }
+
+  async updateProjectTask(projectId: string, taskId: string, body: Record<string, unknown>, turn?: string): Promise<Record<string, unknown>> {
+    return this.projectRequest("PATCH", this.projectPath(projectId, `/tasks/${encodeURIComponent(taskId)}`), turn, body);
+  }
+
+  async addProjectTaskNote(projectId: string, taskId: string, body: string, turn?: string): Promise<Record<string, unknown>> {
+    return this.projectRequest("POST", this.projectPath(projectId, `/tasks/${encodeURIComponent(taskId)}/log`), turn, { body });
+  }
+
+  async getProjectLog(projectId: string, limit = 50, turn?: string): Promise<Array<Record<string, unknown>>> {
+    const res = await this.projectRequest<{ entries: Array<Record<string, unknown>> }>(
+      "GET", this.projectPath(projectId, `/log?limit=${limit}`), turn);
+    return res.entries;
+  }
+
+  async addProjectLogEntry(projectId: string, body: Record<string, unknown>, turn?: string): Promise<Record<string, unknown>> {
+    return this.projectRequest("POST", this.projectPath(projectId, "/log"), turn, body);
+  }
+
+  async linkToProject(projectId: string, body: Record<string, unknown>, turn?: string): Promise<Record<string, unknown>> {
+    return this.projectRequest("POST", this.projectPath(projectId, "/items"), turn, body);
+  }
+
+  // v3: the steward's digest and health.
+  async getStewardDigest(turn?: string): Promise<Array<Record<string, unknown>>> {
+    const res = await this.projectRequest<{ projects: Array<Record<string, unknown>> }>(
+      "GET", "/api/enterprise/projects/agent/stewarding", turn);
+    return res.projects;
+  }
+
+  async setProjectHealth(projectId: string, body: Record<string, unknown>, turn?: string): Promise<Record<string, unknown>> {
+    return this.projectRequest("POST", this.projectPath(projectId, "/health"), turn, body);
   }
 
   // --- Role assignments (trinity-enterprise#500) ----------------------------

@@ -1,7 +1,7 @@
 """Pydantic models for Workspace asks (ent#364). OSS core since ent#428."""
 from __future__ import annotations
 
-from typing import Any, List, Optional
+from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field
 
@@ -22,13 +22,35 @@ class WorkspaceAsk(BaseModel):
     title: str
     question: str
     options: Optional[List[Any]] = None
+    # trinity-enterprise#611: the exact action an approval asks this person to
+    # approve. Agent-authored like `context`, but named here on purpose: it is the
+    # thing being decided, and the prompt tells agents to put it here "so the
+    # operator can verify what they are approving". `context` stays off.
+    proposal: Optional[Dict[str, Any]] = None
     created_at: str
     expires_at: Optional[str] = None
-    # pending | expired on a LISTING (`list_asks` queries `status="pending"`, so
-    # terminal rows never appear there); `answered` is reachable only from the
-    # ANSWER response, where the row this call just recorded is projected back.
+    # pending | answered | cancelled | expired. A listing carries pending asks,
+    # plus — with `include_ended` — the ones that ended in the last 7 days
+    # (trinity-enterprise#611); the ANSWER response projects the row it recorded.
     status: str
+    # How the ask ended, COARSE on purpose (trinity-enterprise#611): `ended_by`
+    # is `you` | `operator` | `timeout`, never an email, and the operator's
+    # cancel reason never crosses. `ended_at` is when it ended — None when the
+    # platform does not know (a row that ended before the ledger), never the
+    # time the ask was filed.
+    ended_at: Optional[str] = None
+    ended_by: Optional[str] = None
     chat_id: Optional[str] = None   # the thread it was attached to, when known
+    # ent#734: raised BY the turn serving `chat_id` (draw it as a tile there),
+    # as opposed to a background ask (schedule / loop / gate) whose `chat_id` is
+    # Main only as the reply target and which renders in no chat.
+    raised_in_turn: bool = False
+    # #2915: what the platform last established about the agent's own copy of
+    # this ask, COARSE on purpose — `confirmed | changed | closed | unconfirmed`.
+    # A client never sees the reason (it names the operator's infrastructure)
+    # nor a poller timestamp. `aging` is the operator's configured bound.
+    sync: str = "unconfirmed"
+    aging: bool = False
     # ent#430 AC #5: whether answering this ask sets work in motion, so a
     # surface can say "answered" without implying the agent started working.
     # Populated only on the ANSWER response — a pending ask has not been
@@ -52,3 +74,62 @@ class WorkspaceAskAnswer(BaseModel):
     """
     response: Optional[str] = Field(default=None, max_length=500)
     response_text: Optional[str] = Field(default=None, max_length=4000)
+    # #2915: see `OperatorResponse.acknowledge_divergence`.
+    acknowledge_divergence: bool = False
+
+
+# --- trinity-enterprise#610 PR A2, §3g L7 (E1): an ask's context ---------------
+#
+# Platform data only, and deliberately STRICTER than the Work tab's projection
+# (`work/models.py::WorkItem` carries the run id): no `cost` and no
+# `execution_id` anywhere below (§6.9). `execution_id` is AGENT-written on the
+# queue row, so it is a lookup key the service validates, never a fact it
+# forwards.
+
+
+class WorkspaceAskOriginMessage(BaseModel):
+    """One message of the chat the ask came from — an excerpt, never the body
+    (`chat_previews._arrival_excerpt`: credentials redacted, markdown stripped,
+    at most 280 chars). No `cost`."""
+    id: str
+    role: str
+    at: str
+    excerpt: str
+
+
+class WorkspaceAskOrigin(BaseModel):
+    """Where the ask came from. `verified` is True only when the run's portal
+    session is the viewer's own thread; only then are `messages` filled (the
+    three before the ask). Otherwise it is the ask's own chat — Main, for every
+    ingested ask — with no excerpt, because what precedes an ask in Main is
+    usually unrelated to it."""
+    chat_id: str
+    title: Optional[str] = None
+    is_main: bool = False
+    verified: bool = False
+    messages: List[WorkspaceAskOriginMessage] = []
+
+
+class WorkspaceAskRun(BaseModel):
+    """The run that raised the ask — shown only after the agent, live-window and
+    audience checks pass. `label` names the schedule for a platform principal
+    only ("Asked by the nightly-billing run"); a client reads "Asked during a
+    scheduled run" (T12)."""
+    kind: str               # schedule | manual | turn | delegated | loop | room | other
+    label: str
+    started_at: Optional[str] = None
+
+
+class WorkspaceAskAnswered(BaseModel):
+    """One of the viewer's own recent answers to this agent — how they answered
+    a similar ask. The answer is an excerpt of the decision, never the note."""
+    id: str
+    title: str
+    answer: Optional[str] = None
+    ended_at: Optional[str] = None
+
+
+class WorkspaceAskContext(BaseModel):
+    origin: Optional[WorkspaceAskOrigin] = None
+    run: Optional[WorkspaceAskRun] = None
+    recent_answers: List[WorkspaceAskAnswered] = []

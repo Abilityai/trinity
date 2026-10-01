@@ -490,7 +490,7 @@ class TestDegradesHonestly:
 
         assert any(
             p.search(f"{NO_CREDENTIAL_MARKER} host=github.com")
-            for p in gs._AUTH_PATTERNS
+            for p in gs.conflicts._AUTH_PATTERNS
         )
 
     def test_a_bare_403_is_NOT_treated_as_an_auth_failure(self):
@@ -505,7 +505,7 @@ class TestDegradesHonestly:
             "fatal: unable to access 'https://github.com/o/r/': "
             "The requested URL returned error: 403"
         )
-        assert not any(p.search(rate_limited) for p in gs._AUTH_PATTERNS)
+        assert not any(p.search(rate_limited) for p in gs.conflicts._AUTH_PATTERNS)
 
 
 class TestStoreAndEraseAreNoOps:
@@ -636,7 +636,7 @@ class TestTheSweep:
         assert report == {
             "remotes_scrubbed": 0, "harvested": 0, "seeded": 0, "refused": 0,
             "gitmodules_hits": 0, "helper_ok": 1, "competing_helpers": 0,
-            "root_readable": 1,
+            "root_readable": 1, "root_traversable": 1, "git_present": 1,
         }
 
     def test_a_caller_held_credential_can_be_SEEDED(self, sweep, helper_env, tmp_path):
@@ -969,10 +969,13 @@ def _git_service():
 class _RecordingExec:
     """Stands in for `execute_command_in_container`, recording every exec."""
 
-    def __init__(self, helper_ok: int = 1, root_readable: int = 1):
+    def __init__(self, helper_ok: int = 1, root_readable: int = 1,
+                 root_traversable: int = 1, git_present: int = 1):
         self.calls: list[dict] = []
         self.helper_ok = helper_ok
         self.root_readable = root_readable
+        self.root_traversable = root_traversable
+        self.git_present = git_present
 
     async def __call__(self, container_name, command, timeout=60, *,
                        environment=None, user="developer"):
@@ -983,7 +986,9 @@ class _RecordingExec:
             return {"exit_code": 0, "output": (
                 f"TRINITY_SCRUB_REPORT remotes_scrubbed=1 harvested=0 seeded=0 "
                 f"refused=0 gitmodules_hits=0 helper_ok={self.helper_ok} "
-                f"competing_helpers=0 root_readable={self.root_readable}"
+                f"competing_helpers=0 root_readable={self.root_readable} "
+                f"root_traversable={self.root_traversable} "
+                f"git_present={self.git_present}"
             )}
         return {"exit_code": 0, "output": ""}
 
@@ -998,13 +1003,23 @@ def gs_with_exec():
     gs = _git_service()
     patches = []
 
-    def _install(helper_ok: int = 1, root_readable: int = 1) -> _RecordingExec:
-        recorder = _RecordingExec(helper_ok=helper_ok, root_readable=root_readable)
-        ctx = patch.multiple(
-            gs,
-            execute_command_in_container=recorder,
-            _detect_git_dir=AsyncMock(return_value="/home/developer"),
+    def _install(helper_ok: int = 1, root_readable: int = 1,
+                 root_traversable: int = 1, git_present: int = 1) -> _RecordingExec:
+        recorder = _RecordingExec(
+            helper_ok=helper_ok, root_readable=root_readable,
+            root_traversable=root_traversable, git_present=git_present,
         )
+        # #1028: `git_service` is a package. Each sibling module binds
+        # `execute_command_in_container` at import, and `_detect_git_dir` lives
+        # in `gitignore` and is reached as `gitignore._detect_git_dir(...)` — so
+        # the recorder is installed on every module that execs, and the git-dir
+        # stub on the one module that owns it.
+        for mod in (gs.token_scrub, gs.remotes, gs.provisioning, gs.sync):
+            ctx = patch.object(mod, "execute_command_in_container", recorder)
+            ctx.start()
+            patches.append(ctx)
+        ctx = patch.object(gs.gitignore, "_detect_git_dir",
+                           AsyncMock(return_value="/home/developer"))
         ctx.start()
         patches.append(ctx)
         return recorder
@@ -1123,7 +1138,7 @@ class TestRotationWithoutARecreate:
 
     def test_the_env_write_never_logs_its_output(self):
         """That exec is editing `.env`; its output could echo the file."""
-        source = (_ROOT / "src/backend/services/git_service.py").read_text()
+        source = (_ROOT / "src/backend/services/git_service/token_scrub.py").read_text()
         fn_start = source.index("async def write_container_github_pat")
         fn_end = source.index("\ndef _alarm_git_token_scrub_refused")
         body = source[fn_start:fn_end]
@@ -1194,7 +1209,7 @@ class TestTheSweepIsBoundedAndSurvives:
         """
         gs = _git_service()
         assert gs._SCRUB_CONCURRENCY >= 1
-        source = (_ROOT / "src/backend/services/git_service.py").read_text()
+        source = (_ROOT / "src/backend/services/git_service/token_scrub.py").read_text()
         body = source[source.index("async def scrub_git_remote_tokens"):
                       source.index("def schedule_fleet_git_remote_token_sweep")]
         assert "async with _scrub_semaphore:" in body, (
@@ -1206,7 +1221,7 @@ class TestTheSweepIsBoundedAndSurvives:
         sleeps 20s before doing real work and runs once per boot, so a
         collected task is a remediation that silently never happened."""
         gs = _git_service()
-        source = (_ROOT / "src/backend/services/git_service.py").read_text()
+        source = (_ROOT / "src/backend/services/git_service/token_scrub.py").read_text()
         fn = source[source.index("def schedule_fleet_git_remote_token_sweep"):
                     source.index("def spawn_git_remote_token_scrub")]
         assert "global _fleet_scrub_task" in fn
@@ -1215,7 +1230,7 @@ class TestTheSweepIsBoundedAndSurvives:
 
     def test_the_per_agent_spawn_keeps_its_task_alive_too(self):
         gs = _git_service()
-        source = (_ROOT / "src/backend/services/git_service.py").read_text()
+        source = (_ROOT / "src/backend/services/git_service/token_scrub.py").read_text()
         fn = source[source.index("def spawn_git_remote_token_scrub"):
                     source.index("_inflight_token_scrub_tasks: set")]
         assert "_inflight_token_scrub_tasks.add(task)" in fn
@@ -1306,15 +1321,110 @@ class TestTheSweepCannotReportWorkItDidNotDo:
         assert report["remotes_scrubbed"] == 1
 
 
+class TestNoRepositoryIsNotAnUnreadableOne:
+    """#2930. `root_readable=0` had two causes and only one is an operator's
+    problem. An agent from a `local:` template has no repository, so the
+    readability test failed on EXISTENCE — and every stock starter filed a
+    "could not check this agent's git remotes" alert on every fresh install,
+    telling a first-time operator to loosen a capability setting that was not
+    involved."""
+
+    def test_the_script_reports_no_repository_as_traversable_and_absent(
+        self, sweep, helper_env, tmp_path
+    ):
+        bare = tmp_path / "no-repo"
+        bare.mkdir()
+        report, _ = sweep(bare, GITHUB_PAT="env_tok")
+        assert report["root_traversable"] == 1, "the home itself was readable"
+        assert report["git_present"] == 0
+        assert report["root_readable"] == 0
+
+    def test_a_real_repo_reports_both(self, sweep, helper_env, tmp_path):
+        """The positive control for the pair — without it the assertion above
+        passes against flags hard-coded to 1/0."""
+        repo = _mkrepo(tmp_path / "present", _TOKEN_URL)
+        report, _ = sweep(repo, GITHUB_PAT="env_tok")
+        assert (report["root_traversable"], report["git_present"]) == (1, 1)
+
+    @pytest.mark.skipif(
+        os.geteuid() == 0,
+        reason="root bypasses the permission bits this test relies on",
+    )
+    def test_an_unreadable_home_is_not_traversable(
+        self, sweep, helper_env, tmp_path
+    ):
+        """The capability case the alarm exists for: ROOT cannot be entered, so
+        whether a repo is in there is unknowable — which is precisely why this
+        one still alarms."""
+        repo = _mkrepo(tmp_path / "locked", _TOKEN_URL)
+        repo.chmod(0o000)
+        try:
+            report, _ = sweep(repo, GITHUB_PAT="env_tok")
+        finally:
+            repo.chmod(0o755)
+        assert report["root_traversable"] == 0
+        assert report["root_readable"] == 0
+
+    def test_no_repository_files_no_alarm(self, gs_with_exec):
+        gs = _git_service()
+        gs_with_exec(helper_ok=1, root_readable=0, root_traversable=1, git_present=0)
+        import asyncio
+
+        with patch.object(gs.token_scrub, "_alarm_git_token_scrub_unreadable") as alarm:
+            report = asyncio.run(gs.scrub_git_remote_tokens("a1"))
+
+        assert report["git_present"] == 0
+        assert not alarm.called, (
+            "nothing to sweep is not a finding — this fired once per local-template "
+            "agent on every fresh install (#2930)"
+        )
+
+    def test_an_unreachable_repo_still_alarms(self, gs_with_exec):
+        """The ent#615 property this must not trade away: an all-zero report
+        from a tree the sweep could not see is never an all-clear."""
+        gs = _git_service()
+        gs_with_exec(helper_ok=1, root_readable=0, root_traversable=0, git_present=0)
+        import asyncio
+
+        with patch.object(gs.token_scrub, "_alarm_git_token_scrub_unreadable") as alarm:
+            asyncio.run(gs.scrub_git_remote_tokens("a1"))
+        assert alarm.called
+
+    def test_a_present_but_unreadable_repo_still_alarms(self, gs_with_exec):
+        """The other unreachable shape: the home is traversable, `.git` is
+        there, and it still could not be read."""
+        gs = _git_service()
+        gs_with_exec(helper_ok=1, root_readable=0, root_traversable=1, git_present=1)
+        import asyncio
+
+        with patch.object(gs.token_scrub, "_alarm_git_token_scrub_unreadable") as alarm:
+            asyncio.run(gs.scrub_git_remote_tokens("a1"))
+        assert alarm.called
+
+    def test_an_old_report_without_the_flags_still_alarms(self, gs_with_exec):
+        """Fail-safe direction: a report that carries neither flag parses both
+        as 0, which routes to the alarm — the pre-#2930 behaviour."""
+        gs = _git_service()
+        rec = gs_with_exec(helper_ok=1, root_readable=0)
+        rec.root_traversable = 0
+        rec.git_present = 0
+        import asyncio
+
+        with patch.object(gs.token_scrub, "_alarm_git_token_scrub_unreadable") as alarm:
+            asyncio.run(gs.scrub_git_remote_tokens("a1"))
+        assert alarm.called
+
+
 class TestAnUnreadableSweepReachesAnOperator:
     """The consumer half of [C1]. A report nobody can act on is not a fix."""
 
     def test_it_alarms_when_the_sweep_could_not_look(self, gs_with_exec):
         gs = _git_service()
-        gs_with_exec(helper_ok=1, root_readable=0)
+        # The capability case: ROOT itself could not be traversed (#2930).
+        gs_with_exec(helper_ok=1, root_readable=0, root_traversable=0, git_present=0)
         import asyncio
 
-        with patch.object(gs, "_alarm_git_token_scrub_unreadable") as alarm:
+        with patch.object(gs.token_scrub, "_alarm_git_token_scrub_unreadable") as alarm:
             report = asyncio.run(gs.scrub_git_remote_tokens("a1"))
 
         assert report["root_readable"] == 0
@@ -1330,7 +1440,7 @@ class TestAnUnreadableSweepReachesAnOperator:
         gs_with_exec(helper_ok=1, root_readable=1)
         import asyncio
 
-        with patch.object(gs, "_alarm_git_token_scrub_unreadable") as alarm:
+        with patch.object(gs.token_scrub, "_alarm_git_token_scrub_unreadable") as alarm:
             asyncio.run(gs.scrub_git_remote_tokens("a1"))
         assert not alarm.called
 

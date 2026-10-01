@@ -150,9 +150,13 @@ files: Optional[List[WebFileUpload]] = None  # (#364)
 ```
 for each file (up to max_files):
   1. sanitize_filename() — NFKC, path traversal, dedup
-  2. Reject unsupported MIME categories (PDF, ZIP, TAR, video/, audio/)
+  2. Reject unsupported MIME categories (PDF, tar/gzip/rar, video/, audio/) — ZIP is accepted (#2152)
   3. Actual size check against declared limit (TOCTOU defense)
   4. Magic-byte MIME validation via python-magic (graceful fallback):
+     - Declared `application/zip` whose bytes start with a ZIP signature (`PK\x03\x04` /
+       `PK\x05\x06` / `PK\x07\x08`, `utils/zip_signature.is_zip_container` — shared with the
+       outbound `detect_mime()`, #3080) → accepted without consulting libmagic (#3046:
+       libmagic 5.46 on Debian trixie returns `application/octet-stream` for a ZIP buffer)
      - Image MIME mislabel (JPEG vs PNG) → accept with detected MIME
      - text/plain vs text/csv → accept
      - Other mismatch → reject with "file type mismatch"
@@ -238,9 +242,9 @@ routers/chat.py:execute_parallel_task           routers/public.py:public_chat
 upload_service.process_file_uploads():
   for each file (max 3):
     sanitize_filename() — unicode NFKC, path traversal, dedup
-    reject unsupported MIME (PDF, ZIP, video, audio)
+    reject unsupported MIME (PDF, tar/gzip/rar, video, audio)
     size check vs WEB_MAX_FILE_SIZE / WEB_MAX_IMAGE_SIZE
-    magic-byte MIME validation (python-magic; fallback graceful)
+    magic-byte MIME validation (python-magic; fallback graceful; declared ZIP with ZIP signature bypasses libmagic, #3046)
     if image:
       base64-encode → append to image_data list
       audit log: storage=stream_json_vision

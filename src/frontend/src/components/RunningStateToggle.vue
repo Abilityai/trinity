@@ -5,7 +5,7 @@
       class="font-medium whitespace-nowrap min-w-[3.25rem] text-right"
       :class="[
         labelSizeClass,
-        modelValue ? 'text-status-success-600 dark:text-status-success-400' : 'text-gray-500 dark:text-gray-400'
+        modelValue ? 'text-status-success-700 dark:text-status-success-400' : 'text-gray-500 dark:text-gray-400'
       ]"
     >
       {{ modelValue ? 'Running' : 'Stopped' }}

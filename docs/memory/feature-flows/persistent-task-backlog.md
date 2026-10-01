@@ -192,6 +192,23 @@ The partial index is the key to cheap FIFO claim — only queued rows are
 indexed. `claim_next_queued` reads at most one row via the subquery,
 making the operation O(log n) on backlog size.
 
+**Pull claim order (#2842, #2843).** The backend drain above claims oldest
+first. A pull pilot's worker claims through the same method with two extra
+rules: rows whose `triggered_by` is in `pull_pilot.INTERACTIVE_TRIGGERS` go
+first (strict precedence, no anti-starvation rule), and a row whose
+`conversation_key` already has a `running` row is skipped. The partial unique
+index below stops two workers running one conversation at once:
+
+```sql
+CREATE UNIQUE INDEX idx_executions_one_running_turn
+ON schedule_executions(agent_name, conversation_key)
+WHERE status = 'running' AND conversation_key IS NOT NULL;
+```
+
+`backlog_service.enqueue` stamps `conversation_key` (`chat_session_id`, else
+`resume_session_id`) on pilot agents only. The ordering expression cannot use
+`idx_executions_queued`; per-agent queues are small.
+
 ### backlog_metadata JSON Shape
 
 Captured at enqueue time, replayed on drain. No credential values, only

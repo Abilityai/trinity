@@ -135,7 +135,7 @@ last_task_at: Optional[str] = None            # db_models.py:855
 | **Agent Row Click** | - | Navigate to agent detail |
 | **"Check All" button** | `POST /api/monitoring/check-all` | Trigger fleet-wide check (admin) |
 | **Agent refresh button** | `POST /api/monitoring/agents/{name}/check` | Trigger single agent check (admin) |
-| MCP: `get_fleet_health` | `GET /api/monitoring/status` | Fleet health via MCP |
+| MCP: `get_fleet_health` | `GET /api/monitoring/status` | Fleet health via MCP (carries each agent's `sync` block, `sync_summary` and the `issues` strings — ent#707) |
 | MCP: `get_agent_health` | `GET /api/monitoring/agents/{name}` | Agent health via MCP |
 | MCP: `trigger_health_check` | `POST /api/monitoring/agents/{name}/check` | Trigger check via MCP |
 
@@ -397,7 +397,7 @@ app.include_router(monitoring_router)  # Agent Monitoring (MON-001)
 
 | Endpoint | Line | Method | Auth | Description |
 |----------|------|--------|------|-------------|
-| `GET /api/monitoring/status` | 87-160 | `get_fleet_status()` | User | Fleet health summary |
+| `GET /api/monitoring/status` | 87-160 | `get_fleet_status()` | User | Fleet health summary; `_merge_sync_health()` adds the per-agent git `sync` block + `sync_summary` (ent#707, see below) |
 | `GET /api/monitoring/agents/{name}` | 167-249 | `get_agent_health()` | Owner | Agent health detail |
 | `GET /api/monitoring/agents/{name}/history` | 252-273 | `get_agent_health_history()` | Owner | Historical checks |
 | `POST /api/monitoring/agents/{name}/check` | 276-303 | `trigger_health_check()` | Admin | Force health check |
@@ -743,7 +743,8 @@ server.addTool(monitoringTools.triggerHealthCheck);
 
 | Tool | Line | Parameters | Description |
 |------|------|------------|-------------|
-| `get_fleet_health` | 41-91 | (none) | Fleet-wide health summary |
+| `get_fleet_health` | 41-91 | (none) | Fleet-wide health summary, with `sync` / `sync_summary` / `issues` (ent#707) |
+| `get_fleet_sync_audit` | — | (none) | The fleet git sync audit, `GET /api/fleet/sync-audit` unchanged (ent#707) |
 | `get_agent_health` | 96-158 | `agent_name` | Detailed agent health |
 | `trigger_health_check` | 163-203 | `agent_name` | Force immediate check (admin) |
 
@@ -928,6 +929,29 @@ Monitoring service stopped
 ```
 
 ---
+
+
+## Git sync health on fleet health (trinity-enterprise#707)
+
+`GET /api/monitoring/status` annotates each agent with its git sync health, read path only:
+
+```
+get_fleet_status()
+  ├── _build_agent_summary() × N        (unchanged)
+  ├── heartbeat_status_bulk()           (unchanged annotation)
+  └── _merge_sync_health(agents, names)
+        └── sync_health_view.fleet_sync(names)
+              ├── db.list_sync_health_rows(names)   -- ONE query: agent_git_config ⋈ live ownership ⟕ agent_sync_state
+              └── sync_block() per git-bound agent → sync_view() → sync_freeze_policy.classify()
+```
+
+- `agent.sync` = `{binding, auto_sync_enabled, ahead, behind, dirty_files, last_successful_push_at, divergence_age_s, state, reason, recommendation, frozen}`; `null` for an agent with no git binding. Counts are null until the poller has observed the agent (`state: unknown`).
+- `sync_summary` = `{git_bound, diverged, frozen, auto_sync_off, dirty, red, yellow}` over the caller's accessible, git-bound agents.
+- A red agent gains `issues[]` entry `sync: <reason> — <recommendation>`.
+- An **annotation** (the heartbeat precedent): `status`, the sort and the `summary` counts are unchanged.
+- Computed before it is applied; a fault logs and leaves every `sync` / `sync_summary` null, never the "aggregation failed" payload.
+- `reason` never carries the agent-written git error (`sync_view` withholds it); the recommendation still reads it.
+- Tests: `tests/unit/test_ent707_fleet_health_sync.py`; MCP `src/mcp-server/src/tools/monitoring.test.ts`. Flow detail: [git-sync-health.md](git-sync-health.md).
 
 ## Related Flows
 

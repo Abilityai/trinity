@@ -24,9 +24,10 @@
  */
 
 import { z } from "zod";
-import { TrinityClient } from "../client.js";
+import { TrinityClient, depthRefusalFromError } from "../client.js";
 import type { LoopStatus, McpAuthContext } from "../types.js";
-import { checkAgentEdge, resolveClient } from "../access.js";
+import { accessDenied, checkAgentEdge, resolveClient } from "../access.js";
+import type { DenyCallContext } from "../access.js";
 
 export function createLoopTools(
   client: TrinityClient,
@@ -44,9 +45,11 @@ export function createLoopTools(
    * The loop-id tools' gate. Returns the denial body, or null when the caller
    * may reach the loop's agent. Fail-closed: a payload without an agent name is
    * not a loop this layer can vouch for. The internal reason (which names the
-   * agent) is logged, never returned — the caller supplied only an id.
+   * agent) is logged and stamped on the admin-only audit row (#2807), never
+   * returned — the caller supplied only an id.
    */
   const denyUnlessAccessible = async (
+    context: DenyCallContext | undefined,
     apiClient: TrinityClient,
     authContext: McpAuthContext | undefined,
     loopId: string,
@@ -60,15 +63,15 @@ export function createLoopTools(
     if (access.allowed) return null;
     const caller = authContext?.agentName || authContext?.userId || "unknown";
     console.log(`[Access Denied] loop ${loopId}: ${caller}: ${access.reason}`);
-    return JSON.stringify(
+    return accessDenied(
+      context,
       {
         success: false,
         error: "Access denied",
         reason: `Loop '${loopId}' not found or not accessible`,
         hint: LOOP_DENIAL_HINT,
       },
-      null,
-      2
+      access.reason
     );
   };
 
@@ -253,6 +256,9 @@ export function createLoopTools(
           });
           return JSON.stringify({ success: true, ...result }, null, 2);
         } catch (error) {
+          // #2973: a chain-depth refusal is a result to stop on, not an error.
+          const refusal = depthRefusalFromError(error, agentName);
+          if (refusal) return JSON.stringify(refusal, null, 2);
           const msg = error instanceof Error ? error.message : String(error);
           console.error(`[run_agent_loop] error: ${msg}`);
           return JSON.stringify({ success: false, error: msg }, null, 2);
@@ -281,7 +287,7 @@ export function createLoopTools(
         const apiClient = getClient(authContext);
         try {
           const loop = await apiClient.getLoopStatus(params.loop_id);
-          const denial = await denyUnlessAccessible(apiClient, authContext, params.loop_id, loop);
+          const denial = await denyUnlessAccessible(context, apiClient, authContext, params.loop_id, loop);
           if (denial) return denial;
           return JSON.stringify({ success: true, ...loop }, null, 2);
         } catch (error) {
@@ -327,7 +333,7 @@ export function createLoopTools(
             2
           );
         }
-        const denial = await denyUnlessAccessible(apiClient, authContext, params.loop_id, loop);
+        const denial = await denyUnlessAccessible(context, apiClient, authContext, params.loop_id, loop);
         if (denial) return denial;
         try {
           const result = await apiClient.stopAgentLoop(params.loop_id);

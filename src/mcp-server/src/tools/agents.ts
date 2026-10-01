@@ -6,8 +6,37 @@
 
 import { z } from "zod";
 import { TrinityClient } from "../client.js";
-import type { McpAuthContext } from "../types.js";
+import type { McpAuthContext, StartAgentResult } from "../types.js";
+import { accessDenied } from "../access.js";
 import { deriveMcpIdempotencyKey } from "./chat.js";
+
+/** Statuses of a start's skill delivery that need no follow-up line. */
+const QUIET_SKILL_STATUSES = new Set(["success", "skipped"]);
+/** Per-skill outcomes that mean the package is on the agent. */
+// `unassigned_meanwhile`: unassigned mid-start, correctly not installed — not a problem.
+const DELIVERED = new Set(["injected", "unchanged", "fallback", "unassigned_meanwhile"]);
+
+/**
+ * #2991: the skill-delivery part of a start, as text an agent can act on.
+ * Empty for a clean delivery or a no-op (no skills, or an already-running
+ * container) — the start message alone then says everything.
+ */
+export function skillsDeliveryLines(result: StartAgentResult): string[] {
+  const status = result.skills_injection ?? "unknown";
+  const detail = result.skills_result ?? { status };
+  const problems = Object.entries(detail.skills ?? {}).filter(([, s]) => !DELIVERED.has(s.status));
+  const conflicts = detail.conflicts ?? [];
+  if (QUIET_SKILL_STATUSES.has(status) && problems.length === 0 && conflicts.length === 0) return [];
+  const reason = detail.reason ? ` (${detail.reason})` : "";
+  const lines = [`Skills delivery: ${status}${reason}`];
+  for (const [skill, s] of problems) {
+    lines.push(`- ${skill}: ${s.status}${s.code ? ` (${s.code})` : ""}`);
+  }
+  for (const skill of conflicts) {
+    if (!problems.some(([n]) => n === skill)) lines.push(`- ${skill}: conflict`);
+  }
+  return lines;
+}
 
 /**
  * Create agent management tools with the given client
@@ -128,11 +157,11 @@ export function createAgentTools(
 
             if (!permittedAgents.includes(name)) {
               console.log(`[get_agent_info] Agent '${callerAgentName}' denied access to '${name}' (not permitted)`);
-              return JSON.stringify({
+              return accessDenied(context, {
                 error: "Access denied",
                 reason: `Agent '${callerAgentName}' does not have permission to access '${name}'`,
                 hint: "Request permission from the agent owner or use the agent permissions API",
-              }, null, 2);
+              });
             }
           }
 
@@ -178,11 +207,11 @@ export function createAgentTools(
           if (agent_name !== callerAgentName) {
             const permittedAgents = await apiClient.getPermittedAgents(callerAgentName);
             if (!permittedAgents.includes(agent_name)) {
-              return JSON.stringify({
+              return accessDenied(context, {
                 success: false,
                 error: "Access denied",
                 reason: `Agent '${callerAgentName}' does not have permission to access '${agent_name}'`,
-              }, null, 2);
+              });
             }
           }
         }
@@ -259,6 +288,17 @@ export function createAgentTools(
             "Branch to track for this agent. Default: 'main'. " +
             "Can also be specified in template URL as 'github:owner/repo@branch'."
           ),
+        kind: z
+          .enum(["agent", "deployment"])
+          .optional()
+          .describe(
+            "What is being created from a 'github:owner/repo' template (trinity-enterprise#705). " +
+            "'agent' (default when omitted): the repository IS the agent — it gets a working branch it " +
+            "alone writes, auto-sync on and schedules paused while sync fails, but only when the repo is owned by the " +
+            "creator's own GitHub account (not a catalog template) and their own token (not the platform-wide one) can push to it; " +
+            "otherwise it is created pull-only and the response's git_mode " +
+            "says why. 'deployment': a deployment of a codebase — pull-only, no auto-push."
+          ),
         import_intent: z
           .enum(["copy", "clone"])
           .optional()
@@ -309,6 +349,7 @@ export function createAgentTools(
           mcp_servers?: string[];
           custom_instructions?: string;
           source_branch?: string;
+          kind?: "agent" | "deployment";
           import_intent?: "copy" | "clone";
           ephemeral?: { max_executions?: number; ttl_seconds?: number };
         },
@@ -327,6 +368,7 @@ export function createAgentTools(
           mcp_servers: args.mcp_servers,
           custom_instructions: args.custom_instructions,
           source_branch: args.source_branch,
+          kind: args.kind,
           import_intent: args.import_intent,
           ephemeral: args.ephemeral,
         };
@@ -458,7 +500,11 @@ export function createAgentTools(
       description:
         "Start a stopped agent. " +
         "Use this to restart an agent that was previously stopped. " +
-        "The agent must already exist in the platform.",
+        "The agent must already exist in the platform. " +
+        "The first line is the start message; when its assigned skills did not all land cleanly, the " +
+        "lines after it give the skills delivery status and one line per skill that was not delivered " +
+        "(`conflict` = the agent has its own skill of that name, which runs; the library copy was not " +
+        "installed). No extra lines means the skills landed or there was nothing to deliver.",
       parameters: z.object({
         name: z.string().describe("The name of the agent to start"),
       }),
@@ -466,7 +512,7 @@ export function createAgentTools(
         const authContext = context?.session;
         const apiClient = getClient(authContext);
         const result = await apiClient.startAgent(name);
-        return result.message;
+        return [result.message, ...skillsDeliveryLines(result)].join("\n");
       },
     },
 

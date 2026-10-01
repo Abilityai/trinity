@@ -1,5 +1,7 @@
 # Feature: Skill Injection (Full Directory Packages)
 
+> **2026-09-24 — ent#530 skill sets.** Every inject path — agent start (`lifecycle.inject_assigned_skills`), manual Sync (`POST …/skills/inject`), fleet re-inject — runs `skill_set_service.reconcile_agent` (DB only, fail-closed) BEFORE reading the names, then prunes with `reconcile_agent_skills` outside the lock. Behaviour change beyond sets: a manual Sync now prunes orphaned platform-managed skills for EVERY agent (the start path always did); the fleet re-inject prunes only when the set reconcile dropped members. The per-skill `.trinity-skill.json` meta records `via_sets`, and the CLAUDE.md *Platform Skills* line reads `(via <set>)`.
+
 ## Overview
 
 Skill Injection ships each assigned skill's **entire directory package**
@@ -42,9 +44,11 @@ row is committed and authoritative, delivery is best-effort, NOTHING fails the w
 the HTTP status stays 200 and the body carries an honest report:
 
 ```
-delivery: {status, reason?, skills: {name: {status, error?}}}
+delivery: {status, reason?, conflicts?, skills: {name: {status, error?}}}
   injected        every requested skill landed (or was already present and current)
-  partial         some did; the rest carry their error
+  partial         some did; the rest carry their error (a `conflict` among them is listed in `conflicts[]`)
+  conflict        (#2914) every requested name collides with an agent-authored skill dir — nothing
+                  written, the agent's copy runs; `conflicts[]` names them, Sync would refuse again
   pending_start   the container is stopped — the start path (`skills-on-agent-start.md`) delivers
   in_progress     the injection outlived SKILL_DELIVERY_BUDGET_SECONDS (20 s) and continues in
                   the background; the WS trigger fires when it lands
@@ -116,7 +120,24 @@ The Skills tab's Save note takes its tone from it and arms the Sync nudge only w
 delivery did NOT land; the Library control (`components/skills/AssignedAgents.vue`) renders
 the same rule under its Assign button, since it has no Sync button of its own. MCP passes
 the `delivery` block through verbatim (`skills.ts`, Invariant #13) and its descriptions
-name the vocabulary.
+name the vocabulary. A `conflict` (#2914) reads "Saved but not delivered: the agent
+already has its own skill with that name (…) — its copy is kept and runs. Unassign the
+library skill, or rename the agent's." and never arms the Sync nudge (Sync refuses
+again by design); the Skills tab additionally reads `delivery_status` off the assignment
+rows (`stores/skills.js::conflictNames`) so the badge, the explanation and the inline
+"Unassign library skill" action show on a fresh load, and `inject()` re-reads the rows so
+a resolved conflict clears without a reload.
+
+**A deprecated skill (ent#672)** is a second, separate statement. `deliver_assigned` stamps
+`skills[name].warnings = ["deprecated" | "deprecated:<successor>"]` on the report for a
+deprecated name — on every outcome, because it reads the library entry
+(`_deprecation_notes`) rather than injection results, and a stopped agent never runs an
+injection. The key is absent for a live skill and carries lifecycle codes only.
+`utils/skillDelivery.js::deprecationText(report)` turns it into "`<skill>` is deprecated —
+superseded by `<successor>`." and both assign surfaces render it as its own warning-toned
+line (`AssignedAgents.vue` under the delivery note; `SkillsPanel.vue` under the save row,
+shown only beside the save note it belongs to). `deliveryText` is untouched: a clean
+delivery stays green.
 
 ## Removal (ent#236)
 
@@ -141,7 +162,7 @@ _finalize_removed_dirs (ONE exec): rmdir the emptied dirs (incl. the skill root)
 |---|---|
 | Only platform-written files die | delete set is the previous injection's own manifest — agent-authored files and runtime artifacts (`__pycache__`, models) are never in it |
 | Directories survive if not empty | `os.rmdir` refuses a non-empty dir, so a skill dir holding agent files stays |
-| Unmanaged dir untouched | no `.trinity-skill.json` ⇒ `not_managed` + `unmanaged_dir_kept` (the mirror of injection's overwrite-only `unmanaged_dir_overwritten` — overwrite is recoverable, deletion is not) |
+| Unmanaged dir untouched | no `.trinity-skill.json` ⇒ `not_managed` + `unmanaged_dir_kept` (the mirror of injection's `conflict` refusal, #2914 — neither side ever writes into a directory the platform did not create) |
 | Meta removed last | while it exists the package is still managed, so an interrupted removal resumes. Included even when the manifest is missing/garbage, or the dir would stay in every future reconcile's inventory with nothing to delete |
 | Truncation (>200 paths) | `removal_truncated` and the meta is **kept** — dropping it would strand the remaining files as unmanaged orphans |
 | Unassign never fails | DB row is authoritative and already committed; a stopped agent / busy lock / dead transport degrades to `removal_deferred:*` and the start-path reconcile finishes it |
@@ -210,7 +231,8 @@ agent /home/developer/.claude/skills/<name>/  (+ .trinity-skill.json provenance)
 | Idempotent start | agent meta `version` == library tree SHA → `unchanged`, no transfer (dep check still runs so CLAUDE.md annotations stay fresh) |
 | Deleted library files propagate | manifest diff prune on next inject |
 | Agent runtime files survive | prune only touches previous-manifest paths — `__pycache__`, downloaded models, agent notes untouched |
-| Same-named agent-authored dir | no meta → overwrite-only + `unmanaged_dir_overwritten`, never pruned |
+| Platform writes always carry the marker (#2914) | the legacy fallback writes `.trinity-skill.json` beside `SKILL.md` (manifest = `[SKILL.md]`), and a restore whose `restored` list lacks the marker writes it back with one `write_file` (`marker_written_directly`); either failing → `failed` + `marker_not_written` (legacy write rolled back). Without this, the platform's own marker-less dir would read as agent-authored and conflict forever |
+| Same-named agent-authored dir | no meta → **refused** as `conflict` before any archive/restore/finalize (#2914): the agent's copy stays byte-for-byte and tracked; the row is stamped `agent_skills.delivery_status='conflict'` (cleared once the name lands, gone on unassign) so the Skills tab shows it on load with an inline Unassign; `force` does not override. Was overwrite + `unmanaged_dir_overwritten` before #2914 |
 | Repo bloat guard | injected names appended to agent's `.gitignore` + untracked, so the 15-min auto-sync (which deliberately commits `.claude/`) never commits platform packages (#1595/#1596 class); Playbooks keep committing |
 | Concurrency | Redis `skill_inject:{name}` SETNX+TTL fail-open lock via the shared `redis_breaker_util.SingleFlightLock` (#1920; injected `_redis_client`, `_acquire_inject_lock` still raises `SkillInjectionBusy` on contention) — outside `agent:*` (`compat_fix` precedent); manual inject → 409, start path → skip |
 | Caps | `SKILL_MAX_BYTES` (10 MiB) / `SKILLS_TOTAL_MAX_BYTES` (50 MiB), env-tunable; over-cap → named error, other skills continue |
@@ -221,6 +243,7 @@ agent /home/developer/.claude/skills/<name>/  (+ .trinity-skill.json provenance)
 {
   "success": true,
   "skills_injected": 2, "skills_unchanged": 17, "skills_failed": 0,
+  "skills_conflict": 1, "conflicts": ["backlog"],
   "results": {
     "clip-video": {
       "success": true, "status": "injected", "files_written": 7,
@@ -230,13 +253,19 @@ agent /home/developer/.claude/skills/<name>/  (+ .trinity-skill.json provenance)
 }
 ```
 
-`status` ∈ `injected | unchanged | fallback | failed`. Warning codes:
+`status` ∈ `injected | unchanged | fallback | failed | conflict` (`conflict` = #2914
+name-conflict refusal: `success: false`, `error: name_conflict: …`, not counted in
+`skills_failed`). Warning codes:
 `missing_binary:*`, `missing_env:*`, `packages_not_checked`, `dep_check_skipped`,
 `skill_too_large` (error), `symlink_skipped:*`, `protected_name_skipped:*`,
 `restore_skipped:*`, `stale_delete_failed:*`, `prune_truncated`,
-`unmanaged_dir_overwritten`, `repair_reinjected`, `multi_file_dropped_old_image`,
+`repair_reinjected`, `marker_written_directly`, `multi_file_dropped_old_image`,
 `frontmatter_invalid`, `invalid_skill_name`, `gitignore_update_failed`,
-`finalize_partial:*`.
+`finalize_partial:*`, `deprecated` / `deprecated:<successor>` (ent#672 — informational:
+the skill is injected as usual, on `injected`, `unchanged` and `conflict` alike; the
+successor is present only when it is a valid skill name). The start endpoint's public
+projection (`lifecycle.public_skills_result`) keeps `deprecated:<successor>` beside the
+two dep codes.
 
 ## Frontmatter Contract
 
@@ -263,6 +292,30 @@ before probing — library-derived strings never reach a shell (all in-container
 work runs as base64-injected python, the compatibility-collector idiom).
 Provisioning (installing deps) is Phase 2 — placement / skill-runner
 (trinity-enterprise#139).
+
+### Lifecycle keys (ent#672)
+
+```yaml
+deprecated: true             # a real boolean; absent / null = not deprecated
+superseded-by: new-skill     # `superseded_by` is read too; a `trinity:` block wins in either spelling
+```
+
+The two keys a library uses to retire a skill. Both reach `list_skills` / `get_skill`,
+`GET /api/skills/library` (`SkillInfo.deprecated`, `.superseded_by` — named in the route's
+explicit construction) and MCP `list_skills` (named in its field map). A deprecated skill
+stays **listed, assignable and injected**; it is flagged, never hidden.
+
+- `superseded_by` is the **author's text**, kept as one printable line of at most 200
+  characters (`_one_line`: control and format characters dropped, whitespace collapsed) and
+  `None` unless the skill is deprecated. It is usually a skill name and sometimes a sentence
+  ("… lives in another catalog"); the platform does not resolve it.
+- `skill_packaging.deprecation_warning(info)` is the ONE producer of the machine code:
+  `deprecated:<successor>` when the text passes `validate_skill_name`, bare `deprecated`
+  otherwise — prose never enters a `kind:detail` code.
+- Garbage is named: a non-boolean `deprecated` → `frontmatter_invalid:deprecated`; a
+  non-string `superseded-by` → `frontmatter_invalid:superseded-by`. A library's own CI that
+  runs this parser fails on those, which is what keeps the two repositories agreeing.
+- The agent's CLAUDE.md is **not** annotated: a holding agent behaves exactly as before.
 
 ## CLAUDE.md Section
 
@@ -309,6 +362,12 @@ round-trip against the REAL `restore_from_tar`, real-git end-to-end
 orchestration (skip-vs-force, 404 fallback, repair path, manifest prune,
 unmanaged-dir guard, caps, dep warnings, lock contention, CLAUDE.md rebuild).
 
+`tests/unit/test_ent672_skill_deprecation.py`: the lifecycle-key parse table,
+the warning grammar, the fields through `list_skills` / `get_skill` / the REST route, the
+code on injected / unchanged / conflict results, the delivery stamp on running, stopped,
+docker-unreadable and over-budget outcomes (and none on an unreadable library), the start
+projection, and the un-annotated CLAUDE.md line.
+
 ## Related Flows
 
 | Flow | Relationship |
@@ -325,6 +384,7 @@ unmanaged-dir guard, caps, dep warnings, lock contention, CLAUDE.md rebuild).
 
 | Date | Change |
 |------|--------|
+| 2026-09-30 | **trinity-enterprise#672 lifecycle keys**: `extract_contract` carries `deprecated` / `superseded-by`; `deprecation_warning` produces the `deprecated[:<successor>]` code that rides every injection outcome and, via `deliver_assigned`'s library read, every delivery outcome; `public_skills_result` keeps it. A deprecated skill stays listed, assignable and injected — flagged on each surface, CLAUDE.md untouched. |
 | 2026-09-11 | **#2703 delivery on assign + `agent_skills_changed`**: every assign path delivers via the start-path injection with an honest per-skill `delivery` report (bounded 20 s → `in_progress`, busy retried once, `docker_unavailable` ≠ `pending_start`, opt-in under-lock re-read); one thin WS trigger from the service, fired by all six listing writers; Agent Detail lists refetch on the tick, the Workspace re-validates the briefing stale-while-revalidate (and on `/` open for portal clients, who have no `/ws`) |
 | 2026-08-04 | **trinity-enterprise#332 per-source skills root**: source layout resolvable per source (`catalog.yaml` `skills_root:` → evidence-gated `skills/` probe → `.claude/skills/` fallback; segment-wise validation, ent#314 hardened parse, lstat/containment guards, dual-layout keeps legacy + `layout_conflict`); `filter_skill_archive(source_root=…)` rewrites arcnames to the canonical agent-side destination so manifests/prune/removal stay destination-canonical with zero migration. Requirements §21.1.4. |
 | 2026-07-29 | **trinity-enterprise#236 lifecycle automation**: removal-on-unassign (`remove_skills` + `compute_removal`, manifest-driven, same inject lock), start-path reconciliation with a blast-radius refusal, and fleet-wide re-inject after a commit-changing library sync. See also [skills-library-sync.md](skills-library-sync.md) for the scheduled sync. |

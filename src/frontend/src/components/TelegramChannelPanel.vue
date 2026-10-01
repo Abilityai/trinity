@@ -118,6 +118,25 @@
               </button>
             </div>
 
+            <!-- Group context (ent#600) — per-group switch (default on), honest
+                 state, and the next action. Evidence-based on the backend: "sees
+                 all messages" only once an un-tagged message has actually reached
+                 the bot in this group. The hint text comes from the backend and
+                 also says what the switch does in each state. -->
+            <div class="mb-2">
+              <div class="flex items-center gap-3 flex-wrap">
+                <BaseToggle
+                  :model-value="group.context_enabled"
+                  label="Group context"
+                  @update:model-value="v => updateGroup(group, { context_enabled: v })"
+                />
+                <BaseBadge :variant="contextBadgeVariant(group)" dot>
+                  {{ contextBadgeLabel(group) }}
+                </BaseBadge>
+              </div>
+              <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">{{ group.context_hint }}</p>
+            </div>
+
             <!-- Trigger Mode -->
             <div class="flex items-center gap-4 text-xs flex-wrap">
               <label class="flex items-center gap-1.5 cursor-pointer">
@@ -183,23 +202,22 @@
                  what the flag governs today (D2/F2); rename if the proactive
                  group-send coherence gate ships later. -->
             <div class="mt-2">
-              <label class="flex items-center gap-1.5 cursor-pointer text-xs">
-                <input
-                  type="checkbox"
-                  :checked="group.allow_proactive"
-                  @change="updateGroup(group, { allow_proactive: !group.allow_proactive })"
-                  class="rounded text-action-primary-600 focus:ring-action-primary-500"
-                />
-                <span class="text-gray-600 dark:text-gray-400">Completion reports</span>
-              </label>
-              <p class="mt-0.5 text-xs text-gray-400">
+              <!-- BaseToggle (instant-apply), matching the Group context switch
+                   above; also pays the raw-gray ratchet back for ent#600. -->
+              <BaseToggle
+                :model-value="group.allow_proactive"
+                label="Completion reports"
+                @update:model-value="v => updateGroup(group, { allow_proactive: v })"
+              />
+              <p class="mt-0.5 pl-[46px] text-xs text-gray-400">
                 Posts a completion notice for delegated or background tasks started from this group.
               </p>
             </div>
+
           </div>
         </div>
       </div>
-      <div v-else-if="binding.configured && binding.webhook_url" class="mt-3 text-xs text-gray-400 dark:text-gray-500">
+      <div v-else-if="binding.configured && binding.webhook_url" class="mt-3 text-xs text-gray-500 dark:text-gray-400">
         No group chats yet. Add the bot to a Telegram group to see it here.
       </div>
 
@@ -254,6 +272,23 @@
 import { ref, onMounted, watch } from 'vue'
 import api from '../api'
 import VoiceChannelToggle from './VoiceChannelToggle.vue'
+import BaseBadge from './base/BaseBadge.vue'
+import BaseToggle from './base/BaseToggle.vue'
+
+// ent#600: one badge per context state; the hint text comes from the backend
+// so the "next action" wording lives in one place.
+const CONTEXT_BADGE = {
+  all_messages: { variant: 'success', label: 'Sees all messages' },
+  tagged_only: { variant: 'warning', label: 'Tagged messages only' },
+  unconfirmed: { variant: 'info', label: 'Not confirmed yet' },
+  off: { variant: 'neutral', label: 'Context off' },
+}
+function contextBadgeVariant(group) {
+  return (CONTEXT_BADGE[group.context_status] || CONTEXT_BADGE.unconfirmed).variant
+}
+function contextBadgeLabel(group) {
+  return (CONTEXT_BADGE[group.context_status] || CONTEXT_BADGE.unconfirmed).label
+}
 
 const props = defineProps({
   agentName: {
@@ -347,6 +382,9 @@ async function verifyBot() {
     })
     if (response.data.ok) {
       message.value = { type: 'success', text: response.data.message }
+      // ent#600: Verify re-reads the bot's Privacy Mode — refresh the per-group
+      // context status in place so a BotFather change shows without a reload.
+      await loadGroups()
     } else {
       message.value = { type: 'error', text: response.data.message || 'Verification failed' }
     }

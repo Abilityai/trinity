@@ -231,8 +231,8 @@ function statusLabel(loop) { return loopStatusLabel(loop) }
 function toneClass(loop) {
   switch (loopStatusTone(loop)) {
     case 'active': return 'text-action-primary-600 dark:text-action-primary-400'
-    case 'ok': return 'text-status-success-600 dark:text-status-success-400'
-    case 'warn': return 'text-status-warning-600 dark:text-status-warning-400'
+    case 'ok': return 'text-status-success-700 dark:text-status-success-400'
+    case 'warn': return 'text-status-warning-700 dark:text-status-warning-400'
     case 'danger': return 'text-status-danger-600 dark:text-status-danger-400'
     default: return 'text-gray-600 dark:text-gray-300'
   }

@@ -7,9 +7,9 @@
 
 import { z } from "zod";
 import { createHash } from "crypto";
-import { TrinityClient } from "../client.js";
+import { TrinityClient, isDepthRefusal, type DepthRefusal } from "../client.js";
 import type { McpAuthContext, AgentAccessCheckResult } from "../types.js";
-import { checkAgentEdge, resolveClient, uniformDenial } from "../access.js";
+import { accessDenied, checkAgentEdge, resolveClient, uniformDenial } from "../access.js";
 
 /**
  * RELIABILITY-006 (#525): derive a deterministic Idempotency-Key for an MCP
@@ -124,6 +124,18 @@ export interface RunAgentChatParams {
 }
 
 /**
+ * #2806: the tool result for a chain-depth refusal — the backend's refusal
+ * verbatim (`retryable: false` and its "do not retry" message), logged so the
+ * refusal is visible in the MCP server's own output.
+ */
+function depthRefusalResult(refusal: DepthRefusal): string {
+  console.log(
+    `[Chain Depth #2806] refused -> ${refusal.agent} (depth ${refusal.depth} > ${refusal.max_depth})`,
+  );
+  return JSON.stringify(refusal, null, 2);
+}
+
+/**
  * The shared chat_with_agent execution body (#846).
  *
  * Single source of truth for chatting with one agent — used verbatim by the
@@ -166,12 +178,12 @@ export async function runAgentChat(
 
   if (!accessCheck.allowed) {
     console.log(`[Access Denied] ${authContext?.agentName || authContext?.userId || "unknown"} -> ${agent_name}: ${accessCheck.reason}`);
-    return JSON.stringify({
+    return accessDenied(context, {
       error: "Access denied",
       reason: accessCheck.reason,
       caller: authContext?.agentName || authContext?.userId,
       target: agent_name,
-    }, null, 2);
+    });
   }
 
   // Pass source agent for collaboration tracking
@@ -267,6 +279,7 @@ export async function runAgentChat(
     // as the sequential branch does below. Without the log line the two routes
     // are indistinguishable in the MCP server's own output, which is how the
     // 2026-09-08 cascade read as "chat_with_agent just fails sometimes".
+    if (isDepthRefusal(response)) return depthRefusalResult(response);
     if ('status' in response && response.status === 'queued_timeout') {
       console.log(`[Task Timeout Recovery] Agent '${agent_name}' execution_id=${response.execution_id} — caller should poll get_execution_result (#2661)`);
     }
@@ -292,11 +305,15 @@ export async function runAgentChat(
       mcpKeyInfo,
       idempotencyKey
     );
+    if (isDepthRefusal(receipt)) return depthRefusalResult(receipt);
     return JSON.stringify(receipt, null, 2);
   }
 
   // Sequential chat mode - uses queue, maintains context
   const response = await apiClient.chat(agent_name, message, sourceAgent, mcpKeyInfo, idempotencyKey);
+
+  // #2806: chain-depth refusal — a result the model must stop on, not an error.
+  if (isDepthRefusal(response)) return depthRefusalResult(response);
 
   // #914: MCP-server gateway timeout — task still running on agent.
   // Surface the structured receipt so the caller polls rather than retries.
@@ -358,7 +375,11 @@ export function createChatTools(
         "Responses may take some time depending on the complexity of the task. " +
         "\n\n**Execution Modes:**\n" +
         "- `parallel=false` (default): Sequential chat mode. Uses execution queue, maintains conversation history. " +
-        "Best for multi-turn conversations requiring context.\n" +
+        "Best for multi-turn conversations requiring context. It continues this agent's own chat session " +
+        "(shared by every caller of this agent, never a scheduled or other headless run's). A turn that " +
+        "crosses the context limit can pay a one-off auto-compaction: it is recorded as `compact_metadata`, " +
+        "readable via `get_execution_result`, and is not a sign the agent is degraded. The session restarts " +
+        "after a model change or a `/api/chat/history` reset.\n" +
         "- `parallel=true`: Parallel task mode. Stateless, no queue, can run N tasks concurrently. " +
         "Best for independent tasks, batch processing, orchestrator delegation.\n" +
         "- `async=true` (with parallel=true): Fire-and-forget mode. Returns immediately with execution_id. " +
@@ -664,10 +685,10 @@ export function createChatTools(
         const accessCheck = await checkAgentAccess(apiClient, authContext, agent_name);
         if (!accessCheck.allowed) {
           console.log(`[Access Denied] ${authContext?.agentName || authContext?.userId || "unknown"} -> ${agent_name}: ${accessCheck.reason}`);
-          return JSON.stringify({
+          return accessDenied(context, {
             error: "Access denied",
             reason: accessCheck.reason,
-          }, null, 2);
+          });
         }
 
         const sourceAgent = authContext?.scope === "agent" ? authContext.agentName : undefined;
@@ -707,6 +728,7 @@ export function createChatTools(
           idempotencyKey
         );
 
+        if (isDepthRefusal(response)) return depthRefusalResult(response);
         return JSON.stringify(response, null, 2);
       },
     },

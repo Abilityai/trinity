@@ -188,6 +188,7 @@ import {
   railEmptyCopy,
   signalFor,
   signalShape,
+  railTitle,
 } from './portalRail'
 
 const props = defineProps({
@@ -217,7 +218,13 @@ const active = computed(() => {
 
 const strip = computed(() => collapsedSignals(props.signals, props.tabs))
 const stripTabs = computed(() =>
-  props.tabs.map((t) => ({ id: t.id, label: t.label, signal: signalShape(signalFor(props.signals, t)) }))
+  props.tabs.map((t) => {
+    const sig = signalFor(props.signals, t)
+    const signal = signalShape(sig)
+    // The dot's meaning on hover ("Info · 2 suggestions"), so it is never an
+    // unexplained circle (ent#610 sign-off).
+    return { id: t.id, label: t.label, signal, signalTitle: signal ? railTitle(t, sig) : undefined }
+  })
 )
 const activeSignal = computed(() => signalFor(props.signals, active.value))
 const empty = computed(() => railEmptyCopy(active.value, props.participants))
@@ -295,6 +302,8 @@ const ICONS = {
   refresh: 'M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15',
   template: 'M4 5a1 1 0 011-1h14a1 1 0 011 1v2a1 1 0 01-1 1H5a1 1 0 01-1-1V5zM4 13a1 1 0 011-1h6a1 1 0 011 1v6a1 1 0 01-1 1H5a1 1 0 01-1-1v-6zM16 13a1 1 0 011-1h2a1 1 0 011 1v6a1 1 0 01-1 1h-2a1 1 0 01-1-1v-6z',
   paperclip: 'M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13',
+  // ent#661 — Projects: the folder glyph the sidebar's Projects link carries.
+  folder: 'M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2V7z',
   // ent#547 — Info. The same glyph the header's Agent-details button carried, so
   // the control that moved is recognisably the same control. `iconPath` falls
   // back to `bolt` for an unknown id, which is silent: a tab with no entry here

@@ -27,18 +27,39 @@ const error = ref(null)
 const fixing = ref({})        // check_id -> bool
 const fixMessage = ref(null)  // { text, ok }
 
-const failing = computed(() => (report.value?.checks || []).filter((c) => c.status === 'fail'))
 const hardCount = computed(() => report.value?.hard_count || 0)
 const softCount = computed(() => report.value?.soft_count || 0)
-const infoCount = computed(() => report.value?.info_count || 0)
-const issueCount = computed(() => hardCount.value + softCount.value)
 const isUnavailable = computed(() => report.value?.overall_status === 'unavailable')
 
-// Group all checks by category for the expanded checklist, in catalog order.
+// An AI check that could not run is not a finding — it is the ABSENCE of one.
+// On a keyless install that is 30 of 89 checks, one row each, and they buried
+// the real findings on the first screen a new operator ever sees (#2899). They
+// collapse to one line per reason above the checklist instead.
+const AI_SKIP_NOTES = {
+  no_api_key: 'no Anthropic API key is configured. An admin can add one in Settings, then re-run the analysis',
+  ai_not_run: 'the analysis has not run yet for this agent',
+  ai_no_result: 'the model returned no verdict for them — re-run the analysis',
+}
+const isSkippedAi = (c) => c.type === 'ai' && c.status === 'skipped' && AI_SKIP_NOTES[c.skip_reason]
+
+const aiSkipNotes = computed(() => {
+  const counts = {}
+  for (const c of report.value?.checks || []) {
+    if (isSkippedAi(c)) counts[c.skip_reason] = (counts[c.skip_reason] || 0) + 1
+  }
+  return Object.entries(counts).map(([reason, count]) => ({
+    reason,
+    count,
+    text: `${count} AI ${count === 1 ? 'check was' : 'checks were'} skipped — ${AI_SKIP_NOTES[reason]}.`,
+  }))
+})
+
+// Group the remaining checks by category for the expanded checklist, in catalog order.
 const grouped = computed(() => {
   const out = []
   const seen = {}
   for (const c of report.value?.checks || []) {
+    if (isSkippedAi(c)) continue
     if (!seen[c.category]) {
       seen[c.category] = { category: c.category, checks: [] }
       out.push(seen[c.category])
@@ -48,12 +69,24 @@ const grouped = computed(() => {
   return out
 })
 
+// Only a HARD finding is a problem with the agent; soft/info are advice. The
+// banner counted hard + soft in one warning-toned number, so an agent whose
+// findings were all advisory announced "5 compatibility issues" on its landing
+// tab (#2899). Advisory findings keep a neutral line — never the success tone,
+// because the API still calls that state `issues` and soft covers security
+// findings (S-006/S-008) nobody should read as "all clear".
 const summaryTone = computed(() => {
   if (isUnavailable.value) return 'gray'
   if (hardCount.value > 0) return 'danger'
-  if (softCount.value > 0) return 'warning'
+  if (softCount.value > 0) return 'gray'
   return 'success'
 })
+
+const recommendationSuffix = computed(() => (
+  softCount.value > 0
+    ? ` · ${softCount.value} ${softCount.value === 1 ? 'recommendation' : 'recommendations'}`
+    : ''
+))
 
 function fmtTime(iso) {
   if (!iso) return null
@@ -129,7 +162,6 @@ watch(() => agentName.value, loadInitial)
       class="w-full flex items-center justify-between px-4 py-3 rounded-lg border transition-colors text-left"
       :class="{
         'bg-status-danger-50 dark:bg-status-danger-900/30 border-status-danger-200 dark:border-status-danger-800 hover:bg-status-danger-100 dark:hover:bg-status-danger-900/50': summaryTone === 'danger',
-        'bg-status-warning-50 dark:bg-status-warning-900/30 border-status-warning-200 dark:border-status-warning-800 hover:bg-status-warning-100 dark:hover:bg-status-warning-900/50': summaryTone === 'warning',
         'bg-status-success-50 dark:bg-status-success-900/20 border-status-success-200 dark:border-status-success-800 hover:bg-status-success-100 dark:hover:bg-status-success-900/40': summaryTone === 'success',
         'bg-gray-50 dark:bg-gray-800/60 border-gray-200 dark:border-gray-700 hover:bg-gray-100 dark:hover:bg-gray-800': summaryTone === 'gray',
       }"
@@ -138,7 +170,6 @@ watch(() => agentName.value, loadInitial)
       <span class="flex items-center text-sm font-medium"
         :class="{
           'text-status-danger-800 dark:text-status-danger-300': summaryTone === 'danger',
-          'text-status-warning-800 dark:text-status-warning-300': summaryTone === 'warning',
           'text-status-success-800 dark:text-status-success-300': summaryTone === 'success',
           'text-gray-700 dark:text-gray-300': summaryTone === 'gray',
         }"
@@ -148,11 +179,11 @@ watch(() => agentName.value, loadInitial)
         </svg>
         <template v-if="loading && !report">Checking agent compatibility…</template>
         <template v-else-if="isUnavailable">Compatibility — {{ report?.message || 'unavailable' }}</template>
-        <template v-else-if="issueCount === 0">Compatible — all checks passing</template>
-        <template v-else>
-          {{ issueCount }} compatibility {{ issueCount === 1 ? 'issue' : 'issues' }}
-          <span v-if="hardCount > 0" class="ml-1 text-status-danger-700 dark:text-status-danger-400">({{ hardCount }} must-fix)</span>
+        <template v-else-if="hardCount > 0">
+          {{ hardCount }} must-fix compatibility {{ hardCount === 1 ? 'issue' : 'issues' }}{{ recommendationSuffix }}
         </template>
+        <template v-else-if="softCount > 0">No must-fix issues{{ recommendationSuffix }}</template>
+        <template v-else>Compatible — all checks passing</template>
       </span>
       <span class="flex items-center gap-2 text-xs text-gray-500 dark:text-gray-400">
         <span v-if="aiLoading">analyzing…</span>
@@ -174,9 +205,15 @@ watch(() => agentName.value, loadInitial)
         >{{ aiLoading ? 'Running…' : 'Re-run analysis' }}</button>
       </div>
 
+      <p
+        v-for="note in aiSkipNotes"
+        :key="note.reason"
+        class="px-4 py-2 text-xs text-gray-600 dark:text-gray-300"
+      >{{ note.text }}</p>
+
       <p v-if="error" class="px-4 py-2 text-sm text-status-danger-600 dark:text-status-danger-400">{{ error }}</p>
       <p v-if="fixMessage" class="px-4 py-2 text-sm"
-         :class="fixMessage.ok ? 'text-status-success-600 dark:text-status-success-400' : 'text-status-danger-600 dark:text-status-danger-400'">
+         :class="fixMessage.ok ? 'text-status-success-700 dark:text-status-success-400' : 'text-status-danger-600 dark:text-status-danger-400'">
         {{ fixMessage.text }}
       </p>
 
@@ -192,7 +229,7 @@ watch(() => agentName.value, loadInitial)
             </span>
             <div class="min-w-0 flex-1">
               <div class="flex items-center gap-2 flex-wrap">
-                <span class="text-xs font-mono text-gray-400 dark:text-gray-500">{{ c.check_id }}</span>
+                <span class="text-xs font-mono text-gray-500 dark:text-gray-400">{{ c.check_id }}</span>
                 <span class="text-sm text-gray-800 dark:text-gray-200">{{ c.message }}</span>
                 <span v-if="c.status === 'fail'" class="text-[10px] uppercase font-semibold px-1.5 py-0.5 rounded"
                   :class="c.severity === 'hard' ? 'bg-status-danger-100 text-status-danger-700 dark:bg-status-danger-900/40 dark:text-status-danger-300' : (c.severity === 'soft' ? 'bg-status-warning-100 text-status-warning-700 dark:bg-status-warning-900/40 dark:text-status-warning-300' : 'bg-gray-100 text-gray-600 dark:bg-gray-700 dark:text-gray-300')">{{ c.severity }}</span>
@@ -203,9 +240,6 @@ watch(() => agentName.value, loadInitial)
                 class="mt-1 text-xs text-gray-500 dark:text-gray-400 prose-xs dark:prose-invert max-w-none"
                 v-html="renderMarkdown(c.explanation)"
               ></div>
-              <p v-else-if="c.status === 'skipped' && c.skip_reason === 'no_api_key'" class="mt-0.5 text-xs text-gray-400 dark:text-gray-500">
-                Skipped — no Anthropic API key configured
-              </p>
             </div>
             <!-- Fix button for auto-fixable failures -->
             <button

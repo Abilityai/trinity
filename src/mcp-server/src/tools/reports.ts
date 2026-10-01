@@ -13,6 +13,7 @@
 import { z } from "zod";
 import { TrinityClient } from "../client.js";
 import type { McpAuthContext } from "../types.js";
+import { accessDenied, resolveActingAgent } from "../access.js";
 
 
 /**
@@ -68,18 +69,14 @@ export function createReportTools(client: TrinityClient, requireApiKey: boolean)
   };
 
   /**
-   * Resolve the reporting agent from the auth context. The report tool is
-   * agent-facing: it requires an agent-scoped key so a report can only ever be
-   * attributed to the calling agent (no spoofing).
+   * Resolve the reporting agent from the auth context. The report tool takes no
+   * target parameter, so a report can only ever be attributed to the identity
+   * the KEY carries — `resolveActingAgent` is that rule, shared with the canvas
+   * and metrics tools (#2975; it admits the platform orchestrator's
+   * system-scoped key, which carries `trinity-system`, and nothing else).
    */
-  const getAgentName = (authContext: McpAuthContext | undefined): string => {
-    if (authContext?.scope === "agent" && authContext.agentName) {
-      return authContext.agentName;
-    }
-    throw new Error(
-      "The report tool requires an agent-scoped API key (it publishes a report as the calling agent)."
-    );
-  };
+  const getAgentName = (authContext: McpAuthContext | undefined): string =>
+    resolveActingAgent(authContext, "The report tool");
 
   /**
    * Agent-to-agent READ gate (mirrors operator_queue.ts / executions.ts).
@@ -153,11 +150,20 @@ export function createReportTools(client: TrinityClient, requireApiKey: boolean)
         // is what every report was before this field existed. The backend
         // checks the address against YOUR OWN roster and refuses an address it
         // does not already share you with, so this cannot reach a stranger.
+        // ent#606 — name the ROLE the report is for; the platform resolves the
+        // person through your assignments. You never pick a person.
+        to: z.enum(["primary", "approver", "viewer", "operator"]).optional()
+          .describe(
+            "Optional. The role this report is FOR — primary (the person you serve), approver, " +
+            "viewer, or operator. The platform resolves who fills it; the report then appears as a " +
+            "deliverable on their agent page and (with execution_id) in the chat that produced it. " +
+            "operator, or omitting both `to` and audience_email, publishes an operator-only report. " +
+            "A role nobody fills, or that several people fill, is refused with a named reason."
+          ),
         audience_email: z.string().optional()
           .describe(
-            "Optional. The Workspace user this report is FOR — it then appears as a deliverable " +
-            "on their agent page, and (with execution_id) as a card in the chat that produced it. " +
-            "Must be someone this agent is already shared with. Omit for an operator-only report."
+            "Deprecated — use `to`. The Workspace user this report is FOR; must be someone this " +
+            "agent is already shared with. Not together with `to`."
           ),
         // Only meaningful alongside an audience: it places the card in the
         // right conversation. The backend resolves the session itself; the id
@@ -178,6 +184,7 @@ export function createReportTools(client: TrinityClient, requireApiKey: boolean)
           period_start?: string;
           period_end?: string;
           audience_email?: string;
+          to?: "primary" | "approver" | "viewer" | "operator";
           execution_id?: string;
         },
         context?: { session?: McpAuthContext }
@@ -208,6 +215,7 @@ export function createReportTools(client: TrinityClient, requireApiKey: boolean)
             period_start: params.period_start,
             period_end: params.period_end,
             audience_email: params.audience_email,
+            to: params.to,
             execution_id: params.execution_id,
           });
           return JSON.stringify(
@@ -218,8 +226,11 @@ export function createReportTools(client: TrinityClient, requireApiKey: boolean)
               report_type: result.report_type,
               created_at: result.created_at,
               // Echoed so an agent can tell an addressed deliverable from an
-              // operator-only one without re-reading it.
+              // operator-only one without re-reading it. A role is echoed as
+              // the role — the person it resolved to is never returned to an
+              // agent (ent#606: an agent names a role, never a person).
               addressed_to: params.audience_email ?? null,
+              addressed_to_role: params.to ?? null,
             },
             null,
             2
@@ -314,7 +325,7 @@ export function createReportTools(client: TrinityClient, requireApiKey: boolean)
           const access = await checkAgentAccess(apiClient, authContext, params.agent_name);
           if (!access.allowed) {
             console.log(`[list_reports] Access denied: ${access.reason}`);
-            return JSON.stringify({ error: "Access denied", reason: access.reason }, null, 2);
+            return accessDenied(context, { error: "Access denied", reason: access.reason });
           }
         }
 
@@ -405,12 +416,12 @@ export function createReportTools(client: TrinityClient, requireApiKey: boolean)
           if (authContext?.scope === "agent") {
             if (!owner) {
               console.error("[get_report] response carried no agent_name — refusing");
-              return JSON.stringify({ error: "Report not found" }, null, 2);
+              return accessDenied(context, { error: "Report not found" }, "response carried no agent_name — refusing");
             }
             const access = await checkAgentAccess(apiClient, authContext, owner);
             if (!access.allowed) {
               console.log(`[get_report] Access denied: ${access.reason}`);
-              return JSON.stringify({ error: "Report not found" }, null, 2);
+              return accessDenied(context, { error: "Report not found" }, access.reason);
             }
           }
 

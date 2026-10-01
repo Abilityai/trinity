@@ -1,0 +1,63 @@
+{
+  "version": "1.1",
+  "date": "2026-09-23",
+  "mode": "diff",
+  "scope": "all",
+  "confidence_gate": 8,
+  "branch": "AndriiPasternak31/issue-2806 -> dev",
+  "issue": "abilityai/trinity#2806",
+  "phases_run": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9,
+    10,
+    11,
+    12,
+    13,
+    14
+  ],
+  "attack_surface": {
+    "new_endpoints": 0,
+    "new_tools": 0,
+    "websocket": 0,
+    "docker": "unchanged",
+    "dependencies": "unchanged",
+    "ci": "unchanged",
+    "migrations": 1,
+    "changed_response_surface": "named 403 inter_agent_depth_exceeded on /chat, /task, /fan-out (after the uniform 404)"
+  },
+  "findings": [],
+  "appendix": [
+    "reliability bound, not a security boundary; residuals: user-scoped key held by an agent = root; no running row = depth 1 (#2392)",
+    "loops / schedule triggers / events start fresh roots \u2014 filed #2973",
+    "over-refusal is contagious: an agent with an edge to Y can pin Y's outgoing calls while a max-depth row runs (availability, rule 1)"
+  ],
+  "supply_chain_summary": {
+    "python": "unchanged",
+    "node": "unchanged"
+  },
+  "filter_stats": {
+    "candidates": 6,
+    "refuted": 3,
+    "excluded_by_rule": 3
+  },
+  "totals": {
+    "critical": 0,
+    "high": 0,
+    "medium": 0,
+    "low": 0
+  },
+  "trend": {
+    "prior": "cso-diff-2026-09-21-ent549-file-audience",
+    "prior_findings": 0,
+    "this_findings": 0,
+    "direction": "stable"
+  }
+}

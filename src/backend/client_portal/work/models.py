@@ -1,7 +1,7 @@
 """Pydantic models for Workspace work (trinity-enterprise#525)."""
 from __future__ import annotations
 
-from typing import List, Literal, Optional
+from typing import Dict, List, Literal, Optional
 
 from pydantic import BaseModel, Field
 
@@ -47,6 +47,26 @@ class WorkSteps(BaseModel):
     stages: List[WorkStage] = Field(default_factory=list)
 
 
+class WorkActivity(BaseModel):
+    """What a live execution is doing RIGHT NOW (trinity-enterprise#620) —
+    the agent's last heartbeat, folded onto its row.
+
+    `tool` is the agent's display name (`Read`, `Bash`, `mcp:trinity`,
+    `Task:explore`; None between tools, which the card shows as "Thinking");
+    `summary` the agent's bounded input summary, passed through the SAME
+    sanitiser as titles and roster-masked (a delegation to an agent the
+    caller cannot see names nobody). `age_seconds` is how old the beat was
+    at read time, so the client can drop a line the agent stopped renewing.
+    The label ("Reading …", "Running …") is composed client-side from these
+    two facts — one vocabulary for every surface, never a string the agent
+    chose.
+    """
+    tool: Optional[str] = None
+    summary: Optional[str] = None
+    since: Optional[str] = None
+    age_seconds: Optional[int] = None
+
+
 class WorkItem(BaseModel):
     """One execution, projected for the person who asked for it.
 
@@ -82,6 +102,10 @@ class WorkItem(BaseModel):
     loop_id: Optional[str] = None
     error: Optional[str] = None
     steps: Optional[WorkSteps] = None
+    #: trinity-enterprise#620: the live activity line's facts. Only on a live,
+    #: non-stale row of a rostered agent whose image reports it; None means
+    #: "no live signal" and the card shows nothing rather than a guess.
+    activity: Optional[WorkActivity] = None
 
 
 class PortalWork(BaseModel):
@@ -97,3 +121,12 @@ class PortalWork(BaseModel):
     #: `earlier` is bounded; this is the bound, so the client can say "30+"
     #: honestly when the page is full.
     earlier_limit: int
+
+
+class PortalWorkActivity(BaseModel):
+    """`GET …/work/activity` (trinity-enterprise#620): the live lines alone,
+    keyed by execution id — the cheap read the Work tab polls every few
+    seconds while something is running, so the full ledger read can stay at
+    its 12 s cadence. Same roster gate as `PortalWork`; reads Redis only."""
+    agents: List[str]
+    items: Dict[str, WorkActivity]

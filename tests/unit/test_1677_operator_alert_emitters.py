@@ -61,7 +61,17 @@ _ALLOWED_CALLERS = {
         "platform-only: idempotent id per portal client's legacy dir (ent#308)",
     ("database.py", "DatabaseManager.create_operator_queue_item"):
         "the facade delegation itself (the _operator_queue_ops.create_item spelling)",
-    ("services/agent_client.py", "_emit_dormant_alert"):
+    ("database.py", "DatabaseManager.create_operator_queue_item_with_outcome"):
+        "the facade delegation itself (trinity-enterprise#611: the file poller's create, "
+        "which also reports whether it inserted)",
+    ("database.py", "DatabaseManager.create_native_operator_queue_item"):
+        "the facade delegation itself (trinity-enterprise#611: the native create)",
+    ("services/ask_service.py", "raise_ask"):
+        "the native (MCP) ask seam itself (trinity-enterprise#611): agent-authored, so "
+        "NOT platform-only — bounded instead by the #1632 depth cap, enforced ATOMICALLY "
+        "per agent inside create_native_item, and by the SAME per-agent + fleet rate "
+        "buckets as the file seam; every field validated at the call",
+    ("services/agent_client/circuit.py", "_emit_dormant_alert"):  # 1028: package split
         "platform-only: edge-triggered after consecutive failed CB probes (cb-dormant)",
     ("services/archive_storage.py", "_alarm_unwritable_archive_dir"):
         "platform-only: raised from probe_archive_writability() at the start of an "
@@ -72,12 +82,12 @@ _ALLOWED_CALLERS = {
         "platform-only: edge-triggered on the durable prior-status transition "
         "(ok->failed), plus a staleness re-alarm throttled to weekly; volume is "
         "bound by the daily job cadence and no agent input reaches it (#2216)",
-    ("services/git_service.py", "_alarm_git_token_scrub_refused"):
+    ("services/git_service/token_scrub.py", "_alarm_git_token_scrub_refused"):
         "platform-only: the ent#615 sweep refused to strip a credential URL it "
         "could not replace. Raised from a start hook / boot one-shot, so the "
         "cadence is the platform's, and the id is bucketed per agent per UTC "
         "day so a restart loop is <=1 row/agent/day; no agent input reaches it",
-    ("services/git_service.py", "_alarm_git_token_scrub_unreadable"):
+    ("services/git_service/token_scrub.py", "_alarm_git_token_scrub_unreadable"):
         "platform-only: the ent#615 sweep could not READ the tree it swept, so "
         "its all-zero report is not evidence of a clean agent. Same emitters as "
         "its refusal sibling (start hook / boot one-shot), same per-agent-per-UTC-"
@@ -122,6 +132,10 @@ _ALLOWED_CALLERS = {
         "platform-only: edge-triggered once per failure series (2→3 crossing, #389)",
     ("services/sync_health_service.py", "SyncHealthService._emit_git_bloat_alert"):
         "platform-only: edge-triggered per threshold crossing (#1595)",
+    ("services/sync_health_service.py", "SyncHealthService._emit_sync_diverged_alert"):
+        "platform-only: deterministic per-episode id (sync-diverged-{agent}-"
+        "{diverged_since}), and an episode must last > 24 h before it can raise "
+        "one, so at most one per agent per day (trinity-enterprise#706)",
     ("services/system_agent_service.py",
      "SystemAgentService._emit_base_image_stale_alert"):
         "platform-only: per-process cooldown, hosted on trinity-system (#1816)",
@@ -150,6 +164,19 @@ def _receiver_names(node: ast.AST) -> list[str]:
     return names
 
 
+# trinity-enterprise#611 added two creates beside the original: the file
+# poller's `…_with_outcome` and the native ask's create. Each is a way to put a
+# row in the queue, so each is a spelling this guard must see — a new create
+# method is exactly how an unclassified emitter would slip past a guard that
+# matched one name.
+_FACADE_CREATES = (
+    "create_operator_queue_item",
+    "create_operator_queue_item_with_outcome",
+    "create_native_operator_queue_item",
+)
+_OPS_CREATES = ("create_item", "create_item_with_outcome", "create_native_item")
+
+
 def _is_emitter_call(call: ast.Call) -> bool:
     """True for any spelling of the operator-queue create.
 
@@ -164,12 +191,12 @@ def _is_emitter_call(call: ast.Call) -> bool:
     """
     func = call.func
     if isinstance(func, ast.Name):
-        return func.id == "create_operator_queue_item"
+        return func.id in _FACADE_CREATES
     if not isinstance(func, ast.Attribute):
         return False
-    if func.attr == "create_operator_queue_item":
+    if func.attr in _FACADE_CREATES:
         return True
-    if func.attr == "create_item":
+    if func.attr in _OPS_CREATES:
         return any(
             n in ("_operator_queue_ops", "OperatorQueueOperations")
             for n in _receiver_names(func.value)

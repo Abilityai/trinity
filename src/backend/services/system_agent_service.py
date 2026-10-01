@@ -419,6 +419,10 @@ class SystemAgentService:
             env_vars['OTEL_EXPORTER_OTLP_PROTOCOL'] = os.getenv('OTEL_EXPORTER_OTLP_PROTOCOL', 'grpc')
             env_vars['OTEL_EXPORTER_OTLP_ENDPOINT'] = os.getenv('OTEL_COLLECTOR_ENDPOINT', 'http://trinity-otel-collector:4317')
             env_vars['OTEL_METRIC_EXPORT_INTERVAL'] = os.getenv('OTEL_METRIC_EXPORT_INTERVAL', '60000')
+            # #3106: the OTEL_* env above is Claude Code's. FastAPI >= 0.142 reads the same
+            # names to auto-configure the agent server itself, refuses grpc, and the server
+            # exits on boot. Claude Code does not read this flag, so its metrics still flow.
+            env_vars['OTEL_SDK_DISABLED'] = 'true'
 
         # Inject Trinity MCP credentials
         if agent_mcp_key:

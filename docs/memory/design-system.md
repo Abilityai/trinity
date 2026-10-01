@@ -140,10 +140,10 @@ The dark tinted-ground recipe `token-500 at 16%` is expressible as `token-500/16
 
 | Variant | Recipe (light) | Recipe (dark) |
 |---|---|---|
-| primary | bg action-primary-600, white text; hover 700 | bg action-primary-500; hover 400 |
+| primary | bg action-primary-600, white text; hover 700 | **the light pair**: bg action-primary-600; hover 700 (ent#610 round 3: white on 500 measured 4.47:1 and on the 400 hover ~2.9:1, under AA; 600 / 700 are 6.29 / 7.90) |
 | secondary | surface bg, primary ink, border-strong; hover chrome bg | same roles, dark mappings |
 | danger | bg status-danger-600, white text; hover 700 | bg status-danger-500; hover 400 |
-| ghost | transparent, action-primary text; hover accent-soft bg | same roles, dark mappings |
+| ghost | transparent, action-primary-600 text; hover accent-soft bg | transparent, **action-primary-400** text (ent#610 §3g B7b: 500 measured 3.97:1 on gray-900 and 3.29 on gray-800; 400 is 5.95 / 4.92); hover action-primary-500/16 bg, where the 400 ink measures 4.13 over gray-800 — recorded, not fixed, because the hover is transient |
 
 **States:** disabled — opacity .45, `cursor: not-allowed` · in-flight — inline 16px spinner (2px border, top-colored, 0.7s linear rotation) + progressive label ("Deploying…"); the control acknowledges the press, honest-state rule 18 · focus — `:focus-visible` ring: `0 0 0 2px <surface>, 0 0 0 4px <ring>` on **all** variants, never `outline: none` alone.
 **Rules:** one primary per view (principle 11); destructive verbs are named ("Delete agent", never "OK").
@@ -208,6 +208,8 @@ Driven directly by the token families — the badge variant *is* the token famil
 | Neutral (light) | gray-100 | gray-600 |
 | Neutral (dark) | gray-750 | gray-400 |
 
+`primary` (ent#610 §3g) is the action family on the same recipe (700 on 100, 6.41:1; 300 on 500/16, 7.53:1 over gray-900) — a per-row "N new" in the hue of the solid "came back" counter it sums into. A *counter* is solid (white on a 700 ground — OverflowTabs' `badgeVariant`, the sidebar pills); a per-row *fact* is a tinted BaseBadge.
+
 **Rule:** a badge answers **one** question — status, mode, or identity — never two at once. Two facts = two badges.
 
 - **Do:** `Healthy` (status-success) next to `Claude` (brand-claude) as separate badges.
@@ -224,12 +226,19 @@ Driven directly by the token families — the badge variant *is* the token famil
 
 ### Modal shell & ConfirmDialog
 
-**One shell for every dialog.**
+**One shell for every dialog** — `components/base/BaseModal.vue` (#1923): overlay, Esc, focus trap, focus return and a **shared, ref-counted** scroll lock (`utils/focusTrap.js::bodyScrollLock` — modals nest, and a per-instance write to `body.style.overflow` unlocks the page when an inner dialog mounts or closes). The overlay carries `tabindex="-1"` so Esc still fires after a click on non-focusable text. The decidable rules live in `utils/focusTrap.js`; the wiring is proven by mounting the shell in `tests/unit/baseModal.spec.js` (per-file jsdom, #2918). Adopted so far by NavBar's and SystemViewEditor's dialogs; `ConfirmDialog` is the confirm recipe.
 **Recipe:** overlay gray-950 at 55% (`rgba(10,14,22,.55)`) · card — surface bg, 1px border, radius 10, shadow-lg, `max-width: 400px`, padding 20 · title 15.5/650 · body 13.5 secondary ink · actions right-aligned, 10px gap, **safe choice first** (left), destructive last.
 **Behavior:** Esc closes; click-outside closes; focus is trapped; **initial focus lands on the safe action, never the destructive one**. Destructive confirms restate the consequence: "This permanently removes the agent and its workspace. 3 schedules will be cancelled. This cannot be undone." (principle 19).
 
 - **Do:** `Cancel` focused, `Delete agent` as the named danger action.
 - **Don't:** "Are you sure? — OK / Cancel" with focus on OK.
+- **Consequential, not destructive (ent#610 §3g A9):** `ConfirmDialog`'s `confirmVariant`
+  (default `danger`, so every existing dialog is unchanged) takes `primary` for a confirm
+  that restates an irreversible but non-destructive consequence — "Mark 28 chats read?" /
+  "157 new messages across 28 chats will be marked read. You can't undo this." Cancel keeps
+  the initial focus either way: that is `data-destructive`'s job, not the button colour's.
+  Pair it with `variant="info"` (an i in a circle, primary ink; ent#610 round 3): a warning
+  triangle over a primary confirm reads as a danger the button then contradicts.
 
 ### OverflowTabs
 
@@ -261,6 +270,39 @@ recoverable only by widening the window.
   `+Infinity`, so every tab is inline before the first measurement; a truncating label
   drops the button's min-content to padding, and flex's default shrink would squeeze the
   row for a frame while the `width: max-content` mirror still reports 160.
+
+**Per-tab fields.** A tab is `{ id, label, badge?, signal?, pinned?, hasDraft? }`.
+`badge` is the success pill, `signal` the rail's activity dot (`live` ringed /
+`updated` plain), `pinned` the bookmark before the label (ent#523's Main), and
+`hasDraft` (trinity-enterprise#657) the Draft mark after it. Three rules hold for
+every one of them, and each has already been broken once: it renders in the
+**mirror row** as well as the visible one (a glyph the visible row draws and the
+mirror does not is a tab measured narrower than it draws, i.e. a strip that
+overflows one tab too late); it enters the **re-measure key** (`tabsSignature`),
+or toggling it repacks nothing; and in the overflow-menu row it gets its **own**
+`v-if`, never another arm of the `badge`/`signal` chain (#2794's `v-else` lesson).
+
+**Opt-in counter and tab semantics (ent#610 §3g L1).** Three fields, each off by default
+and each rendering the pre-existing DOM byte-for-byte when off:
+- `tab.badgeVariant` — `success` (default: the tinted pill) · `urgent` · `primary` ·
+  `neutral`. `urgent` and `primary` are **solid white on the 700 tier** (white on
+  status-urgent-700 5.18:1, on action-primary-700 7.90:1): a *counter* is solid, a per-row
+  *fact* is tinted (the counter-vs-label rule). `neutral` (ent#610 PR A2) is the gray tint
+  (gray-700 on gray-100 / gray-300 on gray-750) for a *share* of a count that is no
+  event's outcome — the Inbox's per-agent facets, which in success-green read as "done"
+  beside the urgent Action count. One class arm per variant, never two colours of a
+  property in one string (#2662).
+- `tab.badgeLabel` — the tab's `aria-label` when the bare count would be read as
+  "Action 21"; the badge is then `aria-hidden`. Neither field changes a tab's width, so
+  neither enters `tabsSignature`.
+- `tablistLabel` (prop) — the inline tabs render inside a `role="tablist"` of that name,
+  each a `role="tab"` with `aria-selected` and a roving tabindex; Arrow Left/Right wrap,
+  Home/End jump, and activation is **manual** (arrows move focus; Enter/Space selects).
+  The More trigger is not a tab and stays outside the tablist. Off, the wrapper is not
+  rendered at all (a functional component returns its slot bare). Flipping the default,
+  and retargeting the e2e specs that address tabs as buttons, is #3056.
+
+Guarded by `tests/unit/overflowTabsTablist.mount.spec.js`.
 
 ### Data table
 
@@ -440,6 +482,7 @@ The behavioral half of the standard (the visual half is §1–6). Confirmed in t
 7. Panels flex to available width; no overlap at narrow widths; wide content scrolls in its own container, never the page.
 8. Scrolling is axis-locked — one axis at a time.
 29. **Recommendation, verified by eye: enabling something should not shove the rest of the panel (#954, #1563, #1939, #2640).** A user-driven state change — a toggle switched on, a checkbox that reveals dependent fields, a mode that swaps a column, a tab switch — deserves the same care as data arrival (principle 4), but this is guidance, not a hard rule: some reveals are genuinely better as an instant snap, and the judgement is the reviewer's. Preferred shapes, chosen by size: a **reserved footprint** for small dependents (the block already occupies its space, disabled or dimmed, and enabling fills it in place — the natural default for settings forms), or a **height/flex transition** for a whole section or column (150–300ms ease-out, `motion-reduce:transition-none`, via `<Transition>` or an animatable property such as `grid-template-rows` / `flex-grow`) rather than a bare `v-if` that lands the new layout in one paint. Aim for: the activated control stays under the pointer, new content opens below or beside its trigger rather than above it, and what the user was reading stays in view. A swap that must remount should let the leaving element finish before the entering one takes its width — a mid-transition third column is a worse jump than the one being fixed (#2647). **No scanner can see this** — it is confirmed only by a human toggling the control in the browser, in both themes, and watching what moves; record that you did in the PR.
+30. **The primary surface sits at a fixed vertical position; nothing of variable cardinality stacks above it (trinity-enterprise#724).** A strip whose height depends on how many items it holds — a wrapping chip/pill row, a pile of banners, a toolbar that reflows to a second line — pushes the main content down by a different amount on every instance: another agent, a longer list, a narrower viewport, and the thing the user came to read starts somewhere new and has to be re-found. The Canvas tab's selector was the case: one chip per canvas, wrapping, above the canvas itself, so the canvas body began four rows lower on an agent with four canvases than on one with one. Chrome above the primary surface has a **fixed height**. A variable-cardinality set collapses into a fixed-height control — a `BaseSelect` for "pick one of N", a single row with a counted overflow menu (principle 10) for "act on any of N" — and a conditional row either reserves its footprint or opens **below or beside** the content, never above it. Principle 29 checks what moves across clicks; this checks what moves across instances: open the surface with a small set and a large set, and the primary content's top edge is at the same y in both.
 
 ### C. Density & progressive disclosure
 
@@ -467,7 +510,7 @@ The behavioral half of the standard (the visual half is §1–6). Confirmed in t
 24. Identity is encoded in form as well as color — classes and states are distinguishable by shape or icon, never by hue alone.
 25. Meaningful errors everywhere: every failure surface says what happened, what it means, and what to do — in user vocabulary; stack traces and HTTP codes go behind a details disclosure, never the headline.
 26. Expectation setting: non-instant actions state what will happen and roughly how long; multi-step operations show staged progress; say where the result will appear.
-27. Post-action next steps: after a completed action, offer the natural next move via static per-flow sequencing. (An adaptive, system-wide suggestion tier is deliberately deferred.)
+27. Post-action next steps: after a completed action, offer the natural next move via static per-flow sequencing. (An adaptive, system-wide suggestion tier is deliberately deferred.) The per-agent, per-viewer suggestions list (ent#465, `PortalSuggestions.vue`) is not that tier — it is computed from state, not triggered by the action just taken — but it owns the dismissal model that tier should reuse (`workspace_suggestion_feedback.surface`).
 28. Unbounded data is contained: any surface that can render a large or unbounded set (tables, logs, activity streams, execution lists) gets a bounded viewport — max-height with internal scroll, pagination, or virtualization — and never grows the page itself without limit. Sticky headers stay visible while scrolling; the surface states the total ("412 executions · latest 50 shown") so what's beyond the fold is known, not hidden. Companion of 7 (horizontal) and 4 (stable footprint).
 
 ## 8. Do / don't — the shape of a violation
@@ -485,15 +528,17 @@ The recurring failure modes, in one place:
 | Skeleton re-flash on a 30s poll | Stale-while-revalidate, in-place swap |
 | A toggle whose `v-if` pops a block open and shoves the form below it, unreviewed | Prefer a reserved footprint or a height transition; either way, a human toggles it and watches what moves (principle 29, a recommendation) |
 | Tabs wrapping to two rows | OverflowTabs with "+N more" |
+| A wrapping chip/pill strip (or banner pile) above the main content, its height set by how many items there are | A fixed-height control — a `BaseSelect` for pick-one, a single row with a counted overflow menu for act-on-any — so the main content's top edge is the same for 1 item and 40 (principle 30) |
 | A table that grows the page unbounded | Bounded viewport + sticky header + stated total |
 | Red border as the whole error | Named error + fix + example |
 | "Are you sure? OK" | Named verb + consequence + safe-action focus |
 
 ## 9. Enforcement
 
-Four layers keep the standard true:
+Five layers keep the standard true:
 
 1. **The token ratchet.** `src/frontend/scripts/check-design-tokens.mjs` (`npm run check:tokens`, wired into the frontend build workflow) validates token→palette aliasing and resolvable references, extended with a **raw-color ratchet**: a checked-in baseline (`raw-color-baseline.json`, per-file raw-palette counts) that **only shrinks**. CI fails when any file exceeds its baseline; migrating a file lowers its entry. New code starts at a baseline of zero raw colors — there is no legal way to add one.
 2. **The component reference page.** The living catalog renders every primitive and pattern from this document in both themes. It is re-rendered from the real primitives once they exist, so page, code, and doc cannot drift apart. When reviewing UI, compare against the page.
 3. **The review checklist.** Every frontend PR is checked against the builder contract's self-check (the condensed companion of this document); the validation playbook sweeps the frontend for the mechanically checkable principles — raw palette, hand-rolled primitives, off-scale spacing, unbounded surfaces — always reading rules from this document and the token file, never from a hardcoded copy. Findings are named and actionable: file, violation, suggested token or primitive.
 4. **The loading-gate ratchet (#1927).** `src/frontend/scripts/scan-loading-gates.mjs` counts, per `.vue` file, the bare `v-if`/`v-else-if` gates whose whole expression is a loading flag (`loading`, `loading.queue`, `executionsLoading`, …) — the p13/p14 violation class (#1634, #1926, #1927): such a gate swaps rendered data for a spinner on every background poll. `loading-gate-baseline.json` freezes today's per-file counts and `tests/unit/loadingGateRatchet.spec.js` (part of `npm run test:unit`) fails when any file's count grows, when a new file gains one, or when an entry is stale (a fixed file must lower its entry — `node scripts/scan-loading-gates.mjs src --baseline loading-gate-baseline.json`). The sanctioned shape is `utils/loadingState.js::viewState({ loading, hasLoaded, error, count })` → `loading | failed | empty | ready` + `stale`, with the stale-refresh banner (`InlineError retryable`, copy from `staleBannerMessage`) rendered as a **sibling before** the chain. Freeze, then pay down: the baseline is the sweep's worklist, not its permission slip.
+5. **The source-text ratchet (#2918).** `src/frontend/scripts/scan-source-text-specs.mjs` counts, per spec under `tests/unit/`, the source-text reads of `components/`/`views/` SFCs (a non-import `.vue` literal in a spec that calls `readFileSync`) — the class where a fleet-delete confirmation's `canRemove` (#2756) and a modal's Esc/focus-trap contract (#2778) shipped with regex-only coverage that an inverted predicate passes byte-identically, each justified by the false belief that this vitest cannot mount. `source-text-baseline.json` freezes today's per-spec counts and `tests/unit/sourceTextRatchet.spec.js` (part of `npm run test:unit`) fails when a spec's count grows, when a **new** spec reads SFC source without a `@source-text-pin: <reason>` marker in its docblock (the reviewable escape for an AST-shaped call-site guard or a parity table), or when an entry is stale. The failure message names the harness at the decision point — `// @vitest-environment jsdom` + `@vue/test-utils`, precedent `portalThemeSwitch.spec.js` — because the capability was never the gap; its discoverability was.

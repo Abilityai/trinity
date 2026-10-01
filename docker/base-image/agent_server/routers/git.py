@@ -3,6 +3,7 @@ Git sync endpoints for GitHub bidirectional sync.
 """
 import asyncio
 import functools
+import hashlib
 import json
 import os
 import re
@@ -116,6 +117,8 @@ _SYNC_STATE_DEFAULT: Dict = {
     "maintenance_failures": 0,  # #1595: consecutive failed maintenance attempts
     "maintenance_next_attempt_at": None,  # #1595: backoff gate (ISO timestamp)
     "last_lock_recovery": None,  # #2742: the boot reap's own record of a wedge
+    "last_successful_push_at": None,  # #3011: last cycle whose push landed
+    "behind_after_fetch": None,  # #3011: commits origin/<branch> had that we lacked
 }
 
 
@@ -174,13 +177,16 @@ def _write_sync_state_file(
     pack_count: Optional[int] = None,
     loose_objects: Optional[int] = None,
     maintenance_status: Optional[str] = None,
+    behind_after_fetch: Optional[int] = None,
 ) -> Dict:
     """Persist one sync outcome.
 
     consecutive_failures is bumped on `failed`, reset on `success`, untouched
     on `never`. last_error_summary is cleared on success, kept on never.
-    git_dir_bytes (#1596) / pack_count / loose_objects (#1595) are updated when
-    measured; a None here preserves the last known value.
+    git_dir_bytes (#1596) / pack_count / loose_objects (#1595) /
+    behind_after_fetch (#3011) are updated when measured; a None here preserves
+    the last known value. last_successful_push_at (#3011) is stamped on
+    `success` only — a sync outcome here always means the push landed.
 
     maintenance_status (#1595) drives the maintenance backoff bookkeeping:
     "failed" increments maintenance_failures and pushes
@@ -210,6 +216,8 @@ def _write_sync_state_file(
         prior["pack_count"] = pack_count
     if loose_objects is not None:
         prior["loose_objects"] = loose_objects
+    if behind_after_fetch is not None:
+        prior["behind_after_fetch"] = behind_after_fetch
 
     if maintenance_status is not None:
         prior["maintenance_status"] = maintenance_status
@@ -235,6 +243,8 @@ def _write_sync_state_file(
 
     prior["last_sync_status"] = last_sync_status
     prior["last_sync_at"] = last_sync_at or datetime.now(timezone.utc).isoformat()
+    if last_sync_status == "success":
+        prior["last_successful_push_at"] = prior["last_sync_at"]
 
     path = _sync_state_path(home_dir)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -744,13 +754,235 @@ def _maybe_run_git_maintenance(home_dir: Path, stats: Dict) -> Optional[str]:
         return "failed"
 
 
+# ent#708: the ONE Claude Code settings file whose content (not its name) makes
+# it unfit for the repo. `.claude/settings.json` is the agent's project settings
+# and may be committed — unless its content is container-only or secret:
+#   - it registers a HOOK whose command runs from the container's absolute
+#     `/opt/trinity/` path, which bricks any clone made outside the container
+#     (#2036: a PreToolUse hook whose script is missing exits 2 = "block"). The
+#     base image stopped baking such a copy in ent#345, but a legacy one survives
+#     on volumes whose copy does not byte-match the managed file, and an agent
+#     can write one. Only the `hooks` subtree counts: a `permissions.deny` rule
+#     naming the path is portable (review of #3019);
+#   - it carries a credential-bearing key. HOME is the repo root (#1703), so
+#     this is ALSO Claude Code's user settings file, and these top-level keys
+#     hold a credential or name the command that produces one (Claude Code
+#     settings reference): `env` (environment variables, e.g. an API key),
+#     `apiKeyHelper`, `awsAuthRefresh`, `awsCredentialExport`, `gcpAuthRefresh`,
+#     `otelHeadersHelper`. A present-but-empty value is not a credential;
+#   - it is not UTF-8 JSON object text, so it cannot be cleared of either (fail
+#     closed).
+# Mirrored for the backend's initialize path by
+# `services/git_service/gitignore.py::CONTAINER_ONLY_SETTINGS_GUARD` — same rule,
+# parity-tested against `_CREDENTIAL_SETTINGS_KEYS`. The backend's `.gitignore`
+# merge also greps THIS file for `_guard_container_only_settings` before it drops
+# the pre-ent#708 ignore line (`_SETTINGS_GUARD_PROBE_TOKEN`) — keep the name.
+_CONTAINER_ONLY_SETTINGS = ".claude/settings.json"
+_CONTAINER_ONLY_MARKER = "/opt/trinity/"
+_CREDENTIAL_SETTINGS_KEYS = (
+    "env",
+    "apiKeyHelper",
+    "awsAuthRefresh",
+    "awsCredentialExport",
+    "gcpAuthRefresh",
+    "otelHeadersHelper",
+)
+
+
+def _parse_settings(content: str):
+    """(data, None) for UTF-8 JSON text, else (None, reason). `content` is read
+    with `surrogateescape`, so undecodable bytes survive as lone surrogates and
+    fail the re-encode here instead of raising inside `git show`."""
+    try:
+        content.encode("utf-8")
+    except UnicodeEncodeError:
+        return None, "it is not valid UTF-8, so it cannot be checked for credentials"
+    try:
+        return json.loads(content), None
+    except ValueError:
+        return None, "it is not valid JSON, so it cannot be checked for credentials"
+
+
+def _registers_container_hooks(data) -> bool:
+    """True when a hook in this settings object runs from `/opt/trinity/`."""
+    return isinstance(data, dict) and _CONTAINER_ONLY_MARKER in json.dumps(data.get("hooks"))
+
+
+def _settings_refusal_reason(content: str) -> Optional[str]:
+    """Why this settings content must not be committed, or None when it may.
+    The reason names keys, never values — it goes to the log."""
+    data, reason = _parse_settings(content)
+    if reason:
+        return reason
+    if not isinstance(data, dict):
+        return "it is not a JSON object, so it cannot be checked for credentials"
+    if _registers_container_hooks(data):
+        return (
+            f"it registers container-only {_CONTAINER_ONLY_MARKER} hook paths, "
+            "which would break any clone made outside the container"
+        )
+    keys = [k for k in _CREDENTIAL_SETTINGS_KEYS if data.get(k)]
+    if keys:
+        return f"it carries credential-bearing key(s): {', '.join(keys)}"
+    return None
+
+
+# (repo, action, sha256 of the refused content) already logged — an untracked
+# refused file is re-staged by `git add -A` and refused again every cycle, so it
+# is logged once per content, not once per 15 minutes. Bounded: cleared when big.
+_SETTINGS_REFUSALS_LOGGED: set = set()
+
+
+def _guard_container_only_settings(home_dir: Path) -> Optional[str]:
+    """Keep NEW container-only or credential-bearing `.claude/settings.json`
+    content out of the next commit.
+
+    Runs after staging. When the INDEX copy is refused by
+    `_settings_refusal_reason`:
+      - HEAD holds the file and it registers no `/opt/trinity/` hook: keep the
+        HEAD copy (`git reset`). When the index copy already EQUALS HEAD this is
+        a no-op and nothing is logged — the content is in history, nothing new
+        leaks, and untracking would only commit a deletion of a template's
+        settings (review of #3019);
+      - HEAD registers `/opt/trinity/` hooks (a pre-#2036 leak), or there is no
+        HEAD copy: untrack it. For the leak, the next commit records the
+        deletion, which unbricks future clones.
+    The working-tree file is never touched: the running agent keeps whatever it
+    registers. Returns what it did ("restored" / "untracked"), or None when
+    there was nothing to keep out.
+    """
+    def _blob(spec: str) -> Optional[str]:
+        res = run_registered(
+            ["git", "show", spec], cwd=str(home_dir), timeout=10,
+            errors="surrogateescape",
+        )
+        return res.stdout if res.returncode == 0 else None
+
+    staged = _blob(f":{_CONTAINER_ONLY_SETTINGS}")
+    if staged is None:
+        return None
+    reason = _settings_refusal_reason(staged)
+    if reason is None:
+        return None
+    head = _blob(f"HEAD:{_CONTAINER_ONLY_SETTINGS}")
+    if head is not None and not _registers_container_hooks(_parse_settings(head)[0]):
+        if head == staged:
+            return None
+        run_registered(
+            ["git", "reset", "-q", "--", _CONTAINER_ONLY_SETTINGS],
+            cwd=str(home_dir), timeout=10, check=True,
+        )
+        action = "restored"
+    else:
+        run_registered(
+            ["git", "rm", "-q", "--cached", "--", _CONTAINER_ONLY_SETTINGS],
+            cwd=str(home_dir), timeout=10, check=True,
+        )
+        action = "untracked"
+    digest = hashlib.sha256(staged.encode("utf-8", "surrogateescape")).hexdigest()
+    key = (str(home_dir), action, digest)
+    if key not in _SETTINGS_REFUSALS_LOGGED:
+        if len(_SETTINGS_REFUSALS_LOGGED) > 256:
+            _SETTINGS_REFUSALS_LOGGED.clear()
+        _SETTINGS_REFUSALS_LOGGED.add(key)
+        logger.warning(
+            "git: kept %s out of the commit (%s) — %s",
+            _CONTAINER_ONLY_SETTINGS, action, reason,
+        )
+    return action
+
+
+def _has_staged_changes(porcelain: str) -> bool:
+    """True when `git status --porcelain` shows a STAGED entry. Untracked
+    (`??`) and unstaged-only (` M`) lines do not count — a guarded-out
+    settings file stays untracked on disk and must not trigger an empty
+    commit every cycle (ent#708)."""
+    return any(
+        line and line[0] not in (" ", "?")
+        for line in porcelain.splitlines()
+    )
+
+
+def _is_missing_remote_ref(stderr: Optional[str]) -> bool:
+    """`git fetch origin <branch>` failed only because the branch is not on the
+    remote yet (a working branch whose first push has not happened)."""
+    return "couldn't find remote ref" in (stderr or "").lower()
+
+
+def _is_shared_source_branch(home_dir: Path, branch: str) -> bool:
+    """#3011: True when the heartbeat must NOT push — a source-mode agent
+    (pull-only by contract) sitting on the repo's default branch.
+
+    Fork-to-own agents are source-mode too but own their fork's `main`; they are
+    recognised by `GIT_UPSTREAM_REPO` (baked at creation) or, since that env is
+    not re-derived on recreate, by the `upstream` remote startup.sh writes into
+    `.git/config` on the persistent volume.
+    """
+    if os.getenv("GIT_SOURCE_MODE", "").lower() != "true":
+        return False
+    if os.getenv("GIT_UPSTREAM_REPO"):
+        return False
+    upstream = run_registered(
+        ["git", "remote", "get-url", "upstream"], cwd=str(home_dir), timeout=10,
+    )
+    if upstream.returncode == 0:
+        return False
+    head = run_registered(
+        ["git", "symbolic-ref", "--short", "-q", "refs/remotes/origin/HEAD"],
+        cwd=str(home_dir), timeout=10,
+    ).stdout.strip()
+    if head.startswith("origin/"):
+        return branch == head[len("origin/"):]
+    # origin/HEAD unset (not a fresh clone): fall back to the conventional names.
+    return branch in ("main", "master")
+
+
+def _rebase_onto_remote(home_dir: Path, branch: str) -> Optional[str]:
+    """#3011: rebase local commits onto the freshly fetched `origin/<branch>`.
+
+    Returns None on a clean rebase, else the error summary to record. Any
+    failure is aborted, so the repo is back exactly where it was — a conflict is
+    never resolved automatically, the remote never overwritten, nothing reset.
+    """
+    try:
+        rebase = run_registered(
+            ["git", "rebase", "--autostash", f"origin/{branch}"],
+            cwd=str(home_dir), timeout=120,
+        )
+    except subprocess.TimeoutExpired:
+        # Killed mid-rebase: abort, or the next cycle meets a half-done rebase.
+        run_registered(["git", "rebase", "--abort"], cwd=str(home_dir), timeout=60)
+        return f"rebase timed out on {branch}"
+    if rebase.returncode == 0:
+        return None
+    conflicted = run_registered(
+        ["git", "diff", "--name-only", "--diff-filter=U"],
+        cwd=str(home_dir), timeout=10,
+    ).stdout.strip()
+    abort = run_registered(
+        ["git", "rebase", "--abort"], cwd=str(home_dir), timeout=60,
+    )
+    if abort.returncode != 0:
+        logger.error(
+            "auto-sync: rebase --abort failed on %s: %s",
+            branch, _summarize_git_error(abort.stderr),
+        )
+    output = f"{rebase.stdout or ''}\n{rebase.stderr or ''}"
+    if conflicted or "CONFLICT" in output:
+        return f"diverged: rebase conflict on {branch}"
+    return _summarize_git_error(rebase.stderr or rebase.stdout or "rebase failed")
+
+
 def _run_auto_sync_once(home_dir: Path) -> Dict:
     """One auto-sync cycle: reap stale lock litter, measure, stage, commit if
-    dirty, push, maybe consolidate .git. Records outcome.
+    dirty, fetch + rebase onto the remote branch, push, maybe consolidate .git.
+    Records outcome.
 
-    Intentionally minimal — heavy conflict handling stays in the operator-
-    initiated `sync_to_github` endpoint. Auto-sync is a heartbeat, not a
-    rescue.
+    #3011: the cycle reconciles before it pushes — a foreign push to the branch
+    is rebased over (lease-protected push), a conflicting one is aborted and
+    recorded as `diverged: …` for the `sync_failing` path, and a source-mode
+    agent on the default branch refuses to push at all. Conflict RESOLUTION
+    still belongs to the operator-initiated `sync_to_github` endpoint.
 
     #1595: runs in a worker thread (asyncio.to_thread) so a long repack no
     longer starves /health, the 5s liveness heartbeat, and chat. Every
@@ -775,11 +1007,36 @@ def _run_auto_sync_once(home_dir: Path) -> Dict:
         stats = _collect_git_object_stats(home_dir)
         gdb = _git_dir_bytes(home_dir)
 
+        def _fail(err: str, behind: Optional[int] = None) -> Dict:
+            _write_sync_state_file(
+                home_dir, "failed", last_sync_at=now, last_error_summary=err,
+                git_dir_bytes=gdb,
+                pack_count=stats.get("pack_count"),
+                loose_objects=stats.get("loose_objects"),
+                behind_after_fetch=behind,
+            )
+            return {"status": "failed", "error": err}
+
         try:
+            branch = run_registered(
+                ["git", "symbolic-ref", "--short", "-q", "HEAD"],
+                cwd=str(home_dir), timeout=10,
+            ).stdout.strip()
+            if not branch:
+                return _fail("detached HEAD: auto-sync needs a branch")
+
+            # #3011: a source-mode agent is pull-only by contract. On the repo's
+            # default branch its commits would land straight on `main` of a repo
+            # that may deploy on push — refuse BEFORE committing, so the clone
+            # stays a clean mirror. Fork-to-own agents own their fork's `main`.
+            if _is_shared_source_branch(home_dir, branch):
+                return _fail(f"refused: source-mode on {branch}")
+
             # Stage everything.
             run_registered(
                 ["git", "add", "-A"], cwd=str(home_dir), timeout=30, check=True,
             )
+            _guard_container_only_settings(home_dir)
 
             # Is there anything to commit? check=True: a swept/killed status
             # (rc −9, empty stdout) must fail the cycle loudly, not be
@@ -788,25 +1045,53 @@ def _run_auto_sync_once(home_dir: Path) -> Dict:
                 ["git", "status", "--porcelain"],
                 cwd=str(home_dir), timeout=10, check=True,
             )
-            if status.stdout.strip():
+            if _has_staged_changes(status.stdout):
                 commit_msg = f"Trinity auto-sync: {now}"
                 run_registered(
                     ["git", "commit", "-m", commit_msg],
                     cwd=str(home_dir), timeout=30, check=True,
                 )
 
-            push = run_registered(
-                ["git", "push", "origin", "HEAD"], cwd=str(home_dir), timeout=300,
+            # #3011: reconcile with the remote before pushing — anyone else's
+            # push to this branch otherwise fails every later cycle
+            # non-fast-forward, forever.
+            fetch = run_registered(
+                ["git", "fetch", "origin", branch], cwd=str(home_dir), timeout=120,
             )
+            behind: Optional[int] = None
+            push_cmd = ["git", "push", "origin", "HEAD"]
+            if fetch.returncode != 0:
+                if not _is_missing_remote_ref(fetch.stderr):
+                    return _fail(_summarize_git_error(
+                        fetch.stderr or fetch.stdout or "fetch failed"))
+                # Branch not on the remote yet (a fresh working branch): the
+                # first push creates it — nothing to reconcile.
+                behind = 0
+            else:
+                _, behind = _compute_ahead_behind(home_dir, branch)
+                if behind > 0:
+                    fetched_sha = run_registered(
+                        ["git", "rev-parse", f"origin/{branch}"],
+                        cwd=str(home_dir), timeout=10, check=True,
+                    ).stdout.strip()
+                    rebase_err = _rebase_onto_remote(home_dir, branch)
+                    if rebase_err:
+                        return _fail(rebase_err, behind)
+                    # Lease on the ref we rebased onto: a push that lands
+                    # between our fetch and this push is rejected, never
+                    # overwritten. Never the bare forced form.
+                    push_cmd = [
+                        "git", "push",
+                        f"--force-with-lease=refs/heads/{branch}:{fetched_sha}",
+                        "origin", f"HEAD:refs/heads/{branch}",
+                    ]
+
+            push = run_registered(push_cmd, cwd=str(home_dir), timeout=300)
             if push.returncode != 0:
-                err = _summarize_git_error(push.stderr or push.stdout or "push failed")
-                _write_sync_state_file(
-                    home_dir, "failed", last_sync_at=now, last_error_summary=err,
-                    git_dir_bytes=gdb,
-                    pack_count=stats.get("pack_count"),
-                    loose_objects=stats.get("loose_objects"),
+                return _fail(
+                    _summarize_git_error(push.stderr or push.stdout or "push failed"),
+                    behind,
                 )
-                return {"status": "failed", "error": err}
 
             # #1596/#1595: consolidate .git when packs or loose objects pile up
             # (self-throttling, non-fatal), then record the resulting size so
@@ -822,6 +1107,7 @@ def _run_auto_sync_once(home_dir: Path) -> Dict:
                 pack_count=stats.get("pack_count"),
                 loose_objects=stats.get("loose_objects"),
                 maintenance_status=maintenance,
+                behind_after_fetch=behind,
             )
             result = {"status": "success"}
             if maintenance:
@@ -1020,6 +1306,43 @@ def _is_stale_lease_rejection(stderr: str) -> bool:
     return "stale info" in s or "stale" in s and "rejected" in s
 
 
+def _ahead_behind_vs(home_dir: Path, ref: str) -> Optional[tuple]:
+    """``(ahead, behind)`` of HEAD vs ``origin/<ref>``, or ``None`` when that
+    can't be computed: the ref doesn't exist or git failed (#2105).
+
+    Unlike :func:`_compute_ahead_behind`, which returns a best-effort ``(0, 0)``
+    for the conflict classifier, this never turns "unknown" into a
+    believable 0.
+    """
+    try:
+        result = run_registered(
+            ["git", "rev-list", "--left-right", "--count", f"origin/{ref}...HEAD"],
+            cwd=str(home_dir), timeout=10,
+        )
+        if result.returncode == 0:
+            parts = result.stdout.strip().split()
+            if len(parts) == 2:
+                return int(parts[1]), int(parts[0])
+    except Exception:  # best-effort diagnostic only
+        pass
+    return None
+
+
+def _count_on_no_remote(home_dir: Path) -> Optional[int]:
+    """Commits reachable from HEAD that no remote-tracking ref contains:
+    the unpushed count for a branch that has no upstream yet (#2105)."""
+    try:
+        result = run_registered(
+            ["git", "rev-list", "--count", "HEAD", "--not", "--remotes"],
+            cwd=str(home_dir), timeout=10,
+        )
+        if result.returncode == 0:
+            return int(result.stdout.strip())
+    except Exception:  # best-effort diagnostic only
+        pass
+    return None
+
+
 def _dual_ahead_behind_payload(current_branch: str, home_dir: Path) -> dict:
     """Return ahead/behind tuples for both `origin/main` and the working branch.
 
@@ -1031,18 +1354,31 @@ def _dual_ahead_behind_payload(current_branch: str, home_dir: Path) -> dict:
     - `ahead_working`/`behind_working` — against `origin/<current_branch>`
       (peer divergence / P5-style silent clobber)
 
+    #2105: the working tuple is measured against `origin/<current_branch>`
+    whatever the branch is called. It used to do that only for `trinity/*`
+    and hand every other branch the `origin/main` counts under the working
+    label, which the fleet audit read as unpushed commits. When the branch has
+    no upstream (never pushed, or a detached HEAD), `ahead_working` counts the
+    commits no remote holds and `behind_working` is `None`. A count that can't
+    be computed is `None`, never 0. For example, the main tuple on a repo that
+    has no `main` is `None`.
+
     Legacy aliases `ahead` and `behind` track the main tuple to preserve
     backward compatibility with clients written against the old response.
     """
-    # Uses upstream's `_compute_ahead_behind(home_dir, branch) -> (ahead, behind)`
-    # defined near the top of this module.
-    main_ahead, main_behind = _compute_ahead_behind(home_dir, "main")
-    # Non-trinity branches use the same ref twice; avoid a second subprocess
-    # for the common case.
-    if current_branch.startswith("trinity/") and current_branch != "main":
-        working_ahead, working_behind = _compute_ahead_behind(home_dir, current_branch)
+    main = _ahead_behind_vs(home_dir, "main")
+    main_ahead, main_behind = main if main is not None else (None, None)
+
+    if current_branch == "main":
+        working = main
+    elif current_branch in ("HEAD", "unknown", ""):
+        working = None  # detached: `origin/HEAD` is the default branch, not ours
     else:
-        working_ahead, working_behind = main_ahead, main_behind
+        working = _ahead_behind_vs(home_dir, current_branch)
+    if working is not None:
+        working_ahead, working_behind = working
+    else:
+        working_ahead, working_behind = _count_on_no_remote(home_dir), None
 
     return {
         "ahead": main_ahead,  # legacy alias
@@ -1066,7 +1402,7 @@ _STATUS_HOME_DIR = Path("/home/developer")
 _STATUS_FOLLOWER_WAIT_SECONDS = 35
 
 # #2742 — COMPUTATION bound, deliberately a different number and a different
-# kind of thing. The child timeouts sum to ~130 s nominal (see
+# kind of thing. The child timeouts sum to ~130-150 s nominal (see
 # `_compute_git_status`'s docstring for the arithmetic) before `run_registered`'s
 # post-killpg drain, and on this design a slow leader costs no follower threads
 # but DOES hold the in-flight slot — so every caller in that window 504s. Cap it
@@ -1087,6 +1423,32 @@ _STATUS_LEADER_DEADLINE_SECONDS = 90
 _STATUS_INFLIGHT: Dict[str, "asyncio.Future"] = {}
 
 
+def _parse_porcelain_z(stdout: str) -> list[dict]:
+    """Parse `git status --porcelain -z` into `[{status, path[, orig_path]}]` (#2957).
+
+    Records are NUL-separated `XY PATH`, never quoted. A rename or copy (`R`/`C`
+    in either column) is followed by one extra record holding its origin, which
+    is surfaced as `orig_path`. Nothing is stripped before slicing: a leading
+    space IS the X column of an unstaged change.
+    """
+    records = [r for r in stdout.split("\0") if r]
+    changes = []
+    i = 0
+    while i < len(records):
+        rec = records[i]
+        i += 1
+        xy = rec[:2]
+        entry = {"status": xy.strip(), "path": rec[3:]}
+        if "R" in xy or "C" in xy:
+            if i < len(records):
+                entry["orig_path"] = records[i]
+                i += 1
+            else:
+                logger.warning(f"git status -z: rename/copy record without origin: {rec!r}")
+        changes.append(entry)
+    return changes
+
+
 def _compute_git_status(home_dir: Path) -> Dict:
     """The whole `/api/git/status` computation, as ONE blocking callable (#2742).
 
@@ -1102,8 +1464,9 @@ def _compute_git_status(home_dir: Path) -> Dict:
     caller-side bounds.** Sequential worst case:
     `rev-parse` 10 + `status` 10 + `log` 10 + `fetch` **30** + `merge-base` 10 +
     `log`(ancestor) 10 + `remote get-url` 10 = 90, plus `_persist_last_remote_sha`
-    10, `_get_pull_branch` 10 and `_dual_ahead_behind_payload` 10 (20 on a
-    `trinity/*` branch) = **~130 s nominal**, before `run_registered`'s
+    10, `_get_pull_branch` 10 and `_dual_ahead_behind_payload` 10 (20 on any
+    branch other than `main`, 30 when that branch has no upstream, #2105)
+    = **~130-150 s nominal**, before `run_registered`'s
     post-`killpg` drain of up to 10 s per timing-out child. The flow doc's old
     "~30 s worst case" was wrong and is corrected there.
     """
@@ -1135,21 +1498,18 @@ def _compute_git_status(home_dir: Path) -> Dict:
         # `GIT_OPTIONAL_LOCKS=0`: `run_registered` has no `env=` kwarg, the env
         # form would silently change the mutating sites too, and only the argv is
         # assertable in a test. Needs git >= 2.15; bookworm ships 2.39.
+        # #2957: `-z` — an outer strip ate the first line's X column, and plain
+        # porcelain quotes odd paths and prints renames as `old -> new`.
+        # `-z` also stops quoting non-ASCII, so git now emits raw filename bytes:
+        # a strict decode of one non-UTF-8 name would 500 the whole status.
+        # `backslashreplace` keeps it visible (`caf\\xe9.txt`) and JSON-safe.
         status_result = run_registered(
-            ["git", "--no-optional-locks", "status", "--porcelain"],
+            ["git", "--no-optional-locks", "status", "--porcelain", "-z"],
             cwd=str(home_dir),
             timeout=10,
+            errors="backslashreplace",
         )
-        changes = []
-        if status_result.returncode == 0 and status_result.stdout.strip():
-            for line in status_result.stdout.strip().split('\n'):
-                if line:
-                    status_code = line[:2]
-                    filepath = line[3:]
-                    changes.append({
-                        "status": status_code.strip(),
-                        "path": filepath
-                    })
+        changes = _parse_porcelain_z(status_result.stdout) if status_result.returncode == 0 else []
 
         # Get last commit
         log_result = run_registered(
@@ -1260,7 +1620,10 @@ def _compute_git_status(home_dir: Path) -> Dict:
             "behind": behind,
             "common_ancestor_sha": common_ancestor_sha,
             "common_ancestor_age_days": common_ancestor_age_days,
-            "sync_status": "up_to_date" if ahead == 0 and len(changes) == 0 else "pending_sync",
+            # #2105: `ahead` aliases the main tuple, which is now None (not a
+            # best-effort 0) on a repo with no `main`. Treat unknown as 0 so a
+            # clean `master` repo keeps reading "Synced", as it did before.
+            "sync_status": "up_to_date" if (ahead or 0) == 0 and len(changes) == 0 else "pending_sync",
         }
         # #389: dual ahead/behind tuples plus legacy ahead/behind aliases.
         response.update(ahead_behind)
@@ -1275,6 +1638,10 @@ def _compute_git_status(home_dir: Path) -> Dict:
         # rebuilds it from coerced values and never trusts the nested copy,
         # which `_read_sync_state_file` merges wholesale from agent-written JSON.
         response["lock_recovery"] = response["sync_state"].get("last_lock_recovery")
+        # #3010: the auto-sync gate the loop is running with — the owner's DB
+        # flag as last read, the same source `GET .../git/auto-sync` returns.
+        from ..auto_sync import current_auto_sync_enabled
+        response["auto_sync_enabled"] = current_auto_sync_enabled()
         # #2742: a currently-stuck lock is REPORTED, never removed. This is the
         # "tell the truth about state" half — a stale lock does not fail
         # `git status` (rc=0, empty stderr), so before this the read could not
@@ -1529,6 +1896,10 @@ async def sync_to_github(request: GitSyncRequest):
             )
             if add_result.returncode != 0:
                 raise HTTPException(status_code=500, detail=f"Git add failed: {add_result.stderr}")
+
+        # ent#708: whichever way it was staged, a settings file carrying
+        # container paths or credential-bearing keys never reaches the remote.
+        _guard_container_only_settings(home_dir)
 
         # Check if there's anything to commit
         status_result = subprocess.run(
@@ -2019,6 +2390,10 @@ def reset_to_main_preserve_state_impl(
     restored, _skipped = restore_from_tar(home_dir, tar_bytes, patterns)
 
     _git(["add", "-A"], home_dir)
+    # ent#708: this path commits AND force-pushes; a settings file carrying
+    # container paths or credential-bearing keys (from the tree or the
+    # preserved snapshot) never reaches it.
+    _guard_container_only_settings(home_dir)
     commit_res = _git(
         ["commit", "-m", "Adopt main baseline, preserve state", "--allow-empty"],
         home_dir,

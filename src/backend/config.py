@@ -1,7 +1,9 @@
 """
 Configuration constants for the Trinity backend.
 """
+import logging
 import os
+from typing import Optional
 from urllib.parse import urlparse
 
 # Email Authentication Mode (Phase 12.4)
@@ -581,6 +583,12 @@ INSTALL_SOURCE_VALUES = frozenset({
     # run at all unless DO's metadata service answers — so the value is a fact
     # the machine established, not a claim an operator typed.
     "do-script",
+    # AWS (#3004): the Marketplace AMI's first boot, and a doc-driven install
+    # onto EC2. `aws-script` is established the same way `do-script` is —
+    # `start.sh --provision --cloud aws` refuses to run unless EC2's metadata
+    # service issues it an IMDSv2 token.
+    "aws-marketplace",
+    "aws-script",
     "script",
     INSTALL_SOURCE_UNKNOWN,
 })
@@ -588,7 +596,7 @@ INSTALL_SOURCE_VALUES = frozenset({
 # The subset that renders the first-run hardening guide. Kept here rather than
 # in the frontend so the browser holds no second copy of the predicate (the
 # ent#386 rule); the flag surface ships the resolved boolean, not this set.
-MARKETPLACE_INSTALL_SOURCES = frozenset({"do-marketplace", "vultr-marketplace"})
+MARKETPLACE_INSTALL_SOURCES = frozenset({"do-marketplace", "vultr-marketplace", "aws-marketplace"})
 
 # Which installs the first-run hardening guide is offered to. Deliberately a
 # SEPARATE set from `MARKETPLACE_INSTALL_SOURCES` rather than a widening of it:
@@ -603,7 +611,7 @@ MARKETPLACE_INSTALL_SOURCES = frozenset({"do-marketplace", "vultr-marketplace"})
 # domain, no HTTPS flag and a 100.x address, so a gate on TLS state (or on "any
 # install") would fire permanently on every paying client's instance. Provenance
 # is why this gate exists.
-HARDENING_GUIDE_INSTALL_SOURCES = MARKETPLACE_INSTALL_SOURCES | {"do-script"}
+HARDENING_GUIDE_INSTALL_SOURCES = MARKETPLACE_INSTALL_SOURCES | {"do-script", "aws-script"}
 
 TRINITY_INSTALL_SOURCE = os.getenv(INSTALL_SOURCE_ENV_VAR, "").strip().lower()
 
@@ -699,6 +707,12 @@ RETENTION_OPS_KEYS = (
     # GET /api/settings/retention excludes it from the generic windows map.
     # NOT a community-floor key (fewer days = the destructive direction here).
     "backup_retention_days",
+    # trinity-enterprise#478: recorded metric points. A real row sweep, so it
+    # carries its own `_guard_allows` site in cleanup_service (the #1771a
+    # set-equality assertion is what makes that pairing mandatory rather than
+    # remembered). Deliberately NOT a community-floor key: the 5-day floor
+    # would gut a feature whose whole point is a year of history.
+    "metrics_retention_days",
 )
 
 # The RETENTION_OPS_KEYS members whose prune is NOT a #1644 row sweep (#2216).
@@ -763,6 +777,11 @@ OPS_SETTINGS_DEFAULTS = {
     # (acknowledged/cancelled/expired). "0" disables the sweep. `responded` rows
     # get a more generous fixed floor (never deleted younger than #772's guard).
     "operator_queue_retention_days": "90",
+    # #2915: hours a queue item may sit pending before the card carries an aging
+    # marker and the filing agent gets a receipt. Read at request time (no sweep);
+    # "0" disables — the retention-key idiom. Not a retention window: nothing is
+    # deleted by it, so it is deliberately NOT in RETENTION_OPS_KEYS.
+    "operator_queue_aging_hours": "24",
     # Issue #1296: retention for TERMINAL agent_reminders (fired/cancelled/
     # failed). Rows older than this many days are deleted; pending/firing never
     # deleted. "0" disables the sweep. Wide/safe default per the #1638 floor rule.
@@ -788,6 +807,30 @@ OPS_SETTINGS_DEFAULTS = {
     # "0" is INVALID for this key (validated 1–3650): keep-forever is the
     # disk-fill trap; disabling backups is DB_BACKUP_ENABLED=false.
     "backup_retention_days": "14",
+    # trinity-enterprise#478: how long a recorded metric point is kept. A year
+    # so a metric can be compared against the same month last year, which is
+    # the question a business metric exists to answer. "0" disables the sweep
+    # (keep forever), as on every row window above. Wide/safe per #1638.
+    "metrics_retention_days": "365",
+    # trinity-enterprise#478: per-agent per-UTC-day WRITE budget for recorded
+    # points. "0" is unlimited, following `ops_cost_limit_daily_usd` and the
+    # `max_agents_*` convention — an operator must be able to lift a cap
+    # without typing a huge number. At the ent#482 norm (tens of points a day)
+    # this is a ceiling against a runaway writer, not a working limit.
+    "metrics_daily_point_cap": "100000",
+    # #2806: how many agent-to-agent hops one chain may take. A non-agent
+    # principal's call is a root (depth 0); each agent-principal hop is
+    # `1 + max(depth of the caller's running rows)`, and a hop above this
+    # value is refused before any model work. 8 matches ROOM_MAX_CHAIN_DEPTH;
+    # the derivation errs toward over-refusal, so the default is generous.
+    "inter_agent_max_chain_depth": "8",
+    # #2973: event-subscription dispatches one source agent may send one
+    # subscriber agent per one-hour Redis window, across all subscriptions
+    # between the two (an agent key can create subscriptions on itself, so a
+    # per-subscription cap multiplies; a per-subscriber cap lets one noisy
+    # source starve the rest). Chain depth bounds how deep a chain runs; this
+    # bounds how often.
+    "event_dispatch_max_fires_per_hour": "120",
 }
 
 
@@ -814,6 +857,7 @@ OPS_SETTINGS_VALIDATION = {
     "schedule_soft_delete_retention_days": ("int", 0, _DAYS_MAX),
     "agent_reports_retention_days": ("int", 0, _DAYS_MAX),
     "operator_queue_retention_days": ("int", 0, _DAYS_MAX),
+    "operator_queue_aging_hours": ("int", 0, 8760),  # #2915 — a year of hours
     "agent_reminders_retention_days": ("int", 0, _DAYS_MAX),
     # ent#433 — the two subscription-telemetry windows. `0` means "disable this
     # sweep" on both, same as the row windows above.
@@ -826,7 +870,75 @@ OPS_SETTINGS_VALIDATION = {
     # The lower bound 1 plus the fixed BACKUP_MIN_KEEP=3 floor in
     # db/backup_primitives.py carry the "small valid integer" (#1644) safety.
     "backup_retention_days": ("int", 1, _DAYS_MAX),
+    # trinity-enterprise#478. The window follows the row convention (`0`
+    # disables). The cap's `0` means UNLIMITED, so its bounds are its own.
+    "metrics_retention_days": ("int", 0, _DAYS_MAX),
+    "metrics_daily_point_cap": ("int", 0, 10_000_000),
+    # #2806: the floor is 1, not 0 — no value may refuse every agent call.
+    "inter_agent_max_chain_depth": ("int", 1, 32),
+    "event_dispatch_max_fires_per_hour": ("int", 1, 10_000),
 }
+
+
+# ---------------------------------------------------------------------------
+# Env tier for ops settings (trinity-enterprise#478)
+# ---------------------------------------------------------------------------
+
+# The ops keys that read an environment variable when no `system_settings` row
+# exists. OPT-IN PER KEY, deliberately: making every ops key env-backed would
+# change precedence for ~20 keys that `GET /api/settings/retention` currently
+# documents as having NO env layer — inert today (no such variables exist) but
+# a policy change nobody asked for.
+#
+# The semantic is ONE semantic: env is a LIVE fallback, read on every
+# resolution, never frozen into a row. A later `PUT /ops/config` row still
+# wins; a later env change is honoured until such a row exists. The #2085 boot
+# seeder therefore SKIPS a key whose env var is set and valid, rather than
+# copying it into a row and quietly ending the env's authority.
+ENV_BACKED_OPS_KEYS = {
+    "metrics_retention_days": "METRICS_RETENTION_DAYS",
+    "metrics_daily_point_cap": "METRICS_DAILY_POINT_CAP",
+    "inter_agent_max_chain_depth": "INTER_AGENT_MAX_CHAIN_DEPTH",
+}
+
+_env_ops_warned: set = set()
+
+
+def env_ops_value(key: str) -> Optional[str]:
+    """The env value for an env-backed ops key, if set AND valid.
+
+    A malformed value is IGNORED with a one-time warning rather than crashing
+    the boot or being silently accepted: an operator who typed
+    `METRICS_RETENTION_DAYS=abc` gets the code default and a log line naming
+    the variable, not a 500 on the first write of the day.
+    """
+    var = ENV_BACKED_OPS_KEYS.get(key)
+    if not var:
+        return None
+    raw = os.getenv(var)
+    if raw is None or raw == "":
+        return None
+    try:
+        return validate_ops_setting(key, raw)
+    except ValueError as exc:
+        if key not in _env_ops_warned:
+            _env_ops_warned.add(key)
+            logging.getLogger(__name__).warning(
+                "Ignoring invalid %s=%r (%s); using the built-in default for %s",
+                var, raw, exc, key,
+            )
+        return None
+
+
+def resolve_ops_default(key: str) -> Optional[str]:
+    """The value an ops key takes when `system_settings` holds no row.
+
+    Env first (for the listed keys only), then the code default. Lives in
+    `config` rather than `settings_service` because the boot seeder runs at
+    IMPORT time and can only import config — which is also why the settings
+    layer resolves through this function instead of duplicating the chain.
+    """
+    return env_ops_value(key) or OPS_SETTINGS_DEFAULTS.get(key)
 
 
 def validate_ops_setting(key: str, value: str) -> str:

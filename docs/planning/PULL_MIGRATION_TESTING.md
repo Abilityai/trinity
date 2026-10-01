@@ -189,7 +189,7 @@ Run on **both** engines (SQLite supported until EOS 2026-09-01), even though loc
 |----|------|----------|
 | T6.1 | Re-delivery preserves `execution_id` | Requeue and park both keep the row id. |
 | T6.2 | effect_guard dedup across re-delivery | Same `execution_id` re-run → `send_message`/`create_share`/`voip` de-duped. |
-| T6.3 | **effect_guard fail-open when `execution_id` absent** | Without trusted injection a re-run **double-emits**. Must close before default-ON for side-effect agents. **Policy is decided — `TARGET_ARCHITECTURE.md` says fail-closed; #2392 is the build, not a decision.** |
+| T6.3 | **effect_guard without a usable `execution_id`** | Platform-injected via the MCP header (#2392). A pull-mode agent's effect with no usable id is refused + alarmed; a `manual` terminal session is sent and logged. Unit: `test_2392_effect_guard_fail_closed.py`. Live positive control: the eu2 emitting arm (a pull-mode pilot agent) once it runs an image with #2392. |
 | T6.4 | Nevermined settle exactly-once | Duplicate re-delivery → single settle on native `agent_request_id` token. |
 
 ### TIER 7 — PostgreSQL (now the LOCAL backend) — P0
@@ -346,14 +346,17 @@ the moment the lease-reaper became eligible and stayed red until its next sweep.
 the reaper never touches still fires — that is M4's automated owner (§9). Canary lease-awareness is now
 complete: S-01 and E-05 exclude leased rows, E-01 grace-bounds them; E-02 deliberately does neither (a
 terminal→non-terminal reversal is corruption regardless of ownership, and pull is the more exposed path) ·
-Tier-6 `effect_guard` `execution_id` injection (**#2392** — build fail-closed injection + operator alarm; the policy itself is already decided in the spec, do not re-open it) · ~~G3 canary-on-PG (#1540)~~ ✅ closed ·
+~~Tier-6 `effect_guard` `execution_id` injection~~ ✅ **built by #2392** — the id reaches the sinks through the agent's MCP header, and a pull-mode agent's effect without a usable id is refused with an operator alarm (§3 T6.3) · ~~G3 canary-on-PG (#1540)~~ ✅ closed ·
 B6 runtime-verify on the rebuilt image · the ≥2-week soak (#856 / #1766, measurement set in §9).
 
 **Also closed by #1766:** the pilot flag was purely additive, so a pilot ran push AND pull concurrently —
 the producer never force-queued (a free slot still meant a push, so rows only queued on overflow) and the
 backend's own `drain_next` raced the agent's worker for whatever did queue. Two independent capacity
 counters meant up to 2x `max_parallel_tasks`, invisible to S-02. The flag is now a true either/or for
-autonomous triggers; interactive turns keep the synchronous path (Open Question 7 scope cut).
+autonomous triggers; interactive turns keep the synchronous path for now — a **migration state**, not a
+boundary. Open Question 7 was **decided 2026-09-16 (#1989)** in favour of the edge adapter: interactive
+chat joins the queue once #2842 (queue priority) and #2843 (one turn per conversation) land, after which
+the synchronous push dispatch path is deleted.
 
 ## 9. Soak measurement set (#1766)
 
@@ -371,8 +374,8 @@ name for `'<agent>'`.
 
 **Every autonomous trigger reaches the durable queue as of #2524.** There is no
 longer a "can this agent be piloted at all?" question — `agent`, `event`,
-`schedule`, `webhook`, `reminder`, `loop`, `fan_out`, `a2a` and
-`operator_response` are all pullable. Pick a pilot on volume and traffic mix,
+`schedule`, `webhook`, `reminder`, `loop`, `fan_out`, `a2a`,
+`operator_response` and `retry` (#2845) are all pullable. Pick a pilot on volume and traffic mix,
 not on eligibility.
 
 > **Changed by #2391, widened again by #2523.** Before #2391,
@@ -483,14 +486,15 @@ passed `overflow_policy="queue_persistent"`. Two of the three producers can:
 
 | Producer | Carries | `overflow_policy` | Pullable? |
 |---|---|---|---|
-| `task_execution_service` | scheduler — **all cron** — webhooks, reminders, loops, fan-out, A2A, operator resumes | `queue_persistent` **when `pull_owns_dispatch` is true**, else `reject` | **Yes**, for every autonomous trigger it carries |
+| `task_execution_service` | scheduler — **all cron** and its RETRY-001 retries — webhooks, reminders, loops, fan-out, A2A, operator resumes | `queue_persistent` **when `pull_owns_dispatch` is true**, else `reject` | **Yes**, for every autonomous trigger it carries |
 | `dispatch_admission_service` | sequential `chat_with_agent`, human chat | `queue_in_memory` | **No** |
 | `chat_execution_service` (`POST /task`) | parallel `chat_with_agent`, MCP/manual task | `queue_persistent` | **Yes**, for `agent` / `event` |
 
 `POST /task` can only derive `triggered_by ∈ {self_task, agent, mcp, manual,
 event}`, contributing `agent` + `event`. `task_execution_service` contributes the
 autonomous triggers with **no synchronous result consumer**: `schedule`,
-`webhook` and `reminder`, all three of which reach it from the scheduler, which
+`webhook`, `reminder` and `retry` (#2845 — RETRY-001's next attempt at a failed
+run), all of which reach it from the scheduler, which
 dispatches `async_mode=True` and then polls the DB for the terminal, plus `loop`
 (#2523) and `fan_out` (#2524) since their orchestrators stopped holding the work
 in a coroutine, plus `a2a` and `operator_response` (#2524) through
@@ -535,7 +539,7 @@ SELECT agent_name,
        COUNT(*) FILTER (WHERE triggered_by = 'schedule') AS cron,
        COUNT(*) FILTER (WHERE triggered_by IN
          ('agent','event','schedule','webhook','reminder','loop','fan_out',
-          'a2a','operator_response'))                            AS pull_eligible,
+          'a2a','operator_response','retry'))                    AS pull_eligible,
        COUNT(*) FILTER (WHERE triggered_by IN
          ('manual','mcp','chat','public','session','voice','room'))
                                                                  AS interactive
@@ -737,6 +741,10 @@ load rather than in the 2026-07-08 synthetic pilot.
 > occurred" rather than "unknown". It also makes the T6.3 gate concrete: re-running
 > the same execution is now demonstrated behaviour, which is the condition
 > fail-closed `execution_id` injection was written for.
+
+A parked row stays parked: RETRY-001 skips any row whose `error` starts with
+`poison_lease` (#2845), so a schedule's `max_retries` cannot restart the
+re-delivery budget on a fresh row.
 
 ```sql
 SELECT redelivery_count, COUNT(*)

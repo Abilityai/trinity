@@ -1,5 +1,6 @@
 #!/bin/bash
-# Build-time provisioner for the Trinity DigitalOcean 1-Click snapshot (#2281).
+# Build-time provisioner for the Trinity DigitalOcean 1-Click snapshot (#2281)
+# and the AWS Marketplace AMI (#3004).
 # Everything here is baked into the image and shared by every droplet created
 # from it — so nothing droplet-specific and nothing secret may be produced here.
 #
@@ -59,12 +60,30 @@ git clone --depth 1 --branch "${TRINITY_IMAGE_TAG}" \
   https://github.com/abilityai/trinity.git /opt/trinity
 cd /opt/trinity
 
+# A tag cut before AWS support (#3004) has a start.sh that refuses --cloud aws.
+# The probe is the IMDSv2 helper's definition, pinned by test_3004_aws_packer.
+# Say so now, in plain words, rather than ten minutes of apt later.
+if [ "${TRINITY_CLOUD:-digitalocean}" = "aws" ] \
+    && ! grep -qF 'provision_aws_imds() {' scripts/deploy/start.sh; then
+    echo "FATAL: ${TRINITY_IMAGE_TAG} predates AWS support (#3004). Build from the first release containing AWS support, or later." >&2
+    exit 1
+fi
+
 # --- Machine provisioning (shared with the docs install path) ----------------
 # Docker, Caddy 2.11.x with the IP-certificate floor asserted, ufw, and
 # trinity-docker-firewall.service. --machine-only stops before anything
 # droplet-specific: no IP, no Caddyfile, no certificate, no .env, no Trinity.
 # First boot runs the matching --site-only half.
-./scripts/deploy/start.sh --provision --cloud digitalocean --machine-only
+#
+# The AWS bundle (packer/aws/, #3004) runs this same script with
+# TRINITY_CLOUD=aws. The cloud is recorded in /etc/trinity/cloud below, and first
+# boot reads it back to choose its admin path and provenance.
+TRINITY_CLOUD="${TRINITY_CLOUD:-digitalocean}"
+case "$TRINITY_CLOUD" in
+    digitalocean|aws) ;;
+    *) echo "FATAL: unsupported TRINITY_CLOUD '${TRINITY_CLOUD}'." >&2; exit 1 ;;
+esac
+./scripts/deploy/start.sh --provision --cloud "${TRINITY_CLOUD}" --machine-only
 
 # --- Pull the images so first boot pulls nothing -----------------------------
 # This is the entire point of the snapshot. Tags must match
@@ -103,6 +122,7 @@ docker pull "$OTEL_IMAGE"
 # Record what was baked, for the MOTD and for support.
 mkdir -p /etc/trinity
 echo "${TRINITY_IMAGE_TAG}" > /etc/trinity/baked-image-tag
+echo "${TRINITY_CLOUD}" > /etc/trinity/cloud
 
 # --- Place the per-instance and MOTD files -----------------------------------
 # Only files that have no home in the checkout: the cloud-init hook, the login

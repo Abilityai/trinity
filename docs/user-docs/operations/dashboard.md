@@ -35,7 +35,7 @@ When a type-to-filter query matches nothing, the Dashboard tells you so explicit
 
 - On first load each pane shows a skeleton in the shape of its content — rows for Timeline and List, tile outlines for Grid — until the fleet arrives. Skeletons are for "no data yet" only; a pane with data never regresses to one.
 - If the fleet can't be read, the pane shows **Couldn't load agents** (or **Couldn't load timeline data**) with a **Retry** button, instead of an empty list that looks like a fleet with no agents.
-- A fleet with no agents shows **No agents yet** and a **Get started** button that opens the Create Agent dialog. First-run setup is a separate overlay that opens over the Dashboard on a fresh install, and the **Getting started** checklist sits above the fleet until its milestones are done — both are described in [Setup](../getting-started/setup.md#your-first-dashboard).
+- A fleet with no agents shows **No agents yet** and a **Get started** button that opens the Create Agent dialog. First-run setup is a separate overlay that opens over the Dashboard on a fresh install. The **Getting started** checklist, on instances that have it, lives in the left **Systems** sidebar under the view list rather than in the fleet pane, so it never shifts the fleet down. It stays there until its milestones are done, and collapsing the sidebar hides it. Both are described in [Setup](../getting-started/setup.md#your-first-dashboard).
 - Background polls swap values in place. A poll that fails after a successful one keeps the numbers on screen and marks them stale rather than blanking them — for example, the Executions tile's stamp becomes `24h · stale`.
 
 ### Timeline View (default)
@@ -55,7 +55,7 @@ Agent-to-agent collaboration is surfaced here — via the Agent-Triggered trigge
 
 ![Trinity Dashboard — Grid view showing the fleet as a canvas of agent tiles with activity sparklines, success rates, cost, and inline Run/Auto toggles](../../screenshots/dashboard-grid.png)
 
-A magnetic tile canvas. It holds two kinds of occupant on one lattice: **agent tiles** (one per agent) and **info tiles** (fleet-level readouts). Each agent is a five-zone tile showing its avatar, runtime badge, and inline **Running** and **Autonomy** toggles, plus live status chips (git sync health, pending operator-queue items, subscription pressure). When an agent has a display label, the tile's name line shows the label and the meta line beneath leads with the slug in a click-to-copy code style, so the name that URLs and MCP keys use is always visible.
+A magnetic tile canvas. It holds two kinds of occupant on one lattice: **agent tiles** (one per agent) and **info tiles** (fleet-level readouts). Each agent is a five-zone tile showing its avatar, runtime badge, and inline **Running** and **Autonomy** toggles, plus live status chips (git sync health, pending operator-queue items, subscription pressure). The sync chip reads like `↑7 ↓0 · 12 dirty · pushed 3h ago` — commits ahead and behind the agent's branch on GitHub, uncommitted files, and the last successful push — colored by the agent's sync state; hover it for the reason and a recommendation. Agents with no GitHub binding, or no sync reading yet, show no chip. When an agent has a display label, the tile's name line shows the label and the meta line beneath leads with the slug in a click-to-copy code style, so the name that URLs and MCP keys use is always visible.
 
 1. Drag a tile to move it; drop it onto another tile to **swap** positions. The layout snaps to an unbounded lattice.
 2. **Tidy up** re-packs the tiles into a compact arrangement without losing your ordering.
@@ -83,6 +83,8 @@ Four ship today, all on by default:
 | **Subscription pressure** *(admins only)* | One row per Claude subscription: the share of its 5-hour and 7-day limits already spent, each as a small bar plus the number, colour-banded — green below 60%, amber from 60%, red from 85% — with a chip on the left when something needs attention. Header stamp `N subscriptions`, or `3 of 9` when the tile can't fit them all (the last row becomes **+N more**), with `· stale` after a failed refresh | **Open subscriptions →** — Settings → Integrations → Claude Subscriptions |
 
 **Subscription pressure chips.** `auth` — the provider rejected the token; re-register it. `limit` — rate-limited right now; the row says when the limit resets (`resets 19:10`, `reset due` once that time has passed, or `reset unknown`). `429s` — rate-limit errors in the last 24h, but not limited right now. `near` — inside the red band, or the provider's own "approaching limit" warning even below it. `?` — no usable reading. Rows sort by severity, so a token that needs a person outranks a limit that needs a wait. Percentages appear only from a provider reading under 30 minutes old; otherwise the row shows a short status (`rate-limited`, `3× 429`, `token invalid`, `no provider data`, `unavailable`, `ok`) rather than a stale number. What each state means, and how to read the same figures in Settings, is on [Subscription Credentials](../credentials/subscription-credentials.md).
+
+**Readiness badge.** An agent whose owner has stamped its readiness shows a **ready** (green) or **calibrating** (amber) badge — after the runtime badge on a Grid tile, and after the pressure badge on a List row. Hover it for the date the stamp changed. A calibrating tooltip says the agent's scheduled brief is paused only when one is actually held (an enabled Workspace-delivery schedule and autonomy on); otherwise it says the agent is not yet marked ready. Agents with no stamp show no badge. The badge updates on the next background poll, without a reload.
 
 **Per-agent pressure chips.** Agent tiles (and List rows) carry a small badge when the agent's own subscription is under strain: **sub limit** (rate-limited now), **sub 429s** (rate-limit errors in the last 24h), or **sub auth** (the token was rejected). Hover it for the subscription name, the event count, and the 5h utilization.
 
@@ -117,7 +119,7 @@ Org tags are **human-only**: agent-scoped API keys cannot add or remove them.
 The former standalone Agents page, folded into the Dashboard as a third mode (`/agents` now redirects here).
 
 1. One row per agent. Columns: **Name**, **Status**, **Controls**, **Success**, **Exec / Sched**, plus a capacity meter. The header and every row share one column grid, so the columns line up regardless of what each row contains.
-2. The name cell carries only exception markers — **SYSTEM**, **GHOST**, **Shared**. A labelled agent shows its display label in the name cell and its slug, in a click-to-select code style, first on the row's secondary line — followed by the subscription pressure badge (if any), a runtime badge for any non-default runtime, and the agent's tags with a `+N` overflow count.
+2. The name cell carries only exception markers — **SYSTEM**, **GHOST**, **Shared**. A labelled agent shows its display label in the name cell and its slug, in a click-to-select code style, first on the row's secondary line — followed by the subscription pressure badge (if any), the readiness badge (if any), a runtime badge for any non-default runtime, and the agent's tags with a `+N` overflow count.
 3. **Run** and **Autonomy** toggles inline on each row.
 4. Sort by **Newest First**, **Oldest First**, **Name (A-Z)**, **Name (Z-A)**, **Running First**, or **Success Rate**; filter by name (**Search agents...**) and status (**All** / **Running** / **Stopped**). These two filters persist per browser.
 5. Select multiple rows for bulk tag operations.
@@ -134,7 +136,7 @@ The header's left side carries live fleet telemetry: `n/total agents`, `N workin
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `/api/agents` | GET | List all agents (carries `tags`, `read_only_enabled`, and `display_label` per row) |
+| `/api/agents` | GET | List all agents (carries `tags`, `read_only_enabled`, `display_label`, `readiness` (`{status, changed_at, source}` or `null`), and `brief_held` per row) |
 | `/api/agents/context-stats` | GET | Context and activity state for all agents |
 | `/api/agents/autonomy-status` | GET | Autonomy status for all agents |
 | `/api/agents/subscription-pressure` | GET | Per-agent subscription pressure — auth mode, subscription name, 24h failure events, `rate_limited_now`, token status, 5h utilization. The source of the per-agent chips |

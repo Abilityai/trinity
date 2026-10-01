@@ -359,7 +359,7 @@ def test_resend_test_endpoint_checks_the_sender_in_force_when_none_is_given(monk
         seen.update(key=key, from_address=from_address)
         return {"valid": True}
 
-    monkeypatch.setattr(sr.platform_keys_service, "check_resend_key", fake_check)
+    monkeypatch.setattr(sr.provider_keys.platform_keys_service, "check_resend_key", fake_check)  # #1028: package
     _client().post("/api/settings/api-keys/resend/test", json={"api_key": "re_k"})
     assert seen == {"key": "re_k", "from_address": "noreply@env.example.com"}
 
@@ -537,14 +537,14 @@ def test_restart_skips_a_running_execution_and_an_already_current_env(monkeypatc
 
 def test_api_key_save_returns_an_int_count_only_for_the_first_credential(monkeypatch):
     calls = []
-    monkeypatch.setattr(sr, "connect_agents_to_first_credential", lambda: calls.append(1) or 2)
+    monkeypatch.setattr(sr.credentials, "connect_agents_to_first_credential", lambda: calls.append(1) or 2)  # #1028: package
     client = _client()
 
-    monkeypatch.setattr(sr, "is_claude_auth_configured", lambda: False)
+    monkeypatch.setattr(sr.credentials, "is_claude_auth_configured", lambda: False)
     r = client.put("/api/settings/api-keys/anthropic", json={"api_key": "sk-ant-api03-first"})
     assert r.status_code == 200 and r.json()["connected_agents"] == 2
 
-    monkeypatch.setattr(sr, "is_claude_auth_configured", lambda: True)
+    monkeypatch.setattr(sr.credentials, "is_claude_auth_configured", lambda: True)
     r = client.put("/api/settings/api-keys/anthropic", json={"api_key": "sk-ant-api03-second"})
     assert r.json()["connected_agents"] == 0
     assert calls == [1]

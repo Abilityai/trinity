@@ -166,7 +166,16 @@ A `continue`-mode loop that reaches its run limit (or matches its stop signal) w
 
 ## For Agents
 
-Agents (and scripts) start loops via MCP tools or REST. The permission model matches `chat_with_agent`: owner, admin, or shared access on the target agent; agent-scoped MCP keys need an explicit permission grant.
+Agents (and scripts) start loops via MCP tools or REST. The permission model matches `chat_with_agent`: a person needs owner, admin, or shared access on the target agent. An agent can loop on itself, and on another agent only if it has permission to call that agent (see [Agent Permissions](../collaboration/agent-permissions.md)).
+
+### Permission checks on the loop tools
+
+The MCP loop tools check the calling agent's permission before they act:
+
+- **`run_agent_loop`** — an agent-scoped key that names an agent it may not call is refused before any loop starts, with the same reason `chat_with_agent` gives: `Permission denied: Agent '<caller>' is not permitted to communicate with '<target>'`.
+- **`get_loop_status` / `stop_loop`** — these take only a `loop_id`, so they look up the loop's agent first and apply the same rule. A refusal reads `Loop '<id>' not found or not accessible` and never names the agent. `stop_loop` sends no stop when it is refused.
+
+If an agent started a loop and its permission to that agent was removed afterwards, it can no longer read or stop the loop. The agent's owner can still stop it from the **Loops** tab, the Workspace, or `POST /api/loops/{loop_id}/stop`. Refused calls are recorded in the [audit log](../operations/audit-trail.md) as refusals.
 
 ### From Claude Code: `/trinity:loop`
 

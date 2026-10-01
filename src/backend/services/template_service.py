@@ -2237,6 +2237,16 @@ def _is_platform_injected(var: str) -> bool:
     return any(var.startswith(prefix) for prefix in _PLATFORM_INJECTED_PREFIXES)
 
 
+# The MCP servers Trinity writes into the agent's own `.mcp.json` at boot —
+# the server-level twin of `_PLATFORM_INJECTED_EXACT` above. A template that
+# declares one of these in `template.yaml mcp_servers[]` is CORRECT to leave it
+# out of `.mcp.json.template`: the entry is materialised inside the container by
+# `docker/base-image/agent_server/services/trinity_mcp.py`, which the backend
+# structurally cannot import (separate image, Invariant #5). A static mirror,
+# for the same reason the env-var list above is one (#2899).
+PLATFORM_INJECTED_MCP_SERVERS = frozenset({"trinity"})
+
+
 def _sanitize_for_warning(text: str, max_len: int = 80) -> str:
     """Make an operator-supplied string safe to echo in a deploy warning.
 

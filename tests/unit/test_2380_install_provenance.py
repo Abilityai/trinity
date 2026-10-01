@@ -67,6 +67,8 @@ MARKETPLACE = "do-marketplace"
 OTHER_MARKETPLACE = "vultr-marketplace"
 SCRIPT = "script"
 DO_SCRIPT = "do-script"
+AWS_MARKETPLACE = "aws-marketplace"  # #3004
+AWS_SCRIPT = "aws-script"  # #3004
 UNKNOWN = "unknown"
 
 
@@ -90,7 +92,27 @@ def _settings_service_module():
 
 
 def _router():
+    """The composed router package — use for `.router` only."""
     import routers.settings as m
+    return m
+
+
+# #1028: `routers/settings.py` is a package now, and the collaborators tests
+# patch (`db`, `settings_service`) are deliberately NOT re-exported on the
+# package. That is what makes a stale patch raise AttributeError instead of
+# applying to a module nobody reads — a silently-inapplicable patch on `db` is
+# a test that asserts nothing while hitting the real accessor. So each helper
+# below names the module that actually owns the handler under test.
+
+def _generic():
+    """`GET/PUT/DELETE /{key}` — the catch-all guards."""
+    import routers.settings.generic as m
+    return m
+
+
+def _flags_mod():
+    """`GET /feature-flags`."""
+    import routers.settings.flags as m
     return m
 
 
@@ -150,7 +172,7 @@ class TestConfigContract:
         cfg = _config()
         assert cfg.INSTALL_SOURCE_UNKNOWN == UNKNOWN
         assert cfg.INSTALL_SOURCE_VALUES == frozenset(
-            {MARKETPLACE, OTHER_MARKETPLACE, SCRIPT, DO_SCRIPT, UNKNOWN}
+            {MARKETPLACE, OTHER_MARKETPLACE, AWS_MARKETPLACE, SCRIPT, DO_SCRIPT, AWS_SCRIPT, UNKNOWN}
         )
 
     def test_marketplace_sources_are_a_strict_subset(self):
@@ -158,7 +180,7 @@ class TestConfigContract:
         marketplace value that cannot be recorded could never fire the guide."""
         cfg = _config()
         assert cfg.MARKETPLACE_INSTALL_SOURCES == frozenset(
-            {MARKETPLACE, OTHER_MARKETPLACE}
+            {MARKETPLACE, OTHER_MARKETPLACE, AWS_MARKETPLACE}
         )
         assert cfg.MARKETPLACE_INSTALL_SOURCES < cfg.INSTALL_SOURCE_VALUES
         assert cfg.INSTALL_SOURCE_UNKNOWN not in cfg.MARKETPLACE_INSTALL_SOURCES
@@ -167,6 +189,7 @@ class TestConfigContract:
         # question with a different set — widening this one instead would make
         # the install claim a vendor listing it never came from.
         assert DO_SCRIPT not in cfg.MARKETPLACE_INSTALL_SOURCES
+        assert AWS_SCRIPT not in cfg.MARKETPLACE_INSTALL_SOURCES
 
     def test_the_guide_set_is_marketplace_plus_the_do_script_install(self):
         """#2380's amended AC. The guide's subject is "public cloud VM at a bare
@@ -181,7 +204,7 @@ class TestConfigContract:
         say — fires on every paying client's instance, permanently."""
         cfg = _config()
         assert cfg.HARDENING_GUIDE_INSTALL_SOURCES == frozenset(
-            {MARKETPLACE, OTHER_MARKETPLACE, DO_SCRIPT}
+            {MARKETPLACE, OTHER_MARKETPLACE, AWS_MARKETPLACE, DO_SCRIPT, AWS_SCRIPT}
         )
         assert cfg.MARKETPLACE_INSTALL_SOURCES < cfg.HARDENING_GUIDE_INSTALL_SOURCES
         assert cfg.HARDENING_GUIDE_INSTALL_SOURCES < cfg.INSTALL_SOURCE_VALUES
@@ -313,7 +336,7 @@ class TestRecorderSqlite:
         [
             "do-marketplac",        # the realistic typo
             "DO-MARKETPLACE",       # case: the marker is matched exactly
-            "aws-marketplace",      # a channel that does not exist yet
+            "gcp-marketplace",      # a channel that does not exist yet
             "; DROP TABLE users",
             "true",
         ],
@@ -566,7 +589,7 @@ class TestResolver:
         assert svc.get_install_source() == value
 
     @pytest.mark.parametrize(
-        "rogue", ["aws-marketplace", "do-marketplac", "true", "", "   "]
+        "rogue", ["gcp-marketplace", "do-marketplac", "true", "", "   "]
     )
     def test_a_row_outside_the_allowlist_reads_as_unknown(self, monkeypatch, rogue):
         """Defence in depth against a value written by any path other than the
@@ -891,9 +914,9 @@ def client(monkeypatch):
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
 
-    rs = _router()
+    rs = _generic()          # the module whose collaborators this fixture stubs
     app = FastAPI()
-    app.include_router(rs.router)
+    app.include_router(_router().router)
     app.dependency_overrides[rs.get_current_user] = lambda: _principal()
 
     # Nothing below the guards may reach a real DB or audit sink. The PUT
@@ -965,7 +988,7 @@ class TestRouterGuards:
     def test_the_refusal_precedes_any_write(self, client, monkeypatch):
         """The guard must sit above the sink, not beside it — a 422 returned
         after the row was already written would be the worst of both."""
-        rs = _router()
+        rs = _generic()
         writes = []
         monkeypatch.setattr(rs.db, "set_setting", lambda k, v: writes.append((k, v)))
         monkeypatch.setattr(rs.db, "delete_setting", lambda k: writes.append(("del", k)))
@@ -979,7 +1002,7 @@ class TestRouterGuards:
     def test_a_non_admin_is_still_refused_first(self, client, monkeypatch):
         """The provenance guards must not have opened a hole above the admin
         gate — `assert_admin` runs before either of them."""
-        rs = _router()
+        rs = _generic()
         client.app.dependency_overrides[rs.get_current_user] = lambda: _principal(
             role="user"
         )
@@ -1000,7 +1023,7 @@ def _flags(monkeypatch, *, source, marketplace, posture, guide=None, reached=Fal
     Mirrors `test_2217_canary_status.py`: a pure handler test that still
     catches a dropped or misnamed key.
     """
-    rs = _router()
+    rs = _flags_mod()
 
     stub_settings = types.SimpleNamespace(
         is_brain_orb_enabled=lambda: False,

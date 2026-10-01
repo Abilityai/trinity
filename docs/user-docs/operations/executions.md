@@ -12,6 +12,7 @@ View, monitor, and manage task executions across all agents. Executions are crea
 |---------|--------|
 | `manual` | Tasks tab in agent detail |
 | `schedule` | Cron-based schedule |
+| `retry` | An automatic retry of a failed run (charted under **Scheduled**) |
 | `chat` | Chat tab in agent detail |
 | `session` | A resumable conversation turn (the Workspace) |
 | `agent` | Agent-to-agent call |
@@ -23,7 +24,8 @@ View, monitor, and manage task executions across all agents. Executions are crea
 | `reminder` | An agent's own deferred self-trigger |
 | `room` | A turn inside a shared multi-agent room |
 | `a2a` | A task sent in by an external A2A orchestrator |
-| `operator_response` | An answer to a parked request waking the agent, on an agent with wake-on-answer turned on (see [Approvals](../automation/approvals.md)) |
+| `operator_response` | An answer to a parked request waking the agent, on an agent with the ask-ending wake turned on (see [Approvals](../automation/approvals.md)) |
+| `operator_ending` | A parked request that was cancelled or expired waking the agent — one turn per agent per sweep or expiry, same switch |
 
 Channel and voice triggers (`telegram`, `slack`, `whatsapp`, `voip`, `voice`, `paid`) are recorded too and are folded into the **Channels**, **Voice**, and **Public** groups on the analytics charts. Rooms and operator answers get their own **Rooms** and **Operator queue** groups, beside **Loops** and **Reminders**.
 
@@ -92,17 +94,16 @@ Durations are always non-negative, and a run that ends through a recovery path (
 
 ### Work in the Workspace
 
-Platform users see their executions inside the [Workspace](../sharing-and-access/workspace.md) too, in the vocabulary of the chat rather than the ledger. An external client sees none of this.
+Platform users see their executions inside the [Workspace](../sharing-and-access/workspace.md) too, in the vocabulary of the chat rather than the ledger. An external client sees only the live card under their own message, never the Work tab.
 
-**The live card.** When a message starts a longer job, a card under it shows the status word, how long it has been going, what the agent is doing right now, and — where the agent publishes a pipeline — the steps with the agent holding each one. Its controls are only those the platform can honour: **Stop** (where a stop would be accepted — your own turn or a job it handed on), **Open in Work** (the rail, on this tab), and after a job that failed, timed out, was stopped or was lost, **Ask about it**, which pre-fills the composer with a question naming the job and how it ended and never sends on its own. A card for a finished job survives a reload; a reply that lands replaces it.
+**The live card.** When a message starts a longer job, a card under it shows the status word, how long it has been going, what the agent is doing right now, and — where the agent publishes a pipeline — the steps with the agent holding each one. Its controls are only those the platform can honour: **Stop** (where a stop would be accepted — your own turn, a job it handed on, or a room turn your message started), **Open in Work** (the rail, on this tab), and after a job that failed, timed out, was stopped or was lost, **Ask about it**, which pre-fills the composer with a question naming the job and how it ended and never sends on its own. A card for a finished job survives a reload; a reply that lands replaces it.
 
 Steps are one of three sentences, never two: the stages themselves, *{agent} doesn't report steps.* when a reachable agent publishes none, or *Steps could not be read right now.* when nobody can tell (a stopped or unreachable agent, or two runs on the same agent).
 
-**The Work tab** in the rail has three sections:
+**The Work tab** in the rail has two sections, plus one line — *N asks waiting on you · Open in Inbox* — while something waits on you (questions are answered in the Inbox, see [Approvals](../automation/approvals.md)):
 
 | Section | Holds |
 |---------|-------|
-| **Waiting on you** | Open asks from this chat's participants, answerable in place — see [Approvals](../automation/approvals.md) |
 | **Now** | A live card per job in flight; *Nothing running right now.* otherwise |
 | **Earlier** | The last 30 days: *N in the last 30 days · latest 3 shown*, with **Show all N** / **Show fewer** |
 
@@ -137,6 +138,7 @@ Full API reference: http://localhost:8000/docs
 | `list_recent_executions(name)` | List recent executions for an agent |
 | `get_execution_result(id)` | Get the result of a specific execution |
 | `get_agent_activity_summary(name)` | Get activity summary including execution stats |
+| `search_executions(query, ...)` | Search execution messages, responses, and errors across the agents you can access. Offered only to user- and system-scoped keys, never to agent keys. It needs a matching entitlement; where the search is not available it answers `available: false` rather than "no results" |
 
 ## See Also
 

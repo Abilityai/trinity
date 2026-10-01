@@ -215,6 +215,19 @@ Use `unless-stopped`, never `always`: Trinity stops an agent through Docker's ma
 
 ---
 
+## GitHub token out of agent remotes (automatic, then rotate)
+
+Agents' git remotes no longer carry the GitHub token. Git asks a credential helper for it instead (see [GitHub PAT Setup → How git gets the token](../../integrations/github-pat-setup.md#how-git-gets-the-token)). Existing agents need no manual step:
+
+- About 20 seconds after the backend starts, Trinity cleans the remotes of every running agent once. It cleans each agent again every time that agent starts.
+- Each pass installs the helper (including into agents on an older base image), checks that a token still resolves, and only then removes the token from the URL.
+- An agent whose only token was inside its remote URL gets that token moved to a private file the helper reads. If Trinity cannot place a replacement, it leaves the URL alone and files an operator-queue alert, *A git remote still carries an embedded credential*. Give that agent its own token on its **Git** tab and the next start finishes the job.
+- A pass that cannot read an agent's workspace — expected when the agent runs without full capabilities — files a separate alert, *Trinity could not check this agent's git remotes*. Check that agent's remotes by hand.
+
+Then rotate the platform GitHub token. Backups, log archives, and container logs from before the upgrade can still contain it. Rotation is mandatory if the cleanup reports a token in a committed `.gitmodules` file, because that token is already in the repository's history. Full runbook, including how to verify an agent: [`docs/migrations/GIT_REMOTE_TOKEN_SCRUB_2026-09.md`](../../../migrations/GIT_REMOTE_TOKEN_SCRUB_2026-09.md).
+
+---
+
 ## Rollback
 
 If something goes wrong after the upgrade:

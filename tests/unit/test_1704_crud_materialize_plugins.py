@@ -77,6 +77,7 @@ def _stub_github_resolution(monkeypatch):
         *,
         source_metadata=None,
         source_metadata_reason=None,
+        allow_unforked_pull_only=False,
     ):
         return repo, pat, tier, None
 

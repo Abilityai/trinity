@@ -43,7 +43,7 @@ pytestmark = pytest.mark.unit
 
 @pytest.fixture(scope="module")
 def fmt():
-    from routers.ops import _format_model_name
+    from services.ops_costs_service import _format_model_name  # moved by #1028
 
     return _format_model_name
 
@@ -63,6 +63,10 @@ def catalog_ids():
         # A dated snapshot of the same point release: the 8-digit strip runs
         # first, then the exact entry matches.
         ("claude-fable-5-1-20260101", "Claude Fable 5.1"),
+        # #2987: the same shape one tier over. Stated explicitly as well as
+        # covered by the derived test below, so the expected STRING is pinned
+        # and not merely "does not contain a split version".
+        ("claude-opus-5-5", "Claude Opus 5.5"),
         # Unchanged neighbours — proof the new entry swallowed nothing.
         ("claude-fable-5", "Claude Fable 5"),
         ("claude-opus-5", "Claude Opus 5"),

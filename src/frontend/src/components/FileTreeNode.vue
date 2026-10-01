@@ -54,7 +54,7 @@ export default defineComponent({
             ]),
             // Folder icon
             h('svg', {
-              class: `w-5 h-5 mr-2 ${isExpanded() ? 'text-action-primary-500 dark:text-action-primary-400' : 'text-gray-400 dark:text-gray-500'}`,
+              class: `w-5 h-5 mr-2 ${isExpanded() ? 'text-action-primary-500 dark:text-action-primary-400' : 'text-gray-500 dark:text-gray-400'}`,
               fill: 'currentColor',
               viewBox: '0 0 20 20'
             }, [
@@ -94,7 +94,7 @@ export default defineComponent({
         }, [
           // File icon
           h('svg', {
-            class: 'w-4 h-4 mr-2 text-gray-400 dark:text-gray-500',
+            class: 'w-4 h-4 mr-2 text-gray-500 dark:text-gray-400',
             fill: 'currentColor',
             viewBox: '0 0 20 20'
           }, [

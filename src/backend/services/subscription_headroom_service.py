@@ -9,7 +9,9 @@ Verified 2026-08-19 against a real stored ``sk-ant-oat01-`` setup token:
   missing user:profile scope`` — that endpoint needs an interactive-login
   token; the mechanism behind closed PR #2170). Do not resurrect it here.
 - ``POST /v1/messages`` under the same token returns the full unified header
-  set: ``{5h,7d}-utilization`` (fraction 0..1), ``-reset`` (unix seconds),
+  set: ``{5h,7d}-utilization`` (a fraction of the cap — 1.0 is the limit, and
+  it is NOT clamped: a value past 1 is honoured as >100%, matching the
+  provider's own client, #2419), ``-reset`` (unix seconds),
   per-window ``-status``, ``representative-claim``, overage status/reason.
 
 The probe is a real ``max_tokens=1`` Haiku message on the OPERATOR'S OWN
@@ -122,14 +124,26 @@ def is_auto_refresh_enabled() -> bool:
 
 
 def _parse_utilization(raw: Optional[str]) -> Optional[float]:
-    """Header carries a fraction (0.15 = 15%); tolerate an already-percent value."""
+    """Header value → percent of the window's cap, 1 decimal.
+
+    The header carries a FRACTION of the cap (``0.39`` = 39%) and it is not
+    clamped: ``1.2`` is 120% — an overage plan past its limit — exactly as the
+    provider's own client reads it (``Number(value)``, ``× 100``, no ``<= 1``
+    branch). An earlier "tolerate an already-percent value" branch here turned
+    that reading into 1.2%, so an exhausted subscription displayed, alerted and
+    ranked as nearly empty (#2419). Any ``float()`` literal is accepted; a
+    non-finite or negative result is ``None`` — the guard sits on the SCALED
+    value because a finite ``1e307`` overflows only after the multiply.
+    """
     if raw is None:
         return None
     try:
-        v = float(raw)
+        pct = float(raw) * 100.0
     except (TypeError, ValueError):
         return None
-    return round(v * 100.0, 1) if v <= 1.0 else round(v, 1)
+    if not math.isfinite(pct) or pct < 0:
+        return None
+    return round(pct, 1) + 0.0  # + 0.0: a "-0.0" header would render as "-0%"
 
 
 def _parse_reset(raw: Optional[str]) -> Optional[str]:
@@ -254,8 +268,40 @@ async def _probe(subscription_id: str) -> Optional[dict]:
             )
             return {"fetched_at": snapshot["fetched_at"], "status": "error"}
         return snapshot
+    _log_past_cap(subscription_id, parsed, resp.headers)
     snapshot.update(parsed)
     return snapshot
+
+
+def _log_past_cap(subscription_id: str, parsed: dict, headers) -> None:
+    """#2419 arrival signal — the only way the issue's "capture a real overage
+    header set" criterion can ever close.
+
+    No header set past the cap has been captured: every local plan carries
+    ``overage_status = rejected`` and blocks at 100%, so the fix was modelled
+    on the provider client's parser instead. When a window first reads past
+    100% this records the RAW header strings, so the modelled sample becomes a
+    real one (``SELECT * FROM subscription_headroom_history WHERE
+    five_hour_utilization_pct > 100 OR seven_day_utilization_pct > 100`` finds
+    the rows). INFO, at most one line per probe (probes are
+    ``MIN_PROBE_INTERVAL_SECONDS`` apart) — and the same line is where a
+    provider switch to percent units (``39`` → 3900%) would show up.
+    """
+    over = [
+        w for w in ("five_hour", "seven_day")
+        if ((parsed.get(w) or {}).get("utilization_pct") or 0) > 100
+    ]
+    if not over:
+        return
+    logger.info(
+        "[#2419] subscription %s reports utilization past its cap (%s): "
+        "5h-utilization=%r 7d-utilization=%r overage-status=%r status=%r "
+        "representative-claim=%r",
+        subscription_id, ",".join(over),
+        headers.get(_H + "5h-utilization"), headers.get(_H + "7d-utilization"),
+        headers.get(_H + "overage-status"), headers.get(_H + "status"),
+        headers.get(_H + "representative-claim"),
+    )
 
 
 def _read_snapshot(subscription_id: str) -> tuple:

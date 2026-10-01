@@ -121,3 +121,15 @@ describe('ent#557 — the two writers do not erase each other', () => {
     expect(() => { setBaseTitle(BASE); setUnreadCount(2) }).not.toThrow()
   })
 })
+
+describe('capCount — one cap for every counter (ent#610 §3g D-1)', () => {
+  it('caps at 99+, and says nothing for zero or junk', async () => {
+    const { capCount } = await import('../../src/utils/tabTitle')
+    expect(capCount(157)).toBe('99+')
+    expect(capCount(99)).toBe('99')
+    expect(capCount(1)).toBe('1')
+    expect(capCount(0)).toBe('')
+    expect(capCount(-3)).toBe('')
+    expect(capCount('x')).toBe('')
+  })
+})

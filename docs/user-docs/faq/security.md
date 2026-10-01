@@ -26,6 +26,14 @@ Yes — that is the intended path. The platform keys (Claude, GitHub, the Resend
 
 Credential values are never logged — all credential operations use structured logging with values masked. On top of that, a guardrail hook scans agent command output for known credential patterns (API keys, GitHub tokens, cloud access keys) and records only the pattern name when it finds a match, never the value itself, so you can review potential leaks without the log becoming one. A value an agent fetches from the Credential Vault is additionally scrubbed out of everything Trinity persists from that turn — transcript, execution log, response, notifications — and replaced with `***REDACTED***`. See [Agent Guardrails](../agents/agent-guardrails.md).
 
+## Is the GitHub token stored in my agent's git remote?
+
+No. An agent's git remotes carry no credential: git asks Trinity's credential helper for the token on each fetch or push, over standard input, so the token is not written into `.git/config` and does not appear in the container's process list or logs. Existing agents are converted automatically after an upgrade, and a token is removed from a URL only once a replacement resolves. This does not hide the token from the agent itself — `GITHUB_PAT` stays in its `.env` and environment so `git` and `gh` keep working. To limit what one agent can reach, give it its own repo-scoped token on its **Git** tab. See [GitHub PAT Setup](../integrations/github-pat-setup.md#how-git-gets-the-token).
+
+## Should I rotate the platform GitHub token after upgrading?
+
+Yes. Taking the token out of agent remotes protects your install from the upgrade onward, but backups, log archives, and container logs taken before the upgrade can still contain it. Mint a replacement, save it under **Settings → Integrations**, confirm a fetch works on a couple of agents, then revoke the old token on GitHub; the new token reaches running agents without a restart. Rotation is mandatory if the cleanup reports a token in a committed `.gitmodules` file, since that token is already in the repository's history; the operator runbook, [Git remote token scrub](../../migrations/GIT_REMOTE_TOKEN_SCRUB_2026-09.md), has the verification commands. See [Upgrading](../guides/deploying/upgrading.md#github-token-out-of-agent-remotes-automatic-then-rotate).
+
 ## Is it safe to commit the `.credentials.enc` file to git?
 
 Yes — that is what it exists for. It is an AES-256-GCM encrypted archive of the agent's full credential set, safe to store in version control as an encrypted backup; on agent startup Trinity decrypts and re-injects it automatically. The encryption key lives only in your platform's environment, and it can be rotated online without downtime or data loss. See [Credential Management](../credentials/credential-management.md).
@@ -33,6 +41,10 @@ Yes — that is what it exists for. It is an AES-256-GCM encrypted archive of th
 ## What is recorded in the audit log?
 
 Administrative and security-relevant actions across the platform: agent lifecycle (create, start, stop, delete, rename, recover), logins and logouts, permission grants and denials, settings changes, credential inject/export/import, git operations, and every MCP tool call. Each entry records who acted (user, agent, MCP client, or system), what was affected, when, and where the request originated. When the call was authenticated with an MCP API key, the entry also names the key — its id, name, and scope — beside the accountable owner, so "what did that leaked key touch?" is answered by filtering the list on the key id; a browser session records no key fields. Admins can search, filter, and export it from the dashboard. See [Audit Trail](../operations/audit-trail.md).
+
+## Does a refused MCP tool call show up in the audit log?
+
+Yes, and it is labelled as a refusal. When a tool turns a call away — for example an agent calling `chat_with_agent`, `fan_out`, or `run_agent_loop` on an agent it has no permission for — the caller gets an `Access denied` result, and the `mcp_operation` entry records `success: false`, `denied: true`, and the reason. A backend `403` that surfaces through a tool is marked `denied` too. Other errors carry no `denied` flag, so a refused call is never mistaken for a permitted one or for a broken one. Where the caller only sees a generic "not found or not accessible", the admin-only entry keeps the specific reason. See [Audit Trail](../operations/audit-trail.md#refused-mcp-calls).
 
 ## Can audit log entries be edited or deleted?
 
@@ -54,13 +66,17 @@ URLs end up in places you don't control — reverse-proxy logs, browser history,
 
 No. The browser's `/ws` connection is scoped to the agents its ticket's user can access: an event that names agents is delivered only when every agent it names is one that user may access, and both live delivery and the reconnect replay are filtered — admins see everything. An unknown or suspended account is closed with code 4001. The MCP-key endpoint `/ws/events` is scoped the same way to the key owner's agents, and only `user`, `agent` (non-ephemeral agents), and `system` keys may open it; `ops`, `connector`, and `portal_delegate` keys are closed with code 4003. See [Authentication](../api-reference/authentication.md#websocket-authentication).
 
+## Can a user read the event history of agents they can't access?
+
+No. `GET /api/events` returns only events whose source agent is one you can access, the same set the live event streams use. The filter runs before the result limit, so a page is never padded or emptied by events you cannot see. Asking for one agent you cannot access returns a 403 that looks the same whether or not that agent exists. Admins see every event. See [Event Subscriptions](../collaboration/event-subscriptions.md).
+
 ## What do guardrails actually block?
 
-Guardrails are deterministic, infrastructure-level rules that agents cannot bypass or edit. They block dangerous shell commands against a deny-list (recursive deletion of root or home, world-writable permissions, piping remote scripts to a shell, force pushes, filesystem formatting, writing to a raw block device with `dd of=/dev/sd*`, killing the init process with `kill -9 1`, fork bombs, host shutdown), block writes to credential files and hook configuration, scan output for leaked credentials, and cap the number of turns per execution to stop runaway loops — 50 turns by default for both chat and task/headless runs, adjustable per agent between 1 and 500. If a guardrail hook itself errors, the tool call is blocked — the system fails closed. Owners can tighten the baseline per agent but never loosen it. See [Agent Guardrails](../agents/agent-guardrails.md).
+Guardrails are deterministic, infrastructure-level rules that agents cannot bypass or edit. They block dangerous shell commands against a deny-list (recursive deletion of root or home, world-writable permissions, piping remote scripts to a shell, force pushes, filesystem formatting, writing to a raw block device with `dd of=/dev/sd*`, killing the init process with `kill -9 1`, fork bombs, host shutdown, `sudo` commands against the guardrail files or sudoers, root shells), block writes to credential files and hook configuration, scan output for leaked credentials, and cap the number of turns per execution to stop runaway loops — 50 turns by default for both chat and task/headless runs, adjustable per agent between 1 and 500. If a guardrail hook itself errors, the tool call is blocked — the system fails closed. Owners can tighten the baseline per agent but never loosen it. See [Agent Guardrails](../agents/agent-guardrails.md).
 
 ## Can an agent — or a git push to its repository — remove its own guardrail hooks?
 
-No. Hook registration lives in Claude Code's admin-controlled managed settings (`/etc/claude-code/managed-settings.json`), which is root-owned and read-only, takes precedence over user and project settings, and sits outside the git-synced working tree — so neither an edit inside the container nor a push to the agent's repository can remove it, and the hook scripts under `/opt/trinity/` are root-owned too. Both paths are also on the guardrails' own write-protection list. On every boot the container checks that the registration is present and unwritable and logs `GUARDRAILS: ERROR` if it is not, so a broken registration shows up in the agent's logs rather than going silently missing. See [Agent Guardrails](../agents/agent-guardrails.md).
+No. Hook registration lives in Claude Code's admin-controlled managed settings (`/etc/claude-code/managed-settings.json`), which is root-owned and read-only, takes precedence over user and project settings, and sits outside the git-synced working tree — so neither an edit inside the container nor a push to the agent's repository can remove it, and the hook scripts under `/opt/trinity/` are root-owned too. The agent user has passwordless `sudo`, so this stops accidental rewrites; the Bash deny-list refuses the obvious `sudo` commands against these paths. Both paths are also on the guardrails' own write-protection list. On every boot the container checks that the registration is present and unwritable and logs `GUARDRAILS: ERROR` if it is not, so a broken registration shows up in the agent's logs rather than going silently missing. The agent's `/health` re-checks it on every request (`guardrails_registration`). See [Agent Guardrails](../agents/agent-guardrails.md).
 
 ## Why are some Claude Code tools missing during a scheduled or headless run?
 
@@ -78,6 +94,14 @@ Only an install with **no admin account** has an open window. On a normal instal
 ## Can an agent publish one of its canvases to the open internet on its own?
 
 No. An agent can write a canvas and mark it for its roster, but it cannot create, list, or revoke a share link — the share routes refuse an agent's own key outright, the same way the pin route does, and there is deliberately no MCP tool for them. Deciding who *outside* the platform may read a canvas is a person's call: only the agent's owner or an admin can click **Share**, the narrower **People who already have access** option is preselected, and **Anyone with the link** says plainly that it needs no sign-in. Links stay live until **Revoke**, and creating or revoking one is recorded in the audit log, as are canvas deletes and pins. Everything on a canvas is sanitised before it renders — scripts never execute, `<style>` tags are stripped — so a shared page cannot restyle or script the browser that opens it. See [Agent Canvas](../agents/agent-canvas.md#removing-canvases).
+
+## Can an agent turn on its own wake-on-answer?
+
+No. **Wake this agent when an ask it raised ends** means each answer, cancellation or expiry can start a turn the owner pays for, so the switch belongs to people. An agent's key acts for its owner, but `PUT /api/agents/{name}/operator-resume` refuses it with `403` before anything changes. Only the agent's owner or an admin can turn the switch on or off, from **Settings → Reliability**. An agent can still read the setting, so it can tell whether an answer will wake it. See [Agent Configuration](../agents/agent-configuration.md#wake-when-an-ask-ends).
+
+## Can an agent change its own autonomy, resources, or guardrails?
+
+No. Every agent configuration write accepts only a person: a browser session or the person's own `user` API key. That covers autonomy, read-only mode, resources, capabilities, capacity, timeout, the public-channel model, guardrails and the API-key setting. An agent's key acts for its owner, but these routes refuse it with `403` (`person_required`) even when the owner is an admin, and so do the system key and every other scope. Autonomy matters most here: it decides whether the agent's schedules fire unattended. An agent's own key can still create, enable and disable its schedules. See [Authentication → What a Key Is Not](../api-reference/authentication.md#what-a-key-is-not).
 
 ## Is a webhook URL secure enough on its own?
 
@@ -114,6 +138,10 @@ Access is governed by Trinity's role and sharing model: owners share agents with
 ## An admin API key can do anything an admin can — is that a problem?
 
 Not any more — the admin gate is an allowlist over key scopes, not a list of known exceptions. An MCP key resolves to the user who created it, carrying that user's role, so on a default admin-owned install an agent's own injected key would otherwise pass any plain "is this caller an admin?" check. Admin-only endpoints now admit only a browser session, a standard `user` key, and the system agent's key: an agent-scoped key never satisfies an admin gate, and neither does a `connector`, `portal_delegate`, or `ops` key or any scope invented later (the individual ops read routes opt the `ops` scope in explicitly). On top of that, endpoints whose blast radius is operator-scale require a **human** caller and reject keys of any scope: approving an oversized retention deletion, turning usage sharing on or off, restarting or reinitializing the system agent, managing skill sources, reading an agent's credential checklist, reading or rotating an agent's MCP key, minting an ops or portal-delegate key, binding an agent to a GitHub repository, writing an evaluation, and editing organizational tags. A 403 from an automation on one of those is the gate working as intended. See [Authentication](../api-reference/authentication.md).
+
+## Why can't my script create an MCP API key using another API key?
+
+Creating a key requires a signed-in session. `POST /api/mcp/keys` and `POST /api/mcp/keys/ensure-default` accept only a login (JWT) token and refuse every MCP key with a 403, your own `user` key included, so a leaked key cannot mint more keys. Sign in first (`POST /api/token`, or the email code flow) and send that token instead, or create the key under **Settings → MCP Keys**. The same rule protects changing your sign-in email and your personal GitHub token. Every created key is recorded in the audit log. See [Authentication → MCP key scopes](../api-reference/authentication.md#mcp-key-scopes).
 
 ## What is an Ops (read-only) API key, and when should I use one?
 

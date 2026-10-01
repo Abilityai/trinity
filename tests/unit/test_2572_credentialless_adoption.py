@@ -68,7 +68,7 @@ def _http_request(path: str = "/api/subscriptions"):
     """The injected ``Request``, read only for audit context."""
     return types.SimpleNamespace(
         client=types.SimpleNamespace(host="10.0.0.9"),
-        url=types.SimpleNamespace(path=path),
+        scope={"path": path},
         state=types.SimpleNamespace(request_id="req-2572"),
     )
 
@@ -800,12 +800,24 @@ class TestTriggerA1Registration:
 # Trigger A2 — the instance API key is deleted
 # ===========================================================================
 
+class _SettingsPackage:
+    """#1028: `routers.settings` is a package. The two A2 routes live in
+    `credentials` (`delete_anthropic_key`) and `generic` (`delete_setting`),
+    each binding `db` at import — so the fake is installed on both, and the
+    route functions are reached through the module that owns them."""
+
+    def __init__(self, credentials, generic):
+        self.delete_anthropic_key = credentials.delete_anthropic_key
+        self.delete_setting = generic.delete_setting
+
+
 @pytest.fixture
 def settings_router(env, monkeypatch):
-    import routers.settings as st
+    from routers.settings import credentials, generic
 
-    monkeypatch.setattr(st, "db", env.db)
-    return st
+    monkeypatch.setattr(credentials, "db", env.db)
+    monkeypatch.setattr(generic, "db", env.db)
+    return _SettingsPackage(credentials, generic)
 
 
 def _set_instance_key(value: str = "sk-ant-instance-key") -> None:

@@ -10,7 +10,7 @@ Core REST API endpoints for agent lifecycle management, configuration, files, an
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `/api/agents` | GET | List all agents |
+| `/api/agents` | GET | List all agents. Each row carries `readiness` (`{status, changed_at, source}` for an agent whose owner stamped it `ready` or `calibrating`, otherwise `null`) and `brief_held` — see [Dashboard](../operations/dashboard.md#grid-view) |
 | `/api/agents` | POST | Create agent |
 | `/api/agents/{name}` | GET | Get agent details |
 | `/api/agents/{name}` | DELETE | Delete agent |
@@ -30,6 +30,18 @@ Core REST API endpoints for agent lifecycle management, configuration, files, an
 | `/api/agents/{name}/stats` | GET | Live telemetry |
 | `/api/agents/{name}/analytics` | GET | Multi-day execution analytics for the Overview tab (`?window=7d\|14d\|30d`, default `7d`) |
 
+### Metrics and Objectives
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/agents/{name}/metrics` | GET | Declared metrics joined to recorded points, with a freshness verdict per metric. Works for a stopped agent. An agent key reads only its own |
+| `/api/agents/{name}/metrics/points` | POST | Record a batch of metric points (all-or-nothing; accepts `Idempotency-Key`). An agent key records only as itself |
+| `/api/agents/{name}/metrics/definitions` | GET | The declared-metric registry built from `template.yaml` `metrics:` |
+| `/api/agents/{name}/metrics/definitions/refresh` | POST | Re-read `template.yaml` into the registry (agent must be running) |
+| `/api/agents/{name}/objectives` | GET | Objectives joined to metrics — target, actual, freshness, gap. An agent key reads only its own |
+
+See [Dynamic Dashboards → Declared Metrics](../advanced/dynamic-dashboards.md#declared-metrics).
+
 ### Configuration
 
 | Endpoint | Method | Description |
@@ -40,6 +52,8 @@ Core REST API endpoints for agent lifecycle management, configuration, files, an
 | `/api/agents/{name}/ssh-access` | POST | Generate SSH credentials |
 | `/api/agents/{name}/circuit-breaker` | GET/PUT | Circuit breaker state / per-agent enable-disable (owner-only) — see [Agent Configuration](../agents/agent-configuration.md) |
 | `/api/agents/{name}/circuit-breaker/reset` | POST | Reset both breakers to closed (admin-only) |
+| `/api/agents/{name}/operator-resume` | GET/PUT | Wake the agent when an ask it raised ends — answered, cancelled or expired (`{"enabled": true}`). GET for anyone with access; PUT is owner or admin, and an agent-scoped key gets `403` — see [Agent Configuration](../agents/agent-configuration.md#wake-when-an-ask-ends) |
+| `/api/agents/{name}/operator-queue/{request_id}` | GET | The agent's own operator-queue item by the id it chose, with the agent's own key only — how it stands and how it ended (trinity-enterprise#611) |
 | `/api/agents/{name}/resources` | GET/PUT | Memory and CPU limits (applied on the next recreate) |
 | `/api/agents/{name}/capabilities` | GET/PUT | `full_capabilities` — Docker default capabilities (`apt-get` works) vs the restricted secure default — see [Agent Configuration](../agents/agent-configuration.md) |
 | `/api/agents/{name}/mcp-exposed` | GET/PUT | Publish the agent as its own `chat_with_<slug>` MCP tool — see [MCP Server](../integrations/mcp-server.md#dedicated-agent-tools-expose-via-mcp) |

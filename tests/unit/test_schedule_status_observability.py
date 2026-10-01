@@ -28,6 +28,7 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
+from db.write_params import ExecutionResult
 
 # ---------------------------------------------------------------------------
 # Bootstrap: make src/backend importable. Copy of the bootstrap from
@@ -127,7 +128,9 @@ class TestResidualRaceObservabilityLog:
             updated = schedule_ops.update_execution_status(
                 execution_id="exec-378",
                 status=TaskExecutionStatus.SUCCESS,
-                response="agent returned result",
+                result=ExecutionResult(
+                    response="agent returned result",
+                ),
             )
 
         assert updated is True
@@ -160,7 +163,9 @@ class TestResidualRaceObservabilityLog:
             updated = schedule_ops.update_execution_status(
                 execution_id="exec-other",
                 status=TaskExecutionStatus.SUCCESS,
-                response="late agent response",
+                result=ExecutionResult(
+                    response="late agent response",
+                ),
             )
 
         assert updated is True
@@ -190,7 +195,9 @@ class TestResidualRaceObservabilityLog:
             updated = schedule_ops.update_execution_status(
                 execution_id="exec-happy",
                 status=TaskExecutionStatus.SUCCESS,
-                response="ok",
+                result=ExecutionResult(
+                    response="ok",
+                ),
             )
 
         assert updated is True
@@ -214,7 +221,9 @@ class TestResidualRaceObservabilityLog:
             schedule_ops.update_execution_status(
                 execution_id="exec-same",
                 status=TaskExecutionStatus.FAILED,
-                error="re-fail",
+                result=ExecutionResult(
+                    error="re-fail",
+                ),
             )
 
         matching = [r for r in caplog.records if RESIDUAL_LOG_MARKER in r.getMessage()]
@@ -518,7 +527,9 @@ class TestStatusWriteNoOpOnTerminalRow:
         ok = schedule_ops.update_execution_status(
             execution_id="cas-cancel",
             status=TaskExecutionStatus.SUCCESS,
-            response="late 'I am done'",
+            result=ExecutionResult(
+                response="late 'I am done'",
+            ),
         )
 
         assert ok is False
@@ -537,7 +548,9 @@ class TestStatusWriteNoOpOnTerminalRow:
         ok = schedule_ops.update_execution_status(
             execution_id=f"cas-{terminal}",
             status=TaskExecutionStatus.FAILED,
-            error="cleanup misfire",
+            result=ExecutionResult(
+                error="cleanup misfire",
+            ),
         )
 
         assert ok is False

@@ -330,8 +330,15 @@ describe('the two paths are complementary, not alternatives', () => {
     // guard that stops it coming back.
     const prose = withoutComments(GUIDE_SFC)
     expect(prose).toMatch(/Cloudflare/)
-    expect(prose).toMatch(/cloudflared/)
-    expect(prose).toMatch(/TUNNEL_TOKEN/)
+    // #2691 AC 3: plain language, no security jargon. The tunnel's MECHANISM is
+    // still named ("stop listening on the public internet", "Cloudflare holds a
+    // connection open from the inside"); its IMPLEMENTATION is not. `cloudflared`,
+    // the `tunnel` compose profile and `TUNNEL_TOKEN` in `.env` were asserted here
+    // and are now deliberately absent: they are host-shell detail a first-run
+    // reader cannot act on from this page, and naming an env var was the single
+    // most-cited jargon hit when this screen was walked on a fresh droplet. The
+    // docs link carries them.
+    expect(prose).not.toMatch(/TUNNEL_TOKEN|cloudflared|compose profile|\.env\b/)
     expect(prose).not.toMatch(/Tailscale/)
     expect(prose.toLowerCase()).not.toMatch(/\bvpn\b/)
   })
@@ -371,7 +378,13 @@ describe('the two paths are complementary, not alternatives', () => {
     expect(prose).not.toMatch(/90-day certificate then replaces/)
     expect(prose).not.toMatch(/certificate then replaces|replaces the short-lived/)
     expect(prose).toContain('Trinity does not issue certificates itself')
-    expect(prose).toMatch(/whatever terminates TLS in front of it/)
+    // The ACTOR must still be named — the claim is that something else obtains
+    // the certificate, not Trinity. "whatever terminates TLS in front of it" was
+    // the old spelling and is now banned by the jargon rule below; "the web
+    // server in front of it" makes the same attribution in words a non-engineer
+    // reads. The assertion is on the attribution, not on the phrasing.
+    expect(prose).toMatch(/the web server in front of it is configured to obtain one/)
+    expect(prose).not.toMatch(/terminates TLS/)
     expect(prose).toMatch(/hands out the name instead of the IP/)
     // What CHANGED (#2380 follow-up): the sentence used to end "...picks up the
     // name", implying the proxy reconfigures itself from a Trinity setting. It
@@ -410,6 +423,38 @@ describe('step one is finishable from the browser (#2380, on-demand TLS)', () =>
     expect(GUIDE_SFC).toContain("updateSetting('public_chat_url'")
     expect(GUIDE_SFC).not.toMatch(/sudo /)
     expect(GUIDE_SFC).not.toMatch(/set-domain\.sh/)
+  })
+
+  it('confirms the save, naming the value and what is still unknown', () => {
+    // Before this, pressing Save emptied the field and changed a badge — the
+    // whole feedback for a write that also re-registers every live Telegram
+    // webhook. The confirmation has to survive the field clearing, so it reads
+    // from its own ref rather than from `url`.
+    const body = GUIDE_SFC
+    expect(body).toContain('data-testid="first-run-public-url-saved"')
+    expect(body).toMatch(/v-if="savedUrl"/)
+    expect(body).toMatch(/\{\{ savedUrl \}\}/)
+    // Announced, not merely shown.
+    expect(body).toMatch(/data-testid="first-run-public-url-saved"[\s\S]{0,80}role="status"/)
+
+    // Set from the value that was saved, AFTER the write resolves and BEFORE
+    // the field is cleared — the ordering is what makes the message truthful.
+    const save = body.slice(body.indexOf('async function save()'))
+    const wrote = save.indexOf("updateSetting('public_chat_url'")
+    const remembered = save.indexOf('savedUrl.value = value')
+    const cleared = save.indexOf("url.value = ''")
+    expect(wrote).toBeGreaterThan(-1)
+    expect(remembered).toBeGreaterThan(wrote)
+    expect(cleared).toBeGreaterThan(remembered)
+    // Cleared when a new attempt starts, so a failed save cannot leave the
+    // previous success standing next to an error.
+    expect(save).toMatch(/savedUrl\.value = ''[\s\S]{0,120}saving\.value = true/)
+
+    // It states the write, and refuses to state that the domain works — that
+    // claim belongs to `postureCopy` and waits for a request to arrive.
+    expect(body).toMatch(/Saved\./)
+    expect(body).toMatch(/Nothing has reached/)
+    expect(body).not.toMatch(/Your domain is working|is now live|successfully configured/)
   })
 
   it('says the certificate is obtained for the saved name, without claiming to do it', () => {

@@ -50,7 +50,7 @@
           {{ grantCount }} grants / {{ possibleCount }} possible
         </span>
 
-        <span v-if="busy" class="inline-flex items-center gap-1.5 text-xs text-state-autonomous-600 dark:text-state-autonomous-400">
+        <span v-if="busy" class="inline-flex items-center gap-1.5 text-xs text-state-autonomous-700 dark:text-state-autonomous-400">
           <span class="animate-spin rounded-full h-3 w-3 border-b-2 border-current"></span>
           Saving…
         </span>

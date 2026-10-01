@@ -28,6 +28,7 @@ import { z } from "zod";
 import { TrinityClient, ApiError } from "../client.js";
 import type { McpAuthContext } from "../types.js";
 import type { ToolCallContext } from "../audit.js";
+import { accessDenied } from "../access.js";
 
 /** git log -N is shelled in the agent server — clamp to a sane bound (#905). */
 const GIT_LOG_MIN = 1;
@@ -97,7 +98,7 @@ export function createGitTools(client: TrinityClient, requireApiKey: boolean) {
     const access = await checkAgentAccess(apiClient, authContext, agentName);
     if (!access.allowed) {
       console.log(`[${toolName}] Access denied: ${access.reason}`);
-      return JSON.stringify({ error: "Access denied", reason: access.reason }, null, 2);
+      return accessDenied(context, { error: "Access denied", reason: access.reason });
     }
 
     // Mint one id per tool call and stamp it on the shared audit context so the
@@ -284,7 +285,10 @@ export function createGitTools(client: TrinityClient, requireApiKey: boolean) {
       name: "get_git_sync_state",
       description:
         "Get the persisted git sync-health row for an agent (#389) — last sync " +
-        "status/time, consecutive failures, ahead/behind counts. Read-only. " +
+        "status/time, consecutive failures, ahead/behind counts, uncommitted-file " +
+        "count, last successful push — plus the backend's verdict: state " +
+        "(green/yellow/red/unknown), reason, recommendation, binding " +
+        "(agent/deployment) and whether its schedules are frozen. Read-only. " +
         "Access control: agent-scoped keys may only query themselves or permitted agents.",
       parameters: z.object({
         agent_name: z.string().min(1).describe("Agent whose sync-state to read."),

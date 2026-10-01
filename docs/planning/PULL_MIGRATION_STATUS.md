@@ -28,7 +28,7 @@ behind **`PULL_MODE_PILOT_AGENTS`** (default empty ⇒ inert).
 | **Phase 2** | Agent worker pool behind `PULL_MODE_PILOT_AGENTS`; scoped-key auth | ✅ done |
 | **Phase 3** | Lease reaper + `MAX_REDELIVERY` + capacity shadow meter + canary lease-awareness | ✅ done (Alembic `0017`) |
 | **Phase 4** | Sync edge adapter + async fan-out join | 🔶 **in review — [#2532](https://github.com/abilityai/trinity/pull/2532)** |
-| **Phase 5** | Default-ON + delete ZSET / overflow LIST / dispatch-breaker-gate / canary S-01–S-03 | ⬜ blocked — see §4 |
+| **Phase 5** | Default-ON + delete ZSET / overflow LIST / dispatch-breaker-gate / canary S-01–S-03 and B-02's push arm (B-02 stays as the pull check, alongside B-08 pull-worker liveness, #2840) | ⬜ blocked — see §4 |
 
 ## 3. Trigger reach — which work can actually reach the queue
 
@@ -38,7 +38,8 @@ Dispatch topology, not policy. `pull_pilot.PULL_REACHABLE_TRIGGERS` is the sourc
 |---|---|---|
 | **On `dev` today** | `agent`, `event`, `schedule`, `webhook`, `reminder`, `loop` | 6 of 9 |
 | **Adds with Phase 4** | `fan_out`, `a2a`, `operator_response` | → 9 of 9 |
-| **Deliberately excluded** | interactive chat / Session-tab turns | scope cut, see §4 item 5 |
+| **Pending** | interactive chat / Session-tab turns | claim order (#2842) and conversation guard (#2843) are in; producers not yet routed (decided 2026-09-16, #1989) |
+| **Unreached, unclassified** | `retry` | in neither trigger set — #2845. 4.7% of `eu2` traffic; looks like an oversight, not a decision |
 
 `schedule` / `webhook` / `reminder` landed with #2391; `loop` with #2523. Before #2391 the pilot flag was
 inert for the fleet's dominant traffic class, so a cron-driven agent was not a viable pilot. It is now.
@@ -50,16 +51,17 @@ The spec names the gates (`TARGET_ARCHITECTURE.md`, §Re-Delivery and Side-Effec
 > Default-on for effect-bearing agents is still gated on trace fidelity (#548/#333), `prior_trace`
 > injection (#1401), and **fail-closed `execution_id` injection**.
 
-**Two of those three are shipped.** The full remaining list, in order:
+**All three are built** (fail-closed injection by #2392). The full remaining list, in order:
 
 1. **Land Phase 4** — [#2532](https://github.com/abilityai/trinity/pull/2532). Rebased on `dev`, migration
    renumbered to `0059`, full unit suite matched against unmodified `dev` (same single pre-existing
    failure, 21 net new tests). Blocked only on review.
 2. **Fail-closed `execution_id` injection** — [#2392](https://github.com/abilityai/trinity/issues/2392).
-   **The policy is decided, not open**: the spec says fail-closed. What is missing is the build —
-   platform-side injection, reject + operator alarm when the id is still absent, and a regression test that
-   a re-delivered execution emits each effect once. *(Trace fidelity #548/#333 closed Aug/Jun; `prior_trace`
-   injection #1401 closed 2026-07-08; #1402 closed 2026-07-26.)*
+   The agent's MCP config sends each turn's id as `X-Trinity-Execution-Id`; on a pull-mode agent an effect
+   without a usable id is refused with an operator alarm, and a person's terminal session (`manual`) is sent
+   and logged. Pilots must run a base image with #2392, or every effect call whose model omits the id is
+   refused. *(Trace fidelity #548/#333 closed Aug/Jun; `prior_trace` injection #1401 closed 2026-07-08;
+   #1402 closed 2026-07-26.)*
 3. **A soak on an agent that actually emits.** The current pilot (`cornelius-oracle` on eu2) emits no
    messages, calls or shares — measured 2026-09-02: 219 `idempotency_keys` rows, all `agent:*`, zero
    `effect:*`. It has therefore never entered the code path item 2 protects, so a clean window on it is not
@@ -67,12 +69,24 @@ The spec names the gates (`TARGET_ARCHITECTURE.md`, §Re-Delivery and Side-Effec
    (`trinity-ops-agent:docs/pull-soak-eu2.md`). System of record for the soak is
    [#1766](https://github.com/abilityai/trinity/issues/1766)'s comment thread — read it before measuring.
 4. **Phase 5: flip default-ON and delete the legacy machinery** — the 9-path cleanup pyramid, the slot ZSET,
-   the overflow LIST, the dispatch-breaker gate, canary S-01–S-03. Tracked as
+   the overflow LIST, the dispatch-breaker gate, canary S-01–S-03, and canary B-02's push arm — B-02 itself
+   stays, as the check that pilots' queued work is being claimed, and B-08 checks the pull workers are alive
+   (#2840). Tracked as
    [#429](https://github.com/abilityai/trinity/issues/429). Until this lands, both systems run at once.
-5. **Decide whether interactive chat joins the queue** — [#1989](https://github.com/abilityai/trinity/issues/1989),
-   `TARGET_ARCHITECTURE.md` Open Question 7, *under consideration, not decided*. Until it is decided,
-   "everything is pull" is false **by design**, not by omission. One FIFO ordered by `queued_at` would park
-   a human turn behind autonomous work, which is why the cut exists.
+5. **Interactive chat joins the queue** — **DECIDED 2026-09-16**
+   ([#1989](https://github.com/abilityai/trinity/issues/1989)): the queue carries all traffic and the
+   synchronous push path is deleted afterwards. Two pieces gate the move —
+   [#2842](https://github.com/abilityai/trinity/issues/2842) (interactive turns jump the queue, so a person's
+   wait is no worse than today) and [#2843](https://github.com/abilityai/trinity/issues/2843) (one turn per
+   conversation at a time, so two workers never resume one transcript). Both are in the pull claim:
+   interactive triggers (`pull_pilot.INTERACTIVE_TRIGGERS`) are claimed first with strict precedence and **no
+   anti-starvation rule** (steady chat that fills every worker is answered by raising the worker count); a
+   row whose `conversation_key` already has a `running` row is skipped, and the unique index
+   `idx_executions_one_running_turn` stops two concurrent claimers. **No worker is reserved** for interactive
+   arrivals: one of N held idle is 33% of a 3-worker agent. Multi-container affinity (`replica_count > 1`,
+   #927) is out of scope. The claim guard is the one mechanism for pulled turns: when session turns are routed
+   onto the queue, `session_turn_service`'s Redis `ResumeLock` is removed from that path, not kept beside it. Next: route the interactive producers onto the queue. Until then they still run on
+   the old path — a **migration state, not a design boundary**.
 
 ### The soak duration requirement is mis-cited — correct it when you touch it
 

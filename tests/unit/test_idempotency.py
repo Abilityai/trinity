@@ -312,6 +312,15 @@ def effect_service(idem_ops, monkeypatch):
     fake_database = types.ModuleType("database")
     fake_database.db = fake_db
     monkeypatch.setitem(sys.modules, "database", fake_database)
+    # #2392: the guard asks the stdlib-only pull_pilot leaf whether the agent
+    # is pull-mode. Register it directly so sibling fixtures that stub the
+    # `services` package still resolve it.
+    pp_spec = importlib.util.spec_from_file_location(
+        "services.pull_pilot", os.path.join(_backend_path, "services", "pull_pilot.py")
+    )
+    pull_pilot = importlib.util.module_from_spec(pp_spec)
+    pp_spec.loader.exec_module(pull_pilot)
+    monkeypatch.setitem(sys.modules, "services.pull_pilot", pull_pilot)
 
     path = os.path.join(_backend_path, "services", "idempotency_service.py")
     spec = importlib.util.spec_from_file_location("_idem_service_effect", path)
@@ -990,6 +999,7 @@ class TestVoipCallGuard:
 
 # ---------------------------------------------------------------------------
 # share_file wiring (#1084) — guard on filename + content version
+# (+ the addressee since ent#549; these tests address nobody, so it is "" throughout)
 # ---------------------------------------------------------------------------
 
 @pytest.fixture
@@ -1017,6 +1027,20 @@ def shared_files_mod(effect_service, monkeypatch):
     services_stub.docker_utils = docker_utils_stub
     services_stub.settings_service = settings_stub
 
+    # ent#549: the share service decides who a file is for through
+    # `services.turn_audience`. The REAL module, loaded standalone like the
+    # service itself — a stub here would let the wiring rot unseen. These tests
+    # never say `actor_is_agent`, so resolution answers "nobody" without a read.
+    ta_path = os.path.join(_backend_path, "services", "turn_audience.py")
+    ta_spec = importlib.util.spec_from_file_location("services.turn_audience", ta_path)
+    turn_audience_mod = importlib.util.module_from_spec(ta_spec)
+    # Registered BEFORE it executes: `@dataclass` resolves annotations through
+    # `sys.modules[cls.__module__]`, which is None for a spec-loaded module
+    # that nobody registered.
+    monkeypatch.setitem(sys.modules, "services.turn_audience", turn_audience_mod)
+    ta_spec.loader.exec_module(turn_audience_mod)
+    services_stub.turn_audience = turn_audience_mod
+
     monkeypatch.setitem(sys.modules, "services", services_stub)
     monkeypatch.setitem(sys.modules, "services.idempotency_service", effect_service)
     monkeypatch.setitem(sys.modules, "services.docker_service", docker_service_stub)
@@ -1041,7 +1065,7 @@ class TestShareFileGuard:
             return (data, os.path.basename(container_path))
 
         def fake_persist(agent_name, data, *, basename, display_name,
-                         expires_in, created_by):
+                         expires_in, created_by, audience=None):
             finals.append(basename)
             tok = f"tok{len(finals)}"
             return {

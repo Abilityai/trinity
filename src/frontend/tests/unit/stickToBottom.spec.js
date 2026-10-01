@@ -264,6 +264,30 @@ describe('#2624 late growth is covered by an observer, not by chasing frames', (
     })
   })
 
+  // trinity-enterprise#610: an anchor jump (Inbox "Open in chat") scrolls to an
+  // older message. Without detach() the next size change — markdown settling —
+  // re-pins to the bottom and undoes the jump.
+  it('detach() stops the re-pin without moving the reader', async () => {
+    await withFakeObserver(async (instances) => {
+      const node = markRaw({ scrollHeight: 1000, clientHeight: 400, scrollTop: 600, firstElementChild: markRaw({}) })
+      const s = useStickToBottom(ref(node))
+      await nextTick()
+      expect(s.following.value).toBe(true)
+
+      s.detach()
+      expect(s.following.value).toBe(false)
+      expect(node.scrollTop).toBe(600)       // detaching is not a scroll
+
+      node.scrollTop = 200                   // the anchor's scrollIntoView
+      node.scrollHeight = 1420
+      instances[0].fire()
+      expect(node.scrollTop).toBe(200)       // the observer leaves it there
+
+      await s.pinToBottom()
+      expect(s.following.value).toBe(true)   // the normal rule re-arms it
+    })
+  })
+
   it('works where there is no ResizeObserver at all', async () => {
     // The node test environment, and any browser old enough to lack it: the
     // pin still happens, only the late-growth cover is absent.
@@ -298,5 +322,46 @@ describe('#2624 the affordance is honest', () => {
     const s = useStickToBottom(scrollEl, { threshold: 400 })
     s.onScroll()
     expect(s.following.value).toBe(true)
+  })
+})
+
+describe('an empty chat is not a transcript (`enabled`)', () => {
+  // The new-chat empty state (identity, "Things you can ask", suggestions) sits
+  // in the same scroller. Pinning it to the bottom scrolled the agent's identity
+  // out of view and moved the hints ~190px every time the suggestions landed.
+  function setup(initial, active) {
+    const node = el(initial)
+    const on = ref(active)
+    return { node, on, ...useStickToBottom(ref(node), { enabled: () => on.value }) }
+  }
+
+  it('growth while disabled does not scroll', async () => {
+    const s = setup({ scrollTop: 0 }, false)
+    s.node.scrollHeight = 1400          // the suggestions arrived below the hints
+    await s.onArrive(0)
+    expect(s.node.scrollTop).toBe(0)
+  })
+
+  it('an explicit pin while disabled puts the reader at the TOP', async () => {
+    const s = setup({ scrollTop: 600 }, false)   // left over from the previous thread
+    await s.pinToBottom()
+    expect(s.node.scrollTop).toBe(0)
+    expect(s.following.value).toBe(true)
+  })
+
+  it('the first turn re-enables sticking to the bottom', async () => {
+    const s = setup({ scrollTop: 0 }, false)
+    s.on.value = true
+    s.node.scrollHeight = 1600
+    await s.onArrive(1)
+    expect(s.node.scrollTop).toBe(1600)
+  })
+
+  it('without the option nothing changes (every other surface)', async () => {
+    const node = el({ scrollTop: 0 })
+    const s = useStickToBottom(ref(node))
+    node.scrollHeight = 1400
+    await s.onArrive(1)
+    expect(node.scrollTop).toBe(1400)
   })
 })

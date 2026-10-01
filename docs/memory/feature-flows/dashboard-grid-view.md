@@ -65,7 +65,7 @@ views/Dashboard.vue          mode toggle, grid pane (v-if), Tidy up / Reset pill
 | Live context %, Active/Idle/Offline | fleet `GET /api/agents/context-stats` (15s poll) |
 | Success meter, tasks/cost/last-run, schedules chip | fleet `GET /api/agents/execution-stats` (15s poll) |
 | ⚡ circuit open chip | `GET /api/agents/slots` → `circuit_breakers` map (#526) |
-| ⟳ sync failing / git ✓ chips | `GET /api/agents/sync-health` (#389, batch) |
+| ⟳ sync chip — `↑ahead ↓behind · N dirty · pushed <age> ago`, kind from the backend `state` (red crit / yellow warn / green calm, none for unknown), reason — recommendation on hover (`utils/syncSummary.js::syncChip`, ent#707; replaced the `sync failing ×N` and `git ✓` chips) | `GET /api/agents/sync-health` (#389, batch) |
 | ⚠ needs response / approval pending chip | `GET /api/operator-queue?status=pending` (batch, grouped per agent) |
 | ▶ working + elapsed timer | WS `agent_activity` events → `workingState` map, reconciled by the context-stats poll; fallback `activityState === 'active'` |
 
@@ -91,6 +91,12 @@ click would start a tile drag rather than selecting. **By design the slug does
 not navigate**: it is a copy affordance; navigation stays on `.t-name` and the
 Details button. Ink is `var(--gv-muted)`, the same token as the repo text it
 sits beside — no new `--gv-*` var.
+
+**Nameline badge order:** `.t-name` · runtime icon · **readiness** · SYSTEM /
+SKILL RUNNER. The readiness badge (trinity-enterprise#527 rider) is a `BaseBadge`
+(`flex-none`) that renders only for a stamped role companion, from the same
+`utils/readinessBadge.js` predicate as the agents list; its calibrating tooltip
+names a paused brief only when the row's `brief_held` is true.
 
 ### Trigger-bucket collapse (tile scale)
 

@@ -113,6 +113,8 @@
            Skills tab (ent#182: one skill model); ent#384 added the READ of
            who already holds each skill, not a second write path. -->
       <div v-else-if="hasSkills">
+        <!-- ent#530: sets declared by the synced sources, above the skills they name. -->
+        <LibrarySkillSets />
         <ul class="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
           <li v-for="s in store.library" :key="s.name">
             <BaseCard class="h-full flex flex-col">
@@ -125,9 +127,25 @@
                   variant="warning"
                   :title="`Shadowed by: ${s.shadowed_by.join(', ')}`"
                 >shadowed</BaseBadge>
+                <!-- ent#672: a retired skill stays in the grid, flagged — an
+                     operator whose agents hold it must still find it here. -->
+                <BaseBadge
+                  v-if="s.deprecated"
+                  variant="warning"
+                  :title="DEPRECATED_TITLE"
+                  :data-testid="`skill-deprecated-library-${s.name}`"
+                >deprecated</BaseBadge>
               </div>
               <p v-if="s.description" class="mt-1 text-[12.5px] text-gray-600 dark:text-gray-400 flex-grow">{{ s.description }}</p>
               <div v-else class="flex-grow"></div>
+              <!-- The author's text, interpolated. It can be a sentence, so it
+                   is clamped with the whole of it on hover. -->
+              <p
+                v-if="supersededLine(s)"
+                :title="supersededLine(s)"
+                :data-testid="`skill-superseded-library-${s.name}`"
+                class="mt-1 text-[12.5px] text-status-warning-700 dark:text-status-warning-400 break-words line-clamp-2"
+              >{{ supersededLine(s) }}</p>
               <SkillContractChips :skill="s" show-version class="mt-2" />
               <p v-if="deps(s)" class="mt-1 text-[11px] text-gray-600 dark:text-gray-400">Requires {{ deps(s) }}</p>
 
@@ -193,7 +211,8 @@ import { useSkillsLibraryStore } from '../stores/skillsLibrary'
 import { useRole } from '../composables/useRole'
 import SkillContractChips from './skills/SkillContractChips.vue'
 import AssignedAgents from './skills/AssignedAgents.vue'
-import { deps } from './skills/contract'
+import LibrarySkillSets from './skills/LibrarySkillSets.vue'
+import { deps, supersededLine, DEPRECATED_TITLE } from './skills/contract'
 import BaseBadge from './base/BaseBadge.vue'
 import BaseButton from './base/BaseButton.vue'
 import BaseCard from './base/BaseCard.vue'

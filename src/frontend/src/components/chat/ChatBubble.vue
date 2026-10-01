@@ -11,7 +11,7 @@
       </div>
       <p class="whitespace-pre-wrap break-words">{{ content }}</p>
     </div>
-    <p v-if="formattedTime" class="text-xs text-gray-400 dark:text-gray-500 mt-1 text-right">{{ formattedTime }}</p>
+    <p v-if="formattedTime" class="text-xs text-gray-500 dark:text-gray-400 mt-1 text-right">{{ formattedTime }}</p>
   </div>
   <!-- Self-task result message (SELF-EXEC-001) - collapsible by default -->
   <div
@@ -59,7 +59,7 @@
         v-html="renderedContent"
       ></div>
     </div>
-    <p v-if="formattedTime" class="text-xs text-gray-400 dark:text-gray-500 mt-1">{{ formattedTime }}</p>
+    <p v-if="formattedTime" class="text-xs text-gray-500 dark:text-gray-400 mt-1">{{ formattedTime }}</p>
   </div>
   <!-- Assistant message (markdown rendered) -->
   <div
@@ -77,7 +77,7 @@
       <svg v-else class="w-4 h-4 text-status-success-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" /></svg>
     </button>
     <div class="rounded-xl px-4 py-3 bg-white dark:bg-gray-800 text-gray-900 dark:text-white shadow-sm overflow-hidden">
-      <div v-if="source === 'voice'" class="flex items-center gap-1.5 mb-1 text-gray-400 dark:text-gray-500">
+      <div v-if="source === 'voice'" class="flex items-center gap-1.5 mb-1 text-gray-500 dark:text-gray-400">
         <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15.536 8.464a5 5 0 010 7.072M18.364 5.636a9 9 0 010 12.728M5.586 15H4a1 1 0 01-1-1v-4a1 1 0 011-1h1.586l4.707-4.707C10.923 3.663 12 4.109 12 5v14c0 .891-1.077 1.337-1.707.707L5.586 15z" /></svg>
         <span class="text-[10px] uppercase tracking-wide">Voice</span>
       </div>
@@ -86,7 +86,7 @@
         v-html="renderedContent"
       ></div>
     </div>
-    <p v-if="formattedTime" class="text-xs text-gray-400 dark:text-gray-500 mt-1">{{ formattedTime }}</p>
+    <p v-if="formattedTime" class="text-xs text-gray-500 dark:text-gray-400 mt-1">{{ formattedTime }}</p>
   </div>
 </template>
 

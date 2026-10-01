@@ -197,10 +197,10 @@
                             :title="failureKindLabel(usageFor(sub.id).failure_events_by_kind) || ''">
                         {{ usageFor(sub.id).failure_events_24h }} event{{ usageFor(sub.id).failure_events_24h === 1 ? '' : 's' }} (24h)
                       </span>
-                      <span v-else class="text-xs text-gray-400 dark:text-gray-500">ok</span>
+                      <span v-else class="text-xs text-gray-500 dark:text-gray-400">ok</span>
                     </template>
-                    <span v-else-if="usageFor(sub.id) && usageFor(sub.id).error" class="text-xs text-gray-400 dark:text-gray-500" title="Usage unavailable">—</span>
-                    <span v-else class="text-xs text-gray-400 dark:text-gray-500">—</span>
+                    <span v-else-if="usageFor(sub.id) && usageFor(sub.id).error" class="text-xs text-gray-500 dark:text-gray-400" title="Usage unavailable">—</span>
+                    <span v-else class="text-xs text-gray-500 dark:text-gray-400">—</span>
                   </td>
                   <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-400">
                     {{ formatDate(sub.created_at) }}
@@ -224,7 +224,7 @@
                         <div class="flex items-center justify-between mb-2">
                           <h4 class="text-xs font-semibold uppercase tracking-wider text-gray-500 dark:text-gray-400">Usage</h4>
                           <div class="flex items-center gap-2">
-                            <span v-if="usageFor(sub.id) && !usageFor(sub.id).error" class="text-xs text-gray-400 dark:text-gray-500">
+                            <span v-if="usageFor(sub.id) && !usageFor(sub.id).error" class="text-xs text-gray-500 dark:text-gray-400">
                               {{ usageSourceLabel(usageFor(sub.id)) }}
                             </span>
                             <button
@@ -255,7 +255,7 @@
                             <div v-if="headroomWindowLabel(usageFor(sub.id).headroom.seven_day, '7d')" class="text-sm text-gray-800 dark:text-gray-200">
                               {{ headroomWindowLabel(usageFor(sub.id).headroom.seven_day, '7d') }}
                             </div>
-                            <div v-if="usageFor(sub.id).headroom.status !== 'ok'" class="text-xs text-status-warning-600 dark:text-status-warning-400">
+                            <div v-if="usageFor(sub.id).headroom.status !== 'ok'" class="text-xs text-status-warning-700 dark:text-status-warning-400">
                               Probe status: {{ usageFor(sub.id).headroom.status }}
                             </div>
                           </div>
@@ -288,7 +288,7 @@
                               </tr>
                             </tbody>
                           </table>
-                          <p class="mt-1 text-[11px] text-gray-400 dark:text-gray-500">
+                          <p class="mt-1 text-[11px] text-gray-500 dark:text-gray-400">
                             Cost is API-equivalent (what this consumption would cost at API prices) — not a bill.
                           </p>
 
@@ -498,7 +498,7 @@
               <p
                 v-if="subsStore.apiKeyFallback.loaded && subsStore.apiKeyFallback.enabled
                   && subsStore.apiKeyFallback.key_configured === false"
-                class="mt-1 text-xs text-status-warning-600 dark:text-status-warning-400"
+                class="mt-1 text-xs text-status-warning-700 dark:text-status-warning-400"
               >
                 No platform API key is configured, so this has nothing to fall back to. Add one under
                 API Keys for it to take effect.

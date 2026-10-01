@@ -29,9 +29,16 @@ from services.capacity_manager import (
 )
 from services import dispatch_admission_service
 from services import chat_execution_service
-from services.chat_signals import ChatAdmissionReplay, ChatDispatchError
+from services.chat_signals import (
+    ChatAdmissionReplay,
+    ChatDispatchError,
+    InterAgentDepthExceeded,
+)
+from services.chat_execution_service import ERROR_CODE_HEADER
+from services.execution_envelope import TaskExecutionErrorCode
 from database import db
 from utils.helpers import utc_now_iso
+from db.write_params import ExecutionResult
 
 logger = logging.getLogger(__name__)
 
@@ -86,7 +93,9 @@ def _raise_ephemeral_exhausted_410(agent_name: str, execution_id, exc) -> NoRetu
             db.update_execution_status(
                 execution_id=execution_id,
                 status=TaskExecutionStatus.FAILED,
-                error=f"ephemeral_exhausted: ghost agent budget spent ({exc.reason})",
+                result=ExecutionResult(
+                    error=f"ephemeral_exhausted: ghost agent budget spent ({exc.reason})",
+                ),
             )
         except Exception as e:
             logger.warning(
@@ -114,7 +123,9 @@ def _raise_circuit_open_503(agent_name: str, execution_id, exc: CircuitOpen) -> 
             db.update_execution_status(
                 execution_id=execution_id,
                 status=TaskExecutionStatus.FAILED,
-                error="circuit_open: agent unhealthy (dispatch breaker open)",
+                result=ExecutionResult(
+                    error="circuit_open: agent unhealthy (dispatch breaker open)",
+                ),
             )
         except Exception as e:
             logger.warning(
@@ -125,6 +136,22 @@ def _raise_circuit_open_503(agent_name: str, execution_id, exc: CircuitOpen) -> 
         status_code=503,
         detail={"error": "circuit_open", "retry_after_seconds": retry_after},
         headers={"X-Circuit-Open": "true", "Retry-After": str(retry_after)},
+    )
+
+
+def _raise_depth_exceeded_403(exc: InterAgentDepthExceeded) -> NoReturn:
+    """Map a chain-depth refusal to its named 403 (#2806).
+
+    403, not 429 (the MCP client reads that as "busy, retry") and not 422
+    (invalid input on these routes). Safe as a 403 only because the
+    `get_authorized_agent` dependency has already answered the uniform 404, so
+    this can never disclose whether a target exists (Invariant #8). The named
+    body and header are what tell it apart from an access denial.
+    """
+    raise HTTPException(
+        status_code=403,
+        detail=exc.detail(),
+        headers={ERROR_CODE_HEADER: exc.detail()["error"]},
     )
 
 
@@ -195,6 +222,8 @@ async def chat_with_agent(
             x_via_mcp=x_via_mcp,
             idempotency_key=idempotency_key,
         )
+    except InterAgentDepthExceeded as e:
+        _raise_depth_exceeded_403(e)
     except CircuitOpen as e:
         _raise_circuit_open_503(name, None, e)
     except EphemeralBudgetExhausted as e:
@@ -208,7 +237,12 @@ async def chat_with_agent(
                 "queue_length": e.depth or 0,
                 "retry_after": 30,
                 "message": f"Agent '{name}' is busy. Please try again later."
-            }
+            },
+            # #2919: an admission refusal is self-describing (the same 1:1
+            # header shape the ChatDispatchError branch below maps).
+            headers=chat_execution_service._error_code_headers(
+                TaskExecutionErrorCode.CAPACITY
+            ),
         )
     if isinstance(admission, ChatAdmissionReplay):
         if admission.in_flight:
@@ -247,6 +281,7 @@ async def chat_with_agent(
         chat_execution_id=chat_execution_id,
         capacity_result=capacity_result,
         queue_result=queue_result,
+        chain_depth=admission.chain_depth,
     )
     execution = ctx.execution
     task_execution_id = ctx.task_execution_id
@@ -417,6 +452,8 @@ async def execute_parallel_task(
             x_event_trigger=x_event_trigger,
             x_internal_secret=x_internal_secret,
         )
+    except InterAgentDepthExceeded as e:
+        _raise_depth_exceeded_403(e)
     except ChatDispatchError as e:
         raise HTTPException(status_code=e.status_code, detail=e.detail, headers=e.headers)
     if isinstance(result, ChatAdmissionReplay):

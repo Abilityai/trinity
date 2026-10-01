@@ -22,6 +22,7 @@ from sqlalchemy import select, insert, update, delete, func, and_, or_
 
 from .engine import get_engine
 from .tables import (
+    public_user_memory_writes,
     agent_public_links,
     public_link_verifications,
     public_link_usage,
@@ -824,6 +825,192 @@ class PublicLinkOperations:
         return self._update_user_memory_section(
             agent_name, user_email, conversation_summary=conversation_summary or ""
         )
+
+    # ---- write history (ent#637 / ent#419 layer 3) --------------------------
+
+    def write_user_memory_agent_notes(
+        self,
+        agent_name: str,
+        user_email: str,
+        agent_notes: str,
+        *,
+        execution_id: Optional[str],
+        triggered_by: str,
+        schedule_id: Optional[str] = None,
+    ) -> dict:
+        """Replace the agent_notes section AND record the write (ent#637).
+
+        The one writer behind `POST /api/agents/{name}/user-memory`. Read,
+        replace and the history insert happen in ONE transaction on one
+        connection, so `previous_notes` is what the row held at the instant of
+        the write, never a value read a moment earlier by a different
+        connection. Returns ``{"write_id", "previous_notes", "new_notes"}``.
+
+        Recorded for every trigger, not only `schedule`: the person's "what
+        touched my memory" list is only honest if a chat write is in it too,
+        and undo is latest-first over the same sequence.
+        """
+        email = user_email.lower()
+        now = utc_now_iso()
+        notes = agent_notes or ""
+        with get_engine().begin() as conn:
+            row = conn.execute(
+                select(public_user_memory.c.memory_text).where(
+                    and_(
+                        public_user_memory.c.agent_name == agent_name,
+                        public_user_memory.c.user_email == email,
+                    )
+                )
+            ).first()
+            if row is None:
+                conn.execute(
+                    insert(public_user_memory).values(
+                        id=secrets.token_urlsafe(16),
+                        agent_name=agent_name,
+                        user_email=email,
+                        memory_text="",
+                        message_count=0,
+                        created_at=now,
+                        updated_at=now,
+                    )
+                )
+                current = {"agent_notes": "", "conversation_summary": ""}
+            else:
+                current = _parse_memory_blob(row[0])
+            previous = current["agent_notes"]
+            conn.execute(
+                update(public_user_memory)
+                .where(
+                    and_(
+                        public_user_memory.c.agent_name == agent_name,
+                        public_user_memory.c.user_email == email,
+                    )
+                )
+                .values(
+                    memory_text=_encode_memory_blob(notes, current["conversation_summary"]),
+                    updated_at=now,
+                )
+            )
+            write_id = secrets.token_urlsafe(16)
+            conn.execute(
+                insert(public_user_memory_writes).values(
+                    id=write_id,
+                    agent_name=agent_name,
+                    user_email=email,
+                    execution_id=execution_id,
+                    triggered_by=triggered_by,
+                    schedule_id=schedule_id,
+                    previous_notes=previous,
+                    new_notes=notes,
+                    written_at=now,
+                )
+            )
+        return {"write_id": write_id, "previous_notes": previous, "new_notes": notes}
+
+    def list_user_memory_writes(
+        self, agent_name: str, user_email: str, limit: int = 20
+    ) -> List[dict]:
+        """Newest first, bounded. Notes ride along so the person can see WHAT changed."""
+        email = user_email.lower()
+        with get_engine().connect() as conn:
+            rows = conn.execute(
+                select(
+                    public_user_memory_writes.c.id,
+                    public_user_memory_writes.c.execution_id,
+                    public_user_memory_writes.c.triggered_by,
+                    public_user_memory_writes.c.schedule_id,
+                    public_user_memory_writes.c.previous_notes,
+                    public_user_memory_writes.c.new_notes,
+                    public_user_memory_writes.c.written_at,
+                    public_user_memory_writes.c.undone_at,
+                )
+                .where(
+                    and_(
+                        public_user_memory_writes.c.agent_name == agent_name,
+                        public_user_memory_writes.c.user_email == email,
+                    )
+                )
+                .order_by(public_user_memory_writes.c.written_at.desc(),
+                          public_user_memory_writes.c.id.desc())
+                .limit(max(1, min(int(limit), 100)))
+            ).mappings().all()
+        return [dict(r) for r in rows]
+
+    def undo_user_memory_write(
+        self, agent_name: str, user_email: str, write_id: str, *, undone_by: str
+    ) -> str:
+        """Revert the agent_notes to what they were before ``write_id`` (ent#637).
+
+        Latest-first: only the most recent write that is not already undone can
+        be undone, so a revert never silently discards a later change the person
+        has not looked at. Returns one of ``undone`` | ``not_found`` |
+        ``already_undone`` | ``not_latest``. The restore and the mark are one
+        transaction.
+        """
+        email = user_email.lower()
+        now = utc_now_iso()
+        with get_engine().begin() as conn:
+            target = conn.execute(
+                select(
+                    public_user_memory_writes.c.id,
+                    public_user_memory_writes.c.previous_notes,
+                    public_user_memory_writes.c.undone_at,
+                ).where(
+                    and_(
+                        public_user_memory_writes.c.id == write_id,
+                        public_user_memory_writes.c.agent_name == agent_name,
+                        public_user_memory_writes.c.user_email == email,
+                    )
+                )
+            ).first()
+            if target is None:
+                return "not_found"
+            if target[2]:
+                return "already_undone"
+            latest = conn.execute(
+                select(public_user_memory_writes.c.id)
+                .where(
+                    and_(
+                        public_user_memory_writes.c.agent_name == agent_name,
+                        public_user_memory_writes.c.user_email == email,
+                        public_user_memory_writes.c.undone_at.is_(None),
+                    )
+                )
+                .order_by(public_user_memory_writes.c.written_at.desc(),
+                          public_user_memory_writes.c.id.desc())
+                .limit(1)
+            ).first()
+            if latest is None or latest[0] != write_id:
+                return "not_latest"
+            row = conn.execute(
+                select(public_user_memory.c.memory_text).where(
+                    and_(
+                        public_user_memory.c.agent_name == agent_name,
+                        public_user_memory.c.user_email == email,
+                    )
+                )
+            ).first()
+            current = _parse_memory_blob(row[0]) if row else {"agent_notes": "", "conversation_summary": ""}
+            if row is not None:
+                conn.execute(
+                    update(public_user_memory)
+                    .where(
+                        and_(
+                            public_user_memory.c.agent_name == agent_name,
+                            public_user_memory.c.user_email == email,
+                        )
+                    )
+                    .values(
+                        memory_text=_encode_memory_blob(target[1], current["conversation_summary"]),
+                        updated_at=now,
+                    )
+                )
+            conn.execute(
+                update(public_user_memory_writes)
+                .where(public_user_memory_writes.c.id == write_id)
+                .values(undone_at=now, undone_by=undone_by)
+            )
+        return "undone"
 
     # =========================================================================
     # Helpers

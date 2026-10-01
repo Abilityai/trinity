@@ -46,6 +46,7 @@ None — backend-only feature. The execution context block is assembled server-s
 - **Primary human**: A. Smith (role: head-of-ops) — proactive contact NOT yet permitted; do not message them unprompted
 - **Stakeholders**: approver: B. Jones, viewer: C. Okafor
 - **Collaborators**: researcher-1, writer-1
+- **Ended asks (last 24 h)**: inv-7 cancelled 2026-04-14T08:40:12.000000Z; inv-3 expired 2026-04-14T07:02:00.000000Z — read one with get_my_ask
 - **Timestamp**: 2026-04-14T09:00:00Z
 - **Platform**: https://your-domain.com
 
@@ -54,7 +55,9 @@ and return your results. Plan your work to finish well within the timeout budget
 ```
 
 Fields that don't apply are omitted (chat mode has no timeout; non-scheduled
-runs have no schedule block; empty collaborators list is omitted entirely).
+runs have no schedule block; empty collaborators list is omitted entirely; the
+ended-asks line appears only when an ask this agent raised ended in the last 24 h —
+trinity-enterprise#611).
 The two assignment lines (trinity-enterprise#500) are omitted on any build with
 no registered provider, and on every outside-facing turn — see
 [role-assignments.md](role-assignments.md).
@@ -140,11 +143,16 @@ leaves them `None`, without mutating the caller's dataclass:
   `services/assignment_provider.resolve_assignment(agent_name, triggered_by)`
   (trinity-enterprise#500). All four come from ONE provider answer, so they are
   resolved together in a single call rather than per field.
+- `ended_asks` → `db.list_recent_operator_queue_endings(agent_name, <24 h ago>, 6,
+  exclude_request_id_prefixes=<platform-alarm prefixes>)` (trinity-enterprise#611):
+  request id + disposition + `disposed_at` only, never a title, answer or reason;
+  the sixth row only decides the ", and more" suffix.
 
 Each lookup degrades to empty / omitted on failure.
 
 **The `replace` guard is part of the contract, not an optimisation.** It reads
-`if ctx.collaborators is None or ctx.platform_url is None or needs_assignment`.
+`if ctx.collaborators is None or ctx.platform_url is None or needs_assignment or ctx.ended_asks is None`
+(`ended_asks` joined it with trinity-enterprise#611).
 Before `needs_assignment` joined it, a caller that pre-filled BOTH older
 auto-filled fields skipped the whole block — and the assignment lines never
 rendered, for that caller only, with nothing to notice. Any future auto-filled
@@ -185,11 +193,12 @@ redeploy. Lives alongside the existing `trinity_prompt` operator setting.
 No schema changes. Reads from existing:
 - `agent_permissions` (collaborators)
 - `settings` (`public_chat_url`, `trinity_execution_context_enabled`)
+- `operator_queue` (the ended-asks line — the endings ledger columns, trinity-enterprise#611)
 
 ## Side Effects
 
 - Increases the prompt token count of every invocation by ~150–250 tokens (the rendered context block plus mode guidance line). At low invocation rates the cost is negligible; at high rates the operator can disable via the kill-switch.
-- Two read-only DB queries per invocation: `agent_permissions` lookup (collaborators) and `settings` lookup (`public_chat_url`). Both are local SQLite, sub-millisecond, indexed.
+- Three read-only DB queries per invocation: `agent_permissions` (collaborators), `settings` (`public_chat_url`) and `operator_queue` (the ended-asks line, trinity-enterprise#611 — `agent_name`-indexed, at most 6 rows). All small indexed reads.
 - No new WebSocket events, no new audit entries, no notifications.
 
 ## Error Handling
@@ -200,6 +209,7 @@ No schema changes. Reads from existing:
 | `compose_system_prompt` raises | Caller-side try/except in both `chat.py` and `task_execution_service.py` falls back to `get_platform_system_prompt()` alone. Logged at `WARNING`. |
 | `db.get_permitted_agents` fails | `_resolve_collaborators` returns `[]`; collaborators line omitted. Logged at `DEBUG`. |
 | `db.get_setting_value("public_chat_url")` fails | `_resolve_platform_url` returns `None`; platform line omitted. Logged at `DEBUG`. |
+| `db.list_recent_operator_queue_endings` fails | `_resolve_ended_asks` returns `[]`; ended-asks line omitted, never the turn. Logged at `DEBUG`. |
 | Schedule lookup row missing | Schedule fields stay `None`; schedule block omitted entirely. No error. |
 | `execution_id` is `None` (interactive chat) | Schedule lookup never runs (gated on `triggered_by == "schedule"`). |
 | Adversarial schedule / MCP key name | Sanitizer neutralizes control chars, backticks, and markdown heading markers; truncates to the per-field cap. The string content is preserved but cannot inject structure. |
@@ -245,10 +255,16 @@ raising provider still yielding the full block (platform prompt included).
 assignment line, an inside turn still does, an unrecognised label is suppressed,
 and the outside-facing routers use only suppressed trigger labels.
 
-Run: `.venv/bin/python -m pytest tests/unit/test_platform_prompt_unit.py tests/unit/test_ent500_*.py -v`
+`tests/unit/test_ent611_ask_endings.py::TestExecutionContextLine` — the ended-asks
+line: this agent's endings of the last day newest first, ids and endings only (never
+a title, answer or reason), bounded with an "and more" suffix, omitted when empty or
+when the read fails, and filled in by `compose_system_prompt`.
+
+Run: `.venv/bin/python -m pytest tests/unit/test_platform_prompt_unit.py tests/unit/test_ent500_*.py tests/unit/test_ent611_ask_endings.py -v`
 
 ## Related Flows
 - [system-wide-trinity-prompt.md](system-wide-trinity-prompt.md) — parent feature (admin-configurable platform instructions)
 - [task-execution-service.md](task-execution-service.md) — primary wiring site
 - [parallel-headless-execution.md](parallel-headless-execution.md) — headless task path
 - [role-assignments.md](role-assignments.md) — where the assignment fields come from (trinity-enterprise#500)
+- [operating-room.md](operating-room.md) — the endings behind the ended-asks line (trinity-enterprise#611)

@@ -123,7 +123,7 @@ Trinity uses two separate Redis passwords by design. `REDIS_BACKEND_PASSWORD` is
 
 | Variable | Notes |
 |---|---|
-| `ANTHROPIC_API_KEY` | Required for agents to run Claude. Can be left blank and configured in Settings after login (or connect a Claude subscription there). |
+| `ANTHROPIC_API_KEY` | Required for agents to run Claude. Can be left blank. The setup steps that open the first time you log in ask for a Claude subscription token or an Anthropic API key, and Trinity cannot run agents until one is set. |
 | `GITHUB_PAT` | Required to clone private GitHub template repos. |
 
 #### Required for production access
@@ -311,6 +311,10 @@ Plain HTTP on a public IPv4 with none of the above is the one combination to avo
 
 The Trinity 1-Click is a Droplet image with Docker, Caddy, ufw and a pinned Trinity release already pulled — Option A baked into a snapshot, so first boot pulls nothing.
 
+Find it on the [DigitalOcean Marketplace](https://marketplace.digitalocean.com/apps/trinity), or search **Trinity** under **Marketplace** when you create a Droplet in the control panel. Pick a region and a size from the table below, then create the Droplet. Trinity is free; DigitalOcean bills you for the Droplet.
+
+Prefer to choose the admin password before the Droplet exists? `trinity-do-create.sh` gives the same result from your own terminal — see [Deploy on DigitalOcean](digitalocean.md). The sections below (first boot, sign-in, managing the Droplet) apply to both, with four differences: an installer Droplet has its admin account from first boot, takes about six minutes rather than ninety seconds (it installs and pulls everything on first boot), records `do-script` instead of `do-marketplace` as its provenance, and has no login banner.
+
 ### Sizing
 
 | Use case | RAM | vCPU | Boot disk |
@@ -380,7 +384,7 @@ docker compose -f docker-compose.hosted.yml restart     # restart
 docker compose -f docker-compose.hosted.yml logs -f backend
 ```
 
-**Updating.** Pin the release you want in `.env`, check out the matching tag so the compose files and mounted config move with the images, and re-run the installer:
+**Updating.** Pin the release you want in `.env`, check out the matching tag so the compose files and mounted config move with the images, and re-run the installer. Do both. `start.sh` reads `TRINITY_IMAGE_TAG` from the environment or `.env`, never from the checkout. A checkout alone leaves the old images running, and the run still reports success. The version in the web interface comes from the images, so check it to confirm the upgrade landed:
 
 ```bash
 cd /opt/trinity
@@ -395,19 +399,20 @@ sudo ./scripts/deploy/start.sh --hosted
 
 ## DigitalOcean installer script
 
-`scripts/deploy/trinity-do-create.sh` gives you the 1-Click result from your own terminal, with the admin password chosen before the Droplet exists — so there is no claim window. It needs [`doctl`](https://docs.digitalocean.com/reference/doctl/how-to/install/) installed and signed in (`doctl auth init` with a write-scoped API token).
+`scripts/deploy/trinity-do-create.sh` gives you the 1-Click result from your own terminal, with the admin password chosen before the Droplet exists — so there is no claim window. It needs [`doctl`](https://docs.digitalocean.com/reference/doctl/how-to/install/) installed and signed in (`doctl auth init` with a write-scoped API token). The step-by-step walkthrough — from installing `doctl` to adding a domain, with the installer's error messages and how to remove the Droplet — is [Deploy on DigitalOcean](digitalocean.md).
 
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/abilityai/trinity/<release-tag>/scripts/deploy/trinity-do-create.sh)
 ```
 
-It asks four questions and writes nothing to your computer:
+It asks three questions and writes nothing to your computer:
 
 1. **Admin password** (twice; 12+ characters, guessable prefixes refused). Your username will be `admin`.
-2. **Claude subscription token** — run `claude setup-token` in another terminal and paste the `sk-ant-oat01-…` value. An API key is not accepted here; add one later under **Settings → Integrations** if you prefer.
-3. **Region** and **Droplet name** (defaults offered), then a confirmation that names the monthly cost.
+2. **Region** and **Droplet name** (defaults offered), then a confirmation that names the monthly cost.
 
-It then creates an Ubuntu 24.04 Droplet (4 vCPU / 8 GB — Trinity's recommended size), attaches every SSH key already on your account, and hands the Droplet a first-boot script that clones the pinned release to `/opt/trinity`, runs `start.sh --provision --cloud digitalocean --hosted --unattended` (Docker, Caddy with the IP certificate, the firewall, then the install itself), registers your Claude subscription and assigns it to the seeded agents. Both secrets travel only in the Droplet's own user-data; the firewall blocks containers from reading it back. The script polls `https://<ip>/` with certificate verification for up to fifteen minutes and prints the address when it answers. If it times out, open the Droplet's Console and read `/var/log/trinity-install.log`.
+It then creates an Ubuntu 24.04 Droplet (4 vCPU / 8 GB — Trinity's recommended size), attaches every SSH key already on your account, and hands the Droplet a first-boot script that clones the pinned release to `/opt/trinity`, runs `start.sh --provision --cloud digitalocean --hosted --unattended` (Docker, Caddy with the IP certificate, the firewall, then the install itself). The password travels only in the Droplet's own user-data; the firewall blocks containers from reading it back. The script polls `https://<ip>/` with certificate verification for up to fifteen minutes and prints the address when it answers. If it times out, open the Droplet's Console and read `/var/log/trinity-install.log`.
+
+The installer does not ask for a Claude credential. When you first sign in, the setup that opens includes **Connect Claude**, the one required step: paste a subscription token from `claude setup-token` or an Anthropic API key. It is checked with Anthropic before it is saved and handed to the seeded agents.
 
 The install records `do-script` as its provenance, so the first-run **Secure this instance** step appears exactly as on the 1-Click. Day-two operations are identical — see [Managing the Droplet](#managing-the-droplet). The script pins the release it was fetched from; set `TRINITY_IMAGE_TAG` in the environment before running it to pick another.
 
@@ -502,13 +507,13 @@ Every key in `.env.example`, with the compose files that forward it. **A key a c
 | `TRINITY_DEFAULT_SKILL_SOURCE` / `TRINITY_DEFAULT_SKILL_SOURCE_REF` (commented) | dev · prod · hosted | Bundled community skills source seeded on fresh installs; set the URL to `""` to disable the seed. |
 | `WEBHOOK_RATE_LIMIT` / `WEBHOOK_IP_RATE_LIMIT` / `WEBHOOK_MAX_BODY_BYTES` | dev · prod · hosted | Public webhook trigger limits. |
 | `REMINDER_MESSAGE_MAX_CHARS` / `REMINDER_MIN_DELAY_SECONDS` / `REMINDER_MAX_DELAY_SECONDS` / `MAX_PENDING_REMINDERS_PER_AGENT` / `MAX_REMINDERS_PER_AGENT_PER_DAY` / `REMINDER_RATE_LIMIT` | dev · prod · hosted | Agent self-reminder caps. |
-| `OPERATOR_QUEUE_MAX_PENDING_PER_AGENT` / `OPERATOR_QUEUE_CREATE_RATE_LIMIT` / `OPERATOR_QUEUE_CREATE_RATE_WINDOW` / `OPERATOR_QUEUE_FLEET_CREATE_RATE_LIMIT` / `OPERATOR_QUEUE_MAX_SCAN_PER_CYCLE` / `OPERATOR_QUEUE_MAX_FILE_BYTES` / `OPERATOR_QUEUE_TITLE_MAX` / `OPERATOR_QUEUE_QUESTION_MAX` / `OPERATOR_QUEUE_CONTEXT_MAX_BYTES` / `OPERATOR_QUEUE_OPTIONS_MAX_BYTES` / `OPERATOR_QUEUE_ID_MAX` / `OPERATOR_QUEUE_EXECUTION_ID_MAX` / `OPERATOR_QUEUE_EMAIL_MAX` / `OPERATOR_QUEUE_FLOOD_ALERT_COOLDOWN_SECONDS` / `OPERATOR_ALERT_MAX_PENDING_PER_TYPE` | dev · prod · hosted | Operator-queue ingestion caps (bound a runaway agent). |
+| `OPERATOR_QUEUE_MAX_PENDING_PER_AGENT` / `OPERATOR_QUEUE_CREATE_RATE_LIMIT` / `OPERATOR_QUEUE_CREATE_RATE_WINDOW` / `OPERATOR_QUEUE_FLEET_CREATE_RATE_LIMIT` / `OPERATOR_QUEUE_MAX_SCAN_PER_CYCLE` / `OPERATOR_QUEUE_MAX_FILE_BYTES` / `OPERATOR_QUEUE_TITLE_MAX` / `OPERATOR_QUEUE_QUESTION_MAX` / `OPERATOR_QUEUE_CONTEXT_MAX_BYTES` / `OPERATOR_QUEUE_OPTIONS_MAX_BYTES` / `OPERATOR_QUEUE_PROPOSAL_MAX_BYTES` / `OPERATOR_QUEUE_ID_MAX` / `OPERATOR_QUEUE_EXECUTION_ID_MAX` / `OPERATOR_QUEUE_EMAIL_MAX` / `OPERATOR_QUEUE_FLOOD_ALERT_COOLDOWN_SECONDS` / `OPERATOR_ALERT_MAX_PENDING_PER_TYPE` | dev · prod · hosted | Operator-queue ingestion caps (bound a runaway agent). |
 
 ### Install identity, URLs, ports, data
 
 | Key | Forwarded by | What it does |
 |---|---|---|
-| `TRINITY_INSTALL_SOURCE` | dev · prod · hosted | Install-provenance marker (`do-marketplace`, `vultr-marketplace`, `do-script`, `script`); written by `start.sh --provision`, read once at first boot and recorded permanently. Leave empty on an ordinary install. |
+| `TRINITY_INSTALL_SOURCE` | dev · prod · hosted | Install-provenance marker (`do-marketplace`, `vultr-marketplace`, `aws-marketplace`, `do-script`, `aws-script`, `script`); written by `start.sh --provision`, read once at first boot and recorded permanently. Leave empty on an ordinary install. |
 | `BACKEND_URL` | dev · prod · hosted | Backend base URL used to build OAuth callback URLs (default `http://localhost:8000`). |
 | `FRONTEND_PORT` | dev · prod · hosted | Host port for the web UI (default 80). |
 | `FRONTEND_URL` | dev · prod · hosted | Public UI URL for email links and OAuth callbacks. |
@@ -583,6 +588,7 @@ Every key in `.env.example`, with the compose files that forward it. **A key a c
 | `OTEL_METRICS_EXPORTER` / `OTEL_LOGS_EXPORTER` / `OTEL_EXPORTER_OTLP_PROTOCOL` / `OTEL_METRIC_EXPORT_INTERVAL` | dev · prod · hosted | Exporter settings. |
 | `TELEMETRY_CONTAINER_STATS_TTL` / `TELEMETRY_DOCKER_POOL_SIZE` | dev · prod · hosted | Container-stats cache freshness and Docker fetch parallelism. |
 | `CANARY_ENABLED` / `CANARY_SLACK_WEBHOOK_URL` | dev · prod · hosted | Continuous invariant watcher (staging/dev) and its Slack webhook. |
+| `SYNC_HEALTH_POLL_INTERVAL_SECONDS` | dev · prod · hosted | Seconds between git sync-health polls of each git-enabled agent (default 60). Each poll runs a `git fetch` inside the agent, so raise it to cut that load on a large fleet. An invalid or non-positive value falls back to 60. |
 
 ## See Also
 

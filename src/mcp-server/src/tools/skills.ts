@@ -4,13 +4,18 @@
  * MCP tools for managing Trinity agent skills:
  * - list_skills: List available skills from the library
  * - get_skill: Get skill details and content
- * - assign_skill_to_agent: Assign a skill to an agent
+ * - list_skill_sets: List the skill sets the library declares (ent#530)
+ * - assign_skill_to_agent: Assign a skill (or `set:<name>`) to an agent
+ * - unassign_skill_set: Remove a skill set from an agent (ent#530)
  * - sync_agent_skills: Inject assigned skills to a running agent
  */
 
 import { z } from "zod";
 import { TrinityClient } from "../client.js";
 import type { McpAuthContext } from "../types.js";
+
+/** ent#530: a skill SET wherever a skill name is accepted — `:` never occurs in a skill name. */
+const SET_PREFIX = "set:";
 
 /**
  * Skill information from the library.
@@ -34,6 +39,10 @@ interface SkillInfo {
   source_id?: string | null;
   source_name?: string | null;
   shadowed_by?: Array<{ source_id: string; source_name: string }>;
+  // ent#672 lifecycle. `superseded_by` is the library author's TEXT (one line,
+  // <= 200 chars), not a resolved skill name, and is null unless deprecated.
+  deprecated?: boolean;
+  superseded_by?: string | null;
 }
 
 /**
@@ -81,6 +90,9 @@ interface SkillInjectionResult {
   skills_injected: number;
   skills_unchanged?: number;
   skills_failed: number;
+  // #2914: same-named agent-authored dirs the platform refused to write into.
+  skills_conflict?: number;
+  conflicts?: string[];
   results: Record<string, {
     success: boolean;
     status?: string;
@@ -95,9 +107,14 @@ interface SkillInjectionResult {
  */
 // #2703 — the backend's per-skill delivery report, passed through verbatim.
 interface SkillDelivery {
-  status: "injected" | "partial" | "pending_start" | "in_progress" | "not_delivered";
+  status: "injected" | "partial" | "conflict" | "pending_start" | "in_progress" | "not_delivered";
   reason?: string;
-  skills: Record<string, { status: string; error?: string }>;
+  // #2914: names refused because the agent already has its own skill dir of
+  // that name. Present whenever at least one requested name collided.
+  conflicts?: string[];
+  // ent#672: `warnings` is present only for a deprecated skill and carries
+  // lifecycle codes only — `deprecated` or `deprecated:<successor>`.
+  skills: Record<string, { status: string; error?: string; warnings?: string[] }>;
 }
 
 export function createSkillsTools(
@@ -129,6 +146,9 @@ export function createSkillsTools(
         "List all available skills from the skills library. " +
         "Returns skill names, descriptions, and paths. " +
         "Skills are loaded from the configured GitHub repository. " +
+        "A skill the library is retiring carries `deprecated: true` and stays assignable; " +
+        "`superseded_by` is the author's note on what replaces it (free text, not checked " +
+        "against the library; null unless deprecated). " +
         "Use get_skill to get the full content of a specific skill.",
       parameters: z.object({}),
       execute: async (_params: unknown, context?: { session?: McpAuthContext }) => {
@@ -166,7 +186,11 @@ export function createSkillsTools(
             // Non-empty => lower-precedence sources also ship this name and
             // are unreachable. Surfaced so an agent reading the catalog sees
             // the same conflict the UI shows (ent#237 AC#4).
-            shadowed_by: (s.shadowed_by ?? []).map(x => x.source_name)
+            shadowed_by: (s.shadowed_by ?? []).map(x => x.source_name),
+            // ent#672: named here because this map drops anything it does
+            // not name — the lifecycle keys would stop at REST otherwise.
+            deprecated: s.deprecated ?? false,
+            superseded_by: s.superseded_by ?? null
           }))
         }, null, 2);
       },
@@ -222,6 +246,24 @@ export function createSkillsTools(
     },
 
     // ========================================================================
+    // list_skill_sets - The skill SETS the library declares (ent#530)
+    // ========================================================================
+    listSkillSets: {
+      name: "list_skill_sets",
+      description:
+        "List the skill sets the library's sources declare: each set's name, source, status " +
+        "(`ok` | `partial` | `invalid` — only `ok` can be assigned), members with their versions, " +
+        "problem codes, prerequisites and suggested schedules. Assign one with " +
+        "assign_skill_to_agent using `set:<name>`; get_agent_skills lists the sets an agent holds.",
+      parameters: z.object({}),
+      execute: async (_params: unknown, context?: { session?: McpAuthContext }) => {
+        const apiClient = getClient(context?.session);
+        const sets = await apiClient.request<unknown[]>("GET", "/api/skills/library/sets");
+        return JSON.stringify(sets, null, 2);
+      },
+    },
+
+    // ========================================================================
     // assign_skill_to_agent - Assign a skill to an agent
     // ========================================================================
     assignSkillToAgent: {
@@ -230,14 +272,26 @@ export function createSkillsTools(
         "Assign a skill to an agent and deliver it. On a running agent the package is injected " +
         "immediately; the response's `delivery` block says what happened per skill: " +
         "`injected` (available now), `pending_start` (agent stopped — applies on next start), " +
-        "`in_progress` (still installing; the listing updates when it lands), or " +
+        "`in_progress` (still installing; the listing updates when it lands), " +
+        "`conflict` (the agent already has its OWN skill directory of that name — the " +
+        "agent-authored copy is kept and runs, the library package was not written; " +
+        "unassign the library skill or rename the agent's — a sync will refuse again), or " +
         "`not_delivered` with a `reason` (`injection_in_progress`, `agent_not_ready`, " +
         "`docker_unavailable`, `injection_error`) — the assignment is kept either way and " +
         "sync_agent_skills is the manual retry. " +
-        "Skills teach agents specific behaviors defined in SKILL.md files.",
+        "A deprecated skill is still assigned and delivered; its entry in `delivery.skills` then carries " +
+        "`warnings` with `deprecated:<successor>` (only when the author's note is shaped like a skill name — it is not checked against the library) or bare `deprecated` — on " +
+        "every outcome, a stopped agent included. That list holds lifecycle codes only; dependency " +
+        "warnings are on sync_agent_skills. " +
+        "Called with an agent key, this needs the skill-management permission an instance admin grants (it covers the calling agent's OWN skills too); without it the call is refused with `skill_management_not_permitted` and nothing changes. " +
+        "Skills teach agents specific behaviors defined in SKILL.md files. " +
+        "Pass `set:<name>` to assign a library skill SET — every member is assigned and delivered in " +
+        "one act and kept current as a unit (members added upstream arrive on the next re-inject). " +
+        "An unknown set, or a set naming a skill its source does not ship, is refused by name; the " +
+        "response carries the set's status (prerequisites, suggested schedules — shown, never created).",
       parameters: z.object({
         agent_name: z.string().describe("Name of the agent to assign the skill to"),
-        skill_name: z.string().describe("Name of the skill to assign"),
+        skill_name: z.string().describe("Name of the skill to assign, or `set:<name>` for a skill set"),
       }),
       execute: async (
         { agent_name, skill_name }: { agent_name: string; skill_name: string },
@@ -245,6 +299,15 @@ export function createSkillsTools(
       ) => {
         const authContext = context?.session;
         const apiClient = getClient(authContext);
+
+        // ent#530: `set:<name>` is a set — its own route, same ent#596 fence.
+        if (skill_name.startsWith(SET_PREFIX)) {
+          const setResult = await apiClient.request<unknown>(
+            "POST",
+            `/api/agents/${encodeURIComponent(agent_name)}/skill-sets/${encodeURIComponent(skill_name.slice(SET_PREFIX.length))}`
+          );
+          return JSON.stringify(setResult, null, 2);
+        }
 
         // #2703: `delivery` rides the backend body unchanged (three-surface
         // sync, Invariant #13) — the tool never re-derives it.
@@ -272,10 +335,13 @@ export function createSkillsTools(
         "Set all skills for an agent (replaces existing assignments). " +
         "Use this to configure multiple skills at once. Added skills are delivered to a running " +
         "agent and dropped skills are removed from it; `delivery` and `removal` in the response " +
-        "report each half honestly (see assign_skill_to_agent for the delivery vocabulary).",
+        "report each half honestly (see assign_skill_to_agent for the delivery vocabulary). " +
+        "Called with an agent key, this needs the skill-management permission an instance admin grants (it covers the calling agent's OWN skills too); without it the call is refused with `skill_management_not_permitted` and nothing changes. " +
+        "Entries of the form `set:<name>` ADD skill sets (each must be assignable); the agent's other sets " +
+        "and their members are left as they are. Remove a set with unassign_skill_set.",
       parameters: z.object({
         agent_name: z.string().describe("Name of the agent"),
-        skills: z.array(z.string()).describe("List of skill names to assign"),
+        skills: z.array(z.string()).describe("List of skill names to assign; `set:<name>` entries are skill sets"),
       }),
       execute: async (
         { agent_name, skills }: { agent_name: string; skills: string[] },
@@ -289,6 +355,7 @@ export function createSkillsTools(
           agent_name: string;
           skills_assigned: number;
           skills: string[];
+          sets?: string[];
           delivery?: SkillDelivery | null;
           removal?: unknown;
         }>(
@@ -311,7 +378,10 @@ export function createSkillsTools(
         "packages (SKILL.md + scripts/ + resources) under .claude/skills/. " +
         "Unconditional repair: re-injects even unchanged skills. Agent must be " +
         "running. Per-skill warnings (missing deps, skipped files) are " +
-        "reported even on success.",
+        "reported even on success. A skill whose name matches a directory the " +
+        "agent authored itself is reported under `conflicts` and left untouched " +
+        "(the agent's copy runs); syncing again does not change that. " +
+        "Called with an agent key, this needs the skill-management permission an instance admin grants (it covers the calling agent's OWN skills too); without it the call is refused with `skill_management_not_permitted` and nothing changes. ",
       parameters: z.object({
         agent_name: z.string().describe("Name of the agent to sync skills to"),
       }),
@@ -334,13 +404,19 @@ export function createSkillsTools(
         for (const [name, r] of Object.entries(result.results || {})) {
           if (r.warnings && r.warnings.length > 0) warnings[name] = r.warnings;
         }
+        // #2914: a conflict is not a failure (success stays true — the platform
+        // did exactly what it should: nothing) but it is never delivered, so it
+        // must not vanish into the success message.
+        const conflicts = result.conflicts ?? [];
         if (result.success) {
           return JSON.stringify({
             success: true,
             message: `Injected ${result.skills_injected} skills to agent ${agent_name}` +
-              (result.skills_unchanged ? ` (${result.skills_unchanged} already up to date)` : ""),
+              (result.skills_unchanged ? ` (${result.skills_unchanged} already up to date)` : "") +
+              (conflicts.length ? ` — ${conflicts.length} name conflict(s), agent's own copy kept: ${conflicts.join(", ")}` : ""),
             skills_injected: result.skills_injected,
             skills_unchanged: result.skills_unchanged ?? 0,
+            ...(conflicts.length ? { skills_conflict: conflicts.length, conflicts } : {}),
             ...(Object.keys(warnings).length > 0 ? { warnings } : {})
           }, null, 2);
         } else {
@@ -362,7 +438,13 @@ export function createSkillsTools(
     getAgentSkills: {
       name: "get_agent_skills",
       description:
-        "Get the list of skills assigned to an agent.",
+        "Get the list of skills assigned to an agent. Each entry carries " +
+        "`delivery_status`: `conflict` when the agent has its own skill directory of " +
+        "that name (the agent's copy runs; the library package was not installed), " +
+        "null otherwise. `via_sets` names the assigned skill sets that bring a skill, and " +
+        "`individual` is false when a skill is present ONLY through a set (unassigning that " +
+        "set removes it). `sets` lists the agent's assigned sets. These rows are assignments " +
+        "only — whether a held skill is deprecated is on its list_skills entry.",
       parameters: z.object({
         agent_name: z.string().describe("Name of the agent"),
       }),
@@ -379,20 +461,68 @@ export function createSkillsTools(
           skill_name: string;
           assigned_by: string;
           assigned_at: string;
+          delivery_status?: string | null;
+          individual?: boolean;
+          via_sets?: string[];
         }>>(
           "GET",
           `/api/agents/${encodeURIComponent(agent_name)}/skills`
         );
+        // ent#530: the set list is context, never a reason the skills read fails.
+        let sets: Array<{ name: string; status: string }> | null = null;
+        try {
+          sets = await apiClient.request<Array<{ name: string; status: string }>>(
+            "GET",
+            `/api/agents/${encodeURIComponent(agent_name)}/skill-sets`
+          );
+        } catch {
+          sets = null;
+        }
 
+        const conflicts = skills.filter(s => s.delivery_status === "conflict").map(s => s.skill_name);
         return JSON.stringify({
           agent_name,
           skill_count: skills.length,
+          ...(conflicts.length ? { conflicts } : {}),
+          ...(Array.isArray(sets) ? { sets: sets.map(x => ({ name: x.name, status: x.status })) } : {}),
           skills: skills.map(s => ({
             name: s.skill_name,
             assigned_by: s.assigned_by,
-            assigned_at: s.assigned_at
+            assigned_at: s.assigned_at,
+            // #2914: durable — survives the assign response the caller never saw.
+            delivery_status: s.delivery_status ?? null,
+            // ent#530: why the skill is present.
+            individual: s.individual ?? true,
+            via_sets: s.via_sets ?? [],
           }))
         }, null, 2);
+      },
+    },
+
+    // ========================================================================
+    // unassign_skill_set - Remove a skill set from an agent (ent#530)
+    // ========================================================================
+    unassignSkillSet: {
+      name: "unassign_skill_set",
+      description:
+        "Unassign a skill set from an agent. Removes the members the set alone brought; a member " +
+        "also assigned individually, or named by another set the agent holds, stays. " +
+        "Called with an agent key, this needs the skill-management permission an instance admin grants (it covers the calling agent's OWN skills too); without it the call is refused with `skill_management_not_permitted` and nothing changes.",
+      parameters: z.object({
+        agent_name: z.string().describe("Name of the agent"),
+        set_name: z.string().describe("Name of the skill set (with or without the `set:` prefix)"),
+      }),
+      execute: async (
+        { agent_name, set_name }: { agent_name: string; set_name: string },
+        context?: { session?: McpAuthContext }
+      ) => {
+        const apiClient = getClient(context?.session);
+        const name = set_name.startsWith(SET_PREFIX) ? set_name.slice(SET_PREFIX.length) : set_name;
+        const result = await apiClient.request<unknown>(
+          "DELETE",
+          `/api/agents/${encodeURIComponent(agent_name)}/skill-sets/${encodeURIComponent(name)}`
+        );
+        return JSON.stringify(result, null, 2);
       },
     },
 

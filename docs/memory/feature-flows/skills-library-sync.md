@@ -1,5 +1,7 @@
 # Feature: Skills Library Sync
 
+> **2026-09-24 — ent#530 skill sets.** `SkillSourceClone._catalog()` memoises the guarded `catalog.yaml` read (reset after `sync()`), shared by `_declared_root()` and the new `declared_sets()` (`services/skill_sets.parse_catalog_sets` — total, codes only). `skill_set_service.library_sets()` resolves sets across sources with skill precedence, cached by `_library_fingerprint`, served by `GET /api/skills/library/sets`. The fleet re-inject resolves sets once per sweep and `_reinject_agent` reconciles set-derived rows first, then prunes after injection when members were dropped upstream.
+
 ## Overview
 Synchronizes a skills library from a GitHub repository to the local filesystem using git clone/pull operations. Enables platform administrators to maintain a centralized collection of reusable agent skills that can be assigned to agents.
 
@@ -536,7 +538,8 @@ Page loads or sync completes
 
 Since ent#183, `list_skills`/`get_skill` also parse the frontmatter **contract**
 (`automation`, `user_invocable`, `requires: {packages, binaries, env}`,
-`allowed-tools`) plus package metadata (`multi_file`, `file_count`,
+`allowed-tools`, and since ent#672 the lifecycle keys `deprecated` /
+`superseded_by`) plus package metadata (`multi_file`, `file_count`,
 `size_bytes`, `version` = git tree SHA); `get_skill` adds a `files` list. The
 list metadata is cached per library commit SHA and invalidated by
 `sync_library()`. `GET /api/skills/library/status` additionally reports
@@ -704,6 +707,7 @@ CREATE TABLE IF NOT EXISTS system_settings (
 
 | Date | Changes |
 |------|---------|
+| 2026-09-30 | **ent#672**: the listing the sync produces now carries each skill's lifecycle keys — `deprecated` and `superseded_by` (the library's `superseded-by`) — parsed on every listing, never persisted, so a re-sync that drops the key clears the flag. Contract details: [skill-injection.md](skill-injection.md). |
 | 2026-09-06 | **#2545 + #2550**: bundled community-catalog pin bumped to `trinity-skills` **v0.2.0** (fresh-install seed only — adds the `project-management` category, 14 skills; `.env.example` documents the same value, `tests/unit/test_2545_skill_source_pin.py` keeps them in step). Update-path tag pin now compares the tag **peeled** (`refs/tags/<ref>^{commit}`): an annotated tag's bare rev-parse is the tag object, so the unmoved bundled source was refused as `moved_tag` on every sync after the first (`tests/unit/test_2550_annotated_tag_pin.py`, both tag kinds). |
 | 2026-07-29 | **ent#236 lifecycle automation**: scheduled leader-locked auto-sync, commit-gated fleet-wide re-inject with an honest per-agent report, durable sync status (`--workers 2` gap), and the dedicated range-validated `GET/PUT /api/settings/skills-library` route. Removal-on-unassign is documented in [skill-injection.md](skill-injection.md). |
 | 2026-07-19 | **ent#183 skill packages**: skills are full directory packages; list/get surface the frontmatter contract + package metadata (commit-SHA-cached); status adds `multi_file_count`; HEAD of the clone is the atomic injection source. |
@@ -712,5 +716,5 @@ CREATE TABLE IF NOT EXISTS system_settings (
 
 ---
 
-**Last Updated**: 2026-09-06
-**Status**: Verified - Updated for #2545 pin bump + #2550 annotated-tag pin fix
+**Last Updated**: 2026-09-30
+**Status**: Verified - Updated for ent#672 lifecycle keys on the listing

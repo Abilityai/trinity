@@ -3,7 +3,7 @@
 **Status**: Implemented
 **Date**: 2025-11-29
 **Priority**: High
-**Last Updated**: 2026-06-21 (Pull-pilot routing #946 added)
+**Last Updated**: 2026-09-30 (Chain depth carried through loops, schedule triggers and events #2973)
 
 ---
 
@@ -299,6 +299,29 @@ This mirrors the existing `/chat` (chat.py:242) and `CapacityFull` (chat.py:1577
 
 ---
 
+## Chain-Depth Guard (#2806)
+
+Stops a call bouncing A→B→A→B… forever. Every agent-to-agent path goes through one helper, `dispatch_admission_service.enforce_inter_agent_depth()`:
+
+| Path | Call site | Runs before |
+|------|-----------|-------------|
+| `/chat` (sequential, every `chat_with_<slug>`) | first line of `admit_chat_request()` | idempotency `begin`, breaker read, `capacity.acquire` |
+| `/task` (parallel, self-task, #946 pull-routed) | `dispatch_parallel_task()` right after `derive_source_and_trigger()` | `begin_task_idempotency`, uploads, row insert, capacity |
+| `/fan-out` | `routers/fan_out.fan_out()` after the target check | `idempotency_service.begin`, `FanOutService.execute` |
+
+1. **Caller** = `current_user.agent_name`, or `trinity-system` for a `scope=system` key. Any other principal is a root → returns `None`, no DB read, child row `chain_depth` NULL. The `X-Source-Agent` header and the typed `parent_execution_id` are never consulted.
+2. **Limit** = `settings_service.get_ops_setting("inter_agent_max_chain_depth", int)` (row → env `INTER_AGENT_MAX_CHAIN_DEPTH` → default 8), clamped to 1–32; a read error falls back to 8.
+3. **Depth** = `1 + db.get_max_running_chain_depth(caller)` — `MAX(chain_depth)` over the caller's `status='running'` rows (`db/schedules/executions.py`).
+4. **Admitted** → depth is stamped on the child row: `ChatAdmission.chain_depth` → `prepare_chat_execution(chain_depth=)`; `create_task_execution_and_activities(chain_depth=)`; `FanOutService.execute(chain_depth=)` → every subtask insert.
+5. **Refused** (`depth > max`) → an `inter_agent_depth_exceeded` audit row and a FAILED `agent_collaboration` activity on the caller (both best-effort), then `InterAgentDepthExceeded` → router → **403** `{"detail": {"error": "inter_agent_depth_exceeded", depth, max_depth, caller, target, message}}` + `X-Trinity-Error-Code`. No execution row, no idempotency claim, no slot.
+6. **MCP** → `client.ts::parseDepthRefusal` turns that 403 into a `DepthRefusal` result; `runAgentChat` returns `{status: "inter_agent_depth_exceeded", retryable: false, ...}` to the calling model.
+
+7. **New roots (#2973)** → the same helper runs on `POST /api/agents/{name}/sessions/{id}/message` (depth passed to `execute_task(chain_depth=)`), `POST /api/agents/{name}/loops` (depth persisted on `agent_loops.chain_depth`, stamped on every iteration by `loop_service._dispatch_run`), `POST /api/agents/{name}/schedules/{id}/trigger` (depth forwarded to the scheduler in the trigger body; a retry keeps it), and both event-emit routes when at least one subscription matches (depth signed into the EVT-001 loopback JWT as `chain_depth` → `User.loopback_chain_depth`, read by the helper before its root early-return; `_chain_caller` also falls back to `vouched_source_agent`). These routes let the refusal propagate to the app-level handler `error_handlers.inter_agent_depth_exceeded` (same 403 body and header). `agent.task.*` terminal events carry the finished row's depth + 1.
+
+Access (`get_authorized_agent`, uniform 404) resolves before the helper, so a depth 403 never discloses whether a target exists. Residuals and deferrals (non-agent keys held by agents, calls with no running row, webhook/cron/reminder roots #3116): `requirements/core-agent.md` §9.1.1. Tests: `tests/unit/test_2806_inter_agent_depth.py`, `tests/unit/test_2973_depth_new_roots.py`, `src/mcp-server/src/chat-depth.test.ts`, `src/mcp-server/src/tools/depth-refusal.test.ts`, J10 `test_two_agents_cannot_bounce_a_call_between_each_other_forever`.
+
+---
+
 ## Backend Layer
 
 ### CORS Configuration for X-Source-Agent
@@ -589,6 +612,8 @@ class ActivityType(str, Enum):
 | Timeout | 504 | Task execution timed out |
 | Connection error | 503 | Failed to communicate with agent |
 
+Since #2889 every sync `/chat`/`/task` failure the backend classifies also carries `X-Trinity-Error-Code` (`auth` / `billing` / `network` / `agent_error` / `capacity` / `timeout`) — `network` is the only value that means the agent server was never reached; the body is unchanged. A queue-full 429 (either admission refusal) carries `capacity` since #2919.
+
 *Note: MCP tools return errors in JSON response body, not HTTP status codes.
 
 ---
@@ -605,7 +630,7 @@ class ActivityType(str, Enum):
 
 ## Testing
 
-**Journey J10 — "My agents can call each other, and I can see what they said"** (`tests/journeys/test_j10_agent_calls_agent_journey.py`, #2349; record in `tests/journeys/catalog.yaml`). Two ephemeral agents; every call is made through the MCP server with the caller's own agent-scoped key, read from its container, so the `checkAgentAccess` gate above is what the harness crosses. Credential-free on every PR (`journey-smoke.yml`): the permitted call lands on the callee attributed to the caller (IA-01) with an `agent_collaboration` activity on the caller (AC-01); a call with no edge is refused with a reason naming both agents and nothing runs on the callee (P-02); a stopped callee answers `503 Agent is not running` within seconds and leaves no row (IA-03); a fan-out is capped at 50 and lands as one batch on the callee (IA-02); a loop stops at its budget; deleting the callee leaves no dangling edge (L-03). On a keyed stack the callee's real answer is read back from its execution record. Two `strict=True` xfails carry open findings: no chain-depth guard (#2806) and refusals audited as successful tool calls (#2807). The third — `run_agent_loop` skipping the permission gate (trinity-enterprise#628) — is closed and asserted: a loop without an edge is refused with the same reason as a chat, and a loop-id read or stop after the edge is removed is refused without naming the loop's agent (`src/mcp-server/src/access.ts`, `TOOL_ACCESS_POLICY`). The backend REST routes do not consult `agent_permissions` for agent principals (Invariant #8); that ruling is trinity-enterprise#629.
+**Journey J10 — "My agents can call each other, and I can see what they said"** (`tests/journeys/test_j10_agent_calls_agent_journey.py`, #2349; record in `tests/journeys/catalog.yaml`). Two ephemeral agents; every call is made through the MCP server with the caller's own agent-scoped key, read from its container, so the `checkAgentAccess` gate above is what the harness crosses. Credential-free on every PR (`journey-smoke.yml`): the permitted call lands on the callee attributed to the caller (IA-01) with an `agent_collaboration` activity on the caller (AC-01); a call with no edge is refused with a reason naming both agents and nothing runs on the callee (P-02); a stopped callee answers `503 Agent is not running` within seconds and leaves no row (IA-03); a fan-out is capped at 50 and lands as one batch on the callee (IA-02); a loop stops at its budget; deleting the callee leaves no dangling edge (L-03). On a keyed stack the callee's real answer is read back from its execution record. One `strict=True` xfail carries an open finding: no chain-depth guard (#2806). Refusals audited as successful tool calls (#2807) is closed and asserted: the refused call's audit row reads `success: false`, `denied: true` (the deny sites stamp the call context through `src/mcp-server/src/access.ts::accessDenied`; `audit.ts::withAudit` reads it). Also closed and asserted — `run_agent_loop` skipping the permission gate (trinity-enterprise#628): a loop without an edge is refused with the same reason as a chat, and a loop-id read or stop after the edge is removed is refused without naming the loop's agent (`src/mcp-server/src/access.ts`, `TOOL_ACCESS_POLICY`). The backend REST routes do not consult `agent_permissions` for agent principals (Invariant #8); that ruling is trinity-enterprise#629.
 
 Run it locally (creates and deletes `pytest-ephemeral-journey-*` agents only; needs the Docker socket of the host running the stack):
 

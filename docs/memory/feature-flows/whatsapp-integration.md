@@ -43,7 +43,9 @@ no platform-level Twilio account required.
   `ChannelResponse.files` as Twilio `MediaUrl` (one message per file), reusing
   FILES-001 storage to mint a public `?sig=` URL Twilio fetches server-side.
   Gated on `file_sharing_enabled`; text-link fallback when undeliverable as
-  media. See *Flow: Outbound media attachments* below.
+  media. Each hosted file is addressed to the number the reply is going to, so
+  it lists in no other client's Workspace Files tab. See *Flow: Outbound media
+  attachments* below.
 
 ### Deferred
 - **Phase 3 (remaining)** — SMS on the same Twilio binding, WhatsApp Business
@@ -207,16 +209,30 @@ Twilio fetches a `MediaUrl` **server-side from the public internet** — it cann
 upload bytes the way Slack does. So each file is persisted to FILES-001 storage
 and its public `?sig=` download URL is handed to Twilio.
 
+That store is the same one the Workspace Files tab lists, so each file is
+addressed to the number the reply is going to — and to the email the binding
+verified for that number, if any — via
+`turn_audience.whatsapp_recipient(binding_id, recipient)`
+(trinity-enterprise#549); the hosted voice note
+(`services/voice_reply_service.py::_deliver_whatsapp`) is addressed the same way.
+An unverified number's media is in nobody's Files tab and shows on the owner's
+Sharing panel under the number — the rule is in
+[file-sharing-outbound.md](file-sharing-outbound.md) → *Who a file is for*.
+
 ```
 WhatsAppAdapter.send_response(channel_id, response)
         │
         ▼
-_prepare_outbound_media(agent_name, response.files)   ← per-file isolated
+_prepare_outbound_media(agent_name, response.files,   ← per-file isolated
+        recipient=channel_id, binding_id=binding.get("id"))   (keyword-only; omitted → the owner only)
    gate: db.get_file_sharing_enabled(agent_name)       (off → text-only + WARN)
+   whatsapp_recipient(binding_id, recipient)           ← who the media is for
+     → (verified email | None, "whatsapp:+…")
    for each OutboundFile:
      create_share_from_bytes(agent_name, f.content,    ← FILES-001 reuse
          display_name=f.filename, expires_in=3600,      (1h TTL; reaper purges)
-         created_by=agent_name)  → {url, mime_type, size_bytes}
+         created_by=agent_name,
+         addressed_to_email=…, addressed_to_channel=…)  → {url, mime_type, size_bytes}
        · HTTPException/any error → WARN + skip (never aborts text or siblings)
      classify:
        · url not https://         → text-link fallback (public_chat_url unset)

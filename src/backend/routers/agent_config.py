@@ -4,7 +4,13 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 
 from models import User, AgentCapacityUpdate, PublicChannelModelUpdate
 from database import db
-from dependencies import get_current_user, AuthorizedAgentByName, assert_agent_access, assert_agent_owner
+from dependencies import (
+    get_current_user,
+    AuthorizedAgentByName,
+    assert_agent_access,
+    assert_agent_owner,
+    require_person,
+)
 from services import settings_service
 from services.docker_service import get_agent_container
 from services.agent_service import (
@@ -37,7 +43,7 @@ async def update_agent_api_key_setting(
     agent_name: str,
     request: Request,
     body: dict,
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(require_person)
 ):
     """Update the API key setting for an agent."""
     return await update_agent_api_key_setting_logic(agent_name, body, current_user, request)
@@ -61,10 +67,14 @@ async def set_agent_autonomy_status(
     agent_name: str,
     body: dict,
     request: Request,
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(require_person)
 ):
     """
     Set the autonomy status for an agent.
+
+    Person-only (#2996): autonomy decides whether the agent's cron schedules
+    fire unattended — a grant, so an agent- or system-scoped key is refused
+    before the owner check, whatever agent it addresses.
 
     Body:
     - enabled: True to enable autonomy, False to disable
@@ -82,7 +92,7 @@ async def set_agent_autonomy_status(
         actor_ip=request.client.host if request.client else None,
         target_type="agent",
         target_id=agent_name,
-        endpoint=str(request.url.path),
+        endpoint=request.scope["path"],
         request_id=getattr(request.state, "request_id", None),
         details={"enabled": bool(body.get("enabled"))},
     )
@@ -114,7 +124,7 @@ async def get_agent_read_only_status(
 async def set_agent_read_only_status(
     agent_name: str,
     body: dict,
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(require_person)
 ):
     """
     Set the read-only mode status for an agent.
@@ -176,7 +186,7 @@ async def set_agent_resources(
     agent_name: str,
     body: dict,
     request: Request,
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(require_person)
 ):
     """
     Set the resource limits for an agent.
@@ -237,7 +247,7 @@ async def set_agent_resources(
         actor_ip=request.client.host if request.client else None,
         target_type="agent",
         target_id=agent_name,
-        endpoint=str(request.url.path),
+        endpoint=request.scope["path"],
         request_id=getattr(request.state, "request_id", None),
         details={
             "memory": memory,
@@ -305,7 +315,7 @@ async def get_agent_capabilities(
 async def set_agent_capabilities(
     agent_name: str,
     body: dict,
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(require_person)
 ):
     """
     Set the capabilities for an agent.
@@ -424,7 +434,7 @@ async def get_agent_capacity(
 async def set_agent_capacity(
     agent_name: str,
     body: AgentCapacityUpdate,
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(require_person)
 ):
     """
     Set the parallel execution capacity for an agent.
@@ -504,13 +514,17 @@ async def get_agent_timeout(
 async def set_agent_timeout(
     agent_name: str,
     body: dict,
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(require_person)
 ):
     """
     Set the execution timeout for an agent.
 
     Body:
     - execution_timeout_seconds: Timeout in seconds (60-7200, i.e., 1 min to 2 hours)
+
+    Applies to new runs. Runs already in progress keep their current limit;
+    queued pull-dispatched jobs with a longer timeout are cut to this one
+    when they start.
 
     Only agent owners can modify timeout settings.
     """
@@ -608,7 +622,7 @@ async def set_public_channel_model(
     agent_name: str,
     body: PublicChannelModelUpdate,
     request: Request,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_person),
 ):
     """Set or clear the per-agent public-channel model override (owner-only, #894).
 
@@ -643,7 +657,7 @@ async def set_public_channel_model(
         actor_ip=request.client.host if request.client else None,
         target_type="agent",
         target_id=agent_name,
-        endpoint=str(request.url.path),
+        endpoint=request.scope["path"],
         request_id=getattr(request.state, "request_id", None),
         details={"public_channel_model": model},  # None = cleared
     )
@@ -742,7 +756,7 @@ async def get_agent_guardrails(
 async def set_agent_guardrails(
     agent_name: str,
     body: dict,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_person),
 ):
     """Set per-agent guardrails overrides. Owner-only. Requires container
     recreation to take effect (the runtime config file is written during

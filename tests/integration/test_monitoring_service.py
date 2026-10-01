@@ -113,12 +113,15 @@ _preload_backend_helpers()
 # call-time `from services.agent_client import ...`, so the binding is needed only
 # while these tests run; `_bind_agent_client` below does it with
 # monkeypatch.setitem, which is scoped and auto-restored.
-_AC_SPEC = importlib.util.spec_from_file_location(
-    "services.agent_client",
-    str(_BACKEND / "services" / "agent_client.py"),
-)
-agent_client = importlib.util.module_from_spec(_AC_SPEC)
-_AC_SPEC.loader.exec_module(agent_client)
+# #1028: `services/agent_client.py` is the package `services/agent_client/`, so
+# the `spec_from_file_location` load this replaces raised FileNotFoundError at
+# collection. A plain import also makes the `_bind_agent_client` fixture below a
+# no-op in the good way: the module the test reads IS the one
+# `check_network_health` resolves at call time, rather than a second generation
+# of it. The private collaborators are not re-exported on the package
+# (deliberately — see its `__init__` docstring), so they come from `circuit`.
+import services.agent_client as agent_client  # noqa: E402
+from services.agent_client import circuit as _ac_circuit  # noqa: E402
 
 
 # Stub `database`, `services.docker_service`, and `services.docker_utils` ONLY
@@ -180,16 +183,16 @@ def agent_name(redis_client):
     name = f"mon-test-{uuid.uuid4().hex[:10]}"
     yield name
     redis_client.delete(
-        f"{agent_client._CIRCUIT_HASH_PREFIX}{name}",
-        f"{agent_client._CIRCUIT_HASH_PREFIX}{name}{agent_client._CIRCUIT_PROBE_LOCK_SUFFIX}",
+        f"{_ac_circuit._CIRCUIT_HASH_PREFIX}{name}",
+        f"{_ac_circuit._CIRCUIT_HASH_PREFIX}{name}{_ac_circuit._CIRCUIT_PROBE_LOCK_SUFFIX}",
     )
 
 
 @pytest.fixture(autouse=True)
 def _reset_agent_client_redis():
-    agent_client._reset_circuit_redis_client()
+    _ac_circuit._reset_circuit_redis_client()
     yield
-    agent_client._reset_circuit_redis_client()
+    _ac_circuit._reset_circuit_redis_client()
 
 
 def _patch_httpx(monkeypatch, handler):

@@ -14,13 +14,17 @@ Load this before writing any code under `src/frontend/`. It is the condensed, bi
 
 - `darkMode: 'class'`. Build and verify light AND dark for everything. No per-theme hardcoded color inside a component — theming lives in the token layer.
 - Surfaces: ground gray-50/gray-900 · surface white/gray-800 · chrome gray-100/gray-750 · field white/gray-900 · border gray-200/gray-750 · border-strong gray-300/gray-700.
-- Dark ink ladder: primary gray-100 · secondary gray-300 · tertiary gray-400. **gray-500 is the floor** — disabled/decoration only, never meta text (keeps ≥4.5:1 AA on gray-800).
-- Light ink: primary gray-900 · secondary gray-600 · tertiary gray-500.
+- Dark ink ladder: primary gray-100 · secondary gray-300 · tertiary gray-400. **gray-500 is the floor** — disabled/decoration only, never meta text (gray-500 measures 3.04:1 on gray-800 and 2.13:1 on gray-700; gray-400 is 5.78:1 on gray-800, 6.99 on gray-900, 5.21 on gray-750).
+- Light ink: primary gray-900 · secondary gray-600 · tertiary gray-500. **gray-400 is not text** — 2.54:1 on white.
+- **Tertiary ink is for surface and ground, not for chrome (#2201).** Measured: light tertiary gray-500 is 4.83:1 on white and 4.63 on gray-50, but **4.39 on gray-100** — below AA; dark tertiary gray-400 is 5.78/6.99/5.21 on gray-800/900/750 but **4.06 on gray-700**. On a chrome fill, step up one tier (gray-600 light / gray-300 dark). Numbers are checked, not remembered: `tests/unit/contrast.spec.js` drives `utils/contrast.js` over the real palette and fails if a prescribed pairing drops below AA.
+- **Status/state text is the 700 tier in light and the 400 tier in dark (#2201).** The 600 tier fails AA on a light surface for every warm family — success 3.30, warning 2.94, autonomous 3.19, urgent 3.56 — while the cool ones pass, so the rule is stated per tier rather than per family. The 500 tier is a solid/decoration shade and is never text on a light surface (success 2.28).
+- **White ink needs a 600–700 ground, never a 500 solid (#2201).** White on urgent-500 is 2.80:1 and on danger-500 3.76:1; the Operations count badge uses urgent-700 (5.18) and danger-600 (4.83).
+- A page's rendered contrast is ratcheted: `e2e/contrast-ratchet.spec.js` counts distinct failing text treatments per page and theme against `e2e/contrast-baseline.json` and fails when a count grows; a page with no entry is held to zero. The remaining debt is a long tail of `text-gray-400` written with no `dark:` half — fixing those needs a semantic ink token, because adding the missing half at ~1,500 sites would grow the raw-colour ratchet by ~1,500 raw classes. The two guards pull against each other; the migration is the way out, not a baseline bump.
 - Interactive accent: action-primary-600 light / 500 dark; hover 700 / 400; focus ring 500@40% / 400@42%.
 
 ## Primitives first
 
-- Compose `BaseButton`, `BaseInput`, `BaseSelect`, `BaseToggle`, `BaseTextarea`, `BaseBadge`, `BaseCard`, the modal shell (`ConfirmDialog`), `OverflowTabs`, the bounded data table, and the failed-state pair `LoadFailed` (failed fetch) / `InlineError` (failed verb). Never hand-roll a lookalike — identical pixels from a class string is still a defect.
+- Compose `BaseButton`, `BaseInput`, `BaseSelect`, `BaseToggle`, `BaseTextarea`, `BaseBadge`, `BaseCard`, the modal shell (`BaseModal` — Esc, focus trap, focus return and a shared ref-counted scroll lock; `ConfirmDialog` is the confirm recipe on top of it), `OverflowTabs`, the bounded data table, and the failed-state pair `LoadFailed` (failed fetch) / `InlineError` (failed verb). Never hand-roll a lookalike — identical pixels from a class string is still a defect.
 - BaseButton: 4 variants (primary/secondary/danger/ghost) × 2 sizes (md 13.5 pad 7×14 · sm 12.5 pad 4×10), radius 6px. Disabled = opacity .45. In-flight = 16px spinner + progressive label. Focus ring on all variants.
 - BaseInput/BaseSelect: field bg, border-strong, radius 6px, pad 8×11; focus = accent border + 3px ring; errors name the problem, the fix, and an example — never a bare red border.
 - BaseSelect: 2 variants — `field` (default, the recipe above) and `ghost` (#2662: borderless, transparent, content-width, 44px tall, hover tints the ground only). Use `ghost` where a select is a lightweight preference beside content rather than a field in a form; a form keeps `field`. Reach for the variant, never a hand-rolled select in chat chrome. `ghost` flips the chevron up while the picker is open via `:open` (#2662) — the app's chevron idiom, which selects were excluded from only because a native picker cannot report its state; `field` deliberately does not, that being a change to Settings surfaces #2662 does not own. The selector is `[&:open~svg]` — a GENERAL sibling, so the chevron must FOLLOW the select as a sibling; an element between the two is harmless. What kills it silently is wrapping the svg, or moving it above the select.
@@ -62,6 +66,7 @@ Layout stability:
 7. Panels flex to width; no overlap when narrow; wide content scrolls in its own container, never the page.
 8. Scrolling is axis-locked — one axis at a time.
 29. Recommendation, not a hard rule: enabling something should not shove the rest of the panel. Prefer a reserved footprint (small dependents: disabled in place) or a height/flex transition (section/column: 150–300ms, `motion-reduce:transition-none`) over a bare `v-if` snap; aim for the trigger staying under the pointer, new content opening below or beside it, and what the user was reading staying in view. No scanner sees this — a human toggles it in the browser and watches (#954, #1563, #1939, #2640).
+30. Nothing of variable cardinality stacks above the primary surface — a wrapping chip row or banner pile moves the main content to a different y per instance (trinity-enterprise#724). Collapse it into a fixed-height control (a select for pick-one, a single row with a counted overflow menu for act-on-any) or open it below/beside the content; the content's top edge is the same for 1 item and 40.
 
 Density:
 9. Overflowing tabs collapse into a counted "More ▾" menu (OverflowTabs) — everywhere.
@@ -91,6 +96,11 @@ Consistency:
 20. Tokens only; primitives only; both themes always.
 21. Domain-scoped stores; single API client; loading flags live in stores, not components.
 
+## Testing a component — the harness mounts (#2918)
+
+- `src/frontend/vitest.config.js` runs `environment: 'node'` by **default**, but it carries `plugins: [vue()]`, `jsdom` and `@vue/test-utils` precisely so a spec can opt in **per file**: put `// @vitest-environment jsdom` on line 1, `import { mount } from '@vue/test-utils'`, mount the SFC, and assert on the rendered DOM, emitted events and store calls. Copy `tests/unit/portalThemeSwitch.spec.js` (theme switch → store → `<html class>`) or `portalComposerDraft.spec.js`. The belief that "this repo's vitest cannot mount" is false and is what routed a fleet-delete confirmation (#2756) and a modal's Esc/focus-trap contract (#2778) into regex-only coverage.
+- **A regex over the component's source is not a test of the component.** `readFileSync(...Panel.vue)` + `toContain('canRemove')` proves the predicate was *written*; `||` for `&&` and an inverted `toggle()` pass it byte-identically. It is acceptable for a spelling pin or an AST-shaped call-site guard, and **not** acceptable as the only coverage for a predicate that gates a destructive action, a keyboard contract, or a store write. `tests/unit/sourceTextRatchet.spec.js` enforces the direction: per-spec counts of source-text reads of `components/`/`views/` SFCs are frozen in `src/frontend/source-text-baseline.json` and may only shrink; a **new** spec is held to zero unless its docblock says why a mount cannot prove what it pins (`// @source-text-pin: <reason>`). Regenerate after paying one down: `node src/frontend/scripts/scan-source-text-specs.mjs src/frontend --baseline src/frontend/source-text-baseline.json`.
+
 ## PR self-check
 
 Before requesting review, verify:
@@ -100,6 +110,7 @@ Before requesting review, verify:
 - [ ] Verified in light AND dark; dark meta text is gray-300/400, never gray-500
 - [ ] Spacing on the 4px grid; radii 6px controls / 8–10px surfaces; type within the six-size scale
 - [ ] Loading/empty/failed states all exist, visually distinct, sharing one footprint — no layout shift on arrival; the empty branch gates on a succeeded fetch (`hasLoaded`), not on list length
+- [ ] Nothing above the primary surface changes height with item count — a variable-cardinality set is a fixed-height control (select / single row + counted overflow), and the content's top edge is the same with 1 item and 40 (principle 30)
 - [ ] Every toggle, checkbox, or mode switch that reveals or hides content was exercised by a human in the browser, in both themes, watching what moves — a reserved footprint or a transition is the recommendation (principle 29), a snap is acceptable when judged so, and the PR says it was looked at
 - [ ] Every action failure has a user-visible home (`InlineError` near the control); no `console.error`-only catch, no `alert()`, and `Promise.allSettled` bulk helpers report their rejected count
 - [ ] Data loading uses the scanline primitive on chart surfaces and a skeleton placeholder on every other first load, keyed off store state; background refresh is invisible (no re-flash, no scroll reset) — no bare `v-if="loading"` gate on a data surface: gate on "no data yet" (`utils/loadingState.js::viewState`), stale refresh = sibling `InlineError` banner; `tests/unit/loadingGateRatchet.spec.js` fails if a file's bare-gate count grows (#1927)
@@ -109,3 +120,4 @@ Before requesting review, verify:
 - [ ] Unbounded sets bounded (internal scroll/pagination/virtualization) with the total stated
 - [ ] One primary action on the view; destructive flows restate consequence with safe-action focus
 - [ ] Numbers use `tabular-nums`; times show relative + absolute-on-hover
+- [ ] Every predicate that gates a destructive verb, a keyboard contract, or a store write is proven by a test that **mounts** the component (`// @vitest-environment jsdom` + `@vue/test-utils`), not by a regex over its source; `tests/unit/sourceTextRatchet.spec.js` holds a new spec to zero source-text reads unless it carries `@source-text-pin: <reason>` (#2918)

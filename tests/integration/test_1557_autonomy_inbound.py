@@ -64,8 +64,16 @@ def _load(name: str, rel: str):
     return module
 
 
-agent_client = _load("agent_client_1557", "services/agent_client.py")
-_CIRCUIT = agent_client._CIRCUIT_HASH_PREFIX
+# #1028: `services/agent_client.py` is the package `services/agent_client/`, so
+# `_load` on that path raised FileNotFoundError at collection. The isolation the
+# loader claimed was already void — the module imports `services.agent_auth` at
+# import time, which runs `services/__init__.py` either way — so this is a plain
+# import, and the key prefix comes from the module that owns it (the package
+# deliberately does not re-export private collaborators).
+import services.agent_client as agent_client  # noqa: E402
+from services.agent_client import circuit as _ac_circuit  # noqa: E402
+
+_CIRCUIT = _ac_circuit._CIRCUIT_HASH_PREFIX
 
 
 @pytest.fixture(autouse=True)

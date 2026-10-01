@@ -91,6 +91,7 @@ from services.sync_waiter import (
     wait_for_fan_out_batch,
 )
 from services.task_execution_service import get_task_execution_service
+from db.write_params import ExecutionResult, TaskExecutionFields
 
 logger = logging.getLogger(__name__)
 
@@ -292,6 +293,9 @@ class FanOutService:
         source_mcp_key_name: Optional[str] = None,
         # #2670: called once with the batch id, before the first dispatch.
         on_started: Optional[Callable[[str], None]] = None,
+        # #2806: stamped on every subtask row; captured by the router at
+        # request time. None for a non-agent principal (a root).
+        chain_depth: Optional[int] = None,
     ) -> FanOutResult:
         """Dispatch tasks in parallel and (unless *async_mode*) collect results.
 
@@ -354,6 +358,7 @@ class FanOutService:
             source_agent_name=source_agent_name or agent_name,
             source_mcp_key_id=source_mcp_key_id,
             source_mcp_key_name=source_mcp_key_name,
+            chain_depth=chain_depth,
         ))
 
         if async_mode:
@@ -446,6 +451,7 @@ class FanOutService:
         source_agent_name: Optional[str],
         source_mcp_key_id: Optional[str],
         source_mcp_key_name: Optional[str],
+        chain_depth: Optional[int] = None,
     ) -> None:
         """Dispatch every subtask, paced by the semaphore. The batch's outcome
         is read from the rows, not from here — this only records the
@@ -467,15 +473,18 @@ class FanOutService:
                     agent_name=agent_name,
                     message=task.message,
                     triggered_by="fan_out",
-                    source_user_id=source_user_id,
-                    source_user_email=source_user_email,
-                    source_agent_name=source_agent_name,
-                    source_mcp_key_id=source_mcp_key_id,
-                    source_mcp_key_name=source_mcp_key_name,
-                    model_used=model,
-                    fan_out_id=fan_out_id,
-                    fan_out_task_id=task.id,
-                    subscription_id=subscription_id,
+                    fields=TaskExecutionFields(
+                        source_user_id=source_user_id,
+                        source_user_email=source_user_email,
+                        source_agent_name=source_agent_name,
+                        source_mcp_key_id=source_mcp_key_id,
+                        source_mcp_key_name=source_mcp_key_name,
+                        model_used=model,
+                        fan_out_id=fan_out_id,
+                        fan_out_task_id=task.id,
+                        subscription_id=subscription_id,
+                        chain_depth=chain_depth,
+                    ),
                 )
                 if execution is None:
                     logger.error(
@@ -548,7 +557,9 @@ class FanOutService:
             won = db.update_execution_status(
                 execution_id=execution_id,
                 status=TaskExecutionStatus.FAILED,
-                error=error_text,
+                result=ExecutionResult(
+                    error=error_text,
+                ),
             )
             if won:
                 # #1804: a terminal writer owns closing the paired dispatch activity.

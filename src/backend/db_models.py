@@ -307,6 +307,8 @@ class ScheduleExecution(BaseModel):
     # ent#555 — the canvas the user had open for this turn. Context about what
     # is being discussed; never authority over what may be read or written.
     open_canvas_id: Optional[str] = None
+    # #2806 — agent-to-agent hops from a non-agent root (NULL/None = root).
+    chain_depth: Optional[int] = None
 
 
 # =========================================================================
@@ -723,6 +725,19 @@ class AgentSkill(BaseModel):
     # None = assigned before multi-source, or the source row is gone. Recorded
     # so a later cross-source swap under the same bare name is detectable.
     source_id: Optional[str] = None
+    # #2914: the durable verdict of the last injection that looked at this
+    # name. `conflict` = an agent-authored `.claude/skills/<name>/` blocks the
+    # library package (the agent's own copy is what runs); None = no standing
+    # conflict. Written and cleared by the inject path only.
+    delivery_status: Optional[str] = None
+    # ent#596 (Tandem R29): the agent that made the assignment, when the writer
+    # was an agent principal; None for a human. `assigned_by` stays the owner's
+    # username, so "the agent did it" is distinguishable from "the person did it".
+    assigned_by_agent: Optional[str] = None
+    # ent#530: False = present only because an assigned skill SET names it;
+    # `via_sets` names those sets (filled by the router from the current catalogs).
+    individual: bool = True
+    via_sets: List[str] = []
 
 
 class SkillSource(BaseModel):
@@ -780,11 +795,21 @@ class SkillInfo(BaseModel):
     # version of this skill than a given source intended — AC#4 requires that be
     # visible, never a silent overwrite.
     shadowed_by: List[Dict[str, str]] = Field(default_factory=list)
+    # trinity-enterprise#672 lifecycle. A deprecated skill stays listed and
+    # assignable — flagged, never hidden. `superseded_by` is the library
+    # author's text (one printable line, <= 200 chars), NOT a resolved skill
+    # name, and is None unless `deprecated` is true.
+    deprecated: bool = False
+    superseded_by: Optional[str] = None
 
 
 class AgentSkillsUpdate(BaseModel):
     """Request model for bulk updating agent skills."""
     skills: List[str]  # List of skill names to assign
+    # ent#530: the agent's skill SETS. None = leave sets untouched, so a client
+    # that only knows skills can never drop a set; a list replaces the sets.
+    # `set:<name>` entries in `skills` are accepted too and treated as sets.
+    sets: Optional[List[str]] = None
 
 
 class SkillsLibraryStatus(BaseModel):
@@ -968,7 +993,7 @@ class SubscriptionUsageWindow(BaseModel):
 
 class HeadroomWindow(BaseModel):
     """One rolling-limit window from the anthropic-ratelimit-unified-* headers (#471)."""
-    utilization_pct: Optional[float] = None  # 0..100
+    utilization_pct: Optional[float] = None  # percent of the cap; past 100 on an overage plan (#2419)
     resets_at: Optional[str] = None          # ISO-Z
     status: Optional[str] = None             # provider's per-window status (e.g. "allowed")
 
@@ -1107,6 +1132,42 @@ class AgentHealthDetail(BaseModel):
     # #526: unified breaker block — {dispatch:{...}, transport:{...}, open: bool,
     # config:{enabled}}. Same shape as GET /api/agents/{name}/circuit-breaker.
     circuit_breaker: Optional[dict] = None
+    # ent#479: INFORMATIONAL declared-metric freshness — counts and names, no
+    # values. It never feeds `aggregate_status` or `issues`: a business metric
+    # going stale is the operator's news, not a platform health failure, and a
+    # store read failure leaves this `None` rather than failing the check.
+    metrics: Optional[dict] = None
+
+
+class AgentSyncHealth(BaseModel):
+    """One agent's git sync health on the fleet surfaces (trinity-enterprise#707).
+
+    Read from `agent_sync_state` through the shared reader and the one policy
+    (`services/sync_health_view.py`); the counts are None until the poller has
+    observed the agent. `reason` never carries the agent-written git error.
+    """
+    binding: str  # "agent" | "deployment"
+    auto_sync_enabled: bool = False
+    ahead: Optional[int] = None  # origin on the agent's own branch (#2105)
+    behind: Optional[int] = None
+    dirty_files: Optional[int] = None
+    last_successful_push_at: Optional[str] = None
+    divergence_age_s: Optional[int] = None
+    state: str  # green | yellow | red | unknown
+    reason: str
+    recommendation: Optional[str] = None
+    frozen: bool = False
+
+
+class FleetSyncSummary(BaseModel):
+    """Fleet totals over the git-bound agents the caller can see (trinity-enterprise#707)."""
+    git_bound: int = 0
+    diverged: int = 0
+    frozen: int = 0
+    auto_sync_off: int = 0
+    dirty: int = 0
+    red: int = 0
+    yellow: int = 0
 
 
 class AgentHealthSummary(BaseModel):
@@ -1127,6 +1188,10 @@ class AgentHealthSummary(BaseModel):
     heartbeat_active_executions: Optional[int] = None
     heartbeat_memory_mb: Optional[float] = None
     heartbeat_state: Optional[str] = None
+    # trinity-enterprise#707: git sync health, an annotation like the heartbeat
+    # layer — it never changes `status`. None = no git binding (or the sync
+    # read degraded).
+    sync: Optional[AgentSyncHealth] = None
 
 
 class FleetHealthSummary(BaseModel):
@@ -1146,6 +1211,7 @@ class FleetHealthStatus(BaseModel):
     summary: FleetHealthSummary
     agents: List[AgentHealthSummary] = []
     circuit_breakers: Optional[Dict[str, Any]] = None
+    sync_summary: Optional[FleetSyncSummary] = None  # trinity-enterprise#707
 
 
 class MonitoringConfig(BaseModel):

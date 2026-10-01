@@ -1,6 +1,7 @@
 """Execution-row create/update lifecycle, dispatch marker, and execution getters."""
 
 import logging
+from dataclasses import asdict
 from datetime import datetime
 from typing import Optional, List, Dict
 
@@ -12,6 +13,7 @@ from ..tables import (
     schedule_executions,
 )
 from db_models import ScheduleExecution
+from ..write_params import ExecutionResult, ExecutionSource, TaskExecutionFields
 from models import TaskExecutionStatus
 from utils.helpers import (
     duration_ms_between,
@@ -100,6 +102,8 @@ class ScheduleExecutionsMixin:
             source_channel_agent=row["source_channel_agent"] if "source_channel_agent" in row_keys else None,
             source_channel_client=row["source_channel_client"] if "source_channel_client" in row_keys else None,
             open_canvas_id=row["open_canvas_id"] if "open_canvas_id" in row_keys else None,
+            # Inter-agent chain depth (#2806); NULL = root.
+            chain_depth=row["chain_depth"] if "chain_depth" in row_keys else None,
         )
 
     # =========================================================================
@@ -111,22 +115,7 @@ class ScheduleExecutionsMixin:
         agent_name: str,
         message: str,
         triggered_by: str = "manual",
-        source_user_id: int = None,
-        source_user_email: str = None,
-        source_agent_name: str = None,
-        source_mcp_key_id: str = None,
-        source_mcp_key_name: str = None,
-        model_used: str = None,
-        fan_out_id: str = None,
-        fan_out_task_id: str = None,
-        loop_id: str = None,
-        subscription_id: str = None,
-        source_channel: str = None,
-        source_channel_chat_id: str = None,
-        source_channel_thread: str = None,
-        source_channel_agent: str = None,
-        source_channel_client: str = None,
-        open_canvas_id: str = None,
+        fields: Optional[TaskExecutionFields] = None,
     ) -> Optional[ScheduleExecution]:
         """Create a new execution record for a manual/API-triggered task (no schedule).
 
@@ -134,6 +123,7 @@ class ScheduleExecutionsMixin:
             agent_name: Target agent name
             message: Task message
             triggered_by: Trigger type - "manual", "mcp", "agent", "fan_out", "loop"
+            fields: every optional column, as a `TaskExecutionFields` (#1482):
             source_user_id: User ID who triggered (for manual/mcp triggers)
             source_user_email: User email (denormalized for queries)
             source_agent_name: Calling agent name (for agent-to-agent)
@@ -153,7 +143,11 @@ class ScheduleExecutionsMixin:
                 Set ONLY when channel context is inherited from a parent
                 execution; None for direct rows (reporter falls back to the
                 executing agent).
+            chain_depth: Agent-to-agent hops from a non-agent root (#2806).
+                Set only on the child row of an agent-principal call; None
+                (read as 0) on every root.
         """
+        f = asdict(fields or TaskExecutionFields())
         execution_id = self._generate_id()
         now = utc_now_iso()
 
@@ -167,25 +161,13 @@ class ScheduleExecutionsMixin:
                     started_at=now,
                     message=message,
                     triggered_by=triggered_by,
-                    source_user_id=source_user_id,
-                    source_user_email=source_user_email,
-                    source_agent_name=source_agent_name,
-                    source_mcp_key_id=source_mcp_key_id,
-                    source_mcp_key_name=source_mcp_key_name,
-                    model_used=model_used,
-                    fan_out_id=fan_out_id,
-                    fan_out_task_id=fan_out_task_id,
-                    loop_id=loop_id,
-                    subscription_id=subscription_id,
-                    source_channel=source_channel,
-                    source_channel_chat_id=source_channel_chat_id,
-                    source_channel_thread=source_channel_thread,
-                    source_channel_agent=source_channel_agent,
-                    source_channel_client=source_channel_client,
-                    open_canvas_id=open_canvas_id,
+                    **f,
                 )
             )
 
+        # `fan_out_task_id` is persisted but not on the ScheduleExecution model
+        # (the aggregate reads it back from the rows, #2524).
+        f.pop("fan_out_task_id")
         return ScheduleExecution(
                 id=execution_id,
                 schedule_id="__manual__",
@@ -194,22 +176,29 @@ class ScheduleExecutionsMixin:
                 started_at=datetime.fromisoformat(now),
                 message=message,
                 triggered_by=triggered_by,
-                source_user_id=source_user_id,
-                source_user_email=source_user_email,
-                source_agent_name=source_agent_name,
-                source_mcp_key_id=source_mcp_key_id,
-                source_mcp_key_name=source_mcp_key_name,
-                model_used=model_used,
-                fan_out_id=fan_out_id,
-                loop_id=loop_id,
-                subscription_id=subscription_id,
-                source_channel=source_channel,
-                source_channel_chat_id=source_channel_chat_id,
-                source_channel_thread=source_channel_thread,
-                source_channel_agent=source_channel_agent,
-                source_channel_client=source_channel_client,
-                open_canvas_id=open_canvas_id,
+                **f,
             )
+
+    def get_max_running_chain_depth(self, agent_name: str) -> int:
+        """Deepest `chain_depth` among `agent_name`'s RUNNING rows, 0 if none (#2806).
+
+        The chain-depth guard stamps a child `1 + this`. Only `running` rows
+        count: every row is inserted RUNNING, so a caller mid-turn is always
+        visible, while `queued` / `pending_retry` rows are not executing and so
+        cannot be the one making the call. NULL depths (roots) read as 0.
+        Taking the MAX means a caller cannot lower it while it has a running
+        execution — the guard fails toward over-refusal.
+        """
+        with get_engine().connect() as conn:
+            value = conn.execute(
+                select(func.max(schedule_executions.c.chain_depth)).where(
+                    and_(
+                        schedule_executions.c.agent_name == agent_name,
+                        schedule_executions.c.status == TaskExecutionStatus.RUNNING,
+                    )
+                )
+            ).scalar()
+        return int(value or 0)
 
     def create_schedule_execution(
         self,
@@ -217,13 +206,7 @@ class ScheduleExecutionsMixin:
         agent_name: str,
         message: str,
         triggered_by: str = "schedule",
-        source_user_id: int = None,
-        source_user_email: str = None,
-        source_agent_name: str = None,
-        source_mcp_key_id: str = None,
-        source_mcp_key_name: str = None,
-        model_used: str = None,
-        subscription_id: str = None,
+        source: Optional[ExecutionSource] = None,
     ) -> Optional[ScheduleExecution]:
         """Create a new execution record for a scheduled task.
 
@@ -231,6 +214,7 @@ class ScheduleExecutionsMixin:
         since the schedule itself is the trigger (schedule owner is tracked via schedule.owner_id).
         For manual schedule triggers, source fields may be populated.
         """
+        f = asdict(source or ExecutionSource())
         execution_id = self._generate_id()
         now = utc_now_iso()
 
@@ -244,13 +228,7 @@ class ScheduleExecutionsMixin:
                     started_at=now,
                     message=message,
                     triggered_by=triggered_by,
-                    source_user_id=source_user_id,
-                    source_user_email=source_user_email,
-                    source_agent_name=source_agent_name,
-                    source_mcp_key_id=source_mcp_key_id,
-                    source_mcp_key_name=source_mcp_key_name,
-                    model_used=model_used,
-                    subscription_id=subscription_id,
+                    **f,
                 )
             )
 
@@ -262,13 +240,7 @@ class ScheduleExecutionsMixin:
             started_at=datetime.fromisoformat(now),
             message=message,
             triggered_by=triggered_by,
-            source_user_id=source_user_id,
-            source_user_email=source_user_email,
-            source_agent_name=source_agent_name,
-            source_mcp_key_id=source_mcp_key_id,
-            source_mcp_key_name=source_mcp_key_name,
-            model_used=model_used,
-            subscription_id=subscription_id,
+            **f,
         )
 
     def mark_execution_dispatched(
@@ -404,20 +376,15 @@ class ScheduleExecutionsMixin:
         self,
         execution_id: str,
         status: str,
-        response: str = None,
-        error: str = None,
-        context_used: int = None,
-        context_max: int = None,
-        cost: float = None,
-        tool_calls: str = None,
-        execution_log: str = None,
-        claude_session_id: str = None,
-        compact_metadata: str = None,
-        retry_count: Optional[int] = None,
+        result: Optional[ExecutionResult] = None,
+        *,
         claim_token: Optional[str] = None,
-        turn_integrity: Optional[str] = None,
     ) -> bool:
         """Update execution status when completed.
+
+        `result` carries what the write records (#1482 — see `ExecutionResult`
+        for which `None`s NULL a column and which leave it alone); None records
+        the status alone.
 
         CAS contract:
         - SUCCESS writes win over RUNNING / QUEUED / PENDING_RETRY / SKIPPED and
@@ -429,7 +396,7 @@ class ScheduleExecutionsMixin:
           overwriting any already-terminal status (RELIABILITY-005), preventing
           cleanup paths from silently clobbering a real completion.
 
-        Args:
+        Args (fields of `result`, plus `claim_token`):
             claude_session_id: Claude Code session ID for --resume support (EXEC-023)
             retry_count: #678 — number of in-line auto-retries used to produce
                 this terminal write. None leaves the column unchanged (default
@@ -441,6 +408,7 @@ class ScheduleExecutionsMixin:
                 (rowcount 0) and cannot clobber a terminal. None (every existing
                 caller) adds no precondition — dark by default.
         """
+        r = result or ExecutionResult()
         # Terminal states that a non-success write must not overwrite.
         _TERMINAL = (
             TaskExecutionStatus.SUCCESS,
@@ -484,27 +452,27 @@ class ScheduleExecutionsMixin:
                 "status": status,
                 "completed_at": to_utc_iso(completed_at),
                 "duration_ms": duration_ms,
-                "response": response,
-                "error": error,
-                "context_used": context_used,
-                "context_max": context_max,
-                "cost": cost,
-                "tool_calls": tool_calls,
-                "execution_log": execution_log,
-                "claude_session_id": claude_session_id,
-                "compact_metadata": compact_metadata,
+                "response": r.response,
+                "error": r.error,
+                "context_used": r.context_used,
+                "context_max": r.context_max,
+                "cost": r.cost,
+                "tool_calls": r.tool_calls,
+                "execution_log": r.execution_log,
+                "claude_session_id": r.claude_session_id,
+                "compact_metadata": r.compact_metadata,
             }
             # #678: optionally update retry_count alongside the terminal write.
             # Leaving it out of the values dict preserves the prior value when
             # the caller passes None so other update paths (cleanup, scheduler)
             # don't accidentally zero it.
-            if retry_count is not None:
-                values["retry_count"] = int(retry_count)
+            if r.retry_count is not None:
+                values["retry_count"] = int(r.retry_count)
             # #2467: same conditional shape — an unconditional None here would
             # NULL the column on the documented FAILED→SUCCESS resurrect CAS
             # and on every terminal writer that doesn't derive it.
-            if turn_integrity is not None:
-                values["turn_integrity"] = turn_integrity
+            if r.turn_integrity is not None:
+                values["turn_integrity"] = r.turn_integrity
 
             if status == TaskExecutionStatus.SUCCESS:
                 # Agent's own completion result wins over everything except a
@@ -848,6 +816,45 @@ class ScheduleExecutionsMixin:
                 d["completed_at"] = _norm_ts(d.get("completed_at"))
                 rows.append(d)
             return rows
+
+
+    def get_running_in_conversation(
+        self, agent_name: str, source_channel: str, chat_id: str,
+    ) -> List[ScheduleExecution]:
+        """THIS agent's RUNNING executions in one conversation (ent#549).
+
+        Behind `services/turn_audience.resolve_turn_audience`: an agent that
+        cites a finished execution of its own has proved which CONVERSATION a
+        side effect came from, never which person — the person is whoever the
+        turn running in that conversation now belongs to. Exactly one row is an
+        answer; none or several is "could not tell".
+
+        All three predicates are required, and an empty one returns nothing
+        rather than widening: `agent_name` is the authenticated caller (a chat
+        id alone would let one agent read another's turn — the #2433 rule that
+        a local lookup must bind every identifier the remote authority used
+        to), and the channel keeps a Telegram chat id from colliding with a
+        room id.
+
+        RUNNING only, unlike `get_running_for_chat`: a QUEUED row has no process
+        that could be making a tool call. `idx_executions_status` drives it, as
+        it does there — a handful of rows on any install.
+        """
+        if not (agent_name and source_channel and chat_id):
+            return []
+        stmt = (
+            select(schedule_executions)
+            .where(and_(
+                schedule_executions.c.status == TaskExecutionStatus.RUNNING,
+                schedule_executions.c.agent_name == agent_name,
+                schedule_executions.c.source_channel == source_channel,
+                schedule_executions.c.source_channel_chat_id == chat_id,
+            ))
+            .order_by(schedule_executions.c.started_at.desc())
+        )
+        with get_engine().connect() as conn:
+            rows = conn.execute(stmt).mappings().all()
+        return [self._row_to_schedule_execution(r) for r in rows]
 
     def stamp_execution_channel_context(
         self,

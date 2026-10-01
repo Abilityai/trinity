@@ -22,6 +22,7 @@
 - **GitHub Issue**: #19
 - **Description**: MCP tools for querying execution history, polling async results, and monitoring agent activity
 - **Key Features**: `list_recent_executions`, `get_execution_result`, `get_agent_activity_summary`; enables async polling pattern for agent-to-agent collaboration beyond 60s MCP timeout
+- **`search_executions`** (abilityai/trinity-enterprise#653, 2026-09-19): grep over the execution corpus (prompt/response/error) with bounded excerpts — `mode=substring` (default) or `mode=regex` (POSIX, PostgreSQL only; matched and excerpted by the database, never by Python `re`) — proxying the entitlement-gated enterprise execution-search route. Available to the system agent and user-scoped keys only — agent-scoped keys are refused at the backend and never see the tool (per-tool `canAccess` allow-list). Absent/unentitled module → `available:false`, never an empty result.
 - **Spec**: `docs/requirements/MCP_EXECUTION_QUERY_TOOLS.md`
 
 ### 7.4 Configurable MCP Server URL (MCP-URL-001)
@@ -775,6 +776,15 @@ runs the same access gate, so ownership/sharing is never bypassed.
   routing, parallel/self-task paths, idempotency tokens, #914 gateway-timeout recovery, access
   denial). Dedicated tools register with the `connectorDenied` visibility gate and bind their
   audit target (no `agent_name` param).
+- **FR-5a — Chain-depth refusal is a result, not an error (#2806)**: when the backend refuses a
+  hop with 403 `detail.error == "inter_agent_depth_exceeded"` (`core-agent.md` §9.1.1),
+  `client.chat` / `client.task` / `client.fanOut` return a typed refusal instead of throwing,
+  and `runAgentChat` (sequential, parallel, self-task and pull-routed branches) and `fan_out`
+  answer `{"status": "inter_agent_depth_exceeded", "agent", "depth", "max_depth",
+  "retryable": false, "message"}` so the calling model reads "stop, do not retry or re-route".
+  A 403 without that code (access denial, SELF-EXEC-001) still throws as before.
+  Since #2973 `run_agent_loop`, `trigger_agent_schedule` and `emit_event` return the same
+  refusal object (`client.ts::depthRefusalFromError`).
 - **FR-6 — Surfacing**: `mcp_exposed` is exposed on `GET /api/agents` / MCP `list_agents`. A
   Settings-tab toggle ("Expose via MCP") shows the computed tool name and up-to-poll-interval
   latency copy.
@@ -1049,3 +1059,38 @@ returns a sibling's plaintext to an agent principal. All three now run
 derived, and `User.mcp_scope` is a Pydantic field, not a column.
 
 **Flow**: `docs/memory/feature-flows/agent-mcp-key.md`
+
+## Self-Acting MCP Tools — identity from the key, including the orchestrator's (#2975)
+
+- **Status**: ✅ Implemented (2026-09-23)
+- **Requirement ID**: MCP-SELF-ACTING
+- **GitHub Issue**: #2975 (P1, reported by the operator via `trinity-system`)
+- **Description**: `report`, the four canvas tools and the four metrics tools declare **no**
+  agent-target parameter — they act AS the caller, so the publishing identity must come from
+  the credential. That identity is resolved in ONE place,
+  `src/mcp-server/src/access.ts::resolveActingAgent`, and the rule is an **allowlist** over
+  the free-text `mcp_api_keys.scope` column (#1854, #2323):
+  - `scope='agent'` with an `agent_name` → the calling agent (unchanged);
+  - `scope='system'` with an `agent_name` → that agent. This is the platform orchestrator:
+    `system_agent_service` mints `trinity-system`'s key agent-scoped and then flips the
+    scope (`_set_system_scope`), and #1816 makes that permanent — the orchestrator's key is
+    never re-minted as `agent`, so issuing it an agent-scoped key is not an available fix;
+  - everything else refused, **including `connector`**, which carries an `agent_name` (it is
+    bound to one agent) but is an END USER's consumption key — admitting it would let a
+    client publish as the agent serving them. A `system` key with no `agent_name` is refused
+    too: there is no identity to attribute the write to.
+- **The name always comes from the key row, never from a parameter**, so admitting a scope
+  widens identity by exactly zero — a system key already reaches every agent's data on the
+  read surfaces.
+- **The backend was never the refuser** and is unchanged: `POST /api/agents/{name}/reports`,
+  the canvas writes and `POST /api/agents/{name}/metrics/points` are `AuthorizedAgent` plus a
+  self-gate on `current_user.agent_name`, which `dependencies.py` sets only for
+  `scope == "agent"` — so for a system key the self-gate is a no-op and the write succeeds
+  (verified live against the instance before the tools were touched).
+- **Impact this closes**: the daily `/fleet-health` run and the weekly ops review on
+  `trinity-system` could read every surface and publish nothing; both fell back to
+  `~/reports/` and the operator queue.
+- **Tests**: `src/mcp-server/src/tools/self-acting-scope.test.ts` — every self-acting tool
+  admits the system key and acts as `trinity-system`, an agent key is unchanged, and seven
+  other credential shapes (user, connector, portal_delegate, ops, anonymous, a system key
+  naming no agent, an unknown future scope) are refused without reaching the network.

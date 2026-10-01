@@ -24,7 +24,7 @@
 - **GitHub Issue**: #147
 - **Description**: Email-verified public chat sessions maintain persistent per-user memory (text blob) scoped to `(agent_name, user_email)`, injected into every agent call. Memory is updated via background summarization every 5 messages (auto) or explicitly via the `write_user_memory` MCP tool (agent-initiated, #888). The tool resolves the user email server-side from the execution record — agents never handle email addresses directly.
 - **Database Tables**: `public_user_memory`
-- **API**: `POST /api/agents/{name}/user-memory` (agent-scoped key + execution_id; user-facing triggers only)
+- **API**: `POST /api/agents/{name}/user-memory` (agent-scoped key + execution_id; user-facing triggers, plus a `schedule` run that names a seat — §10.19 of `scheduling.md`, ent#637). Every agent-notes write records a `public_user_memory_writes` row; the person reads and undoes them through the Workspace (`GET/POST /api/enterprise/client-portal/agents/{name}/memory…`)
 - **Flow**: `docs/memory/feature-flows/public-agent-links.md#per-user-persistent-memory-mem-001`
 
 ### 15.1a-3 Agent Website Proxy (SITE-001)
@@ -183,7 +183,7 @@
   - Auto-created group configs on first interaction (no manual setup required)
   - Bot added/removed from group detection via `my_chat_member` update events
   - User join/leave detection via `chat_member` events (requires bot admin in group)
-  - Fresh context per group message (no prior session history to prevent context bleed)
+  - Group turns read only the group's own per-chat session — never DM history (superseded the original "fresh context per group message" rule; see TGRAM-GROUP-CTX, §15.1e-ctx)
   - Silent rate limit drops in groups (no error messages visible to all members)
   - Mention text stripped from agent input for cleaner prompts
   - Commands support @botname suffix in groups (e.g., `/help@mybot`)
@@ -207,6 +207,29 @@
   - Bot loop prevention inherited from TGRAM-001 (`is_bot` check)
 - **Frontend**: TelegramChannelPanel extended with group list, trigger mode radio, welcome message config
 - **Flow**: `docs/memory/feature-flows/telegram-integration.md`
+
+### 15.1e-ctx Telegram Group Conversation Context (TGRAM-GROUP-CTX — ent#600)
+- **Status**: 🔨 In Progress (2026-09-11)
+- **Requirement ID**: TGRAM-GROUP-CTX
+- **Priority**: P1
+- **Description**: In a Telegram group the agent still *speaks* only per the group's trigger mode, but it *knows* the group's recent conversation when it does. Un-tagged messages the bot receives are recorded as attributed context without spending an agent turn; a tagged turn is answered with that bounded history. Replaces TGRAM-GROUP's "fresh context per group message" rule — the reason for that rule (DM history must never reach a group reply) is preserved by construction, because the group's context lives in its own session.
+- **Key Features**:
+  - Group sessions are keyed per chat (`{bot_id}:group:{chat_id}`, plus `:topic:{message_thread_id}` in forum supergroups), not per sender. DMs keep their per-user key; nothing from a DM or another group can appear in a group reply.
+  - In `mention` mode an un-tagged group message is **observed**: persisted to the group session with its speaker label, never executed — no reply, no typing, no reaction, no rate-limit charge. Bare `/commands` are neither executed nor recorded; a command addressed to the bot (`/reset@bot`) counts as tagged.
+  - Every group turn (mention / all / observe) is built as sender identity + a bounded, attributed "recent group conversation" block (default 40 messages within 24 h; `[NO_REPLY]` turns skipped; lines clamped) + the tagged message. The tagged user turn is persisted *before* execution so stored order matches what the group saw. Observed history is untrusted third-party input and is rendered inside a delimited block with sanitized labels.
+  - Zero-config slice: a tagged message that replies to someone else's message carries `[Replying to <name>: "<quote>"]` — works with Privacy Mode on.
+  - Proactive `send_group_message` broadcasts now land in the same group session, closing #1649's "agent can't recall its own broadcast" limitation.
+  - Per-group `context_enabled` (default ON; owner-editable via the existing group PUT + panel toggle; human-only). OFF ⇒ nothing about the group is recorded — no observed messages, no tagged turns or replies, no broadcasts — and group turns run with fresh context (sender identity + reply quote + the message). Switching OFF also deletes what was recorded (the chat's session and its forum-topic sessions), so switching back ON starts from an empty history. Not required config.
+  - Storage bound: a group session is pruned to its newest 500 rows each time its message count crosses a multiple of 50, on every group write path (observed messages, tagged turns, `all`/`observe` turns). Bounds are env-overridable (`TELEGRAM_GROUP_CONTEXT_MAX_MESSAGES`, `TELEGRAM_GROUP_CONTEXT_MAX_AGE_HOURS`).
+  - Honest status per group: `context_status` ∈ `all_messages` (an un-tagged message has reached the bot here) / `tagged_only` (getMe reports Privacy Mode on; hint names `/setprivacy` → Disable, re-add the bot, or make it a group admin) / `unconfirmed` (Privacy Mode off or unknown, nothing un-tagged seen yet; hint names re-add / Verify) / `off` (toggle off). `can_read_all_group_messages` is refreshed from `getMe` at connect, at Verify, and when the bot is added to a group.
+  - Graceful degradation: with Privacy Mode on the bot never receives un-tagged messages, so behaviour is exactly TGRAM-GROUP's.
+- **Database Changes** (dual-track: `telegram_group_context` + Alembic `0079_telegram_group_context`; all additive, nullable/defaulted):
+  - `telegram_bindings.can_read_all_group_messages INTEGER` (NULL = never checked)
+  - `telegram_group_configs.last_untagged_seen_at TEXT`, `telegram_group_configs.context_enabled INTEGER DEFAULT 1`
+- **API Changes**: `GET /api/agents/{name}/telegram/groups` items gain `context_enabled`, `context_status`, `context_hint`, `last_untagged_seen_at`; `PUT …/groups/{id}` accepts `context_enabled`. MCP `list_channel_groups` passes `context_status` through (Invariant #13).
+- **Known limitations**: no backfill — context starts when the bot can see messages; a group locked by `group_auth_mode=any_verified` records nothing until unlocked; ent#265 completion reports are not written into group context; `/reset@bot` by any member clears the group's shared context.
+- **Journey**: J14 (`tests/journeys/catalog.yaml`, `built: no`)
+- **Flow**: `docs/memory/feature-flows/telegram-integration.md` → Group Conversation Context
 
 ### 15.1h Channel Completion Report-Back (CHANNEL-REPORT — ent#224 Slack, ent#265 Telegram)
 - **Status**: ✅ Slack (2026-07, ent#224) · ✅ Telegram (2026-07, ent#265)
@@ -912,3 +935,57 @@ spoken replies (#2157) stay as composer affordances.
   frame after persistence tells the client when to reload; End always works.
 - **FR-9 — Out of scope**: rooms; acting as the agent (#535); the external
   projection (#285/#446); provider choice (#354, seam kept provider-neutral).
+
+### 48.4 Workspace Projects — the open-core surface (trinity-enterprise#661)
+
+**Description**: An internal user runs sustained work as a **project**: a
+record that links the Workspace chats and rooms where the work happens, with
+members and the agents that may work on it. The record and its rules are a
+private module; this section is the edition-agnostic surface it needs.
+
+- **FR-1 — Capability on the roster**: `projects_available` is true only when
+  the module is entitled AND the principal is a platform user or an outside
+  client invited to a project (asked through the `portal_capabilities` seam,
+  since the core holds no invitations). Fails closed on an older backend, a
+  failed read, or an uninvited outside client.
+- **FR-2 — Turn-context seam**: a provider registry both Workspace composers
+  call on every turn (chat: resumed and cold arms; room: ahead of the file
+  manifest). The platform fills the context from the chat row or room,
+  including whether the audience is internal. No provider → no change.
+- **FR-3 — Addressed gate asks**: a platform (`gate`) raise may name exactly
+  one addressee; an agent's raise may not.
+- **FR-4 — Workspace UI, gated on FR-1**: a Projects list across agents, a
+  project page (goal, status, steward, my chats, others' chats as a count only,
+  agents with consent state, members, rooms), a rail tab for the current agent,
+  and chat-header controls (link, detach, make a project) — never in Main.
+- **FR-5 — Agent tools over MCP**: `list_projects` / `get_project` (with the
+  recent log and open tasks), `list_project_tasks`, `get_project_log`,
+  `create_project_task`, `update_project_task`, `add_project_task_note`,
+  `add_project_log_entry`, `link_to_project` (a file, report, decision or an
+  ask it raised), and for a steward agent `get_steward_digest` /
+  `set_project_health`. License-blind (404 = no module, string 403 =
+  unlicensed); an agent reaches only projects it is active on, and only in a
+  turn whose audience is internal: every call forwards the platform-supplied
+  `X-Trinity-Execution-Id` (#2392), never a tool parameter, and a refusal is a
+  coded 403 the agent can relay.
+- **FR-6 — v2 Workspace surface, gated on FR-1**: a project page with Tasks
+  (the ent#673 fields and status set), an append-only Log, and Files & reports
+  (link a file, report or decision you can already see; the creator may share
+  a file or report with guests); guest invites and a narrow guest view; a
+  one-shot import of a folder project from an agent; a room-header link
+  control; editing name, goal, steward and tracker; and **Wrap up** in a
+  linked chat, which asks the agent to record the chat's outcomes itself.
+- **FR-7 — v3 hub surface, gated on FR-1**: on a project's Overview, its
+  health (on track / at risk / off track and a line, set by its steward or
+  creator), where it stands (tasks by status, and what needs attention, each
+  opening Tasks), the declared agent metrics a member picked (value, a small
+  trend, and the platform's one stale verdict), and **Needs you**: the
+  viewer's own open asks on the project, answered in place with the Inbox's
+  component (`PortalAsks` narrowed by `askIds` — it can only narrow the
+  viewer's own list), with everyone else's as a count. The Projects list shows
+  health and an attention count per row, and an **I steward** tab lists what
+  needs the steward across their projects. Guests see none of it. An ask an
+  agent raises over MCP records the raising turn from the same
+  platform-supplied `X-Trinity-Execution-Id` (only when it is that agent's own
+  execution, winning over an agent-written `context.execution_id`), which is
+  how an ask raised in a project's chat is found on the project.

@@ -129,6 +129,8 @@
           :current-session-id="activeSessionId"
           :current-room-id="activeRoomIdFromRoute"
           :is-platform-session="store.isPlatformSession"
+          :projects-available="store.projectsAvailable"
+          :projects-active="projectsRoute"
           :loading-roster="store.loading && !store.rosterLoaded"
           v-model:search="search"
           :searching="searching"
@@ -138,6 +140,7 @@
           @new-chat-with-agent="newChatWithAgent"
           @open-agent="openAgentPage"
           @open-thread="openThread"
+          @open-projects="openProjects(null)"
           @toggle-star="toggleStar"
           @sign-out="onSignOut"
         />
@@ -172,6 +175,8 @@
             :current-session-id="activeSessionId"
             :current-room-id="activeRoomIdFromRoute"
             :is-platform-session="store.isPlatformSession"
+            :projects-available="store.projectsAvailable"
+            :projects-active="projectsRoute"
             :loading-roster="store.loading && !store.rosterLoaded"
             v-model:search="search"
             :searching="searching"
@@ -181,6 +186,8 @@
             @new-chat-with-agent="(n) => { mobileNav = false; newChatWithAgent(n) }"
             @open-agent="(n) => { mobileNav = false; openAgentPage(n) }"
             @open-thread="(t) => { mobileNav = false; openThread(t) }"
+            @open-inbox="mobileNav = false"
+            @open-projects="openProjects(null)"
             @toggle-star="toggleStar"
             @sign-out="onSignOut"
           />
@@ -250,7 +257,20 @@
              branch that used to precede it, so no terminal arm can render under
              it (the ent#253 lesson). The scanline beam that was here
              (#2163) is the CHART motion and is gone from every non-chart zone. -->
-        <PortalSkeleton v-if="stage.state === 'loading'" variant="stage" />
+        <!-- #3060: on the Inbox route (or bare /workspace, which lands there)
+             the placeholder is the INBOX's own frame — header, the same tab
+             strip with its badge slots reserved, the list column at the width
+             the Inbox will pick, and the pane block — not the conversation's. -->
+        <PortalInboxSkeleton
+          v-if="stage.state === 'loading' && inboxSkeleton"
+          :rail-allowance="inboxRailAllowance"
+          @open-menu="mobileNav = true"
+        >
+          <template #header-end>
+            <PortalThemeSwitch />
+          </template>
+        </PortalInboxSkeleton>
+        <PortalSkeleton v-else-if="stage.state === 'loading'" variant="stage" />
         <template v-else>
         <PortalRoom
           v-if="activeRoomIdFromRoute && store.multiAgentChatAvailable"
@@ -268,6 +288,7 @@
           @participants-changed="onRoomParticipants"
           @work-state="onWorkState"
           @open-work="openRailOn('work')"
+          @open-project="openProjects"
         >
           <template #rail-strip>
             <PortalRailStrip v-if="railVisible" :tabs="railTabs" :signals="railSignals" @open="railSheetOpen = true" />
@@ -321,6 +342,58 @@
           </template>
         </div>
 
+        <!-- trinity-enterprise#610 (D9): the Inbox. After the room branches and
+             before the conversation, and only on a READY stage: on `failed` /
+             `empty` the route falls through to the bare-stage block below,
+             whose guard is true here too (the ent#253 lesson). -->
+        <PortalInbox
+          v-else-if="inboxVisible"
+          :threads="sidebarThreads"
+          :previews="chatPreviews"
+          :threads-loaded="threadsLoaded"
+          :threads-failed="store.sessionsFailed || previewsFailed"
+          :labels="inboxAgentLabels"
+          :is-platform="store.isPlatformSession"
+          :mark-read="markRead"
+          :rail-allowance="inboxRailAllowance"
+          :canvas-count="inboxCanvases"
+          @open-canvas="openRailOn('canvas')"
+          @open-menu="mobileNav = true"
+          @update:preview="(k) => { inboxPreview = k }"
+          @refresh="refreshThreads"
+          @open-chat="(url) => router.push(url)"
+          @reply="replyInChat"
+        >
+          <template #header-end>
+            <PortalThemeSwitch />
+          </template>
+        </PortalInbox>
+        <!-- ent#661: Projects. Placed BEFORE the conversation branch for the
+             same reason as the room branches above: `activeAgent` defaults to
+             the first roster entry, so falling through would open that agent's
+             chat under a projects URL. Rendered only when the roster said this
+             principal has the capability; otherwise the next branch says so. -->
+        <PortalProjects
+          v-else-if="projectsRoute && store.projectsAvailable"
+          :project-id="activeProjectId"
+          :my-email="store.clientEmail || ''"
+          @open-menu="mobileNav = true"
+          @navigate="openProjects"
+          @open-thread="openThread"
+          @open-room="openRoom"
+        >
+          <template #header-end>
+            <PortalThemeSwitch />
+          </template>
+        </PortalProjects>
+        <div v-else-if="projectsRoute" :class="STAGE_WRAP" data-testid="projects-unavailable">
+          <p :class="STAGE_TITLE">Projects aren't available here</p>
+          <p :class="STAGE_BODY">
+            They're not enabled on this instance, or not for your account. Ask an administrator if you expected them.
+          </p>
+          <button :class="STAGE_ACTION" @click="router.push('/workspace')">Back to chats</button>
+        </div>
+
         <PortalConversation
           v-else-if="activeAgent"
           ref="conversationRef"
@@ -330,10 +403,12 @@
           :session-id="pendingSession"
           :new-chat="startingNewChat"
           :prefill="prefill"
+          :reply-target="replyTarget"
           :starred="isStarred('thread', activeSessionId || pendingSession)"
           :threads="threads"
           :rename="renameChat"
           @switch-agent="switchAgent"
+          @reply-done="replyTarget = null"
           @new-chat="newChatWithAgent(activeAgent.name)"
           @session-adopted="onSessionAdopted"
           @sessions-changed="onConversationTurnDone"
@@ -343,6 +418,7 @@
           @open-thread="openThread"
           @work-state="onWorkState"
           @open-work="openRailOn('work')"
+          @open-project="openProjects"
           @main-reset="onMainReset"
           @voice-call="onVoiceCall"
           @voice-panel="(v) => { voicePanelVersion = v }"
@@ -372,7 +448,12 @@
                `isMainChat`, `resetting`, `sending` and the voice state) and it
                is the follow-up, not this PR. -->
           <template #band>
-            <PortalAgentBand :key="activeAgent.name" :agent-name="activeAgent.name" />
+            <!-- ent#610 round 2 (QA mobile F1): with a phone's keyboard up the
+                 viewport is ~400px; the band's ~105px left the thread ~20px and
+                 hid the note being typed in an ask tile. It steps aside then. -->
+            <div class="[@media(max-width:639px)_and_(max-height:480px)]:hidden">
+              <PortalAgentBand :key="activeAgent.name" :agent-name="activeAgent.name" />
+            </div>
           </template>
           <!-- #2579 AC 3 — the operator's mark on a fallback title. The same
                `titleGenerationNotice` copy the settings panel renders, raised
@@ -401,7 +482,23 @@
             </div>
           </template>
           <template #empty>
-            <PortalBriefing :agent="activeAgent" @use-playbook="usePlaybook" />
+            <PortalBriefing :agent="activeAgent" @use-playbook="usePlaybook">
+              <!-- ent#465: the top 3 suggestions for you and this agent, below
+                   its hints (they load after them and change; the hints do
+                   not) — platform sessions, 1:1 only; renders nothing when
+                   there is nothing to suggest. -->
+              <template #after-hints>
+                <PortalSuggestions
+                  v-if="store.isPlatformSession && activeAgent && !activeRoomIdFromRoute"
+                  compact
+                  :agent-name="activeAgent.name"
+                  :limit="3"
+                  @use-playbook="usePlaybook"
+                  @open-section="openSuggestionSection"
+                  @open-chat="focusConversationComposer"
+                />
+              </template>
+            </PortalBriefing>
           </template>
           <template #rail-strip>
             <PortalRailStrip v-if="railVisible" :tabs="railTabs" :signals="railSignals" @open="railSheetOpen = true" />
@@ -564,18 +661,35 @@
            is conserved at every frame — so the hazard is gone by construction
            rather than held off by a flag, and the two motions now overlap
            instead of running back to back. -->
+      <!-- #2711 (review): the LEAVE is animated only when the column actually
+           held a rail. A reservation that turns out to be wrong — an empty or
+           failed roster, where the rail never arrives — must be given back in
+           one frame, not slid away over 300ms, or the fix hands back the very
+           shift it removes. Measured before this: `reserved(48) → 22 → 3 → none`
+           on a rosterless load. The ENTER keeps its transition: it only ever
+           runs for the voice-canvas swap (#2676), since a reserved column is
+           present from the first frame and never enters. -->
       <Transition
-        enter-active-class="transition-[width] duration-300 ease-out overflow-hidden motion-reduce:transition-none motion-reduce:duration-0"
-        leave-active-class="transition-[width] duration-300 ease-out overflow-hidden motion-reduce:transition-none motion-reduce:duration-0"
+        :enter-active-class="RAIL_MOTION"
+        :leave-active-class="railEverHeldRail ? RAIL_MOTION : ''"
         enter-from-class="!w-0"
-        leave-to-class="!w-0"
+        :leave-to-class="railEverHeldRail ? '!w-0' : ''"
       >
       <div
-        v-if="railHasColumn"
+        v-if="railHasColumn || railColumnReserved || inboxRailPlaceholder"
+        ref="railColEl"
         class="hidden sm:flex shrink-0 min-h-0 w-[var(--ws-rail,24rem)]"
         data-testid="ws-rail-column"
+        :data-reserved="railColumnReserved && !railHasColumn ? 'true' : undefined"
       >
+      <!-- #2711: the column exists while the stage loads, EMPTY. Its width is
+           the persisted one, known synchronously, so the conversation column
+           lands on the footprint it will keep instead of losing the rail's width
+           the moment the roster arrives. The rail itself still waits for a ready
+           stage — `railHasColumn` is unchanged — because its tabs need the
+           roster; what is reserved is space, not content. -->
       <PortalRail
+        v-if="railHasColumn"
         :tabs="railTabs"
         :active-tab="railState.tab"
         :open="railState.open"
@@ -589,7 +703,7 @@
              body READS a shell-owned store (`usePortalRailFeeds`) and never
              fetches, so the collapsed rail can signal with nothing mounted. -->
         <template #tab-work="{ participants, tab }">
-          <PortalWork :participants="participants" :tab="tab" :chat-id="railChatId" @open-thread="openThread" @see-hints="seeHints" @ask-about-it="askAboutIt" />
+          <PortalWork :participants="participants" :tab="tab" @open-thread="openThread" @see-hints="seeHints" @ask-about-it="askAboutIt" />
         </template>
         <template #tab-loops="{ participants, tab }">
           <PortalLoops :participants="participants" :tab="tab" />
@@ -599,6 +713,10 @@
         </template>
         <template #tab-files="{ participants }">
           <PortalRailFiles :participants="participants" />
+        </template>
+        <!-- ent#661: Projects — door PLATFORM + the roster capability. -->
+        <template #tab-projects="{ participants }">
+          <PortalRailProjects :participants="participants" :current-project-id="railProjectId" @open-projects="openProjects" />
         </template>
         <!-- ent#547: Info — the one docked tab whose body owns its own reads
              rather than taking a shell-fed store (see `feedsFor`). Its door is
@@ -612,9 +730,20 @@
             :threads="threads"
             @open-thread="openThread"
             @use-playbook="usePlaybook"
+            @focus-composer="focusConversationComposer"
           />
         </template>
       </PortalRail>
+      <!-- Round 3: an open rail on the Inbox before anything is selected. It
+           has no agent to show, but it keeps its column (the Inbox chose its
+           layout counting it) and the rail's own collapse control, so the
+           reader is never left with an open rail they cannot see or close. -->
+      <!-- `inboxRailPlaceholder` excludes `railHasColumn` itself, so the two
+           never both render (a plain v-if, like the voice canvas column). -->
+      <PortalRailPlaceholder
+        v-if="inboxRailPlaceholder"
+        @collapse="setRailOpen(false)"
+      />
       </div>
       </Transition>
     </div>
@@ -636,7 +765,7 @@
            body READS a shell-owned store (`usePortalRailFeeds`) and never
            fetches, so the collapsed rail can signal with nothing mounted. -->
       <template #tab-work="{ participants, tab }">
-        <PortalWork :participants="participants" :tab="tab" :chat-id="railChatId" @open-thread="openThread" @see-hints="seeHints" @ask-about-it="askAboutIt" />
+        <PortalWork :participants="participants" :tab="tab" @open-thread="openThread" @see-hints="seeHints" @ask-about-it="askAboutIt" />
       </template>
       <template #tab-loops="{ participants, tab }">
         <PortalLoops :participants="participants" :tab="tab" />
@@ -646,6 +775,9 @@
       </template>
       <template #tab-files="{ participants }">
         <PortalRailFiles :participants="participants" />
+      </template>
+      <template #tab-projects="{ participants }">
+        <PortalRailProjects :participants="participants" :current-project-id="railProjectId" @open-projects="(id) => { railSheetOpen = false; openProjects(id) }" />
       </template>
       <!-- ent#547: the sheet needs its OWN `#tab-info`. A slot supplied to the
            column mount alone would leave a phone on the registry's generic empty
@@ -660,6 +792,7 @@
           :threads="threads"
           @open-thread="(t) => { railSheetOpen = false; openThread(t) }"
           @use-playbook="(text) => { railSheetOpen = false; usePlaybook(text) }"
+          @focus-composer="() => { railSheetOpen = false; focusConversationComposer() }"
         />
       </template>
     </PortalRail>
@@ -690,10 +823,13 @@
 </template>
 
 <script setup>
-import { ref, computed, watch, onMounted, onBeforeUnmount, onUnmounted, nextTick } from 'vue'
+import { ref, computed, watch, onMounted, onBeforeUnmount, onUnmounted, nextTick, toRaw } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useClientPortalStore, MULTI_AGENT_UNAVAILABLE, PLATFORM_LOGIN_ROUTE } from '@/stores/clientPortal'
 import { useAuthStore } from '@/stores/auth'
+import { usePortalDraftsStore } from '@/stores/portalDrafts'
+import { threadKey } from '@/components/portal/portalDrafts'
+import { safeStorage } from '@/utils/safeStorage'
 import PortalSidebar from '@/components/portal/PortalSidebar.vue'
 import PortalBrand from '@/components/portal/PortalBrand.vue'
 import PortalConversation from '@/components/portal/PortalConversation.vue'
@@ -702,23 +838,36 @@ import PortalLoops from '@/components/portal/PortalLoops.vue'
 import PortalRailCanvas from '@/components/portal/PortalRailCanvas.vue'
 import PortalWork from '@/components/portal/PortalWork.vue'
 import PortalRailFiles from '@/components/portal/PortalRailFiles.vue'
+import PortalProjects from '@/components/portal/projects/PortalProjects.vue'
+import PortalRailProjects from '@/components/portal/projects/PortalRailProjects.vue'
+import { useProjectsStore } from '@/stores/projects'
 import PortalCodeInput from '@/components/portal/PortalCodeInput.vue'
 import PortalAgentPicker from '@/components/portal/PortalAgentPicker.vue'
 import PortalRoom from '@/components/portal/PortalRoom.vue'
+import PortalInbox from '@/components/portal/PortalInbox.vue'
+import PortalInboxSkeleton from '@/components/portal/PortalInboxSkeleton.vue'
+import {
+  inboxLandingTarget, isInboxPath, inboxBranchVisible, inboxSelectedAgent, inboxCanvasCount,
+  sidebarThreadsOf, agentLabels, inboxRailAllowance as inboxRailAllowanceFor,
+} from '@/components/portal/portalInbox'
 import {
   partitionAttachments, fanOutPlan, carriedNotice, noticeIsProblem, mergeCarrySources,
 } from '@/components/portal/portalAttachments'
 import PortalAgentBand from '@/components/portal/PortalAgentBand.vue'
 import PortalAgentDetails from '@/components/portal/PortalAgentDetails.vue'
+import PortalSuggestions from '@/components/portal/PortalSuggestions.vue'
 import ColumnResizeHandle from '@/components/ColumnResizeHandle.vue'
-import { useColumnResize } from '@/composables/useColumnResize'
+import { useColumnResize, RAIL_COLLAPSED } from '@/composables/useColumnResize'
+import { useContainerWidth } from '@/composables/useContainerWidth'
 import PortalSkeleton from '@/components/portal/PortalSkeleton.vue'
 import PortalThemeSwitch from '@/components/portal/PortalThemeSwitch.vue'
 import PortalRail from '@/components/portal/PortalRail.vue'
+import PortalRailPlaceholder from '@/components/portal/PortalRailPlaceholder.vue'
 import PortalRailStrip from '@/components/portal/PortalRailStrip.vue'
 import PortalVoiceCanvas from '@/components/portal/PortalVoiceCanvas.vue'
 import ConfirmDialog from '@/components/ConfirmDialog.vue'
 import { usePortalRailFeeds } from '@/composables/usePortalRailFeeds'
+import { usePortalRailFeedsStore } from '@/stores/portalRailFeeds'
 import {
   RAIL_TABS,
   askCanvasPrefill,
@@ -726,10 +875,13 @@ import {
   railOpenPlan,
   emptySignal,
   loadRailState,
+  railColumnReservedFor,
+  railSizedOpen,
   railParticipantsFor,
   railVisibleFor,
   saveRailState,
   visibleTabs,
+  infoSignalFrom,
 } from '@/components/portal/portalRail'
 import { stageZone } from '@/components/portal/portalBriefingState'
 import {
@@ -740,6 +892,9 @@ import {
   // ent#557: the SAME sum the sidebar renders, so the tab and the rows cannot
   // disagree about the number.
   totalUnread,
+  // trinity-enterprise#610 §3g S4: the read's optimistic zero and its rollback.
+  optimisticRead, rollbackRead,
+  asksHomeRoute,
 } from '@/components/portal/portalUtils'
 // ent#557: the tab title's unread half. The router owns the label; this pushes
 // the count. See `utils/tabTitle.js` for why neither writes `document.title`.
@@ -754,6 +909,11 @@ import {
 
 const store = useClientPortalStore()
 const authStore = useAuthStore()
+// trinity-enterprise#657. Declared with its siblings rather than beside its
+// first reader (`decorate`, ~900 lines down): `onMainReset` reads it too, and a
+// `const` used above its declaration is a TDZ crash the moment any caller
+// becomes synchronous with setup.
+const drafts = usePortalDraftsStore()
 
 // #2261 — shown only when this tab suppressed the platform fallback (a client
 // session expired here) AND a platform session actually exists to continue as.
@@ -842,6 +1002,10 @@ const unreachableAgent = ref(null)
 const pendingSession = ref(null)      // session to load when the conversation (re)mounts
 const prefill = ref('')
 const mobileNav = ref(false)
+// trinity-enterprise#610 §3g F4: the phone drawer closes on ANY navigation —
+// tapping the pinned Inbox row (a router-link, not one of the sidebar's emits)
+// left it open over the page it had just opened.
+watch(() => route.fullPath, () => { mobileNav.value = false })
 const convGen = ref(0)                // bumps on explicit thread switches → remount
 // #2163 — `bootstrap()` has finished placing the caller (see the function).
 // Deliberately a separate bit from `store.rosterLoaded`: that one says the
@@ -853,7 +1017,30 @@ const activeSessionId = computed(() => route.params.sessionId || null)
 const activeRoomIdFromRoute = computed(() => route.params.roomId || null)
 // ent#360: `/workspace/a/:agentName`.
 const activeAgentPageName = computed(() => route.params.agentName || null)
+// trinity-enterprise#610 (D10): on the Inbox route the rail follows the SELECTED
+// item (`?item=`), never `agents[0]`, and is never written to `activeAgentName`
+// — that would mint a Main (`ensureMainListed`) and retarget the conversation.
+const isInboxRoute = computed(() => isInboxPath(route.path))
+// §3g S5 (T2): or the Inbox's desktop PREVIEW, which never enters the URL.
+const inboxPreview = ref(null)
+const inboxSelection = computed(() => (isInboxRoute.value ? route.query.item || inboxPreview.value || null : null))
+const inboxVisible = computed(() => inboxBranchVisible({ isInboxRoute: isInboxRoute.value, stageState: stage.value.state }))
+// #3060: which skeleton the stage draws while it has no verdict. Bare
+// `/workspace` is replaced by the Inbox route in onMounted, AFTER first paint,
+// so it counts as the Inbox here too — or it drew one frame of the chat shape.
+const inboxSkeleton = computed(() => isInboxRoute.value
+  || Boolean(inboxLandingTarget({ path: route.path, params: route.params, query: route.query })))
+const inboxAgentLabels = computed(() => agentLabels(store.agents))
+// ent#661: `/workspace/projects` and `/workspace/projects/:projectId`.
+const projectsRoute = computed(() => route.name === 'WorkspaceProjects' || route.name === 'WorkspaceProject')
+const activeProjectId = computed(() => route.params.projectId || null)
+// A stage page that never carries a rail: the agent page (ent#360) and the
+// Projects pages (ent#661). Both rail rules read it as their `agentPage`.
+const railFreePage = computed(() => activeAgentPageName.value || (projectsRoute.value ? 'projects' : null))
 const activeAgent = computed(() => {
+  if (isInboxRoute.value) {
+    return inboxSelectedAgent({ item: inboxSelection.value, threads: threads.value, asks: store.asks, agents: store.agents })
+  }
   // Never substitute a different agent for one the caller asked for by name.
   if (unreachableAgent.value) return null
   if (!activeAgentName.value) return store.agents[0] || null
@@ -953,7 +1140,16 @@ function onVoiceCall(sig) {
 // auto-collapse below, which is the AC's tie-breaker when the viewport cannot
 // fit all three.
 const columns = useColumnResize({
-  railOpen: computed(() => railState.value.open && railVisible.value),
+  // #3060: sized open while the column is RESERVED too, not only once the rail
+  // is visible — otherwise a rail left open reserves 48px and then jumps to its
+  // open width when the stage lands (`railSizedOpen`).
+  // ent#610 round 3: the Inbox's placeholder rail is an OPEN column too (its
+  // width is the one the Inbox counted), so it counts as visible here.
+  railOpen: computed(() => railSizedOpen({
+    open: railState.value.open,
+    visible: Boolean(railVisible.value || inboxRailPlaceholder.value),
+    reserved: railColumnReserved.value,
+  })),
   setRailOpen: (open) => { if (!open) setRailOpen(false) },
 })
 
@@ -1009,12 +1205,13 @@ const railParticipants = computed(() => railParticipantsFor({
 const railTabs = computed(() => visibleTabs(RAIL_TABS, {
   isPlatform: store.isPlatformSession,
   participants: railParticipants.value,
+  capabilities: { projects: store.projectsAvailable },
 }))
 // Keyed on the route and the stage VERDICT — synchronous facts — never on data
 // still arriving (a room's participants land with its own fetch), so a live
 // update cannot flicker the rail in and out.
 const railVisible = computed(() => railVisibleFor({
-  agentPage: activeAgentPageName.value,
+  agentPage: railFreePage.value,
   stageState: stage.value.state,
   roomId: activeRoomIdFromRoute.value,
   roomsAvailable: store.multiAgentChatAvailable,
@@ -1027,9 +1224,74 @@ const railVisible = computed(() => railVisibleFor({
 // carries `v-if="tabs.length"` — with the width now on a wrapper this view
 // owns, a tabless rail would otherwise leave a full-width empty column behind.
 // Reading the same list the component does keeps the two from disagreeing.
+// #2711 — the column is held open while the stage loads, so the conversation
+// column lands on the footprint it keeps. The rule is pure (`portalRail.js`)
+// and deliberately narrower than `railVisible`: see its docblock for why a room
+// route is excluded. `voiceCanvasHasColumn` still wins — the canvas and the rail
+// are never both in the row.
+// One definition of the rail column's motion, so the enter and the (conditional)
+// leave cannot drift apart.
+const RAIL_MOTION = 'transition-[width] duration-300 ease-out overflow-hidden '
+  + 'motion-reduce:transition-none motion-reduce:duration-0'
+
+const railColumnReserved = computed(() => Boolean(
+  railColumnReservedFor({
+    agentPage: railFreePage.value,
+    stageState: stage.value.state,
+    roomId: activeRoomIdFromRoute.value,
+  }) && !voiceCanvasHasColumn.value
+))
+
 const railHasColumn = computed(() => Boolean(
   railVisible.value && railTabs.value.length && !voiceCanvasHasColumn.value
 ))
+
+// trinity-enterprise#610 §3g C10: the selected item's agent's canvases, from
+// the rail's own feed (it loads that agent's canvases anyway) — "Open canvas"
+// shows only when there is one, and opens the rail on it.
+const railFeedsStore = usePortalRailFeedsStore()
+const inboxCanvases = computed(() => inboxCanvasCount({
+  tabs: railTabs.value, canvases: railFeedsStore.canvases, agent: activeAgent.value?.name || null,
+}))
+
+// trinity-enterprise#610 §3g A4: the Inbox decides split / stacked by its OWN
+// width. While the rail is not yet a column — nothing selected, so no rail — its
+// width is counted in advance (the width it will render at: the open width or
+// the 48px strip), so a preview that brings the rail in cannot flip the layout
+// it was chosen in. 0 once the column (or its reservation) is really there.
+// Round 3: the allowance is what the column has NOT grown into yet — it enters
+// from 0 over RAIL_MOTION, and counting 0 from its first frame flipped the
+// Inbox's list 320 → 384 → 320 on every load at ~1400–1440px.
+const railColEl = ref(null)
+const railColMeasured = useContainerWidth(railColEl)
+const inboxRailAllowance = computed(() => inboxRailAllowanceFor({
+  target: railState.value.open ? columns.effectiveRail.value : RAIL_COLLAPSED,
+  present: !!(railHasColumn.value || railColumnReserved.value || inboxRailPlaceholder.value),
+  measured: railColMeasured.value,
+}))
+// Round 3: an OPEN rail on the Inbox with nothing selected has no agent, so no
+// tabs — the rail, its strip and the control to close it all vanished (at 1280
+// the open rail stacks the Inbox, and a stacked Inbox previews nothing, so
+// nothing would ever select an agent). The column stays, saying why it is
+// empty, with the rail's own collapse control.
+const inboxRailPlaceholder = computed(() => Boolean(
+  isInboxRoute.value && railState.value.open && !railHasColumn.value
+  && !railColumnReserved.value && !voiceCanvasHasColumn.value
+))
+
+// #2711 (review): has this column ever actually held the rail? A reservation
+// that is handed back without ever becoming a rail was a guess that did not pay
+// off, and giving it back instantly is strictly better than animating it away.
+// Reset per route, because the answer is about THIS stage: navigating from a
+// conversation to an empty roster must not inherit the conversation's verdict.
+const railEverHeldRail = ref(false)
+watch(railHasColumn, (has) => { if (has) railEverHeldRail.value = true })
+// `route.fullPath`, not `route.value.fullPath`: `useRoute()` returns a REACTIVE
+// OBJECT, not a ref. The `.value` spelling threw on every Workspace load —
+// Vue routes a watch-getter error to its error handler rather than aborting
+// setup, so the page still rendered and the e2e still passed while this
+// watcher was dead. Every other route read in this file is the plain form.
+watch(() => route.fullPath, () => { railEverHeldRail.value = railHasColumn.value })
 // ent#475: the ONE owner of what the Loops / Canvas / Files tabs read. It
 // feeds `portalLoops` and `portalRailFeeds` off the same door gate and
 // participant list the rail renders from — nothing is fetched for a tab this
@@ -1051,7 +1313,25 @@ const rail = usePortalRailFeeds({
 })
 // ent#525: the Work signal is store-derived now — the owner merges the
 // conversation's emit into the feed's running rows BY EXECUTION ID.
-const railSignals = computed(() => ({ ...rail.signals.value }))
+// ent#465: Info's dot — suggestions waiting for you on the agent on screen.
+// Read only when the store slice belongs to that agent (the #2162 rule).
+const infoSignal = computed(() => {
+  const name = activeAgent.value?.name
+  if (!name || !store.isPlatformSession || store.suggestionsAgent !== name) return null
+  return infoSignalFrom(store.suggestions)
+})
+// Loaded by the shell, not only by the bodies that render it: the dot exists
+// for the person mid-conversation with the rail collapsed, where neither the
+// empty chat nor the Info tab is mounted. Reused for 60 s across placements.
+watch(
+  () => (store.isPlatformSession && !activeRoomIdFromRoute.value ? activeAgent.value?.name : null),
+  (name) => { if (name) store.loadAgentSuggestions(name) },
+  { immediate: true },
+)
+const railSignals = computed(() => ({
+  ...rail.signals.value,
+  ...(infoSignal.value ? { info: infoSignal.value } : {}),
+}))
 
 function setRailOpen(open) { railState.value = { ...railState.value, open } }
 function setRailTab(tab) { railState.value = { ...railState.value, tab } }
@@ -1086,6 +1366,17 @@ function askForCanvas() {
 function askAboutIt(text) {
   railSheetOpen.value = false
   usePlaybook(text)
+}
+// ent#465: a suggestion's Accept. Decisions live in the Info tab; `open_chat`
+// puts the caret in the composer — never a send. The asks suggestion goes to
+// the agent's asks home, the Inbox (trinity-enterprise#610, the 09-30 ruling —
+// Work no longer lists asks).
+function openSuggestionSection(name) {
+  if (name === 'asks') { router.push(asksHomeRoute(activeAgent.value?.name || null)); return }
+  openRailOn('info')
+}
+function focusConversationComposer() {
+  conversationRef.value?.focusComposer?.()
 }
 function onRoomParticipants(list) { roomParticipants.value = Array.isArray(list) ? list : [] }
 
@@ -1128,10 +1419,8 @@ function seeHints() {
 
 // localStorage can throw on access (private mode, blocked site data); the rail
 // then runs session-only, which `loadRailState`/`saveRailState` already treat
-// as the default.
-function safeStorage() {
-  try { return typeof localStorage !== 'undefined' ? localStorage : null } catch { return null }
-}
+// as the default. `safeStorage` is the shared util (trinity-enterprise#657
+// made it the third consumer).
 
 // #2163 — hydrate the ACTIVE agent's briefing, driven from HERE rather than
 // from `PortalBriefing`'s mount. `PortalBriefing` renders only in the
@@ -1318,7 +1607,18 @@ async function onEscalateToRoom({ agents, message, attachments = [] } = {}) {
     if (message) {
       try {
         await store.postRoomMessage(roomId, message)
-      } catch { /* the room is open in front of them; retyping recovers */ }
+      } catch {
+        // trinity-enterprise#657: the room is open in front of them, but the
+        // 1:1's `send()` already emptied the composer, so without this the
+        // words were simply gone. Handed back through `prefill` — the outer
+        // catch's own mechanism — because `openRoom` above has already
+        // mounted the room, whose setup-time restore has passed; its `prefill`
+        // watcher puts the text in the field, and the write-through then keeps
+        // it as the room's draft. Cleared first so the same text re-triggers.
+        prefill.value = ''
+        await nextTick()
+        prefill.value = message
+      }
     }
   } catch (err) {
     // Escalation failed, so the user is still in the 1:1 with an emptied
@@ -1366,6 +1666,23 @@ const STAGE_ICON = 'w-10 h-10 text-gray-300 dark:text-gray-700 mb-3'
 const STAGE_TITLE = 'text-sm text-gray-700 dark:text-gray-300 font-medium'
 const STAGE_BODY = 'mt-1 text-xs text-gray-500 dark:text-gray-400 max-w-xs'
 const STAGE_ACTION = 'mt-3 text-sm text-action-primary-600 hover:underline'
+
+// ent#661 — the Projects list (id null) or one project. Leaving a call asks
+// first, like every other exit from the stage.
+function openProjects(id) {
+  if (guardLeaveCall(() => openProjects(id))) return
+  mobileNav.value = false
+  router.push(id ? `/workspace/projects/${encodeURIComponent(id)}` : '/workspace/projects')
+}
+// The project the chat on screen is in, for the rail tab's "This chat" mark.
+// Read from the store's per-chat cache, which the chat header fills.
+const projectsStore = useProjectsStore()
+const railProjectId = computed(() => {
+  const roomId = activeRoomIdFromRoute.value
+  const sid = activeSessionId.value || pendingSession.value
+  const hit = roomId ? projectsStore.forLink('room', roomId) : (sid ? projectsStore.forLink('thread', sid) : null)
+  return hit?.id || null
+})
 
 function openRoom(roomId) {
   if (!roomId) return
@@ -1514,6 +1831,10 @@ async function onMainReset(result) {
   if (!result?.archived_session_id) return
   const id = result.main_session_id
   if (!id) return
+  // trinity-enterprise#657: Reset archives the history, not what the person
+  // was typing — a draft left on the archived tab would invite them to carry
+  // on in an archived chat. Moved before the remount so the new Main restores it.
+  drafts.move(threadKey(result.archived_session_id), threadKey(id))
   pendingSession.value = id
   convGen.value++
   router.push(`/workspace/c/${id}`)
@@ -1591,16 +1912,30 @@ const isStarred = (kind, id) => !!(id && chatState.value[`${kind}:${id}`]?.starr
 // agent the person has never talked to, and the agent's own row already is the
 // way into it. The tab strip must show Main from the first visit, so this is a
 // projection for one consumer rather than a filter on `threads` itself.
-const sidebarThreads = computed(() => threads.value.filter(
-  (t) => !(t.is_main && !t.last_message_at),
-))
+// trinity-enterprise#610 (D13): the predicate lives in `portalInbox.js` so the
+// Inbox's counts and this projection are one rule, property-tested there.
+const sidebarThreads = computed(() => sidebarThreadsOf(threads.value))
+// trinity-enterprise#610 (D5/D13): the previews that ride `/chat-state` while
+// the Inbox is on screen, and the thread list's verdict — latched on the first
+// good read, so the Inbox's empty copy never stands in for "not loaded yet".
+const chatPreviews = ref({})
+const threadsLoaded = ref(false)
+// A failed previews read on the Inbox is a failed thread read there (the D7
+// twin): stale banner over data, LoadFailed before any — never a silent empty.
+const previewsFailed = ref(false)
 
+// trinity-enterprise#657: `hasDraft` rides the same projection as the star and
+// the unread count — the drafts store's keys are the shell's `chatKey`s, so a
+// later server-side draft would swap only the source. Re-stamped when the key
+// SET changes (a draft appearing or disappearing), never per keystroke.
 function decorate(list) {
+  const draftKeys = drafts.keys
   return list.map((t) => {
     const s = chatState.value[chatKey(t)]
-    return { ...t, starred: !!s?.starred, unread: Number(s?.unread) || 0 }
+    return { ...t, starred: !!s?.starred, unread: Number(s?.unread) || 0, hasDraft: draftKeys.has(chatKey(t)) }
   })
 }
+watch(() => drafts.keys, () => { threads.value = decorate(threads.value) })
 
 async function refreshThreads() {
   // #2198: both halves are caught. `fetchAllSessions` already returns its last
@@ -1611,11 +1946,18 @@ async function refreshThreads() {
   // outright, on the most client-visible surface in the product. Before the
   // batch this was structurally impossible (each per-agent call had its own
   // catch); with one request it is one 500 away, so it is made explicit.
+  // trinity-enterprise#610 (D5): on the Inbox the SAME read carries previews,
+  // so a row's "N new" and its excerpt come from one response.
+  const withPreviews = isInboxRoute.value
+  let listOk = true
   const [list, state] = await Promise.all([
-    store.fetchAllSessions().catch(() => store.lastSessions),
-    store.fetchChatState().catch(() => chatState.value),
+    store.fetchAllSessions().catch(() => { listOk = false; return store.lastSessions }),
+    (withPreviews ? store.fetchChatState({ previews: true }) : store.fetchChatState()).catch(() => null),
   ])
-  chatState.value = state || {}
+  if (withPreviews) previewsFailed.value = !state
+  if (state && withPreviews) { chatState.value = state.state || {}; chatPreviews.value = state.previews || {} }
+  else if (state) chatState.value = state
+  if (listOk && !store.sessionsFailed && !(withPreviews && !state)) threadsLoaded.value = true
   threads.value = decorate(list || [])
   // ent#491: rank any agent this session has not ranked yet. Fills only missing
   // keys, so a refresh triggered by an incoming reply cannot walk back a send's
@@ -1818,15 +2160,54 @@ function onGlobalKeydown(e) {
 // `GET /chat-state` racing the cursor UPSERT overwrites the optimistic zero
 // with a stale count, and the badge comes back on the conversation the user is
 // reading — possibly for minutes, until the next refresh.
-function markRead(kind, id) {
-  if (!id) return Promise.resolve()
+// trinity-enterprise#610 §3g S4: a failed write ROLLS BACK the zero — only
+// while the entry is still the one this call wrote (`rollbackRead`) — and the
+// promise resolves `false`. It NEVER rejects: seven callers use it, two of
+// them `.then(refreshThreads)`, and a rejection would skip that refresh.
+async function markRead(kind, id) {
+  if (!id) return true
   const key = `${kind}:${id}`
-  if (chatState.value[key]?.unread) {
-    chatState.value = { ...chatState.value, [key]: { ...chatState.value[key], unread: 0 } }
+  const { state, written } = optimisticRead(chatState.value, key)
+  if (written) {
+    chatState.value = state
     threads.value = decorate(threads.value)
   }
-  return store.markChatRead(kind, id)
+  try {
+    await store.markChatReadStrict(kind, id)
+    return true
+  } catch {
+    // `toRaw`: the guard is an IDENTITY check, and a reactive ref hands back
+    // a proxy of the entry, never the object this call wrote.
+    const now = toRaw(chatState.value)
+    const back = rollbackRead(now, key, written)
+    if (back !== now) {
+      chatState.value = back
+      threads.value = decorate(threads.value)
+    }
+    return false
+  }
 }
+
+// trinity-enterprise#610: arriving on the Inbox from another stage fetches its
+// previews now rather than on the next 20 s tick.
+watch(isInboxRoute, (on) => {
+  if (on && store.isClientSignedIn && bootstrapResolved.value) refreshThreads()
+})
+
+// "Reply in chat" (D11): the chat, anchored, with the composer focused. From a
+// message's arrow (round 8) it also carries `{ sessionId, messageId, excerpt }`,
+// shown as a "replying to" chip on that chat's composer; the turn sends the id.
+const replyTarget = ref(null)
+async function replyInChat(url, reply = null) {
+  replyTarget.value = reply && reply.messageId ? reply : null
+  await router.push(url)
+  await nextTick(); await nextTick()
+  focusConversationComposer()
+}
+// A reply belongs to one chat: leaving it drops the chip.
+watch(() => route.params.sessionId, (sid) => {
+  if (replyTarget.value && sid !== replyTarget.value.sessionId) replyTarget.value = null
+})
 
 // ---- Cross-chat search (sidebar) ----------------------------------------------
 const search = ref('')
@@ -1964,7 +2345,9 @@ function resolveAgentQuery() {
 // helper, so the tab and the rows cannot disagree about the number. "Honest
 // counts" (AC 6) is a property of that sharing, not of a second sum: every unit
 // in this total is a thread in the list the user can click.
-const unreadTotal = computed(() => totalUnread(threads.value))
+// D13 (round 3): the SAME projection the sidebar and the Inbox sum — a Main the
+// sidebar hides must not count in the tab title either.
+const unreadTotal = computed(() => totalUnread(sidebarThreads.value))
 watch(unreadTotal, (n) => setUnreadCount(n), { immediate: true })
 
 // Leaving the Workspace clears it: the count would otherwise outlive the only
@@ -2033,7 +2416,12 @@ async function bootstrap() {
   // Read BEFORE the first await: `resolveAgentQuery()`'s landing replace and the
   // strip below both rewrite `route.query`.
   const voiceKeyPresent = route.query[VOICE_QUERY_KEY] !== undefined
+  // trinity-enterprise#610 (D9): bare `/workspace` lands on the Inbox — decided
+  // from the route as it was BEFORE any await, and replaced before the stage
+  // resolves, so no conversation flashes for `agents[0]` first.
+  const landing = inboxLandingTarget({ path: route.path, params: route.params, query: route.query })
   try {
+    if (landing) await router.replace(landing)
     await store.fetchRoster()
     await refreshThreads()
     startAsksPoll()
@@ -2105,6 +2493,7 @@ async function onSignOut() {
   try {
     const target = await store.signOutEverywhere()
     threads.value = []; activeAgentName.value = null; pendingSession.value = null
+    threadsLoaded.value = false; chatPreviews.value = {}; previewsFailed.value = false   // trinity-enterprise#610
     // #2579: this handler resets state IN PLACE — the OTP form is a branch of
     // this same component, so the view is never remounted. Without clearing
     // these, client B signing in on the same tab inherits client A's resolved

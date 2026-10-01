@@ -3,8 +3,8 @@
 > The visual half of ent#457. When a message starts a long-running job, the
 > Workspace shows it happening: a **live card** under the message (status,
 > elapsed, current step, the steps of a pipeline with the agent holding each,
-> Stop, Open in Work) and the rail's **Work** tab (Waiting on you · Now ·
-> Earlier). The report-back contract itself — every terminal posts back into
+> Stop, Open in Work) and the rail's **Work** tab (Now · Earlier, plus one
+> "N ask(s) waiting on you · Open in Inbox" line — ent#610, the 2026-09-30 ruling; the same line is on Info for every principal). The report-back contract itself — every terminal posts back into
 > the chat that started it — is abilityai/trinity#2386 and lives in
 > `channel-completion-report.md`. The user-facing noun is **work**.
 >
@@ -29,7 +29,9 @@ Portal.vue (shell)
 │                        terminalCardItem → <PortalWorkCard> (from the durable verdict)  @ask-about-it → prefill
 ├─ <PortalRoom>          feed live rows with `chat_id` == the room (∩ server `working`) → <PortalWorkCard show-agent …/>
 │                        no row for the room yet → the server-derived "X is thinking…" line (#2792)
-└─ <PortalRail> #tab-work → <PortalWork>  Waiting on you (PortalAsks over store.asks) · Now · Earlier
+└─ <PortalRail> #tab-work → <PortalWork>  Now · Earlier; while a participant waits on you: <PortalAsksWaitingLine> "N ask(s) waiting on you · Open in Inbox"
+                          (counted from portal.openAsks, in the top row in both the loaded and the empty state)
+                          → asksHomeRoute(agent) = /workspace/inbox?tab=action&from=<agent> (no `from` when 2+ agents wait)
 stores/portalWork.js ──► GET /api/enterprise/client-portal/work?agents=a,b&chat_id=…
 utils/websocket.js: agent_activity (started + terminal) / loop_* for a participant → portalWork (debounced 2 s)
 
@@ -110,7 +112,13 @@ unreadable file, or **two runs on one agent** (an agent-written, clock-skewed
 `updated_at` cannot say which run an instance belongs to) all read `unknown`,
 with their own sentence — "could not be read right now". Telling a user a
 stopped agent "doesn't report steps" would be the distrust-training misrender
-the ruling exists to prevent, in new clothes.
+the ruling exists to prevent, in new clothes. In the chat's live card,
+`pending` (the feed has not read the turn yet) holds the sentence's one-line
+footprint, blank and aria-hidden, and the sentence is held to one line there
+(only the agent's name truncates), so `none` / `unknown` swap in place. The
+row takes the card's width and never sets it (`w-0 min-w-full`), so a long
+agent name cannot widen the card when the sentence lands. The Work tab and the
+room render as before (#2964).
 
 ### The #919 read is hardened like the MCP tool
 
@@ -175,6 +183,56 @@ now and clears it with the turn, pinned by a source guard.
   `POST …/executions/{id}/terminate` will accept (roster + started by this
   caller + in flight + a turn or delegated child), so the button is never a lie.
 
+## The activity line — what the agent is doing right now (trinity-enterprise#620)
+
+The card's "current step" slot was fed by the ent#286 stream through a handler
+that matched `evt.type === 'tool_use'` — a shape the raw stream-json frames
+never carry — so it said nothing; and no run but the chat's own turn had a
+live path at all. Now:
+
+- **One vocabulary** — `utils/workActivity.js::activityLine({tool, summary})`
+  composes "Reading `…/x.py`" / "Running `pytest …`" / "Searching for …" /
+  "Fetching …" / "Using <server>" / "Delegating to <agent>: …" / "Thinking".
+  `execution-status.js` (Chat tab) and `useSessionActivity` (Agent Detail)
+  compose from the same function.
+- **Two feeds, same facts.** The chat's own turn reads the SSE frames
+  (`activityFromStreamEvent` parses `message.content[].type === 'tool_use'`
+  and summarises the input with a port of the agent's `get_input_summary`;
+  parity fixture `tests/fixtures/tool_input_summary.json`). Every other run —
+  delegated, scheduled, room — reads the agent's **heartbeat**: the agent
+  server keys its active tool per execution (`session_activity.by_execution`)
+  and the 5 s beat carries `executions: [{execution_id, tool, summary, since}]`
+  for the registry's running set. `heartbeat_service.read_execution_activity`
+  keys it by id; `work/service.clean_activity` sanitises (same `sanitize_text`
+  + bound as titles), masks an off-roster delegation target, drops a line
+  older than 30 s, and `get_work` folds it onto a live, non-stale row of a
+  rostered agent as `WorkItem.activity`. `GET …/work/activity?agents=` is the
+  cheap sibling (Redis only, same gates) the store polls every 2.5 s while a
+  card is live; the full read stays at 12 s. `store.activityFor(item)` prefers
+  the fresher map.
+- **The row.** `PortalWorkCard` reserves `h-4 overflow-hidden` for the whole
+  live life; a keyed `<Transition name="portal-activity">` slides a new line up
+  (a swap under reduced motion); `createActivityLineQueue` holds each line
+  ≥700 ms, collapses a burst to its latest member, never re-keys an identical
+  line, keeps the last line on a quiet run, and is cleared at terminal. The
+  chat's card (`reserveLiveRows`) also reserves the steps-sentence row and
+  Stop's slot from first paint: Stop stays invisible, disabled, aria-hidden
+  and out of the tab order until the 202's execution id arrives (ent#155),
+  then the same button turns usable, so Open in Work never moves. In that card
+  only the agent's name truncates, never "doesn't report steps." Both of the
+  chat's synthetic cards (live and terminal) title themselves with
+  `previewTitle`, a mirror of `service.clean_title` pinned row-for-row by
+  `tests/fixtures/portal-work-titles.json`, so the feed's row lands without
+  re-wrapping the title; only secret masking is not mirrored, and the
+  server's sanitiser masks some plain words too ("Basic question"), so those
+  titles still change when the row lands. Known and out
+  of scope: `stages ↔ unknown`, and a row going stale mid-turn (#2964).
+- **Scroll.** `submitUserText` already pins before `deliver`; the card mounts
+  after, so a `watch(sending)` re-pins once, on `nextTick`, guarded by
+  `following` — the person's own send only (#2624 holds for arrivals).
+- **Honest silence.** No beat (old image), a stale row, an off-roster agent, or
+  an aged line → the row is empty. The three-state steps rule is untouched.
+
 ## Tests
 
 `tests/unit/test_ent525_portal_work.py` — the door (a portal token never
@@ -184,12 +242,26 @@ reaches the service), roster narrowing with no oracle, the `work_kind` /
 window total, steps only for one running row per agent, a ledger failure is a
 503), and the hardened pipeline read (traversal ids, the listing-size cap, the
 streamed cap, malformed YAML, an instance older than the run, the cache).
+`tests/unit/test_ent620_work_activity.py` / `test_ent620_agent_activity.py` /
+`test_ent620_summary_parity.py` and `src/frontend/tests/unit/workActivity.spec.js`
+— the activity line (ent#620): the heartbeat's bounds, the per-execution slot,
+the fold's gates, sanitiser + mask, the age ceiling, the route's gates, the
+vocabulary, the real frame shape, the summariser parity, the queue rules.
 `src/frontend/tests/unit/portalWork.spec.js` — the pure rules, the store under
 Pinia (one request, stale response dropped, failed-never-empty, the poll only
 while live and not for a stale row, push filtered and debounced, Stop through
 the terminate route), the owner feeding the Work store off the door gate and
 re-scoping on a thread switch, the merged signal, and source guards on the
 shell, both conversations, the tab body, the card and the WebSocket consumer.
+`src/frontend/tests/unit/portalWorkCardLiveShape.spec.js` — the chat card's
+reserved rows (#2964): the steps row and Stop's slot exist from first paint and
+are patched in place, and every other host keeps the default markup.
+`tests/fixtures/portal-work-titles.json`, asserted by
+`tests/unit/test_2964_portal_work_title_fixture.py` (against `clean_title`) and
+`src/frontend/tests/unit/portalWorkTitle.spec.js` (against `previewTitle`) —
+the pre-read title mirror, row for row.
+`src/frontend/tests/unit/portalAskCard.mount.spec.js` — an ask read from another chat is answerable in place (#3055): its answer controls sit beside "Open the conversation"; the link has its own `v-if` and never replaces them. (Work no longer draws asks — ent#610, the 2026-09-30 ruling.)
+`src/frontend/tests/unit/portalWorkAsksLine.spec.js` — Work draws no ask; one "N ask(s) waiting on you · Open in Inbox" line with the real router's href (narrowed to one agent, whole Action tab for two); Work takes no exclude list; pending only; in the same top row in the loaded and empty states; Info mounts the same line for every principal (`portalAsksWaitingLine.mount.spec.js`); the briefing's asks suggestion and Info's asks link route to the Inbox.
 
 ## Residuals (stated)
 

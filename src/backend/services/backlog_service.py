@@ -34,6 +34,7 @@ from typing import Any, Dict, Optional
 from models import ParallelTaskRequest, TaskExecutionStatus
 from services.slot_service import get_slot_service
 from utils.helpers import utc_now_iso
+from db.write_params import ExecutionResult
 
 logger = logging.getLogger(__name__)
 
@@ -117,8 +118,16 @@ class BacklogService:
             "self_task_activity_id": self_task_activity_id,
         }
         queued_at = utc_now_iso()
+        # #2843: a pilot's worker claims these, so tag the conversation a turn
+        # continues and the claim will never run two of its turns at once.
+        # Non-pilots are drained by the backend and keep today's behaviour.
+        from services.pull_pilot import is_pull_pilot_agent
+
+        conversation_key = None
+        if is_pull_pilot_agent(agent_name):
+            conversation_key = request.chat_session_id or request.resume_session_id or None
         ok = db.update_execution_to_queued(
-            execution_id, json.dumps(metadata), queued_at
+            execution_id, json.dumps(metadata), queued_at, conversation_key
         )
         if not ok:
             # update_execution_to_queued is CAS-guarded on status == RUNNING
@@ -246,7 +255,9 @@ class BacklogService:
             db.update_execution_status(
                 execution_id=execution_id,
                 status=TaskExecutionStatus.FAILED,
-                error=f"Backlog drain failed: corrupt metadata ({e})",
+                result=ExecutionResult(
+                    error=f"Backlog drain failed: corrupt metadata ({e})",
+                ),
             )
             await slots.release_slot(agent_name, execution_id)
             return False
@@ -265,7 +276,9 @@ class BacklogService:
             db.update_execution_status(
                 execution_id=execution_id,
                 status=TaskExecutionStatus.FAILED,
-                error=f"Backlog drain spawn failed: {e}",
+                result=ExecutionResult(
+                    error=f"Backlog drain spawn failed: {e}",
+                ),
             )
             await slots.release_slot(agent_name, execution_id)
             return False
@@ -362,7 +375,9 @@ class BacklogService:
 
         n = db.expire_stale_queued(max_age_hours)
         if n:
-            logger.info(f"[Backlog] Expired {n} stale queued rows (>{max_age_hours}h)")
+            # Warning, not info (#2840): a row nobody picked up for a day is a
+            # failure, and on a pull pilot this is the only trace it leaves.
+            logger.warning(f"[Backlog] Expired {n} stale queued rows (>{max_age_hours}h)")
         return n
 
     async def drain_orphans_all(self) -> int:

@@ -18,24 +18,22 @@
           </p>
         </div>
 
-        <!-- Tab strip (#302) -->
-        <div class="mb-6 border-b border-gray-200 dark:border-gray-700" role="tablist" aria-label="Settings sections">
-          <nav class="-mb-px flex space-x-6" aria-label="Tabs">
-            <button
-              v-for="tab in visibleTabs"
-              :key="tab.id"
-              role="tab"
-              :aria-selected="activeTab === tab.id"
-              :class="[
-                'whitespace-nowrap py-2 px-1 border-b-2 text-sm font-medium',
-                activeTab === tab.id
-                  ? 'border-action-primary-500 text-action-primary-600 dark:text-action-primary-400'
-                  : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300 dark:text-gray-400 dark:hover:text-gray-200'
-              ]"
-              type="button"
-              @click="selectTab(tab.id)"
-            >{{ tab.label }}</button>
-          </nav>
+        <!-- Tab strip (#302, #1925). OverflowTabs measures and collapses what
+             does not fit into a counted "More" menu. The hand-rolled strip this
+             replaces was a plain flex row: below 7xl the ten tabs overflowed
+             silently, which #1862 mitigated by widening the page rather than
+             adopting the primitive.
+
+             `:model-value` + `@update:modelValue` rather than `v-model`, on
+             purpose — `selectTab` carries the valid-id guard, the same-tab
+             no-op and the `router.push` that keeps `?tab=` in step. v-model
+             would assign `activeTab` directly and skip all three. -->
+        <div class="mb-6">
+          <OverflowTabs
+            :tabs="visibleTabs"
+            :model-value="activeTab"
+            @update:modelValue="selectTab"
+          />
         </div>
 
         <!-- Loading State -->
@@ -74,6 +72,7 @@
 
           <!-- ent#279 — System Credential Vault (enterprise, gated by `credential_vault`) -->
           <CredentialVaultPanel v-if="activeTab === 'credential-vault'" />
+          <SkillRunnerPanel v-if="activeTab === 'skill-runner'" @navigate-tab="selectTab" />
 
           <!-- Retention Tab Content (#1039) -->
           <div v-if="activeTab === 'retention'" class="bg-white dark:bg-gray-800 shadow dark:shadow-gray-900 rounded-lg">
@@ -230,7 +229,7 @@
             <div class="px-6 py-4 border-b border-gray-200 dark:border-gray-700">
               <h2 class="text-lg font-medium text-gray-900 dark:text-white">Admin sign-in email</h2>
               <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
-                Sign in with this email and your password instead of the <code class="px-1 py-0.5 bg-gray-100 dark:bg-gray-700 rounded text-xs">admin</code> username. No verification email is sent.
+                Sign in with this email and your password instead of the <code class="px-1 py-0.5 bg-gray-100 dark:bg-gray-700 rounded text-xs">admin</code> username. We email a 6-digit code to confirm the address is yours.
               </p>
             </div>
             <div class="px-6 py-4">
@@ -243,17 +242,33 @@
                   :placeholder="adminEmailCurrent || 'you@company.com'"
                   :disabled="savingAdminEmail"
                   :class="[SETTINGS_TEXT_INPUT_CLASS, 'flex-1']"
+                  data-testid="admin-email-input"
+                />
+                <!-- ent#720: the mailbox proof. Shown once the code is sent;
+                     editing the address above starts over. -->
+                <input
+                  v-if="adminEmailCodeSent"
+                  type="text"
+                  inputmode="numeric"
+                  autocomplete="one-time-code"
+                  aria-label="Confirmation code"
+                  placeholder="6-digit code"
+                  v-model="adminEmailCode"
+                  :disabled="savingAdminEmail"
+                  :class="[SETTINGS_TEXT_INPUT_CLASS, 'w-32']"
+                  data-testid="admin-email-code"
                 />
                 <button
                   @click="saveAdminEmail"
-                  :disabled="!adminEmailInput || savingAdminEmail"
+                  :disabled="!adminEmailInput || savingAdminEmail || (adminEmailCodeSent && adminEmailCode.trim().length !== 6)"
+                  data-testid="admin-email-save"
                   class="inline-flex items-center px-4 py-2 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-action-primary-600 hover:bg-action-primary-700 disabled:opacity-50 disabled:cursor-not-allowed"
                 >
                   <svg v-if="savingAdminEmail" class="animate-spin -ml-1 mr-2 h-4 w-4" fill="none" viewBox="0 0 24 24">
                     <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
                     <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
                   </svg>
-                  Save
+                  {{ adminEmailCodeSent ? 'Confirm' : 'Save' }}
                 </button>
               </div>
               <div class="mt-2 flex items-center text-sm">
@@ -261,16 +276,16 @@
                   <svg class="h-4 w-4 text-status-success-500 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
                   </svg>
-                  <span class="text-status-success-600 dark:text-status-success-400">Saved — you can now sign in with this email</span>
+                  <span class="text-status-success-700 dark:text-status-success-400">Saved — you can now sign in with this email</span>
                 </template>
                 <template v-else-if="adminEmailError">
                   <span class="text-status-danger-600 dark:text-status-danger-400">{{ adminEmailError }}</span>
                 </template>
-                <template v-else-if="adminEmailCurrent">
-                  <span class="text-gray-500 dark:text-gray-400">Current: {{ adminEmailCurrent }}</span>
+                <template v-else-if="adminEmailCodeSent || adminEmailCurrent">
+                  <span class="text-gray-500 dark:text-gray-400" data-testid="admin-email-status">{{ adminEmailCodeSent ? `Code sent to ${adminEmailInput.trim()} — it expires in 10 minutes.` : `Current: ${adminEmailCurrent}` }}</span>
                 </template>
                 <template v-else>
-                  <span class="text-state-autonomous-600 dark:text-state-autonomous-400">No email set — you currently sign in as <code class="px-1 py-0.5 bg-gray-100 dark:bg-gray-700 rounded text-xs">admin</code></span>
+                  <span class="text-state-autonomous-700 dark:text-state-autonomous-400">No email set — you currently sign in as <code class="px-1 py-0.5 bg-gray-100 dark:bg-gray-700 rounded text-xs">admin</code></span>
                 </template>
               </div>
             </div>
@@ -318,7 +333,7 @@
                       <svg class="h-4 w-4 text-status-success-500 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
                       </svg>
-                      <span class="text-status-success-600 dark:text-status-success-400">Saved</span>
+                      <span class="text-status-success-700 dark:text-status-success-400">Saved</span>
                     </template>
                     <!-- #2691: a saved URL is a string an admin typed. On a
                          provisioned install the tick waits until a request for
@@ -332,7 +347,7 @@
                       <svg class="h-4 w-4 text-status-success-500 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
                       </svg>
-                      <span class="text-status-success-600 dark:text-status-success-400">
+                      <span class="text-status-success-700 dark:text-status-success-400">
                         {{ publicUrlCurrent }}
                       </span>
                     </template>
@@ -353,7 +368,7 @@
                       <svg class="h-4 w-4 text-state-autonomous-500 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
                       </svg>
-                      <span class="text-state-autonomous-600 dark:text-state-autonomous-400">
+                      <span class="text-state-autonomous-700 dark:text-state-autonomous-400">
                         Not configured — required for Telegram bots and public links
                       </span>
                     </template>
@@ -379,10 +394,15 @@
                     Default Model
                   </label>
                   <div class="mt-1 flex gap-2 items-center">
+                    <!-- #2197 — `min-w-0`. A flex item defaults to
+                         `min-width: auto`, and a <select>'s min-content width is
+                         its WIDEST OPTION ("Claude Opus 5 — Most capable Opus
+                         (latest) (recommended)", ~417px), so this control alone
+                         scrolled the Settings page body at 375px. -->
                     <select
                       v-model="platformDefaultModelValue"
                       :disabled="savingPlatformDefaultModel"
-                      class="block flex-1 px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md shadow-sm focus:outline-none focus:ring-action-primary-500 focus:border-action-primary-500 dark:bg-gray-700 dark:text-white text-sm"
+                      class="block flex-1 min-w-0 px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md shadow-sm focus:outline-none focus:ring-action-primary-500 focus:border-action-primary-500 dark:bg-gray-700 dark:text-white text-sm"
                     >
                       <!-- Options derive from the single source of truth
                            (src/constants/modelCatalog.js, generated from
@@ -407,7 +427,7 @@
                       Save
                     </button>
                   </div>
-                  <div v-if="platformDefaultModelSaveSuccess" class="mt-1 flex items-center text-sm text-status-success-600 dark:text-status-success-400">
+                  <div v-if="platformDefaultModelSaveSuccess" class="mt-1 flex items-center text-sm text-status-success-700 dark:text-status-success-400">
                     <svg class="h-4 w-4 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                       <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
                     </svg>
@@ -433,7 +453,7 @@
                       class="h-4 w-4 text-action-primary-600 border-gray-300 dark:border-gray-600 rounded focus:ring-action-primary-500 disabled:opacity-50"
                     />
                   </label>
-                  <div v-if="defaultAccessPolicySaveSuccess" class="mt-1 flex items-center text-sm text-status-success-600 dark:text-status-success-400">
+                  <div v-if="defaultAccessPolicySaveSuccess" class="mt-1 flex items-center text-sm text-status-success-700 dark:text-status-success-400">
                     <svg class="h-4 w-4 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                       <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
                     </svg>
@@ -470,7 +490,7 @@
                       Save
                     </button>
                   </div>
-                  <div v-if="ceilingSaveSuccess" class="mt-1 flex items-center text-sm text-status-success-600 dark:text-status-success-400">
+                  <div v-if="ceilingSaveSuccess" class="mt-1 flex items-center text-sm text-status-success-700 dark:text-status-success-400">
                     <svg class="h-4 w-4 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                       <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
                     </svg>
@@ -515,12 +535,12 @@
                       :disabled="savingProactive"
                       class="inline-flex items-center px-4 py-2 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-action-primary-600 hover:bg-action-primary-700 disabled:opacity-50 disabled:cursor-not-allowed"
                     >Save</button>
-                    <span v-if="proactiveSaveSuccess" class="inline-flex items-center text-sm text-status-success-600 dark:text-status-success-400">
+                    <span v-if="proactiveSaveSuccess" class="inline-flex items-center text-sm text-status-success-700 dark:text-status-success-400">
                       <svg class="h-4 w-4 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" /></svg>
                       Saved
                     </span>
                   </div>
-                  <p v-for="w in proactiveWarnings" :key="w" class="mt-1 text-xs text-status-warning-600 dark:text-status-warning-400">⚠ {{ w }}</p>
+                  <p v-for="w in proactiveWarnings" :key="w" class="mt-1 text-xs text-status-warning-700 dark:text-status-warning-400">⚠ {{ w }}</p>
                   <p v-if="proactiveError" class="mt-1 text-sm text-status-danger-600 dark:text-status-danger-400">{{ proactiveError }}</p>
                 </div>
 
@@ -560,7 +580,7 @@
                       <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
                         {{ flag.hint }}
                         <template v-if="flag.key === 'voice_enabled' && !brainOrbGeminiKey">
-                          <span class="text-state-autonomous-600 dark:text-state-autonomous-400">
+                          <span class="text-state-autonomous-700 dark:text-state-autonomous-400">
                             GEMINI_API_KEY is not configured (env-only) — voice stays unavailable even when on.
                           </span>
                         </template>
@@ -573,7 +593,7 @@
                       </p>
                     </div>
                   </div>
-                  <div v-if="brainOrbSaveSuccess" class="mt-2 flex items-center text-sm text-status-success-600 dark:text-status-success-400">
+                  <div v-if="brainOrbSaveSuccess" class="mt-2 flex items-center text-sm text-status-success-700 dark:text-status-success-400">
                     <svg class="h-4 w-4 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                       <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
                     </svg>
@@ -684,7 +704,7 @@
                     </p>
                   </div>
 
-                  <div v-if="elevenLabsSaveSuccess" class="mt-2 flex items-center text-sm text-status-success-600 dark:text-status-success-400">
+                  <div v-if="elevenLabsSaveSuccess" class="mt-2 flex items-center text-sm text-status-success-700 dark:text-status-success-400">
                     <svg class="h-4 w-4 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                       <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
                     </svg>
@@ -782,7 +802,7 @@
                       <svg v-else class="h-4 w-4 text-status-danger-500 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
                       </svg>
-                      <span :class="apiKeyTestResult ? 'text-status-success-600 dark:text-status-success-400' : 'text-status-danger-600 dark:text-status-danger-400'">
+                      <span :class="apiKeyTestResult ? 'text-status-success-700 dark:text-status-success-400' : 'text-status-danger-600 dark:text-status-danger-400'">
                         {{ apiKeyTestMessage }}
                       </span>
                     </template>
@@ -790,7 +810,7 @@
                       <svg class="h-4 w-4 text-status-success-500 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
                       </svg>
-                      <span class="text-status-success-600 dark:text-status-success-400">
+                      <span class="text-status-success-700 dark:text-status-success-400">
                         Configured
                         <span class="text-gray-500 dark:text-gray-400">
                           ({{ anthropicKeyStatus.source === 'settings' ? 'from settings' : 'from environment' }})
@@ -801,7 +821,7 @@
                       <svg class="h-4 w-4 text-state-autonomous-500 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
                       </svg>
-                      <span class="text-state-autonomous-600 dark:text-state-autonomous-400">
+                      <span class="text-state-autonomous-700 dark:text-state-autonomous-400">
                         Not configured - required for agents
                       </span>
                     </template>
@@ -887,7 +907,7 @@
                       <svg v-else class="h-4 w-4 text-status-danger-500 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
                       </svg>
-                      <span :class="githubPatTestResult ? 'text-status-success-600 dark:text-status-success-400' : 'text-status-danger-600 dark:text-status-danger-400'">
+                      <span :class="githubPatTestResult ? 'text-status-success-700 dark:text-status-success-400' : 'text-status-danger-600 dark:text-status-danger-400'">
                         {{ githubPatTestMessage }}
                       </span>
                     </template>
@@ -895,7 +915,7 @@
                       <svg class="h-4 w-4 text-status-success-500 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
                       </svg>
-                      <span class="text-status-success-600 dark:text-status-success-400">
+                      <span class="text-status-success-700 dark:text-status-success-400">
                         Configured
                         <span class="text-gray-500 dark:text-gray-400">
                           ({{ githubPatStatus.source === 'settings' ? 'from settings' : 'from environment' }})
@@ -932,7 +952,7 @@
                       <div v-if="!githubPatPropagation.updated.length" class="text-status-danger-600 dark:text-status-danger-400">
                         PAT saved, but applied to <strong>0 of {{ githubPatPropagation.total_running }}</strong> running agent{{ githubPatPropagation.total_running === 1 ? '' : 's' }} — they keep using the previous token until restarted.
                       </div>
-                      <div v-else :class="githubPatPropagation.failed.length ? 'text-status-warning-700 dark:text-status-warning-400' : 'text-status-success-600 dark:text-status-success-400'">
+                      <div v-else :class="githubPatPropagation.failed.length ? 'text-status-warning-700 dark:text-status-warning-400' : 'text-status-success-700 dark:text-status-success-400'">
                         PAT updated and applied to {{ githubPatPropagation.updated.length }} of {{ githubPatPropagation.total_running }} running agent{{ githubPatPropagation.total_running === 1 ? '' : 's' }}.
                       </div>
                       <!-- The .env write only lands on the next restart; the
@@ -1012,7 +1032,7 @@
                       class="block w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md shadow-sm placeholder-gray-400 focus:outline-none focus:ring-action-primary-500 focus:border-action-primary-500 dark:bg-gray-700 dark:text-white font-mono text-sm"
                     />
                   </div>
-                  <div v-if="slackSettings.client_id?.configured" class="mt-1 text-xs text-status-success-600 dark:text-status-success-400">
+                  <div v-if="slackSettings.client_id?.configured" class="mt-1 text-xs text-status-success-700 dark:text-status-success-400">
                     ✓ Configured ({{ slackSettings.client_id.source === 'settings' ? 'from settings' : 'from environment' }})
                   </div>
                 </div>
@@ -1045,7 +1065,7 @@
                       </svg>
                     </button>
                   </div>
-                  <div v-if="slackSettings.client_secret?.configured" class="mt-1 text-xs text-status-success-600 dark:text-status-success-400">
+                  <div v-if="slackSettings.client_secret?.configured" class="mt-1 text-xs text-status-success-700 dark:text-status-success-400">
                     ✓ Configured ({{ slackSettings.client_secret.source === 'settings' ? 'from settings' : 'from environment' }})
                   </div>
                 </div>
@@ -1078,7 +1098,7 @@
                       </svg>
                     </button>
                   </div>
-                  <div v-if="slackSettings.signing_secret?.configured" class="mt-1 text-xs text-status-success-600 dark:text-status-success-400">
+                  <div v-if="slackSettings.signing_secret?.configured" class="mt-1 text-xs text-status-success-700 dark:text-status-success-400">
                     ✓ Configured ({{ slackSettings.signing_secret.source === 'settings' ? 'from settings' : 'from environment' }})
                   </div>
                 </div>
@@ -1108,7 +1128,7 @@
                     </svg>
                     Remove Credentials
                   </button>
-                  <span v-if="slackSaveSuccess" class="text-sm text-status-success-600 dark:text-status-success-400">
+                  <span v-if="slackSaveSuccess" class="text-sm text-status-success-700 dark:text-status-success-400">
                     ✓ Saved
                   </span>
                 </div>
@@ -1152,7 +1172,7 @@
                       </svg>
                     </button>
                   </div>
-                  <div v-if="slackTransportStatus.app_token_configured" class="mt-1 text-xs text-status-success-600 dark:text-status-success-400">
+                  <div v-if="slackTransportStatus.app_token_configured" class="mt-1 text-xs text-status-success-700 dark:text-status-success-400">
                     ✓ App token configured
                   </div>
                   <p class="mt-1 text-xs text-gray-400">
@@ -1175,7 +1195,7 @@
                     </svg>
                     {{ connectingSlack ? 'Connecting...' : 'Connect' }}
                   </button>
-                  <span v-if="slackTransportStatus.connected" class="text-sm text-status-success-600 dark:text-status-success-400">
+                  <span v-if="slackTransportStatus.connected" class="text-sm text-status-success-700 dark:text-status-success-400">
                     ✓ Socket Mode active
                   </span>
 
@@ -1191,7 +1211,7 @@
                     </svg>
                     {{ slackTransportStatus.workspaces.length > 0 ? 'Reinstall to Workspace' : 'Install to Workspace' }}
                   </button>
-                  <span v-if="slackInstallSuccess" class="text-sm text-status-success-600 dark:text-status-success-400">
+                  <span v-if="slackInstallSuccess" class="text-sm text-status-success-700 dark:text-status-success-400">
                     ✓ Workspace installed
                   </span>
                 </div>
@@ -1287,7 +1307,7 @@ Example:
                 <!-- Character Count -->
                 <div class="flex justify-between text-sm text-gray-500 dark:text-gray-400">
                   <span>{{ trinityPrompt.length }} characters</span>
-                  <span v-if="hasChanges" class="text-state-autonomous-600 dark:text-state-autonomous-400">Unsaved changes</span>
+                  <span v-if="hasChanges" class="text-state-autonomous-700 dark:text-state-autonomous-400">Unsaved changes</span>
                 </div>
 
                 <!-- Action Buttons -->
@@ -1538,7 +1558,7 @@ Example:
                     class="px-3 py-2 text-sm font-medium rounded-lg bg-action-primary-600 hover:bg-action-primary-700 text-white disabled:opacity-50">Send invite</button>
                   <button type="button" @click="showInvite = false; inviteEmail = ''" :disabled="umBusy"
                     class="px-3 py-2 text-sm rounded-lg text-gray-600 dark:text-gray-300 hover:underline">Cancel</button>
-                  <span v-if="inviteMsg" class="text-xs" :class="inviteErr ? 'text-status-danger-600 dark:text-status-danger-400' : 'text-status-success-600 dark:text-status-success-400'">{{ inviteMsg }}</span>
+                  <span v-if="inviteMsg" class="text-xs" :class="inviteErr ? 'text-status-danger-600 dark:text-status-danger-400' : 'text-status-success-700 dark:text-status-success-400'">{{ inviteMsg }}</span>
                 </form>
               </div>
 
@@ -1604,7 +1624,7 @@ Example:
                           </span>
                           <button @click="openActivity(u)" class="text-action-primary-600 dark:text-action-primary-400 hover:underline">Activity</button>
                           <template v-if="u.username !== currentUsername && u.username !== 'admin'">
-                            <button v-if="u.suspended_at" @click="reactivateUser(u)" :disabled="umBusy" class="text-status-success-600 dark:text-status-success-400 hover:underline disabled:opacity-50">Reactivate</button>
+                            <button v-if="u.suspended_at" @click="reactivateUser(u)" :disabled="umBusy" class="text-status-success-700 dark:text-status-success-400 hover:underline disabled:opacity-50">Reactivate</button>
                             <button v-else @click="suspendUser(u)" :disabled="umBusy" class="text-status-danger-600 dark:text-status-danger-400 hover:underline disabled:opacity-50">Deactivate</button>
                           </template>
                         </div>
@@ -1715,7 +1735,7 @@ Example:
               <p v-if="mcpUrlError" class="mt-2 text-sm text-status-danger-600 dark:text-status-danger-400">
                 {{ mcpUrlError }}
               </p>
-              <p v-if="mcpUrlSuccess" class="mt-2 text-sm text-status-success-600 dark:text-status-success-400">
+              <p v-if="mcpUrlSuccess" class="mt-2 text-sm text-status-success-700 dark:text-status-success-400">
                 {{ mcpUrlSuccess }}
               </p>
             </div>
@@ -1892,6 +1912,9 @@ Example:
                   />
                 </button>
               </div>
+              <!-- #2915: the operator-queue aging bound — its own component so
+                   this view's raw-colour count cannot move (the registry-panel precedent). -->
+              <OperatorQueueAgingSetting />
             </div>
           </div>
 
@@ -1911,7 +1934,7 @@ Example:
                   <label class="text-sm font-medium text-gray-700 dark:text-gray-300">Admin</label>
                   <p class="text-sm text-gray-500 dark:text-gray-400">Admins can always create unlimited agents</p>
                 </div>
-                <span class="text-sm font-medium text-status-success-600 dark:text-status-success-400">Unlimited</span>
+                <span class="text-sm font-medium text-status-success-700 dark:text-status-success-400">Unlimited</span>
               </div>
 
               <!-- Creator role -->
@@ -1986,6 +2009,13 @@ Example:
 
           <!-- Skills Library sources (ent#237) -->
           <SkillSourcesPanel v-if="activeTab === 'agents'" />
+
+          <!-- Skill managers (ent#596) — beside the sources panel, because the two
+               together are the skills-governance surface: where skills come
+               FROM, and which agents may change which skills an agent holds.
+               Every agent not granted here is refused, its own skills included,
+               so this is the only place an orchestrator's skill map is unblocked. -->
+          <SkillManagersPanel v-if="activeTab === 'agents'" />
 
           <!-- Skills Library automation (ent#236). Kept in Settings, NOT folded
                into SkillSourcesPanel: auto-sync and fleet re-inject are
@@ -2200,6 +2230,7 @@ import { useSettingsStore } from '../stores/settings'
 import { useSessionsStore } from '../stores/sessions'
 import { apiErrorMessage } from '../utils/apiError'
 import { readOpsBool, opsBoolValue } from '../utils/opsSettings'
+import OperatorQueueAgingSetting from '../components/settings/OperatorQueueAgingSetting.vue'
 import { describeSttCapability, describeSttLastFailure } from '../utils/sttCapability'
 import { useEnterpriseStore } from '../stores/enterprise'
 import NavBar from '../components/NavBar.vue'
@@ -2208,9 +2239,12 @@ import SubscriptionsPanel from '../components/settings/SubscriptionsPanel.vue'
 import UserGitHubPatPanel from '../components/settings/UserGitHubPatPanel.vue'
 import AgentPermissionsMatrix from '../components/AgentPermissionsMatrix.vue'
 import SkillSourcesPanel from '../components/SkillSourcesPanel.vue'
+import SkillManagersPanel from '../components/SkillManagersPanel.vue'
 import TwoFactorPanel from '../components/settings/TwoFactorPanel.vue'
 import SsoPanel from '../components/settings/SsoPanel.vue'
+import OverflowTabs from '../components/OverflowTabs.vue'
 import CredentialVaultPanel from '../components/settings/CredentialVaultPanel.vue'
+import SkillRunnerPanel from '../components/settings/SkillRunnerPanel.vue'
 import ActivationFunnelPanel from '../components/settings/ActivationFunnelPanel.vue'
 import TelemetrySharingPanel from '../components/settings/TelemetrySharingPanel.vue'
 import FirstRunRerunPanel from '../components/settings/FirstRunRerunPanel.vue'
@@ -2253,6 +2287,8 @@ const INSTALL_SOURCE_LABELS = {
   'do-marketplace': 'DigitalOcean Marketplace',
   'do-script': 'DigitalOcean (install script)',
   'vultr-marketplace': 'Vultr Marketplace',
+  'aws-marketplace': 'AWS Marketplace',
+  'aws-script': 'AWS (install script)',
   script: 'Install script',
   unknown: 'Not recorded',
 }
@@ -2284,6 +2320,11 @@ const ALL_TABS = [
   { id: 'security',     label: 'Security',     adminOnly: false, requires: '2fa' },
   { id: 'sso',          label: 'SSO',          adminOnly: true,  requires: 'sso' },
   { id: 'credential-vault', label: 'Vault',    adminOnly: true,  requires: 'credential_vault' },
+  // ent#242 — the skill runner's operator half. `requires:` hides the tab
+  // outright when unentitled; the server gates every route regardless
+  // (`requires_entitlement("skill_runner")` + `require_human_admin`), so
+  // this is UX, not containment.
+  { id: 'skill-runner', label: 'Skill Runner', adminOnly: true,  requires: 'skill_runner' },
   { id: 'agents',       label: 'Agents',       adminOnly: true  },
   { id: 'retention',    label: 'Retention',    adminOnly: true  },
   // ent#184 — local product-event activation funnel. Capture is OSS-core;
@@ -2568,6 +2609,10 @@ const adminEmailInput = ref('')
 const savingAdminEmail = ref(false)
 const adminEmailSaveSuccess = ref(false)
 const adminEmailError = ref('')
+// ent#720 — the bind's second step: a code was emailed to the new address.
+const adminEmailCodeSent = ref(false)
+const adminEmailCode = ref('')
+watch(adminEmailInput, () => { adminEmailCodeSent.value = false; adminEmailCode.value = '' })
 // Only a real email (with @) counts as "set"; the legacy admin row stores the
 // placeholder 'admin' until one is registered.
 const adminEmailCurrent = computed(() => {
@@ -2992,8 +3037,16 @@ function removeGithubPat() {
 
 // Platform default model methods (#831)
 async function loadPlatformDefaultModel() {
+  // #2202 — read the RESOLVED value off the feature-flags payload the page
+  // already loads, not `GET /api/settings/platform_default_model`. That key is
+  // unwritten on any instance that never overrode the default, so the generic
+  // getter 404s — measured eight times per Settings load, on every tab. The
+  // flags payload carries the resolved value (row → code default), so this is
+  // also more correct: the control now shows what the platform will actually
+  // use rather than blank.
   try {
-    const value = await settingsStore.getSetting('platform_default_model')
+    await sessionsStore.loadFeatureFlags()
+    const value = sessionsStore.platformDefaultModel
     if (value) platformDefaultModelValue.value = value
   } catch {
     // non-critical; UI shows the code-default
@@ -3200,9 +3253,16 @@ async function saveElevenLabsDefaultVoice() {
 
 // Public URL methods
 async function loadPublicUrl() {
+  // #2202 — the dedicated route, because "not configured" is this setting's
+  // normal state. The generic `GET /api/settings/{key}` answers 404 for a key
+  // that was never written, so this call logged a failed request in the browser
+  // console on every visit to every Settings tab — and no JS handling can
+  // suppress that, which is why the fix is the route and not a try/catch.
   try {
-    const value = await settingsStore.getSetting('public_chat_url')
-    publicUrlCurrent.value = value || ''
+    const { data } = await axios.get('/api/settings/public-chat-url', {
+      headers: authStore.authHeader,
+    })
+    publicUrlCurrent.value = data?.value || ''
   } catch (e) {
     console.error('Failed to load public URL:', e)
   }
@@ -3215,14 +3275,16 @@ async function saveAdminEmail() {
   adminEmailSaveSuccess.value = false
   adminEmailError.value = ''
   try {
-    await axios.put('/api/users/me/email', { email }, { headers: authStore.authHeader })
-    // Refresh so the displayed "current" email updates immediately.
-    await authStore.fetchUserProfile()
+    const out = await authStore.bindOwnEmail(email, adminEmailCodeSent.value ? adminEmailCode.value.trim() : null)
+    if (out.needsCode) {
+      adminEmailCodeSent.value = true
+      return
+    }
     adminEmailInput.value = ''
     adminEmailSaveSuccess.value = true
     setTimeout(() => { adminEmailSaveSuccess.value = false }, 4000)
   } catch (e) {
-    adminEmailError.value = e?.response?.data?.detail || 'Failed to save email'
+    adminEmailError.value = apiErrorMessage(e, 'Failed to save email')
   } finally {
     savingAdminEmail.value = false
   }

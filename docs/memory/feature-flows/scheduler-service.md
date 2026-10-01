@@ -109,6 +109,7 @@ As a **platform administrator**, I want **scheduled tasks to execute exactly onc
 | `POLL_INTERVAL` | `10` | Seconds between DB polls for async task completion (SCHED-ASYNC-001) |
 | `DISPATCH_TIMEOUT` | `30` | HTTP deadline for the scheduler→backend `POST /api/internal/execute-task` round-trip (dispatch only; the async endpoint returns ~instantly). Reaching it means the backend did not respond — outcome is **UNKNOWN**, not "rejected" (#1022) |
 | `PRE_CHECK_TIMEOUT` | `70` | HTTP deadline for the scheduler→backend pre-check call (agent-side hook is 60s; 10s headroom). Fail-open (#1022) |
+| `READINESS_CHECK_TIMEOUT` | `5` | HTTP deadline for the scheduler→backend readiness verdict on a cron seat brief (trinity-enterprise#689; the backend bounds its template read at 3 s). Fail-open |
 | `MISFIRE_GRACE_TIME` | `3600` | Seconds after a missed trigger that APScheduler will still execute (Issue #145) |
 | `BACKEND_URL` | `http://backend:8000` | Backend API URL for process executions and task delegation |
 | `INTERNAL_API_SECRET` | _(empty)_ | Shared secret for backend internal API auth (C-003) |
@@ -707,6 +708,8 @@ tick. Users opt in (1-5) when a missed tick is genuinely costly.
 
 ```
 Execution fails → _maybe_schedule_retry()
+    ├─ Skip SKIPPED / CANCELLED, and rows the lease reaper poison-parked
+    │    (`error` starts with `poison_lease` — already with the operator, #2845)
     ├─ Check schedule.max_retries > 0
     ├─ Check attempt_number <= max_retries
     ├─ Calculate delay (2x for 429/rate-limit, capped at 300s)
@@ -718,7 +721,15 @@ _execute_retry() fires:
     ├─ Verify schedule still exists and enabled
     ├─ Create new execution record (triggered_by="retry", attempt_number=N+1)
     └─ Call _call_backend_execute_task()
+         └─ on exception: FAILED only if the row is still `running`
+            (CAS — a pull pilot may already have queued it, #2845)
 ```
+
+`retry` is dispatched exactly like the cron fire it retries (async + DB poll), so
+it is in both `_AUTONOMOUS_TRIGGERS` (an unresolved command alerts) and
+`PULL_REACHABLE_TRIGGERS` (a pilot claims it from the durable queue) — #2845. A
+retry is a new row, so it starts with its own `redelivery_count`; RETRY-001
+attempts and lease re-deliveries are counted separately.
 
 ### Execution Record Fields
 

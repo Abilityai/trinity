@@ -268,6 +268,10 @@ class PortalRoster(BaseModel):
     # Defaults False so an older client, a partial payload or a failed read
     # never advertises an affordance that cannot work (the whole of this bug).
     multi_agent_chat_available: bool = False
+    # ent#661 — whether this principal may use Workspace Projects: a platform
+    # user on an entitled build, or an outside client invited to a project.
+    # Defaults False (fails closed on an older backend or a failed read).
+    projects_available: bool = False
     # ent#403 — the curated model list the composer offers. INSTANCE-level, like
     # the two fields above and for the same reason `realtime_voice` is: the
     # option list is identical for every agent, and putting it on each card would
@@ -332,6 +336,12 @@ class PortalChatRequest(BaseModel):
     # existing caller (and the headless integration surface ent#83 documents)
     # is unaffected.
     open_canvas_id: Optional[str] = Field(None, max_length=64)
+    # ent#610 sign-off — the message this turn replies to (the Inbox pane's
+    # arrow → the composer's "replying to" chip). An ID, never text: the server
+    # resolves it against the caller's own thread and builds the quote itself,
+    # so a client cannot put words in the agent's mouth. Optional; every
+    # existing caller is unaffected.
+    reply_to_message_id: Optional[str] = Field(None, max_length=64)
     # ent#403 — the model this turn should run on. THREE states, preserving the
     # #894 shape rather than collapsing it to two: a curated id = an explicit
     # choice; `None`/`""`/whitespace = INHERIT (the agent's `public_channel_model`,
@@ -348,9 +358,13 @@ class PortalChatRequest(BaseModel):
 
 class PortalChatResponse(BaseModel):
     """The agent's reply to a portal chat turn. ``session_id`` echoes the thread
-    the turn landed in, so a client that sent none learns which session was used."""
+    the turn landed in, so a client that sent none learns which session was used.
+
+    No ``cost`` (#3063): external clients never see a turn's cost, and this
+    synchronous route is the streaming path's fallback. The service still
+    returns it for internal accounting; not declaring it is what keeps it off
+    the wire (``response_model`` drops undeclared keys)."""
     response: str
-    cost: Optional[float] = None
     session_id: Optional[str] = None
     # #2580: the persisted row's id, so the caller can rate the reply it was just
     # given instead of waiting for a reload to learn what to point at. The
@@ -510,6 +524,243 @@ class PortalAgentHeader(BaseModel):
     last_active: Optional[str] = None
 
 
+class PortalMemoryWrite(BaseModel):
+    """ent#637 — one change to the notes an agent keeps about the viewer.
+
+    `schedule_name` is the bounded label the agent page already uses; `kind`
+    says who wrote it in the viewer's vocabulary — `scheduled_run` for a seat
+    run, `conversation` for anything the viewer was present for. `notes` is the
+    text the write left; `previous_notes` is what undo restores. `undoable` is
+    computed server-side (latest, not already undone), so the client never
+    guesses which button to show."""
+    id: str
+    kind: Literal["scheduled_run", "conversation"]
+    execution_id: Optional[str] = None
+    schedule_name: Optional[str] = None
+    written_at: str
+    undone_at: Optional[str] = None
+    undoable: bool = False
+    notes: str = ""
+    previous_notes: str = ""
+
+
+class PortalAgentMemory(BaseModel):
+    """ent#637 — what this agent remembers about the viewer, and what changed it.
+
+    Only the viewer's own memory ever leaves through here (keyed on the
+    principal's email inside the accessor); `writes` is newest-first and bounded."""
+    agent_name: str
+    notes: str = ""
+    updated_at: Optional[str] = None
+    writes: list[PortalMemoryWrite] = Field(default_factory=list)
+
+
+class PortalMemoryUndo(BaseModel):
+    """ent#637 — what Undo did: the notes as they now stand."""
+    write_id: str
+    notes: str = ""
+class PortalRoleReadiness(BaseModel):
+    """ent#527 / #663 — the effective readiness state. `source` says whether an
+    owner's stamp or the template's word produced it; `unstamped_ready` flags a
+    template that claims `ready` with no owner stamp."""
+    status: Literal["calibrating", "ready"]
+    changed_at: Optional[str] = None
+    changed_by: Optional[str] = None
+    # ent#689: `rollout` — the one-time seed at the readiness gate's rollout,
+    # not an owner's act (`changed_by` is then None, never a person).
+    source: Literal["owner", "template", "rollout"]
+    unstamped_ready: bool = False
+
+
+class PortalRoleMetricGap(BaseModel):
+    """Position relative to the target — never pace, and never the delta."""
+    status: str  # behind | on_target | ahead | off_target | not_computable
+
+
+class PortalRoleMetricFinding(BaseModel):
+    """ent#676 — a finding crosses to the Workspace as its CODE. The sentence
+    beside it on the operator door is remediation that names files a client
+    does not own; the Workspace renders its own copy per code."""
+    code: str
+
+
+class PortalRoleMetric(BaseModel):
+    """ent#676 — one objective metric as a Workspace client sees it: a
+    projection of the objective ↔ metric join (`ObjectiveMetricRead`), never
+    that model whole. A field added here is a disclosure decision."""
+    name: str
+    # The registry's declared type and unit — what the card formats the two
+    # numbers with. None for a metric this agent does not declare.
+    type: Optional[str] = None
+    unit: Optional[str] = None
+    target: Optional[float | int | str] = None
+    actual: Optional[float | int | str] = None
+    last_point_at: Optional[str] = None
+    stale: bool = False
+    # fresh | stale | no_cadence | no_points — the platform's one stale rule
+    # (2× cadence); None for a metric this agent does not declare.
+    freshness: Optional[str] = None
+    gap: PortalRoleMetricGap
+    finding: Optional[PortalRoleMetricFinding] = None
+
+
+class PortalRoleObjective(BaseModel):
+    id: str
+    statement: Optional[str] = None
+    horizon: Optional[str] = None
+    status: Optional[str] = None
+    owned: bool = False
+    metrics: list[PortalRoleMetric] = Field(default_factory=list)
+
+
+class PortalRoleInfo(BaseModel):
+    id: Optional[str] = None
+    title: Optional[str] = None
+    mission: Optional[str] = None
+    status: Optional[str] = None
+    review_by: Optional[str] = None
+    stale: bool = False
+    path: Optional[str] = None
+    # role_file_not_found | role_file_unreadable | role_file_invalid |
+    # role_id_invalid | canon_path_invalid — the card SAYS the file failed.
+    error: Optional[str] = None
+
+
+class PortalRoleWalkthrough(BaseModel):
+    asks: int = 0
+    target: int = 10
+    rated_down: int = 0
+    unavailable: bool = False
+
+
+class PortalRoleCard(BaseModel):
+    """ent#527 — the role card, a projection of the agent's own files.
+    `role` is None when the agent carries no `x-role` (no card is rendered)."""
+    agent_name: str
+    role: Optional[PortalRoleInfo] = None
+    seat: Optional[str] = None
+    objectives: list[PortalRoleObjective] = Field(default_factory=list)
+    # ent#676 — why `objectives` is empty when that is NOT simply true:
+    # objectives_rate_limited | agent_unreachable | objectives_timeout |
+    # objectives_unreadable | objectives_incomplete. None = a real empty.
+    objectives_error: Optional[str] = None
+    # ent#676 — objectives joined, but some objective files were not read (would
+    # not read or parse, refused by name, beyond the scan bound): the list may be
+    # missing some. Never set together with `objectives_error`.
+    objectives_partial: bool = False
+    # The join's findings as distinct codes — never the sentences, paths or ids.
+    finding_codes: list[str] = Field(default_factory=list)
+    readiness: Optional[PortalRoleReadiness] = None
+    walkthrough: Optional[PortalRoleWalkthrough] = None
+    # ent#500's assignment kind, when it lands; None renders as "no assignment recorded".
+    relationship: Optional[str] = None
+    can_flip_readiness: bool = False
+    # ent#689: a live seat-delivery schedule is being held because readiness is
+    # not `ready` — the card says "its scheduled brief is paused".
+    brief_held: bool = False
+    # agent_stopped | agent_unreachable — the files live in the container.
+    unavailable: Optional[str] = None
+
+
+class PortalRoleReadinessFlip(BaseModel):
+    status: Literal["calibrating", "ready"]
+
+
+class PortalDecisionBy(BaseModel):
+    role: Optional[str] = None
+    person: Optional[str] = None
+
+
+class PortalSeatDecision(BaseModel):
+    """ent#638 — one seat decision as the Workspace sees it. `status` is the
+    EFFECTIVE state (`expired` is computed from `review_by`, never stored);
+    `writable` says whether this principal may act on it."""
+    id: str
+    seat: str
+    outcome: Literal["approved", "deferred", "killed"]
+    decided: str
+    alternatives: list[str] = Field(default_factory=list)
+    criterion: str
+    reversal: str
+    decided_by: PortalDecisionBy
+    decided_at: str
+    review_by: str
+    notes: Optional[str] = None
+    ask_class: Optional[str] = None
+    scope: Literal["seat", "direction"] = "seat"
+    status: Literal["active", "expired", "superseded", "closed", "reversed", "routed"]
+    supersedes_id: Optional[str] = None
+    cites: list[str] = Field(default_factory=list)
+    request_id: Optional[str] = None
+    close_reason: Optional[str] = None
+    closed_at: Optional[str] = None
+    closed_by: Optional[str] = None
+    reconfirmed_at: Optional[str] = None
+    writable: bool = False
+
+
+class PortalDecisionClassEvidence(BaseModel):
+    ask_class: str
+    count: int
+    criteria: list[str] = Field(default_factory=list)
+    reversals: int = 0
+    expired: int = 0
+    stable: bool = False
+
+
+class PortalDecisionStats(BaseModel):
+    """ent#638 — conversion, not volume: `reused` = records a LATER record
+    cited; per ask class the evidence the autonomy dial (#641) reads."""
+    recorded: int = 0
+    reused: int = 0
+    reuse_rate: float = 0.0
+    reversed: int = 0
+    ask_classes: list[PortalDecisionClassEvidence] = Field(default_factory=list)
+
+
+class PortalSeatDecisions(BaseModel):
+    """ent#638 — the seats this principal may read on the agent, their
+    decisions (newest first, history included and marked), the stats of the
+    principal's OWN seat, and which seat is theirs."""
+    agent_name: str
+    my_seat: str
+    seats: list[str] = Field(default_factory=list)
+    decisions: list[PortalSeatDecision] = Field(default_factory=list)
+    stats: PortalDecisionStats = Field(default_factory=PortalDecisionStats)
+    can_record: bool = True
+
+
+class PortalSeatDecisionRecord(BaseModel):
+    """The person records a decision for their own seat (or the owner for a
+    named seat). Grammar is checked by the service, which answers a receipt."""
+    outcome: str = Field(..., max_length=16)
+    decided: str = Field(..., max_length=2000)
+    alternatives: list[str] = Field(default_factory=list, max_length=32)
+    criterion: str = Field(..., max_length=2000)
+    reversal: str = Field(..., max_length=2000)
+    review_by: str = Field(..., max_length=32)
+    scope: str = Field("seat", max_length=16)
+    notes: Optional[str] = Field(None, max_length=4000)
+    ask_class: Optional[str] = Field(None, max_length=128)
+    decided_by_role: Optional[str] = Field(None, max_length=128)
+    cites: list[str] = Field(default_factory=list, max_length=32)
+    request_id: Optional[str] = Field(None, max_length=200)
+    seat: Optional[str] = Field(None, max_length=254)   # owner only; default = own seat
+
+
+class PortalSeatDecisionAction(BaseModel):
+    """close / reverse / reconfirm / supersede an active decision."""
+    action: Literal["close", "reverse", "reconfirm", "supersede"]
+    reason: Optional[str] = Field(None, max_length=2000)
+    review_by: Optional[str] = Field(None, max_length=32)
+    fields: Optional[dict] = None
+
+
+class PortalSeatDecisionResult(BaseModel):
+    decision: PortalSeatDecision
+    hint: Optional[str] = None
+
+
 class PortalAgentPage(BaseModel):
     """The Workspace agent page (ent#360) — one call, because the page is one
     screen and five round trips would render it in pieces."""
@@ -539,14 +790,40 @@ class PortalAgentReports(BaseModel):
     reports: list[PortalAgentReport] = Field(default_factory=list)
 
 
+class PortalChatArrival(BaseModel):
+    """The newest unread arrival in a chat (ent#610 D5), for the Inbox preview.
+
+    ``kind`` is ``message`` (an agent message) or ``deliverable`` (a report
+    addressed to the viewer). ``excerpt`` is plain text, markdown stripped, at
+    most 160 chars (a deliverable's is its title). ``outcome`` is ``done`` /
+    ``failed`` only for a platform-written run-completion message — read from
+    the ``source`` marker, never the body — else null.
+
+    Deliberately NO ``cost`` / ``execution_id``: AC 7 — nothing #610 adds
+    projects run cost or execution detail to a Workspace viewer.
+    """
+    kind: str
+    id: str
+    at: Optional[str] = None
+    excerpt: Optional[str] = None
+    outcome: Optional[str] = None
+
+
 class PortalChatStateEntry(BaseModel):
     """One chat's per-viewer state (ent#359). ``kind`` is ``thread`` (a portal
     session) or ``room`` (a multi-agent room) — two independent id spaces, so
-    both fields are needed to address a chat."""
+    both fields are needed to address a chat.
+
+    ``latest`` / ``first_unread_message_id`` (ent#610) are filled only by
+    ``GET /chat-state?previews=true`` and only for a thread with unread
+    arrivals; the route drops None fields, so without previews the payload is
+    exactly the ent#359 shape."""
     kind: str
     id: str
     starred: bool = False
     unread: int = 0
+    latest: Optional[PortalChatArrival] = None
+    first_unread_message_id: Optional[str] = None
 
 
 class PortalChatState(BaseModel):
@@ -649,7 +926,11 @@ class PortalHistoryMessage(BaseModel):
     id: Optional[str] = None
     role: str                       # 'user' | 'assistant'
     content: str
-    cost: Optional[float] = None
+    # #3063: no `cost`. The row stores it, but a turn's cost is never a
+    # Workspace field — the viewer may be an external client and the contract
+    # excludes costs outright (the Work projection's rule). Undeclared here, the
+    # route's `response_model` strips it for every principal; nothing in the
+    # client read it.
     created_at: Optional[str] = None
     # The caller's OWN rating of this message, if any — never anyone else's.
     # Present so a reload shows the thumb the person already gave.

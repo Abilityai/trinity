@@ -1061,7 +1061,7 @@ class TestFleetReinject:
             staticmethod(lambda: ["ok", "bad", "busy"]),
         ), patch.object(
             SkillsLibrarySyncService, "_reinject_agent",
-            staticmethod(AsyncMock(side_effect=lambda n: outcomes[n])),
+            staticmethod(AsyncMock(side_effect=lambda n, sets_lib=None: outcomes[n])),
         ), patch.object(
             sync_module.db, "set_setting",
             MagicMock(side_effect=lambda k, v: stored.__setitem__(k, v)),
@@ -1187,7 +1187,9 @@ class TestAutomationSwitchIsHumanOnly:
     @pytest.fixture()
     def router_mod(self):
         try:
-            import routers.settings as mod
+            # #1028: the skills-library automation handlers live in the
+            # package's `integrations` module.
+            import routers.settings.integrations as mod
         except Exception:  # noqa: BLE001
             pytest.skip("routers.settings not importable in this run")
         return mod

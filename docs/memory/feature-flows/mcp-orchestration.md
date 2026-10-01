@@ -386,6 +386,8 @@ console.log(`Registered ${totalTools} tools`);
 | `fan_out` | 390-590 | `{agent_name, tasks[], timeout_seconds?, max_concurrency?, model?, system_prompt?, allowed_tools?}` | `POST /api/agents/{name}/fan-out` |
 | `get_fan_out_result` | `tools/executions.ts` | `{agent_name, fan_out_id}` | `GET /api/agents/{name}/fan-out/{fan_out_id}` (#2670) |
 
+> **Chain-depth refusal (#2806)**: when the backend refuses an agent-to-agent hop with 403 `inter_agent_depth_exceeded`, `client.chat` / `task` / `fanOut` return a typed `DepthRefusal` (`parseDepthRefusal`) instead of throwing, and `chat_with_agent` (sequential, parallel, pull-routed) and `fan_out` return `{status: "inter_agent_depth_exceeded", agent, depth, max_depth, retryable: false, message}`. Any other 403 still throws `API error (403)`. Since #2973 `run_agent_loop`, `trigger_agent_schedule` and `emit_event` render the same refusal through `client.ts::depthRefusalFromError`. Tests: `src/mcp-server/src/chat-depth.test.ts`, `src/mcp-server/src/tools/depth-refusal.test.ts`.
+
 > **Per-agent timeout fallback (#418, 2026-04-20)**: For `chat_with_agent` (when `parallel=true`) and `fan_out`, `timeout_seconds` is fully optional with **no default**. When omitted, the backend falls back to the target agent's configured `execution_timeout_seconds` (TIMEOUT-001; default 900s, max 7200s). Previously, the Zod schema defaulted to `600`, which silently capped inter-agent invocations below the per-agent setting.
 
 ### System Tools (`src/mcp-server/src/tools/systems.ts`)
@@ -396,6 +398,7 @@ console.log(`Registered ${totalTools} tools`);
 | `list_systems` | 105-133 | `{}` | List deployed systems grouped by prefix |
 | `restart_system` | 138-167 | `{system_name}` | Restart all agents in system |
 | `get_system_manifest` | 172-202 | `{system_name}` | Export system as YAML manifest |
+| `teardown_system` | ent#454 | `{system_name, dry_run?, agents?, strict?}` | Remove a deployed system — deploy's inverse. A **license-blind proxy** over an entitlement-gated route: it degrades rather than throws, keeping 404 (module absent on this build) / 403 (unentitled, or an agent key on a human-only verb) / 503 (membership unverified, retryable) distinct, and returns a `failed` report that arrives as a 500 AS a result. `dry_run` defaults to **`true`** — the opposite of `deploy_system`, because an unwanted preview costs a round trip and an unwanted execute costs a fleet |
 
 ### Documentation Tools (`src/mcp-server/src/tools/docs.ts`)
 
@@ -462,7 +465,8 @@ chat_with_agent({
 **When `parallel: false` (default)** *(updated 2025-12-30)*:
 - Calls `POST /api/agents/{name}/chat`
 - Uses execution queue (one at a time per agent)
-- Maintains conversation context with `--continue` flag
+- Maintains conversation context by resuming the agent's own chat session by id (`--resume`, #2958; shared by every `/chat` caller of the agent, never a headless run's). A different effective model or a `DELETE /api/chat/history` starts a fresh session
+- A turn that crosses the context limit can pay a one-off auto-compaction: recorded as `compact_metadata` on the row, summarised in the response's `execution.compaction`, and returned by `get_execution_result` (#2958)
 - Agent-to-agent calls (with `X-Source-Agent` header) now create `schedule_executions` record (visible in Tasks tab)
 
 See [Parallel Headless Execution](parallel-headless-execution.md) for full details.
@@ -519,6 +523,12 @@ list_recent_executions({ agent_name: "worker-1", limit: 5 })
 
 // And: get_agent_activity_summary for monitoring
 get_agent_activity_summary({ agent_name: "worker-1", hours: 24 })
+
+// And, for the system agent / user-scoped keys only (abilityai/trinity-enterprise#653):
+// a substring grep over past executions' prompt/response/error with bounded
+// excerpts. Proxies an entitlement-gated enterprise route — answers
+// available:false where the module is absent; agent-scoped keys never see it.
+search_executions({ query: "timeout contacting", agents: ["worker-1"], hours: 168 })
 ```
 
 **Polling for results via REST API**:
@@ -1189,8 +1199,9 @@ npx @modelcontextprotocol/inspector http://localhost:8080/mcp
 # - get_agent_ssh_access, deploy_local_agent, initialize_github_sync
 # Chat tools (3):
 # - chat_with_agent, get_chat_history, get_agent_logs
-# System tools (4):
+# System tools (5):
 # - deploy_system, list_systems, restart_system, get_system_manifest
+# - teardown_system (ent#454 — proxies an entitlement-gated route, license-blind)
 # Docs tools (1):
 # - get_agent_requirements
 # Skills tools (7):

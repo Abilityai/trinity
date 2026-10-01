@@ -33,8 +33,8 @@
 | T-001 | HARD | STATIC | template.yaml | Valid YAML syntax |
 | T-002 | HARD | STATIC | template.yaml | `name` field present and valid (lowercase alphanumeric + hyphens, ≤64 chars) |
 | T-003 | HARD | STATIC | template.yaml | `description` field present and non-empty |
-| T-004 | HARD | STATIC | template.yaml | `resources.cpu` present and valid Docker CPU string |
-| T-005 | HARD | STATIC | template.yaml | `resources.memory` present and valid Docker memory string |
+| T-004 | HARD | STATIC | template.yaml | `resources.cpu` is a value container creation accepts, when declared (absent = inherit the instance default) |
+| T-005 | HARD | STATIC | template.yaml | `resources.memory` is a value container creation accepts, when declared (absent = inherit the instance default) |
 | T-006 | SOFT | STATIC | template.yaml | `display_name` field present |
 | T-007 | INFO | STATIC | template.yaml | `version` field present (semantic version format) |
 | T-008 | INFO | STATIC | template.yaml | `author` field present |
@@ -84,10 +84,12 @@
 | D-005 | SOFT | STATIC | Dashboard/Metrics | Status widget colors are from allowed palette (green/red/yellow/gray/blue/orange/purple) |
 | D-007 | SOFT | AI | Dashboard/Metrics | Metrics definitions reflect meaningful domain KPIs (not just generic "messages processed") |
 | D-008 | INFO | STATIC | Dashboard/Metrics | Dashboard `refresh_interval` is >= 5 seconds |
+| D-009 | SOFT | STATIC | Dashboard/Metrics | `template.yaml` `metrics:` entries are well-formed (name charset, known type, status `values`, cadence grammar, thresholds, dimensions, caps) |
+| D-010 | SOFT | STATIC | Dashboard/Metrics | `metrics.json` is not used — the file is superseded by `record_metrics`, and any keys in it with no `template.yaml metrics:` entry are named |
 | X-001 | SOFT | AI | Consistency | Agent name, `display_name`, and `description` tell a coherent story about the same agent |
 | X-002 | SOFT | AI | Consistency | CLAUDE.md identity is consistent with `template.yaml` description and use cases |
 | X-003 | SOFT | AI | Consistency | Skills/playbooks described in `template.yaml` match skills that actually exist in `.claude/skills/` |
-| X-004 | SOFT | AI | Consistency | MCP servers listed in `template.yaml` match servers in `.mcp.json.template` |
+| X-004 | SOFT | STATIC | Consistency | MCP servers listed in `template.yaml` match servers in `.mcp.json.template`, apart from the platform-injected `trinity` |
 | X-005 | SOFT | AI | Consistency | Credentials in `.env.example` are consistent with those documented in CLAUDE.md |
 | X-006 | INFO | AI | Consistency | The agent's stated use cases are achievable given its declared tools and MCP servers |
 | X-007 | SOFT | STATIC | Consistency | Scheduled messages resolve to an existing `.claude/skills/<name>/SKILL.md` **or** `.claude/commands/<name>.md` |
@@ -206,9 +208,22 @@ Must match `/^[a-z0-9][a-z0-9\-]*$/`, max 64 chars. Used as Docker container nam
 Severity: HARD | Type: STATIC  
 Required for template gallery display.
 
-**T-004/T-005** — `resources.cpu` and `resources.memory` valid  
+**T-004/T-005** — `resources.cpu` and `resources.memory` valid when declared  
 Severity: HARD | Type: STATIC  
-CPU must be a numeric string ("1", "2", "4", "8", "16"). Memory must match `/^\d+[gm]$/` (e.g., "2g", "512m").
+An ABSENT `resources` block (or an absent/empty key inside one) PASSES: the agent
+then inherits the instance-wide default an admin sets under Settings, which is what
+the bundled starters and `local:default` rely on — and a block here overrides both
+that default and the values a manifest or API caller asked for.
+
+A declared value is validated by the same functions container creation uses
+(`normalize_cpu` / `normalize_memory`), so the check accepts exactly what creation
+accepts and never reports a must-fix for a template that would deploy: CPU is `1`,
+`2`, `4`, `8` or `16`; memory is `1g`, `2g`, `4g`, `8g`, `16g` or `32g`, case-folded
+(`4G` is fine). A Kubernetes-style value (`cpu: "0.5"`, `memory: "512Mi"`) or a size
+outside that set (`512m`) FAILS — creation rejects it with a 400.
+
+A `resources` block that is not a mapping (a list, a string, a number) FAILS on
+T-004 and skips T-005, so one malformed block is one finding.
 
 **T-006** — `display_name` present  
 Severity: SOFT | Type: STATIC  
@@ -462,10 +477,59 @@ Prompt: "Are these metrics meaningful domain KPIs, or are they generic vanity me
 Severity: INFO | Type: STATIC  
 Faster refresh rates put unnecessary load on the agent container.
 
+**D-009** — `metrics:` entries are well-formed  
+Severity: SOFT | Type: STATIC  
+The declared-metric registry (trinity-enterprise#477) **drops** any entry it
+cannot read, so a malformed declaration is silently absent from the registry
+and ent#478 then rejects its points as undeclared. This check is where that
+becomes visible. It delegates to the one reader
+(`services/template_metrics.metric_shape_errors`), so a finding here is exactly
+an entry the registry refused to hold.
+
+Named per entry: unknown keys (with a did-you-mean), a `name` outside
+`^[a-z][a-z0-9_]{0,63}$`, a `type` outside counter/gauge/percentage/status/
+duration/bytes, a `status` metric with no `values` (or a non-status metric with
+them), a non-numeric threshold, a `cadence` that is not `<n>(s|m|h|d|w)` or an
+ISO 8601 fixed duration between 60s and 366d, duplicate names, and the caps
+(50 metrics, 50 status values, 10 dimensions, 20 `x-` keys / 1 KB). `x-`
+prefixed keys are preserved, never reported.
+
+SOFT, not HARD, on the T-018 precedent: the author is already told twice (here
+and by ent#478's 422), and HARD would flip a whole agent to incompatible over a
+mistyped label.
+
 ---
 
 ### Category: Cross-File Consistency
 
+
+**D-010** — `metrics.json` is not used  
+Severity: SOFT | Type: STATIC  
+`metrics.json` was the agent-written file the old `GET /api/agents/{name}/metrics`
+proxy read. Since trinity-enterprise#479 that route is backed by the
+`metric_points` store, so nothing reads the file: a number written there is
+invisible to the metric tiles, the `dashboard.yaml` `metric:` binding, the MCP
+`get_metrics` tool and every consumer downstream. Serving it when the store is
+empty was rejected deliberately — two sources for one number is what ent#476
+exists to prevent — so the file becomes a finding instead.
+
+The detail is the object `{keys, undeclared}` — the file's keys
+(charset-bounded, 25 max) and, separately, those with **no** `template.yaml
+metrics:` entry: "you still write this file" is advice, "these four numbers are
+declared nowhere" is a fix. Values are never persisted into `checks_json`. The
+read echoes the object unchanged, so a UI must SPELL it out (the tiles render
+"keys in the file: … · declared nowhere: …") rather than interpolating it —
+`{{ detail }}` on an object is pretty-printed JSON braces. SOFT, like D-009:
+the agent runs fine, its numbers simply are not arriving.
+
+The container's own `GET /api/metrics` no longer reads the file either: it is
+retired in place and answers `410` with
+`{has_metrics: false, superseded_by, finding: "D-010"}`, so the finding is the
+only thing the file produces anywhere.
+
+Remedy: declare the metrics in `template.yaml metrics:`, call
+`refresh_metric_definitions`, and record points with `record_metrics` instead of
+writing the file.
 **X-001** — Name, display_name, description tell a coherent story  
 Severity: SOFT | Type: AI  
 All three should clearly refer to the same agent and the same purpose. Discrepancies suggest the agent was cloned and partially updated.
@@ -481,6 +545,8 @@ If `template.yaml` lists `skills:`, verify each has a corresponding SKILL.md fil
 **X-004** — MCP servers consistent across files  
 Severity: SOFT | Type: STATIC  
 Server names in `template.yaml mcp_servers[]` must match keys in `.mcp.json.template mcpServers{}`. Mismatches mean the UI shows capabilities the agent can't actually use.
+
+One exemption: `trinity`. The agent's own boot writes that entry into `.mcp.json`, so a template that declares it in `template.yaml` and omits it from `.mcp.json.template` is correct. The other direction is still reported — a template shipping its own `trinity` block is overwritten when Trinity MCP is configured and left standing when it is not.
 
 **X-005** — `.env.example` and CLAUDE.md credential references consistent  
 Severity: SOFT | Type: AI  
@@ -588,7 +654,7 @@ Removed from the catalog; their ids are permanently retired.
 | Retired | Reason | Successor |
 |---------|--------|-----------|
 | `T-017`, `G-003`, `G-004`, `G-005` | The `template.yaml git:` block has **no backend reader** anywhere in the platform, and no bundled template declares it. It is documented in `TRINITY_COMPATIBLE_AGENT_GUIDE.md` as legacy Working Branch Mode config. | — |
-| `D-006` | `template.yaml metrics:` has no backend reader — `dashboard.yaml` is the read surface. | D-001..D-005, D-008 |
+| `D-006` | `template.yaml metrics:` has no backend reader — `dashboard.yaml` is the read surface. **The premise expired with trinity-enterprise#477**, which gave the block a reader and a per-agent registry. A retired id is never reissued (persisted `checks_json` rows would be re-read as a verdict about a different check), so the successor is the new id `D-009` — a mapping, not a revival. | `D-009` (was D-001..D-005, D-008) |
 | `I-005` | `.trinity/post-check` has no executor. Its only other mention was a `git_service` comment pointing back at this check. | — |
 | `F-008` | Required `.claude/commands/`; the `create-agent` wizards emit `.claude/skills/<name>/SKILL.md` and never `.claude/commands/`, so this was a guaranteed INFO failure. | F-009 |
 | `F-012`, `F-013` | `docs/memory/requirements.md` / `CHANGELOG.md` are Trinity-repo conventions, not agent conventions. | — |

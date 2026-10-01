@@ -111,6 +111,14 @@ journeys:
     built: false
     owner: trinity
     invariants: [E-01, E-05]
+    # ent#610: "find out" has a place now. A schedule that delivers to the
+    # Workspace (`deliver_to_workspace_email`) lands its completion in Main, and
+    # the Inbox's Unread shows it with a done/failed outcome read from the
+    # platform `source` marker. A run with no delivery address is not in anyone's
+    # Unread (A8) — the Work tab owns it — so the variant names the delivered shape.
+    variants:
+      - name: inbox
+        promise: "I open the Workspace and the Inbox tells me the run came back, and whether it finished, without my opening the agent."
 
   - id: J06
     issue: 2345
@@ -181,8 +189,9 @@ journeys:
     # P-01/P-02: the permission edge and the MCP gate that consults it;
     # AC-01: every call leaves an activity ("I can see what they said");
     # L-03: a deleted callee cascades; IA-01..03: the recorded call had an
-    # edge, a fan-out batch is bounded, a stopped callee fails fast (#2337).
-    invariants: [P-01, P-02, AC-01, L-03, IA-01, IA-02, IA-03]
+    # edge, a fan-out batch is bounded, a stopped callee fails fast (#2337);
+    # IA-04: a chain past the depth limit is refused before it runs (#2806).
+    invariants: [P-01, P-02, AC-01, L-03, IA-01, IA-02, IA-03, IA-04]
 
   - id: J11
     issue: 2565
@@ -197,8 +206,72 @@ journeys:
     # invariants the delivering execution rides on; L-03 covers the cascade that
     # must not strand a delivered thread when the agent goes away.
     invariants: [E-01, E-05, L-03]
+    # ent#610: the brief lands in Main (ent#498) and is an arrival in the Inbox's
+    # Unread; reading it there moves the same #557 cursor the sidebar counts.
+    variants:
+      - name: inbox
+        promise: "When I open the Workspace, the brief is waiting in my Inbox, and reading it there clears it everywhere."
+
+  - id: J12
+    # ent#477 declares, ent#478 records, ent#479 reads it back with freshness,
+    # ent#666 puts it against the target an objective set — the promise is
+    # whole now. It stays `built: false` because the harness needs a real
+    # container and docker; the unit island proves each leg (test_ent477_*,
+    # test_ent478_*, test_ent479_*, test_ent666_*), which is not the same as
+    # walking the loop once end to end. ent#666's leg is the one the island
+    # can prove least: the join reads objective FILES out of a container.
+    issue: [477, 478, 479, 666]
+    promise: "My agent's own declaration of what it measures is what Trinity actually knows about it."
+    actor: user
+    lanes: [local]
+    tier: live-stack
+    harness: tests/journeys/test_j12_declared_metrics_journey.py
+    built: false
+    owner: trinity
+    # L-02: the registry is written as part of an atomic create, so an agent
+    # that exists has the definitions its template declared; L-03: a deleted
+    # agent's definitions cascade, so a reused name never inherits another
+    # tenant's declaration.
+    invariants: [L-02, L-03]
 
 # The agent-lifecycle journey #2336 shipped is NOT a journey of its own — it is
 # J03's first half. Recording it here rather than minting a J11 keeps the
 # catalog a list of PROMISES; "an agent can be restarted" is a step inside
 # "I get a useful answer", not something a user asks for on its own.
+
+  - id: J13
+    # ent#465 — the issue asked for "J11-recommended-actions"; J11 was taken by
+    # #2565's brief delivery and J12 by the declared metrics, so this is J13.
+    # `built: false`: the unit island proves the rules, the SQL and the doors
+    # (test_ent465_suggestions.py) and the mount proves the verbs
+    # (portalSuggestions.spec.js); neither is a person opening a real agent
+    # whose schedule really failed and seeing it named.
+    issue: [465]
+    promise: "My agent tells me what I can do with it and what is waiting on me — and only things that are true."
+    actor: user
+    lanes: [local]
+    tier: live-stack
+    harness: tests/journeys/test_j13_suggestions_journey.py
+    built: false
+    owner: trinity
+    # No catalog invariant covers "a surface computed per viewer stays behind
+    # the platform door" yet — an empty list, not an invented id.
+    invariants: []
+
+  - id: J14
+    # ent#600 — minted as J12 on its branch; J12 went to the declared metrics
+    # and J13 to the suggestions while it waited, so this is J14.
+    # The first messenger/channel journey. Lives in the private tracker, so the
+    # reference is fully qualified — a bare number would name the wrong repo.
+    issue: "abilityai/trinity-enterprise#600"
+    promise: "I can tag the agent in our group chat and it already knows what we've been talking about."
+    actor: user
+    lanes: [local]
+    tier: live-stack
+    harness: null
+    built: false
+    owner: trinity
+    # Telegram gives bots no history and no un-tagged messages under Privacy
+    # Mode, so the harness needs a bot with Privacy Mode off in a real group —
+    # nothing in the invariant catalog covers a channel adapter yet.
+    invariants: []

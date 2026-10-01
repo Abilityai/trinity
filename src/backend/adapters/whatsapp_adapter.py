@@ -29,6 +29,7 @@ from adapters.base import (
     OutboundFile,
 )
 from services.agent_shared_files_service import create_share_from_bytes
+from services.turn_audience import whatsapp_recipient
 from services.email_service import EmailService
 from services.settings_service import get_public_chat_url
 
@@ -397,7 +398,9 @@ class WhatsAppAdapter(ChannelAdapter):
             return
 
         # Persist + classify outbound files (per-file isolated; never raises).
-        media_urls, fallback_links = self._prepare_outbound_media(agent_name, response.files)
+        media_urls, fallback_links = self._prepare_outbound_media(
+            agent_name, response.files, recipient=channel_id, binding_id=binding.get("id"),
+        )
 
         # Voice replies v2 (ent#117): replies are TEXT by default. Voice is now a
         # per-message capability the agent opts into via the send_voice_reply MCP
@@ -453,10 +456,21 @@ class WhatsAppAdapter(ChannelAdapter):
     # OGG via create_share_from_bytes and sends it as a Twilio MediaUrl).
 
     def _prepare_outbound_media(
-        self, agent_name: str, files: List["OutboundFile"]
+        self,
+        agent_name: str,
+        files: List["OutboundFile"],
+        *,
+        recipient: Optional[str] = None,
+        binding_id: Optional[int] = None,
     ) -> tuple:
         """Persist each outbound file to FILES-001 storage and classify it for
         delivery.
+
+        ``recipient`` / ``binding_id`` (ent#549): the number this reply is going
+        to. The media is hosted in the same store the Workspace Files tab lists,
+        so it is addressed to that number — and to the email the binding
+        verified for it, if any — instead of landing in every rostered client's
+        tab. Omitted = the owner only.
 
         Returns ``(media_urls, fallback_links)`` where ``media_urls`` are absolute
         HTTPS ``?sig=`` URLs to send as Twilio ``MediaUrl`` and ``fallback_links``
@@ -481,6 +495,8 @@ class WhatsAppAdapter(ChannelAdapter):
             )
             return media_urls, fallback_links
 
+        addressed_email, addressed_channel = whatsapp_recipient(binding_id, recipient)
+
         for f in files:
             try:
                 share = create_share_from_bytes(
@@ -489,6 +505,8 @@ class WhatsAppAdapter(ChannelAdapter):
                     display_name=f.filename,
                     expires_in=_OUTBOUND_MEDIA_EXPIRES_IN,
                     created_by=agent_name,
+                    addressed_to_email=addressed_email,
+                    addressed_to_channel=addressed_channel,
                 )
             except HTTPException as e:
                 logger.warning(
@@ -654,6 +672,12 @@ class WhatsAppAdapter(ChannelAdapter):
             result = db.verify_login_code(pending_email, arg)
             if not result:
                 return "❌ Invalid or expired code. Try again or request a new one."
+            # ent#720: a suspended account is refused here as on the web — the
+            # verified email is NOT recorded, so the open-access shortcut below
+            # and the per-message gate never see it.
+            if db.is_email_account_suspended(pending_email):
+                _clear_pending_login(binding["id"], message.sender_id)
+                return "❌ This account is suspended. Contact the agent's owner."
             db.set_whatsapp_verified_email(binding["id"], message.sender_id, pending_email)
             _clear_pending_login(binding["id"], message.sender_id)
 

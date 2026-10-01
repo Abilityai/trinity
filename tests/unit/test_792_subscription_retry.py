@@ -22,6 +22,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
+from unit._write_params import flat_kwargs
 
 _BACKEND = Path(__file__).resolve().parents[2] / "src" / "backend"
 if str(_BACKEND) not in sys.path:
@@ -155,7 +156,7 @@ def _success_update_kwargs(mock_db):
     from services.task_execution_service import TaskExecutionStatus
     for call in mock_db.update_execution_status.call_args_list:
         if call.kwargs.get("status") == TaskExecutionStatus.SUCCESS:
-            return call.kwargs
+            return flat_kwargs(call)
     return None
 
 

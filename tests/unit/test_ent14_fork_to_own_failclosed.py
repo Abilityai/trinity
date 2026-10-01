@@ -296,6 +296,14 @@ def github(monkeypatch):
                 template=template, fork_to_own=None,
                 source_branch=None, source_mode=True,
                 import_intent=None,  # ent#15 (#2040)
+                # trinity-enterprise#705: the two attributes the real AgentConfig
+                # always carries and the kind default reads. `source_mode=True` is
+                # set explicitly here, so it is in the set — exactly what a real
+                # `AgentConfig(source_mode=True)` reports — and the default never
+                # probes push access (no extra GitHub call).
+                name="second-brain", kind=None, ephemeral=None,
+                model_fields_set={"template", "fork_to_own", "source_branch",
+                                  "source_mode", "import_intent"},
             )
             return catalog, asyncio.run(crud._resolve_template(config, _user()))
 
@@ -393,4 +401,73 @@ def test_required_declared_by_EITHER_read_refuses(github):
     })
     with pytest.raises(HTTPException) as exc:
         github.create(branch="feature-x")
+    assert exc.value.detail["code"] == "FORK_TO_OWN_REQUIRED"
+
+
+# ---------------------------------------------------------------------------
+# The first-run seeder's door (ent#107): open only for a create that cannot push
+# ---------------------------------------------------------------------------
+
+def _seed_config(**over):
+    """The shape `cornelius_agent_service._provision` builds: pinned pull-only
+    (trinity-enterprise#705), no fork block, no token to fork with."""
+    base = dict(kind="deployment", source_mode=True)
+    base.update(over)
+    return _config(**base)
+
+
+def _apply_seeder(config, *, allow=True):
+    return asyncio.run(
+        crud._apply_fork_to_own(
+            config=config,
+            current_user=_user(),
+            gh_template={"fork_to_own": "required"},
+            github_repo_for_agent="Abilityai/cornelius",
+            github_pat_for_agent=None,
+            github_pat_tier="none",
+            url_branch=None,
+            source_metadata={},
+            source_metadata_reason=None,
+            allow_unforked_pull_only=allow,
+        )
+    )
+
+
+def test_seeder_door_lets_a_pinned_pull_only_create_past_required():
+    """The seeder runs at first boot with no user and no token, so it can never
+    satisfy `fork_to_own: required`. Pinned pull-only, it also cannot push — the
+    bind the gate exists to prevent — so it is let through."""
+    repo, pat, tier, upstream = _apply_seeder(_seed_config())
+    assert repo == "Abilityai/cornelius"
+    assert pat is None          # still tokenless
+    assert upstream is None     # nothing forked
+
+
+def test_required_still_400s_the_seeder_door_when_it_is_shut():
+    """Same inputs, flag off: the ordinary caller's 400 is unchanged."""
+    with pytest.raises(HTTPException) as exc:
+        _apply_seeder(_seed_config(), allow=False)
+    assert exc.value.status_code == 400
+    assert exc.value.detail["code"] == "FORK_TO_OWN_REQUIRED"
+
+
+@pytest.mark.parametrize(
+    "over, why",
+    [
+        ({"kind": "agent"}, "an agent gets a working branch — it can push"),
+        ({"source_mode": False}, "working-branch mode — it can push"),
+        ({"source_mode": None}, "unset is not pinned; only an explicit True is"),
+    ],
+)
+def test_seeder_door_refuses_a_shape_that_could_push(over, why):
+    """The flag is not trusted on its own.
+
+    A caller passing it while building a config that pushes would reopen exactly
+    the bind ent#162 closed — a private knowledge base reaching the shared public
+    upstream. The gate re-derives the pinned-pull-only shape rather than taking
+    the call site's word, so each of these still 400s WITH the flag set.
+    """
+    with pytest.raises(HTTPException) as exc:
+        _apply_seeder(_seed_config(**over))
+    assert exc.value.status_code == 400, why
     assert exc.value.detail["code"] == "FORK_TO_OWN_REQUIRED"

@@ -1,5 +1,17 @@
 // Types for Trinity API responses
 
+/** #2991: `POST /api/agents/{name}/start` — skill delivery rides the response. */
+export interface StartAgentResult {
+  message: string;
+  skills_injection?: string;
+  skills_result?: {
+    status: string;
+    reason?: string | null;
+    conflicts?: string[];
+    skills?: Record<string, { status: string; code?: string; warnings?: string[] }>;
+  };
+}
+
 export interface Agent {
   name: string;
   status: string;
@@ -102,6 +114,8 @@ export interface McpAuthContext extends Record<string, unknown> {
   // treated as least-privileged, never as `user`.
   scope: "user" | "agent" | "system" | "connector" | "portal_delegate" | "anonymous" | "ops";
   mcpApiKey?: string;    // The actual MCP API key (for user-scoped requests to Trinity backend)
+  // #2392: X-Trinity-Execution-Id of THIS request (turn id or "manual"); wins over an agent-supplied execution_id.
+  executionId?: string;
 
   // --- #848 inline email auth (anonymous scope only) ---------------------
   // Mutated IN PLACE by verify_login. FastMCP hands every tool the same auth
@@ -135,6 +149,19 @@ export interface AgentAccessInfo {
 export interface AgentAccessCheckResult {
   allowed: boolean;
   reason?: string;       // Denial reason if not allowed
+}
+
+/**
+ * #2807: the outcome a tool RETURNED rather than threw, stamped on the
+ * per-call tool context by `access.ts::accessDenied` and read by the audit
+ * wrapper after `execute` — the same seam #905 uses for `requestId`. `denied`
+ * is the only kind today; a returned non-denial failure is the registered
+ * follow-up and adds a kind here, not a second field.
+ */
+export interface ToolOutcome {
+  kind: "denied";
+  /** What the AUDIT row records — by default the reason the caller was given. */
+  reason: string;
 }
 
 /**
@@ -295,6 +322,9 @@ export interface ScheduleExecution {
   execution_log?: string;
   model_used?: string;
   claude_session_id?: string;
+  // #2958: JSON array of auto-compaction events ({trigger, pre_tokens,
+  // post_tokens, duration_ms, timestamp}); null when the turn did not compact.
+  compact_metadata?: string | null;
   source_agent_name?: string;
   source_user_email?: string;
   // AUDIT-001: MCP key origin tracking — used by #914 chat-timeout
@@ -465,10 +495,91 @@ export interface OperatorQueueItem {
   expires_at?: string | null;
   response?: string | null;
   response_text?: string | null;
+  // A person's identity — withheld from agent, system and other machine keys
+  // (trinity-enterprise#715), as are `addressed_to_email`, `disposed_by_email`
+  // and `resolved_to`. Only a person's JWT or user-scoped key reads them.
   responded_by_id?: string | null;
   responded_by_email?: string | null;
   responded_at?: string | null;
   acknowledged_at?: string | null;
+  // trinity-enterprise#611 — how the ask ended (NULL on a row that ended before
+  // the ledger: read `status`).
+  disposition?: string | null;        // answered | cancelled | expired
+  disposed_at?: string | null;
+  disposed_by?: string | null;        // person | timeout
+  disposition_reason?: string | null; // the operator's optional cancel reason
+}
+
+/**
+ * An agent's own ask, read back by the request_id it chose
+ * (GET /api/agents/{name}/operator-queue/{request_id}, trinity-enterprise#611).
+ * A redacted projection: never a person's email.
+ */
+export interface OperatorQueueAskReadback {
+  id: string;
+  request_id: string;
+  agent_name: string;
+  type: string;
+  priority: string;
+  status: string;
+  title: string;
+  question: string;
+  options?: unknown;
+  created_at: string;
+  expires_at?: string | null;
+  response?: string | null;
+  response_text?: string | null;
+  responded_at?: string | null;
+  disposition?: string | null;
+  disposed_at?: string | null;
+  disposed_by?: string | null;
+  disposition_reason?: string | null;
+  raised_by?: string | null;
+  channel?: string | null;
+  to_role?: string | null;
+  proposal?: unknown;
+  supersedes_expired?: string | null;
+}
+
+/**
+ * trinity-enterprise#611: an ask an agent raises as itself
+ * (POST /api/agents/{name}/operator-queue). The backend validates every field
+ * and names each refusal; this is the wire shape only.
+ */
+export interface OperatorAskCreate {
+  request_id: string;
+  title: string;
+  question?: string;
+  type?: "approval" | "question" | "alert";
+  priority?: "critical" | "high" | "medium" | "low";
+  options?: string[];
+  context?: Record<string, unknown> | null;
+  proposal?: Record<string, unknown> | null;
+  to?: "primary" | "approver" | "viewer" | "operator";
+  expires_at?: string;
+  supersedes_expired?: string;
+}
+
+/**
+ * trinity-enterprise#611: the receipt a raise returns. It names the ROLE the
+ * ask went to, never a person's email. `differs` is present on a replay only.
+ */
+export interface OperatorAskReceipt {
+  status: "created" | "replayed";
+  id: string;
+  request_id: string;
+  raised_by: "agent" | "gate" | null;   // null: a replay of a row older than the column
+  channel: string;
+  type: string;
+  to_role: string;
+  resolved: boolean;
+  ask_status: string;
+  disposition?: string | null;
+  disposed_at?: string | null;
+  expires_at?: string | null;
+  wakes_on_ending: boolean;
+  supersedes_expired?: string | null;
+  differs?: string[];
 }
 
 export interface OperatorQueueListResponse {
@@ -548,4 +659,51 @@ export interface ReportSummary {
   period_start?: string | null;
   period_end?: string | null;
   created_at: string;
+}
+
+// ---------------------------------------------------------------------------
+// Execution search (enterprise `execution_search`, abilityai/trinity-enterprise#653)
+// ---------------------------------------------------------------------------
+
+export type ExecutionSearchField = "message" | "response" | "error";
+
+export type ExecutionSearchMode = "substring" | "regex";
+
+export interface ExecutionSearchParams {
+  query: string;
+  mode?: ExecutionSearchMode;
+  agents?: string[];
+  fields?: ExecutionSearchField[];
+  status?: string;
+  triggered_by?: string;
+  hours?: number;
+  limit?: number;
+  offset?: number;
+  context?: number;
+}
+
+export interface ExecutionSearchMatch {
+  field: ExecutionSearchField;
+  excerpt: string;
+}
+
+export interface ExecutionSearchHit {
+  id: string;
+  agent_name: string;
+  status: string | null;
+  started_at: string | null;
+  completed_at: string | null;
+  duration_ms: number | null;
+  triggered_by: string | null;
+  message: string;
+  matches: ExecutionSearchMatch[];
+}
+
+export interface ExecutionSearchResult {
+  query: string;
+  mode: ExecutionSearchMode;
+  fields: ExecutionSearchField[];
+  hours: number;
+  count: number;
+  hits: ExecutionSearchHit[];
 }

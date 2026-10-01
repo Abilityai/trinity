@@ -386,7 +386,9 @@ def test_the_settings_read_carries_the_health(monkeypatch):
     reads `title_generation` from it, so it has to be there."""
     import asyncio
     from types import SimpleNamespace
-    from routers import settings as settings_router
+    # #1028: routers/settings.py is a package; the portal-policy read lives
+    # in routers/settings/flags.py.
+    from routers.settings import flags as settings_router
     from services.entitlement_service import entitlement_service
     monkeypatch.setattr(entitlement_service, "list_entitled_features", lambda: [])
     # The route's admin gate is the real one (#2323's allowlist); this test is

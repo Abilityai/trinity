@@ -137,7 +137,7 @@ async def recover_agent(
         actor_ip=request.client.host if request.client else None,
         target_type="agent",
         target_id=agent_name,
-        endpoint=str(request.url.path),
+        endpoint=request.scope["path"],
     )
 
     return {
@@ -219,7 +219,7 @@ async def recover_schedule(
         actor_ip=request.client.host if request.client else None,
         target_type="schedule",
         target_id=schedule_id,
-        endpoint=str(request.url.path),
+        endpoint=request.scope["path"],
     )
 
     return {

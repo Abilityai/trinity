@@ -40,6 +40,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from fastapi import HTTPException
+from unit._write_params import flat_kwargs
 
 _REPO = Path(__file__).resolve().parents[2]
 _BACKEND = _REPO / "src" / "backend"
@@ -227,7 +228,7 @@ class TestTaskRoute:
                 x_source_agent="agent-a",
             )
         assert out["task_execution_id"] == "exec1"
-        row = m["db"].create_task_execution.call_args.kwargs
+        row = flat_kwargs(m["db"].create_task_execution.call_args)
         assert row["source_agent_name"] == "agent-a"
         assert row["triggered_by"] == "agent"
         collab = _collab_calls(m["activity"])
@@ -242,7 +243,7 @@ class TestTaskRoute:
                 current_user=_mock_user(agent_name=None, vouched="worker-a", role="admin"),
                 x_source_agent="worker-a",
             )
-        row = m["db"].create_task_execution.call_args.kwargs
+        row = flat_kwargs(m["db"].create_task_execution.call_args)
         assert row["source_agent_name"] == "worker-a"
         assert row["triggered_by"] == "agent"
 
@@ -263,7 +264,7 @@ class TestTaskRoute:
                 x_event_trigger=None,
                 x_internal_secret=None,
             ))
-        row = m["db"].create_task_execution.call_args.kwargs
+        row = flat_kwargs(m["db"].create_task_execution.call_args)
         assert row["source_agent_name"] is None
         assert row["triggered_by"] == "mcp"
         assert _collab_calls(m["activity"]) == []
@@ -338,6 +339,8 @@ def _admit_env():
     db = MagicMock()
     db.get_execution_timeout.return_value = 600
     db.get_max_parallel_tasks.return_value = 3
+    # #2806: admission now reads the caller's running chain depth first.
+    db.get_max_running_chain_depth.return_value = 0
     cap = MagicMock()
     cap.acquire = AsyncMock(return_value=MagicMock(state="admitted", queue_position=0))
     audit = MagicMock(log=AsyncMock())
@@ -579,7 +582,7 @@ def _admin_row():
 def _resolve_principal(token, *, method="POST", path="/api/agents/orch/task"):
     import dependencies as dep
 
-    req = SimpleNamespace(method=method, url=SimpleNamespace(path=path))
+    req = SimpleNamespace(method=method, scope={"path": path})
     with patch.object(dep, "db") as db:
         db.get_user_by_username.return_value = _admin_row()
         return asyncio.run(dep.get_current_user(req, token))

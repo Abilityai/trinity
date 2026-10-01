@@ -40,6 +40,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
+from db.write_params import TaskExecutionFields
 
 os.environ.setdefault("REDIS_URL", "redis://test:test@redis:6379")
 os.environ.setdefault("REDIS_PASSWORD", "test")
@@ -474,9 +475,15 @@ def _seed_parent(agent="agent-a", *, channel="telegram", chat_id="-100777",
     from database import db
 
     row = db.create_task_execution(
-        agent_name=agent, message="parent turn", triggered_by=channel or "manual",
-        source_channel=channel, source_channel_chat_id=chat_id,
-        source_channel_thread=thread, source_channel_agent=channel_agent,
+        agent_name=agent,
+        message="parent turn",
+        triggered_by=channel or "manual",
+        fields=TaskExecutionFields(
+            source_channel=channel,
+            source_channel_chat_id=chat_id,
+            source_channel_thread=thread,
+            source_channel_agent=channel_agent,
+        ),
     )
     return row.id
 
@@ -720,9 +727,15 @@ class TestRealEffectGuard:
         from database import db
 
         row = db.create_task_execution(
-            agent_name=agent, message="delegated", triggered_by="agent",
-            source_channel="telegram", source_channel_chat_id="-100777",
-            source_channel_thread="42", source_channel_agent="agent-a",
+            agent_name=agent,
+            message="delegated",
+            triggered_by="agent",
+            fields=TaskExecutionFields(
+                source_channel="telegram",
+                source_channel_chat_id="-100777",
+                source_channel_thread="42",
+                source_channel_agent="agent-a",
+            ),
         )
         return row.id
 

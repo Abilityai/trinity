@@ -158,14 +158,15 @@ def test_an_agent_key_cannot_repoint_the_skills_library(monkeypatch):
     from fastapi import HTTPException
 
     try:
-        from routers import settings as settings_router
+        # #1028: the generic /{key} handlers live in the package's `generic` module.
+        from routers.settings import generic as settings_router
         from db_models import SystemSettingUpdate
     except ImportError:  # pragma: no cover
         pytest.skip("backend venv required")
 
     class _Req:
         client = type("c", (), {"host": "127.0.0.1"})()
-        url = type("u", (), {"path": "/api/settings/skills_library_url"})()
+        scope = {"path": "/api/settings/skills_library_url"}
         state = type("s", (), {"request_id": "r1"})()
         headers: dict = {}
 
@@ -198,7 +199,8 @@ def test_the_same_write_still_works_for_a_human_admin(monkeypatch):
     import asyncio
 
     try:
-        from routers import settings as settings_router
+        # #1028: the generic /{key} handlers live in the package's `generic` module.
+        from routers.settings import generic as settings_router
         from db_models import SystemSettingUpdate
     except ImportError:  # pragma: no cover
         pytest.skip("backend venv required")
@@ -219,7 +221,7 @@ def test_the_same_write_still_works_for_a_human_admin(monkeypatch):
 
     class _Req:
         client = type("c", (), {"host": "127.0.0.1"})()
-        url = type("u", (), {"path": "/api/settings/public_chat_url"})()
+        scope = {"path": "/api/settings/public_chat_url"}
         state = type("s", (), {"request_id": "r1"})()
         headers: dict = {}
 
@@ -251,14 +253,15 @@ def test_the_skills_library_key_is_refused_for_humans_too(monkeypatch):
     from fastapi import HTTPException
 
     try:
-        from routers import settings as settings_router
+        # #1028: the generic /{key} handlers live in the package's `generic` module.
+        from routers.settings import generic as settings_router
         from db_models import SystemSettingUpdate
     except ImportError:  # pragma: no cover
         pytest.skip("backend venv required")
 
     class _Req:
         client = type("c", (), {"host": "127.0.0.1"})()
-        url = type("u", (), {"path": "/api/settings/skills_library_url"})()
+        scope = {"path": "/api/settings/skills_library_url"}
         state = type("s", (), {"request_id": "r1"})()
         headers: dict = {}
 

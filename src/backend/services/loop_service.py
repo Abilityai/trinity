@@ -67,6 +67,7 @@ from database import db
 from services.runtime_secret_scrub import get_staged_values, scrub_text
 from services.task_execution_service import get_task_execution_service
 from utils.helpers import utc_now_iso
+from db.write_params import ExecutionResult, TaskExecutionFields
 
 logger = logging.getLogger(__name__)
 
@@ -215,6 +216,7 @@ class LoopService:
         source_agent_name: Optional[str] = None,
         source_mcp_key_id: Optional[str] = None,
         source_mcp_key_name: Optional[str] = None,
+        chain_depth: Optional[int] = None,
     ) -> dict:
         """Create the loop row and dispatch its first iteration.
 
@@ -241,6 +243,7 @@ class LoopService:
             source_agent_name=source_agent_name,
             source_mcp_key_id=source_mcp_key_id,
             source_mcp_key_name=source_mcp_key_name,
+            chain_depth=chain_depth,
         )
         loop_id = loop_row["id"]
         db.mark_loop_running(loop_id)
@@ -654,13 +657,17 @@ class LoopService:
             agent_name=loop["agent_name"],
             message=message,
             triggered_by="loop",
-            source_user_id=loop.get("started_by_user_id"),
-            source_user_email=loop.get("started_by_user_email"),
-            source_agent_name=loop.get("source_agent_name"),
-            source_mcp_key_id=loop.get("source_mcp_key_id"),
-            source_mcp_key_name=loop.get("source_mcp_key_name"),
-            model_used=loop.get("model"),
-            loop_id=loop_id,
+            fields=TaskExecutionFields(
+                source_user_id=loop.get("started_by_user_id"),
+                source_user_email=loop.get("started_by_user_email"),
+                source_agent_name=loop.get("source_agent_name"),
+                source_mcp_key_id=loop.get("source_mcp_key_id"),
+                source_mcp_key_name=loop.get("source_mcp_key_name"),
+                model_used=loop.get("model"),
+                loop_id=loop_id,
+                # #2973: the starter's inherited depth, captured at loop start.
+                chain_depth=loop.get("chain_depth"),
+            ),
         )
         if execution is None:
             logger.error(
@@ -733,7 +740,9 @@ class LoopService:
                 db.update_execution_status(
                     execution_id=execution_id,
                     status=TaskExecutionStatus.FAILED,
-                    error=error_text,
+                    result=ExecutionResult(
+                        error=error_text,
+                    ),
                 )
                 # #1804: this is a terminal writer, so it owns closing the paired
                 # dispatch activity. `execute_task` may have opened one before

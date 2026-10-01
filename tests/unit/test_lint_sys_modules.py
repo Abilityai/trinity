@@ -393,3 +393,77 @@ def test_lint_baseline_file_exists():
         "tests/lint_sys_modules_baseline.txt must be committed. "
         "Generate with `python tests/lint_sys_modules.py --regenerate-baseline`."
     )
+
+
+# ---------------------------------------------------------------------------
+# Unguarded package eviction — the runner-killer class (trinity-enterprise#620)
+# ---------------------------------------------------------------------------
+
+_EVICT_UNGUARDED = '''
+import sys, types
+_STUBBED_MODULE_NAMES = ("agent_server",)
+def _restore_sys_modules():
+    pass
+for _mod in list(sys.modules):
+    if _mod == "agent_server" or _mod.startswith("agent_server."):
+        sys.modules.pop(_mod, None)
+'''
+
+_EVICT_GUARDED = '''
+import sys, types
+_existing = sys.modules.get("agent_server")
+if _existing is None or not any("x" in p for p in (getattr(_existing, "__path__", None) or [])):
+    for _mod in list(sys.modules):
+        if _mod == "agent_server" or _mod.startswith("agent_server."):
+            sys.modules.pop(_mod, None)
+'''
+
+
+def test_unguarded_registry_scan_eviction_is_a_hard_finding(tmp_path):
+    """Even with the snapshot/restore helper pair present — that pair proves the
+    file cleans up after itself; the damage here is to a file collected
+    EARLIER, at collection time, before any fixture runs."""
+    findings = _check_source(_EVICT_UNGUARDED, tmp_path)
+    hard = [f for f in findings if f.hard]
+    assert len(hard) == 1
+    assert "unguarded module-level sys.modules eviction loop" in hard[0].message
+
+
+def test_guarded_registry_scan_eviction_is_not_flagged(tmp_path):
+    findings = _check_source(_EVICT_GUARDED, tmp_path)
+    assert [f for f in findings if f.hard] == []
+
+
+def test_named_list_pops_are_not_the_eviction_class(tmp_path):
+    """A loop over a fixed name list is the ordinary import-time stub shape —
+    it never re-registers a package under a fresh object."""
+    src = '''
+import sys
+_STUBBED_MODULE_NAMES = ("a", "b")
+def _restore_sys_modules():
+    pass
+for _n in _STUBBED_MODULE_NAMES:
+    sys.modules.pop(_n, None)
+'''
+    assert [f for f in _check_source(src, tmp_path) if f.hard] == []
+
+
+def test_hard_findings_fail_main_before_the_baseline_is_consulted(monkeypatch, capsys):
+    import lint_sys_modules as lint
+    # main() prints paths relative to the repo root, so the fixture file lives
+    # under tests/ (removed on exit; never collected — pytest is already running).
+    p = Path(lint.TESTS_ROOT) / "unit" / "_tmp_evictor_fixture_2845.py"
+    p.write_text(_EVICT_UNGUARDED)
+    try:
+        monkeypatch.setattr(lint, "collect_findings", lambda root=None: lint._check_file(p))
+        assert lint.main([]) == 1
+    finally:
+        p.unlink(missing_ok=True)
+    assert "never baselined" in capsys.readouterr().out
+
+
+def test_the_live_tree_has_no_unguarded_registry_scan_eviction():
+    """The rule, applied to the real tests/ tree. If this fails, nest the loop
+    under the `_existing`/`__path__` guard (test_git_status_dual_ahead_behind.py)."""
+    hard = [f for f in collect_findings() if f.hard]
+    assert hard == [], "\n".join(f"{f.path}:{f.lineno}" for f in hard)

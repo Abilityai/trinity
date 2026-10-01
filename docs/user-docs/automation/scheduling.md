@@ -68,6 +68,8 @@ The server remains the authority: an expression the form accepts but the schedul
 | `trigger_agent_schedule(name, id)` | Manual trigger |
 | `get_schedule_executions(name, id)` | Execution history |
 
+Beyond the name, cron expression, message, timezone and description, `create_agent_schedule` and `update_agent_schedule` accept the same optional settings as the API: `timeout_seconds`, `allowed_tools`, `model`, `max_retries`, `retry_delay_seconds`, `validation_enabled`, `validation_prompt`, `validation_timeout_seconds` (see [Post-Run Validation](#post-run-validation)), and `deliver_to_workspace_email`. On an update, a setting you leave out keeps its current value.
+
 ### API Endpoints
 
 | Endpoint | Method | Description |
@@ -138,6 +140,41 @@ has to retry internally.
 **Rateable.** The delivered message is an ordinary reply from the agent, so the
 person can rate it like any other — see [Workspace](../sharing-and-access/workspace.md#reading-replies).
 
+### The run remembers the person
+
+A run of a schedule that names a person runs as that person's seat. Before it
+starts, the agent receives that person's per-person memory — the same notes it
+sees in a chat with them — and it can write them back with `write_user_memory`,
+passing the run's `execution_id`. So a morning brief can carry open loops and
+commitments forward to the next one. This holds for a cron fire, **Run now**, and
+a webhook fire alike: the run serves the named person, not whoever pressed the
+button. A scheduled run that names no one still cannot write anyone's memory.
+
+`write_user_memory` replaces the whole notes blob, so the agent must write the
+complete updated notes, not just the new part. Every write is recorded, and the
+person can see what the agent changed and undo the latest write in their
+Workspace. Another agent cannot write through this agent's run.
+
+### Held until a companion is marked ready
+
+An agent whose template declares a role is a **companion**. While its owner has
+not marked it ready, its cron-fired Workspace brief is **held**: the run is
+recorded as a `skipped` execution with the reason (*"… is a calibrating companion —
+its proactive brief runs once its owner marks it ready"*) and the next run time
+advances. A held brief is never a failure, never retried and never alerted. The
+owner flips the companion between **calibrating** and **ready** on its **Role**
+card in the Workspace agent details; only the owner's mark counts, not what the
+agent writes about itself.
+
+- The hold applies only to cron fires of a schedule with a Workspace recipient.
+  **Run now**, webhook fires and schedules without a recipient always fire.
+- Agents that declare no role are never held.
+- When the readiness cannot be read (the backend, Docker or the template is
+  unreachable), the brief fires and the reason is logged.
+- On upgrade, every agent whose brief was already firing was marked ready, so no
+  existing brief stops. The role card shows that mark as *carried over*.
+- `READINESS_CHECK_TIMEOUT` in `.env` bounds the scheduler's check.
+
 ## Per-Schedule Analytics
 
 Each schedule has an analytics view summarizing how it has been performing over a selectable time window.
@@ -179,10 +216,10 @@ Failed executions can automatically retry with configurable delay and attempt li
 
 | Field | Default | Range | Description |
 |-------|---------|-------|-------------|
-| `max_retries` | 1 | 0-5 | Max retry attempts (0 = disabled) |
+| `max_retries` | 0 | 0-5 | Max retry attempts (0 = disabled) |
 | `retry_delay_seconds` | 60 | 30-600 | Delay between retries |
 
-New schedules default to 1 retry. Set `max_retries: 0` to disable.
+Retries are off by default: a schedule created in the UI (**Max Retries** → **Disabled (default)**) or over the REST API has `max_retries: 0`. The `create_agent_schedule` MCP tool is the exception and defaults to 1 retry; pass `max_retries: 0` there to turn it off.
 
 ### Retry Behavior
 
@@ -210,6 +247,25 @@ The execution list groups retries under their parent execution for clarity.
 | `pending_retry` | Failed, retry scheduled but not yet fired |
 | `running` | Retry in progress |
 | `success` / `failed` | Final outcome |
+
+## Post-Run Validation
+
+A run can report success without having done the work. Post-run validation checks for that. When it is on, each run that finishes successfully is followed by **one more execution on the same agent**, in a clean context, that audits the run. By default it reads the original task and the response, checks the workspace for the claimed results, and returns a pass, fail, or partial verdict.
+
+It is off by default, and the schedule form in the UI has no field for it. Set it over the API or with `create_agent_schedule` / `update_agent_schedule`:
+
+| Field | Default | Range | Description |
+|-------|---------|-------|-------------|
+| `validation_enabled` | `false` | — | Run the validation pass after each successful run |
+| `validation_prompt` | built-in auditor prompt | — | Your own auditor instructions |
+| `validation_timeout_seconds` | 120 | 30-600 | Timeout for the validation execution. The API clamps a value outside the range; the MCP tools refuse it |
+
+What to expect:
+
+- **It costs a run.** The validation pass is a real execution. It goes through the agent's normal capacity and appears in the execution list with trigger `validation`.
+- **The verdict is recorded on the original run.** Its `business_status` becomes `validated` on a pass, or `failed_validation` on a fail or partial. A successful run on a schedule with validation off is marked `skipped`.
+- **A failed verdict raises one high-priority alert**, titled **Validation Failed**, in the Operations queue. It carries the verdict summary and the individual checks.
+- **It does not retry.** Retries only follow a technical failure, and validation only runs after a technical success.
 
 ## Pre-Check Hook
 
@@ -267,6 +323,7 @@ Raise the agent cap first, then raise the schedule timeout.
 - Retries count against the agent's parallel capacity slots.
 - Pre-check hooks run with the same permissions as the agent's normal tool calls (`developer` user inside the container).
 - A template may declare at most 20 schedules. Beyond that the list is truncated, with the reason reported.
+- A companion's brief stays held until its owner marks it ready. An agent that removes its own role declaration before its owner has marked it takes itself out of the hold.
 - If the agent has **freeze schedules if sync failing** enabled and its git sync has failed three times in a row, the scheduler skips firing until sync recovers.
 
 ## See Also
@@ -275,5 +332,5 @@ Raise the agent cap first, then raise the schedule timeout.
 - [Agent Configuration](../agents/agent-configuration.md) — autonomy mode, execution timeout
 - [Agent Loops](agent-loops.md) — bounded sequential task repetition
 - [Agent Self-Reminders](agent-reminders.md) — one-shot, durable, agent-initiated deferred follow-ups
-- [Approvals](approvals.md) — human-in-the-loop gates for scheduled work
+- [Approvals](approvals.md) — human-in-the-loop gates for scheduled work, and where a failed validation alert lands
 - [Workspace](../sharing-and-access/workspace.md) — where a delivered run lands

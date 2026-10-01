@@ -188,7 +188,7 @@ def no_pilots(monkeypatch):
 
 class TestFlagOffIsUnchanged:
     @pytest.mark.parametrize(
-        "trigger", ["schedule", "webhook", "reminder", "loop", "fan_out"]
+        "trigger", ["schedule", "webhook", "reminder", "loop", "fan_out", "retry"]
     )
     def test_policy_stays_reject_with_no_pilots(self, no_pilots, trigger):
         """The property the entire risk assessment rests on: with an empty
@@ -318,8 +318,8 @@ class TestStrandedTriggersStayPushed:
 
     @pytest.mark.parametrize("trigger", ["manual", "mcp", "chat", "public", "voice"])
     def test_interactive_triggers_are_untouched(self, pilot, trigger):
-        """Open Question 7's scope cut: a human turn keeps the synchronous push
-        path and today's Redis session lock."""
+        """Until #2842/#2843 land (#1989), a human turn keeps the synchronous
+        push path and today's Redis session lock."""
         _, m = _run(triggered_by=trigger)
         assert _acquire_kwargs(m["capacity"])["overflow_policy"] == "reject"
 
@@ -424,7 +424,7 @@ class _FakeQueueDb:
     def get_max_backlog_depth(self, agent_name):
         return 50
 
-    def update_execution_to_queued(self, execution_id, metadata, queued_at):
+    def update_execution_to_queued(self, execution_id, metadata, queued_at, conversation_key=None):
         self.queued[execution_id] = metadata
         return True
 

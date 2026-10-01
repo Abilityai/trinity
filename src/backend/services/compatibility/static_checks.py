@@ -33,7 +33,11 @@ from services.credential_charset import (
     CREDENTIAL_DETECTOR_NAME_RE,
     CREDENTIAL_DETECTOR_REF_RE,
 )
-from services.template_service import _is_platform_injected, declared_credential_names
+from services.template_service import (
+    PLATFORM_INJECTED_MCP_SERVERS,
+    _is_platform_injected,
+    declared_credential_names,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -455,24 +459,96 @@ def c_t003(snap):
                           else _fail("template.yaml 'description' is missing or empty"))
 
 
+def _resource_normalizers():
+    """The create path's own cpu/memory validators, imported lazily (#2899).
+
+    `services.agent_service.capabilities` is stdlib-only, but reaching it runs
+    the package `__init__`, which pulls the whole create stack (crud, lifecycle,
+    deploy, fastapi). This module is imported by the compatibility router at
+    startup and has no other agent_service edge, so the import stays inside the
+    two checks that need it rather than becoming a package-level one.
+    """
+    from services.agent_service.capabilities import (  # noqa: PLC0415 — see docstring
+        VALID_CPU,
+        VALID_MEMORY,
+        normalize_cpu,
+        normalize_memory,
+    )
+    return normalize_cpu, normalize_memory, VALID_CPU[0], VALID_MEMORY[0]
+
+
+def _resources_block(d) -> Tuple[Optional[dict], Optional[Result]]:
+    """(resources-mapping, shape-failure). `None`/absent means "not declared".
+
+    `null` and an absent key are the same thing to the create path
+    (`crud.py`: `config.resources` stays the caller's, then the admin default
+    fills it), so both are a legitimate declaration. Any OTHER non-mapping is
+    a real defect: `_resolve_local_template` assigns it unchanged and the
+    create path then raises `AttributeError` on `.get`.
+    """
+    r = d.get("resources")
+    if r is None:
+        return {}, None
+    if not isinstance(r, dict):
+        return None, _fail(
+            "template.yaml 'resources' must be a mapping of cpu/memory — "
+            f"got {type(r).__name__}",
+            {"type": type(r).__name__},
+        )
+    return r, None
+
+
 def c_t004(snap):
+    """HARD: `resources.cpu` is one the create path accepts, when declared.
+
+    An ABSENT block is not a finding (#2899): the agent then inherits the
+    admin's fleet-wide default (RES-001), which is what every bundled starter
+    and `local:default` rely on — declaring one here would silently override
+    both that default and the value a manifest or API caller asked for. Only a
+    value the create path would REJECT is a must-fix, and the verdict is the
+    create path's own `normalize_cpu`, never a second copy of the value set:
+    `"4G"`, `" 4g"` and `""` are all accepted there, and a membership test
+    against `VALID_CPU` would have called them must-fix.
+    """
     def f(d):
-        cpu = ((d.get("resources") or {}).get("cpu"))
-        if cpu is None:
-            return _fail("template.yaml resources.cpu is missing")
-        if str(cpu) not in {"1", "2", "4", "8", "16"}:
-            return _fail("resources.cpu must be one of 1/2/4/8/16", {"cpu": str(cpu)})
+        resources, shape_failure = _resources_block(d)
+        if shape_failure:
+            return shape_failure
+        cpu = resources.get("cpu")
+        if cpu is None or str(cpu).strip() == "":
+            return _ok("resources.cpu is not declared — the platform default applies")
+        normalize_cpu, _normalize_memory, cpu_default, _memory_default = _resource_normalizers()
+        # Clip BEFORE the normalizer: its ValueError quotes the value back, and
+        # `template.yaml` is agent-writable, so an unbounded (or escape-bearing)
+        # scalar would reach the UI row, the MCP payload and `checks_json`
+        # verbatim (the #950 L1 / `_clip` rule). No verdict can change — every
+        # accepted value is two or three printable characters.
+        try:
+            normalize_cpu(_clip(cpu), cpu_default)
+        except ValueError as e:
+            return _fail(str(e), {"cpu": _clip(cpu)})
         return _ok("resources.cpu is valid")
     return _with_template(snap, f)
 
 
 def c_t005(snap):
+    """HARD: `resources.memory` is one the create path accepts, when declared.
+
+    Same contract as T-004. Skips when the block itself is malformed so one
+    bad `resources:` is one finding, not two.
+    """
     def f(d):
-        mem = ((d.get("resources") or {}).get("memory"))
-        if mem is None:
-            return _fail("template.yaml resources.memory is missing")
-        if not re.match(r"^\d+[gm]$", str(mem)):
-            return _fail("resources.memory must match <number>g|m (e.g. 2g, 512m)", {"memory": str(mem)})
+        resources, shape_failure = _resources_block(d)
+        if shape_failure:
+            return _skip("resources is not a mapping (see T-004)", "invalid_resources")
+        mem = resources.get("memory")
+        if mem is None or str(mem).strip() == "":
+            return _ok("resources.memory is not declared — the platform default applies")
+        _normalize_cpu, normalize_memory, _cpu_default, memory_default = _resource_normalizers()
+        try:
+            normalize_memory(_clip(mem), memory_default)  # see T-004 on the clip
+        except ValueError as e:
+            return _fail(str(e), {"memory": _clip(mem)})
         return _ok("resources.memory is valid")
     return _with_template(snap, f)
 
@@ -1156,6 +1232,111 @@ def c_d008(snap):
     return _with_dashboard(snap, f)
 
 
+def c_d009(snap):
+    """STATIC: the `metrics:` block is well-formed (ent#477).
+
+    Delegates to the one reader — `template_metrics.metric_shape_errors` — so
+    the report and the registry can never disagree about which entries are
+    valid: an entry named here is exactly an entry the registry refused to
+    hold, because both answers come out of the same `_parse`.
+
+    Twin of T-018 for the `schedules:` block, including the fail-CLOSED handler
+    below. Function-local import for the same reason T-018 uses one: the leaf
+    must stay importable without dragging the compatibility package with it.
+    """
+    def f(d):
+        try:
+            from services.template_metrics import metric_shape_errors
+            errors = metric_shape_errors(d.get("metrics"))
+        except Exception as e:  # noqa: BLE001
+            # Fail CLOSED, deliberately — the T-018 reasoning verbatim.
+            # `run_static` turns a raise into `skipped` and `_counts` tallies
+            # only `status == "fail"`, so a raising SOFT check drops
+            # soft_count 1->0 and flips the whole report from `issues` to
+            # `compatible` exactly when this check's finding was the only
+            # failure. That is the entire population D-009 exists to serve. And
+            # `build_report` persists `checks_json`, so one transient raise is
+            # replayed as a clean bill of health on every stopped-agent read.
+            #
+            # Type name ONLY: `detail` is persisted to
+            # agent_compatibility_results.checks_json and rendered in the UI,
+            # and `str(e)` can embed untrusted template content.
+            return _fail("metrics block could not be evaluated",
+                         {"error_type": type(e).__name__})
+        if errors:
+            return _fail("template.yaml `metrics:` entries are malformed",
+                         {"errors": errors[:25]})
+        return _ok("metrics block entries are well-formed")
+    return _with_template(snap, f)
+
+
+_ECHO_SAFE_RE = re.compile(r"[^a-zA-Z0-9_.:-]")
+
+
+def _echo_key(value) -> str:
+    """A key name reduced to a charset safe to persist and render.
+
+    The `metric_points_service._safe_echo` rule, spelled locally rather than
+    imported: this leaf must stay importable without dragging a sibling
+    service in (the D-009 / T-018 convention in this module).
+    """
+    return _ECHO_SAFE_RE.sub("?", str(value))[:64]
+
+
+def c_d010(snap):
+    """STATIC: `metrics.json` is superseded by the point store (ent#479).
+
+    The file is no longer READ by anything: `GET /api/agents/{name}/metrics`
+    is backed by `metric_points`, so a number written here is invisible to the
+    tiles, the dashboard binding, the MCP tool and every consumer downstream.
+    An agent still writing it is measuring into a void, which is exactly the
+    failure this check exists to make visible — the alternative (serving the
+    file when the store is empty) would mean two sources of truth for one
+    number, and ent#476 exists to prevent that.
+
+    SOFT, like its D-009 sibling: the agent works, its numbers are simply not
+    arriving. The detail carries KEY NAMES only (charset-bounded, 25 max) —
+    `checks_json` is persisted and rendered in the UI, and both the keys and
+    the values in this file are author-controlled text.
+    """
+    if not _exists(snap, "metrics.json"):
+        return _ok("no superseded metrics.json")
+
+    keys: List[str] = []
+    undeclared: List[str] = []
+    raw = _content(snap, "metrics.json")
+    if raw:
+        try:
+            parsed = json.loads(raw)
+        except (TypeError, ValueError):
+            parsed = None
+        if isinstance(parsed, dict):
+            # The legacy file nests values under `metrics` or holds them flat;
+            # both spellings shipped, so both are read rather than guessed at.
+            values = parsed.get("metrics")
+            if not isinstance(values, dict):
+                values = {k: v for k, v in parsed.items()
+                          if k not in ("last_updated", "metrics")}
+            keys = [_echo_key(k) for k in list(values)[:25]]
+
+    declared = set()
+    data, err = _template(snap)
+    if not err and isinstance(data, dict):
+        block = data.get("metrics")
+        if isinstance(block, dict):
+            declared = {str(k) for k in block}
+        elif isinstance(block, list):
+            declared = {str(e.get("name")) for e in block
+                        if isinstance(e, dict) and e.get("name")}
+    undeclared = [k for k in keys if k not in declared]
+
+    return _fail(
+        "metrics.json is superseded and no longer served — record these "
+        "values with `record_metrics`",
+        {"keys": keys, "undeclared": undeclared},
+    )
+
+
 # ===========================================================================
 # X — Cross-File Consistency (static parts)
 # ===========================================================================
@@ -1196,6 +1377,13 @@ def c_x004(snap):
         actual = set(_mcp_server_names(snap))
         if not declared_names and not actual:
             return _ok("no MCP servers declared")
+        # #2899: a platform-injected server (today: `trinity`) belongs in
+        # `template.yaml` and NOT in `.mcp.json.template` — the agent's own boot
+        # writes the entry into `.mcp.json`. Exempt that direction only: a
+        # template that ships its own `trinity` block in `.mcp.json.template` is
+        # still a mismatch worth reporting, because the injection overwrites it
+        # when Trinity MCP is configured and leaves it standing when it is not.
+        declared_names -= (PLATFORM_INJECTED_MCP_SERVERS - actual)
         only_template = sorted(declared_names - actual)
         only_mcp = sorted(actual - declared_names)
         if only_template or only_mcp:
@@ -1446,7 +1634,7 @@ STATIC_CHECKS = {
     "P-001": c_p001, "P-002": c_p002, "P-004": c_p004, "P-006": c_p006,
     "A-001": c_a001, "A-002": c_a002, "A-004": c_a004,
     "D-001": c_d001, "D-002": c_d002, "D-003": c_d003, "D-004": c_d004,
-    "D-005": c_d005, "D-008": c_d008,
+    "D-005": c_d005, "D-008": c_d008, "D-009": c_d009, "D-010": c_d010,
     "X-003": c_x003, "X-004": c_x004, "X-007": c_x007,
     "I-006": c_i006,
     "DP-001": c_dp001, "DP-002": c_dp002, "DP-003": c_dp003,

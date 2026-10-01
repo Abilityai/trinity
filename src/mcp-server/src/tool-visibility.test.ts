@@ -404,7 +404,7 @@ describe("#279 credential-vault tools are operator-scope only", () => {
   });
 });
 
-describe("ent#500 get_agent_assignments is operator-scope only", () => {
+describe("ent#500 get_agent_assignments — operator-scope gate (module) + fenced registration (0.9.5 F1)", () => {
   // The tool names a real person — the human an agent works for. A connector key
   // is an end-user consumption credential bound to one agent, and an anonymous
   // session is pre-login; neither may ever see staff identities. The `agent`
@@ -413,32 +413,36 @@ describe("ent#500 get_agent_assignments is operator-scope only", () => {
   // agent-scoped key resolves to its owner carrying the owner's role.
   const operatorOnly = makeOperatorOnly(true);
 
-  it("advertises to user, agent and system scopes", () => {
+  it("the operatorOnly gate admits user, agent and system scopes", () => {
     for (const scope of ["user", "agent", "system"]) {
       assert.equal(
         operatorOnly({ scope }),
         true,
-        `${scope} should see get_agent_assignments`,
+        `operatorOnly should admit ${scope}`,
       );
     }
   });
 
-  it("hides it from connector and anonymous sessions", () => {
+  it("the operatorOnly gate refuses connector and anonymous sessions", () => {
     for (const scope of ["connector", "anonymous"]) {
       assert.equal(
         operatorOnly({ scope }),
         false,
-        `${scope} must not see get_agent_assignments`,
+        `operatorOnly must refuse ${scope}`,
       );
     }
   });
 
-  it("hides it from a scope nobody has thought of yet (fails CLOSED)", () => {
+  it("the operatorOnly gate refuses a scope nobody has thought of yet (fails CLOSED)", () => {
     assert.equal(operatorOnly({ scope: "portal_delegate" }), false);
     assert.equal(operatorOnly({ scope: "some_future_tier" }), false);
   });
 
-  it("registers the tool in the operator group, not the connector one", async () => {
+  it("is FENCED for 0.9.5 (work-order F1): the module exists but server.ts does not register it", async () => {
+    // The assignments layer (ent#500) is not shipping in this cut, so the tool that
+    // reads it must not be advertised to ANY scope. The module stays (its own tests
+    // cover the proxy); the registration is what is withheld. When ent#500 lands,
+    // flip this assertion back to `assert.match` and restore the access.ts row.
     const { createAssignmentTools } = await import("./tools/assignments.js");
     const tools = createAssignmentTools(
       { getBaseUrl: () => "http://x" } as any,
@@ -450,8 +454,8 @@ describe("ent#500 get_agent_assignments is operator-scope only", () => {
     const serverSrc = await import("node:fs").then((fs) =>
       fs.readFileSync(new URL("./server.ts", import.meta.url), "utf8"),
     );
-    assert.match(serverSrc, /createAssignmentTools\(client, requireApiKey\)/);
-    assert.doesNotMatch(serverSrc, /connectorGroup\s*=\s*createAssignmentTools/);
+    assert.doesNotMatch(serverSrc, /createAssignmentTools\(client, requireApiKey\)/);
+    assert.doesNotMatch(serverSrc, /^import \{ createAssignmentTools \}/m);
   });
 
   it("exposes no write tool — an assignment is a grant, and the backend " +

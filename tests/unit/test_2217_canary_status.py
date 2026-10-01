@@ -382,7 +382,8 @@ def test_feature_flags_carries_canary_enabled(monkeypatch):
     import asyncio
     from types import SimpleNamespace
 
-    from routers import settings as settings_module
+    # #1028: `get_public_feature_flags` lives in the package's `flags` module.
+    from routers.settings import flags as settings_module
 
     # Stub the module-level settings/telemetry/db surfaces the handler reads.
     stub_settings = SimpleNamespace(

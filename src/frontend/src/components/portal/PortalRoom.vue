@@ -61,7 +61,7 @@
         class="ml-auto mr-2 truncate text-xs"
         :class="notice.level === 'critical'
           ? 'text-status-danger-600 dark:text-status-danger-400 font-medium'
-          : 'text-status-warning-600 dark:text-status-warning-400'"
+          : 'text-status-warning-700 dark:text-status-warning-400'"
         :title="`${notice.headline}. ${notice.detail}`"
         data-testid="room-budget-headline"
       >
@@ -69,6 +69,8 @@
       </div>
 
       <div class="flex items-center gap-1 shrink-0" :class="{ 'ml-auto': !notice }">
+        <!-- ent#661: the room's project — badge + Detach, or "Add to a project". -->
+        <ProjectChatControls kind="room" :target-id="roomId" @open-project="(id) => emit('open-project', id)" />
         <!-- ent#359 AC #4: star from the header, same as a 1:1. -->
         <PortalStarButton
           :starred="starred"
@@ -117,7 +119,7 @@
           <!-- A system line is the room narrating itself: a join, a budget
                close, a wake that did not happen. It is not from a participant,
                so it renders as neither side of the conversation. -->
-          <p v-if="m.kind === 'system'" class="text-center text-xs text-gray-400 dark:text-gray-500 py-1">
+          <p v-if="m.kind === 'system'" class="text-center text-xs text-gray-500 dark:text-gray-400 py-1">
             {{ m.content }}
           </p>
 
@@ -160,6 +162,7 @@
               :item="it"
               show-agent
               :elapsed-seconds="elapsedOf(it)"
+              :live-step="stepOf(it)"
               :can-stop="it.can_stop"
               :stopping="workStore.stoppingIds.includes(it.id)"
               show-open-in-work
@@ -382,6 +385,7 @@
  * ONE execution id, and a room turn wakes N agents. Merging N live streams is
  * its own design; until then the seq cursor is the honest mechanism.
  */
+import ProjectChatControls from './projects/ProjectChatControls.vue'
 import { ref, computed, watch, nextTick, onMounted, onBeforeUnmount } from 'vue'
 import { useClientPortalStore } from '@/stores/clientPortal'
 import { budgetNotice } from '@/utils/roomBudgets'
@@ -390,6 +394,7 @@ import PortalAgentBubble from './PortalAgentBubble.vue'
 import PortalWorkCard from './PortalWorkCard.vue'
 import { usePortalWorkStore } from '@/stores/portalWork'
 import { liveElapsedSeconds, liveItemsForRoom, soleStoppableItem } from './portalWork'
+import { resolveActivityText } from '@/utils/workActivity'
 import PortalAvatar from './PortalAvatar.vue'
 import PortalStarButton from './PortalStarButton.vue'
 import PortalEditableTitle from './PortalEditableTitle.vue'
@@ -398,6 +403,9 @@ import BaseButton from '@/components/base/BaseButton.vue'
 import PortalJumpToLatest from './PortalJumpToLatest.vue'
 import { workSignalFromRoom } from './portalRail'
 import { usePortalFileDrop, attachmentState } from '@/composables/usePortalFileDrop'
+import { useComposerDraft } from '@/composables/useComposerDraft'
+import { usePortalDraftsStore } from '@/stores/portalDrafts'
+import { draftKeyFor, shouldFocusOnRestore } from './portalDrafts'
 import { shouldCancelOnEscape, cancelOutcome } from '@/utils/turnCancel'
 import { useStickToBottom } from '@/composables/useStickToBottom'
 import {
@@ -436,7 +444,7 @@ const props = defineProps({
   // room id there so it cannot follow the reader into another conversation.
   carryNotice: { type: Object, default: null },
 })
-const emit = defineEmits(['open-menu', 'rooms-changed', 'toggle-star', 'participants-changed', 'work-state', 'open-work', 'dismiss-carry-notice'])
+const emit = defineEmits(['open-menu', 'rooms-changed', 'toggle-star', 'participants-changed', 'work-state', 'open-work', 'dismiss-carry-notice', 'open-project'])
 
 const store = useClientPortalStore()
 
@@ -453,6 +461,14 @@ const loading = ref(true)
 const sending = ref(false)
 const sendError = ref(null)
 const input = ref('')
+// trinity-enterprise#657: the room's unsent text outlives this instance. The
+// room is keyed on its id (the shell remounts per room), so the key never
+// changes in-instance; `send()` giving the text back on failure makes it a
+// draft again through the same write-through. Growing and focusing the field
+// waits for `load()` — the composer sits behind `v-if="!isClosed"`.
+const drafts = usePortalDraftsStore()
+const draftKey = computed(() => draftKeyFor({ roomId: props.roomId }))
+const { restored: draftRestored } = useComposerDraft({ key: draftKey, input })
 const scrollEl = ref(null)
 // #2624: an arriving message must not move a transcript the reader is holding.
 // The 3s poll below is the worst offender on this surface — several agents can
@@ -544,6 +560,11 @@ watch(() => roomLiveItems.value.length > 0, (on) => {
 }, { immediate: true })
 onBeforeUnmount(() => { if (clockTimer) clearInterval(clockTimer) })
 function elapsedOf(it) { return liveElapsedSeconds(it, { fetchedAtMs: workStore.fetchedAt, nowMs: clockMs.value }) }
+// trinity-enterprise#620: a room's cards carry the activity line too — the
+// room has no stream of its own, so every card reads the heartbeat feed.
+function stepOf(it) {
+  return resolveActivityText({ live: true, activity: workStore.activityFor(it), nowMs: clockMs.value })
+}
 
 // #2795 — stopping a room turn.
 //
@@ -935,6 +956,28 @@ onMounted(async () => {
   document.addEventListener('click', onDocClick)
   window.addEventListener('resize', onViewportResize)
   await load({ full: true })
+  // ent#475's prefill, applied at MOUNT as well as by the watcher above — the
+  // sibling conversation has always done both (`PortalConversation.onMounted`).
+  // The watcher is not `immediate`, so a prefill set while this component was
+  // still mounting reaches nothing; trinity-enterprise#657 made that reachable
+  // (a room post that fails after `openRoom` hands the text back this way), and
+  // a text-losing path must not depend on which of two async settlings won.
+  if (props.prefill) input.value = props.prefill
+  // trinity-enterprise#657: a closed room has no composer, so a draft left in
+  // it has no field to come back to — clear it rather than mark a row the
+  // person cannot type into. Otherwise a restored draft gets the caret at its
+  // end, on a fine pointer only (a phone would get the keyboard over the room).
+  if (isClosed.value) drafts.clear(draftKey.value)
+  else if (draftRestored && !props.prefill
+      && shouldFocusOnRestore(typeof window !== 'undefined' ? window.matchMedia?.bind(window) : null)) {
+    nextTick(() => {
+      const el = textarea.value
+      if (!el || el.disabled) return
+      el.focus()
+      const end = el.value.length
+      try { el.setSelectionRange(end, end) } catch { /* not a text control */ }
+    })
+  }
   // #2259: and only NOW — the composer sits behind `v-if="!isClosed"`, so before
   // the room resolves there is no textarea to measure and an eager call would
   // silently no-op on the null ref. Without this the field mounts with `overflow-y`

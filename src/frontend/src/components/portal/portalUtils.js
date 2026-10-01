@@ -97,20 +97,33 @@ export function askBadgeTitle(count) {
   return `${n} ${n === 1 ? 'ask is' : 'asks are'} waiting on your answer`
 }
 
+// trinity-enterprise#610 (D3/D13): the unread badge's accessible name. The
+// count is arrivals (agent messages AND deliverables addressed to you), so the
+// noun is "new" — "replies" was true only while messages were the one arm.
+export function unreadBadgeTitle(count) {
+  const n = Number(count) || 0
+  if (n <= 0) return ''
+  return `${n} new you haven't read`
+}
+
 // The agent row's accessible name.
 //
 // #2424: this composed unread replies and the availability chip and never
 // mentioned asks, so a blocked agent's title was the bare "Open ws-sage" — the
 // pending decision was unreachable for a screen-reader user as well as
 // invisible. Asks lead: a decision outranks unread chatter.
-export function agentRowTitle({ label, name, unread = 0, askCount = 0, chipTitle = '' } = {}) {
+export function agentRowTitle({ label, name, unread = 0, askCount = 0, chipTitle = '', hasDraft = false } = {}) {
   const who = label && label !== name ? `${label} (${name})` : (label || name || '')
   const asks = Number(askCount) || 0
   const reads = Number(unread) || 0
 
   const parts = []
   if (asks > 0) parts.push(`${asks} ${asks === 1 ? 'ask' : 'asks'} waiting on you`)
-  if (reads > 0) parts.push(`${reads} unread ${reads === 1 ? 'reply' : 'replies'}`)
+  // trinity-enterprise#610 (D3): the count is ARRIVALS — agent messages and
+  // deliverables addressed to you — so it says "new", not "replies".
+  if (reads > 0) parts.push(`${reads} new`)
+  // trinity-enterprise#657: the Draft mark beside the name, in words too.
+  if (hasDraft) parts.push('an unsent draft')
 
   const base = parts.length ? `${who} — ${parts.join(', ')}` : `Open ${who}`
   return chipTitle ? `${base} — ${chipTitle}` : base
@@ -128,14 +141,20 @@ export function agentRowTitle({ label, name, unread = 0, askCount = 0, chipTitle
 // exactly where they were and the visible list simply grows.
 export const AGENT_COLLAPSE_LIMIT = 5
 
-export function visibleAgentRows(roster, { expanded = false, askCounts = {}, limit = AGENT_COLLAPSE_LIMIT } = {}) {
+//
+// trinity-enterprise#657: an agent holding an UNSENT DRAFT is lifted the same
+// way — "a Draft mark visible without opening the chat" is false for a row
+// hidden under "N more". Same append-not-float rule, same reason.
+export function visibleAgentRows(roster, { expanded = false, askCounts = {}, draftAgents = null, limit = AGENT_COLLAPSE_LIMIT } = {}) {
   const list = Array.isArray(roster) ? roster : []
   if (expanded) return list
 
   const head = list.slice(0, limit)
   const shown = new Set(head.map((a) => a?.name))
   const counts = askCounts || {}
-  const waiting = list.filter((a) => a?.name && !shown.has(a.name) && (Number(counts[a.name]) || 0) > 0)
+  const drafted = draftAgents instanceof Set ? draftAgents : new Set()
+  const waiting = list.filter((a) => a?.name && !shown.has(a.name)
+    && ((Number(counts[a.name]) || 0) > 0 || drafted.has(a.name)))
   return waiting.length ? [...head, ...waiting] : head
 }
 
@@ -333,8 +352,15 @@ export const NEW_CHAT_TAB_LABEL = 'New chat'
 // whose title is literally "Main" would otherwise be indistinguishable from it.
 export const MAIN_TAB_LABEL = 'Main'
 
-export function agentChatTabs(threads, agentName, { activeId = null, draft = false } = {}) {
+// trinity-enterprise#657: `draftKeys` is the drafts store's key set. A tab
+// whose thread holds unsent text carries `hasDraft` (keyed on the TAB id, not
+// the thread row — the born-here provisional tab has no row yet), and an
+// unsaved chat with a `new:<agent>` draft is listed as the provisional tab
+// even while another chat is open, so the place the person left their words
+// stays reachable: the agent row lands on Main, and this tab is the only door.
+export function agentChatTabs(threads, agentName, { activeId = null, draft = false, draftKeys = null } = {}) {
   if (!agentName) return []
+  const holds = (key) => !!(key && draftKeys && typeof draftKeys.has === 'function' && draftKeys.has(key))
   const mine = (Array.isArray(threads) ? threads : [])
     .filter((t) => t && !t.is_room && t.agent_name === agentName)
     // ent#523: an archived chat IS a tab. The operator ruled it explicitly —
@@ -369,21 +395,28 @@ export function agentChatTabs(threads, agentName, { activeId = null, draft = fal
       // so in the strip rather than only in its position.
       pinned: !!t.is_main,
       thread: t,
+      hasDraft: holds(`thread:${t.id || t.session_id}`),
     }))
   // #2579: the provisional tab. Only on an explicit draft, and only while no
   // real row already carries the active id — once the list catches up with the
   // adopted thread the real tab takes over in the same slot.
-  if (draft && !tabs.some((t) => t.id === activeId)) {
+  //
+  // trinity-enterprise#657: ALSO listed, inactive, while a `new:<agent>` draft
+  // exists. Decided up front and inserted once — both cases share the slot.
+  const activeIsProvisional = draft && !tabs.some((t) => t.id === activeId)
+  const newChatDraft = holds(`new:${agentName}`)
+  if (activeIsProvisional || newChatDraft) {
     const after = tabs.length && tabs[0].pinned ? 1 : 0
     tabs.splice(after, 0, {
       // Keyed to the adopted id when there is one, so the tab the person is
       // looking at keeps its identity across the gap between "the thread now
       // exists" and "the list says so".
-      id: activeId || NEW_CHAT_TAB_ID,
+      id: activeIsProvisional ? (activeId || NEW_CHAT_TAB_ID) : NEW_CHAT_TAB_ID,
       label: NEW_CHAT_TAB_LABEL,
       provisional: true,
       pinned: false,
       thread: null,
+      hasDraft: activeIsProvisional && activeId ? holds(`thread:${activeId}`) : newChatDraft,
     })
   }
   return tabs
@@ -637,6 +670,26 @@ export const STAGE_QUERY_KEYS = ['agent', 'new', 'voice']
 // this surface exists for, and a dead affordance is one of the two failures
 // the brand corner must not have (the other being an unlabelled one).
 export const WORKSPACE_ROOT = '/workspace'
+
+// trinity-enterprise#610 (D9): the Inbox — the Workspace's landing and the brand
+// mark's target. A NEW constant on purpose: `WORKSPACE_ROOT` is also
+// `shouldEscapeStage`'s root and the sign-out destination, and bare `/workspace`
+// keeps its meaning (the new-chat stage). Being a path that is not the root, the
+// Inbox is a stage `shouldEscapeStage` leaves — the fail-closed rule holds.
+export const WORKSPACE_INBOX = '/workspace/inbox'
+
+// trinity-enterprise#610 (the 09-30 ruling, item 2): an agent's asks home, on
+// every door and for platform users and clients alike — the Inbox's Action tab
+// narrowed to that agent (§3g C2 `?from=`), or the whole tab when no one agent.
+export function asksHomeRoute(agentName = null) {
+  const query = { tab: 'action' }
+  if (agentName) query.from = agentName
+  return { path: WORKSPACE_INBOX, query }
+}
+export function asksWaitingLabel(n) {
+  const k = Number(n) || 0
+  return k > 0 ? `${k} ${k === 1 ? 'ask' : 'asks'} waiting on you` : ''
+}
 
 export function shouldEscapeStage(path, query) {
   if (path && path.replace(/\/+$/, '') !== WORKSPACE_ROOT) return true
@@ -904,39 +957,6 @@ export function availabilityChip(agent, { detailed = false } = {}) {
     }
 }
 
-/**
- * #2641 — does THIS list of rows need the availability slot reserved at all?
- *
- * The slot's fixed footprint exists so a row does not reflow when an agent
- * starts or stops between refreshes (#2196), and that is worth keeping. What
- * was wrong is paying for it on every row unconditionally: `availabilityChip`
- * returns null for every state except `stopped` and `unavailable`, so on a
- * fleet where everything is running — the normal case — the strip is empty on
- * EVERY row. That produced both halves of the reported defect at once: the
- * dates stopped 72px short of the right edge, and 72px per row came out of the
- * only element that wanted it, the name.
- *
- * The reservation is now a property of the LIST, not of a row: reserve on every
- * row iff any row can actually show a chip. Uniform down the list, so #2580's
- * identical truncation point survives, and free when there is nothing to hold
- * space for.
- *
- * Takes the ROWS BEING RENDERED, not the whole roster — a stopped agent hidden
- * by search or by the collapse limit would otherwise reserve width on a list
- * that shows no chip, which is the original bug with extra steps.
- *
- * Residual, stated rather than discovered: the 0→1 transition (the first agent
- * in view stops) reflows the whole list once, where before it reflowed nothing.
- * That is the honest cost of not charging every row for the empty case, and it
- * is the trade the issue delegates. Within a populated list nothing moves: a
- * second agent stopping, or the first one restarting while another is still
- * stopped, changes only that row's chip.
- */
-export function reservesAvailabilitySlot(rows, opts = {}) {
-  if (!Array.isArray(rows)) return false
-  return rows.some((a) => availabilityChip(a, opts) !== null)
-}
-
 export const EMPTY_REASON_NO_PLAYBOOKS = 'No playbooks are available for this agent right now.'
 export const EMPTY_REASON_NO_PEERS = 'No other agents are shared with you.'
 export const EMPTY_REASON_NO_MENTIONABLE_PEERS =
@@ -1082,11 +1102,12 @@ export const SEARCH_PLACEHOLDER = 'Search agents and chats…'
  */
 export function searchAgents(roster, query, {
   askCounts = {},
+  draftAgents = null,
   expanded = false,
   limit = SIDEBAR_AGENT_RESULT_LIMIT,
 } = {}) {
   const { items } = filterAgentCandidates(roster, query, { requireMentionable: false })
-  const visible = visibleAgentRows(items, { expanded, askCounts, limit })
+  const visible = visibleAgentRows(items, { expanded, askCounts, draftAgents, limit })
   return {
     items,
     visible,
@@ -1615,13 +1636,19 @@ export function expiredLabel(expiresAt, now = Date.now()) {
  * findable, not to restrict where it may be answered — and an ask the reader
  * can see but not reach is the failure this closes, not one it should create.
  */
+//
+// trinity-enterprise#610 (the 09-30 ruling, amended): only for an ask a chat
+// TURN raised (ent#734's `raised_in_turn`, the literal true). A background
+// ask's `chat_id` is Main only as the reply target — it is not drawn there, so
+// a link would send the reader to a chat where the ask is not. Its home is the
+// Inbox.
 export function askThreadLink(ask, currentSessionId = null) {
+  if (ask?.raised_in_turn !== true) return null
   const target = ask?.chat_id
   if (!target) return null
   if (currentSessionId && target === currentSessionId) return null
   return target
 }
-
 
 // ---- ent#365: deliverables ------------------------------------------------
 
@@ -2040,8 +2067,31 @@ export function replyFromHistory(messages, baseline) {
   if (!isNew) return null
   return {
     response: last.content,
-    cost: last.cost ?? null,
     id: last.id || null,
     myRating: last.my_rating || null,
+    // trinity-enterprise#610: the stored time, which places a chat-turn ask
+    // before this reply without the browser's clock (`placeAsksInThread`).
+    at: last.created_at || null,
   }
+}
+
+// trinity-enterprise#610 §3g S4 — the read's optimistic zero, and its rollback.
+// `optimisticRead` zeroes a chat's unread and returns the ENTRY it wrote;
+// `rollbackRead` restores the count only while that very entry is still in
+// the state. Identity, not value: a refresh that replaced the state (the server
+// has spoken since) is left alone, so a late failure never resurrects a count
+// the server already settled. Known limit (round-3 review F6): a second read of
+// an entry that is ALREADY zero writes nothing, so if the first write then
+// fails its rollback restores the count although the second write succeeded —
+// wrong until the next poll (≤20 s), never persisted.
+export function optimisticRead(state, key) {
+  const before = state && state[key]
+  if (!before || !(Number(before.unread) > 0)) return { state, written: null }
+  const entry = { ...before, unread: 0 }
+  return { state: { ...state, [key]: entry }, written: { entry, before } }
+}
+
+export function rollbackRead(state, key, written) {
+  if (!written || !state || state[key] !== written.entry) return state
+  return { ...state, [key]: written.before }
 }

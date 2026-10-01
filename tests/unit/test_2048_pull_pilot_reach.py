@@ -70,7 +70,7 @@ pytestmark = pytest.mark.unit
 _STRANDED: list = []
 # All of them, now.
 _REACHABLE = ["agent", "event", "schedule", "webhook", "reminder", "loop",
-              "fan_out", "a2a", "operator_response"]
+              "fan_out", "a2a", "operator_response", "retry"]
 # Stands in for "a trigger somebody adds without classifying it", so the
 # diagnostic below is still covered now that nothing real trips it.
 _SYNTHETIC_STRANDED = "agent"
@@ -114,15 +114,19 @@ def test_reachable_set_is_what_the_two_queueing_producers_can_actually_emit():
     from services.task_execution_service import _AUTONOMOUS_TRIGGERS
 
     task_route_can_emit = {"self_task", "agent", "mcp", "manual", "event"}
-    scheduler_async_polled = {"schedule", "webhook", "reminder"}
+    # #2845: `retry` is RETRY-001's second attempt, dispatched and polled
+    # exactly like the cron fire it retries.
+    scheduler_async_polled = {"schedule", "webhook", "reminder", "retry"}
     # #2523 / #2524: `loop_service` is advanced by execution terminals and a
     # fan-out's aggregate is a query over `fan_out_id`, so neither dispatch has
     # a synchronous reader either.
     db_joined = {"loop", "fan_out"}
     # #2524: these two DO need the answer in-line, and get it from
     # `dispatch_and_await_terminal` — the sync edge adapter — rather than from
-    # the dispatch's return value.
-    adapter_served = {"a2a", "operator_response"}
+    # the dispatch's return value. trinity-enterprise#611's `operator_ending`
+    # (the wake for a cancelled or expired ask) records the same receipt the
+    # same way.
+    adapter_served = {"a2a", "operator_response", "operator_ending"}
     assert PULL_REACHABLE_TRIGGERS == (
         (task_route_can_emit | scheduler_async_polled | db_joined | adapter_served)
         & _AUTONOMOUS_TRIGGERS
@@ -284,8 +288,8 @@ def test_a_reachable_trigger_is_not_reported(pilot, trigger):
 
 @pytest.mark.parametrize("trigger", ["manual", "mcp", "chat", "self_task", "voip"])
 def test_an_interactive_trigger_is_not_reported(pilot, trigger):
-    """Interactive turns are excluded from pull by design (Open Question 7's
-    scope cut), so they are not a gap and must not be logged as one."""
+    """Interactive turns are excluded from pull until #2842/#2843 land (#1989),
+    so they are a known migration state, not a gap, and must not be logged as one."""
     assert pilot.note_unreachable_pull_trigger("pilot-a", trigger) is False
 
 

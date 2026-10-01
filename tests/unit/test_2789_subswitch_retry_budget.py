@@ -492,36 +492,43 @@ def test_retry_budget_is_logged_with_its_cause(caplog):
 
     from services.task_execution_service import _log_retry_budget
 
+    # Only THIS logger's records: caplog is process-wide, and a background task
+    # left running by an earlier test (order-dependent under a random seed)
+    # can log an unrelated ERROR inside the window — which is how this read
+    # `['ERROR', 'WARNING'] == ['WARNING']` on CI with the code correct.
+    def mine():
+        return [r for r in caplog.records if r.name == "services.task_execution_service"]
+
     with caplog.at_level(logging.INFO):
         _log_retry_budget("agent-x", "reader-race", 300, 3600, ceiling=300.0)
-    assert [r.levelname for r in caplog.records] == ["WARNING"]
-    assert "clamped to 300s" in caplog.records[0].message
+    assert [r.levelname for r in mine()] == ["WARNING"]
+    assert "clamped to 300s" in mine()[0].message
 
     caplog.clear()
     with caplog.at_level(logging.INFO):
         # a spend-bounded retry with zero elapsed is NOT a clamp (review W4)
         _log_retry_budget("agent-x", "subscription-switch", 3590, 3600, elapsed_s=0)
-    assert all("clamped" not in r.message for r in caplog.records)
+    assert all("clamped" not in r.message for r in mine())
 
     caplog.clear()
     with caplog.at_level(logging.INFO):
         _log_retry_budget("agent-x", "subscription-switch", 3570, 3600, elapsed_s=30)
-    assert [r.levelname for r in caplog.records] == ["INFO"], "elapsed time is not a clamp"
-    assert "clamped" not in caplog.records[0].message
-    assert "30s already spent" in caplog.records[0].message
+    assert [r.levelname for r in mine()] == ["INFO"], "elapsed time is not a clamp"
+    assert "clamped" not in mine()[0].message
+    assert "30s already spent" in mine()[0].message
 
     caplog.clear()
     with caplog.at_level(logging.INFO):
         _log_retry_budget("agent-x", "subscription-switch", 120, 3600, elapsed_s=3480)
-    assert [r.levelname for r in caplog.records] == ["WARNING"], "under the ceiling is worth a look"
-    assert "likely hopeless" in caplog.records[0].message
+    assert [r.levelname for r in mine()] == ["WARNING"], "under the ceiling is worth a look"
+    assert "likely hopeless" in mine()[0].message
 
     caplog.clear()
     with caplog.at_level(logging.INFO):
         _log_retry_budget("agent-x", "subscription-switch", 3600, 3600, elapsed_s=0)
-    assert not caplog.records, "a retry that lost nothing must stay quiet"
+    assert not mine(), "a retry that lost nothing must stay quiet"
 
     caplog.clear()
     with caplog.at_level(logging.INFO):
         _log_retry_budget("agent-x", "subscription-switch", 600, None, elapsed_s=30)
-    assert not caplog.records, "no configured limit means nothing was taken away"
+    assert not mine(), "no configured limit means nothing was taken away"

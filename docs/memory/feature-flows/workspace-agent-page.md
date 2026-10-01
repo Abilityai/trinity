@@ -13,7 +13,7 @@
 > | Your chats, What it can do, Reports | `PortalAgentDetails.vue`, in the rail's place |
 > | Canvas, Files | rail tabs since ent#475 |
 > | Recent work, Activity | the rail's Work tab since ent#525 |
-> | asks | the conversation's mount, the surviving one after #2449 |
+> | asks | a chat's own chat-turn asks as tiles in its thread; every agent's asks home is the Inbox (ent#610, 2026-09-30 ruling) |
 > | **Start a chat** | gone — the row opens the chat itself |
 >
 > **Status (original)**: ✅ Implemented (2026-08-13)
@@ -364,6 +364,23 @@ was already live: `_asks` excluded `alert` items while `/asks` includes them, so
 the page already showed them through `<PortalAsks>`; only the duplicate hid
 them.
 
+**An outage is not "nothing waiting" (trinity-enterprise#610 PR A0).**
+"Unreadable-roster fail-closed" above used to mean the ask silently vanished:
+`list_asks` caught every error and returned `[]`, and `fetchAsks` set
+`asks = []` and `asksAvailable = false` on any failure, so a 5xx cleared this
+section and the sidebar badge alike. Now the list raises `AsksUnavailable` (a
+queue-read fault, or a roster that cannot be READ — an agent genuinely off the
+roster is still dropped) and the route answers **503 `asks_unavailable`**. The
+store keeps the last good list on any non-404/403 failure, sets `asksFailed`,
+leaves `asksAvailable` as it was, and latches `asksLoaded` on the first success
+— so `<PortalAsks>` keeps rendering what it last knew instead of blanking.
+A **401** is not an outage but the end of the session: `fetchAsks` calls
+`endSession({expired: true, resumePath})` exactly as the roster fetch does
+(ent#375), because the 20s poll never re-reads the roster and `portalHttp`'s 401
+interceptor acts only for a platform session. A read that resolves after its
+session ended (sign-out, expiry, another client) is dropped, never written.
+The 503 carries `Retry-After: 20`.
+
 ### The Overview row is unconditional, and asks moved below it (#2169)
 
 #2161 put asks and recent work in a grid whose column count was **bound to
@@ -557,6 +574,21 @@ destination" is finally true.
 | UI | `utils/reportPaging.js` | **new** — the one frontend page-size constant, shared with `stores/reports.js` (#2162) |
 
 ## Tests
+
+`tests/unit/test_ent610_asks_unavailable.py` (trinity-enterprise#610 PR A0) — the
+asks list fails loud: a queue-read fault and an unreadable roster each raise
+`AsksUnavailable` and answer **503 `asks_unavailable`**; a clean off-roster agent
+is still dropped with a 200; `answer_ask` stays a uniform 404 on a roster outage;
+the suggestions build still degrades to no ask ids (a guard for the new raise
+path, not a regression test: it also passes on the pre-fix code). The raise and
+roster halves are mutation-tested (revert the raise to `return []`; make
+`_on_roster` swallow again → red).
+`src/frontend/tests/unit/workspaceAsks.spec.js` pins the store half: a 5xx keeps
+the last good list with `asksFailed` set and `asksAvailable` untouched, a 404
+is absence (and resets `asksLoaded`), a success clears the failure, a
+sign-out drops the kept list so the next client never inherits it, a 401 ends a
+portal-token session and drops the list, and a read resolving after sign-out
+writes nothing (each mutation-tested).
 
 `tests/unit/test_ent360_workspace_agent_page.py` — the projections (no
 message/cost/model; alerts excluded; `context` never present, asserted against

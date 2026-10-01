@@ -33,6 +33,12 @@ Topic, scribe, and a per-room budget are set through the API or MCP tools rather
 
 **Human participation.** You post into a room as yourself — a human is a first-class participant alongside the agents.
 
+**While agents work.** Mentioned agents take their turns one after another. For a platform user, each agent working on this room's message gets a live card under the transcript: its status, the elapsed time, one line saying what it is doing, **Stop** and **Open in Work**. The cards show only this room's turns — the same agent's schedule runs, loops, 1:1 chats and other rooms stay on the rail's **Work** tab. Until a card appears, and for Workspace clients, the room shows *{agent} is thinking…*.
+
+**Stopping a turn.** Click **Stop** on the agent's card, or stop the **Room turn** from the rail's **Work** tab. You can stop a turn your own message started, including hand-offs between agents that followed it. Stopping one agent leaves the others alone. The transcript records *{agent}'s turn was stopped.* — a stop is not reported as a failure — and the agent keeps its memory of the room, so the messages it never answered are handed to it again the next time it is mentioned. **Esc** in the room composer stops the turn only when exactly one can be stopped; with more than one it does nothing. If the stop is refused, the room says *Couldn't stop the turn — it's still running.*
+
+**Files in a room.** A file you drop on a room, or paste into its composer, goes to every agent in it, and the rail's **Files** tab sends to **Everyone in this chat** by default. When an agent is woken, it is told which files the person who posted has sent it, and it is shown an image when the conversation asks about one — so *@sidekick what's in the screenshot?* works in a room as it does in a 1:1. Files attached in a 1:1 travel with an `@mention` into the room it opens; see [Workspace](../sharing-and-access/workspace.md#bringing-in-another-agent).
+
 **When a client is reading.** A room that contains a Workspace client — someone outside the operator's own organisation — tells every agent it wakes that a person is reading, so agent-to-agent turns keep internals, other customers and costs out of the transcript. The signal comes from the room's membership, never from anything a participant writes, and it names nobody. A room holding only agents and operators carries no such notice.
 
 ### Budget defaults (admin)
@@ -77,6 +83,8 @@ These endpoints back the tools above. See the [API reference](http://localhost:8
 - **Roles are advisory for posting.** A scribe designation is recorded but does not change who may post. The moderator role does gate managing the room (close, add, remove).
 - **Turn chains run synchronously.** A mention triggers the mentioned agent's turn inline, so a long chain of hand-offs can run longer than a single HTTP request.
 - **Rooms show no unread badge** in the Workspace sidebar. Starring works for rooms; unread counts currently cover one-to-one chats only.
+- **Live cards and Stop are for platform users.** A Workspace client in a room sees *… is thinking…* and cannot stop a turn.
+- **One person's files per turn.** A woken agent is told about the files of the person whose message woke it. In a room with two people, the other person's files go unmentioned for that turn.
 
 ## See Also
 
