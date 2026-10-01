@@ -155,7 +155,7 @@ These tools act on the calling agent's own metrics. An agent-scoped key can read
 
 | Tool | Description |
 |------|-------------|
-| `record_metrics(points, execution_id?)` | Record up to 1,000 points (`{metric, value, ts?, dims?}`) against declared metrics. A point's identity is `(metric, ts, dims)`, so re-sending it deduplicates; a correction is a new `ts`. Pass `execution_id` so a re-delivered turn replays instead of recording twice. Never throws — refusals come back with a reason code per point |
+| `record_metrics(points, execution_id?)` | Record up to 1,000 points (`{metric, value, ts?, dims?}`) against declared metrics. A point's identity is `(metric, ts, dims)`: re-sending the same value deduplicates, and a different value at the same identity corrects the stored point in place (reported as `corrected`). Pass `execution_id` so a re-delivered turn replays instead of recording twice. Never throws — refusals come back with a reason code per point |
 | `refresh_metric_definitions()` | Re-read `template.yaml` and reconcile the registry after you change `metrics:`. Needs the agent running |
 | `get_metrics(metric?, window?, since?, until?)` | Your declared metrics with the latest value, freshness, and a bounded series (up to 120 buckets each). Name one `metric` for its raw points, newest first |
 | `get_objectives()` | Your objectives joined to your metrics: target, actual, freshness, and gap. Use it instead of computing a gap from `get_metrics` |

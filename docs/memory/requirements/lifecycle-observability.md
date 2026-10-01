@@ -1121,10 +1121,12 @@ The same observation posted twice is therefore **one row** with no client key,
 no Redis and no execution id.
 
 `value` is deliberately **outside** the identity: one observation of one metric
-at one instant with one set of dimensions is one fact, so a re-post with a
-different number deduplicates rather than double-counting. **A correction is a
-new `ts`** — this is stated in the tool description because it is the one rule
-an author can get wrong in a way the platform cannot detect.
+at one instant with one set of dimensions is one fact, so the same identity is
+always **one row**. A re-post with the **same** value is a duplicate and writes
+nothing. A re-post with a **different** value is a **correction** and restates
+that row in place (§48.9, trinity-enterprise#729 — ruling R45, which closes
+Q7 of the business-metrics PRD). A correction keeps its `ts`: the `ts` is the
+period the number describes, so the chart stays one point per period.
 
 The on-disk `dims` need not be byte-identical to the canonical form the hash
 was taken over; the canonical form exists so the identity is stable across
@@ -1134,9 +1136,11 @@ clients, and the column's serialisation belongs to the driver.
 
 A batch is 1..1000 points and ≤ 2 MiB encoded, **all-or-nothing**: a caller
 never has to reconcile a partial write against what it meant to send. The 201
-returns `recorded`, `deduplicated` and `replayed` as **separate** counts, plus
-each accepted point's assigned `{index, ts, idempotency_key}` — an "we already
-had this" must not read as a write that happened.
+returns `recorded` (new rows), `corrected` (rows restated, §48.9) and
+`deduplicated` (identical repeats, nothing written) as **separate** counts,
+plus `replayed` and each accepted point's assigned `{index, ts,
+idempotency_key}` — an "we already had this" must not read as a write that
+happened, and a restatement must not read as either.
 
 Two idempotency layers, for two different failures:
 
@@ -1213,6 +1217,13 @@ cross", not "how many did today hold"), which means two concurrent batches can
 each pass and overshoot by at most one batch. That is accepted and documented
 rather than serialised.
 
+A correction (§48.9) keeps its row's `created_at`, so it never adds to "used
+today": the cap counts **rows created**. The pre-check still counts every
+incoming point, exactly as it already does for duplicates, so a batch of
+corrections cannot pass a cap that a batch of new points would cross. Ruled
+2026-10-01 for trinity-enterprise#729: no extra read on the write path.
+Corrections are bounded by the per-agent rate limit, not by the cap.
+
 One audit row per (agent, UTC day) on the **first** refusal — a quota event is
 the security-relevant signal. No row per accepted batch: `audit_log` is
 append-only and undeletable for a year, so that would be up to 86 000
@@ -1249,11 +1260,69 @@ refetch route, and that route is ent#479's); no partial-accept mode; no
 per-point caller-supplied key; no refresh-on-miss inside the write path — the
 remedy is the `refresh_metric_definitions` tool the 422's hint names.
 
+### 48.9 Restatement — a corrected value updates the row (trinity-enterprise#729, R45)
+
+Derived and cross-channel numbers (a funnel end to end, CAC, a weekly total)
+are restated as late data lands. Before this, a corrected value posted at the
+same period close was silently dropped (`recorded: 0, deduplicated: 1`). The
+documented workaround, restating at a new `ts`, plotted the W39 figure at the
+restatement's x-position.
+
+* **A different value at an existing identity updates the row.** The upsert
+  keeps the same conflict target `(agent_name, ts, idempotency_key)` and is
+  `DO UPDATE … WHERE` the stored value `IS DISTINCT FROM` the incoming one. The
+  comparison is null-safe because `value_numeric` or `value_text` is NULL by
+  type. An identical value matches nothing, so nothing is written and the
+  revision is not bumped.
+* **What moves:** `value_numeric` / `value_text`, `revision` (+1),
+  `recorded_at` (the correcting write's clock) and `execution_id`. Provenance
+  follows the write that produced the current value, so it is NULL when the
+  correcting call's execution could not be confirmed. It never credits the run
+  that wrote the replaced number.
+* **What does not move:** `ts` (one row per period), `created_at` (the first
+  write, which the daily cap counts, §48.6), `metric` and `dims`. The
+  identity is the same, so the canonical dims are too.
+* **Freshness does not move.** `last_point_at` is the newest `ts` (§49.1). A
+  restated W39 cannot make a series look freshly measured, and the stale rule
+  is untouched.
+* **No read-path change.** `revision` and `recorded_at` are write-side columns.
+  `get_metrics`, the tiles and the §50 objective join select explicit columns
+  and read a corrected store exactly as they would read a store whose final
+  value had been recorded first. A parity test pins that.
+* **Columns.** `revision BIGINT NOT NULL DEFAULT 0`: existing rows read 0. It is
+  BIGINT because it is a monotonic counter. `recorded_at TEXT` is nullable. The
+  store stamps it on every write (equal to `created_at` on insert). NULL
+  means the row was written before ent#729, and its write time is then
+  `created_at`. Nullable and defaulted so code from before this change can
+  still insert during a rollback.
+* **The write order is defined.** Rows are written in `(ts, idempotency_key)`
+  order, so two overlapping batches lock conflicting rows in the same order on
+  PostgreSQL. The store also refuses two rows with one identity in a single call.
+  The service already rejects that as `duplicate_in_batch`, and the guard makes
+  the PostgreSQL cardinality error unreachable rather than merely unlikely.
+
+**Stated limits** (the contract, not defects to rediscover):
+
+* **Last write wins, by arrival order.** A delayed retry carrying an older
+  value restates the row back to it. No `expected_revision` precondition exists
+  yet.
+* **Restatement is lossy.** The replaced value is not kept, and `revision`
+  counts corrections without recording them.
+* **A replayed batch writes nothing, even after a later correction.**
+  Re-sending a batch identical to an earlier one replays the first result
+  (`replayed: true`) and writes nothing. This applies in the same turn, or under
+  the same client key within 24 h. So `A → B → A` in one turn ends on `B`; to
+  restate back to `A`, send it in a new turn or under a new key.
+
 ### Acceptance
 
 - [x] `record_metrics` records validated points and is the only write path
 - [x] A batch is all-or-nothing with a named reason code per rejected point
 - [x] The same observation posted twice is one row, with or without a key
+- [x] A different value at the same identity restates the row in place
+      (`revision` +1, `recorded_at` set; `ts`, `created_at` and freshness
+      unmoved), and the 201 reports it as `corrected` on REST and MCP
+      (trinity-enterprise#729)
 - [x] A re-delivered turn replays rather than recording twice
 - [x] The daily cap refuses with 429 + `Retry-After` and audits once a day
 - [x] A store outage is retryable and never fails the agent's turn; a rejected

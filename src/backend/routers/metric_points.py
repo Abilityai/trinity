@@ -33,13 +33,20 @@ would turn one malformed batch into a day of silently dropped metrics
 
 The ROW key is the invariant: `sha256(metric \0 ts \0 dims)` is the primary
 key, so the same observation is one row with no client key, no Redis and no
-execution id. The BATCH key is the convenience Invariant #18 asks for: a
+execution id — an identical value is a duplicate, a different one restates the
+row (ent#729). The BATCH key is the convenience Invariant #18 asks for: a
 re-delivered turn replays the first result rather than re-doing the work. When
 no client key is given but `execution_id` resolves to this agent, the batch key
 is derived from the execution — which is what dedups a batch of `ts`-less
 points on a re-delivered turn, since those would otherwise take a fresh
 server-now timestamp and hash to something new. With neither, a retry is a new
 observation, and the tool description says so.
+
+A replay writes nothing, and that now has a visible edge: a batch identical to
+an EARLIER one in the same turn (or under the same client key within 24 h)
+replays the first result even if a correction landed in between, so `A → B →
+A` ends on `B` with `replayed: true`. Stated in §48.9 rather than fixed here —
+fixing it means changing the idempotency model, not this route.
 
 ## Failure classification
 
@@ -316,8 +323,11 @@ async def record_metric_points(
             )
 
     # --- write ---------------------------------------------------------------
+    # Only the CALL sits in the `try`: the counts are read below it, so a shape
+    # error cannot land in `except Exception` and answer a retryable 503 for a
+    # batch that has already committed.
     try:
-        recorded, deduplicated = db.insert_metric_points(name, rows)
+        counts = db.insert_metric_points(name, rows)
     except (OperationalError, DBAPIError) as exc:
         # Connectivity only. `DBAPIError` is checked for its
         # `connection_invalidated` flag so a content error wearing the same
@@ -347,10 +357,16 @@ async def record_metric_points(
             headers={"Retry-After": str(STORE_RETRY_AFTER_SECONDS)},
         )
 
+    if counts.corrected:
+        # History was restated (ent#729): one line per batch, counts only —
+        # never a value or a dimension, which may be a customer's name.
+        logger.info("[Metrics] %s restated %d point(s)", name, counts.corrected)
+
     result = MetricPointsResult(
         agent_name=name,
-        recorded=recorded,
-        deduplicated=deduplicated,
+        recorded=counts.recorded,
+        deduplicated=counts.deduplicated,
+        corrected=counts.corrected,
         replayed=False,
         # The identity the store assigned, so a caller can tell which of its
         # points became which row — and learn the `ts` that was defaulted.

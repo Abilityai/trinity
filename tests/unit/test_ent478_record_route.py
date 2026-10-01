@@ -104,6 +104,8 @@ class _Db:
         self.inserted = []
         self.raise_on_insert = None
         self.raise_on_read = None
+        # What the next insert reports; None = "every row was new".
+        self.counts = None
 
     def list_metric_definitions(self, name, include_retired=False):
         if self.raise_on_read:
@@ -114,10 +116,14 @@ class _Db:
         return min(self.today, limit)
 
     def insert_metric_points(self, name, rows):
+        from db.metric_points import PointWriteCounts
+
         if self.raise_on_insert:
             raise self.raise_on_insert
         self.inserted.append(rows)
-        return (len(rows), 0)
+        if self.counts is not None:
+            return self.counts
+        return PointWriteCounts(recorded=len(rows), deduplicated=0, corrected=0)
 
 
 @pytest.fixture
@@ -211,6 +217,88 @@ def test_a_valid_batch_is_recorded(ctx):
     assert body["recorded"] == 1 and body["deduplicated"] == 0
     assert body["replayed"] is False
     assert body["agent_name"] == AGENT
+
+
+def _hours_ago(hours):
+    """A `ts` relative to the wall clock: the route validates against the real
+    clock and a 365-day window, so a literal date would expire in a year."""
+    from datetime import datetime, timedelta, timezone
+
+    return (datetime.now(timezone.utc) - timedelta(hours=hours)).strftime(
+        "%Y-%m-%dT%H:%M:%SZ")
+
+
+def test_a_restated_point_is_reported_as_corrected_not_deduplicated(ctx):
+    """ent#729: a correction is neither of the two older counts, and reporting
+    it as `deduplicated` is what made a dropped restatement invisible. The
+    counts are asymmetric so a swapped field cannot pass."""
+    from db.metric_points import PointWriteCounts
+
+    ctx.db.counts = PointWriteCounts(recorded=1, deduplicated=2, corrected=3)
+    points = [{"metric": "cycles", "value": h, "ts": _hours_ago(h + 1)}
+              for h in range(6)]
+
+    r = _post(ctx, points=points)
+
+    assert r.status_code == 201, r.text
+    body = r.json()
+    assert (body["recorded"], body["deduplicated"], body["corrected"]) == (1, 2, 3)
+
+
+def test_a_restatement_is_logged_as_a_count_never_a_value(ctx, caplog):
+    import logging
+
+    from db.metric_points import PointWriteCounts
+
+    ctx.db.counts = PointWriteCounts(recorded=0, deduplicated=0, corrected=1)
+    with caplog.at_level(logging.INFO, logger=route_mod.logger.name):
+        _post(ctx, points=[{"metric": "cycles", "value": 98765,
+                            "ts": _hours_ago(1)}])
+
+    lines = [r.getMessage() for r in caplog.records if "restated" in r.getMessage()]
+    assert lines == [f"[Metrics] {AGENT} restated 1 point(s)"]
+    assert "98765" not in caplog.text
+
+
+def test_a_store_result_of_the_wrong_shape_is_not_answered_as_retryable(ctx):
+    """The counts are read OUTSIDE the store `try`: a shape error there would
+    otherwise reach `except Exception` and tell the agent to retry (503 +
+    Retry-After) a batch that had already committed."""
+    ctx.db.counts = (1, 0)
+    r = _post(ctx)
+    assert r.status_code == 500
+    assert "Retry-After" not in r.headers
+
+
+def test_a_snapshot_stored_before_corrected_existed_still_replays(ctx):
+    """Snapshots written by the ent#478 route carry no `corrected`; the model's
+    default is what lets them replay instead of 500ing for 24 hours."""
+    ctx.idem.claims[(f"agent:{AGENT}", _batch_key("old-snap"))] = {
+        "state": "completed",
+        "snapshot": {"success": True, "agent_name": AGENT, "recorded": 1,
+                     "deduplicated": 0, "replayed": False, "points": []},
+    }
+    r = _post(ctx, headers={"Idempotency-Key": "old-snap"})
+
+    assert r.status_code == 201, r.text
+    assert r.json()["replayed"] is True and r.json()["corrected"] == 0
+    assert ctx.db.inserted == []
+
+
+def test_an_identical_batch_after_a_correction_replays_and_writes_nothing(ctx):
+    """The stated limit of §48.9, pinned so it is changed on purpose or not at
+    all: under one client key, A → B → A replays the first A — the store never
+    sees the third batch, so B stands and the receipt says `replayed: true`."""
+    period = _hours_ago(1)
+    a = [{"metric": "cycles", "value": 1, "ts": period}]
+    b = [{"metric": "cycles", "value": 2, "ts": period}]
+
+    _post(ctx, points=a, headers={"Idempotency-Key": "scoreboard"})
+    _post(ctx, points=b, headers={"Idempotency-Key": "scoreboard"})
+    third = _post(ctx, points=a, headers={"Idempotency-Key": "scoreboard"})
+
+    assert third.json()["replayed"] is True
+    assert [rows[0]["value_numeric"] for rows in ctx.db.inserted] == [1.0, 2.0]
 
 
 def test_the_response_returns_the_identity_the_store_assigned(ctx):

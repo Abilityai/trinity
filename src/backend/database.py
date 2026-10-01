@@ -4048,7 +4048,8 @@ class DatabaseManager:
     # -------------------------------------------------------------------------
 
     def insert_metric_points(self, agent_name: str, rows):
-        """Insert validated points; returns `(recorded, deduplicated)`."""
+        """Insert or restate validated points; returns `PointWriteCounts`
+        (`recorded`, `deduplicated`, `corrected` — ent#729)."""
         return self._metric_point_ops.insert_points(agent_name, rows)
 
     def count_metric_points_today(

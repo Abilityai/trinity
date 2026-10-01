@@ -3435,7 +3435,18 @@
         "database",
         "unit"
       ],
-      "description": "The `metric_points` store against real rows on SQLite (and PostgreSQL when TEST_POSTGRES_URL is set). Dedup by the identity primary key with `on_conflict_do_nothing`, `recorded` counted via `.returning` because rowcount is not a portable count across a multi-VALUES DO NOTHING, the write-time daily cap count, and the sweep primitives sharing one predicate. The ts-range chunked prune takes boundary TIES with it, so a timestamp shared by more rows than the chunk size cannot wedge the loop, and is bounded per call. Carries the negative control for what `test_schema_parity` structurally cannot see (a column in the DDL but not in `tables.py`), the JSONB marker-rule translation, a float8 precision check, and facade signature parity."
+      "description": "The `metric_points` store against real rows on SQLite (and PostgreSQL when TEST_POSTGRES_URL is set). Dedup by the identity primary key (a different value restates the one row since ent#729), counts read via `.returning` because rowcount is not a portable count across a multi-VALUES upsert, the write-time daily cap count, and the sweep primitives sharing one predicate. The ts-range chunked prune takes boundary TIES with it, so a timestamp shared by more rows than the chunk size cannot wedge the loop, and is bounded per call. Carries the negative control for what `test_schema_parity` structurally cannot see (a column in the DDL but not in `tables.py`), the JSONB marker-rule translation, a float8 precision check, and facade signature parity."
+    },
+    {
+      "file": "unit/test_ent729_metric_restatement.py",
+      "feature": "abilityai/trinity-enterprise#729",
+      "added": "2026-10-01",
+      "categories": [
+        "backend",
+        "database",
+        "unit"
+      ],
+      "description": "Restatement (R45) against real rows on SQLite and, under `requires_postgres`, PostgreSQL: a different value at an existing (metric, ts, dims) updates the row in place (`revision` +1, `recorded_at` = the correcting write, `execution_id` follows it; `ts`, `created_at` and dims unmoved), an identical value writes nothing, an asymmetric mixed batch counts recorded / deduplicated / corrected separately, and a value moving between the two value columns is still a change (`IS DISTINCT FROM`, mutation-proved against `!=`). The store refuses two rows with one identity and writes in (ts, key) order. The SQLite migration on the ent#478 table shape, a pre-ent#729 INSERT on the new schema, and the Alembic revision upgrading 0085 to head over an existing row on PostgreSQL. Through the real `read_agent_metrics` / `latest_by_metric`: a correction leaves `last_point_at` and `stale` unmoved, and a corrected store reads exactly like a born-correct one with no write-side column on any read."
     },
     {
       "file": "unit/test_ent478_record_route.py",

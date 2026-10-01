@@ -1,0 +1,52 @@
+{
+  "version": "1.2",
+  "date": "2026-10-01",
+  "mode": "daily",
+  "scope": "diff",
+  "branch": "feature/729-metric-restatement",
+  "issue": "abilityai/trinity-enterprise#729",
+  "phases_run": [0, 1, 2, 7, 9, 10, 11, 12, 13, 14],
+  "phases_not_applicable": {
+    "3": "no dependency manifest, lockfile or image install changed on the branch",
+    "4": "no workflow changed",
+    "5": "no Dockerfile or compose file changed",
+    "6": "no webhook, channel, internal or agent-identity route changed; the write route's auth is unchanged",
+    "8": "no shipped skill, template, plugin or settings file changed; the one agent-loaded text changed (the record_metrics tool description) was scanned under Phase 7/8 rules"
+  },
+  "stack_cve_quicklist": [
+    {"component": "all quicklist rows", "verdict": "not in diff scope", "note": "the branch changes no pin; rows carry their last full-run verdicts"}
+  ],
+  "attack_surface": {
+    "new_endpoints": 0,
+    "changed_endpoints": ["POST /api/agents/{name}/metrics/points — a different value at an existing (metric, ts, dims) now restates the stored row instead of deduplicating; 201 gains `corrected`"],
+    "new_mcp_tools": 0,
+    "changed_mcp_tools": ["record_metrics — static description text and one receipt count"],
+    "schema": ["metric_points + revision BIGINT NOT NULL DEFAULT 0, + recorded_at TEXT (SQLite migration metric_points_restatement, Alembic 0086)"],
+    "agent_context_ingress": "unchanged — the receipt carries counts only; the description is static text"
+  },
+  "checks": [
+    {"check": "Auth boundary (Invariant #8)", "result": "unchanged", "evidence": "AuthorizedAgent + self-gate `current_user.agent_name and current_user.agent_name != name` → 403 (routers/metric_points.py:180) before any read; test_2996 census, test_186, test_1310, test_293 green (139 passed)"},
+    {"check": "Cross-agent restatement", "result": "not possible", "evidence": "an agent key may record only as itself (self-gate above); `agent_name` is stamped by the store from the auth-resolved name and a row dict cannot override it (tested)"},
+    {"check": "Store-stamped write-side columns", "result": "clean", "evidence": "`revision` and `recorded_at` are overwritten in insert_points; a smuggled value is ignored (test_a_row_dict_cannot_smuggle_its_own_revision_or_write_time)"},
+    {"check": "SQL injection (A05)", "result": "clean", "evidence": "SQLAlchemy Core upsert with bound parameters; SET/WHERE reference column objects and `excluded.*` only"},
+    {"check": "Failure direction (A10)", "result": "stated", "evidence": "insert_points refuses duplicate identities with ValueError (docstring states why); unreachable from the route because validate_batch refuses `duplicate_in_batch` first (metric_points_service.py:376)"},
+    {"check": "Migration safety", "result": "additive", "evidence": "both columns additive, NOT NULL only with a constant default; no backfill, no rewrite; pre-ent#729 INSERT still succeeds (tested on SQLite and PostgreSQL)"},
+    {"check": "Logging / PII", "result": "clean", "evidence": "one INFO line per batch with corrected > 0: agent name + count; never a value or a dimension (route test asserts the value is absent)"},
+    {"check": "MCP description (#846 class) / concealed instructions", "result": "clean", "evidence": "static text, no per-agent metadata; 0 hits for tag-block / zero-width / bidi Unicode and for injection strings across every changed file"},
+    {"check": "Secrets / enterprise disclosure", "result": "clean", "evidence": "0 secret-prefix hits in added lines; enterprise-docs-guard PATTERN 0 hits over docs/ and CLAUDE.md"}
+  ],
+  "findings": [],
+  "hypotheses": [],
+  "coverage_gaps": [
+    "Enterprise submodule not mounted on this clone: any private caller of db.insert_metric_points (whose return changed from a 2-tuple to a 3-field NamedTuple) was not inspected; GitHub code search returned no hits in the org"
+  ],
+  "accepted_risks": [
+    {"risk": "A shared viewer who may record points may now also restate a past point", "why_accepted": "AuthorizedAgent already admitted shared viewers to this write route, and they could already set the LATEST value (new ts), which is what every tile shows; restating history adds little. Ruled at the ent#729 plan gate (decision #9); the alternative (owner/admin-only humans) also removes recording for shared viewers and connector keys"},
+    {"risk": "Restatement is lossy and last-write-wins", "why_accepted": "the R45 ruling names revision + recorded_at only; documented in requirements §48.9 as a stated limit"},
+    {"risk": "The batch replay layer can swallow a revert (A → B → A under one key/turn ends on B)", "why_accepted": "documented in §48.9 and the tool's idempotency_key description, pinned by a route test; fixing it changes the idempotency model"}
+  ],
+  "supply_chain_summary": {"scanner": "not run — no dependency change in scope"},
+  "filter_stats": {"candidates": 3, "excluded_by_rule": {"5 (missing hardening without concrete vulnerability)": 1}, "accepted_by_design": 2, "reported": 0},
+  "totals": {"critical": 0, "high": 0, "medium": 0, "low": 0},
+  "trend": "first diff run on this branch; prior metric diff runs (ent#671, ent#727) also 0 findings"
+}

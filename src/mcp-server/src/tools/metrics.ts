@@ -108,9 +108,10 @@ export function createMetricsTools(client: TrinityClient, requireApiKey: boolean
         "whole batch is refused and each bad point comes back with a reason code and a fix. " +
         "A metric must be declared in your template.yaml `metrics:` block first — if you get " +
         "`metric_undeclared`, add it there and call refresh_metric_definitions. " +
-        "Identity is (metric, ts, dims): re-sending the same observation is deduplicated " +
-        "rather than double-counted, and a CORRECTION is a new ts, not a new value at the " +
-        "same one. Stamp `ts` yourself (RFC 3339 with an offset, e.g. 2026-09-22T08:00:00Z) " +
+        "Identity is (metric, ts, dims): re-sending the same value is deduplicated rather " +
+        "than double-counted, and a different value at the same (metric, ts, dims) CORRECTS " +
+        "the stored point in place — keep the ts of the period the number describes, and the " +
+        "result counts it as `corrected`. Stamp `ts` yourself (RFC 3339 with an offset, e.g. 2026-09-22T08:00:00Z) " +
         "for an observation about a specific moment; omit it for 'now'. Pass `execution_id` " +
         "(from your Execution Context block) so a re-delivered turn replays instead of " +
         "recording twice — without it, and without `ts`, a retry is a new observation.",
@@ -156,7 +157,9 @@ export function createMetricsTools(client: TrinityClient, requireApiKey: boolean
             "Optional. Re-sending the same batch under the same key returns the FIRST " +
               "result instead of recording again. The key is bound to the batch CONTENT, " +
               "so a different set of points under a reused key is still recorded — you " +
-              "cannot lose data by reusing a key, only by re-sending identical points.",
+              "cannot lose data by reusing a key, only by re-sending identical points. " +
+              "That includes restating a value back after correcting it: an identical " +
+              "earlier batch replays (`replayed: true`, nothing written), so use a new key.",
           ),
         execution_id: z
           .string()
@@ -207,10 +210,13 @@ export function createMetricsTools(client: TrinityClient, requireApiKey: boolean
             {
               success: true,
               agent_name: result.agent_name,
-              // Three separate counts, on purpose: "we already had this" is an
-              // honest outcome and must not read as a write that happened.
+              // Separate counts, on purpose: "we already had this" is an honest
+              // outcome and must not read as a write that happened, and a
+              // restated point (ent#729) is neither. `?? 0`: a backend that
+              // predates corrections can never restate a row.
               recorded: result.recorded,
               deduplicated: result.deduplicated,
+              corrected: result.corrected ?? 0,
               replayed: result.replayed,
               points: result.points,
             },
