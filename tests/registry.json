@@ -676,18 +676,6 @@
       "description": "Tests for business task validation (#294): prompt building (placeholders, truncation, custom prompts), response parsing (JSON, markdown blocks, text fallback, failure indicators), business status mapping, schedule/execution model validation fields, API integration tests"
     },
     {
-      "file": "unit/test_2959_validation_input.py",
-      "feature": "Issue #2959",
-      "added": "2026-10-01",
-      "categories": [
-        "backend",
-        "unit",
-        "scheduler",
-        "validation"
-      ],
-      "description": "VALIDATE-001 input integrity (#2959): drives the real ValidationService with a fake auditor that PASSes only when the run's last-line status is in its prompt. A >10,000-char response validates against its last line (head+tail window); a custom validation_prompt without placeholders still carries the task and response; a full template is honoured and literal braces do not crash; an empty/whitespace/None response records business_status=validation_unavailable before any referee or validator run, files no operator-queue alert and is never a PASS; a validator cannot award itself 'unavailable'."
-    },
-    {
       "file": "test_github_pat.py",
       "feature": "Issue #347",
       "added": "2026-04-16",
@@ -4024,6 +4012,29 @@
         "unit"
       ],
       "description": "Narrow cross-agent metrics read. The one predicate (self or an agent_permissions grant, directional), the hourly-deduped audit of who read whose numbers (source passed, marker set only after the row is written, written anyway when the marker store is down, never raises into the read), and get_objectives resolving an actual from the agent that serves a metric through the READER's grant: fail-closed with no viewer predicate, ambiguity decided before the viewer filter, a server the viewer cannot see treated as not served, local declaration wins; plus the objectives route passing the viewer predicate and auditing each serving agent. The /metrics and /definitions grant gate itself is in test_ent479_metrics_route.py."
+    },
+    {
+      "file": "unit/test_2969_exec_timeout.py",
+      "feature": "#2969",
+      "added": "2026-10-01",
+      "categories": [
+        "backend",
+        "reliability",
+        "unit"
+      ],
+      "description": "execute_command_in_container enforces its timeout: the command (string or argv) is wrapped in an in-container `timeout -k K N`, the call is bounded by asyncio.wait_for so a wedged exec thread frees the caller, the result carries an honest timed_out flag (exit 124/137 only once the bound elapsed), a non-positive timeout is refused, a hanging pre-check hook returns promptly, and (with GNU coreutils) the built argv ends hung, STOPped and TERM-ignoring processes."
+    },
+    {
+      "file": "unit/test_2959_validation_input.py",
+      "feature": "Issue #2959",
+      "added": "2026-10-01",
+      "categories": [
+        "backend",
+        "unit",
+        "scheduler",
+        "validation"
+      ],
+      "description": "VALIDATE-001 input integrity (#2959): drives the real ValidationService with a fake auditor that PASSes only when the run's last-line status is in its prompt. A >10,000-char response validates against its last line (head+tail window); a custom validation_prompt without placeholders still carries the task and response; a full template is honoured and literal braces do not crash; an empty/whitespace/None response records business_status=validation_unavailable before any referee or validator run, files no operator-queue alert and is never a PASS; a validator cannot award itself 'unavailable'."
     },
     {
       "file": "unit/test_2968_chat_is_error.py",
