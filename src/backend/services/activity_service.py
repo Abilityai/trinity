@@ -11,6 +11,7 @@ This service provides centralized activity tracking with:
 import asyncio
 import json
 import logging
+import math
 from typing import Dict, List, Optional, Callable, Any, Set
 from datetime import datetime
 from models import (
@@ -323,11 +324,16 @@ class ActivityService:
 
         # Add context info if present in details
         if details:
-            if "context_used" in details and "context_max" in details:
+            used, maximum = details.get("context_used"), details.get("context_max")
+            # Some runtimes report usage as unknown. Do not fabricate zero or
+            # let optional telemetry prevent successful execution finalization.
+            if (type(used) in (int, float) and type(maximum) in (int, float)
+                    and math.isfinite(used) and math.isfinite(maximum)
+                    and used >= 0 and maximum > 0):
                 event["details"]["context"] = {
-                    "used": details["context_used"],
-                    "max": details["context_max"],
-                    "percentage": round((details["context_used"] / details["context_max"]) * 100, 2)
+                    "used": used,
+                    "max": maximum,
+                    "percentage": round((used / maximum) * 100, 2)
                 }
 
         # Broadcast to main WebSocket manager (UI)
