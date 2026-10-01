@@ -215,7 +215,7 @@ async def update_ops_settings(
                 source="api",
                 actor_user=current_user,
                 actor_ip=request.client.host if request.client else None,
-                endpoint=str(request.url.path),
+                endpoint=request.scope["path"],
                 request_id=getattr(request.state, "request_id", None),
                 # Values are operator config, not secrets, and the whole point is
                 # being able to answer "who shortened retention, to what, when".
@@ -287,7 +287,7 @@ async def reset_ops_settings(
             source="api",
             actor_user=current_user,
             actor_ip=request.client.host if request.client else None,
-            endpoint=str(request.url.path),
+            endpoint=request.scope["path"],
             request_id=getattr(request.state, "request_id", None),
             # Keys and counts only. Unlike /ops/config there is no value worth
             # recording — every one of these is being DELETED, so the durable

@@ -112,6 +112,9 @@ makes this de-dup possible on the subscriber side.
 - `emit_task_terminal_event(agent_name, execution_id, *, terminal_status, summary_or_error, duration_ms, cost)`
   — async, fail-open (whole body try/except-swallowed). Matching-sub gated; recursion-break;
   reads `triggered_by`/`fan_out_id`/`loop_id` (+ duration/cost fallback) from the row once.
+  Passes `chain_depth = row.chain_depth + 1` to each dispatch (#2973) — the finished row is
+  no longer running, so the subscriber's `/task` could not derive it — and the max depth
+  when the row read fails.
 - `spawn_task_terminal_event(...)` — sync strong-ref `asyncio.create_task` wrapper; every
   terminal writer calls this one wrapper (no per-module spawner, no `await`).
 - **Status → event.** `terminal_status == SUCCESS` → `agent.task.completed`; else

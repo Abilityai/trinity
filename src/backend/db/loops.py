@@ -78,6 +78,7 @@ def _loop_row_to_dict(row) -> dict:
         # #2523
         "next_run_at": row["next_run_at"],
         "stop_requested_at": row["stop_requested_at"],
+        "chain_depth": row["chain_depth"],
     }
 
 
@@ -123,6 +124,7 @@ class LoopOperations:
         source_agent_name: Optional[str] = None,
         source_mcp_key_id: Optional[str] = None,
         source_mcp_key_name: Optional[str] = None,
+        chain_depth: Optional[int] = None,
     ) -> dict:
         """Insert a new loop in `queued` status; return its dict snapshot."""
         loop_id = f"loop_{secrets.token_urlsafe(12)}"
@@ -155,6 +157,7 @@ class LoopOperations:
             source_agent_name=source_agent_name,
             source_mcp_key_id=source_mcp_key_id,
             source_mcp_key_name=source_mcp_key_name,
+            chain_depth=chain_depth,
             created_at=now,
             started_at=None,
             completed_at=None,
@@ -188,6 +191,7 @@ class LoopOperations:
             "source_agent_name": source_agent_name,
             "source_mcp_key_id": source_mcp_key_id,
             "source_mcp_key_name": source_mcp_key_name,
+            "chain_depth": chain_depth,
             "created_at": now,
             "started_at": None,
             "completed_at": None,

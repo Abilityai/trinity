@@ -10,7 +10,7 @@ Core REST API endpoints for agent lifecycle management, configuration, files, an
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `/api/agents` | GET | List all agents |
+| `/api/agents` | GET | List all agents. Each row carries `readiness` (`{status, changed_at, source}` for an agent whose owner stamped it `ready` or `calibrating`, otherwise `null`) and `brief_held` — see [Dashboard](../operations/dashboard.md#grid-view) |
 | `/api/agents` | POST | Create agent |
 | `/api/agents/{name}` | GET | Get agent details |
 | `/api/agents/{name}` | DELETE | Delete agent |
@@ -29,6 +29,18 @@ Core REST API endpoints for agent lifecycle management, configuration, files, an
 | `/api/agents/{name}/logs` | GET | Container logs |
 | `/api/agents/{name}/stats` | GET | Live telemetry |
 | `/api/agents/{name}/analytics` | GET | Multi-day execution analytics for the Overview tab (`?window=7d\|14d\|30d`, default `7d`) |
+
+### Metrics and Objectives
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/agents/{name}/metrics` | GET | Declared metrics joined to recorded points, with a freshness verdict per metric. Works for a stopped agent. An agent key reads only its own |
+| `/api/agents/{name}/metrics/points` | POST | Record a batch of metric points (all-or-nothing; accepts `Idempotency-Key`). An agent key records only as itself |
+| `/api/agents/{name}/metrics/definitions` | GET | The declared-metric registry built from `template.yaml` `metrics:` |
+| `/api/agents/{name}/metrics/definitions/refresh` | POST | Re-read `template.yaml` into the registry (agent must be running) |
+| `/api/agents/{name}/objectives` | GET | Objectives joined to metrics — target, actual, freshness, gap. An agent key reads only its own |
+
+See [Dynamic Dashboards → Declared Metrics](../advanced/dynamic-dashboards.md#declared-metrics).
 
 ### Configuration
 

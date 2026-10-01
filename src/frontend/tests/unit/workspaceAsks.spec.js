@@ -424,7 +424,8 @@ describe('the inline-in-chat surface filters by agent NAME', () => {
       new URL('../../src/components/portal/PortalConversation.vue', import.meta.url),
       'utf8',
     )
-    expect(src).toContain('store.asksForAgent(props.agent.name)')
+    // #3115: the strip no longer filters in the conversation — PortalAsks does,
+    // by the NAME it is handed (its own `asksForAgent(props.agentName)`).
     expect(src).not.toContain('store.asksForAgent(props.agent)')
     expect(src).toMatch(/:agent-name="agent\.name"/)
   })

@@ -2336,6 +2336,17 @@ class TestInvariantB02Pull:
         assert obs["oldest_queued_age_seconds"] == 400
         assert (obs["pool_size"], obs["busy_workers"], obs["idle_workers"]) == (3, 1, 2)
 
+    def test_row_waiting_on_its_own_conversation_does_not_fire(self):
+        """#2843: a second turn of a running conversation is skipped by the
+        claim, so it sits queued beside idle workers by design."""
+        meta = {"q0": {"queued_at": _b02_iso(400), "backlog_metadata": "{}",
+                       "conversation_key": "conv-A"}}
+        snap = self._snap(queued_ages=[400], leases=[-600], queued_meta_override=meta)
+        snap.agents[0].running_conversation_keys = {"conv-A"}
+        assert self._check(snap) == []
+        snap.agents[0].running_conversation_keys = {"conv-B"}
+        assert [x.observed_state["kind"] for x in self._check(snap)] == ["queued_not_claimed"]
+
     def test_aged_row_with_full_pool_does_not_fire(self):
         """Every worker mid-turn: queued is the correct state."""
         assert self._check(self._snap(queued_ages=[900], leases=[-60, -60, -60])) == []

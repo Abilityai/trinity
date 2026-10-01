@@ -1,6 +1,44 @@
 {
   "test_files": [
     {
+      "file": "mcp-server/src/tools/monitoring.test.ts",
+      "feature": "ent#707",
+      "added": "2026-09-27",
+      "categories": [
+        "mcp-server",
+        "typescript",
+        "unit",
+        "git-sync",
+        "monitoring"
+      ],
+      "description": "The monitoring MCP tools carry sync health (trinity-enterprise#707); real tool execute() over a fake TrinityClient (requireApiKey=false seam), node:test. get_fleet_health passes each agent's sync block through verbatim, the fleet sync_summary, and the issues strings (where the red-sync recommendation lives) next to the kept issues_count; status is untouched; an agent with no git binding has sync: null as a present key; an older backend without the fields yields null, never undefined. get_fleet_sync_audit is registered in the monitoring group with no parameters, reads the audit once and returns it unchanged, and turns a backend failure into a structured {success:false} result; its TOOL_ACCESS_POLICY row is kind none, naming accessible_agent_names (decision D12)."
+    },
+    {
+      "file": "unit/test_fleet_sync_audit.py",
+      "feature": "#390, ent#707",
+      "added": "2026-09-27",
+      "categories": [
+        "backend",
+        "unit",
+        "git-sync",
+        "api"
+      ],
+      "description": "The fleet sync audit (GET /api/fleet/sync-audit, MCP get_fleet_sync_audit) on a real DB via db_harness. #390: find_duplicate_bindings flags agents sharing (github_repo, working_branch) with source-mode rows excluded; build_fleet_sync_audit on an empty fleet, a clean agent, a duplicate pair, unpushed_commits from ahead_working, and the accessible-name filter. trinity-enterprise#707: every pre-#707 entry key keeps its meaning and the entry adds ahead / behind / dirty_files / diverged_since / divergence_age_s / last_successful_push_at / state / reason / recommendation / binding / auto_sync_enabled / frozen (a work agent diverged 7 ahead for 26 h is red + frozen); dirty_tree comes from dirty_files and drives the summary's in_sync / dirty; the summary adds diverged / frozen / auto_sync_off / red over a mixed fleet; an agent never observed is unknown with null counts and the old unpushed_commits fallback; no raw git error text anywhere in the result (seeded marker) while the recommendation still reads it."
+    },
+    {
+      "file": "unit/test_ent707_fleet_health_sync.py",
+      "feature": "ent#707",
+      "added": "2026-09-27",
+      "categories": [
+        "backend",
+        "unit",
+        "git-sync",
+        "monitoring",
+        "api"
+      ],
+      "description": "GET /api/monitoring/status carries each agent's git sync health (trinity-enterprise#707); real DB via db_harness, handler called directly with Docker/Redis/accessibility stubbed on the module the handler resolves them from. Each git-bound agent has a sync block (binding, auto_sync_enabled, ahead, behind, dirty_files, last_successful_push_at, divergence_age_s, state, reason, recommendation, frozen) — a work agent diverged 7 ahead for 26 h is red + frozen with the policy's reason; an agent with no git binding reports sync null (null in the JSON, not absent); a bound agent never observed is unknown with null counts. sync_summary totals {git_bound, diverged, frozen, auto_sync_off, dirty, red, yellow} over a seeded mixed fleet. A red agent gains exactly one issues[] entry 'sync: <reason> — <recommendation>'; a yellow one none. Sync never moves status or the health counts. A non-admin sees only accessible agents and their totals. No raw git error text anywhere in the payload (seeded marker), while the recommendation still reads the error. A sync-reader fault degrades to sync null / sync_summary null and leaves the health summary intact (not the aggregation-failed branch). The view layer (sync_view) keeps git stderr out of reason and freeze_reason for every surface; a denied push still recommends 'credential is read-only'."
+    },
+    {
       "file": "unit/test_ent706_sync_health_surfaces.py",
       "feature": "ent#706",
       "added": "2026-09-27",
@@ -127,6 +165,18 @@
         "mcp-keys"
       ],
       "description": "Creating an MCP key requires a signed-in session: POST /api/mcp/keys (every scope) and POST /api/mcp/keys/ensure-default through the REAL get_current_user with seeded agent/system/connector/user key rows -> 403 and mcp_api_keys row count unchanged, no key_create audit row; JWT -> 200 with the secret and one key_create audit row (ensure-default included, target = new key id); admin JWT still creates ops/portal_delegate; non-admin JWT portal_delegate still 403; a user-scoped key asking an admin scope 403; existing user key -> ensure-default returns null, creates and audits nothing; the created key validates as its owner."
+    },
+    {
+      "file": "unit/test_mcp_key_listing_requires_session.py",
+      "feature": "ent#712",
+      "added": "2026-09-28",
+      "categories": [
+        "backend",
+        "auth",
+        "security",
+        "mcp-keys"
+      ],
+      "description": "GET /api/mcp/keys requires a signed-in session (INTERACTIVE, Depends(require_interactive)): agent/system/connector/user keys through the REAL get_current_user with seeded key rows, and connector/loopback-JWT/ops/portal_delegate/unknown-future-scope/missing-mcp_scope via an explicit principal dataclass -> 403. Signed-in admin -> every key with user_email (never the secret); signed-in user -> own keys only. Every route in routers/mcp_keys.py read off the router object and listed with its rule; a single-key read stays owner-scoped; /validate needs no session."
     },
     {
       "file": "unit/test_ent600_telegram_group_context.py",
@@ -3866,6 +3916,39 @@
         "guard"
       ],
       "description": "Route census, live side: imports main in a SUBPROCESS and checks every registered non-enterprise APIRoute maps to a key the AST census found, and every stored METHOD /full/path (baseline + reviewed tables) is what the app registers (rule 7). Fails, never skips, on a failed import, unparseable output or zero routes."
+    },
+    {
+      "file": "unit/test_2973_depth_new_roots.py",
+      "feature": "#2973",
+      "added": "2026-09-30",
+      "categories": [
+        "backend",
+        "scheduler",
+        "security"
+      ],
+      "description": "Loop start, manual schedule trigger and agent event emit inherit the inter-agent chain depth (#2806) through their real routes with a minted agent bearer; loopback JWT claim, terminal-event depth, scheduler origin/insert/retry."
+    },
+    {
+      "file": "unit/test_2973_event_dispatch_budget.py",
+      "feature": "#2973",
+      "added": "2026-09-30",
+      "categories": [
+        "backend",
+        "security"
+      ],
+      "description": "Per source->subscriber hourly event-dispatch budget (fakeredis): cap, pair keying, no cross-source starvation, one alert per window, TTL always set, fail-open."
+    },
+    {
+      "file": "unit/test_ent727_cross_agent_metrics.py",
+      "feature": "abilityai/trinity-enterprise#727",
+      "added": "2026-09-30",
+      "categories": [
+        "backend",
+        "api",
+        "security",
+        "unit"
+      ],
+      "description": "Narrow cross-agent metrics read. The one predicate (self or an agent_permissions grant, directional), the hourly-deduped audit of who read whose numbers (source passed, marker set only after the row is written, written anyway when the marker store is down, never raises into the read), and get_objectives resolving an actual from the agent that serves a metric through the READER's grant: fail-closed with no viewer predicate, ambiguity decided before the viewer filter, a server the viewer cannot see treated as not served, local declaration wins; plus the objectives route passing the viewer predicate and auditing each serving agent. The /metrics and /definitions grant gate itself is in test_ent479_metrics_route.py."
     }
   ]
 }

@@ -1140,6 +1140,43 @@ carry the identifier with the flag and let the consumer still refuse an empty on
 **Flow**: [workspace-agents-at-the-centre.md](../feature-flows/workspace-agents-at-the-centre.md) ·
 **Requirements**: `requirements/core-agent.md` §5.23, §5.30
 
+## Projects — the Workspace surface (ent#661)
+
+A project links the chats and rooms where a piece of work happens. The record,
+its rules and its agent-facing reads live in a private module; what ships here
+is the edition-agnostic surface it plugs into:
+
+- **Capability** — `PortalRoster.projects_available` (`_projects_available`):
+  entitled AND (`is_platform` OR invited, via `services/portal_capabilities.py`),
+  so an uninvited outside client is never told it exists; the store raises
+  `projectsAvailable` only on a strict `=== true` (#2128).
+- **Routes** — `/workspace/projects` and `/workspace/projects/:projectId`
+  render `components/portal/projects/PortalProjects.vue` in the `Portal.vue`
+  stage, placed BEFORE the conversation branch (`activeAgent` defaults to the
+  first roster entry, so a fall-through would open that agent's chat under a
+  projects URL). Both are rail-free pages (`railFreePage`).
+- **Rail tab** — `projects`, door `AUDIENCE` plus `capability: 'projects'`.
+  `tabPassesDoor` checks a declared capability fail-closed against
+  `session.capabilities`, so a session without it — including a platform
+  session on a build without the module — sees exactly the tabs it saw before.
+- **Project page (v2)** — `OverflowTabs` over Overview / Tasks
+  (`ProjectTasks.vue`) / Log (`ProjectLog.vue`) / Files & reports
+  (`ProjectMaterial.vue`, reusing `ReportRenderer`). An invited guest gets one
+  narrow view (the server omits the log, tasks, decisions and members); the
+  controls it cannot use are absent, not disabled. `ProjectImportModal.vue`
+  imports a folder project once.
+- **Chat and room header** — `ProjectChatControls.vue` (`kind` thread|room):
+  the project badge + Detach, or one "Project" button (add to a project, or —
+  for a 1:1 chat — make one from it). **Wrap up** in a linked chat sends the
+  agent a fixed instruction through the conversation's own `send()`, so the
+  request is visible and the log entries are the agent's. A guest gets the
+  badge and Detach only. Never in Main, never before the chat exists.
+- **Store** — `stores/projects.js` on `portalHttp` + the portal auth header;
+  loading = no verdict yet, a failed refresh keeps the rows (ent#253).
+- **Turn line** — through `services/turn_context.py`; the owner-consent ask
+  through `ask_service.raise_ask(addressee=...)` and an ending observer, so
+  it renders in the existing asks UI with no new component.
+
 ## The Tandem layer — a brief lands in Main, a room says who is reading, a complaint reaches the operator (ent#498, ent#363, ent#499)
 
 Three small features that only make sense once Main exists (ent#523).

@@ -160,11 +160,17 @@ def test_the_job_running_pr_code_has_no_write_token():
         f"the PR-code job gained scope beyond contents:read: {test_perms}"
     )
 
+    # #3103: the one permitted checkout is the trusted verdict module, pinned
+    # to this workflow's own commit and sparse to scripts/ci — never PR code.
     comment = _doc()["jobs"]["comment"]
-    steps = str(comment["steps"])
-    assert "actions/checkout" not in steps, (
-        "the write-scoped comment job must not check out PR code"
-    )
+    for step in comment["steps"]:
+        if str(step.get("uses", "")).startswith("actions/checkout"):
+            w = step.get("with") or {}
+            assert w.get("ref") == "${{ github.sha }}", (
+                "the write-scoped comment job must not check out PR code"
+            )
+            assert w.get("persist-credentials") is False
+            assert w.get("sparse-checkout") == "scripts/ci"
 
 
 def test_the_job_running_pr_code_holds_no_secrets():

@@ -244,6 +244,12 @@ class SharingMixin:
         if not normalized:
             return False
         user = self._user_ops.get_user_by_email(normalized)
+        # ent#720: a suspended account reaches nothing by channel either. The
+        # web path refuses it in `get_current_user`; the channel gates (Telegram,
+        # WhatsApp, the MCP inline redeemer) come here instead, and used to skip
+        # the check — a share to a suspended person's address kept working.
+        if user and user.get("suspended_at"):
+            return False
         if user:
             if user.get("role") == "admin":
                 return True

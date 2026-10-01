@@ -69,6 +69,8 @@
       </div>
 
       <div class="flex items-center gap-1 shrink-0" :class="{ 'ml-auto': !notice }">
+        <!-- ent#661: the room's project — badge + Detach, or "Add to a project". -->
+        <ProjectChatControls kind="room" :target-id="roomId" @open-project="(id) => emit('open-project', id)" />
         <!-- ent#359 AC #4: star from the header, same as a 1:1. -->
         <PortalStarButton
           :starred="starred"
@@ -383,6 +385,7 @@
  * ONE execution id, and a room turn wakes N agents. Merging N live streams is
  * its own design; until then the seq cursor is the honest mechanism.
  */
+import ProjectChatControls from './projects/ProjectChatControls.vue'
 import { ref, computed, watch, nextTick, onMounted, onBeforeUnmount } from 'vue'
 import { useClientPortalStore } from '@/stores/clientPortal'
 import { budgetNotice } from '@/utils/roomBudgets'
@@ -441,7 +444,7 @@ const props = defineProps({
   // room id there so it cannot follow the reader into another conversation.
   carryNotice: { type: Object, default: null },
 })
-const emit = defineEmits(['open-menu', 'rooms-changed', 'toggle-star', 'participants-changed', 'work-state', 'open-work', 'dismiss-carry-notice'])
+const emit = defineEmits(['open-menu', 'rooms-changed', 'toggle-star', 'participants-changed', 'work-state', 'open-work', 'dismiss-carry-notice', 'open-project'])
 
 const store = useClientPortalStore()
 

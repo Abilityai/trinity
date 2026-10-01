@@ -4231,6 +4231,25 @@ def _migrate_execution_chain_depth(cursor, conn):
     conn.commit()
 
 
+def _migrate_loop_chain_depth(cursor, conn):
+    """#2973 — the inter-agent chain depth a loop inherits from its starter.
+
+    Captured when an agent principal starts the loop and stamped on every
+    iteration's execution row, because later iterations run after the
+    starter's own turn has ended and its running rows can no longer be read.
+    NULL on a loop started by a human (a root). Nullable, no backfill.
+
+    Mirrored by the Alembic revision 0084_agent_loops_chain_depth.
+    """
+    _safe_add_column(
+        cursor,
+        "agent_loops",
+        "chain_depth",
+        "ALTER TABLE agent_loops ADD COLUMN chain_depth INTEGER",
+    )
+    conn.commit()
+
+
 def _migrate_agent_canvas_shares_table(cursor, conn):
     """ent#554 — share links for a canvas.
 
@@ -4693,7 +4712,7 @@ def _migrate_seat_ask_class_state_table(cursor, conn):
     (`autonomy_dial_service.LEVEL_KEY`). The live conjuncts (level, the agent's
     autonomy switch, the clock) are read, never written.
 
-    Mirrored by the Alembic revision 0083_seat_ask_class_state.
+    Mirrored by the Alembic revision 0087_seat_ask_class_state.
     """
     cursor.execute(
         """
@@ -4816,6 +4835,91 @@ def _migrate_portal_messages_unread_index(cursor, conn):
         "CREATE INDEX IF NOT EXISTS idx_portal_messages_unread "
         "ON enterprise_portal_messages(client_email, role, session_id, created_at)"
     )
+
+
+def _migrate_execution_conversation_key(cursor, conn):
+    """#2843 — one turn per conversation at a time on the pull queue.
+
+    `schedule_executions.conversation_key` names the conversation a queued turn
+    continues; the partial unique index allows at most one `running` row per
+    (agent, key). Nullable, no backfill: existing rows carry no guard.
+    PostgreSQL half: Alembic `0083_execution_conversation_key`.
+    """
+    _safe_add_column(
+        cursor,
+        "schedule_executions",
+        "conversation_key",
+        "ALTER TABLE schedule_executions ADD COLUMN conversation_key TEXT",
+    )
+    cursor.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_executions_one_running_turn "
+        "ON schedule_executions(agent_name, conversation_key) "
+        "WHERE status = 'running' AND conversation_key IS NOT NULL"
+    )
+    conn.commit()
+
+
+def _migrate_ent720_email_identity(cursor, conn):
+    """trinity-enterprise#720 — a sign-in email is unique, and a code has a purpose.
+
+    1. `email_login_codes.purpose` (NULL = sign-in; `email_bind:<user id>` for
+       the mailbox proof a bind now requires).
+    2. Resolve pre-existing duplicate `users.email` values, then add
+       `idx_users_email_unique ON users(lower(email)) WHERE email IS NOT NULL`.
+       Blank addresses become NULL first (they would collide under the index).
+       Per lower-cased address the EARLIEST-created account keeps it; the others
+       are set to NULL and named by USERNAME only in the log — the address itself
+       never is. Duplicates only exist because nothing stopped them; the oldest
+       row is the original owner.
+
+    Idempotent; a fresh install whose tables do not exist yet on the first pass
+    gets both from `db/schema.py`. PostgreSQL half: Alembic
+    `0085_ent720_email_identity` (same decision function, `resolve_duplicate_emails`).
+    """
+    cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='email_login_codes'")
+    if cursor.fetchone():
+        cursor.execute("PRAGMA table_info(email_login_codes)")
+        if "purpose" not in {r[1] for r in cursor.fetchall()}:
+            cursor.execute("ALTER TABLE email_login_codes ADD COLUMN purpose TEXT")
+
+    cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='users'")
+    if not cursor.fetchone():
+        return
+    cursor.execute("UPDATE users SET email = NULL WHERE email IS NOT NULL AND TRIM(email) = ''")
+    # Every real `users` table carries username + created_at; a reduced legacy
+    # shape (the #1160 boot fixture) lacks them, so read them only when present.
+    cursor.execute("PRAGMA table_info(users)")
+    cols = {r[1] for r in cursor.fetchall()}
+    name_col = "username" if "username" in cols else "CAST(id AS TEXT)"
+    created_col = "created_at" if "created_at" in cols else "''"
+    cursor.execute(
+        f"SELECT id, {name_col}, email, {created_col} FROM users WHERE email IS NOT NULL")
+    losers = resolve_duplicate_emails(cursor.fetchall())
+    for user_id, username in losers:
+        cursor.execute("UPDATE users SET email = NULL WHERE id = ?", (user_id,))
+        print(f"[ent#720] duplicate sign-in email: cleared on account '{username}' "
+              "(an earlier account holds it)")
+    cursor.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email_unique "
+        "ON users(lower(email)) WHERE email IS NOT NULL"
+    )
+
+
+def resolve_duplicate_emails(rows):
+    """[(id, username, email, created_at)] → [(id, username)] that must LOSE
+    their email: per lower-cased address, all but the earliest-created account
+    (ties broken by the lower id). Shared by both migration tracks (ent#720)."""
+    groups = {}
+    for user_id, username, email, created_at in rows:
+        groups.setdefault((email or "").strip().lower(), []).append(
+            (created_at or "", user_id, username))
+    losers = []
+    for key, members in groups.items():
+        if not key or len(members) < 2:
+            continue
+        members.sort()
+        losers += [(uid, uname) for _, uid, uname in members[1:]]
+    return losers
 
 
 def _migrate_agent_skill_sets(cursor, conn):
@@ -5091,5 +5195,8 @@ MIGRATIONS = [
     ("agent_skill_sets", _migrate_agent_skill_sets),
     ("portal_messages_unread_index", _migrate_portal_messages_unread_index),
     ("agent_sync_state_divergence", _migrate_agent_sync_state_divergence),
+    ("execution_conversation_key", _migrate_execution_conversation_key),
+    ("loop_chain_depth", _migrate_loop_chain_depth),
+    ("ent720_email_identity", _migrate_ent720_email_identity),
     ("seat_ask_class_state_table", _migrate_seat_ask_class_state_table),
 ]

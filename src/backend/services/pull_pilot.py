@@ -117,6 +117,15 @@ PULL_REACHABLE_TRIGGERS = frozenset(
 )
 
 
+# Triggers with a person waiting on the reply. A pull worker claims these ahead
+# of every other queued row (#2842). ⚠️ Adding a human-facing trigger? Add it
+# here, or its turns queue behind batch work.
+INTERACTIVE_TRIGGERS = frozenset(
+    {"manual", "mcp", "chat", "session", "public", "voice", "voip", "room",
+     "user", "paid", "slack", "telegram", "whatsapp"}
+)
+
+
 def pull_owns_dispatch(agent_name: str, triggered_by: Optional[str]) -> bool:
     """True when this ``(agent, trigger)`` pair must reach the agent ONLY by the
     agent claiming it from the durable queue — the backend neither pushes it nor
@@ -137,12 +146,10 @@ def pull_owns_dispatch(agent_name: str, triggered_by: Optional[str]) -> bool:
     push path and today's Redis session lock. ``TARGET_ARCHITECTURE.md`` Open
     Question 7 is decided the other way (#1989): the queue carries ALL traffic,
     interactive included, and the push path is deleted afterwards. The exclusion
-    is a migration state, not a design boundary, and it stays load-bearing until
-    two pieces land: interactive turns claimed ahead of autonomous ones (#2842) —
-    otherwise one FIFO ordered by ``queued_at`` parks a human turn behind N batch
-    tasks — and one turn per conversation at a time (#2843) — otherwise N
-    competing workers can claim two turns of one session concurrently, the
-    concurrent ``--resume`` on one JSONL the session lock exists to prevent.
+    is a migration state, not a design boundary. Its two prerequisites are in
+    the claim: interactive turns go first (#2842, ``INTERACTIVE_TRIGGERS``) and
+    one turn per conversation runs at a time (#2843, ``conversation_key``). What
+    remains is routing the interactive producers onto the queue.
 
     Fail-safe: any error resolving the trigger set returns ``False``, i.e. the
     unchanged push behaviour. The dangerous direction would be silently claiming

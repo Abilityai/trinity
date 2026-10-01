@@ -320,6 +320,18 @@ export function parseDepthRefusal(
   }
 }
 
+/**
+ * #2973: the `DepthRefusal` a thrown `ApiError` carries, or undefined. For the
+ * tools whose backend routes let the refusal propagate (loop start, schedule
+ * trigger, event emit) — each renders it as a result, like chat does.
+ */
+export function depthRefusalFromError(
+  error: unknown,
+  agent: string,
+): DepthRefusal | undefined {
+  return error instanceof ApiError ? parseDepthRefusal(error.status, error.body, agent) : undefined;
+}
+
 /** #2806: type guard for the refusal, shared by every tool that dispatches. */
 export function isDepthRefusal(value: unknown): value is DepthRefusal {
   return (value as { status?: unknown })?.status === INTER_AGENT_DEPTH_EXCEEDED;
@@ -327,6 +339,32 @@ export function isDepthRefusal(value: unknown): value is DepthRefusal {
 
 /** Bound for #848 inline-auth control-plane calls (not chat). */
 const INLINE_AUTH_TIMEOUT_MS = Number(process.env.MCP_INLINE_AUTH_TIMEOUT_MS || 15000);
+
+/** One agent's git sync health on fleet health (trinity-enterprise#707). */
+export interface FleetAgentSync {
+  binding: "agent" | "deployment";
+  auto_sync_enabled: boolean;
+  ahead: number | null;
+  behind: number | null;
+  dirty_files: number | null;
+  last_successful_push_at: string | null;
+  divergence_age_s: number | null;
+  state: "green" | "yellow" | "red" | "unknown";
+  reason: string;
+  recommendation: string | null;
+  frozen: boolean;
+}
+
+/** Fleet sync totals over the caller's git-bound agents (trinity-enterprise#707). */
+export interface FleetSyncSummary {
+  git_bound: number;
+  diverged: number;
+  frozen: number;
+  auto_sync_off: number;
+  dirty: number;
+  red: number;
+  yellow: number;
+}
 
 export class TrinityClient {
   private baseUrl: string;
@@ -2040,6 +2078,7 @@ export class TrinityClient {
       // the backend validates the address against the agent's roster and
       // resolves the chat itself.
       audience_email?: string;
+      to?: "primary" | "approver" | "viewer" | "operator";
       execution_id?: string;
     }
   ): Promise<{
@@ -2350,11 +2389,16 @@ export class TrinityClient {
    * receipt on a new ask and 200 with the first receipt on a replay. A refusal
    * (422 / 429 / 403) is thrown as an ApiError carrying the named code.
    */
-  async raiseAsk(agentName: string, body: OperatorAskCreate): Promise<OperatorAskReceipt> {
+  async raiseAsk(agentName: string, body: OperatorAskCreate, turn?: string): Promise<OperatorAskReceipt> {
+    // ent#661 v3: the raising turn as the platform saw it (#2392), so an ask
+    // raised in a project chat is found on the project.
     return this.request<OperatorAskReceipt>(
       "POST",
       `/api/agents/${encodeURIComponent(agentName)}/operator-queue`,
       body,
+      false,
+      undefined,
+      turn ? { "X-Trinity-Execution-Id": turn } : undefined,
     );
   }
 
@@ -2421,7 +2465,8 @@ export class TrinityClient {
   async sendUserMessage(
     agentName: string,
     data: {
-      recipient_email: string;
+      recipient_email?: string;
+      to?: "primary" | "approver" | "viewer";
       text: string;
       channel?: "auto" | "telegram" | "slack" | "web";
       reply_to_thread?: boolean;
@@ -2854,9 +2899,24 @@ export class TrinityClient {
       runtime_available?: boolean;
       last_check_at?: string;
       issues: string[];
+      // trinity-enterprise#707: null when the agent has no git binding.
+      sync?: FleetAgentSync | null;
     }>;
+    sync_summary?: FleetSyncSummary | null;
   }> {
     return this.request("GET", "/api/monitoring/status");
+  }
+
+  /**
+   * Fleet git sync audit (#390, trinity-enterprise#707): per-agent sync state,
+   * the divergence columns and the policy's verdict. The backend scopes the
+   * rows to the caller's accessible agents (admins: all).
+   */
+  async getFleetSyncAudit(): Promise<{
+    agents: Array<Record<string, unknown>>;
+    summary: Record<string, number>;
+  }> {
+    return this.request("GET", "/api/fleet/sync-audit");
   }
 
   /**
@@ -3647,6 +3707,75 @@ export class TrinityClient {
     execution_id?: string;
   }): Promise<{ name: string; kind: string; value: string }> {
     return this.request("POST", "/api/enterprise/credential-vault/fetch", body);
+  }
+
+  // --- Workspace Projects (trinity-enterprise#661) ---------------------------
+  // Agent-key routes: only projects the calling agent is ACTIVE on, and only in
+  // a turn whose audience is internal. `turn` is the platform-supplied
+  // X-Trinity-Execution-Id of THIS request (#2392) — the backend decides the
+  // audience from that row, so it is forwarded, never chosen by the tool.
+
+  private projectRequest<T>(method: string, path: string, turn?: string, body?: unknown): Promise<T> {
+    return this.request<T>(method, path, body, false, undefined, turn ? { "X-Trinity-Execution-Id": turn } : undefined);
+  }
+
+  private projectPath(projectId: string, tail = ""): string {
+    return `/api/enterprise/projects/agent/projects/${encodeURIComponent(projectId)}${tail}`;
+  }
+
+  /** List the projects the calling key's agent works on. */
+  async listMyProjects(turn?: string): Promise<Array<Record<string, unknown>>> {
+    const res = await this.projectRequest<{ projects: Array<Record<string, unknown>> }>(
+      "GET", "/api/enterprise/projects/agent/projects", turn);
+    return res.projects;
+  }
+
+  /** Read one project the calling key's agent works on (uniform 404 otherwise). */
+  async getMyProject(projectId: string, turn?: string): Promise<Record<string, unknown>> {
+    return this.projectRequest("GET", this.projectPath(projectId), turn);
+  }
+
+  async listProjectTasks(projectId: string, status = "open", turn?: string): Promise<Array<Record<string, unknown>>> {
+    const res = await this.projectRequest<{ tasks: Array<Record<string, unknown>> }>(
+      "GET", this.projectPath(projectId, `/tasks?status=${encodeURIComponent(status)}`), turn);
+    return res.tasks;
+  }
+
+  async createProjectTask(projectId: string, body: Record<string, unknown>, turn?: string): Promise<Record<string, unknown>> {
+    return this.projectRequest("POST", this.projectPath(projectId, "/tasks"), turn, body);
+  }
+
+  async updateProjectTask(projectId: string, taskId: string, body: Record<string, unknown>, turn?: string): Promise<Record<string, unknown>> {
+    return this.projectRequest("PATCH", this.projectPath(projectId, `/tasks/${encodeURIComponent(taskId)}`), turn, body);
+  }
+
+  async addProjectTaskNote(projectId: string, taskId: string, body: string, turn?: string): Promise<Record<string, unknown>> {
+    return this.projectRequest("POST", this.projectPath(projectId, `/tasks/${encodeURIComponent(taskId)}/log`), turn, { body });
+  }
+
+  async getProjectLog(projectId: string, limit = 50, turn?: string): Promise<Array<Record<string, unknown>>> {
+    const res = await this.projectRequest<{ entries: Array<Record<string, unknown>> }>(
+      "GET", this.projectPath(projectId, `/log?limit=${limit}`), turn);
+    return res.entries;
+  }
+
+  async addProjectLogEntry(projectId: string, body: Record<string, unknown>, turn?: string): Promise<Record<string, unknown>> {
+    return this.projectRequest("POST", this.projectPath(projectId, "/log"), turn, body);
+  }
+
+  async linkToProject(projectId: string, body: Record<string, unknown>, turn?: string): Promise<Record<string, unknown>> {
+    return this.projectRequest("POST", this.projectPath(projectId, "/items"), turn, body);
+  }
+
+  // v3: the steward's digest and health.
+  async getStewardDigest(turn?: string): Promise<Array<Record<string, unknown>>> {
+    const res = await this.projectRequest<{ projects: Array<Record<string, unknown>> }>(
+      "GET", "/api/enterprise/projects/agent/stewarding", turn);
+    return res.projects;
+  }
+
+  async setProjectHealth(projectId: string, body: Record<string, unknown>, turn?: string): Promise<Record<string, unknown>> {
+    return this.projectRequest("POST", this.projectPath(projectId, "/health"), turn, body);
   }
 
   // --- Role assignments (trinity-enterprise#500) ----------------------------

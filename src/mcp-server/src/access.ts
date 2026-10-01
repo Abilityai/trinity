@@ -310,7 +310,10 @@ export const TOOL_ACCESS_POLICY: Readonly<Record<string, ToolAccessPolicy>> = {
   report: { kind: "none", why: "self-published; the backend self-gates the path agent (#918)" },
   record_metrics: { kind: "none", why: "self-recorded; the backend self-gates the path agent (ent#478)" },
   refresh_metric_definitions: { kind: "none", why: "self-scoped; reconciles the calling agent's own template (ent#478)" },
-  get_metrics: { kind: "none", why: "self-scoped read; the backend self-gates the path agent (ent#479)" },
+  // ent#727: `agent` is the cross-agent read. Unlike the `baselined` rows, the
+  // backend RE-CHECKS this edge (routers/agent_files.py `_metric_read_gate`),
+  // so this route is closed for ent#629's purposes, not on its work list.
+  get_metrics: { kind: "enforce", param: "agent" },
   get_objectives: { kind: "none", why: "self-scoped read; the backend self-gates the path agent (ent#666)" },
   list_reports: { kind: "in-tool", how: REPORTS_GATE },
   get_report: { kind: "in-tool", how: "reports.ts resolves the report's agent, then " + REPORTS_GATE },
@@ -334,6 +337,10 @@ export const TOOL_ACCESS_POLICY: Readonly<Record<string, ToolAccessPolicy>> = {
   delete_subscription: { kind: "none", why: "a subscription name, not an agent" },
   // --- monitoring.ts ---
   get_fleet_health: { kind: "none", why: "no agent target" },
+  get_fleet_sync_audit: {
+    kind: "none",
+    why: "no agent target; the backend scopes the rows via accessible_agent_names (an agent key sees its owner's set, trinity-enterprise#707 D12)",
+  },
   get_agent_health: { kind: "baselined", owner: ENT629 },
   trigger_health_check: { kind: "baselined", owner: ENT629 },
   // --- nevermined.ts ---
@@ -420,6 +427,18 @@ export const TOOL_ACCESS_POLICY: Readonly<Record<string, ToolAccessPolicy>> = {
   // --- credential_vault.ts ---
   list_available_credentials: { kind: "none", why: "the calling agent's own grants (ent#279)" },
   fetch_credential: { kind: "none", why: "`name` is a credential; the backend scopes it to the calling agent (ent#279)" },
+  // --- projects.ts ---
+  list_projects: { kind: "none", why: "the calling agent's own active projects (ent#661)" },
+  get_project: { kind: "none", why: "a project id; the backend answers only for a project the calling agent is active on (ent#661)" },
+  list_project_tasks: { kind: "none", why: "a project id; the backend answers only for a project the calling agent is active on (ent#661)" },
+  create_project_task: { kind: "none", why: "a project id; the backend answers only for a project the calling agent is active on (ent#661)" },
+  update_project_task: { kind: "none", why: "a project id; the backend answers only for a project the calling agent is active on (ent#661)" },
+  add_project_task_note: { kind: "none", why: "a project id; the backend answers only for a project the calling agent is active on (ent#661)" },
+  get_project_log: { kind: "none", why: "a project id; the backend answers only for a project the calling agent is active on (ent#661)" },
+  add_project_log_entry: { kind: "none", why: "a project id; the backend answers only for a project the calling agent is active on (ent#661)" },
+  link_to_project: { kind: "none", why: "a project id; the backend answers only for a project the calling agent is active on (ent#661)" },
+  get_steward_digest: { kind: "none", why: "the calling agent's own stewarded projects (ent#661 v3)" },
+  set_project_health: { kind: "none", why: "a project id; the backend answers only when the calling agent is its active steward (ent#661 v3)" },
   // --- assignments.ts --- get_agent_assignments is FENCED (not registered; 0.9.5 F1) —
   // the totality test forbids a row for an unregistered tool. Restore with the registration:
   //   get_agent_assignments: { kind: "baselined", owner: ENT629 + "; the route's 404 is uniform (ent#500)" },

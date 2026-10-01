@@ -203,9 +203,10 @@ def test_the_prompt_context_survives_a_resumed_turn():
     src = inspect.getsource(service.portal_chat)
     # #2694 put the voice delta at the head of a resumed turn; the canvas rides
     # behind it and AHEAD of the manifest on both arms, so a resumed turn and a
-    # cold one name the same canvas in the same place.
-    assert "(delta_prefix + canvas_prefix + manifest_prefix + message) if resuming" in src
-    assert "cold_message = history_prefix + canvas_prefix + manifest_prefix + message" in src
+    # cold one name the same canvas in the same place. (ent#661 put the
+    # turn-context lines between the delta and the canvas, on both arms.)
+    assert "(delta_prefix + turn_prefix + canvas_prefix + manifest_prefix + message) if resuming" in src
+    assert "cold_message = history_prefix + turn_prefix + canvas_prefix + manifest_prefix + message" in src
 
 
 # --- wiring -----------------------------------------------------------------

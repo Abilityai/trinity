@@ -298,9 +298,24 @@ def raise_ask(
     raised_by: str,
     channel: str,
     actor_user: Any = None,
+    addressee: Optional[str] = None,
+    platform_execution_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Raise an ask through the platform and return its receipt
     (trinity-enterprise#611).
+
+    `platform_execution_id` (ent#661 v3) is the raising turn as the platform
+    saw it — the MCP request's `X-Trinity-Execution-Id` (#2392). When it is one
+    of this agent's own executions it is recorded as the ask's execution,
+    winning over an agent-written `context.execution_id`; `manual`, an unknown
+    id or another agent's changes nothing. Consumers (a project's asks) read
+    the turn from it, so an agent cannot place its ask in a chat it isn't in.
+
+    `addressee` (ent#661) names exactly who is asked, bypassing role
+    resolution. Only a `gate` raise may pass it (a platform decision such as an
+    agent owner's consent must reach that owner, not whoever a provider maps
+    `primary` to); for an agent's raise it is a programming error, so an agent
+    can never choose who is asked.
 
     The seam the agent's MCP tool calls today, and the one a gate calls later
     with `raised_by="gate"`, `channel="gate"` and a `request_id` derived from the
@@ -338,6 +353,7 @@ def raise_ask(
         raise ValueError(f"raise_ask: unknown channel {channel!r}")
     if (raised_by == "gate") != (channel == "gate"):
         raise ValueError(f"raise_ask: channel {channel!r} does not go with raised_by {raised_by!r}")
+    named = _named_addressee(addressee, raised_by)
     norm = _validated_ask(ask, oqs, raised_by=raised_by)
     existing = db.get_operator_queue_item_for_agent_by_request_id(agent_name, norm["request_id"])
     if existing:
@@ -351,9 +367,15 @@ def raise_ask(
     predecessor = _predecessor(agent_name, norm["supersedes_expired"], raised_by)
     if norm["proposal"] is not None and predecessor is None:
         _refuse_unlinked_reask(agent_name, norm["proposal"], raised_by)
-    people, addressee, resolved = _address(agent_name, norm["to"])
+    if named:
+        people, addressee, resolved = [named], named, True
+    else:
+        people, addressee, resolved = _address(agent_name, norm["to"])
 
     context = dict(norm["context"])
+    turn = _platform_turn(agent_name, platform_execution_id)
+    if turn:
+        context["execution_id"] = turn
     if addressee:
         # The addressee's Main chat (ent#429/#523), resolved at raise time. Only
         # after the caps passed: attaching may create the chat.
@@ -421,6 +443,18 @@ def raise_ask(
         logger.warning("[AskService] could not schedule the raised announcement", exc_info=True)
     return _receipt(row, status="created", resolved=resolved,
                     supersedes_request_id=norm["supersedes_expired"])
+
+
+def _platform_turn(agent_name: str, execution_id: Optional[str]) -> Optional[str]:
+    """The platform-supplied turn id iff it is this agent's own execution — never raises."""
+    if not execution_id or execution_id == "manual":
+        return None
+    from services.idempotency_service import resolve_and_validate_execution
+    try:
+        return execution_id if resolve_and_validate_execution(execution_id, agent_name) is not None else None
+    except Exception:  # noqa: BLE001 — provenance never fails the ask
+        logger.warning("[AskService] turn lookup failed — ask stored without it", exc_info=True)
+        return None
 
 
 def _too_large(field: str, limit: int, unit: str) -> AskRejected:
@@ -611,49 +645,49 @@ def _refuse_unlinked_reask(agent_name: str, proposal: Dict[str, Any], raised_by:
                 expired_request_id=prior["request_id"])
 
 
+def _named_addressee(addressee: Optional[str], raised_by: str) -> Optional[str]:
+    """The lower-cased email a platform raise names, or None when none is named.
+
+    A programming error (`ValueError`), never a refusal: an agent's raise that
+    names anyone, or a named addressee that is not an email.
+    """
+    if addressee is None:
+        return None
+    if raised_by != "gate":
+        raise ValueError("raise_ask: only a gate raise may name its addressee")
+    email = str(addressee).strip().lower()
+    if "@" not in email:
+        raise ValueError("raise_ask: addressee must be an email")
+    return email
+
+
 def _address(agent_name: str, role: str) -> Tuple[List[str], Optional[str], bool]:
     """`(resolved_to, addressed_to_email, resolved)` for a role.
 
-    A registered provider answers first (`assignment_provider.people_for`); with
-    no answer the core defaults hold: `primary` → the agent's owner (their
-    Workspace Main chat); `operator` → the operators, no person recorded;
-    `approver` / `viewer` → refused until someone fills them. A provider that
-    answers "nobody" (`[]`) for `primary` sends the ask to the operators — the
-    ent#606 ruling: an ask to primary falls back to operator when no primary is
-    assigned, and the owner stands in only when no provider answers at all. An
-    owner with no email makes a `primary` ask an operator ask too; either way the
-    receipt says so (`resolved: false`). Several people are recorded, but none
-    becomes the single Workspace addressee.
+    The one resolution rule, `services/role_addressing.resolve` (ent#606) —
+    shared with reports and messages so an ask and a report addressed to the
+    same role reach the same people. Several people are recorded, but none
+    becomes the single Workspace addressee. `role` is already validated
+    against `ASK_ROLES` by `_validated_ask` (the only caller passes its output),
+    so the one refusal left to map is an unfilled role.
     """
-    from services import assignment_provider
+    from services import role_addressing
 
-    people = assignment_provider.resolve_role_people(agent_name, role)
-    if people:
-        return people, (people[0] if len(people) == 1 else None), True
-    if role == "primary":
-        if people is not None:   # the provider answered: nobody fills primary
-            return [], None, False
-        owner = _owner_email(agent_name)
-        return ([owner], owner, True) if owner else ([], None, False)
-    if role == "operator":
-        return [], None, True
-    raise AskRejected(422, "role_unassigned",
-                      f"Nobody fills the {role} role for this agent yet; address the ask to "
-                      "primary or operator.", role=role)
+    try:
+        r = role_addressing.resolve(agent_name, role, owner_lookup=_owner_email)
+    except role_addressing.RoleRefused:
+        raise AskRejected(422, "role_unassigned",
+                          f"Nobody fills the {role} role for this agent yet; address the ask to "
+                          "primary or operator.", role=role)
+    return r.people, r.single, r.resolved
 
 
 def _owner_email(agent_name: str) -> Optional[str]:
-    """The agent owner's email, or None when there is none (the default admin
-    often has none). Unreadable ⇒ None: an operator ask, never a guess."""
-    try:
-        owner = db.get_agent_owner(agent_name)
-        username = (owner or {}).get("owner_username")
-        user = db.get_user_by_username(username) if username else None
-        email = ((user or {}).get("email") or "").strip().lower()
-    except Exception:  # noqa: BLE001
-        logger.warning("[AskService] owner lookup failed for %s", agent_name, exc_info=True)
-        return None
-    return email if "@" in email else None
+    """The agent owner's email (`role_addressing.owner_email`). Kept as this
+    module's own name so the ask tests' patches keep a target that is read."""
+    from services import role_addressing
+
+    return role_addressing.owner_email(agent_name)
 
 
 def _rate_allowed(agent_name: str, oqs) -> bool:
