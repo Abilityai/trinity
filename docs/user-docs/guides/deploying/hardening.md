@@ -8,7 +8,7 @@ Take a one-click Trinity droplet from a bare public IP to an instance you would 
 - The instance is about to hold real work, real credentials, or other people's data.
 - You want a memorable address instead of an IP, and an ordinary long-lived certificate instead of the short-lived IP one.
 
-Not for you if Trinity already runs on a private network — the managed fleet's own shape — or behind a reverse proxy you operate. Those are finished postures, not compromises.
+Not for you if Trinity already runs on a private network or behind a reverse proxy you operate. Those are finished postures, not compromises.
 
 ## What You Start With
 

@@ -490,7 +490,7 @@ async def download_shared_file(
                     "preview": is_preview,
                     "user_agent": (request.headers.get("user-agent") or "")[:200],
                 },
-                endpoint=str(request.url.path),
+                endpoint=request.scope["path"],
             )
         except Exception as e:  # pragma: no cover
             logger.warning("[files] audit log failed for %s: %s", file_id, e)

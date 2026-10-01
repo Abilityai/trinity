@@ -129,7 +129,7 @@ def _seed_db(db_path: Path) -> None:
             response TEXT, error TEXT, triggered_by TEXT, model_used TEXT,
             attempt_number INTEGER DEFAULT 1, retry_of_execution_id TEXT,
             source_user_id INTEGER, source_user_email TEXT, source_agent_name TEXT,
-            source_mcp_key_id TEXT, source_mcp_key_name TEXT,
+            source_mcp_key_id TEXT, source_mcp_key_name TEXT, chain_depth INTEGER,
             -- Written by update_execution_status. Omitting them made the
             -- abandon path raise OperationalError, which its fail-safe
             -- swallowed, so the row stayed `running` and the test "found" a bug

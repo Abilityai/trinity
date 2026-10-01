@@ -304,7 +304,8 @@ def test_an_undeclared_metric_is_a_named_finding_never_a_blank():
 
 
 def test_a_supporting_agent_is_not_told_to_declare_someone_elses_metric():
-    """The registry is per-agent and cross-agent reads are ent#80's grant, so
+    """The registry is per-agent and, with no grant on a serving agent
+    (ent#727), there is no number to show — so
     "declare it and refresh" is advice a supporter cannot take. It gets the
     informational code instead, and is NOT counted as undeclared."""
     supported = _objective(id="shared", owner="role:someone-else",

@@ -30,6 +30,7 @@ from database import db
 from db_models import WebFileUpload, SessionMessageInsert
 from dependencies import AuthorizedAgent, get_current_user
 from models import CreateSessionRequest, SessionMessageRequest, User
+from services import dispatch_admission_service
 from services.docker_service import get_agent_container
 from services.model_catalog import InvalidModelError, validate_dispatch_model
 from services.session_cleanup_service import get_session_cleanup_service
@@ -303,6 +304,16 @@ async def send_session_message(
 
     user_email = current_user.email or current_user.username
 
+    # #2973: a turn an agent drives on a session is an agent-to-agent hop like
+    # /chat — it inherits the caller's chain depth (#2806) and is refused past
+    # the max (named 403, main.py) before anything is uploaded or persisted.
+    chain_depth = await dispatch_admission_service.enforce_inter_agent_depth(
+        current_user=current_user,
+        target=name,
+        endpoint=f"/api/agents/{name}/sessions/{session_id}/message",
+        x_via_mcp=None,
+    )
+
     # Phase 5.2 — file uploads. Mirror routers/chat.py's pattern: decode
     # the base64 payloads, write non-images into the agent workspace via
     # process_file_uploads (which uses Docker put_archive), and pass any
@@ -407,6 +418,7 @@ async def send_session_message(
             timeout_seconds=body.timeout_seconds,
             subscription_id=session.subscription_id,
             images=image_data or None,
+            chain_depth=chain_depth,
         )
         result = turn.result
         fallback_fired = turn.fallback_fired

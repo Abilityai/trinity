@@ -737,6 +737,7 @@ async def _apply_fork_to_own(
     *,
     source_metadata: dict,
     source_metadata_reason: Optional[str],
+    allow_unforked_pull_only: bool = False,
 ) -> tuple[str, Optional[str], str, Optional[str]]:
     """trinity-enterprise#93: enforce a `fork_to_own: required` template and, when
     the caller forks, copy the template into a user-owned repo and return the
@@ -830,7 +831,25 @@ async def _apply_fork_to_own(
         (source_metadata or {}).get("fork_to_own"),
         (gh_template or {}).get("fork_to_own"),
     }
-    if "required" in declared_fork_modes and not config.fork_to_own:
+    # `allow_unforked_pull_only` is the first-run Cornelius seeder's door and
+    # nobody else's (ent#107). What this gate prevents is a PUSH: an agent bound
+    # to the shared upstream sending a private knowledge base into a public repo.
+    # trinity-enterprise#705 pins that seeder pull-only, so for it the push is
+    # unreachable and the gate is guarding something that cannot happen — while
+    # the gate itself is unsatisfiable there, since the seeder runs at first boot
+    # with no user present and no token to fork with.
+    #
+    # The flag alone is not trusted. A caller could pass it while building a
+    # config that pushes, which would reopen exactly the bind ent#162 closed, so
+    # the pinned-pull-only shape is re-checked HERE rather than assumed from the
+    # call site — the door opens only for a create that genuinely cannot push.
+    seeder_pull_only = (
+        allow_unforked_pull_only
+        and config.kind == "deployment"
+        and config.source_mode is True
+        and not config.fork_to_own
+    )
+    if "required" in declared_fork_modes and not config.fork_to_own and not seeder_pull_only:
         raise HTTPException(
             status_code=400,
             detail={
@@ -1362,7 +1381,11 @@ def _resolve_local_template(config: AgentConfig) -> tuple[dict, Optional[dict]]:
     return template_data, template_shared_folders
 
 
-async def _resolve_template(config: AgentConfig, current_user: User) -> _TemplateResolution:
+async def _resolve_template(
+    config: AgentConfig,
+    current_user: User,
+    allow_unforked_pull_only: bool = False,
+) -> _TemplateResolution:
     """Dispatch template resolution (github incl. fork | local | none) and return
     the set-once `_TemplateResolution`. The whole github phase — including the
     real fork-to-own GitHub write — stays here, BEFORE the caller's docker
@@ -1562,6 +1585,7 @@ async def _resolve_template(config: AgentConfig, current_user: User) -> _Templat
                 url_branch,
                 source_metadata=source_metadata,
                 source_metadata_reason=source_metadata_reason,
+                allow_unforked_pull_only=allow_unforked_pull_only,
             )
             # trinity-enterprise#705: agent vs deployment decides the git mode —
             # BEFORE validation and branch reservation, which both read it.
@@ -1855,6 +1879,10 @@ def _apply_gemini_and_otel_env(config: AgentConfig, env_vars: dict) -> None:
         env_vars['OTEL_EXPORTER_OTLP_PROTOCOL'] = os.getenv('OTEL_EXPORTER_OTLP_PROTOCOL', 'grpc')
         env_vars['OTEL_EXPORTER_OTLP_ENDPOINT'] = os.getenv('OTEL_COLLECTOR_ENDPOINT', 'http://trinity-otel-collector:4317')
         env_vars['OTEL_METRIC_EXPORT_INTERVAL'] = os.getenv('OTEL_METRIC_EXPORT_INTERVAL', '60000')
+        # #3106: the OTEL_* env above is Claude Code's. FastAPI >= 0.142 reads the same
+        # names to auto-configure the agent server itself, refuses grpc, and the server
+        # exits on boot. Claude Code does not read this flag, so its metrics still flow.
+        env_vars['OTEL_SDK_DISABLED'] = 'true'
 
 
 def _apply_mcp_and_auth_env(
@@ -3260,6 +3288,7 @@ async def create_agent_internal(
     skip_name_sanitization: bool = False,
     ws_manager=None,
     adopt_existing_workspace: bool = False,
+    allow_unforked_pull_only: bool = False,
 ) -> AgentStatus:
     """
     Internal function to create an agent.
@@ -3334,7 +3363,7 @@ async def create_agent_internal(
     # phase — including the real fork-to-own GitHub write and its structured
     # FORK_* 4xx errors — stays OUTSIDE the docker try-block below, so those
     # errors are not flattened to a generic 500.
-    tr = await _resolve_template(config, current_user)
+    tr = await _resolve_template(config, current_user, allow_unforked_pull_only=allow_unforked_pull_only)
 
     # #1187: runtime is final here (request value, possibly overridden by the
     # template). Reject an unknown one now (clear 400) instead of letting the

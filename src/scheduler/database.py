@@ -226,6 +226,7 @@ class SchedulerDatabase:
             source_agent_name=row["source_agent_name"] if "source_agent_name" in row_keys else None,
             source_mcp_key_id=row["source_mcp_key_id"] if "source_mcp_key_id" in row_keys else None,
             source_mcp_key_name=row["source_mcp_key_name"] if "source_mcp_key_name" in row_keys else None,
+            chain_depth=row["chain_depth"] if "chain_depth" in row_keys else None,
             # Retry tracking (RETRY-001)
             attempt_number=row["attempt_number"] if "attempt_number" in row_keys and row["attempt_number"] else 1,
             retry_of_execution_id=row["retry_of_execution_id"] if "retry_of_execution_id" in row_keys else None,
@@ -393,7 +394,8 @@ class SchedulerDatabase:
         source_user_email: Optional[str] = None,
         source_agent_name: Optional[str] = None,
         source_mcp_key_id: Optional[str] = None,
-        source_mcp_key_name: Optional[str] = None
+        source_mcp_key_name: Optional[str] = None,
+        chain_depth: Optional[int] = None,
     ) -> Optional[ScheduleExecution]:
         """Create a new execution record.
 
@@ -427,8 +429,8 @@ class SchedulerDatabase:
                     id, schedule_id, agent_name, status, started_at, message, triggered_by,
                     model_used, attempt_number, retry_of_execution_id,
                     source_user_id, source_user_email, source_agent_name,
-                    source_mcp_key_id, source_mcp_key_name
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    source_mcp_key_id, source_mcp_key_name, chain_depth
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 execution_id,
                 schedule_id,
@@ -444,7 +446,8 @@ class SchedulerDatabase:
                 source_user_email,
                 source_agent_name,
                 source_mcp_key_id,
-                source_mcp_key_name
+                source_mcp_key_name,
+                chain_depth,
             ))
             conn.commit()
 
@@ -461,6 +464,7 @@ class SchedulerDatabase:
                 source_agent_name=source_agent_name,
                 source_mcp_key_id=source_mcp_key_id,
                 source_mcp_key_name=source_mcp_key_name,
+                chain_depth=chain_depth,
                 attempt_number=attempt_number,
                 retry_of_execution_id=retry_of_execution_id
             )

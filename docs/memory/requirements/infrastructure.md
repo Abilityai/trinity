@@ -280,6 +280,7 @@
   - Alert cooldowns to prevent notification spam
   - Fleet dashboard with health summary (admin-only)
   - 3 MCP tools: `get_fleet_health`, `get_agent_health`, `trigger_health_check`
+  - Fleet health carries a per-agent git `sync` block and fleet `sync_summary` — an annotation that never changes `status` (trinity-enterprise#707; see `github.md` §11.19)
 - **Status Levels**: healthy → degraded → unhealthy → critical → unknown
 - **Flow**: `docs/memory/feature-flows/agent-monitoring.md`
 

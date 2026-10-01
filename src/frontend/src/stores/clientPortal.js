@@ -320,6 +320,10 @@ export const useClientPortalStore = defineStore('clientPortal', {
     // actually says otherwise, and the component never sees an undefined
     // tri-state.
     multiAgentChatAvailable: false,
+    // ent#661 — may THIS principal use Workspace Projects? Same channel and
+    // same fail-closed direction as the flag above: only a successful roster
+    // that says so raises it (internal-only, so an outside client never does).
+    projectsAvailable: false,
     // ent#534 — may THIS principal start a real-time voice call from the
     // Workspace, and if not, why (words for the disabled control). Fail-closed
     // like the flag above; `reason: null` for a portal-token client means the
@@ -2190,6 +2194,8 @@ export const useClientPortalStore = defineStore('clientPortal', {
         // every background refetch would unmount a live room and flash a
         // refusal at an entitled client before taking it back.
         this.multiAgentChatAvailable = data.multi_agent_chat_available === true
+        // ent#661: same strictness, same reason.
+        this.projectsAvailable = data.projects_available === true
         // ent#534: same strictness — an older backend without the field reads
         // as "not available", never as truthy.
         this.realtimeVoice = {

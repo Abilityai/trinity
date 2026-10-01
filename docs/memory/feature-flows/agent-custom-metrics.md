@@ -269,8 +269,9 @@ delete the file.
 
 | Aspect | Contract |
 |---|---|
-| Gate | `AuthorizedAgentByName` (uniform 404 — Invariant #8/#186), **then** the agent self-gate: an agent-scoped key reads only its own numbers (403). Cross-agent reads are ent#80's grant. |
-| Rate limit | 240/min per agent — clears N tabs at a 30 s poll, stops a loop |
+| Gate | `AuthorizedAgentByName` (uniform 404 — Invariant #8/#186), **then** the metric-read gate (`_metric_read_gate` → `metric_access_service.can_read_agent_metrics`): an agent-scoped key reads its own numbers, or another agent's while it holds an `agent_permissions` grant on it (ent#727 — the edge `chat_with_agent` uses); otherwise 403. `/metrics/definitions` carries the same gate. |
+| Rate limit | 240/min per agent — clears N tabs at a 30 s poll, stops a loop. A cross-agent read is charged to the **reader** (`agent_metrics_read_by:{reader}`), so a fan-out never spends the target's budget |
+| Audit | A cross-agent read (metrics, definitions, or an objective row served elsewhere) writes one `authorization`/`metrics_cross_agent_read` row per (reader, target, route, actor) per hour; marker set only after the row is written |
 | Window | `auto` (default) · `24h` · `7d` · `30d` · `90d`, or `since`/`until`. `auto` = `max(24h, 12 × cadence)` capped at 90 d, because a cadence ranges 60 s–1 y and a fixed 24 h shows a weekly metric four points |
 | Filters | `metric=<declared name>` · `include_retired` · `series_limit` (≤ 2000, single-metric path) |
 | Errors | 422 `window_invalid` · 422 `metric_undeclared` (retired names get "retired at T — pass `include_retired=true`") · 503 `metric_store_unavailable` + `Retry-After: 30` |
@@ -347,7 +348,7 @@ objectives/<id>.yaml  ──┐                    (Tandem §3.4, in the agent's
         ┌───────────────┴───────────────────────────────────────┐
         ▼                        ▼                              ▼
  GET /api/agents/          MCP get_objectives          role card (ent#527) /
-   {name}/objectives         (agent-scoped)            hub (ent#661) /
+   {name}/objectives         (agent-scoped)            project view (ent#661 v3) /
                                                        proactivity (ent#605)
                                                        — in process, no second join
 ```
@@ -572,8 +573,8 @@ Still open:
 1. **Pace, as opposed to position** — `gap.status` is where the number sits
    relative to the target; judging whether the agent is *late* against `by` is
    ent#605's ramp maths, on top of the `by` / `horizon` this read already carries
-2. **Cross-agent and fleet reads** — the read is self-scoped by design; lifting
-   that is a deliberate grant (ent#80, ent#94)
+2. **Fleet reads and arbitrary datasets** — a grant holder may read one other
+   agent's declared series (ent#727); the wide permissioned read is ent#80/ent#94
 3. **A `metrics_updated` WebSocket trigger** — the refetch route now exists, so
    a thin coalesced trigger is possible (ent#538)
 4. **Alerting** on a breached threshold or a stale metric

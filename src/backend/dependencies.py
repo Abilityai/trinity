@@ -302,6 +302,19 @@ PORTAL_SESSION_SCOPE = "portal_session"
 EVENT_LOOPBACK_SCOPE = "event_loopback"
 EVENT_LOOPBACK_ROUTE = re.compile(r"^/api/agents/[^/]+/task$")
 
+
+def _loopback_chain_depth(payload: dict) -> Optional[int]:
+    """The loopback's signed ``chain_depth`` claim (#2973), or None.
+
+    A non-int or non-positive value reads as absent rather than failing the
+    dispatch; only the backend mints this token, so that is a bug, not an attack.
+    """
+    value = payload.get("chain_depth")
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        return None
+    return value
+
+
 # RETIRED as a lifetime (ent#375). The session now slides: `_portal_session_policy()`
 # supplies an idle window and an absolute cap, and every consumer reads those.
 #
@@ -649,10 +662,13 @@ async def get_current_user(request: Request, token: str = Depends(oauth2_scheme)
         # ONLY `POST /api/agents/{subscriber}/task`. Fenced here at the auth
         # entry point (the connector / portal_delegate pattern below) so a
         # leaked loopback bearer is not a five-minute admin session.
+        # #3102 — every fence here reads scope["path"], the path the router
+        # dispatched. request.url is rebuilt from the Host header, so a Host
+        # carrying "/" or "?" makes request.url.path name a different route.
         loopback = payload.get("scope") == EVENT_LOOPBACK_SCOPE
         if loopback and (
             request.method.upper() != "POST"
-            or not EVENT_LOOPBACK_ROUTE.match(request.url.path)
+            or not EVENT_LOOPBACK_ROUTE.match(request.scope["path"])
         ):
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
@@ -682,6 +698,8 @@ async def get_current_user(request: Request, token: str = Depends(oauth2_scheme)
             # ent#614: only a loopback token carries this, and only when the
             # backend derived the source from an agent-originated event.
             vouched_source_agent=(payload.get("source_agent") or None) if loopback else None,
+            # #2973: SECRET_KEY-signed, so only the backend could have set it.
+            loopback_chain_depth=_loopback_chain_depth(payload) if loopback else None,
         )
     except JWTError:
         # JWT failed, try MCP API key
@@ -713,7 +731,7 @@ async def get_current_user(request: Request, token: str = Depends(oauth2_scheme)
             # reach anything else, including the portal endpoints themselves.
             portal_delegate = scope == PORTAL_DELEGATE_SCOPE
             if portal_delegate and (
-                (request.method.upper(), request.url.path) not in PORTAL_DELEGATE_ALLOWED_ROUTES
+                (request.method.upper(), request.scope["path"]) not in PORTAL_DELEGATE_ALLOWED_ROUTES
             ):
                 raise HTTPException(
                     status_code=status.HTTP_403_FORBIDDEN,
@@ -734,7 +752,7 @@ async def get_current_user(request: Request, token: str = Depends(oauth2_scheme)
                     ("POST", f"/api/agents/{connector_agent}/chat"),
                     ("GET", f"/api/agents/{connector_agent}/connector/playbooks"),
                 }
-                if (request.method.upper(), request.url.path) not in allowed:
+                if (request.method.upper(), request.scope["path"]) not in allowed:
                     raise HTTPException(
                         status_code=status.HTTP_403_FORBIDDEN,
                         detail="Connector keys may only chat their bound agent and list its playbooks",
@@ -842,7 +860,7 @@ def _enforce_ephemeral_key_fence(request: Request, agent_name: str) -> None:
     if not isinstance(info, dict) or not info.get("is_ephemeral"):
         return
     method = request.method.upper()
-    path = request.url.path
+    path = request.scope["path"]
     for allowed_method, pattern in _EPHEMERAL_ALLOWED_ROUTES:
         if method != allowed_method:
             continue
@@ -1020,7 +1038,7 @@ def _enforce_ops_key_fence(request: Request) -> None:
     membership a settings lookup.
     """
     method = request.method.upper()
-    path = request.url.path
+    path = request.scope["path"]
     for allowed_method, pattern in _OPS_ALLOWED_ROUTES:
         if method == allowed_method and pattern.fullmatch(path):
             return
@@ -1817,7 +1835,7 @@ async def enforce_agent_capability(
             actor_ip=request.client.host if request.client else None,
             target_type="agent",
             target_id=target,
-            endpoint=str(request.url.path),
+            endpoint=request.scope["path"],
             request_id=getattr(request.state, "request_id", None),
             details={"capability": capability, "code": code, "method": request.method},
         )

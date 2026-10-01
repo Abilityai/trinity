@@ -96,7 +96,7 @@ class InterAgentDepthExceeded(Exception):
     message tells the calling model to stop rather than retry or re-route.
     """
 
-    def __init__(self, caller: str, target: str, depth: int, max_depth: int):
+    def __init__(self, caller: Optional[str], target: str, depth: int, max_depth: int):
         super().__init__(
             f"{INTER_AGENT_DEPTH_EXCEEDED}: {caller} -> {target} at depth {depth} > {max_depth}"
         )

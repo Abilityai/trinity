@@ -328,7 +328,7 @@ async def export_agent_data(
             actor_ip=request.client.host if request.client else None,
             target_type="agent",
             target_id=agent_name,
-            endpoint=str(request.url.path),
+            endpoint=request.scope["path"],
             request_id=getattr(request.state, "request_id", None),
             details={
                 "size_bytes": os.path.getsize(tmp_path),
@@ -510,7 +510,7 @@ async def import_agent_data(
             actor_ip=request.client.host if request.client else None,
             target_type="agent",
             target_id=agent_name,
-            endpoint=str(request.url.path),
+            endpoint=request.scope["path"],
             request_id=getattr(request.state, "request_id", None),
             details={
                 "bytes_received": bytes_received,

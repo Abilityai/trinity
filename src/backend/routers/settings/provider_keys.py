@@ -38,7 +38,7 @@ async def _audit_key_change(request: Request, current_user: User, setting: str, 
         source="api",
         actor_user=current_user,
         actor_ip=request.client.host if request.client else None,
-        endpoint=str(request.url.path),
+        endpoint=request.scope["path"],
         request_id=getattr(request.state, "request_id", None),
         details={"setting": setting, "action": action, **extra},
     )

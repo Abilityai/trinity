@@ -67,7 +67,7 @@ def _principal(scope, agent=None, role="admin", username="owner"):
 
 def _request(path="/api/agents/x/skills", method="PUT"):
     return SimpleNamespace(client=SimpleNamespace(host="127.0.0.1"), method=method,
-                           url=SimpleNamespace(path=path), state=SimpleNamespace(request_id="r1"))
+                           scope={"path": path}, state=SimpleNamespace(request_id="r1"))
 
 
 @pytest.fixture

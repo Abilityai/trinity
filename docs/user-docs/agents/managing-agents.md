@@ -66,6 +66,8 @@ Toggle an agent between Running and Stopped using the switch on a Dashboard tile
 - **API:** `POST /api/agents/{name}/start` and `POST /api/agents/{name}/stop`
 - **MCP:** `start_agent(name)` and `stop_agent(name)`
 
+A start also delivers the agent's assigned skills, and the start response says how that went. `skills_injection` is the overall status, and `skills_result` lists each skill's status plus any name `conflicts`, with errors reduced to a code. A start that did nothing reports `skipped` with a reason; a missing result reads `unknown`. A conflict does not fail the start, so check `conflicts` to tell it apart from a clean one. The MCP `start_agent` tool adds a line for each skill that did not land.
+
 **After a host reboot.** Agent containers are created with Docker's `unless-stopped` restart policy, so when the host reboots or the Docker daemon restarts, every agent that was running comes back on its own — schedules resume without anyone starting agents by hand. An agent you deliberately stopped stays stopped: the policy honours Docker's manual-stop flag, so a quarantined agent is never resurrected by a reboot. While Docker is bringing agents back they may briefly show as stopped. The policy is set when the container is created; agents created before this behaviour shipped adopt it on their next recreate (a resource, runtime, or base-image change), not on a plain restart — an upgrading install can sweep its existing fleet once using [`AGENT_RESTART_POLICY_2026-09.md`](../../migrations/AGENT_RESTART_POLICY_2026-09.md).
 
 ### Display Label
@@ -102,7 +104,7 @@ The agent header displays status (Running/Stopped), CPU and memory usage, networ
 
 Fleet-wide monitoring is available at `GET /api/monitoring/fleet-health`. Health levels, from best to worst: healthy, degraded, unhealthy, critical, unknown.
 
-- **MCP:** `get_agent_health(name)`, `get_fleet_health()`, `trigger_health_check()`
+- **MCP:** `get_agent_health(name)`, `get_fleet_health()` (includes each agent's git `sync` block), `get_fleet_sync_audit()`, `trigger_health_check()`
 
 ### Resource Allocation
 

@@ -71,7 +71,7 @@ async def _audit_git(
         actor_ip=request.client.host if request.client else None,
         target_type="agent",
         target_id=agent_name,
-        endpoint=str(request.url.path),
+        endpoint=request.scope["path"],
         request_id=getattr(request.state, "request_id", None),
         details={**details, "success": success},
     )
@@ -594,7 +594,7 @@ async def initialize_github_sync(
             actor_ip=request.client.host if request.client else None,
             target_type="agent",
             target_id=agent_name,
-            endpoint=str(request.url.path),
+            endpoint=request.scope["path"],
             request_id=getattr(request.state, "request_id", None),
             details={
                 "github_repo": repo_full_name,

@@ -120,5 +120,5 @@ async def regenerate_agent_mcp_key_endpoint(
         current_user,
         actor_ip=request.client.host if request.client else None,
         request_id=getattr(request.state, "request_id", None),
-        endpoint=str(request.url.path),
+        endpoint=request.scope["path"],
     )

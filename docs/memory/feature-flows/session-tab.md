@@ -91,6 +91,7 @@ Voice mic and SSE dynamic status labels are **deferred** (each requires a backen
 `POST /api/agents/{name}/sessions/{id}/message`:
 
 1. Resolve session row, enforce per-user ownership (404 on mismatch — not 403, to avoid leaking session-id existence).
+1a. **Chain depth (#2973)**: an agent-principal turn runs `enforce_inter_agent_depth` — past `inter_agent_max_chain_depth` it is a 403 `inter_agent_depth_exceeded` before any upload or message persist; otherwise the depth rides `run_resumable_turn` into `execute_task(chain_depth=)` and is stamped on the execution row. A human turn is a root.
 2. Persist the user message immediately so it appears even on failure.
 3. Read `cached_claude_session_id`.
 4. Resolve dynamic lock TTL via `_resolve_lock_ttl(agent_name)` = `db.get_execution_timeout(agent) + 30s`, capped at 7230s. The static 300s constant was removed in #759 because turns running longer than 5 min would silently drop the lock and allow concurrent JSONL writes.
