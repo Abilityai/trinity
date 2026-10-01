@@ -155,6 +155,19 @@ reports as `retryable`; a batch the database rejects on its content is a 500
 the tool reports as explicitly not retryable, because an agent told to retry
 that would retry forever. A refusal never ends the turn.
 
+**The two knobs on the Settings page (trinity-enterprise#671).** Settings →
+Retention shows `metrics_retention_days` as **Metric points** (days) and
+`metrics_daily_point_cap` as **Metric point quota** (points / agent / day,
+"0 = unlimited") beside the sibling windows, in an edition whose managed
+retention endpoint can save them; in Community the rows are absent and
+`PUT /api/settings/ops/config` remains the write path. The panel reads the
+window from `GET /api/settings/retention` → `windows`/`sources` and the quota
+from its `quotas` block (`{value, source}`). A knob whose source is `env` is
+read-only with an `env` badge naming its variable, and is never sent: the
+panel's Save carries only the fields the operator changed
+(`src/frontend/src/utils/retentionFields.js`), so saving one window never
+freezes a code default or an env value into a row.
+
 Requirement: `docs/memory/requirements/lifecycle-observability.md` §48.
 
 ---
@@ -608,4 +621,5 @@ Still open:
 | 2026-09-22 | Added the objective join (ent#666): `GET .../objectives`, MCP `get_objectives`, `latest_by_metric`, the gap semantics (position not pace, the `hold` arm) and the role-card follow-up note (ent#676) |
 | 2026-09-22 | ent#666 review fixes: findings scoped to the objectives returned, a declared `hold` on the wire as the registry's `neutral`, a 30 s fan-out budget + 5 s per-read timeout, `objectives_skipped` / `objective_id_invalid` findings, and both Alembic rebase orders written out above |
 | 2026-09-22 | Rewrote the READ half (ent#479): the re-backed route, the one `2 x cadence` staleness rule, the declared-metric tiles, MCP `get_metrics`, the health block — and retired `metrics.json` as a source, replacing it with the D-010 finding |
+| 2026-09-29 | Settings → Retention rows for both knobs (ent#671): the `quotas` block on `GET /api/settings/retention`, env-sourced rows read-only, changed-fields-only Save |
 | 2026-09-30 | ent#676: the role card cut over to the objective join — the rebase note became the landed section; one limiter bucket for both doors in `services/objectives_read_budget.py` (the card degrades, the route 429s) |
