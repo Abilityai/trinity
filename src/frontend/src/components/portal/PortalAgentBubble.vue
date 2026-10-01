@@ -94,8 +94,10 @@ defineEmits(['reply'])
 
 // One recipe for the row's own buttons (#738). The ink is the thumbs' beside
 // them (`PortalRating`): gray-500 light / gray-400 dark — Copy's former
-// gray-400 in light was 2.54:1 on white, under the 3:1 an icon needs.
-const ACTION_BUTTON = 'p-1 rounded-md text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-800 focus:outline-none focus:ring-2 focus:ring-action-primary-500/40 dark:focus:ring-action-primary-400/40 transition-colors disabled:opacity-45 disabled:cursor-not-allowed'
+// gray-400 in light was 2.54:1 on white, under the 3:1 an icon needs. Hover
+// is `enabled:` only: `:hover` still matches a disabled button, and a
+// `disabled:hover:` reset would tie `dark:hover:` on specificity (#2662).
+const ACTION_BUTTON = 'p-1 rounded-md text-gray-500 dark:text-gray-400 enabled:hover:text-gray-700 dark:enabled:hover:text-gray-200 enabled:hover:bg-gray-100 dark:enabled:hover:bg-gray-800 focus:outline-none focus:ring-2 focus:ring-action-primary-500/40 dark:focus:ring-action-primary-400/40 transition-colors disabled:opacity-45 disabled:cursor-not-allowed'
 
 const feedback = ref(null)
 const copiedOk = ref(false)

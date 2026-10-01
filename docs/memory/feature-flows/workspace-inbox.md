@@ -185,7 +185,8 @@ Sign-in / reload on bare /workspace
       Esc in the composer → resolveComposerKey(hasReply = chip on screen && !defaultPrevented)
         → 'drop-reply' (preventDefault, so the turn-cancel listener yields) — innermost first:
         an open typeahead takes the first Esc; with no chip, Esc reaches the turn
-      × on the chip → reply-done + the caret back in the composer
+      × on the chip → reply-done + the caret back in the composer; Escape with focus on the ×
+        → the chip's own @keydown.esc does the same (preventDefault — never the turn)
       cleared on leaving the chat: watch(route sessionId) and watch(convKey) (a New chat or an
         agent switch on a URL that does not name the chat); the Inbox path survives its own
         navigation because the /c/:id handler sets pendingSession in the remounting tick

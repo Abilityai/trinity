@@ -901,7 +901,8 @@ keeps its target through its own navigation because the `/c/:id` handler sets
 `pendingSession` in the tick it remounts. Esc in the composer drops the chip through
 `resolveComposerKey`'s `drop-reply`, keyed on the chip ON SCREEN and on `!defaultPrevented`.
 Its `preventDefault` is what makes the turn-cancel listener yield. So it is innermost first:
-typeahead, then chip, then turn. An @mention escalation to a room carries the text, not the
+typeahead, then chip, then turn. Escape with focus on the chip's own × is claimed by the chip
+itself (`PortalReplyChip` `@keydown.esc`, removable only), for the same reason. An @mention escalation to a room carries the text, not the
 reply (unchanged). The relation is not persisted on the stored user row, so a reload shows no
 quote on a sent reply (ent#746). Pinned by `portalInChatReply.mount.spec.js` and
 `portalInboxShell.mount.spec.js`.

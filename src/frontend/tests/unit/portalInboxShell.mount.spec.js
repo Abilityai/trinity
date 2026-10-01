@@ -410,6 +410,7 @@ describe('ent#738 — Reply from inside the chat', () => {
     expect(conv(w).props('replyTarget')).toBeNull()
   })
 
+  // Pins the route watcher (it predates ent#738): the in-chat door relies on it.
   it('leaving the chat drops it — and coming back does not bring it back', async () => {
     arm()
     store.fetchAllSessions = vi.fn(async () => { store.sessionsFailed = false; return TWO })
@@ -439,6 +440,19 @@ describe('ent#738 — Reply from inside the chat', () => {
     conv(w).vm.$emit('new-chat')
     await flushPromises()
     expect(router.currentRoute.value.params.sessionId).toBeUndefined()
+    expect(conv(w).props('replyTarget')).toBeNull()
+  })
+
+  it('on a URL that does not name the chat, switching agent drops the reply too', async () => {
+    arm()
+    const { w, router } = await boot('/workspace?agent=sage')
+    conv(w).vm.$emit('reply', target('s-sage'))
+    await flushPromises()
+    expect(conv(w).props('replyTarget')).toEqual(target('s-sage'))
+    conv(w).vm.$emit('switch-agent', 'scout')
+    await flushPromises()
+    expect(router.currentRoute.value.params.sessionId).toBeUndefined()
+    expect(conv(w).props('agent').name).toBe('scout')
     expect(conv(w).props('replyTarget')).toBeNull()
   })
 

@@ -123,6 +123,45 @@ describe('the Reply action on a message (ent#738)', () => {
     expect(button.attributes('title')).toBe('Reply to this message')
   })
 
+  it("sits in the message's own action row, before the rating (Copy · Reply · thumbs)", async () => {
+    await mountChat()
+    const reply = replyOn('r1').element
+    const rating = wrapper.find('[data-message-id="r1"] portal-rating-stub').element
+    expect(rating).toBeTruthy()
+    // Same row (the bubble's action row), Reply first — so the rating's comment
+    // box, which grows from the thumbs, never moves Reply.
+    expect(rating.parentElement).toBe(reply.parentElement)
+    expect(reply.compareDocumentPosition(rating) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+  })
+
+  it('is not offered while the chat has no session yet — there is no thread for the server to prove', async () => {
+    // Messages with ids but no resolved chat: a reply would name `null`.
+    store.fetchHistory = vi.fn(async () => ({ sessionId: null, messages: HISTORY }))
+    await mountChat({ sessionId: null, agent: { name: 'sage', playbooks: [] } })
+    await wrapper.setProps({ agent: { name: 'scout', playbooks: [] } })
+    await flushPromises()
+    expect(wrapper.find('[data-message-id="r1"]').exists()).toBe(true)
+    expect(wrapper.findAll(REPLY)).toHaveLength(0)
+  })
+
+  it('a second Reply moves the chip to that message, and a draft in the composer is kept', async () => {
+    store.fetchHistory = vi.fn(async () => ({ sessionId: 's1', messages: [
+      ...HISTORY.slice(0, 2),
+      { id: 'r2', role: 'assistant', content: 'Second point: retry later.' },
+    ] }))
+    await mountChat()
+    await textarea().setValue('half-written thought')
+    await replyOn('r1').trigger('click')
+    await flushPromises()
+    await replyOn('r2').trigger('click')
+    await flushPromises()
+    const chips = composerChips()
+    expect(chips).toHaveLength(1)
+    expect(chips[0].props('excerpt')).toBe('Second point: retry later.')
+    expect(textarea().element.value).toBe('half-written thought')
+    expect(document.activeElement).toBe(textarea().element)
+  })
+
   it('hands the shell this chat, the message and its excerpt — and puts the caret in the composer', async () => {
     await mountChat()
     await replyOn('r1').trigger('click')
@@ -205,8 +244,6 @@ describe('the Reply action on a message (ent#738)', () => {
     // Still there (no row reflow), just not live.
     expect(replyOn('r1').exists()).toBe(true)
     expect(replyOn('r1').attributes('disabled')).toBeDefined()
-    await replyOn('r1').trigger('click')
-    expect(wrapper.emitted('reply')).toBeUndefined()
   })
 })
 
@@ -242,6 +279,29 @@ describe('Esc clears the chip — innermost first (ent#738 ruling)', () => {
     expect(store.cancelPortalTurn).not.toHaveBeenCalled()
 
     // Positive control: with no chip left, the same key reaches the turn.
+    await esc(textarea())
+    await flushPromises()
+    expect(store.cancelPortalTurn).toHaveBeenCalledTimes(1)
+  })
+
+  it("Esc on the chip's own × drops the reply, not the running turn (focus off the textarea)", async () => {
+    store.streamPortalExecution = vi.fn(() => new Promise(() => {}))
+    await mountChat()
+    await textarea().setValue('look into it')
+    await wrapper.find('form').trigger('submit')
+    await flushPromises()
+    await replyOn('r1').trigger('click')
+    await flushPromises()
+    // A keyboard user tabs to the chip's remove control and presses Escape.
+    const remove = wrapper.find('[data-testid="portal-reply-chip-remove"]')
+    remove.element.focus()
+    await esc(remove)
+    await flushPromises()
+    expect(store.cancelPortalTurn).not.toHaveBeenCalled()
+    expect(wrapper.emitted('reply-done')).toHaveLength(1)
+    expect(composerChips()).toHaveLength(0)
+    expect(document.activeElement).toBe(textarea().element)
+    // Positive control: with the chip gone, the next Escape reaches the turn.
     await esc(textarea())
     await flushPromises()
     expect(store.cancelPortalTurn).toHaveBeenCalledTimes(1)
@@ -321,14 +381,15 @@ describe('the bubble owns the row (ent#738)', () => {
     expect(reply.classList.contains('dark:text-gray-400')).toBe(true)
   })
 
-  it('emits reply on click, and not while disabled', async () => {
+  it('emits reply on click, and is natively disabled on request', async () => {
     const w = mountBubble({ replyLabel: 'Reply to this message' })
     await w.find(REPLY).trigger('click')
     expect(w.emitted('reply')).toHaveLength(1)
     await w.setProps({ replyDisabled: true })
+    // The native attribute is the proof: a disabled button gets no click from
+    // a person. (VTU's `trigger` skips disabled elements, so a click-then-
+    // assert-nothing check here would test the library, not this component.)
     expect(w.find(REPLY).attributes('disabled')).toBeDefined()
-    await w.find(REPLY).trigger('click')
-    expect(w.emitted('reply')).toHaveLength(1)
   })
 })
 
