@@ -471,9 +471,16 @@ def test_reset_clears_the_agents_cached_ids(tmp_db, monkeypatch):
     cm = MagicMock(__aenter__=AsyncMock(return_value=client), __aexit__=AsyncMock(return_value=False))
     monkeypatch.setattr(rc, "agent_httpx_client", lambda name: cm)
 
+    ui_only = db.get_or_create_chat_session(AGENT, 2, "u2@example.com")   # never used by /chat
+
     asyncio.run(rc.reset_agent_chat_history(name=AGENT, current_user=_user()))
     assert db.get_chat_session_claude_id(a.id) is None
     assert db.get_chat_session_claude_id(other.id) == UUID2
+    # The reset session is closed, so the pilot history starts empty.
+    assert db.get_agent_chat_sessions(AGENT, user_id=1, status="active") == []
+    assert [x.id for x in db.get_agent_chat_sessions(AGENT, user_id=2, status="active")] == [ui_only.id]
+    monkeypatch.setenv("PULL_MODE_PILOT_AGENTS", AGENT)
+    assert asyncio.run(rc.get_agent_chat_history(name=AGENT, current_user=_user())) == []
 
 
 def test_pilot_history_comes_from_the_callers_session(tmp_db, monkeypatch):
