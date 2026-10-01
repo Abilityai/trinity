@@ -63,10 +63,12 @@ The spec names the gates (`TARGET_ARCHITECTURE.md`, §Re-Delivery and Side-Effec
    and logged. Pilots must run a base image with #2392, or every effect call whose model omits the id is
    refused. *(Trace fidelity #548/#333 closed Aug/Jun; `prior_trace` injection #1401 closed 2026-07-08;
    #1402 closed 2026-07-26.)*
-3. **A soak on an agent that actually emits.** The current pilot (`cornelius-oracle` on eu2) emits no
-   messages, calls or shares — measured 2026-09-02: 219 `idempotency_keys` rows, all `agent:*`, zero
-   `effect:*`. It has therefore never entered the code path item 2 protects, so a clean window on it is not
-   evidence about that gate. Mechanics for a second, disposable emitting pilot are in the ops repo
+3. **A soak on an agent that actually emits.** eu2 runs three pilot arms: `cornelius-oracle` and
+   `oracle-6-science` emit no messages, calls or shares; `oracle-7-ai-semi` (flipped 2026-09-15) is the
+   emitting arm, with a 2-hourly schedule that writes a byte-stable file to its public folder and calls
+   `share_file`, so a re-delivered execution must emit once. What the gate still needs is the pulled-run rate on
+   that arm: effect rows per pulled execution, with no duplicate share on a re-delivery. All three arms share
+   one subscription seat, so a quota blackout darkens every arm at once. Mechanics are in the ops repo
    (`trinity-ops-agent:docs/pull-soak-eu2.md`). System of record for the soak is
    [#1766](https://github.com/abilityai/trinity/issues/1766)'s comment thread — read it before measuring.
 4. **Phase 5: flip default-ON and delete the legacy machinery** — the 9-path cleanup pyramid, the slot ZSET,
