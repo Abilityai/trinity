@@ -426,10 +426,35 @@ def _try_recover_completed_turn(ctx: "HeadlessRunContext") -> bool:
     # Same session-id resolution as the #678 sibling path: the id Claude echoed
     # back wins; fall back to the UUID we put on the command line (unset when
     # the race wedged the reader before init, and empty on a --resume run).
-    effective_session_id = ctx.metadata.session_id or ctx.claude_session_uuid or None
+    # (#1025) `ctx` is a parameter, not a closure, so this correctly targets
+    # the finalize snapshot when one was taken. On the non-snapshot path this
+    # mutates the list `execute_headless_task` still holds — harmless, and the
+    # same aliasing every other recovery step here already relies on.
+    return _recover_completed_turn_into(
+        metadata=ctx.metadata,
+        response_parts=ctx.response_parts,
+        session_id=ctx.metadata.session_id or ctx.claude_session_uuid or None,
+        since_iso=ctx.task_start_iso,
+        label=ctx.task_session_id,
+    )
+
+
+def _recover_completed_turn_into(
+    *,
+    metadata: ExecutionMetadata,
+    response_parts: List[str],
+    session_id: Optional[str],
+    since_iso: Optional[str],
+    label: Optional[str],
+) -> bool:
+    """The #1870 recovery core, shared by the headless path and the sync chat
+    path (#2968). On positive on-disk evidence that the turn finished, replaces
+    ``response_parts`` with the notice + recovered answer, flags ``metadata``
+    and returns True. Otherwise returns False. Never raises."""
+    effective_session_id = session_id
     try:
         recovered = _recover_completed_turn_from_jsonl(
-            effective_session_id, since_iso=ctx.task_start_iso
+            effective_session_id, since_iso=since_iso
         )
     except Exception as e:  # noqa: BLE001 — must never mask the 502 with a 500
         # `%r` on the session id, not `%s`: `resume_session_id` reaches
@@ -453,21 +478,16 @@ def _try_recover_completed_turn(ctx: "HeadlessRunContext") -> bool:
     # authoritative for this turn's assistant text and that fragment is a
     # subset of it; appending would duplicate it. Mirrors the parser's own
     # `if result_text: clear(); append()` idiom.
-    #
-    # (#1025) `ctx` is a parameter, not a closure, so this correctly targets
-    # the finalize snapshot when one was taken. On the non-snapshot path this
-    # mutates the list `execute_headless_task` still holds — harmless, and the
-    # same aliasing every other recovery step here already relies on.
-    ctx.response_parts[:] = [_RECOVERY_NOTICE, recovered]
-    ctx.metadata.recovered_from_jsonl = True   # #678 continuity
-    ctx.metadata.recovered_terminal = True     # §2.5 C1 — the precise signal
+    response_parts[:] = [_RECOVERY_NOTICE, recovered]
+    metadata.recovered_from_jsonl = True   # #678 continuity
+    metadata.recovered_terminal = True     # §2.5 C1 — the precise signal
     logger.warning(
         "event=completed_turn_recovered_from_jsonl session_id=%r chars=%d "
         "task=%r — runtime reported error_during_execution but the transcript "
         "shows stop_reason=end_turn; surfacing the recovered answer as success",
         effective_session_id,
         len(recovered),
-        ctx.task_session_id,
+        label,
     )
     return True
 

@@ -47,6 +47,7 @@ from . import chat_session_marker
 from . import jsonl_recovery as _jsonl_recovery
 from .headless_executor import (
     _attempt_empty_result_recovery,
+    _recover_completed_turn_into,
     _valid_session_id,
     execute_headless_task,
 )
@@ -560,26 +561,40 @@ async def _execute_claude_code_once(
                     detail=f"Claude Code execution failed (exit code {return_code}): {error_detail[:300]}"
                 )
 
-            # #2958: a failed `--resume` is exit 0 with an `is_error` result
-            # (#1673's shape), which the stream parser marks `execution_error`.
-            # Without this the chat path reads it as "returned empty response"
-            # and the caller cannot tell a dead session from a silent model.
-            # Resume turns only, and only when the turn produced no text: a
-            # turn that answered and then reported `is_error` still returns its
-            # text, as it did under `--continue` and still does on a cold turn.
-            # The general chat `execution_error` handling also needs #1870's
-            # completed-turn recovery (a follow-up).
-            if (
-                resume_session_id
-                and metadata.error_type == "execution_error"
-                and not response_parts
-            ):
-                err = sanitize_text(metadata.error_message or "Execution error")
-                logger.error(f"[Chat] Resume turn reported an execution error: {err[:300]}")
-                raise HTTPException(
-                    status_code=502,
-                    detail=f"Execution error: {err[:300]}",
+            # #1673 / #2968: an `is_error` result with a clean exit (the
+            # stream parser marks it `execution_error`) is a failure, whatever
+            # text it carries — a failed `--resume` (#2958), an `API Error: …`
+            # in the result field, or a partial answer cut off mid-turn. Parity
+            # with headless_executor._finalize_headless_result: first the #1870
+            # completed-turn recovery, gated on on-disk `stop_reason=end_turn`
+            # evidence (never on the stdout text, which would re-open #1673),
+            # so a finished answer the CLI mislabelled is kept; otherwise 502
+            # (not 503 — clear of SUB-003's auth auto-switch) with the
+            # sanitized cause. The structured body matches the #678/#1853
+            # shape so the backend salvages cost/context onto the FAILED row.
+            # Off the event loop, like the compact read above: it parses the
+            # session JSONL. The reader threads are done, so nothing else
+            # touches `metadata` / `response_parts` while it mutates them.
+            if metadata.error_type == "execution_error":
+                recovered = await loop.run_in_executor(
+                    None,
+                    lambda: _recover_completed_turn_into(
+                        metadata=metadata,
+                        response_parts=response_parts,
+                        session_id=metadata.session_id or resume_session_id,
+                        since_iso=task_start_iso,
+                        label=execution_id,
+                    ),
                 )
+                if not recovered:
+                    err = sanitize_text(metadata.error_message or "Execution error")
+                    logger.error(f"[Chat] Claude Code execution error: {err[:300]}")
+                    meta = sanitize_dict(metadata.model_dump())
+                    meta["session_id"] = _valid_session_id(metadata.session_id)
+                    raise HTTPException(
+                        status_code=502,
+                        detail={"message": f"Execution error: {err[:300]}", "metadata": meta},
+                    )
 
             # #678: empty-result recovery before falling through to the
             # generic 500. Tries JSONL metadata back-fill then text
