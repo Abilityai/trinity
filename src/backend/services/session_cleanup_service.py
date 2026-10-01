@@ -84,8 +84,8 @@ _PROJECTS_DIR = "/home/developer/.claude/projects/-home-developer"
 # (tests/unit/test_2958_marker_path_parity.py).
 CHAT_SESSION_MARKER_PATH = "/home/developer/.trinity/chat-session.json"
 _NO_CHAT_SESSION = "__NO_CHAT_SESSION__"
-# `execute_command_in_container` accepts a timeout it does not forward, so the
-# marker read bounds itself (a hung exec otherwise stalls the whole cycle).
+# Bound on the marker read, enforced by `execute_command_in_container` (#2969) —
+# a hung exec would otherwise stall the whole cycle.
 _CHAT_MARKER_READ_TIMEOUT_S = 10
 # `$` in `re.match` lets a trailing newline through; the marker reader uses
 # `fullmatch` so a junk id can never widen the keep set.
@@ -247,22 +247,20 @@ class SessionCleanupService:
         runtime) is a normal None. Anything else that is not a clean UUID
         RAISES, and the caller aborts that agent's sweep.
 
-        Bounded three ways: ``head -c 512`` caps the read, an in-container
-        ``timeout 5`` frees the exec thread, and ``asyncio.wait_for`` frees
-        this coroutine. Runs as ``developer``, never root.
+        Bounded: ``head -c 512`` caps the read, and the primitive enforces
+        ``_CHAT_MARKER_READ_TIMEOUT_S`` in the container and around the await
+        (#2969). Runs as ``developer``, never root.
         """
         path = shlex.quote(CHAT_SESSION_MARKER_PATH)
         command = (
-            f"sh -c 'P={path}; if [ -f \"$P\" ]; then timeout 5 head -c 512 -- \"$P\"; "
+            f"sh -c 'P={path}; if [ -f \"$P\" ]; then head -c 512 -- \"$P\"; "
             f"else echo {_NO_CHAT_SESSION}; fi'"
         )
-        try:
-            result = await asyncio.wait_for(
-                execute_command_in_container(container, command, timeout=10, user="developer"),
-                timeout=_CHAT_MARKER_READ_TIMEOUT_S,
-            )
-        except asyncio.TimeoutError:
-            raise ChatSessionMarkerError("marker_timeout") from None
+        result = await execute_command_in_container(
+            container, command, timeout=_CHAT_MARKER_READ_TIMEOUT_S, user="developer"
+        )
+        if result.get("timed_out"):
+            raise ChatSessionMarkerError("marker_timeout")
         if result.get("exit_code") != 0:
             raise ChatSessionMarkerError("marker_exec_failed")
         output = (result.get("output") or "").strip()
