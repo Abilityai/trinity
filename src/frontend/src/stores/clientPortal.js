@@ -300,6 +300,10 @@ export const useClientPortalStore = defineStore('clientPortal', {
     // sync step, and three separate queries is how that stops being true.
     asks: [],
     asksAvailable: false,   // false when the backend does not serve /asks (404/403)
+    // trinity-enterprise#610: the 404/403 VERDICT, distinct from "not fetched
+    // yet" (both leave `asksAvailable` false). The Inbox's Action tab needs it:
+    // an instance that does not serve asks has an empty Action, not a skeleton.
+    asksAbsent: false,
     // trinity-enterprise#610 (PR A0): the read's honesty. `asksLoaded` latches on
     // the first success; `asksFailed` is the LAST read's verdict for anything but
     // 404/403 (a 5xx, 503 `asks_unavailable`, a network error) — the list keeps
@@ -608,9 +612,14 @@ export const useClientPortalStore = defineStore('clientPortal', {
       // client's first failed read shows them the previous client's asks.
       this.asks = []
       this.asksAvailable = false
+      this.asksAbsent = false
       this.asksLoaded = false
       this.asksFailed = false
       this.asksLoadedAt = null
+      // Round-3 /cso: the session list keeps its last good copy the same way
+      // (#2198), so it is session state and goes with the session too.
+      this.lastSessions = []
+      this.sessionsFailed = false
       // #2261: the primitive clears the suppression; `endSession({expired})`
       // re-arms it immediately afterwards. Keeping the clear HERE is what stops
       // a marker from outliving the session it was about.
@@ -715,7 +724,7 @@ export const useClientPortalStore = defineStore('clientPortal', {
     // on BOTH turn actions — a field honoured by only one brings the bug back
     // exactly when streaming fails and this fallback runs.
     async sendPortalChat(agentName, message, sessionId = null,
-                    { newThread = false, openCanvasId = null, model = null } = {}) {
+                    { newThread = false, openCanvasId = null, model = null, replyToMessageId = null } = {}) {
       const { data } = await portalHttp.post(
         `/api/enterprise/client-portal/agents/${agentName}/chat`,
         {
@@ -727,6 +736,10 @@ export const useClientPortalStore = defineStore('clientPortal', {
           // Server-validated: an id the caller cannot see is discarded there,
           // so sending it is never a way to reach a canvas they could not open.
           open_canvas_id: openCanvasId,
+          // ent#610 — the message this turn replies to. An id only: the server
+          // quotes the stored row into the prompt, and refuses (422) one that
+          // is not in this caller's thread.
+          reply_to_message_id: replyToMessageId || null,
         },
         { headers: this.authHeader }
       )
@@ -739,7 +752,7 @@ export const useClientPortalStore = defineStore('clientPortal', {
     // for headless clients (ent#83), and is still the fallback when streaming
     // is unavailable.
     async startPortalChat(agentName, message, sessionId = null,
-                    { newThread = false, openCanvasId = null, model = null } = {}) {
+                    { newThread = false, openCanvasId = null, model = null, replyToMessageId = null } = {}) {
       const { data } = await portalHttp.post(
         `/api/enterprise/client-portal/agents/${agentName}/chat/stream`,
         {
@@ -751,6 +764,10 @@ export const useClientPortalStore = defineStore('clientPortal', {
           // Server-validated: an id the caller cannot see is discarded there,
           // so sending it is never a way to reach a canvas they could not open.
           open_canvas_id: openCanvasId,
+          // ent#610 — the message this turn replies to. An id only: the server
+          // quotes the stored row into the prompt, and refuses (422) one that
+          // is not in this caller's thread.
+          reply_to_message_id: replyToMessageId || null,
         },
         { headers: this.authHeader }
       )
@@ -942,16 +959,23 @@ export const useClientPortalStore = defineStore('clientPortal', {
     // rather than their deliverables. Fail-soft to [] — a chat that cannot list
     // its deliverables must still be a working chat.
     async fetchSessionDeliverables(agentName, sessionId) {
-      if (!agentName || !sessionId) return []
       try {
-        const { data } = await portalHttp.get(
-          `/api/enterprise/client-portal/agents/${agentName}/reports`,
-          { headers: this.authHeader, params: { session_id: sessionId } },
-        )
-        return data.reports || []
+        return await this.fetchSessionDeliverablesStrict(agentName, sessionId)
       } catch {
         return []
       }
+    },
+
+    // trinity-enterprise#610 (D11): the same read, but it RETHROWS. The Inbox
+    // pane must tell "this chat has no deliverables" from "the list failed" —
+    // the fail-soft twin above cannot, by design.
+    async fetchSessionDeliverablesStrict(agentName, sessionId) {
+      if (!agentName || !sessionId) return []
+      const { data } = await portalHttp.get(
+        `/api/enterprise/client-portal/agents/${agentName}/reports`,
+        { headers: this.authHeader, params: { session_id: sessionId } },
+      )
+      return data.reports || []
     },
 
     // #2162: `rowsLimit` windows a TABULAR payload server-side. Sent on every
@@ -1449,15 +1473,31 @@ export const useClientPortalStore = defineStore('clientPortal', {
     //
     // Keyed `${kind}:${id}`: the two id spaces are independent, so an id alone
     // is not a key.
-    async fetchChatState() {
+    // trinity-enterprise#610 (D5): called with NO argument it returns the
+    // `kind:id` → entry map, exactly as before — every existing caller keeps
+    // its shape. Called with an options object it returns `{state, previews}`:
+    // `previews` maps `kind:id` → `{latest, first_unread_message_id}` for the
+    // entries the server enriched (only with `previews: true`, only while the
+    // Inbox is mounted). Counts and previews come from one response, so the
+    // row's "N new" and its excerpt cannot drift. An older backend ignores the
+    // flag and `previews` is simply empty.
+    async fetchChatState(opts) {
+      const withPreviews = !!(opts && opts.previews)
       const { data } = await portalHttp.get('/api/enterprise/client-portal/chat-state', {
         headers: this.authHeader,
+        ...(withPreviews ? { params: { previews: true } } : {}),
       })
       const out = {}
+      const previews = {}
       for (const c of data.chats || []) {
-        if (c && c.kind && c.id) out[`${c.kind}:${c.id}`] = c
+        if (!(c && c.kind && c.id)) continue
+        const key = `${c.kind}:${c.id}`
+        out[key] = c
+        if (c.latest || c.first_unread_message_id) {
+          previews[key] = { latest: c.latest || null, first_unread_message_id: c.first_unread_message_id || null }
+        }
       }
-      return out
+      return opts === undefined ? out : { state: out, previews }
     },
 
     async setChatStar(kind, chatId, starred) {
@@ -1478,6 +1518,18 @@ export const useClientPortalStore = defineStore('clientPortal', {
           { headers: this.authHeader },
         )
       } catch { /* stale badge only */ }
+    },
+
+    // trinity-enterprise#610 (D11): the same write, but it RETHROWS. Mark all
+    // read settles many of these and must report how many failed —
+    // `markChatRead` swallows every error by design, so `Promise.allSettled`
+    // over it would report zero failures even if all of them failed.
+    async markChatReadStrict(kind, chatId) {
+      await portalHttp.post(
+        `/api/enterprise/client-portal/chat-state/${kind}/${encodeURIComponent(chatId)}/read`,
+        null,
+        { headers: this.authHeader },
+      )
     },
 
     // `since` is the seq cursor: 0 loads the whole transcript, a later value
@@ -2082,6 +2134,7 @@ export const useClientPortalStore = defineStore('clientPortal', {
         if (stale()) return []
         this.asks = Array.isArray(data) ? data : []
         this.asksAvailable = true
+        this.asksAbsent = false
         this.asksLoaded = true
         this.asksFailed = false
         this.asksLoadedAt = Date.now()
@@ -2097,6 +2150,7 @@ export const useClientPortalStore = defineStore('clientPortal', {
         }
         if ([403, 404].includes(err.response?.status)) {
           this.asksAvailable = false
+          this.asksAbsent = true
           this.asksLoaded = false
           this.asksFailed = false
           this.asks = []

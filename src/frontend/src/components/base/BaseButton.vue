@@ -46,10 +46,12 @@ const SIZE_CLASSES = {
 }
 
 const VARIANT_CLASSES = {
+  // Dark uses the light pair (ent#610 round 3): white on 500 was 4.47:1 and on
+  // the 400 hover ~2.9:1, under AA on every dark primary action.
   primary:
     'border-transparent ' +
     'bg-action-primary-600 hover:bg-action-primary-700 text-white ' +
-    'dark:bg-action-primary-500 dark:hover:bg-action-primary-400',
+    'dark:bg-action-primary-600 dark:hover:bg-action-primary-700',
   // The only variant whose border is part of the design: a white button on a
   // white card is its own outline (design-system-reference.html, .btn-secondary
   // → border-color: var(--border-strong)).
@@ -60,9 +62,11 @@ const VARIANT_CLASSES = {
     'border-transparent ' +
     'bg-status-danger-600 hover:bg-status-danger-700 text-white ' +
     'dark:bg-status-danger-500 dark:hover:bg-status-danger-400',
+  // Dark ink is the 400 tier, not 500 (ent#610 §3g B7b): 500 measured 3.97:1
+  // on gray-900 and 3.29 on gray-800, under the AA floor for every ghost verb.
   ghost:
     'border-transparent ' +
-    'bg-transparent text-action-primary-600 dark:text-action-primary-500 ' +
+    'bg-transparent text-action-primary-600 dark:text-action-primary-400 ' +
     'hover:bg-action-primary-100 dark:hover:bg-action-primary-500/16',
 }
 

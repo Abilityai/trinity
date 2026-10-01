@@ -60,15 +60,23 @@ beforeEach(() => {
 afterEach(() => { wrapper?.unmount(); wrapper = null })
 
 describe('the chat strip', () => {
-  it('mounts its PortalAsks pending-only', async () => {
+  // ent#610 (merged with #3115): the strip is the chat's own row — its asks
+  // pinned by `pinnedAskIds`, which holds only asks seen PENDING here — and the
+  // mount inside it rides `pending-only` too. An ended ask never enters it.
+  it("mounts its PortalAsks pending-only, on this chat's pending asks", async () => {
+    store.asks = [ask('p1', { chat_id: 's1' }), { ...ANSWERED, chat_id: 's1' }]
     wrapper = shallowMount(PortalConversation, {
-      props: { agent: { name: 'scout', playbooks: [] }, sessionId: null },
+      props: { agent: { name: 'scout', playbooks: [] }, sessionId: 's1' },
+      global: { renderStubDefaultSlot: true },
     })
     await flushPromises()
+    const details = wrapper.find('details')
+    details.element.open = true
+    await details.trigger('toggle')
     const strip = wrapper.findComponent(PortalAsks)
     expect(strip.exists()).toBe(true)
     expect(strip.props('pendingOnly')).toBe(true)
-    expect(strip.props('agentName')).toBe('scout')
+    expect(strip.props('askIds')).toEqual(['p1'])
   })
 })
 

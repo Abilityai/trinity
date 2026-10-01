@@ -69,8 +69,8 @@ def test_chat_turn_carries_the_line_on_both_arms():
     from client_portal import service
     src = inspect.getsource(service.portal_chat)
     assert "turn_context.collect(" in src
-    assert "(delta_prefix + turn_prefix + canvas_prefix + manifest_prefix + message) if resuming" in src
-    assert "cold_message = history_prefix + turn_prefix + canvas_prefix + manifest_prefix + message" in src
+    assert "(delta_prefix + turn_prefix + canvas_prefix + manifest_prefix + reply_prefix + message) if resuming" in src
+    assert "cold_message = history_prefix + turn_prefix + canvas_prefix + manifest_prefix + reply_prefix + message" in src
 
 
 def test_chat_turn_derives_the_audience_from_the_principal_not_the_request():

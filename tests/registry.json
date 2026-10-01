@@ -3784,6 +3784,26 @@
       "description": "Journey J13 (suggestions): my agent tells me what I can do with it and what is waiting on me, and only things that are true. A strict=True xfail skeleton — the rules, SQL and doors are unit-proven and the verbs mount-proven; the walk needs a real failing schedule, a shared platform user and a magic-link client on one instance."
     },
     {
+      "file": "unit/test_ent610_asks_unavailable.py",
+      "feature": "trinity-enterprise#610",
+      "added": "2026-09-28",
+      "categories": [
+        "backend",
+        "workspace"
+      ],
+      "description": "Workspace asks read fails loud (ent#610 PR A0): a queue-read fault and an unreadable roster each raise AsksUnavailable and the route answers 503 asks_unavailable (never []); a genuinely off-roster agent is still dropped with a 200; answer_ask stays a uniform 404 on a roster outage (Invariant #8); the suggestions build still degrades to no ask ids through its own attempt() (a guard for the new raise path; it also passes pre-fix). Mutations: revert the raise to return [] (2 red), make _on_roster swallow again (3 red incl. the reversed test_ent428 case)."
+    },
+    {
+      "file": "unit/test_ent610_inbox.py",
+      "feature": "trinity-enterprise#610",
+      "added": "2026-09-28",
+      "categories": [
+        "backend",
+        "workspace"
+      ],
+      "description": "Workspace Inbox backend (ent#610 PR A), on a real SQLite schema. D3: a report addressed to me and stamped to a chat I own is an unread arrival on the #557 cursor/baseline (own-session join, plain-equality lowercased audience, index not scan; Hypothesis property: the count is exactly the arrivals). D4: resolve_report_session stamps an addressed report to the addressee's own in-flight chat else their Main (minted, touched added=0, one Main under concurrency, fail-soft None). D5: the completion writer's source marker (completion:done/failed); unread_arrivals_with_latest windows the same fragment (property: n == count_unread_by_session, latest = max arrival, first_unread_message_id = earliest unread message); GET /chat-state?previews=true attaches a roster-scoped, 100-bounded, markdown-stripped 160-char preview with outcome from the marker only and NO cost key, reusing the same statement's counts; without previews the payload is the ent#359 shape unchanged; the route forwards the principal kind to the roster read (platform vs portal token) and an unreadable roster fails the previews read with a 5xx, never a preview-less 200. Mutations recorded in the PR (roster filter, unread passthrough, cost, latest order, body-parsed outcome, first-unread order, hard-coded principal kind, swallowed roster read: all red)."
+    },
+    {
       "file": "unit/test_ent713_events_access_scope.py",
       "feature": "ent#713",
       "added": "2026-09-28",

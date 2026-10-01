@@ -277,8 +277,11 @@ describe('Overview containment', () => {
     // rendered, proven mounted in portalAskStripPendingOnly.mount.spec.js), and
     // the strip hosts it pending-only; its top gap follows content.
     const src = stripComments(readFileSync(CONVERSATION, 'utf8'))
+    // ent#610 sign-off: the mount now sits inside a closed-by-default row + capped box, so the
+    // window widened; the guard it pins (`agentAsks.length` gates it) is unchanged. #3115's
+    // pending-only rides the mount (ent#610's pinnedAskIds already holds only asks seen pending).
+    expect(src).toMatch(/v-if="agentAsks\.length"[\s\S]{0,1500}<PortalAsks/)
     expect(src).toMatch(/<PortalAsks[\s\S]{0,200}pending-only/)
-    expect(src).toContain('[&:has([data-testid=portal-asks])]:pt-2')
   })
 
   it('does not nest a scroll region inside the asks rendering', () => {
