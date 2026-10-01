@@ -270,6 +270,31 @@ async def _within_fire_budget(source: str, subscriber: str) -> bool:
     return False
 
 
+def _subscription_still_permitted(subscription) -> bool:
+    """The create-time rule (`routers/event_subscriptions.py`), applied at delivery.
+
+    Self-subscription needs no edge. Otherwise the subscriber must still hold the
+    `agent_permissions` edge to the subscription's source — the subscription's
+    own `source_agent`, never the event's, which is a username for a human emit.
+    Fails closed: an unreadable grant skips this delivery (the subscription is
+    kept, so a re-grant resumes it).
+    """
+    subscriber = getattr(subscription, "subscriber_agent", None)
+    source = getattr(subscription, "source_agent", None)
+    if subscriber and subscriber == source:
+        return True
+    try:
+        permitted = bool(source) and db.is_agent_permitted(subscriber, source)
+    except Exception as e:  # noqa: BLE001 — fail closed
+        logger.warning("[ent#739] permission read failed for %s -> %s; delivery skipped: %s",
+                       subscriber, source, e)
+        return False
+    if not permitted:
+        logger.info("[ent#739] %s no longer permitted to %s; subscription %s not delivered",
+                    subscriber, source, getattr(subscription, "id", "?"))
+    return permitted
+
+
 async def trigger_subscription(
     subscription, event, *, agent_originated: bool, chain_depth: Optional[int] = None
 ):
@@ -298,6 +323,12 @@ async def trigger_subscription(
     its source → subscriber hourly budget and is skipped once it is spent.
     """
     import httpx
+
+    # trinity-enterprise#739: the grant is re-read per delivery, not trusted from
+    # the day the subscription was made. Withdrawing the subscriber -> source
+    # edge must stop the next wake-up, the way it stops the next peer call.
+    if not _subscription_still_permitted(subscription):
+        return
 
     if not await _within_fire_budget(str(event.source_agent), subscription.subscriber_agent):
         return

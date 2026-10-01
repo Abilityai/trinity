@@ -461,6 +461,9 @@ def get_latest_version(base_name: str) -> Optional[AgentStatus]:
     return max(existing, key=get_version)
 
 
+_SHARED_IN_PREFIX = "/home/developer/shared-in/"
+
+
 async def check_shared_folder_mounts_match(container, agent_name: str) -> bool:
     """
     Check if container's shared folder mounts match the current config.
@@ -487,7 +490,13 @@ async def check_shared_folder_mounts_match(container, agent_name: str) -> bool:
         if "/home/developer/shared-out" in mount_dests:
             return False  # Config says no expose, but mount exists
 
-    # Check consume mounts
+    # Check consume mounts — in BOTH directions, like the expose branch above
+    # (trinity-enterprise#739). The set is computed through `is_permitted`, so a
+    # grant withdrawn since the container was built leaves a mount that is
+    # present but no longer expected; that is drift, and the start-time
+    # recreate drops it. Checking only "expected but missing" let a withdrawn
+    # grant's mount survive every restart.
+    expected = set()
     if config.consume_enabled:
         available = db.get_available_shared_folders(agent_name)
         for source_agent in available:
@@ -496,10 +505,14 @@ async def check_shared_folder_mounts_match(container, agent_name: str) -> bool:
             # Check if volume exists (async to avoid blocking)
             try:
                 await volume_get(source_volume)
-                if mount_path not in mount_dests:
-                    return False  # Should be mounted but isn't
             except Exception:
-                pass  # Volume doesn't exist yet, OK to skip
+                continue  # Volume doesn't exist yet, OK to skip
+            if mount_path not in mount_dests:
+                return False  # Should be mounted but isn't
+            expected.add(mount_path)
+    for dest in mount_dests:
+        if dest and dest.startswith(_SHARED_IN_PREFIX) and dest not in expected:
+            return False  # Mounted but no longer permitted (or consume disabled)
 
     return True
 
