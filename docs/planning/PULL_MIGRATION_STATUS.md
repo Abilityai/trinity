@@ -100,7 +100,7 @@ The spec names the gates (`TARGET_ARCHITECTURE.md`, §Re-Delivery and Side-Effec
    `trinity chat`) skips the slot acquire and runs through `session_turn_service.run_resumable_turn` with key
    `session:chat:<chat_sessions.id>`. Memory is one Claude conversation per (agent, user): the chat session's
    `cached_claude_session_id` is resumed, a second turn of the same user waits on the `ResumeLock` (30s, then
-   429), and other users run in parallel. `DELETE /chat/history` forgets the cached ids; `GET /chat/history`
+   429), and other users run in parallel. `DELETE /chat/history` closes the sessions /chat used and forgets their ids; `GET /chat/history`
    serves the caller's session from the database. Off a pilot `/chat` keeps the agent container's single
    shared session. Images ride the queue in
    `backlog_metadata`, which the #1449 retention sweep NULLs once the row is terminal. Live-stream proxies hold the SSE connection

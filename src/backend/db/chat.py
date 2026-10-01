@@ -351,8 +351,11 @@ class ChatOperations:
             return result.rowcount > 0
 
     def clear_chat_session_claude_ids(self, agent_name: str) -> int:
-        """Forget every cached Claude id on this agent's chat sessions, so the
-        next pulled /chat turn of each user starts a fresh conversation."""
+        """Reset the agent's pulled /chat conversations (#3127): every chat
+        session carrying a cached Claude id is closed and the id forgotten, so
+        each user's next pulled /chat turn starts a fresh conversation in a new
+        session and ``GET /chat/history`` shows it empty. Sessions /chat never
+        used (no cached id) are left alone."""
         with get_engine().begin() as conn:
             result = conn.execute(
                 update(chat_sessions)
@@ -362,7 +365,7 @@ class ChatOperations:
                         chat_sessions.c.cached_claude_session_id.isnot(None),
                     )
                 )
-                .values(cached_claude_session_id=None)
+                .values(cached_claude_session_id=None, status="closed")
             )
             return result.rowcount
 
