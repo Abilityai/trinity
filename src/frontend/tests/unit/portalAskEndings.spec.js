@@ -109,8 +109,10 @@ describe('PortalAsks renders how an ask ended (mounted)', () => {
 
   it('a sync badge speaks only about an ask that is still waiting', () => {
     store.asks = [
-      ask('p1', { sync: 'unconfirmed' }),
-      ask('c1', { status: 'cancelled', ended_by: 'operator', ended_at: ENDED, sync: 'unconfirmed' }),
+      // ent#610 §3g B5: `changed`, not `unconfirmed` — the Workspace hides
+      // "Unconfirmed" on every ask, so it could no longer tell pending from ended.
+      ask('p1', { sync: 'changed' }),
+      ask('c1', { status: 'cancelled', ended_by: 'operator', ended_at: ENDED, sync: 'changed' }),
     ]
     store.asksAvailable = true
     const w = mount(PortalAsks, { props: { agentName: 'scout' } })
@@ -124,20 +126,23 @@ describe('PortalAsks renders how an ask ended (mounted)', () => {
   })
 })
 
-describe('the Work tab\'s "Waiting on you" stays pending-only (mounted)', () => {
-  it('lists the pending ask of a participant, never one that ended', async () => {
+// ent#610 (the 09-30 ruling): Work draws no asks; its one line COUNTS the
+// waiting ones, and an ended ask is not waiting.
+describe("the Work tab's waiting line counts pending asks only (mounted)", () => {
+  it('counts the pending ask of a participant, never one that ended', async () => {
     store.asks = LIST.map((a) => ({ ...a }))
     store.asksAvailable = true
+    store.isPlatformSession = true
     const work = usePortalWorkStore()
     work.hasLoaded = true
     portalHttp.get.mockResolvedValue({ data: { now: [], earlier: [], earlier_total: 0 } })
     const w = mount(PortalWork, {
       props: { participants: ['scout'] },
-      global: { stubs: { PortalWorkCard: true, PortalAvatar: true, PortalSkeleton: true, LoadFailed: true } },
+      global: { stubs: { PortalWorkCard: true, PortalAvatar: true, PortalSkeleton: true, LoadFailed: true, RouterLink: { template: '<a><slot /></a>' } } },
     })
     await flushPromises()
-    const waiting = w.find('[data-testid="portal-work-waiting"]')
-    expect(waiting.exists()).toBe(true)
-    expect(waiting.findAll('[data-status]').map((c) => c.attributes('data-status'))).toEqual(['pending'])
+    const pending = LIST.filter((a) => a.status === 'pending').length
+    expect(w.find('[data-testid="portal-work-waiting-line"]').text()).toContain(`${pending} ${pending === 1 ? 'ask' : 'asks'} waiting on you`)
+    expect(w.findAll('[data-status]')).toHaveLength(0)
   })
 })

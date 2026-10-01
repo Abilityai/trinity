@@ -1,0 +1,73 @@
+{
+  "version": "1.1",
+  "date": "2026-09-29",
+  "mode": "diff",
+  "scope": "all",
+  "confidence_gate": 8,
+  "branch": "feature/671-metrics-retention-rows",
+  "issue": "abilityai/trinity-enterprise#671",
+  "phases_run": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    9,
+    10,
+    11,
+    12,
+    13,
+    14
+  ],
+  "attack_surface": {
+    "new_endpoints": 0,
+    "changed_endpoints": [
+      "GET /api/settings/retention (quotas block, admin-only)",
+      "PUT /api/enterprise/retention/config (two bounded fields, unknown keys 422, audit row)"
+    ],
+    "deploy_config": [
+      "docker-compose.yml",
+      "docker-compose.prod.yml",
+      "docker-compose.hosted.yml",
+      ".env.example"
+    ],
+    "frontend": [
+      "src/frontend/src/views/Settings.vue",
+      "src/frontend/src/utils/retentionFields.js"
+    ]
+  },
+  "findings": [],
+  "fixed_during_audit": [],
+  "appendix": [
+    {
+      "status": "accepted",
+      "title": "Managed PUT audit write is best-effort (vault precedent); OSS /ops/config 500s after the write instead"
+    },
+    {
+      "status": "accepted",
+      "title": "ADMIN_GATE_SCOPES admits an admin-owned user-scoped MCP key on both write paths (#2323, by design, unchanged)"
+    }
+  ],
+  "supply_chain_summary": "no dependency, lockfile, CI or Dockerfile changes",
+  "filter_stats": {
+    "candidates": 2,
+    "reported": 0,
+    "below_gate": 2
+  },
+  "totals": {
+    "critical": 0,
+    "high": 0,
+    "medium": 0,
+    "low": 0
+  },
+  "mutations": [
+    "audit call removed from the managed PUT -> router audit test red",
+    "extra=forbid removed -> unknown-key tests red",
+    "view env lock removed -> e2e env-state test red",
+    "compose default restored / .env.example line uncommented -> forwarding guard red"
+  ],
+  "trend": "diff-mode report; no prior report for this branch"
+}

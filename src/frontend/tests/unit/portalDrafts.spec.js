@@ -404,7 +404,7 @@ describe('portalUtils — the tab model, the collapse lift and the row title kno
   it('agentRowTitle names the draft in words', async () => {
     const { agentRowTitle } = await import('../../src/components/portal/portalUtils')
     expect(agentRowTitle({ label: 'Scribe', name: 'scribe', hasDraft: true })).toBe('Scribe (scribe) — an unsent draft')
-    expect(agentRowTitle({ name: 'scribe', unread: 2, hasDraft: true })).toBe('scribe — 2 unread replies, an unsent draft')
+    expect(agentRowTitle({ name: 'scribe', unread: 2, hasDraft: true })).toBe('scribe — 2 new, an unsent draft')  // ent#610: arrivals are "new"
     expect(agentRowTitle({ name: 'scribe' })).toBe('Open scribe')
   })
 })

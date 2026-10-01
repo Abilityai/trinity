@@ -1010,6 +1010,26 @@ operator can lift the cap without typing a huge number.
 module — `metrics_retention_days` is registered together with its sweeper. The
 cap is deliberately NOT a retention key: it is a write budget, not a window.
 
+**Settings surface (trinity-enterprise#671).** Settings → Retention shows both
+knobs beside the sibling windows: **Metric points** (days — the window, subject
+to the panel's existing floor rule on the managed path) and **Metric point
+quota** (points / agent / day, its own hint "0 = unlimited", no floor). They
+save through the same managed endpoint as the sibling windows, so the rows
+render only in an edition where that endpoint exists; in Community they are
+absent and `PUT /api/settings/ops/config` stays the write path.
+`GET /api/settings/retention` reports the window in `windows`/`sources` and the
+cap in `quotas.metrics_daily_point_cap` (`value` + `source`), where the value is
+read the way the write boundary enforces it. When a knob's source is `env`, its
+row is read-only with an `env` badge naming the variable and what unsetting it
+does (the #2085 seeder then writes the code default as a row), and Save omits
+it. Save sends only the fields the operator changed, so saving one window never
+turns another knob's code default or env value into a stored row.
+`env` has to mean "an operator set the variable", so every compose file forwards
+the env-backed keys with an EMPTY default (`${METRICS_DAILY_POINT_CAP:-}`) and
+`.env.example` leaves them commented — a compose default or a copied example
+line made `env` the reported source on every install and locked both rows
+(`tests/unit/test_ent671_env_backed_ops_forwarding.py`).
+
 ### 47.9 Legacy `metrics.json` — retired as a source, named as a finding (ent#479)
 
 `GET /api/agents/{name}/metrics` keeps its URL and is **re-backed by the point
@@ -1717,9 +1737,27 @@ Gate order (Invariant #8), copied verbatim from `/metrics`:
 
 `OBJECTIVES_READ_RATE_LIMIT` (env, default **60**/min per agent, window 60 s)
 is its **own** knob, not `/metrics`'s 240. That route is store-only; this one
-drives a container. Ten open role cards polling at 30 s is 20/min, so 60 clears
-normal traffic with room and still stops a loop from pinning an agent-server the
-platform also needs for chat.
+drives a container. The Workspace role card draws on the same bucket (below) but
+loads once per open and never polls, so 60 clears normal traffic from both doors
+with room and still stops a loop from pinning an agent-server the platform also
+needs for chat.
+
+**One budget, every door (trinity-enterprise#676).** The key, the limit and the
+window are spelled once, in `services/objectives_read_budget.py`, and every door
+to the container fan-out draws on it: this route (and MCP `get_objectives`
+through it) with `enforce` — a 429 + `Retry-After` — and the Workspace role card
+with `admit`, which never raises and is asked only once the card is about to read
+the objectives (after the role file), so a card that reads none spends none. The two doors fail differently on purpose. An
+agent polling its own objectives can empty the bucket, and the role card also
+carries the role, the readiness stamp and the owner's flip; refusing the whole
+card would let the agent hide its owner's control. So a refused card read is a
+200 without objectives (`objectives_error: objectives_rate_limited`) and without
+a fan-out. The card additionally takes a per-viewer cap
+(`portal_role_objectives:{email}:{name}`, a third of the limit — 20/min at the
+default, derived rather than fixed so a lowered limit lowers it too) **before** the
+shared key, so
+one Workspace viewer can spend at most a third of the budget and a refused
+viewer spends none of it.
 
 A store outage is `503 metric_store_unavailable` + `Retry-After: 30`.
 **Everything below transport is a named field on a 200** — an agent that is
@@ -1837,7 +1875,7 @@ metric, every one `declared: false` with its `metric_undeclared` finding and
 |---|---|
 | `GET /api/agents/{name}/objectives` | the operator/agent door |
 | MCP `get_objectives` | agent-scoped (no agent parameter), returns the route body verbatim, never throws |
-| Role card (ent#527, PR #2927) | calls `read_objective_join(agent, template=…, client=…)` **in process** behind its own roster gate — one implementation, two doors |
+| Role card (ent#527; cut over in ent#676) | calls `read_objective_join(agent, template=…, client=…)` **in process** behind its own roster gate and the shared budget (§50.6) — one implementation, two doors. It serves a slim client projection (codes, never the operator sentences; `core-agent.md` §5.36) |
 | Project view (ent#661 v3) | composes `read_objective_files` (one file read) with `join_objectives` per participating agent over store-only reads — the agent door stays out of its loop |
 | Proactivity (ent#605) | consumes `summary.behind` and per-row `gap.status == "behind" and not stale`; it owns the "never act on a stale number" rule and the pace maths |
 

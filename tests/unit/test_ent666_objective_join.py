@@ -1001,3 +1001,41 @@ def test_there_is_exactly_one_stale_rule_and_this_module_imports_it():
     assert "from services.metric_read_service import" in source
     assert "def freshness" not in source
     assert svc.STALE_RULE is metric_read_service.STALE_RULE
+
+    # ent#676 — the role card shipped the FIRST copy of this join and a second
+    # staleness rule with it (30 days over `metrics.json`). It now reaches
+    # freshness only through `read_objective_join`; its `is_stale` survives for
+    # the role FILE's `review_by` alone (framework §3.5 governs files).
+    #
+    # A shape pin, layered on the behaviour in `test_ent676_role_card_join.py`
+    # (a 3-hour-old point on a 1-hour cadence reads stale; a 40-day-old one
+    # with no cadence does not). What it adds is the reverse direction: a NEW
+    # `is_stale(` on a metric goes red here even while every number agrees.
+    import ast
+
+    from client_portal import role_card
+
+    tree = ast.parse(Path(role_card.__file__).read_text())
+
+    def _calls(name):
+        return [n for n in ast.walk(tree) if isinstance(n, ast.Call)
+                and getattr(n.func, "id", getattr(n.func, "attr", None)) == name]
+
+    stale_calls = _calls("is_stale")
+    assert len(stale_calls) == 1, "is_stale is for the role file's review_by only"
+    assert "review_by" in ast.unparse(stale_calls[0])
+
+    defined = {n.name for n in ast.walk(tree)
+               if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+    assert not defined & {"freshness", "metric_row", "objective_concerns",
+                          "canon_root", "_read_metrics", "_list_yaml_files"}
+
+    build = next(n for n in ast.walk(tree)
+                 if isinstance(n, ast.AsyncFunctionDef)
+                 and n.name == "build_role_card")
+    joins = [n for n in ast.walk(build) if isinstance(n, ast.Call)
+             and getattr(n.func, "attr", None) == "read_objective_join"]
+    assert len(joins) == 1, "the card reaches its objectives through the one join"
+    passed = {kw.arg for kw in joins[0].keywords}
+    assert {"template", "client"} <= passed, (
+        "the join is handed the template and client the card already holds")

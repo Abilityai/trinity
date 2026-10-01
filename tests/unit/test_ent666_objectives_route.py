@@ -198,11 +198,14 @@ def test_the_rate_limit_is_its_own_knob_and_is_enforced(monkeypatch, ctx):
                             (key, limit, window)))
     _get(ctx)
 
+    # The key, limit and window are spelled once, in the budget module the
+    # Workspace role card also draws on (ent#676).
+    budget = route_mod.objectives_read_budget
     assert seen == [(f"agent_objectives_read:{AGENT}",
-                     route_mod.OBJECTIVES_READ_RATE_LIMIT,
-                     route_mod.OBJECTIVES_READ_RATE_WINDOW)]
-    assert route_mod.OBJECTIVES_READ_RATE_LIMIT == 60
-    assert (route_mod.OBJECTIVES_READ_RATE_LIMIT
+                     budget.OBJECTIVES_READ_RATE_LIMIT,
+                     budget.OBJECTIVES_READ_RATE_WINDOW)]
+    assert budget.OBJECTIVES_READ_RATE_LIMIT == 60
+    assert (budget.OBJECTIVES_READ_RATE_LIMIT
             < route_mod.METRICS_READ_RATE_LIMIT)
 
 
@@ -210,7 +213,10 @@ def test_the_limiter_is_keyed_on_the_validated_name(monkeypatch, ctx):
     """After the access gate, never before: an unvalidated path param in a
     limiter key is a key-amplification surface."""
     order = []
-    monkeypatch.setattr(route_mod.rate_limiter, "enforce",
+    # The seam the route calls (ent#676 moved the key into the budget leaf):
+    # patching `rate_limiter.enforce` beneath it would go vacuous the day the
+    # leaf stopped delegating to it.
+    monkeypatch.setattr(route_mod.objectives_read_budget, "enforce",
                         lambda *a, **k: order.append("limiter"))
     ctx.users["user"] = User(id=3, username="other", email="o@agents.local",
                              role="user", agent_name="other-agent")

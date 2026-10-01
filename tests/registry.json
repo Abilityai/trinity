@@ -1,15 +1,26 @@
 {
   "test_files": [
     {
-      "file": "unit/test_2968_chat_is_error.py",
-      "feature": "#2968",
-      "added": "2026-10-01",
+      "file": "unit/test_ent671_env_backed_ops_forwarding.py",
+      "feature": "trinity-enterprise#671",
+      "added": "2026-09-29",
       "categories": [
-        "agent-server",
-        "unit",
-        "execution"
+        "config",
+        "compose",
+        "settings"
       ],
-      "description": "The synchronous chat path treats an exit-0 is_error result (error_type execution_error) as a failure, parity with the headless #1673 check. Drives the real execute_claude_code against a fake claude on PATH: empty result -> 502 carrying the real errors[] cause (was 500 'returned empty response'); an 'API Error' result text and partial assistant text before is_error are 502s, not successes; is_error false stays a success. #1870 completed-turn recovery runs first: an on-disk end_turn answer is returned with the recovery notice and recovered_terminal; an unfinished transcript still fails. A failed turn never captures its session; the 502 body is structured {message, metadata} for backend telemetry salvage and is credential-sanitized in both fields; the completed-turn recovery's JSONL parse runs off the event loop."
+      "description": "Every config.ENV_BACKED_OPS_KEYS variable (METRICS_RETENTION_DAYS, METRICS_DAILY_POINT_CAP, INTER_AGENT_MAX_CHAIN_DEPTH) is forwarded exactly once by docker-compose.yml / .prod.yml / .hosted.yml with an EMPTY default (${VAR:-}), no other docker-compose*.yml supplies a default, and .env.example leaves each commented but documented - so `source: env` on GET /api/settings/retention means an operator set it and the Settings rows are not locked on every install."
+    },
+    {
+      "file": "unit/test_ent671_retention_metric_rows.py",
+      "feature": "trinity-enterprise#671",
+      "added": "2026-09-29",
+      "categories": [
+        "backend",
+        "settings",
+        "retention"
+      ],
+      "description": "Settings -> Retention metric rows: GET /api/settings/retention carries quotas.metrics_daily_point_cap {value, source} in both editions and keeps the cap out of windows/sources; env-supplied values report source env for both knobs; a stored row wins over env; the reported quota equals what the record_metrics write boundary enforces (metric_points._ops_int) for default/0/env/garbage/-1 resolver output; call-site pin that Settings.vue uses utils/retentionFields.js (visibleRetentionFields, retentionSaveBody) and has no private field list."
     },
     {
       "file": "mcp-server/src/tools/monitoring.test.ts",
@@ -3170,6 +3181,17 @@
       "description": "Skill assignment delivers (#2703): deliver_assigned runs the start-path injection (all assigned, force=False - a subset rewrites CLAUDE.md), stopped -> pending_start, Docker unreadable -> not_delivered/docker_unavailable, busy -> one retry, over budget -> in_progress with the work kept + WS on completion; under-lock re-read is opt-in; routes stay 200 with `delivery` in the body and fire the thin agent_skills_changed trigger; 404/422 fire before any write."
     },
     {
+      "file": "unit/test_ent672_skill_deprecation.py",
+      "feature": "abilityai/trinity-enterprise#672",
+      "added": "2026-09-30",
+      "categories": [
+        "backend",
+        "skills",
+        "unit"
+      ],
+      "description": "Skill lifecycle keys (ent#672): extract_contract carries `deprecated` (a real boolean) and `superseded-by` (both spellings, a trinity: block wins, the author's text as one printable line <= 200 chars, None unless deprecated) with named frontmatter_invalid:* warnings for garbage; deprecation_warning is the one grammar producer (successor only when it is a skill name); list_skills / get_skill and the REST route's explicit SkillInfo construction carry both fields; the injection result carries the code on injected / unchanged / conflict; deliver_assigned stamps it on every delivery outcome (stopped agent, docker unreadable, over budget) from the library entry, leaves a live skill's report byte-identical and never fails on an unreadable library; public_skills_result keeps deprecated:<name>; CLAUDE.md is deliberately not annotated."
+    },
+    {
       "file": "unit/test_2337_invariant_namespace.py",
       "feature": "#2337",
       "added": "2026-09-12",
@@ -3795,6 +3817,37 @@
       "description": "Journey J13 (suggestions): my agent tells me what I can do with it and what is waiting on me, and only things that are true. A strict=True xfail skeleton — the rules, SQL and doors are unit-proven and the verbs mount-proven; the walk needs a real failing schedule, a shared platform user and a magic-link client on one instance."
     },
     {
+      "file": "unit/test_ent610_asks_unavailable.py",
+      "feature": "trinity-enterprise#610",
+      "added": "2026-09-28",
+      "categories": [
+        "backend",
+        "workspace"
+      ],
+      "description": "Workspace asks read fails loud (ent#610 PR A0): a queue-read fault and an unreadable roster each raise AsksUnavailable and the route answers 503 asks_unavailable (never []); a genuinely off-roster agent is still dropped with a 200; answer_ask stays a uniform 404 on a roster outage (Invariant #8); the suggestions build still degrades to no ask ids through its own attempt() (a guard for the new raise path; it also passes pre-fix). Mutations: revert the raise to return [] (2 red), make _on_roster swallow again (3 red incl. the reversed test_ent428 case)."
+    },
+    {
+      "file": "unit/test_ent610_ask_context.py",
+      "feature": "trinity-enterprise#610",
+      "added": "2026-09-29",
+      "categories": [
+        "backend",
+        "workspace",
+        "security"
+      ],
+      "description": "An ask's context (ent#610 PR A2 §3g L7, E1) on a real SQLite: origin = the 3 messages before the ask only from a run thread verified as the viewer's, else the ask's own Main with no excerpt; run shown only for the ask's agent, live when filed (parsed, 300 s grace), schedule/manual or the viewer's own — another user's run on the same agent, another agent's run, a run outside its window and a missing execution are all None; the schedule name for platform principals only; recent_answers = the viewer's own 3 newest from this agent; the route has no cost/execution_id, one 404 body for missing/not-mine/off-roster/invisible kind, 503 on a roster outage (the answer path stays 404), the rate-limit key, and the # mcp header. Mutations: agent check, audience check, _owned_ask, +cost, live window, schedule name to clients, unverified origin, non-strict roster (each red)."
+    },
+    {
+      "file": "unit/test_ent610_inbox.py",
+      "feature": "trinity-enterprise#610",
+      "added": "2026-09-28",
+      "categories": [
+        "backend",
+        "workspace"
+      ],
+      "description": "Workspace Inbox backend (ent#610 PR A), on a real SQLite schema. D3: a report addressed to me and stamped to a chat I own is an unread arrival on the #557 cursor/baseline (own-session join, plain-equality lowercased audience, index not scan; Hypothesis property: the count is exactly the arrivals). D4: resolve_report_session stamps an addressed report to the addressee's own in-flight chat else their Main (minted, touched added=0, one Main under concurrency, fail-soft None). D5: the completion writer's source marker (completion:done/failed); unread_arrivals_with_latest windows the same fragment (property: n == count_unread_by_session, latest = max arrival, first_unread_message_id = earliest unread message); GET /chat-state?previews=true attaches a roster-scoped, 100-bounded, markdown-stripped 160-char preview with outcome from the marker only and NO cost key, reusing the same statement's counts; without previews the payload is the ent#359 shape unchanged; the route forwards the principal kind to the roster read (platform vs portal token) and an unreadable roster fails the previews read with a 5xx, never a preview-less 200. Mutations recorded in the PR (roster filter, unread passthrough, cost, latest order, body-parsed outcome, first-unread order, hard-coded principal kind, swallowed roster read: all red)."
+    },
+    {
       "file": "unit/test_ent713_events_access_scope.py",
       "feature": "ent#713",
       "added": "2026-09-28",
@@ -3856,6 +3909,16 @@
         "database"
       ],
       "description": "ent#527 rider (ruling 2026-09-24): the owner's readiness stamp on the agents list and the fleet grid. One batched read on a real database returns only stamped agents, names a rollout seed as such, never carries who flipped it, skips an unknown state and does not query for an empty list; GET /api/agents attaches it per agent from that one read, None when unstamped. brief_held rides next to it: the role card's shared predicates (is_seat_delivery_schedule, brief_is_held), one batched schedule read over the calibrating+autonomy candidates only, fail-soft to no claim, so the list's calibrating tooltip never says a brief is paused when the card would not."
+    },
+    {
+      "file": "unit/test_ent676_role_card_join.py",
+      "feature": "abilityai/trinity-enterprise#676",
+      "added": "2026-09-30",
+      "categories": [
+        "backend",
+        "workspace"
+      ],
+      "description": "ent#676: the role card reads the ONE objective-metric join instead of its own. The portal projection is an allowlist (literal key sets for a metric and an objective; a finding crosses as its code, the operator sentence, canon paths and role owner never do; agent-written text is capped). build_role_card is driven through the REAL join with the agent door and the store faked: the store's numbers, stale by the 2x-cadence rule (3h on a 1h cadence is stale; 40 days with no cadence is not), undeclared is a code with no number, achieved objectives are gone, the template is read once and handed over. Every way of showing no objectives is named (door dies mid-read, store raises, every file unreadable, budget refused) and the role, readiness and flip survive each. One budget, two doors on the real in-process limiter: the operator door empties it and the card still answers without objectives, card reads spend the operator's budget, a viewer's own cap is spent first and a refused viewer costs the shared bucket nothing, off-roster is a 404 before any key is minted. Mutations: 10 on role_card.py / router.py, each red."
     },
     {
       "file": "unit/test_2996_owner_config_person_only.py",
@@ -3949,6 +4012,17 @@
         "unit"
       ],
       "description": "Narrow cross-agent metrics read. The one predicate (self or an agent_permissions grant, directional), the hourly-deduped audit of who read whose numbers (source passed, marker set only after the row is written, written anyway when the marker store is down, never raises into the read), and get_objectives resolving an actual from the agent that serves a metric through the READER's grant: fail-closed with no viewer predicate, ambiguity decided before the viewer filter, a server the viewer cannot see treated as not served, local declaration wins; plus the objectives route passing the viewer predicate and auditing each serving agent. The /metrics and /definitions grant gate itself is in test_ent479_metrics_route.py."
+    },
+    {
+      "file": "unit/test_2968_chat_is_error.py",
+      "feature": "#2968",
+      "added": "2026-10-01",
+      "categories": [
+        "agent-server",
+        "unit",
+        "execution"
+      ],
+      "description": "The synchronous chat path treats an exit-0 is_error result (error_type execution_error) as a failure, parity with the headless #1673 check. Drives the real execute_claude_code against a fake claude on PATH: empty result -> 502 carrying the real errors[] cause (was 500 'returned empty response'); an 'API Error' result text and partial assistant text before is_error are 502s, not successes; is_error false stays a success. #1870 completed-turn recovery runs first: an on-disk end_turn answer is returned with the recovery notice and recovered_terminal; an unfinished transcript still fails. A failed turn never captures its session; the 502 body is structured {message, metadata} for backend telemetry salvage and is credential-sanitized in both fields; the completed-turn recovery's JSONL parse runs off the event loop."
     }
   ]
 }

@@ -3,41 +3,23 @@
        element's. `w-full` inside the cell, with `w-72` kept as the mobile
        drawer's width, where there is no grid and no handle. -->
   <aside class="flex flex-col h-full w-72 sm:w-full min-w-0 bg-gray-50 dark:bg-gray-950 border-r border-gray-200 dark:border-gray-800">
-    <!-- Brand. ent#359: the aggregate "waiting on you" count lives here, because
-         the agents block now occupies the top of the scroll region and would
-         otherwise scroll a fleet-wide signal out of view. -->
+    <!-- Brand. ent#556: Trinity's mark and the product's name. trinity-enterprise
+         #610 (D9/D13): it links to the Inbox — the Workspace's landing — and
+         the two aggregate counts that used to sit beside it MOVED to the pinned
+         Inbox row below: one home per fact, and that row is in the same
+         non-scrolling top block, so ent#359's "must not scroll out of view"
+         still holds. -->
     <div class="shrink-0 flex items-center gap-2 px-4 h-14 border-b border-gray-200 dark:border-gray-800">
-      <!-- ent#556: Trinity's mark and the product's name, replacing a
-           hand-drawn outline icon and the bare word "Workspace". Linked to the
-           Workspace root — true for both principals, and the only destination a
-           client session can actually open. -->
-      <PortalBrand :to="WORKSPACE_ROOT" />
-      <!-- ent#364: an ASK is a distinct fact from an unread reply — one is waiting
-           on you to decide, the other on you to read — so it gets its own badge
-           rather than being summed into that one. Before the unread count,
-           because a blocked agent outranks unread chatter.
-
-           #2424: `status-urgent` (not amber) — the token the operator NavBar's
-           pending-operator-queue badge already uses for "waiting on you", so the
-           two surfaces agree. Amber maps to `state-autonomous`, an operating
-           mode, which is a different claim. The wording comes from
-           `askBadgeTitle` because the inline literal said "agents" while
-           `askCount` counted asks. -->
-      <span
-        v-if="askCount"
-        class="ml-auto shrink-0 min-w-[1.25rem] px-1.5 h-5 rounded-full bg-status-urgent-500 text-white text-[11px] font-semibold flex items-center justify-center"
-        data-testid="sidebar-ask-count"
-        :title="askBadgeTitle(askCount)"
-      >{{ askCount > 99 ? '99+' : askCount }}</span>
-      <span
-        v-if="totalWaiting"
-        class="shrink-0 min-w-[1.25rem] px-1.5 h-5 rounded-full bg-action-primary-600 text-white text-[11px] font-semibold flex items-center justify-center"
-        :class="askCount ? 'ml-1.5' : 'ml-auto'"
-        :title="`${totalWaiting} ${totalWaiting === 1 ? 'reply' : 'replies'} you haven't read`"
-      >{{ totalWaiting > 99 ? '99+' : totalWaiting }}</span>
+      <PortalBrand :to="WORKSPACE_INBOX" />
     </div>
 
     <div class="p-3 space-y-2">
+      <!-- trinity-enterprise#610: the pinned Inbox row (see the component). -->
+      <!-- Round 3 (§3g F4): said out loud, because on the drawer's landing
+           URL (/workspace/inbox) the row changes no route, and the shell's
+           route watcher is what closes the drawer everywhere else. -->
+      <PortalInboxRow :needs="inbox.needs" :came="inbox.came" @click="$emit('open-inbox')" />
+
       <!-- New chat -->
       <!-- ent#357: disabled with an empty roster. `newChat()` only resets
            conversation state, so with no agent to chat with every branch of it
@@ -86,7 +68,7 @@
         <!-- ent#402: while searching the label states the MATCH count. The
              toggle beside the rows states the overflow, so this must not
              repeat it — one fact, one place. -->
-        <div class="px-1.5 pt-1 pb-1.5 text-[11px] font-semibold uppercase tracking-wide text-gray-400">{{ isSearching ? agentResultsLabel(agentResults.total) : 'Agents' }}</div>
+        <div class="px-1.5 pt-1 pb-1.5 text-[11px] font-semibold uppercase tracking-wide" :class="META_INK">{{ isSearching ? agentResultsLabel(agentResults.total) : 'Agents' }}</div>
 
         <!-- #2159: the roster load is the first thing that happens after
              sign-in and it is not instant on a large fleet. Without this the
@@ -133,8 +115,18 @@
                  exists to remove. The slug stays the subtitle when the agent
                  renders under a label; the preview takes the line below it,
                  and never both lines at once. -->
-            <span v-if="rowMeta[a.name]?.preview" class="block text-xs text-gray-400 truncate">{{ rowMeta[a.name].preview }}</span>
-            <span v-else-if="agentLabel(a) !== a.name" class="block text-xs text-gray-400 truncate font-mono">{{ a.name }}</span>
+            <!-- ent#610 sign-off: the #2196 availability chip sits HERE, on the
+                 subtitle line, not in a strip reserved on every row (#2641) —
+                 that strip left a ~250px sidebar 0px for the names the moment
+                 "Show all" revealed a stopped agent. The text beside it truncates. -->
+            <span
+              v-if="chipFor(a) || rowMeta[a.name]?.preview || agentLabel(a) !== a.name"
+              class="flex items-center gap-1.5 min-w-0 text-xs"
+            >
+              <BaseBadge v-if="chipFor(a)" class="shrink-0" :variant="chipFor(a).variant">{{ chipFor(a).label }}</BaseBadge>
+              <span v-if="rowMeta[a.name]?.preview" class="min-w-0 truncate" :class="META_INK">{{ rowMeta[a.name].preview }}</span>
+              <span v-else-if="agentLabel(a) !== a.name" class="min-w-0 truncate font-mono" :class="META_INK">{{ a.name }}</span>
+            </span>
           </span>
           <!-- ent#523 / board A3: when you last heard from this agent. Tight
                enough to sit beside the name without competing with it. -->
@@ -152,55 +144,50 @@
                identical on every row — the same reason the availability slot
                below reserves its own footprint. `tabular-nums` was already
                right and is what makes a fixed column line up digit-for-digit. -->
-          <span class="shrink-0 w-14 text-right text-[11px] text-gray-400 tabular-nums">
+          <span class="shrink-0 w-14 text-right text-[11px] tabular-nums" :class="META_INK">
             <template v-if="rowMeta[a.name]?.time">{{ rowMeta[a.name].time }}</template>
           </span>
-          <!-- #2196: the agent can't currently run. LABEL, never disable —
-               disabling would relocate the dead state rather than remove it,
-               since a client whose agents are all stopped (a routine
-               resource-saving posture) would get an entirely inert Workspace.
-               The chip sets the expectation; the server's 502 is the honest
-               refusal. Nothing is rendered for `ready` or `unknown`.
-
-               The slot's footprint is RESERVED so a row does not reflow when an
-               agent starts or stops between refreshes — the same reason the
-               roster is not re-sorted by this.
-
-               #2641: the reservation is a property of the LIST, not of a row.
-               `availabilityChip` answers null for everything except `stopped`
-               and `unavailable`, so on a fleet where everything is running the
-               strip was empty on EVERY row — which is why the dates stopped
-               72px short of the right edge and the name was charged 72px for
-               nothing. Reserved on every row iff any VISIBLE row can show a
-               chip: uniform down the list, so #2580's identical truncation
-               point survives, and absent entirely when there is nothing to hold
-               space for, which puts the date flush against the row's edge.
-
-               The whole element goes, not just its width — a zero-width flex
-               child still sits between the date and the edge, and `gap-2.5` on
-               the row would keep paying 10px for it. -->
-          <span v-if="reserveAvailability" class="shrink-0 min-w-[4.5rem] flex justify-end">
-            <BaseBadge v-if="chipFor(a)" :variant="chipFor(a).variant">{{ chipFor(a).label }}</BaseBadge>
-          </span>
+          <!-- #2196's availability chip (LABEL, never disable) moved to the
+               subtitle line under the name (ent#610 sign-off): #2641's strip,
+               reserved on every row once any visible row could show a chip,
+               left the names 0px in a ~250px sidebar. Nothing after the date
+               reserves width now, so the date stays flush right (#2641). -->
           <!-- #2424: the ask badge ent#364's comment above already promised.
                It got an aggregate in the brand header and nothing per row, so
                the header advertised a count with no way to reach the agent it
                meant. Same token as that header badge; deliberately a DIFFERENT
                colour from the unread pill beside it, because they are
-               different obligations. -->
+               different obligations. ent#610 §3g A3b: both counters are the
+               700 tier — white on urgent-500 measured 2.80:1 — and the same two
+               colours the pinned Inbox row and the Inbox tabs use. -->
           <!-- trinity-enterprise#657: unsent text in one of this agent's chats
                (or in an unsaved new chat with it). Quiet and gray beside the two
                pills — a state of the person's own work, not an obligation. -->
           <span v-if="hasDraftFor(a.name)" class="shrink-0 flex items-center" data-testid="agent-draft"><DraftMark /></span>
+          <!-- trinity-enterprise#610 (the 09-30 ruling, item 3 — "D" in the
+               round-2 brief): this is the
+               agent row's "needs you" mark — the same feed (`openAsks`) and
+               the same hover words as the pinned Inbox row's, so the two read
+               as one fact. -->
           <span
             v-if="askCountFor(a.name)"
-            class="shrink-0 min-w-[1.25rem] px-1.5 h-5 rounded-full bg-status-urgent-500 text-white text-[11px] font-semibold flex items-center justify-center"
+            class="shrink-0 min-w-[1.25rem] px-1.5 h-5 rounded-full bg-status-urgent-700 text-white text-[11px] font-semibold flex items-center justify-center"
+            :title="askBadgeTitle(askCountFor(a.name))"
+            aria-hidden="true"
             data-testid="agent-ask-count"
-          >{{ askCountFor(a.name) > 99 ? '99+' : askCountFor(a.name) }}</span>
+          >{{ capCount(askCountFor(a.name)) }}</span>
+          <!-- Round 2 (design F3): the two pills differ by colour alone, and a
+               title on a span inside a button is never read — each says what it
+               counts to a screen reader. -->
+          <span v-if="askCountFor(a.name)" class="sr-only">{{ askBadgeTitle(askCountFor(a.name)) }}</span>
           <span
             v-if="waitingFor(a.name)"
-            class="shrink-0 min-w-[1.25rem] px-1.5 h-5 rounded-full bg-action-primary-600 text-white text-[11px] font-semibold flex items-center justify-center"
-          >{{ waitingFor(a.name) > 99 ? '99+' : waitingFor(a.name) }}</span>
+            class="shrink-0 min-w-[1.25rem] px-1.5 h-5 rounded-full bg-action-primary-700 text-white text-[11px] font-semibold flex items-center justify-center"
+            :title="`${waitingFor(a.name)} unread`"
+            aria-hidden="true"
+            data-testid="agent-unread-count"
+          >{{ capCount(waitingFor(a.name)) }}</span>
+          <span v-if="waitingFor(a.name)" class="sr-only">{{ waitingFor(a.name) }} unread</span>
         </button>
 
         <!-- #2159: ONE persistent button, never two v-if-alternated ones —
@@ -227,7 +214,8 @@
              both would state the same absence twice in two different words. -->
         <div
           v-if="isSearching && emptyLines.agents && roster.length"
-          class="px-2 py-3 text-xs text-gray-400"
+          class="px-2 py-3 text-xs"
+          :class="META_INK"
         >{{ emptyLines.agents }}</div>
 
         <!-- ent#357/#359 AC: an empty roster keeps a next action. Which one
@@ -253,7 +241,7 @@
         <!-- Header and section status are ONE group and share one ink
              declaration; the result rows below are siblings, so they keep the
              body colour a chat title needs. -->
-        <div class="text-gray-400">
+        <div :class="META_INK">
           <div class="px-2 pb-1 text-[11px] font-semibold uppercase tracking-wide">Chats</div>
           <div v-if="emptyLines.chats" class="px-2 py-3 text-xs">
             {{ emptyLines.chats }}
@@ -273,7 +261,7 @@
             <PortalAvatar :name="r.agent_name" :avatar-url="avatarFor(r.agent_name)" :size="22" />
             <span class="min-w-0 flex-1">
               <span class="block text-sm truncate">{{ r.title || 'Chat' }}</span>
-              <span v-if="r.snippet" class="block text-xs text-gray-400 truncate">{{ r.snippet }}</span>
+              <span v-if="r.snippet" class="block text-xs truncate" :class="META_INK">{{ r.snippet }}</span>
             </span>
             <!-- trinity-enterprise#657: a search hit is a third row site with no
                  ChatRow, so the mark is read from the store here. -->
@@ -286,7 +274,7 @@
         <!-- Starred first, and LIFTED OUT of the date groups below (a starred
              chat appears exactly once — see partitionStarred). -->
         <div v-if="starred.length" class="mt-3">
-          <div class="px-2 pb-1 text-[11px] font-semibold uppercase tracking-wide text-gray-400">Starred</div>
+          <div class="px-2 pb-1 text-[11px] font-semibold uppercase tracking-wide" :class="META_INK">Starred</div>
           <ChatRow
             v-for="t in starred"
             :key="rowKey(t)"
@@ -300,7 +288,7 @@
         </div>
 
         <div v-for="g in grouped" :key="g.label" class="mt-3">
-          <div class="px-2 pb-1 text-[11px] font-semibold uppercase tracking-wide text-gray-400">{{ g.label }}</div>
+          <div class="px-2 pb-1 text-[11px] font-semibold uppercase tracking-wide" :class="META_INK">{{ g.label }}</div>
           <ChatRow
             v-for="t in g.threads"
             :key="rowKey(t)"
@@ -324,7 +312,7 @@
          lesson); only the accessible name changes. -->
     <div class="shrink-0 border-t border-gray-200 dark:border-gray-800 p-3 flex items-center gap-2">
       <div class="min-w-0 flex-1">
-        <div class="text-xs text-gray-400">{{ isPlatformSession ? 'Signed in to Trinity' : 'Signed in' }}</div>
+        <div class="text-xs" :class="META_INK">{{ isPlatformSession ? 'Signed in to Trinity' : 'Signed in' }}</div>
         <div class="text-sm truncate" :title="clientEmail">{{ clientEmail }}</div>
       </div>
       <button
@@ -346,22 +334,29 @@ import { computed, ref } from 'vue'
 import PortalAvatar from './PortalAvatar.vue'
 import ChatRow from './PortalChatRow.vue'
 import PortalBrand from './PortalBrand.vue'
+import PortalInboxRow from './PortalInboxRow.vue'
 import BaseBadge from '@/components/base/BaseBadge.vue'
 import DraftMark from '@/components/base/DraftMark.vue'
 import { useClientPortalStore } from '@/stores/clientPortal'
 import { usePortalDraftsStore } from '@/stores/portalDrafts'
 import { agentsWithDrafts, threadKey } from './portalDrafts'
 import {
-  groupThreadsByDate, partitionStarred, unreadByAgent, totalUnread, availabilityChip,
-  reservesAvailabilitySlot,
+  groupThreadsByDate, partitionStarred, unreadByAgent, availabilityChip,
   orderRosterAgents, agentRowMeta,
-  asksByAgent, askBadgeTitle, agentRowTitle as buildAgentRowTitle,
+  asksByAgent, agentRowTitle as buildAgentRowTitle,
   visibleAgentRows, AGENT_COLLAPSE_LIMIT,
   signOutLabelFor,
   searchAgents, sidebarSearchState, searchEmptyLines,
   agentResultsLabel, agentToggleLabel, showAgentToggle, SEARCH_PLACEHOLDER,
-  WORKSPACE_ROOT,
+  WORKSPACE_INBOX, askBadgeTitle,
 } from './portalUtils'
+import { inboxCounts } from './portalInbox'
+import { capCount } from '@/utils/tabTitle'
+
+// ent#610 §3g B7a: the sidebar's meta ink, ONE string for every meta text
+// site. Bare gray-400 ink is 2.54:1 on white ("gray-400 is not text") and
+// had no dark half; gray-500 light is 4.83:1, gray-400 dark 6.99:1 on gray-900.
+const META_INK = 'text-gray-500 dark:text-gray-400'
 
 const props = defineProps({
   roster: { type: Array, default: () => [] },
@@ -383,7 +378,7 @@ const props = defineProps({
   rename: { type: Function, default: null },
 })
 const emit = defineEmits([
-  'new-chat', 'new-chat-with-agent', 'open-agent', 'open-thread', 'toggle-star',
+  'new-chat', 'new-chat-with-agent', 'open-agent', 'open-thread', 'toggle-star', 'open-inbox',
   'update:search', 'sign-out', 'open-projects',
 ])
 
@@ -398,14 +393,15 @@ const grouped = computed(() => groupThreadsByDate(split.value.rest))
 
 const waiting = computed(() => unreadByAgent(props.threads))
 const waitingFor = (name) => waiting.value[name] || 0
-const totalWaiting = computed(() => totalUnread(props.threads))
 // ent#364: read from the store rather than taken as a prop, because the count and
 // the two ask renderings must come from ONE list — a prop threaded from the view
 // would be a second path to the same fact, free to disagree with it.
 const asksStore = useClientPortalStore()
-const askCount = computed(() => asksStore.askCount)
+// trinity-enterprise#610 (D13): the pinned Inbox row's two counts — `needs` is
+// `askCount` (pending asks), `came` is `totalUnread` over these threads.
+const inbox = computed(() => inboxCounts(props.threads, asksStore.openAsks))
 // #2424: the ask twin of `waiting`. Kept a separate map on purpose — see the
-// brand-badge comment in the template.
+// Inbox-row comment in the template.
 const asksPerAgent = computed(() => asksByAgent(asksStore.openAsks))
 const askCountFor = (name) => asksPerAgent.value[name] || 0
 
@@ -532,8 +528,6 @@ const shownAgents = computed(() => (isSearching.value
 // reported bug with extra steps. Declared after `shownAgents` rather than
 // beside `chipFor` so the dependency reads in source order; one pass per
 // render, beside `rowMeta`'s.
-const reserveAvailability = computed(() => reservesAvailabilitySlot(
-  shownAgents.value, { detailed: props.isPlatformSession }))
 
 // The one-line preview under the name (AC 6): the newest chat you have with
 // this agent. Null when there is nothing to show, so a row with no history

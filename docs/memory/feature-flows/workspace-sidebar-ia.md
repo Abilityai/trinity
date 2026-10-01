@@ -236,7 +236,20 @@ renders nothing rather than a `(0)`.
 |---|---|---|
 | per chat | the chat row | which conversation to open |
 | per agent | the agent row in the agents block | which agent is waiting |
-| total | the **wordmark** | the agents block now occupies the top of a *scrolling* region, so a fleet-wide signal parked there scrolls away |
+| total | the pinned **Inbox** row (ent#610; the wordmark until then) | the agents block now occupies the top of a *scrolling* region, so a fleet-wide signal parked there scrolls away; the Inbox row sits in the non-scrolling top block for the same reason |
+
+**The agent row's "needs you" mark (ent#610, the 2026-09-30 ruling).** The per-agent ask pill (`agent-ask-count`, #2424) IS the ruling's mark: `asksByAgent(openAsks)` — the same pending, addressed-to-you feed the Inbox row counts, chat-turn and background asks alike — sitting before the unread pill, titled in the Inbox row's words (`askBadgeTitle`). The marks and the Inbox row's number come from the same feed (`portalAgentNeedsYouMark.mount.spec.js`) — not a row-by-row sum a collapsed or searched list could hide. Each pill (ask and unread) carries `sr-only` text saying what it counts; the number itself is `aria-hidden` (round 2 — they differed by colour alone).
+
+**The pinned Inbox row (ent#610).** The two fleet-wide counts — asks waiting on you
+(`askCount`, `data-testid="sidebar-ask-count"`, unchanged address) and what came back
+(`totalUnread(sidebarThreads)`, `sidebar-unread-count`) — moved from the brand head to a
+pinned `router-link` to `/workspace/inbox` in the non-scrolling top block: one home per
+fact. The row is its own component, `components/portal/PortalInboxRow.vue`, and the brand
+mark links to `WORKSPACE_INBOX` too. Both badges are white on a 700 ground (the old `urgent-500` + white was 2.80:1) with
+`tabular-nums`. **"new", not "replies"**: since ent#610 a count is of *arrivals* — agent
+messages and deliverables addressed to you stamped to your chat — so every title and badge
+says "new". The Inbox reads the same `sidebarThreads` projection, so its "came back" and
+this row can never disagree.
 
 A room credits its unread to **every** agent in it — there is no single agent a
 room is "with", so if three agents share a room you are behind on, all three
@@ -258,15 +271,18 @@ Three decisions worth keeping:
 * **No re-sorting.** Ordering by availability would make rows jump as agents
   start and stop; the design system's layout-stability rule forbids that, and the
   top-5 fold is #2159's design.
-* **Reserve the chip's footprint**, so a row does not reflow when an agent's
-  state changes between refreshes — but **for the list, not for every row**
-  (#2641). `availabilityChip()` answers null for everything except `stopped` and
+* **Reserve nothing for the chip** (ent#610 sign-off round 7, superseding #2641's
+  list-level reservation, whose `reservesAvailabilitySlot` helper was removed in the
+  #3054 review). The chip now renders on the row's second line, under the name, so
+  the meta strip holds no slot and no row pays for another row's state. History of
+  the #2641 step, kept for its reasoning: it reserved the footprint **for the list,
+  not for every row**. `availabilityChip()` answers null for everything except `stopped` and
   `unavailable`, so on a fleet where everything is running — the normal case —
   the 72px strip rendered empty on *every* row. That produced two visible
   defects from one fact: the dates stopped 72px short of the row's right edge,
   and 72px per row came out of the only element that wanted it, so names
-  truncated (`Chief ...`) beside a blank strip. `reservesAvailabilitySlot(rows)`
-  now decides it once per render, over the rows actually **rendered** — a
+  truncated (`Chief ...`) beside a blank strip. A list-level predicate
+  then decided it once per render, over the rows actually **rendered** — a
   stopped agent hidden by search or the collapse limit must not reserve width on
   a list that shows no chip. The whole `<span>` goes when nothing reserves it,
   not just its width: a zero-width flex child still sits between the date and
@@ -445,5 +461,5 @@ can actually see.
 |---|---|
 | **Rooms report `unread: 0`** | A room already has its own seq cursor (`since`), which is a different model from a timestamp cursor. Stars work for rooms; unread does not, so a room never badges. Reconciling the two is follow-up work. |
 | ~~**Unread needs one open first**~~ | **Fixed by ent#557.** A never-opened thread now counts agent messages newer than the viewer's stored account baseline. What remains is narrower and deliberate: a viewer who has never read *anything* has no baseline and sees no badge, and a chat that predates their baseline and was never opened still reports nothing. |
-| **The agent badge counts replies, not questions** | "Waiting on the user" is read here as "the agent replied and you haven't read it". An agent blocked on an operator-queue approval is a different signal and is not surfaced here — that queue belongs to operators, and a Workspace viewer may be an external client with no standing in it. |
+| **The agent badge counts arrivals, not questions** | "Waiting on the user" is read here as "something came back and you haven't read it" — an agent message or, since ent#610, a deliverable addressed to you. An agent blocked on an operator-queue approval is a different signal and is not surfaced here — that queue belongs to operators, and a Workspace viewer may be an external client with no standing in it. |
 | **Optimistic star, no cross-tab sync** | A star toggled in one tab does not appear in another until its next `refreshThreads`. |
