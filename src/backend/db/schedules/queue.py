@@ -471,6 +471,29 @@ class ScheduleQueueMixin:
                 for row in conn.execute(stmt).mappings()
             }
 
+    def execution_awaits_claim(self, execution_id: str) -> bool:
+        """True while no worker holds the row yet (#3114): ``queued``, or a
+        ``running`` row with neither a lease nor a dispatch sentinel, which is a
+        pre-created portal row in the moment before it is enqueued. A pushed row
+        carries ``claude_session_id='dispatched'`` before the agent is called and
+        a claimed row carries a lease, so neither matches. Read-only.
+        """
+        c = schedule_executions.c
+        stmt = select(c.status, c.lease_expires_at, c.claude_session_id).where(
+            c.id == execution_id
+        )
+        with get_engine().connect() as conn:
+            row = conn.execute(stmt).mappings().first()
+        if row is None:
+            return False
+        if row["status"] == TaskExecutionStatus.QUEUED:
+            return True
+        return (
+            row["status"] == TaskExecutionStatus.RUNNING
+            and row["lease_expires_at"] is None
+            and row["claude_session_id"] is None
+        )
+
     def count_active_leased(self, agent_name: str) -> int:
         """Scalar single-agent variant of ``count_active_leased_by_agent``.
 

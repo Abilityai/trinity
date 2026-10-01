@@ -225,9 +225,11 @@ async def wait_for_sync_terminal(
 
 async def wait_while_queued(execution_id: str, budget: float) -> AsyncIterator[str]:
     """Yield ``STREAM_QUEUED_TICK`` once per ``STREAM_QUEUED_POLL_INTERVAL``
-    while the execution row is ``queued``, for at most ``budget`` seconds (#3114).
+    while no worker holds the execution row (``db.execution_awaits_claim``:
+    queued, or pre-created and about to be enqueued), for at most ``budget``
+    seconds (#3114).
 
-    Returns once the row left ``queued`` (claimed, terminal, gone) or the budget
+    Returns once a worker holds the row, it is terminal or gone, or the budget
     is spent. ``budget <= 0`` returns at once without reading the row, so a
     non-pilot's stream is untouched. A failed row read ends the hold: the
     proxy then behaves as it did before.
@@ -240,11 +242,11 @@ async def wait_while_queued(execution_id: str, budget: float) -> AsyncIterator[s
     deadline = loop.time() + budget
     while True:
         try:
-            row = db.get_execution(execution_id)
+            waiting = db.execution_awaits_claim(execution_id)
         except Exception as exc:  # noqa: BLE001 — a DB blip must not kill the stream
             logger.warning("[SyncWaiter] queued-hold read for %s failed: %s", execution_id, exc)
             return
-        if row is None or row.status != TaskExecutionStatus.QUEUED:
+        if not waiting:
             return
         remaining = deadline - loop.time()
         if remaining <= 0:

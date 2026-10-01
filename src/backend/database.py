@@ -1588,6 +1588,9 @@ class DatabaseManager:
     def count_active_leased_by_agent(self, agent_names):
         return self._schedule_ops.count_active_leased_by_agent(agent_names)
 
+    def execution_awaits_claim(self, execution_id: str) -> bool:
+        return self._schedule_ops.execution_awaits_claim(execution_id)
+
     def count_active_leased(self, agent_name: str) -> int:
         return self._schedule_ops.count_active_leased(agent_name)
 

@@ -454,7 +454,12 @@ async def _run_and_report(
         and registry.was_terminated(execution_id)
         and body.get("error_code") not in ("auth", "billing")
     ):
-        body = {**body, "status": "cancelled", "error_code": None}
+        body = {
+            **body,
+            "status": "cancelled",
+            "error_code": None,
+            "error": "Execution terminated by user",
+        }
         finish_success = None
 
     agent_state.record_task_finish(success=finish_success)

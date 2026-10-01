@@ -399,3 +399,46 @@ async def test_mention_chain_back_to_the_same_agent_does_not_wait_on_itself(monk
     await asyncio.wait_for(service._wake_agent(user, "r1", AGENT, 0), 5)
     assert len(state["dispatches"]) == 2
     assert fake.store == {}
+
+
+# ---------------------------------------------------------------------------
+# Live-check fixes: Session capacity status, stop message
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("code, status", [("capacity", 429), ("agent_error", 502), (None, 502)])
+def test_session_turn_maps_capacity_to_429(code, status):
+    """An unclaimed pilot turn returns FAILED/CAPACITY; the Session tab answers
+    the retryable 429 for it."""
+    import asyncio as _asyncio
+    from unittest.mock import AsyncMock as _AsyncMock, MagicMock as _MagicMock, patch as _patch
+    from fastapi import HTTPException
+    from models import SessionMessageRequest
+    from routers import sessions as sessions_mod
+
+    user = _MagicMock(id=1, email="u@example.com", username="u", role="admin",
+                      agent_name=None, mcp_key_id=None, mcp_key_name=None)
+    db = _MagicMock()
+    db.get_session.return_value = _MagicMock(id="sess1", user_id=1, agent_name="agent1",
+                                             subscription_id=None, cached_claude_session_id=None)
+    turn = _MagicMock(result=_MagicMock(status="failed", error="Agent at capacity (x)",
+                                        error_code=code, execution_id="e1"),
+                      fallback_fired=False, fallback_reason=None)
+    with _patch.object(sessions_mod, "is_session_tab_enabled", return_value=True), \
+            _patch.object(sessions_mod, "db", db), \
+            _patch.object(sessions_mod, "run_resumable_turn", _AsyncMock(return_value=turn)), \
+            _patch.object(sessions_mod, "_resolve_lock_ttl", return_value=60):
+        with pytest.raises(HTTPException) as exc:
+            _asyncio.run(sessions_mod.send_session_message(
+                name="agent1", session_id="sess1",
+                body=SessionMessageRequest(message="hi"), current_user=user))
+    assert exc.value.status_code == status
+
+
+def test_terminated_turn_reports_the_terminate_message(monkeypatch):
+    def _run(registry):
+        registry.terminate("e1")
+        raise RuntimeError("Claude Code reported no error detail")
+
+    _, body, _, _ = _drive_worker(monkeypatch, run=_run)
+    assert (body["status"], body["error"]) == ("cancelled", "Execution terminated by user")

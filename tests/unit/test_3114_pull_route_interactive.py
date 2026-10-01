@@ -676,7 +676,8 @@ async def test_stream_holds_while_queued_then_attaches_after_the_claim(seed_agen
     assert await body.__anext__() == ": queued\n\n"
     assert await body.__anext__() == ": queued\n\n"      # still queued: still holding
     assert client.calls == 0
-    _hrun("UPDATE schedule_executions SET status='running' WHERE id='e1'")   # claimed
+    _hrun("UPDATE schedule_executions SET status='running', "
+          "lease_expires_at='2099-01-01T00:00:00Z' WHERE id='e1'")   # claimed
     rest = [c async for c in body]
     assert rest[-1] == "data: x\n\n"                      # 404 before registration retried
     assert client.calls == 2
@@ -843,3 +844,35 @@ async def test_session_turns_of_one_session_never_overlap_on_a_pilot(seed_agent,
     assert events.index(("enqueue", "t2")) > events.index(("done", "t1"))
     assert r1.result.response == r2.result.response == "ok"
     assert fake.store == {}                   # both locks released
+
+
+def test_awaits_claim_covers_the_pre_enqueue_moment(seed_agent):
+    """A pre-created portal row is `running` for a moment before it is
+    enqueued; the stream must keep holding through it (#3114 live check)."""
+    seed_agent()
+    db = _db()
+    _row("pre", status="running")                                  # pre-created
+    _row("q", status="queued")
+    _row("pushed", status="running", session="dispatched")         # push sentinel
+    _row("claimed", status="running")
+    _hrun("UPDATE schedule_executions SET lease_expires_at='2099-01-01T00:00:00Z' "
+          "WHERE id='claimed'")
+    _row("done", status="success")
+    assert [db.execution_awaits_claim(e) for e in ("pre", "q", "pushed", "claimed", "done", "gone")] == [
+        True, True, False, False, False, False]
+
+
+@pytest.mark.asyncio
+async def test_stream_holds_from_pre_created_row_until_the_claim(seed_agent, monkeypatch):
+    seed_agent()
+    _row("e2", status="running")                                   # not yet enqueued
+    from services import sync_waiter
+
+    monkeypatch.setattr(sync_waiter, "STREAM_QUEUED_POLL_INTERVAL", 0.01)
+    hold = sync_waiter.wait_while_queued("e2", budget=5)
+    assert await hold.__anext__() == ": queued\n\n"
+    _hrun("UPDATE schedule_executions SET status='queued' WHERE id='e2'")
+    assert await hold.__anext__() == ": queued\n\n"
+    _hrun("UPDATE schedule_executions SET status='running', "
+          "lease_expires_at='2099-01-01T00:00:00Z' WHERE id='e2'")
+    assert [t async for t in hold] == []
