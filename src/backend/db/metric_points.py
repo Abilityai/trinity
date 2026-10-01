@@ -1,22 +1,29 @@
 """Recorded metric points — database operations (trinity-enterprise#478).
 
-The append-only store behind `record_metrics`: one row per observation of a
-metric the ent#477 registry declares for that agent. Writes insert, the
-retention sweep deletes by `ts` range, nothing updates.
+The store behind `record_metrics`: one row per observation of a metric the
+ent#477 registry declares for that agent. Writes insert or restate, the
+retention sweep deletes by `ts` range.
 
 ## Identity, not a surrogate key
 
 The primary key is `(agent_name, ts, idempotency_key)`, where the service
 computes `idempotency_key = sha256(metric \0 ts \0 canonical_dims)`. The same
-observation posted twice therefore conflicts with itself and
-`on_conflict_do_nothing` drops the second copy — the row-level guarantee that
-holds with no client key, no Redis and no execution id. `value` is deliberately
-outside the identity: a corrected number at the same instant with the same
-dimensions is the same observation, and a genuine correction is a new `ts`.
+observation posted twice therefore conflicts with itself — the row-level
+guarantee that holds with no client key, no Redis and no execution id. `value`
+is deliberately outside the identity, so one identity is always ONE row:
 
-`insert_points` counts what it actually wrote with `.returning(...)` rather
-than `rowcount`: across a multi-VALUES insert with `DO NOTHING`, `rowcount` is
-not a portable count of the rows that survived the conflict.
+* the same value again is a duplicate — the conflict's `WHERE` matches nothing,
+  so nothing is written;
+* a different value is a correction (ent#729, ruling R45) — the row is restated
+  in place: value, `execution_id` and `recorded_at` follow the correcting
+  write, `revision` goes up by one, and `ts` / `created_at` never move. The
+  `ts` is the period the number describes, so the chart stays one point per
+  period, and `created_at` is the first write the daily cap counts.
+
+`insert_points` counts what it actually wrote with `.returning(revision)`
+rather than `rowcount`: an inserted row comes back at revision 0, a restated
+one at >= 1, and a duplicate does not come back at all. Across a multi-VALUES
+upsert `rowcount` is not a portable count of any of the three.
 
 ## Sweep primitives
 
@@ -31,9 +38,9 @@ SQLite and PostgreSQL.
 """
 
 import logging
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, NamedTuple, Optional
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, or_, select
 
 from .engine import get_engine, make_insert
 from .tables import metric_points
@@ -44,6 +51,15 @@ logger = logging.getLogger(__name__)
 # One prune call never deletes more than this many rows, so the 300 s cleanup
 # cycle cannot be monopolised by a table whose window just narrowed (TD-14).
 MAX_CHUNKS_PER_PRUNE = 20
+
+
+class PointWriteCounts(NamedTuple):
+    """What one `insert_points` call did. Named, so a caller reads
+    `.corrected` rather than a position it could silently swap."""
+
+    recorded: int        # new rows
+    deduplicated: int    # identical repeats — nothing written
+    corrected: int       # rows restated with a different value (ent#729)
 
 
 def _prune_predicate(cutoff: str):
@@ -60,32 +76,72 @@ class MetricPointOperations:
 
     def insert_points(
         self, agent_name: str, rows: List[Dict[str, Any]]
-    ) -> Tuple[int, int]:
-        """Insert validated rows, returning `(recorded, deduplicated)`.
+    ) -> PointWriteCounts:
+        """Insert or restate validated rows; see `PointWriteCounts`.
 
         `rows` are the service's output: each carries `metric`, `ts`,
         `idempotency_key`, `value_numeric` / `value_text`, `dims`,
-        `execution_id`, `created_at`. `agent_name` is stamped here from the
-        AUTH-resolved name, never from the body.
+        `execution_id`, `created_at`. The store stamps `agent_name` (the
+        AUTH-resolved name, never the body's), `revision` and `recorded_at` (the
+        batch's `created_at` — the wall clock of THIS write), so a row dict can
+        smuggle none of them.
+
+        Refuses two rows with one identity: PostgreSQL raises a cardinality
+        violation on that and SQLite silently applies both, so the dialects
+        would disagree. The service already rejects it (`duplicate_in_batch`);
+        this makes the divergence unreachable rather than merely unlikely.
+
+        Rows are written in `(ts, idempotency_key)` order. `DO UPDATE` locks
+        every conflicting row — even one its `WHERE` then skips — so two
+        overlapping batches locking in arrival order could deadlock on
+        PostgreSQL; one canonical order cannot.
         """
         if not rows:
-            return (0, 0)
-        payload = [dict(r, agent_name=agent_name) for r in rows]
-        stmt = (
-            make_insert(metric_points)
-            .values(payload)
-            .on_conflict_do_nothing(
-                index_elements=[
-                    metric_points.c.agent_name,
-                    metric_points.c.ts,
-                    metric_points.c.idempotency_key,
-                ]
-            )
-            .returning(metric_points.c.idempotency_key)
+            return PointWriteCounts(0, 0, 0)
+        identities = {(r["ts"], r["idempotency_key"]) for r in rows}
+        if len(identities) != len(rows):
+            raise ValueError(
+                "two rows share one point identity (ts, idempotency_key); "
+                "one identity is one observation per write")
+        payload = sorted(
+            (
+                dict(r, agent_name=agent_name, revision=0,
+                     recorded_at=r["created_at"])
+                for r in rows
+            ),
+            key=lambda r: (r["ts"], r["idempotency_key"]),
         )
+        insert = make_insert(metric_points).values(payload)
+        stored, incoming = metric_points.c, insert.excluded
+        stmt = insert.on_conflict_do_update(
+            index_elements=[stored.agent_name, stored.ts, stored.idempotency_key],
+            set_={
+                "value_numeric": incoming.value_numeric,
+                "value_text": incoming.value_text,
+                "execution_id": incoming.execution_id,
+                "recorded_at": incoming.recorded_at,
+                "revision": stored.revision + 1,
+            },
+            # Null-safe, because one value column is NULL on every row (by
+            # type). For same-type values a plain `!=` would happen to agree —
+            # the non-NULL column decides the `OR` — but a value that moves
+            # between the columns makes both `x != NULL` = NULL and a real
+            # change would read as a duplicate. `IS DISTINCT FROM` on
+            # PostgreSQL, `IS NOT` on SQLite.
+            where=or_(
+                stored.value_numeric.is_distinct_from(incoming.value_numeric),
+                stored.value_text.is_distinct_from(incoming.value_text),
+            ),
+        ).returning(stored.revision)
         with get_engine().begin() as conn:
-            recorded = len(conn.execute(stmt).fetchall())
-        return (recorded, len(payload) - recorded)
+            revisions = [r[0] for r in conn.execute(stmt).fetchall()]
+        recorded = sum(1 for rev in revisions if rev == 0)
+        corrected = len(revisions) - recorded
+        return PointWriteCounts(
+            recorded=recorded,
+            deduplicated=len(payload) - len(revisions),
+            corrected=corrected,
+        )
 
     # ---------------------------------------------------------------------
     # Read

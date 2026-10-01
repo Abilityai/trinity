@@ -20,8 +20,10 @@ what makes every reason code testable without a DB and what keeps Invariant
 * **No coercion.** `True` is not `1`, `"42"` is not `42`, and `NaN`/`inf` are
   not values. Each gets a named code rather than a silently stored surprise.
 * **Identity excludes the value.** `idempotency_key = sha256(metric \0 ts \0
-  canonical_dims)`: the same observation posted twice is one row, and a genuine
-  correction is a new `ts`.
+  canonical_dims)`: one identity is one row. The same value posted again is a
+  duplicate; a different value at the same identity is a correction, and the
+  store restates the row in place with its `ts` unchanged (ent#729, R45). A
+  correction is NOT a new `ts` — the `ts` is the period the number describes.
 * **A value is a label, not a document.** Text values are bounded at
   `METRIC_VALUE_TEXT_MAX_LEN`; `status` labels are bounded far tighter by
   their declared domain.
@@ -375,8 +377,8 @@ def validate_batch(
             errors.append(PointError(
                 index, metric, "duplicate_in_batch",
                 f"the same observation (metric, ts, dims) is already at index "
-                f"{seen[key]} of this batch; one identity is one observation, "
-                "and a correction is a new ts",
+                f"{seen[key]} of this batch; send one value per identity — a "
+                "later batch with a different value corrects the stored one",
             ))
             continue
         seen[key] = index

@@ -92,7 +92,8 @@ def test_the_identity_is_stable_across_dimension_key_order():
 
 def test_the_identity_excludes_the_value():
     """Same observation, different number, one identity: a corrected re-post
-    must dedup rather than double-count. A correction is a NEW ts."""
+    must restate the one row rather than double-count (ent#729 — the store's
+    upsert, proved in `test_ent729_metric_restatement.py`)."""
     rows, _ = _validate([{"metric": "cycles", "value": 1,
                           "ts": "2026-09-22T11:00:00Z"}])
     other, _ = _validate([{"metric": "cycles", "value": 999,

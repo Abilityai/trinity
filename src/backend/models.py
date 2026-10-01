@@ -4896,14 +4896,19 @@ class MetricPointAccepted(BaseModel):
 
 
 class MetricPointsResult(BaseModel):
-    """The 201 body. `recorded` and `deduplicated` are separate counts on
-    purpose: an honest "we already had this" is not a failure and must not read
-    as a success that wrote something."""
+    """The 201 body. `recorded`, `deduplicated` and `corrected` are separate
+    counts on purpose: an honest "we already had this" is not a failure and
+    must not read as a success that wrote something, and a restated row
+    (ent#729) is neither of the two.
+
+    `corrected` defaults to 0 so an idempotency snapshot stored before it
+    existed still replays (`MetricPointsResult(**snapshot, replayed=True)`)."""
 
     success: bool = True
     agent_name: str
     recorded: int
     deduplicated: int
+    corrected: int = 0
     replayed: bool = False
     points: List[MetricPointAccepted] = []
 
