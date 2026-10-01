@@ -159,7 +159,9 @@
   - New additive recovery surface
     `jsonl_recovery._recover_completed_turn_from_jsonl(session_id, since_iso)`,
     consulted from inside the existing `execution_error` branch via
-    `headless_executor._try_recover_completed_turn(ctx)`. On a hit the recovered
+    `headless_executor._try_recover_completed_turn(ctx)` — a thin wrapper over the
+    shared core `_recover_completed_turn_into`, which the sync chat path
+    (`claude_code._execute_claude_code_once`) also consults since #2968. On a hit the recovered
     text becomes the response and the turn returns **200 / SUCCESS**; on a miss the
     502 is unchanged. `_recover_response_from_jsonl` (#678) is **not modified**.
   - **Three independent gates, all required** — *main-thread only* × *turn-scoped* ×
@@ -256,7 +258,7 @@
   each agent is cold-recreated** (a plain restart does not always adopt, #1809).
 - **Files**:
   - `docker/base-image/agent_server/services/jsonl_recovery.py` — `_recover_completed_turn_from_jsonl`, `_is_main_thread`, `_is_before`
-  - `docker/base-image/agent_server/services/headless_executor.py` — `_try_recover_completed_turn`, `_RECOVERY_NOTICE`, the `execution_error` branch
+  - `docker/base-image/agent_server/services/headless_executor.py` — `_try_recover_completed_turn`, `_recover_completed_turn_into` (shared core, #2968), `_RECOVERY_NOTICE`, the `execution_error` branch
   - `docker/base-image/agent_server/models.py` — `ExecutionMetadata.recovered_terminal`
 
 ### 10.4.4 Telemetry + Transcript on a Failing `error_during_execution` / 504 Row (#1853)
