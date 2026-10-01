@@ -394,6 +394,18 @@
           <button :class="STAGE_ACTION" @click="router.push('/workspace')">Back to chats</button>
         </div>
 
+        <!-- #3140: a chat URL this viewer cannot open. Before the conversation,
+             because `activeAgent` would otherwise fall back to the first roster
+             agent and offer a live composer under someone else's chat id. -->
+        <div v-else-if="chatUnavailable" :class="STAGE_WRAP" data-testid="chat-unavailable">
+          <svg :class="STAGE_ICON" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z" /></svg>
+          <p :class="STAGE_TITLE">This chat isn't available</p>
+          <p :class="STAGE_BODY">
+            It may have been deleted, or it belongs to someone else. Your own chats are in the sidebar.
+          </p>
+          <button :class="STAGE_ACTION" data-testid="chat-unavailable-back" @click="leaveUnavailable">Back to your chats</button>
+        </div>
+
         <PortalConversation
           v-else-if="activeAgent"
           ref="conversationRef"
@@ -411,6 +423,7 @@
           @reply-done="replyTarget = null"
           @new-chat="newChatWithAgent(activeAgent.name)"
           @session-adopted="onSessionAdopted"
+          @thread-missing="onThreadMissing"
           @sessions-changed="onConversationTurnDone"
           @open-menu="mobileNav = true"
           @escalate-to-room="onEscalateToRoom"
@@ -525,6 +538,7 @@
           <p :class="STAGE_BODY">
             That link points at an agent that isn't shared with you. Pick one from the sidebar, or ask whoever sent the link.
           </p>
+          <button :class="STAGE_ACTION" data-testid="agent-unreachable-back" @click="leaveUnavailable">Back to your chats</button>
         </div>
 
         <div v-else-if="!activeRoomIdFromRoute && !activeAgentPageName" :class="STAGE_WRAP">
@@ -999,6 +1013,10 @@ const activeRoomId = ref(null)
 // so a latch that never clears leaves the whole Workspace stuck on the
 // access-denied panel for the rest of the SPA session.
 const unreachableAgent = ref(null)
+// #3140: a `/workspace/c/:id` this viewer cannot open — someone else's chat, or
+// one that no longer exists. Holds the id, and the stage shows the unavailable
+// state only while the URL still names it, so any navigation clears it.
+const unavailableChatId = ref(null)
 const pendingSession = ref(null)      // session to load when the conversation (re)mounts
 const prefill = ref('')
 const mobileNav = ref(false)
@@ -1013,6 +1031,7 @@ const convGen = ref(0)                // bumps on explicit thread switches → r
 const bootstrapResolved = ref(false)
 
 const activeSessionId = computed(() => route.params.sessionId || null)
+const chatUnavailable = computed(() => !!activeSessionId.value && unavailableChatId.value === activeSessionId.value)
 // ent#361: `/workspace/r/:roomId` is the multi-agent chat.
 const activeRoomIdFromRoute = computed(() => route.params.roomId || null)
 // ent#360: `/workspace/a/:agentName`.
@@ -1043,6 +1062,9 @@ const activeAgent = computed(() => {
   }
   // Never substitute a different agent for one the caller asked for by name.
   if (unreachableAgent.value) return null
+  // #3140: nor for a chat the URL named that this viewer cannot open — the
+  // fallback to the first roster agent is what put a live composer under it.
+  if (chatUnavailable.value) return null
   if (!activeAgentName.value) return store.agents[0] || null
   return store.agents.find((a) => a.name === activeAgentName.value) || { name: activeAgentName.value }
 })
@@ -1893,6 +1915,24 @@ function onSessionAdopted(id) {
 }
 function usePlaybook(text) { prefill.value = ''; nextTick(() => { prefill.value = text }) }
 
+// #3140: the thread list can say "this id is not yours" only when it loaded
+// cleanly. A failed list is the conversation's call (its history read 404s).
+function threadListTrusted() { return threadsLoaded.value && !store.sessionsFailed }
+// The conversation's history read 404'd: the URL names a chat this viewer
+// cannot open. Only while the URL still names it — a late answer for a thread
+// the person has already left must not blank the one they moved to.
+function onThreadMissing(id) {
+  if (id && route.params.sessionId === id) {
+    unavailableChatId.value = id
+    pendingSession.value = null
+  }
+}
+function leaveUnavailable() {
+  unavailableChatId.value = null
+  unreachableAgent.value = null
+  router.push('/workspace')
+}
+
 // ent#359 — per-viewer star + unread state, merged onto the thread list.
 //
 // Kept a separate call from `fetchAllSessions` on purpose, so that a chat-state
@@ -2232,10 +2272,19 @@ watch([() => route.params.sessionId, () => threads.value.length], () => {
   if (!sid || !store.isClientSignedIn) return
   if (pendingSession.value === sid && activeAgentName.value) return
   const known = threads.value.find((t) => (t.id || t.session_id) === sid)
+  // #3140: an id the cleanly-loaded list lacks, and that this shell is not
+  // holding as a just-adopted new chat, is not the viewer's to open.
+  if (!known && threadListTrusted() && pendingSession.value !== sid) {
+    unavailableChatId.value = sid
+    return
+  }
   // ent#451 review: this is "the commonest way in — back/forward, a bookmark
   // and a reload" (below), and it adopts a REAL thread, so any pending
   // fresh-start intent is spent here too.
   if (known) {
+    // A refresh that now contains the id (a chat made in another tab) lifts
+    // an earlier "not available" verdict for it.
+    if (unavailableChatId.value === sid) unavailableChatId.value = null
     activeAgentName.value = known.agent_name
     pendingSession.value = sid
     startingNewChat.value = false
@@ -2261,6 +2310,13 @@ watch([activeAgentPageName, () => threads.value.length], ([name]) => {
   // resolve the name yet, and the "you don't have access" branch would fire for
   // an agent the caller can perfectly well reach.
   if (!store.rosterLoaded) return
+  // #3140: an agent that is not on a cleanly-loaded roster is the "you don't
+  // have access" stage, never a conversation — `landOnAgent` would otherwise
+  // open a fresh chat with a name the server refuses, under a live composer.
+  if (!store.error && !store.agents.some((a) => a.name === name)) {
+    unreachableAgent.value = name
+    return
+  }
   landOnAgent(name)
 })
 
@@ -2428,8 +2484,11 @@ async function bootstrap() {
     const sid = route.params.sessionId
     if (sid) {
       const known = threads.value.find((t) => (t.id || t.session_id) === sid)
+      // #3140: the list is the viewer's WHOLE thread set (no LIMIT server-side),
+      // so when it loaded cleanly an id it lacks is not theirs to open.
+      if (!known && threadListTrusted()) { unavailableChatId.value = sid; return }
       if (known) { activeAgentName.value = known.agent_name; pendingSession.value = sid }
-      else pendingSession.value = sid   // let the conversation resolve/load it
+      else pendingSession.value = sid   // list failed: let the conversation try (a 404 lands in onThreadMissing)
       convGen.value++
       markRead('thread', sid)           // a deep-linked open is still an open
       return
