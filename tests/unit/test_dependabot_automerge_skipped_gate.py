@@ -115,3 +115,37 @@ def test_other_non_success_conclusions_still_block(tmp_path: Path, conclusion: s
     rows = f"completed\\tsuccess\\ncompleted\\t{conclusion}\\n"
     r = _run_gate(tmp_path, rows)
     assert r.returncode == 1, r.stdout + r.stderr
+
+
+
+def _gate_jq_filter() -> str:
+    """The `--jq` expression the step hands to `gh api`, as written in the workflow."""
+    script = _gate_script()
+    start = script.index("--jq '") + len("--jq '")
+    return script[start:script.index("'", start)]
+
+
+def test_the_regression_verdict_is_a_gating_check() -> None:
+    """`pytest (head)` runs its suite with `|| true` and reports green regardless;
+    the regression verdict is the `regression diff` job. A gate that does not
+    select it would auto-merge a patch/minor bump that breaks unit tests the
+    moment the skipped-row fix above let the gate pass at all. The workflow's
+    own filter runs under real jq here, with only its output projection swapped
+    for the check name."""
+    import json
+    import shutil
+
+    jq = shutil.which("jq")
+    if not jq:
+        pytest.skip("jq not on PATH")
+    projection = '| "\\(.status)\\t\\(.conclusion)"'
+    flt = _gate_jq_filter()
+    assert flt.endswith(projection), flt
+    names = ("build", "pytest (head, seed 12345)", "regression diff",
+             "Analyze (python)", "secret-scan", "journey-smoke")
+    payload = {"check_runs": [{"name": n, "status": "completed", "conclusion": "success"} for n in names]}
+    selected = set(subprocess.run(
+        [jq, "-r", flt[: -len(projection)] + "| .name"],
+        input=json.dumps(payload), capture_output=True, text=True, check=True,
+    ).stdout.splitlines())
+    assert selected == {"build", "pytest (head, seed 12345)", "regression diff"}

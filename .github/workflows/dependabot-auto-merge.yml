@@ -57,8 +57,10 @@ jobs:
           grace_deadline=$(( SECONDS + 300 ))    # 5 min for gating checks to appear
           hard_deadline=$(( SECONDS + 1800 ))    # 30 min overall ceiling
           while (( SECONDS < hard_deadline )); do
+            # `regression diff` is the unit verdict: `pytest (head)` runs with
+            # `|| true` and is green whatever the suite does (#2994).
             mapfile -t rows < <(gh api "repos/$REPO/commits/$SHA/check-runs" --paginate \
-              --jq '.check_runs[] | select(.name | test("^build$|pytest")) | "\(.status)\t\(.conclusion)"')
+              --jq '.check_runs[] | select(.name | test("^build$|pytest|^regression diff$")) | "\(.status)\t\(.conclusion)"')
             if (( ${#rows[@]} == 0 )); then
               if (( SECONDS < grace_deadline )); then sleep 20; continue; fi
               echo "No build/pytest checks for this PR (path-filtered) -- relying on required checks via --auto"
