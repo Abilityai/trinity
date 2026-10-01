@@ -434,7 +434,7 @@ def test_the_marker_is_set_and_cleared_around_the_turn():
     import inspect
     from shared_sessions import service
 
-    src = inspect.getsource(service._wake_agent)
+    src = inspect.getsource(service._wake_agent_locked)
     assert "_mark_agent_working(" in src
     assert "_clear_agent_working(" in src
     # The clear must be in the finally, or a raised turn leaves it stuck.

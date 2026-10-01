@@ -15,7 +15,7 @@ What is pinned here:
 * The pull sink persists compact events and wakes an in-process sync waiter.
 * ``result_from_execution_row`` rebuilds a push-shaped result.
 * ``dispatch_and_await_terminal`` waits at most one agent timeout for a claim on
-  interactive triggers, cancels to FAILED/CAPACITY, and carries on when the
+  interactive triggers, stores FAILED/CAPACITY, and carries on when the
   cancel loses to a claim.
 * ``run_resumable_turn`` goes through the adapter with a per-conversation key,
   and the Session lock TTL grows by the queue allowance on a pilot.
@@ -384,7 +384,7 @@ def _queued_service(eid):
 
 
 @pytest.mark.asyncio
-async def test_unclaimed_interactive_turn_is_cancelled_as_capacity(seed_agent, monkeypatch):
+async def test_unclaimed_interactive_turn_fails_as_capacity(seed_agent, monkeypatch):
     seed_agent(timeout=1)
     _row("e1")
     from services import task_execution_service as tes
@@ -401,7 +401,8 @@ async def test_unclaimed_interactive_turn_is_cancelled_as_capacity(seed_agent, m
     assert out.status == "failed"
     assert out.error_code == TaskExecutionErrorCode.CAPACITY
     assert out.error == "Agent at capacity (queued turn not claimed in 1s)"
-    assert _db().get_execution("e1").status == "cancelled"
+    row = _db().get_execution("e1")
+    assert (row.status, row.error) == ("failed", out.error)
     waited.assert_not_called()
 
 
@@ -414,9 +415,9 @@ async def test_cancel_that_loses_to_a_claim_waits_for_the_terminal(seed_agent, m
     db = _db()
     real_cancel = db.cancel_queued_execution
 
-    def _claim_then_cancel(eid, reason="cancelled"):
+    def _claim_then_cancel(eid, reason="cancelled", status="cancelled"):
         db.claim_next_queued(AGENT, worker_id="w1", lease_seconds=900)
-        return real_cancel(eid, reason)
+        return real_cancel(eid, reason, status)
 
     monkeypatch.setattr(tes, "QUEUE_CLAIM_POLL_INTERVAL", 0.05)
     monkeypatch.setattr(tes.db, "cancel_queued_execution", _claim_then_cancel)

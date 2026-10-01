@@ -31,6 +31,7 @@ from typing import Any, Dict, Optional, Tuple
 from config import MAX_REDELIVERY
 from database import db
 from models import TaskExecutionStatus
+from services import channel_completion_report
 from services import event_dispatch_service
 from services import subscription_auto_switch
 from services.activity_service import activity_service
@@ -617,6 +618,15 @@ def apply_task_result(
             terminal_status=row_status,
             summary_or_error=summary,
             cost=cost,
+        )
+        # #3114: a delegated child that ran on a pull pilot reports back to the
+        # channel / portal / room it came from, exactly as the push terminals
+        # do. `report_completion` skips INLINE_CHANNEL_TRIGGERS turns itself.
+        channel_completion_report.spawn_completion_report(
+            execution_id=execution_id,
+            agent_name=execution.agent_name,
+            status=str(getattr(row_status, "value", row_status)),
+            summary_or_error=summary,
         )
         # #1804: the pull sink is a CAS-won terminal writer, so it owns closing
         # the paired dispatch activity — the issue names this as one of the next

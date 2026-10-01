@@ -12,6 +12,7 @@ mechanical: **you are woken iff you were @mentioned**.
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import logging
 import re
 import uuid
@@ -113,6 +114,12 @@ ROOM_MAX_CHAIN_DEPTH = 8
 
 MAX_CONTENT_CHARS = 8000
 ROOM_TURN_TIMEOUT_SECONDS = 300
+# #3114: how long a room turn waits for a pull pilot's worker to claim it. A
+# room post is held while it waits, so this is far below the agent timeout a
+# Session turn gets; an unclaimed turn fails as at-capacity and the room says so.
+ROOM_CLAIM_BUDGET_SECONDS = 300
+# Slack on the per-(room, agent) wake lock beyond the longest turn it covers.
+ROOM_WAKE_LOCK_BUFFER_SECONDS = 60
 
 _MENTION_RE = re.compile(r"@([A-Za-z0-9][A-Za-z0-9_-]{0,99})")
 
@@ -1023,8 +1030,16 @@ def _working_key(room_id: str, agent_name: str) -> str:
     return f"room_working:{room_id}:{agent_name}"
 
 
-def _working_ttl() -> int:
-    return ROOM_TURN_TIMEOUT_SECONDS + 30
+def _room_queue_allowance(agent_name: str) -> int:
+    """Seconds a room turn of ``agent_name`` can sit queued (#3114): the
+    pilot's queue allowance, bounded by the room claim budget; 0 off-pilot."""
+    from services.pull_pilot import pull_queue_allowance
+
+    return min(pull_queue_allowance(agent_name), ROOM_CLAIM_BUDGET_SECONDS)
+
+
+def _working_ttl(agent_name: str) -> int:
+    return ROOM_TURN_TIMEOUT_SECONDS + 30 + _room_queue_allowance(agent_name)
 
 
 def _mark_agent_working(room_id: str, agent_name: str) -> None:
@@ -1032,7 +1047,7 @@ def _mark_agent_working(room_id: str, agent_name: str) -> None:
         from redis_breaker_util import get_breaker_redis
         client = get_breaker_redis()
         if client is not None:
-            client.set(_working_key(room_id, agent_name), "1", ex=_working_ttl())
+            client.set(_working_key(room_id, agent_name), "1", ex=_working_ttl(agent_name))
     except Exception as e:  # noqa: BLE001 — a missing indicator must not fail a turn
         logger.warning("room %s: working-marker SET failed for %s: %s", room_id, agent_name, e)
 
@@ -1098,7 +1113,46 @@ def _apply_wake_cap(room_id: str, sender_kind: str, sender_identity: str,
     return allowed
 
 
+# #3114: wake-lock keys this task chain already holds. A reply posted under the
+# lock can mention its way back to the same agent (A -> B -> A); that nested
+# wake runs inside the outer one's chain and must not wait on its own lock.
+_held_wake_locks: contextvars.ContextVar[frozenset] = contextvars.ContextVar(
+    "room_wake_locks_held", default=frozenset()
+)
+
+
 async def _wake_agent(current_user, room_id: str, agent_name: str, chain_depth: int) -> None:
+    """Serialise wakes of one agent in one room, then run the turn (#3114).
+
+    Two posts that both mention an agent wake it twice. Unserialised, both
+    read the same cursor, delta and cached session id and both answer the same
+    messages. The lock spans the whole turn, so the second wake reads what the
+    first left; it waits up to one turn's length, then gives up visibly.
+    """
+    from services.session_turn_service import ResumeLock, ResumeLockBusy
+
+    key = f"room_wake_lock:{room_id}:{agent_name}"
+    held = _held_wake_locks.get()
+    if key in held:
+        await _wake_agent_locked(current_user, room_id, agent_name, chain_depth)
+        return
+    ttl = (ROOM_TURN_TIMEOUT_SECONDS + _room_queue_allowance(agent_name)
+           + ROOM_WAKE_LOCK_BUFFER_SECONDS)
+    try:
+        async with ResumeLock(agent_name, None, "", ttl, key=key, wait_seconds=ttl):
+            token = _held_wake_locks.set(held | {key})
+            try:
+                await _wake_agent_locked(current_user, room_id, agent_name, chain_depth)
+            finally:
+                _held_wake_locks.reset(token)
+    except ResumeLockBusy:
+        logger.warning("room %s: %s still busy with an earlier turn after %ss",
+                       room_id, agent_name, ttl)
+        _post_system(room_id, f"{agent_name} is still busy with an earlier turn.")
+
+
+async def _wake_agent_locked(current_user, room_id: str, agent_name: str,
+                             chain_depth: int) -> None:
     """One agent turn: delta -> execute_task -> auto-post the reply.
 
     Every wake is an ORDINARY execution through the standard path, so slots, the
@@ -1186,6 +1240,8 @@ async def _wake_agent(current_user, room_id: str, agent_name: str, chain_depth: 
             timeout_seconds=ROOM_TURN_TIMEOUT_SECONDS,
             resume_session_id=cached,
             persist_session=True,
+            # #3114: hold the post for a claim at most this long on a pilot.
+            claim_budget=ROOM_CLAIM_BUDGET_SECONDS,
         )
     except asyncio.CancelledError:
         # ent#220 item 2: cancellation is a BaseException, so it used to slip

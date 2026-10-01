@@ -742,6 +742,7 @@ async def dispatch_and_await_terminal(
     message: str,
     triggered_by: str,
     wait_timeout: Optional[float] = None,
+    claim_budget: Optional[float] = None,
     service: Optional["TaskExecutionService"] = None,
     **execute_kwargs,
 ) -> TaskExecutionResult:
@@ -766,8 +767,9 @@ async def dispatch_and_await_terminal(
     ``SYNC_WAITER_POLL_INTERVAL``.
 
     **Interactive and validation triggers wait in two phases (#3114).** Phase 1
-    holds while the row is ``queued``, for at most one agent execution timeout.
-    If no worker claimed it by then the row is cancelled and the caller gets
+    holds while the row is ``queued``, for at most ``claim_budget`` seconds
+    (default one agent execution timeout; a room passes a shorter one). If no
+    worker claimed it by then the row is stored FAILED and the caller gets
     FAILED/``CAPACITY``, which is what push answers for an agent with no free
     slot. A cancel that loses the race means a worker just claimed the row, so
     the wait carries on. Phase 2 is the terminal wait, timed from the claim.
@@ -797,6 +799,8 @@ async def dispatch_and_await_terminal(
         agent_timeout = 7200.0
     if wait_timeout is None:
         wait_timeout = agent_timeout + 120.0
+    if claim_budget is None:
+        claim_budget = agent_timeout
 
     logger.info(
         "[TaskExecService] %s dispatch for %s queued as %s; awaiting its terminal",
@@ -804,7 +808,7 @@ async def dispatch_and_await_terminal(
     )
     if triggered_by in _CLAIM_WAITING_TRIGGERS:
         try:
-            claimed = await _wait_until_claimed(result.execution_id, agent_timeout)
+            claimed = await _wait_until_claimed(result.execution_id, claim_budget)
         except asyncio.CancelledError:
             # The caller went away: a turn still queued must not run later for
             # nobody (a paid turn would run unsettled).
@@ -812,12 +816,16 @@ async def dispatch_and_await_terminal(
             raise
         if not claimed:
             error = (
-                f"Agent at capacity (queued turn not claimed in {int(agent_timeout)}s)"
+                f"Agent at capacity (queued turn not claimed in {int(claim_budget)}s)"
             )
-            if db.cancel_queued_execution(result.execution_id, reason=error):
+            # #3114: stored FAILED, so it reads as a capacity failure; only a
+            # caller going away (above) leaves a CANCELLED row.
+            if db.cancel_queued_execution(
+                result.execution_id, reason=error, status=TaskExecutionStatus.FAILED
+            ):
                 logger.info(
-                    "[TaskExecService] %s: queued %s turn %s not claimed in %ss; cancelled",
-                    agent_name, triggered_by, result.execution_id, int(agent_timeout),
+                    "[TaskExecService] %s: queued %s turn %s not claimed in %ss; failed",
+                    agent_name, triggered_by, result.execution_id, int(claim_budget),
                 )
                 return TaskExecutionResult(
                     execution_id=result.execution_id,

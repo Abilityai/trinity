@@ -90,16 +90,25 @@ The spec names the gates (`TARGET_ARCHITECTURE.md`, §Re-Delivery and Side-Effec
    **Routed on pilots (#3114)** for every interactive trigger except `chat` (the UI `/chat` path, still
    pushed). Sync callers (Session tab, Workspace, public links, channels, rooms, paid, MCP key auth,
    validation, internal run-now) go through `task_execution_service.dispatch_and_await_terminal`: it waits up
-   to one agent execution timeout for a worker to claim the row, cancels it as FAILED/`CAPACITY` if none does,
-   then waits for the terminal. Each producer passes a `conversation_key` (`session:`, `public:`, `channel:`,
+   to one agent execution timeout for a worker to claim the row (rooms: `ROOM_CLAIM_BUDGET_SECONDS`, 300s,
+   via `claim_budget`), stores it FAILED/`CAPACITY` if none does (a caller that went away leaves it
+   CANCELLED), then waits for the terminal. Each producer passes a `conversation_key` (`session:`, `public:`, `channel:`,
    `room:`, `paid:`), which is what the claim guard serialises on. Images ride the queue in
    `backlog_metadata`, which the #1449 retention sweep NULLs once the row is terminal. Live-stream proxies hold the SSE connection
    while the row is queued.
 
    **The Session-tab `ResumeLock` and the Workspace in-flight markers are retained** and span the queued
    wait: their TTLs add `pull_pilot.pull_queue_allowance` (one agent timeout on a pilot). The lock also
-   keeps the cached resume id fresh across turns, which the claim guard does not do. The claim guard is the
-   only serialisation for rooms, public links and channels.
+   keeps the cached resume id fresh across turns, which the claim guard does not do. Rooms take a
+   per-(room, agent) wake lock (`ResumeLock` under `room_wake_lock:<room>:<agent>`) from the cursor read
+   through the posted reply, so a second wake reads what the first left; a mention chain back to the same
+   agent re-enters it. The room working marker adds the queue allowance (capped at the room claim budget).
+   The claim guard is the only serialisation for public links and channels.
+
+   **Report-back and stop.** The pull sink (`apply_task_result`) spawns the channel / portal / room
+   completion report on its CAS-won branch, as the push terminals do. The agent's pull worker registers a
+   claimed turn as pending in the process registry, so `/api/executions/{id}/terminate` before spawn skips
+   the turn and reports it `cancelled`.
 
 ### The soak duration requirement is mis-cited — correct it when you touch it
 

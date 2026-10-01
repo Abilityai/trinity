@@ -1594,8 +1594,10 @@ class DatabaseManager:
     def get_queued_count(self, agent_name: str) -> int:
         return self._schedule_ops.get_queued_count(agent_name)
 
-    def cancel_queued_execution(self, execution_id: str, reason: str = "cancelled") -> bool:
-        return self._schedule_ops.cancel_queued_execution(execution_id, reason)
+    def cancel_queued_execution(
+        self, execution_id: str, reason: str = "cancelled", status: str = "cancelled"
+    ) -> bool:
+        return self._schedule_ops.cancel_queued_execution(execution_id, reason, status)
 
     def cancel_queued_for_agent(self, agent_name: str, reason: str = "agent_deleted") -> int:
         return self._schedule_ops.cancel_queued_for_agent(agent_name, reason)

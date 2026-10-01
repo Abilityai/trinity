@@ -500,11 +500,19 @@ class ScheduleQueueMixin:
             row = conn.execute(stmt).mappings().first()
         return int(row["c"]) if row else 0
 
-    def cancel_queued_execution(self, execution_id: str, reason: str = "cancelled") -> bool:
+    def cancel_queued_execution(
+        self,
+        execution_id: str,
+        reason: str = "cancelled",
+        status: str = TaskExecutionStatus.CANCELLED,
+    ) -> bool:
         """Cancel a single queued execution. No container interaction.
 
+        ``status`` is the terminal written (#3114): CANCELLED by default, FAILED
+        for an interactive turn no worker claimed in time. Same CAS either way.
+
         Returns:
-            True if the row was still queued and is now cancelled, False otherwise.
+            True if the row was still queued and is now terminal, False otherwise.
         """
         now = utc_now_iso()
         with get_engine().begin() as conn:
@@ -517,7 +525,7 @@ class ScheduleQueueMixin:
                     )
                 )
                 .values(
-                    status=TaskExecutionStatus.CANCELLED,
+                    status=status,
                     completed_at=now,
                     error=reason,
                 )

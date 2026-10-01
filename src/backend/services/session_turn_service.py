@@ -296,13 +296,19 @@ class ResumeLock:
         claude_session_id: Optional[str],
         session_id: str,
         ttl_seconds: int = LOCK_TTL_FALLBACK,
+        *,
+        key: Optional[str] = None,
+        wait_seconds: Optional[float] = None,
     ):
-        self._key = (
+        # #3114: `key` / `wait_seconds` let a room wake reuse this lock under
+        # its own key with a wait as long as one turn.
+        self._key = key or (
             session_lock_key(agent_name, claude_session_id)
             if claude_session_id
             else f"session_lock:cold:{session_id}"
         )
         self._ttl = ttl_seconds
+        self._wait = wait_seconds
         self._token = secrets.token_urlsafe(16)
         self._redis = None
         self._held = False
@@ -316,7 +322,9 @@ class ResumeLock:
             )
             return self
 
-        deadline = asyncio.get_event_loop().time() + LOCK_WAIT_TOTAL_SECONDS
+        deadline = asyncio.get_event_loop().time() + (
+            LOCK_WAIT_TOTAL_SECONDS if self._wait is None else self._wait
+        )
         while True:
             try:
                 acquired = await self._redis.set(
