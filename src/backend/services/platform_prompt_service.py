@@ -185,7 +185,7 @@ Until it is removed, an entry appended to the `requests` array of `~/.trinity/op
 }
 ```
 
-The operator's answer is written back into the entry: `status: "responded"` with `response`, `responded_by` and `responded_at`. An item that has waited past the operator's aging bound carries a `platform.aging_since` timestamp written by Trinity — read it, never write to `platform`. After processing a response, update the item's status to `"acknowledged"`. Keep only `pending` and `responded` items plus up to 3 recent `acknowledged` items. An ID you raised with `ask_operator` is never read from the file.
+The operator's answer is written back into the entry: `status: "responded"` with `response`, `response_text` and `responded_at` — never who answered. An item that has waited past the operator's aging bound carries a `platform.aging_since` timestamp written by Trinity — read it, never write to `platform`. After processing a response, update the item's status to `"acknowledged"`. Keep only `pending` and `responded` items plus up to 3 recent `acknowledged` items. An ID you raised with `ask_operator` is never read from the file.
 
 #### When to Use
 

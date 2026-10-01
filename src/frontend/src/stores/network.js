@@ -1363,6 +1363,23 @@ export const useNetworkStore = defineStore('network', () => {
     }
   }
 
+  // The readiness stamp and whether it holds a brief (ent#527 rider) are the
+  // two per-row fields expected to change while a dashboard stays open. Only
+  // a changed value is written, so an unchanged poll triggers nothing.
+  function patchReadinessInPlace(freshAgents) {
+    const byName = new Map(freshAgents.map(a => [a.name, a]))
+    for (const row of agents.value) {
+      const fresh = byName.get(row.name)
+      if (!fresh) continue
+      const readiness = fresh.readiness ?? null
+      if (JSON.stringify(row.readiness ?? null) !== JSON.stringify(readiness)) {
+        row.readiness = readiness
+      }
+      const briefHeld = fresh.brief_held === true
+      if (row.brief_held !== briefHeld) row.brief_held = briefHeld
+    }
+  }
+
   // Start polling agent list every 30 seconds (PERF-269: was 10s)
   function startAgentRefresh() {
     if (agentRefreshInterval.value) {
@@ -1395,6 +1412,11 @@ export const useNetworkStore = defineStore('network', () => {
           // Pre-query, owner-filtered rebuild (ent#261) — this poll previously
           // rebuilt nodes from the RAW list, ignoring even the owner filter.
           convertAgentsToNodes(ownerFilteredAgents.value)
+        } else {
+          // ent#527 rider (PR #3038 review): a readiness flip changes no name
+          // and emits no WS event, so patch the stamp in place on the rows
+          // already present — no node rebuild, no row replacement.
+          patchReadinessInPlace(newAgents)
         }
       } catch (error) {
         console.error('[Collaboration] Failed to refresh agents:', error)

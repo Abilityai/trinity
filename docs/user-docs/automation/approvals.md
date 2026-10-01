@@ -13,6 +13,8 @@ Human-in-the-loop approval gates surfaced through the Operations queue. An agent
 - **Priority** — `critical`, `high`, `medium`, `low`. Affects sort order in the queue.
 - **Response window** — Optional `expires_at`. After expiry the item moves to `expired`; the agent treats that as "not approved — do not proceed". An answer that arrives after the deadline is refused (`409 expired`), even in the few seconds before the platform sweeps the item.
 - **Re-ask** — An ask that raises again one of the agent's asks that expired, once the agent has new information. It names the expired ask (`supersedes_expired`), and the Operations cards show the link both ways: **Re-ask of …** on the new ask, **Re-asked as …** on the expired one. An expiry means *not approved*, so repeating an expired ask's exact action without naming it is refused.
+- **Proposal** — Optional structured description of the exact action an approval would allow. It is shown read-only, as text, on every card that offers the decision (the Operations card, the mobile admin and the Workspace ask) and stays on the resolved card, so the record says what was decided.
+- **Aging** — A pending item that waits longer than the aging bound (default 24 hours) is marked **Waiting** on its card, and a queue-file item gets a `platform.aging_since` timestamp written into the agent's entry. An admin sets the bound in **Settings → Access → Operator queue aging bound (hours)**; `0` turns it off.
 - **How it ended** — Every item ends one of three ways — **answered**, **cancelled** or **expired** — and records who ended it (a person, or the timeout), when, and for a cancellation the optional reason the operator gave. The Resolved tab, the mobile admin and the Workspace all show it.
 
 ## How It Works
@@ -29,6 +31,20 @@ Human-in-the-loop approval gates surfaced through the Operations queue. An agent
 
 **The decision must be one the agent offered.** For an approval that listed options, an answer outside that list is refused with a `422` that names the offered options; matching is exact, so `Approve` and `approve` are different answers. Questions, alerts and approvals that offered no options take free text.
 
+**When the agent's copy and the queue disagree.** For a queue-file item, the platform compares every entry in the agent's file with the queue on each cycle and shows a badge when something is off. A healthy card shows no badge.
+
+| Badge | Meaning |
+|-------|---------|
+| **Changed by the agent** | The agent rewrote the item after it was ingested. You are reading the original. |
+| **Closed by the agent** | The agent closed the item on its side; it still waits for you here. |
+| **Gone from the agent** | The agent's file no longer carries the item. |
+| **Re-used id** | The agent used the id again after the item closed; the new entry was not admitted. |
+| **Unconfirmed** | The platform could not check the agent's copy — the agent is stopped or unreachable, or its file is unreadable. Hover for the reason and when it was last confirmed. |
+| **Answer not delivered** | Your answer or cancellation did not reach the agent's file. Hover for why; most causes retry on their own, and an answer to a stopped agent lands when it starts. |
+| **Waiting** | The item is past the aging bound. |
+
+Answering an item marked **Changed by the agent** or **Closed by the agent** is refused once (`409 item_diverged`): the card refreshes and asks you to review it, and the next **Send** answers anyway. The Operations header counts items whose answer did not reach the agent and items the agent closed, and offers one-click cancel of the closed ones. The platform never writes over an agent's queue file it cannot parse, and delivers an answer only into an entry that still matches what you answered.
+
 **Platform heads-ups.** Trinity itself files items of other types into the same queue — for example a Workspace client rating a response as not useful, or an agent calling a playbook that does not exist. These carry no decision; they show **Got it** only, and acknowledging them sends nothing back to the agent.
 
 WebSocket events fired along the way: `operator_queue_new` when the item arrives, `operator_queue_responded` when someone decides, `operator_queue_cancelled` when someone cancels it, `operator_queue_acknowledged` when the agent confirms it saw the decision.
@@ -39,11 +55,11 @@ An item raised with `ask_operator` is addressed by role: `primary` (the default 
 
 What that person sees in the [Workspace](../sharing-and-access/workspace.md):
 
-- The ask renders above the composer of the chat it belongs to — and, for platform users, again under **Waiting on you** in the rail's **Work** tab. An ask raised outside any chat (by a scheduled run, say) attaches to the person's **Main** chat with that agent; from any other chat the card offers **Open the conversation** instead of controls.
+- Every ask waiting on the person is in their Workspace **Inbox** (the **Action** tab, which can be narrowed to one agent). An ask raised during a chat turn appears as a tile inside that chat's conversation, placed where it was asked, and you answer it right there; once it has ended it stays in that chat's history as one muted line (kind · title · how it ended · when). An ask raised outside any chat — by a scheduled run, a loop or a gate — appears in no chat, only in the **Inbox**; your reply to it lands in your **Main** chat with that agent. The agent's **Work** tab (platform users) and **Info** tab (everyone) carry one line, *N asks waiting on you · Open in Inbox*.
 - The sidebar header counts them (*N asks are waiting on your answer*), and the agent's row carries its own badge — distinct from the unread-replies count, and never hidden behind **Show all**.
 - The controls are the same three as the Operations page: option → optional note (*Add a note (optional)…*) → **Send**; a typed answer → **Send**; **Got it** for an alert.
 - Answering clears the ask from every count at once, keeps it on the card as **Answered by you**, and shows a short confirmation: **Sent.**, or **Sent — {agent} is picking this up.** when the owner has turned on the wake.
-- An ask that ended — answered, cancelled or expired — stays listed for 7 days with how it ended (**by you**, **by the operator**, or expired) and when, without answer controls. It is not silently removed, it drops out of the count, and **Waiting on you** lists only what is still pending. The operator's reason for cancelling is never shown to you.
+- An ask that ended — answered, cancelled or expired — stays listed in the Inbox for 7 days with how it ended (**by you**, **by the operator**, or expired) and when, without answer controls; in the chat that raised it, it stays as a muted line for as long as the queue keeps it. It is not silently removed, and it drops out of the count. The operator's reason for cancelling is never shown to you.
 - The Workspace refreshes asks every 20 seconds while the tab is visible.
 
 An ask is answered through the Workspace's own route (below), which records the answer with the same write-back, audit fields and wake-on-answer behaviour as an operator's. A client whose share was revoked stops seeing the ask.
@@ -64,7 +80,7 @@ Approvals share the operator-queue API surface:
 |----------|--------|-------------|
 | `/api/operator-queue` | GET | List queue items (filter by `type=approval`) |
 | `/api/operator-queue/{id}` | GET | Get a single item |
-| `/api/operator-queue/{id}/respond` | POST | Submit the decision — `{response, response_text?}`. A person only (`403 person_required` for an agent's or the system key). `422` when an approval's `response` is not an offered option; `409` when the item is no longer pending, `409 expired` past its deadline |
+| `/api/operator-queue/{id}/respond` | POST | Submit the decision — `{response, response_text?, acknowledge_divergence?}`. A person only (`403 person_required` for an agent's or the system key). `422` when an approval's `response` is not an offered option; `409` when the item is no longer pending, `409 expired` past its deadline, `409 item_diverged` when the agent changed or closed the item (send again with `acknowledge_divergence: true` to answer anyway) |
 | `/api/operator-queue/{id}/cancel` | POST | Cancel a pending item — optional `{reason}` (≤ 500 characters). A person only; `409` when the item is no longer pending |
 | `/api/operator-queue/bulk-cancel` | POST | Cancel listed pending items — `{ids, reason?}`; returns `{cancelled, skipped, batch_id}`. A person only |
 | `/api/agents/{name}/operator-queue` | POST | Raise an item as the agent itself — `{request_id, title, question?, type?, options?, priority?, context?, proposal?, to?, expires_at?, supersedes_expired?}`, with the agent's own key only (`403 agent_identity_required` otherwise). `201` with a receipt (the role it went to, never a person's email); `200` with the first receipt when the id was already used; a named `422` for a malformed item, `429 rate_limited` or `queue_full` |
@@ -75,7 +91,7 @@ Asks addressed to a Workspace user are read and answered as that user, under the
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `/api/enterprise/client-portal/asks?agent_name=&include_ended=` | GET | Open asks addressed to the caller, optionally narrowed to one agent; `include_ended=true` adds the ones that ended in the last 7 days. Each carries `kind`, `title`, `question`, `options`, `expires_at`, `status` (`pending`, `answered`, `cancelled` or `expired`), `ended_at` / `ended_by` (`you`, `operator` or `timeout`) and the `chat_id` it belongs to |
+| `/api/enterprise/client-portal/asks?agent_name=&include_ended=&chat_id=` | GET | Open asks addressed to the caller, optionally narrowed to one agent; `include_ended=true` adds the ones that ended in the last 7 days; `chat_id` returns the asks raised during a turn of that chat, ended ones included with no 7-day limit. Each carries `kind`, `title`, `question`, `options`, `expires_at`, `status` (`pending`, `answered`, `cancelled` or `expired`), `ended_at` / `ended_by` (`you`, `operator` or `timeout`) and the `chat_id` it belongs to |
 | `/api/enterprise/client-portal/asks/{id}/answer` | POST | Answer one — `{response, response_text?}`. A person only: the platform's system key gets `403 person_required`. Returns the ask with `status: "answered"` and `resume_requested` (whether answering started a turn). `422 empty_answer` / `response_not_an_offered_option`; `409` expired; a missing or not-yours ask is a uniform `404` |
 
 See the [Operating Room doc](../operations/operating-room.md) for the full queue model.
@@ -88,11 +104,11 @@ Agents can inspect the queue and resolve a pending item programmatically:
 |------|-------------|
 | `list_operator_queue` | List queue items, broad or filtered by `agent_name` |
 | `get_operator_queue_item` | Fetch a single item by id |
-| `respond_to_operator_queue(item_id, response, response_text?)` | Submit the decision for a pending item, with a person's own API key — the same rules as the `respond` route: `response` must be an offered option, an item that is no longer pending (or past its deadline) returns a structured error, and an agent's key is refused |
+| `respond_to_operator_queue(item_id, response, response_text?, acknowledge_divergence?)` | Submit the decision for a pending item, with a person's own API key — the same rules as the `respond` route: `response` must be an offered option, an item that is no longer pending (or past its deadline, or changed by the agent without `acknowledge_divergence`) returns a structured error, and an agent's key is refused |
 | `ask_operator(request_id, title, …)` | The calling agent raises an item as itself and gets a receipt: whether it was created or replayed, the role it went to, and `wakes_on_ending` (whether the agent will be woken when the item ends). `expires_at` needs a timezone and must be at least 15 minutes out; a re-ask names the expired item in `supersedes_expired`. A refusal comes back as its named code. Acts as the agent the key belongs to — there is no agent parameter |
 | `get_my_ask(request_id)` | The calling agent reads back one of its own items by the id it chose: status, the answer, and how it ended (`disposition`, `disposed_at`, `disposed_by`, the operator's `disposition_reason`). Acts as the agent the key belongs to — there is no agent parameter |
 
-Agent-scoped API keys see only items for the calling agent itself plus agents it has been explicitly permitted to access. Answering and cancelling are a person's act: an agent's own key — or the system key — is refused (`403 person_required`), so an agent can never approve its own request. Every turn's Execution Context also lists the agent's items that ended in the last 24 hours (ids, how and when — no text), so an agent that slept through an ending still learns of it.
+Agent-scoped API keys see only items for the calling agent itself plus agents it has been explicitly permitted to access. Answering and cancelling are a person's act: an agent's own key — or the system key — is refused (`403 person_required`), so an agent can never approve its own request. Only a person (a browser session or the person's own API key) reads a whole queue row. An agent's key, the system key and other machine keys get the row without any person's identity — no answerer's email, no addressee, no name of who ended it — and never see the platform's heads-ups about a person (such as a Workspace client's complaint). The answer written back into a queue file carries `response`, `response_text` and `responded_at`, not who answered. Every turn's Execution Context also lists the agent's items that ended in the last 24 hours (ids, how and when — no text), so an agent that slept through an ending still learns of it.
 
 ## Limitations
 

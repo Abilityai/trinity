@@ -46,9 +46,11 @@ worker, and is it taking the work?*
   busy would make a dead pool read as full. Rows the backend pushed to a pilot
   (interactive triggers) hold Redis slots, not pool workers, and are ignored
   here on purpose — never compute pool occupancy from `slot_ids`.
-- **Every queued row counts, whatever its trigger.** `claim_next_queued`
-  claims the oldest queued row for the agent with no trigger filter, so an
-  idle worker takes any of them.
+- **Every queued row counts, whatever its trigger.** An idle worker claims
+  any queued row: interactive ones first (#2842), and a row whose conversation
+  is already running is skipped for the next one (#2843). That skipped row can
+  sit queued beside an idle worker by design; it runs when its conversation's
+  turn ends.
 
 Finding: `queued_not_claimed` (critical) — a worker is idle and the oldest
 queued row is older than `PULL_CLAIM_GRACE_SECONDS`.
@@ -225,16 +227,19 @@ def pull_pool_state(
 
 
 def oldest_queued_age(agent: AgentSnapshot, now: float) -> Optional[float]:
-    """Seconds the agent's oldest queued row has waited, or None. Shared with
-    B-08. NULL / unparseable `queued_at` is E-04's finding, and an eid absent
-    from `queued_meta` means the columns do not exist; both are skipped. A
-    future-dated value floors at age 0."""
-    times = [
-        t
-        for eid in agent.queued_exec_ids
-        if (t := parse_ts((agent.queued_meta.get(eid) or {}).get("queued_at")))
-        is not None
-    ]
+    """Seconds the agent's oldest claimable queued row has waited, or None.
+    Shared with B-08. NULL / unparseable `queued_at` is E-04's finding, and an
+    eid absent from `queued_meta` means the columns do not exist; both are
+    skipped. So is a row whose conversation already has a running turn
+    (#2843): no worker may take it yet. A future-dated value floors at age 0."""
+    times = []
+    for eid in agent.queued_exec_ids:
+        meta = agent.queued_meta.get(eid) or {}
+        if meta.get("conversation_key") in agent.running_conversation_keys:
+            continue
+        t = parse_ts(meta.get("queued_at"))
+        if t is not None:
+            times.append(t)
     return max(0.0, now - min(times)) if times else None
 
 

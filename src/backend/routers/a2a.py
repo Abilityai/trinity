@@ -57,7 +57,7 @@ from services.a2a_outbound_service import (
     A2AEndpointNotFound,
     A2AOutboundDisabled,
 )
-from services.idempotency_service import EffectInProgressError
+from services.idempotency_service import EffectInProgressError, EffectUnguardedError
 from services.agent_auth import agent_httpx_client
 from services.docker_service import get_agent_container
 from services.platform_audit_service import AuditEventType, platform_audit_service
@@ -494,7 +494,7 @@ async def a2a_jsonrpc(
             event_type=AuditEventType.EXECUTION, event_action="a2a_task", source="a2a",
             actor_user=current_user, actor_ip=caller_ip,
             target_type="agent", target_id=agent_name,
-            endpoint=str(request.url.path),
+            endpoint=request.scope["path"],
             details={"execution_id": result.execution_id, "state": state},
         )
         return _rpc_result(rpc_id, task)
@@ -554,7 +554,7 @@ async def a2a_jsonrpc(
             event_type=AuditEventType.EXECUTION, event_action="a2a_cancel", source="a2a",
             actor_user=current_user, actor_ip=caller_ip,
             target_type="agent", target_id=agent_name,
-            endpoint=str(request.url.path), details={"execution_id": exec_id},
+            endpoint=request.scope["path"], details={"execution_id": exec_id},
         )
         return _rpc_result(rpc_id, _task_object(exec_id, "canceled"))
 
@@ -760,6 +760,9 @@ async def call_a2a_agent(
                 ),
             },
         )
+    except EffectUnguardedError as exc:
+        # #2392: pull-mode agent, no usable execution id — refused, not retryable.
+        raise HTTPException(status_code=422, detail={"reason": "effect_unguarded", "message": str(exc)})
     except EffectInProgressError as exc:
         raise HTTPException(status_code=409, detail=str(exc))
     except A2ACallError as exc:
@@ -773,7 +776,7 @@ async def call_a2a_agent(
         actor_ip=request.client.host if request.client else None,
         target_type="agent",
         target_id=agent_name,
-        endpoint=str(request.url.path),
+        endpoint=request.scope["path"],
         request_id=getattr(request.state, "request_id", None),
         details=a2a_outbound_service.audit_details(outcome),
     )

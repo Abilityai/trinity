@@ -60,6 +60,8 @@
   | `assert_agent_owner(user, agent_name, *, detail=…)` | `_enforce_connector_scope(owner_op=True)` + `db.can_user_share_agent` | 403 | inline `can_user_share_agent` → 403. **NOT delete-authorization** (see below) |
   | `assert_owns_or_admin(user, owner_id, *, detail="Not authorized")` | `user.id != owner_id AND role != "admin"` | 403 | strict-self-**or-admin** session gates (voice/chat) |
   | `assert_owns(user, owner_id, *, detail=…)` | `user.id != owner_id` (id-only, **no admin bypass**) | 403 | strict-self session gate (`public.py` public-link session detail) |
+  | `assert_person(user)` / `Depends(require_person)` | `is_person_principal` (JWT or the person's own `user` key) + no `vouched_source_agent` | 403 `HUMAN_ONLY_DETAIL` | owner-tier grant routes (§2.8, #2996) |
+  | `Depends(require_interactive)` | `reject_non_interactive_principal` (JWT only) + no `vouched_source_agent` | 403 | credential / sign-in identity mint, bind, rotate (§2.8) |
 
 - **Preserve-403 (not 404).** All five raise **403** — access-first inline handlers are already *self-uniform* per INV-8 (they check access before any existence lookup, so there is no 404-then-403 enumeration oracle). The platform precedent is `schedules.py` `create_schedule` (#1445: "Access-check FIRST … no 404-vs-403 name-enumeration oracle"). The clean `{agent_name}`-path sites *could* have adopted the uniform-404 path-dependencies, but were consciously kept 403 to minimize frontend blast-radius and hold **one** imperative convention.
 - **Imperative vs path-dependency (when to use which).** Agent name **in the path** → prefer the path-dependency (`AuthorizedAgent[ByName]`/`OwnedAgent[ByName]`, uniform-404). Agent name **derived from a resolved resource** (notification/session/subscription/execution row) or a **composite** gate (owner-or-initiator, resource-404-then-access) → use the imperative helper. Both fences run `_enforce_connector_scope` first, so the two conventions enforce the connector boundary identically.
@@ -69,5 +71,35 @@
 - **Static guard**: `tests/unit/test_1310_auth_wiring.py` — a precise AST matcher forbids `db.can_user_access_agent(` / `db.can_user_share_agent(` Call-nodes whose negation guards a `raise HTTPException`, and inline `role != "admin"` deny-`If`s, in `routers/` (per-function allowlist; `# noqa: inv8` line-exemption retained for a future, individually-reviewed exception — none in-tree after #1710). Filter/capability/allow-branch sites (assignments, `role == "admin"` selection, WS-`close(4003)` dict handlers) are **not** flagged.
 - **Behavioral proof**: `tests/unit/test_1310_auth_consolidation.py` (real-DB `db_harness`) locks status + detail + admitted-principal set per migrated site; `test_186_enumeration_uniformity.py` extended for the five helpers.
 - **Flow**: `docs/memory/feature-flows/role-model.md`
+
+### 2.8 Human-Only Grant Surfaces (INV-8, #2996 / trinity-enterprise#711)
+- **Status**: ✅ Implemented (2026-09-28)
+- **GitHub Issues**: #2996 (autonomy toggle), trinity-enterprise#711 (sign-in email rebind)
+- **Problem**: `get_current_user` resolves an agent-scoped or system-scoped MCP key to its **owner, carrying the owner's role**. #1890 made the admin gates refuse agent keys; the **owner** tier (`can_user_share_agent`, `assert_agent_owner`, `OwnedAgentByName`) and the self-service routes (`get_current_user` alone) kept admitting them. The owner gates cannot simply refuse agent keys the way the admin gates do, because agents legitimately use owner-gated routes (MCP schedule tools, file writes). So the rule is applied per route, and a route census makes the next route choose a side.
+- **Two principal rules** — both **allowlists** over `User.mcp_scope`, fail-closed on a principal without the attribute (sentinel, never `getattr(..., None)`), and both refuse a principal carrying `vouched_source_agent` (the event-loopback JWT, `mcp_scope=None`):
+
+  | Rule | Admits | Refuses | Primitive |
+  |---|---|---|---|
+  | **PERSON** | JWT session; the person's own `user`-scoped key | agent, system, connector, portal_delegate, ops, any future scope, a missing `mcp_scope`, a `user` principal carrying an agent/connector/delegate identity | `assert_person` / `Depends(require_person)` (predicate `is_person_principal`, ent#611) |
+  | **INTERACTIVE** | JWT session only | every key | `Depends(require_interactive)` (predicate `is_interactive_principal`, #1854) |
+
+  They are **credential-class** rules, not proof of human origin: a `user` key is the person's delegated credential, and a JWT counts as interactive only because non-human JWTs are fenced at `get_current_user`.
+- **Assignment rule**: a route that **grants or changes what an agent may do** takes PERSON; a route that **mints, binds or rotates a credential or sign-in identity** takes INTERACTIVE — a minter must be stricter than the principal class it produces, or the PERSON rule is circular.
+
+  | Route | Rule |
+  |---|---|
+  | `PUT /api/agents/{name}/autonomy` (#2996 — decides whether **unattended cron** fires; a manual `trigger_schedule` is not gated by autonomy) | PERSON |
+  | `PUT /api/agents/{name}/{api-key-setting, read-only, resources, capabilities, capacity, timeout, public-channel-model, guardrails}` | PERSON |
+  | `PUT /api/users/me/email` (ent#711) | INTERACTIVE |
+  | `PUT` / `DELETE /api/users/me/github-pat` (a credential future agent creations inherit, ent#162) | INTERACTIVE |
+  | `POST /api/mcp/keys` (every scope), `POST /api/mcp/keys/ensure-default` | INTERACTIVE (security.md §20.10) |
+  | `GET /api/mcp/keys` (trinity-enterprise#712 — the key inventory; no machine consumer) | INTERACTIVE |
+
+- **Refusal**: 403. PERSON routes return `HUMAN_ONLY_DETAIL` (`{"code": "person_required", ...}`, the same machine code as ent#611's ask endings, whose own detail is unchanged); INTERACTIVE routes return `reject_non_interactive_principal`'s existing detail. The refusal depends only on the principal, never on whether the addressed agent exists, so answering 403 before a path's 404 is not an enumeration oracle (#186).
+- **Still working**: the owner's `user` key and ops tooling on a `user` key keep the PERSON routes; the UI and CLI use JWTs everywhere; heartbeat, the result callback, reports and notifications do not use these gates; `trinity-system` keeps `require_admin` (#2323) and has no caller of the routes above.
+- **Route census (the inheritance mechanism)**: `tests/unit/test_2996_human_only_routes.py` walks every `*.py` under `src/backend/` (`rglob`, `enterprise/` excluded — the private tree carries its own), every HTTP method (GETs included), both `@<router>.<verb>(...)` and `add_api_route(...)`. Each route must resolve to exactly one policy class: `person` / `interactive` (the Depends form, or the imperative call as the handler's **first** statement on its principal argument, with the name imported from `dependencies`), `admin_tier` (`require_admin` / `assert_admin`, counted and printed), `admin_widened` (an `allow_scopes` opt-in, listed per route), `portal` (`get_portal_principal`), `agent_callable` / `own_auth` / `delegated` (listed per route with the `METHOD /path` pinned and a reason), or `unclassified_at_freeze` — the frozen baseline `tests/unit/fixtures/human_only_route_baseline.json`. The baseline is **shrink-only**: exact count literal, stale entries fail, an entry that becomes gated must be removed. WebSocket routes are pinned as a literal set. `tests/unit/test_2996_route_census_runtime.py` imports the real app in a subprocess (fails, never skips) and checks every registered route maps to a census key and every stored `METHOD /path` matches.
+- **Not closed here**: the census does not classify the routes it freezes as `unclassified_at_freeze` — the baseline is a to-do marker, not a judgement (`tests/unit/fixtures/README.md`). Each entry leaves it through a per-route ruling (tracked in trinity-enterprise#719), and the baseline only lets it shrink.
+- **Tests**: `tests/unit/test_human_only_principals.py` (primitives), `tests/unit/test_mcp_key_creation_requires_session.py`, `tests/unit/test_2996_human_only_routes.py`, `tests/unit/test_2996_route_census_runtime.py`, `tests/unit/test_2996_owner_config_person_only.py`, `tests/unit/test_2996_self_service_session_only.py`, `tests/unit/test_2996_agent_schedule_tools_unchanged.py` (the agent's own schedule tools stay agent-callable).
+- **Flows**: `feature-flows/autonomy-mode.md`, `feature-flows/email-authentication.md`, `feature-flows/mcp-api-keys.md`
 
 ---

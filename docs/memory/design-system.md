@@ -140,10 +140,10 @@ The dark tinted-ground recipe `token-500 at 16%` is expressible as `token-500/16
 
 | Variant | Recipe (light) | Recipe (dark) |
 |---|---|---|
-| primary | bg action-primary-600, white text; hover 700 | bg action-primary-500; hover 400 |
+| primary | bg action-primary-600, white text; hover 700 | **the light pair**: bg action-primary-600; hover 700 (ent#610 round 3: white on 500 measured 4.47:1 and on the 400 hover ~2.9:1, under AA; 600 / 700 are 6.29 / 7.90) |
 | secondary | surface bg, primary ink, border-strong; hover chrome bg | same roles, dark mappings |
 | danger | bg status-danger-600, white text; hover 700 | bg status-danger-500; hover 400 |
-| ghost | transparent, action-primary text; hover accent-soft bg | same roles, dark mappings |
+| ghost | transparent, action-primary-600 text; hover accent-soft bg | transparent, **action-primary-400** text (ent#610 §3g B7b: 500 measured 3.97:1 on gray-900 and 3.29 on gray-800; 400 is 5.95 / 4.92); hover action-primary-500/16 bg, where the 400 ink measures 4.13 over gray-800 — recorded, not fixed, because the hover is transient |
 
 **States:** disabled — opacity .45, `cursor: not-allowed` · in-flight — inline 16px spinner (2px border, top-colored, 0.7s linear rotation) + progressive label ("Deploying…"); the control acknowledges the press, honest-state rule 18 · focus — `:focus-visible` ring: `0 0 0 2px <surface>, 0 0 0 4px <ring>` on **all** variants, never `outline: none` alone.
 **Rules:** one primary per view (principle 11); destructive verbs are named ("Delete agent", never "OK").
@@ -208,6 +208,8 @@ Driven directly by the token families — the badge variant *is* the token famil
 | Neutral (light) | gray-100 | gray-600 |
 | Neutral (dark) | gray-750 | gray-400 |
 
+`primary` (ent#610 §3g) is the action family on the same recipe (700 on 100, 6.41:1; 300 on 500/16, 7.53:1 over gray-900) — a per-row "N new" in the hue of the solid "came back" counter it sums into. A *counter* is solid (white on a 700 ground — OverflowTabs' `badgeVariant`, the sidebar pills); a per-row *fact* is a tinted BaseBadge.
+
 **Rule:** a badge answers **one** question — status, mode, or identity — never two at once. Two facts = two badges.
 
 - **Do:** `Healthy` (status-success) next to `Claude` (brand-claude) as separate badges.
@@ -230,6 +232,13 @@ Driven directly by the token families — the badge variant *is* the token famil
 
 - **Do:** `Cancel` focused, `Delete agent` as the named danger action.
 - **Don't:** "Are you sure? — OK / Cancel" with focus on OK.
+- **Consequential, not destructive (ent#610 §3g A9):** `ConfirmDialog`'s `confirmVariant`
+  (default `danger`, so every existing dialog is unchanged) takes `primary` for a confirm
+  that restates an irreversible but non-destructive consequence — "Mark 28 chats read?" /
+  "157 new messages across 28 chats will be marked read. You can't undo this." Cancel keeps
+  the initial focus either way: that is `data-destructive`'s job, not the button colour's.
+  Pair it with `variant="info"` (an i in a circle, primary ink; ent#610 round 3): a warning
+  triangle over a primary confirm reads as a danger the button then contradicts.
 
 ### OverflowTabs
 
@@ -272,6 +281,28 @@ mirror does not is a tab measured narrower than it draws, i.e. a strip that
 overflows one tab too late); it enters the **re-measure key** (`tabsSignature`),
 or toggling it repacks nothing; and in the overflow-menu row it gets its **own**
 `v-if`, never another arm of the `badge`/`signal` chain (#2794's `v-else` lesson).
+
+**Opt-in counter and tab semantics (ent#610 §3g L1).** Three fields, each off by default
+and each rendering the pre-existing DOM byte-for-byte when off:
+- `tab.badgeVariant` — `success` (default: the tinted pill) · `urgent` · `primary` ·
+  `neutral`. `urgent` and `primary` are **solid white on the 700 tier** (white on
+  status-urgent-700 5.18:1, on action-primary-700 7.90:1): a *counter* is solid, a per-row
+  *fact* is tinted (the counter-vs-label rule). `neutral` (ent#610 PR A2) is the gray tint
+  (gray-700 on gray-100 / gray-300 on gray-750) for a *share* of a count that is no
+  event's outcome — the Inbox's per-agent facets, which in success-green read as "done"
+  beside the urgent Action count. One class arm per variant, never two colours of a
+  property in one string (#2662).
+- `tab.badgeLabel` — the tab's `aria-label` when the bare count would be read as
+  "Action 21"; the badge is then `aria-hidden`. Neither field changes a tab's width, so
+  neither enters `tabsSignature`.
+- `tablistLabel` (prop) — the inline tabs render inside a `role="tablist"` of that name,
+  each a `role="tab"` with `aria-selected` and a roving tabindex; Arrow Left/Right wrap,
+  Home/End jump, and activation is **manual** (arrows move focus; Enter/Space selects).
+  The More trigger is not a tab and stays outside the tablist. Off, the wrapper is not
+  rendered at all (a functional component returns its slot bare). Flipping the default,
+  and retargeting the e2e specs that address tabs as buttons, is #3056.
+
+Guarded by `tests/unit/overflowTabsTablist.mount.spec.js`.
 
 ### Data table
 
@@ -451,6 +482,7 @@ The behavioral half of the standard (the visual half is §1–6). Confirmed in t
 7. Panels flex to available width; no overlap at narrow widths; wide content scrolls in its own container, never the page.
 8. Scrolling is axis-locked — one axis at a time.
 29. **Recommendation, verified by eye: enabling something should not shove the rest of the panel (#954, #1563, #1939, #2640).** A user-driven state change — a toggle switched on, a checkbox that reveals dependent fields, a mode that swaps a column, a tab switch — deserves the same care as data arrival (principle 4), but this is guidance, not a hard rule: some reveals are genuinely better as an instant snap, and the judgement is the reviewer's. Preferred shapes, chosen by size: a **reserved footprint** for small dependents (the block already occupies its space, disabled or dimmed, and enabling fills it in place — the natural default for settings forms), or a **height/flex transition** for a whole section or column (150–300ms ease-out, `motion-reduce:transition-none`, via `<Transition>` or an animatable property such as `grid-template-rows` / `flex-grow`) rather than a bare `v-if` that lands the new layout in one paint. Aim for: the activated control stays under the pointer, new content opens below or beside its trigger rather than above it, and what the user was reading stays in view. A swap that must remount should let the leaving element finish before the entering one takes its width — a mid-transition third column is a worse jump than the one being fixed (#2647). **No scanner can see this** — it is confirmed only by a human toggling the control in the browser, in both themes, and watching what moves; record that you did in the PR.
+30. **The primary surface sits at a fixed vertical position; nothing of variable cardinality stacks above it (trinity-enterprise#724).** A strip whose height depends on how many items it holds — a wrapping chip/pill row, a pile of banners, a toolbar that reflows to a second line — pushes the main content down by a different amount on every instance: another agent, a longer list, a narrower viewport, and the thing the user came to read starts somewhere new and has to be re-found. The Canvas tab's selector was the case: one chip per canvas, wrapping, above the canvas itself, so the canvas body began four rows lower on an agent with four canvases than on one with one. Chrome above the primary surface has a **fixed height**. A variable-cardinality set collapses into a fixed-height control — a `BaseSelect` for "pick one of N", a single row with a counted overflow menu (principle 10) for "act on any of N" — and a conditional row either reserves its footprint or opens **below or beside** the content, never above it. Principle 29 checks what moves across clicks; this checks what moves across instances: open the surface with a small set and a large set, and the primary content's top edge is at the same y in both.
 
 ### C. Density & progressive disclosure
 
@@ -496,6 +528,7 @@ The recurring failure modes, in one place:
 | Skeleton re-flash on a 30s poll | Stale-while-revalidate, in-place swap |
 | A toggle whose `v-if` pops a block open and shoves the form below it, unreviewed | Prefer a reserved footprint or a height transition; either way, a human toggles it and watches what moves (principle 29, a recommendation) |
 | Tabs wrapping to two rows | OverflowTabs with "+N more" |
+| A wrapping chip/pill strip (or banner pile) above the main content, its height set by how many items there are | A fixed-height control — a `BaseSelect` for pick-one, a single row with a counted overflow menu for act-on-any — so the main content's top edge is the same for 1 item and 40 (principle 30) |
 | A table that grows the page unbounded | Bounded viewport + sticky header + stated total |
 | Red border as the whole error | Named error + fix + example |
 | "Are you sure? OK" | Named verb + consequence + safe-action focus |

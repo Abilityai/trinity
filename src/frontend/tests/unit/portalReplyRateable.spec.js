@@ -71,7 +71,13 @@ describe('#2580 — replyFromHistory reads the row the server wrote', () => {
   it('returns the newest assistant row WITH its id once it differs from the baseline', () => {
     const before = replyBaseline(hist(1))
     const reply = replyFromHistory([...hist(2), { role: 'user', content: 'q' }], before)
-    expect(reply).toEqual({ response: 'a1', cost: 1, id: 'm1', myRating: null })
+    // #3063: no cost — history no longer carries it, and nothing read it off the reply.
+    expect(reply).toEqual({ response: 'a1', id: 'm1', myRating: null, at: null })
+  })
+
+  it("carries the row's stored time (trinity-enterprise#610: it places a chat-turn ask before this reply)", () => {
+    const rows = [{ role: 'assistant', content: 'a', id: 'm', created_at: '2026-09-30T10:01:00Z' }]
+    expect(replyFromHistory(rows, replyBaseline([]))).toMatchObject({ at: '2026-09-30T10:01:00Z' })
   })
 
   it('carries an existing rating through', () => {

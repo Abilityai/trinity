@@ -12,6 +12,7 @@ View, monitor, and manage task executions across all agents. Executions are crea
 |---------|--------|
 | `manual` | Tasks tab in agent detail |
 | `schedule` | Cron-based schedule |
+| `retry` | An automatic retry of a failed run (charted under **Scheduled**) |
 | `chat` | Chat tab in agent detail |
 | `session` | A resumable conversation turn (the Workspace) |
 | `agent` | Agent-to-agent call |
@@ -99,11 +100,10 @@ Platform users see their executions inside the [Workspace](../sharing-and-access
 
 Steps are one of three sentences, never two: the stages themselves, *{agent} doesn't report steps.* when a reachable agent publishes none, or *Steps could not be read right now.* when nobody can tell (a stopped or unreachable agent, or two runs on the same agent).
 
-**The Work tab** in the rail has three sections:
+**The Work tab** in the rail has two sections, plus one line — *N asks waiting on you · Open in Inbox* — while something waits on you (questions are answered in the Inbox, see [Approvals](../automation/approvals.md)):
 
 | Section | Holds |
 |---------|-------|
-| **Waiting on you** | Open asks from this chat's participants, answerable in place — see [Approvals](../automation/approvals.md) |
 | **Now** | A live card per job in flight; *Nothing running right now.* otherwise |
 | **Earlier** | The last 30 days: *N in the last 30 days · latest 3 shown*, with **Show all N** / **Show fewer** |
 
@@ -138,6 +138,7 @@ Full API reference: http://localhost:8000/docs
 | `list_recent_executions(name)` | List recent executions for an agent |
 | `get_execution_result(id)` | Get the result of a specific execution |
 | `get_agent_activity_summary(name)` | Get activity summary including execution stats |
+| `search_executions(query, ...)` | Search execution messages, responses, and errors across the agents you can access. Offered only to user- and system-scoped keys, never to agent keys. It needs a matching entitlement; where the search is not available it answers `available: false` rather than "no results" |
 
 ## See Also
 

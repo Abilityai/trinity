@@ -112,7 +112,7 @@ async def _remove_unassigned_skills(
             source="api",
             actor_user=current_user,
             actor_ip=request.client.host if request and request.client else None,
-            endpoint=str(request.url.path) if request else None,
+            endpoint=request.scope["path"] if request else None,
             request_id=getattr(request.state, "request_id", None) if request else None,
             target_type="agent",
             target_id=agent_name,
@@ -192,6 +192,9 @@ async def list_skills(current_user: User = Depends(get_current_user)):
             source_id=s.get("source_id"),
             source_name=s.get("source_name"),
             shadowed_by=s.get("shadowed_by") or [],
+            # #672 lifecycle — named here for the same reason.
+            deprecated=bool(s.get("deprecated")),
+            superseded_by=s.get("superseded_by"),
         )
         for s in skills
     ]
@@ -846,7 +849,7 @@ async def set_skill_manager(
                 source="api",
                 actor_user=admin_user,
                 actor_ip=request.client.host if request.client else None,
-                endpoint=str(request.url.path),
+                endpoint=request.scope["path"],
                 request_id=getattr(request.state, "request_id", None),
                 target_type="agent",
                 target_id=agent_name,
@@ -894,7 +897,7 @@ async def _audit_source(request, actor, action: str, source_id: str, details: di
             source="api",
             actor_user=actor,
             actor_ip=request.client.host if request.client else None,
-            endpoint=str(request.url.path),
+            endpoint=request.scope["path"],
             request_id=getattr(request.state, "request_id", None),
             target_type="skill_source",
             target_id=source_id,

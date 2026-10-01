@@ -1814,8 +1814,9 @@ bounding the table. OSS-core (Workspace rule above). Flow:
 - **Description**: When a message starts a long-running job, the Workspace
   shows it happening: a **live card** under that message (status word,
   elapsed, the current step, the steps of a pipeline with the agent holding
-  each one, Stop, Open in Work), and the rail's **Work** tab — *Waiting on
-  you*, *Now*, *Earlier*. The user-facing noun is **work**. The report-back
+  each one, Stop, Open in Work), and the rail's **Work** tab — *Now*,
+  *Earlier* (since the ent#610 ruling of 2026-09-30 it draws no asks: one
+  "N asks waiting on you · Open in Inbox" line instead). The user-facing noun is **work**. The report-back
   contract (ent#457 AC 3) is abilityai/trinity#2386; this is the surface.
   Built to the approved artboards (ent#457, 2026-08-24 / 2026-09-06) and the
   three PM answers of 2026-09-02: an honest "Ask about it" instead of a fake
@@ -1843,9 +1844,14 @@ bounding the table. OSS-core (Workspace rule above). Flow:
   a composer prefill that names the job, never a send. Stop works after a
   reload (`reattach` sets the execution id).
 - **AC-4 — the Work tab** (`PortalWork`, docked into `#tab-work` in both rail
-  mounts): *Waiting on you* = `PortalAsks` over `store.asks` filtered to the
-  participants (the fourth rendering of the same operator-queue row, ent#428;
-  a computed, never a narrowed fetch); *Now* = a card per live row with Stop
+  mounts): since the ent#610 ruling (2026-09-30) no asks — one line "N ask(s)
+  waiting on you · Open in Inbox" while a participant's ask waits
+  (`PortalAsksWaitingLine`, counted from the store's `openAsks`, a computed,
+  never a narrowed fetch), to the Inbox's Action tab `?from=<agent>` (the whole
+  Action tab when two or more agents wait). It sits in the top row in both the
+  loaded and the empty state, so it arriving or work starting moves nothing;
+  Info mounts the same line for every principal (a client has no Work tab);
+  *Now* = a card per live row with Stop
   where `can_stop`; *Earlier* = "N in the last 30 days · latest 3 shown", Show
   all expands in place inside the rail's own scroll axis, "30+" when the
   server's page is full (principle 28).
@@ -1916,8 +1922,14 @@ bounding the table. OSS-core (Workspace rule above). Flow:
 - **Recording**: a platform audit row (`event_type=execution`, `event_action=inter_agent_depth_exceeded`) and an `agent_collaboration` activity on the **caller**, opened and closed FAILED with the code. Both are best-effort; the refusal is raised whether or not they are written.
 - **MCP**: `chat_with_agent` (all branches) and `fan_out` return a structured `{"status": "inter_agent_depth_exceeded", "retryable": false, ...}` result instead of throwing `API error (403)` (see `requirements/mcp.md`).
 - **Named residuals** (the guarantee holds for a call made with an agent-scoped credential while the calling agent has a running execution): **(a)** a non-agent credential held by an agent (a hand-pasted user-scoped key, detected by #1854) resolves to the human owner and counts as a root; **(b)** agent-key calls with no running row (a web-terminal session, a spawned background process, an orphan after its row went terminal) count as depth 1, or max+1 over any other running rows. An exact parent link needs a platform-injected execution id (#2392).
-- **Deferred**: loops (`run_agent_loop`), schedule trigger (`trigger_schedule`) and agent-emitted events each start a new root at depth 0 and so do not inherit depth yet — follow-up #2973. A2A cross-instance chains are the peer's to bound.
-- **Tests**: `tests/unit/test_2806_inter_agent_depth.py`; keyed end-to-end `tests/journeys/test_j10_agent_calls_agent_journey.py::test_two_agents_cannot_bounce_a_call_between_each_other_forever`; invariant IA-04 in `docs/testing/orchestration-invariant-catalog.md`.
+- **New roots closed (#2973)**: four agent-initiated paths inherit the caller's depth instead of starting at 0, each refused at the max with the same 403 contract (mapped by an app-level exception handler, `error_handlers.inter_agent_depth_exceeded`):
+  - **Loops** — `POST /api/agents/{name}/loops` computes the depth at start and persists it on `agent_loops.chain_depth`; every iteration row carries it, because later iterations run after the starter's turn has ended.
+  - **Manual schedule trigger** — `POST /api/agents/{name}/schedules/{id}/trigger` sends `chain_depth` to the scheduler, which stamps the row; a retry keeps the original's depth. Cron ticks and webhooks stay roots.
+  - **Chat-session turns** — `POST /api/agents/{name}/sessions/{id}/message` runs the guard before the user message is persisted and passes the depth through `run_resumable_turn` to `execute_task`, which stamps the row it creates (both the first attempt and the cold retry).
+  - **Events** — `POST /api/events` and `POST /api/agents/{name}/emit-event` by an agent principal with at least one matching subscription compute the emitter's depth (an emit nobody listens to is never refused). The depth rides the EVT-001 loopback JWT as a signed `chain_depth` claim, minted whether or not the source is vouched, so an emit on another agent's behalf cannot launder it. A system `agent.task.*` terminal event carries the finished row's depth + 1 (the max when the row is unreadable). The loopback `/task` stamps the claim; a vouched loopback without a claim counts the vouched agent's running rows.
+- **Event dispatch budget (#2973, CSO Finding 3)**: Chain depth bounds how deep an event chain runs; this bounds how often one source agent can wake one subscriber (fan-out breadth, and loops re-entering through a #3116 root). Every EVT-001 dispatch spends one unit of the **source → subscriber pair's** hourly budget (Redis `INCR` + `EXPIRE NX` in one transaction, key `trinity:evt_fires:{source}:{subscriber}`, shared by every subscription between the two, since an agent key can subscribe itself; keyed per pair so one noisy source cannot starve a subscriber's other sources); past the ops setting `event_dispatch_max_fires_per_hour` (default 120, 1–10000) the dispatch is skipped and logged, and the first skip in a window raises one high-priority notification on the subscriber naming the source (a flag key, so a cap lowered mid-window still alerts once). `agent_events.subscriptions_triggered` counts matched subscriptions, including skipped ones. Fails open when Redis is unavailable.
+- **Deferred**: webhook tokens, agent-created cron schedules and self-reminders still start a new root (#3116). A2A cross-instance chains are the peer's to bound.
+- **Tests**: `tests/unit/test_2806_inter_agent_depth.py`, `tests/unit/test_2973_depth_new_roots.py`, `tests/unit/test_2973_event_dispatch_budget.py`, `src/mcp-server/src/tools/depth-refusal.test.ts`; keyed end-to-end `tests/journeys/test_j10_agent_calls_agent_journey.py::test_two_agents_cannot_bounce_a_call_between_each_other_forever`; invariant IA-04 in `docs/testing/orchestration-invariant-catalog.md`.
 
 ### 9.2 Agent Permissions
 - **Status**: ✅ Implemented (2025-12-10, Updated 2026-02-19)
@@ -2183,10 +2195,13 @@ issue if it's ever wanted. Also deferred: `data.json` caching/streaming.
   (no manual create/clone). Provisioned by
   `services/cornelius_agent_service.py::CorneliusAgentService.ensure_seeded()`.
 - **Key Features**:
-  - **Public source template** (#1656): provisioned via the ordinary `create_agent_internal` from
-    `github:Abilityai/cornelius` — an anonymous, source-mode clone with **no PAT**, on the
-    trinity-enterprise#123 tokenless public-repo path (`AgentConfig.source_mode` defaults `True`, which
-    that path requires). Carries `capabilities: [brain-orb]`, `CLAUDE.md`, `.trinity/brain-orb/` hooks,
+  - **Public source template** (#1656): provisioned from `github:Abilityai/cornelius` through the
+    **`routers/agents.py` facade** — not `services.agent_service.crud` directly, because the facade
+    injects `ws_manager` and the `agent_created` broadcast is a silent no-op without one (an already-open
+    browser is never told the agent exists). Same choice, same reason, as
+    `system_service._default_create_agent_fn` for the fleet seeder. An anonymous, source-mode clone with
+    **no PAT**, on the trinity-enterprise#123 tokenless public-repo path, pinned pull-only by
+    trinity-enterprise#705 (`kind="deployment"`, explicit `source_mode=True`). Carries `capabilities: [brain-orb]`, `CLAUDE.md`, `.trinity/brain-orb/` hooks,
     a pre-generated `resources/agent-visualization/data.json` seed graph so the orb renders immediately,
     `resources/local-brain-search/` (so `semantic_search` is real, not a keyword fallback), and the full
     `Brain/` vault the seed graph was exported from. Was a vendored
@@ -2194,6 +2209,17 @@ issue if it's ever wanted. Also deferred: `data.json` caching/streaming.
     and caused #1646 and #1656, so the bundle was deleted rather than re-vendored. **No offline
     fallback** — a fallback would only fire on a transient clone failure and would burn the durable
     `cornelius_seeded` flag on the degraded copy; leaving the flag unset to retry next boot is safer.
+  - **Past `fork_to_own: required`, by one narrow door**: the template declares it (2026-09-11) because
+    it pushes a personal knowledge base to `Brain/`, and an agent bound to the shared public upstream is
+    a path from a private vault into a public repo. The seeder cannot satisfy that gate — it runs at
+    first boot with no user present and no token to fork with — so from that date every fresh install
+    ended with the fleet trio only, an ERROR in the log and a high-priority `system-seed-cornelius-failed`
+    alert in the operator queue. What the gate prevents is a PUSH, and the pull-only pin above makes the
+    push unreachable, so `_apply_fork_to_own` stands aside for this one caller
+    (`allow_unforked_pull_only=True`). The flag is **not trusted on its own**: the gate re-derives the
+    pinned-pull-only shape itself, so a caller passing it while building a config that could push is
+    still refused. Seeder-only on purpose — anyone creating an agent themselves can be asked for a
+    token, and keeps the promise that `required` means the repo lands in an account they own.
   - **First-run-only**: a durable `cornelius_seeded` system-setting flag gates the seed — an operator who
     deletes Cornelius is **not** re-provisioned.
   - **Fresh-install-scoped**: skipped when any non-system agent already exists (`db.count_non_system_agents()`),
@@ -2203,8 +2229,10 @@ issue if it's ever wanted. Also deferred: `data.json` caching/streaming.
   - **Triggers**: the setup-completion handler (`routers/setup.py`, fresh installs, FastAPI BackgroundTask)
     + a `main.py` lifespan safety-net gated on `setup_completed && !cornelius_seeded` (upgrades). A Redis
     SETNX lock (`cornelius:provision`, fail-open, mirrors the #1464 leader-lock) guards the `--workers 2` race.
-- **Known deviation (local bundle)**: the default Cornelius is a LOCAL bundle, not github-native, so it has
-  **no git origin** — it won't auto-`git pull` upstream template updates. Durable ownership is deferred to
+- **Pull-only, and stays that way**: Cornelius clones the shared public upstream and tracks it read-only
+  (trinity-enterprise#703's pull heartbeat applies). It never pushes, so the knowledge base it builds
+  lives only on that server until the owner binds a repo of their own — `POST /api/agents/{name}/git/initialize`
+  accepts an agent with no existing binding, which is the upgrade path. Durable ownership remains
   fork-to-own (trinity-enterprise#109). No DB migration (`system_settings` is free-form KV). The Brain Orb was
   already fully OSS (flag-gated, not entitlement-gated), so no de-gating was needed.
 - **Flow**: `docs/memory/feature-flows/cornelius-default-agent.md`
@@ -2281,8 +2309,9 @@ issue if it's ever wanted. Also deferred: `data.json` caching/streaming.
 - `PortalAgentPage.vue` is dismantled: stats + the Activity chart to
   `PortalAgentBand.vue` (always visible); chats / what it can do / reports to
   `PortalAgentDetails.vue`; Canvas and Files were already rail tabs (ent#475);
-  recent work was already the rail's Work tab (ent#525); asks keep the
-  conversation's mount, which was the surviving one after #2449.
+  recent work was already the rail's Work tab (ent#525); asks: a chat draws
+  only the asks its own turns raised, as tiles in its thread, and every agent's
+  asks home is the Inbox filtered to it (ent#610, the 2026-09-30 ruling).
 - **Agent details was a sibling of the rail, not a rail tab** (ruled
   2026-09-05): the rail is participant-scoped with a fixed five-tab set, while
   this is about one agent and is dismissed rather than switched away from.
@@ -2419,7 +2448,8 @@ issue if it's ever wanted. Also deferred: `data.json` caching/streaming.
   the thing being criticised is a prompt-injection path into it — is why the
   operator's copy goes to the queue directly and the agent-facing redaction
   (`comment_withheld`) is untouched. The operator sees the comment; the agent
-  still does not.
+  still does not — including through its own key: the operator queue's reads
+  never return this item to a machine principal (trinity-enterprise#715).
 - **Routed through the budget, never allowlisted** (#1677). The volume here is
   driven by a *client* clicking, so this is an agent-influenceable emitter by
   the classification rule and goes through
@@ -3238,7 +3268,7 @@ to localStorage in the clear.
 ### 5.36 Workspace — the role card in Agent details: role, objectives with metric freshness, readiness (trinity-enterprise#527)
 - **Status**: ✅ Implemented (2026-09-21) — the Role + Readiness half; the relationship line waits for ent#500. OSS-core (Workspace).
 - **Requirement ID**: WORKSPACE_ROLE_CARD
-- **GitHub Issue**: abilityai/trinity-enterprise#527 (+ #663, the 1.0 gate on who flips readiness)
+- **GitHub Issue**: abilityai/trinity-enterprise#527 (+ #663, the 1.0 gate on who flips readiness; + #676, 2026-09-30, the objectives cut over to the ent#666 join)
 - **Description**: When a companion has a role (Tandem, ent#497), the Info rail's
   Agent details show a **Role** card: the role it fills, the objectives it owns or
   supports with each metric's latest value, target and freshness, the viewer's
@@ -3251,18 +3281,46 @@ to localStorage in the clear.
   `create-agent:role-companion` wizard, #511) and `x-canon.clone_path` (default
   `canon`); the role file `<canon>/roles/<id>.yaml` and `<canon>/objectives/*.yaml`
   (framework §3.4 grammar — `owner: role:<id>` or `supporting_agents` names this
-  agent); metric values from the agent's `metrics.json` through its own
-  `/api/metrics` (`last_updated` is the freshness stamp). Nothing is cached or
+  agent). The role file is the card's own read; the objectives and their numbers
+  are **not** — they come from the one objective ↔ metric join
+  (`objective_join_service.read_objective_join`, §50 of
+  `lifecycle-observability.md`), called in process with the template and the agent
+  client the card already holds (trinity-enterprise#676). Nothing is cached or
   copied platform-side. Every read is fail-soft and **named**: no `x-role` → no
   card at all (the panel is unchanged, AC 5); a role file that cannot be read or
   parsed → the card says so (`role.error`), never an empty role; a stopped agent
-  → "the agent is stopped; the card reads its files when it runs".
-- **Freshness is honest, never optimistic (quality bar #4).** A metric is `stale`
-  when its value is missing, when `metrics.json` carries no `last_updated`, or when
-  that stamp is older than the framework's 30-day staleness bound (§3.5); a stale
-  metric renders as stale beside its last value and age, never as current. A
-  per-metric cadence is the business-metrics workstream's to declare; until then
-  the bound is the one rule the framework already states.
+  → "the agent is stopped; the card reads its files when it runs"; objectives
+  that could not be read → one line saying so (`objectives_error`), never an
+  empty list dressed as "this agent has none"; and when some objectives joined but
+  some objective files were not read → one line under the list saying it may be
+  incomplete (`objectives_partial`), never a partial list dressed as the whole.
+- **Freshness is honest, never optimistic (quality bar #4) — and it is the
+  platform's one rule (trinity-enterprise#676).** A metric on the card is stale
+  exactly when the join says so: a declared `cadence:` and no recorded point within
+  2× of it (§49.1, `metric_read_service.freshness`). The card computes no metric
+  staleness of its own; a stale metric renders as stale beside its last value,
+  never as current, a declared metric with no points says "no points yet", and a
+  metric with no cadence is never stale. The framework's 30-day bound (§3.5)
+  governs **files**: on the card it applies to the role file's `review_by` and to
+  nothing else.
+- **The client sees a projection, never the operator's read (trinity-enterprise#676,
+  TD-4).** Per objective: `id, statement, horizon, status, owned`. Per metric:
+  `name, target, actual, last_point_at, stale, freshness, type, unit, gap.status,
+  finding.code`. A finding crosses as its **code** and the Workspace renders its
+  own client-safe sentence per code; the join's remediation text, objective file
+  paths and `owner: role:<id>` stay on the operator door (the #78 auth-path invariant). Only
+  `status: active` objectives are on the card — the join's rule.
+- **One budget, two doors (trinity-enterprise#676).** The card's objective read
+  draws on the same per-agent budget as `GET /api/agents/{name}/objectives`
+  (`agent_objectives_read:{name}`, 60/min), after a per-viewer cap of a third of
+  that limit per agent (20/min at the default, derived so it moves with the limit),
+  so one viewer cannot spend the agent's and the operator's read. An
+  exhausted budget **never refuses the card**: the role, readiness and the owner's
+  flip still answer, the objectives are left out with
+  `objectives_error: objectives_rate_limited`, and no container fan-out happens.
+  The budget is spent only when the objectives are about to be read: opening the
+  Info tab of an agent with no role, a stopped agent or a role file that failed
+  costs nothing from either bucket.
 - **Readiness is a platform record, and only the agent owner writes it (#663,
   ruled 2026-09-20).** `x-role.status` in `template.yaml` is agent-writable, so it
   cannot be the thing that says a companion is `ready`. `agent_role_readiness`
@@ -3317,6 +3375,22 @@ to localStorage in the clear.
     shipped", never "by <owner>"; when a seat-delivery schedule exists and readiness is not
     `ready`, the card adds "its scheduled brief is paused until you mark it ready" — for
     platform viewers only, and not when autonomy is off (the autonomy gate stops it first).
+- **The stamp on the agents list and the fleet grid (rider, operator ruling 2026-09-24 —
+  ent#560's closure)**: readiness is a role-companion property, and the owner's stamp is
+  shown beside the agent wherever the operator scans the fleet, not only on the role card.
+  `GET /api/agents` attaches `readiness: {status, changed_at, source}` from ONE batched
+  read (`get_role_readiness_for_agents`, the display-label pattern); an agent with no stamp
+  carries `null` and shows nothing — never a guessed `calibrating`, because whether it is a
+  companion at all is in its template.yaml, which a list never reads. The list says what and
+  when, never who (the role card, owner-scoped, keeps the person). Both surfaces render one
+  predicate (`utils/readinessBadge.js`): the role card's words and variants (`ready` =
+  success, `calibrating` = warning, with a dot), and a tooltip that names a rollout stamp
+  and what calibrating holds back. The row also carries `brief_held` (one batched schedule
+  read, the role card's own predicate — `role_readiness_gate.brief_is_held`: a calibrating
+  stamp, an enabled seat-delivery schedule, autonomy on), and the tooltip says the brief is
+  paused only when it is true, so the list never claims a pause the card does not. The
+  dashboard's 30 s agent poll patches `readiness`/`brief_held` in place, so a flip reaches an
+  open tab without a reload.
 
 ### 5.37 Workspace — the seat-level decision record: why a thing was approved, deferred or killed (trinity-enterprise#638)
 - **Status**: ✅ Implemented (2026-09-22). OSS-core (Workspace).
@@ -3503,3 +3577,147 @@ to localStorage in the clear.
   and objective-gap inputs (#500, #661, #477–#479) — each attaches as a new class without
   changing the object; the Inbox placement (#610).
 - **Flow**: `docs/memory/feature-flows/workspace-suggestions.md`
+
+### 5.40 Workspace Inbox — what needs you and what came back, across your agents (trinity-enterprise#610)
+- **Status**: 🚧 In progress (PR A: landing, Unread, All, the reading pane; PR B: role-addressed
+  Action after abilityai/trinity#3028; PR C: rooms in Unread)
+- **Requirement ID**: WORKSPACE_INBOX
+- **GitHub Issue**: abilityai/trinity-enterprise#610 (preceded by the asks-honesty fix, §26.8)
+- **Description**: The Workspace opens on an **Inbox**: one place that answers "what needs me"
+  and "what came back" across every agent on the viewer's roster, with a reading pane so an
+  item can be read and answered without leaving it. It is four windows over rows that already
+  exist — the ask table (OPS-001, `requirements/security.md` §26; §26.9 endings), the portal
+  messages, the addressed deliverables and the #557 read cursor. It owns **no table, no
+  router and no store**.
+- **Landing (AC 1)**: a bootstrap on bare `/workspace` with no route param and no stage key
+  (`agent`, `new`, `voice`) replaces to `/workspace/inbox` before the stage resolves, so no
+  conversation flashes. Every explicit target wins: a chat, a room, an agent page, `?agent=`,
+  `?new=1`, the armed-once `?voice=1`. Bare `/workspace` keeps its meaning (the new-chat
+  stage), and the brand mark and a pinned sidebar row lead to the Inbox.
+- **Three windows (tabs)**:
+  | Tab | Membership | Source |
+  |---|---|---|
+  | **Action** | asks addressed to me, pending (question, approval, alert), roster re-checked; ordered by urgency — expiring within 24h first (soonest first), then priority (critical > high > medium > low), then the longest-waiting (§3g C1) | the ONE asks list (`openAsks`) |
+  | **Unread** | chats with new arrivals — one row per chat, "N new", the latest arrival's excerpt; archived chats included | the sidebar's `threads` + `GET /chat-state?previews=true` |
+  | **All** | every chat the sidebar lists, of any age (read or not; an unused Main is not listed; rooms wait for PR C), pending asks, and asks that ended in the last 7 days; its footer says the 7-day rule, the 200-ask read cap when hit, and — to a viewer with rooms — that rooms are not here yet (§3g D-4) | the same two lists |
+- **One unread model (AC 6)**: the unit of Unread is a **chat**, read through the existing
+  #557 cursor (`POST /chat-state/thread/{id}/read`); there is no second cursor and no per-item
+  read row. An arrival is an assistant message in my chat **or** a report addressed to me that
+  is stamped to a chat I own. Every surface that shows the count says **"new"** (it used to say
+  "replies"), and the sidebar, the agent row, the tab title and the Inbox read one number.
+- **What arrives (A8)**: Unread holds only what was **addressed into the Workspace** —
+  replies and agent-started messages in my chats, runs whose completion was delivered to me
+  (portal turns, and schedules with `deliver_to_workspace_email` = me), and reports addressed
+  to me. A scheduled, webhook, MCP or agent-to-agent run with no delivery address is in no
+  one's Unread; the Work tab (platform door) owns it. Queued and running work is not an arrival.
+- **A deliverable the agent publishes always has a chat**: an addressed report the agent
+  publishes as itself with no in-flight chat **of the addressee** is stamped to the addressee's **Main** at publish (a report addressed to
+  X during Y's turn goes to X's Main, never into Y's chat), and that Main is touched so the
+  sidebar lists it. Its card appears inline there, and it counts as an arrival. A report a
+  human sharer publishes as the agent is placed in no chat at all (not Main, not the
+  addressee's in-flight turn), so one person cannot put a badge in another's Inbox.
+- **The run outcome is a platform marker**: the completion message the platform writes into a
+  chat carries `source = completion:done | completion:failed`; the Inbox's done/failed pill is
+  read from that, never parsed out of the body (an agent reply that begins "**Finished**" is
+  not a run outcome).
+- **The pane (AC 3)**: an ask renders the existing ask card for that one ask (select-option,
+  note, Send — never a one-tap Approve) and stays selected after an answer, shown ended in
+  place. A chat renders its newest arrivals (from the first unread message) and its
+  deliverables through `ReportRenderer` with the summary fallback. Opening a chat row (or
+  arriving on its `?item=` deep link) marks it read only AFTER the pane has rendered it —
+  history, deliverables and every deliverable payload on screen (§3g S5, D-3); a failed load
+  leaves it unread, a failed write says so in the pane, and the pane's **Mark read** (shown
+  while the chat has new messages) reads it on demand. The row keeps its place, drawn read, for the rest of the tab visit (§3g S1: a row that
+  leaves any tab stays as a ghost — a chat drawn read, an ask drawn ended — and a poll never
+  re-sorts; leaving the tab, clicking it again or a completed Mark all read starts a new visit). **Open
+  in chat** / **Reply in chat** open the chat at the first arrival (`?anchor=`), with the
+  composer focused for Reply (A2 — no composer in the pane). **Mark all read** is secondary,
+  on Unread and All only, and names what it reads ("Mark 28 chats read"); for more than one
+  chat it asks first (ConfirmDialog, the consequence restated, Cancel focused, a non-danger
+  confirm), one chat is read directly. Success is a toast ("Marked 28 chats read") and a new
+  tab visit; a partial failure names how many failed and those chats keep their count (the S4
+  rollback) (§3g A9).
+- **Where an ask lives (the 2026-09-30 ruling as amended, PR A2 on ent#734's data)**: an ask
+  raised during a chat turn is a tile in THAT chat's thread, placed by server time among the
+  messages and answerable in place; once ended — at once when answered there, the confirmation
+  in the row, announced, focus on the row (team ruling on #3101, 2026-10-01) — it is one muted row
+  (kind · title · ending with who · when) that stays in that chat's history for the queue's own retention — the chat reads
+  its own chat-turn asks (`GET …/asks?chat_id=`, no 7-day window). A background ask (schedule,
+  loop, gate) is in no chat, only the Inbox; its `chat_id` (Main) is the reply target. Nothing
+  sits between the thread and the composer (principle 30). Every door — Work for platform
+  users, Info for everyone — carries one "N ask(s) waiting on you · Open in Inbox" line to
+  Action `?from=<agent>`, and each agent row's "needs you" mark counts from the same feed as the
+  pinned Inbox row.
+- **Action by agent (§3g C2, PR A2)**: whenever anything is waiting — from one agent on, so a
+  second agent's ask does not push the list down — Action shows a second strip ("All agents",
+  then each agent with its count), and choosing one narrows the tab to that agent's asks
+  (`?from=<agent>`, so it survives a reload and can be linked). The filter lasts while that
+  agent still has asks or its just-answered ask is on screen, then clears itself; switching
+  tabs drops it. A `?from=` the page OPENS with is kept even when that agent has nothing
+  waiting (Andrii's sign-off, 2026-10-01): the list says "Nothing is waiting on you from X."
+  with "Show all agents"; only a filter answered down to nothing during the visit clears, the
+  head saying "Nothing waiting from X · …". Arriving by an "Open in Inbox" link
+  puts focus on the list.
+- **The ask card while answering (§3g L6, PR A2)**: picking an approval option moves focus to
+  the note field (not on a touch screen, where it would pop the keyboard), so the Enter that
+  follows sends instead of unselecting the option — still pick, then Send (#2375). A question
+  the agent offered options for shows them as quick picks that fill the answer box and never
+  send (an option over the answer's 500-character limit is left out, never cut); the pick
+  that filled the answer shows as chosen, and on a touch screen it does not pop the keyboard
+  either. "Unconfirmed" is never shown in the Workspace — it is the platform's own
+  bookkeeping; every other sync state still is (`workspaceAskBadge`). After Send, focus lands
+  on the answered card; a second Enter while the answer is on its way sends nothing. In the
+  Inbox pane the card's header carries the priority and the expiry (the row's badges), where
+  the person decides — its context below the answer row does not repeat them.
+- **Open canvas (§3g C10)**: the pane offers "Open canvas" — on a chat or an ask — only when
+  the item's agent has a canvas this viewer can see; it opens the rail on that canvas.
+- **Long tabs page (§3g SM / C4)**: every tab renders 50 rows, states "Showing 50 of 212", and
+  offers "Show more" (50 at a time, focus to the first new row); the window resets when the tab
+  changes, never on a refresh, and always includes the selected row.
+- **An ask row says what differs (§3g A10)**: its kind by shape (approval, question, alert —
+  gray outlines, the kind spoken); a priority only when High or Critical; its expiry only
+  within the day ("Expires in 18m" as a warning under an hour, a neutral "Expires in 5h"
+  otherwise, the absolute time on hover); never more than two badges. The expiry counts down
+  on a 30-second clock that runs only while such a row exists.
+- **An ask's context (§3g L7, E1, PR A2)**: below an ask in the pane (the answer controls never
+  move, and work whether or not the context loads): where it came from — the conversation the
+  chat turn was in and the three messages before the ask, only when that conversation is the
+  viewer's own, else the ask's own chat for an ask a chat turn raised; a background ask has no
+  chat origin (only a chat turn verifies a thread — a schedule that delivers into Main is not
+  where its ask came from) — the run that raised it ("Asked during a
+  scheduled run · 09:00"; a platform user reads the schedule's name), what was delivered in
+  that chat, and the viewer's own last three answers to this agent. A run is named only when
+  it belongs to the ask's agent, was running when the ask was filed, and was a schedule, a
+  manual run or the viewer's own — the agent writes the link, so it is checked, never trusted.
+- **The door (AC 7)**: nothing the Inbox adds carries cost, an execution id or run detail; the
+  preview projection has no `cost` field; the ask-context read carries no `cost` and no
+  execution id (a run's kind, label and start time only). The Inbox needs no capability flag — it reads the
+  roster payload, the viewer's own chat state and the asks list.
+- **Honest states**: loading ≠ empty ≠ failed ≠ stale, for asks and threads alike. The empty
+  copy renders only after a successful read; a failed first read shows a retry; a failed
+  refresh keeps the list with a stale banner (§26.8, the asks read fails loud). All waits on
+  the chats only: its ask rows merge in when the asks read lands, and a failed asks read is a
+  banner above the chats, never a failed All (§3g S3 / A11).
+- **Split or stacked by the Inbox's own width (§3g A4)**: side by side from 720px of CONTAINER
+  width (a 320px list + a 400px pane; a 384px list from 1100), with 16px of hysteresis; below
+  that — a phone, a 768px window beside the sidebar, 200% zoom, a 1280 window with the rail
+  open — list and pane are successive full-width states with an explicit Back (Esc too), and
+  nothing is previewed, so the landing starts no agent feed. The rail's width is counted
+  before it arrives, so a preview that brings it in cannot flip the layout; a flip keeps an
+  opened item and moves focus to it (its pane heading when stacked, its row when split).
+  When split, the tab's first row is previewed (the rail column does not pop in on the first
+  click); the preview is never a read and never enters the URL — `?item=` holds only what the
+  reader opened (§3g S5, T2).
+- **Known properties (stated, not bugs)**:
+  - A viewer who has never read anything has no baseline, so nothing counts for them — a first
+    deliverable included (the inherited #557 rule).
+  - **An owner's Inbox is thinner by existing rules (A9)**: asks and reports validate their
+    addressee with `include_owned=False`, so a platform owner is never an addressee. Their
+    Action empty state points to Operations; a client's names what would land here.
+  - Archived chats stay in Unread; Σ "N new" equals the "came back" count.
+  - Counts for the viewer's own chats with agents no longer on their roster are in the
+    chat-state payload (since ent#359/#557) but nothing renders them.
+  - Rooms are not in Unread until PR C (no human room read cursor exists).
+- **Not in scope**: the editable "What would be sent" (09-20 ruling); #609; the `people_for`
+  provider; `may_end` (rides #164); run pills with step labels (need a message→execution link).
+- **Flow**: `docs/memory/feature-flows/workspace-inbox.md`

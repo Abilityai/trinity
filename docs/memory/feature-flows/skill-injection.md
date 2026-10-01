@@ -128,6 +128,17 @@ rows (`stores/skills.js::conflictNames`) so the badge, the explanation and the i
 "Unassign library skill" action show on a fresh load, and `inject()` re-reads the rows so
 a resolved conflict clears without a reload.
 
+**A deprecated skill (ent#672)** is a second, separate statement. `deliver_assigned` stamps
+`skills[name].warnings = ["deprecated" | "deprecated:<successor>"]` on the report for a
+deprecated name — on every outcome, because it reads the library entry
+(`_deprecation_notes`) rather than injection results, and a stopped agent never runs an
+injection. The key is absent for a live skill and carries lifecycle codes only.
+`utils/skillDelivery.js::deprecationText(report)` turns it into "`<skill>` is deprecated —
+superseded by `<successor>`." and both assign surfaces render it as its own warning-toned
+line (`AssignedAgents.vue` under the delivery note; `SkillsPanel.vue` under the save row,
+shown only beside the save note it belongs to). `deliveryText` is untouched: a clean
+delivery stays green.
+
 ## Removal (ent#236)
 
 Injection's inverse, added because an unassigned skill previously stayed on the
@@ -250,7 +261,11 @@ name-conflict refusal: `success: false`, `error: name_conflict: …`, not counte
 `restore_skipped:*`, `stale_delete_failed:*`, `prune_truncated`,
 `repair_reinjected`, `marker_written_directly`, `multi_file_dropped_old_image`,
 `frontmatter_invalid`, `invalid_skill_name`, `gitignore_update_failed`,
-`finalize_partial:*`.
+`finalize_partial:*`, `deprecated` / `deprecated:<successor>` (ent#672 — informational:
+the skill is injected as usual, on `injected`, `unchanged` and `conflict` alike; the
+successor is present only when it is a valid skill name). The start endpoint's public
+projection (`lifecycle.public_skills_result`) keeps `deprecated:<successor>` beside the
+two dep codes.
 
 ## Frontmatter Contract
 
@@ -277,6 +292,30 @@ before probing — library-derived strings never reach a shell (all in-container
 work runs as base64-injected python, the compatibility-collector idiom).
 Provisioning (installing deps) is Phase 2 — placement / skill-runner
 (trinity-enterprise#139).
+
+### Lifecycle keys (ent#672)
+
+```yaml
+deprecated: true             # a real boolean; absent / null = not deprecated
+superseded-by: new-skill     # `superseded_by` is read too; a `trinity:` block wins in either spelling
+```
+
+The two keys a library uses to retire a skill. Both reach `list_skills` / `get_skill`,
+`GET /api/skills/library` (`SkillInfo.deprecated`, `.superseded_by` — named in the route's
+explicit construction) and MCP `list_skills` (named in its field map). A deprecated skill
+stays **listed, assignable and injected**; it is flagged, never hidden.
+
+- `superseded_by` is the **author's text**, kept as one printable line of at most 200
+  characters (`_one_line`: control and format characters dropped, whitespace collapsed) and
+  `None` unless the skill is deprecated. It is usually a skill name and sometimes a sentence
+  ("… lives in another catalog"); the platform does not resolve it.
+- `skill_packaging.deprecation_warning(info)` is the ONE producer of the machine code:
+  `deprecated:<successor>` when the text passes `validate_skill_name`, bare `deprecated`
+  otherwise — prose never enters a `kind:detail` code.
+- Garbage is named: a non-boolean `deprecated` → `frontmatter_invalid:deprecated`; a
+  non-string `superseded-by` → `frontmatter_invalid:superseded-by`. A library's own CI that
+  runs this parser fails on those, which is what keeps the two repositories agreeing.
+- The agent's CLAUDE.md is **not** annotated: a holding agent behaves exactly as before.
 
 ## CLAUDE.md Section
 
@@ -323,6 +362,12 @@ round-trip against the REAL `restore_from_tar`, real-git end-to-end
 orchestration (skip-vs-force, 404 fallback, repair path, manifest prune,
 unmanaged-dir guard, caps, dep warnings, lock contention, CLAUDE.md rebuild).
 
+`tests/unit/test_ent672_skill_deprecation.py`: the lifecycle-key parse table,
+the warning grammar, the fields through `list_skills` / `get_skill` / the REST route, the
+code on injected / unchanged / conflict results, the delivery stamp on running, stopped,
+docker-unreadable and over-budget outcomes (and none on an unreadable library), the start
+projection, and the un-annotated CLAUDE.md line.
+
 ## Related Flows
 
 | Flow | Relationship |
@@ -339,6 +384,7 @@ unmanaged-dir guard, caps, dep warnings, lock contention, CLAUDE.md rebuild).
 
 | Date | Change |
 |------|--------|
+| 2026-09-30 | **trinity-enterprise#672 lifecycle keys**: `extract_contract` carries `deprecated` / `superseded-by`; `deprecation_warning` produces the `deprecated[:<successor>]` code that rides every injection outcome and, via `deliver_assigned`'s library read, every delivery outcome; `public_skills_result` keeps it. A deprecated skill stays listed, assignable and injected — flagged on each surface, CLAUDE.md untouched. |
 | 2026-09-11 | **#2703 delivery on assign + `agent_skills_changed`**: every assign path delivers via the start-path injection with an honest per-skill `delivery` report (bounded 20 s → `in_progress`, busy retried once, `docker_unavailable` ≠ `pending_start`, opt-in under-lock re-read); one thin WS trigger from the service, fired by all six listing writers; Agent Detail lists refetch on the tick, the Workspace re-validates the briefing stale-while-revalidate (and on `/` open for portal clients, who have no `/ws`) |
 | 2026-08-04 | **trinity-enterprise#332 per-source skills root**: source layout resolvable per source (`catalog.yaml` `skills_root:` → evidence-gated `skills/` probe → `.claude/skills/` fallback; segment-wise validation, ent#314 hardened parse, lstat/containment guards, dual-layout keeps legacy + `layout_conflict`); `filter_skill_archive(source_root=…)` rewrites arcnames to the canonical agent-side destination so manifests/prune/removal stay destination-canonical with zero migration. Requirements §21.1.4. |
 | 2026-07-29 | **trinity-enterprise#236 lifecycle automation**: removal-on-unassign (`remove_skills` + `compute_removal`, manifest-driven, same inject lock), start-path reconciliation with a blast-radius refusal, and fleet-wide re-inject after a commit-changing library sync. See also [skills-library-sync.md](skills-library-sync.md) for the scheduled sync. |

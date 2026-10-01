@@ -567,6 +567,7 @@ class OperatorQueueOperations:
         addressed_to_email: Optional[str] = None,
         hide_ended_before: Optional[str] = None,
         types: Optional[Tuple[str, ...]] = None,
+        context_contains: Optional[Tuple[str, ...]] = None,
     ) -> Optional[list]:
         """The WHERE conditions `list_items`, `count_items` and
         `list_item_agent_names` share (#3059) — ONE definition, so a page, its
@@ -615,6 +616,13 @@ class OperatorQueueOperations:
                     operator_queue.c.created_at,
                 ) >= hide_ended_before,
             ))
+        for fragment in context_contains or ():
+            # trinity-enterprise#610: a PREFILTER on the stored JSON text, for a
+            # key the platform writes (the caller re-checks the parsed context —
+            # a nested look-alike key matches this text too). LIKE-escaped, so a
+            # `_` or `%` in the fragment matches only itself.
+            escaped = fragment.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            conds.append(operator_queue.c.context.like(f"%{escaped}%", escape="\\"))
         return conds
 
     def count_items(self, **filters) -> int:
@@ -655,6 +663,7 @@ class OperatorQueueOperations:
         addressed_to_email: Optional[str] = None,
         hide_ended_before: Optional[str] = None,
         types: Optional[Tuple[str, ...]] = None,
+        context_contains: Optional[Tuple[str, ...]] = None,
     ) -> List[Dict]:
         """List queue items with optional filters.
 
@@ -698,6 +707,7 @@ class OperatorQueueOperations:
             since=since, accessible_agent_names=accessible_agent_names,
             include_cleared=include_cleared, addressed_to_email=addressed_to_email,
             hide_ended_before=hide_ended_before, types=types,
+            context_contains=context_contains,
         )
         if conds is None:
             return []

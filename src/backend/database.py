@@ -1564,11 +1564,11 @@ class DatabaseManager:
     # Backlog Execution Queries (delegated to db/schedules.py) - BACKLOG-001
     # =========================================================================
 
-    def update_execution_to_queued(self, execution_id: str, backlog_metadata: str, queued_at: str) -> bool:
-        return self._schedule_ops.update_execution_to_queued(execution_id, backlog_metadata, queued_at)
+    def update_execution_to_queued(self, execution_id: str, backlog_metadata: str, queued_at: str, conversation_key: str = None) -> bool:
+        return self._schedule_ops.update_execution_to_queued(execution_id, backlog_metadata, queued_at, conversation_key)
 
-    def claim_next_queued(self, agent_name: str, worker_id: str = None, lease_seconds: int = None):
-        return self._schedule_ops.claim_next_queued(agent_name, worker_id, lease_seconds)
+    def claim_next_queued(self, agent_name: str, worker_id: str = None, lease_seconds: int = None, interactive_triggers=None):
+        return self._schedule_ops.claim_next_queued(agent_name, worker_id, lease_seconds, interactive_triggers)
 
     def release_claim_to_queued(self, execution_id: str) -> bool:
         return self._schedule_ops.release_claim_to_queued(execution_id)
@@ -1743,6 +1743,9 @@ class DatabaseManager:
 
     def get_agent_schedule_names(self, agent_name: str):
         return self._schedule_ops.get_agent_schedule_names(agent_name)
+
+    def get_workspace_delivery_schedules_for_agents(self, agent_names):
+        return self._schedule_ops.get_workspace_delivery_schedules_for_agents(agent_names)
 
     def find_active_schedules_exceeding_timeout(self, agent_name: str, ceiling_seconds: int):
         return self._schedule_ops.find_active_schedules_exceeding_timeout(
@@ -2047,6 +2050,9 @@ class DatabaseManager:
 
     def list_sync_states(self):
         return self._sync_state_ops.list_all()
+
+    def list_sync_health_rows(self, agent_names=None):
+        return self._sync_state_ops.list_health_rows(agent_names)
 
     def upsert_sync_state(self, agent_name: str, **fields):
         return self._sync_state_ops.upsert(agent_name, **fields)
@@ -2638,14 +2644,20 @@ class DatabaseManager:
     def list_whitelist(self, limit: int = 100):
         return self._email_auth_ops.list_whitelist(limit)
 
-    def create_login_code(self, email: str, expiry_minutes: int = 10):
-        return self._email_auth_ops.create_login_code(email, expiry_minutes)
+    def create_login_code(self, email: str, expiry_minutes: int = 10, purpose=None):
+        return self._email_auth_ops.create_login_code(email, expiry_minutes, purpose=purpose)
 
-    def verify_login_code(self, email: str, code: str):
-        return self._email_auth_ops.verify_login_code(email, code)
+    def is_email_account_suspended(self, email: str) -> bool:
+        return self._user_ops.is_email_account_suspended(email)
+
+    def verify_login_code(self, email: str, code: str, purpose=None):
+        return self._email_auth_ops.verify_login_code(email, code, purpose=purpose)
 
     def count_recent_code_requests(self, email: str, minutes: int = 10):
         return self._email_auth_ops.count_recent_code_requests(email, minutes)
+
+    def count_recent_codes_for_purpose(self, purpose: str, minutes: int = 10):
+        return self._email_auth_ops.count_recent_codes_for_purpose(purpose, minutes)
 
     def cleanup_old_codes(self, days: int = 1):
         return self._email_auth_ops.cleanup_old_codes(days)
@@ -2735,6 +2747,9 @@ class DatabaseManager:
 
     def set_agent_role_readiness(self, agent_name: str, status: str, changed_by: str):
         return self._role_readiness_ops.set_role_readiness(agent_name, status, changed_by)
+
+    def get_role_readiness_for_agents(self, agent_names):
+        return self._role_readiness_ops.get_role_readiness_for_agents(agent_names)
 
     # Seat decisions (delegated to db/seat_decisions.py) — ent#638 / R25.
     # Explicit signatures on purpose (learnings 2026-09-01: a kwarg the mixin

@@ -1213,6 +1213,12 @@ from error_handlers import validation_error_without_input as _validation_error_w
 
 app.add_exception_handler(_RequestValidationError, _validation_error_without_input)
 
+# #2973: routes that let a chain-depth refusal propagate get the #2806 named 403.
+from services.chat_signals import InterAgentDepthExceeded as _InterAgentDepthExceeded
+from error_handlers import inter_agent_depth_exceeded as _inter_agent_depth_exceeded
+
+app.add_exception_handler(_InterAgentDepthExceeded, _inter_agent_depth_exceeded)
+
 # Add CORS middleware
 app.add_middleware(
     CORSMiddleware,
@@ -1282,6 +1288,14 @@ async def add_security_headers(request: Request, call_next):
         response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
 
     return response
+
+
+# #3102 — reject a Host header that would shift the Host-built request URL.
+# Registered LAST so it runs FIRST (add_middleware prepends); keep every other
+# middleware above this line. Pure ASGI, so WebSocket handshakes are covered too.
+from utils.host_header import HostHeaderGuard
+
+app.add_middleware(HostHeaderGuard)
 
 
 # Include all routers
@@ -1828,7 +1842,8 @@ async def get_version(current_user: User = Depends(get_current_user)):
     modules listed in `enterprise_features`. See docs/ENTERPRISE.md.
 
     `install_source` (#2380) is how this instance was installed —
-    `do-marketplace` / `vultr-marketplace` / `script` / `unknown` — recorded
+    `do-marketplace` / `vultr-marketplace` / `aws-marketplace` / `do-script` /
+    `aws-script` / `script` / `unknown` — recorded
     once at first boot and surfaced here so an operator can answer "what kind
     of install is this?" from a support surface they already read.
     """

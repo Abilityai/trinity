@@ -30,6 +30,10 @@ Yes. Your tile positions, your info-tile selection (the **Tiles ▾** choices), 
 
 They flag an agent whose own Claude subscription is under strain: **sub limit** means it is rate-limited right now, **sub 429s** means it hit rate-limit errors in the last 24 hours but isn't limited at the moment, and **sub auth** means the provider rejected the token — re-register it. Hover a chip for the subscription name, the event count, and the 5-hour utilization; the same badge appears on List rows. Admins get the fleet-level picture from the **Subscription pressure** info tile, whose rows carry `auth`, `limit` (with the reset time), `429s`, `near`, or `?` chips, sorted by severity so a token that needs a person outranks a limit that just needs a wait; percentages appear only from a provider reading under 30 minutes old, otherwise the row shows a short status such as `rate-limited` or `no provider data`. What each state means, and the switching and alert settings behind it, live on the subscriptions page in Settings. See [Subscription Credentials](../credentials/subscription-credentials.md).
 
+## What does the "ready" or "calibrating" badge on an agent mean?
+
+It is the readiness stamp the agent's owner set. **ready** means the owner marked the agent ready; **calibrating** means it is not marked ready yet. Hover the badge for the date the stamp changed — and, on a calibrating agent whose scheduled brief is being held, a note that the brief is paused until the owner marks it ready. Agents with no stamp show no badge. The badge appears on Grid tiles and List rows. See [Dashboard](../operations/dashboard.md#grid-view).
+
 ## Why do dashboard panels show a skeleton, a scanline sweep, or a "stale" stamp?
 
 Each means something different, and none is an error. A **skeleton** in the shape of the content (rows for Timeline and List, tile outlines for Grid) means no data has arrived yet; a pane that already has data never regresses to one. The **scanline** sweep plays over a chart zone while its data loads and wipes the chart in once — a background refresh never replays it. Background polls swap values in place, so a poll that fails after a successful one keeps the numbers on screen and marks them **stale** (for example, the Executions tile's stamp becomes `24h · stale`) instead of blanking them. If the fleet itself can't be read you get **Couldn't load agents** with a **Retry** button rather than an empty list that looks like a fleet with no agents, and a fleet with none shows **No agents yet** with a **Get started** button that opens the Create Agent dialog (first-run setup is a separate overlay that opens over the Dashboard on a fresh install). Polls pause while the tab is hidden and refresh immediately when you return. See [Dashboard](../operations/dashboard.md).
@@ -96,7 +100,7 @@ Yes. Click any running execution to open its detail page, where a green pulsing 
 
 ## Can I see what my agents are running from inside the Workspace?
 
-Yes, in the chat's vocabulary rather than the ledger's. When a message starts a longer job, a live card under it shows the status, how long it has run, what the agent is doing, and — where the agent publishes a pipeline — the steps; its controls are **Stop** (where a stop would be accepted), **Open in Work**, and after a failed, timed-out, stopped, or lost job, **Ask about it**, which pre-fills a question in the composer and never sends on its own. The rail's **Work** tab has three sections — **Waiting on you** (open asks, answerable in place), **Now** (a live card per job in flight), and **Earlier** (the last 30 days, latest three shown) — with rows labelled by kind (**You asked**, **Handed on**, **Loop run**, **Scheduled**, **Room turn**, **Background**) and by outcome (**Working**, **Done**, **Failed**, **Timed out**, **Stopped by you**, **Skipped**, or **No longer tracked**). A job the agent delegated appears here even though it ran on another agent. External clients see none of this. See [Executions — Work in the Workspace](../operations/executions.md#work-in-the-workspace).
+Yes, in the chat's vocabulary rather than the ledger's. When a message starts a longer job, a live card under it shows the status, how long it has run, what the agent is doing, and — where the agent publishes a pipeline — the steps; its controls are **Stop** (where a stop would be accepted), **Open in Work**, and after a failed, timed-out, stopped, or lost job, **Ask about it**, which pre-fills a question in the composer and never sends on its own. The rail's **Work** tab has two sections — **Now** (a live card per job in flight) and **Earlier** (the last 30 days, latest three shown) — plus one line, *N asks waiting on you · Open in Inbox*, while something waits on you — with rows labelled by kind (**You asked**, **Handed on**, **Loop run**, **Scheduled**, **Room turn**, **Background**) and by outcome (**Working**, **Done**, **Failed**, **Timed out**, **Stopped by you**, **Skipped**, or **No longer tracked**). A job the agent delegated appears here even though it ran on another agent. External clients see none of this. See [Executions — Work in the Workspace](../operations/executions.md#work-in-the-workspace).
 
 ## Why does an execution's response start with a "Background work lost" warning?
 
@@ -121,6 +125,18 @@ The dispatch circuit breaker has tripped: the agent's container answered several
 ## How do I turn the circuit breaker on for an agent, or reset one that's open?
 
 The breaker is off by default and needs two switches: the per-agent toggle in the agent's **Settings → Reliability** section (or `PUT /api/agents/{name}/circuit-breaker` with `{"enabled": true}`, owner-only) and the platform-wide `DISPATCH_BREAKER_ENABLED` environment variable. `GET` on the same endpoint shows the current state of both the dispatch and transport breakers. If a breaker is open and you've fixed the underlying problem, an admin can force both closed immediately — without waiting for the cooldown — via `POST /api/agents/{name}/circuit-breaker/reset`. See [Agent Configuration](../agents/agent-configuration.md).
+
+## How do I show business numbers like revenue on an agent's dashboard?
+
+Declare each metric in the `metrics:` block of the agent's `template.yaml`, then have the agent record values with the `record_metrics` MCP tool. The metrics appear as tiles on the agent's **Dashboard** tab, even without a `dashboard.yaml` and even while the agent is stopped. Each tile shows when its value was recorded. You can also bind a `dashboard.yaml` widget to a declared metric with `metric: <name>`. See [Dynamic Dashboards](../advanced/dynamic-dashboards.md#declared-metrics).
+
+## Why is a metric tile on my agent's dashboard marked stale?
+
+No new value has arrived within twice the metric's declared `cadence`. The tile keeps showing the last value, with a warning chip, so you know it may no longer be true. Check that the agent's recording schedule is still running. A metric with no `cadence` is never marked stale. See [Dynamic Dashboards](../advanced/dynamic-dashboards.md#freshness).
+
+## Why does my agent's metrics.json no longer show up?
+
+Trinity no longer reads `metrics.json`. Declare the metrics in `template.yaml` and record them with `record_metrics`. The agent's compatibility report names the keys the file still holds and which are not declared yet. Delete the file once you have switched. See [Dynamic Dashboards](../advanced/dynamic-dashboards.md#retired-metricsjson).
 
 ## What are agent reports and where do I find them?
 

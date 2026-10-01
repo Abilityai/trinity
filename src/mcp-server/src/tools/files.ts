@@ -10,6 +10,7 @@
 import { z } from "zod";
 import { TrinityClient } from "../client.js";
 import type { McpAuthContext } from "../types.js";
+import { resolveExecutionId } from "./execution_id.js";
 
 export function createFileTools(
   client: TrinityClient,
@@ -82,7 +83,8 @@ export function createFileTools(
               "prompt. Pass it: it is how the platform knows which conversation this share belongs " +
               "to, and so whose Files tab lists the file — without it the file is listed for the " +
               "agent's owner only. It also lets a re-run of this turn replay the original signed " +
-              "URL instead of minting a new token (#1084)."
+              "URL instead of minting a new token (#1084)." +
+              " The platform normally supplies this automatically (#2392); this param is a fallback for older agent images."
           ),
         audience_email: z
           .string()
@@ -142,7 +144,7 @@ export function createFileTools(
             filename: params.filename,
             display_name: params.display_name,
             expires_in: params.expires_in,
-            execution_id: params.execution_id,
+            execution_id: resolveExecutionId(authContext, params.execution_id),
             dedup_label: params.dedup_label,
             audience_email: params.audience_email,
           });

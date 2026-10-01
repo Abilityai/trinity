@@ -12,6 +12,10 @@ Standalone mobile-optimized PWA at `/m` for managing agents on the go — check 
    - **System** -- Fleet health (Total / Running / Stopped / High Ctx) and the fleet-level actions: **Emergency Stop**, **Fleet Restart**, **Pause Schedules**, **Resume Schedules**. Each confirms in a bottom sheet before running.
 4. Each tab refreshes every 15 seconds while it is open, and pull-to-refresh forces one. A refresh that fails keeps what is on screen and says when it was last fetched, with **Retry**.
 
+### Signed in without the admin role
+
+The fleet list and fleet health are admin-only. If you open `/m` with a session that is not an admin's (for example, one already signed in to the main app), the **Agents** tab says *The fleet list is admin-only on mobile.* and points you to your own agents on the desktop dashboard, with **Open the Queue** — which lands on the **Queue** sub-tab. There is no **Retry**, because retrying cannot succeed, and the 15-second poll stops asking; a pull-to-refresh checks again, so a role granted in the meantime shows up. The **System** tab says *Fleet health and fleet actions are admin-only* and hides the four fleet actions. Any other failure still shows the usual error with **Retry**.
+
 ### Answering the queue
 
 A queue card shows the agent, the priority, the type — **Needs approval**, **Question** or **Heads up** — the title and the question. The controls depend on the type, and they match the desktop page:

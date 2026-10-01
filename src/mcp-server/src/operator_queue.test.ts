@@ -366,3 +366,20 @@ describe("trinity-enterprise#611 ask_operator", () => {
     assert.doesNotMatch(tool.description, /mcp__trinity__/);
   });
 });
+
+// ent#661 v3 — the raising turn rides the ask, from the platform header only.
+describe("ent#661 ask_operator forwards the turn id", () => {
+  it("passes the request's X-Trinity-Execution-Id, never a parameter", async () => {
+    const turns: unknown[] = [];
+    const fake = {
+      raiseAsk: async (_agent: string, _body: OperatorAskCreate, turn?: string) => {
+        turns.push(turn);
+        return { status: "created" };
+      },
+    } as Partial<TrinityClient>;
+    const ctx = agentCtx("self") as unknown as { session: Record<string, unknown> };
+    await makeAskOperator(fake).execute(ASK as any, { session: { ...ctx.session, executionId: "exec-9" } } as any);
+    await makeAskOperator(fake).execute({ ...ASK, request_id: "deploy-2" } as any, agentCtx("self"));
+    assert.deepEqual(turns, ["exec-9", undefined]);
+  });
+});

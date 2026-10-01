@@ -16,7 +16,7 @@
 **Feature ID**: 9.9
 **Status**: Implemented
 **Date**: 2025-12-10
-**Last Updated**: 2026-09-22 (ent#479 — the read contract and freshness)
+**Last Updated**: 2026-09-30 (ent#676 — the role card consumes the objective join)
 
 ## The declared metric registry (ent#477)
 
@@ -282,8 +282,9 @@ delete the file.
 
 | Aspect | Contract |
 |---|---|
-| Gate | `AuthorizedAgentByName` (uniform 404 — Invariant #8/#186), **then** the agent self-gate: an agent-scoped key reads only its own numbers (403). Cross-agent reads are ent#80's grant. |
-| Rate limit | 240/min per agent — clears N tabs at a 30 s poll, stops a loop |
+| Gate | `AuthorizedAgentByName` (uniform 404 — Invariant #8/#186), **then** the metric-read gate (`_metric_read_gate` → `metric_access_service.can_read_agent_metrics`): an agent-scoped key reads its own numbers, or another agent's while it holds an `agent_permissions` grant on it (ent#727 — the edge `chat_with_agent` uses); otherwise 403. `/metrics/definitions` carries the same gate. |
+| Rate limit | 240/min per agent — clears N tabs at a 30 s poll, stops a loop. A cross-agent read is charged to the **reader** (`agent_metrics_read_by:{reader}`), so a fan-out never spends the target's budget |
+| Audit | A cross-agent read (metrics, definitions, or an objective row served elsewhere) writes one `authorization`/`metrics_cross_agent_read` row per (reader, target, route, actor) per hour; marker set only after the row is written |
 | Window | `auto` (default) · `24h` · `7d` · `30d` · `90d`, or `since`/`until`. `auto` = `max(24h, 12 × cadence)` capped at 90 d, because a cadence ranges 60 s–1 y and a fixed 24 h shows a weekly metric four points |
 | Filters | `metric=<declared name>` · `include_retired` · `series_limit` (≤ 2000, single-metric path) |
 | Errors | 422 `window_invalid` · 422 `metric_undeclared` (retired names get "retired at T — pass `include_retired=true`") · 503 `metric_store_unavailable` + `Retry-After: 30` |
@@ -298,7 +299,8 @@ stale  ⟺  cadence declared  AND  now − last_point_at > 2 × cadence
 ```
 
 `metric_read_service.freshness()` is pure, exported and the ONLY implementation.
-The tiles, the bound widgets, the health block and the role card all import it;
+The tiles, the bound widgets and the health block all import it, and the role
+card reaches it through the objective join (ent#676);
 a second copy is a defect whether or not it currently agrees.
 
 | `freshness` | `stale` | Meaning |
@@ -360,7 +362,7 @@ objectives/<id>.yaml  ──┐                    (Tandem §3.4, in the agent's
         ┌───────────────┴───────────────────────────────────────┐
         ▼                        ▼                              ▼
  GET /api/agents/          MCP get_objectives          role card (ent#527) /
-   {name}/objectives         (agent-scoped)            hub (ent#661) /
+   {name}/objectives         (agent-scoped)            project view (ent#661 v3) /
                                                        proactivity (ent#605)
                                                        — in process, no second join
 ```
@@ -368,7 +370,7 @@ objectives/<id>.yaml  ──┐                    (Tandem §3.4, in the agent's
 | Aspect | Contract |
 |---|---|
 | Gate | `AuthorizedAgentByName` (uniform 404) → agent self-gate (403) → limiter on the **validated** name — the `/metrics` order, verbatim |
-| Rate limit | `OBJECTIVES_READ_RATE_LIMIT`, default **60**/min per agent — its own knob, a quarter of `/metrics`, because this read touches the **container** |
+| Rate limit | `OBJECTIVES_READ_RATE_LIMIT`, default **60**/min per agent — its own knob, a quarter of `/metrics`, because this read touches the **container**. One bucket for every door to the fan-out (`services/objectives_read_budget.py`): this route answers 429, the Workspace role card degrades to "no objectives" instead (ent#676) |
 | Store-only? | **No.** Files are truth and they live in the container (E7/E13), so a stopped agent answers `unavailable: agent_stopped` with copy naming the fix — never a cached number |
 | `actual` | the tile's folded latest via `latest_by_metric` — one number on every surface, parity-tested on a dimensioned `sum` metric |
 | `gap.status` | `behind` · `on_target` · `ahead` · `off_target` (the `hold` arm) · `not_computable` — **position, never pace**. `by` and `horizon` ride the row so a consumer can judge pace itself |
@@ -379,34 +381,41 @@ objectives/<id>.yaml  ──┐                    (Tandem §3.4, in the agent's
 | Findings | belong to the objectives returned — another role's or a finished objective's parse defect never lands on this agent's read, since a shared fleet canon would otherwise put every role's mistakes on every card. File-level (`objective_invalid`, `objective_unreadable`, `objective_file_skipped`, `objectives_read_timeout`) are unconditional: nothing there says whose they are |
 | Errors | 503 `metric_store_unavailable` + `Retry-After: 30`. Everything below transport is a **named field on a 200** |
 
-### The role-card follow-up (ent#676; was "the rebase note for PR #2927")
+### The role card consumes this join (ent#676 — landed)
 
 The role card (ent#527, #2927) shipped the first version of this join — and a
 second staleness rule with it (a 30-day bound over `metrics.json`'s
-`last_updated`). This section was written as a rebase note on the assumption
-that ent#666 would land first; it did not — #2927 merged on 2026-09-22 ahead
-of the metrics stack — so the cut-over is now a follow-up on `dev`, tracked as
-**trinity-enterprise#676**. Until it lands, the join is spelled twice and the
-two surfaces can disagree about staleness. What that follow-up does:
+`last_updated`) — because it merged on 2026-09-22 ahead of the metrics stack.
+**trinity-enterprise#676** cut it over; the join is now spelled once:
 
-* `client_portal/role_card.py` drops `_read_metrics`, `metric_row`,
-  `objective_concerns`, `canon_root`, the objectives loop and
-  `MAX_OBJECTIVES` / `MAX_METRICS_PER_OBJECTIVE`, and keeps `is_stale` /
-  `STALE_AFTER_DAYS` **only** for the role file's `review_by` (framework §3.5
-  governs files, not metrics). After the role read it calls
-  `objective_join_service.read_objective_join(agent_name, template=template,
-  client=client)` — function-locally, so no portal suite drags the metrics
-  stack in — and copies `objectives` / `findings` / `summary` onto the card.
+* `client_portal/role_card.py` no longer has `_read_metrics`, `metric_row`,
+  `objective_concerns`, `canon_root`, an objectives loop or its own objective
+  bounds. `is_stale` / `STALE_AFTER_DAYS` remain **only** for the role file's
+  `review_by` (framework §3.5 governs files, not metrics). After the role read
+  it calls `objective_join_service.read_objective_join(agent_name,
+  template=template, client=client)` — function-locally, so no portal suite
+  drags the metrics stack in.
 * **A slim portal projection** (TD-4). The card exposes
-  `name, target, actual, last_point_at, stale, freshness, gap.status,
-  finding.code` with client-safe copy per code — **not** `ObjectiveMetricRead`
-  whole. The findings here are operator-facing remediation ("call
-  `refresh_metric_definitions`") and `owner: role:<id>` names a canon an
-  external client does not own (#78 auth-path invariant).
-* **The portal route gains the limiter.** `GET …/client-portal/agents/{name}/role`
-  has none today and reaches the same container fan-out; it takes the same
-  `agent_objectives_read:{name}` key, so one key bounds both doors. The limiter
-  stays in the routers — it is transport (Invariant #1).
+  `name, type, unit, target, actual, last_point_at, stale, freshness,
+  gap.status, finding.code` — **not** `ObjectiveMetricRead` whole — and the
+  Workspace renders its own sentence per finding code. The findings here are
+  operator-facing remediation ("call `refresh_metric_definitions`") and
+  `owner: role:<id>` names a canon an external client does not own (#78
+  auth-path invariant). `summary` is not projected; the flat findings cross as
+  `finding_codes`, codes only.
+* **One budget, two doors.** `services/objectives_read_budget.py` spells the
+  `agent_objectives_read:{name}` key, the limit and the window once. This
+  route calls `enforce` (429); the portal route calls `admit`, which never
+  raises — an exhausted budget leaves the objectives off the card
+  (`objectives_error: objectives_rate_limited`) and the role, readiness and the
+  owner's flip still answer. The agent's own `get_objectives` draws on this
+  bucket, so a whole-card refusal would let an agent hide its owner's control.
+  The portal door also spends a per-viewer cap first
+  (`portal_role_objectives:{email}:{name}`, a third of the limit, 20/min at
+  the default). Which door calls which
+  function stays in the routers — it is transport (Invariant #1).
+
+Flow: [workspace-role-card.md](workspace-role-card.md).
 
 **Alembic.** The two Alembic orders the original note carried are obsolete:
 #2924 / #2927 / #2936 landed `0066_public_user_memory_writes` →
@@ -428,6 +437,7 @@ locally before pushing — the first must report exactly **one** head.
 | Write | `src/backend/services/metric_points_service.py`, `db/metric_points.py` | `record_metrics` validation + store (ent#478) |
 | **Read** | `src/backend/services/metric_read_service.py` | `freshness`, `read_agent_metrics`, `latest_by_metric`, `freshness_summary`, `bind_dashboard_widgets` (ent#479, ent#666) |
 | **Join** | `src/backend/services/objective_join_service.py` | `gap`, `join_objectives`, `read_objective_files`, `read_objective_join` (ent#666) — the one objective ↔ metric join |
+| Budget | `src/backend/services/objectives_read_budget.py` | The per-agent bucket on the objective fan-out — `enforce` for the operator route, `admit` for the Workspace role card (ent#676) |
 | Route | `src/backend/routers/agent_files.py` | `GET/POST .../metrics*`, `GET .../objectives` |
 | Health | `src/backend/routers/monitoring.py`, `db_models.AgentHealthDetail` | The informational block |
 | Compat | `src/backend/services/compatibility/static_checks.py` | D-009 (shape), D-010 (`metrics.json` superseded) |
@@ -585,8 +595,8 @@ Still open:
 1. **Pace, as opposed to position** — `gap.status` is where the number sits
    relative to the target; judging whether the agent is *late* against `by` is
    ent#605's ramp maths, on top of the `by` / `horizon` this read already carries
-2. **Cross-agent and fleet reads** — the read is self-scoped by design; lifting
-   that is a deliberate grant (ent#80, ent#94)
+2. **Fleet reads and arbitrary datasets** — a grant holder may read one other
+   agent's declared series (ent#727); the wide permissioned read is ent#80/ent#94
 3. **A `metrics_updated` WebSocket trigger** — the refetch route now exists, so
    a thin coalesced trigger is possible (ent#538)
 4. **Alerting** on a breached threshold or a stale metric
@@ -612,3 +622,4 @@ Still open:
 | 2026-09-22 | ent#666 review fixes: findings scoped to the objectives returned, a declared `hold` on the wire as the registry's `neutral`, a 30 s fan-out budget + 5 s per-read timeout, `objectives_skipped` / `objective_id_invalid` findings, and both Alembic rebase orders written out above |
 | 2026-09-22 | Rewrote the READ half (ent#479): the re-backed route, the one `2 x cadence` staleness rule, the declared-metric tiles, MCP `get_metrics`, the health block — and retired `metrics.json` as a source, replacing it with the D-010 finding |
 | 2026-09-29 | Settings → Retention rows for both knobs (ent#671): the `quotas` block on `GET /api/settings/retention`, env-sourced rows read-only, changed-fields-only Save |
+| 2026-09-30 | ent#676: the role card cut over to the objective join — the rebase note became the landed section; one limiter bucket for both doors in `services/objectives_read_budget.py` (the card degrades, the route 429s) |

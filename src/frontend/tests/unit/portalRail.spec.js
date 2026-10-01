@@ -127,7 +127,7 @@ describe('ent#474 — the tab contract', () => {
   })
 
   it('registers the design\'s four tabs with their doors, icons and signals (ent#475)', () => {
-    expect(RAIL_TABS.map((t) => t.id)).toEqual(['work', 'loops', 'canvas', 'files', 'info'])
+    expect(RAIL_TABS.map((t) => t.id)).toEqual(['work', 'loops', 'canvas', 'files', 'projects', 'info'])
     expect(tab('loops')).toMatchObject({ door: RAIL_DOORS.PLATFORM, signal: RAIL_SIGNAL_LIVE, icon: 'refresh' })
     expect(tab('canvas')).toMatchObject({ door: RAIL_DOORS.AUDIENCE, signal: RAIL_SIGNAL_UPDATED, icon: 'template' })
     expect(tab('files')).toMatchObject({ door: RAIL_DOORS.AGENT, signal: RAIL_SIGNAL_UPDATED, icon: 'paperclip' })
@@ -155,9 +155,23 @@ describe('ent#474 — the tab contract', () => {
   })
 
   it('keeps the fixed order Work · Loops · Canvas · Files', () => {
-    expect(RAIL_TAB_ORDER).toEqual(['work', 'loops', 'canvas', 'files', 'info'])
+    expect(RAIL_TAB_ORDER).toEqual(['work', 'loops', 'canvas', 'files', 'projects', 'info'])
     // PLATFORM has exactly one participant, so Info's SOLO_AGENT door passes.
     expect(visibleTabs(ALL_TABS, PLATFORM).map((t) => t.id)).toEqual(['work', 'loops', 'canvas', 'files', 'info'])
+  })
+
+  // ent#661 — Projects needs the platform door AND the roster capability. A
+  // platform session that was not told it has the capability sees exactly the
+  // tabs it saw before (the lines above are unchanged for that reason).
+  it('shows Projects only to a session the roster gave the capability', () => {
+    expect(tab('projects')).toMatchObject({ door: RAIL_DOORS.AUDIENCE, capability: 'projects', icon: 'folder', empty: null })
+    const withCap = { ...PLATFORM, capabilities: { projects: true } }
+    expect(visibleTabs(ALL_TABS, withCap).map((t) => t.id)).toEqual(['work', 'loops', 'canvas', 'files', 'projects', 'info'])
+    expect(tabPassesDoor(tab('projects'), PLATFORM)).toBe(false)
+    expect(tabPassesDoor(tab('projects'), { ...PLATFORM, capabilities: { projects: 'true' } })).toBe(false)
+    // v2.4: an invited outside client gets the capability from its roster, and the tab.
+    expect(tabPassesDoor(tab('projects'), { ...CLIENT, capabilities: { projects: true } })).toBe(true)
+    expect(tabPassesDoor(tab('projects'), CLIENT)).toBe(false)
   })
 
   it('persists under the one approved key', () => {

@@ -112,7 +112,8 @@ async def create_agent_internal(
     current_user: User,
     request: Request,
     skip_name_sanitization: bool = False,
-    adopt_existing_workspace: bool = False
+    adopt_existing_workspace: bool = False,
+    allow_unforked_pull_only: bool = False,
 ) -> AgentStatus:
     """
     Internal function to create an agent.
@@ -125,7 +126,8 @@ async def create_agent_internal(
         request=request,
         skip_name_sanitization=skip_name_sanitization,
         ws_manager=manager,
-        adopt_existing_workspace=adopt_existing_workspace
+        adopt_existing_workspace=adopt_existing_workspace,
+        allow_unforked_pull_only=allow_unforked_pull_only,
     )
 
 
@@ -168,10 +170,27 @@ async def list_agents_endpoint(
     # would be an N+1 on the fleet's hottest endpoint. Agents without a label
     # are absent from the map and render under their slug, as they do today.
     all_labels = db.get_display_labels_for_agents(agent_names)
+    # ent#527 rider (ruling 2026-09-24): the owner's readiness stamp on the list
+    # and the fleet grid — batched for the same reason. Only stamped agents carry
+    # one; `None` means "no stamp", never a guessed `calibrating`. The stamp is
+    # decoration: a failed read degrades to "no stamp" rather than failing the
+    # whole list.
+    try:
+        all_readiness = db.get_role_readiness_for_agents(agent_names)
+    except Exception:
+        logger.warning("[ent#527] readiness read failed; listing without stamps", exc_info=True)
+        all_readiness = {}
+    # Whether a calibrating stamp is actually holding a scheduled brief — the
+    # role card's own predicate, one batched schedule read, so the list's
+    # tooltip never claims a pause the card does not (PR #3038 review).
+    from services.role_readiness_gate import briefs_held_for_list
+    held = briefs_held_for_list(agents, all_readiness)
 
     for agent in agents:
         agent["tags"] = all_tags.get(agent.get("name"), [])
         agent["display_label"] = all_labels.get(agent.get("name"))
+        agent["readiness"] = all_readiness.get(agent.get("name"))
+        agent["brief_held"] = agent.get("name") in held
 
     return agents
 
@@ -265,31 +284,46 @@ async def get_all_sync_health(
 ):
     """Dashboard batch endpoint for sync-health dots (#389).
 
-    Returns one entry per accessible agent. Entries join `agent_sync_state`
-    with the per-agent auto-sync flag so the UI can colour dots and badge
-    agents that have auto-sync off.
+    Returns one entry per accessible agent. trinity-enterprise#706: each entry
+    carries the backend's verdict — `state` / `reason` / `recommendation` /
+    `binding` / `freeze` from `services/sync_health_view.py` — and the new
+    columns, so the dot renders a state the backend owns. The pre-#706 keys are
+    unchanged. One shared query (`db.list_sync_health_rows`) replaces the
+    per-table reads (still no N+1, #73).
     """
+    from services.sync_health_view import sync_view
+
     accessible = {a["name"] for a in get_accessible_agents(current_user)}
-    rows = db.list_sync_states()
-    by_name = {r["agent_name"]: r for r in rows if r["agent_name"] in accessible}
-    # #73: one scoped query instead of an N+1 per-agent lookup.
-    auto_sync_map = db.get_all_git_auto_sync_enabled(accessible)
+    rows = db.list_sync_health_rows(accessible)
 
     entries = []
     for name in sorted(accessible):
-        row = by_name.get(name)
+        bound = rows.get(name)
+        row = (bound or {}).get("state")
+        config = (bound or {}).get("config")
+        view = sync_view(row, config)
+        row = row or {}
         entries.append({
             "agent_name": name,
-            "auto_sync_enabled": auto_sync_map.get(name, False),
-            "last_sync_at": (row or {}).get("last_sync_at"),
-            "last_sync_status": (row or {}).get("last_sync_status") or "never",
-            "consecutive_failures": (row or {}).get("consecutive_failures") or 0,
-            "last_error_summary": (row or {}).get("last_error_summary"),
-            "behind_working": (row or {}).get("behind_working") or 0,
-            "behind_main": (row or {}).get("behind_main") or 0,
-            "ahead_working": (row or {}).get("ahead_working") or 0,
-            "ahead_main": (row or {}).get("ahead_main") or 0,
-            "git_dir_bytes": (row or {}).get("git_dir_bytes"),  # #1596 bloat curve
+            "auto_sync_enabled": bool((config or {}).get("auto_sync_enabled")),
+            "last_sync_at": row.get("last_sync_at"),
+            "last_sync_status": row.get("last_sync_status") or "never",
+            "consecutive_failures": row.get("consecutive_failures") or 0,
+            "last_error_summary": row.get("last_error_summary"),
+            "behind_working": row.get("behind_working") or 0,
+            "behind_main": row.get("behind_main") or 0,
+            "ahead_working": row.get("ahead_working") or 0,
+            "ahead_main": row.get("ahead_main") or 0,
+            "git_dir_bytes": row.get("git_dir_bytes"),  # #1596 bloat curve
+            # trinity-enterprise#706
+            "dirty_files": row.get("dirty_files"),
+            "last_successful_push_at": row.get("last_successful_push_at"),
+            "state": view["state"],
+            "reason": view["reason"],
+            "recommendation": view["recommendation"],
+            "binding": view["binding"] if config else None,
+            "divergence_age_s": view["divergence_age_s"],
+            "freeze": view["freeze"],
         })
     return {"agents": entries}
 
@@ -578,7 +612,7 @@ async def create_agent_endpoint(
         actor_ip=request.client.host if request.client else None,
         target_type="agent",
         target_id=config.name,
-        endpoint=str(request.url.path),
+        endpoint=request.scope["path"],
         details={
             "template": getattr(config, "template", None),
             "base_image": getattr(config, "base_image", None),
@@ -793,7 +827,7 @@ async def delete_agent_endpoint(agent_name: str, request: Request, current_user:
         actor_ip=request.client.host if request.client else None,
         target_type="agent",
         target_id=agent_name,
-        endpoint=str(request.url.path),
+        endpoint=request.scope["path"],
     )
 
     if manager:
@@ -830,7 +864,7 @@ async def start_agent_endpoint(agent_name: AuthorizedAgentByName, request: Reque
             actor_ip=request.client.host if request.client else None,
             target_type="agent",
             target_id=agent_name,
-            endpoint=str(request.url.path),
+            endpoint=request.scope["path"],
             details={
                 "credentials_injection": credentials_status,
                 # #1809: record container replacement + cause (config_drift |
@@ -921,7 +955,7 @@ async def stop_agent_endpoint(agent_name: AuthorizedAgentByName, request: Reques
             actor_ip=request.client.host if request.client else None,
             target_type="agent",
             target_id=agent_name,
-            endpoint=str(request.url.path),
+            endpoint=request.scope["path"],
         )
 
         event = {

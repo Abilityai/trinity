@@ -249,14 +249,16 @@ async def get_agent_resources(
     }
 ```
 
-#### PUT /api/agents/{name}/resources (Lines 841-904)
+#### PUT /api/agents/{name}/resources
+
+**Person-only (#2996)**: the route takes `Depends(require_person)` — a JWT session or the owner's own `user`-scoped key. Agent- and system-scoped keys (and every other key scope) get 403 `person_required` before the owner check, whatever agent they address. See requirements `auth.md` §2.8.
 
 ```python
 @router.put("/{agent_name}/resources")
 async def set_agent_resources(
     agent_name: str,
     body: dict,
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(require_person)
 ):
     # Only owners can change resources
     if not db.can_user_share_agent(current_user.username, agent_name):

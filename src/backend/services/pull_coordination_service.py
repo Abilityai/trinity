@@ -204,8 +204,9 @@ def record_worker_poll(agent_name: str) -> None:
 
 
 def claim_next_task(agent_name: str, worker_id: str) -> Optional[Dict[str, Any]]:
-    """Atomically claim the oldest queued task for ``agent_name`` on behalf of
-    ``worker_id``. Returns the §3.1 claim response, or None when the queue is
+    """Atomically claim the next queued task for ``agent_name`` on behalf of
+    ``worker_id``: interactive turns first (#2842), never a second turn of a
+    conversation already running (#2843). Returns the §3.1 claim response, or None when the queue is
     empty (router → §3.2 empty claim).
 
     The lease TTL reuses the slot-TTL convention: the agent's
@@ -219,7 +220,14 @@ def claim_next_task(agent_name: str, worker_id: str) -> Optional[Dict[str, Any]]
     """
     record_worker_poll(agent_name)
     cap = int(db.get_execution_timeout(agent_name))
-    row = db.claim_next_queued(agent_name, worker_id=worker_id, lease_seconds=cap + SLOT_TTL_BUFFER)
+    from services.pull_pilot import INTERACTIVE_TRIGGERS
+
+    row = db.claim_next_queued(
+        agent_name,
+        worker_id=worker_id,
+        lease_seconds=cap + SLOT_TTL_BUFFER,
+        interactive_triggers=INTERACTIVE_TRIGGERS,
+    )
     if not row:
         return None
     claim = _build_claim_response(row)

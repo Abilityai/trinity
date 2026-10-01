@@ -196,7 +196,7 @@ await platform_audit_service.log(
     target_type="agent",
     target_id=agent_name,
     request_id=request.headers.get("X-Request-ID"),
-    endpoint=str(request.url.path),
+    endpoint=request.scope["path"],
     details={"template": template_name},
 )
 ```
@@ -307,7 +307,7 @@ await platform_audit_service.log(
     actor_ip=request.client.host if request.client else None,
     target_type="agent",
     target_id=agent_name,
-    endpoint=str(request.url.path),
+    endpoint=request.scope["path"],
     details={...},                  # action-specific
 )
 ```

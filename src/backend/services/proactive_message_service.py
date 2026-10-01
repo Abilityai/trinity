@@ -193,7 +193,8 @@ class ProactiveMessageService:
                 turn it ran in is re-delivered (pull-mode at-least-once), the same
                 resolved (recipient, channel) within the same execution dedupes to
                 exactly one send — the LLM-generated body is NOT part of the key.
-                Fail-open when absent/invalid (old image): the send proceeds.
+                Without a usable id: refused on a pull-mode agent, else sent and
+                logged as degraded (#2392, `idempotency_service.effect_guard`).
             dedup_label: Optional agent-supplied discriminator (#1084) so an agent
                 can intentionally send two distinct messages to the same recipient
                 in one turn. Default "" → at-most-one send per (recipient, channel)

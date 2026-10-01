@@ -371,7 +371,7 @@ async def post_brain_orb_action(
         actor_ip=request.client.host if request.client else None,
         target_type="agent",
         target_id=agent_name,
-        endpoint=str(request.url.path),
+        endpoint=request.scope["path"],
         request_id=getattr(request.state, "request_id", None),
         details=details,
     )
@@ -421,7 +421,7 @@ async def post_brain_orb_refresh(agent_name: OwnedAgentByName, request: Request,
         actor_ip=request.client.host if request.client else None,
         target_type="agent",
         target_id=agent_name,
-        endpoint=str(request.url.path),
+        endpoint=request.scope["path"],
         request_id=getattr(request.state, "request_id", None),
     )
     return result
@@ -459,7 +459,7 @@ async def put_brain_orb_postprocess(agent_name: OwnedAgentByName, request: Reque
         actor_ip=request.client.host if request.client else None,
         target_type="agent",
         target_id=agent_name,
-        endpoint=str(request.url.path),
+        endpoint=request.scope["path"],
         request_id=getattr(request.state, "request_id", None),
     )
     return result

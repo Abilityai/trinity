@@ -11,13 +11,22 @@ the Files tab uses — never copied platform-side:
 
 * `template.yaml` → `x-role: {role, status, seat?}` (the wizard writes it,
   #511) and `x-canon.clone_path` (default `canon`);
-* `<canon>/roles/<id>.yaml`, `<canon>/objectives/*.yaml` (framework §3.4);
-* metric values from the agent's own `/api/metrics` (`metrics.json`, whose
-  `last_updated` is the freshness stamp).
+* `<canon>/roles/<id>.yaml` (framework §3.4).
+
+**The objectives are not this module's to compute (ent#676).** What the agent
+is supposed to move, where each number is and whether to believe it is the one
+objective ↔ metric join (`services/objective_join_service.read_objective_join`,
+ent#666), called in process with the template and the client already in hand.
+There is no second join and no second metric stale rule here; this module only
+PROJECTS the join's answer down to what a Workspace client may see (TD-4): the
+operator's remediation sentences, objective file paths and `owner: role:<id>`
+stay on the operator door (the #78 auth-path invariant), and a finding crosses
+as its code.
 
 Every read is fail-soft and NAMED: no `x-role` → no card; an unreadable or
 unparseable role file → `role.error`, never an empty role; a stopped agent →
-`unavailable: agent_stopped`.
+`unavailable: agent_stopped`; objectives that could not be read →
+`objectives_error`, never an empty list dressed as "this agent has none".
 
 **Readiness is the one thing that is NOT read from the file.** `x-role.status`
 is agent-writable and the 2026-09-20 ruling (#663) is that only the agent
@@ -34,26 +43,28 @@ from __future__ import annotations
 import logging
 import re
 from datetime import datetime, timedelta, timezone
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from database import db
+from services.role_readiness_gate import brief_is_held, is_seat_delivery_schedule
 
 from . import db as portal_db
 
 logger = logging.getLogger(__name__)
 
-#: Framework §3.5 — the staleness bound for roles, objectives and the map, and
-#: the one rule the framework states for "is this metric current". A per-metric
-#: cadence is the business-metrics workstream's to declare.
+#: Framework §3.5 — the staleness bound for canon FILES. On this card it
+#: governs the role file's `review_by` and nothing else: whether a METRIC is
+#: stale is the join's one rule (`metric_read_service.freshness`, 2× cadence),
+#: never a second one here (ent#676).
 STALE_AFTER_DAYS = 30
 #: §7.2 step 9 — the three-strikes test asks for ten real asks.
 WALKTHROUGH_ASKS = 10
 #: Bounds on what crosses from author-controlled files to the card.
 MAX_TEXT = 400
-MAX_OBJECTIVES = 20
-MAX_METRICS_PER_OBJECTIVE = 12
+#: A text value or target on a metric row — the join's own bound on
+#: `target_text`, applied to a recorded text value too.
+MAX_VALUE_TEXT = 64
 _ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
-_PATH_SEG_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 
 READINESS_STATES = ("calibrating", "ready")
 
@@ -82,17 +93,6 @@ def _safe_id(v: Any) -> Optional[str]:
     return s if s and _ID_RE.match(s) else None
 
 
-def canon_root(template: dict) -> Optional[str]:
-    """`x-canon.clone_path` (default `canon`), validated as one plain path
-    segment chain — it is author-controlled and reaches a file read."""
-    xc = template.get("x-canon") if isinstance(template, dict) else None
-    raw = (xc.get("clone_path") if isinstance(xc, dict) else None) or "canon"
-    raw = str(raw).strip().strip("/")
-    if not raw or any(not _PATH_SEG_RE.match(seg) or seg == ".." for seg in raw.split("/")):
-        return None
-    return raw
-
-
 def parse_iso(ts: Any) -> Optional[datetime]:
     if not ts or not isinstance(ts, str):
         return None
@@ -106,22 +106,13 @@ def parse_iso(ts: Any) -> Optional[datetime]:
 def is_stale(as_of: Optional[str], *, now: Optional[datetime] = None,
              bound_days: int = STALE_AFTER_DAYS) -> bool:
     """Missing stamp, unparseable stamp, or older than the bound → stale.
-    Never optimistic: an unknown age is stale, not current (quality bar #4)."""
+    Never optimistic: an unknown age is stale, not current (quality bar #4).
+    For a canon file's `review_by` only — never for a metric (ent#676)."""
     dt = parse_iso(as_of)
     if dt is None:
         return True
     now = now or datetime.now(timezone.utc)
     return dt < now - timedelta(days=bound_days)
-
-
-def objective_concerns(obj: dict, role_id: str, agent_name: str) -> bool:
-    """An objective belongs on this card when the role owns it or this agent
-    supports it (framework §3.4: `owner: role:<id>`, `supporting_agents`)."""
-    owner = _text(obj.get("owner"), 128) or ""
-    if owner == f"role:{role_id}":
-        return True
-    supporting = obj.get("supporting_agents")
-    return isinstance(supporting, list) and agent_name in [str(a) for a in supporting]
 
 
 def effective_readiness(template_status: Any, stamp: Optional[dict]) -> dict:
@@ -153,19 +144,119 @@ def effective_readiness(template_status: Any, stamp: Optional[dict]) -> dict:
     }
 
 
-def metric_row(name: str, spec: dict, values: dict, as_of: Optional[str], *,
-               now: Optional[datetime] = None) -> dict:
-    value = values.get(name) if isinstance(values, dict) else None
-    stale = value is None or is_stale(as_of, now=now)
+# ---------------------------------------------------------------------------
+# the portal projection of the objective join (ent#676, TD-4)
+#
+# Every function here PICKS fields; none of them copies a row. A key the join
+# grows tomorrow therefore does not reach a Workspace client until someone adds
+# it here and to the model on purpose.
+# ---------------------------------------------------------------------------
+
+def _value(v: Any) -> Any:
+    """A number as it is; agent-written text bounded; anything else nothing."""
+    if isinstance(v, bool):
+        return None
+    if isinstance(v, (int, float)):
+        return v
+    return _text(v, MAX_VALUE_TEXT) if isinstance(v, str) else None
+
+
+def portal_metric(row: dict) -> dict:
+    """One joined metric as a Workspace client may see it.
+
+    The finding crosses as its CODE: the sentence beside it on the operator
+    door is remediation ("call refresh_metric_definitions") and names files
+    the client does not own. `gap` crosses as its status — position relative
+    to the target, never pace, and never the delta.
+    """
+    gap = row.get("gap") if isinstance(row.get("gap"), dict) else {}
+    finding = row.get("finding") if isinstance(row.get("finding"), dict) else None
+    target = row.get("target")
     return {
-        "name": name,
-        "direction": _text(spec.get("direction"), 16),
-        "target": spec.get("target") if isinstance(spec.get("target"), (int, float, str)) else None,
-        "by": _text(spec.get("by"), 32),
-        "value": value if isinstance(value, (int, float, str)) else None,
-        "as_of": as_of if value is not None else None,
-        "stale": stale,
+        "name": row.get("name"),
+        "type": _text(row.get("type"), 32),
+        "unit": _text(row.get("unit"), 32),
+        "target": _value(target if target is not None else row.get("target_text")),
+        "actual": _value(row.get("actual")),
+        "last_point_at": row.get("last_point_at"),
+        "stale": row.get("stale") is True,
+        "freshness": row.get("freshness"),
+        "gap": {"status": gap.get("status") or "not_computable"},
+        "finding": {"code": finding["code"]} if finding and finding.get("code") else None,
     }
+
+
+def portal_objective(obj: dict) -> dict:
+    """One joined objective as a Workspace client may see it — no `owner`, no
+    canon `path`, no `review_by`: those describe a canon the client does not
+    own."""
+    metrics = obj.get("metrics") if isinstance(obj.get("metrics"), list) else []
+    return {
+        "id": obj.get("id"),
+        "statement": obj.get("statement"),
+        "horizon": obj.get("horizon"),
+        "status": obj.get("status"),
+        "owned": obj.get("owned") is True,
+        "metrics": [portal_metric(m) for m in metrics if isinstance(m, dict)],
+    }
+
+
+def finding_codes(join: dict) -> list[str]:
+    """The join's findings as distinct codes, first seen first. Codes only: a
+    file-level finding can name another role's file, and whose it is cannot be
+    known when it never parsed."""
+    codes: list[str] = []
+    for finding in join.get("findings") or []:
+        code = finding.get("code") if isinstance(finding, dict) else None
+        if isinstance(code, str) and code not in codes:
+            codes.append(code)
+    return codes
+
+
+#: The join's file-level failures: an objective file that would not read, would
+#: not parse, or was refused by name. Whose file it was is unknowable (it never
+#: parsed), so on the card they mean "the list may be missing some".
+_FILE_FAILURE_CODES = frozenset({
+    "objective_unreadable", "objective_invalid", "objective_file_skipped"})
+
+
+def objectives_partial(join: dict) -> bool:
+    """True when objectives joined but some objective files were not read.
+
+    The list on the card is then possibly incomplete, and it must not look
+    like a complete one (design-system principle 15). Never true for zero
+    objectives — `objectives_error` names that case.
+    """
+    if not join.get("objectives"):
+        return False
+    source = join.get("source") if isinstance(join.get("source"), dict) else {}
+    return (bool(set(finding_codes(join)) & _FILE_FAILURE_CODES)
+            or bool(source.get("objectives_unscanned")))
+
+
+def objectives_error(join: dict) -> Optional[str]:
+    """Why the card shows NO objectives — or None when that is simply true.
+
+    An agent with no objectives directory, or none that name it, has none: a
+    real empty, and the card says nothing. Every other way of arriving at zero
+    is a read that did not happen, and rendering it as the same empty would
+    turn "could not be read" into "has none".
+    """
+    if join.get("objectives"):
+        return None
+    if join.get("unavailable"):
+        return "agent_unreachable"
+    source = join.get("source") if isinstance(join.get("source"), dict) else {}
+    state = source.get("objectives_dir")
+    codes = set(finding_codes(join))
+    if state == "timeout":
+        return "objectives_timeout"
+    if state == "unreadable" or "objective_unreadable" in codes:
+        return "objectives_unreadable"
+    if (codes & {"objective_invalid", "objective_file_skipped"}
+            or source.get("objectives_unscanned")):
+        return "objectives_incomplete"
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -193,57 +284,32 @@ async def _read_yaml(client, path: str) -> tuple[Optional[dict], Optional[str]]:
     return (data, None) if isinstance(data, dict) else (None, "invalid")
 
 
-async def _list_yaml_files(client, directory: str) -> list[str]:
-    """Names of `*.yaml` / `*.yml` directly under `directory`, or [] when the
-    directory is absent or unreadable."""
-    try:
-        resp = await client.get(f"/api/files?path=/home/developer/{directory}")
-    except Exception as e:  # noqa: BLE001
-        logger.warning("role card: list %s failed: %s", directory, e)
-        return []
-    if resp is None or getattr(resp, "status_code", 0) != 200:
-        return []
-    try:
-        body = resp.json()
-    except ValueError:
-        return []
-    names: list[str] = []
-    for item in (body.get("tree") or body.get("children") or []):
-        if not isinstance(item, dict) or item.get("type") == "directory" or item.get("is_dir"):
-            continue
-        name = str(item.get("name") or "")
-        if name.endswith((".yaml", ".yml")) and _PATH_SEG_RE.match(name):
-            names.append(name)
-    return sorted(names)[:MAX_OBJECTIVES]
-
-
-async def _read_metrics(client) -> tuple[dict, Optional[str]]:
-    """(values, last_updated) from the agent's own metrics endpoint."""
-    try:
-        resp = await client.get("/api/metrics")
-        if resp is None or resp.status_code != 200:
-            return {}, None
-        body = resp.json()
-    except Exception as e:  # noqa: BLE001
-        logger.warning("role card: metrics read failed: %s", e)
-        return {}, None
-    values = body.get("values") if isinstance(body, dict) else None
-    return (values if isinstance(values, dict) else {}), (body.get("last_updated") if isinstance(body, dict) else None)
-
-
 # ---------------------------------------------------------------------------
 # the card
 # ---------------------------------------------------------------------------
 
-async def build_role_card(agent_name: str, email: str, *, is_platform: bool) -> dict:
+async def build_role_card(agent_name: str, email: str, *, is_platform: bool,
+                          admit_objectives: Callable[[], bool]) -> dict:
     """Everything the Role card shows, or `{"role": None}` when the agent has no role.
 
     The relationship line reads from ent#500's assignments when they land;
     until then it is `None`, which the client renders as "no assignment
     recorded" rather than blank.
+
+    `admit_objectives` is the router's check against the objective-read budget
+    (`services/objectives_read_budget`), called here — once, and only when the
+    objectives are about to be read — so a card that stops earlier (no role, a
+    stopped agent, a role file that failed) spends nothing. It is required,
+    never defaulted: a caller that forgot it would reach the container fan-out
+    unbounded. False leaves the objectives out and says so; the rest of the
+    card still answers.
     """
     from services import docker_utils
     from services.agent_client import get_agent_client
+    # Function-local so no portal suite drags the metrics stack in, and outside
+    # any `try`: an import that fails here must be loud, not read as "the
+    # objectives could not be read" by the fail-soft handler below.
+    from services import objective_join_service
 
     stamp = _readiness_stamp(agent_name)
 
@@ -273,7 +339,9 @@ async def build_role_card(agent_name: str, email: str, *, is_platform: bool) -> 
         return {"agent_name": agent_name, "role": None}
 
     role_id = _safe_id(xrole.get("role"))
-    root = canon_root(template)
+    # The join's validator, not a copy of it — one rule for what may reach a
+    # file read.
+    root = objective_join_service.canon_root(template)
     card: dict[str, Any] = {
         "agent_name": agent_name,
         "role": {
@@ -284,6 +352,9 @@ async def build_role_card(agent_name: str, email: str, *, is_platform: bool) -> 
         },
         "seat": _text(xrole.get("seat"), 128),
         "objectives": [],
+        "objectives_error": None,
+        "objectives_partial": False,
+        "finding_codes": [],
         "readiness": effective_readiness(xrole.get("status"), stamp),
         # Platform viewers only: an external client can neither act on a held
         # brief nor see the schedules it comes from (the flip is platform-only too).
@@ -308,26 +379,26 @@ async def build_role_card(agent_name: str, email: str, *, is_platform: bool) -> 
         "stale": is_stale(_text(role.get("review_by"), 32)) if role.get("review_by") else False,
     })
 
-    # Objectives: the role owns them or this agent supports them.
-    values, as_of = await _read_metrics(client)
-    now = datetime.now(timezone.utc)
-    for fname in await _list_yaml_files(client, f"{root}/objectives"):
-        obj, oerr = await _read_yaml(client, f"{root}/objectives/{fname}")
-        if oerr or not objective_concerns(obj, role_id, agent_name):
-            continue
-        metrics = obj.get("metrics") if isinstance(obj.get("metrics"), list) else []
-        rows = []
-        for m in metrics[:MAX_METRICS_PER_OBJECTIVE]:
-            if isinstance(m, dict) and _safe_id(m.get("name")):
-                rows.append(metric_row(_safe_id(m.get("name")), m, values, as_of, now=now))
-        card["objectives"].append({
-            "id": _safe_id(obj.get("id")) or fname.rsplit(".", 1)[0],
-            "statement": _text(obj.get("statement")),
-            "horizon": _text(obj.get("horizon"), 16),
-            "status": _text(obj.get("status"), 32),
-            "owned": (_text(obj.get("owner"), 128) or "") == f"role:{role_id}",
-            "metrics": rows,
-        })
+    if not admit_objectives():
+        card["objectives_error"] = "objectives_rate_limited"
+        return card
+
+    # Objectives, their numbers and their freshness: the one join (ent#666).
+    try:
+        join = await objective_join_service.read_objective_join(
+            agent_name, template=template, client=client)
+    except Exception:  # noqa: BLE001 — the card is fail-soft and named
+        # The store is the one thing the join raises for. Whatever it was, the
+        # role and the owner's readiness control must still answer; the
+        # traceback keeps a defect loud in the log.
+        logger.exception("role card: objective join failed for %s", agent_name)
+        card["objectives_error"] = "objectives_unreadable"
+        return card
+    card["objectives"] = [portal_objective(o) for o in join.get("objectives") or []
+                          if isinstance(o, dict)]
+    card["objectives_error"] = objectives_error(join)
+    card["objectives_partial"] = objectives_partial(join)
+    card["finding_codes"] = finding_codes(join)
     return card
 
 
@@ -336,18 +407,22 @@ def _brief_held(agent_name: str, stamp: Optional[dict]) -> bool:
     seat-delivery schedule and its stamp is not `ready`. Reads the stamp the
     gate reads, never the template. Fail-soft: an unreadable schedule list says
     nothing rather than a claim about a pause."""
-    if stamp and stamp.get("status") == "ready":
+    status = stamp.get("status") if stamp else None
+    if status == "ready":
         return False
     try:
         # Autonomy off stops every schedule before readiness is asked; saying
         # "paused until you mark it ready" then would promise a flip that
-        # starts nothing.
-        if not db.get_autonomy_enabled(agent_name):
+        # starts nothing. The rule itself is shared with the agents list
+        # (services/role_readiness_gate.brief_is_held) so the two never disagree.
+        autonomy = db.get_autonomy_enabled(agent_name)
+        if not autonomy:
             return False
-        return any(
-            s.enabled and (s.deliver_to_workspace_email or "").strip()
+        seated = any(
+            is_seat_delivery_schedule(s.enabled, s.deliver_to_workspace_email)
             for s in db.list_agent_schedules(agent_name)
         )
+        return brief_is_held(status, autonomy, seated)
     except Exception as e:  # noqa: BLE001
         logger.warning("role card: schedule read failed for %s: %s", agent_name, e)
         return False

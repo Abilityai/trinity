@@ -300,6 +300,18 @@ export const useClientPortalStore = defineStore('clientPortal', {
     // sync step, and three separate queries is how that stops being true.
     asks: [],
     asksAvailable: false,   // false when the backend does not serve /asks (404/403)
+    // trinity-enterprise#610: the 404/403 VERDICT, distinct from "not fetched
+    // yet" (both leave `asksAvailable` false). The Inbox's Action tab needs it:
+    // an instance that does not serve asks has an empty Action, not a skeleton.
+    asksAbsent: false,
+    // trinity-enterprise#610 (PR A0): the read's honesty. `asksLoaded` latches on
+    // the first success; `asksFailed` is the LAST read's verdict for anything but
+    // 404/403 (a 5xx, 503 `asks_unavailable`, a network error) — the list keeps
+    // what it last knew, so a surface can say "couldn't refresh" instead of
+    // claiming nothing is waiting. `asksLoadedAt` feeds the stale banner.
+    asksLoaded: false,
+    asksFailed: false,
+    asksLoadedAt: null,
     // Where the user was when it expired, so re-authenticating returns them
     // there instead of the roster root.
     resumePath: null,
@@ -312,6 +324,10 @@ export const useClientPortalStore = defineStore('clientPortal', {
     // actually says otherwise, and the component never sees an undefined
     // tri-state.
     multiAgentChatAvailable: false,
+    // ent#661 — may THIS principal use Workspace Projects? Same channel and
+    // same fail-closed direction as the flag above: only a successful roster
+    // that says so raises it (internal-only, so an outside client never does).
+    projectsAvailable: false,
     // ent#534 — may THIS principal start a real-time voice call from the
     // Workspace, and if not, why (words for the disabled control). Fail-closed
     // like the flag above; `reason: null` for a portal-token client means the
@@ -591,6 +607,19 @@ export const useClientPortalStore = defineStore('clientPortal', {
       // client signing in on the same browser must not inherit this list.
       this.modelOptions = []
       this.rosterLoaded = false
+      // trinity-enterprise#610 (PR A0): a failed read keeps the last good list,
+      // so the list must not outlive the session it belongs to — or the next
+      // client's first failed read shows them the previous client's asks.
+      this.asks = []
+      this.asksAvailable = false
+      this.asksAbsent = false
+      this.asksLoaded = false
+      this.asksFailed = false
+      this.asksLoadedAt = null
+      // Round-3 /cso: the session list keeps its last good copy the same way
+      // (#2198), so it is session state and goes with the session too.
+      this.lastSessions = []
+      this.sessionsFailed = false
       // #2261: the primitive clears the suppression; `endSession({expired})`
       // re-arms it immediately afterwards. Keeping the clear HERE is what stops
       // a marker from outliving the session it was about.
@@ -695,7 +724,7 @@ export const useClientPortalStore = defineStore('clientPortal', {
     // on BOTH turn actions — a field honoured by only one brings the bug back
     // exactly when streaming fails and this fallback runs.
     async sendPortalChat(agentName, message, sessionId = null,
-                    { newThread = false, openCanvasId = null, model = null } = {}) {
+                    { newThread = false, openCanvasId = null, model = null, replyToMessageId = null } = {}) {
       const { data } = await portalHttp.post(
         `/api/enterprise/client-portal/agents/${agentName}/chat`,
         {
@@ -707,6 +736,10 @@ export const useClientPortalStore = defineStore('clientPortal', {
           // Server-validated: an id the caller cannot see is discarded there,
           // so sending it is never a way to reach a canvas they could not open.
           open_canvas_id: openCanvasId,
+          // ent#610 — the message this turn replies to. An id only: the server
+          // quotes the stored row into the prompt, and refuses (422) one that
+          // is not in this caller's thread.
+          reply_to_message_id: replyToMessageId || null,
         },
         { headers: this.authHeader }
       )
@@ -719,7 +752,7 @@ export const useClientPortalStore = defineStore('clientPortal', {
     // for headless clients (ent#83), and is still the fallback when streaming
     // is unavailable.
     async startPortalChat(agentName, message, sessionId = null,
-                    { newThread = false, openCanvasId = null, model = null } = {}) {
+                    { newThread = false, openCanvasId = null, model = null, replyToMessageId = null } = {}) {
       const { data } = await portalHttp.post(
         `/api/enterprise/client-portal/agents/${agentName}/chat/stream`,
         {
@@ -731,6 +764,10 @@ export const useClientPortalStore = defineStore('clientPortal', {
           // Server-validated: an id the caller cannot see is discarded there,
           // so sending it is never a way to reach a canvas they could not open.
           open_canvas_id: openCanvasId,
+          // ent#610 — the message this turn replies to. An id only: the server
+          // quotes the stored row into the prompt, and refuses (422) one that
+          // is not in this caller's thread.
+          reply_to_message_id: replyToMessageId || null,
         },
         { headers: this.authHeader }
       )
@@ -922,16 +959,23 @@ export const useClientPortalStore = defineStore('clientPortal', {
     // rather than their deliverables. Fail-soft to [] — a chat that cannot list
     // its deliverables must still be a working chat.
     async fetchSessionDeliverables(agentName, sessionId) {
-      if (!agentName || !sessionId) return []
       try {
-        const { data } = await portalHttp.get(
-          `/api/enterprise/client-portal/agents/${agentName}/reports`,
-          { headers: this.authHeader, params: { session_id: sessionId } },
-        )
-        return data.reports || []
+        return await this.fetchSessionDeliverablesStrict(agentName, sessionId)
       } catch {
         return []
       }
+    },
+
+    // trinity-enterprise#610 (D11): the same read, but it RETHROWS. The Inbox
+    // pane must tell "this chat has no deliverables" from "the list failed" —
+    // the fail-soft twin above cannot, by design.
+    async fetchSessionDeliverablesStrict(agentName, sessionId) {
+      if (!agentName || !sessionId) return []
+      const { data } = await portalHttp.get(
+        `/api/enterprise/client-portal/agents/${agentName}/reports`,
+        { headers: this.authHeader, params: { session_id: sessionId } },
+      )
+      return data.reports || []
     },
 
     // #2162: `rowsLimit` windows a TABULAR payload server-side. Sent on every
@@ -1429,15 +1473,31 @@ export const useClientPortalStore = defineStore('clientPortal', {
     //
     // Keyed `${kind}:${id}`: the two id spaces are independent, so an id alone
     // is not a key.
-    async fetchChatState() {
+    // trinity-enterprise#610 (D5): called with NO argument it returns the
+    // `kind:id` → entry map, exactly as before — every existing caller keeps
+    // its shape. Called with an options object it returns `{state, previews}`:
+    // `previews` maps `kind:id` → `{latest, first_unread_message_id}` for the
+    // entries the server enriched (only with `previews: true`, only while the
+    // Inbox is mounted). Counts and previews come from one response, so the
+    // row's "N new" and its excerpt cannot drift. An older backend ignores the
+    // flag and `previews` is simply empty.
+    async fetchChatState(opts) {
+      const withPreviews = !!(opts && opts.previews)
       const { data } = await portalHttp.get('/api/enterprise/client-portal/chat-state', {
         headers: this.authHeader,
+        ...(withPreviews ? { params: { previews: true } } : {}),
       })
       const out = {}
+      const previews = {}
       for (const c of data.chats || []) {
-        if (c && c.kind && c.id) out[`${c.kind}:${c.id}`] = c
+        if (!(c && c.kind && c.id)) continue
+        const key = `${c.kind}:${c.id}`
+        out[key] = c
+        if (c.latest || c.first_unread_message_id) {
+          previews[key] = { latest: c.latest || null, first_unread_message_id: c.first_unread_message_id || null }
+        }
       }
-      return out
+      return opts === undefined ? out : { state: out, previews }
     },
 
     async setChatStar(kind, chatId, starred) {
@@ -1458,6 +1518,18 @@ export const useClientPortalStore = defineStore('clientPortal', {
           { headers: this.authHeader },
         )
       } catch { /* stale badge only */ }
+    },
+
+    // trinity-enterprise#610 (D11): the same write, but it RETHROWS. Mark all
+    // read settles many of these and must report how many failed —
+    // `markChatRead` swallows every error by design, so `Promise.allSettled`
+    // over it would report zero failures even if all of them failed.
+    async markChatReadStrict(kind, chatId) {
+      await portalHttp.post(
+        `/api/enterprise/client-portal/chat-state/${kind}/${encodeURIComponent(chatId)}/read`,
+        null,
+        { headers: this.authHeader },
+      )
     },
 
     // `since` is the seq cursor: 0 loads the whole transcript, a later value
@@ -2024,32 +2096,84 @@ export const useClientPortalStore = defineStore('clientPortal', {
     // store onto a dedicated instance so a workspace request can never inherit
     // the platform JWT from `axios.defaults`.
     //
-    // Degrades to silence. Asks are OSS core since ent#428, so a CURRENT backend
-    // always serves this; against an OLDER one — which either predates the
-    // surface or still gates it behind the entitlement it used to carry — the
+    // Absence degrades to silence. Asks are OSS core since ent#428, so a CURRENT
+    // backend always serves this; against an OLDER one — which either predates
+    // the surface or still gates it behind the entitlement it used to carry — the
     // 404/403 is not an error worth showing a client. `asksAvailable` stays
     // false and every surface renders nothing.
+    //
+    // A FAILURE is not absence (trinity-enterprise#610, PR A0). Anything else —
+    // 5xx, 503 `asks_unavailable`, network — sets `asksFailed`, keeps the last
+    // good list and leaves `asksAvailable` alone: clearing either would blank
+    // every PortalAsks surface and zero the badge, i.e. "nothing needs you"
+    // during an outage (#2915; the contract's "never overwrite the data with a
+    // synthetic empty payload in a catch", ent#253).
+    //
+    // A 401 is neither: the SESSION ended. It goes through `endSession` exactly
+    // as the roster fetch's 401 does (ent#375), which clears the list via
+    // `signOut()`. Folding it into `asksFailed` kept the previous client's list
+    // on screen: the 20s poll runs this and `refreshThreads`, never the roster,
+    // and `portalHttp`'s 401 interceptor acts only for a platform session — so
+    // for a portal-token client nothing else would ever end it.
+    //
+    // A read that resolves after the session it was issued under has ended
+    // (sign-out, expiry, another client signing in) is dropped: writing it
+    // would put that session's asks back into the store the sign-out cleared.
     async fetchAsks(agentName = null) {
       if (!this.isClientSignedIn) return []
+      const issuedUnder = this.portalToken
+      const stale = () => this.portalToken !== issuedUnder || !this.isClientSignedIn
       try {
         // trinity-enterprise#611: the asks that ended in the last 7 days ride the
         // same list, so a person sees how an ask ended instead of watching it
-        // vanish; `openAsks` (the badge) and the Work tab stay pending-only.
+        // vanish; `openAsks` (the badges and the asks-waiting line) stays pending-only.
         const { data } = await portalHttp.get('/api/enterprise/client-portal/asks', {
           headers: this.authHeader,
           params: agentName ? { agent_name: agentName, include_ended: true } : { include_ended: true },
         })
+        if (stale()) return []
         this.asks = Array.isArray(data) ? data : []
         this.asksAvailable = true
+        this.asksAbsent = false
+        this.asksLoaded = true
+        this.asksFailed = false
+        this.asksLoadedAt = Date.now()
         return this.asks
       } catch (err) {
-        this.asksAvailable = false
-        if (![403, 404].includes(err.response?.status)) {
-          console.warn('[workspace] asks unavailable:', err?.message || err)
+        if (stale()) return []
+        if (err.response?.status === 401 && this.portalToken) {
+          this.endSession({
+            expired: true,
+            resumePath: typeof window !== 'undefined' ? window.location.pathname : null,
+          })
+          return []
         }
-        this.asks = []
-        return []
+        if ([403, 404].includes(err.response?.status)) {
+          this.asksAvailable = false
+          this.asksAbsent = true
+          this.asksLoaded = false
+          this.asksFailed = false
+          this.asks = []
+          return []
+        }
+        console.warn('[workspace] asks unavailable:', err?.message || err)
+        this.asksFailed = true
+        return this.asks
       }
+    },
+
+    // trinity-enterprise#610 (the 09-30 ruling, amended): ONE chat's chat-turn
+    // asks, pending and ended with no ended window — an ended one stays in that
+    // chat's history for the queue's retention, past the 7 days `asks` carries.
+    // Returns the rows and writes nothing: `asks` stays the one list the counts
+    // read. Rethrows; the chat keeps what `asks` gives it when this fails.
+    async fetchChatTurnAsks(chatId) {
+      if (!this.isClientSignedIn || !chatId) return []
+      const { data } = await portalHttp.get('/api/enterprise/client-portal/asks', {
+        headers: this.authHeader,
+        params: { chat_id: chatId },
+      })
+      return Array.isArray(data) ? data : []
     },
 
     // ent#525: the chat's work — what its participants are doing now and did
@@ -2075,6 +2199,17 @@ export const useClientPortalStore = defineStore('clientPortal', {
         headers: this.authHeader,
         params: { agents: (agentNames || []).filter(Boolean).join(',') },
       })
+      return data
+    },
+
+    // trinity-enterprise#610 PR A2 §3g L7 (E1): one ask's context — its origin,
+    // the run that raised it, the viewer's recent answers. It RETHROWS: the
+    // pane must tell "this ask has no context" from "the read failed".
+    async fetchAskContext(askId) {
+      const { data } = await portalHttp.get(
+        `/api/enterprise/client-portal/asks/${encodeURIComponent(askId)}/context`,
+        { headers: this.authHeader },
+      )
       return data
     },
 
@@ -2138,6 +2273,8 @@ export const useClientPortalStore = defineStore('clientPortal', {
         // every background refetch would unmount a live room and flash a
         // refusal at an entitled client before taking it back.
         this.multiAgentChatAvailable = data.multi_agent_chat_available === true
+        // ent#661: same strictness, same reason.
+        this.projectsAvailable = data.projects_available === true
         // ent#534: same strictness — an older backend without the field reads
         // as "not available", never as truthy.
         this.realtimeVoice = {

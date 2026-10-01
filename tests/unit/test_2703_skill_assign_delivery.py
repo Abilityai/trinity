@@ -283,7 +283,7 @@ def _user():
 
 def _request():
     return SimpleNamespace(client=SimpleNamespace(host="127.0.0.1"),
-                           url=SimpleNamespace(path="/x"), state=SimpleNamespace(request_id="r1"))
+                           scope={"path": "/x"}, state=SimpleNamespace(request_id="r1"))
 
 
 def test_post_assign_delivers_and_broadcasts(router, monkeypatch, ws):

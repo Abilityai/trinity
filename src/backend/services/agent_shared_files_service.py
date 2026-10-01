@@ -36,6 +36,7 @@ from services.docker_utils import container_get_archive
 from services.settings_service import get_public_chat_url
 from services import turn_audience
 from services.turn_audience import TurnAudience
+from utils.zip_signature import is_zip_container
 
 logger = logging.getLogger(__name__)
 
@@ -123,12 +124,17 @@ def validate_publish_path(filename: str) -> str:
 
 def detect_mime(data: bytes) -> str:
     """Return the MIME type inferred from the first bytes of `data`."""
+    detected = "application/octet-stream"
     if _MAGIC_AVAILABLE:
         try:
-            return magic.from_buffer(data[:4096], mime=True) or "application/octet-stream"
+            detected = magic.from_buffer(data[:4096], mime=True) or detected
         except Exception as e:
             logger.warning(f"[shared-files] MIME detection failed: {e}")
-    return "application/octet-stream"
+    # libmagic 5.46 reports a ZIP buffer as octet-stream (#3080). Only the generic
+    # answer is overridden, so DOCX/XLSX/JAR keep libmagic's more specific type.
+    if detected == "application/octet-stream" and is_zip_container(data):
+        return "application/zip"
+    return detected
 
 
 def check_mime_blocklist(data: bytes, mime_type: str) -> None:
@@ -512,8 +518,9 @@ async def create_share(
     + the addressee (ent#549 — re-addressing a file is a second share),
     scoped to ``execution_id``. A re-run of the same turn sharing the same file
     replays the original signed URL instead of minting a second token; a changed
-    file (different content) under the same name produces a new share. Fail-open
-    when ``execution_id`` is absent/invalid (old image / the internal path).
+    file (different content) under the same name produces a new share. Without a
+    usable ``execution_id`` (old image / the internal path): refused on a
+    pull-mode agent, else shared and logged as degraded (#2392).
     """
     # --- flag gate ---
     if not db.get_file_sharing_enabled(agent_name):

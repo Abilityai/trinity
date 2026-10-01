@@ -118,8 +118,16 @@ class BacklogService:
             "self_task_activity_id": self_task_activity_id,
         }
         queued_at = utc_now_iso()
+        # #2843: a pilot's worker claims these, so tag the conversation a turn
+        # continues and the claim will never run two of its turns at once.
+        # Non-pilots are drained by the backend and keep today's behaviour.
+        from services.pull_pilot import is_pull_pilot_agent
+
+        conversation_key = None
+        if is_pull_pilot_agent(agent_name):
+            conversation_key = request.chat_session_id or request.resume_session_id or None
         ok = db.update_execution_to_queued(
-            execution_id, json.dumps(metadata), queued_at
+            execution_id, json.dumps(metadata), queued_at, conversation_key
         )
         if not ok:
             # update_execution_to_queued is CAS-guarded on status == RUNNING

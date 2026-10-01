@@ -583,6 +583,12 @@ INSTALL_SOURCE_VALUES = frozenset({
     # run at all unless DO's metadata service answers — so the value is a fact
     # the machine established, not a claim an operator typed.
     "do-script",
+    # AWS (#3004): the Marketplace AMI's first boot, and a doc-driven install
+    # onto EC2. `aws-script` is established the same way `do-script` is —
+    # `start.sh --provision --cloud aws` refuses to run unless EC2's metadata
+    # service issues it an IMDSv2 token.
+    "aws-marketplace",
+    "aws-script",
     "script",
     INSTALL_SOURCE_UNKNOWN,
 })
@@ -590,7 +596,7 @@ INSTALL_SOURCE_VALUES = frozenset({
 # The subset that renders the first-run hardening guide. Kept here rather than
 # in the frontend so the browser holds no second copy of the predicate (the
 # ent#386 rule); the flag surface ships the resolved boolean, not this set.
-MARKETPLACE_INSTALL_SOURCES = frozenset({"do-marketplace", "vultr-marketplace"})
+MARKETPLACE_INSTALL_SOURCES = frozenset({"do-marketplace", "vultr-marketplace", "aws-marketplace"})
 
 # Which installs the first-run hardening guide is offered to. Deliberately a
 # SEPARATE set from `MARKETPLACE_INSTALL_SOURCES` rather than a widening of it:
@@ -605,7 +611,7 @@ MARKETPLACE_INSTALL_SOURCES = frozenset({"do-marketplace", "vultr-marketplace"})
 # domain, no HTTPS flag and a 100.x address, so a gate on TLS state (or on "any
 # install") would fire permanently on every paying client's instance. Provenance
 # is why this gate exists.
-HARDENING_GUIDE_INSTALL_SOURCES = MARKETPLACE_INSTALL_SOURCES | {"do-script"}
+HARDENING_GUIDE_INSTALL_SOURCES = MARKETPLACE_INSTALL_SOURCES | {"do-script", "aws-script"}
 
 TRINITY_INSTALL_SOURCE = os.getenv(INSTALL_SOURCE_ENV_VAR, "").strip().lower()
 
@@ -818,6 +824,13 @@ OPS_SETTINGS_DEFAULTS = {
     # value is refused before any model work. 8 matches ROOM_MAX_CHAIN_DEPTH;
     # the derivation errs toward over-refusal, so the default is generous.
     "inter_agent_max_chain_depth": "8",
+    # #2973: event-subscription dispatches one source agent may send one
+    # subscriber agent per one-hour Redis window, across all subscriptions
+    # between the two (an agent key can create subscriptions on itself, so a
+    # per-subscription cap multiplies; a per-subscriber cap lets one noisy
+    # source starve the rest). Chain depth bounds how deep a chain runs; this
+    # bounds how often.
+    "event_dispatch_max_fires_per_hour": "120",
 }
 
 
@@ -863,6 +876,7 @@ OPS_SETTINGS_VALIDATION = {
     "metrics_daily_point_cap": ("int", 0, 10_000_000),
     # #2806: the floor is 1, not 0 — no value may refuse every agent call.
     "inter_agent_max_chain_depth": ("int", 1, 32),
+    "event_dispatch_max_fires_per_hour": ("int", 1, 10_000),
 }
 
 

@@ -186,7 +186,8 @@ TABLES = {
             created_at TEXT NOT NULL,
             expires_at TEXT NOT NULL,
             verified INTEGER DEFAULT 0,
-            used_at TEXT
+            used_at TEXT,
+            purpose TEXT
         )
     """,
 
@@ -295,6 +296,9 @@ TABLES = {
             open_canvas_id TEXT,
             -- #2806: agent-to-agent hops from a non-agent root. NULL = root (0).
             chain_depth INTEGER,
+            -- #2843: the conversation this turn continues; at most one running
+            -- row per (agent, key). NULL = no conversation guard.
+            conversation_key TEXT,
             FOREIGN KEY (schedule_id) REFERENCES agent_schedules(id)
         )
     """,
@@ -333,7 +337,8 @@ TABLES = {
             started_at TEXT,
             completed_at TEXT,
             next_run_at TEXT,
-            stop_requested_at TEXT
+            stop_requested_at TEXT,
+            chain_depth INTEGER
         )
     """,
 
@@ -1194,6 +1199,10 @@ TABLES = {
             pack_count INTEGER,
             loose_objects INTEGER,
             maintenance_failures INTEGER DEFAULT 0,
+            diverged_since TEXT,
+            dirty_files INTEGER,
+            dirty_since TEXT,
+            last_successful_push_at TEXT,
             last_check_at TEXT,
             updated_at TEXT NOT NULL,
             FOREIGN KEY (agent_name) REFERENCES agent_ownership(agent_name)
@@ -1984,6 +1993,12 @@ INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_users_username ON users(username)",
     "CREATE INDEX IF NOT EXISTS idx_users_auth0_sub ON users(auth0_sub)",
     "CREATE INDEX IF NOT EXISTS idx_users_email ON users(email)",
+    # trinity-enterprise#720 — a sign-in email belongs to ONE account. Every
+    # sign-in path resolves the account by email alone, so a duplicate is an
+    # identity coin toss. Lower-cased (addresses are compared that way), NULL
+    # allowed (password-only accounts, the pre-#82 placeholder).
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email_unique "
+    "ON users(lower(email)) WHERE email IS NOT NULL",
     "CREATE INDEX IF NOT EXISTS idx_agent_ownership_owner ON agent_ownership(owner_id)",
     "CREATE INDEX IF NOT EXISTS idx_agent_ownership_name ON agent_ownership(agent_name)",
     # Issue #834: partial index for the retention sweep — narrow scan to
@@ -2310,6 +2325,11 @@ INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_executions_queued "
     "ON schedule_executions(agent_name, queued_at) "
     "WHERE status = 'queued'",
+    # #2843: one turn per conversation at a time. The pull claim relies on the
+    # IntegrityError this raises when two workers claim one conversation at once.
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_executions_one_running_turn "
+    "ON schedule_executions(agent_name, conversation_key) "
+    "WHERE status = 'running' AND conversation_key IS NOT NULL",
     "CREATE INDEX IF NOT EXISTS idx_executions_pending_retry "
     "ON schedule_executions(retry_scheduled_at) "
     "WHERE retry_scheduled_at IS NOT NULL AND status = 'pending_retry'",

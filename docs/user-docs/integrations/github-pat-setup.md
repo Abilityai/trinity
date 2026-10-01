@@ -91,6 +91,8 @@ So a non-admin is no longer confined to the admin PAT's repo scope: an agent you
 - When the resolved token came from the **personal (or fork) tier**, it is saved as that agent's per-agent token, so the agent keeps working even if you later change your personal token.
 - When the agent fell back to the **platform global** PAT, it keeps **no** copy — it stays on the shared token and follows global rotations.
 
+**Your own token decides whether a new agent gets a working branch.** An agent created from a repository your GitHub account owns gets its own working branch and auto-sync, but only when the token is your personal token (or the agent's own). The platform-wide token never qualifies, because being able to push to a repository does not make it yours. With only the platform token available, the agent is created pull-only and the create response's `git_mode.reason` tells you to add your own token. See [GitHub Sync → Creating an agent with sync](github-sync.md#creating-an-agent-with-sync).
+
 **Clearing your personal token** reverts **future** agent creations to the platform global. **Already-created agents are unaffected** — they keep the copy they were given. Conversely, *adding* a personal token never force-recreates a running agent; it only changes what new agents resolve.
 
 ### Endpoints (per-user)
@@ -311,6 +313,14 @@ Uses the configured PAT to create (by default, private) or connect a GitHub repo
 **Fix (Classic):** Regenerate with `repo` scope checked.
 
 **Fix (Fine-Grained):** Add "Contents: Read and write" permission.
+
+### Creating an agent fails: "The GitHub token can read … but is not allowed to push to it"
+
+**Cause:** The agent will save its work to the repository automatically, and the token has read access only. Trinity checks push access against GitHub itself, so a fine-grained token with **Contents: Read-only** is caught here instead of failing every sync later. The same cause raises a **Git token can't push** alert on an agent that already exists.
+
+**Fix (Classic):** Use a token with the `repo` scope.
+
+**Fix (Fine-Grained):** Set **Contents: Read and write** on that repository. Or create the agent in source mode (pull-only).
 
 ### "Must have admin rights to Repository"
 

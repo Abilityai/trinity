@@ -47,7 +47,7 @@ def admin_block() -> str:
     return m.group(1)
 
 
-def _run(block: str, tmp_path: Path, supplied: str | None) -> dict:
+def _run(block: str, tmp_path: Path, supplied: str | None, cloud: str = "digitalocean") -> dict:
     state = tmp_path / "etc-trinity"
     state.mkdir()
     pw_file = state / "admin-password"
@@ -55,6 +55,7 @@ def _run(block: str, tmp_path: Path, supplied: str | None) -> dict:
         pw_file.write_text(supplied)
     script = (
         "set -euo pipefail\n"
+        f'CLOUD="{cloud}"\n'
         f'CRED_FILE="{state}/admin-credentials"\n'
         f'USER_SUPPLIED_PW="{pw_file}"\n'
         + block
@@ -128,3 +129,24 @@ def test_the_script_really_does_set_pipefail() -> None:
     assert re.search(r"^set -euo pipefail$", _FIRSTBOOT.read_text(), re.MULTILINE), (
         "firstboot.sh no longer sets `-euo pipefail`; this test's premise is gone."
     )
+
+
+# ---------------------------------------------------------------------------
+# The AWS image (#3004): always the instance-ID claim
+# ---------------------------------------------------------------------------
+
+def test_aws_exports_the_instance_id_claim_and_no_password(admin_block, tmp_path):
+    out = _run(admin_block, tmp_path, supplied=None, cloud="aws")
+    assert out["source"] == "instance-id"
+    assert out["exported"] == {"ADMIN_PASSWORD_SOURCE": "instance-id"}
+    assert out["cred"] == "source=instance-id\n"
+    assert out["cred_mode"] == 0o600
+
+
+def test_aws_ignores_a_user_data_password(admin_block, tmp_path):
+    """Marketplace review forbids a preset password; a stray user-data file must
+    neither pre-provision an admin nor linger on disk."""
+    out = _run(admin_block, tmp_path, supplied="Correct-Horse-Battery-9!\n", cloud="aws")
+    assert out["source"] == "instance-id"
+    assert "ADMIN_PASSWORD" not in out["exported"]
+    assert not out["pw_file_left"]

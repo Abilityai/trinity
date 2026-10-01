@@ -123,7 +123,7 @@ Trinity uses two separate Redis passwords by design. `REDIS_BACKEND_PASSWORD` is
 
 | Variable | Notes |
 |---|---|
-| `ANTHROPIC_API_KEY` | Required for agents to run Claude. Can be left blank and configured in Settings after login (or connect a Claude subscription there). |
+| `ANTHROPIC_API_KEY` | Required for agents to run Claude. Can be left blank. The setup steps that open the first time you log in ask for a Claude subscription token or an Anthropic API key, and Trinity cannot run agents until one is set. |
 | `GITHUB_PAT` | Required to clone private GitHub template repos. |
 
 #### Required for production access
@@ -311,6 +311,8 @@ Plain HTTP on a public IPv4 with none of the above is the one combination to avo
 
 The Trinity 1-Click is a Droplet image with Docker, Caddy, ufw and a pinned Trinity release already pulled — Option A baked into a snapshot, so first boot pulls nothing.
 
+Find it on the [DigitalOcean Marketplace](https://marketplace.digitalocean.com/apps/trinity), or search **Trinity** under **Marketplace** when you create a Droplet in the control panel. Pick a region and a size from the table below, then create the Droplet. Trinity is free; DigitalOcean bills you for the Droplet.
+
 Prefer to choose the admin password before the Droplet exists? `trinity-do-create.sh` gives the same result from your own terminal — see [Deploy on DigitalOcean](digitalocean.md). The sections below (first boot, sign-in, managing the Droplet) apply to both, with four differences: an installer Droplet has its admin account from first boot, takes about six minutes rather than ninety seconds (it installs and pulls everything on first boot), records `do-script` instead of `do-marketplace` as its provenance, and has no login banner.
 
 ### Sizing
@@ -382,7 +384,7 @@ docker compose -f docker-compose.hosted.yml restart     # restart
 docker compose -f docker-compose.hosted.yml logs -f backend
 ```
 
-**Updating.** Pin the release you want in `.env`, check out the matching tag so the compose files and mounted config move with the images, and re-run the installer:
+**Updating.** Pin the release you want in `.env`, check out the matching tag so the compose files and mounted config move with the images, and re-run the installer. Do both. `start.sh` reads `TRINITY_IMAGE_TAG` from the environment or `.env`, never from the checkout. A checkout alone leaves the old images running, and the run still reports success. The version in the web interface comes from the images, so check it to confirm the upgrade landed:
 
 ```bash
 cd /opt/trinity
@@ -511,7 +513,7 @@ Every key in `.env.example`, with the compose files that forward it. **A key a c
 
 | Key | Forwarded by | What it does |
 |---|---|---|
-| `TRINITY_INSTALL_SOURCE` | dev · prod · hosted | Install-provenance marker (`do-marketplace`, `vultr-marketplace`, `do-script`, `script`); written by `start.sh --provision`, read once at first boot and recorded permanently. Leave empty on an ordinary install. |
+| `TRINITY_INSTALL_SOURCE` | dev · prod · hosted | Install-provenance marker (`do-marketplace`, `vultr-marketplace`, `aws-marketplace`, `do-script`, `aws-script`, `script`); written by `start.sh --provision`, read once at first boot and recorded permanently. Leave empty on an ordinary install. |
 | `BACKEND_URL` | dev · prod · hosted | Backend base URL used to build OAuth callback URLs (default `http://localhost:8000`). |
 | `FRONTEND_PORT` | dev · prod · hosted | Host port for the web UI (default 80). |
 | `FRONTEND_URL` | dev · prod · hosted | Public UI URL for email links and OAuth callbacks. |

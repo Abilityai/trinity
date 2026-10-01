@@ -39,7 +39,7 @@ platform's baseline protections.
 
 - **UI (Agent Detail)**: owner-only **Settings** tab (renamed from "Guardrails", #1108/#1122) — `GuardrailsPanel.vue` rendered unchanged as **section #1** inside `components/settings/SettingsPanel.vue`, wired in `AgentDetail.vue:187` (tab pushed at `647`, gated on `agent.can_share`). Old `?tab=guardrails` deep links resolve via `TAB_ALIASES` (`guardrails → settings`). Exposes `max_turns_chat` / `max_turns_task` only (#967 / #992).
 - **API (read)**: `GET /api/agents/{name}/guardrails` — any authenticated user; 404 if no container.
-- **API (write)**: `PUT /api/agents/{name}/guardrails` — **owner-only**; empty body clears overrides. Requires agent restart to apply.
+- **API (write)**: `PUT /api/agents/{name}/guardrails` — **owner-only** and **person-only** (`Depends(require_person)`, #2996: agent- and system-scoped keys get 403 `person_required`); empty body clears overrides. Requires agent restart to apply.
 - **Agent creation**: overrides serialized into the `AGENT_GUARDRAILS` env var (`crud.py`).
 - **Agent restart**: env var re-serialized from DB (`lifecycle.py`); runtime config regenerated at boot (`startup.sh` → `write-runtime-config.py`).
 - **Tool-call time**: Claude Code `PreToolUse` / `PostToolUse` hooks fire on every `Bash` / file-write tool call.
@@ -264,7 +264,7 @@ Runs as **root** via `sudo` from `startup.sh`. Reads baseline + `$AGENT_GUARDRAI
 
 Immutable, root-owned `0444`. Contents:
 
-- **`bash_deny`** (10 regex+reason rules): recursive root/home delete, `chmod 777`, pipe-to-shell, git force-push, `kill -9 1`, raw `dd of=/dev/sd…`, `mkfs.*`, fork bomb, read-only-config tamper, host shutdown/reboot/poweroff.
+- **`bash_deny`** (12 regex+reason rules): recursive root/home delete, `chmod 777`, pipe-to-shell, git force-push, `kill -9 1`, raw `dd of=/dev/sd…`, `mkfs.*`, fork bomb, read-only-config tamper, host shutdown/reboot/poweroff, `sudo` naming `/etc/claude-code`/`/opt/trinity`/`/etc/sudoers` or `visudo`, root shells (`sudo -i`/`-s`/`--login`/`--shell`, `sudo su`, `sudo <shell>` with no script, bare `su`) (#3105).
 - **`path_deny`** (12 globs): `.env`, `.env.*`, `.mcp.json`, `.credentials.enc`, `~/.ssh/*`, `~/.aws/*`, `~/.gcp/*`, `~/.claude/settings.json`, `~/.claude/settings.local.json`, `~/.trinity/read-only-config.json`, `/opt/trinity/*`, `/etc/claude-code/*`.
 - **`credential_patterns`** (9): Anthropic key/OAuth, OpenAI, GitHub PAT (classic + fine-grained), AWS access key, Slack bot/user token, Google API key.
 - **Budgets**: `max_turns_chat: 50`, `max_turns_task: 50`, `execution_timeout_sec: 1800`.
@@ -304,8 +304,8 @@ See [read-only-mode.md](read-only-mode.md).
 ## Security Properties
 
 1. **Baseline immutable** — image-baked, root-owned `0444`; agent cannot read-modify-write it.
-2. **Runtime config root-generated** — written by `sudo` at boot, `0444`; agent process cannot rewrite it post-start.
-3. **Hooks tamper-proof** — in `/opt/trinity/*` (path-denied) and registered in `~/.claude/settings.json` (also path-denied).
+2. **Runtime config root-generated** — written by `sudo` at boot, `0444`; agent process cannot rewrite it post-start without `sudo` (`developer` holds `NOPASSWD:ALL`; `bash_deny` refuses the obvious `sudo` spellings, #3105).
+3. **Hooks tamper-resistant** — in `/opt/trinity/*` (path-denied) and registered in root-owned `/etc/claude-code/managed-settings.json` (also path-denied; ent#345). `sudo` can still rewrite both; `bash_deny` refuses the obvious spellings and agent `/health` reports `guardrails_registration` per request (#3105).
 4. **Override scope minimal** — numeric caps + literal substrings only; regex and credential scanner are platform-owned.
 5. **Fail-closed everywhere** — bad stdin, bad config, or any uncaught hook exception → deny (exit 2).
 6. **No value leakage** — credential scanner logs pattern *names*, never matched secrets.
