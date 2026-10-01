@@ -583,6 +583,12 @@ INSTALL_SOURCE_VALUES = frozenset({
     # run at all unless DO's metadata service answers — so the value is a fact
     # the machine established, not a claim an operator typed.
     "do-script",
+    # AWS (#3004): the Marketplace AMI's first boot, and a doc-driven install
+    # onto EC2. `aws-script` is established the same way `do-script` is —
+    # `start.sh --provision --cloud aws` refuses to run unless EC2's metadata
+    # service issues it an IMDSv2 token.
+    "aws-marketplace",
+    "aws-script",
     "script",
     INSTALL_SOURCE_UNKNOWN,
 })
@@ -590,7 +596,7 @@ INSTALL_SOURCE_VALUES = frozenset({
 # The subset that renders the first-run hardening guide. Kept here rather than
 # in the frontend so the browser holds no second copy of the predicate (the
 # ent#386 rule); the flag surface ships the resolved boolean, not this set.
-MARKETPLACE_INSTALL_SOURCES = frozenset({"do-marketplace", "vultr-marketplace"})
+MARKETPLACE_INSTALL_SOURCES = frozenset({"do-marketplace", "vultr-marketplace", "aws-marketplace"})
 
 # Which installs the first-run hardening guide is offered to. Deliberately a
 # SEPARATE set from `MARKETPLACE_INSTALL_SOURCES` rather than a widening of it:
@@ -605,7 +611,7 @@ MARKETPLACE_INSTALL_SOURCES = frozenset({"do-marketplace", "vultr-marketplace"})
 # domain, no HTTPS flag and a 100.x address, so a gate on TLS state (or on "any
 # install") would fire permanently on every paying client's instance. Provenance
 # is why this gate exists.
-HARDENING_GUIDE_INSTALL_SOURCES = MARKETPLACE_INSTALL_SOURCES | {"do-script"}
+HARDENING_GUIDE_INSTALL_SOURCES = MARKETPLACE_INSTALL_SOURCES | {"do-script", "aws-script"}
 
 TRINITY_INSTALL_SOURCE = os.getenv(INSTALL_SOURCE_ENV_VAR, "").strip().lower()
 

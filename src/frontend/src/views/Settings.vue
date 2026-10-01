@@ -2287,6 +2287,8 @@ const INSTALL_SOURCE_LABELS = {
   'do-marketplace': 'DigitalOcean Marketplace',
   'do-script': 'DigitalOcean (install script)',
   'vultr-marketplace': 'Vultr Marketplace',
+  'aws-marketplace': 'AWS Marketplace',
+  'aws-script': 'AWS (install script)',
   script: 'Install script',
   unknown: 'Not recorded',
 }
