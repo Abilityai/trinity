@@ -362,9 +362,9 @@ class CapacityManager:
         # capacity counters. Skipping admission here makes the durable queue the
         # single entry point for this agent, so its worker pool IS its capacity
         # (#1081 Phase 5, pilot-scoped). `pull_owns_dispatch` covers the
-        # autonomous triggers and, since #3114, every interactive trigger but
-        # `chat`; it fails safe to push, so a non-pilot's path is byte-for-byte
-        # unchanged.
+        # autonomous triggers and every interactive trigger (#3114, #3127; a
+        # pilot's /chat never calls acquire); it fails safe to push, so a
+        # non-pilot's path is byte-for-byte unchanged.
         from services.pull_pilot import pull_owns_dispatch
 
         pull_exclusive = (

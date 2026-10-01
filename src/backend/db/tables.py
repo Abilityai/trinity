@@ -417,6 +417,8 @@ chat_sessions = Table(
     Column("total_context_max", Integer),
     Column("status", Text),
     Column("subscription_id", Text),
+    # #3127: the Claude session a pulled /chat turn resumes.
+    Column("cached_claude_session_id", Text),
 )
 
 chat_messages = Table(

@@ -77,7 +77,8 @@ def pull_queue_allowance(agent_name: str) -> int:
 #   task_execution_service   → "reject" | "queue_persistent"  ← #2391, pilot-gated
 #                              scheduler/ALL cron, webhooks, reminders, loops,
 #                              fan-out, A2A, operator resumes
-#   dispatch_admission_svc   → "queue_in_memory"   — sequential chat, human chat
+#   dispatch_admission_svc   → "queue_in_memory"   — POST /chat (push agents;
+#                              on a pilot /chat skips acquire and is pulled, #3127)
 #   chat_execution_service   → "queue_persistent"  — POST /task
 #
 # ``POST /task`` derives its trigger in ``_derive_task_trigger``, which can only
@@ -144,14 +145,14 @@ INTERACTIVE_TRIGGERS = frozenset(
 )
 
 
-# Non-autonomous triggers a pull pilot takes ONLY from the durable queue (#3114):
-# every interactive trigger except ``chat``, plus ``validation``. Their sync
-# callers go through ``task_execution_service.dispatch_and_await_terminal``,
-# which waits for a worker to claim the row (bounded by one agent timeout) and
-# then for its terminal. ``chat`` is the UI ``/chat`` path
-# (``dispatch_admission_service`` → ``chat_execution_service.run_chat_turn``),
-# which still pushes; it is routed in a later change.
-PULL_REACHABLE_NON_AUTONOMOUS = (INTERACTIVE_TRIGGERS - {"chat"}) | {"validation"}
+# Non-autonomous triggers a pull pilot takes ONLY from the durable queue (#3114,
+# #3127): every interactive trigger plus ``validation``. Their sync callers go
+# through ``task_execution_service.dispatch_and_await_terminal``, which waits
+# for a worker to claim the row (bounded by one agent timeout) and then for its
+# terminal. ``POST /chat`` (triggers ``chat``/``mcp``/``agent``) reaches it via
+# ``chat_execution_service.run_pulled_chat_turn``, resuming one Claude
+# conversation per chat session.
+PULL_REACHABLE_NON_AUTONOMOUS = INTERACTIVE_TRIGGERS | {"validation"}
 
 
 def pull_owns_dispatch(agent_name: str, triggered_by: Optional[str]) -> bool:
@@ -169,8 +170,8 @@ def pull_owns_dispatch(agent_name: str, triggered_by: Optional[str]) -> bool:
     S-02, which counts ``ZCARD`` only. Making the pilot flag a true either/or
     restores one capacity owner per agent.
 
-    **Interactive turns are pulled too (#3114),** except the UI ``/chat`` path
-    (trigger ``chat``). ``PULL_REACHABLE_NON_AUTONOMOUS`` lists them. The claim
+    **Interactive turns are pulled too (#3114, #3127),** ``POST /chat``
+    included. ``PULL_REACHABLE_NON_AUTONOMOUS`` lists them. The claim
     orders them ahead of batch work (#2842, ``INTERACTIVE_TRIGGERS``) and runs
     one turn per conversation at a time (#2843, ``conversation_key``). Session
     tab and portal turns keep their Redis locks as well; the lock TTLs carry
