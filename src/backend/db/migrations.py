@@ -4915,6 +4915,21 @@ def resolve_duplicate_emails(rows):
         members.sort()
         losers += [(uid, uname) for _, uid, uname in members[1:]]
     return losers
+def _migrate_chat_session_claude_id(cursor, conn):
+    """#3127 — per-user `/chat` memory on pull pilots.
+
+    `chat_sessions.cached_claude_session_id` holds the Claude session id the
+    session's next pulled `/chat` turn resumes. Nullable, no backfill: a session
+    without one starts a fresh conversation.
+    PostgreSQL half: Alembic `0086_chat_session_claude_id`.
+    """
+    _safe_add_column(
+        cursor,
+        "chat_sessions",
+        "cached_claude_session_id",
+        "ALTER TABLE chat_sessions ADD COLUMN cached_claude_session_id TEXT",
+    )
+    conn.commit()
 
 
 def _migrate_agent_skill_sets(cursor, conn):
@@ -5288,4 +5303,5 @@ MIGRATIONS = [
     ("metric_points_restatement", _migrate_metric_points_restatement),
     ("pull_sync", _migrate_pull_sync),
     ("skill_gate_requests_table", _migrate_skill_gate_requests_table),
+    ("chat_session_claude_id", _migrate_chat_session_claude_id),
 ]

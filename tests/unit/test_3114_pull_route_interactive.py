@@ -2,8 +2,8 @@
 
 What is pinned here:
 
-* ``pull_owns_dispatch`` covers every interactive trigger but ``chat``, plus
-  ``validation``, on a pull pilot.
+* ``pull_owns_dispatch`` covers every interactive trigger (``chat`` since
+  #3127) plus ``validation`` on a pull pilot.
 
 * ``execute_task``'s queue payload carries what the push payload sends beside
   the request (conversation key, persist_session, images, schedule context,
@@ -129,15 +129,15 @@ _IMG = [{"media_type": "image/png", "data": "iVBORw0KGgo+AIzaQQQQ"}]
 # ---------------------------------------------------------------------------
 
 
-def test_pilot_pulls_interactive_triggers_except_chat(monkeypatch):
+def test_pilot_pulls_every_interactive_trigger(monkeypatch):
     from services import pull_pilot as pp
 
     monkeypatch.setenv("PULL_MODE_PILOT_AGENTS", AGENT)
-    assert pp.PULL_REACHABLE_NON_AUTONOMOUS == (pp.INTERACTIVE_TRIGGERS - {"chat"}) | {"validation"}
+    # #3127: ``chat`` is pulled too.
+    assert pp.PULL_REACHABLE_NON_AUTONOMOUS == pp.INTERACTIVE_TRIGGERS | {"validation"}
     for trigger in pp.PULL_REACHABLE_NON_AUTONOMOUS:
         assert pp.pull_owns_dispatch(AGENT, trigger) is True, trigger
         assert pp.pull_owns_dispatch("not-a-pilot", trigger) is False, trigger
-    assert pp.pull_owns_dispatch(AGENT, "chat") is False
     assert pp.pull_owns_dispatch(AGENT, None) is False
 
 

@@ -32,11 +32,13 @@ from models import User, ChatMessageRequest, ExecutionSource
 from database import db
 from services import idempotency_service, skill_gate_service
 from services.capacity_manager import (
+    AcquireResult,
     CapacityFull,
     CircuitOpen,
     EphemeralBudgetExhausted,
     get_capacity_manager,
 )
+from services import pull_pilot
 from services.task_execution_service import dispatch_breaker_active
 from services.platform_audit_service import platform_audit_service, AuditEventType
 from services.activity_service import activity_service
@@ -46,6 +48,7 @@ from services.chat_signals import (
     ChatAdmissionReplay,
     INTER_AGENT_DEPTH_EXCEEDED,
     InterAgentDepthExceeded,
+    chat_trigger,
 )
 from db.agents import SYSTEM_AGENT_NAME
 from models import ActivityType, ActivityState
@@ -300,6 +303,10 @@ async def admit_chat_request(
     (queue full) / ``EphemeralBudgetExhausted`` (ghost spent) — each after
     releasing the idempotency claim so the caller can retry. The router maps them.
 
+    On a pull pilot (#3127) the acquire is skipped: the admission carries
+    ``capacity=None`` and a ``queued_persistent`` result, and the turn is queued
+    by ``chat_execution_service.run_pulled_chat_turn``.
+
     Raises ``InterAgentDepthExceeded`` (#2806) FIRST — before the claim, the
     breaker read and the acquire — so a refused hop leaves nothing behind.
 
@@ -373,6 +380,29 @@ async def admit_chat_request(
             # can retry with the same key once the breaker recovers (#525).
             idempotency_service.fail(idem)
             raise CircuitOpen(name, int(_disp.get("retry_after_seconds") or 0))
+
+    # #3127: on a pull pilot /chat takes no slot here. The turn goes onto the
+    # durable queue in ``chat_execution_service.run_pulled_chat_turn`` and the
+    # agent's worker pool is its capacity; ``capacity=None`` selects that path.
+    if pull_pilot.pull_owns_dispatch(name, chat_trigger(x_source_agent, x_via_mcp)):
+        queue_result = "queued"
+        logger.info(f"[Chat] Agent '{name}' execution {chat_execution_id}: pull queue")
+        await _audit_chat_started(
+            name=name, x_via_mcp=x_via_mcp, x_source_agent=x_source_agent,
+            current_user=current_user, execution_id=chat_execution_id,
+            queue_result=queue_result, source=source, message=request.message,
+        )
+        return ChatAdmission(
+            idem=idem,
+            execution_id=chat_execution_id,
+            capacity_result=AcquireResult(
+                state="queued_persistent", execution_id=chat_execution_id
+            ),
+            capacity=None,
+            queue_result=queue_result,
+            chat_timeout=chat_timeout,
+            chain_depth=chain_depth,
+        )
     try:
         capacity_result = await capacity.acquire(
             agent_name=name,

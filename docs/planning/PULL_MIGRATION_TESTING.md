@@ -353,10 +353,9 @@ B6 runtime-verify on the rebuilt image · the ≥2-week soak (#856 / #1766, meas
 the producer never force-queued (a free slot still meant a push, so rows only queued on overflow) and the
 backend's own `drain_next` raced the agent's worker for whatever did queue. Two independent capacity
 counters meant up to 2x `max_parallel_tasks`, invisible to S-02. The flag is now a true either/or for
-autonomous triggers and, since #3114, every interactive trigger except `chat` (the UI `/chat` path, which
-still pushes). Open Question 7 (#1989) put interactive chat on the queue behind #2842 (queue priority)
-and #2843 (one turn per conversation); the synchronous push dispatch path is deleted once `chat` is
-routed too.
+autonomous triggers and, since #3114 and #3127, every interactive trigger. Open Question 7 (#1989) put
+interactive chat on the queue behind #2842 (queue priority) and #2843 (one turn per conversation); the
+synchronous push dispatch path is deleted at default-ON.
 
 ## 9. Soak measurement set (#1766)
 

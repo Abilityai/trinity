@@ -362,6 +362,8 @@ CREATE TABLE chat_sessions (
     total_context_used INTEGER DEFAULT 0,
     total_context_max INTEGER DEFAULT 200000,
     status TEXT DEFAULT 'active',         -- 'active' or 'closed'
+    subscription_id TEXT,
+    cached_claude_session_id TEXT,        -- #3127: Claude session a pulled /chat turn resumes (pull pilots only)
     FOREIGN KEY (user_id) REFERENCES users(id)
 );
 
