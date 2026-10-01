@@ -70,6 +70,30 @@ Sign-in / reload on bare /workspace
                entry our open pushed, else replaces the item away (a deep link never walks out)
       split: the tab's first row is a local PREVIEW — not ?item=, NOT a read, emitted as
                update:preview (§3g S5, T2); stacked: nothing selected
+    actionItems(openAsks, now)  Action's order is URGENCY (§3g C1, askUrgencyCompare): asks
+                               expiring within 24h first (soonest first — the A10 badge is
+                               the reason shown), then priority critical > high > medium > low
+                               (unknown = medium), then the OLDEST first; ties on id
+    agent facets (§3g C2)      Action only, when ≥ 1 agent is waiting (round 2: from one, so a
+                               second agent's ask never pushes the list down): a second dense
+                               OverflowTabs strip (inbox-agent-facets, tablist "Asks by
+                               agent") — "All agents" (FROM_ALL) then each agent, most asks
+                               first, with its count; the choice is ?from=<agent> (never
+                               ?agent=, a stage key) → filterByAgent before stableRows; a new
+                               ?from= is a new visit; it holds while the agent has asks or its
+                               ended ask is selected (activeAgentFilter), then leaves the URL
+                               (its strip stays while it holds, even at zero asks); a tab
+                               change drops it; choosing another agent closes an open ask
+                               that is not theirs; counts are badgeVariant 'neutral' with a
+                               badgeLabel ("Relay Bot, 2 asks"); the list head names the
+                               filter ("3 asks from Relay Bot") since its chip can sit in More;
+                               the strip keeps the order the visit first drew (an answered ask
+                               moves a count, never a chip); a ?from= on another tab leaves the URL;
+                               a ?from= the page OPENS with is kept even with nothing waiting (empty
+                               state "Nothing is waiting on you from X." + "Show all agents"); one
+                               answered down to nothing mid-visit clears, the head saying
+                               "Nothing waiting from X · …"; arriving with a
+                               ?from= while nothing holds focus focuses the list column
     stableRows(fresh, visit)   rows keep their place for one TAB VISIT (§3g S1): a row that leaves
                                stays as a ghost (chat drawn read, ask drawn ended); a poll never
                                re-sorts; a new row goes in before its nearest fresh neighbour; a
@@ -95,6 +119,33 @@ Sign-in / reload on bare /workspace
                       + zone on hover; ≤ 2 badges; a 30 s clock only while such a row exists
     PortalInboxPane
       ask   → <PortalAsks :ask-ids="[id]" testid-prefix="inbox-ask"> → store.answerAsk → asks/router
+              the card (§3g L6, every surface): a pick focuses the note (not on a coarse
+              pointer) so Enter sends; a question's options are quick picks that FILL the
+              answer (questionQuickPicks, ≤ 500 chars) and never send; the badge is
+              workspaceAskBadge (queueSyncBadge minus "Unconfirmed"); after Send focus
+              lands on the answered card (tabindex=-1, focus ring); a submit while one is
+              in flight is dropped; the pane passes show-urgency (priority + expiry
+              badges in the card header, portalAskUrgency's row rule, 30 s clock) and
+              agent-label ("<display name> recommends"); order inside the card: body
+              (PortalMarkdown) → QueueProposal → QueueBrief lead (Why now → "{agent}
+              recommends") → options (stacked with an impact hint when the brief has one)
+              → answer row → QueueBrief fallback ("If you don't answer by …") — the brief
+              is the E2 seam, fixture-tested; L8 supplies it
+            → <PortalAskContext :ask> BELOW the card (§3g L7, E1; the card's thread link
+              is off in the pane — "Open the conversation" lives here): store.fetchAskContext
+              (RETHROWS) → GET /asks/{id}/context; skeleton → LoadFailed dense (retry) in
+              its slot, the controls above never depend on it (a failed read still offers
+              "Open the conversation" → the ask's own chat, for an in-turn ask only); the skeleton is the smallest
+              loaded shape (4 lines, chrome fill); meta line askContextMeta ("Asked 8m ago
+              during a scheduled run · started 09:00" — the clock for a schedule/manual run
+              only; expiry and priority are on the card); Where it came from (a chat turn's verified
+              thread: its title — "Main" for Main — + "Filed in your Main chat" when the
+              ask was filed elsewhere, the 3 messages before the ask, Open “<chat>” →
+              ?anchor=m:<last>; else, for an in-turn ask, "Filed in …" → the chat; a
+              background ask has no origin section) → Delivered in
+              that chat (verified only, fetchSessionDeliverablesStrict → ?anchor=d:<id>,
+              read BEFORE the context paints; a failed read is LoadFailed dense with its own
+              retry) → Your recent answers
       chat  → store.fetchHistory(agent, id, {limit: 50})  render from first_unread_message_id
               store.fetchSessionDeliverablesStrict → ReportRenderer (+ ReportSummary fallback)
                                                a failed read is LoadFailed, never "no deliverables"
@@ -157,6 +208,21 @@ GET /api/enterprise/client-portal/chat-state?previews=true      (only while the 
     attach latest{kind,id,at,excerpt,outcome} for roster agents, ≤100
       excerpt: credential-sanitised, markdown-stripped, ≤160; a deliverable's excerpt = its title
       response_model_exclude_none → no preview = keys absent; roster read failure → raises (fail loud)
+
+GET /api/enterprise/client-portal/asks/{item_id}/context        (PR A2 §3g L7 — one per selected ask)
+  rate_limiter.enforce("portal_ask_context:{email}", 120, 60)
+  asks/service.get_ask_context(item_id, email, is_platform)
+    _owned_ask(strict=True)   lookup + addressee + _VISIBLE_KINDS + roster → uniform 404;
+                              roster outage → AsksUnavailable → 503 (answer_ask shares it, non-strict)
+    _validated_run            db.get_execution(row.execution_id — AGENT-written): same agent AND
+                              started_at ≤ created_at ≤ (completed_at|now)+300s (parsed) AND
+                              a schedule run, or the viewer's own (email / a thread they hold) — manual too
+    _run_view                 kind + label (schedule NAME for platform only, T12) + started_at
+    _origin                   the run's portal thread if get_portal_session(chat, agent, email):
+                              get_portal_messages(limit=3, before=created_at) → _arrival_excerpt(280);
+                              else the ask's own chat (workspace_session_id), no excerpt
+    _recent_answers           the viewer's own 3 newest answered asks from this agent (7 days)
+  → WorkspaceAskContext (asks/models.py): no cost, no execution_id; any read failure → 503
 
 Where arrivals come from
   a turn's reply / an agent-started message         → enterprise_portal_messages (role=assistant)
@@ -260,6 +326,7 @@ table, no migration. The report publish may mint the addressee's Main
 | Backend | `src/backend/client_portal/service.py` | `get_chat_state(email, unread=None)` — the optional precomputed map only |
 | Backend | `src/backend/client_portal/router.py` | `GET /chat-state?previews=` (`response_model_exclude_none`) |
 | Backend | `src/backend/client_portal/models.py` | `PortalChatArrival` (no `cost`), `PortalChatStateEntry.latest` / `first_unread_message_id` |
+| Backend | `src/backend/client_portal/asks/service.py`, `asks/router.py`, `asks/models.py` | `_owned_ask`, `get_ask_context` (+ `_validated_run`, `_run_view`, `_origin`, `_recent_answers`); `GET /asks/{id}/context`; `WorkspaceAskContext` (PR A2 §3g L7) |
 | Backend | `src/backend/services/channel_completion_report.py` | `source="completion:done" \| "completion:failed"` on the portal message |
 | Backend | `src/backend/services/report_service.py`, `src/backend/routers/reports.py` | `resolve_report_session` — the addressee's in-flight chat, else (agent's own publish only) their Main; `touch_report_session` after the insert |
 | Frontend | `src/frontend/src/router/index.js` | route `WorkspaceInbox` `/workspace/inbox` |
@@ -267,7 +334,9 @@ table, no migration. The report publish may mint the addressee's Main
 | Frontend | `src/frontend/src/components/portal/PortalInbox.vue`, `PortalInboxList.vue`, `PortalInboxPane.vue`, `PortalInboxRow.vue` | container, list, pane, pinned sidebar row |
 | Frontend | `src/frontend/src/views/Portal.vue` | stage branch, landing replace, `threadsLoaded`, `chatPreviews`, `replyInChat` |
 | Frontend | `src/frontend/src/components/portal/PortalSidebar.vue`, `portalUtils.js` | pinned row mount, `WORKSPACE_INBOX`, "new" wording (`unreadBadgeTitle`) |
-| Frontend | `src/frontend/src/components/portal/PortalAsks.vue` | `askIds`, `testidPrefix` |
+| Frontend | `src/frontend/src/components/portal/PortalAsks.vue` | `askIds`, `testidPrefix`, `threadLink`; PR A2: pick → note focus, question quick picks, `workspaceAskBadge`, focus after Send, the QueueBrief seam and stacked impact options |
+| Frontend | `src/frontend/src/components/operator/QueueBrief.vue`, `src/frontend/src/utils/operatorQueue.js` | the brief seam (`part` lead / fallback); `briefOf`, `briefImpactFor`, `ifNoAnswerLabel`, `workspaceAskBadge`, `questionQuickPicks` |
+| Frontend | `src/frontend/src/components/portal/PortalAskContext.vue`, `portalAskUrgency.js` | the ask's context below the card; `askContextMeta` |
 | Frontend | `src/frontend/src/components/portal/PortalConversation.vue`, `PortalDeliverables.vue`, `composables/useConversationAnchor.js`, `composables/useStickToBottom.js` | anchors (`data-message-id`, `data-report-id`, `loaded`, `detach()`) |
 | Frontend | `src/frontend/src/stores/clientPortal.js` | `fetchChatState({previews})`, `markChatReadStrict`, `fetchSessionDeliverablesStrict`, `asksAbsent` |
 
@@ -300,6 +369,9 @@ an ask that ends while selected; a deep-linked `?item=`; previews read failing m
 | `src/frontend/tests/unit/portalSidebarInboxRow.spec.js` | the pinned row's counts and link |
 | `src/frontend/tests/unit/portalAsksTestidPrefix.mount.spec.js` | default ids unchanged, prefix over every id, disjoint id sets |
 | `src/frontend/tests/unit/portalConversationAnchor.mount.spec.js`, `stickToBottom.spec.js` | `?anchor=` found / missing / one-shot, `detach()` |
+| `tests/unit/test_ent610_ask_context.py` | PR A2 §3g L7: origin only from a verified thread, run gates (agent, live window, audience), schedule name for platform only, recent answers, no `cost`/`execution_id`, one 404 body, 503 on a roster outage, the `# mcp:` header |
+| `src/frontend/tests/unit/portalAskAnswerFlow.mount.spec.js`, `queueBrief.mount.spec.js`, `portalAskContext.mount.spec.js` | PR A2: B2/B3/B5 + focus after Send; the brief seam order, impact hints, XSS; the context below the card, its states, anchors |
+| `src/frontend/tests/unit/portalInboxActionSort.spec.js`, `portalInboxAgentFilter.spec.js`, `portalChatAsksElsewhere.spec.js` | PR A2: C1 urgency order, C2 `?from=` facets (+ mount cases in `portalInbox.mount.spec.js`), B1 a client's link to the Inbox |
 | `src/frontend/e2e/workspace-inbox.spec.js` (`@smoke`) | landing, the pinned row, explicit targets still win |
 | `src/frontend/e2e/workspace-rail-reserved.spec.js`, `e2e/contrast-ratchet.spec.js` | retargeted to `?agent=` / `?new=1`; `/workspace/inbox` held at zero contrast failures |
 

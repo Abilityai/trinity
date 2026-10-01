@@ -678,6 +678,19 @@ export const WORKSPACE_ROOT = '/workspace'
 // Inbox is a stage `shouldEscapeStage` leaves — the fail-closed rule holds.
 export const WORKSPACE_INBOX = '/workspace/inbox'
 
+// trinity-enterprise#610 (the 09-30 ruling, item 2): an agent's asks home, on
+// every door and for platform users and clients alike — the Inbox's Action tab
+// narrowed to that agent (§3g C2 `?from=`), or the whole tab when no one agent.
+export function asksHomeRoute(agentName = null) {
+  const query = { tab: 'action' }
+  if (agentName) query.from = agentName
+  return { path: WORKSPACE_INBOX, query }
+}
+export function asksWaitingLabel(n) {
+  const k = Number(n) || 0
+  return k > 0 ? `${k} ${k === 1 ? 'ask' : 'asks'} waiting on you` : ''
+}
+
 export function shouldEscapeStage(path, query) {
   if (path && path.replace(/\/+$/, '') !== WORKSPACE_ROOT) return true
   if (!query) return false
@@ -1623,41 +1636,19 @@ export function expiredLabel(expiresAt, now = Date.now()) {
  * findable, not to restrict where it may be answered — and an ask the reader
  * can see but not reach is the failure this closes, not one it should create.
  */
+//
+// trinity-enterprise#610 (the 09-30 ruling, amended): only for an ask a chat
+// TURN raised (ent#734's `raised_in_turn`, the literal true). A background
+// ask's `chat_id` is Main only as the reply target — it is not drawn there, so
+// a link would send the reader to a chat where the ask is not. Its home is the
+// Inbox.
 export function askThreadLink(ask, currentSessionId = null) {
+  if (ask?.raised_in_turn !== true) return null
   const target = ask?.chat_id
   if (!target) return null
   if (currentSessionId && target === currentSessionId) return null
   return target
 }
-
-// trinity-enterprise#610 sign-off: which of an agent's asks a chat PINS above
-// its composer. Pinning all of them, uncapped, let seven cards crush the
-// conversation to nothing. A chat pins the asks raised against it — Main also
-// takes the unattached ones, which have nowhere else to live — and the rest
-// that still wait are counted, one link away in Work. An ask that ended in
-// another chat is not waiting, so it is not counted.
-// Sign-off round 5: the chat's asks row. Pending asks, plus any that were
-// pending while this chat was on screen — an ask you just answered stays drawn,
-// ended, with its confirmation, until you leave the chat.
-export function pinnedAskIds(here, seenPending = new Set()) {
-  return (here || []).filter((a) => a.status === 'pending' || seenPending.has(a.id)).map((a) => a.id)
-}
-export function chatAsksLabel(n) {
-  if (!n) return 'No asks waiting on you'
-  return n === 1 ? '1 ask waiting on you' : `${n} asks waiting on you`
-}
-
-export function splitChatAsks(asks, { sessionId = null, isMain = false } = {}) {
-  const here = []
-  const elsewhere = []
-  for (const a of asks || []) {
-    const onThis = a.chat_id ? (!!sessionId && a.chat_id === sessionId) : isMain
-    if (onThis) here.push(a)
-    else if (a.status === 'pending') elsewhere.push(a)
-  }
-  return { here, elsewhere }
-}
-
 
 // ---- ent#365: deliverables ------------------------------------------------
 
@@ -2078,6 +2069,9 @@ export function replyFromHistory(messages, baseline) {
     response: last.content,
     id: last.id || null,
     myRating: last.my_rating || null,
+    // trinity-enterprise#610: the stored time, which places a chat-turn ask
+    // before this reply without the browser's clock (`placeAsksInThread`).
+    at: last.created_at || null,
   }
 }
 

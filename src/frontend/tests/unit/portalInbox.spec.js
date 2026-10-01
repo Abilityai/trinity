@@ -82,16 +82,18 @@ describe('item keys', () => {
 })
 
 describe('Action (D8)', () => {
-  it('pending only, newest first', () => {
+  // ent#610 §3g C1 REVERSED "newest first": the order is urgency, and among
+  // equals the ask that has waited longest leads (portalInboxActionSort.spec.js).
+  it('pending only, the longest-waiting first among equals', () => {
     const rows = actionItems([
       ask('old', { created_at: iso(5 * H) }),
       ask('done', { status: 'answered', ended_at: iso(0) }),
       ask('new', { created_at: iso(H) }),
       ask('exp', { status: 'expired' }),
-    ])
-    expect(rows.map((r) => r.key)).toEqual(['ask:new', 'ask:old'])
-    expect(rows[0]).toMatchObject({ type: 'ask', id: 'new', agent_name: 'scout', status: 'pending' })
-    expect(rows[0].ask.id).toBe('new')
+    ], NOW)
+    expect(rows.map((r) => r.key)).toEqual(['ask:old', 'ask:new'])
+    expect(rows[0]).toMatchObject({ type: 'ask', id: 'old', agent_name: 'scout', status: 'pending' })
+    expect(rows[0].ask.id).toBe('old')
   })
   it('tolerates junk', () => {
     expect(actionItems(null)).toEqual([])

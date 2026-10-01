@@ -1814,8 +1814,9 @@ bounding the table. OSS-core (Workspace rule above). Flow:
 - **Description**: When a message starts a long-running job, the Workspace
   shows it happening: a **live card** under that message (status word,
   elapsed, the current step, the steps of a pipeline with the agent holding
-  each one, Stop, Open in Work), and the rail's **Work** tab — *Waiting on
-  you*, *Now*, *Earlier*. The user-facing noun is **work**. The report-back
+  each one, Stop, Open in Work), and the rail's **Work** tab — *Now*,
+  *Earlier* (since the ent#610 ruling of 2026-09-30 it draws no asks: one
+  "N asks waiting on you · Open in Inbox" line instead). The user-facing noun is **work**. The report-back
   contract (ent#457 AC 3) is abilityai/trinity#2386; this is the surface.
   Built to the approved artboards (ent#457, 2026-08-24 / 2026-09-06) and the
   three PM answers of 2026-09-02: an honest "Ask about it" instead of a fake
@@ -1843,9 +1844,14 @@ bounding the table. OSS-core (Workspace rule above). Flow:
   a composer prefill that names the job, never a send. Stop works after a
   reload (`reattach` sets the execution id).
 - **AC-4 — the Work tab** (`PortalWork`, docked into `#tab-work` in both rail
-  mounts): *Waiting on you* = `PortalAsks` over `store.asks` filtered to the
-  participants (the fourth rendering of the same operator-queue row, ent#428;
-  a computed, never a narrowed fetch); *Now* = a card per live row with Stop
+  mounts): since the ent#610 ruling (2026-09-30) no asks — one line "N ask(s)
+  waiting on you · Open in Inbox" while a participant's ask waits
+  (`PortalAsksWaitingLine`, counted from the store's `openAsks`, a computed,
+  never a narrowed fetch), to the Inbox's Action tab `?from=<agent>` (the whole
+  Action tab when two or more agents wait). It sits in the top row in both the
+  loaded and the empty state, so it arriving or work starting moves nothing;
+  Info mounts the same line for every principal (a client has no Work tab);
+  *Now* = a card per live row with Stop
   where `can_stop`; *Earlier* = "N in the last 30 days · latest 3 shown", Show
   all expands in place inside the rail's own scroll axis, "30+" when the
   server's page is full (principle 28).
@@ -2303,8 +2309,9 @@ issue if it's ever wanted. Also deferred: `data.json` caching/streaming.
 - `PortalAgentPage.vue` is dismantled: stats + the Activity chart to
   `PortalAgentBand.vue` (always visible); chats / what it can do / reports to
   `PortalAgentDetails.vue`; Canvas and Files were already rail tabs (ent#475);
-  recent work was already the rail's Work tab (ent#525); asks keep the
-  conversation's mount, which was the surviving one after #2449.
+  recent work was already the rail's Work tab (ent#525); asks: a chat draws
+  only the asks its own turns raised, as tiles in its thread, and every agent's
+  asks home is the Inbox filtered to it (ent#610, the 2026-09-30 ruling).
 - **Agent details was a sibling of the rail, not a rail tab** (ruled
   2026-09-05): the rail is participant-scoped with a fixed five-tab set, while
   this is about one agent and is dismissed rather than switched away from.
@@ -3562,7 +3569,7 @@ to localStorage in the clear.
 - **Three windows (tabs)**:
   | Tab | Membership | Source |
   |---|---|---|
-  | **Action** | asks addressed to me, pending (question, approval, alert), roster re-checked | the ONE asks list (`openAsks`) |
+  | **Action** | asks addressed to me, pending (question, approval, alert), roster re-checked; ordered by urgency — expiring within 24h first (soonest first), then priority (critical > high > medium > low), then the longest-waiting (§3g C1) | the ONE asks list (`openAsks`) |
   | **Unread** | chats with new arrivals — one row per chat, "N new", the latest arrival's excerpt; archived chats included | the sidebar's `threads` + `GET /chat-state?previews=true` |
   | **All** | every chat the sidebar lists, of any age (read or not; an unused Main is not listed; rooms wait for PR C), pending asks, and asks that ended in the last 7 days; its footer says the 7-day rule, the 200-ask read cap when hit, and — to a viewer with rooms — that rooms are not here yet (§3g D-4) | the same two lists |
 - **One unread model (AC 6)**: the unit of Unread is a **chat**, read through the existing
@@ -3602,6 +3609,38 @@ to localStorage in the clear.
   confirm), one chat is read directly. Success is a toast ("Marked 28 chats read") and a new
   tab visit; a partial failure names how many failed and those chats keep their count (the S4
   rollback) (§3g A9).
+- **Where an ask lives (the 2026-09-30 ruling as amended, PR A2 on ent#734's data)**: an ask
+  raised during a chat turn is a tile in THAT chat's thread, placed by server time among the
+  messages and answerable in place; once ended — at once when answered there, the confirmation
+  in the row, announced, focus on the row (team ruling on #3101, 2026-10-01) — it is one muted row
+  (kind · title · ending with who · when) that stays in that chat's history for the queue's own retention — the chat reads
+  its own chat-turn asks (`GET …/asks?chat_id=`, no 7-day window). A background ask (schedule,
+  loop, gate) is in no chat, only the Inbox; its `chat_id` (Main) is the reply target. Nothing
+  sits between the thread and the composer (principle 30). Every door — Work for platform
+  users, Info for everyone — carries one "N ask(s) waiting on you · Open in Inbox" line to
+  Action `?from=<agent>`, and each agent row's "needs you" mark counts from the same feed as the
+  pinned Inbox row.
+- **Action by agent (§3g C2, PR A2)**: whenever anything is waiting — from one agent on, so a
+  second agent's ask does not push the list down — Action shows a second strip ("All agents",
+  then each agent with its count), and choosing one narrows the tab to that agent's asks
+  (`?from=<agent>`, so it survives a reload and can be linked). The filter lasts while that
+  agent still has asks or its just-answered ask is on screen, then clears itself; switching
+  tabs drops it. A `?from=` the page OPENS with is kept even when that agent has nothing
+  waiting (Andrii's sign-off, 2026-10-01): the list says "Nothing is waiting on you from X."
+  with "Show all agents"; only a filter answered down to nothing during the visit clears, the
+  head saying "Nothing waiting from X · …". Arriving by an "Open in Inbox" link
+  puts focus on the list.
+- **The ask card while answering (§3g L6, PR A2)**: picking an approval option moves focus to
+  the note field (not on a touch screen, where it would pop the keyboard), so the Enter that
+  follows sends instead of unselecting the option — still pick, then Send (#2375). A question
+  the agent offered options for shows them as quick picks that fill the answer box and never
+  send (an option over the answer's 500-character limit is left out, never cut); the pick
+  that filled the answer shows as chosen, and on a touch screen it does not pop the keyboard
+  either. "Unconfirmed" is never shown in the Workspace — it is the platform's own
+  bookkeeping; every other sync state still is (`workspaceAskBadge`). After Send, focus lands
+  on the answered card; a second Enter while the answer is on its way sends nothing. In the
+  Inbox pane the card's header carries the priority and the expiry (the row's badges), where
+  the person decides — its context below the answer row does not repeat them.
 - **Open canvas (§3g C10)**: the pane offers "Open canvas" — on a chat or an ask — only when
   the item's agent has a canvas this viewer can see; it opens the rail on that canvas.
 - **Long tabs page (§3g SM / C4)**: every tab renders 50 rows, states "Showing 50 of 212", and
@@ -3612,8 +3651,19 @@ to localStorage in the clear.
   within the day ("Expires in 18m" as a warning under an hour, a neutral "Expires in 5h"
   otherwise, the absolute time on hover); never more than two badges. The expiry counts down
   on a 30-second clock that runs only while such a row exists.
+- **An ask's context (§3g L7, E1, PR A2)**: below an ask in the pane (the answer controls never
+  move, and work whether or not the context loads): where it came from — the conversation the
+  chat turn was in and the three messages before the ask, only when that conversation is the
+  viewer's own, else the ask's own chat for an ask a chat turn raised; a background ask has no
+  chat origin (only a chat turn verifies a thread — a schedule that delivers into Main is not
+  where its ask came from) — the run that raised it ("Asked during a
+  scheduled run · 09:00"; a platform user reads the schedule's name), what was delivered in
+  that chat, and the viewer's own last three answers to this agent. A run is named only when
+  it belongs to the ask's agent, was running when the ask was filed, and was a schedule, a
+  manual run or the viewer's own — the agent writes the link, so it is checked, never trusted.
 - **The door (AC 7)**: nothing the Inbox adds carries cost, an execution id or run detail; the
-  preview projection has no `cost` field. The Inbox needs no capability flag — it reads the
+  preview projection has no `cost` field; the ask-context read carries no `cost` and no
+  execution id (a run's kind, label and start time only). The Inbox needs no capability flag — it reads the
   roster payload, the viewer's own chat state and the asks list.
 - **Honest states**: loading ≠ empty ≠ failed ≠ stale, for asks and threads alike. The empty
   copy renders only after a successful read; a failed first read shows a retry; a failed

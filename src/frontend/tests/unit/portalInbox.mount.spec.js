@@ -677,7 +677,8 @@ describe('answering an ask in the pane (D8)', () => {
 
 describe('a selection restored from the URL (D8)', () => {
   it('a deep-linked ask is held in place once answered, exactly as a clicked one is', async () => {
-    store.asks = [ask('a1', { created_at: iso(1) }), ask('a2', { created_at: iso(20) })]
+    // §3g C1: Action is oldest-first among equals, so a2 (newer) is second.
+    store.asks = [ask('a1', { created_at: iso(20) }), ask('a2', { created_at: iso(1) })]
     store.asksLoaded = true
     store.answerAsk = vi.fn(async (id) => {
       const answered = { ...store.asks.find((a) => a.id === id), status: 'answered', ended_by: 'you', ended_at: new Date().toISOString() }
@@ -955,14 +956,21 @@ describe('a phone reaches the menu from the Inbox (§3g A5)', () => {
 describe('an ask attached to a chat is answerable in the pane (#3055 / §3g L0)', () => {
   // Ingestion attaches every addressed ask to Main, so every real ask has a
   // chat_id — and the card's thread link once took the controls away. The
-  // pane keeps the link (the only way to the ask's chat until E1 lands) AND
-  // the controls.
+  // controls always render. The way back to the ask's chat moved BELOW the
+  // card with E1 (§3g L7, PR A2): the context's "Open the conversation", so
+  // the card's own link is off in the pane (`threadLink=false`).
   it('a question with a chat shows its answer box and the link back', async () => {
     store.asksLoaded = true
     store.asks = [ask('q1', { chat_id: 'main-1' })]
+    store.fetchAskContext = vi.fn(async () => ({
+      origin: { chat_id: 'main-1', title: null, is_main: true, verified: false, messages: [] },
+      run: null, recent_answers: [],
+    }))
     const w = await mountInbox({}, { query: { tab: 'action', item: 'ask:q1' } })
     expect(has(w, 'inbox-ask-input-q1')).toBe(true)
-    expect(has(w, 'inbox-ask-open-thread-q1')).toBe(true)
+    expect(has(w, 'inbox-ask-open-thread-q1')).toBe(false)
+    await w.find('[data-testid="inbox-ask-context-open"]').trigger('click')
+    expect(w.emitted('open-chat')?.at(-1)).toEqual(['/workspace/c/main-1'])
   })
   it('an approval with a chat shows its options and Send', async () => {
     store.asksLoaded = true
@@ -1235,5 +1243,119 @@ describe('phone (D12)', () => {
     await w.find('[data-testid="inbox-pane-heading"]').trigger('keydown', { key: 'Escape' })
     await flushPromises()
     expect(router.currentRoute.value.query.item).toBeUndefined()
+  })
+})
+
+describe('Action narrowed to one agent (§3g C2, ?from=)', () => {
+  const facetsTabs = (w) => w.find('[data-testid="inbox-agent-facets"]')
+  it('two agents waiting → the facet strip; ?from= narrows the rows', async () => {
+    store.asks = [ask('s1'), ask('r1', { agent_name: 'relay' }), ask('r2', { agent_name: 'relay' })]
+    store.asksLoaded = true
+    const w = await mountInbox({}, { query: { tab: 'action', from: 'relay' } })
+    expect(facetsTabs(w).exists()).toBe(true)
+    const keys = w.findAll('[data-inbox-row]').map((r) => r.attributes('data-inbox-row'))
+    expect(keys.sort()).toEqual(['ask:r1', 'ask:r2'])
+  })
+
+  it('choosing a facet writes ?from=; "All agents" removes it', async () => {
+    store.asks = [ask('s1'), ask('r1', { agent_name: 'relay' })]
+    store.asksLoaded = true
+    const w = await mountInbox({}, { query: { tab: 'action' } })
+    const strip = facetsTabs(w).findComponent({ name: 'OverflowTabs' })
+    strip.vm.$emit('update:modelValue', 'relay')
+    await flushPromises()
+    expect(router.currentRoute.value.query.from).toBe('relay')
+    expect(w.findAll('[data-inbox-row]').map((r) => r.attributes('data-inbox-row'))).toEqual(['ask:r1'])
+    facetsTabs(w).findComponent({ name: 'OverflowTabs' }).vm.$emit('update:modelValue', 'all-agents')
+    await flushPromises()
+    expect(router.currentRoute.value.query.from).toBeUndefined()
+  })
+
+  it("narrowing to another agent drops the open ask that isn't theirs (A2 r1, Codex C4)", async () => {
+    store.asks = [ask('s1'), ask('r1', { agent_name: 'relay' })]
+    store.asksLoaded = true
+    const w = await mountInbox({}, { query: { tab: 'action', item: 'ask:s1' } })
+    facetsTabs(w).findComponent({ name: 'OverflowTabs' }).vm.$emit('update:modelValue', 'relay')
+    await flushPromises()
+    expect(router.currentRoute.value.query.from).toBe('relay')
+    expect(router.currentRoute.value.query.item).toBeUndefined()
+    // …and an open ask that IS theirs stays open.
+    await router.replace({ path: '/workspace/inbox', query: { tab: 'action', item: 'ask:r1' } })
+    await flushPromises()
+    facetsTabs(w).findComponent({ name: 'OverflowTabs' }).vm.$emit('update:modelValue', 'relay')
+    await flushPromises()
+    expect(router.currentRoute.value.query.item).toBe('ask:r1')
+  })
+
+  it('the facet strip keeps its order while counts change under the reader (A2 r1 QA P2)', async () => {
+    store.asks = [ask('s1'), ask('s2'), ask('r1', { agent_name: 'relay' })]
+    store.asksLoaded = true
+    const w = await mountInbox({}, { query: { tab: 'action' } })
+    const order = () => facetsTabs(w).findComponent({ name: 'OverflowTabs' }).props('tabs').map((t) => t.id)
+    expect(order()).toEqual(['all-agents', 'scout', 'relay'])
+    store.asks = [ask('s1'), ask('r1', { agent_name: 'relay' }), ask('r2', { agent_name: 'relay' })]
+    await flushPromises()
+    expect(order()).toEqual(['all-agents', 'scout', 'relay'])
+  })
+
+  it('opening a ?from= on an agent with nothing waiting KEEPS the filter and says so, with a way to everyone (Andrii, 2026-10-01)', async () => {
+    store.asks = [ask('s1')]
+    store.asksLoaded = true
+    const w = await mountInbox({ labels: { relay: 'Relay Bot' } }, { query: { tab: 'action', from: 'relay' } })
+    await flushPromises()
+    expect(router.currentRoute.value.query.from).toBe('relay')                 // not rewritten
+    expect(w.findAll('[data-inbox-row]')).toHaveLength(0)                       // scout's ask is not listed
+    const empty = w.find('[data-testid="inbox-empty"]')
+    expect(empty.text()).toContain('Nothing is waiting on you from Relay Bot')
+    const all = w.find('[data-testid="inbox-empty-link"]')
+    expect(all.text()).toBe('Show all agents')
+    expect(all.attributes('href')).toBe('/workspace/inbox?tab=action')
+    const strip = w.find('[data-testid="inbox-agent-facets"]').findComponent({ name: 'OverflowTabs' })
+    expect(strip.props('modelValue')).toBe('relay')                            // its facet stays chosen
+  })
+
+  it('a filter whose agent is answered down to nothing DURING the visit still clears, and the head says why', async () => {
+    store.asks = [ask('s1'), ask('r1', { agent_name: 'relay' })]
+    store.asksLoaded = true
+    const w = await mountInbox({ labels: { relay: 'Relay Bot' } }, { query: { tab: 'action', from: 'relay' } })
+    await flushPromises()
+    expect(router.currentRoute.value.query.from).toBe('relay')
+    // relay's last ask leaves the list (answered elsewhere, not the one on screen)
+    store.asks = [ask('s1')]
+    await flushPromises()
+    expect(router.currentRoute.value.query.from).toBeUndefined()
+    expect(w.find('[data-testid="inbox-list-total"]').text()).toContain('Nothing waiting from Relay Bot ·')
+  })
+
+  it('arriving by an "Open in Inbox" link puts focus on the list, not the page body (round 2, QA P2-3)', async () => {
+    store.asks = [ask('s1'), ask('r1', { agent_name: 'relay' })]
+    store.asksLoaded = true
+    document.body.focus()
+    const w = await mountInbox({}, { query: { tab: 'action', from: 'relay' } })
+    await flushPromises()
+    expect(document.activeElement).toBe(w.find('[data-testid="inbox-list-column"]').element)
+  })
+
+  it('a ?from= on a tab it does not narrow leaves the URL (A2 r1 QA N1)', async () => {
+    store.asks = [ask('s1'), ask('r1', { agent_name: 'relay' })]
+    store.asksLoaded = true
+    await mountInbox({}, { query: { tab: 'all', from: 'relay' } })
+    await flushPromises()
+    expect(router.currentRoute.value.query.from).toBeUndefined()
+    expect(router.currentRoute.value.query.tab).toBe('all')
+  })
+
+  it('one agent → the strip still, so a second agent asking moves nothing; other tabs never show it, and leaving Action drops ?from=', async () => {
+    store.asks = [ask('s1'), ask('s2')]
+    store.asksLoaded = true
+    const w = await mountInbox({}, { query: { tab: 'action' } })
+    expect(facetsTabs(w).exists()).toBe(true)
+    store.asks = [ask('s1'), ask('r1', { agent_name: 'relay' })]
+    await router.replace({ path: '/workspace/inbox', query: { tab: 'action', from: 'relay' } })
+    await flushPromises()
+    w.findComponent({ name: 'OverflowTabs' }).vm.$emit('update:modelValue', 'all')
+    await flushPromises()
+    expect(router.currentRoute.value.query.from).toBeUndefined()
+    expect(facetsTabs(w).exists()).toBe(false)
   })
 })

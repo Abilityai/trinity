@@ -69,6 +69,13 @@ describe('badgeVariant (A3a): one colour per fact, solid', () => {
     }
   })
 
+  it('neutral is a gray tint — a per-agent share of a count, not an event outcome (ent#610 A2 r1)', () => {
+    mk({ tabs: [{ ...TABS[0], badgeVariant: 'neutral' }, TABS[1], TABS[2]] })
+    const cls = badgeOf(tabsOf(w)[0]).classes()
+    expect(cls).toEqual(expect.arrayContaining(['bg-gray-100', 'dark:bg-gray-750', 'text-gray-700', 'dark:text-gray-300']))
+    expect(cls.some((k) => k.includes('status-'))).toBe(false)
+  })
+
   it('an unknown variant falls back to the default pill, never to no colour', () => {
     mk({ tabs: [{ ...TABS[0], badgeVariant: 'nope' }] })
     expect(badgeOf(tabsOf(w)[0]).attributes('class')).toContain(SUCCESS_PILL)

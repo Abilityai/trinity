@@ -13,7 +13,7 @@
 > | Your chats, What it can do, Reports | `PortalAgentDetails.vue`, in the rail's place |
 > | Canvas, Files | rail tabs since ent#475 |
 > | Recent work, Activity | the rail's Work tab since ent#525 |
-> | asks | the conversation's mount, the surviving one after #2449 |
+> | asks | a chat's own chat-turn asks as tiles in its thread; every agent's asks home is the Inbox (ent#610, 2026-09-30 ruling) |
 > | **Start a chat** | gone — the row opens the chat itself |
 >
 > **Status (original)**: ✅ Implemented (2026-08-13)

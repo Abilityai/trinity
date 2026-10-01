@@ -76,3 +76,60 @@ class WorkspaceAskAnswer(BaseModel):
     response_text: Optional[str] = Field(default=None, max_length=4000)
     # #2915: see `OperatorResponse.acknowledge_divergence`.
     acknowledge_divergence: bool = False
+
+
+# --- trinity-enterprise#610 PR A2, §3g L7 (E1): an ask's context ---------------
+#
+# Platform data only, and deliberately STRICTER than the Work tab's projection
+# (`work/models.py::WorkItem` carries the run id): no `cost` and no
+# `execution_id` anywhere below (§6.9). `execution_id` is AGENT-written on the
+# queue row, so it is a lookup key the service validates, never a fact it
+# forwards.
+
+
+class WorkspaceAskOriginMessage(BaseModel):
+    """One message of the chat the ask came from — an excerpt, never the body
+    (`chat_previews._arrival_excerpt`: credentials redacted, markdown stripped,
+    at most 280 chars). No `cost`."""
+    id: str
+    role: str
+    at: str
+    excerpt: str
+
+
+class WorkspaceAskOrigin(BaseModel):
+    """Where the ask came from. `verified` is True only when the run's portal
+    session is the viewer's own thread; only then are `messages` filled (the
+    three before the ask). Otherwise it is the ask's own chat — Main, for every
+    ingested ask — with no excerpt, because what precedes an ask in Main is
+    usually unrelated to it."""
+    chat_id: str
+    title: Optional[str] = None
+    is_main: bool = False
+    verified: bool = False
+    messages: List[WorkspaceAskOriginMessage] = []
+
+
+class WorkspaceAskRun(BaseModel):
+    """The run that raised the ask — shown only after the agent, live-window and
+    audience checks pass. `label` names the schedule for a platform principal
+    only ("Asked by the nightly-billing run"); a client reads "Asked during a
+    scheduled run" (T12)."""
+    kind: str               # schedule | manual | turn | delegated | loop | room | other
+    label: str
+    started_at: Optional[str] = None
+
+
+class WorkspaceAskAnswered(BaseModel):
+    """One of the viewer's own recent answers to this agent — how they answered
+    a similar ask. The answer is an excerpt of the decision, never the note."""
+    id: str
+    title: str
+    answer: Optional[str] = None
+    ended_at: Optional[str] = None
+
+
+class WorkspaceAskContext(BaseModel):
+    origin: Optional[WorkspaceAskOrigin] = None
+    run: Optional[WorkspaceAskRun] = None
+    recent_answers: List[WorkspaceAskAnswered] = []

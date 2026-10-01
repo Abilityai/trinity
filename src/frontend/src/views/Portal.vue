@@ -448,7 +448,12 @@
                `isMainChat`, `resetting`, `sending` and the voice state) and it
                is the follow-up, not this PR. -->
           <template #band>
-            <PortalAgentBand :key="activeAgent.name" :agent-name="activeAgent.name" />
+            <!-- ent#610 round 2 (QA mobile F1): with a phone's keyboard up the
+                 viewport is ~400px; the band's ~105px left the thread ~20px and
+                 hid the note being typed in an ask tile. It steps aside then. -->
+            <div class="[@media(max-width:639px)_and_(max-height:480px)]:hidden">
+              <PortalAgentBand :key="activeAgent.name" :agent-name="activeAgent.name" />
+            </div>
           </template>
           <!-- #2579 AC 3 — the operator's mark on a fallback title. The same
                `titleGenerationNotice` copy the settings panel renders, raised
@@ -698,7 +703,7 @@
              body READS a shell-owned store (`usePortalRailFeeds`) and never
              fetches, so the collapsed rail can signal with nothing mounted. -->
         <template #tab-work="{ participants, tab }">
-          <PortalWork :participants="participants" :tab="tab" :chat-id="railChatId" :exclude-ask-ids="inboxOpenAskIds" @open-thread="openThread" @see-hints="seeHints" @ask-about-it="askAboutIt" />
+          <PortalWork :participants="participants" :tab="tab" @open-thread="openThread" @see-hints="seeHints" @ask-about-it="askAboutIt" />
         </template>
         <template #tab-loops="{ participants, tab }">
           <PortalLoops :participants="participants" :tab="tab" />
@@ -725,7 +730,6 @@
             :threads="threads"
             @open-thread="openThread"
             @use-playbook="usePlaybook"
-            @open-rail-tab="openRailOn"
             @focus-composer="focusConversationComposer"
           />
         </template>
@@ -761,7 +765,7 @@
            body READS a shell-owned store (`usePortalRailFeeds`) and never
            fetches, so the collapsed rail can signal with nothing mounted. -->
       <template #tab-work="{ participants, tab }">
-        <PortalWork :participants="participants" :tab="tab" :chat-id="railChatId" :exclude-ask-ids="inboxOpenAskIds" @open-thread="openThread" @see-hints="seeHints" @ask-about-it="askAboutIt" />
+        <PortalWork :participants="participants" :tab="tab" @open-thread="openThread" @see-hints="seeHints" @ask-about-it="askAboutIt" />
       </template>
       <template #tab-loops="{ participants, tab }">
         <PortalLoops :participants="participants" :tab="tab" />
@@ -788,7 +792,6 @@
           :threads="threads"
           @open-thread="(t) => { railSheetOpen = false; openThread(t) }"
           @use-playbook="(text) => { railSheetOpen = false; usePlaybook(text) }"
-          @open-rail-tab="openRailOn"
           @focus-composer="() => { railSheetOpen = false; focusConversationComposer() }"
         />
       </template>
@@ -844,7 +847,7 @@ import PortalRoom from '@/components/portal/PortalRoom.vue'
 import PortalInbox from '@/components/portal/PortalInbox.vue'
 import PortalInboxSkeleton from '@/components/portal/PortalInboxSkeleton.vue'
 import {
-  inboxLandingTarget, isInboxPath, inboxBranchVisible, inboxSelectedAgent, inboxCanvasCount, parseItemKey,
+  inboxLandingTarget, isInboxPath, inboxBranchVisible, inboxSelectedAgent, inboxCanvasCount,
   sidebarThreadsOf, agentLabels, inboxRailAllowance as inboxRailAllowanceFor,
 } from '@/components/portal/portalInbox'
 import {
@@ -891,6 +894,7 @@ import {
   totalUnread,
   // trinity-enterprise#610 §3g S4: the read's optimistic zero and its rollback.
   optimisticRead, rollbackRead,
+  asksHomeRoute,
 } from '@/components/portal/portalUtils'
 // ent#557: the tab title's unread half. The router owns the label; this pushes
 // the count. See `utils/tabTitle.js` for why neither writes `document.title`.
@@ -1020,11 +1024,6 @@ const isInboxRoute = computed(() => isInboxPath(route.path))
 // §3g S5 (T2): or the Inbox's desktop PREVIEW, which never enters the URL.
 const inboxPreview = ref(null)
 const inboxSelection = computed(() => (isInboxRoute.value ? route.query.item || inboxPreview.value || null : null))
-// ent#610 sign-off: the ask open in the Inbox pane is not repeated in Work.
-const inboxOpenAskIds = computed(() => {
-  const parsed = inboxSelection.value ? parseItemKey(inboxSelection.value) : null
-  return parsed && parsed.type === 'ask' ? [parsed.id] : []
-})
 const inboxVisible = computed(() => inboxBranchVisible({ isInboxRoute: isInboxRoute.value, stageState: stage.value.state }))
 // #3060: which skeleton the stage draws while it has no verdict. Bare
 // `/workspace` is replaced by the Inbox route in onMounted, AFTER first paint,
@@ -1368,11 +1367,13 @@ function askAboutIt(text) {
   railSheetOpen.value = false
   usePlaybook(text)
 }
-// ent#465: a suggestion's Accept. Asks are answered in Work's "Waiting on
-// you"; decisions live in the Info tab. `open_chat` puts the caret in the
-// composer — never a send.
+// ent#465: a suggestion's Accept. Decisions live in the Info tab; `open_chat`
+// puts the caret in the composer — never a send. The asks suggestion goes to
+// the agent's asks home, the Inbox (trinity-enterprise#610, the 09-30 ruling —
+// Work no longer lists asks).
 function openSuggestionSection(name) {
-  openRailOn(name === 'asks' ? 'work' : 'info')
+  if (name === 'asks') { router.push(asksHomeRoute(activeAgent.value?.name || null)); return }
+  openRailOn('info')
 }
 function focusConversationComposer() {
   conversationRef.value?.focusComposer?.()

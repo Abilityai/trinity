@@ -30,7 +30,7 @@ const ask = (id, over = {}) => ({
   id, agent_name: 'ops', kind: 'notification', priority: 'high',
   title: 'Backup job failed twice', question: 'The nightly backup failed.', options: null,
   created_at: '2026-09-20T10:00:00Z', expires_at: null, status: 'pending',
-  chat_id: 'main-1', sync: 'confirmed', aging: false, ended_at: null, ended_by: null, ...over,
+  chat_id: 'main-1', raised_in_turn: true, sync: 'confirmed', aging: false, ended_at: null, ended_by: null, ...over,
 })
 
 beforeEach(() => { setActivePinia(createPinia()) })

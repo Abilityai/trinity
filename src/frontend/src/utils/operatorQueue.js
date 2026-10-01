@@ -217,6 +217,39 @@ export function queueSyncBadge(item) {
   return null
 }
 
+/**
+ * trinity-enterprise#610 §3g B5 — the badge a WORKSPACE reader sees. The same
+ * rule as `queueSyncBadge`, minus `unconfirmed`: that state means only that no
+ * confirming poll has read the row back from the agent's file yet — platform
+ * bookkeeping, nothing a client can act on (it read as "is this ask real?").
+ * An unconfirmed ask that is also aging still says "Waiting". Desktop and `/m`
+ * keep the full rule; they are the operator's door.
+ *
+ * @param {object|undefined} item
+ * @returns {{label: string, variant: string, title: string}|null}
+ */
+export function workspaceAskBadge(item) {
+  if (!item || typeof item !== 'object') return null
+  const state = item.sync_state || item.sync
+  if (state === 'unconfirmed' && item.delivery_state !== 'undelivered') {
+    return queueSyncBadge({ ...item, sync_state: null, sync: null })
+  }
+  return queueSyncBadge(item)
+}
+
+/**
+ * trinity-enterprise#610 §3g B3 — the options a QUESTION offered, as quick
+ * picks. `queueResponseKind` keeps a question free-text on purpose (desktop and
+ * `/m` rely on it); these only FILL the answer box, they never send. An option
+ * longer than the answer field accepts (`WorkspaceAskAnswer.response`,
+ * max 500) is left out rather than cut — a pick must be what the agent offered.
+ */
+export const QUICK_PICK_MAX = 500
+export function questionQuickPicks(item) {
+  if (!item || item.type !== 'question') return []
+  return optionsOf(item).filter((s) => s.length <= QUICK_PICK_MAX)
+}
+
 function changedTitle(detail) {
   const fields = typeof detail === 'string' && detail ? detail.split(',').join(', ') : 'content'
   return `The agent rewrote this item since it was ingested (${fields}). You are reading the original.`
@@ -374,6 +407,59 @@ export function queueReaskBadges(item, items = []) {
     })
   }
   return out
+}
+
+/**
+ * trinity-enterprise#610 §3g L6 (E2 seam) — the parts of an ask's agent-authored
+ * brief that are shown: `why`, `recommendation`, `if_no_answer`, each a
+ * non-empty string, else absent. Nothing to show is `null`, so a card with no
+ * brief renders no brief block at all. The server stores and projects the
+ * brief (L8); this only decides what of it is displayable. Agent text: the
+ * renderer (PortalMarkdown → DOMPurify) is the XSS boundary.
+ *
+ * @param {{brief?: unknown}|undefined} item
+ * @returns {{why?: string, recommendation?: string, if_no_answer?: string}|null}
+ */
+const BRIEF_TEXT_FIELDS = Object.freeze(['why', 'recommendation', 'if_no_answer'])
+export function briefOf(item) {
+  const b = item?.brief
+  if (!b || typeof b !== 'object' || Array.isArray(b)) return null
+  const out = {}
+  for (const k of BRIEF_TEXT_FIELDS) {
+    if (typeof b[k] === 'string' && b[k].trim()) out[k] = b[k]
+  }
+  return Object.keys(out).length ? out : null
+}
+
+/**
+ * The brief's per-option consequence, for an APPROVAL's offered options only:
+ * a key that is not an offered option, or a value that is not a string, is
+ * dropped (the server filters too — this is the renderer's belt). A question or
+ * an alert has no impact line.
+ *
+ * @param {{kind?: string, type?: string, options?: unknown, brief?: unknown}} item
+ * @returns {Object<string, string>}
+ */
+export function briefImpactFor(item) {
+  const kind = item?.kind ?? item?.type
+  const impact = item?.brief?.impact
+  if (kind !== 'approval' || !impact || typeof impact !== 'object' || Array.isArray(impact)) return {}
+  const offered = new Set(optionsOf({ options: item.options }))
+  // No prototype: an option literally named `constructor` must read as absent,
+  // not as Object's native function (A2 round 1, /cso nit).
+  const out = Object.create(null)
+  for (const [opt, text] of Object.entries(impact)) {
+    if (offered.has(opt) && typeof text === 'string' && text.trim()) out[opt] = text
+  }
+  return out
+}
+
+/** "If you don't answer by Oct 1, 3:00 PM" — or plainly, with no deadline. */
+export function ifNoAnswerLabel(expiresAt) {
+  const at = expiresAt ? Date.parse(expiresAt) : NaN
+  if (!Number.isFinite(at)) return "If you don't answer"
+  const when = new Date(at).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })
+  return `If you don't answer by ${when}`
 }
 
 /**

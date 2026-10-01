@@ -64,3 +64,43 @@ export function askKindIcon(kind) {
   if (kind === 'question') return ICONS.question
   return ICONS.alert
 }
+
+// §3g L7 (E1) — the context's one meta line: when it was asked, with the run
+// that asked it folded in (reconcile row 14). The run's label comes from the
+// server, which already decided what this viewer may read of it (a client never
+// gets the schedule's name). A2 round 1: the expiry and a priority worth saying
+// moved to the card's header (PortalAsks `showUrgency`) — below Send they came
+// after the decision — and the run's clock says it is the run's START, shown
+// only for a schedule or a manual run (a chat turn's time is the chat's own).
+// Each part is one unbreakable phrase. `formatTime` is injectable so the
+// wording is testable locale-free.
+const defaultClock = (iso) => {
+  const t = iso ? Date.parse(iso) : NaN
+  return Number.isFinite(t) ? new Date(t).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : ''
+}
+function ago(iso, now) {
+  const t = iso ? Date.parse(iso) : NaN
+  if (!Number.isFinite(t)) return ''
+  const ms = Math.max(0, now - t)
+  if (ms < 60_000) return 'just now'
+  if (ms < HOUR_MS) return `${Math.floor(ms / 60_000)}m ago`
+  if (ms < DAY_MS) return `${Math.floor(ms / HOUR_MS)}h ago`
+  return `${Math.floor(ms / DAY_MS)}d ago`
+}
+const CLOCKED_RUNS = new Set(['schedule', 'manual'])
+export function askContextMeta(ask, run = null, now = Date.now(), formatTime = defaultClock) {
+  if (!ask) return []
+  const when = ago(ask.created_at, now)
+  let head = when ? `Asked ${when}` : 'Asked'
+  const parts = []
+  if (run && run.label) {
+    const how = /^Asked\s+/.test(run.label) ? run.label.replace(/^Asked\s+/, '') : null
+    head = how ? `${head} ${how}` : `${head} · ${run.label}`
+  }
+  parts.push(head)
+  if (run && CLOCKED_RUNS.has(run.kind)) {
+    const clock = formatTime(run.started_at)
+    if (clock) parts.push(`started ${clock}`)
+  }
+  return parts
+}
