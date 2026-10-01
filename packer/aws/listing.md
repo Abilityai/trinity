@@ -72,7 +72,8 @@ Elastic IP keeps the address fixed.
 
 **Managing over SSH** (optional): `cd /opt/trinity`, then
 `docker compose -f docker-compose.hosted.yml ps` / `logs -f backend`, and
-`sudo ./scripts/deploy/start.sh --hosted` to restart. Backups run nightly under
+`sudo ./scripts/deploy/start.sh --hosted` to restart. The database is a bundled
+PostgreSQL container (`trinity-postgres`). Backups run nightly under
 `/opt/trinity/trinity-data/backups/` on the same volume; take EBS snapshots as
 well.
 

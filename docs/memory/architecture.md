@@ -121,7 +121,7 @@ Two Docker bridge networks, by design — agents physically cannot route to Redi
 
 | Network | Subnet | Members |
 |---------|--------|---------|
-| `trinity-platform-network` | 172.29.0.0/16 | redis, scheduler, vector |
+| `trinity-platform-network` | 172.29.0.0/16 | redis, scheduler, vector, postgres (hosted compose; dev `--profile postgres`, #3159) |
 | `trinity-agent-network` | 172.28.0.0/16 | agents, frontend |
 
 Bridges (members of **both** networks): `backend` (primary HTTP API — Redis on platform side, agents on agent side), `mcp-server` (agents reach `http://mcp-server:8080/mcp` via Docker DNS), `otel-collector` (agents push metrics), `cloudflared` (prod only — proxies to backend and public agents).

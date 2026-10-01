@@ -100,10 +100,12 @@ done
 docker pull "ghcr.io/abilityai/trinity-agent-base:${TRINITY_IMAGE_TAG}"
 docker tag "ghcr.io/abilityai/trinity-agent-base:${TRINITY_IMAGE_TAG}" trinity-agent-base:latest
 
-# Third-party images docker-compose.hosted.yml pulls that are not ours.
+# Third-party images docker-compose.hosted.yml pulls that are not ours
+# (postgres is the hosted database, #3159).
 docker pull redis:7-alpine
 docker pull timberio/vector:0.43.1-alpine
 docker pull alpine:3.20
+docker pull postgres:16-alpine
 
 # The OTel collector is NOT profile-gated in docker-compose.hosted.yml — unlike
 # cloudflared, which is correctly skippable under `profiles: [tunnel]` — so
