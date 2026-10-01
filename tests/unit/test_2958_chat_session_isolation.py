@@ -398,20 +398,25 @@ async def test_no_retry_when_cancelled(shim, monkeypatch):
 # --------------------------------------------------------------------------
 
 
-async def test_resume_error_after_text_still_returns_the_text(shim):
-    """The dead-session 502 is for an EMPTY resume turn. A resumed turn that
-    answered and then reported `is_error` returns its text, as under
-    `--continue` and as a cold turn still does — not a 502."""
+async def test_resume_error_after_text_is_a_502_without_cold_retry(shim):
+    """#2968: a resumed turn that emitted partial text and then reported
+    `is_error` is a failure (parity with the headless path, #1673) unless the
+    transcript proves the turn finished (#1870, covered in
+    test_2968_chat_is_error.py). The session is live (its JSONL exists), so
+    there is no cold retry, and the failed turn does not move the id."""
     chat1 = await _chat("hello")
     _env("SHIM_ERROR_AFTER_TEXT", "1")
     runs_before = len(shim.runs())
 
-    text, _log, _meta, _raw = await claude_code.execute_claude_code(
-        "go on", model=M1, execution_id=f"exec-{uuid.uuid4().hex[:12]}"
-    )
+    with pytest.raises(HTTPException) as exc:
+        await claude_code.execute_claude_code(
+            "go on", model=M1, execution_id=f"exec-{uuid.uuid4().hex[:12]}"
+        )
 
-    assert text == f"partial answer from {chat1.session_id}"
+    assert exc.value.status_code == 502
+    assert "mid-turn failure 2958" in str(exc.value.detail)
     assert len(shim.runs()) - runs_before == 1, "no cold retry for a live session"
+    assert agent_state.chat_session_id == chat1.session_id
 
 
 async def test_marker_written_after_success_and_kept_on_failure(shim):
