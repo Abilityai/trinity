@@ -4024,6 +4024,17 @@
         "unit"
       ],
       "description": "Narrow cross-agent metrics read. The one predicate (self or an agent_permissions grant, directional), the hourly-deduped audit of who read whose numbers (source passed, marker set only after the row is written, written anyway when the marker store is down, never raises into the read), and get_objectives resolving an actual from the agent that serves a metric through the READER's grant: fail-closed with no viewer predicate, ambiguity decided before the viewer filter, a server the viewer cannot see treated as not served, local declaration wins; plus the objectives route passing the viewer predicate and auditing each serving agent. The /metrics and /definitions grant gate itself is in test_ent479_metrics_route.py."
+    },
+    {
+      "file": "unit/test_2968_chat_is_error.py",
+      "feature": "#2968",
+      "added": "2026-10-01",
+      "categories": [
+        "agent-server",
+        "unit",
+        "execution"
+      ],
+      "description": "The synchronous chat path treats an exit-0 is_error result (error_type execution_error) as a failure, parity with the headless #1673 check. Drives the real execute_claude_code against a fake claude on PATH: empty result -> 502 carrying the real errors[] cause (was 500 'returned empty response'); an 'API Error' result text and partial assistant text before is_error are 502s, not successes; is_error false stays a success. #1870 completed-turn recovery runs first: an on-disk end_turn answer is returned with the recovery notice and recovered_terminal; an unfinished transcript still fails. A failed turn never captures its session; the 502 body is structured {message, metadata} for backend telemetry salvage and is credential-sanitized in both fields; the completed-turn recovery's JSONL parse runs off the event loop."
     }
   ]
 }
