@@ -1,0 +1,100 @@
+{
+  "version": "1.2",
+  "date": "2026-09-30",
+  "mode": "diff",
+  "scope": "all",
+  "confidence_gate": 8,
+  "branch": "feature/672-skill-deprecation-lifecycle",
+  "issue": "abilityai/trinity-enterprise#672",
+  "merge_base": "863240f32",
+  "commit": "5051e2da3",
+  "phases_run": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14],
+  "stack_cve_quicklist": [],
+  "stack_cve_quicklist_note": "Not re-evaluated: no pin, lockfile, Dockerfile, compose file or workflow is in the diff.",
+  "attack_surface": {
+    "endpoints_new": 0,
+    "endpoints_changed_response": [
+      "GET /api/skills/library (+deprecated, +superseded_by)",
+      "GET /api/skills/library/{name} (+deprecated, +superseded_by; human-only)",
+      "POST/PUT /api/agents/{name}/skills… and POST /api/agents/{name}/skill-sets/{set} (delivery.skills[name].warnings, deprecated names only)",
+      "POST /api/agents/{name}/start (skills_result may carry deprecated:<name>)"
+    ],
+    "auth_dependencies_changed": 0,
+    "mcp_tools_changed": ["list_skills (+2 fields)", "description text: list_skills, assign_skill_to_agent, get_agent_skills"],
+    "agent_context_ingress_new": 0,
+    "frontend_html_sinks_added": 0,
+    "migrations": 0,
+    "dependency_or_ci_or_infra_files": 0
+  },
+  "findings": [],
+  "hypotheses": [],
+  "coverage_gaps": [],
+  "candidates_not_reported": [
+    {
+      "title": "New log line interpolates the exception from list_skills()",
+      "category": "credential-in-log",
+      "file": "src/backend/services/skill_service.py",
+      "reason": "Read path runs only `git rev-parse HEAD` / `git ls-tree` with cwd set and no URL or token in argv; _clones() handles its own DB/constructor errors. Below the gate; _scrub_pat hardening left to the owner."
+    },
+    {
+      "title": "Name-shaped successor text that is not a skill enters the warning code",
+      "category": "input-validation",
+      "file": "src/backend/services/skill_packaging.py",
+      "reason": "Rendered as text, never linkified; the library author already controls the skill body. Informational."
+    },
+    {
+      "title": "description is not normalised like superseded_by",
+      "category": "input-validation",
+      "file": "src/backend/services/skill_service.py",
+      "reason": "Pre-existing, outside the diff."
+    },
+    {
+      "title": "Library-authored text in an agent's MCP list_skills result",
+      "category": "prompt-injection",
+      "file": "src/mcp-server/src/tools/skills.ts",
+      "reason": "Existing library-content channel (description is uncapped); the new field is capped at 200 printable characters and equal in trust to the skill bodies an assigned agent runs."
+    }
+  ],
+  "fixed_during_audit": [
+    {
+      "title": "Regression pin: an HTML-shaped successor renders as text",
+      "file": "src/frontend/tests/unit/skillDeprecation.spec.js",
+      "evidence": "Red when the Library successor line is mutated to v-html; component restored byte-identical."
+    }
+  ],
+  "active_verification": {
+    "guard_tests": [
+      "tests/unit/test_2996_human_only_routes.py",
+      "tests/unit/test_1310_auth_wiring.py",
+      "tests/unit/test_293_admin_gate_rejects_agent_keys.py",
+      "tests/unit/test_models_centralized.py",
+      "tests/unit/test_186_enumeration_uniformity.py",
+      "tests/unit/test_1965_agent_server_safe_yaml.py",
+      "tests/unit/test_2991_start_skills_result.py"
+    ],
+    "guard_tests_result": "159 passed",
+    "concealed_unicode_grep": "24 files, 0 hits",
+    "mutation_battery": "39 wiring mutations, 0 survived"
+  },
+  "supply_chain_summary": {
+    "scanner": "not run — no dependency or lockfile change in the diff",
+    "dependency_files_changed": 0
+  },
+  "filter_stats": {
+    "candidates": 4,
+    "reported": 0,
+    "below_gate": 4
+  },
+  "totals": {
+    "critical": 0,
+    "high": 0,
+    "medium": 0,
+    "low": 0
+  },
+  "trend": {
+    "prior_reports_for_these_files": 0,
+    "resolved": [],
+    "persistent": [],
+    "new": []
+  }
+}

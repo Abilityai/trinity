@@ -289,7 +289,9 @@ async def inject_assigned_skills(agent_name: str) -> dict:
 # that can hold an exception string, a transport URL or a path, and is reduced
 # to a code here, never passed through.
 _CODE_RE = re.compile(r"^[a-z][a-z0-9_]{1,63}$")
-_WARNING_RE = re.compile(r"^(missing_binary|missing_env):[A-Za-z0-9_.+-]{1,128}$")
+# `deprecated:<successor>` (#672) joins the two dep codes: its detail is a skill
+# name by construction (`skill_packaging.deprecation_warning`), never prose.
+_WARNING_RE = re.compile(r"^(missing_binary|missing_env|deprecated):[A-Za-z0-9_.+-]{1,128}$")
 _SKILL_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 _PROSE_ERRORS = {
     "Skill not found in library": "not_in_library",
