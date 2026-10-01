@@ -841,7 +841,7 @@ import { agentDisplayName } from '@/utils/agentName'
 import PortalAgentBubble from './PortalAgentBubble.vue'
 import PortalWorkCard from './PortalWorkCard.vue'
 import { usePortalWorkStore } from '@/stores/portalWork'
-import { askAboutItPrefill, childrenForChat, itemById, previewTitle } from './portalWork'
+import { askAboutItPrefill, childrenForChat, clockRestartsAt, itemById, pendingTurnOutcome, previewTitle } from './portalWork'
 import { activityFromStreamEvent, resolveActivityText } from '@/utils/workActivity'
 import PortalAvatar from './PortalAvatar.vue'
 import PortalStarButton from './PortalStarButton.vue'
@@ -1196,7 +1196,7 @@ const liveCardItem = computed(() => {
     id: activeExecutionId.value || 'pending',
     agent_name: props.agent.name,
     status: 'running',
-    outcome: 'running',
+    outcome: pendingTurnOutcome(liveStreamActivity.value),
     kind: 'turn',
     // The feed's own title shape, so its row lands without re-wrapping it (#2964).
     title: previewTitle(pendingUserText.value || lastUserText()),
@@ -2141,6 +2141,9 @@ async function cancelTurn() {
 // stream-json frames never carry, so the card only ever said nothing.)
 const streaming = ref(false)
 const liveStreamActivity = ref(null)
+watch(() => liveCardItem.value.outcome, (now, before) => {
+  if (clockRestartsAt(before, now)) elapsed.value = 0
+})
 // Bumped after each completed turn; `PortalDeliverables` watches it.
 const deliverableTick = ref(0)
 

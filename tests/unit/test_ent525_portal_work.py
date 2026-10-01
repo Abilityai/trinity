@@ -631,3 +631,18 @@ def test_the_fleet_dashboard_payload_gains_no_channel_destination_ids():
            "started_at": "2026-09-06T10:00:00Z", "message": "m", "triggered_by": "public",
            "source_channel_chat_id": "sess-1", "loop_id": "l1", "source_channel": "portal"}
     assert not hasattr(FleetExecutionSummary(**row), "source_channel_chat_id")
+
+
+# #3114: a pilot's Workspace turn is pre-created `running` and enqueued a moment
+# later. Until a worker claims it (a claim writes a lease) it is waiting for a
+# slot, so the card must not say "Working".
+@pytest.mark.parametrize("row, outcome", [
+    (dict(agent_name="pilot-a", status="running", triggered_by="public", lease_expires_at=None), "queued"),
+    (dict(agent_name="pilot-a", status="running", triggered_by="public",
+          lease_expires_at="2026-10-01T17:00:00Z"), "running"),
+    (dict(agent_name="push-a", status="running", triggered_by="public", lease_expires_at=None), "running"),
+    (dict(agent_name="pilot-a", status="running", triggered_by="chat", lease_expires_at=None), "running"),
+])
+def test_unclaimed_pilot_row_reads_queued(svc, monkeypatch, row, outcome):
+    monkeypatch.setenv("PULL_MODE_PILOT_AGENTS", "pilot-a")
+    assert svc.work_outcome(_row(**row)) == outcome

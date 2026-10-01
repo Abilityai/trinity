@@ -54,7 +54,7 @@ vi.mock('@/api', () => ({ default: api }))
 vi.mock('../../src/api', () => ({ default: api }))
 
 import {
-  EARLIER_PREVIEW, askAboutItPrefill, childrenForChat, earlierSlice, earlierSummary, formatElapsed,
+  EARLIER_PREVIEW, askAboutItPrefill, childrenForChat, clockRestartsAt, pendingTurnOutcome, earlierSlice, earlierSummary, formatElapsed,
   holderLine, isHonestTerminal, isLive, itemById, kindLabel, liveElapsedSeconds, liveItems,
   stageRows, stepsLine, workSignalFromItems, workStatusLabel, workTone, workView,
 } from '@/components/portal/portalWork'
@@ -511,5 +511,21 @@ describe('ent#525 — the tab and the card are wired (source guards)', () => {
   it('the WebSocket handler routes activity and loop events to the Work store', () => {
     expect(ws).toContain("import { usePortalWorkStore } from '../stores/portalWork'")
     expect((ws.match(/portalWorkStore\.handleWebSocketEvent\(data\)/g) || []).length).toBe(2)
+  })
+})
+
+// #3114: a just-sent turn may be waiting for a pull worker. Before the agent
+// streams anything the card says "Waiting for a slot", and the clock restarts
+// when the turn is picked up, so "Working" counts working time only.
+describe('pending turn on a pull agent (#3114)', () => {
+  it('reads waiting until the agent streams', () => {
+    expect(workStatusLabel({ outcome: pendingTurnOutcome(null) })).toBe('Waiting for a slot')
+    expect(workStatusLabel({ outcome: pendingTurnOutcome({ text: 'Reading a file' }) })).toBe('Working')
+  })
+  it('restarts the clock only on queued -> running', () => {
+    expect(clockRestartsAt('queued', 'running')).toBe(true)
+    expect(clockRestartsAt('running', 'running')).toBe(false)
+    expect(clockRestartsAt(undefined, 'running')).toBe(false)
+    expect(clockRestartsAt('running', 'success')).toBe(false)
   })
 })
