@@ -30,6 +30,19 @@ import services.event_dispatch_service as _EDS  # noqa: E402
 
 pytestmark = pytest.mark.unit
 
+
+@pytest.fixture(autouse=True)
+def _grant_still_held(monkeypatch):
+    """trinity-enterprise#739: delivery re-reads the subscriber -> source edge.
+    These subscriptions are stubs without one; this file is about the dispatch
+    budget, not whether delivery is permitted (test_ent739_grant_withdrawal.py
+    covers that), so the grant is held."""
+    try:
+        from services import event_dispatch_service as _eds
+    except ImportError:
+        return
+    monkeypatch.setattr(_eds, "_subscription_still_permitted", lambda sub: True)
+
 LIMIT = 3
 SUB_AGENT = "budget-sub"
 
