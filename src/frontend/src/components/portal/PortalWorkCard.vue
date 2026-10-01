@@ -16,7 +16,7 @@
                     capability Trinity does not have (#919)
 
   Three sentences for steps, never two (ruling 2, reviewed): the stages when
-  the agent publishes them, "doesn't report steps" when it reachably does not,
+  the agent publishes them, nothing when it reachably does not (#3001),
   "could not be read right now" when nobody can tell — a stopped agent must
   never be described as one that doesn't report.
 
@@ -78,25 +78,21 @@
       <!-- #2964: in the chat's card (`reserveLiveRows`) the row exists from
            first paint — blank and aria-hidden while the feed has not read the
            turn — and holds ONE line, so `pending → none | unknown` swaps the
-           text in place. Only the agent's name truncates; the claim
-           ("doesn't report steps.") is never cut (ent#525's "says so").
+           text in place.
            `w-0 min-w-full`: the row takes the card's width and never sets it,
            so a long name cannot widen the card when the sentence lands. -->
-      <!-- #3001: `activity` (a live line has shown on this run) is silent like
-           `pending` — the reserved row stays, blank, so the card never moves. -->
+      <!-- #3001: `none` (no stages published) is silent like `pending` — no
+           sentence at all; in the chat's card the reserved row stays, blank,
+           so the card never moves. -->
       <p
-        v-else-if="(steps.kind !== 'pending' && steps.kind !== 'activity') || reserveLiveRows"
+        v-else-if="!stepsSilent || reserveLiveRows"
         class="mt-1.5 text-xs text-gray-500 dark:text-gray-400"
         :class="reserveLiveRows ? 'h-4 leading-4 flex w-0 min-w-full whitespace-nowrap' : ''"
         :aria-hidden="stepsSilent ? 'true' : undefined"
         :title="reserveLiveRows && steps.text ? steps.text : undefined"
         :data-testid="stepsSilent ? 'portal-work-reserved-steps' : `portal-work-steps-${steps.kind}`"
       >
-        <template v-if="reserveLiveRows && steps.who">
-          <span class="truncate" data-testid="portal-work-sentence-who">{{ steps.who }}</span>
-          <span class="shrink-0 whitespace-pre" data-testid="portal-work-sentence-claim">{{ steps.text.slice(steps.who.length) }}</span>
-        </template>
-        <span v-else-if="reserveLiveRows" class="truncate">{{ steps.text }}</span>
+        <span v-if="reserveLiveRows" class="truncate">{{ steps.text }}</span>
         <template v-else>{{ steps.text }}</template>
       </p>
     </template>
@@ -212,14 +208,9 @@ onBeforeUnmount(() => { if (_tick) clearInterval(_tick) })
 const statusWord = computed(() => workStatusLabel(props.item))
 const kindWord = computed(() => kindLabel(props.item.kind))
 const clock = computed(() => (live.value ? formatElapsed(props.elapsedSeconds) : null))
-// #3001: whether this run has shown a live activity line. Sticky for the run —
-// a beat expires every 15 s, and the sentence must not flicker back in between
-// two of them — and reset when the card starts showing a different run.
-const activitySeen = ref(false)
-watch(shownStep, (v) => { if (v && live.value) activitySeen.value = true }, { immediate: true })
-watch(() => props.item.id, () => { activitySeen.value = false })
-const steps = computed(() => stepsLine(props.item.steps, props.item.agent_name, { activitySeen: activitySeen.value }))
-const stepsSilent = computed(() => steps.value.kind === 'pending' || steps.value.kind === 'activity')
+const steps = computed(() => stepsLine(props.item.steps))
+// #3001: `pending` and `none` say nothing — only stages or "could not be read".
+const stepsSilent = computed(() => steps.value.kind === 'pending' || steps.value.kind === 'none')
 const stages = computed(() => stageRows(props.item.steps))
 const askable = computed(() => !live.value && isHonestTerminal(props.item.outcome))
 const hasActions = computed(() => (live.value && (props.canStop || props.reserveLiveRows)) || askable.value || props.showOpenInWork)

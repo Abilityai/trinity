@@ -1,17 +1,17 @@
 // @vitest-environment jsdom
 /**
- * #3001 — a live Work card must not say "<agent> doesn't report steps" while it
- * shows (or has shown this run) that agent's live activity line (#620).
+ * #3001 — the Work card never says "<agent> doesn't report steps".
  *
- * The #919 read's `none` is accurate — the agent publishes no pipeline — but
- * the sentence was ruled for ent#525, before the activity row existed on the
- * same card. Mounted (#2918): the rule lives where the card composes the two,
- * and the "stays suppressed between beats" half is a behaviour over time that
- * a regex over the SFC cannot see.
+ * The sentence was ruled for ent#525, before #620 put the agent's live activity
+ * line on the same card; beside "Thinking" / "Reading …" it read as the card
+ * contradicting itself, and before the first line it read as a fault. Ruled
+ * (2026-10-01): remove it outright. A running card shows the live activity
+ * line, or the stages when the agent publishes them, or nothing. "Steps could
+ * not be read right now." stays — it reports a real failure.
  *
- * Re-landed on top of #2972/#2964 (the chat card's reserved one-line row): there
- * the row keeps its height but goes blank, so withholding the sentence never
- * moves the card.
+ * Mounted (#2918): what matters is what the card renders, including the chat's
+ * reserved one-line row (`reserveLiveRows`, #2964), which must stay — blank —
+ * so the card keeps its shape.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { mount } from '@vue/test-utils'
@@ -27,63 +27,51 @@ function item(over = {}) {
   }
 }
 
-const NONE = '[data-testid="portal-work-steps-none"]'
-
+const SENTENCE = "doesn't report steps"
 beforeEach(() => { vi.useFakeTimers() })
 afterEach(() => { vi.useRealTimers() })
 
 describe('stepsLine (#3001)', () => {
-  it('says nothing about steps once the agent has reported live activity', () => {
-    expect(stepsLine({ state: 'none' }, 'scout', { activitySeen: true })).toEqual({ kind: 'activity', text: '' })
+  it('says nothing for an agent that publishes no stages', () => {
+    expect(stepsLine({ state: 'none' })).toEqual({ kind: 'none', text: '' })
+    expect(stepsLine({ state: 'reported', stages: [] })).toEqual({ kind: 'none', text: '' })
   })
-  it('keeps the ruled sentence for an agent that reports neither stages nor activity', () => {
-    expect(stepsLine({ state: 'none' }, 'scout', { activitySeen: false }))
-      .toEqual({ kind: 'none', text: "scout doesn't report steps.", who: 'scout' })
-    expect(stepsLine({ state: 'none' }, 'scout')).toEqual({ kind: 'none', text: "scout doesn't report steps.", who: 'scout' })
-  })
-  it('leaves "could not be read" alone — it stays true while activity shows', () => {
-    expect(stepsLine({ state: 'unknown' }, 'scout', { activitySeen: true }).kind).toBe('unknown')
+  it('keeps "could not be read" — a real failure', () => {
+    expect(stepsLine({ state: 'unknown' }).text).toBe('Steps could not be read right now.')
   })
 })
 
 describe('PortalWorkCard (#3001)', () => {
-  it('shows the sentence when there is no live line at all', () => {
-    const w = mount(PortalWorkCard, { props: { item: item(), liveStep: null } })
-    expect(w.find(NONE).text()).toBe("acme-analyst doesn't report steps.")
+  it.each([
+    ['before the first activity line', null],
+    ['beside a live activity line', 'Thinking'],
+  ])('never says it %s', async (_label, liveStep) => {
+    const w = mount(PortalWorkCard, { props: { item: item(), liveStep } })
+    await w.vm.$nextTick()
+    expect(w.text()).not.toContain(SENTENCE)
+    expect(w.find('[data-testid="portal-work-steps-none"]').exists()).toBe(false)
   })
 
-  it('never shows it beside a live activity line', async () => {
+  it('not between heartbeats either', async () => {
     const w = mount(PortalWorkCard, { props: { item: item(), liveStep: 'Thinking' } })
-    expect(w.get('[data-testid="portal-work-step"]').text()).toBe('Thinking')
-    expect(w.find(NONE).exists()).toBe(false)
-  })
-
-  it('stays suppressed between heartbeats, and resets for the next run', async () => {
-    const w = mount(PortalWorkCard, { props: { item: item(), liveStep: 'Thinking' } })
-    await w.setProps({ liveStep: null })          // the beat expired
+    await w.setProps({ liveStep: null })
     vi.advanceTimersByTime(2000)
     await w.vm.$nextTick()
-    expect(w.find(NONE).exists()).toBe(false)
-    await w.setProps({ item: item({ status: 'success', outcome: 'success' }) })  // terminal
-    await w.setProps({ item: item({ id: 'e2' }), liveStep: null })               // a new run
-    await w.vm.$nextTick()
-    expect(w.find(NONE).exists()).toBe(true)
+    expect(w.text()).not.toContain(SENTENCE)
   })
-})
 
-describe('PortalWorkCard in the chat (reserveLiveRows, #2964)', () => {
-  const RESERVED = '[data-testid="portal-work-reserved-steps"]'
-  it('keeps the row, blank and aria-hidden, once activity has shown', async () => {
-    const w = mount(PortalWorkCard, { props: { item: item(), liveStep: 'Reading ./plan.md', reserveLiveRows: true } })
+  it('still says "could not be read" when the steps are unreadable', () => {
+    const w = mount(PortalWorkCard, { props: { item: item({ steps: { state: 'unknown' } }), liveStep: null } })
+    expect(w.get('[data-testid="portal-work-steps-unknown"]').text()).toBe('Steps could not be read right now.')
+  })
+
+  it('in the chat card, keeps the reserved row — blank, aria-hidden, one line high', async () => {
+    const w = mount(PortalWorkCard, { props: { item: item(), liveStep: null, reserveLiveRows: true } })
     await w.vm.$nextTick()
-    expect(w.find(NONE).exists()).toBe(false)
-    const row = w.get(RESERVED)
+    const row = w.get('[data-testid="portal-work-reserved-steps"]')
     expect(row.text()).toBe('')
     expect(row.attributes('aria-hidden')).toBe('true')
-    expect(row.classes()).toContain('h-4')          // the card keeps its shape
-  })
-  it('still says it for an agent that reports neither', () => {
-    const w = mount(PortalWorkCard, { props: { item: item(), liveStep: null, reserveLiveRows: true } })
-    expect(w.get(NONE).text()).toContain("doesn't report steps.")
+    expect(row.classes()).toContain('h-4')
+    expect(w.text()).not.toContain(SENTENCE)
   })
 })
