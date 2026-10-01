@@ -18,6 +18,7 @@ import {
   extractRetryAfter,
 } from "./metrics.js";
 import { TrinityClient } from "../client.js";
+import { TOOL_ACCESS_POLICY } from "../access.js";
 import type { McpAuthContext } from "../types.js";
 
 const AGENT_AUTH: McpAuthContext = {
@@ -355,7 +356,7 @@ test("get_metrics refuses a non-agent key without calling the backend", async ()
   assert.equal(called, false);
 });
 
-test("get_metrics reads the CALLING agent — there is no target to spoof", async () => {
+test("get_metrics with no `agent` reads the CALLING agent — no change for existing callers", async () => {
   let seen = "";
   const t = tools({
     read: async (agent) => {
@@ -364,16 +365,81 @@ test("get_metrics reads the CALLING agent — there is no target to spoof", asyn
     },
   });
   await t.getMetrics.execute({}, { session: AGENT_AUTH });
-
   assert.equal(seen, "metrics-agent");
-  // ent#80 is the grant that would add one; until then the schema has no
-  // agent parameter at all, so a prompt-injected "read the other agent's
-  // revenue" has nothing to bind to.
-  assert.equal(t.getMetrics.parameters.safeParse({ agent_name: "victim" }).success, true);
+
+  // An empty string is "omitted" — the access wrapper skips the edge check
+  // for it, so the tool must not read an agent named "" either.
+  await t.getMetrics.execute({ agent: "" }, { session: AGENT_AUTH });
+  assert.equal(seen, "metrics-agent");
+});
+
+test("get_metrics(agent) reads THAT agent and never forwards `agent` as a query knob (ent#727)", async () => {
+  let seen = "";
+  let options: Record<string, unknown> = {};
+  const t = tools({
+    read: async (agent, opts) => {
+      seen = agent;
+      options = opts as Record<string, unknown>;
+      return { agent_name: agent, metrics: [] };
+    },
+  });
+  const result = JSON.parse(
+    (await t.getMetrics.execute(
+      { agent: "revenue-agent", window: "7d" },
+      { session: AGENT_AUTH },
+    )) as string,
+  );
+
+  assert.equal(result.success, true);
+  assert.equal(seen, "revenue-agent");
+  assert.equal(options.window, "7d");
+  assert.equal("agent" in options, false);
+});
+
+test("get_metrics(agent) works for a user key — the backend scopes it by owner access", async () => {
+  let seen = "";
+  const t = tools({
+    read: async (agent) => {
+      seen = agent;
+      return {};
+    },
+  });
+  await t.getMetrics.execute(
+    { agent: "revenue-agent" },
+    { session: { scope: "user", mcpApiKey: "k" } as McpAuthContext },
+  );
+  assert.equal(seen, "revenue-agent");
+});
+
+test("get_metrics(agent) is gated on the chat_with_agent edge: the policy row enforces `agent`", () => {
+  assert.deepEqual(TOOL_ACCESS_POLICY.get_metrics, { kind: "enforce", param: "agent" });
+  // Still no `agent_name` — one spelling of the target, the one the row names.
   assert.equal(
-    Object.keys(t.getMetrics.parameters.shape).includes("agent_name"),
+    Object.keys(tools().getMetrics.parameters.shape).includes("agent_name"),
     false,
   );
+});
+
+test("a backend grant refusal reads as not_authorized, not as a retry", async () => {
+  const t = tools({
+    read: async () => {
+      throw new Error("403 Agent-scoped key may only read its own metrics");
+    },
+  });
+  const result = JSON.parse(
+    (await t.getMetrics.execute({ agent: "revenue-agent" }, { session: AGENT_AUTH })) as string,
+  );
+  assert.equal(result.success, false);
+  assert.equal(result.not_authorized, true);
+  assert.notEqual(result.retryable, true);
+});
+
+test("the get_metrics description names the grant requirement and the refusal", () => {
+  const d = tools().getMetrics.description;
+  assert.match(d, /permission grant/);
+  assert.match(d, /chat_with_agent/);
+  assert.match(d, /Access denied/);
+  assert.doesNotMatch(d, /there is no agent parameter/);
 });
 
 test("get_metrics returns the route body verbatim — the shape IS the contract", async () => {

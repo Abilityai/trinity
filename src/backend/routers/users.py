@@ -15,12 +15,15 @@ from models import (
     User,
     UserRoleUpdate,
     UpdateMyEmailRequest,
+    RequestEmailBindCodeRequest,
     GitHubPATRequest,
     UserPreferenceWrite,
     UserPreferenceRecord,
     UserPreferencesResponse,
 )
 from database import db
+from db.users import EmailInUseError
+from services.platform_audit_service import AuditEventType, platform_audit_service
 from dependencies import (
     require_admin,
     get_current_user,
@@ -35,43 +38,149 @@ router = APIRouter(prefix="/api/users", tags=["users"])
 VALID_ROLES = {"admin", "creator", "operator", "user"}
 
 # Permissive email-shape check (mirrors routers/setup.py): one @, a dot in the
-# domain, no spaces. Identity binding only — no verification mail is sent.
+# domain, no spaces.
 _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s.]+$")
+
+# trinity-enterprise#720 — binding a sign-in email requires proving the mailbox.
+# Every sign-in path resolves the account by email ALONE, so whoever holds the
+# address on a `users` row holds that identity: what is shared with it, its
+# Workspace threads, and the real person's next sign-in. The 409 alone only saw
+# `users` rows, so any signed-in human could claim an address nobody had signed
+# in with yet — a sharee who never signed up, a Workspace-only client.
+_BIND_CODE_MINUTES = 10
+_BIND_CODE_MAX_PER_WINDOW = 3   # the sign-in code limit (routers/auth.py)
+
+
+def _bind_purpose(user_id) -> str:
+    """A bind code completes THIS account's bind only, and is never a sign-in code."""
+    return f"email_bind:{user_id}"
+
+
+def _bind_attempt_scope(user_id, email: str) -> str:
+    """The OTP failure-counter key for one account binding one address.
+
+    Scoped to the bind (`otp_attempts:bind:{user_id}:{email}`), never the bare
+    address: wrong bind guesses must not lock the address's real owner out of
+    email sign-in (`otp_attempts:{email}`) — the cross-surface lockout the
+    portal's `portal:` prefix avoids too (ent#311)."""
+    return f"bind:{user_id}:{email}"
+
+
+def _email_can_be_delivered() -> bool:
+    """False when the provider is `console`: the code only reaches the server log."""
+    from services.settings_service import settings_service
+    return settings_service.get_email_provider() != "console"
+
+
+def _refuse(status_code: int, code: str, message: str):
+    raise HTTPException(status_code=status_code, detail={"code": code, "message": message})
+
+
+def _valid_new_email(raw: str, current_user: User) -> str:
+    email = (raw or "").strip().lower()
+    if not _EMAIL_RE.match(email):
+        _refuse(400, "invalid_email", "Invalid email address")
+    existing = db.get_user_by_email(email)
+    if existing and existing.get("username") != current_user.username:
+        _refuse(409, "email_in_use", "That email is already associated with another account")
+    return email
+
+
+@router.post("/me/email/code")
+async def request_email_bind_code(
+    body: RequestEmailBindCodeRequest,
+    request: Request,
+    current_user: User = Depends(require_interactive),
+):
+    """Send a 6-digit code to the address the caller wants to bind (ent#720).
+
+    Interactive sessions only: an identity change is a person's act. The code is
+    tied to the caller's account (`purpose`), so it completes only their bind and
+    never signs anyone in.
+    """
+    email = _valid_new_email(body.email, current_user)
+    if not _email_can_be_delivered() and current_user.role != "admin":
+        _refuse(409, "email_verification_unavailable",
+                "Email verification isn't available on this instance yet. Ask an admin to configure email.")
+    # The allowance belongs to the CALLER, across every address: counting the
+    # address instead would let one account spend another's bind allowance,
+    # and bind rows counted by sign-in would suppress the owner's sign-in codes.
+    purpose = _bind_purpose(current_user.id)
+    if db.count_recent_codes_for_purpose(purpose, minutes=_BIND_CODE_MINUTES) >= _BIND_CODE_MAX_PER_WINDOW:
+        _refuse(429, "too_many_codes", "Too many codes requested. Try again in a few minutes.")
+
+    code = db.create_login_code(email, expiry_minutes=_BIND_CODE_MINUTES, purpose=purpose)
+    from services.email_service import EmailService
+    sent = await EmailService().send_verification_code(
+        email, code["code"], context_label="Trinity sign-in email confirmation")
+    if not sent:
+        _refuse(502, "email_send_failed", "We couldn't send the code. Try again in a moment.")
+    await platform_audit_service.log(
+        event_type=AuditEventType.AUTHENTICATION, event_action="email_bind_code_sent",
+        source="api", actor_user=current_user, target_type="user", target_id=current_user.username,
+        endpoint=request.scope["path"], request_id=getattr(request.state, "request_id", None),
+    )
+    return {"sent": True, "expires_in_seconds": code["expires_in_seconds"]}
 
 
 @router.put("/me/email")
 async def update_my_email(
     body: UpdateMyEmailRequest,
+    request: Request,
     current_user: User = Depends(require_interactive),
 ):
-    """Bind a sign-in email to the current account (#82 Phase 1 transition).
+    """Bind a sign-in email to the current account (#82 FR-3, ent#720 FR-4).
+
+    Requires the code `POST /me/email/code` sent to the new address. The one
+    exception is the #82 transition on an install that cannot deliver mail
+    (provider `console`): an interactive ADMIN may bind without a code, and the
+    bind is audited as unverified.
 
     Signed-in session only (trinity-enterprise#711): email sign-in resolves the
     account by this column, so binding it is a sign-in identity change and no
     MCP key may make it.
-
-    The migration path for an existing admin created before #82 — whose stored
-    email is still the placeholder 'admin' — to register a real email and then
-    sign in with email + password, exactly like a fresh install captures at
-    first run. No verification mail is sent; binding the identity is independent
-    of whether an email provider is configured.
     """
-    email = (body.email or "").strip().lower()
-    if not _EMAIL_RE.match(email):
-        raise HTTPException(status_code=400, detail="Invalid email address")
+    email = _valid_new_email(body.email, current_user)
+    code = (body.code or "").strip()
+    verified = False
+    if code:
+        # Cap wrong guesses exactly as email sign-in does (OTP_MAX_ATTEMPTS=5 in
+        # 10 minutes, pentest 3.1.5): past the cap even the right code is
+        # refused, so a caller cannot mint 3 live codes and guess without limit.
+        from routers import auth as auth_limits
+        scope = _bind_attempt_scope(current_user.id, email)
+        try:
+            auth_limits.check_otp_rate_limit(scope)
+        except HTTPException as e:
+            if e.status_code != 429:
+                raise
+            _refuse(429, "too_many_attempts",
+                    "Too many wrong codes for that address. Try again in a few minutes.")
+        verified = bool(db.verify_login_code(email, code, purpose=_bind_purpose(current_user.id)))
+        auth_limits.record_otp_attempt(scope, success=verified)
+        if not verified:
+            _refuse(400, "invalid_code", "That code is wrong or has expired. Request a new one.")
+    elif _email_can_be_delivered():
+        _refuse(400, "code_required", "Enter the code we sent to that address.")
+    elif current_user.role != "admin":
+        _refuse(409, "email_verification_unavailable",
+                "Email verification isn't available on this instance yet. Ask an admin to configure email.")
 
-    # Don't let one account claim another account's sign-in identity.
-    existing = db.get_user_by_email(email)
-    if existing and existing.get("username") != current_user.username:
-        raise HTTPException(
-            status_code=409,
-            detail="That email is already associated with another account",
-        )
-
-    updated = db.update_user(current_user.username, {"email": email})
+    try:
+        updated = db.update_user(current_user.username, {"email": email})
+    except EmailInUseError:
+        _refuse(409, "email_in_use", "That email is already associated with another account")
     if not updated:
         raise HTTPException(status_code=404, detail="User not found")
-    return {"success": True, "email": email}
+
+    await platform_audit_service.log(
+        event_type=AuditEventType.AUTHENTICATION,
+        event_action="email_bound" if verified else "email_bind_unverified",
+        source="api", actor_user=current_user, target_type="user", target_id=current_user.username,
+        endpoint=request.scope["path"], request_id=getattr(request.state, "request_id", None),
+        details={"verified": verified},
+    )
+    return {"success": True, "email": email, "verified": verified}
 
 
 # ---------------------------------------------------------------------------

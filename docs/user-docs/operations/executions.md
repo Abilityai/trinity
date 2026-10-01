@@ -12,6 +12,7 @@ View, monitor, and manage task executions across all agents. Executions are crea
 |---------|--------|
 | `manual` | Tasks tab in agent detail |
 | `schedule` | Cron-based schedule |
+| `retry` | An automatic retry of a failed run (charted under **Scheduled**) |
 | `chat` | Chat tab in agent detail |
 | `session` | A resumable conversation turn (the Workspace) |
 | `agent` | Agent-to-agent call |
@@ -138,6 +139,7 @@ Full API reference: http://localhost:8000/docs
 | `list_recent_executions(name)` | List recent executions for an agent |
 | `get_execution_result(id)` | Get the result of a specific execution |
 | `get_agent_activity_summary(name)` | Get activity summary including execution stats |
+| `search_executions(query, ...)` | Search execution messages, responses, and errors across the agents you can access. Offered only to user- and system-scoped keys, never to agent keys. It needs a matching entitlement; where the search is not available it answers `available: false` rather than "no results" |
 
 ## See Also
 
