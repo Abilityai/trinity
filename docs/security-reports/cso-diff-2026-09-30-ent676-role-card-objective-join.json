@@ -1,0 +1,107 @@
+{
+ "version": "1.2",
+ "date": "2026-09-30",
+ "mode": "diff",
+ "scope": "all",
+ "confidence_gate": 8,
+ "branch": "feature/676-role-card-objective-join",
+ "issue": "abilityai/trinity-enterprise#676",
+ "merge_base": "863240f32",
+ "phases_run": [
+  0,
+  1,
+  2,
+  3,
+  4,
+  5,
+  6,
+  7,
+  8,
+  9,
+  10,
+  11,
+  12,
+  13,
+  14
+ ],
+ "stack_cve_quicklist": [
+  {
+   "component": "all rows",
+   "verdict": "not assessed",
+   "reason": "no Dockerfile, lockfile, requirements file, compose service or image pin in the diff"
+  }
+ ],
+ "attack_surface": {
+  "new_endpoints": 0,
+  "changed_endpoints": [
+   "GET /api/enterprise/client-portal/agents/{agent_name}/role (response shape; two non-raising limiter checks)",
+   "GET /api/agents/{agent_name}/objectives (same limiter, called through a shared leaf)"
+  ],
+  "agent_context_ingress": 0,
+  "mcp_tools_changed": 0,
+  "websocket_changed": 0,
+  "migrations": 0,
+  "dependencies_changed": 0
+ },
+ "findings": [],
+ "hypotheses": [],
+ "coverage_gaps": [
+  "tests/unit/test_2996_route_census_runtime.py cannot import main on this host (opentelemetry.exporter missing from the local venv); closed by CI and /verify-local",
+  "stack CVE quicklist rows are outside this diff and were not assessed",
+  "no live probe; unit tests drive the real in-process limiter and the real join"
+ ],
+ "appendix": [
+  {
+   "candidate": "roster members can exhaust the shared per-agent bucket (three viewers at their own 20/min cap)",
+   "disposition": "hard exclusion 1 (rate-limit exhaustion); the read was unbounded before; the card itself never answers 429"
+  },
+  {
+   "candidate": "role.path (the role file's canon path) reaches portal clients",
+   "disposition": "pre-existing since #2927, ent#527's stated design; not in this diff"
+  },
+  {
+   "candidate": "finding_codes can name a file-level failure concerning another role's file",
+   "disposition": "codes only, by recorded owner ruling; no path, id or sentence crosses"
+  },
+  {
+   "candidate": "objectives_rate_limited reveals that the agent's objectives are being read heavily",
+   "disposition": "below the gate; no identity, count or timing"
+  },
+  {
+   "candidate": "viewer email in a limiter key",
+   "disposition": "existing pattern of every limiter in this router; 61-second key"
+  }
+ ],
+ "failure_directions": {
+  "limiter_checks": "fail open via the limiter's bounded in-process fallback",
+  "refused_budget": "degrade: card without objectives, named",
+  "objectives_admitted": "required keyword, no default",
+  "join_raises": "fail-soft and named, logged with traceback; import outside the try"
+ },
+ "supply_chain_summary": {
+  "scanner": "none needed",
+  "note": "no dependency changes"
+ },
+ "filter_stats": {
+  "candidates": 5,
+  "dropped_hard_exclusion": 1,
+  "pre_existing_by_design": 1,
+  "accepted_by_ruling": 1,
+  "below_gate": 2,
+  "reported": 0
+ },
+ "totals": {
+  "critical": 0,
+  "high": 0,
+  "medium": 0,
+  "low": 0
+ },
+ "mutations": {
+  "backend": 10,
+  "frontend": 7,
+  "survived": 0
+ },
+ "trend": {
+  "note": "first diff audit of the Workspace role card surface; no prior finding to close; no new finding"
+ }
+}

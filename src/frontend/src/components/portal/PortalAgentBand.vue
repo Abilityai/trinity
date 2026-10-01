@@ -187,8 +187,10 @@ const ratingsCaption = computed(() => (
 ))
 
 // A rate that has never been measured is `—`, not `0%`: zero is a claim about
-// performance, and no runs is a claim about nothing.
+// performance, and no runs is a claim about nothing. `success_rate` and
+// `first_try.rate` are RATIOS in 0..1 (db/schedules/analytics.py), so they
+// are scaled to a percent here, as every other surface does (#3138).
 function pct(v) {
-  return typeof v === 'number' && Number.isFinite(v) ? `${Math.round(v)}%` : '—'
+  return typeof v === 'number' && Number.isFinite(v) ? `${Math.round(v * 100)}%` : '—'
 }
 </script>

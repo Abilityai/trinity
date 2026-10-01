@@ -107,6 +107,9 @@ const props = defineProps({
   agentName: { type: String, required: true },
   limit: { type: Number, default: 5 },
   compact: { type: Boolean, default: false },
+  // ent#610 sign-off: sources this placement leaves out (Info omits `asks`,
+  // which Work and the Inbox own). They leave the count too.
+  omitSources: { type: Array, default: () => [] },
 })
 const emit = defineEmits(['use-playbook', 'open-section', 'open-chat'])
 
@@ -116,10 +119,12 @@ const store = useClientPortalStore()
 // when it belongs to the agent on screen.
 const mine = computed(() => store.suggestionsAgent === props.agentName)
 const data = computed(() => (mine.value && store.suggestions) || { suggestions: [], total: 0 })
-const items = computed(() => (data.value.suggestions || []).slice(0, props.limit))
+const pool = computed(() => (data.value.suggestions || []).filter((s) => !props.omitSources.includes(s.source)))
+const omitted = computed(() => (data.value.suggestions || []).length - pool.value.length)
+const items = computed(() => pool.value.slice(0, props.limit))
 // The "capabilities only" note is true only when a capability item is listed.
 const hasCapabilityItems = computed(() => items.value.some((s) => s.source === 'capability'))
-const hiddenCount = computed(() => Math.max(0, (data.value.total || 0) - items.value.length))
+const hiddenCount = computed(() => Math.max(0, (data.value.total || 0) - omitted.value - items.value.length))
 const error = computed(() => (mine.value ? store.suggestionsError : null))
 const view = computed(() => viewState({
   hasLoaded: mine.value && store.suggestionsLoaded,

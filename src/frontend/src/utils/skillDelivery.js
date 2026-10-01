@@ -107,3 +107,33 @@ export function deliveryText(report, { saved = true } = {}) {
       return { tone: DELIVERY_TONE.pending, text: `${lead}.`, needsSync: false }
   }
 }
+
+/** ent#672 — `deprecated` or `deprecated:<successor>`: a lifecycle code, not a delivery problem. */
+export function isDeprecationCode(w) {
+  return w === 'deprecated' || String(w).startsWith('deprecated:')
+}
+
+/**
+ * ent#672 — what an assign says about a DEPRECATED skill, or null.
+ *
+ * Separate from `deliveryText` on purpose: whether the skill reached the agent
+ * and whether the library is retiring it are two facts, and folding the second
+ * into the first would turn a clean delivery amber. The backend stamps
+ * `warnings: ['deprecated' | 'deprecated:<successor>']` on a deprecated name
+ * for EVERY delivery outcome (a stopped agent never runs an injection), so
+ * this reads the report, not the injection results. The successor is present
+ * only when it is a skill name.
+ *
+ * @param {{skills?: Record<string,{warnings?: string[]}>}|null|undefined} report
+ * @returns {string|null}
+ */
+export function deprecationText(report) {
+  const parts = []
+  for (const [name, v] of Object.entries(report?.skills || {})) {
+    const code = (v?.warnings || []).find(isDeprecationCode)
+    if (!code) continue
+    const successor = String(code).split(':')[1]
+    parts.push(successor ? `${name} is deprecated — superseded by ${successor}` : `${name} is deprecated`)
+  }
+  return parts.length ? `${parts.join('; ')}.` : null
+}

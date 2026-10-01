@@ -55,11 +55,11 @@ An item raised with `ask_operator` is addressed by role: `primary` (the default 
 
 What that person sees in the [Workspace](../sharing-and-access/workspace.md):
 
-- The ask renders above the composer of the chat it belongs to — and, for platform users, again under **Waiting on you** in the rail's **Work** tab. An ask raised outside any chat (by a scheduled run, say) attaches to the person's **Main** chat with that agent; from any other chat the card offers **Open the conversation** instead of controls.
+- Every ask waiting on the person is in their Workspace **Inbox** (the **Action** tab, which can be narrowed to one agent). An ask raised during a chat turn appears as a tile inside that chat's conversation, placed where it was asked, and you answer it right there; once it has ended it stays in that chat's history as one muted line (kind · title · how it ended · when). An ask raised outside any chat — by a scheduled run, a loop or a gate — appears in no chat, only in the **Inbox**; your reply to it lands in your **Main** chat with that agent. The agent's **Work** tab (platform users) and **Info** tab (everyone) carry one line, *N asks waiting on you · Open in Inbox*.
 - The sidebar header counts them (*N asks are waiting on your answer*), and the agent's row carries its own badge — distinct from the unread-replies count, and never hidden behind **Show all**.
 - The controls are the same three as the Operations page: option → optional note (*Add a note (optional)…*) → **Send**; a typed answer → **Send**; **Got it** for an alert.
 - Answering clears the ask from every count at once, keeps it on the card as **Answered by you**, and shows a short confirmation: **Sent.**, or **Sent — {agent} is picking this up.** when the owner has turned on the wake.
-- An ask that ended — answered, cancelled or expired — stays listed for 7 days with how it ended (**by you**, **by the operator**, or expired) and when, without answer controls. It is not silently removed, it drops out of the count, and **Waiting on you** lists only what is still pending. The operator's reason for cancelling is never shown to you.
+- An ask that ended — answered, cancelled or expired — stays listed in the Inbox for 7 days with how it ended (**by you**, **by the operator**, or expired) and when, without answer controls; in the chat that raised it, it stays as a muted line for as long as the queue keeps it. It is not silently removed, and it drops out of the count. The operator's reason for cancelling is never shown to you.
 - The Workspace refreshes asks every 20 seconds while the tab is visible.
 
 An ask is answered through the Workspace's own route (below), which records the answer with the same write-back, audit fields and wake-on-answer behaviour as an operator's. A client whose share was revoked stops seeing the ask.
@@ -91,7 +91,7 @@ Asks addressed to a Workspace user are read and answered as that user, under the
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `/api/enterprise/client-portal/asks?agent_name=&include_ended=` | GET | Open asks addressed to the caller, optionally narrowed to one agent; `include_ended=true` adds the ones that ended in the last 7 days. Each carries `kind`, `title`, `question`, `options`, `expires_at`, `status` (`pending`, `answered`, `cancelled` or `expired`), `ended_at` / `ended_by` (`you`, `operator` or `timeout`) and the `chat_id` it belongs to |
+| `/api/enterprise/client-portal/asks?agent_name=&include_ended=&chat_id=` | GET | Open asks addressed to the caller, optionally narrowed to one agent; `include_ended=true` adds the ones that ended in the last 7 days; `chat_id` returns the asks raised during a turn of that chat, ended ones included with no 7-day limit. Each carries `kind`, `title`, `question`, `options`, `expires_at`, `status` (`pending`, `answered`, `cancelled` or `expired`), `ended_at` / `ended_by` (`you`, `operator` or `timeout`) and the `chat_id` it belongs to |
 | `/api/enterprise/client-portal/asks/{id}/answer` | POST | Answer one — `{response, response_text?}`. A person only: the platform's system key gets `403 person_required`. Returns the ask with `status: "answered"` and `resume_requested` (whether answering started a turn). `422 empty_answer` / `response_not_an_offered_option`; `409` expired; a missing or not-yours ask is a uniform `404` |
 
 See the [Operating Room doc](../operations/operating-room.md) for the full queue model.
