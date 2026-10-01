@@ -3,7 +3,17 @@
 # Identical to docker-compose.prod.yml in every respect except one: it carries
 # NO `build:` blocks. (Plus the ent#580 marketplace admin claim: this file
 # renders an explicitly blank ADMIN_PASSWORD and forwards ADMIN_PASSWORD_SOURCE;
-# prod refuses a blank one. The parity test allowlists exactly those lines.)
+# prod refuses a blank one. Plus the bundled PostgreSQL of #3159: a `postgres`
+# service, its volume, and a DATABASE_URL that defaults to it. The parity test
+# allowlists exactly those lines.)
+#
+# DATABASE: hosted installs run on the bundled PostgreSQL. POSTGRES_PASSWORD is
+# REQUIRED; the file does not render without it. `start.sh --hosted` generates
+# it. A compose-only install (a template or a managed host that runs this file
+# directly) sets it in its environment, e.g. `openssl rand -hex 24`, and leaves
+# DATABASE_URL unset. An install that already has /data/trinity.db sets
+# `DATABASE_URL=` (empty) to stay on SQLite; moving it to PostgreSQL is
+# docs/migrations/SQLITE_TO_POSTGRES.md.
 # Every service resolves a prebuilt image from GHCR, so a
 # fresh VM is serving in ~2 minutes instead of spending 5-10 of them compiling
 # the agent base image on first boot. That build time is what fails the
@@ -418,12 +428,14 @@ services:
       - TEMPLATE_REGISTRY_URL=${TEMPLATE_REGISTRY_URL:-https://raw.githubusercontent.com/Abilityai/trinity-templates/main/registry.yaml}
       # Internal API shared secret (C-003) - for scheduler/agent communication
       - INTERNAL_API_SECRET=${INTERNAL_API_SECRET}
-      # Configurable database backend (#300, experimental) — mirrors
-      # docker-compose.yml; without these lines the .env lever is inert in prod
-      # (the #1039/#1056 packaging-gap class). Unset → SQLite at /data/trinity.db.
-      # Prod compose ships no postgres service: a postgresql:// URL must point at
-      # an operator-managed PostgreSQL instance (see docs/POSTGRESQL_SETUP.md).
-      - DATABASE_URL=${DATABASE_URL:-}
+      # Database backend (#3159, HOST-022). Hosted installs default to the
+      # bundled `postgres` service below. `-` with no colon is load-bearing:
+      # UNSET resolves to the bundled PostgreSQL; set-but-EMPTY (`DATABASE_URL=`,
+      # which start.sh --hosted writes for an install that already has
+      # /data/trinity.db) keeps SQLite, so an update never boots an empty
+      # PostgreSQL beside a populated SQLite file. Any other postgresql:// URL
+      # points at an operator-managed server (docs/POSTGRESQL_SETUP.md).
+      - DATABASE_URL=${DATABASE_URL-postgresql://trinity:${POSTGRES_PASSWORD}@postgres:5432/trinity}
       - DB_POOL_SIZE=${DB_POOL_SIZE:-10}
       - DB_MAX_OVERFLOW=${DB_MAX_OVERFLOW:-20}
       # Fire-and-forget dispatch (#1083). When true, eligible autonomous turns
@@ -522,6 +534,8 @@ services:
       # + deletes archived originals.
       - trinity-logs:/data/logs
     depends_on:
+      postgres:
+        condition: service_healthy
       redis:
         condition: service_healthy
       vector:
@@ -688,6 +702,39 @@ services:
       retries: 5
       start_period: 5s
 
+  # PostgreSQL (#3159, HOST-022) — the hosted database. SQLite reached
+  # end-of-support on 2026-09-01 (#1278), so every one-click channel starts on
+  # this service. It is hosted-only: docker-compose.prod.yml leaves the database
+  # to the operator, and the parity test allowlists exactly this service, its
+  # volume and the two depends_on edges. An install that keeps SQLite (an
+  # existing /data/trinity.db) still starts it, idle, so one file renders for
+  # both. Platform network only: agents NEVER reach it (Issue #589).
+  postgres:
+    image: postgres:16-alpine
+    container_name: trinity-postgres
+    logging: *default-logging
+    restart: unless-stopped
+    expose:
+      - "5432"
+    environment:
+      - POSTGRES_DB=trinity
+      - POSTGRES_USER=trinity
+      - "POSTGRES_PASSWORD=${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env (generate openssl rand -hex 24; start.sh --hosted does this)}"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    networks:
+      - trinity-platform   # Issue #589: PostgreSQL is NOT on agent network
+    security_opt:
+      - no-new-privileges:true
+    # TCP probe: the image's first-boot init runs a socket-only temporary
+    # server, so a socket probe can report ready before the real server listens.
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U trinity -d trinity"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
   # Scheduler - dedicated service for cron-based agent task execution
   # Prevents duplicate executions that occurred with multiple backend workers
   scheduler:
@@ -697,9 +744,9 @@ services:
     restart: unless-stopped
     environment:
       - DATABASE_PATH=/data/trinity.db
-      # #300: when set to a postgresql:// URL the scheduler reads/writes Postgres
-      # (the same DB the backend uses); unset → shared SQLite at DATABASE_PATH.
-      - DATABASE_URL=${DATABASE_URL:-}
+      # #300/#3159: the same database the backend uses — see the backend's
+      # DATABASE_URL comment for why the default uses `-` with no colon.
+      - DATABASE_URL=${DATABASE_URL-postgresql://trinity:${POSTGRES_PASSWORD}@postgres:5432/trinity}
       # Scheduler uses the same `backend` ACL user (identical access patterns).
       - "REDIS_URL=redis://backend:${REDIS_BACKEND_PASSWORD:?REDIS_BACKEND_PASSWORD must be set in .env}@redis:6379"
       - HEALTH_PORT=8001
@@ -716,6 +763,8 @@ services:
     volumes:
       - ${TRINITY_DATA_PATH:-./trinity-data}:/data
     depends_on:
+      postgres:
+        condition: service_healthy
       redis:
         condition: service_healthy
       backend:
@@ -921,6 +970,7 @@ services:
 volumes:
   agent-configs:
   redis-data:
+  postgres-data:  # PostgreSQL data (#3159)
   trinity-logs:  # Vector log storage
   # trinity-data: using bind mount via TRINITY_DATA_PATH env var
 

@@ -291,7 +291,7 @@ def _render(compose: str, tmp_path: Path, dotenv_text: str):
     redis = secrets.token_hex(24)
     base_env = {k: v for k, v in os.environ.items() if k in ("PATH", "HOME", "DOCKER_HOST", "DOCKER_CONFIG")}
     dotenv = tmp_path / "claim.env"
-    dotenv.write_text(dotenv_text + f"REDIS_PASSWORD={redis}\nREDIS_BACKEND_PASSWORD={redis}\n")
+    dotenv.write_text(dotenv_text + f"REDIS_PASSWORD={redis}\nREDIS_BACKEND_PASSWORD={redis}\nPOSTGRES_PASSWORD={redis}\n")
     return subprocess.run(
         ["docker", "compose", "--env-file", str(dotenv), "-f", compose, "config"],
         cwd=_ROOT, capture_output=True, text=True, timeout=120, env=base_env,
