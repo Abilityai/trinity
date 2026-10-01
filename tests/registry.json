@@ -9,7 +9,7 @@
         "unit",
         "execution"
       ],
-      "description": "The synchronous chat path treats an exit-0 is_error result (error_type execution_error) as a failure, parity with the headless #1673 check. Drives the real execute_claude_code against a fake claude on PATH: empty result -> 502 carrying the real errors[] cause (was 500 'returned empty response'); an 'API Error' result text and partial assistant text before is_error are 502s, not successes; is_error false stays a success. #1870 completed-turn recovery runs first: an on-disk end_turn answer is returned with the recovery notice and recovered_terminal; an unfinished transcript still fails. A failed turn never captures its session; the 502 body is structured {message, metadata} for backend telemetry salvage."
+      "description": "The synchronous chat path treats an exit-0 is_error result (error_type execution_error) as a failure, parity with the headless #1673 check. Drives the real execute_claude_code against a fake claude on PATH: empty result -> 502 carrying the real errors[] cause (was 500 'returned empty response'); an 'API Error' result text and partial assistant text before is_error are 502s, not successes; is_error false stays a success. #1870 completed-turn recovery runs first: an on-disk end_turn answer is returned with the recovery notice and recovered_terminal; an unfinished transcript still fails. A failed turn never captures its session; the 502 body is structured {message, metadata} for backend telemetry salvage and is credential-sanitized in both fields; the completed-turn recovery's JSONL parse runs off the event loop."
     },
     {
       "file": "mcp-server/src/tools/monitoring.test.ts",

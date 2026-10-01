@@ -287,3 +287,38 @@ async def test_502_body_carries_telemetry_for_salvage(shim):
     assert detail["message"] == "Execution error: boom 2968"
     assert detail["metadata"]["cost_usd"] == pytest.approx(0.0123)
     assert detail["metadata"]["session_id"] == SID
+
+
+async def test_502_body_is_sanitized(shim):
+    """A credential the CLI echoes into its error text is redacted in BOTH the
+    user-facing message and the metadata the backend persists."""
+    secret = "sk-ant-api03-" + "A" * 40
+    _script([_init(), _result(is_error=True, errors=[f"boom with key {secret}"])])
+
+    with pytest.raises(HTTPException) as exc:
+        await _chat()
+
+    assert secret not in json.dumps(exc.value.detail)
+    assert "boom with key" in _message(exc.value)
+
+
+async def test_completed_turn_recovery_runs_off_the_event_loop(shim, monkeypatch):
+    """The recovery parses the chat's JSONL, which grows for the life of the
+    session (read capped at 10 MB) — the same reason the compact-events read
+    is already off-loaded. It must not block the agent server's event loop."""
+    import threading
+
+    seen = {}
+    real = claude_code._recover_completed_turn_into
+
+    def spy(**kwargs):
+        seen["thread"] = threading.current_thread()
+        return real(**kwargs)
+
+    monkeypatch.setattr(claude_code, "_recover_completed_turn_into", spy)
+    _script([_init(), _result(is_error=True, errors=["boom 2968"])])
+
+    with pytest.raises(HTTPException):
+        await _chat()
+
+    assert seen["thread"] is not threading.main_thread()

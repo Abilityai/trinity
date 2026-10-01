@@ -572,13 +572,19 @@ async def _execute_claude_code_once(
             # (not 503 — clear of SUB-003's auth auto-switch) with the
             # sanitized cause. The structured body matches the #678/#1853
             # shape so the backend salvages cost/context onto the FAILED row.
+            # Off the event loop, like the compact read above: it parses the
+            # session JSONL. The reader threads are done, so nothing else
+            # touches `metadata` / `response_parts` while it mutates them.
             if metadata.error_type == "execution_error":
-                recovered = _recover_completed_turn_into(
-                    metadata=metadata,
-                    response_parts=response_parts,
-                    session_id=metadata.session_id or resume_session_id,
-                    since_iso=task_start_iso,
-                    label=execution_id,
+                recovered = await loop.run_in_executor(
+                    None,
+                    lambda: _recover_completed_turn_into(
+                        metadata=metadata,
+                        response_parts=response_parts,
+                        session_id=metadata.session_id or resume_session_id,
+                        since_iso=task_start_iso,
+                        label=execution_id,
+                    ),
                 )
                 if not recovered:
                     err = sanitize_text(metadata.error_message or "Execution error")
