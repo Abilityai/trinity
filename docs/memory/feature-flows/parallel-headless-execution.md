@@ -809,7 +809,7 @@ The `max_turns` parameter limits the number of agentic turns an agent can take b
 
 When `max_turns` is specified:
 
-1. **Agent Server** passes `--max-turns N` to the Claude Code or Gemini CLI command
+1. **Agent Server** passes `--max-turns N` to the Claude Code command (Gemini: see below — no equivalent flag)
 2. **CLI** counts each agentic turn (tool use + tool result cycle)
 3. **At limit**: CLI exits with an error, returning partial results
 4. **Response**: Includes whatever work was completed before the limit
@@ -823,11 +823,11 @@ if max_turns is not None:
     logger.info(f"[Headless Task] Limiting to {max_turns} agentic turns")
 ```
 
-**Gemini CLI** (`docker/base-image/agent_server/services/gemini_runtime.py:558-560`):
+**Gemini CLI** (`docker/base-image/agent_server/services/gemini_runtime.py`, #2971): gemini-cli has **no** `--max-turns` (its strict parser rejects it, and `model.maxSessionTurns` is a settings-file value shared by every concurrent run), so `max_turns` is **logged, not enforced**, and the run is bounded by the wall-clock `timeout_seconds` only:
 ```python
 if max_turns is not None:
-    cmd.extend(["--max-turns", str(max_turns)])
-    logger.info(f"[Headless Task {session_id}] Limiting to {max_turns} agentic turns")
+    logger.info(f"[Headless Task {session_id}] max_turns={max_turns} requested; "
+                f"gemini-cli has no per-run turn cap — relying on the {timeout_seconds}s wall-clock timeout")
 ```
 
 ### Usage Examples
