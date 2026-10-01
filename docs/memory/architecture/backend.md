@@ -161,6 +161,7 @@
 - `backlog_service.py` - Internal to `CapacityManager`: persistent SQLite FIFO overflow store with drain-on-release (BACKLOG-001)
 - `dispatch_breaker.py` - Per-agent dispatch circuit breaker (RELIABILITY-007, #526) — see [Circuit Breakers](execution.md#circuit-breakers-transport--dispatch-526)
 - `scheduler_service.py` - APScheduler-based scheduling
+- `validation_service.py` - Post-run business validation (VALIDATE-001): frames the parent run for a clean-context auditor and maps its verdict onto `business_status`; an empty response is decided platform-side as `validation_unavailable` before any validator runs, and a validator cannot award that status to itself (#2959) — see [Business Validation](../feature-flows/business-validation.md)
 - `cleanup_service.py` - Watchdog reconciliation + retention sweeps — see [Soft Delete & Retention](reliability.md#soft-delete-retention--recovery-834-772)
 - `idempotency_service.py` - Trigger-boundary dedup (`begin`/`complete`/`fail`) (RELIABILITY-006, #525; Invariant #18)
 - `rate_limiter.py` - Shared sliding-window request limiter (#1023; see Container Security)
