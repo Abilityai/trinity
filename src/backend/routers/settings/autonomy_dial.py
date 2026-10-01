@@ -83,7 +83,7 @@ async def set_autonomy_dial(
         source="api",
         actor_user=current_user,
         actor_ip=request.client.host if request.client else None,
-        endpoint=str(request.url.path),
+        endpoint=request.scope.get("path", ""),  # #3102: the routed path, never the Host-rebuilt URL
         request_id=getattr(request.state, "request_id", None),
         details={"from": previous, "to": level,
                  "allows_unprompted": autonomy_dial_service.level_allows_unprompted(level)},
