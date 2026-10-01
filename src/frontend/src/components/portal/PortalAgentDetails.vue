@@ -55,7 +55,7 @@
     <InlineError
       v-if="pageError && pageLoaded"
       :message="pageError"
-      retryable
+      :retryable="!pageDenied"
       @retry="reload"
     />
 
@@ -123,6 +123,7 @@
         dense
         title="Couldn't load this agent"
         :message="pageError"
+        :show-retry="!pageDenied"
         @retry="reload"
       />
       <p v-else-if="!capabilities.length" class="text-sm text-gray-400">
@@ -263,7 +264,7 @@ function openSection(name) {
 // The window is fixed here: this panel shows no windowed figure, and a second
 // selector disagreeing with the band's would be two controls for one fact.
 const timeWindow = ref('7d')
-const { header, capabilities, loaded: pageLoaded, error: pageError, reload } =
+const { header, capabilities, loaded: pageLoaded, error: pageError, denied: pageDenied, reload } =
   usePortalAgentPage(toRef(props, 'agentName'), timeWindow)
 
 // #2597: the two faces of a failed `/page`, kept apart because the honest
