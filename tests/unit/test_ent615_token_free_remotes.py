@@ -981,6 +981,7 @@ class _RecordingExec:
                        environment=None, user="developer"):
         self.calls.append({
             "command": command, "environment": environment, "user": user,
+            "timeout": timeout,
         })
         if "base64 -d" in command and "sh -s" in command:
             return {"exit_code": 0, "output": (
@@ -1085,18 +1086,31 @@ class TestTheCredentialNeverTouchesArgv:
         assert asyncio.run(gs.update_remote_pat("a1", "TOK", "acme/agent")) is False
         assert not [c for c in recorder.calls if "remote set-url" in c["command"]]
 
-    def test_the_sweep_is_bounded_in_the_container_too(self, gs_with_exec):
-        """`execute_command_in_container` accepts a `timeout` and forwards it
-        nowhere, so `asyncio.wait_for` alone frees the caller while the
-        `_docker_executor` pool thread stays pinned — fleet-wide, from a
-        background pass."""
+    def test_the_sweep_is_bounded(self, gs_with_exec):
+        """The sweep hands `SCRUB_TIMEOUT_S` to `execute_command_in_container`,
+        which enforces it in the container (freeing the `_docker_executor`
+        pool thread) and around the await (freeing the caller) — #2969."""
         gs = _git_service()
         recorder = gs_with_exec()
         import asyncio
 
         asyncio.run(gs.scrub_git_remote_tokens("a1"))
-        sweep_cmd = next(c["command"] for c in recorder.calls if "sh -s" in c["command"])
-        assert sweep_cmd.startswith(f"timeout {gs.SCRUB_TIMEOUT_S} ")
+        sweep = next(c for c in recorder.calls if "sh -s" in c["command"])
+        assert sweep["timeout"] == gs.SCRUB_TIMEOUT_S
+
+    def test_a_timed_out_sweep_reports_failure(self, gs_with_exec, monkeypatch):
+        gs = _git_service()
+        gs_with_exec()
+        import asyncio
+
+        async def _timed_out(container_name, command, timeout=60, **kw):
+            if "sh -s" in command:
+                return {"exit_code": 124, "output": "", "timed_out": True}
+            return {"exit_code": 0, "output": ""}
+
+        monkeypatch.setattr(gs.token_scrub, "execute_command_in_container", _timed_out)
+        report = asyncio.run(gs.scrub_git_remote_tokens("a1"))
+        assert report["success"] is False
 
 
 class TestRotationWithoutARecreate:

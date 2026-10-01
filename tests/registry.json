@@ -4035,6 +4035,17 @@
         "execution"
       ],
       "description": "The synchronous chat path treats an exit-0 is_error result (error_type execution_error) as a failure, parity with the headless #1673 check. Drives the real execute_claude_code against a fake claude on PATH: empty result -> 502 carrying the real errors[] cause (was 500 'returned empty response'); an 'API Error' result text and partial assistant text before is_error are 502s, not successes; is_error false stays a success. #1870 completed-turn recovery runs first: an on-disk end_turn answer is returned with the recovery notice and recovered_terminal; an unfinished transcript still fails. A failed turn never captures its session; the 502 body is structured {message, metadata} for backend telemetry salvage and is credential-sanitized in both fields; the completed-turn recovery's JSONL parse runs off the event loop."
+    },
+    {
+      "file": "unit/test_2969_exec_timeout.py",
+      "feature": "#2969",
+      "added": "2026-10-01",
+      "categories": [
+        "backend",
+        "reliability",
+        "unit"
+      ],
+      "description": "execute_command_in_container enforces its timeout: the command (string or argv) is wrapped in an in-container `timeout -k K N`, the call is bounded by asyncio.wait_for so a wedged exec thread frees the caller, the result carries an honest timed_out flag (exit 124/137 only once the bound elapsed), a non-positive timeout is refused, a hanging pre-check hook returns promptly, and (with GNU coreutils) the built argv ends hung, STOPped and TERM-ignoring processes."
     }
   ]
 }
