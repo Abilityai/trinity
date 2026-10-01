@@ -552,6 +552,13 @@ watch(() => route.query.view, (view) => {
 
 // First-run overlay (ent#581) is open — the hotkey guards below stand down.
 const firstRunOpen = ref(false)
+// #3109: the overlay's steps can create agents server-side (setup seeds them),
+// and none of those paths reaches this store live — so on close, refetch, as
+// `onCreateModalClose` does for the create modal. Watching the model catches
+// every way it closes (finish, skip, confirm-close).
+watch(firstRunOpen, (now, was) => {
+  if (was && !now) networkStore.fetchAgents()
+})
 
 // System View Editor Modal State
 const isEditorOpen = ref(false)
