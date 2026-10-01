@@ -4046,6 +4046,16 @@
         "unit"
       ],
       "description": "execute_command_in_container enforces its timeout: the command (string or argv) is wrapped in an in-container `timeout -k K N`, the call is bounded by asyncio.wait_for so a wedged exec thread frees the caller, the result carries an honest timed_out flag (exit 124/137 only once the bound elapsed), a non-positive timeout is refused, a hanging pre-check hook returns promptly, and (with GNU coreutils) the built argv ends hung, STOPped and TERM-ignoring processes."
+    },
+    {
+      "file": "unit/test_2971_gemini_runtime.py",
+      "feature": "#2971",
+      "added": "2026-10-01",
+      "categories": [
+        "agent-server",
+        "gemini-runtime"
+      ],
+      "description": "#2971: the Gemini runtime runs a turn on the pinned gemini-cli (0.62.0). Real execute/execute_headless with a captured Popen: argv carries only flags the pinned CLI accepts (no --system-prompt/--max-turns), the system prompt is prepended to the turn input, --skip-trust is always passed, and chat resumes only its own captured session id (never bare --resume; model change/reset start fresh; failed turns don't move it; a missing session gets one cold retry unless cancelled). The build-time smoke harness is exercised against a fake gemini emulating 0.62.0's strict parser, and the Dockerfile pin/smoke placement are asserted. No Docker, no network."
     }
   ]
 }

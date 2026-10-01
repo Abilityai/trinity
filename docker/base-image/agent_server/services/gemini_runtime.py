@@ -23,6 +23,13 @@ from ..utils.subprocess_pgroup import EXECUTION_TAG_NAME
 from ..utils.orphan_sweep import kill_cgroup_orphans
 from .activity_tracking import start_tool_execution, complete_tool_execution
 from .execution_env import build_execution_env
+from .gemini_cli_args import (
+    RESUME_MISSING_MARKER,
+    build_chat_argv,
+    build_headless_argv,
+    compose_prompt,
+)
+from .headless_executor import _valid_session_id
 from .process_registry import get_process_registry
 from .runtime_adapter import AgentRuntime, RuntimeCapabilities
 
@@ -111,6 +118,10 @@ def calculate_gemini_cost(input_tokens: int, output_tokens: int, model: Optional
     return round(input_cost + output_cost, 6)
 
 
+class _ResumeMissing(HTTPException):
+    """A chat ``--resume <id>`` whose session the CLI cannot find (#2971)."""
+
+
 class GeminiRuntime(AgentRuntime):
     """Gemini CLI implementation of AgentRuntime interface."""
 
@@ -172,11 +183,14 @@ class GeminiRuntime(AgentRuntime):
         execution_id: Optional[str] = None
     ) -> Tuple[str, List[ExecutionLogEntry], ExecutionMetadata, List[Dict]]:
         """
-        Execute Gemini CLI with the given prompt.
+        Execute a Gemini chat turn.
 
-        Uses same output format as Claude Code for compatibility.
-        Note: system_prompt is accepted for interface compatibility but not yet
-        supported by Gemini CLI.
+        #2971: the chat resumes ONLY its own session (``--resume <id>``), never
+        a bare ``--resume`` — that takes the newest session in a store headless
+        runs also write to (the #2958 class). The id is captured after a
+        successful turn; a model change or ``reset_session()`` starts fresh; a
+        resumed session that no longer exists gets one cold retry. The system
+        prompt is prepended to the turn input (gemini-cli has no flag for it).
 
         Returns: (response_text, execution_log, metadata, raw_messages)
             - execution_log: Simplified ExecutionLogEntry objects for activity tracking
@@ -188,6 +202,64 @@ class GeminiRuntime(AgentRuntime):
                 detail="Gemini CLI is not available in this container"
             )
 
+        # Minted here so a cold retry keeps the same id (#817 tag, #2433 registry).
+        execution_id = execution_id or str(uuid.uuid4())
+        generation = agent_state.chat_session_generation
+        resume = (
+            _valid_session_id(agent_state.chat_session_id) if continue_session else None
+        )
+        if resume and agent_state.chat_session_model != model:
+            logger.info(
+                f"event=chat_session_model_change runtime=gemini "
+                f"old={agent_state.chat_session_model} new={model}"
+            )
+            resume = None
+        agent_state.session_started = True
+
+        try:
+            result = await self._execute_chat_once(
+                prompt, model, system_prompt, execution_id, resume
+            )
+        except _ResumeMissing:
+            # Re-register as pending BEFORE the cancel check (mirrors the
+            # Claude path, #2958): a cancel landing in the gap is then
+            # recorded and the retry's `register()` kills at spawn.
+            registry = get_process_registry()
+            registry.register_pending(execution_id, metadata={"type": "chat"})
+            if registry.was_terminated(execution_id):
+                registry.discard_pending(execution_id)
+                raise HTTPException(
+                    status_code=500,
+                    detail="Gemini execution was cancelled",
+                )
+            logger.warning(
+                f"event=chat_resume_fallback runtime=gemini session={resume} "
+                f"reason=session_missing"
+            )
+            agent_state.chat_session_id = None
+            agent_state.chat_session_model = None
+            result = await self._execute_chat_once(
+                prompt, model, system_prompt, execution_id, None
+            )
+
+        # Capture the session a SUCCESSFUL turn ran in; a reset during the turn
+        # drops it.
+        sid = _valid_session_id(result[2].session_id)
+        if sid and agent_state.chat_session_generation == generation:
+            agent_state.chat_session_id = sid
+            agent_state.chat_session_model = model
+        return result
+
+    async def _execute_chat_once(
+        self,
+        prompt: str,
+        model: Optional[str],
+        system_prompt: Optional[str],
+        execution_id: str,
+        resume: Optional[str],
+    ) -> Tuple[str, List[ExecutionLogEntry], ExecutionMetadata, List[Dict]]:
+        """One Gemini CLI chat subprocess. Raises ``_ResumeMissing`` when
+        ``resume`` names a session the CLI cannot find."""
         try:
             # Get GEMINI_API_KEY from environment
             api_key = os.getenv("GEMINI_API_KEY")
@@ -197,21 +269,14 @@ class GeminiRuntime(AgentRuntime):
                     detail="GEMINI_API_KEY not configured in agent container"
                 )
 
-            # Build command
-            cmd = ["gemini", "--output-format", "stream-json", "--yolo"]
-
-            # Add model selection if specified
+            # Only flags the pinned gemini-cli accepts (#2971).
+            cmd = build_chat_argv(model, resume)
             if model:
-                cmd.extend(["--model", model])
                 logger.info(f"Using Gemini model: {model}")
-
-            # Session continuity
-            if continue_session and agent_state.session_started:
-                cmd.append("--resume")
-                logger.info("Resuming existing Gemini session")
-            else:
-                agent_state.session_started = True
-                logger.info("Starting new Gemini session")
+            logger.info(
+                f"Resuming Gemini chat session {resume}" if resume
+                else "Starting new Gemini session"
+            )
 
             # Initialize tracking structures
             execution_log: List[ExecutionLogEntry] = []
@@ -228,8 +293,6 @@ class GeminiRuntime(AgentRuntime):
             # Gemini subprocess and any descendants. Tag is inherited at
             # every fork/exec/setsid, lets the post-wait sweep identify
             # and kill orphans the same way the Claude path does.
-            execution_id = execution_id or str(uuid.uuid4())
-
             # Use Popen for real-time streaming
             process = subprocess.Popen(
                 cmd,
@@ -261,7 +324,7 @@ class GeminiRuntime(AgentRuntime):
             # `list_recently_completed_ids`, but still that long with orphan
             # recovery blocked). Pair the register with the failure path here.
             try:
-                process.stdin.write(prompt)
+                process.stdin.write(compose_prompt(system_prompt, prompt))
                 process.stdin.close()
             except BaseException:
                 get_process_registry().unregister(_registered_id)
@@ -277,6 +340,15 @@ class GeminiRuntime(AgentRuntime):
                         # Capture raw JSON for full execution log (same as Claude Code)
                         try:
                             raw_msg = json.loads(line.strip())
+                            # #2971: the CLI echoes its whole stdin as the user
+                            # message; record the caller's prompt, not the
+                            # prepended platform system prompt.
+                            if (
+                                isinstance(raw_msg, dict)
+                                and raw_msg.get("type") == "message"
+                                and raw_msg.get("role") == "user"
+                            ):
+                                raw_msg["content"] = prompt
                             raw_messages.append(raw_msg)
                         except json.JSONDecodeError:
                             pass
@@ -320,6 +392,15 @@ class GeminiRuntime(AgentRuntime):
 
             # Check for errors
             if return_code != 0:
+                if (
+                    resume
+                    and not response_parts
+                    and RESUME_MISSING_MARKER in (stderr_output or "")
+                ):
+                    raise _ResumeMissing(
+                        status_code=500,
+                        detail=f"Gemini chat session {resume} not found",
+                    )
                 error_detail = stderr_output[:500] if stderr_output else ""
                 if not error_detail:
                     has_key = bool(os.environ.get("GOOGLE_API_KEY"))
@@ -618,8 +699,10 @@ class GeminiRuntime(AgentRuntime):
         Unlike execute(), this function:
         - Does NOT use --resume (stateless)
         - Each call is independent
-        - Supports tool restrictions and custom system prompts
-        - Supports max_turns for runaway prevention
+        - Supports tool restrictions and custom system prompts (prepended to
+          the turn input — gemini-cli has no system-prompt flag, #2971)
+        - max_turns is logged, not enforced (no gemini-cli equivalent); the
+          wall-clock timeout bounds the run
 
         Note: resume_session_id and persist_session are not supported by
         Gemini CLI (accepted for ABC parity, ignored at runtime).
@@ -643,26 +726,16 @@ class GeminiRuntime(AgentRuntime):
             # Use provided execution_id or generate unique session ID for this task
             session_id = execution_id or str(uuid.uuid4())[:8]
 
-            # Build command - stateless (no --resume)
-            cmd = ["gemini", "--output-format", "stream-json", "--yolo"]
-
-            # Add model selection if specified
-            if model:
-                cmd.extend(["--model", model])
-
-            # Add tool restrictions if specified
-            if allowed_tools:
-                for tool in allowed_tools:
-                    cmd.extend(["--allowed-tools", tool])
-
-            # Add system prompt if specified
-            if system_prompt:
-                cmd.extend(["--system-prompt", system_prompt])
-
-            # Add max turns limit for runaway prevention
+            # Build command - stateless (no --resume). Only flags the pinned
+            # gemini-cli accepts (#2971): the system prompt travels in the turn
+            # input, and there is no per-run turn cap.
+            cmd = build_headless_argv(model, allowed_tools)
             if max_turns is not None:
-                cmd.extend(["--max-turns", str(max_turns)])
-                logger.info(f"[Headless Task {session_id}] Limiting to {max_turns} agentic turns")
+                logger.info(
+                    f"[Headless Task {session_id}] max_turns={max_turns} requested; "
+                    f"gemini-cli has no per-run turn cap — relying on the "
+                    f"{timeout_seconds}s wall-clock timeout"
+                )
 
             # Initialize tracking structures
             execution_log: List[ExecutionLogEntry] = []
@@ -707,7 +780,7 @@ class GeminiRuntime(AgentRuntime):
             # `list_recently_completed_ids`, but still that long with orphan
             # recovery blocked). Pair the register with the failure path here.
             try:
-                process.stdin.write(prompt)
+                process.stdin.write(compose_prompt(system_prompt, prompt))
                 process.stdin.close()
             except BaseException:
                 get_process_registry().unregister(_registered_id)
