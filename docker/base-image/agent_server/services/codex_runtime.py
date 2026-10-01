@@ -1020,7 +1020,13 @@ _AUTH_PATTERNS = (
     re.compile(r"\bnot\s+authenticated\b", re.IGNORECASE),
     re.compile(r"\bauthentication\s+(?:failed|error)\b", re.IGNORECASE),
 )
-_RATE_MARKERS = ("429", "rate limit", "rate_limit", "quota", "too many requests")
+_RATE_MARKERS = ("rate limit", "rate_limit", "quota", "too many requests")
+# Numeric 429 needs status context; timestamps, process IDs and ports can
+# contain the same digits without reporting a provider rate limit.
+_RATE_STATUS_PATTERN = re.compile(
+    r"\b(?:HTTP(?:/\d(?:\.\d)?)?|status(?:[ _]code)?)\s*[:=]?\s*429\b",
+    re.IGNORECASE,
+)
 
 
 def _classify_codex_failure(
@@ -1035,7 +1041,9 @@ def _classify_codex_failure(
         s for s in (stderr or "", metadata.error_message or "") if s
     )
     haystack_lower = haystack.lower()
-    if any(marker in haystack_lower for marker in _RATE_MARKERS):
+    if _RATE_STATUS_PATTERN.search(haystack) or any(
+        marker in haystack_lower for marker in _RATE_MARKERS
+    ):
         return 429, f"Codex rate limit: {(stderr or metadata.error_message or '')[:300]}"
     if any(pattern.search(haystack) for pattern in _AUTH_PATTERNS):
         return 503, (

@@ -352,6 +352,32 @@ def test_classify_generic_failure_is_500():
     assert status == 500
 
 
+@pytest.mark.parametrize("evidence", [
+    "2026-10-01T12:30:14.429Z failed to spawn tool process",
+    "tool process 42985 terminated with signal 11",
+    "connection refused at localhost:4299",
+    "HTTP 4290 is an invalid status value",
+])
+@pytest.mark.parametrize("field", ["stderr", "error_message"])
+def test_classify_incidental_429_is_not_a_rate_limit(evidence, field):
+    """#3175: incidental digits do not establish provider rate limiting."""
+    assert _classify(**{field: evidence})[0] == 500
+
+
+@pytest.mark.parametrize("evidence", [
+    "HTTP 429", "HTTP/1.1 429", "HTTP/2 429", "status: 429",
+    "status code 429", "status_code=429", "429 Too Many Requests",
+    "rate_limit_exceeded", "rate limit exceeded", "quota exceeded",
+])
+@pytest.mark.parametrize("field", ["stderr", "error_message"])
+def test_classify_rate_limit_evidence_remains_429(evidence, field):
+    assert _classify(**{field: evidence})[0] == 429
+
+
+def test_classify_auth_with_incidental_429_stays_auth():
+    assert _classify(stderr="2026-10-01T12:30:14.429Z invalid_api_key")[0] == 503
+
+
 # ---------------------------------------------------------------------------
 # I3 — end-of-options separator: the built command ends with "--" so a prompt
 # starting with "-"/"--" is parsed as the positional prompt, never as a flag.
