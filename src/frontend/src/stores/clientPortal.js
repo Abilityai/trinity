@@ -2126,7 +2126,7 @@ export const useClientPortalStore = defineStore('clientPortal', {
       try {
         // trinity-enterprise#611: the asks that ended in the last 7 days ride the
         // same list, so a person sees how an ask ended instead of watching it
-        // vanish; `openAsks` (the badge) and the Work tab stay pending-only.
+        // vanish; `openAsks` (the badges and the asks-waiting line) stays pending-only.
         const { data } = await portalHttp.get('/api/enterprise/client-portal/asks', {
           headers: this.authHeader,
           params: agentName ? { agent_name: agentName, include_ended: true } : { include_ended: true },
@@ -2162,6 +2162,20 @@ export const useClientPortalStore = defineStore('clientPortal', {
       }
     },
 
+    // trinity-enterprise#610 (the 09-30 ruling, amended): ONE chat's chat-turn
+    // asks, pending and ended with no ended window — an ended one stays in that
+    // chat's history for the queue's retention, past the 7 days `asks` carries.
+    // Returns the rows and writes nothing: `asks` stays the one list the counts
+    // read. Rethrows; the chat keeps what `asks` gives it when this fails.
+    async fetchChatTurnAsks(chatId) {
+      if (!this.isClientSignedIn || !chatId) return []
+      const { data } = await portalHttp.get('/api/enterprise/client-portal/asks', {
+        headers: this.authHeader,
+        params: { chat_id: chatId },
+      })
+      return Array.isArray(data) ? data : []
+    },
+
     // ent#525: the chat's work — what its participants are doing now and did
     // recently — one request for every participant. Platform door only: the
     // route 404s a portal token, and the rail never feeds the store for one.
@@ -2185,6 +2199,17 @@ export const useClientPortalStore = defineStore('clientPortal', {
         headers: this.authHeader,
         params: { agents: (agentNames || []).filter(Boolean).join(',') },
       })
+      return data
+    },
+
+    // trinity-enterprise#610 PR A2 §3g L7 (E1): one ask's context — its origin,
+    // the run that raised it, the viewer's recent answers. It RETHROWS: the
+    // pane must tell "this ask has no context" from "the read failed".
+    async fetchAskContext(askId) {
+      const { data } = await portalHttp.get(
+        `/api/enterprise/client-portal/asks/${encodeURIComponent(askId)}/context`,
+        { headers: this.authHeader },
+      )
       return data
     },
 

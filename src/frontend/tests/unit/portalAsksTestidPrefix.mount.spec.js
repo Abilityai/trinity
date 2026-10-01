@@ -83,7 +83,7 @@ describe('testidPrefix — the default keeps every id byte-identical', () => {
     await answerFirst(w)
     expect(new Set(ids(w))).toEqual(new Set([
       'portal-asks', 'portal-ask-confirmation',
-      'portal-ask-q1', 'queue-sync-badge', 'portal-ask-input-q1',
+      'portal-ask-q1', 'queue-sync-badge', 'portal-ask-input-q1', 'portal-ask-send-q1',
       'portal-ask-ap1', 'portal-ask-option-ap1', 'portal-ask-note-ap1', 'portal-ask-send-ap1',
       'portal-ask-al1', 'portal-ask-ack-al1',
       'portal-ask-x1', 'portal-ask-ending',

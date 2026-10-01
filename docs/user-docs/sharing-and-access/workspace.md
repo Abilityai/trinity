@@ -141,7 +141,7 @@ Clicking an agent no longer opens a report about it. Its numbers sit in a band u
 | **What it remembers about you** | The agent's notes about you, and a **Changes** list of the runs that rewrote them, with **Undo** |
 | **Decisions** | The seat's decision record — see [Decisions](#decisions) |
 
-It reports; it does not configure. There are no schedules, skills, logs, costs or model details here. A question the agent raised appears above the composer of the chat it belongs to, and answering it there tells you whether the agent is picking the work up — see [Approvals](../automation/approvals.md). Everything is read from stored data, so a stopped agent still renders. The old address `/workspace/a/{agent}` still works and lands in the chat.
+It reports; it does not configure. There are no schedules, skills, logs, costs or model details here. A question the agent raised during a chat appears inside that chat, and answering it there tells you whether the agent is picking the work up; every question waiting on you is in the **Inbox**, and the agent's **Info** tab links there (*N asks waiting on you · Open in Inbox*) — see [Approvals](../automation/approvals.md). Everything is read from stored data, so a stopped agent still renders. The old address `/workspace/a/{agent}` still works and lands in the chat.
 
 ### Suggestions
 

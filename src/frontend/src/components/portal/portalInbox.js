@@ -140,12 +140,84 @@ function threadItem(t, previews) {
 
 const byAtDesc = (a, b) => ts(b.at) - ts(a.at) || String(b.id).localeCompare(String(a.id))
 
-// Action (D8): exactly `openAsks` — pending only — newest first.
-export function actionItems(openAsks) {
+// §3g C1 (Andrii 2026-09-29: a 24h bucket plus the A10 badge): Action is
+// ordered by urgency, not recency. Asks expiring within a day lead, soonest
+// first — the row's "Expires in …" badge is the reason it sits there; then
+// priority, an unknown one as medium; then the ask that has waited LONGEST.
+// Ties break on id so a poll can never swap two equal rows.
+export const PRIORITY_RANK = Object.freeze({ critical: 0, high: 1, medium: 2, low: 3 })
+const URGENT_EXPIRY_MS = DAY_MS
+const rankOf = (p) => (Object.prototype.hasOwnProperty.call(PRIORITY_RANK, p) ? PRIORITY_RANK[p] : PRIORITY_RANK.medium)
+function expiryWithinDay(a, now) {
+  const at = a && a.expires_at ? Date.parse(a.expires_at) : NaN
+  return Number.isFinite(at) && at - now <= URGENT_EXPIRY_MS ? at : null
+}
+export function askUrgencyCompare(a, b, now = Date.now()) {
+  const ea = expiryWithinDay(a, now)
+  const eb = expiryWithinDay(b, now)
+  if ((ea === null) !== (eb === null)) return ea === null ? 1 : -1
+  if (ea !== null && ea !== eb) return ea - eb
+  const pr = rankOf(a.priority) - rankOf(b.priority)
+  if (pr) return pr
+  return ts(a.created_at) - ts(b.created_at) || String(a.id).localeCompare(String(b.id))
+}
+
+// Action (D8): exactly `openAsks` — pending only — in urgency order (C1).
+export function actionItems(openAsks, now = Date.now()) {
   return (Array.isArray(openAsks) ? openAsks : [])
     .filter((a) => a && a.id && a.status === 'pending')
+    .sort((a, b) => askUrgencyCompare(a, b, now))
     .map(askItem)
-    .sort(byAtDesc)
+}
+
+// §3g C2: Action narrowed to one agent. The choice lives in `?from=<agent>` —
+// never `?agent=`, which is a stage key (it would open that agent's page). The
+// facets are a second dense strip, shown only when two or more agents are
+// waiting on you; "All agents" is a sentinel id, never an agent name.
+export const FROM_ALL = 'all-agents'
+export function normalizeFrom(v) {
+  return typeof v === 'string' && v && v !== FROM_ALL ? v : null
+}
+// Most asks first, then the name; an active filter whose agent has none left
+// keeps its facet (count-less) so it can still be cleared — even when no asks
+// are left at all (A2 r1, Codex C5: the strip vanished while `?from=` held).
+// Counts are NEUTRAL: a per-agent share of Action's urgent count, not an
+// outcome, and each tab names what it counts (A2 r1 design P1).
+const facet = (id, label, n) => ({
+  id, label, badge: n, badgeVariant: 'neutral',
+  badgeLabel: n === null ? undefined : `${label}, ${plural(n, 'ask', 'asks')}`,
+})
+// `order` (A2 r1 QA P2): the ids this tab visit already showed, in place — an
+// answered ask changes a count, never a chip's position under the reader; an
+// agent new to the visit joins after them, by count.
+export function agentFacets(rows, labels = {}, active = null, order = null) {
+  const counts = new Map()
+  for (const r of Array.isArray(rows) ? rows : []) {
+    if (r && r.agent_name) counts.set(r.agent_name, (counts.get(r.agent_name) || 0) + 1)
+  }
+  // Round 2 (codex C5): from ONE agent, not two — the strip appearing when a
+  // second agent asked pushed an unchanged list down (principle 30).
+  if (counts.size < 1 && !(active && !counts.has(active))) return []
+  const total = [...counts.values()].reduce((a, b) => a + b, 0)
+  const at = new Map((Array.isArray(order) ? order : []).map((id, i) => [id, i]))
+  const pos = (name) => (at.has(name) ? at.get(name) : Infinity)
+  const agents = [...counts.entries()]
+    .sort((a, b) => (pos(a[0]) - pos(b[0])) || b[1] - a[1] || a[0].localeCompare(b[0]))
+    .map(([name, n]) => facet(name, (labels && labels[name]) || name, n))
+  if (active && !counts.has(active)) agents.push(facet(active, (labels && labels[active]) || active, null))
+  return [facet(FROM_ALL, 'All agents', total), ...agents]
+}
+export function filterByAgent(rows, from) {
+  if (!from) return rows
+  return (Array.isArray(rows) ? rows : []).filter((r) => r && r.agent_name === from)
+}
+// The filter holds while its agent still has asks — or while its just-ended
+// ask is the one on screen (the reader is looking at it); after that it clears
+// rather than leaving the reader on an empty, filtered tab.
+export function activeAgentFilter(from, rows, selected = null) {
+  if (!from) return null
+  if ((Array.isArray(rows) ? rows : []).some((r) => r && r.agent_name === from)) return from
+  return selected && selected.agent_name === from ? from : null
 }
 
 // Unread (D1): one row per CHAT with arrivals. Archived chats stay (an archived
@@ -222,12 +294,19 @@ export function newLabel(n) {
 // Counts LIVE rows (a ghost is not a member); the "new" sum is the same message
 // count the tab badge and the sidebar show (D13), capped like them.
 const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`
-export function listHeadLabel(tab, liveItems) {
+// `fromLabel` (§3g C2, A2 r1): Action narrowed to one agent says so — its facet
+// can sit in the strip's More menu, where nothing on screen would name it.
+export function listHeadLabel(tab, liveItems, fromLabel = null, droppedLabel = null) {
   const items = Array.isArray(liveItems) ? liveItems : []
-  if (!items.length) return 'All caught up'
+  // Round 2 (QA mobile F5): a `?from=` whose agent had nothing left was dropped
+  // silently and the list showed everyone's — say it, in the head's own line.
+  if (droppedLabel && tab === 'action') {
+    return `Nothing waiting from ${droppedLabel} · ${items.length ? `${listHeadLabel(tab, items)} from all agents` : 'All caught up'}`
+  }
+  if (!items.length) return fromLabel && tab === 'action' ? `Nothing waiting from ${fromLabel}` : 'All caught up'
   const chats = items.filter((it) => it && it.type === 'thread')
   const asks = items.filter((it) => it && it.type === 'ask')
-  if (tab === 'action') return plural(asks.length, 'ask', 'asks')
+  if (tab === 'action') return plural(asks.length, 'ask', 'asks') + (fromLabel ? ` from ${fromLabel}` : '')
   if (tab === 'unread') {
     const fresh = chats.reduce((sum, it) => sum + (Number(it.n) || 0), 0)
     return `${plural(chats.length, 'chat', 'chats')} · ${capCount(fresh) || 0} new`

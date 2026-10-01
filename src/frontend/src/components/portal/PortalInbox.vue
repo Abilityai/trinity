@@ -81,6 +81,11 @@
 
     <div class="shrink-0 px-4 border-b border-gray-200 dark:border-gray-750" :class="overPane ? 'hidden' : ''" data-testid="inbox-tabs">
       <OverflowTabs :tabs="tabStrip" :model-value="tab" dense tablist-label="Inbox" @update:model-value="onTab" />
+      <!-- §3g C2: Action narrowed to one agent — a second dense strip, only
+           when two or more agents are waiting on you; the choice is `?from=`. -->
+      <div v-if="facets.length" class="pb-1" data-testid="inbox-agent-facets">
+        <OverflowTabs :tabs="facets" :model-value="activeFrom || FROM_ALL" dense tablist-label="Asks by agent" @update:model-value="onFrom" />
+      </div>
     </div>
 
     <div class="flex-1 min-h-0 flex">
@@ -132,7 +137,7 @@
         />
         <div v-else-if="view.state === 'empty'" class="px-4 pt-6 text-center" data-testid="inbox-empty">
           <p class="text-sm font-medium text-gray-900 dark:text-gray-100">{{ empty.title }}</p>
-          <p class="mt-1 text-[12.5px] text-gray-600 dark:text-gray-300">{{ empty.body }}</p>
+          <p v-if="empty.body" class="mt-1 text-[12.5px] text-gray-600 dark:text-gray-300">{{ empty.body }}</p>
           <router-link
             v-if="empty.link"
             :to="empty.link.to"
@@ -209,7 +214,7 @@ import {
   actionItems, unreadItems, allItems, inboxCounts, defaultInboxTab, normalizeInboxTab,
   stableRows, emptyVisit, isGhost, resolveItem, parseItemKey, listHeadLabel,
   markAllLabel, markAllConfirm, allFooterNotes, pageWindow, PAGE_SIZE, inboxLayout, listHeadExact,
-  INBOX_TAB_SHELL,
+  INBOX_TAB_SHELL, agentFacets, filterByAgent, activeAgentFilter, normalizeFrom, FROM_ALL,
 } from './portalInbox'
 import { askBadgeTitle, unreadBadgeTitle } from './portalUtils'
 import { capCount } from '@/utils/tabTitle'
@@ -313,8 +318,51 @@ const tabStrip = computed(() => [
   { ...INBOX_TAB_SHELL[2] },
 ])
 
+// §3g C2: `?from=` narrows Action to one agent. It holds while that agent has
+// asks, or while its just-ended ask is the one selected (read from the asks
+// list by key, so this never depends on the rows it filters).
+const actionBase = computed(() => actionItems(store.openAsks))
+const fromQuery = computed(() => (tab.value === 'action' ? normalizeFrom(route.query.from) : null))
+const selectedAsk = computed(() => {
+  const p = parseItemKey(selectedKey.value)
+  if (!p || p.type !== 'ask') return null
+  return store.asks.find((a) => a.id === p.id) || null
+})
+const rawFrom = computed(() => activeAgentFilter(fromQuery.value, actionBase.value, selectedAsk.value))
+// Andrii's sign-off (2026-10-01): a ?from= the page OPENS on (a link, a typed
+// URL, Back) is kept even when that agent has nothing waiting — the list says
+// so and offers everyone. Only a filter answered down to nothing DURING the
+// visit clears (round 1), so the reader is not left on an empty tab mid-flow.
+const keptFrom = ref(null)
+const checkedFrom = ref(null)
+const activeFrom = computed(() => (fromQuery.value && keptFrom.value === fromQuery.value ? fromQuery.value : rawFrom.value))
+// A2 r1 (QA P2): the facets keep the order this Action visit first showed —
+// an answered ask moves a count, never a chip under the reader. Not reactive
+// (it only remembers what the last evaluation drew); leaving Action forgets it.
+let facetOrder = null
+const facets = computed(() => {
+  if (tab.value !== 'action') { facetOrder = null; return [] }
+  const f = agentFacets(actionBase.value, props.labels, activeFrom.value, facetOrder)
+  facetOrder = f.map((t) => t.id)
+  return f
+})
+// A2 r1 (Codex C4): narrowing to another agent closes an open ask that is not
+// theirs — else the pane keeps agent A's ask beside a list of agent B's.
+function onFrom(id) {
+  droppedFrom.value = null
+  keptFrom.value = null
+  const from = normalizeFrom(id)
+  const sel = selectedAsk.value
+  if (from && sel && sel.agent_name !== from) {
+    previewFor.value = { tab: null, key: null }
+    replaceQuery({ from, item: undefined })
+    return
+  }
+  replaceQuery({ from: from || undefined })
+}
+
 const baseItems = computed(() => {
-  if (tab.value === 'action') return actionItems(store.openAsks)
+  if (tab.value === 'action') return filterByAgent(actionBase.value, activeFrom.value)
   if (tab.value === 'unread') return unreadItems(props.threads, props.previews)
   return allItems(props.threads, store.asks, props.previews)
 })
@@ -332,6 +380,35 @@ const previewFor = ref({ tab: null, key: null })
 const previewKey = computed(() => (!stacked.value && previewFor.value.tab === tab.value ? previewFor.value.key : null))
 const selectedKey = computed(() => routeItem.value || previewKey.value)
 watch(previewKey, (k) => emit('update:preview', k || null))
+// §3g C2: a `?from=` that no longer narrows anything (its agent's asks are all gone and
+// none is on screen) leaves the URL, once the asks have a verdict.
+// Round 2 (QA mobile F5): the head says whose filter was dropped, until the
+// reader picks a tab or a facet.
+const droppedFrom = ref(null)
+watch([fromQuery, rawFrom, asksVerdict], ([q, a, v]) => {
+  if (!q || !v) return
+  if (checkedFrom.value !== q) {          // arriving on this filter: keep it, even empty
+    checkedFrom.value = q
+    if (!a) keptFrom.value = q
+    return
+  }
+  if (!a && keptFrom.value !== q) { droppedFrom.value = q; replaceQuery({ from: undefined }) }
+}, { immediate: true })
+// Round 2 (QA P2-3): a door that narrows the Inbox to an agent ("Open in
+// Inbox" in Work or Info) is a link; the page it leaves takes focus with it,
+// so it would land on the body. Focus the list, where the narrowed asks are —
+// only when nothing else holds focus (a facet click keeps its own).
+watch(fromQuery, async (q) => {
+  if (!q || typeof document === 'undefined') return
+  await nextTick()
+  const at = document.activeElement
+  if (!at || at === document.body) listColEl.value?.focus?.({ preventScroll: true })
+}, { immediate: true })
+// A2 r1 (QA N1): `?from=` narrows Action only — on another tab (a deep link,
+// a hand-edited URL) it is ignored, so it leaves the URL rather than lingering.
+watch(() => tab.value !== 'action' && route.query.from !== undefined, (stray) => {
+  if (stray) replaceQuery({ from: undefined })
+}, { immediate: true })
 onBeforeUnmount(() => emit('update:preview', null))
 
 // Principle 5 (§3g S1): the rows of one TAB VISIT keep their place — a row
@@ -341,18 +418,21 @@ onBeforeUnmount(() => emit('update:preview', null))
 // tab again and a completed bulk read start one explicitly. Not reactive
 // itself: the computed returns the next visit, which is kept here (re-applying
 // the same fresh list is a no-op, so a lazy re-evaluation is safe).
+// §3g C2: the agent filter is part of the visit's key — a new `?from=` is a
+// new visit, so the narrowed rows start in their own order.
 let visit = { tab: null, ...emptyVisit() }
 const visitEpoch = ref(0)
 function newVisit() { visit = { tab: null, ...emptyVisit() }; visitEpoch.value++ }
+const visitKey = computed(() => `${tab.value}|${activeFrom.value || ''}`)
 const live = {
   thread: (id) => props.threads.find((t) => (t.id || t.session_id) === id) || null,
   ask: (id) => store.asks.find((a) => a.id === id) || null,
 }
 const shownItems = computed(() => {
   visitEpoch.value // eslint-disable-line no-unused-expressions
-  const prev = visit.tab === tab.value ? visit : emptyVisit()
+  const prev = visit.tab === visitKey.value ? visit : emptyVisit()
   const out = stableRows(baseItems.value, prev, live)
-  visit = { tab: tab.value, ...out.visit }
+  visit = { tab: visitKey.value, ...out.visit }
   return out.rows
 })
 // §3g SM / C4: 50 rows, then "Show more" — per tab visit: the limit resets on a
@@ -389,7 +469,10 @@ async function showMore() {
 // The head counts LIVE rows, never ghosts, in units (§3g A8); with only ghosts
 // left it says "All caught up".
 const liveItems = computed(() => shownItems.value.filter((it) => !isGhost(it)))
-const head = computed(() => listHeadLabel(tab.value, liveItems.value))
+const labelOf = (name) => (props.labels && props.labels[name]) || name
+const head = computed(() => listHeadLabel(tab.value, liveItems.value,
+  activeFrom.value ? labelOf(activeFrom.value) : null,
+  !activeFrom.value && droppedFrom.value ? labelOf(droppedFrom.value) : null))
 const headExact = computed(() => listHeadExact(tab.value, liveItems.value))
 
 // A selection the rendered rows do not hold (an old chat, a deep link) is
@@ -431,6 +514,13 @@ const failedTitle = computed(() => (tab.value === 'action' ? "Couldn't load your
 // A9: an owner is never the addressee of their own agents' asks, so a
 // platform session's empty Action points at the door where operator asks live.
 const empty = computed(() => {
+  if (tab.value === 'action' && activeFrom.value) {
+    return {
+      title: `Nothing is waiting on you from ${labelOf(activeFrom.value)}.`,
+      body: '',
+      link: { to: { path: route.path, query: { tab: 'action' } }, label: 'Show all agents' },
+    }
+  }
   if (tab.value === 'action') {
     return props.isPlatform
       ? {
@@ -528,8 +618,10 @@ async function open(it) {
 // A click on the active tab starts a new visit: the list re-sorts and its
 // ghosts go, which is the one way to ask for that without leaving the tab.
 function onTab(next) {
+  droppedFrom.value = null
+  keptFrom.value = null
   if (next === tab.value) { newVisit(); return }
-  replaceQuery({ tab: next, item: undefined })
+  replaceQuery({ tab: next, item: undefined, from: undefined })
 }
 
 // Back (D12). Focus can only land once the list column is shown again: the

@@ -141,13 +141,25 @@
         data-testid="inbox-pane-read-error"
         @dismiss="$emit('dismiss-read-error')"
       />
-      <!-- An ask: the card itself. -->
-      <PortalAsks
-        v-if="item.type === 'ask'"
-        :ask-ids="[item.id]"
-        testid-prefix="inbox-ask"
-        @open-thread="(t) => $emit('open-thread', t)"
-      />
+      <!-- An ask: the card itself, then its context BELOW it (§3g L7, E1 —
+           the controls never move). "Open the conversation" lives in the
+           context now, so the card's own thread link is off here. -->
+      <template v-if="item.type === 'ask'">
+        <PortalAsks
+          :ask-ids="[item.id]"
+          testid-prefix="inbox-ask"
+          :thread-link="false"
+          show-urgency
+          :agent-label="agentLabel"
+          @open-thread="(t) => $emit('open-thread', t)"
+        />
+        <PortalAskContext
+          v-if="liveAsk"
+          :ask="liveAsk"
+          :agent-label="agentLabel"
+          @open-chat="(url) => url && $emit('open-chat', url)"
+        />
+      </template>
 
       <template v-else>
         <div v-if="view.state === 'loading'" class="space-y-3" aria-busy="true" data-testid="inbox-pane-loading">
@@ -276,6 +288,7 @@ import InlineError from '@/components/InlineError.vue'
 import ReportRenderer from '@/components/reports/ReportRenderer.vue'
 import ReportSummary from '@/components/reports/ReportSummary.vue'
 import PortalAsks from './PortalAsks.vue'
+import PortalAskContext from './PortalAskContext.vue'
 import PortalAvatar from './PortalAvatar.vue'
 import PortalAgentBubble from './PortalAgentBubble.vue'
 import { useClientPortalStore } from '@/stores/clientPortal'
@@ -299,6 +312,11 @@ const props = defineProps({
 const emit = defineEmits(['back', 'open-chat', 'reply', 'open-thread', 'rendered', 'mark-read', 'dismiss-read-error', 'open-canvas'])
 
 const store = useClientPortalStore()
+// §3g L7: the ask the context reads — the store's live row (the item is a
+// snapshot), so the meta line follows an answer; the snapshot when it left.
+const liveAsk = computed(() => (props.item?.type === 'ask'
+  ? (store.asks.find((a) => a.id === props.item.id) || props.item.ask || null)
+  : null))
 const headingEl = ref(null)
 const headingId = computed(() => `inbox-pane-h-${props.item.key}`)
 
