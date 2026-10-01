@@ -1717,9 +1717,27 @@ Gate order (Invariant #8), copied verbatim from `/metrics`:
 
 `OBJECTIVES_READ_RATE_LIMIT` (env, default **60**/min per agent, window 60 s)
 is its **own** knob, not `/metrics`'s 240. That route is store-only; this one
-drives a container. Ten open role cards polling at 30 s is 20/min, so 60 clears
-normal traffic with room and still stops a loop from pinning an agent-server the
-platform also needs for chat.
+drives a container. The Workspace role card draws on the same bucket (below) but
+loads once per open and never polls, so 60 clears normal traffic from both doors
+with room and still stops a loop from pinning an agent-server the platform also
+needs for chat.
+
+**One budget, every door (trinity-enterprise#676).** The key, the limit and the
+window are spelled once, in `services/objectives_read_budget.py`, and every door
+to the container fan-out draws on it: this route (and MCP `get_objectives`
+through it) with `enforce` — a 429 + `Retry-After` — and the Workspace role card
+with `admit`, which never raises and is asked only once the card is about to read
+the objectives (after the role file), so a card that reads none spends none. The two doors fail differently on purpose. An
+agent polling its own objectives can empty the bucket, and the role card also
+carries the role, the readiness stamp and the owner's flip; refusing the whole
+card would let the agent hide its owner's control. So a refused card read is a
+200 without objectives (`objectives_error: objectives_rate_limited`) and without
+a fan-out. The card additionally takes a per-viewer cap
+(`portal_role_objectives:{email}:{name}`, a third of the limit — 20/min at the
+default, derived rather than fixed so a lowered limit lowers it too) **before** the
+shared key, so
+one Workspace viewer can spend at most a third of the budget and a refused
+viewer spends none of it.
 
 A store outage is `503 metric_store_unavailable` + `Retry-After: 30`.
 **Everything below transport is a named field on a 200** — an agent that is
@@ -1837,7 +1855,7 @@ metric, every one `declared: false` with its `metric_undeclared` finding and
 |---|---|
 | `GET /api/agents/{name}/objectives` | the operator/agent door |
 | MCP `get_objectives` | agent-scoped (no agent parameter), returns the route body verbatim, never throws |
-| Role card (ent#527, PR #2927) | calls `read_objective_join(agent, template=…, client=…)` **in process** behind its own roster gate — one implementation, two doors |
+| Role card (ent#527; cut over in ent#676) | calls `read_objective_join(agent, template=…, client=…)` **in process** behind its own roster gate and the shared budget (§50.6) — one implementation, two doors. It serves a slim client projection (codes, never the operator sentences; `core-agent.md` §5.36) |
 | Project view (ent#661 v3) | composes `read_objective_files` (one file read) with `join_objectives` per participating agent over store-only reads — the agent door stays out of its loop |
 | Proactivity (ent#605) | consumes `summary.behind` and per-row `gap.status == "behind" and not stale`; it owns the "never act on a stale number" rule and the pace maths |
 
