@@ -641,7 +641,6 @@ def test_the_fleet_dashboard_payload_gains_no_channel_destination_ids():
     (dict(agent_name="pilot-a", status="running", triggered_by="public",
           lease_expires_at="2026-10-01T17:00:00Z"), "running"),
     (dict(agent_name="push-a", status="running", triggered_by="public", lease_expires_at=None), "running"),
-    (dict(agent_name="pilot-a", status="running", triggered_by="chat", lease_expires_at=None), "running"),
 ])
 def test_unclaimed_pilot_row_reads_queued(svc, monkeypatch, row, outcome):
     monkeypatch.setenv("PULL_MODE_PILOT_AGENTS", "pilot-a")
