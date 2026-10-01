@@ -68,7 +68,11 @@ jobs:
             for r in "${rows[@]}"; do
               status="${r%%$'\t'*}"; conclusion="${r##*$'\t'}"
               [[ "$status" != "completed" ]] && pending=1
-              [[ "$status" == "completed" && "$conclusion" != "success" ]] && failed=1
+              # `skipped` is not a failure: since the #2945 tiering every PR
+              # carries `pytest (base, inline fallback)` and `pytest (push,
+              # absolute failures)` as by-design skips, and counting them
+              # here blocked every Dependabot merge from mid-September on.
+              [[ "$status" == "completed" && "$conclusion" != "success" && "$conclusion" != "skipped" ]] && failed=1
             done
             if (( failed )); then
               echo "::error title=Auto-merge blocked::a gating check failed"
