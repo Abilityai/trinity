@@ -449,3 +449,49 @@ def test_dockerfile_runs_the_gemini_arg_parse_smoke_after_copying_the_agent_serv
         if l.startswith("RUN") and "gemini_cli_args.py" in l and "--smoke" in l
     )
     assert smoke_idx > copy_idx
+
+
+# --------------------------------------------------------------------------
+# review: the CLI echoes its whole stdin as the turn's user message
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_chat_transcript_does_not_carry_the_prepended_system_prompt(runtime, monkeypatch):
+    """gemini-cli 0.62.0 stream-json echoes the full stdin input as
+    `{"type":"message","role":"user","content":<input>}` (verified in the
+    bundle). That event lands in `raw_messages` — the execution log persisted
+    by the backend and returned via the result callback — so without a rewrite
+    every Gemini chat log would carry the whole composed platform prompt
+    (collaborators, stakeholders, custom instructions) as the user's turn,
+    which neither the Claude nor the Codex transcript does."""
+    sid = _sid()
+    written = []
+
+    def popen(cmd, *a, **k):
+        def lines():
+            yield json.dumps({"type": "init", "session_id": sid}) + "\n"
+            yield json.dumps({"type": "message", "role": "user", "content": "".join(written)}) + "\n"
+            yield json.dumps({"type": "message", "role": "assistant", "content": "ok"}) + "\n"
+            yield json.dumps({"type": "result", "stats": {}}) + "\n"
+            yield ""
+        proc = MagicMock()
+        proc.pid = 4242
+        proc.stdout.readline.side_effect = lines()
+        proc.stderr.read.return_value = ""
+        proc.wait.return_value = 0
+        proc.returncode = 0
+        proc.stdin.write.side_effect = written.append
+        return proc
+
+    monkeypatch.setattr(gemini_runtime.subprocess, "Popen", popen)
+
+    _, _, _, raw = await runtime.execute(
+        prompt="hello", system_prompt="PLATFORM SECRET-ISH CONTEXT",
+        continue_session=True, execution_id="c-echo",
+    )
+
+    assert "PLATFORM SECRET-ISH CONTEXT" in "".join(written)  # model still gets it
+    user_msgs = [m for m in raw if m.get("type") == "message" and m.get("role") == "user"]
+    assert user_msgs and [m["content"] for m in user_msgs] == ["hello"]
+    assert "PLATFORM SECRET-ISH CONTEXT" not in json.dumps(raw)

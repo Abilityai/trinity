@@ -340,6 +340,15 @@ class GeminiRuntime(AgentRuntime):
                         # Capture raw JSON for full execution log (same as Claude Code)
                         try:
                             raw_msg = json.loads(line.strip())
+                            # #2971: the CLI echoes its whole stdin as the user
+                            # message; record the caller's prompt, not the
+                            # prepended platform system prompt.
+                            if (
+                                isinstance(raw_msg, dict)
+                                and raw_msg.get("type") == "message"
+                                and raw_msg.get("role") == "user"
+                            ):
+                                raw_msg["content"] = prompt
                             raw_messages.append(raw_msg)
                         except json.JSONDecodeError:
                             pass
