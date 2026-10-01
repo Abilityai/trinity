@@ -140,10 +140,10 @@ The dark tinted-ground recipe `token-500 at 16%` is expressible as `token-500/16
 
 | Variant | Recipe (light) | Recipe (dark) |
 |---|---|---|
-| primary | bg action-primary-600, white text; hover 700 | bg action-primary-500; hover 400 |
+| primary | bg action-primary-600, white text; hover 700 | **the light pair**: bg action-primary-600; hover 700 (ent#610 round 3: white on 500 measured 4.47:1 and on the 400 hover ~2.9:1, under AA; 600 / 700 are 6.29 / 7.90) |
 | secondary | surface bg, primary ink, border-strong; hover chrome bg | same roles, dark mappings |
 | danger | bg status-danger-600, white text; hover 700 | bg status-danger-500; hover 400 |
-| ghost | transparent, action-primary text; hover accent-soft bg | same roles, dark mappings |
+| ghost | transparent, action-primary-600 text; hover accent-soft bg | transparent, **action-primary-400** text (ent#610 §3g B7b: 500 measured 3.97:1 on gray-900 and 3.29 on gray-800; 400 is 5.95 / 4.92); hover action-primary-500/16 bg, where the 400 ink measures 4.13 over gray-800 — recorded, not fixed, because the hover is transient |
 
 **States:** disabled — opacity .45, `cursor: not-allowed` · in-flight — inline 16px spinner (2px border, top-colored, 0.7s linear rotation) + progressive label ("Deploying…"); the control acknowledges the press, honest-state rule 18 · focus — `:focus-visible` ring: `0 0 0 2px <surface>, 0 0 0 4px <ring>` on **all** variants, never `outline: none` alone.
 **Rules:** one primary per view (principle 11); destructive verbs are named ("Delete agent", never "OK").
@@ -208,6 +208,8 @@ Driven directly by the token families — the badge variant *is* the token famil
 | Neutral (light) | gray-100 | gray-600 |
 | Neutral (dark) | gray-750 | gray-400 |
 
+`primary` (ent#610 §3g) is the action family on the same recipe (700 on 100, 6.41:1; 300 on 500/16, 7.53:1 over gray-900) — a per-row "N new" in the hue of the solid "came back" counter it sums into. A *counter* is solid (white on a 700 ground — OverflowTabs' `badgeVariant`, the sidebar pills); a per-row *fact* is a tinted BaseBadge.
+
 **Rule:** a badge answers **one** question — status, mode, or identity — never two at once. Two facts = two badges.
 
 - **Do:** `Healthy` (status-success) next to `Claude` (brand-claude) as separate badges.
@@ -230,6 +232,13 @@ Driven directly by the token families — the badge variant *is* the token famil
 
 - **Do:** `Cancel` focused, `Delete agent` as the named danger action.
 - **Don't:** "Are you sure? — OK / Cancel" with focus on OK.
+- **Consequential, not destructive (ent#610 §3g A9):** `ConfirmDialog`'s `confirmVariant`
+  (default `danger`, so every existing dialog is unchanged) takes `primary` for a confirm
+  that restates an irreversible but non-destructive consequence — "Mark 28 chats read?" /
+  "157 new messages across 28 chats will be marked read. You can't undo this." Cancel keeps
+  the initial focus either way: that is `data-destructive`'s job, not the button colour's.
+  Pair it with `variant="info"` (an i in a circle, primary ink; ent#610 round 3): a warning
+  triangle over a primary confirm reads as a danger the button then contradicts.
 
 ### OverflowTabs
 
@@ -272,6 +281,25 @@ mirror does not is a tab measured narrower than it draws, i.e. a strip that
 overflows one tab too late); it enters the **re-measure key** (`tabsSignature`),
 or toggling it repacks nothing; and in the overflow-menu row it gets its **own**
 `v-if`, never another arm of the `badge`/`signal` chain (#2794's `v-else` lesson).
+
+**Opt-in counter and tab semantics (ent#610 §3g L1).** Three fields, each off by default
+and each rendering the pre-existing DOM byte-for-byte when off:
+- `tab.badgeVariant` — `success` (default: the tinted pill) · `urgent` · `primary`. The
+  last two are **solid white on the 700 tier** (white on status-urgent-700 5.18:1, on
+  action-primary-700 7.90:1): a *counter* is solid, a per-row *fact* is tinted (the
+  counter-vs-label rule). One class arm per variant, never two colours of a property in
+  one string (#2662).
+- `tab.badgeLabel` — the tab's `aria-label` when the bare count would be read as
+  "Action 21"; the badge is then `aria-hidden`. Neither field changes a tab's width, so
+  neither enters `tabsSignature`.
+- `tablistLabel` (prop) — the inline tabs render inside a `role="tablist"` of that name,
+  each a `role="tab"` with `aria-selected` and a roving tabindex; Arrow Left/Right wrap,
+  Home/End jump, and activation is **manual** (arrows move focus; Enter/Space selects).
+  The More trigger is not a tab and stays outside the tablist. Off, the wrapper is not
+  rendered at all (a functional component returns its slot bare). Flipping the default,
+  and retargeting the e2e specs that address tabs as buttons, is #3056.
+
+Guarded by `tests/unit/overflowTabsTablist.mount.spec.js`.
 
 ### Data table
 

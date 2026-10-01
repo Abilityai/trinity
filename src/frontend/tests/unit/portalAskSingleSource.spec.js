@@ -70,9 +70,11 @@ describe('#2449 — one ask entity, one rendering per surface', () => {
   })
 
   it('renders the section from the store list, not a page payload', () => {
-    // #3115: the store list is read inside PortalAsks (the one shared
-    // component); the conversation only hands it the agent's name.
-    expect(page).toMatch(/<PortalAsks[\s\S]{0,200}:agent-name="agent\.name"/)
+    // #3115 × ent#610: the conversation reads the ONE store list for this
+    // agent (agentAsks → splitChatAsks) and hands PortalAsks the ids of this
+    // chat's asks; PortalAsks renders them from the same store list.
+    expect(page).toContain('store.asksForAgent(')
+    expect(page).toMatch(/<PortalAsks[\s\S]{0,200}:ask-ids="chatAskIds"/)
   })
 
   it('counts the surviving badge from the SAME store, pending-only', () => {

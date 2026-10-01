@@ -297,6 +297,7 @@
           v-if="item.kind === 'voice-call'"
           class="rounded-xl border border-gray-200 dark:border-gray-800 bg-gray-50 dark:bg-gray-950"
           data-testid="portal-voice-call-block"
+          :data-message-ids="item.turns.map((t) => t.id).filter(Boolean).join(' ') || undefined"
         >
           <summary class="cursor-pointer select-none flex items-center gap-2 px-3 py-2 text-xs text-gray-600 dark:text-gray-300">
             <svg class="w-3.5 h-3.5 shrink-0 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11a7 7 0 01-14 0m7 7v3m0-3a4 4 0 004-4V7a4 4 0 10-8 0v6a4 4 0 004 4z" /></svg>
@@ -308,6 +309,7 @@
               v-for="(t, j) in item.turns"
               :key="t.id || j"
               :class="t.role === 'user' ? 'flex justify-end' : 'flex items-start gap-2.5'"
+              :data-message-id="t.id || undefined"
               data-testid="portal-voice-turn"
             >
               <PortalAvatar v-if="t.role !== 'user'" :name="agent.name" :avatar-url="agent.avatar_url" :size="24" class="mt-0.5" />
@@ -321,7 +323,11 @@
             </div>
           </div>
         </details>
-        <div v-else>
+        <!-- trinity-enterprise#610 (D11): a real DOM target per message, so the
+             Inbox's "Open in chat" anchor can land on the arrival. Rows are
+             keyed by index (and a live row has no id until history reloads),
+             so the id rides as data, never as the key. -->
+        <div v-else :data-message-id="item.message.id || undefined">
         <p
           v-if="item.message.role === 'system'"
           :class="PLATFORM_LINE_CLASS"
@@ -330,6 +336,18 @@
         <div v-else :class="item.message.role === 'user' ? 'flex justify-end' : 'flex items-start gap-2.5'">
           <PortalAvatar v-if="item.message.role !== 'user'" :name="agent.name" :avatar-url="agent.avatar_url" :size="28" class="mt-0.5" />
           <div v-if="item.message.role === 'user'" class="max-w-[85%] flex flex-col items-end gap-1">
+            <!-- ent#610 round 8: what this message replied to (this visit —
+                 the stored row keeps only what was typed). Removable only while
+                 the message failed (#3054 review): the server refuses a reply
+                 target it cannot prove, and Retry must be able to send without it. -->
+            <PortalReplyChip
+              v-if="item.message.replyTo"
+              :excerpt="item.message.replyTo.excerpt"
+              placement="message"
+              :removable="!!item.message.failed"
+              class="max-w-full"
+              @remove="dropReply(item.index)"
+            />
             <div
               class="rounded-2xl rounded-br-md px-3.5 py-3 text-sm leading-relaxed whitespace-pre-wrap"
               :class="item.message.failed ? 'bg-status-danger-50 dark:bg-status-danger-900/30 text-status-danger-800 dark:text-status-danger-200 ring-1 ring-status-danger-300 dark:ring-status-danger-800' : 'bg-action-primary-600 text-white'"
@@ -434,10 +452,22 @@
           :agent-name="agent.name"
           :session-id="currentSessionId"
           :refresh-key="deliverableTick"
+          @loaded="anchor.afterDeliverables"
         />
       </div>
       </div>
     </div>
+    <!-- trinity-enterprise#610: an "Open in chat" anchor that pointed further up
+         than the loaded window says so, rather than silently opening at the
+         bottom as if it had found nothing to show. -->
+    <p
+      v-if="anchor.notice.value"
+      class="shrink-0 px-3 sm:px-6"
+      :class="PLATFORM_LINE_CLASS"
+      role="status"
+      aria-live="polite"
+      data-testid="portal-anchor-notice"
+    >{{ anchor.notice.value }}</p>
     <PortalJumpToLatest :show="showJumpToLatest" :count="unreadBelow" @jump="scrollToLatest" />
     </div>
 
@@ -445,23 +475,47 @@
          third rendering of the SAME row the sidebar counts and the agent page
          shows, so answering here clears it in both. Directly above the input
          because it is a turn that is waiting on the person about to type.
-         #3115 (stopgap for the ent#610 ruling): PENDING ONLY. Since #3023 the
-         asks list carries ended asks for 7 days, and the strip piled every
-         answered tile above the composer of every chat with the agent. An
-         ended ask belongs to history (the Inbox), not to the strip.
-         The strip is not gated on a count here: PortalAsks decides its own
-         visibility, which includes the ent#468 "sent" confirmation that must
-         outlive the last pending ask — a parent `v-if` on the pending count
-         would unmount it the instant it appears. The top gap follows content. -->
-    <div class="shrink-0 px-3 sm:px-6 [&:has([data-testid=portal-asks])]:pt-2" data-testid="portal-ask-strip">
-      <div class="max-w-[var(--ws-message-max,64rem)] mx-auto">
+         #3115 (dev's stopgap for the ent#610 ruling) made the strip pending-
+         only; this is the ruling itself: `chatAskIds` (pinnedAskIds) holds only
+         asks seen PENDING here, so ended ones never pile up, while the one just
+         answered stays drawn in place with its ent#468 confirmation. -->
+    <!-- ent#610 sign-off: Work is the asks' home, so a chat shows ONE row —
+         "N asks waiting on you" — closed by default and expanding inline, like
+         a "Delivered here" card. Only THIS chat's asks (splitChatAsks); open,
+         they sit in a box capped at a third of the screen with its own scroll,
+         a sibling of the thread's scroll region, never nested in it. The rest
+         are one line away in Work. `relative` keeps each card's sr-only text
+         inside the box. -->
+    <div v-if="agentAsks.length" class="shrink-0 px-3 sm:px-6 pt-2">
+      <BaseCard v-if="chatAskIds.length" flush class="max-w-[var(--ws-message-max,64rem)] mx-auto" data-testid="portal-chat-asks">
+        <!-- A native disclosure: the browser owns the expanded state and its
+             semantics (no aria on this file — the composer's no-combobox guard). -->
+        <details :open="asksOpen" @toggle="asksOpen = $event.target.open">
+        <summary
+          class="w-full px-3.5 py-2.5 flex items-center gap-3 text-left text-sm font-medium cursor-pointer select-none list-none [&::-webkit-details-marker]:hidden"
+          data-testid="portal-chat-asks-toggle"
+        >
+          <span class="min-w-0 flex-1">{{ chatAsksLabel(chatAsksPending) }}</span>
+          <svg class="w-4 h-4 shrink-0 transition" :class="{ 'rotate-180': asksOpen }" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" /></svg>
+        </summary>
+        <div v-if="asksOpen" class="relative max-h-[33vh] overflow-y-auto px-3.5 pb-3">
         <PortalAsks
-          :agent-name="agent.name"
+          :ask-ids="chatAskIds"
           :current-session-id="currentSessionId"
           pending-only
           @open-thread="(t) => emit('open-thread', t)"
         />
-      </div>
+        </div>
+        </details>
+      </BaseCard>
+      <p
+        v-if="chatAsks.elsewhere.length"
+        class="max-w-[var(--ws-message-max,64rem)] mx-auto pt-1 text-xs"
+        data-testid="portal-chat-asks-elsewhere"
+      >
+        {{ chatAsks.elsewhere.length }} more {{ chatAsks.elsewhere.length === 1 ? 'ask is' : 'asks are' }} waiting in other chats ·
+        <button type="button" class="text-action-primary-600 dark:text-action-primary-400 hover:underline" @click="emit('open-work')">Open in Work</button>
+      </p>
     </div>
 
     <!-- ent#474: the rail's mobile collapsed form — a strip above the
@@ -618,6 +672,14 @@
                of an equal-specificity pair survives. Dark hid it, because every
                `dark:` variant is emitted after both. Mutually exclusive arms have
                no ordering to get wrong. -->
+          <!-- ent#610 round 8: "replying to" — a tab on top of the composer
+               (Codex-style). The turn carries only the message id; the agent
+               gets the stored message quoted server-side. -->
+          <PortalReplyChip
+            v-if="replyTo"
+            :excerpt="replyTo.excerpt"
+            @remove="emit('reply-done')"
+          />
           <div
             class="rounded-2xl border px-2 py-2 transition has-[textarea:focus]:border-action-primary-600 dark:has-[textarea:focus]:border-action-primary-500 has-[textarea:focus]:ring-[3px] has-[textarea:focus]:ring-action-primary-500/40 dark:has-[textarea:focus]:ring-action-primary-400/40"
             :class="voiceCallActive ? 'border-transparent bg-transparent' : 'border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800'"
@@ -785,14 +847,19 @@ import PortalStarButton from './PortalStarButton.vue'
 import PortalEditableTitle from './PortalEditableTitle.vue'
 import PortalChatTabs from './PortalChatTabs.vue'
 import { newChatHotkeyLabel, MAIN_TAB_LABEL, composerAvailabilityNotice, assistantRow, replyFromHistory, replyBaseline, readReplyBaseline } from './portalUtils'
+import { splitChatAsks, pinnedAskIds, chatAsksLabel } from './portalUtils'
 import { usePortalFileDrop, attachmentState } from '@/composables/usePortalFileDrop'
 import { useStickToBottom } from '@/composables/useStickToBottom'
+import { useConversationAnchor } from '@/composables/useConversationAnchor'
+import { useRoute, useRouter } from 'vue-router'
 import { useComposerDraft } from '@/composables/useComposerDraft'
 import { usePortalDraftsStore } from '@/stores/portalDrafts'
 import { draftKeyFor, shouldFocusOnRestore } from './portalDrafts'
 import PortalTypeahead from './PortalTypeahead.vue'
 import PortalJumpToLatest from './PortalJumpToLatest.vue'
 import PortalAsks from './PortalAsks.vue'
+import BaseCard from '@/components/base/BaseCard.vue'
+import PortalReplyChip from './PortalReplyChip.vue'
 import PortalDeliverables from './PortalDeliverables.vue'
 import PortalSkeleton from './PortalSkeleton.vue'
 import { workSignalFrom } from './portalRail'
@@ -878,6 +945,9 @@ const props = defineProps({
   // backend's `new_thread`.
   newChat: { type: Boolean, default: false },
   prefill: { type: String, default: '' },
+  // ent#610 round 8: `{ sessionId, messageId, excerpt }` from the Inbox arrow.
+  // Shown only on the chat it belongs to; the shell clears it on `reply-done`.
+  replyTarget: { type: Object, default: null },
   // ent#359: whether the CURRENT thread is starred. Owned by the shell (it
   // holds the per-viewer chat state), rendered here.
   starred: { type: Boolean, default: false },
@@ -891,7 +961,7 @@ const props = defineProps({
 // controls that raised them — the rail strip is the door to both now.
 // Declared emits are the component's contract, so a name left here after
 // its only `$emit` is deleted is a promise nothing keeps.
-const emit = defineEmits(['switch-agent', 'session-adopted', 'sessions-changed', 'open-menu', 'toggle-star', 'escalate-to-room', 'open-thread', 'work-state', 'open-work', 'new-chat', 'main-reset', 'voice-call', 'voice-panel', 'open-project'])
+const emit = defineEmits(['reply-done', 'switch-agent', 'session-adopted', 'sessions-changed', 'open-menu', 'toggle-star', 'escalate-to-room', 'open-thread', 'work-state', 'open-work', 'new-chat', 'main-reset', 'voice-call', 'voice-panel', 'open-project'])
 
 // ent#451/#473: the active thread as the shell's list knows it. Null until the
 // list carries the thread (a just-adopted session lands on the next refresh),
@@ -912,6 +982,7 @@ const store = useClientPortalStore()
 // `asksForAgent` compares against `a.agent_name`, so passing the object matched
 // nothing and this surface — the third of the three ent#364 promises — had never
 // rendered. It failed SILENTLY, as an empty list is a legitimate state.
+const agentAsks = computed(() => store.asksForAgent(props.agent.name))
 const messages = ref([])
 const currentSessionId = ref(props.sessionId)
 // ent#555 — the canvas the rail has open for THIS agent, or null.
@@ -987,12 +1058,32 @@ const resetting = ref(false)
 // ent#523 AC 10 — the same pure rule the sidebar chip and the details header
 // read, so the four surfaces cannot disagree about one agent.
 const availabilityNotice = computed(() => composerAvailabilityNotice(props.agent))
+const replyTo = computed(() => (
+  props.replyTarget && props.replyTarget.messageId && props.replyTarget.sessionId === currentSessionId.value
+    ? props.replyTarget : null
+))
 const isMainChat = computed(() => {
   const id = currentSessionId.value
   if (!id) return false
   const row = (props.threads || []).find((t) => !t.is_room && (t.id || t.session_id) === id)
   return !!row?.is_main
 })
+
+// ent#610 sign-off: the chat's asks row. Declared after `currentSessionId`
+// and `isMainChat`: its `immediate` watcher reads both at setup.
+const chatAsks = computed(() => splitChatAsks(agentAsks.value, {
+  sessionId: currentSessionId.value, isMain: isMainChat.value,
+}))
+// An ask seen pending in this chat stays drawn (ended) after you answer it,
+// until you leave the chat; the row starts closed on every chat.
+const seenPendingAsks = ref(new Set())
+const asksOpen = ref(false)
+watch(() => chatAsks.value.here.filter((a) => a.status === 'pending').map((a) => a.id), (ids) => {
+  if (ids.some((id) => !seenPendingAsks.value.has(id))) seenPendingAsks.value = new Set([...seenPendingAsks.value, ...ids])
+}, { immediate: true })
+watch(currentSessionId, () => { seenPendingAsks.value = new Set(); asksOpen.value = false })
+const chatAskIds = computed(() => pinnedAskIds(chatAsks.value.here, seenPendingAsks.value))
+const chatAsksPending = computed(() => chatAsks.value.here.filter((a) => a.status === 'pending').length)
 
 // Archive this conversation and start the agent cold. No confirmation dialog
 // (operator, 2026-09-06) — nothing is lost, and the archived chat is one click
@@ -1175,11 +1266,18 @@ const {
   pinToBottom,
   scrollToLatest,
   reset: resetFollowing,
+  detach: detachFollowing,
 } = useStickToBottom(scrollEl, {
   // An empty chat is not a transcript: it reads from the top, and a section that
   // arrives late (the suggestions) grows downward without moving the hints or
   // scrolling the agent's identity away. Sticking resumes with the first turn.
   enabled: () => messages.value.length > 0 || sending.value,
+})
+// trinity-enterprise#610 (D11): the one-shot `?anchor=m:<id>|d:<id>` the
+// Inbox's "Open in chat" sets. Resolved after the history lands (messages) or
+// when "Delivered here" reports its cards (deliverables); stripped either way.
+const anchor = useConversationAnchor({
+  scrollEl, detach: detachFollowing, pinToBottom, route: useRoute(), router: useRouter(),
 })
 const textarea = ref(null)
 const fileInput = ref(null)
@@ -1234,6 +1332,8 @@ async function loadThread(sessionId) {
   // #2624: opening a thread is an intent — it pins and re-arms, so a thread
   // always opens at the bottom however the previous one was left.
   finally { loadingHistory.value = false; historyLoaded.value = true; await pinToBottom() }
+  // trinity-enterprise#610: after the pin, so a found anchor wins over it.
+  await anchor.afterHistory()
 
   // ent#286: a turn was still running when this client loaded — reattach to it
   // rather than showing a thread that looks finished. The user's message is
@@ -1718,7 +1818,7 @@ let elapsedTimer = null
 // "Thinking… / Working on it… / Still working…" label went with the dots.
 const elapsed = ref(0)
 
-async function deliver(text) {
+async function deliver(text, { replyId = null } = {}) {
   terminalOutcome.value = null
   sending.value = true
   elapsed.value = 0
@@ -1748,7 +1848,9 @@ async function deliver(text) {
                                             { newThread: props.newChat && !currentSessionId.value,
                                               model: chosenModel,
                                               // ent#555 — what the user is looking at.
-                                              openCanvasId: openCanvasId.value })
+                                              openCanvasId: openCanvasId.value,
+                                              // ent#610 — the message this replies to.
+                                              replyToMessageId: replyId })
     } catch (dispatchErr) {
       // Nothing was created, so a retry is safe — but only retry when the
       // ROUTE is what failed. A 404/405 means an older backend without this
@@ -1767,7 +1869,8 @@ async function deliver(text) {
                                           model: chosenModel,
                                           // ent#555 — the fallback carries it too, or the
                                           // context silently depends on streaming working.
-                                          openCanvasId: openCanvasId.value })
+                                          openCanvasId: openCanvasId.value,
+                                          replyToMessageId: replyId })
     }
 
     if (started) {
@@ -2215,7 +2318,12 @@ async function send() {
 
   input.value = ''
   autoGrowAfterUpdate()
-  await submitUserText(text)
+  // ent#610 round 8: read the chip ONCE, with the text it belongs to.
+  // The chip leaves WITH the text: the message it belongs to now carries it
+  // (its label, and Retry resends it), so the next message is not a reply.
+  const reply = replyTo.value
+  if (reply) emit('reply-done')
+  await submitUserText(text, { replyId: reply?.messageId || null, replyExcerpt: reply?.excerpt || '' })
 }
 
 // The tail every user utterance shares, typed or spoken (ent#440). Extracted
@@ -2223,7 +2331,7 @@ async function send() {
 // be a second conversation wearing the same thread, which is the whole thing
 // this feature exists not to be. Returns the outcome so a caller that is not a
 // person watching the screen — the voice loop — can decide what to do next.
-async function submitUserText(text) {
+async function submitUserText(text, { replyId = null, replyExcerpt = '' } = {}) {
   // ent#491: the user's own activity is the ordering signal, so the bump happens
   // HERE — on send — and not when a reply lands. Any agent this message wakes
   // counts, mirroring the room fan-out (`unreadByAgent`): if you @mention two
@@ -2236,14 +2344,17 @@ async function submitUserText(text) {
   } catch {
     // Ordering is a convenience; it must never be able to block a send.
   }
-  const index = messages.value.push({ role: 'user', content: text, failed: false, error: null }) - 1
+  const index = messages.value.push({
+    role: 'user', content: text, failed: false, error: null,
+    replyTo: replyId ? { messageId: replyId, excerpt: replyExcerpt } : null,
+  }) - 1
   // #2624: sending is an explicit intent to follow the bottom — it pins and
   // re-arms whatever the prior scroll position, so the reader is never handed
   // an unread badge for their own message.
   await pinToBottom()
   // A stale "couldn't stop the turn" must not outlive the turn it described.
   cancelError.value = ''
-  const res = await deliver(text)
+  const res = await deliver(text, { replyId })
   return settleDelivery(index, text, res)
 }
 
@@ -2298,6 +2409,13 @@ function settleDelivery(index, text, res) {
   return { ok: false, error: res?.error, lost: res?.lost }
 }
 
+// #3054 review: a failed message lets go of what it replied to, so the next
+// Retry is an ordinary turn. Only a failed one — a delivered reply is history.
+function dropReply(i) {
+  const msg = messages.value[i]
+  if (msg && msg.failed) msg.replyTo = null
+}
+
 async function retry(i) {
   const msg = messages.value[i]
   if (!msg || sending.value) return
@@ -2307,7 +2425,7 @@ async function retry(i) {
   // A stale "couldn't stop the turn" must not outlive the turn it described —
   // and `retry` is a new turn, so it clears it for the same reason `send` does.
   cancelError.value = ''
-  const res = await deliver(content)
+  const res = await deliver(content, { replyId: msg.replyTo?.messageId || null })
   settleDelivery(i, content, res)
 }
 

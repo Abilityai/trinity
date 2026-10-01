@@ -119,6 +119,16 @@ designated; now there is, and a guess would scatter the agent's own messages
 across whichever chat the person happened to open last. An explicit
 `session_id` still wins.
 
+**The Workspace itself lands on the Inbox (ent#610).** A bootstrap on bare
+`/workspace` — no route param, no `agent` / `new` / `voice` key — replaces to
+`/workspace/inbox` before the stage resolves (the route is captured before the first
+await and the replace is awaited inside the `try`, so no conversation flashes). Every
+explicit target still wins, and bare `/workspace` keeps its meaning as the new-chat
+stage `newChatWithAgent` → `escapeStage` lands on. Clicking an agent is unchanged: it
+opens the conversation `landingThread` picks. An addressed report with no chat of its
+addressee joins the agent-initiated things that land in Main, at publish time
+(`report_service.resolve_report_session`).
+
 ---
 
 ## Frontend
