@@ -169,6 +169,24 @@ async def test_custom_prompt_with_literal_braces_does_not_crash(harness):
     assert '{"status": "pass"|"fail"}' in calls["prompts"][0]
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("field", [
+    "{original_message[ticket]}",   # TypeError: str indices must be integers
+    "{execution_response.status}",  # AttributeError on str
+])
+async def test_template_field_lookup_errors_do_not_crash(harness, field):
+    """Any str.format failure, not only KeyError/ValueError, must fall back to
+    plain substitution — a raise here leaves the parent in pending_validation
+    forever (the background task only logs it)."""
+    vs, service, calls = harness
+    template = f"Output:\n{{execution_response}}\nAlso check {field}."
+
+    out = await _validate(service, STATUS_LINE, template)
+
+    assert out.status is vs.ValidationStatus.PASS
+    assert field in calls["prompts"][0]
+
+
 # ---------------------------------------------------------------------------
 # (b) Nothing to inspect is a distinct outcome — not a failure, never a pass
 # ---------------------------------------------------------------------------

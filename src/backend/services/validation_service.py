@@ -430,10 +430,12 @@ class ValidationService:
 
         # A full template. Honour str.format escapes ({{ }}) where it parses;
         # literal braces (a pasted JSON example) fall back to plain substitution
-        # instead of raising before any validator runs.
+        # instead of raising before any validator runs. AttributeError /
+        # TypeError are field lookups on the str values (`{x.attr}`, `{x[k]}`);
+        # any raise here would leave the parent in pending_validation.
         try:
             return custom_prompt.format(**values)
-        except (KeyError, IndexError, ValueError):
+        except (KeyError, IndexError, ValueError, AttributeError, TypeError):
             return _substitute(custom_prompt, values)
 
     def _parse_validation_response(self, result: TaskExecutionResult) -> ValidationResult:
