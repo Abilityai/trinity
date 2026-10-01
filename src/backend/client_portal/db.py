@@ -185,16 +185,25 @@ def add_portal_message(msg_id: str, agent_name: str, client_email: str,
 
 
 def get_portal_messages(agent_name: str, client_email: str, limit: int = 100,
-                        session_id: Optional[str] = None) -> list[dict]:
+                        session_id: Optional[str] = None,
+                        before: Optional[str] = None) -> list[dict]:
     """The most-recent ``limit`` messages for a conversation, oldest-first for
     display. Scoped to one ``session_id`` when given (the multi-session read);
     with no session it falls back to the whole (agent, client) history — the
-    legacy single-thread behaviour."""
+    legacy single-thread behaviour.
+
+    ``before`` (trinity-enterprise#610 §3g L7): only messages strictly older than
+    this ISO-Z instant — the ask context's "what led up to it". A bound
+    parameter compared with another `utc_now_iso()` column, so the two strings
+    share one format (Invariant #16's trap is `datetime('now')`, not this)."""
     where = "agent_name = :agent AND client_email = :email"
     params = {"agent": agent_name, "email": (client_email or "").lower(), "lim": limit}
     if session_id is not None:
         where += " AND session_id = :session"
         params["session"] = session_id
+    if before is not None:
+        where += " AND created_at < :before"
+        params["before"] = before
     stmt = text(
         # ent#366: `id` rides along so a message can be RATED. The row has always
         # had a primary key; the client just never saw it, which is why a thumb
@@ -323,10 +332,11 @@ def get_portal_message(message_id: str) -> Optional[dict]:
 
     Returns the owning `agent_name`/`client_email` so the caller can prove the
     message is one the rater can actually see. A rating route that trusted the
-    id alone would let anyone rate anyone's conversation.
+    id alone would let anyone rate anyone's conversation. `content` rides along
+    for ent#610's reply-to, which quotes the row only AFTER the same proof.
     """
     stmt = text(
-        "SELECT id, agent_name, client_email, session_id, role, created_at "
+        "SELECT id, agent_name, client_email, session_id, role, content, created_at "
         "FROM enterprise_portal_messages WHERE id = :id"
     )
     with get_engine().connect() as conn:
@@ -1103,8 +1113,68 @@ def dismissed_file_ids(client_email: str) -> set[str]:
         return {r[0] for r in conn.execute(stmt)}
 
 
+# ent#610 — the ONE definition of an unread arrival. A `UNION ALL` of two arms
+# that share the #557 cursor-or-baseline predicate unchanged:
+#
+#   (i)  an assistant message in the viewer's own chat (ent#359's rule);
+#   (ii) a report ADDRESSED to the viewer and stamped to a session the viewer
+#        OWNS (`s.client_email = :email`) — a deliverable is an arrival too.
+#
+# `count_unread_by_session` groups it and `unread_arrivals_with_latest` windows
+# it, so the count on a row and the preview beside it are read from the same
+# fragment and cannot drift. The audience predicate is PLAIN equality on a bind
+# lowercased in Python, never `lower(column)`: addressees are normalised at the
+# boundary (#2955, `utils/addressee.py`), and `idx_agent_reports_audience`
+# serves only the bare column — `lower()` would scan the fleet's reports on every
+# 20 s poll. Every reader aliases the subquery (PostgreSQL < 16 requires it).
+_UNREAD_CURSOR = (
+    "  AND ("
+    "        (st.last_read_at IS NOT NULL AND {at} > st.last_read_at)"
+    "     OR (st.last_read_at IS NULL AND {at} > ("
+    "           SELECT b.last_read_at FROM enterprise_portal_chat_state b "
+    "           WHERE b.client_email = :email AND b.chat_kind = :bkind "
+    "             AND b.chat_id = :bid"
+    "         ))"
+    "      ) "
+)
+
+_UNREAD_ARRIVALS = (
+    "SELECT m.session_id AS session_id, m.id AS id, m.created_at AS at, "
+    "       'message' AS kind, m.agent_name AS agent_name "
+    "FROM enterprise_portal_messages m "
+    "LEFT JOIN enterprise_portal_chat_state st "
+    "  ON st.client_email = :email AND st.chat_kind = 'thread' "
+    " AND st.chat_id = m.session_id "
+    "WHERE m.client_email = :email "
+    "  AND m.role = 'assistant' "
+    + _UNREAD_CURSOR.format(at="m.created_at")
+    + "UNION ALL "
+    "SELECT r.portal_session_id AS session_id, r.id AS id, r.created_at AS at, "
+    "       'deliverable' AS kind, s.agent_name AS agent_name "
+    "FROM agent_reports r "
+    "JOIN enterprise_portal_sessions s "
+    "  ON s.id = r.portal_session_id AND s.client_email = :email "
+    "LEFT JOIN enterprise_portal_chat_state st "
+    "  ON st.client_email = :email AND st.chat_kind = 'thread' "
+    " AND st.chat_id = r.portal_session_id "
+    "WHERE r.addressed_to_email = :email "
+    + _UNREAD_CURSOR.format(at="r.created_at")
+)
+
+
+def _unread_params(client_email: str) -> dict:
+    return {"email": (client_email or "").lower(),
+            "bkind": BASELINE_KIND, "bid": BASELINE_ID}
+
+
 def count_unread_by_session(client_email: str) -> dict[str, int]:
-    """Per-thread count of agent messages the viewer has not seen.
+    """Per-thread count of arrivals the viewer has not seen.
+
+    **An arrival (ent#610)** is an agent message in the viewer's chat OR a report
+    addressed to them stamped to a chat they own — the two arms of
+    `_UNREAD_ARRIVALS`. Everything below about cursors and the baseline applies
+    to both arms unchanged; what follows was written for messages and still
+    reads true with "arrival" in its place.
 
     Two cases, and the second one is ent#557:
 
@@ -1152,29 +1222,81 @@ def count_unread_by_session(client_email: str) -> dict[str, int]:
     flow's Known Limitations.)
     """
     stmt = text(
-        "SELECT m.session_id AS session_id, COUNT(*) AS n "
-        "FROM enterprise_portal_messages m "
-        "LEFT JOIN enterprise_portal_chat_state st "
-        "  ON st.client_email = :email AND st.chat_kind = 'thread' "
-        " AND st.chat_id = m.session_id "
-        "WHERE m.client_email = :email "
-        "  AND m.role = 'assistant' "
-        "  AND ("
-        "        (st.last_read_at IS NOT NULL AND m.created_at > st.last_read_at)"
-        "     OR (st.last_read_at IS NULL AND m.created_at > ("
-        "           SELECT b.last_read_at FROM enterprise_portal_chat_state b "
-        "           WHERE b.client_email = :email AND b.chat_kind = :bkind "
-        "             AND b.chat_id = :bid"
-        "         ))"
-        "      ) "
-        "GROUP BY m.session_id"
+        "SELECT a.session_id AS session_id, COUNT(*) AS n "
+        "FROM (" + _UNREAD_ARRIVALS + ") AS a "
+        "GROUP BY a.session_id"
     )
     with get_engine().connect() as conn:
-        rows = conn.execute(stmt, {
-            "email": (client_email or "").lower(),
-            "bkind": BASELINE_KIND, "bid": BASELINE_ID,
-        }).mappings()
+        rows = conn.execute(stmt, _unread_params(client_email)).mappings()
         return {r["session_id"]: int(r["n"]) for r in rows if r["session_id"]}
+
+
+def unread_arrivals_with_latest(client_email: str) -> dict[str, dict]:
+    """Per-thread unread count, the LATEST arrival and the earliest unread
+    MESSAGE id — in ONE statement over the same `_UNREAD_ARRIVALS` fragment
+    `count_unread_by_session` groups (ent#610 D5).
+
+    One statement, not two reads, because the Inbox renders the count and the
+    preview side by side: a message landing between two reads would show
+    "3 new" beside the excerpt of a 4th. Here both come from one snapshot, and
+    `n` is by construction exactly what `count_unread_by_session` returns for
+    the session (a property test pins the equality).
+
+    Returns ``{session_id: {"n", "latest", "first_unread_message_id"}}`` where
+    ``latest`` = ``{kind, id, at, agent_name, content, source, title}``.
+    ``content``/``source`` are set only for a message and ``title`` (the
+    excerpt's source) only for a deliverable. Deliberately NO ``cost``
+    column is selected — a portal message carries one, and AC 7 keeps it out of
+    every projection #610 adds. The window ordering ``at DESC, id DESC`` makes
+    "latest" deterministic on a timestamp tie. ``first_unread_message_id`` is
+    NULL when every unread arrival in the chat is a deliverable.
+    """
+    stmt = text(
+        "SELECT w.session_id AS session_id, w.n AS n, w.id AS id, w.at AS at, "
+        "       w.kind AS kind, w.agent_name AS agent_name, "
+        "       w.first_message_id AS first_message_id, "
+        "       m2.content AS content, m2.source AS source, "
+        "       r2.title AS title "
+        "FROM ("
+        "  SELECT a.session_id, a.id, a.at, a.kind, a.agent_name, "
+        "         COUNT(*) OVER (PARTITION BY a.session_id) AS n, "
+        "         ROW_NUMBER() OVER (PARTITION BY a.session_id "
+        "                            ORDER BY a.at DESC, a.id DESC) AS rn, "
+        "         FIRST_VALUE(CASE WHEN a.kind = 'message' THEN a.id END) OVER ("
+        "           PARTITION BY a.session_id "
+        "           ORDER BY CASE WHEN a.kind = 'message' THEN 0 ELSE 1 END, "
+        "                    a.at ASC, a.id ASC "
+        "           ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING"
+        "         ) AS first_message_id "
+        "  FROM (" + _UNREAD_ARRIVALS + ") AS a"
+        ") AS w "
+        "LEFT JOIN enterprise_portal_messages m2 "
+        "  ON w.kind = 'message' AND m2.id = w.id "
+        "LEFT JOIN agent_reports r2 "
+        "  ON w.kind = 'deliverable' AND r2.id = w.id "
+        "WHERE w.rn = 1"
+    )
+    out: dict[str, dict] = {}
+    with get_engine().connect() as conn:
+        for r in conn.execute(stmt, _unread_params(client_email)).mappings():
+            sid = r["session_id"]
+            if not sid:
+                continue
+            is_msg = r["kind"] == "message"
+            out[sid] = {
+                "n": int(r["n"]),
+                "first_unread_message_id": r["first_message_id"],
+                "latest": {
+                    "kind": r["kind"],
+                    "id": r["id"],
+                    "at": r["at"],
+                    "agent_name": r["agent_name"],
+                    "content": r["content"] if is_msg else None,
+                    "source": r["source"] if is_msg else None,
+                    "title": None if is_msg else r["title"],
+                },
+            }
+    return out
 
 
 # --- Agent page: first-try rate (ent#360) ------------------------------------

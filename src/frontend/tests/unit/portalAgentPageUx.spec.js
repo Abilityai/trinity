@@ -273,12 +273,12 @@ describe('Overview containment', () => {
   })
 
   it('does not advertise an asks section for an agent with nothing waiting', () => {
-    // #3115: PortalAsks decides its own visibility (nothing waiting → nothing
-    // rendered, proven mounted in portalAskStripPendingOnly.mount.spec.js), and
-    // the strip hosts it pending-only; its top gap follows content.
+    // ent#610 (the 09-30 ruling): there is no asks section in the chat at all
+    // any more. An ask this chat raised is a row of the thread, drawn only for
+    // an ask that exists (`threadRows`); nothing is reserved for "no asks".
     const src = stripComments(readFileSync(CONVERSATION, 'utf8'))
-    expect(src).toMatch(/<PortalAsks[\s\S]{0,200}pending-only/)
-    expect(src).toContain('[&:has([data-testid=portal-asks])]:pt-2')
+    expect(src).not.toMatch(/v-if="agentAsks\.length"/)
+    expect(src).toMatch(/v-if="item\.kind === 'ask'"[\s\S]{0,800}<PortalAsks/)
   })
 
   it('does not nest a scroll region inside the asks rendering', () => {

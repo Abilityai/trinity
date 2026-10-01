@@ -111,6 +111,14 @@ journeys:
     built: false
     owner: trinity
     invariants: [E-01, E-05]
+    # ent#610: "find out" has a place now. A schedule that delivers to the
+    # Workspace (`deliver_to_workspace_email`) lands its completion in Main, and
+    # the Inbox's Unread shows it with a done/failed outcome read from the
+    # platform `source` marker. A run with no delivery address is not in anyone's
+    # Unread (A8) — the Work tab owns it — so the variant names the delivered shape.
+    variants:
+      - name: inbox
+        promise: "I open the Workspace and the Inbox tells me the run came back, and whether it finished, without my opening the agent."
 
   - id: J06
     issue: 2345
@@ -198,6 +206,11 @@ journeys:
     # invariants the delivering execution rides on; L-03 covers the cascade that
     # must not strand a delivered thread when the agent goes away.
     invariants: [E-01, E-05, L-03]
+    # ent#610: the brief lands in Main (ent#498) and is an arrival in the Inbox's
+    # Unread; reading it there moves the same #557 cursor the sidebar counts.
+    variants:
+      - name: inbox
+        promise: "When I open the Workspace, the brief is waiting in my Inbox, and reading it there clears it everywhere."
 
   - id: J12
     # ent#477 declares, ent#478 records, ent#479 reads it back with freshness,

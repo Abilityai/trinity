@@ -41,6 +41,12 @@
       </div>
     </div>
 
+    <!-- trinity-enterprise#610 (the 09-30 ruling, item 2): the agent's asks home
+         is the Inbox, filtered to it, "on every door" — for platform users and
+         clients alike. A client has no Work tab (a platform door), so this is
+         their door: the same one line Work draws, for every principal. -->
+    <PortalAsksWaitingLine :agent-names="[agentName]" testid-prefix="portal-info" />
+
     <!-- #2597: a failed REFRESH keeps everything on screen and says so beside
          it (ent#253) — the band's rule, applied to the panel that reads the
          same payload. Sits at the top of the panel body; ent#547 removed the
@@ -60,6 +66,7 @@
     <PortalSuggestions
       v-if="store.isPlatformSession"
       :agent-name="agentName"
+      :omit-sources="['asks']"
       @use-playbook="(text) => $emit('use-playbook', text)"
       @open-section="openSection"
       @open-chat="$emit('focus-composer')"
@@ -92,8 +99,8 @@
             </span>
             <span
               v-if="c.unread"
-              class="shrink-0 min-w-[1.125rem] px-1 h-[1.125rem] rounded-full bg-action-primary-600 text-white text-[10px] font-semibold flex items-center justify-center"
-            >{{ c.unread }}</span>
+              class="shrink-0 min-w-[1.125rem] px-1 h-[1.125rem] rounded-full bg-action-primary-700 text-white text-[10px] font-semibold flex items-center justify-center"
+            >{{ capCount(c.unread) }}</span>
             <span class="text-[11px] text-gray-400 shrink-0">{{ relative(c.last_message_at) }}</span>
           </button>
         </li>
@@ -219,8 +226,11 @@ import PortalAgentMemory from './PortalAgentMemory.vue'
 import PortalAgentRole from './PortalAgentRole.vue'
 import PortalAgentDecisions from './PortalAgentDecisions.vue'
 import PortalSuggestions from './PortalSuggestions.vue'
+import PortalAsksWaitingLine from './PortalAsksWaitingLine.vue'
 import { agentDisplayName } from '@/utils/agentName'
-import { availabilityChip, threadTitle, MAIN_TAB_LABEL } from './portalUtils'
+import { capCount } from '@/utils/tabTitle'
+import { availabilityChip, threadTitle, MAIN_TAB_LABEL, asksHomeRoute } from './portalUtils'
+import { useRouter } from 'vue-router'
 import { usePortalAgentPage } from '@/composables/usePortalAgentPage'
 
 const props = defineProps({
@@ -232,19 +242,22 @@ const props = defineProps({
 // control, not a button this body owns — a second X inside the column would
 // be a second way to do one thing, and the two would disagree about whether
 // the rail is shut or merely on another tab.
-// ent#465: `open-rail-tab` / `focus-composer` carry a suggestion's Accept to
-// the shell, which owns the rail and the composer.
-const emit = defineEmits(['open-thread', 'use-playbook', 'open-rail-tab', 'focus-composer'])
+// ent#465: `focus-composer` carries a suggestion's Accept to the shell, which
+// owns the composer. (The asks suggestion goes to the Inbox by route since the
+// 09-30 ruling, so `open-rail-tab` had no emitter left.)
+const emit = defineEmits(['open-thread', 'use-playbook', 'focus-composer'])
 
 const store = useClientPortalStore()
+const router = useRouter()
 const openReport = ref(null)
 const decisionsEl = ref(null)
 
 // ent#465: a suggestion's "Show …". Decisions live in this panel, so scroll to
-// them; asks are answered in the Work tab's "Waiting on you".
+// them; asks are answered in the Inbox, filtered to this agent (ent#610, the
+// 09-30 ruling — Work no longer lists them).
 function openSection(name) {
   if (name === 'decisions') decisionsEl.value?.scrollIntoView?.({ behavior: 'smooth', block: 'start' })
-  else if (name === 'asks') emit('open-rail-tab', 'work')
+  else if (name === 'asks') router.push(asksHomeRoute(props.agentName))
 }
 
 // The window is fixed here: this panel shows no windowed figure, and a second

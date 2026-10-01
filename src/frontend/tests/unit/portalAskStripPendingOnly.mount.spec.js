@@ -59,16 +59,21 @@ beforeEach(() => {
 })
 afterEach(() => { wrapper?.unmount(); wrapper = null })
 
-describe('the chat strip', () => {
-  it('mounts its PortalAsks pending-only', async () => {
+describe('the chat (the strip is gone — ent#610, the 09-30 ruling)', () => {
+  // #3115's point survives: an ended ask never piles up as a CARD. The strip
+  // above the composer is gone; a chat-turn ask is a tile in its thread, and an
+  // ended one there is one muted history row, not a card.
+  it("mounts a card only for this chat's waiting chat-turn ask; the answered one is a row", async () => {
+    store.asks = [ask('p1', { chat_id: 's1', raised_in_turn: true }), { ...ANSWERED, chat_id: 's1', raised_in_turn: true }]
+    store.fetchHistory = vi.fn(async () => ({ sessionId: 's1', messages: [{ id: 'm1', role: 'user', content: 'go', created_at: '2026-09-30T09:00:00Z' }] }))
     wrapper = shallowMount(PortalConversation, {
-      props: { agent: { name: 'scout', playbooks: [] }, sessionId: null },
+      props: { agent: { name: 'scout', playbooks: [] }, sessionId: 's1' },
+      global: { renderStubDefaultSlot: true },
     })
     await flushPromises()
-    const strip = wrapper.findComponent(PortalAsks)
-    expect(strip.exists()).toBe(true)
-    expect(strip.props('pendingOnly')).toBe(true)
-    expect(strip.props('agentName')).toBe('scout')
+    const cards = wrapper.findAllComponents(PortalAsks)
+    expect(cards.map((c) => c.props('askIds'))).toEqual([['p1']])
+    expect(wrapper.findAll('[data-testid="portal-chat-ask-ended"]')).toHaveLength(1)
   })
 })
 

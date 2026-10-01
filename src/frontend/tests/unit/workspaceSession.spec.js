@@ -114,6 +114,14 @@ import {
 
 const PORTAL_TOKEN_KEY = 'trinity.portalToken'
 
+// vitest 5 clears every mock's call history before EACH test (`clearMocks`
+// now defaults to true). `clientPortal.js` registers its interceptors once,
+// at import, so by the time a test runs `use.mock.calls` is already empty.
+// Capture the registered handlers here, at module scope, before any test's
+// clear — this is the same handler the browser runs, not a restatement.
+const requestInterceptor = portalHttp.interceptors.request.use.mock.calls[0][0]
+const responseRejectInterceptor = portalHttp.interceptors.response.use.mock.calls[0][1]
+
 describe('workspace session', () => {
   beforeEach(() => {
     localStorage.clear()
@@ -583,7 +591,7 @@ describe('an expired client session does not become the operator (#2261)', () =>
     // store-decided from inherited. It is now unconditional: delete, then set
     // from the store.
     expireOnAPlatformBrowser()
-    const handler = portalHttp.interceptors.request.use.mock.calls[0][0]
+    const handler = requestInterceptor
 
     const withInherited = handler({ headers: { Authorization: 'Bearer platform-jwt-from-defaults' } })
     const withNothing = handler({ headers: {} })
@@ -599,7 +607,7 @@ describe('an expired client session does not become the operator (#2261)', () =>
     localStorage.setItem(PORTAL_TOKEN_KEY, 'portal-token')
     setActivePinia(createPinia())
     useClientPortalStore()
-    const handler = portalHttp.interceptors.request.use.mock.calls[0][0]
+    const handler = requestInterceptor
 
     const out = handler({ headers: { Authorization: 'Bearer something-stale' } })
     expect(out.headers.Authorization).toBe('Bearer portal-token')
@@ -654,7 +662,7 @@ describe('an expired client session does not become the operator (#2261)', () =>
     const onLost = vi.fn()
     setPlatformSessionLostHandler(onLost)
 
-    const reject = portalHttp.interceptors.response.use.mock.calls[0][1]
+    const reject = responseRejectInterceptor
     // The arm re-rejects (it is an interceptor, not a handler of last resort);
     // the assertion is about the side effect, so swallow the rejection.
     reject({ response: { status: 401 } }).catch(() => {})
@@ -675,7 +683,7 @@ describe('an expired client session does not become the operator (#2261)', () =>
 
     const onLost = vi.fn()
     setPlatformSessionLostHandler(onLost)
-    const reject = portalHttp.interceptors.response.use.mock.calls[0][1]
+    const reject = responseRejectInterceptor
     reject({ response: { status: 401 } }).catch(() => {})
 
     expect(onLost).toHaveBeenCalledTimes(1)

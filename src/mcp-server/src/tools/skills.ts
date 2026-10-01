@@ -39,6 +39,10 @@ interface SkillInfo {
   source_id?: string | null;
   source_name?: string | null;
   shadowed_by?: Array<{ source_id: string; source_name: string }>;
+  // ent#672 lifecycle. `superseded_by` is the library author's TEXT (one line,
+  // <= 200 chars), not a resolved skill name, and is null unless deprecated.
+  deprecated?: boolean;
+  superseded_by?: string | null;
 }
 
 /**
@@ -108,7 +112,9 @@ interface SkillDelivery {
   // #2914: names refused because the agent already has its own skill dir of
   // that name. Present whenever at least one requested name collided.
   conflicts?: string[];
-  skills: Record<string, { status: string; error?: string }>;
+  // ent#672: `warnings` is present only for a deprecated skill and carries
+  // lifecycle codes only — `deprecated` or `deprecated:<successor>`.
+  skills: Record<string, { status: string; error?: string; warnings?: string[] }>;
 }
 
 export function createSkillsTools(
@@ -140,6 +146,9 @@ export function createSkillsTools(
         "List all available skills from the skills library. " +
         "Returns skill names, descriptions, and paths. " +
         "Skills are loaded from the configured GitHub repository. " +
+        "A skill the library is retiring carries `deprecated: true` and stays assignable; " +
+        "`superseded_by` is the author's note on what replaces it (free text, not checked " +
+        "against the library; null unless deprecated). " +
         "Use get_skill to get the full content of a specific skill.",
       parameters: z.object({}),
       execute: async (_params: unknown, context?: { session?: McpAuthContext }) => {
@@ -177,7 +186,11 @@ export function createSkillsTools(
             // Non-empty => lower-precedence sources also ship this name and
             // are unreachable. Surfaced so an agent reading the catalog sees
             // the same conflict the UI shows (ent#237 AC#4).
-            shadowed_by: (s.shadowed_by ?? []).map(x => x.source_name)
+            shadowed_by: (s.shadowed_by ?? []).map(x => x.source_name),
+            // ent#672: named here because this map drops anything it does
+            // not name — the lifecycle keys would stop at REST otherwise.
+            deprecated: s.deprecated ?? false,
+            superseded_by: s.superseded_by ?? null
           }))
         }, null, 2);
       },
@@ -266,6 +279,10 @@ export function createSkillsTools(
         "`not_delivered` with a `reason` (`injection_in_progress`, `agent_not_ready`, " +
         "`docker_unavailable`, `injection_error`) — the assignment is kept either way and " +
         "sync_agent_skills is the manual retry. " +
+        "A deprecated skill is still assigned and delivered; its entry in `delivery.skills` then carries " +
+        "`warnings` with `deprecated:<successor>` (only when the author's note is shaped like a skill name — it is not checked against the library) or bare `deprecated` — on " +
+        "every outcome, a stopped agent included. That list holds lifecycle codes only; dependency " +
+        "warnings are on sync_agent_skills. " +
         "Called with an agent key, this needs the skill-management permission an instance admin grants (it covers the calling agent's OWN skills too); without it the call is refused with `skill_management_not_permitted` and nothing changes. " +
         "Skills teach agents specific behaviors defined in SKILL.md files. " +
         "Pass `set:<name>` to assign a library skill SET — every member is assigned and delivered in " +
@@ -426,7 +443,8 @@ export function createSkillsTools(
         "that name (the agent's copy runs; the library package was not installed), " +
         "null otherwise. `via_sets` names the assigned skill sets that bring a skill, and " +
         "`individual` is false when a skill is present ONLY through a set (unassigning that " +
-        "set removes it). `sets` lists the agent's assigned sets.",
+        "set removes it). `sets` lists the agent's assigned sets. These rows are assignments " +
+        "only — whether a held skill is deprecated is on its list_skills entry.",
       parameters: z.object({
         agent_name: z.string().describe("Name of the agent"),
       }),

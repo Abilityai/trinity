@@ -100,6 +100,19 @@ export function useStickToBottom(scrollEl, { threshold = STICK_THRESHOLD_PX, ena
   }
 
   /**
+   * Stop following WITHOUT moving — for a deliberate jump to an earlier point
+   * (trinity-enterprise#610: the Inbox's "Open in chat" anchor).
+   *
+   * The observer re-pins to the bottom on every size change while `following`
+   * is true, so a `scrollIntoView` on an older message would be undone by the
+   * next markdown re-flow. Detaching first leaves the reader where the anchor
+   * put them; the normal scroll rule re-arms following if they scroll down.
+   */
+  function detach() {
+    following.value = false
+  }
+
+  /**
    * Pin to the bottom once the pending patch is in the DOM.
    *
    * `nextTick` covers this component's own patch. It deliberately does NOT try
@@ -179,6 +192,7 @@ export function useStickToBottom(scrollEl, { threshold = STICK_THRESHOLD_PX, ena
     pinToBottom,
     scrollToLatest,
     reset,
+    detach,
   }
 }
 

@@ -192,6 +192,9 @@ async def list_skills(current_user: User = Depends(get_current_user)):
             source_id=s.get("source_id"),
             source_name=s.get("source_name"),
             shadowed_by=s.get("shadowed_by") or [],
+            # #672 lifecycle — named here for the same reason.
+            deprecated=bool(s.get("deprecated")),
+            superseded_by=s.get("superseded_by"),
         )
         for s in skills
     ]

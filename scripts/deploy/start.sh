@@ -68,10 +68,16 @@ compose_project_name() {
 . ./scripts/deploy/env-file.sh
 # -----------------------------------------------------------------------------
 
+# The public-IP refresh timer runs this every five minutes; a banner each time
+# is journal noise with nothing behind it.
+_quiet_banner=0
+for _arg in "$@"; do [ "$_arg" = "--refresh-ip" ] && _quiet_banner=1; done
+if [ "$_quiet_banner" = "0" ]; then
 echo "====================================="
 echo "Trinity Agent Platform - Starting"
 echo "====================================="
 echo ""
+fi
 
 # --- Mode + pre-flight (#39: agent-driven one-shot install) -------------------
 # Unattended/agent mode removes interactive hard-stops — required inputs are
@@ -127,6 +133,11 @@ fi
 #                   boot calls this, once per droplet, and continues into the
 #                   normal install.
 #   (neither)       both, in order: a doc-driven install on a fresh droplet.
+#   --refresh-ip    re-apply the address-dependent half of --site-only when the
+#                   metadata IP no longer matches /etc/trinity/public-ip (an EC2
+#                   stop/start, a late Elastic IP), recreate the backend, and
+#                   exit. Never the install: no pull, no image-tag resolution.
+#                   Silent when nothing changed. Run by trinity-ip-refresh.timer.
 #
 # OFF by default, and it must stay inert on a developer laptop — it installs
 # system packages, resets ufw and claims :80/:443. The guard is root + Linux + a
@@ -143,6 +154,7 @@ while [ "$_pi" -lt "${#_pargs[@]}" ]; do
         --machine-only) PROVISION_PHASE=machine ;;
         --site-only)    PROVISION_PHASE=site ;;
         --caddy-only)   PROVISION_PHASE=caddy ;;
+        --refresh-ip)   PROVISION_PHASE=refresh ;;
         --cloud)        _pi=$((_pi + 1)); PROVISION_CLOUD="${_pargs[$_pi]:-}" ;;
         --cloud=*)      PROVISION_CLOUD="${_pargs[$_pi]#*=}" ;;
         --provenance)   _pi=$((_pi + 1)); PROVISION_PROVENANCE="${_pargs[$_pi]:-}" ;;
@@ -171,6 +183,48 @@ provision_metadata_ip() {
             curl -fsS --max-time 10 \
                 http://169.254.169.254/metadata/v1/interfaces/public/0/ipv4/address 2>/dev/null
             ;;
+        aws) provision_aws_imds meta-data/public-ipv4 ;;
+    esac
+}
+
+# One read from EC2's metadata service (#3004). IMDSv2: a session token first,
+# then the read carrying it. The Trinity AMI, and any instance launched with
+# IMDSv2 required, refuses a token-less GET. `public-ipv4` answers 404 when the
+# instance has no public address, so the read comes back empty.
+provision_aws_imds() {
+    local token
+    token="$(curl -fsS --max-time 5 -X PUT \
+        -H 'X-aws-ec2-metadata-token-ttl-seconds: 60' \
+        http://169.254.169.254/latest/api/token 2>/dev/null)" || return 1
+    [ -n "$token" ] || return 1
+    curl -fsS --max-time 5 -H "X-aws-ec2-metadata-token: ${token}" \
+        "http://169.254.169.254/latest/$1" 2>/dev/null
+}
+
+# "Is this a fresh cloud VM, not somebody's laptop?" On DigitalOcean the public
+# address answering is the proof. On AWS it cannot be: an instance in a subnet
+# without a public IPv4 is still an EC2 instance, and it deserves the message
+# naming its real problem (provision_public_ip) rather than "not an aws
+# instance". Nothing on a laptop answers on 169.254.169.254 either way.
+provision_on_cloud() {
+    case "$PROVISION_CLOUD" in
+        aws) [ -n "$(provision_aws_imds meta-data/instance-id || true)" ] ;;
+        *)   [ -n "$(provision_metadata_ip || true)" ] ;;
+    esac
+}
+
+# The instance's public address, or a stop naming why there is none. Called in
+# a command substitution, so the caller exits on its status.
+provision_public_ip() {
+    local ip
+    ip="$(provision_metadata_ip || true)"
+    if [ -n "$ip" ]; then
+        printf '%s' "$ip"
+        return 0
+    fi
+    case "$PROVISION_CLOUD" in
+        aws) provision_die "this EC2 instance has no public IPv4 address. Launch it in a subnet that auto-assigns one, or attach an Elastic IP, then re-run." ;;
+        *)   provision_die "could not read this instance's public IP from the ${PROVISION_CLOUD} metadata service." ;;
     esac
 }
 
@@ -182,6 +236,7 @@ provision_metadata_ip() {
 provision_default_provenance() {
     case "$PROVISION_CLOUD" in
         digitalocean) echo "do-script" ;;
+        aws)          echo "aws-script" ;;
         *)            echo "script" ;;
     esac
 }
@@ -345,9 +400,21 @@ PRIVATE
     # Render beside the live file, never over it. Caddy keeps a bad config
     # only in memory until the next restart; an invalid file on disk with the
     # unit enabled takes the site down on the next reboot.
+    # No-SNI clients (curl and every browser, when the URL is an IP address)
+    # must get the IP certificate. Caddy chooses the TLS automation policy from
+    # the ClientHello's raw ServerName, BEFORE default_sni is applied, and an
+    # empty name matches any policy that has no subjects — so a bare `https://`
+    # on-demand site captured them and asked the backend about the IP, which it
+    # refuses. On a cloud whose public IP is NATed (EC2) that is every visit. So:
+    # `default_sni` names the IP, and the on-demand site lists hostname
+    # wildcards (one `*` per label, 2 to 6 labels), which an empty name cannot
+    # match. Both are needed; each alone still fails (reproduced on 2.11.4).
+    # ponytail: domains deeper than 6 labels get no on-demand certificate; add
+    # another `*.` pattern if one ever needs it.
     cat > /etc/caddy/Caddyfile.new <<CADDY
 {
     acme_ca https://acme-v02.api.letsencrypt.org/directory
+    default_sni ${ip}
     on_demand_tls {
         ask http://127.0.0.1:8000/api/public/tls-allowed
     }
@@ -369,7 +436,7 @@ https://${ip} {
     ${_do_header}
 }
 
-https:// {
+https://*.*, https://*.*.*, https://*.*.*.*, https://*.*.*.*.*, https://*.*.*.*.*.* {
     tls {
         on_demand
     }
@@ -397,30 +464,73 @@ CADDY
     # 077: a 0600 root file the `caddy` service user cannot read, so the restart
     # fails and the droplet never serves. It holds no secrets.
     chmod 0644 /etc/caddy/Caddyfile.new
+    # Unchanged and already running: leave Caddy alone. A refresh that keeps
+    # failing at the backend step re-renders the same file every five minutes,
+    # and a restart drops every live connection, SSE streams included. A
+    # stopped Caddy (the machine phase stops it) is still started.
+    if cmp -s /etc/caddy/Caddyfile.new /etc/caddy/Caddyfile && systemctl is-active --quiet caddy; then
+        rm -f /etc/caddy/Caddyfile.new
+        return 0
+    fi
     mv -f /etc/caddy/Caddyfile.new /etc/caddy/Caddyfile
     systemctl enable caddy
     systemctl restart caddy
 }
 
 provision_site() {
-    local ip provenance _tls
-    ip="$(provision_metadata_ip || true)"
-    [ -n "$ip" ] || provision_die "could not read this instance's public IP from the ${PROVISION_CLOUD} metadata service."
+    local ip provenance
     mkdir -p /etc/trinity
     chmod 0700 /etc/trinity
-    echo "$ip" > /etc/trinity/public-ip
 
+    # Everything that needs no address first, so a missing address below
+    # leaves only the address-dependent half to finish.
     [ -f .env ] || cp .env.example .env
     provenance="${PROVISION_PROVENANCE:-$(provision_default_provenance)}"
     # FRONTEND_PORT moves the SPA off :80 so Caddy can own 80/443 in front of it.
     set_env_key FRONTEND_PORT 8081
-    set_env_key FRONTEND_URL "https://${ip}"
     set_env_key TRINITY_INSTALL_SOURCE "$provenance"
     if [ -n "${TRINITY_IMAGE_TAG:-}" ]; then
         set_env_key TRINITY_IMAGE_TAG "$TRINITY_IMAGE_TAG"
     fi
+    provision_default_admin_source
+    provision_setup_claim
+
+    # No public address yet (an EC2 subnet that assigns none, an Elastic IP
+    # still to come). On the Marketplace path nobody has a shell to re-run this,
+    # so the refresh timer is installed anyway and /etc/trinity/site-pending
+    # tells it to finish the site phase, and the install, once an address
+    # appears (see the refresh block below).
+    if ! ip="$(provision_public_ip)"; then
+        provision_refresh_units
+        : > /etc/trinity/site-pending
+        provision_die "setup will finish by itself within five minutes of this instance getting a public IPv4 address."
+    fi
+    provision_apply_ip "$ip" "$provenance"
+    echo "$ip" > /etc/trinity/public-ip
+    rm -f /etc/trinity/site-pending
+    provision_refresh_units
+}
+
+# Everything in the host config that depends on the instance's public address,
+# in one place, so first boot and the refresh timer (provision_refresh_apply)
+# cannot disagree about what "apply a new address" means. It does NOT record the
+# address in /etc/trinity/public-ip: each caller does that last, once everything
+# it depends on succeeded, so a failed refresh is retried on the next tick.
+#
+# With a third argument (the previous address), FRONTEND_URL is rewritten only
+# while it still points at that address: an operator who set it to a domain
+# keeps it. The Caddyfile needs no such care — it holds no operator content. The
+# domain step (PROV-015) is served by its on-demand `https://` site, which does
+# not name the IP, and PRIVATE_NETWORK_CIDRS is re-read from .env on every render.
+provision_apply_ip() {
+    local ip="$1" provenance="$2" old="${3:-}" _tls
+    if [ -z "$old" ] || [ "$(env_value FRONTEND_URL)" = "https://${old}" ]; then
+        set_env_key FRONTEND_URL "https://${ip}"
+    else
+        echo "→ .env: FRONTEND_URL is $(env_value FRONTEND_URL) (not the old IP) — left alone."
+    fi
     chmod 0600 .env
-    echo "→ .env: FRONTEND_URL=https://${ip}, TRINITY_INSTALL_SOURCE=${provenance}"
+    echo "→ .env: FRONTEND_URL=$(env_value FRONTEND_URL), TRINITY_INSTALL_SOURCE=${provenance}"
 
     provision_caddyfile "$ip" "$provenance" || provision_die "could not write the Caddy configuration."
 
@@ -450,19 +560,179 @@ provision_site() {
     fi
 }
 
+# Which admin path a `--cloud aws` install takes when nobody chose one (#3004).
+# AWS Marketplace review requires the first admin to prove control of the
+# instance with a value unique to it, and a doc-driven install on EC2 is the
+# same exposure: its IP appears in certificate-transparency logs as soon as
+# Caddy asks for a certificate. So an AWS install with no password takes the
+# instance-ID claim instead of a generated password. A password (environment
+# or .env) or an explicit ADMIN_PASSWORD_SOURCE is always left alone, and the
+# other clouds are unchanged.
+provision_default_admin_source() {
+    [ "$PROVISION_CLOUD" = "aws" ] || return 0
+    [ -z "${ADMIN_PASSWORD:-}" ] && [ -z "$(env_value ADMIN_PASSWORD)" ] || return 0
+    [ -z "${ADMIN_PASSWORD_SOURCE:-}" ] && [ -z "$(env_value ADMIN_PASSWORD_SOURCE)" ] || return 0
+    export ADMIN_PASSWORD_SOURCE=instance-id
+    echo "→ Admin: none supplied — the first visitor proves this is their instance with its EC2 instance ID at /setup."
+}
+
+# The instance-ID claim file (#3004): `<data path>/setup-claim`, seen by the
+# backend as /data/setup-claim. Written only when the caller exported
+# ADMIN_PASSWORD_SOURCE=instance-id, so the refresh timer (which exports
+# nothing) never writes it. Written once per instance: never over an existing
+# file, and never once `.env` records the instance-id source — that marker means
+# a previous run already went through here, and the backend deletes the file
+# after the admin is created, so re-creating it would hand the credential back.
+provision_setup_claim() {
+    [ "${ADMIN_PASSWORD_SOURCE:-}" = "instance-id" ] || return 0
+    [ "$(env_value ADMIN_PASSWORD_SOURCE)" = "instance-id" ] && return 0
+    [ "$PROVISION_CLOUD" = "aws" ] \
+        || provision_die "ADMIN_PASSWORD_SOURCE=instance-id needs an EC2 instance ID; --cloud ${PROVISION_CLOUD} has none."
+    local data_path id
+    data_path="${TRINITY_DATA_PATH:-}"
+    [ -n "$data_path" ] || data_path="$(env_value TRINITY_DATA_PATH)"
+    [ -n "$data_path" ] || data_path="./trinity-data"
+    [ -e "${data_path}/setup-claim" ] && return 0
+    id="$(provision_aws_imds meta-data/instance-id || true)"
+    # Fail closed: an instance-id install with no claim has no way in.
+    case "$id" in
+        i-[0-9a-f]*) ;;
+        *) provision_die "could not read this instance's ID from the EC2 metadata service." ;;
+    esac
+    mkdir -p "$data_path"
+    # The data dir belongs to uid 1000, so anything running as that user could
+    # plant a symlink at the temp path. Remove whatever is there, then create
+    # the file exclusively (noclobber opens with O_EXCL, so a link planted in
+    # between makes this fail instead of being followed), and chown with -h.
+    # umask 077 makes it 0600 at creation; no chmod, which would follow a link.
+    local tmp="${data_path}/setup-claim.tmp"
+    rm -f "$tmp"
+    ( set -C; umask 077; printf '%s\n' "$id" > "$tmp" ) \
+        || provision_die "could not create ${tmp}."
+    chown -h 1000:1000 "$tmp"
+    mv -f "$tmp" "${data_path}/setup-claim"
+    # Recorded with the claim, so a run that exports nothing (the refresh timer
+    # finishing a pending site phase) still installs on the claim path, and so
+    # the marker check above knows this instance's claim was already written.
+    set_env_key ADMIN_PASSWORD_SOURCE instance-id
+    echo "→ Setup claim: the instance ID is required at /setup."
+}
+
+# Follow a changed public address (#3004). EC2 releases the public IPv4 on stop
+# and assigns a new one on start, and an Elastic IP can attach after first boot
+# has already read the temporary one.
+#
+# Two halves, because the check runs under `||` (which switches set -e off for
+# everything it calls) and the writes must not. provision_refresh_target prints
+# the new address and succeeds only when there is one to apply; it is silent
+# otherwise, since the timer runs it every five minutes. An empty metadata read
+# keeps the current address: a hiccup must not blank a working configuration.
+provision_refresh_target() {
+    local old new
+    old="$(cat /etc/trinity/public-ip 2>/dev/null || true)"
+    new="$(provision_metadata_ip || true)"
+    [ -n "$new" ] && [ "$new" != "$old" ] || return 1
+    printf '%s' "$new"
+}
+
+# Apply a new address and recreate the backend, the one service that reads
+# FRONTEND_URL, with the images it already has: no pull, no build, no other
+# service. A stop/start must never upgrade Trinity. The address is recorded
+# last, so any failure above leaves the old one and the next tick retries.
+provision_refresh_apply() {
+    local old="$1" new="$2" provenance
+    echo "→ Public IP changed: ${old:-none} → ${new}"
+    provenance="$(env_value TRINITY_INSTALL_SOURCE)"
+    provision_apply_ip "$new" "${provenance:-$(provision_default_provenance)}" "$old"
+    docker compose "${COMPOSE_FILES[@]}" up -d --no-deps --no-build --pull never backend \
+        || provision_die "could not recreate the backend with the new FRONTEND_URL."
+    echo "$new" > /etc/trinity/public-ip
+    echo "→ Now serving on https://${new}"
+}
+
+# The timer that runs the refresh. Written on every cloud: it is one
+# metadata read every five minutes and does nothing while the address holds.
+# It repeats this install's own mode (--hosted or not), which decides the
+# compose files the backend is recreated from.
+provision_refresh_units() {
+    local _hosted=""
+    [ "$HOSTED" = "1" ] && _hosted=" --hosted"
+    cat > /etc/systemd/system/trinity-ip-refresh.service <<UNIT
+[Unit]
+Description=Trinity: follow a changed public IP (Caddyfile, certificate, FRONTEND_URL)
+After=network-online.target docker.service trinity-docker-firewall.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart="${PWD}/scripts/deploy/start.sh" --provision --cloud ${PROVISION_CLOUD} --refresh-ip${_hosted} --unattended
+# The script prints only on a change or a failure; logging its output at
+# notice and dropping everything below keeps systemd's own Starting/Finished
+# lines, every five minutes, out of the journal.
+SyslogLevel=notice
+LogLevelMax=notice
+UNIT
+    cat > /etc/systemd/system/trinity-ip-refresh.timer <<UNIT
+[Unit]
+Description=Trinity: check the public IP after boot and every 5 minutes
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=5min
+
+[Install]
+WantedBy=timers.target
+UNIT
+    systemctl daemon-reload
+    # Started now, not only enabled: the Elastic IP case changes the address
+    # during THIS boot. Never fatal: the address rarely changes, and the site
+    # itself is already configured.
+    systemctl enable --now trinity-ip-refresh.timer \
+        || echo "⚠️  trinity-ip-refresh.timer not enabled — a changed public IP will need: $0 --provision --cloud ${PROVISION_CLOUD} --refresh-ip" >&2
+}
+
 if [ "$PROVISION" = "1" ]; then
     [ "$(uname -s)" = "Linux" ] || provision_die "only runs on Linux — it installs system packages, resets the firewall and claims :80/:443."
     [ "$(id -u)" = "0" ] || provision_die "must run as root."
     case "$PROVISION_CLOUD" in
-        digitalocean) ;;
-        "") provision_die "--cloud is required (supported: digitalocean)." ;;
-        *)  provision_die "unsupported --cloud '${PROVISION_CLOUD}' (supported: digitalocean)." ;;
+        digitalocean|aws) ;;
+        "") provision_die "--cloud is required (supported: digitalocean, aws)." ;;
+        *)  provision_die "unsupported --cloud '${PROVISION_CLOUD}' (supported: digitalocean, aws)." ;;
     esac
     # The metadata service is the "this is a fresh cloud VM, not somebody's
     # laptop" guard, and it costs one request: nothing on a laptop answers on
     # 169.254.169.254.
-    [ -n "$(provision_metadata_ip || true)" ] \
+    provision_on_cloud \
         || provision_die "no ${PROVISION_CLOUD} metadata service reachable — refusing to provision a machine that is not a ${PROVISION_CLOUD} instance."
+
+    # One provisioning run at a time: the refresh timer (provision_refresh_units)
+    # fires during first boot, and two runs would each restart Caddy and bring
+    # the stack up. The lock is held until this script exits, install included.
+    exec 9>/run/trinity-provision.lock
+    if [ "$PROVISION_PHASE" = "refresh" ]; then
+        # Never queue behind another run: the next tick checks again.
+        flock -n 9 || exit 0
+    elif ! flock -n 9; then
+        echo "Waiting for another provisioning run to finish (/run/trinity-provision.lock)..."
+        flock 9
+    fi
+
+    if [ "$PROVISION_PHASE" = "refresh" ]; then
+        [ -f .env ] || provision_die "no .env here — run this from the Trinity install directory."
+        _new_ip="$(provision_refresh_target)" || exit 0
+        if [ ! -e /etc/trinity/site-pending ]; then
+            _old_ip="$(cat /etc/trinity/public-ip 2>/dev/null || true)"
+            provision_refresh_apply "$_old_ip" "$_new_ip"
+            exit 0
+        fi
+        # First boot stopped for want of an address and now there is one: run
+        # the site phase and the install it never reached, as the provenance it
+        # recorded. This is the one refresh that continues into the install.
+        echo "→ Public IP ${_new_ip} is now assigned: finishing the setup first boot could not complete."
+        PROVISION_PROVENANCE="$(env_value TRINITY_INSTALL_SOURCE)"
+        PROVISION_PHASE=site
+        rm -f /etc/trinity/firstboot-failed
+    fi
 
     echo "Provisioning host (cloud: ${PROVISION_CLOUD}, phase: ${PROVISION_PHASE})..."
     if [ "$PROVISION_PHASE" = "caddy" ]; then

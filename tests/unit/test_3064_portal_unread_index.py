@@ -27,7 +27,11 @@ if str(_BACKEND) not in sys.path:
     sys.path.insert(0, str(_BACKEND))
 
 INDEX = "idx_portal_messages_unread"
-TABLES = ("enterprise_portal_messages", "enterprise_portal_chat_state", "enterprise_portal_sessions")
+# ent#610 (D3): the unread count also counts reports addressed to the viewer and
+# stamped to their chat, so the real query reads `agent_reports` too — the
+# fresh track builds every table that query touches, or it cannot run at all.
+TABLES = ("enterprise_portal_messages", "enterprise_portal_chat_state", "enterprise_portal_sessions",
+          "agent_reports")
 
 
 def _fresh(db_file, *, with_indexes=True):

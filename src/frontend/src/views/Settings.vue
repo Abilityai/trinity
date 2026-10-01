@@ -81,7 +81,7 @@
                 <div>
                   <h3 class="text-lg font-medium text-gray-900 dark:text-gray-100">Data Retention</h3>
                   <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
-                    How long Trinity keeps logs, executions, health checks, and soft-deleted agents/schedules.
+                    How long Trinity keeps logs, executions, health checks, metric points, and soft-deleted agents/schedules.
                   </p>
                 </div>
                 <span
@@ -140,17 +140,27 @@
                 </div>
 
                 <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                  <div v-for="f in RETENTION_FIELDS" :key="f.key">
-                    <label class="block text-sm font-medium text-gray-700 dark:text-gray-300">{{ f.label }}</label>
-                    <div class="mt-1 flex items-center gap-2">
+                  <!-- ent#671: the field list and its render/save rules live in
+                       utils/retentionFields.js. An env-sourced row is read-only
+                       and never sent; the enterprise-only rows come and go with
+                       the same response's `edition`, so nothing pops in. -->
+                  <div v-for="f in retentionFields" :key="f.key">
+                    <label :for="`retention-${f.key}`" class="flex items-center gap-2 text-sm font-medium text-gray-700 dark:text-gray-300">
+                      {{ f.label }}
+                      <BaseBadge v-if="isEnvSourced(retention, f)" :title="f.envTitle">env</BaseBadge>
+                    </label>
+                    <div class="mt-1 flex items-center gap-2" :title="isEnvSourced(retention, f) ? f.envTitle : null">
                       <input
-                        type="number" min="0" max="3650"
+                        :id="`retention-${f.key}`"
+                        type="number" min="0" :max="f.max"
                         v-model.number="retentionForm[f.key]"
-                        :disabled="!retentionEntitled || retentionSaving"
+                        :disabled="!retentionEntitled || retentionSaving || isEnvSourced(retention, f)"
+                        :aria-describedby="isEnvSourced(retention, f) ? `retention-${f.key}-env` : null"
                         :class="RETENTION_INPUT_CLASS"
                       />
-                      <span class="text-sm text-gray-500 dark:text-gray-400">days</span>
+                      <span class="text-sm text-gray-500 dark:text-gray-400">{{ f.unit }}<template v-if="f.hint"> · {{ f.hint }}</template></span>
                     </div>
+                    <span v-if="isEnvSourced(retention, f)" :id="`retention-${f.key}-env`" class="sr-only">{{ f.envTitle }}</span>
                   </div>
                   <!-- Audit log — always shown, never editable (integrity floor) -->
                   <div>
@@ -165,12 +175,16 @@
 
                 <div v-if="retentionEntitled" class="flex items-center gap-3 pt-2">
                   <button
-                    @click="saveRetention" :disabled="retentionSaving"
+                    @click="saveRetention" :disabled="retentionSaving || !retentionDirty"
                     class="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md text-white bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50"
                   >{{ retentionSaving ? 'Saving…' : 'Save retention' }}</button>
                   <span v-if="retentionSaved" class="text-sm text-green-600 dark:text-green-400">Saved — applied live.</span>
                   <span class="text-xs text-gray-400">0 disables a sweep · values below the {{ retention.community_floor_days }}-day floor are raised to it.</span>
                 </div>
+                <!-- ent#671: a rejected save (e.g. a value out of bounds) stays
+                     beside the form it came from — it used to replace the whole
+                     panel, leaving no way to correct the value short of a reload. -->
+                <InlineError :message="retentionSaveError" @dismiss="retentionSaveError = ''" />
 
               </div>
             </div>
@@ -2230,6 +2244,12 @@ import { useSettingsStore } from '../stores/settings'
 import { useSessionsStore } from '../stores/sessions'
 import { apiErrorMessage } from '../utils/apiError'
 import { readOpsBool, opsBoolValue } from '../utils/opsSettings'
+import {
+  visibleRetentionFields,
+  isEnvSourced,
+  retentionFormFromStatus,
+  retentionSaveBody,
+} from '../utils/retentionFields'
 import OperatorQueueAgingSetting from '../components/settings/OperatorQueueAgingSetting.vue'
 import { describeSttCapability, describeSttLastFailure } from '../utils/sttCapability'
 import { useEnterpriseStore } from '../stores/enterprise'
@@ -2264,6 +2284,8 @@ import { MODEL_CATALOG } from '../constants/modelCatalog'
 import TemplateRegistryPanel from '../components/settings/TemplateRegistryPanel.vue'
 import PlatformKeyField from '../components/settings/PlatformKeyField.vue'
 import ConfirmDialog from '../components/ConfirmDialog.vue'
+import BaseBadge from '../components/base/BaseBadge.vue'
+import InlineError from '../components/InlineError.vue'
 
 const router = useRouter()
 const route = useRoute()
@@ -2287,6 +2309,8 @@ const INSTALL_SOURCE_LABELS = {
   'do-marketplace': 'DigitalOcean Marketplace',
   'do-script': 'DigitalOcean (install script)',
   'vultr-marketplace': 'Vultr Marketplace',
+  'aws-marketplace': 'AWS Marketplace',
+  'aws-script': 'AWS (install script)',
   script: 'Install script',
   unknown: 'Not recorded',
 }
@@ -2383,16 +2407,13 @@ const umEntitled = computed(() => enterpriseStore.isEntitled('user_management'))
 // /api/enterprise/retention/config). Community shows the fixed 5-day floor +
 // an upgrade hint.
 const retentionEntitled = computed(() => enterpriseStore.isEntitled('retention'))
-const RETENTION_FIELDS = [
-  { key: 'log_retention_days', label: 'Log archival' },
-  { key: 'execution_log_retention_days', label: 'Execution logs' },
-  { key: 'execution_row_retention_days', label: 'Execution rows' },
-  { key: 'health_check_retention_days', label: 'Health checks' },
-  { key: 'agent_soft_delete_retention_days', label: 'Soft-deleted agents' },
-  { key: 'schedule_soft_delete_retention_days', label: 'Soft-deleted schedules' },
-]
-const retention = ref(null)        // { edition, community_floor_days, windows{} }
-const retentionForm = reactive({}) // editable copy of the OPS/log windows
+const retention = ref(null)        // { edition, community_floor_days, windows{}, sources{}, quotas{} }
+const retentionForm = reactive({}) // editable copy of the visible fields
+const retentionLoaded = ref({})    // the values as loaded — Save sends only what differs (ent#671)
+const retentionFields = computed(() => visibleRetentionFields(retention.value))
+const retentionDirty = computed(() =>
+  Object.keys(retentionSaveBody(retentionFields.value, retentionForm, retentionLoaded.value, retention.value)).length > 0
+)
 
 // Shared styling for this panel's number inputs.
 //
@@ -2413,7 +2434,10 @@ const RETENTION_INPUT_CLASS = SETTINGS_NUMBER_INPUT_CLASS
 const retentionLoading = ref(false)
 const retentionSaving = ref(false)
 const retentionError = ref('')
+const retentionSaveError = ref('') // a failed Save — shown beside the form, never instead of it (ent#671)
 const retentionSaved = ref(false)
+// "Saved" describes the values on screen; the first new edit makes it untrue.
+watch(retentionDirty, (dirty) => { if (dirty) retentionSaved.value = false })
 
 // #1709: in-product approval of a guard-refused (over-threshold) retention prune.
 // POST /api/settings/retention/acknowledge is the GATE (admin + human only,
@@ -2454,9 +2478,12 @@ async function loadRetention() {
   try {
     const r = await axios.get('/api/settings/retention', { headers: authStore.authHeader })
     retention.value = r.data
-    for (const f of RETENTION_FIELDS) {
-      retentionForm[f.key] = r.data?.windows?.[f.key]
-    }
+    const values = retentionFormFromStatus(r.data)
+    Object.assign(retentionForm, values)
+    retentionLoaded.value = values
+    // The form now shows the stored values, so an error about a rejected
+    // value that is no longer on screen would describe nothing (ent#671).
+    retentionSaveError.value = ''
   } catch (e) {
     retentionError.value = apiErrorMessage(e, 'Failed to load retention settings.')
   } finally {
@@ -2467,20 +2494,18 @@ async function loadRetention() {
 
 async function saveRetention() {
   if (!retentionEntitled.value) return
+  // Only the fields the operator changed, never an env-sourced one (ent#671).
+  const body = retentionSaveBody(retentionFields.value, retentionForm, retentionLoaded.value, retention.value)
+  if (!Object.keys(body).length) return
   retentionSaving.value = true
-  retentionError.value = ''
+  retentionSaveError.value = ''
   retentionSaved.value = false
   try {
-    const body = {}
-    for (const f of RETENTION_FIELDS) {
-      const n = parseInt(retentionForm[f.key], 10)
-      if (!Number.isNaN(n)) body[f.key] = n
-    }
     await axios.put('/api/enterprise/retention/config', body, { headers: authStore.authHeader })
     retentionSaved.value = true
     await loadRetention()
   } catch (e) {
-    retentionError.value = apiErrorMessage(e, 'Failed to save retention settings.')
+    retentionSaveError.value = apiErrorMessage(e, 'Failed to save retention settings.')
   } finally {
     retentionSaving.value = false
   }
