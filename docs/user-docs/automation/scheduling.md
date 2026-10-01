@@ -257,13 +257,15 @@ It is off by default, and the schedule form in the UI has no field for it. Set i
 | Field | Default | Range | Description |
 |-------|---------|-------|-------------|
 | `validation_enabled` | `false` | — | Run the validation pass after each successful run |
-| `validation_prompt` | built-in auditor prompt | — | Your own auditor instructions |
+| `validation_prompt` | built-in auditor prompt | — | Your own auditor instructions. The run's task and response are attached automatically; to place them yourself, write a full template with `{original_message}` and `{execution_response}` |
 | `validation_timeout_seconds` | 120 | 30-600 | Timeout for the validation execution. The API clamps a value outside the range; the MCP tools refuse it |
 
 What to expect:
 
 - **It costs a run.** The validation pass is a real execution. It goes through the agent's normal capacity and appears in the execution list with trigger `validation`.
 - **The verdict is recorded on the original run.** Its `business_status` becomes `validated` on a pass, or `failed_validation` on a fail or partial. A successful run on a schedule with validation off is marked `skipped`.
+- **A run with nothing to inspect is not judged.** If the run's response is empty, no validation pass runs and `business_status` becomes `validation_unavailable`. That raises no alert and never counts as a pass.
+- **Long responses keep their ending.** The validator sees up to 16,000 characters of the response; beyond that it sees the beginning and the last 12,000 characters, so a closing status line is always included.
 - **A failed verdict raises one high-priority alert**, titled **Validation Failed**, in the Operations queue. It carries the verdict summary and the individual checks.
 - **It does not retry.** Retries only follow a technical failure, and validation only runs after a technical success.
 
