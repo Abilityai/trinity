@@ -1463,7 +1463,10 @@ Four rules are worth knowing before your first call:
   point per period. Last write wins.
 - **Pass `execution_id`.** It links the batch to the turn and makes a
   re-delivered turn replay instead of recording twice. Without it, and without
-  your own `ts`, a retry is treated as a new observation.
+  your own `ts`, a retry is treated as a new observation. Within one turn,
+  re-sending a batch identical to an earlier one replays it (`replayed: true`,
+  nothing written) even if you corrected the value in between. To restate it
+  back, pass a fresh `idempotency_key`.
 
 The old path — writing `metrics.json` into the workspace — is **retired**
 (trinity-enterprise#479). Nothing reads that file any more:

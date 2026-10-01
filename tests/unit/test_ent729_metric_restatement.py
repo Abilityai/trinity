@@ -224,16 +224,23 @@ def test_execution_id_follows_the_write_that_produced_the_current_value(db_backe
 
 
 def test_dims_keep_the_first_writes_key_order(db_backend):
-    """Same identity ⇒ same canonical dims; the stored mapping is not rewritten."""
+    """Same identity ⇒ same canonical dims, so a correction does not rewrite
+    the stored mapping. Proved on the RAW text: dict equality cannot see key
+    order, and PostgreSQL's JSONB normalises it, so only SQLite's stored text
+    can tell "kept" from "rewritten"."""
+    if db_backend != "sqlite":
+        pytest.skip("JSONB normalises key order; SQLite's text proves it")
     db.insert_metric_points(
         AGENT, [_row(dims={"region": "eu", "tier": "pro"}, value=1.0)])
     db.insert_metric_points(
         AGENT, [_row(dims={"tier": "pro", "region": "eu"}, value=2.0)])
 
-    rows = _stored()
-    assert len(rows) == 1
-    assert rows[0]["dims"] == {"region": "eu", "tier": "pro"}
-    assert rows[0]["value_numeric"] == 2.0
+    with get_engine().connect() as conn:
+        raw = conn.execute(text(
+            "SELECT dims, value_numeric FROM metric_points")).all()
+    assert len(raw) == 1
+    assert raw[0][0].index('"region"') < raw[0][0].index('"tier"'), raw[0][0]
+    assert raw[0][1] == 2.0
 
 
 def test_two_rows_with_one_identity_in_one_call_are_refused(db_backend):
@@ -253,7 +260,14 @@ def test_rows_are_written_in_ts_then_key_order(db_backend):
     if db_backend != "sqlite":
         pytest.skip("the order is set in Python; one dialect proves it")
     batch = [_row(ts=f"2026-09-22T1{h}:00:00.000000Z") for h in (4, 1, 3, 0, 2)]
-    expected = sorted(r["ts"] for r in batch)
+    # Several metrics at one period close share a `ts` — the common case the
+    # `idempotency_key` tiebreak exists for. Given in DESCENDING key order.
+    tied = sorted(
+        (_row(metric=m, ts="2026-09-22T12:30:00.000000Z") for m in ("aa", "bb", "cc")),
+        key=lambda r: r["idempotency_key"], reverse=True)
+    batch += tied
+    expected = [r["idempotency_key"] for r in sorted(
+        batch, key=lambda r: (r["ts"], r["idempotency_key"]))]
     seen = []
 
     def _capture(conn, cursor, statement, parameters, context, executemany):
@@ -273,12 +287,18 @@ def test_rows_are_written_in_ts_then_key_order(db_backend):
 def test_the_daily_count_is_not_spent_by_a_correction(db_backend):
     """Ruled 2026-10-01: the cap counts rows CREATED, and a correction keeps
     its row's `created_at` — so restating a point never adds to "used today"."""
-    day = "2026-09-22T00:00:00.000000Z"
-    db.insert_metric_points(AGENT, [_row(value=1.0, created_at=FIRST)])
+    # Across a day boundary, so "keeps created_at" and "takes the correction's
+    # created_at" give different answers: written yesterday, corrected today.
     db.insert_metric_points(
-        AGENT, [_row(value=2.0, created_at="2026-09-22T23:00:00.000000Z")])
+        AGENT, [_row(value=1.0, created_at="2026-09-21T23:00:00.000000Z")])
+    result = db.insert_metric_points(
+        AGENT, [_row(value=2.0, created_at="2026-09-22T01:00:00.000000Z")])
 
-    assert db.count_metric_points_today(AGENT, day, 10) == 1
+    assert _counts(result) == (0, 0, 1)
+    assert db.count_metric_points_today(
+        AGENT, "2026-09-22T00:00:00.000000Z", 10) == 0
+    assert db.count_metric_points_today(
+        AGENT, "2026-09-21T00:00:00.000000Z", 10) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -307,8 +327,12 @@ def test_rows_written_before_the_columns_existed_read_revision_zero(tmp_path):
         (TS, FIRST))
     conn.commit()
 
-    migrations._migrate_metric_points_restatement(cur, conn)
-    migrations._migrate_metric_points_restatement(cur, conn)  # idempotent
+    # Through the REGISTERED entry, not the function: an unregistered
+    # migration passes a direct call and schema parity alike (parity is
+    # one-directional), and then never runs on an existing install.
+    migrate = dict(migrations.MIGRATIONS)["metric_points_restatement"]
+    migrate(cur, conn)
+    migrate(cur, conn)  # idempotent
 
     cur.execute("PRAGMA table_info(metric_points)")
     columns = {r[1]: r for r in cur.fetchall()}
@@ -320,6 +344,7 @@ def test_rows_written_before_the_columns_existed_read_revision_zero(tmp_path):
     conn.close()
 
 
+@pytest.mark.requires_postgres
 def test_code_from_before_this_change_can_still_insert(db_backend):
     """Rollback safety: the eyeball runs this migration on a live dev DB, and a
     checkout switched back to `dev` must keep recording. An INSERT naming
@@ -380,12 +405,13 @@ def test_the_alembic_revision_adds_the_columns_over_existing_rows_on_postgres(
         with get_engine().connect() as conn:
             got = conn.execute(select(
                 metric_points.c.revision, metric_points.c.recorded_at)).all()
-            data_type = conn.execute(text(
-                "SELECT data_type FROM information_schema.columns "
-                "WHERE table_name = 'metric_points' AND column_name = 'revision'"
-            )).scalar_one()
+            columns = {r[0]: tuple(r[1:]) for r in conn.execute(text(
+                "SELECT column_name, data_type, is_nullable, column_default "
+                "FROM information_schema.columns WHERE table_name = 'metric_points' "
+                "AND column_name IN ('revision', 'recorded_at')"))}
         assert [tuple(r) for r in got] == [(0, None)]
-        assert data_type == "bigint"
+        assert columns["revision"] == ("bigint", "NO", "0")
+        assert columns["recorded_at"][:2] == ("text", "YES")
     finally:
         dispose_engines()
 
@@ -515,4 +541,5 @@ def test_the_store_reads_select_no_write_side_column(db_backend):
     for rows in (db.latest_metric_points(AGENT, ["cycles"]),
                  db.metric_series_points(AGENT, "cycles", since)):
         assert rows and rows[0]["value_numeric"] == 2.0
-        assert not set(rows[0]) & {"revision", "recorded_at", "created_at"}
+        assert set(rows[0]) == {"metric", "ts", "value_numeric", "value_text",
+                                "dims", "idempotency_key"}

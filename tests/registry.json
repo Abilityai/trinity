@@ -3428,8 +3428,9 @@
     },
     {
       "file": "unit/test_ent478_metric_points_store.py",
-      "feature": "abilityai/trinity-enterprise#478",
+      "feature": "abilityai/trinity-enterprise#478, #729",
       "added": "2026-09-22",
+      "updated": "2026-10-01",
       "categories": [
         "backend",
         "database",
@@ -3450,15 +3451,16 @@
     },
     {
       "file": "unit/test_ent478_record_route.py",
-      "feature": "abilityai/trinity-enterprise#478",
+      "feature": "abilityai/trinity-enterprise#478, #729",
       "added": "2026-09-22",
+      "updated": "2026-10-01",
       "categories": [
         "backend",
         "api",
         "auth",
         "unit"
       ],
-      "description": "`POST /api/agents/{name}/metrics/points` — gate ORDER and status meaning, with the store, limiter and idempotency service stubbed. The self-gate answers before any read (so the status cannot become an existence oracle); every post-claim refusal releases the batch claim, exercised across all four refusal kinds rather than asserted over the source, because a 422 that wedged the key would silently drop a day of corrected retries; DB failures are classified (connectivity 503 retryable, content 500 not, since an agent told to retry a permanently unstorable batch retries forever); the execution-derived batch key dedups a ts-less re-delivered turn; a human principal's batch does not replay an agent's (the scope folds the identity the key omits); and the cap refuses with 429 + Retry-After, with garbage coercing to the default rather than to 0 = unlimited."
+      "description": "`POST /api/agents/{name}/metrics/points` — gate ORDER and status meaning, with the store, limiter and idempotency service stubbed. The self-gate answers before any read (so the status cannot become an existence oracle); every post-claim refusal releases the batch claim, exercised across all four refusal kinds rather than asserted over the source, because a 422 that wedged the key would silently drop a day of corrected retries; DB failures are classified (connectivity 503 retryable, content 500 not, since an agent told to retry a permanently unstorable batch retries forever); the execution-derived batch key dedups a ts-less re-delivered turn; a human principal's batch does not replay an agent's (the scope folds the identity the key omits); and the cap refuses with 429 + Retry-After, with garbage coercing to the default rather than to 0 = unlimited. ent#729: `corrected` reaches the 201 beside the other counts (asymmetric so a swap fails), an ent#478-era snapshot without `corrected` still replays, a restatement logs a count never a value, a store-shape refusal or an unreadable store result is the non-retryable 500 with the claim released, and the stated limit is pinned — an identical earlier batch replays over a later correction (A → B → A ends on B)."
     },
     {
       "file": "unit/test_ent478_cleanup_sweep.py",
@@ -3484,14 +3486,15 @@
     },
     {
       "file": "mcp-server/src/tools/metrics.test.ts",
-      "feature": "abilityai/trinity-enterprise#478, #479",
+      "feature": "abilityai/trinity-enterprise#478, #479, #729",
       "added": "2026-09-22",
+      "updated": "2026-10-01",
       "categories": [
         "mcp-server",
         "typescript",
         "unit"
       ],
-      "description": "`record_metrics` / `refresh_metric_definitions` / `get_metrics`: agent-scoped keys only, refused before any network call and with no agent target parameter to spoof; three separate outcome counts so a dedup cannot read as a write; and the failure classification, which is the load-bearing part — 503 retryable, 500 explicitly not (a tool that tells an agent to retry a permanently unstorable batch turns one bad point into an infinite loop), 409 in-flight, and the two 429s distinguished because 'wait a moment' and 'wait until tomorrow' are different remedies. Per-point reason codes are surfaced verbatim so the agent can self-correct, and an unparseable body degrades to no detail rather than throwing inside the error path. ent#479 adds the READ tool on the same contract: agent-scoped, never throws, forwards `metric`/`window`/`since`/`until` verbatim, and maps a 422 `metric_undeclared` to `{undeclared: true}` with the hint naming `refresh_metric_definitions` rather than letting the #186 uniform-404 convention tell an agent it lacks access to itself."
+      "description": "`record_metrics` / `refresh_metric_definitions` / `get_metrics`: agent-scoped keys only, refused before any network call and with no agent target parameter to spoof; separate outcome counts so a dedup cannot read as a write (`corrected` added by ent#729, `?? 0` against an older backend, and the description teaches the correction rule instead of the retired \"new ts\" one); and the failure classification, which is the load-bearing part — 503 retryable, 500 explicitly not (a tool that tells an agent to retry a permanently unstorable batch turns one bad point into an infinite loop), 409 in-flight, and the two 429s distinguished because 'wait a moment' and 'wait until tomorrow' are different remedies. Per-point reason codes are surfaced verbatim so the agent can self-correct, and an unparseable body degrades to no detail rather than throwing inside the error path. ent#479 adds the READ tool on the same contract: agent-scoped, never throws, forwards `metric`/`window`/`since`/`until` verbatim, and maps a 422 `metric_undeclared` to `{undeclared: true}` with the hint naming `refresh_metric_definitions` rather than letting the #186 uniform-404 convention tell an agent it lacks access to itself."
     },
     {
       "file": "unit/test_ent479_freshness_rule.py",

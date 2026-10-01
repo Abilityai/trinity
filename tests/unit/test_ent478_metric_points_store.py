@@ -110,8 +110,8 @@ def test_a_corrected_value_at_the_same_identity_restates_the_one_row(db_backend)
 
 
 def test_recorded_counts_only_what_survived_the_conflict(db_backend):
-    """E9: across a multi-VALUES insert with DO NOTHING, `rowcount` is not a
-    portable count of the surviving rows — `.returning` is."""
+    """E9: across a multi-VALUES upsert, `rowcount` is not a portable count
+    of what was written — `.returning(revision)` is."""
     db.insert_metric_points(AGENT, [_row(ts="2026-09-22T10:00:00.000000Z")])
 
     recorded, deduplicated, corrected = db.insert_metric_points(AGENT, [

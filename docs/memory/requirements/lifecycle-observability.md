@@ -1124,8 +1124,8 @@ no Redis and no execution id.
 at one instant with one set of dimensions is one fact, so the same identity is
 always **one row**. A re-post with the **same** value is a duplicate and writes
 nothing. A re-post with a **different** value is a **correction** and restates
-that row in place (§48.9, trinity-enterprise#729 — ruling R45, which closes
-Q7 of the business-metrics PRD). A correction keeps its `ts`: the `ts` is the
+that row in place (§48.9, trinity-enterprise#729, ruling R45). A correction
+keeps its `ts`: the `ts` is the
 period the number describes, so the chart stays one point per period.
 
 The on-disk `dims` need not be byte-identical to the canonical form the hash
@@ -1310,9 +1310,10 @@ restatement's x-position.
   counts corrections without recording them.
 * **A replayed batch writes nothing, even after a later correction.**
   Re-sending a batch identical to an earlier one replays the first result
-  (`replayed: true`) and writes nothing. This applies in the same turn, or under
-  the same client key within 24 h. So `A → B → A` in one turn ends on `B`; to
-  restate back to `A`, send it in a new turn or under a new key.
+  (`replayed: true`) and writes nothing. This applies in the same turn (when
+  `execution_id` is passed), or under the same client key within 24 h. So
+  `A → B → A` ends on `B`. To restate back to `A`, send it under a new
+  `idempotency_key`, or in a new turn if you sent no key.
 
 ### Acceptance
 

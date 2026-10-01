@@ -261,13 +261,29 @@ def test_a_restatement_is_logged_as_a_count_never_a_value(ctx, caplog):
 
 
 def test_a_store_result_of_the_wrong_shape_is_not_answered_as_retryable(ctx):
-    """The counts are read OUTSIDE the store `try`: a shape error there would
+    """The receipt is built OUTSIDE the store `try`: a shape error there would
     otherwise reach `except Exception` and tell the agent to retry (503 +
-    Retry-After) a batch that had already committed."""
+    Retry-After) a batch that had already committed. It still goes through
+    `_reject`, so the claim is released rather than wedged for 24 hours."""
     ctx.db.counts = (1, 0)
-    r = _post(ctx)
+    r = _post(ctx, headers={"Idempotency-Key": "k-shape"})
     assert r.status_code == 500
+    assert r.json()["detail"] == "metric_store_rejected_batch"
     assert "Retry-After" not in r.headers
+    assert (f"agent:{AGENT}", _batch_key("k-shape")) in ctx.idem.failed
+
+
+def test_a_batch_the_store_refuses_by_shape_is_permanent_not_retryable(ctx):
+    """The store refuses two rows with one identity (ent#729) with a
+    ValueError. That will fail identically forever, so it is the
+    non-retryable 500 — never the generic 503 that tells an agent to loop —
+    and the claim is released."""
+    ctx.db.raise_on_insert = ValueError("two rows share one point identity")
+    r = _post(ctx, headers={"Idempotency-Key": "k-dup"})
+    assert r.status_code == 500
+    assert r.json()["detail"] == "metric_store_rejected_batch"
+    assert "Retry-After" not in r.headers
+    assert (f"agent:{AGENT}", _batch_key("k-dup")) in ctx.idem.failed
 
 
 def test_a_snapshot_stored_before_corrected_existed_still_replays(ctx):

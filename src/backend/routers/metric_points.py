@@ -323,11 +323,18 @@ async def record_metric_points(
             )
 
     # --- write ---------------------------------------------------------------
-    # Only the CALL sits in the `try`: the counts are read below it, so a shape
-    # error cannot land in `except Exception` and answer a retryable 503 for a
-    # batch that has already committed.
     try:
         counts = db.insert_metric_points(name, rows)
+    except ValueError as exc:
+        # The store refused the batch's SHAPE (two rows, one identity — ent#729).
+        # Permanent, so never retryable. Unreachable from here today:
+        # `validate_batch` refuses `duplicate_in_batch` first.
+        logger.error("[Metrics] Store refused the batch for %s: %s", name, exc)
+        raise _reject(
+            idem=idem,
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="metric_store_rejected_batch",
+        )
     except (OperationalError, DBAPIError) as exc:
         # Connectivity only. `DBAPIError` is checked for its
         # `connection_invalidated` flag so a content error wearing the same
@@ -357,24 +364,39 @@ async def record_metric_points(
             headers={"Retry-After": str(STORE_RETRY_AFTER_SECONDS)},
         )
 
-    if counts.corrected:
+    # The receipt is built OUTSIDE the store `try` (an unreadable store result
+    # is a defect, not an outage: never a retryable 503 for a batch that has
+    # committed) but still through `_reject`, so the claim is released — every
+    # non-2xx exit past the claim does that.
+    try:
+        result = MetricPointsResult(
+            agent_name=name,
+            recorded=counts.recorded,
+            deduplicated=counts.deduplicated,
+            corrected=counts.corrected,
+            replayed=False,
+            # The identity the store assigned, so a caller can tell which of
+            # its points became which row — and learn the `ts` that was
+            # defaulted.
+            points=[
+                {"index": i, "ts": r["ts"],
+                 "idempotency_key": r["idempotency_key"]}
+                for i, r in enumerate(rows)
+            ],
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.error("[Metrics] Unreadable store result for %s: %s", name, exc)
+        raise _reject(
+            idem=idem,
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="metric_store_rejected_batch",
+        )
+
+    if result.corrected:
         # History was restated (ent#729): one line per batch, counts only —
         # never a value or a dimension, which may be a customer's name.
-        logger.info("[Metrics] %s restated %d point(s)", name, counts.corrected)
+        logger.info("[Metrics] %s restated %d point(s)", name, result.corrected)
 
-    result = MetricPointsResult(
-        agent_name=name,
-        recorded=counts.recorded,
-        deduplicated=counts.deduplicated,
-        corrected=counts.corrected,
-        replayed=False,
-        # The identity the store assigned, so a caller can tell which of its
-        # points became which row — and learn the `ts` that was defaulted.
-        points=[
-            {"index": i, "ts": r["ts"], "idempotency_key": r["idempotency_key"]}
-            for i, r in enumerate(rows)
-        ],
-    )
     idempotency_service.complete(idem, execution_id, result.model_dump())
     return result
 

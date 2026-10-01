@@ -168,7 +168,10 @@ export function createMetricsTools(client: TrinityClient, requireApiKey: boolean
           .describe(
             "Optional. The execution_id of the turn you are recording from (it is in your " +
               "Execution Context block). Links the batch to the turn and makes a re-delivered " +
-              "turn replay rather than record twice.",
+              "turn replay rather than record twice. Within one turn, re-sending a batch " +
+              "identical to an earlier one replays it (`replayed: true`, nothing written) even " +
+              "if you corrected the value in between — pass a fresh `idempotency_key` to " +
+              "restate it back.",
           ),
       }),
       execute: async (

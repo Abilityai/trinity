@@ -24,9 +24,9 @@ No new endpoint, tool, principal, dependency, workflow, image or compose change.
 | Secrets / enterprise tokens | 0 hits in added lines |
 
 ## Accepted (by design, ruled at the plan gate)
-- A shared viewer who may record may now also restate a past point. The route already admitted shared viewers, who could already set the latest value; decision #9 of the ent#729 plan.
+- A shared viewer who may record may now also restate a past point. The route already admitted shared viewers, who could already set the latest value.
 - Restatement is lossy and last-write-wins (requirements §48.9).
 - An identical earlier batch replays over a later correction (`A → B → A` under one key/turn ends on `B`) — documented and pinned by a route test.
 
 ## Coverage gaps
-- Enterprise submodule not mounted: a private caller of `db.insert_metric_points` (2-tuple → 3-field NamedTuple) was not inspected; org code search returned no hits.
+- None remaining. The one gap from the first run (the enterprise submodule was not mounted on the branch worktree, so a private caller of `db.insert_metric_points` — 2-tuple → 3-field NamedTuple — could not be inspected) was closed during the PR #3169 review: the mounted submodule in the main checkout has no such caller.
