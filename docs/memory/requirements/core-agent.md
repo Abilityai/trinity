@@ -3542,3 +3542,104 @@ to localStorage in the clear.
   and objective-gap inputs (#500, #661, #477–#479) — each attaches as a new class without
   changing the object; the Inbox placement (#610).
 - **Flow**: `docs/memory/feature-flows/workspace-suggestions.md`
+
+### 5.40 Workspace Inbox — what needs you and what came back, across your agents (trinity-enterprise#610)
+- **Status**: 🚧 In progress (PR A: landing, Unread, All, the reading pane; PR B: role-addressed
+  Action after abilityai/trinity#3028; PR C: rooms in Unread)
+- **Requirement ID**: WORKSPACE_INBOX
+- **GitHub Issue**: abilityai/trinity-enterprise#610 (preceded by the asks-honesty fix, §26.8)
+- **Description**: The Workspace opens on an **Inbox**: one place that answers "what needs me"
+  and "what came back" across every agent on the viewer's roster, with a reading pane so an
+  item can be read and answered without leaving it. It is four windows over rows that already
+  exist — the ask table (OPS-001, `requirements/security.md` §26; §26.9 endings), the portal
+  messages, the addressed deliverables and the #557 read cursor. It owns **no table, no
+  router and no store**.
+- **Landing (AC 1)**: a bootstrap on bare `/workspace` with no route param and no stage key
+  (`agent`, `new`, `voice`) replaces to `/workspace/inbox` before the stage resolves, so no
+  conversation flashes. Every explicit target wins: a chat, a room, an agent page, `?agent=`,
+  `?new=1`, the armed-once `?voice=1`. Bare `/workspace` keeps its meaning (the new-chat
+  stage), and the brand mark and a pinned sidebar row lead to the Inbox.
+- **Three windows (tabs)**:
+  | Tab | Membership | Source |
+  |---|---|---|
+  | **Action** | asks addressed to me, pending (question, approval, alert), roster re-checked | the ONE asks list (`openAsks`) |
+  | **Unread** | chats with new arrivals — one row per chat, "N new", the latest arrival's excerpt; archived chats included | the sidebar's `threads` + `GET /chat-state?previews=true` |
+  | **All** | every chat the sidebar lists, of any age (read or not; an unused Main is not listed; rooms wait for PR C), pending asks, and asks that ended in the last 7 days; its footer says the 7-day rule, the 200-ask read cap when hit, and — to a viewer with rooms — that rooms are not here yet (§3g D-4) | the same two lists |
+- **One unread model (AC 6)**: the unit of Unread is a **chat**, read through the existing
+  #557 cursor (`POST /chat-state/thread/{id}/read`); there is no second cursor and no per-item
+  read row. An arrival is an assistant message in my chat **or** a report addressed to me that
+  is stamped to a chat I own. Every surface that shows the count says **"new"** (it used to say
+  "replies"), and the sidebar, the agent row, the tab title and the Inbox read one number.
+- **What arrives (A8)**: Unread holds only what was **addressed into the Workspace** —
+  replies and agent-started messages in my chats, runs whose completion was delivered to me
+  (portal turns, and schedules with `deliver_to_workspace_email` = me), and reports addressed
+  to me. A scheduled, webhook, MCP or agent-to-agent run with no delivery address is in no
+  one's Unread; the Work tab (platform door) owns it. Queued and running work is not an arrival.
+- **A deliverable the agent publishes always has a chat**: an addressed report the agent
+  publishes as itself with no in-flight chat **of the addressee** is stamped to the addressee's **Main** at publish (a report addressed to
+  X during Y's turn goes to X's Main, never into Y's chat), and that Main is touched so the
+  sidebar lists it. Its card appears inline there, and it counts as an arrival. A report a
+  human sharer publishes as the agent is placed in no chat at all (not Main, not the
+  addressee's in-flight turn), so one person cannot put a badge in another's Inbox.
+- **The run outcome is a platform marker**: the completion message the platform writes into a
+  chat carries `source = completion:done | completion:failed`; the Inbox's done/failed pill is
+  read from that, never parsed out of the body (an agent reply that begins "**Finished**" is
+  not a run outcome).
+- **The pane (AC 3)**: an ask renders the existing ask card for that one ask (select-option,
+  note, Send — never a one-tap Approve) and stays selected after an answer, shown ended in
+  place. A chat renders its newest arrivals (from the first unread message) and its
+  deliverables through `ReportRenderer` with the summary fallback. Opening a chat row (or
+  arriving on its `?item=` deep link) marks it read only AFTER the pane has rendered it —
+  history, deliverables and every deliverable payload on screen (§3g S5, D-3); a failed load
+  leaves it unread, a failed write says so in the pane, and the pane's **Mark read** (shown
+  while the chat has new messages) reads it on demand. The row keeps its place, drawn read, for the rest of the tab visit (§3g S1: a row that
+  leaves any tab stays as a ghost — a chat drawn read, an ask drawn ended — and a poll never
+  re-sorts; leaving the tab, clicking it again or a completed Mark all read starts a new visit). **Open
+  in chat** / **Reply in chat** open the chat at the first arrival (`?anchor=`), with the
+  composer focused for Reply (A2 — no composer in the pane). **Mark all read** is secondary,
+  on Unread and All only, and names what it reads ("Mark 28 chats read"); for more than one
+  chat it asks first (ConfirmDialog, the consequence restated, Cancel focused, a non-danger
+  confirm), one chat is read directly. Success is a toast ("Marked 28 chats read") and a new
+  tab visit; a partial failure names how many failed and those chats keep their count (the S4
+  rollback) (§3g A9).
+- **Open canvas (§3g C10)**: the pane offers "Open canvas" — on a chat or an ask — only when
+  the item's agent has a canvas this viewer can see; it opens the rail on that canvas.
+- **Long tabs page (§3g SM / C4)**: every tab renders 50 rows, states "Showing 50 of 212", and
+  offers "Show more" (50 at a time, focus to the first new row); the window resets when the tab
+  changes, never on a refresh, and always includes the selected row.
+- **An ask row says what differs (§3g A10)**: its kind by shape (approval, question, alert —
+  gray outlines, the kind spoken); a priority only when High or Critical; its expiry only
+  within the day ("Expires in 18m" as a warning under an hour, a neutral "Expires in 5h"
+  otherwise, the absolute time on hover); never more than two badges. The expiry counts down
+  on a 30-second clock that runs only while such a row exists.
+- **The door (AC 7)**: nothing the Inbox adds carries cost, an execution id or run detail; the
+  preview projection has no `cost` field. The Inbox needs no capability flag — it reads the
+  roster payload, the viewer's own chat state and the asks list.
+- **Honest states**: loading ≠ empty ≠ failed ≠ stale, for asks and threads alike. The empty
+  copy renders only after a successful read; a failed first read shows a retry; a failed
+  refresh keeps the list with a stale banner (§26.8, the asks read fails loud). All waits on
+  the chats only: its ask rows merge in when the asks read lands, and a failed asks read is a
+  banner above the chats, never a failed All (§3g S3 / A11).
+- **Split or stacked by the Inbox's own width (§3g A4)**: side by side from 720px of CONTAINER
+  width (a 320px list + a 400px pane; a 384px list from 1100), with 16px of hysteresis; below
+  that — a phone, a 768px window beside the sidebar, 200% zoom, a 1280 window with the rail
+  open — list and pane are successive full-width states with an explicit Back (Esc too), and
+  nothing is previewed, so the landing starts no agent feed. The rail's width is counted
+  before it arrives, so a preview that brings it in cannot flip the layout; a flip keeps an
+  opened item and moves focus to it (its pane heading when stacked, its row when split).
+  When split, the tab's first row is previewed (the rail column does not pop in on the first
+  click); the preview is never a read and never enters the URL — `?item=` holds only what the
+  reader opened (§3g S5, T2).
+- **Known properties (stated, not bugs)**:
+  - A viewer who has never read anything has no baseline, so nothing counts for them — a first
+    deliverable included (the inherited #557 rule).
+  - **An owner's Inbox is thinner by existing rules (A9)**: asks and reports validate their
+    addressee with `include_owned=False`, so a platform owner is never an addressee. Their
+    Action empty state points to Operations; a client's names what would land here.
+  - Archived chats stay in Unread; Σ "N new" equals the "came back" count.
+  - Counts for the viewer's own chats with agents no longer on their roster are in the
+    chat-state payload (since ent#359/#557) but nothing renders them.
+  - Rooms are not in Unread until PR C (no human room read cursor exists).
+- **Not in scope**: the editable "What would be sent" (09-20 ruling); #609; the `people_for`
+  provider; `may_end` (rides #164); run pills with step labels (need a message→execution link).
+- **Flow**: `docs/memory/feature-flows/workspace-inbox.md`

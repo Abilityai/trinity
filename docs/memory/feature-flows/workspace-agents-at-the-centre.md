@@ -123,6 +123,16 @@ An ask raised DURING a chat turn is not homeless and skips this rule (ent#734):
 it attaches to the chat of the turn that raised it — see
 [operating-room.md](operating-room.md#which-chat-an-addressed-ask-attaches-to-trinity-enterprise734).
 
+**The Workspace itself lands on the Inbox (ent#610).** A bootstrap on bare
+`/workspace` — no route param, no `agent` / `new` / `voice` key — replaces to
+`/workspace/inbox` before the stage resolves (the route is captured before the first
+await and the replace is awaited inside the `try`, so no conversation flashes). Every
+explicit target still wins, and bare `/workspace` keeps its meaning as the new-chat
+stage `newChatWithAgent` → `escapeStage` lands on. Clicking an agent is unchanged: it
+opens the conversation `landingThread` picks. An addressed report with no chat of its
+addressee joins the agent-initiated things that land in Main, at publish time
+(`report_service.resolve_report_session`).
+
 ---
 
 ## Frontend

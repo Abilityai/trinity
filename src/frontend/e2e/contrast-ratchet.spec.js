@@ -29,8 +29,13 @@ import { join } from 'node:path'
 const BASELINE = join(process.cwd(), 'e2e', 'contrast-baseline.json')
 const UPDATE = process.env.CONTRAST_BASELINE_UPDATE === '1'
 
+// trinity-enterprise#610: bare `/workspace` now lands on the Inbox, so the
+// `workspace` entry loads `/workspace?new=1` — the new-chat stage its baseline
+// (light 9, dark 2) was frozen against. The Inbox is its own entry with NO
+// baseline, so it is held to zero failing treatments.
 const PAGES = [['/', 'dashboard'], ['/operations', 'operations'], ['/settings', 'settings'],
-               ['/library', 'library'], ['/workspace', 'workspace']]
+               ['/library', 'library'], ['/workspace?new=1', 'workspace'],
+               ['/workspace/inbox', 'workspace-inbox']]
 const THEMES = ['light', 'dark']
 
 // Runs in the page. Deliberately conservative about what counts as a failure:

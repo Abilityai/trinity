@@ -46,7 +46,7 @@ from services.docker_service import get_agent_container
 from services.platform_audit_service import AuditEventType, platform_audit_service
 
 from database import db
-from . import agent_page, role_card, seat_decisions, service
+from . import agent_page, chat_previews, role_card, seat_decisions, service
 from .models import (
     PortalSessionRename,
     PortalRatingRequest,
@@ -684,9 +684,19 @@ async def portal_briefings(
 # chat id in the install (OSS invariant #8). The service's row cap is what bounds
 # writing junk ids instead.
 
-@router.get("/chat-state", response_model=PortalChatState)
-def portal_chat_state(principal: PortalPrincipal = Depends(get_portal_principal)):
-    """Star + unread state for the signed-in viewer's chats, both kinds."""
+@router.get("/chat-state", response_model=PortalChatState,
+            response_model_exclude_none=True)
+def portal_chat_state(previews: bool = Query(False),
+                      principal: PortalPrincipal = Depends(get_portal_principal)):
+    """Star + unread state for the signed-in viewer's chats, both kinds.
+
+    ``previews=true`` (ent#610, the Inbox) adds each unread thread's newest
+    arrival and first unread message id, read in the SAME statement as the
+    counts (`chat_previews`). Without it the payload is the ent#359 shape,
+    unchanged — None fields are dropped, and no entry carries them."""
+    if previews:
+        return chat_previews.get_chat_state_with_previews(
+            principal.email, principal.is_platform)
     return service.get_chat_state(principal.email)
 
 
@@ -1221,6 +1231,9 @@ async def portal_chat(
         raise HTTPException(status_code=e.status_code, detail=e.detail)
 
     try:
+        # ent#610 — resolved (and refused, loudly) BEFORE anything is written.
+        reply_context = service.reply_context(
+            agent_name, email, body.session_id, getattr(body, "reply_to_message_id", None))
         result = await service.portal_chat(agent_name, body.message, email, session_id=body.session_id,
                                           include_owned=include_owned,
                                           new_thread=body.new_thread,
@@ -1232,7 +1245,8 @@ async def portal_chat(
                                               agent_name,
                                               getattr(body, "open_canvas_id", None),
                                               is_platform=principal.is_platform),
-                                          model=requested_model)
+                                          model=requested_model,
+                                          reply_context=reply_context)
     except ClientPortalError as e:
         raise HTTPException(status_code=e.status_code, detail=e.detail)
     return PortalChatResponse(**result)
@@ -1898,6 +1912,9 @@ async def portal_chat_stream(
         )
 
     try:
+        # ent#610 — same resolution on the streaming path (the ent#555 lesson).
+        reply_context = service.reply_context(
+            agent_name, email, body.session_id, getattr(body, "reply_to_message_id", None))
         started = await service.start_portal_turn(
             agent_name, body.message, email,
             session_id=body.session_id, include_owned=include_owned,
@@ -1911,6 +1928,7 @@ async def portal_chat_stream(
                 agent_name, getattr(body, "open_canvas_id", None),
                 is_platform=principal.is_platform),
             model=requested_model,   # ent#403, same rule as the flag above
+            reply_context=reply_context,
         )
     except ClientPortalError as e:
         idempotency_service.fail(decision)

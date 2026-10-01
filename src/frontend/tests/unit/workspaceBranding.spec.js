@@ -109,8 +109,10 @@ describe('ent#556 the mark is neither dead nor unlabelled', () => {
     expect(BRAND).not.toContain('alt="Trinity"')
   })
 
-  it('the signed-in shell links to the Workspace root, not a platform route', () => {
-    expect(SIDEBAR).toContain(':to="WORKSPACE_ROOT"')
+  it('the signed-in shell links to the Workspace Inbox, not a platform route', () => {
+    // trinity-enterprise#610 (D9): the landing moved to the Inbox; the brand
+    // follows it. WORKSPACE_ROOT is unchanged (sign-out, shouldEscapeStage).
+    expect(SIDEBAR).toContain(':to="WORKSPACE_INBOX"')
   })
 
   it('the sign-in screen renders it inert', () => {

@@ -97,6 +97,15 @@ export function askBadgeTitle(count) {
   return `${n} ${n === 1 ? 'ask is' : 'asks are'} waiting on your answer`
 }
 
+// trinity-enterprise#610 (D3/D13): the unread badge's accessible name. The
+// count is arrivals (agent messages AND deliverables addressed to you), so the
+// noun is "new" — "replies" was true only while messages were the one arm.
+export function unreadBadgeTitle(count) {
+  const n = Number(count) || 0
+  if (n <= 0) return ''
+  return `${n} new you haven't read`
+}
+
 // The agent row's accessible name.
 //
 // #2424: this composed unread replies and the availability chip and never
@@ -110,7 +119,9 @@ export function agentRowTitle({ label, name, unread = 0, askCount = 0, chipTitle
 
   const parts = []
   if (asks > 0) parts.push(`${asks} ${asks === 1 ? 'ask' : 'asks'} waiting on you`)
-  if (reads > 0) parts.push(`${reads} unread ${reads === 1 ? 'reply' : 'replies'}`)
+  // trinity-enterprise#610 (D3): the count is ARRIVALS — agent messages and
+  // deliverables addressed to you — so it says "new", not "replies".
+  if (reads > 0) parts.push(`${reads} new`)
   // trinity-enterprise#657: the Draft mark beside the name, in words too.
   if (hasDraft) parts.push('an unsent draft')
 
@@ -660,6 +671,13 @@ export const STAGE_QUERY_KEYS = ['agent', 'new', 'voice']
 // the brand corner must not have (the other being an unlabelled one).
 export const WORKSPACE_ROOT = '/workspace'
 
+// trinity-enterprise#610 (D9): the Inbox — the Workspace's landing and the brand
+// mark's target. A NEW constant on purpose: `WORKSPACE_ROOT` is also
+// `shouldEscapeStage`'s root and the sign-out destination, and bare `/workspace`
+// keeps its meaning (the new-chat stage). Being a path that is not the root, the
+// Inbox is a stage `shouldEscapeStage` leaves — the fail-closed rule holds.
+export const WORKSPACE_INBOX = '/workspace/inbox'
+
 export function shouldEscapeStage(path, query) {
   if (path && path.replace(/\/+$/, '') !== WORKSPACE_ROOT) return true
   if (!query) return false
@@ -924,39 +942,6 @@ export function availabilityChip(agent, { detailed = false } = {}) {
       variant: 'danger',
       title: `This agent has no running container — ask ${who} to start it.`,
     }
-}
-
-/**
- * #2641 — does THIS list of rows need the availability slot reserved at all?
- *
- * The slot's fixed footprint exists so a row does not reflow when an agent
- * starts or stops between refreshes (#2196), and that is worth keeping. What
- * was wrong is paying for it on every row unconditionally: `availabilityChip`
- * returns null for every state except `stopped` and `unavailable`, so on a
- * fleet where everything is running — the normal case — the strip is empty on
- * EVERY row. That produced both halves of the reported defect at once: the
- * dates stopped 72px short of the right edge, and 72px per row came out of the
- * only element that wanted it, the name.
- *
- * The reservation is now a property of the LIST, not of a row: reserve on every
- * row iff any row can actually show a chip. Uniform down the list, so #2580's
- * identical truncation point survives, and free when there is nothing to hold
- * space for.
- *
- * Takes the ROWS BEING RENDERED, not the whole roster — a stopped agent hidden
- * by search or by the collapse limit would otherwise reserve width on a list
- * that shows no chip, which is the original bug with extra steps.
- *
- * Residual, stated rather than discovered: the 0→1 transition (the first agent
- * in view stops) reflows the whole list once, where before it reflowed nothing.
- * That is the honest cost of not charging every row for the empty case, and it
- * is the trade the issue delegates. Within a populated list nothing moves: a
- * second agent stopping, or the first one restarting while another is still
- * stopped, changes only that row's chip.
- */
-export function reservesAvailabilitySlot(rows, opts = {}) {
-  if (!Array.isArray(rows)) return false
-  return rows.some((a) => availabilityChip(a, opts) !== null)
 }
 
 export const EMPTY_REASON_NO_PLAYBOOKS = 'No playbooks are available for this agent right now.'
@@ -1645,6 +1630,34 @@ export function askThreadLink(ask, currentSessionId = null) {
   return target
 }
 
+// trinity-enterprise#610 sign-off: which of an agent's asks a chat PINS above
+// its composer. Pinning all of them, uncapped, let seven cards crush the
+// conversation to nothing. A chat pins the asks raised against it — Main also
+// takes the unattached ones, which have nowhere else to live — and the rest
+// that still wait are counted, one link away in Work. An ask that ended in
+// another chat is not waiting, so it is not counted.
+// Sign-off round 5: the chat's asks row. Pending asks, plus any that were
+// pending while this chat was on screen — an ask you just answered stays drawn,
+// ended, with its confirmation, until you leave the chat.
+export function pinnedAskIds(here, seenPending = new Set()) {
+  return (here || []).filter((a) => a.status === 'pending' || seenPending.has(a.id)).map((a) => a.id)
+}
+export function chatAsksLabel(n) {
+  if (!n) return 'No asks waiting on you'
+  return n === 1 ? '1 ask waiting on you' : `${n} asks waiting on you`
+}
+
+export function splitChatAsks(asks, { sessionId = null, isMain = false } = {}) {
+  const here = []
+  const elsewhere = []
+  for (const a of asks || []) {
+    const onThis = a.chat_id ? (!!sessionId && a.chat_id === sessionId) : isMain
+    if (onThis) here.push(a)
+    else if (a.status === 'pending') elsewhere.push(a)
+  }
+  return { here, elsewhere }
+}
+
 
 // ---- ent#365: deliverables ------------------------------------------------
 
@@ -2066,4 +2079,25 @@ export function replyFromHistory(messages, baseline) {
     id: last.id || null,
     myRating: last.my_rating || null,
   }
+}
+
+// trinity-enterprise#610 §3g S4 — the read's optimistic zero, and its rollback.
+// `optimisticRead` zeroes a chat's unread and returns the ENTRY it wrote;
+// `rollbackRead` restores the count only while that very entry is still in
+// the state. Identity, not value: a refresh that replaced the state (the server
+// has spoken since) is left alone, so a late failure never resurrects a count
+// the server already settled. Known limit (round-3 review F6): a second read of
+// an entry that is ALREADY zero writes nothing, so if the first write then
+// fails its rollback restores the count although the second write succeeded —
+// wrong until the next poll (≤20 s), never persisted.
+export function optimisticRead(state, key) {
+  const before = state && state[key]
+  if (!before || !(Number(before.unread) > 0)) return { state, written: null }
+  const entry = { ...before, unread: 0 }
+  return { state: { ...state, [key]: entry }, written: { entry, before } }
+}
+
+export function rollbackRead(state, key, written) {
+  if (!written || !state || state[key] !== written.entry) return state
+  return { ...state, [key]: written.before }
 }
