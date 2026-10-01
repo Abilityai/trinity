@@ -82,13 +82,15 @@
            ("doesn't report steps.") is never cut (ent#525's "says so").
            `w-0 min-w-full`: the row takes the card's width and never sets it,
            so a long name cannot widen the card when the sentence lands. -->
+      <!-- #3001: `activity` (a live line has shown on this run) is silent like
+           `pending` — the reserved row stays, blank, so the card never moves. -->
       <p
-        v-else-if="steps.kind !== 'pending' || reserveLiveRows"
+        v-else-if="(steps.kind !== 'pending' && steps.kind !== 'activity') || reserveLiveRows"
         class="mt-1.5 text-xs text-gray-500 dark:text-gray-400"
         :class="reserveLiveRows ? 'h-4 leading-4 flex w-0 min-w-full whitespace-nowrap' : ''"
-        :aria-hidden="steps.kind === 'pending' ? 'true' : undefined"
+        :aria-hidden="stepsSilent ? 'true' : undefined"
         :title="reserveLiveRows && steps.text ? steps.text : undefined"
-        :data-testid="steps.kind === 'pending' ? 'portal-work-reserved-steps' : `portal-work-steps-${steps.kind}`"
+        :data-testid="stepsSilent ? 'portal-work-reserved-steps' : `portal-work-steps-${steps.kind}`"
       >
         <template v-if="reserveLiveRows && steps.who">
           <span class="truncate" data-testid="portal-work-sentence-who">{{ steps.who }}</span>
@@ -210,7 +212,14 @@ onBeforeUnmount(() => { if (_tick) clearInterval(_tick) })
 const statusWord = computed(() => workStatusLabel(props.item))
 const kindWord = computed(() => kindLabel(props.item.kind))
 const clock = computed(() => (live.value ? formatElapsed(props.elapsedSeconds) : null))
-const steps = computed(() => stepsLine(props.item.steps, props.item.agent_name))
+// #3001: whether this run has shown a live activity line. Sticky for the run —
+// a beat expires every 15 s, and the sentence must not flicker back in between
+// two of them — and reset when the card starts showing a different run.
+const activitySeen = ref(false)
+watch(shownStep, (v) => { if (v && live.value) activitySeen.value = true }, { immediate: true })
+watch(() => props.item.id, () => { activitySeen.value = false })
+const steps = computed(() => stepsLine(props.item.steps, props.item.agent_name, { activitySeen: activitySeen.value }))
+const stepsSilent = computed(() => steps.value.kind === 'pending' || steps.value.kind === 'activity')
 const stages = computed(() => stageRows(props.item.steps))
 const askable = computed(() => !live.value && isHonestTerminal(props.item.outcome))
 const hasActions = computed(() => (live.value && (props.canStop || props.reserveLiveRows)) || askable.value || props.showOpenInWork)

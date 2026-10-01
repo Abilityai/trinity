@@ -120,6 +120,15 @@ row takes the card's width and never sets it (`w-0 min-w-full`), so a long
 agent name cannot widen the card when the sentence lands. The Work tab and the
 room render as before (#2964).
 
+**#3001 — the `none` sentence yields to the activity line.** "Doesn't report steps" was
+ruled before #620 put the live activity line on the same card; an agent showing
+"Thinking" / "Reading …" with that sentence beneath it reads as the card contradicting
+itself. `stepsLine(steps, agent, { activitySeen })` returns `kind: 'activity'` (render
+nothing) once `PortalWorkCard` has shown a live line on this run — sticky across the 15 s
+beat gaps, reset when the card shows a different run. In the chat's one-line card
+(`reserveLiveRows`, #2964) the row stays, blank and `aria-hidden`, so the card keeps its
+shape. `unknown` keeps its sentence.
+
 ### The #919 read is hardened like the MCP tool
 
 `pipeline_state.py` restates `pipelines.ts`'s rules because the two cannot

@@ -196,9 +196,16 @@ export function previewTitle(message) {
  * two render the sentence in tertiary ink. `none` also carries `who`, the name
  * `text` starts with, so the chat's one-line card can truncate the name and
  * never the claim (#2964).
+ *
+ * #3001: "doesn't report steps" was ruled before the card gained the live
+ * activity line (#620). Once that line has shown on this run the agent IS
+ * reporting what it does, so `activitySeen` withholds the sentence (kind
+ * `activity`, no text) instead of contradicting the card. `unknown` keeps its
+ * sentence — it stays true either way.
  */
-export function stepsLine(steps, agentName = null) {
+export function stepsLine(steps, agentName = null, { activitySeen = false } = {}) {
   const who = agentName || 'This agent'
+  const silent = activitySeen ? { kind: 'activity', text: '' } : null
   // `undefined` = not read yet (the chat's card before the feed has the row):
   // say nothing rather than "could not be read", which is a different claim.
   if (steps === undefined) return { kind: 'pending', text: '' }
@@ -206,11 +213,11 @@ export function stepsLine(steps, agentName = null) {
     return { kind: 'unknown', text: 'Steps could not be read right now.' }
   }
   if (steps.state === 'none') {
-    return { kind: 'none', text: `${who} doesn't report steps.`, who }
+    return silent || { kind: 'none', text: `${who} doesn't report steps.`, who }
   }
   if (steps.state === 'reported') {
     if (Array.isArray(steps.stages) && steps.stages.length) return { kind: 'stages', text: '' }
-    return { kind: 'none', text: `${who} doesn't report steps.`, who }
+    return silent || { kind: 'none', text: `${who} doesn't report steps.`, who }
   }
   return { kind: 'unknown', text: 'Steps could not be read right now.' }
 }
