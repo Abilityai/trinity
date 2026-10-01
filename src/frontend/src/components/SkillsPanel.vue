@@ -84,6 +84,14 @@
                 <div class="flex items-center gap-2 flex-wrap">
                   <span class="text-sm font-medium text-gray-900 dark:text-gray-100">{{ s.name }}</span>
                   <span v-if="s.version" class="text-[11px] font-mono text-gray-400">{{ s.version.slice(0, 7) }}</span>
+                  <!-- ent#672: read off the library entry, so an agent that
+                       already holds a now-deprecated skill shows it on load. -->
+                  <BaseBadge
+                    v-if="s.deprecated"
+                    variant="warning"
+                    :title="DEPRECATED_TITLE"
+                    :data-testid="`skill-deprecated-assigned-${s.name}`"
+                  >deprecated</BaseBadge>
                   <!-- ent#530: why the skill is present. -->
                   <BaseBadge
                     v-if="store.viaSets(s.name).length"
@@ -106,6 +114,12 @@
                   </span>
                 </div>
                 <p v-if="s.description" class="mt-1 text-xs text-gray-500 dark:text-gray-400">{{ s.description }}</p>
+                <p
+                  v-if="supersededLine(s)"
+                  :title="supersededLine(s)"
+                  :data-testid="`skill-superseded-assigned-${s.name}`"
+                  class="mt-1 text-xs text-status-warning-700 dark:text-status-warning-400 break-words line-clamp-2"
+                >{{ supersededLine(s) }}</p>
 
                 <!-- #2914: which skill, what is running, and the two ways out.
                      The library package was NOT written — the agent's own
@@ -137,8 +151,8 @@
                 <!-- Named warnings, verbatim and translated. A skill that landed
                      with a missing binary is NOT a success, and this is the line
                      that says so. -->
-                <ul v-if="resultFor(s.name)?.warnings?.length" class="mt-2 space-y-1">
-                  <li v-for="w in resultFor(s.name).warnings" :key="w"
+                <ul v-if="runWarnings(s.name).length" class="mt-2 space-y-1">
+                  <li v-for="w in runWarnings(s.name)" :key="w"
                       class="text-xs text-status-warning-700 dark:text-status-warning-400">
                     ⚠ {{ warningText(w) }}
                   </li>
@@ -185,9 +199,23 @@
               <div class="min-w-0 flex-1">
                 <div class="flex items-center gap-2 flex-wrap">
                   <span class="text-sm font-medium text-gray-900 dark:text-gray-100">{{ s.name }}</span>
+                  <!-- ent#672: visible BEFORE the tick — assigning one is
+                       allowed, and nobody should learn it afterwards. -->
+                  <BaseBadge
+                    v-if="s.deprecated"
+                    variant="warning"
+                    :title="DEPRECATED_TITLE"
+                    :data-testid="`skill-deprecated-picker-${s.name}`"
+                  >deprecated</BaseBadge>
                   <SkillContractChips :skill="s" />
                 </div>
                 <p v-if="s.description" class="mt-1 text-xs text-gray-500 dark:text-gray-400">{{ s.description }}</p>
+                <p
+                  v-if="supersededLine(s)"
+                  :title="supersededLine(s)"
+                  :data-testid="`skill-superseded-picker-${s.name}`"
+                  class="mt-1 text-xs text-status-warning-700 dark:text-status-warning-400 break-words line-clamp-2"
+                >{{ supersededLine(s) }}</p>
                 <!-- Declared dependencies, surfaced BEFORE assignment: this is
                      what turns into a missing_binary/missing_env warning later. -->
                 <p v-if="deps(s)" class="mt-1 text-[11px] text-gray-500 dark:text-gray-400">
@@ -219,6 +247,13 @@
                 : 'text-status-success-700 dark:text-status-success-400'"
           >{{ savedNote }}</span>
         </div>
+        <!-- ent#672: the save went through and added a deprecated skill. Its
+             own line under the row — the delivery note keeps its own tone. -->
+        <p
+          v-if="savedNote && deprecationNote"
+          data-testid="skills-saved-deprecation"
+          class="mt-2 text-xs text-status-warning-700 dark:text-status-warning-400"
+        >{{ deprecationNote }}</p>
       </section>
     </template>
   </div>
@@ -227,7 +262,7 @@
 <script setup>
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useSkillsStore } from '../stores/skills'
-import { deliveryText } from '../utils/skillDelivery'
+import { deliveryText, deprecationText, isDeprecationCode } from '../utils/skillDelivery'
 import { useRole } from '../composables/useRole'
 // ent#263 shared contract seam — one rendering of the #183 package facts
 // consumed by BOTH this per-agent tab and the Library page's fleet browse.
@@ -235,7 +270,7 @@ import SkillContractChips from './skills/SkillContractChips.vue'
 import BaseBadge from './base/BaseBadge.vue'
 import BaseButton from './base/BaseButton.vue'
 import AgentSkillSets from './skills/AgentSkillSets.vue'
-import { deps } from './skills/contract'
+import { deps, supersededLine, DEPRECATED_TITLE } from './skills/contract'
 
 const props = defineProps({
   agentName: { type: String, required: true },
@@ -249,9 +284,22 @@ const { isAdmin } = useRole()
 const draft = ref([])
 const savedNote = ref('')
 const savedTone = ref('ok')   // #2703: ok | pending | bad | none
+// ent#672: written by the save it describes and rendered only beside that
+// save's note — never a computed over `store.lastDelivery`, which outlives the
+// note and is also written by a set assign.
+const deprecationNote = ref('')
 
 function resultFor(name) {
   return store.injectionResults?.[name] || null
+}
+
+/**
+ * The last sync's warnings for a skill, minus the deprecation code (ent#672):
+ * this list says what went wrong with the delivery, and a retired skill that
+ * landed fine is not that — the row's badge and successor line already say it.
+ */
+function runWarnings(name) {
+  return (resultFor(name)?.warnings || []).filter(w => !isDeprecationCode(w))
 }
 
 /**
@@ -267,6 +315,7 @@ function isConflict(name) {
 /** The conflict's first way out: drop the library assignment, keep the agent's own skill. */
 async function onUnassign(name) {
   savedNote.value = ''
+  deprecationNote.value = ''
   const next = [...store.individualNames].filter(n => n !== name)
   if (await store.saveAssignments(next)) {
     resetDraft()
@@ -352,6 +401,7 @@ async function onSave() {
     pendingSync.value = verdict.needsSync
     savedNote.value = verdict.text
     savedTone.value = verdict.tone
+    deprecationNote.value = deprecationText(store.lastDelivery) || ''
   }
 }
 

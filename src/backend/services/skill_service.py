@@ -1107,6 +1107,9 @@ class SkillService:
             "file_count": 0,
             "size_bytes": 0,
             "contract_warnings": [],
+            # #672 lifecycle: derived on every parse, never persisted.
+            "deprecated": False,
+            "superseded_by": None,
         }
 
         try:
@@ -1122,6 +1125,8 @@ class SkillService:
                 "allowed_tools": contract["allowed_tools"],
                 "requires": contract["requires"],
                 "contract_warnings": warnings,
+                "deprecated": contract["deprecated"],
+                "superseded_by": contract["superseded_by"],
             })
 
             # Fallback: first non-header paragraph
@@ -1770,6 +1775,13 @@ print(json.dumps(out))
             if entry["shadowed_by"]:
                 warnings.append(f"shadowed_source:{entry['source_name']}")
 
+            # #672: a deprecated skill is still injected — retiring it is the
+            # library's call, not a reason to break an agent that holds it —
+            # and every outcome below says so. Informational: never a failure.
+            deprecation = pkg.deprecation_warning(skill)
+            if deprecation:
+                warnings.append(deprecation)
+
             tree_sha = tree_shas.get(clone.source_id, {}).get(skill_name)
             agent_entry = agent_metas.get(skill_name) or {}
             agent_meta = agent_entry.get("meta") if isinstance(agent_entry, dict) else None
@@ -1959,6 +1971,57 @@ print(json.dumps(out))
     # =========================================================================
 
     async def deliver_assigned(
+        self, agent_name: str, requested: List[str]
+    ) -> Dict[str, Any]:
+        """`_deliver_assigned`, plus the deprecation notice for the names in it (#672).
+
+        The delivery report reduces each skill to a status, and several of its
+        outcomes never run an injection (`pending_start`, `docker_unavailable`)
+        or answer before one finishes (`in_progress`) — so an injection warning
+        cannot be what tells the caller a skill it just assigned is deprecated.
+        The notice comes from the library entry instead
+        and is stamped on whatever report delivery produced:
+        `skills[name]["warnings"] = ["deprecated[:<successor>]"]`, present ONLY
+        for a deprecated name and carrying lifecycle codes only (an injection's
+        dep warnings stay on the sync result, where they have always been).
+
+        The library read (git I/O) runs BESIDE delivery, started first, so it
+        never delays delivery. A slow delivery (the budget-bound `in_progress`
+        path) finds it long finished; a fast outcome (`pending_start`,
+        `docker_unavailable`) waits for it before answering — normally a cached
+        listing read.
+        """
+        notes_task = asyncio.ensure_future(
+            asyncio.to_thread(self._deprecation_notes, requested)
+        )
+        report = await self._deliver_assigned(agent_name, requested)
+        notes = await notes_task
+        skills = report.get("skills")
+        if notes and isinstance(skills, dict):
+            for name, code in notes.items():
+                if isinstance(skills.get(name), dict):
+                    skills[name]["warnings"] = [code]
+        return report
+
+    def _deprecation_notes(self, names: List[str]) -> Dict[str, str]:
+        """`{name: warning code}` for the deprecated names among `names`.
+
+        Best-effort by contract: the assignment row is already committed, so an
+        unreadable library costs the caller the notice, never the write.
+        """
+        wanted = set(names)
+        try:
+            return {
+                skill["name"]: code
+                for skill in self.list_skills()
+                if skill["name"] in wanted
+                and (code := pkg.deprecation_warning(skill))
+            }
+        except Exception as e:  # noqa: BLE001 — never fail a committed assign
+            logger.warning(f"deprecation lookup failed; delivery report left unannotated: {e}")
+            return {}
+
+    async def _deliver_assigned(
         self, agent_name: str, requested: List[str]
     ) -> Dict[str, Any]:
         """Deliver just-assigned skills to the agent and say honestly what happened.
