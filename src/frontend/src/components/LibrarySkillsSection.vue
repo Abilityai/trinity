@@ -122,10 +122,14 @@
                 <span class="text-[14px] font-[550] text-gray-900 dark:text-gray-100">{{ s.name }}</span>
                 <!-- ent#237 multi-source provenance. -->
                 <BaseBadge v-if="s.source_name" variant="info">{{ s.source_name }}</BaseBadge>
+                <!-- #3135: `shadowed_by` is `{source_id, source_name}` objects, so
+                     the tooltip names each source (id if it has no name) — the
+                     one fact the badge exists to give (ent#237 AC#4). -->
                 <BaseBadge
                   v-if="s.shadowed_by?.length"
                   variant="warning"
-                  :title="`Shadowed by: ${s.shadowed_by.join(', ')}`"
+                  :title="`Shadowed by: ${s.shadowed_by.map((x) => x.source_name || x.source_id).join(', ')}`"
+                  :data-testid="`skill-shadowed-library-${s.name}`"
                 >shadowed</BaseBadge>
                 <!-- ent#672: a retired skill stays in the grid, flagged — an
                      operator whose agents hold it must still find it here. -->
