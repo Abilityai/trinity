@@ -3631,7 +3631,13 @@ to localStorage in the clear.
   leaves any tab stays as a ghost — a chat drawn read, an ask drawn ended — and a poll never
   re-sorts; leaving the tab, clicking it again or a completed Mark all read starts a new visit). **Open
   in chat** / **Reply in chat** open the chat at the first arrival (`?anchor=`), with the
-  composer focused for Reply (A2 — no composer in the pane). **Mark all read** is secondary,
+  composer focused for Reply (A2 — no composer in the pane). **Reply to one message** works
+  through both doors (ent#738): each agent message in the pane, and each persisted agent
+  message in the 1:1 chat itself (Copy · Reply · thumbs, "Reply to this message"), sets the
+  same "replying to" chip on that chat's composer and focuses it; the send carries only the
+  message id. Esc drops the chip, innermost first: an open typeahead closes first, and with
+  no chip Esc stops the turn. The chip never follows the person into another chat. Reply is
+  22px like its row; the 44px touch floor is the row's (trinity#3056). **Mark all read** is secondary,
   on Unread and All only, and names what it reads ("Mark 28 chats read"); for more than one
   chat it asks first (ConfirmDialog, the consequence restated, Cancel focused, a non-danger
   confirm), one chat is read directly. Success is a toast ("Marked 28 chats read") and a new

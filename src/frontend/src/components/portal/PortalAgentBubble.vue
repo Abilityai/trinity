@@ -22,13 +22,31 @@
       <button
         v-if="copyable"
         type="button"
-        class="p-1 rounded-md text-gray-400 hover:text-gray-700 dark:hover:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-800 focus:outline-none focus:ring-2 focus:ring-action-primary-500/40 transition-colors"
+        :class="ACTION_BUTTON"
         :title="feedback ? feedback.label : COPY_MESSAGE_ARIA"
         :aria-label="feedback ? feedback.label : COPY_MESSAGE_ARIA"
         @click="copyMessage"
       >
         <svg v-if="!copiedOk" class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" /></svg>
         <svg v-else class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" /></svg>
+      </button>
+      <!-- trinity-enterprise#738: Reply, when the host offers it — the chat on
+           every persisted agent message, the Inbox pane in Copy's place. BEFORE
+           the copy feedback and the slot, so neither the transient "Copied" nor
+           the rating's comment box ever moves it. The glyph is the Inbox arrow's:
+           one action, one icon, through both doors. 22px like its neighbours —
+           the 44px touch floor is the row's, as one change (trinity#3056). -->
+      <button
+        v-if="replyLabel"
+        type="button"
+        :class="ACTION_BUTTON"
+        :title="replyLabel"
+        :aria-label="replyLabel"
+        :disabled="replyDisabled"
+        data-testid="portal-message-reply"
+        @click="$emit('reply')"
+      >
+        <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 10h10a8 8 0 018 8v2M3 10l6 6m-6-6l6-6" /></svg>
       </button>
       <!-- An icon that changes shape cannot say WHY a copy failed, and "it
            silently did nothing" is the behaviour this replaces. The word is
@@ -55,7 +73,7 @@
  * stylesheet, the per-block copy — belongs to PortalMarkdown, so a surface that
  * shows agent markdown outside a conversation gets it without inheriting a
  * chat bubble. What is left here is the chat-specific part: the shape, and the
- * message-level Copy.
+ * message-level Copy and Reply.
  */
 import { ref, onBeforeUnmount } from 'vue'
 import PortalMarkdown from './PortalMarkdown.vue'
@@ -63,9 +81,21 @@ import { copyText, copyFeedback, COPY_FEEDBACK_TTL_MS, COPY_MESSAGE_ARIA } from 
 
 const props = defineProps({
   content: { type: String, default: '' },
-  // ent#610 sign-off: the Inbox pane trades Copy for its reply arrow (slotted).
+  // ent#610 sign-off: the Inbox pane trades Copy for its reply arrow.
   copyable: { type: Boolean, default: true },
+  // trinity-enterprise#738: the Reply action's accessible name, or '' for none.
+  // The host words it ("…in the chat" from the Inbox) and owns what it does.
+  replyLabel: { type: String, default: '' },
+  // Disabled in place (no row reflow) — the chat sets it while a voice call
+  // has the composer Reply would focus.
+  replyDisabled: { type: Boolean, default: false },
 })
+defineEmits(['reply'])
+
+// One recipe for the row's own buttons (#738). The ink is the thumbs' beside
+// them (`PortalRating`): gray-500 light / gray-400 dark — Copy's former
+// gray-400 in light was 2.54:1 on white, under the 3:1 an icon needs.
+const ACTION_BUTTON = 'p-1 rounded-md text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-800 focus:outline-none focus:ring-2 focus:ring-action-primary-500/40 dark:focus:ring-action-primary-400/40 transition-colors disabled:opacity-45 disabled:cursor-not-allowed'
 
 const feedback = ref(null)
 const copiedOk = ref(false)

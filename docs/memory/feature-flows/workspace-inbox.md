@@ -171,6 +171,24 @@ Sign-in / reload on bare /workspace
                                (data-message-id / data-report-id, useStickToBottom.detach(),
                                 not found → bottom + "That message is further up"; key stripped)
               Reply in chat → the same, then focusConversationComposer() (A2: no composer in the pane)
+              Reply on one message (each agent bubble's own action, ent#738 — PortalAgentBubble
+                             reply-label "Reply to this message in the chat", Copy's place)
+                             → $emit('reply', ?anchor=m:<id>, {sessionId, messageId, excerpt})
+                             → replyInChat: the chat at that message + the "replying to" chip
+    In the chat itself (ent#738) — the second door to the same target:
+      every PERSISTED agent message (id && currentSessionId) carries Reply in its action row,
+      Copy · Reply · thumbs (one recipe, ACTION_BUTTON; disabled in place during a voice call)
+      → PortalConversation emit('reply', {sessionId: currentSessionId, messageId, excerpt})
+        — currentSessionId, never the prop: a URL with no :sessionId resolves the chat inside
+      → Portal.setReplyTarget (messageId guard) → replyTarget → the composer chip, which
+        describes the textarea (aria-describedby); the composer is focused inside the tap
+      Esc in the composer → resolveComposerKey(hasReply = chip on screen && !defaultPrevented)
+        → 'drop-reply' (preventDefault, so the turn-cancel listener yields) — innermost first:
+        an open typeahead takes the first Esc; with no chip, Esc reaches the turn
+      × on the chip → reply-done + the caret back in the composer
+      cleared on leaving the chat: watch(route sessionId) and watch(convKey) (a New chat or an
+        agent switch on a URL that does not name the chat); the Inbox path survives its own
+        navigation because the /c/:id handler sets pendingSession in the remounting tick
               Open canvas  → shown when inboxCanvasCount({tabs: railTabs, canvases: the rail feed
                              store, agent}) > 0 — on chats AND asks (T6); split: leftmost of
                              the actions; stacked: in More → open-canvas → openRailOn('canvas')
@@ -332,7 +350,8 @@ table, no migration. The report publish may mint the addressee's Main
 | Frontend | `src/frontend/src/router/index.js` | route `WorkspaceInbox` `/workspace/inbox` |
 | Frontend | `src/frontend/src/components/portal/portalInbox.js` | every pure rule: landing, builders, counts, keys, `sidebarThreadsOf`, selection/hold |
 | Frontend | `src/frontend/src/components/portal/PortalInbox.vue`, `PortalInboxList.vue`, `PortalInboxPane.vue`, `PortalInboxRow.vue` | container, list, pane, pinned sidebar row |
-| Frontend | `src/frontend/src/views/Portal.vue` | stage branch, landing replace, `threadsLoaded`, `chatPreviews`, `replyInChat` |
+| Frontend | `src/frontend/src/views/Portal.vue` | stage branch, landing replace, `threadsLoaded`, `chatPreviews`, `replyInChat`, `setReplyTarget` + the `convKey` clear (ent#738) |
+| Frontend | `src/frontend/src/components/portal/PortalAgentBubble.vue` | the message action row — Copy · Reply (`replyLabel` / `replyDisabled` / `reply`, ent#738) · slot, one `ACTION_BUTTON` recipe |
 | Frontend | `src/frontend/src/components/portal/PortalSidebar.vue`, `portalUtils.js` | pinned row mount, `WORKSPACE_INBOX`, "new" wording (`unreadBadgeTitle`) |
 | Frontend | `src/frontend/src/components/portal/PortalAsks.vue` | `askIds`, `testidPrefix`, `threadLink`; PR A2: pick → note focus, question quick picks, `workspaceAskBadge`, focus after Send, the QueueBrief seam and stacked impact options |
 | Frontend | `src/frontend/src/components/operator/QueueBrief.vue`, `src/frontend/src/utils/operatorQueue.js` | the brief seam (`part` lead / fallback); `briefOf`, `briefImpactFor`, `ifNoAnswerLabel`, `workspaceAskBadge`, `questionQuickPicks` |
@@ -365,7 +384,8 @@ an ask that ends while selected; a deep-linked `?item=`; previews read failing m
 | `src/frontend/tests/unit/portalInbox.spec.js` | pure rules + the seeded count-parity property |
 | `src/frontend/tests/unit/portalInboxStore.spec.js` | `fetchChatState({previews})`, `markChatReadStrict` |
 | `src/frontend/tests/unit/portalInbox.mount.spec.js` | honest states, mark-read once, answer via store, Mark all read (Unread/All only, confirm for k>1 with Cancel focused, k=1 direct, success toast + new visit, partial failure), phone Back + focus; §3g S1 rows keep their place (A1 click-then-read, A7 answer on All, A12 poll ghosts + "All caught up"), a deleted open chat goes Back on phone; §3g S5 read after render (payloads awaited, a failed payload stays unread + Mark read, preview not in the URL, deep link reads, a false write shows the error) |
-| `src/frontend/tests/unit/portalInboxShell.mount.spec.js` | the stage chain (roster error, empty roster, no `PortalConversation`), selection never writes `activeAgentName` |
+| `src/frontend/tests/unit/portalInboxShell.mount.spec.js` | the stage chain (roster error, empty roster, no `PortalConversation`), selection never writes `activeAgentName`; ent#738: `reply` → the target, the `messageId` guard, cleared on leaving (and back), cleared on a New chat from a URL that does not name the chat, the Inbox path keeps its target |
+| `src/frontend/tests/unit/portalInChatReply.mount.spec.js` | ent#738: Reply only on persisted agent messages; the payload names the RESOLVED chat; focus in the tap; the chip + `aria-describedby`; the send carries the id and the sent bubble shows the quote; × returns focus; disabled during a call; Esc innermost first (typeahead, chip, turn — with a positive control), a hidden target never eats the turn's Esc, a claimed Esc is left alone; the bubble's row order and shared recipe; the pane's Reply still opens the chat at the message. 18 call-site mutations, all red |
 | `src/frontend/tests/unit/portalSidebarInboxRow.spec.js` | the pinned row's counts and link |
 | `src/frontend/tests/unit/portalAsksTestidPrefix.mount.spec.js` | default ids unchanged, prefix over every id, disjoint id sets |
 | `src/frontend/tests/unit/portalConversationAnchor.mount.spec.js`, `stickToBottom.spec.js` | `?anchor=` found / missing / one-shot, `detach()` |

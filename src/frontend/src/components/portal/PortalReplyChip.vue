@@ -15,8 +15,10 @@
     data-testid="portal-reply-chip"
   >
     <svg class="w-3.5 h-3.5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 10h10a8 8 0 018 8v2M3 10l6 6m-6-6l6-6" /></svg>
-    <span class="sr-only">Replying to:</span>
-    <span class="min-w-0 truncate" :title="excerpt">{{ excerpt }}</span>
+    <!-- ent#738: ONE element carrying the whole sentence, so a field can point
+         `aria-describedby` at it — the chip root would add the remove button's
+         name to the description ("…Don't reply to this message"). -->
+    <span :id="textId || undefined" class="min-w-0 truncate" :title="excerpt"><span class="sr-only">Replying to: </span>{{ excerpt }}</span>
     <button
       v-if="removable"
       type="button"
@@ -36,6 +38,8 @@ defineProps({
   excerpt: { type: String, default: '' },
   removable: { type: Boolean, default: true },
   placement: { type: String, default: 'composer' },
+  // ent#738: an id for the "Replying to: <excerpt>" text, for `aria-describedby`.
+  textId: { type: String, default: '' },
 })
 defineEmits(['remove'])
 </script>
