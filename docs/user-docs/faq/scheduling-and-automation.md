@@ -52,7 +52,7 @@ Only if you turn retries on. Each schedule has `max_retries` (range 0–5) and `
 
 ## Can Trinity check that a scheduled run actually did its job?
 
-Yes, with post-run validation. Set `validation_enabled: true` on the schedule over the API, or with `create_agent_schedule` / `update_agent_schedule`; the schedule form has no field for it. After each successful run, the same agent runs one extra execution in a clean context that audits the result, and the run's `business_status` becomes `validated` or `failed_validation`. A fail or partial verdict raises one high-priority **Validation Failed** alert in the Operations queue, but it does not trigger a retry. Each validation pass is a real execution, so it costs a run; `validation_prompt` and `validation_timeout_seconds` (30–600, default 120) tune it. See [Scheduling](../automation/scheduling.md#post-run-validation).
+Yes, with post-run validation. Set `validation_enabled: true` on the schedule over the API, or with `create_agent_schedule` / `update_agent_schedule`; the schedule form has no field for it. After each successful run, the same agent runs one extra execution in a clean context that audits the result, and the run's `business_status` becomes `validated` or `failed_validation` (or `validation_unavailable` when the run's response was empty, with no alert). A fail or partial verdict raises one high-priority **Validation Failed** alert in the Operations queue, but it does not trigger a retry. Each validation pass is a real execution, so it costs a run; `validation_prompt` and `validation_timeout_seconds` (30–600, default 120) tune it. See [Scheduling](../automation/scheduling.md#post-run-validation).
 
 ## What happens to the execution history if I delete a schedule?
 

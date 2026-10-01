@@ -240,24 +240,24 @@ the UI instead.
 
 ### 2. The probe, and why the exec is bounded three ways
 
-`execute_command_in_container` **accepts** a `timeout` and then never references
-it again; `container_exec_run` has no timeout parameter, docker-py's `exec_run`
-has none, and docker-py's socket reader `poll()`s with no timeout before every
-`recv`. The call therefore has no bound, and it runs on
+docker-py's `exec_run` has no timeout, and the call runs on
 `ThreadPoolExecutor(max_workers=4)` — the pool shared by **every** Docker
 operation in the backend (Invariant #11). Four wedged calls stop the backend's
 entire Docker layer, and it is agent-triggerable: the agent owns
 `/home/developer/.env`, and `mkfifo /home/developer/.env` makes `open()` block
-forever.
+forever. Until #2969 `execute_command_in_container` accepted a `timeout` and
+never referenced it again, so this probe bounded itself; the primitive now
+enforces its `timeout` (in-container `timeout -k` + `asyncio.wait_for`, see
+[async-docker-operations.md](async-docker-operations.md)).
 
 | Bound | What it actually fixes |
 |---|---|
-| container-side `timeout 10` | **load-bearing** — self-termination closes the socket, so the pool thread is reclaimed. An asyncio cancel does not do this. |
-| `asyncio.wait_for` | bounds the REQUEST, so a wedged probe degrades to `agent_unreachable` instead of hanging the caller |
+| `execute_command_in_container(timeout=_SCRIPT_TIMEOUT)` | **load-bearing** (#2969) — the in-container `timeout -k` ends the process, which closes the socket, so the pool thread is reclaimed. An asyncio cancel does not do this. The script's own inner `timeout 10` predates #2969 and is kept as a belt. |
+| `asyncio.wait_for(_REQUEST_TIMEOUT)` | bounds the REQUEST, so a wedged probe degrades to `agent_unreachable` instead of hanging the caller |
 | `stat.S_ISREG` before `open()` | closes the FIFO vector at source |
 
-`compatibility/collector.py`'s `_EXEC_TIMEOUT` is decorative for the same
-reason; that is filed separately.
+`compatibility/collector.py`'s `_EXEC_TIMEOUT` is bounded the same way by the
+primitive since #2969.
 
 **What crosses the image boundary.** Exactly one policy — the empty-value
 predicate — and it is spliced into the script from real source

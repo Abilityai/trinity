@@ -178,8 +178,8 @@ merge_gitignore_after_clone(name)   monotonic deadline _MERGE_READY_TIMEOUT_SECO
   `auto_sync_enabled` flag — ghosts never recreate), so existing leakers converge on their
   next base-image-drift recreate/restart. No behaviour change on Push (`sync_to_github`).
 - **Bounded & non-fatal**: monotonic deadline, module-level `asyncio.Semaphore` cap on
-  pollers, every exec/HTTP `asyncio.wait_for`-wrapped (frees the task, not the pinned
-  4-thread Docker pool thread). Known hole: a backend restart in the readiness window
+  pollers, every exec/HTTP `asyncio.wait_for`-wrapped (frees the task; the exec's pool
+  thread is freed by the primitive's own enforced `timeout`, #2969). Known hole: a backend restart in the readiness window
   loses the in-memory `create_task` — Push migration remediates; #1703 is the structural fix.
 
 ### 1. Auto-sync heartbeat (agent container)

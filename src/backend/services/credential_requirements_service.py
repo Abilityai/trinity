@@ -24,28 +24,21 @@ payload feeds AI checks, so adding value-derived data to that shared, LLM-bound
 payload is a widening. Being separate also decouples this panel from compat's
 cadence. Accepted cost: two exec paths to keep aligned.
 
-BOUNDING THE EXEC — ALL THREE, NONE IS SUFFICIENT ALONE
--------------------------------------------------------
-`docker_service.execute_command_in_container` ACCEPTS a `timeout` and then
-never references it again; `docker_utils.container_exec_run` has no timeout
-parameter, docker-py's `exec_run` has none, and docker-py's socket reader polls
-with no timeout before every `recv`. So the call is unbounded, and it runs on a
+BOUNDING THE EXEC
+-----------------
+docker-py's `exec_run` has no timeout, and it runs on a
 `ThreadPoolExecutor(max_workers=4)` shared by EVERY Docker operation in the
 backend (Invariant #11). Four wedged calls stop the backend's whole Docker
 layer, and it is agent-triggerable: the agent owns `/home/developer/.env`, and
 `mkfifo /home/developer/.env` makes an `open()` block forever.
 
-  1. Container-side `timeout(1)` — the load-bearing one. Self-termination closes
-     the socket, so the pool thread is actually reclaimed. (An `asyncio` timeout
-     cancels the await, never the thread.)
-  2. `asyncio.wait_for` — bounds the REQUEST, so a wedged probe degrades to
-     `agent_unreachable` instead of hanging the caller.
+  1. `execute_command_in_container(timeout=_SCRIPT_TIMEOUT)` — since #2969 the
+     primitive enforces it in the container (`timeout -k`, which reclaims the
+     pool thread) and around the await. The script's own inner
+     `timeout(1)` predates that and is kept as a belt.
+  2. `asyncio.wait_for(_REQUEST_TIMEOUT)` — bounds the REQUEST, so a wedged
+     probe degrades to `agent_unreachable` instead of hanging the caller.
   3. `stat.S_ISREG` before `open()` — closes the FIFO vector at the source.
-
-`compatibility/collector.py:_EXEC_TIMEOUT` is decorative for the same reason.
-That is a SECOND live instance of this hole, out of scope here and — as of this
-writing — NOT filed on either tracker. Stated plainly rather than as "tracked
-separately": a comment claiming a follow-up exists is the reason nobody checks.
 
 WHAT CROSSES THE IMAGE BOUNDARY
 -------------------------------
