@@ -676,6 +676,18 @@
       "description": "Tests for business task validation (#294): prompt building (placeholders, truncation, custom prompts), response parsing (JSON, markdown blocks, text fallback, failure indicators), business status mapping, schedule/execution model validation fields, API integration tests"
     },
     {
+      "file": "unit/test_2959_validation_input.py",
+      "feature": "Issue #2959",
+      "added": "2026-10-01",
+      "categories": [
+        "backend",
+        "unit",
+        "scheduler",
+        "validation"
+      ],
+      "description": "VALIDATE-001 input integrity (#2959): drives the real ValidationService with a fake auditor that PASSes only when the run's last-line status is in its prompt. A >10,000-char response validates against its last line (head+tail window); a custom validation_prompt without placeholders still carries the task and response; a full template is honoured and literal braces do not crash; an empty/whitespace/None response records business_status=validation_unavailable before any referee or validator run, files no operator-queue alert and is never a PASS; a validator cannot award itself 'unavailable'."
+    },
+    {
       "file": "test_github_pat.py",
       "feature": "Issue #347",
       "added": "2026-04-16",

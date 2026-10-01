@@ -487,7 +487,8 @@
 - **Description**: Post-execution validation phase that runs a clean-context Claude session with auditor framing to verify business task completion. Separates technical success (Claude ran without errors) from business success (intended work was done).
 - **Key Features**:
   - Per-schedule `validation_enabled`, `validation_prompt`, `validation_timeout_seconds` config
-  - `business_status` field on executions: `pending_validation`, `validated`, `failed_validation`, `skipped`
+  - `business_status` field on executions: `pending_validation`, `validated`, `failed_validation`, `validation_unavailable`, `skipped`
+  - #2959: a run with an empty response is recorded `validation_unavailable` before any validator is spawned — it never files the "Validation Failed" alert and can never count as a PASS. The validator always sees the run: a custom `validation_prompt` is framed with the task + response, and an over-long response keeps its tail (16,000-char window, last 12,000 kept)
   - Linked validation execution records via `validates_execution_id` / `validation_execution_id`
   - Default auditor prompt with explicit framing and JSON response format
   - Fallback text inference when JSON parsing fails
