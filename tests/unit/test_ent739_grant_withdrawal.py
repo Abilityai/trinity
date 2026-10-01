@@ -102,12 +102,24 @@ def test_a_permitted_but_missing_mount_is_still_drift(helpers, monkeypatch):
 
 def test_a_source_whose_volume_is_gone_is_not_expected(helpers, monkeypatch):
     """A permitted source with no volume yet is skipped, as before — not drift."""
+    import docker
+
     async def vol(name):
         if name == "agent-beta-shared":
-            raise LookupError("no volume")
+            raise docker.errors.NotFound("no volume")
         return object()
     monkeypatch.setattr(helpers, "volume_get", vol)
     assert _match(helpers, monkeypatch, _Db(), _container(_in("alpha"))) is True
+
+
+def test_an_unreadable_docker_keeps_the_mount_and_is_not_drift(helpers, monkeypatch):
+    """A transient Docker fault is not "no volume" (#2196): a permitted mount
+    that is present stays expected, so a start on a running agent does not
+    recreate it on a daemon hiccup."""
+    async def vol(name):
+        raise RuntimeError("docker daemon unreachable")
+    monkeypatch.setattr(helpers, "volume_get", vol)
+    assert _match(helpers, monkeypatch, _Db(), _container(_in("alpha"), _in("beta"))) is True
 
 
 def test_the_expose_mount_is_not_mistaken_for_a_consume_mount(helpers, monkeypatch):

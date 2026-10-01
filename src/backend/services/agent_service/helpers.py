@@ -505,8 +505,15 @@ async def check_shared_folder_mounts_match(container, agent_name: str) -> bool:
             # Check if volume exists (async to avoid blocking)
             try:
                 await volume_get(source_volume)
-            except Exception:
+            except docker.errors.NotFound:
                 continue  # Volume doesn't exist yet, OK to skip
+            except Exception:
+                # Docker unreadable is not "no volume" (#2196): an unknown
+                # answer must not read as drift and recreate a running
+                # container, so keep whatever mount is there.
+                if mount_path in mount_dests:
+                    expected.add(mount_path)
+                continue
             if mount_path not in mount_dests:
                 return False  # Should be mounted but isn't
             expected.add(mount_path)
