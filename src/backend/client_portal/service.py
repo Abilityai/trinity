@@ -45,6 +45,8 @@ from services.chat_title import (
 # #2157: the surface stamp written onto every portal execution — see
 # `config.PORTAL_SOURCE_CHANNEL` for why it exists and why it is not a channel.
 from config import PORTAL_SOURCE_CHANNEL
+from services import turn_context
+from services.channel_completion_report import COMPLETION_SOURCE_DONE, COMPLETION_SOURCE_FAILED
 
 from . import db
 from .models import (
@@ -360,6 +362,28 @@ def _multi_agent_chat_available() -> bool:
     a second, weaker source of truth for a fact the build already fixes.
     """
     return True
+
+
+def _projects_available(is_platform: bool, email: str | None = None) -> bool:
+    """ent#661: may this principal use Workspace Projects?
+
+    Entitled, AND either a platform principal or an outside client invited to
+    one (asked through `services.portal_capabilities`, since the core does not
+    hold invitations). An uninvited outside client is never told the capability
+    exists. Fails closed — an unreadable registry hides the surface rather than
+    advertising routes that would 404.
+    """
+    try:
+        from services.entitlement_service import entitlement_service
+        if entitlement_service.is_entitled("projects") is not True:
+            return False
+    except Exception:  # noqa: BLE001 — a roster must never 500 over a capability bit
+        logger.warning("[ent#661] projects capability read failed", exc_info=True)
+        return False
+    if is_platform:
+        return True
+    from services import portal_capabilities
+    return portal_capabilities.has("projects", (email or "").strip().lower())
 
 
 def _default_voice_id() -> str | None:
@@ -1014,6 +1038,7 @@ async def get_roster(email: str | None, include_owned: bool = False) -> PortalRo
         client_email=(email or None),
         agents=cards,
         multi_agent_chat_available=multi_agent_chat,
+        projects_available=_projects_available(include_owned, email),
         realtime_voice=realtime_voice_capability(include_owned),
         # ent#403: instance-level, so it rides the roster rather than every card.
         # Empty for a non-platform principal — belt to the per-card braces: the
@@ -1642,6 +1667,50 @@ def agent_on_roster(agent_name: str, email: str | None,
     return agent_name in roster_agent_names(email, include_owned)
 
 
+REPLY_QUOTE_MAX_CHARS = 2000
+REPLY_TARGET_REFUSED = "That message can't be replied to here. Remove the reply and send again."
+
+
+def reply_context(agent_name: str, email: str, session_id, message_id) -> str:
+    """The prompt block for a turn that replies to one earlier message (ent#610).
+
+    The client sends only the message ID; the quote is built HERE from the
+    stored row, so a client cannot put words in the agent's mouth as "your
+    earlier message". The row must be in THIS caller's thread with THIS agent —
+    the same ownership proof ent#366's rating check makes, plus the thread.
+
+    Fails LOUD, unlike `validated_open_canvas`: a canvas that is not open is a
+    harmless "nothing open", but a reply the agent never sees is context the
+    person believes they gave. So every refusal is one 422 with one message —
+    missing, someone else's, another agent's or another thread's all read the
+    same, so the route is no existence oracle — and the composer keeps the text.
+    """
+    if message_id is None:
+        return ""
+    if not isinstance(message_id, str) or not message_id or len(message_id) > 64:
+        raise ClientPortalError(422, REPLY_TARGET_REFUSED)
+    if not session_id:
+        raise ClientPortalError(422, REPLY_TARGET_REFUSED)
+    row = db.get_portal_message(message_id)
+    content = str((row or {}).get("content") or "").strip()
+    if (
+        not row
+        or row.get("agent_name") != agent_name
+        or str(row.get("client_email") or "").lower() != str(email or "").lower()
+        or row.get("session_id") != session_id
+        or not content
+    ):
+        logger.info("portal reply-to refused: agent=%s session=%s message=%s",
+                    agent_name, session_id, message_id)
+        raise ClientPortalError(422, REPLY_TARGET_REFUSED)
+    if len(content) > REPLY_QUOTE_MAX_CHARS:
+        content = content[:REPLY_QUOTE_MAX_CHARS].rstrip() + "…"
+    quoted = "\n".join(f"> {line}" if line.strip() else ">" for line in content.splitlines())
+    whose = "your earlier message" if row.get("role") == "assistant" else "their own earlier message"
+    return (f"[Client Portal] The user is replying to {whose} in this conversation:\n"
+            f"{quoted}\n\n")
+
+
 def validated_open_canvas(agent_name: str, canvas_id, *, is_platform: bool):
     """The open-canvas id to stamp on a turn, or None (ent#555).
 
@@ -1749,10 +1818,18 @@ _HISTORY_TYPED_TURNS = 100
 _SPOKEN_CONTEXT_MAX_CHARS = 24_000
 # The one line above a resumed turn's delta (#2694). Read by the tests.
 VOICE_DELTA_HEADER = (
-    "[What happened in this chat since your last reply — spoken in a voice call, "
-    "not typed; bracketed lines are the platform's own notes. Context only; the "
-    "client's new message follows below]"
+    "[What happened in this chat since your last reply — (voice) lines were spoken "
+    "in a voice call, not typed; bracketed lines are the platform's own notes. "
+    "Context only; the client's new message follows below]"
 )
+
+# ent#610 (#3054 review): the platform's report of a finished background task
+# (`channel_completion_report`) carries one of these markers, so it is NOT a
+# typed row (`db._TYPED`). It is never the resumed-turn cursor and is replayed
+# in both context blocks, told as the platform's note — the agent learns its
+# task came back and what it found, without being handed platform text as its
+# own words.
+_COMPLETION_SOURCES = frozenset({COMPLETION_SOURCE_DONE, COMPLETION_SOURCE_FAILED})
 
 
 _TITLE_MAX_CHARS = 60  # matches the sidebar's truncation width
@@ -2245,9 +2322,14 @@ def _refuse_turn_during_voice_call(session_id: str, *, voice_call_id: str | None
 def ensure_main_session(agent_name: str, email: str) -> str:
     """The pair's pinned **Main** chat id, creating it on first need (ent#523).
 
-    Main is created LAZILY, at exactly two call sites — this function's two
-    callers, `_resolve_session_id` (a turn or an ask with no named thread) and
-    `list_sessions` (opening the agent, which is what renders the pinned tab).
+    Main is created LAZILY, on first need, by exactly these callers:
+    `_resolve_session_id` (a turn or an ask with no named thread),
+    `list_sessions` (opening the agent, which is what renders the pinned tab),
+    `reset_main_session` (resolving the Main it retires),
+    `services/schedule_workspace_delivery.resolve_and_stamp` (a delivered
+    schedule, ent#498) and `services/report_service.resolve_report_session` (an
+    addressed report with no chat of its addressee, ent#610). The earlier
+    "exactly two call sites" went stale with the schedule caller.
     Deliberately NOT from `list_all_sessions`: that batch spans every rostered
     agent and runs on every sidebar refresh, so ensuring there would write one
     row per agent the user has never opened, and an empty Main is not a "recent
@@ -2303,6 +2385,49 @@ def ensure_thread_for_ask(agent_name: str, email: str) -> str:
     return _resolve_session_id(agent_name, email, None)
 
 
+def chat_for_execution(agent_name: str, email: str, execution_id: str) -> str | None:
+    """The Workspace chat `execution_id` is a turn of, iff that chat is
+    (agent_name, email)'s own — else None (ent#734).
+
+    Read off the execution row, which both portal turn-creation sites stamp at
+    creation (`source_channel_chat_id` = the session, `source_channel_client` =
+    the client — ent#457/#2426), so the link is written when the turn's row
+    is created rather than inferred later, and needs no column of its own.
+
+    `triggered_by == "public"` as well as the portal channel, because the
+    channel alone is not "a chat turn": `schedule_workspace_delivery` stamps the
+    same destination on a SCHEDULE row it delivers into Main, and a background
+    raise belongs to the Inbox only (the ent#610 amendment). A delegated child
+    inherits the stamp too (ent#265), under its own trigger. The session must
+    also belong to the pair, so a row can never place an ask in another
+    person's conversation. Raises like any other portal call; the caller owns
+    the fail-soft.
+
+    The turn must still be RUNNING (cso r1). The id arrives as a header the
+    platform sets, but the agent process holds its own key and can send any of
+    its executions' ids; only a live turn can be raising an ask. What remains
+    forgeable is bounded: another RUNNING turn of the same agent for the same
+    addressee — the #2392 trust level `turn_audience` already accepts. An
+    ARCHIVED chat is deliberately not excluded: a reset Main stays listed,
+    readable and resumable (`reset_main_session`), Reset is refused mid-turn,
+    so a running turn there is a person talking in a chat they can see.
+    """
+    from database import db as core_db
+    from models import TaskExecutionStatus
+    execution = core_db.get_execution(execution_id)
+    status = getattr(execution, "status", None)
+    if (execution is None or execution.agent_name != agent_name
+            or getattr(status, "value", status) != TaskExecutionStatus.RUNNING.value
+            or execution.triggered_by != "public"
+            or getattr(execution, "source_channel", None) != PORTAL_SOURCE_CHANNEL):
+        return None
+    chat_id = getattr(execution, "source_channel_chat_id", None)
+    client = (getattr(execution, "source_channel_client", None) or "").lower()
+    if not chat_id or not client or client != (email or "").lower():
+        return None
+    return chat_id if db.get_portal_session(chat_id, agent_name, client) else None
+
+
 def _one_line(content) -> str:
     """A row's content on ONE line. The line form `Who: text` is the whole
     contract of a context block, and a spoken row is text the platform wrote on
@@ -2347,6 +2472,8 @@ def _context_lines(rows: list[dict], spoken_budget: int) -> list[str]:
       ent#523 skipped these outright so the platform's line could not be
       replayed as the agent's words; a marker keeps that guarantee and stops
       hiding from the agent that a call ended or that Main was reset;
+    * a background task's completion report (ent#610 marker) →
+      ``[Background task report: …]``, for the same reason;
     * spoken rows beyond the budget are dropped oldest-first, and every cut is
       named where the call's kept rows begin — a count only, no pointer to a
       place the agent cannot read.
@@ -2361,6 +2488,9 @@ def _context_lines(rows: list[dict], spoken_budget: int) -> list[str]:
         role = m.get("role")
         if role == "system":
             lines.append(f"[{content}]")
+            continue
+        if m.get("source") in _COMPLETION_SOURCES:
+            lines.append(f"[Background task report: {content}]")
             continue
         spoken = m.get("source") == "voice"
         if spoken:
@@ -2689,7 +2819,11 @@ async def portal_chat(agent_name: str, message: str, email: str,
                       voice_call_id: str | None = None,
                       # ent#555 — the canvas on screen, validated at the router.
                       # Stamped on the execution so the agent's tools default to it.
-                      open_canvas_id: str | None = None) -> dict:
+                      open_canvas_id: str | None = None,
+                      # ent#610 — the quoted block `reply_context` built at the
+                      # router from a message id. Server-built text, never a
+                      # request field.
+                      reply_context: str = "") -> dict:
     """Run one client chat turn against a rostered agent as a standard platform
     execution (``triggered_by="public"`` — the external-caller path, observable +
     cost-tracked). Scoped to the caller's roster; raises ``ClientPortalError`` on
@@ -2942,12 +3076,25 @@ async def portal_chat(agent_name: str, message: str, email: str,
             "block id rather than rewriting the whole surface.\n\n"
         )
 
+    # ent#661 — lines other modules add to the turn (services/turn_context.py);
+    # "" in an OSS build. Resolved from THIS chat row and the principal, never
+    # from the request, and rides both arms for the same reason the canvas does.
+    turn_prefix = turn_context.collect(turn_context.TurnContext(
+        surface="thread", agent_name=agent_name, chat_id=session_id,
+        person_email=email, internal_audience=bool(include_owned)))
+
     # #2694 × ent#555 on a resumed turn: the voice delta comes first (it is
     # conversation the session never heard, so it reads as history), then the
-    # canvas on screen, then the file manifest, then what the client said.
-    # The cold message carries the replay in place of the delta.
-    cold_message = history_prefix + canvas_prefix + manifest_prefix + message
-    message = (delta_prefix + canvas_prefix + manifest_prefix + message) if resuming else cold_message
+    # turn context, then the canvas on screen, then the file manifest, then
+    # what the client said. The cold message carries the replay in place of
+    # the delta.
+    # ent#610 — the message this turn replies to, quoted, directly before what
+    # the client said (after the canvas and files, which describe the screen).
+    # On BOTH shapes: a resumed session remembers the thread but not which
+    # message the person just pointed at, and the cold retry needs it as much.
+    reply_prefix = reply_context or ""
+    cold_message = history_prefix + turn_prefix + canvas_prefix + manifest_prefix + reply_prefix + message
+    message = (delta_prefix + turn_prefix + canvas_prefix + manifest_prefix + reply_prefix + message) if resuming else cold_message
 
     # ent#212: inject the client's durable per-user memory (MEM-001) + the #1205
     # public-channel custom instructions into the turn, so a delegated end user
@@ -3698,7 +3845,9 @@ async def start_portal_turn(agent_name: str, message: str, email: str,
                             model: str | None = None,
                             # ent#555 — the canvas on screen, validated at the router.
                             # Stamped on the execution so the agent's tools default to it.
-                            open_canvas_id: str | None = None) -> dict:
+                            open_canvas_id: str | None = None,
+                            # ent#610 — see `portal_chat`.
+                            reply_context: str = "") -> dict:
     """Begin a turn and return as soon as it is dispatchable.
 
     Returns ``{execution_id, session_id}``. The caller subscribes to the
@@ -3806,7 +3955,8 @@ async def start_portal_turn(agent_name: str, message: str, email: str,
                               # already stamped on the row above, so `portal_chat`
                               # never re-resolves and the two cannot disagree.
                               model=model, resolved_model=resolved_model,
-                              open_canvas_id=open_canvas_id)
+                              open_canvas_id=open_canvas_id,
+                              reply_context=reply_context)
         except ClientPortalError as e:
             # There is no request left to raise into — the 202 went out long ago
             # — so the ONLY way this reaches the client is the record written
@@ -5218,14 +5368,16 @@ def _chat_state_room_left(email: str) -> bool:
         return True
 
 
-def get_chat_state(email: str) -> dict:
+def get_chat_state(email: str, unread: dict[str, int] | None = None) -> dict:
     """Star + unread state for every chat the caller has state for.
 
     Unread is computed for threads only; a room carries its own seq cursor and
-    is reported as starred-or-not with `unread = 0`.
+    is reported as starred-or-not with `unread = 0`. `unread` lets a caller pass
+    counts it already read in the same statement as something else
+    (ent#610 `chat_previews`), so the two cannot come from different instants.
     """
     rows = db.get_chat_state(email)
-    unread = db.count_unread_by_session(email)
+    unread = db.count_unread_by_session(email) if unread is None else unread
     chats = []
     seen_threads: set[str] = set()
     for r in rows:

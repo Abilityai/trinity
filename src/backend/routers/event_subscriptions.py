@@ -27,7 +27,7 @@ from db_models import (
     AgentEvent,
     AgentEventList,
 )
-from services import event_dispatch_service
+from services import dispatch_admission_service, event_dispatch_service
 from services.event_dispatch_service import RESERVED_EVENT_PREFIX
 
 logger = logging.getLogger(__name__)
@@ -95,6 +95,26 @@ def _reject_reserved_self_subscription(source_agent: str, subscriber_agent: str,
                 f"completion events instead."
             ),
         )
+
+
+async def _emit_chain_depth(current_user, matching_subs, endpoint: str):
+    """#2973: the chain depth an agent's emit hands its subscribers, or None.
+
+    An agent principal's emit that dispatches to at least one subscriber is a
+    hop (#2806): refused past the max (main.py maps the raise to the named
+    403) BEFORE the event is persisted, else the depth rides each loopback. An
+    emit nobody listens to dispatches nothing, so it is never refused.
+    """
+    if not matching_subs:
+        return None
+    return await dispatch_admission_service.enforce_inter_agent_depth(
+        current_user=current_user,
+        # The refusal is recorded as a collaboration edge, so name a real agent
+        # the event would have reached.
+        target=matching_subs[0].subscriber_agent,
+        endpoint=endpoint,
+        x_via_mcp=None,
+    )
 
 
 def _reject_reserved_emit(event_type: str):
@@ -341,6 +361,7 @@ async def emit_event(
 
     # Find matching subscriptions
     matching_subs = db.find_matching_event_subscriptions(source_agent, data.event_type)
+    chain_depth = await _emit_chain_depth(current_user, matching_subs, "/api/events")
 
     # Persist the event
     event = db.create_agent_event(
@@ -365,6 +386,7 @@ async def emit_event(
                 # agent-scoped key and the caller's USERNAME for a JWT human;
                 # only the former may be vouched to the subscriber.
                 agent_originated=bool(current_user.agent_name),
+                chain_depth=chain_depth,
             )
         )
 
@@ -397,6 +419,11 @@ async def emit_event_for_agent(
     _reject_reserved_emit(data.event_type)
 
     matching_subs = db.find_matching_event_subscriptions(name, data.event_type)
+    # #2973: the depth is the EMITTING principal's, whichever agent it names —
+    # a sibling emitting "for" another agent must not launder its own depth.
+    chain_depth = await _emit_chain_depth(
+        current_user, matching_subs, f"/api/agents/{name}/emit-event"
+    )
 
     event = db.create_agent_event(
         source_agent=name,
@@ -425,6 +452,7 @@ async def emit_event_for_agent(
                 # this issue removes, re-minted one level up and now signed by
                 # the backend. Vouch only when the emitter IS the agent.
                 agent_originated=current_user.agent_name == name,
+                chain_depth=chain_depth,
             )
         )
 

@@ -165,7 +165,8 @@ def test_the_hook_is_wired_into_the_creation_call(live_agent):
 def _stub_github_resolution(monkeypatch):
     async def _passthrough_fork(config, user, gh, repo, pat, tier, branch,
                                 *, source_metadata=None,
-                                source_metadata_reason=None):
+                                source_metadata_reason=None,
+                                allow_unforked_pull_only=False):
         return repo, pat, tier, None
 
     async def _ok(*args, **kwargs):

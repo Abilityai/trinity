@@ -32,7 +32,7 @@
           >{{ b.prefix }} <span v-if="b.id" class="min-w-0 max-w-[12rem] truncate font-mono" :title="b.id" data-testid="queue-reask-id">{{ b.id }}</span></BaseBadge>
         </div>
 
-        <p class="text-sm text-gray-600 dark:text-gray-400">{{ item.title }}</p>
+        <p class="text-sm text-gray-600 dark:text-gray-400"><AskMarkdown :text="item.title" inline data-testid="resolved-title" /></p>
 
         <!-- trinity-enterprise#611: the action this ask proposed, so the record
              says what was approved, denied or let expire (the Workspace keeps it
@@ -57,7 +57,7 @@
             <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
             </svg>
-            {{ item.response }}
+            <AskMarkdown :text="item.response" inline data-testid="resolved-response" />
           </span>
           <!-- The answer's note, or the operator's reason for cancelling. -->
           <span v-if="note" class="text-xs text-gray-500 dark:text-gray-400">
@@ -89,6 +89,7 @@ import { formatLocalDateTime } from '../../utils/timestamps'
 import AgentAvatar from '../AgentAvatar.vue'
 import BaseBadge from '../base/BaseBadge.vue'
 import QueueProposal from './QueueProposal.vue'
+import AskMarkdown from './AskMarkdown.vue'
 
 const props = defineProps({
   item: { type: Object, required: true }

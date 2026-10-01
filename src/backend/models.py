@@ -469,6 +469,11 @@ class User(BaseModel):
     # `X-Source-Agent` header is honoured for this one value and nothing else.
     # None on every other branch, JWT humans included.
     vouched_source_agent: Optional[str] = None
+    # #2973: the inter-agent chain depth (#2806) the backend computed when it
+    # dispatched an EVT-001 event, carried as a signed loopback claim so the
+    # subscriber's execution inherits it instead of starting a new root. Set
+    # only on a loopback JWT; None on every other branch.
+    loopback_chain_depth: Optional[int] = None
 
 
 class Token(BaseModel):
@@ -4309,6 +4314,16 @@ class UserRoleUpdate(BaseModel):
 
 class UpdateMyEmailRequest(BaseModel):
     email: str
+    # trinity-enterprise#720: the 6-digit code sent to `email` by
+    # `POST /api/users/me/email/code` — proof the caller holds the mailbox.
+    # Optional only for the audited admin transition on an install that cannot
+    # deliver mail; everywhere else a missing code is a 400.
+    code: Optional[str] = None
+
+
+class RequestEmailBindCodeRequest(BaseModel):
+    """`POST /api/users/me/email/code` — send a bind code to a NEW address (ent#720)."""
+    email: str
 
 
 class UserPreferenceWrite(BaseModel):
@@ -4952,6 +4967,10 @@ class ObjectiveMetricRead(BaseModel):
     #: Declared by the OWNING role's agent, not by this one — a supporting
     #: agent cannot fix that and must not be told to.
     declared_elsewhere: bool
+    #: The granted agent whose registry and point store supplied this row's
+    #: number (ent#727) — set only when this agent does not declare the metric
+    #: and exactly one agent it holds an `agent_permissions` grant on does.
+    served_by: Optional[str] = None
     #: The REGISTRY's vocabulary and nothing else — `up_good` | `down_good` |
     #: `neutral` | `null` — so a direction-aware formatter needs no fourth
     #: case. An objective's declared `hold` resolves to `neutral`; what tells
@@ -5032,6 +5051,8 @@ class ObjectiveJoinSummary(BaseModel):
     stale: int = 0
     undeclared: int = 0
     declared_elsewhere: int = 0
+    #: Rows whose number came from a granted agent (`served_by`, ent#727).
+    served_elsewhere: int = 0
 
 
 class ObjectiveJoinRead(BaseModel):

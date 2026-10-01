@@ -20,6 +20,7 @@
          is the one child that is not 22px, so it centres itself. -->
     <div class="mt-1.5 flex items-start gap-1">
       <button
+        v-if="copyable"
         type="button"
         class="p-1 rounded-md text-gray-400 hover:text-gray-700 dark:hover:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-800 focus:outline-none focus:ring-2 focus:ring-action-primary-500/40 transition-colors"
         :title="feedback ? feedback.label : COPY_MESSAGE_ARIA"
@@ -33,7 +34,7 @@
            silently did nothing" is the behaviour this replaces. The word is
            transient, so it is not standing noise on every message. -->
       <span
-        v-if="feedback"
+        v-if="copyable && feedback"
         class="text-[11px] self-center"
         :class="copiedOk
           ? 'text-status-success-700 dark:text-status-success-400'
@@ -62,6 +63,8 @@ import { copyText, copyFeedback, COPY_FEEDBACK_TTL_MS, COPY_MESSAGE_ARIA } from 
 
 const props = defineProps({
   content: { type: String, default: '' },
+  // ent#610 sign-off: the Inbox pane trades Copy for its reply arrow (slotted).
+  copyable: { type: Boolean, default: true },
 })
 
 const feedback = ref(null)

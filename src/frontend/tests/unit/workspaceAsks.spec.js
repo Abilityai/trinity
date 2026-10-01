@@ -235,6 +235,16 @@ describe('an unentitled build says nothing', () => {
   // Keeping the last good list on a failure makes the list session-scoped
   // state: it must not outlive a sign-out, or the next client on the same
   // browser sees the previous client's asks on their first failed read.
+  it('a sign-out drops the kept SESSION list too (round-3 /cso #2)', () => {
+    // fetchAllSessions returns `lastSessions` on a failed refresh — the same
+    // last-good-list shape as the asks, with the same next-client leak.
+    store.lastSessions = [{ id: 's1', agent_name: 'scout' }]
+    store.sessionsFailed = true
+    store.signOut()
+    expect(store.lastSessions).toEqual([])
+    expect(store.sessionsFailed).toBe(false)
+  })
+
   it('a sign-out drops the kept list, so the next client never inherits it', async () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
     portalHttp.get.mockResolvedValueOnce({ data: [ask('a1')] })
@@ -382,18 +392,26 @@ describe('expiredLabel', () => {
 
 // --- the thread link, and the surface that never rendered (ent#429) -----------
 describe('askThreadLink', () => {
+  // ent#610 (the 09-30 ruling): a link needs an ask a chat TURN raised; a
+  // background ask's chat_id (Main) is only the reply target.
+  const turn = { raised_in_turn: true }
   it('links to the thread an ask was raised against', () => {
-    expect(askThreadLink({ chat_id: 'sess-1' }, null)).toBe('sess-1')
-    expect(askThreadLink({ chat_id: 'sess-1' }, 'sess-2')).toBe('sess-1')
+    expect(askThreadLink({ ...turn, chat_id: 'sess-1' }, null)).toBe('sess-1')
+    expect(askThreadLink({ ...turn, chat_id: 'sess-1' }, 'sess-2')).toBe('sess-1')
+  })
+
+  it('offers nothing for a background ask attached to Main', () => {
+    expect(askThreadLink({ chat_id: 'main-1', raised_in_turn: false }, null)).toBeNull()
+    expect(askThreadLink({ chat_id: 'main-1' }, null)).toBeNull()
   })
 
   it('offers nothing when the reader is already there', () => {
-    expect(askThreadLink({ chat_id: 'sess-1' }, 'sess-1')).toBeNull()
+    expect(askThreadLink({ ...turn, chat_id: 'sess-1' }, 'sess-1')).toBeNull()
   })
 
   it('offers nothing for a homeless ask', () => {
     // Pre-ent#429 rows, and any ask whose attachment could not be resolved.
-    expect(askThreadLink({ chat_id: null }, 'sess-1')).toBeNull()
+    expect(askThreadLink({ ...turn, chat_id: null }, 'sess-1')).toBeNull()
     expect(askThreadLink({}, null)).toBeNull()
     expect(askThreadLink(undefined, null)).toBeNull()
   })
@@ -424,7 +442,8 @@ describe('the inline-in-chat surface filters by agent NAME', () => {
       new URL('../../src/components/portal/PortalConversation.vue', import.meta.url),
       'utf8',
     )
-    expect(src).toContain('store.asksForAgent(props.agent.name)')
+    // #3115: the strip no longer filters in the conversation — PortalAsks does,
+    // by the NAME it is handed (its own `asksForAgent(props.agentName)`).
     expect(src).not.toContain('store.asksForAgent(props.agent)')
     expect(src).toMatch(/:agent-name="agent\.name"/)
   })
@@ -493,8 +512,12 @@ describe('#2375 — the panel goes through the shared module (source-asserted)',
     // The exact regression: option buttons used to call answer() directly, so a
     // tap on an irreversible decision had no note and no explicit submit.
     expect(sfc).not.toMatch(/@click="answer\(/)
-    // A tap only arms Send: the option click writes the pick, nothing else.
-    expect(sfc).toMatch(/@click="picks\[ask\.id\] = /)
+    // A tap only arms Send: the option click goes through `pick`, which writes
+    // the pick and moves focus to the note (ent#610 §3g B2) — and never sends.
+    expect(sfc).toMatch(/@click="pick\(ask, opt\)"/)
+    const pickBody = sfc.match(/function pick\(ask, opt\) \{([\s\S]*?)\n\}/)?.[1] || ''
+    expect(pickBody).toMatch(/picks\[ask\.id\] = /)
+    expect(pickBody).not.toMatch(/submit|answerAsk/)
     expect(sfc).toMatch(/:disabled="busyId === ask\.id \|\| !picks\[ask\.id\]"/)
   })
 
@@ -509,6 +532,9 @@ describe('#2375 — the panel goes through the shared module (source-asserted)',
   })
 
   it('an approval carries an optional note field', () => {
-    expect(sfc).toMatch(/portal-ask-note-\$\{ask\.id\}/)
+    // trinity-enterprise#610: ids are `${tid.prefix}-…` now (default prefix
+    // 'portal-ask', so the rendered id is unchanged — mounted in
+    // portalAsksTestidPrefix.mount.spec.js).
+    expect(sfc).toMatch(/\$\{tid\.prefix\}-note-\$\{ask\.id\}/)
   })
 })

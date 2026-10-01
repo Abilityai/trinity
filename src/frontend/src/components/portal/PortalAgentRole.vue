@@ -26,10 +26,17 @@
         <p v-if="card.seat" class="mt-1 text-[11px] text-gray-400">Seat · {{ card.seat }}</p>
       </div>
 
-      <!-- Objectives with metric freshness. -->
-      <template v-if="card.objectives.length">
+      <!-- Objectives with metric freshness — the portal projection of the ONE
+           objective ↔ metric join (ent#676). An agent that simply has none
+           renders nothing here, as before. -->
+      <template v-if="card.objectives.length || card.objectives_error">
         <h3 class="mt-3 mb-1 text-[11px] font-medium text-gray-400">Objectives</h3>
-        <ul class="space-y-1.5">
+        <!-- Zero objectives for a NAMED reason: a read that did not happen is
+             never shown as "this agent has none" (principle 15). -->
+        <p v-if="!card.objectives.length" class="text-[12.5px] text-status-warning-700 dark:text-status-warning-300" data-testid="portal-role-objectives-error">
+          {{ objectivesErrorText(card.objectives_error) }}
+        </p>
+        <ul v-else class="space-y-1.5">
           <li v-for="o in card.objectives" :key="o.id"
               class="rounded-lg border border-gray-200 dark:border-gray-800 px-3 py-2 text-[12.5px]"
               data-testid="portal-role-objective">
@@ -38,16 +45,34 @@
               <span class="text-gray-400">{{ o.owned ? 'owns' : 'supports' }}<template v-if="o.horizon"> · {{ o.horizon }}</template></span>
             </div>
             <ul v-if="o.metrics.length" class="mt-1 space-y-0.5">
-              <li v-for="m in o.metrics" :key="m.name" class="flex items-center gap-2 tabular-nums"
+              <li v-for="m in o.metrics" :key="m.name"
                   :data-testid="m.stale ? 'portal-role-metric-stale' : 'portal-role-metric'">
-                <span class="font-mono text-[11.5px] min-w-0 truncate">{{ m.name }}</span>
-                <span class="text-gray-400">{{ m.value ?? '—' }}<template v-if="m.target != null"> / {{ m.target }}</template></span>
-                <BaseBadge v-if="m.stale" variant="warning" dot>stale</BaseBadge>
-                <span v-else class="text-[11px] text-gray-400" :title="m.as_of">as of {{ relative(m.as_of) }}</span>
+                <!-- Wraps: two badges beside the numbers must not crush the name in a narrow rail. -->
+                <div class="flex items-center gap-x-2 gap-y-0.5 flex-wrap tabular-nums">
+                  <span class="font-mono text-[11.5px] min-w-0 truncate">{{ m.name }}</span>
+                  <span class="text-gray-400">{{ shown(m.actual, m) }}<template v-if="m.target != null"> / {{ shown(m.target, m) }}</template></span>
+                  <!-- Position against the target, never pace. Stale is orthogonal: both can show. -->
+                  <BaseBadge v-if="gapBadge(m)" :variant="gapBadge(m).variant" dot data-testid="portal-role-metric-gap">{{ gapBadge(m).label }}</BaseBadge>
+                  <!-- Freshness is the backend's verdict (the one 2× cadence rule) — never recomputed here. -->
+                  <BaseBadge v-if="m.stale" variant="warning" dot :title="m.last_point_at || undefined">stale</BaseBadge>
+                  <span v-else-if="m.freshness === 'no_points'" class="text-[11px] text-gray-400">no points yet</span>
+                  <span v-else-if="m.last_point_at" class="text-[11px] text-gray-400" :title="m.last_point_at">as of {{ relative(m.last_point_at) }}</span>
+                </div>
+                <!-- A finding is never a blank: the Workspace's own sentence for its code. -->
+                <p v-if="m.finding" class="text-[11px] text-status-warning-700 dark:text-status-warning-300" data-testid="portal-role-metric-finding">
+                  {{ findingText(m.finding.code) }}
+                </p>
               </li>
             </ul>
           </li>
         </ul>
+        <!-- Some objectives joined but some files were not read: a partial list
+             must not look like a complete one (principle 15). -->
+        <p v-if="card.objectives.length && card.objectives_partial"
+           class="mt-1.5 text-[12.5px] text-status-warning-700 dark:text-status-warning-300"
+           data-testid="portal-role-objectives-partial">
+          Some objective files in the agent's canon couldn't be read, so this list may be incomplete.
+        </p>
       </template>
 
       <!-- Your relationship (ent#500 when it lands; stated, never blank). -->
@@ -111,9 +136,15 @@
  * objectives, metric freshness) plus the one platform fact — the owner's
  * readiness stamp. Split out of PortalAgentDetails so the flip verb is proven
  * by mounting it (#2918).
+ *
+ * ent#676 — the objectives are the portal projection of the one objective ↔
+ * metric join: numbers, `gap.status` and `freshness` arrive decided, and a
+ * finding arrives as a CODE. The sentences for those codes live here, because
+ * the operator's own are remediation a Workspace client cannot act on.
  */
 import { computed, ref, watch, onMounted } from 'vue'
 import { useClientPortalStore } from '@/stores/clientPortal'
+import { formatMetricValue, metricUnitSuffix } from '@/utils/metricFormat'
 import InlineError from '@/components/InlineError.vue'
 import ConfirmDialog from '@/components/ConfirmDialog.vue'
 import BaseBadge from '@/components/base/BaseBadge.vue'
@@ -145,6 +176,47 @@ function roleErrorText(code) {
     role_id_invalid: 'The role id in template.yaml is not a valid id.',
     canon_path_invalid: 'The canon path in template.yaml is not a valid path.',
   }[code] || 'The role could not be loaded.'
+}
+
+/** A value or target the way its declared type reads (the operator tiles' formatter). */
+function shown(value, m) {
+  if (value === null || value === undefined) return '—'
+  if (typeof value !== 'number') return String(value)
+  const text = formatMetricValue(value, m.type)
+  const suffix = metricUnitSuffix(value, m.type, m.unit)
+  if (!suffix) return text
+  return suffix === '%' ? `${text}%` : `${text} ${suffix}`
+}
+
+const GAP_BADGES = {
+  behind: { variant: 'warning', label: 'behind' },
+  off_target: { variant: 'warning', label: 'off target' },
+  ahead: { variant: 'success', label: 'ahead' },
+  on_target: { variant: 'success', label: 'on target' },
+}
+/** `not_computable` (and anything unknown) shows no badge — the finding line says why. */
+function gapBadge(m) {
+  return GAP_BADGES[m.gap?.status] || null
+}
+
+function findingText(code) {
+  return {
+    metric_undeclared: "This metric isn't being measured yet, so there is no number to show.",
+    metric_not_declared_here: 'Another agent measures this one. This agent supports the objective without tracking the number.',
+    metric_retired: "This metric is no longer measured, so its last number isn't shown.",
+    direction_mismatch: "The objective and the metric disagree on which way is good. The comparison follows the metric's own setting.",
+    direction_undeclared: "Nothing says whether higher or lower is better here, so it can't be compared with its target.",
+  }[code] || "This metric can't be compared with its target right now."
+}
+
+function objectivesErrorText(code) {
+  return {
+    objectives_rate_limited: "The agent's objectives are being read a lot right now. Try again in a minute.",
+    objectives_timeout: "The agent took too long to answer, so its objectives couldn't be read. Try again in a moment.",
+    objectives_unreadable: "The agent's objectives couldn't be read right now. Try again in a moment.",
+    agent_unreachable: 'The agent stopped answering while its objectives were being read. Try again in a moment.',
+    objectives_incomplete: "Some objective files in the agent's canon couldn't be read, so none are shown here.",
+  }[code] || "The agent's objectives couldn't be read."
 }
 
 watch(() => props.agentName, load)

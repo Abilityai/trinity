@@ -253,6 +253,18 @@ export const routes = [
     meta: { title: 'Workspace', hideHelpWidget: true }
   },
   {
+    // trinity-enterprise#610: the Inbox — what needs you and what came back,
+    // across your agents. The same Portal.vue shell renders it as a stage
+    // branch; `bootstrap()` lands a bare `/workspace` here once (D9), while bare
+    // `/workspace` itself stays the new-chat stage. Declared before the
+    // parameterised Workspace routes by convention; it cannot collide with them
+    // (`/c/`, `/r/`, `/a/` are literal prefixes).
+    path: '/workspace/inbox',
+    name: 'WorkspaceInbox',
+    component: () => import('../views/Portal.vue'),
+    meta: { title: 'Workspace · Inbox', hideHelpWidget: true }
+  },
+  {
     // #138: deep-linkable, refresh-safe conversation thread. The same shell as
     // /workspace (new-chat state); the :sessionId opens that thread. Back/forward
     // navigate between new-chat and threads.
@@ -287,6 +299,20 @@ export const routes = [
       title: (to) => `Workspace · ${agentTabTitle(to.params.agentName)}`,
       hideHelpWidget: true,
     }
+  },
+  {
+    // ent#661: Projects — the person's list across agents, and one project.
+    // Literal `projects` segment, safe beside `/c/`, `/r/`, `/a/` (ent#360).
+    path: '/workspace/projects',
+    name: 'WorkspaceProjects',
+    component: () => import('../views/Portal.vue'),
+    meta: { title: 'Workspace · Projects', hideHelpWidget: true }
+  },
+  {
+    path: '/workspace/projects/:projectId',
+    name: 'WorkspaceProject',
+    component: () => import('../views/Portal.vue'),
+    meta: { title: 'Workspace · Projects', hideHelpWidget: true }
   },
   // ent#357 legacy paths. Function form so query AND hash survive the hop —
   // these URLs were handed to real clients by email, and a client landing on a

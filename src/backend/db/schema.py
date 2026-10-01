@@ -186,7 +186,8 @@ TABLES = {
             created_at TEXT NOT NULL,
             expires_at TEXT NOT NULL,
             verified INTEGER DEFAULT 0,
-            used_at TEXT
+            used_at TEXT,
+            purpose TEXT
         )
     """,
 
@@ -336,7 +337,8 @@ TABLES = {
             started_at TEXT,
             completed_at TEXT,
             next_run_at TEXT,
-            stop_requested_at TEXT
+            stop_requested_at TEXT,
+            chain_depth INTEGER
         )
     """,
 
@@ -1991,6 +1993,12 @@ INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_users_username ON users(username)",
     "CREATE INDEX IF NOT EXISTS idx_users_auth0_sub ON users(auth0_sub)",
     "CREATE INDEX IF NOT EXISTS idx_users_email ON users(email)",
+    # trinity-enterprise#720 — a sign-in email belongs to ONE account. Every
+    # sign-in path resolves the account by email alone, so a duplicate is an
+    # identity coin toss. Lower-cased (addresses are compared that way), NULL
+    # allowed (password-only accounts, the pre-#82 placeholder).
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email_unique "
+    "ON users(lower(email)) WHERE email IS NOT NULL",
     "CREATE INDEX IF NOT EXISTS idx_agent_ownership_owner ON agent_ownership(owner_id)",
     "CREATE INDEX IF NOT EXISTS idx_agent_ownership_name ON agent_ownership(agent_name)",
     # Issue #834: partial index for the retention sweep — narrow scan to

@@ -312,7 +312,10 @@ describe('the strip is the primitive, and the editor has one home', () => {
     it('the native tooltip and the menu clamp are GATED, so the other strips grow neither', () => {
       // Unconditional, AgentDetail / Library / PortalRail sprout tooltips on
       // "Overview" / "Tasks" / "Files" for nothing.
-      const titles = s().match(/:title="fixedWidth \? tab\.label : undefined"/g) || []
+      // ent#610 sign-off: the visible button also takes a tab's signal meaning
+      // (`signalTitle`) — present ONLY on a tab with a dot, so a strip with
+      // nothing to say still sprouts no tooltip.
+      const titles = s().match(/:title="(tab\.signalTitle \|\| \()?fixedWidth \? tab\.label : undefined\)?"/g) || []
       expect(titles).toHaveLength(2)   // the visible tab button and the menu row
       expect(s()).toMatch(/:class="fixedWidth \? 'max-w-\[20rem\] truncate' : ''"/)
     })

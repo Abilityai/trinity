@@ -298,9 +298,28 @@ def raise_ask(
     raised_by: str,
     channel: str,
     actor_user: Any = None,
+    addressee: Optional[str] = None,
+    platform_execution_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Raise an ask through the platform and return its receipt
     (trinity-enterprise#611).
+
+    `platform_execution_id` (ent#661 v3) is the raising turn as the platform
+    saw it — the MCP request's `X-Trinity-Execution-Id` (#2392). When it is one
+    of this agent's own executions it is recorded as the ask's execution,
+    winning over an agent-written `context.execution_id`; `manual`, an unknown
+    id or another agent's changes nothing. Consumers (a project's asks) read
+    the turn from it, and ent#734 attaches an addressed ask to that turn's
+    Workspace chat. The header is platform-set, but the agent's own process can
+    send any of its executions' ids, so the guarantee is "one of this agent's
+    own turns" — never another agent's, and never (ent#734) another person's
+    chat or a finished turn's.
+
+    `addressee` (ent#661) names exactly who is asked, bypassing role
+    resolution. Only a `gate` raise may pass it (a platform decision such as an
+    agent owner's consent must reach that owner, not whoever a provider maps
+    `primary` to); for an agent's raise it is a programming error, so an agent
+    can never choose who is asked.
 
     The seam the agent's MCP tool calls today, and the one a gate calls later
     with `raised_by="gate"`, `channel="gate"` and a `request_id` derived from the
@@ -338,6 +357,7 @@ def raise_ask(
         raise ValueError(f"raise_ask: unknown channel {channel!r}")
     if (raised_by == "gate") != (channel == "gate"):
         raise ValueError(f"raise_ask: channel {channel!r} does not go with raised_by {raised_by!r}")
+    named = _named_addressee(addressee, raised_by)
     norm = _validated_ask(ask, oqs, raised_by=raised_by)
     existing = db.get_operator_queue_item_for_agent_by_request_id(agent_name, norm["request_id"])
     if existing:
@@ -351,15 +371,27 @@ def raise_ask(
     predecessor = _predecessor(agent_name, norm["supersedes_expired"], raised_by)
     if norm["proposal"] is not None and predecessor is None:
         _refuse_unlinked_reask(agent_name, norm["proposal"], raised_by)
-    people, addressee, resolved = _address(agent_name, norm["to"])
+    if named:
+        people, addressee, resolved = [named], named, True
+    else:
+        people, addressee, resolved = _address(agent_name, norm["to"])
 
     context = dict(norm["context"])
+    turn = _platform_turn(agent_name, platform_execution_id)
+    if turn:
+        context["execution_id"] = turn
     if addressee:
-        # The addressee's Main chat (ent#429/#523), resolved at raise time. Only
-        # after the caps passed: attaching may create the chat.
-        thread = oqs._workspace_thread_for(agent_name, addressee)
+        # The chat the raising turn serves (ent#734), else the addressee's Main
+        # (ent#429/#523), resolved at raise time. Only after the caps passed:
+        # attaching may create Main. Only an AGENT's raise reads the turn: a
+        # gate's ask is a background ask, and belongs to the Inbox only
+        # (the ent#610 amendment of 2026-09-30).
+        thread, in_turn = oqs._workspace_attachment(
+            agent_name, addressee, execution_id=turn if raised_by == "agent" else None)
         if thread:
             context[oqs._WORKSPACE_THREAD_KEY] = thread
+        if thread and in_turn:
+            context[oqs._WORKSPACE_TURN_KEY] = True
     item = {
         "id": norm["request_id"],
         "type": norm["type"],
@@ -421,6 +453,18 @@ def raise_ask(
         logger.warning("[AskService] could not schedule the raised announcement", exc_info=True)
     return _receipt(row, status="created", resolved=resolved,
                     supersedes_request_id=norm["supersedes_expired"])
+
+
+def _platform_turn(agent_name: str, execution_id: Optional[str]) -> Optional[str]:
+    """The platform-supplied turn id iff it is this agent's own execution — never raises."""
+    if not execution_id or execution_id == "manual":
+        return None
+    from services.idempotency_service import resolve_and_validate_execution
+    try:
+        return execution_id if resolve_and_validate_execution(execution_id, agent_name) is not None else None
+    except Exception:  # noqa: BLE001 — provenance never fails the ask
+        logger.warning("[AskService] turn lookup failed — ask stored without it", exc_info=True)
+        return None
 
 
 def _too_large(field: str, limit: int, unit: str) -> AskRejected:
@@ -487,8 +531,9 @@ def _validated_ask(ask: Any, oqs, *, raised_by: str = "agent") -> Dict[str, Any]
     if not isinstance(context, Mapping):
         raise AskRejected(422, "invalid_context", "context must be an object.")
     # The workspace thread is platform-written: an agent that could author it
-    # would choose which conversation its ask claims to belong to (ent#429).
-    context = {k: v for k, v in context.items() if k != oqs._WORKSPACE_THREAD_KEY}
+    # would choose which conversation its ask claims to belong to (ent#429), and
+    # whether it is drawn in that chat at all (ent#734).
+    context = {k: v for k, v in context.items() if k not in oqs._PLATFORM_CONTEXT_KEYS}
     context_bytes = oqs._json_bytes(context)
     if context_bytes is None:
         raise AskRejected(422, "invalid_context", "context must serialize as JSON.")
@@ -611,6 +656,22 @@ def _refuse_unlinked_reask(agent_name: str, proposal: Dict[str, Any], raised_by:
                 expired_request_id=prior["request_id"])
 
 
+def _named_addressee(addressee: Optional[str], raised_by: str) -> Optional[str]:
+    """The lower-cased email a platform raise names, or None when none is named.
+
+    A programming error (`ValueError`), never a refusal: an agent's raise that
+    names anyone, or a named addressee that is not an email.
+    """
+    if addressee is None:
+        return None
+    if raised_by != "gate":
+        raise ValueError("raise_ask: only a gate raise may name its addressee")
+    email = str(addressee).strip().lower()
+    if "@" not in email:
+        raise ValueError("raise_ask: addressee must be an email")
+    return email
+
+
 def _address(agent_name: str, role: str) -> Tuple[List[str], Optional[str], bool]:
     """`(resolved_to, addressed_to_email, resolved)` for a role.
 
@@ -675,7 +736,7 @@ def _differs(row: Dict[str, Any], norm: Dict[str, Any], oqs) -> List[str]:
     An ask-specific comparison: the file fingerprint's addressee arm would call
     every `primary` ask different (the owner is never on its own roster)."""
     stored_context = row.get("context") if isinstance(row.get("context"), dict) else {}
-    stored_context = {k: v for k, v in stored_context.items() if k != oqs._WORKSPACE_THREAD_KEY}
+    stored_context = {k: v for k, v in stored_context.items() if k not in oqs._PLATFORM_CONTEXT_KEYS}
     expires = norm["expires_at"]
     pairs = {
         "title": (norm["title"], row.get("title")),

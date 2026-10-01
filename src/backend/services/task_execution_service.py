@@ -1419,6 +1419,9 @@ class TaskExecutionService:
         # Only a pull pilot's queue reads it: the claim never runs two queued
         # turns with the same key at once. Ignored on the push path.
         conversation_key: Optional[str] = None,
+        # #2973: inter-agent chain depth (#2806) the caller already admitted;
+        # stamped on the row created here. Ignored when `execution_id` is given.
+        chain_depth: Optional[int] = None,
     ) -> TaskExecutionResult:
         """
         Execute a task on an agent container with full lifecycle management.
@@ -1508,6 +1511,7 @@ class TaskExecutionService:
                     # persisting it would leave `_resolve_portal` failing closed on
                     # every row this branch creates — the sync Workspace turn.
                     source_channel_client=source_channel_client,
+                    chain_depth=chain_depth,
                 ),
             )
             execution_id = execution.id if execution else None

@@ -216,6 +216,7 @@ class LoopService:
         source_agent_name: Optional[str] = None,
         source_mcp_key_id: Optional[str] = None,
         source_mcp_key_name: Optional[str] = None,
+        chain_depth: Optional[int] = None,
     ) -> dict:
         """Create the loop row and dispatch its first iteration.
 
@@ -242,6 +243,7 @@ class LoopService:
             source_agent_name=source_agent_name,
             source_mcp_key_id=source_mcp_key_id,
             source_mcp_key_name=source_mcp_key_name,
+            chain_depth=chain_depth,
         )
         loop_id = loop_row["id"]
         db.mark_loop_running(loop_id)
@@ -663,6 +665,8 @@ class LoopService:
                 source_mcp_key_name=loop.get("source_mcp_key_name"),
                 model_used=loop.get("model"),
                 loop_id=loop_id,
+                # #2973: the starter's inherited depth, captured at loop start.
+                chain_depth=loop.get("chain_depth"),
             ),
         )
         if execution is None:
