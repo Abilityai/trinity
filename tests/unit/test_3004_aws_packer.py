@@ -115,8 +115,15 @@ def test_the_bakery_refuses_a_tag_without_aws_support() -> None:
     """Tags before #3004 reject `--cloud aws`; fail at the top of the build with
     the reason, not ten minutes in with start.sh's generic refusal."""
     bake = _code(_ROOT / "packer" / "digitalocean" / "scripts" / "01-provision.sh")
-    check = bake.index("digitalocean|aws) ;;' scripts/deploy/start.sh")
-    assert check < bake.index("./scripts/deploy/start.sh --provision")
+    m = re.search(r"grep -qF? '([^']+)' scripts/deploy/start\.sh", bake)
+    assert m, "the bakery no longer probes start.sh for AWS support"
+    marker = m.group(1)
+    # A feature marker that formatting cannot move: the function's definition.
+    assert marker == "provision_aws_imds() {"
+    assert re.search(rf"^{re.escape(marker)}$", (_ROOT / "scripts" / "deploy" / "start.sh").read_text(), re.M), (
+        "start.sh no longer defines the marker the bakery probes for — every AWS build would fail"
+    )
+    assert m.start() < bake.index("./scripts/deploy/start.sh --provision")
     assert "first release containing AWS support" in bake
 
 

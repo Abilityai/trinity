@@ -27,9 +27,18 @@ before (#2380). Only the builder, the cleanup and the submit script are AWS-only
 - The release's images on GHCR, publicly pullable.
 - `packer` ≥ 1.9 and AWS credentials for the publishing account (environment or
   profile) with EC2 image-building permissions in us-east-1.
-- The account's **block public access for AMIs** setting off, so `ami_groups =
-  ["all"]` can make the AMI public. The Marketplace lane does not need a public
-  AMI; the Launch Stack lane does.
+- The account's EC2 **Block public access for AMIs** setting off, so `ami_groups =
+  ["all"]` can make the AMI public. Newer accounts have it on by default, and the
+  build then fails at the share step after the whole build. Check and turn it off
+  (us-east-1):
+
+  ```bash
+  aws ec2 get-image-block-public-access-state --region us-east-1
+  aws ec2 disable-image-block-public-access --region us-east-1
+  ```
+
+  To build a private AMI for testing instead, remove the `ami_groups` line. The
+  Marketplace lane does not need a public AMI; the Launch Stack lane does.
 
 ## Build
 
@@ -65,7 +74,9 @@ Ingestion") with the `AWSMarketplaceAmiIngestion` policy. Run "Test Add Version"
 
 `trinity.cfn.yaml` creates the instance (default `t3a.large`), a security group
 open on 80 and 443, an Elastic IP, and optionally SSH from one address range
-(`SshCidr`) with a key pair (`KeyName`). No IAM role. Outputs: `TrinityUrl` and
+(`SshCidr`) with a key pair (`KeyName`). No IAM role. The instance goes into a
+default subnet of the default VPC, or into `SubnetId` (with its `VpcId`), and
+always gets a public IPv4 address. Outputs: `TrinityUrl` and
 `InstanceId` — the value `/setup` asks for.
 
 Host the template in a public S3 bucket, then build the quick-create link:

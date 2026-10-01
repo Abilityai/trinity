@@ -234,16 +234,18 @@ it logs only when something changed or failed. Allow a few minutes after a start
 Elastic IP avoids the change altogether.
 
 **No public IPv4.** `start.sh` stops with "this EC2 instance has no public IPv4
-address". Enable auto-assign public IP on the subnet or attach an Elastic IP,
-then re-run.
+address" after recording everything that needs no address and installing the
+refresh timer. Attach an Elastic IP (or a public address); within five minutes
+the timer finishes the setup and starts Trinity, with no SSH needed.
 
 **Metadata service.** Agent containers cannot reach `169.254.169.254`
 (`docker-firewall.sh` drops link-local traffic from containers). The instance
 metadata service holds user data and any instance-role credentials.
 
-**The CloudFormation template** creates the instance in the region's default
-VPC. An account without a default VPC needs the template's instance given a
-subnet. The AMI is published in us-east-1 only.
+**The CloudFormation template** creates the instance in a default subnet of the
+region's default VPC, or in the subnet you give as `SubnetId` (with its `VpcId`).
+The instance gets a public IPv4 address whatever the subnet's auto-assign
+setting. The AMI is published in us-east-1 only.
 
 **Building the AMI:** [packer/aws/README.md](../packer/aws/README.md).
 

@@ -61,9 +61,10 @@ git clone --depth 1 --branch "${TRINITY_IMAGE_TAG}" \
 cd /opt/trinity
 
 # A tag cut before AWS support (#3004) has a start.sh that refuses --cloud aws.
+# The probe is the IMDSv2 helper's definition, pinned by test_3004_aws_packer.
 # Say so now, in plain words, rather than ten minutes of apt later.
 if [ "${TRINITY_CLOUD:-digitalocean}" = "aws" ] \
-    && ! grep -q 'digitalocean|aws) ;;' scripts/deploy/start.sh; then
+    && ! grep -qF 'provision_aws_imds() {' scripts/deploy/start.sh; then
     echo "FATAL: ${TRINITY_IMAGE_TAG} predates AWS support (#3004). Build from the first release containing AWS support, or later." >&2
     exit 1
 fi

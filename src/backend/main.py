@@ -1842,7 +1842,8 @@ async def get_version(current_user: User = Depends(get_current_user)):
     modules listed in `enterprise_features`. See docs/ENTERPRISE.md.
 
     `install_source` (#2380) is how this instance was installed —
-    `do-marketplace` / `vultr-marketplace` / `script` / `unknown` — recorded
+    `do-marketplace` / `vultr-marketplace` / `aws-marketplace` / `do-script` /
+    `aws-script` / `script` / `unknown` — recorded
     once at first boot and surfaced here so an operator can answer "what kind
     of install is this?" from a support surface they already read.
     """

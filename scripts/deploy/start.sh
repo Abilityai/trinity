@@ -464,6 +464,14 @@ CADDY
     # 077: a 0600 root file the `caddy` service user cannot read, so the restart
     # fails and the droplet never serves. It holds no secrets.
     chmod 0644 /etc/caddy/Caddyfile.new
+    # Unchanged and already running: leave Caddy alone. A refresh that keeps
+    # failing at the backend step re-renders the same file every five minutes,
+    # and a restart drops every live connection, SSE streams included. A
+    # stopped Caddy (the machine phase stops it) is still started.
+    if cmp -s /etc/caddy/Caddyfile.new /etc/caddy/Caddyfile && systemctl is-active --quiet caddy; then
+        rm -f /etc/caddy/Caddyfile.new
+        return 0
+    fi
     mv -f /etc/caddy/Caddyfile.new /etc/caddy/Caddyfile
     systemctl enable caddy
     systemctl restart caddy
@@ -471,10 +479,11 @@ CADDY
 
 provision_site() {
     local ip provenance
-    ip="$(provision_public_ip)" || exit 1
     mkdir -p /etc/trinity
     chmod 0700 /etc/trinity
 
+    # Everything that needs no address first, so a missing address below
+    # leaves only the address-dependent half to finish.
     [ -f .env ] || cp .env.example .env
     provenance="${PROVISION_PROVENANCE:-$(provision_default_provenance)}"
     # FRONTEND_PORT moves the SPA off :80 so Caddy can own 80/443 in front of it.
@@ -485,8 +494,20 @@ provision_site() {
     fi
     provision_default_admin_source
     provision_setup_claim
+
+    # No public address yet (an EC2 subnet that assigns none, an Elastic IP
+    # still to come). On the Marketplace path nobody has a shell to re-run this,
+    # so the refresh timer is installed anyway and /etc/trinity/site-pending
+    # tells it to finish the site phase, and the install, once an address
+    # appears (see the refresh block below).
+    if ! ip="$(provision_public_ip)"; then
+        provision_refresh_units
+        : > /etc/trinity/site-pending
+        provision_die "setup will finish by itself within five minutes of this instance getting a public IPv4 address."
+    fi
     provision_apply_ip "$ip" "$provenance"
     echo "$ip" > /etc/trinity/public-ip
+    rm -f /etc/trinity/site-pending
     provision_refresh_units
 }
 
@@ -590,6 +611,10 @@ provision_setup_claim() {
         || provision_die "could not create ${tmp}."
     chown -h 1000:1000 "$tmp"
     mv -f "$tmp" "${data_path}/setup-claim"
+    # Recorded with the claim, so a run that exports nothing (the refresh timer
+    # finishing a pending site phase) still installs on the claim path, and so
+    # the marker check above knows this instance's claim was already written.
+    set_env_key ADMIN_PASSWORD_SOURCE instance-id
     echo "→ Setup claim: the instance ID is required at /setup."
 }
 
@@ -640,7 +665,7 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
-ExecStart=${PWD}/scripts/deploy/start.sh --provision --cloud ${PROVISION_CLOUD} --refresh-ip${_hosted}
+ExecStart="${PWD}/scripts/deploy/start.sh" --provision --cloud ${PROVISION_CLOUD} --refresh-ip${_hosted} --unattended
 # The script prints only on a change or a failure; logging its output at
 # notice and dropping everything below keeps systemd's own Starting/Finished
 # lines, every five minutes, out of the journal.
@@ -695,9 +720,18 @@ if [ "$PROVISION" = "1" ]; then
     if [ "$PROVISION_PHASE" = "refresh" ]; then
         [ -f .env ] || provision_die "no .env here — run this from the Trinity install directory."
         _new_ip="$(provision_refresh_target)" || exit 0
-        _old_ip="$(cat /etc/trinity/public-ip 2>/dev/null || true)"
-        provision_refresh_apply "$_old_ip" "$_new_ip"
-        exit 0
+        if [ ! -e /etc/trinity/site-pending ]; then
+            _old_ip="$(cat /etc/trinity/public-ip 2>/dev/null || true)"
+            provision_refresh_apply "$_old_ip" "$_new_ip"
+            exit 0
+        fi
+        # First boot stopped for want of an address and now there is one: run
+        # the site phase and the install it never reached, as the provenance it
+        # recorded. This is the one refresh that continues into the install.
+        echo "→ Public IP ${_new_ip} is now assigned: finishing the setup first boot could not complete."
+        PROVISION_PROVENANCE="$(env_value TRINITY_INSTALL_SOURCE)"
+        PROVISION_PHASE=site
+        rm -f /etc/trinity/firstboot-failed
     fi
 
     echo "Provisioning host (cloud: ${PROVISION_CLOUD}, phase: ${PROVISION_PHASE})..."

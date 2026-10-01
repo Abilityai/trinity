@@ -63,3 +63,25 @@ def test_outputs_carry_the_url_and_the_claim_value(cfn):
     out = cfn["Outputs"]
     assert out["InstanceId"]["Value"] == {"Ref": "Instance"}
     assert "https://" in str(out["TrinityUrl"]["Value"])
+
+
+def test_the_instance_gets_a_public_ipv4_in_any_subnet(cfn):
+    """A subnet that does not auto-assign public addresses must still give the
+    instance one, so first boot reaches its IP certificate."""
+    (inst,) = _of_type(cfn, "AWS::EC2::Instance").values()
+    props = inst["Properties"]
+    assert "SecurityGroupIds" not in props, "ignored by EC2 once NetworkInterfaces is set"
+    (eni,) = props["NetworkInterfaces"]
+    assert eni["AssociatePublicIpAddress"] is True
+    assert str(eni["DeviceIndex"]) == "0"
+    assert eni["GroupSet"] == [{"Fn::GetAtt": ["SecurityGroup", "GroupId"]}]
+    assert eni["SubnetId"] == {"Fn::If": ["HasSubnetId", {"Ref": "SubnetId"}, {"Ref": "AWS::NoValue"}]}
+
+
+def test_subnet_and_vpc_are_optional_and_go_together(cfn):
+    p = cfn["Parameters"]
+    assert p["SubnetId"]["Default"] == "" and p["VpcId"]["Default"] == ""
+    (sg,) = _of_type(cfn, "AWS::EC2::SecurityGroup").values()
+    assert sg["Properties"]["VpcId"] == {"Fn::If": ["HasVpcId", {"Ref": "VpcId"}, {"Ref": "AWS::NoValue"}]}
+    rule = cfn["Rules"]["SubnetNeedsItsVpc"]
+    assert rule["RuleCondition"] == {"Fn::Not": [{"Fn::Equals": [{"Ref": "SubnetId"}, ""]}]}

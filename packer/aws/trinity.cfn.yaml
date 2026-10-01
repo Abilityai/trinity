@@ -12,6 +12,8 @@ Metadata:
     ParameterGroups:
       - Label: {default: Instance}
         Parameters: [ImageId, InstanceType]
+      - Label: {default: Optional network placement}
+        Parameters: [VpcId, SubnetId]
       - Label: {default: Optional SSH access}
         Parameters: [KeyName, SshCidr]
 
@@ -26,6 +28,20 @@ Parameters:
     Default: t3a.large
     AllowedValues: [t3a.large, t3.large, m7i-flex.large, t3a.xlarge, t3.xlarge, m7i-flex.xlarge]
     Description: 8 GiB of memory is the minimum Trinity is sized for.
+  VpcId:
+    Type: String
+    Default: ""
+    Description: >-
+      Optional VPC id (vpc-...). Leave blank to use the region's default VPC.
+      Required when SubnetId is set: the security group must be in the
+      subnet's VPC.
+  SubnetId:
+    Type: String
+    Default: ""
+    Description: >-
+      Optional subnet id (subnet-...) in VpcId. Leave blank for a default
+      subnet of the default VPC. The instance gets a public IPv4 address either
+      way.
   KeyName:
     Type: String
     Default: ""
@@ -38,7 +54,20 @@ Parameters:
       Optional address range allowed to reach SSH (port 22), e.g. 203.0.113.4/32.
       Leave blank to keep port 22 closed.
 
+Rules:
+  SubnetNeedsItsVpc:
+    RuleCondition:
+      Fn::Not: [{Fn::Equals: [{Ref: SubnetId}, ""]}]
+    Assertions:
+      - Assert:
+          Fn::Not: [{Fn::Equals: [{Ref: VpcId}, ""]}]
+        AssertDescription: Set VpcId to the VPC that contains SubnetId.
+
 Conditions:
+  HasVpcId:
+    Fn::Not: [{Fn::Equals: [{Ref: VpcId}, ""]}]
+  HasSubnetId:
+    Fn::Not: [{Fn::Equals: [{Ref: SubnetId}, ""]}]
   HasKeyName:
     Fn::Not: [{Fn::Equals: [{Ref: KeyName}, ""]}]
   HasSshCidr:
@@ -49,6 +78,8 @@ Resources:
     Type: AWS::EC2::SecurityGroup
     Properties:
       GroupDescription: Trinity - HTTPS, plus HTTP for the certificate challenge and redirect
+      VpcId:
+        Fn::If: [HasVpcId, {Ref: VpcId}, {Ref: "AWS::NoValue"}]
       SecurityGroupIngress:
         - {IpProtocol: tcp, FromPort: 443, ToPort: 443, CidrIp: 0.0.0.0/0}
         - {IpProtocol: tcp, FromPort: 80, ToPort: 80, CidrIp: 0.0.0.0/0}
@@ -70,8 +101,16 @@ Resources:
       InstanceType: {Ref: InstanceType}
       KeyName:
         Fn::If: [HasKeyName, {Ref: KeyName}, {Ref: "AWS::NoValue"}]
-      SecurityGroupIds:
-        - {"Fn::GetAtt": [SecurityGroup, GroupId]}
+      # A public IPv4 whatever the subnet's auto-assign setting, so first boot
+      # can read its address and obtain the certificate before the Elastic IP
+      # attaches (the refresh timer then moves to the Elastic IP).
+      NetworkInterfaces:
+        - DeviceIndex: "0"
+          AssociatePublicIpAddress: true
+          GroupSet:
+            - {"Fn::GetAtt": [SecurityGroup, GroupId]}
+          SubnetId:
+            Fn::If: [HasSubnetId, {Ref: SubnetId}, {Ref: "AWS::NoValue"}]
       Tags:
         - {Key: Name, Value: {Ref: "AWS::StackName"}}
 

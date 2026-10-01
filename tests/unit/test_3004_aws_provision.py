@@ -391,33 +391,158 @@ def test_the_refresh_timer_repeats_the_install_mode_and_logs_quietly(tmp_path, h
 
 
 def test_the_site_phase_wires_all_of_it_in_order() -> None:
+    """Everything that needs no address (the .env keys, the admin path, the
+    claim) comes BEFORE the address read, so a first boot with no public IPv4
+    leaves only the address-dependent half for the refresh timer to finish."""
     site = _extract("provision_site")
     order = [site.index(s) for s in (
-        "provision_public_ip", "provision_default_admin_source", "provision_setup_claim",
-        "provision_apply_ip", "> /etc/trinity/public-ip", "provision_refresh_units",
-    )]
+        "set_env_key TRINITY_INSTALL_SOURCE", "provision_default_admin_source",
+        "provision_setup_claim", "provision_public_ip", "provision_apply_ip",
+        "> /etc/trinity/public-ip",
+    )] + [site.rindex("provision_refresh_units")]
     assert order == sorted(order), "provision_site calls its steps out of order"
 
 
-def test_the_refresh_phase_and_the_lock_exist() -> None:
-    body = _START.read_text()
-    assert "--refresh-ip)   PROVISION_PHASE=refresh ;;" in body
-    assert "exec 9>/run/trinity-provision.lock" in body
-    # The timer never queues behind another run; a person gets told why it waits.
-    assert "flock -n 9 || exit 0" in body
-    assert "Waiting for another provisioning run to finish" in body
+_SITE = _IMDS + ["provision_public_ip", "provision_default_provenance", "provision_default_admin_source",
+                 "provision_setup_claim", "provision_apply_ip", "provision_refresh_units", "provision_site"]
 
 
-def test_the_refresh_never_falls_through_into_the_install() -> None:
+def test_no_public_ipv4_on_first_boot_leaves_the_timer_to_finish(tmp_path):
+    """The Marketplace buyer has no SSH. A first boot that finds no public IPv4
+    must leave the instance able to finish by itself once one is attached: the
+    refresh timer installed, a pending marker, and every address-free step
+    (provenance, admin path, claim) already recorded."""
+    (tmp_path / ".env.example").write_text("ADMIN_PASSWORD=\n")
+    r = _run(tmp_path, "PROVISION_CLOUD=aws; HOSTED=1; PROVISION_PROVENANCE=aws-marketplace; provision_site",
+             _SITE, {"PUBLIC_IP": None, "ADMIN_PASSWORD_SOURCE": "instance-id"})
+    assert r.returncode != 0
+    assert "Elastic IP" in r.stderr and "finish" in r.stderr
+    state = tmp_path / "etc-trinity"
+    assert (state / "site-pending").exists()
+    assert not (state / "public-ip").exists()
+    assert (tmp_path / "units" / "trinity-ip-refresh.timer").exists()
+    dot = (tmp_path / ".env").read_text()
+    assert "TRINITY_INSTALL_SOURCE=aws-marketplace" in dot
+    assert "ADMIN_PASSWORD_SOURCE=instance-id" in dot, (
+        "the timer's run exports nothing; without the source in .env the install "
+        "it finishes would generate a password instead of taking the claim"
+    )
+    assert (tmp_path / "trinity-data" / "setup-claim").exists()
+    assert "caddyfile" not in _log(tmp_path, "calls.log")
+
+
+def test_a_completed_site_phase_clears_the_pending_marker(tmp_path):
+    (tmp_path / ".env.example").write_text("")
+    state = tmp_path / "etc-trinity"
+    state.mkdir()
+    (state / "site-pending").write_text("")
+    r = _run(tmp_path, "PROVISION_CLOUD=aws; HOSTED=1; provision_site", _SITE)
+    assert r.returncode == 0, r.stderr
+    assert not (state / "site-pending").exists()
+    assert (state / "public-ip").read_text().strip() == "203.0.113.20"
+
+
+# ---------------------------------------------------------------------------
+# The main --provision block, executed: lock, refresh exit, pending completion
+# ---------------------------------------------------------------------------
+
+_HAS_FLOCK = shutil.which("flock") is not None
+
+
+def _main_block() -> str:
     body = _START.read_text()
-    at = body.rindex('if [ "$PROVISION_PHASE" = "refresh" ]; then', 0,
-                     body.index('_new_ip="$(provision_refresh_target)"'))
-    block = body[at:]
-    block = block[: block.index("\n    fi\n")]
-    assert "provision_refresh_apply" in block and re.search(r"^\s*exit 0$", block, re.M)
-    # Detection is the only step allowed under `||` (which disables set -e);
-    # the writes run as plain statements.
-    assert not re.search(r"provision_refresh_apply[^\n]*\|\|", block)
+    start = body.index('if [ "$PROVISION" = "1" ]; then')
+    end = body.index("\n# ----", start)
+    return body[start:end]
+
+
+def _main(tmp_path, phase="refresh", held=False, pending=False, old="198.51.100.1", env=None):
+    import time
+    state = tmp_path / "etc-trinity"
+    state.mkdir(exist_ok=True)
+    if old is not None:
+        (state / "public-ip").write_text(old + "\n")
+    if pending:
+        (state / "site-pending").write_text("")
+        (state / "firstboot-failed").write_text("")
+    (tmp_path / ".env").write_text(_DOTENV)
+    _docker_stub(tmp_path)
+    lock = tmp_path / "provision.lock"
+    block = _main_block().replace("/run/trinity-provision.lock", str(lock))
+    body = "\n".join([
+        "uname() { echo Linux; }",
+        "id() { echo 0; }",
+        'provision_machine() { echo MACHINE >> "$CALL_LOG"; }',
+        'provision_site() { echo SITE >> "$CALL_LOG"; }',
+        "HOSTED=1; COMPOSE_FILES=(-f docker-compose.hosted.yml)",
+        f"PROVISION=1; PROVISION_CLOUD=aws; PROVISION_PHASE={phase}; PROVISION_PROVENANCE=",
+        block.replace("/etc/trinity", str(state)),
+        'echo "FELL_THROUGH phase=$PROVISION_PHASE prov=$PROVISION_PROVENANCE"',
+    ])
+    holder = None
+    if held:
+        holder = subprocess.Popen(["flock", str(lock), "sleep", "3" if held == "briefly" else "30"])
+        time.sleep(0.5)
+    try:
+        r = _run(tmp_path, body, _IMDS + ["provision_on_cloud", "provision_refresh_target",
+                                          "provision_refresh_apply", "provision_apply_ip",
+                                          "provision_default_provenance"], env, state)
+    finally:
+        if holder:
+            holder.kill()
+            holder.wait()
+    return r, state
+
+
+_ACTIONS = ("docker ", "systemctl ", "caddyfile ", "MACHINE", "SITE")
+
+
+@pytest.mark.skipif(not _HAS_FLOCK, reason="flock (util-linux) required")
+def test_a_refresh_while_another_run_holds_the_lock_exits_without_acting(tmp_path):
+    r, _ = _main(tmp_path, held=True)
+    assert r.returncode == 0, r.stderr
+    calls = _log(tmp_path, "calls.log")
+    assert not any(a in calls for a in _ACTIONS), calls
+    assert "FELL_THROUGH" not in r.stdout
+
+
+@pytest.mark.skipif(not _HAS_FLOCK, reason="flock (util-linux) required")
+def test_an_unchanged_refresh_exits_without_acting(tmp_path):
+    r, _ = _main(tmp_path, old="203.0.113.20")
+    assert r.returncode == 0, r.stderr
+    assert not any(a in _log(tmp_path, "calls.log") for a in _ACTIONS)
+    assert r.stdout == ""
+
+
+@pytest.mark.skipif(not _HAS_FLOCK, reason="flock (util-linux) required")
+def test_a_changed_refresh_recreates_the_backend_and_never_runs_the_install(tmp_path):
+    r, state = _main(tmp_path)
+    assert r.returncode == 0, r.stderr
+    calls = _log(tmp_path, "calls.log")
+    assert "up -d --no-deps --no-build --pull never backend" in calls
+    assert "MACHINE" not in calls and "SITE" not in calls
+    assert "FELL_THROUGH" not in r.stdout
+    assert (state / "public-ip").read_text().strip() == "203.0.113.20"
+
+
+@pytest.mark.skipif(not _HAS_FLOCK, reason="flock (util-linux) required")
+def test_a_pending_first_boot_is_finished_by_the_refresh_once_an_ip_appears(tmp_path):
+    r, state = _main(tmp_path, pending=True, old=None)
+    assert r.returncode == 0, r.stderr
+    # Continues as the site phase with the provenance first boot recorded, so
+    # the install runs once, and only the site half (never the machine phase).
+    assert "FELL_THROUGH phase=site prov=aws-marketplace" in r.stdout
+    calls = _log(tmp_path, "calls.log")
+    assert "SITE" in calls and "MACHINE" not in calls
+    assert not (state / "firstboot-failed").exists()
+
+
+@pytest.mark.skipif(not _HAS_FLOCK, reason="flock (util-linux) required")
+def test_a_site_run_says_it_is_waiting_for_the_lock_then_proceeds(tmp_path):
+    r, _ = _main(tmp_path, phase="site", held="briefly")
+    assert r.returncode == 0, r.stderr
+    assert "Waiting for another provisioning run to finish" in r.stdout
+    assert "SITE" in _log(tmp_path, "calls.log")
 
 
 def test_the_refresh_skips_the_banner() -> None:
@@ -447,6 +572,43 @@ def _rendered_caddyfile(tmp_path) -> str:
                        env={"PATH": _SYS_PATH})
     assert r.returncode == 0, r.stderr
     return out.read_text()
+
+
+def _render_twice(tmp_path, active_rc: int) -> list[str]:
+    src = _START.read_text()
+    cidr_fn = _extract("provision_private_cidrs")
+    caddy_fn = src[src.index("provision_caddyfile() {"): src.index("\nprovision_site() {")]
+    out = tmp_path / "Caddyfile"
+    out.write_text("package default\n")
+    log = tmp_path / "sys.log"
+    harness = (
+        (cidr_fn + "\n" + caddy_fn).replace("/etc/caddy/Caddyfile", str(out))
+        + "\nenv_value() { :; }\ncaddy() { :; }\n"
+        + f'systemctl() {{ echo "$*" >> "{log}"; [ "$1" = is-active ] && return {active_rc}; return 0; }}\n'
+        + 'provision_caddyfile "203.0.113.10" "aws-marketplace"\necho ---- >> "' + str(log) + '"\n'
+        + 'provision_caddyfile "203.0.113.10" "aws-marketplace"\n'
+    )
+    r = subprocess.run(["bash", "-c", harness], capture_output=True, text=True, env={"PATH": _SYS_PATH})
+    assert r.returncode == 0, r.stderr
+    first, second = log.read_text().split("----\n")
+    assert not (tmp_path / "Caddyfile.new").exists()
+    return [first, second]
+
+
+def test_an_identical_caddyfile_does_not_bounce_a_running_caddy(tmp_path):
+    """A refresh that keeps failing at the backend step re-renders the same
+    Caddyfile every five minutes; restarting Caddy each time drops live
+    connections, SSE streams included."""
+    first, second = _render_twice(tmp_path, active_rc=0)
+    assert "restart caddy" in first
+    assert "restart caddy" not in second
+
+
+def test_an_identical_caddyfile_still_starts_a_stopped_caddy(tmp_path):
+    """The machine phase stops Caddy; a re-run with an unchanged file must not
+    leave it stopped."""
+    _, second = _render_twice(tmp_path, active_rc=3)
+    assert "restart caddy" in second
 
 
 def test_a_client_without_sni_is_served_the_ip_certificate(tmp_path):
