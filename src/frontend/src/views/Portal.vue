@@ -2282,6 +2282,9 @@ watch([() => route.params.sessionId, () => threads.value.length], () => {
   // and a reload" (below), and it adopts a REAL thread, so any pending
   // fresh-start intent is spent here too.
   if (known) {
+    // A refresh that now contains the id (a chat made in another tab) lifts
+    // an earlier "not available" verdict for it.
+    if (unavailableChatId.value === sid) unavailableChatId.value = null
     activeAgentName.value = known.agent_name
     pendingSession.value = sid
     startingNewChat.value = false

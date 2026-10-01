@@ -144,6 +144,22 @@ describe('#3140 — a chat URL that is not yours', () => {
     expect(conversation(w).exists()).toBe(false)
   })
 
+  it('clears when a later list refresh turns out to contain the chat', async () => {
+    // A chat created in another tab after this one loaded its list: the first
+    // verdict was "not yours", the next refresh says it is.
+    arm()
+    const { w } = await boot('/workspace/c/t2')
+    expect(w.find('[data-testid="chat-unavailable"]').exists()).toBe(true)
+    store.fetchAllSessions = vi.fn(async () => {
+      store.sessionsFailed = false
+      return [...THREADS, { id: 't2', session_id: 't2', agent_name: 'sage', is_main: false, last_message_at: '2026-09-28T10:00:00Z', unread: 0 }]
+    })
+    await w.vm.refreshThreads()
+    await flushPromises()
+    expect(w.find('[data-testid="chat-unavailable"]').exists()).toBe(false)
+    expect(conversation(w).exists()).toBe(true)
+  })
+
   it('when the list failed, the conversation decides — and its 404 lands on the same state', async () => {
     arm({ sessionsFail: true })
     const { w } = await boot('/workspace/c/unknown')
