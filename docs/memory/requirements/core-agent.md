@@ -3478,7 +3478,14 @@ to localStorage in the clear.
   filesystem, never by the CLI's error text. A failed resume is now a 502
   (`Execution error: …`), not "returned empty response". **Residual**: a file that
   exists but still cannot be resumed raises that 502 each turn until
-  `DELETE /api/chat/history` or a model change.
+  `DELETE /api/chat/history` or a model change. **Widened by #2968** (type-bug,
+  `abilityai/trinity#2968`): the 502 was originally raised only for a resume turn with
+  no text; now **any** exit-0 `is_error` chat turn — cold or resumed, with or without
+  text — is a failure, after the #1870 completed-turn recovery
+  (`headless_executor._recover_completed_turn_into`, §10.4.3 in `scheduling.md`) has
+  had first claim. This reverses the #2958 choice to return a resumed turn's partial
+  text when `is_error` followed it; a 502 body is the structured `{message, metadata}`
+  shape so the FAILED row keeps cost/context. Tests: `tests/unit/test_2968_chat_is_error.py`.
 - **Reset**: `DELETE /api/chat/history` clears the id and marker and bumps a generation
   counter; a turn in flight across it discards its capture
   (`event=chat_session_capture_discarded`). No lock (a turn may hold it 30 min).

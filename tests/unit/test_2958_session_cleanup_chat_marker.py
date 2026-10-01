@@ -45,7 +45,7 @@ def sweep(monkeypatch):
     listing = "\n".join(f"{u}.jsonl {OLD}" for u in (CHAT_UUID, ORPHAN_UUID))
 
     async def _fake_exec(container, cmd, timeout=30, **kw):
-        state["calls"].append((cmd, kw))
+        state["calls"].append((cmd, dict(kw, timeout=timeout)))
         if cmd.startswith("rm -f"):
             state["removed"].append(cmd)
             return {"exit_code": 0, "output": ""}
@@ -99,16 +99,10 @@ def test_the_marker_is_read_bounded_and_as_developer(sweep):
 
     cmd, kw = next(c for c in sweep["calls"] if "chat-session.json" in c[0])
     assert kw.get("user") == "developer"
-    assert "head -c 512" in cmd and "timeout 5" in cmd
+    assert "head -c 512" in cmd
+    # #2969: the primitive enforces this bound in the container and around the await.
+    assert kw.get("timeout") == sweep["module"]._CHAT_MARKER_READ_TIMEOUT_S
     assert "cat " not in cmd
-
-
-def _slow():
-    async def _hang():
-        await asyncio.sleep(5)
-        return _ok("never")
-
-    return _hang
 
 
 @pytest.mark.parametrize(
@@ -143,8 +137,8 @@ def test_an_unreadable_marker_aborts_the_sweep(
 ):
     value = marker()
     if value == "timeout":
-        monkeypatch.setattr(sweep["module"], "_CHAT_MARKER_READ_TIMEOUT_S", 0.05)
-        sweep["marker"] = _slow()
+        # What the bounded primitive returns when the read exceeded its bound.
+        sweep["marker"] = {"exit_code": 124, "output": LEAK, "timed_out": True}
     else:
         sweep["marker"] = value
     caplog.set_level(logging.WARNING)

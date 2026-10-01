@@ -276,7 +276,7 @@ class ScheduleExecution(BaseModel):
     retry_of_execution_id: Optional[str] = None  # Links retry to original execution
     retry_scheduled_at: Optional[datetime] = None  # When retry is scheduled (for restart recovery)
     # Validation tracking (VALIDATE-001)
-    business_status: Optional[str] = None       # pending_validation, validated, failed_validation, skipped
+    business_status: Optional[str] = None       # pending_validation, validated, failed_validation, validation_unavailable, skipped
     validated_at: Optional[datetime] = None     # When validation completed
     validation_execution_id: Optional[str] = None  # FK to the validation execution record
     validates_execution_id: Optional[str] = None   # FK to execution being validated (for validation records)

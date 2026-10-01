@@ -96,6 +96,51 @@ class ValidationStatus(str, Enum):
     FAIL = "fail"
     PARTIAL = "partial"
     ERROR = "error"  # Validation itself failed (timeout, parse error, etc.)
+    # #2959: nothing to inspect — decided by the platform from the input, never
+    # accepted from a validator's own answer (see _parse_validation_response).
+    UNAVAILABLE = "unavailable"
+
+
+# Verdicts a validator may return. UNAVAILABLE is deliberately absent: a
+# validator able to award itself "unavailable" could silence its own alert.
+_VALIDATOR_VERDICTS = frozenset(
+    {ValidationStatus.PASS, ValidationStatus.FAIL, ValidationStatus.PARTIAL, ValidationStatus.ERROR}
+)
+
+# #2959: how much of the run's response the validator sees. A run's status line
+# is its LAST line, so an over-cap response keeps a short head (the opening
+# context) and a long tail, never just the head.
+_RESPONSE_CAP = 16_000
+_RESPONSE_HEAD = 4_000
+_RESPONSE_TAIL = _RESPONSE_CAP - _RESPONSE_HEAD
+
+# A custom `validation_prompt` is documented as auditor INSTRUCTIONS. Unless it
+# is a full template (it names `{execution_response}`), the run's data is framed
+# around it here — otherwise the validator is never shown the run (#2959).
+_CUSTOM_INSTRUCTIONS_FRAME = """You are an AUDITOR, not an executor. You are reviewing work this agent ALREADY ATTEMPTED in a previous execution. Verify it; do not redo it.
+
+## Original Task
+```
+{original_message}
+```
+
+## Execution Output
+```
+{execution_response}
+```
+
+## Validation Instructions
+{custom_instructions}"""
+
+
+def _substitute(template: str, values: dict) -> str:
+    """Single-pass `{name}` substitution for the given names only.
+
+    Unlike str.format it leaves every other brace alone, and unlike chained
+    str.replace a value containing a placeholder is never substituted again.
+    """
+    pattern = re.compile(r"\{(" + "|".join(map(re.escape, values)) + r")\}")
+    return pattern.sub(lambda m: str(values[m.group(1)]), template)
 
 
 @dataclass
@@ -195,6 +240,26 @@ class ValidationService:
         Returns:
             ValidationResult with status, summary, and item details.
         """
+        # 0. #2959: nothing to inspect is not a verdict about the job. Decided
+        # here, before any referee or validator is paid to judge blind:
+        # recorded as `validation_unavailable`, no alert, and never a PASS.
+        if not (execution_response or "").strip():
+            logger.warning(
+                "[Validation] execution %s on agent '%s' has an empty response — "
+                "recording %s, no validator run",
+                execution_id, agent_name, BusinessStatus.VALIDATION_UNAVAILABLE.value,
+            )
+            db.update_business_status(
+                execution_id=execution_id,
+                business_status=BusinessStatus.VALIDATION_UNAVAILABLE,
+            )
+            return ValidationResult(
+                status=ValidationStatus.UNAVAILABLE,
+                summary="Validation unavailable: the execution produced no response to inspect",
+                items=[],
+                raw_response=None,
+            )
+
         # 1. Mark original execution as pending validation
         db.update_business_status(execution_id, BusinessStatus.PENDING_VALIDATION)
 
@@ -337,17 +402,41 @@ class ValidationService:
         Returns:
             The formatted validation prompt.
         """
-        template = custom_prompt or DEFAULT_VALIDATION_PROMPT
+        # #2959: keep head AND tail — the status line a validator is usually
+        # asked to find is the response's last line.
+        response = execution_response or "(no response)"
+        if len(response) > _RESPONSE_CAP:
+            omitted = len(response) - _RESPONSE_CAP
+            response = (
+                response[:_RESPONSE_HEAD]
+                + f"\n\n[... {omitted} characters omitted from the middle of the "
+                f"response (truncated for validation) ...]\n\n"
+                + response[-_RESPONSE_TAIL:]
+            )
 
-        # Truncate response if too long (keep first 10K chars)
-        truncated_response = execution_response
-        if execution_response and len(execution_response) > 10000:
-            truncated_response = execution_response[:10000] + "\n\n[... response truncated for validation ...]"
+        values = {"original_message": original_message, "execution_response": response}
 
-        return template.format(
-            original_message=original_message,
-            execution_response=truncated_response or "(no response)",
-        )
+        if not custom_prompt:
+            return DEFAULT_VALIDATION_PROMPT.format(**values)
+
+        if "{execution_response}" not in custom_prompt:
+            # Instructions, not a template: frame the run's data around them.
+            # Single-pass substitution, not format — the instructions are
+            # operator text and may carry literal braces.
+            return _substitute(
+                _CUSTOM_INSTRUCTIONS_FRAME,
+                {**values, "custom_instructions": custom_prompt},
+            )
+
+        # A full template. Honour str.format escapes ({{ }}) where it parses;
+        # literal braces (a pasted JSON example) fall back to plain substitution
+        # instead of raising before any validator runs. AttributeError /
+        # TypeError are field lookups on the str values (`{x.attr}`, `{x[k]}`);
+        # any raise here would leave the parent in pending_validation.
+        try:
+            return custom_prompt.format(**values)
+        except (KeyError, IndexError, ValueError, AttributeError, TypeError):
+            return _substitute(custom_prompt, values)
 
     def _parse_validation_response(self, result: TaskExecutionResult) -> ValidationResult:
         """Parse the validation response from Claude.
@@ -382,7 +471,7 @@ class ValidationService:
                 data = json.loads(json_match.group())
 
                 status_str = data.get("status", "error").lower()
-                status = ValidationStatus(status_str) if status_str in [s.value for s in ValidationStatus] else ValidationStatus.ERROR
+                status = ValidationStatus(status_str) if status_str in [s.value for s in _VALIDATOR_VERDICTS] else ValidationStatus.ERROR
 
                 return ValidationResult(
                     status=status,
@@ -437,6 +526,7 @@ class ValidationService:
             ValidationStatus.FAIL: BusinessStatus.FAILED_VALIDATION,
             ValidationStatus.PARTIAL: BusinessStatus.FAILED_VALIDATION,
             ValidationStatus.ERROR: BusinessStatus.FAILED_VALIDATION,
+            ValidationStatus.UNAVAILABLE: BusinessStatus.VALIDATION_UNAVAILABLE,
         }
         return mapping.get(validation_status, BusinessStatus.FAILED_VALIDATION)
 
