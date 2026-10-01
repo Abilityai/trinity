@@ -125,6 +125,9 @@ def _project(item: dict, *, viewer_email: Optional[str] = None,
     """
     context = item.get("context") if isinstance(item.get("context"), dict) else {}
     chat_id = context.get("workspace_session_id")
+    # ent#734: platform-written, stripped from agent content at both ingestion
+    # boundaries. Only the platform's literal True counts.
+    raised_in_turn = context.get("workspace_raised_in_turn") is True
     from services.operator_queue_service import is_aged
     ended_at, ended_by = _ending_of(item, viewer_email)
     return WorkspaceAsk(
@@ -142,6 +145,7 @@ def _project(item: dict, *, viewer_email: Optional[str] = None,
         ended_at=ended_at,
         ended_by=ended_by,
         chat_id=chat_id if isinstance(chat_id, str) else None,
+        raised_in_turn=raised_in_turn,
         resume_requested=resume_requested,
         sync=_coarse_sync(item),
         aging=bool(is_aged(item)),
