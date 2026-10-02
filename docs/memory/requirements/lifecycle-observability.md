@@ -341,6 +341,41 @@ password) is **Phase 2**, gated on a configured email provider and the existing
   (own-account scoped; 409 if the email belongs to another account), surfaced as
   an **Admin sign-in email** card in Settings → General. No verification email is
   sent; existing `admin`+password login keeps working until/unless an email is set.
+- **FR-4 — A sign-in email is proven, unique, and written in one place
+  (trinity-enterprise#720, residual of #711).** Every sign-in path resolves the
+  account by email alone, so whoever holds an email on a `users` row holds that
+  identity — what is shared with the address, its Workspace threads, and the
+  real person's next sign-in.
+  - **Mailbox proof to bind.** `PUT /api/users/me/email` requires `{email, code}`,
+    where the code was sent to the NEW address by
+    `POST /api/users/me/email/code` (same rate limits as sign-in codes). Bind
+    codes live in `email_login_codes` with `purpose='email_bind'` and are tied to
+    the requesting account; a bind code never signs anyone in and a sign-in code
+    never binds. Missing/wrong/expired code → 400 `invalid_code`.
+  - **The one no-proof bind** is the #82 transition (FR-3) on an install that
+    cannot deliver mail (provider `console`): an **interactive admin** session may
+    bind without a code, audited as `email_bind_unverified`. Anyone else on such an
+    install gets 409 `email_verification_unavailable`. First-run setup (FR-2) is
+    unchanged — it binds before any provider can exist.
+  - **Unique.** `users.email` is unique on its lower-cased value (NULL allowed):
+    `idx_users_email_unique ON users(lower(email)) WHERE email IS NOT NULL`, on both
+    migration tracks. Pre-existing duplicates are resolved first: per address the
+    EARLIEST-created account keeps it; the others are set to NULL and logged by
+    username only.
+  - **One writer.** Every write of `users.email` (setup, the bind route,
+    `create_user`, `update_user`, the password upsert, Auth0, email sign-in
+    creation) goes through `db/users.py`'s checked write, which refuses an address
+    another account holds (`EmailInUseError` → 409 `email_in_use`) and maps a lost
+    race on the unique index to the same refusal. A test enumerates the writers.
+  - **A reclaimed username is not a 500.** Email sign-in creates the account with
+    `username = email`; when that username is already taken (an account that has
+    since re-bound away from the address), the new account gets a unique suffixed
+    username instead of an unhandled IntegrityError.
+  - **Redeemers honour suspension.** The Telegram, WhatsApp and MCP-inline code
+    redeemers and `email_has_agent_access` refuse an address whose account is
+    suspended (`users.suspended_at`), the same account-state rule `/verify` and
+    `get_current_user` apply. (Second-factor on those channels is out of scope:
+    they cannot present a challenge; tracked as a follow-up.)
 
 ---
 
@@ -975,6 +1010,26 @@ operator can lift the cap without typing a huge number.
 module — `metrics_retention_days` is registered together with its sweeper. The
 cap is deliberately NOT a retention key: it is a write budget, not a window.
 
+**Settings surface (trinity-enterprise#671).** Settings → Retention shows both
+knobs beside the sibling windows: **Metric points** (days — the window, subject
+to the panel's existing floor rule on the managed path) and **Metric point
+quota** (points / agent / day, its own hint "0 = unlimited", no floor). They
+save through the same managed endpoint as the sibling windows, so the rows
+render only in an edition where that endpoint exists; in Community they are
+absent and `PUT /api/settings/ops/config` stays the write path.
+`GET /api/settings/retention` reports the window in `windows`/`sources` and the
+cap in `quotas.metrics_daily_point_cap` (`value` + `source`), where the value is
+read the way the write boundary enforces it. When a knob's source is `env`, its
+row is read-only with an `env` badge naming the variable and what unsetting it
+does (the #2085 seeder then writes the code default as a row), and Save omits
+it. Save sends only the fields the operator changed, so saving one window never
+turns another knob's code default or env value into a stored row.
+`env` has to mean "an operator set the variable", so every compose file forwards
+the env-backed keys with an EMPTY default (`${METRICS_DAILY_POINT_CAP:-}`) and
+`.env.example` leaves them commented — a compose default or a copied example
+line made `env` the reported source on every install and locked both rows
+(`tests/unit/test_ent671_env_backed_ops_forwarding.py`).
+
 ### 47.9 Legacy `metrics.json` — retired as a source, named as a finding (ent#479)
 
 `GET /api/agents/{name}/metrics` keeps its URL and is **re-backed by the point
@@ -1066,10 +1121,12 @@ The same observation posted twice is therefore **one row** with no client key,
 no Redis and no execution id.
 
 `value` is deliberately **outside** the identity: one observation of one metric
-at one instant with one set of dimensions is one fact, so a re-post with a
-different number deduplicates rather than double-counting. **A correction is a
-new `ts`** — this is stated in the tool description because it is the one rule
-an author can get wrong in a way the platform cannot detect.
+at one instant with one set of dimensions is one fact, so the same identity is
+always **one row**. A re-post with the **same** value is a duplicate and writes
+nothing. A re-post with a **different** value is a **correction** and restates
+that row in place (§48.9, trinity-enterprise#729, ruling R45). A correction
+keeps its `ts`: the `ts` is the
+period the number describes, so the chart stays one point per period.
 
 The on-disk `dims` need not be byte-identical to the canonical form the hash
 was taken over; the canonical form exists so the identity is stable across
@@ -1079,9 +1136,11 @@ clients, and the column's serialisation belongs to the driver.
 
 A batch is 1..1000 points and ≤ 2 MiB encoded, **all-or-nothing**: a caller
 never has to reconcile a partial write against what it meant to send. The 201
-returns `recorded`, `deduplicated` and `replayed` as **separate** counts, plus
-each accepted point's assigned `{index, ts, idempotency_key}` — an "we already
-had this" must not read as a write that happened.
+returns `recorded` (new rows), `corrected` (rows restated, §48.9) and
+`deduplicated` (identical repeats, nothing written) as **separate** counts,
+plus `replayed` and each accepted point's assigned `{index, ts,
+idempotency_key}` — an "we already had this" must not read as a write that
+happened, and a restatement must not read as either.
 
 Two idempotency layers, for two different failures:
 
@@ -1158,6 +1217,13 @@ cross", not "how many did today hold"), which means two concurrent batches can
 each pass and overshoot by at most one batch. That is accepted and documented
 rather than serialised.
 
+A correction (§48.9) keeps its row's `created_at`, so it never adds to "used
+today": the cap counts **rows created**. The pre-check still counts every
+incoming point, exactly as it already does for duplicates, so a batch of
+corrections cannot pass a cap that a batch of new points would cross. Ruled
+2026-10-01 for trinity-enterprise#729: no extra read on the write path.
+Corrections are bounded by the per-agent rate limit, not by the cap.
+
 One audit row per (agent, UTC day) on the **first** refusal — a quota event is
 the security-relevant signal. No row per accepted batch: `audit_log` is
 append-only and undeletable for a year, so that would be up to 86 000
@@ -1194,11 +1260,70 @@ refetch route, and that route is ent#479's); no partial-accept mode; no
 per-point caller-supplied key; no refresh-on-miss inside the write path — the
 remedy is the `refresh_metric_definitions` tool the 422's hint names.
 
+### 48.9 Restatement — a corrected value updates the row (trinity-enterprise#729, R45)
+
+Derived and cross-channel numbers (a funnel end to end, CAC, a weekly total)
+are restated as late data lands. Before this, a corrected value posted at the
+same period close was silently dropped (`recorded: 0, deduplicated: 1`). The
+documented workaround, restating at a new `ts`, plotted the W39 figure at the
+restatement's x-position.
+
+* **A different value at an existing identity updates the row.** The upsert
+  keeps the same conflict target `(agent_name, ts, idempotency_key)` and is
+  `DO UPDATE … WHERE` the stored value `IS DISTINCT FROM` the incoming one. The
+  comparison is null-safe because `value_numeric` or `value_text` is NULL by
+  type. An identical value matches nothing, so nothing is written and the
+  revision is not bumped.
+* **What moves:** `value_numeric` / `value_text`, `revision` (+1),
+  `recorded_at` (the correcting write's clock) and `execution_id`. Provenance
+  follows the write that produced the current value, so it is NULL when the
+  correcting call's execution could not be confirmed. It never credits the run
+  that wrote the replaced number.
+* **What does not move:** `ts` (one row per period), `created_at` (the first
+  write, which the daily cap counts, §48.6), `metric` and `dims`. The
+  identity is the same, so the canonical dims are too.
+* **Freshness does not move.** `last_point_at` is the newest `ts` (§49.1). A
+  restated W39 cannot make a series look freshly measured, and the stale rule
+  is untouched.
+* **No read-path change.** `revision` and `recorded_at` are write-side columns.
+  `get_metrics`, the tiles and the §50 objective join select explicit columns
+  and read a corrected store exactly as they would read a store whose final
+  value had been recorded first. A parity test pins that.
+* **Columns.** `revision BIGINT NOT NULL DEFAULT 0`: existing rows read 0. It is
+  BIGINT because it is a monotonic counter. `recorded_at TEXT` is nullable. The
+  store stamps it on every write (equal to `created_at` on insert). NULL
+  means the row was written before ent#729, and its write time is then
+  `created_at`. Nullable and defaulted so code from before this change can
+  still insert during a rollback.
+* **The write order is defined.** Rows are written in `(ts, idempotency_key)`
+  order, so two overlapping batches lock conflicting rows in the same order on
+  PostgreSQL. The store also refuses two rows with one identity in a single call.
+  The service already rejects that as `duplicate_in_batch`, and the guard makes
+  the PostgreSQL cardinality error unreachable rather than merely unlikely.
+
+**Stated limits** (the contract, not defects to rediscover):
+
+* **Last write wins, by arrival order.** A delayed retry carrying an older
+  value restates the row back to it. No `expected_revision` precondition exists
+  yet.
+* **Restatement is lossy.** The replaced value is not kept, and `revision`
+  counts corrections without recording them.
+* **A replayed batch writes nothing, even after a later correction.**
+  Re-sending a batch identical to an earlier one replays the first result
+  (`replayed: true`) and writes nothing. This applies in the same turn (when
+  `execution_id` is passed), or under the same client key within 24 h. So
+  `A → B → A` ends on `B`. To restate back to `A`, send it under a new
+  `idempotency_key`, or in a new turn if you sent no key.
+
 ### Acceptance
 
 - [x] `record_metrics` records validated points and is the only write path
 - [x] A batch is all-or-nothing with a named reason code per rejected point
 - [x] The same observation posted twice is one row, with or without a key
+- [x] A different value at the same identity restates the row in place
+      (`revision` +1, `recorded_at` set; `ts`, `created_at` and freshness
+      unmoved), and the 201 reports it as `corrected` on REST and MCP
+      (trinity-enterprise#729)
 - [x] A re-delivered turn replays rather than recording twice
 - [x] The daily cap refuses with 429 + `Retry-After` and audits once a day
 - [x] A store outage is retryable and never fails the agent's turn; a rejected
@@ -1261,8 +1386,9 @@ exactly like a running one.
 **Gate order** (Invariant #8): `AuthorizedAgentByName` decides access first —
 uniform 404 for both an absent and an inaccessible agent — then the agent
 self-gate, `current_user.agent_name and != name → 403`, the same spelling the
-write path uses so read and write agree on who "itself" is. Cross-agent reads
-are ent#80's grant, not an oversight here. Rate-limited at 240/min per agent
+write path uses so read and write agree on who "itself" is. An agent key may
+read another agent only through an `agent_permissions` grant (§51, ent#727).
+Rate-limited at 240/min per agent
 (`rate_limiter.enforce`, the write path's spelling): enough for N open tabs at a
 30 s poll, not enough for a runaway loop.
 
@@ -1433,9 +1559,9 @@ from the registry on every read: `value`, `color` (from the declared status
 
 ### 49.7 What is deliberately absent
 
-The objective ↔ metric join (ent#666). Cross-agent and fleet reads (ent#80,
-ent#94) — the self-gate above is the boundary they will lift, deliberately, with
-a grant. A WebSocket `metrics_updated` trigger: §48.8 deferred it for want of a
+The objective ↔ metric join (ent#666). Cross-agent reads beyond one agent's
+declared series, and fleet reads (ent#80, ent#94) — §51 (ent#727) lifts the
+self-gate for a grant holder only. A WebSocket `metrics_updated` trigger: §48.8 deferred it for want of a
 refetch route, that route now exists, and it is ent#538's to add with
 coalescing, because a per-batch broadcast at the write cap is a storm. Deleting
 the agent-server `/api/metrics` route from the base image — it is **retired in
@@ -1487,7 +1613,7 @@ could disagree — the role card (ent#527) computed its own gap from
 `metrics.json` with its own 30-day staleness rule while the tiles read the
 point store with the §49.1 rule. So there is **one join**, in
 `services/objective_join_service.py`, and every consumer — the role card, the
-project hub (ent#661), proactivity (ent#605) — calls it rather than growing
+project view (ent#661 v3), proactivity (ent#605) — calls it rather than growing
 its own. A second join anywhere is a defect regardless of whether it currently
 agrees.
 
@@ -1638,7 +1764,7 @@ it. Findings appear twice — flat in `findings[]` with `objective_id` / `metric
 | Code | When | The fix it names |
 |---|---|---|
 | `metric_undeclared` | an **owned** objective names a metric this agent does not declare | declare it in `template.yaml metrics:`, call `refresh_metric_definitions` |
-| `metric_not_declared_here` | a **supporting-only** objective names a metric this agent does not declare | *nothing* — the owning role's agent declares it; cross-agent metric reads are ent#80. Counted under `summary.declared_elsewhere`, **not** `undeclared` |
+| `metric_not_declared_here` | a **supporting-only** objective names a metric this agent does not declare | *nothing* — the owning role's agent declares it; when this agent holds a grant on the agent serving it, the row carries `served_by` and an actual instead (§51.6). Counted under `summary.declared_elsewhere`, **not** `undeclared` |
 | `metric_retired` | the name is declared but retired | re-declare and refresh; the last value is **withheld**, because a retired number rendering as current is the §49.2 failure |
 | `metric_name_invalid` | a `metrics:` entry is not a mapping, or its name is not a valid id | fix the objective file |
 | `metric_duplicate` | one objective lists a name twice | first entry wins; drop the rest |
@@ -1647,7 +1773,7 @@ it. Findings appear twice — flat in `findings[]` with `objective_id` / `metric
 | `objective_invalid` | the file is not a YAML mapping | fix the YAML; §3.4 names the fields |
 | `objective_unreadable` | the agent answered, but not with that file (retryable — a transport fault is not an author error) | retry |
 | `objective_id_duplicate` | two files declare one id | both are shown; give one its own id |
-| `objective_id_invalid` | a file's `id:` is not a valid id | the **file name** is used instead and the finding says so — a *missing* `id` falls back silently, an id the author wrote and this read refused does not, because ent#661 keys objectives by id across agents |
+| `objective_id_invalid` | a file's `id:` is not a valid id | the **file name** is used instead and the finding says so — a *missing* `id` falls back silently, an id the author wrote and this read refused does not, because the ent#661 v3 project view keys objectives by id across agents |
 | `objective_file_skipped` | a `*.yaml` in `objectives/` whose NAME is not a plain path segment (a space, a non-ASCII character) | rename it; the file is never fetched, and `source.objectives_skipped` counts them so "not there" can be told from "there under a name this read will not open" |
 | `objectives_read_timeout` | the fan-out exceeded `OBJECTIVES_READ_BUDGET_SEC` | retry; the agent is answering, just too slowly — `source.objectives_dir: "timeout"`, no objective joined |
 | `role_id_invalid` | `x-role.role` is not a valid id | fix `template.yaml`; no owned objective can match until then |
@@ -1681,9 +1807,27 @@ Gate order (Invariant #8), copied verbatim from `/metrics`:
 
 `OBJECTIVES_READ_RATE_LIMIT` (env, default **60**/min per agent, window 60 s)
 is its **own** knob, not `/metrics`'s 240. That route is store-only; this one
-drives a container. Ten open role cards polling at 30 s is 20/min, so 60 clears
-normal traffic with room and still stops a loop from pinning an agent-server the
-platform also needs for chat.
+drives a container. The Workspace role card draws on the same bucket (below) but
+loads once per open and never polls, so 60 clears normal traffic from both doors
+with room and still stops a loop from pinning an agent-server the platform also
+needs for chat.
+
+**One budget, every door (trinity-enterprise#676).** The key, the limit and the
+window are spelled once, in `services/objectives_read_budget.py`, and every door
+to the container fan-out draws on it: this route (and MCP `get_objectives`
+through it) with `enforce` — a 429 + `Retry-After` — and the Workspace role card
+with `admit`, which never raises and is asked only once the card is about to read
+the objectives (after the role file), so a card that reads none spends none. The two doors fail differently on purpose. An
+agent polling its own objectives can empty the bucket, and the role card also
+carries the role, the readiness stamp and the owner's flip; refusing the whole
+card would let the agent hide its owner's control. So a refused card read is a
+200 without objectives (`objectives_error: objectives_rate_limited`) and without
+a fan-out. The card additionally takes a per-viewer cap
+(`portal_role_objectives:{email}:{name}`, a third of the limit — 20/min at the
+default, derived rather than fixed so a lowered limit lowers it too) **before** the
+shared key, so
+one Workspace viewer can spend at most a third of the budget and a refused
+viewer spends none of it.
 
 A store outage is `503 metric_store_unavailable` + `Retry-After: 30`.
 **Everything below transport is a named field on a 200** — an agent that is
@@ -1801,12 +1945,12 @@ metric, every one `declared: false` with its `metric_undeclared` finding and
 |---|---|
 | `GET /api/agents/{name}/objectives` | the operator/agent door |
 | MCP `get_objectives` | agent-scoped (no agent parameter), returns the route body verbatim, never throws |
-| Role card (ent#527, PR #2927) | calls `read_objective_join(agent, template=…, client=…)` **in process** behind its own roster gate — one implementation, two doors |
-| Project hub (ent#661) | composes `read_objective_files` (one file read) with `join_objectives` per participating agent over store-only reads — the agent door stays out of its loop |
+| Role card (ent#527; cut over in ent#676) | calls `read_objective_join(agent, template=…, client=…)` **in process** behind its own roster gate and the shared budget (§50.6) — one implementation, two doors. It serves a slim client projection (codes, never the operator sentences; `core-agent.md` §5.36) |
+| Project view (ent#661 v3) | composes `read_objective_files` (one file read) with `join_objectives` per participating agent over store-only reads — the agent door stays out of its loop |
 | Proactivity (ent#605) | consumes `summary.behind` and per-row `gap.status == "behind" and not stale`; it owns the "never act on a stale number" rule and the pace maths |
 
 Deliberately **not** here: a platform-side copy of objective files; an
-objective-centric cross-agent read (ent#661's design pass, with cross-agent
+objective-centric cross-agent read (the ent#661 v3 project view, with cross-agent
 metric access owned by ent#80); a proactivity evaluator; a `metrics.json`
 fallback for `actual` (retired by §49's D-010); a projection cache.
 
@@ -1846,3 +1990,100 @@ fallback for `actual` (retired by §49's D-010); a projection cache.
 - [x] The model is the contract, pinned by key parity
 - [x] MCP `get_objectives` is agent-scoped, takes no agent parameter, and never
       throws
+
+## 51. Narrow Cross-Agent Metrics Read — a grant holder may read another agent's numbers (trinity-enterprise#727)
+
+**Ruling R40 (2026-09-30): "Narrow read now."** One agent reads another agent's
+declared metrics through the read that already exists (§49), gated on the same
+`agent_permissions` edge `chat_with_agent` uses — if A may call B, A may read B's
+declared series. This ships ahead of ent#80, which stays the wide version
+(arbitrary permissioned datasets, analytics joins); when ent#80 lands it replaces
+the body of the one predicate below rather than adding a second gate.
+
+### 51.1 The gate — `can_read_agent_metrics(caller, target)`
+
+One predicate in `routers/agent_files.py`, used by `GET /api/agents/{name}/metrics`
+and `GET /api/agents/{name}/metrics/definitions`. Gate order (Invariant #8):
+
+1. `AuthorizedAgentByName` — uniform 404 for an absent or inaccessible agent.
+2. A principal with no `agent_name` (JWT human, user key, the system key) passes
+   unchanged. An agent key reading itself passes.
+3. An agent key reading another agent passes only while
+   `db.is_agent_permitted(caller, target)` — the `agent_permissions` edge. No grant
+   → the existing `403 "Agent-scoped key may only read its own metrics"`, message
+   unchanged.
+
+The backend check is the enforcement: an agent key resolves to its owner carrying
+the owner's access, so on an admin-owned install step 1 admits every agent. MCP's
+`checkAgentEdge` in front of it improves the error, it is not the boundary.
+
+`/metrics/definitions` previously had **no** self-gate (any owner-accessible
+agent's definitions were readable by any agent key); it now carries this gate.
+Reading what another agent *declares* is the same trust question as reading what
+it recorded.
+
+### 51.2 One read, one shape
+
+The cross-agent answer is `metric_read_service.read_agent_metrics` unchanged —
+same `stale`, `freshness`, `series`, `chart`, `findings`. No cross-agent response
+variant. Store-only: a stopped target answers exactly like a running one.
+
+### 51.3 Rate limit keyed on the caller
+
+Self and human reads keep `agent_metrics_read:{name}`. A cross-agent read is
+charged to `agent_metrics_read_by:{caller}` (same 240/min), so one caller fanning
+out across the fleet exhausts its own budget, never the target's. Accepted: N
+granted callers can each read a target at 240/min — it is an indexed store read.
+
+### 51.4 Audit — who read whose numbers
+
+A cross-agent read writes an `authorization` / `metrics_cross_agent_read` row
+(`details: {reader_agent, target_agent, route}`) **once per (reader, target, route, actor)
+per hour** — `audit_log` is append-only for 365 days, and a polled read would
+otherwise write up to 240 rows a minute per pair. The actor is whoever asked:
+an agent key is filed as the agent (owner as `actor_email`, key named), never as
+its owner; a person viewing objectives through the path agent's grant is filed as
+that person, with the grant holder in `details.reader_agent`. The dedup marker is set only
+after the row is written, so a failed write never silences auditing for an hour;
+if the marker store is unreachable the row is written anyway. Every cross-agent
+read and every refused one is also a structured log line. An audit failure never
+fails the read.
+
+### 51.5 MCP `get_metrics(agent?)`
+
+Optional `agent`: omitted → the caller itself (no change for any existing caller);
+supplied → the grant-checked read of that agent. The `access.ts` policy row is
+`enforce` on `agent`, so `checkAgentEdge` runs first. A user-scoped key may pass
+`agent` (the backend applies owner access). The description states the grant
+requirement and names the refusal.
+
+### 51.6 `get_objectives` resolves an `actual` served elsewhere
+
+For a metric an objective names that the reading agent does not declare, the join
+looks for **the agent that serves it** among the agents the **reading agent** holds
+a grant on (never the objective owner's grants — that would read through a grant
+the reader lacks):
+
+- exactly one granted agent declares it (active) → the row carries
+  `served_by: <agent>` and that agent's actual, freshness, stale flag, unit and
+  direction; the gap is computed normally. `summary.served_elsewhere` counts it.
+- more than one → `not_computable`, reason `served_by_ambiguous`, a finding naming
+  them (R41: one serving agent per number). Ambiguity is counted over the reader's
+  full grant set before any viewer filtering, so every viewer gets one answer.
+- none → today's `declared_elsewhere` / `undeclared` rows, with the finding naming
+  the grant as the fix.
+
+The requesting principal must also be able to access the serving agent (a
+required predicate — no default); otherwise the row reads as not served, so a
+human who can see A but not B never sees B's number through A's objectives. The
+server read is audited like §51.4 with `route: "objectives"`.
+
+### Acceptance
+
+- [ ] Granted agent key reads `/metrics` and `/metrics/definitions` of the target; same shape as a self read
+- [ ] No grant → 403 with the existing message; human / system paths unchanged; uniform 404 still first
+- [ ] Cross-agent read rate-limited on the caller's key; target's key untouched
+- [ ] Cross-agent read audited once per hour per (reader, target, route, actor); read survives an audit failure
+- [ ] Stopped target answers like a running one
+- [ ] MCP `get_metrics` accepts optional `agent`; policy row is `enforce` on `agent`
+- [ ] `get_objectives` returns `actual` + `served_by` for a metric served by a granted agent; ambiguous → named finding

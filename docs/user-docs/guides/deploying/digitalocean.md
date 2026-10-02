@@ -7,7 +7,7 @@ Install Trinity on a DigitalOcean Droplet from your own terminal in about ten mi
 - You want Trinity on a server of its own, and you have a DigitalOcean account or can create one.
 - You want to choose the admin password yourself, before the server exists. Nobody else can claim the instance, because the admin account exists from first boot.
 
-The installer does not use the Marketplace image. It creates a stock Ubuntu Droplet and installs Trinity on first boot, so it works whether or not the Marketplace 1-Click is available to you. For the 1-Click itself, or for any other Linux server, see [Deploying Trinity](../deploying-trinity.md).
+The installer does not use the Marketplace image. It creates a stock Ubuntu Droplet and installs Trinity on first boot. Prefer no terminal at all? Trinity is also on the [DigitalOcean Marketplace](https://marketplace.digitalocean.com/apps/trinity) as a 1-Click image: you create the Droplet in the control panel and claim the admin account in your browser. See [Single Server → DigitalOcean 1-Click](single-server.md#digitalocean-marketplace-1-click). For any other Linux server, see [Deploying Trinity](../deploying-trinity.md).
 
 ## Pre-flight
 
@@ -161,6 +161,7 @@ Deleting the Droplet also deletes everything on it, including your agents and Tr
 - **Creates an Ubuntu 24.04 Droplet** of size `s-4vcpu-8gb` in the region you chose. It attaches every SSH key already on your DigitalOcean account.
 - **Hands the Droplet a first-boot script.** The script clones the chosen release to `/opt/trinity` and runs `./scripts/deploy/start.sh --provision --cloud digitalocean --hosted --unattended`. That installs Docker, Caddy with a Let's Encrypt certificate for the IP address, and the host firewall, then installs Trinity from prebuilt images. The Marketplace 1-Click uses the same installer.
 - **Writes `/opt/trinity/.env`.** Your password goes in as `ADMIN_PASSWORD`, so the admin account exists at first boot. The file also gets `FRONTEND_PORT=8081` (Caddy owns ports 80 and 443 and forwards to the web UI), `FRONTEND_URL=https://<droplet-ip>` and `TRINITY_IMAGE_TAG=<release-tag>`. Finally, it records `TRINITY_INSTALL_SOURCE=do-script`, the marker that makes the **Secure this instance** step appear.
+- **Runs Trinity on PostgreSQL.** The database is a bundled `trinity-postgres` container. `start.sh` generates its password into `.env` as `POSTGRES_PASSWORD`, next to the `DATABASE_URL` that points at it.
 - **Leaves Claude to the first sign-in.** It asks for no Claude credential. The **Connect Claude** step checks yours with Anthropic before saving it, which the installer could not do before the server existed.
 - **Waits for `https://<droplet-ip>/`** to answer with a valid certificate, for up to 15 minutes. The Droplet keeps its install log at `/var/log/trinity-install.log`.
 

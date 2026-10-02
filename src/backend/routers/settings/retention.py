@@ -187,7 +187,7 @@ async def acknowledge_retention_prune(
         source="api",
         actor_user=current_user,
         actor_ip=request.client.host if request.client else None,
-        endpoint=str(request.url.path),
+        endpoint=request.scope["path"],
         request_id=getattr(request.state, "request_id", None),
         details={"key": body.key, "window_days": effective},
     )
@@ -251,6 +251,19 @@ async def get_retention_status(
     def _ops_source(key: str) -> str:
         _value, source = _settings.resolve_ops_setting(key)
         return "code-default" if source == "default" else source
+
+    def _quota(key: str) -> dict:
+        # trinity-enterprise#671. Read the way the write boundary ENFORCES it
+        # (`routers/metric_points._ops_int(key, 100000)`): an unparseable value
+        # falls back to the default, because `0` here means UNLIMITED — reporting
+        # garbage as 0 would advertise a cap nobody is applying. Pinned to that
+        # reader by tests/unit/test_ent671_retention_metric_rows.py.
+        raw, source = _settings.resolve_ops_setting(key)
+        try:
+            value = max(int(raw), 0)
+        except (TypeError, ValueError):
+            value = int(OPS_SETTINGS_DEFAULTS[key])
+        return {"value": value, "source": "code-default" if source == "default" else source}
 
     entitled = entitlement_service.is_entitled("retention")
     audit_days = max(int(os.getenv("AUDIT_LOG_RETENTION_DAYS", "365") or 365), 365)
@@ -345,6 +358,11 @@ async def get_retention_status(
             "env (log archival only)"
         ),
         "sources": {k: _ops_source(k) for k in RETENTION_OPS_KEYS},
+        # trinity-enterprise#671: ops knobs the Retention panel edits that are
+        # NOT retention windows, each with its value AND source (so `sources`
+        # keeps meaning "per retention window"). The metric point quota is a
+        # per-agent per-UTC-day WRITE budget; `0` is unlimited.
+        "quotas": {"metrics_daily_point_cap": _quota("metrics_daily_point_cap")},
         # #1644 blast-radius guard. Reported separately from `windows` because it
         # is not a retention window — it is the threshold above which a prune is
         # refused pending an explicit acknowledgement. Editable in EVERY edition

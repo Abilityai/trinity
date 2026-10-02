@@ -186,7 +186,8 @@ TABLES = {
             created_at TEXT NOT NULL,
             expires_at TEXT NOT NULL,
             verified INTEGER DEFAULT 0,
-            used_at TEXT
+            used_at TEXT,
+            purpose TEXT
         )
     """,
 
@@ -295,6 +296,9 @@ TABLES = {
             open_canvas_id TEXT,
             -- #2806: agent-to-agent hops from a non-agent root. NULL = root (0).
             chain_depth INTEGER,
+            -- #2843: the conversation this turn continues; at most one running
+            -- row per (agent, key). NULL = no conversation guard.
+            conversation_key TEXT,
             FOREIGN KEY (schedule_id) REFERENCES agent_schedules(id)
         )
     """,
@@ -333,7 +337,8 @@ TABLES = {
             started_at TEXT,
             completed_at TEXT,
             next_run_at TEXT,
-            stop_requested_at TEXT
+            stop_requested_at TEXT,
+            chain_depth INTEGER
         )
     """,
 
@@ -1956,10 +1961,14 @@ TABLES = {
             UNIQUE(agent_name, name)
         )
     """,
-    # Recorded metric points (trinity-enterprise#478) — the append-only store
-    # `record_metrics` writes. No surrogate id: the PK IS the identity
-    # `(agent_name, ts, idempotency_key)`, which keeps the partition key inside
-    # the only unique constraint for the month-partitioning ent#80 wants later.
+    # Recorded metric points (trinity-enterprise#478) — the store
+    # `record_metrics` writes, one row per identity. No surrogate id: the PK IS
+    # the identity `(agent_name, ts, idempotency_key)`, which keeps the
+    # partition key inside the only unique constraint for the
+    # month-partitioning ent#80 wants later. A different value at an existing
+    # identity restates the row (ent#729): `revision` counts the corrections,
+    # `recorded_at` is the write time of the value held (NULL = written before
+    # ent#729; read it as `created_at`).
     # `dims` carries the `/* pg:JSONB */` marker: SQLite reads it as a comment
     # and reports TEXT, `to_postgres_table_ddl` rewrites the column to JSONB, so
     # fresh PG, upgraded PG and SQLite all converge without an ALTER.
@@ -1974,6 +1983,8 @@ TABLES = {
             dims TEXT /* pg:JSONB */,
             execution_id TEXT,
             created_at TEXT NOT NULL,
+            revision BIGINT NOT NULL DEFAULT 0,
+            recorded_at TEXT,
             PRIMARY KEY (agent_name, ts, idempotency_key)
         )
     """,
@@ -1988,6 +1999,12 @@ INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_users_username ON users(username)",
     "CREATE INDEX IF NOT EXISTS idx_users_auth0_sub ON users(auth0_sub)",
     "CREATE INDEX IF NOT EXISTS idx_users_email ON users(email)",
+    # trinity-enterprise#720 — a sign-in email belongs to ONE account. Every
+    # sign-in path resolves the account by email alone, so a duplicate is an
+    # identity coin toss. Lower-cased (addresses are compared that way), NULL
+    # allowed (password-only accounts, the pre-#82 placeholder).
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email_unique "
+    "ON users(lower(email)) WHERE email IS NOT NULL",
     "CREATE INDEX IF NOT EXISTS idx_agent_ownership_owner ON agent_ownership(owner_id)",
     "CREATE INDEX IF NOT EXISTS idx_agent_ownership_name ON agent_ownership(agent_name)",
     # Issue #834: partial index for the retention sweep — narrow scan to
@@ -2314,6 +2331,11 @@ INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_executions_queued "
     "ON schedule_executions(agent_name, queued_at) "
     "WHERE status = 'queued'",
+    # #2843: one turn per conversation at a time. The pull claim relies on the
+    # IntegrityError this raises when two workers claim one conversation at once.
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_executions_one_running_turn "
+    "ON schedule_executions(agent_name, conversation_key) "
+    "WHERE status = 'running' AND conversation_key IS NOT NULL",
     "CREATE INDEX IF NOT EXISTS idx_executions_pending_retry "
     "ON schedule_executions(retry_scheduled_at) "
     "WHERE retry_scheduled_at IS NOT NULL AND status = 'pending_retry'",

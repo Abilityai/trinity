@@ -1564,11 +1564,11 @@ class DatabaseManager:
     # Backlog Execution Queries (delegated to db/schedules.py) - BACKLOG-001
     # =========================================================================
 
-    def update_execution_to_queued(self, execution_id: str, backlog_metadata: str, queued_at: str) -> bool:
-        return self._schedule_ops.update_execution_to_queued(execution_id, backlog_metadata, queued_at)
+    def update_execution_to_queued(self, execution_id: str, backlog_metadata: str, queued_at: str, conversation_key: str = None) -> bool:
+        return self._schedule_ops.update_execution_to_queued(execution_id, backlog_metadata, queued_at, conversation_key)
 
-    def claim_next_queued(self, agent_name: str, worker_id: str = None, lease_seconds: int = None):
-        return self._schedule_ops.claim_next_queued(agent_name, worker_id, lease_seconds)
+    def claim_next_queued(self, agent_name: str, worker_id: str = None, lease_seconds: int = None, interactive_triggers=None):
+        return self._schedule_ops.claim_next_queued(agent_name, worker_id, lease_seconds, interactive_triggers)
 
     def release_claim_to_queued(self, execution_id: str) -> bool:
         return self._schedule_ops.release_claim_to_queued(execution_id)
@@ -1874,7 +1874,8 @@ class DatabaseManager:
         return self._schedule_ops.get_agent_executions(agent_name, limit)
 
     def get_agent_executions_summary(self, agent_name: str, limit: int = 50, *,
-                                     exclude_triggers=None):
+                                     exclude_triggers=None, scope_to_viewer=False,
+                                     viewer_email=None):
         """Get execution summaries for list view - excludes large text fields.
 
         `exclude_triggers` filters before the LIMIT — see the operation's own
@@ -1883,7 +1884,8 @@ class DatabaseManager:
         PERF-001: Task List Performance Optimization
         """
         return self._schedule_ops.get_agent_executions_summary(
-            agent_name, limit, exclude_triggers=exclude_triggers)
+            agent_name, limit, exclude_triggers=exclude_triggers,
+            scope_to_viewer=scope_to_viewer, viewer_email=viewer_email)
 
     def get_execution(self, execution_id: str):
         return self._schedule_ops.get_execution(execution_id)
@@ -2644,14 +2646,20 @@ class DatabaseManager:
     def list_whitelist(self, limit: int = 100):
         return self._email_auth_ops.list_whitelist(limit)
 
-    def create_login_code(self, email: str, expiry_minutes: int = 10):
-        return self._email_auth_ops.create_login_code(email, expiry_minutes)
+    def create_login_code(self, email: str, expiry_minutes: int = 10, purpose=None):
+        return self._email_auth_ops.create_login_code(email, expiry_minutes, purpose=purpose)
 
-    def verify_login_code(self, email: str, code: str):
-        return self._email_auth_ops.verify_login_code(email, code)
+    def is_email_account_suspended(self, email: str) -> bool:
+        return self._user_ops.is_email_account_suspended(email)
+
+    def verify_login_code(self, email: str, code: str, purpose=None):
+        return self._email_auth_ops.verify_login_code(email, code, purpose=purpose)
 
     def count_recent_code_requests(self, email: str, minutes: int = 10):
         return self._email_auth_ops.count_recent_code_requests(email, minutes)
+
+    def count_recent_codes_for_purpose(self, purpose: str, minutes: int = 10):
+        return self._email_auth_ops.count_recent_codes_for_purpose(purpose, minutes)
 
     def cleanup_old_codes(self, days: int = 1):
         return self._email_auth_ops.cleanup_old_codes(days)
@@ -3288,8 +3296,11 @@ class DatabaseManager:
             schedule_id, hours, agent_name,
         )
 
-    def get_agent_analytics(self, agent_name: str, hours: int):
-        return self._schedule_ops.get_agent_analytics(agent_name, hours)
+    def get_agent_analytics(self, agent_name: str, hours: int, *,
+                            scope_to_viewer=False, viewer_email=None):
+        # #3139: `scope_to_viewer` narrows to what a Workspace client can account for.
+        return self._schedule_ops.get_agent_analytics(
+            agent_name, hours, scope_to_viewer=scope_to_viewer, viewer_email=viewer_email)
 
     def get_agent_schedules_summary(self, agent_name: str, hours: int):
         return self._schedule_ops.get_agent_schedules_summary(agent_name, hours)
@@ -4042,7 +4053,8 @@ class DatabaseManager:
     # -------------------------------------------------------------------------
 
     def insert_metric_points(self, agent_name: str, rows):
-        """Insert validated points; returns `(recorded, deduplicated)`."""
+        """Insert or restate validated points; returns `PointWriteCounts`
+        (`recorded`, `deduplicated`, `corrected` — ent#729)."""
         return self._metric_point_ops.insert_points(agent_name, rows)
 
     def count_metric_points_today(

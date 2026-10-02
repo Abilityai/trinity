@@ -1160,10 +1160,17 @@ async def _wake_agent(current_user, room_id: str, agent_name: str, chain_depth: 
     client_email = getattr(current_user, "email", None)
     manifest_prefix, images = await _room_inbox_context(agent_name, client_email, delta)
 
+    # ent#661 — lines other modules add to the turn ("" in an OSS build). The
+    # audience is the room's own membership verdict above, never a claim.
+    from services import turn_context
+    turn_prefix = turn_context.collect(turn_context.TurnContext(
+        surface="room", agent_name=agent_name, chat_id=room_id,
+        person_email=client_email, internal_audience=not user_facing))
+
     try:
         result = await get_task_execution_service().execute_task(
             agent_name=agent_name,
-            message=manifest_prefix + _build_turn_prompt(room, agent_name, delta, cold, user_facing),
+            message=turn_prefix + manifest_prefix + _build_turn_prompt(room, agent_name, delta, cold, user_facing),
             triggered_by="room",
             system_prompt=room_prompt,
             images=images or None,

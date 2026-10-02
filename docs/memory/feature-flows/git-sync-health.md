@@ -178,8 +178,8 @@ merge_gitignore_after_clone(name)   monotonic deadline _MERGE_READY_TIMEOUT_SECO
   `auto_sync_enabled` flag — ghosts never recreate), so existing leakers converge on their
   next base-image-drift recreate/restart. No behaviour change on Push (`sync_to_github`).
 - **Bounded & non-fatal**: monotonic deadline, module-level `asyncio.Semaphore` cap on
-  pollers, every exec/HTTP `asyncio.wait_for`-wrapped (frees the task, not the pinned
-  4-thread Docker pool thread). Known hole: a backend restart in the readiness window
+  pollers, every exec/HTTP `asyncio.wait_for`-wrapped (frees the task; the exec's pool
+  thread is freed by the primitive's own enforced `timeout`, #2969). Known hole: a backend restart in the readiness window
   loses the in-memory `create_task` — Push migration remediates; #1703 is the structural fix.
 
 ### 1. Auto-sync heartbeat (agent container)
@@ -619,9 +619,25 @@ GET /api/fleet/sync-audit
     ├── build_fleet_sync_audit(agent_names=...)
     │     ├── db.find_duplicate_bindings()  -- §P5 SQL
     │     ├── db.list_git_enabled_agents()
-    │     └── db.list_sync_states()
+    │     ├── db.list_sync_states()
+    │     └── sync_health_view.sync_block(row, cfg)   -- ent#707, per agent
     └── assembled { agents: [...], summary: {...} }
 ```
+
+**ent#707:** every pre-#707 key keeps its meaning. Each entry adds `ahead`,
+`behind`, `dirty_files`, `diverged_since`, `divergence_age_s`,
+`last_successful_push_at`, `state`, `reason`, `recommendation`, `binding`,
+`auto_sync_enabled`, `frozen` from the same `sync_view` call every other
+surface makes; `dirty_tree` is now `dirty_files > 0` (it was hard-coded
+`false`), so `in_sync` / `dirty` in the summary are real; the summary adds
+`diverged`, `frozen`, `auto_sync_off`, `red`. Exposed over MCP as
+`get_fleet_sync_audit` (`tools/monitoring.ts`; `routers/fleet.py`'s `# mcp:`
+header names it) — the backend scopes rows through `accessible_agent_names`,
+so an agent-scoped key sees its owner's set (decision D12). No surface's
+`reason` carries the agent-written git error: `sync_view` computes it with
+`last_error_summary` withheld (the recommendation still reads the error). The
+same block, per agent, rides `GET /api/monitoring/status` as `agent.sync` —
+see [agent-monitoring.md](agent-monitoring.md).
 
 `find_duplicate_bindings()` implements the spec's §P5 query verbatim:
 
@@ -663,6 +679,17 @@ the data-loss setup.
   on mount; `components/AgentListPanel.vue` (the Dashboard List mode —
   ent#260 retired the Agents page into it) renders the dot next to each
   agent, with a 60s visibility-aware refresh while the mode is active.
+- **The agent card (ent#707).** The Fleet tile (`AgentTile.vue`) reads the
+  same batch entry and shows one sync chip — `↑7 ↓0 · 12 dirty · pushed 3h
+  ago`, kind from `state` (red crit, yellow warn, green calm; none for
+  unknown), reason — recommendation and the absolute push time on hover, plus
+  `Scheduled runs are paused until it syncs` when a freeze is in force. This
+  closes #3035 /review I2: the old tile chip needed `last_sync_status ==
+  'failed'`, so a divergence-frozen agent (which never fails a push) showed
+  nothing in grid mode while the list-mode dot was red. Agent
+  Detail → Overview reads `/git/sync-state` and renders the same line in the
+  state colour. The formatter is `utils/syncSummary.js` (display only; this
+  file keeps no clock and no counts).
 
 ## Files Touched
 
@@ -712,6 +739,9 @@ the data-loss setup.
 |------|---------|
 | `stores/agents.js` | `syncHealth` state + `fetchSyncHealth()` action |
 | `utils/syncHealth.js` | `classifySyncHealth`, `syncHealthColor`, `syncHealthLabel` — render the backend's `state` / `reason` (ent#706), no thresholds |
+| `utils/syncSummary.js` | `formatSyncSummary` / `syncChip` / `syncTextClass` — the card's numbers (`↑7 ↓0 · 12 dirty · pushed 3h ago`); display only, `now` passed in, kind and colour from the backend `state` (ent#707) |
+| `components/AgentTile.vue` | One sync chip (replaces `sync failing ×N` + `git ✓`): kind from state, the numbers as text, reason — recommendation + absolute push time on hover (ent#707) |
+| `components/OverviewPanel.vue` | Footprint `Sync:` line from the whole `/git/sync-state` payload, state colour one tier up on chrome, `—` with no observation; the attention count still counts failed syncs (ent#707, D13) |
 | `components/AgentListPanel.vue` | Renders the dot + imports helpers + fetches on mount + 60s visibility-aware refresh (ent#260 — replaces the retired `views/Agents.vue`) |
 
 ## Testing
@@ -781,6 +811,19 @@ trinity-enterprise#706 (divergence age and the freeze):
   keep their old keys and add the verdict.
 - `src/frontend/tests/unit/syncHealth.spec.js` — the dot renders the backend
   state and reason and holds no threshold.
+- `tests/unit/test_ent707_fleet_health_sync.py` — `/api/monitoring/status`:
+  the per-agent `sync` block, `sync: null` without a binding, the fleet totals,
+  the red-sync issue string, status untouched, accessible-only, no raw error
+  text anywhere (seeded marker), a sync-reader fault degrades to null.
+- `tests/unit/test_fleet_sync_audit.py` (ent#707 class) — the audit's new keys,
+  `dirty_tree` from `dirty_files`, the summary counts, no raw error text.
+- `src/mcp-server/src/tools/monitoring.test.ts` — `get_fleet_health` passes
+  `sync` / `sync_summary` / `issues` through; `get_fleet_sync_audit` returns the
+  audit unchanged; its policy row.
+- `src/frontend/tests/unit/syncSummary.spec.js`, `agentTileSyncChip.spec.js`,
+  `overviewPanelSync.spec.js` — the formatter, and MOUNTED AgentTile /
+  OverviewPanel: chip kind per state, text, hover without the raw error, the old
+  chips gone, `—` with no observation, the attention count unchanged (D13).
 
 The `.gitignore` half of §0 has its own real-git suites (no Docker either — they
 run the SHIPPED builder commands against throwaway repositories, because the
@@ -819,9 +862,14 @@ defects live in git's own last-match-wins and dir-descent semantics):
 
 ## Known Limitations
 
-- **`dirty_tree` in `/api/fleet/sync-audit` is always `false`** today.
-  Populating it requires a live agent call per row; can land as a
-  follow-up with `asyncio.gather`.
+- **The scheduler's skip row still excerpts the git error.** `sync_view`
+  withholds `last_error_summary` from every backend surface's `reason`
+  (ent#707), but the scheduler calls the vendored policy directly and its
+  `skip_reason` for a `sync_failing` freeze carries up to 120 characters of it,
+  as before. It is shown only on that agent's own execution rows.
+- ~~**`dirty_tree` in `/api/fleet/sync-audit` is always `false`**~~ — real
+  since ent#707 (`dirty_files > 0`, the poller's persisted porcelain count; no
+  live agent call).
 - ~~`freeze_schedules_if_sync_failing` is read-only from the scheduler
   side~~ — enforced since #1808 (`SchedulerDatabase`), and since ent#706 it
   also covers divergence.

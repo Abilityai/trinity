@@ -585,8 +585,9 @@
   - **Wake on any ending (ent#329, same per-agent opt-in):** an answer keeps the existing `operator_response` resume. A cancel or an expiry wakes the agent that raised the ask with the new trigger `operator_ending` — one dispatch per agent per ending event, idempotency key over (agent, disposition, sorted item ids), the ending framed as data. An expiry says, verbatim: "Denied by timeout; do not re-ask the same action without new information." No wake for platform-minted rows, for rows the agent already closed on its side (`sync_state = closed_by_filer`), or for agents that are not running (audited `skipped_not_running`). A crash between the ending commit and the wake spawn loses that wake — accepted, because the readback and the Execution Context line still carry the ending.
   - **Self-readback:** `GET /api/agents/{name}/operator-queue/{request_id}` and the MCP tool `get_my_ask` let an agent read one of its OWN asks by its own `request_id` — only as itself (the system key only as `trinity-system`), still readable after Clear All — through a redacted projection that never carries a person's email. The operator queue's get and list routes give every non-person principal an allowlist projection with no person identity — no `responded_by_id`, `responded_by_email`, `addressed_to_email`, `disposed_by_email` or `resolved_to` — and never return the platform's heads-ups about a person (the ent#499 problem report, the ent#308 inbox collision) to one (trinity-enterprise#715). A person is a JWT session or the person's own user-scoped key (`is_person_principal`); report audiences keep their stricter every-key rule (`is_interactive_principal`), which governs what an MCP tool result may carry. The file write-back carries the answer, never who gave it (no `responded_by`), and the clear-resolved `/ws` trigger is the count only. Residual, registered: the answer and ending wakes still attribute the turn to the person (`source_user_email`), which the executions API returns to keys.
   - **Execution Context line:** every platform-composed turn lists the asks this agent raised that ended in the last 24 hours (ids, disposition, time; no human text). Bounded and fail-soft — a read failure omits the line, never the turn.
-  - **Surfaces:** Operations (the resolved card shows who ended the ask and when; the resolved feed sorts by ending time), `/m` (a "Recently ended" strip), and the client portal (the in-chat card and the agent page list asks that ended in the last 7 days with a coarse who — you, the operator, or timeout — never an operator's email or the cancel reason; the sidebar count stays pending-only). The Clear-All copy states only what the platform delivers. The wake opt-in copy says it fires "when an ask it raised ends — answered, cancelled or expired".
+  - **Surfaces:** Operations (the resolved card shows who ended the ask and when; the resolved feed sorts by ending time), `/m` (a "Recently ended" strip), and the client portal (the Workspace's ask surfaces — a chat's own chat-turn tiles and the Inbox (its pane and its All tab); Work and the agent page no longer list asks — show asks that ended in the last 7 days (a chat's ended chat-turn asks for the queue's retention, through the chat's own `chat_id` read) with a coarse who — you, the operator, or timeout — never an operator's email or the cancel reason; the sidebar count stays pending-only). The Clear-All copy states only what the platform delivers. The wake opt-in copy says it fires "when an ask it raised ends — answered, cancelled or expired".
   - **Paging the Workspace asks read (#3059):** `GET /api/enterprise/client-portal/asks` is paged, not capped. The body stays a **list** (no current caller changes); `limit` (1–200, default 200) and an opaque `cursor` are opt-in query parameters, and every response carries `X-Total-Count` (the viewer's whole visible set) and, when more remain, `X-Next-Cursor`. The total and the pages are honest because every filter the viewer's visibility depends on — the addressee, the visible kinds, the ended-ask window and the read-time roster re-check — is applied in SQL **before** the limit; the roster predicate itself is unchanged (`agent_on_roster`, asked once per agent). The order is stable across pages — pending first by priority then age, then ended by ending time, then `id` as the tie-break — so pending asks are never dropped while ended ones are shown. An unreadable cursor is a named **422 `invalid_cursor`**.
+  - **An ask's context (trinity-enterprise#610 PR A2 §3g L7):** `GET /api/enterprise/client-portal/asks/{id}/context` is a portal-token read, so each field is gated: the uniform 404 is the answer path's own ownership check (`_owned_ask`: addressee, visible kind, roster), a roster outage is 503; the run is resolved from the AGENT-written `execution_id` and shown only when it belongs to the ask's agent, was live when the ask was filed (parsed timestamps, 300 s ingest grace) and was a schedule run or the viewer's own (their email, or a Workspace thread they hold) — a `manual` run is not the owner's by trigger alone (it is any accessor's /task and a schedule's "Run now"), so it shows only to whoever started it — so an agent cannot surface another client's turn; the schedule's name is shown to platform principals only; message excerpts come only from a chat turn's thread (`triggered_by = public`) verified as the viewer's, redacted and markdown-stripped, and the ask's own chat is named only for an ask the platform stamped in-turn — a background ask names no chat (a schedule delivering into Main stamps the portal channel and Main on its run, so it would otherwise read "came from Main"); `GET …/asks?chat_id=` returns only the caller's addressed, rostered, visible-kind asks whose TOP-LEVEL platform keys name that chat in-turn (the SQL LIKE is a LIKE-escaped prefilter; a look-alike key an agent nests never counts); the body carries no `cost` and no execution id; rate-limited 120/min per viewer.
   - **Audit** (`event_type=operator_queue`, ids and enums only, never agent or operator text): `answered` · `cancelled` (+ `has_reason`) · `bulk_cancel` (+ `batch_id`, the cancelled ids) · `expired` (`source=system`) · `operator_resume_dispatch` (+ `disposition`).
   - **Agent-raised asks:** the native create path — `ask_operator`, receipts, idempotent replay, role addressing, re-asks — is OPS-001-RAISE (§26.10).
 - **Files**: `src/backend/services/ask_service.py`, `src/backend/services/operator_resume_service.py`, `src/backend/services/operator_queue_service.py`, `src/backend/db/operator_queue.py`, `src/backend/routers/operator_queue.py`, `src/backend/dependencies.py`, `src/backend/client_portal/asks/`, `src/backend/services/platform_prompt_service.py`, `src/mcp-server/src/tools/operator_queue.ts`, `src/frontend/src/utils/operatorQueue.js` + its callers, migrations `operator_queue_ask_object` (SQLite) / `0076_operator_queue_ask_object` (Alembic)
@@ -615,6 +616,34 @@
 - **Files**: `src/backend/services/ask_service.py` (`raise_ask`), `src/backend/db/operator_queue.py` (`create_native_item`, `create_item_with_outcome`, the file-contract filter), `src/backend/routers/operator_queue.py` (`raise_my_ask`), `src/backend/models.py` (`OperatorAskCreate`), `src/backend/services/assignment_provider.py` (`people_for`), `src/backend/services/operator_queue_service.py` (the poller's side), `src/backend/services/platform_prompt_service.py`, `src/mcp-server/src/tools/operator_queue.ts` (`ask_operator`), `src/frontend/src/utils/operatorQueue.js` (`queueReaskBadges`, `proposalRows`) + `QueueCard.vue` / `ResolvedCard.vue` / `QueueProposal.vue` / `MobileAdmin.vue` / `PortalAsks.vue`, `src/backend/client_portal/asks/` (`WorkspaceAsk.proposal`)
 - **Tests**: `tests/unit/test_ent611_native_ask.py`, `tests/unit/test_ent611_native_ask_pg.py`, `tests/unit/test_1402_prompt_contract.py`, `tests/unit/test_1677_operator_alert_emitters.py` (G3), `src/mcp-server/src/operator_queue.test.ts`, `src/mcp-server/src/access-wiring.test.ts`, `src/frontend/tests/unit/operatorQueueReask.spec.js`, `operatorQueueProposal.spec.js`, `portalAskProposal.spec.js`, `mobileAdminProposal.spec.js`
 
+
+### 26.11 Address by Role — asks, reports, messages (OPS-001-ADDRESS)
+- **Status**: ✅ Implemented (trinity-enterprise#606)
+- **Requirement ID**: OPS-001-ADDRESS
+- **Priority**: P1
+- **Description**: Every outbound object an agent produces for a human — an ask, a report, a message — names **a role, never a person**: `to: primary | approver | viewer | operator`. The platform resolves the person through ONE rule, `services/role_addressing.resolve`, so an ask and a report to the same role reach the same people.
+  - **Resolution:** a registered assignment provider's `people_for` answers first (an empty answer means nobody fills the role); otherwise the core defaults — `primary` → the agent's owner, `operator` → the operators (no person recorded), `approver` / `viewer` refused. No primary assigned → a `primary` ask goes to the operators.
+  - **Refused by name, never dropped or defaulted:** `invalid_to`, `role_unassigned`; for reports and messages (one reader each) also `role_resolves_to_several` (with `count`), and for reports `role_unreachable` (the person is not on the agent's roster) — all **422**.
+  - **Reports:** `ReportCreate.to`. `operator`, nobody, or the owner → operator-only (the owner reads the operator surface); otherwise the checked audience. `to` with `audience_email` → **422 `addressing_conflict`**. Neither → operator-only, unchanged.
+  - **Messages:** `SendMessageRequest` takes exactly one of `to` (`primary | approver | viewer`) or `recipient_email`; `operator` is not a message recipient (the operators' door is an `ask_operator` alert).
+  - **The agent never sees the person:** the MCP `report` / `send_message` tools echo the role, never the resolved email.
+  - **Compatibility (two releases):** an agent-supplied `audience_email` / `recipient_email` is still honoured and logged as deprecated once per agent and surface.
+- **Files**: `src/backend/services/role_addressing.py`, `src/backend/services/ask_service.py` (`_address`), `src/backend/routers/reports.py` (`_report_audience`), `src/backend/routers/messages.py` (`_recipient`), `src/backend/models.py`, `src/mcp-server/src/tools/{reports,messages}.ts`
+- **Tests**: `tests/unit/test_ent606_role_addressing.py`
+
+### 26.12 An Ask Attaches to the Chat That Raised It (OPS-001-THREAD)
+- **Status**: ✅ Implemented (trinity-enterprise#734 — the data half; the chat tile and ended marker are trinity#3101)
+- **Requirement ID**: OPS-001-THREAD
+- **Priority**: P2
+- **Description**: An addressed ask carries `context.workspace_session_id` — the client-facing `chat_id` — resolved at RAISE time and written by the platform only (trinity-enterprise#429: an agent-authored value is stripped on both paths). Since the ent#610 amendment of 2026-09-30 it has two homes:
+  - **Raised during a Workspace chat turn → that chat.** When the RAISING execution — the native path's platform-injected `X-Trinity-Execution-Id` (#2392), validated as this agent's own — is a still-RUNNING Workspace chat turn (`triggered_by="public"`, `source_channel="portal"`) whose stamped chat is a session of the same (agent, addressee) — an archived (reset) Main included, since it stays listed and resumable, the ask attaches to that chat. The link is the one both portal turn-creation sites already stamp on the row (`source_channel_chat_id` / `source_channel_client`, ent#457/#2426), so no column is added.
+  - **Anything else → the pair's Main, unchanged** (ent#523): a schedule (including one that delivers into the Workspace, whose row carries the portal stamp under `triggered_by="schedule"`), a loop, a room turn, a delegated child, a gate raise, no or an unknown or a foreign execution, another addressee's chat, and every file-ingested ask (the file carries only an agent-written `context.execution_id`, which is never read for this — citing a turn would be naming a chat).
+  - **Raised in a turn vs in the background:** a chat-turn ask raised in Main and a background ask both carry `chat_id = Main`, but the amendment draws the first as a tile in Main and the second in no chat. So the platform also writes `context.workspace_raised_in_turn = true` only when the raising turn's chat matched, and the client projection (`WorkspaceAsk.raised_in_turn`) names it — false for every background ask and every file ask. Platform-written like `workspace_session_id`: stripped from agent-authored context on both paths (`_PLATFORM_CONTEXT_KEYS`), ignored when a replay or the file sync compares the agent's content, and only the literal `true` projects.
+  - **Trust bound:** the header is set by the platform (`.mcp.json` → `TRINITY_EXECUTION_ID`), but the agent's own process holds its key and can send any of its executions' ids. So the guarantee is bounded, not absolute: at most another RUNNING turn of the same agent for the same addressee — never another person's chat, another agent's or a finished turn's (the #2392 trust level `turn_audience` already accepts).
+  - **Fail-soft:** a failed lookup attaches the ask to Main and logs a warning; it never refuses the ask (the #1632 clamp contract).
+- **Files**: `src/backend/client_portal/service.py` (`chat_for_execution`), `src/backend/services/operator_queue_service.py` (`_workspace_attachment`, `_workspace_thread_for`, `_PLATFORM_CONTEXT_KEYS`), `src/backend/services/ask_service.py` (`raise_ask`), `src/backend/client_portal/asks/{service,models}.py` (`_project`, `WorkspaceAsk.raised_in_turn`)
+- **Tests**: `tests/unit/test_ent734_ask_raising_chat.py`
+
 ---
 
 ## 28. Agent Guardrails (GUARD-001)
@@ -624,7 +653,7 @@
 - **Requirement ID**: GUARD-001
 - **Priority**: HIGH
 - **Description**: Deterministic safety guardrails for autonomous agent execution. Prevents costly mistakes (destructive commands, credential leaks, runaway loops, unauthorized network access) through layered enforcement baked into the base image and agent-server.py — not relying on model compliance alone.
-- **Design Principle**: Trinity controls the base image, the agent server, and the deployment pipeline. Guardrails are injected infrastructure-level, not advisory. Agents cannot opt out.
+- **Design Principle**: Trinity controls the base image, the agent server, and the deployment pipeline. Guardrails are injected infrastructure-level, not advisory. Agents cannot opt out without `sudo`. The agent user holds `NOPASSWD:ALL` by design, so a `sudo` write can remove the registration; the Bash deny-list refuses the obvious spellings and `/health` reports the registration state per request (28.2.1, #3105).
 
 ### 28.2 Claude Code Hooks Injection (GUARD-002)
 - **Status**: ✅ Implemented (#140)
@@ -666,7 +695,7 @@
   admin-controlled managed-settings path, which takes precedence over user and
   project settings and sits outside the synced tree, closing the self-edit and
   inbound-git vectors together. Root-owned `0444` inside a root-owned `0755`
-  directory: the file cannot be rewritten and the directory cannot be used to
+  directory: without `sudo` the file cannot be rewritten and the directory cannot be used to
   replace it or shadow it with a `managed-settings.d` drop-in. No platform-owned
   `settings.json` is shipped into `~/.claude` at all any more, so there is nothing
   there to edit away.
@@ -674,8 +703,17 @@
   missing or writable, Claude Code simply runs no hooks — silently. `startup.sh`
   asserts both properties on every boot and logs `GUARDRAILS: ERROR …` (Vector
   captures it); it reports and continues rather than refusing to boot, so a
-  registration problem cannot become a fleet outage. An operator-visible signal on
-  `/health` (the `clone_status` pattern, #1439) is the tracked follow-up.
+  registration problem cannot become a fleet outage. The agent `/health` stats the
+  file on every request and reports `guardrails_registration`
+  (`ok`/`missing`/`not_root_owned`/`writable`, enum only, the `clone_status`
+  pattern from #1439), so a change after boot is visible (#3105).
+- **`sudo` route (#3105)**: `developer` holds `NOPASSWD:ALL` by design, so root
+  ownership stops accidental rewrites only. `bash_deny` refuses any `sudo` command
+  naming `/etc/claude-code`, `/opt/trinity` or `/etc/sudoers`, `visudo`, and root
+  shells (`sudo -i`/`-s`/`--login`/`--shell`, `sudo su`, `sudo <shell>` with no
+  script, bare `su`). A regex is a speed bump: variables, encodings or a script
+  file get past it. A `sudo` rewrite that keeps root:root `0444` reads `ok` on
+  `/health`.
 - **Interaction checked**: read-only mode (#887) no longer registers a hook of its
   own — it writes `~/.trinity/read-only-config.json`, which the baked
   `read-only-guard.py` reads — so there is exactly one live registration and the
@@ -683,9 +721,9 @@
   `read_only._remove_legacy_settings_hook` still cleans up pre-#887 leftovers.
 - **Both paths stay in the three write-deny lists**
   (`_FILE_WRITE_DENY_PATTERNS` / `guardrails-baseline.json::path_deny` /
-  `EDIT_PROTECTED_PATHS`) as defence in depth, not as the primary control. Note
-  `bash-guardrail.py` does **not** consult `path_deny`, so before this change the
-  Bash route to the registration was open even though the Edit route was denied.
+  `EDIT_PROTECTED_PATHS`) as defence in depth, not as the primary control. `bash-guardrail.py` does
+  **not** consult `path_deny`; the Bash route is covered by the `bash_deny` `sudo`
+  patterns (#3105).
 - **Legacy in-tree copy**: `~/.claude/settings.json` sits on the **durable home
   volume**, so rebuilding the image does not remove it from an existing agent —
   leaving a second registration (precedence-dependent) and a live #2036 leak

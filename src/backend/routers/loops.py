@@ -23,6 +23,7 @@ from models import (
     StopLoopResponse,
     User,
 )
+from services import dispatch_admission_service
 from services.loop_service import get_loop_service
 
 logger = logging.getLogger(__name__)
@@ -213,6 +214,17 @@ async def start_loop(
     )
     _source_agent = current_user.agent_name or _resolved_source
 
+    # #2973: a loop started by an agent inherits the starter's chain depth
+    # (#2806) and is refused past the max. Captured HERE and persisted on the
+    # loop row, because later iterations run after the starter's turn has ended.
+    # An InterAgentDepthExceeded maps to the named 403 in main.py.
+    chain_depth = await dispatch_admission_service.enforce_inter_agent_depth(
+        current_user=current_user,
+        target=name,
+        endpoint=f"/api/agents/{name}/loops",
+        x_via_mcp=None,
+    )
+
     service = get_loop_service()
     loop_row = await service.start_loop(
         agent_name=name,
@@ -234,6 +246,7 @@ async def start_loop(
         # #2389: the credential actually presented, never the forgeable X-MCP-Key-* headers.
         source_mcp_key_id=getattr(current_user, "mcp_key_id", None),
         source_mcp_key_name=getattr(current_user, "mcp_key_name", None),
+        chain_depth=chain_depth,
     )
     return StartLoopResponse(
         loop_id=loop_row["id"],

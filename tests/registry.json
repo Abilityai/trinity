@@ -1,6 +1,66 @@
 {
   "test_files": [
     {
+      "file": "unit/test_ent671_env_backed_ops_forwarding.py",
+      "feature": "trinity-enterprise#671",
+      "added": "2026-09-29",
+      "categories": [
+        "config",
+        "compose",
+        "settings"
+      ],
+      "description": "Every config.ENV_BACKED_OPS_KEYS variable (METRICS_RETENTION_DAYS, METRICS_DAILY_POINT_CAP, INTER_AGENT_MAX_CHAIN_DEPTH) is forwarded exactly once by docker-compose.yml / .prod.yml / .hosted.yml with an EMPTY default (${VAR:-}), no other docker-compose*.yml supplies a default, and .env.example leaves each commented but documented - so `source: env` on GET /api/settings/retention means an operator set it and the Settings rows are not locked on every install."
+    },
+    {
+      "file": "unit/test_ent671_retention_metric_rows.py",
+      "feature": "trinity-enterprise#671",
+      "added": "2026-09-29",
+      "categories": [
+        "backend",
+        "settings",
+        "retention"
+      ],
+      "description": "Settings -> Retention metric rows: GET /api/settings/retention carries quotas.metrics_daily_point_cap {value, source} in both editions and keeps the cap out of windows/sources; env-supplied values report source env for both knobs; a stored row wins over env; the reported quota equals what the record_metrics write boundary enforces (metric_points._ops_int) for default/0/env/garbage/-1 resolver output; call-site pin that Settings.vue uses utils/retentionFields.js (visibleRetentionFields, retentionSaveBody) and has no private field list."
+    },
+    {
+      "file": "mcp-server/src/tools/monitoring.test.ts",
+      "feature": "ent#707",
+      "added": "2026-09-27",
+      "categories": [
+        "mcp-server",
+        "typescript",
+        "unit",
+        "git-sync",
+        "monitoring"
+      ],
+      "description": "The monitoring MCP tools carry sync health (trinity-enterprise#707); real tool execute() over a fake TrinityClient (requireApiKey=false seam), node:test. get_fleet_health passes each agent's sync block through verbatim, the fleet sync_summary, and the issues strings (where the red-sync recommendation lives) next to the kept issues_count; status is untouched; an agent with no git binding has sync: null as a present key; an older backend without the fields yields null, never undefined. get_fleet_sync_audit is registered in the monitoring group with no parameters, reads the audit once and returns it unchanged, and turns a backend failure into a structured {success:false} result; its TOOL_ACCESS_POLICY row is kind none, naming accessible_agent_names (decision D12)."
+    },
+    {
+      "file": "unit/test_fleet_sync_audit.py",
+      "feature": "#390, ent#707",
+      "added": "2026-09-27",
+      "categories": [
+        "backend",
+        "unit",
+        "git-sync",
+        "api"
+      ],
+      "description": "The fleet sync audit (GET /api/fleet/sync-audit, MCP get_fleet_sync_audit) on a real DB via db_harness. #390: find_duplicate_bindings flags agents sharing (github_repo, working_branch) with source-mode rows excluded; build_fleet_sync_audit on an empty fleet, a clean agent, a duplicate pair, unpushed_commits from ahead_working, and the accessible-name filter. trinity-enterprise#707: every pre-#707 entry key keeps its meaning and the entry adds ahead / behind / dirty_files / diverged_since / divergence_age_s / last_successful_push_at / state / reason / recommendation / binding / auto_sync_enabled / frozen (a work agent diverged 7 ahead for 26 h is red + frozen); dirty_tree comes from dirty_files and drives the summary's in_sync / dirty; the summary adds diverged / frozen / auto_sync_off / red over a mixed fleet; an agent never observed is unknown with null counts and the old unpushed_commits fallback; no raw git error text anywhere in the result (seeded marker) while the recommendation still reads it."
+    },
+    {
+      "file": "unit/test_ent707_fleet_health_sync.py",
+      "feature": "ent#707",
+      "added": "2026-09-27",
+      "categories": [
+        "backend",
+        "unit",
+        "git-sync",
+        "monitoring",
+        "api"
+      ],
+      "description": "GET /api/monitoring/status carries each agent's git sync health (trinity-enterprise#707); real DB via db_harness, handler called directly with Docker/Redis/accessibility stubbed on the module the handler resolves them from. Each git-bound agent has a sync block (binding, auto_sync_enabled, ahead, behind, dirty_files, last_successful_push_at, divergence_age_s, state, reason, recommendation, frozen) — a work agent diverged 7 ahead for 26 h is red + frozen with the policy's reason; an agent with no git binding reports sync null (null in the JSON, not absent); a bound agent never observed is unknown with null counts. sync_summary totals {git_bound, diverged, frozen, auto_sync_off, dirty, red, yellow} over a seeded mixed fleet. A red agent gains exactly one issues[] entry 'sync: <reason> — <recommendation>'; a yellow one none. Sync never moves status or the health counts. A non-admin sees only accessible agents and their totals. No raw git error text anywhere in the payload (seeded marker), while the recommendation still reads the error. A sync-reader fault degrades to sync null / sync_summary null and leaves the health summary intact (not the aggregation-failed branch). The view layer (sync_view) keeps git stderr out of reason and freeze_reason for every surface; a denied push still recommends 'credential is read-only'."
+    },
+    {
       "file": "unit/test_ent706_sync_health_surfaces.py",
       "feature": "ent#706",
       "added": "2026-09-27",
@@ -127,6 +187,18 @@
         "mcp-keys"
       ],
       "description": "Creating an MCP key requires a signed-in session: POST /api/mcp/keys (every scope) and POST /api/mcp/keys/ensure-default through the REAL get_current_user with seeded agent/system/connector/user key rows -> 403 and mcp_api_keys row count unchanged, no key_create audit row; JWT -> 200 with the secret and one key_create audit row (ensure-default included, target = new key id); admin JWT still creates ops/portal_delegate; non-admin JWT portal_delegate still 403; a user-scoped key asking an admin scope 403; existing user key -> ensure-default returns null, creates and audits nothing; the created key validates as its owner."
+    },
+    {
+      "file": "unit/test_mcp_key_listing_requires_session.py",
+      "feature": "ent#712",
+      "added": "2026-09-28",
+      "categories": [
+        "backend",
+        "auth",
+        "security",
+        "mcp-keys"
+      ],
+      "description": "GET /api/mcp/keys requires a signed-in session (INTERACTIVE, Depends(require_interactive)): agent/system/connector/user keys through the REAL get_current_user with seeded key rows, and connector/loopback-JWT/ops/portal_delegate/unknown-future-scope/missing-mcp_scope via an explicit principal dataclass -> 403. Signed-in admin -> every key with user_email (never the secret); signed-in user -> own keys only. Every route in routers/mcp_keys.py read off the router object and listed with its rule; a single-key read stays owner-scoped; /validate needs no session."
     },
     {
       "file": "unit/test_ent600_telegram_group_context.py",
@@ -602,6 +674,18 @@
         "validation"
       ],
       "description": "Tests for business task validation (#294): prompt building (placeholders, truncation, custom prompts), response parsing (JSON, markdown blocks, text fallback, failure indicators), business status mapping, schedule/execution model validation fields, API integration tests"
+    },
+    {
+      "file": "unit/test_2959_validation_input.py",
+      "feature": "Issue #2959",
+      "added": "2026-10-01",
+      "categories": [
+        "backend",
+        "unit",
+        "scheduler",
+        "validation"
+      ],
+      "description": "VALIDATE-001 input integrity (#2959): drives the real ValidationService with a fake auditor that PASSes only when the run's last-line status is in its prompt. A >10,000-char response validates against its last line (head+tail window); a custom validation_prompt without placeholders still carries the task and response; a full template is honoured and literal braces do not crash; an empty/whitespace/None response records business_status=validation_unavailable before any referee or validator run, files no operator-queue alert and is never a PASS; a validator cannot award itself 'unavailable'."
     },
     {
       "file": "test_github_pat.py",
@@ -3109,6 +3193,17 @@
       "description": "Skill assignment delivers (#2703): deliver_assigned runs the start-path injection (all assigned, force=False - a subset rewrites CLAUDE.md), stopped -> pending_start, Docker unreadable -> not_delivered/docker_unavailable, busy -> one retry, over budget -> in_progress with the work kept + WS on completion; under-lock re-read is opt-in; routes stay 200 with `delivery` in the body and fire the thin agent_skills_changed trigger; 404/422 fire before any write."
     },
     {
+      "file": "unit/test_ent672_skill_deprecation.py",
+      "feature": "abilityai/trinity-enterprise#672",
+      "added": "2026-09-30",
+      "categories": [
+        "backend",
+        "skills",
+        "unit"
+      ],
+      "description": "Skill lifecycle keys (ent#672): extract_contract carries `deprecated` (a real boolean) and `superseded-by` (both spellings, a trinity: block wins, the author's text as one printable line <= 200 chars, None unless deprecated) with named frontmatter_invalid:* warnings for garbage; deprecation_warning is the one grammar producer (successor only when it is a skill name); list_skills / get_skill and the REST route's explicit SkillInfo construction carry both fields; the injection result carries the code on injected / unchanged / conflict; deliver_assigned stamps it on every delivery outcome (stopped agent, docker unreadable, over budget) from the library entry, leaves a live skill's report byte-identical and never fails on an unreadable library; public_skills_result keeps deprecated:<name>; CLAUDE.md is deliberately not annotated."
+    },
+    {
       "file": "unit/test_2337_invariant_namespace.py",
       "feature": "#2337",
       "added": "2026-09-12",
@@ -3345,26 +3440,39 @@
     },
     {
       "file": "unit/test_ent478_metric_points_store.py",
-      "feature": "abilityai/trinity-enterprise#478",
+      "feature": "abilityai/trinity-enterprise#478, #729",
       "added": "2026-09-22",
+      "updated": "2026-10-01",
       "categories": [
         "backend",
         "database",
         "unit"
       ],
-      "description": "The `metric_points` store against real rows on SQLite (and PostgreSQL when TEST_POSTGRES_URL is set). Dedup by the identity primary key with `on_conflict_do_nothing`, `recorded` counted via `.returning` because rowcount is not a portable count across a multi-VALUES DO NOTHING, the write-time daily cap count, and the sweep primitives sharing one predicate. The ts-range chunked prune takes boundary TIES with it, so a timestamp shared by more rows than the chunk size cannot wedge the loop, and is bounded per call. Carries the negative control for what `test_schema_parity` structurally cannot see (a column in the DDL but not in `tables.py`), the JSONB marker-rule translation, a float8 precision check, and facade signature parity."
+      "description": "The `metric_points` store against real rows on SQLite (and PostgreSQL when TEST_POSTGRES_URL is set). Dedup by the identity primary key (a different value restates the one row since ent#729), counts read via `.returning` because rowcount is not a portable count across a multi-VALUES upsert, the write-time daily cap count, and the sweep primitives sharing one predicate. The ts-range chunked prune takes boundary TIES with it, so a timestamp shared by more rows than the chunk size cannot wedge the loop, and is bounded per call. Carries the negative control for what `test_schema_parity` structurally cannot see (a column in the DDL but not in `tables.py`), the JSONB marker-rule translation, a float8 precision check, and facade signature parity."
+    },
+    {
+      "file": "unit/test_ent729_metric_restatement.py",
+      "feature": "abilityai/trinity-enterprise#729",
+      "added": "2026-10-01",
+      "categories": [
+        "backend",
+        "database",
+        "unit"
+      ],
+      "description": "Restatement (R45) against real rows on SQLite and, under `requires_postgres`, PostgreSQL: a different value at an existing (metric, ts, dims) updates the row in place (`revision` +1, `recorded_at` = the correcting write, `execution_id` follows it; `ts`, `created_at` and dims unmoved), an identical value writes nothing, an asymmetric mixed batch counts recorded / deduplicated / corrected separately, and a value moving between the two value columns is still a change (`IS DISTINCT FROM`, mutation-proved against `!=`). The store refuses two rows with one identity and writes in (ts, key) order. The SQLite migration on the ent#478 table shape, a pre-ent#729 INSERT on the new schema, and the Alembic revision upgrading 0085 to head over an existing row on PostgreSQL. Through the real `read_agent_metrics` / `latest_by_metric`: a correction leaves `last_point_at` and `stale` unmoved, and a corrected store reads exactly like a born-correct one with no write-side column on any read."
     },
     {
       "file": "unit/test_ent478_record_route.py",
-      "feature": "abilityai/trinity-enterprise#478",
+      "feature": "abilityai/trinity-enterprise#478, #729",
       "added": "2026-09-22",
+      "updated": "2026-10-01",
       "categories": [
         "backend",
         "api",
         "auth",
         "unit"
       ],
-      "description": "`POST /api/agents/{name}/metrics/points` — gate ORDER and status meaning, with the store, limiter and idempotency service stubbed. The self-gate answers before any read (so the status cannot become an existence oracle); every post-claim refusal releases the batch claim, exercised across all four refusal kinds rather than asserted over the source, because a 422 that wedged the key would silently drop a day of corrected retries; DB failures are classified (connectivity 503 retryable, content 500 not, since an agent told to retry a permanently unstorable batch retries forever); the execution-derived batch key dedups a ts-less re-delivered turn; a human principal's batch does not replay an agent's (the scope folds the identity the key omits); and the cap refuses with 429 + Retry-After, with garbage coercing to the default rather than to 0 = unlimited."
+      "description": "`POST /api/agents/{name}/metrics/points` — gate ORDER and status meaning, with the store, limiter and idempotency service stubbed. The self-gate answers before any read (so the status cannot become an existence oracle); every post-claim refusal releases the batch claim, exercised across all four refusal kinds rather than asserted over the source, because a 422 that wedged the key would silently drop a day of corrected retries; DB failures are classified (connectivity 503 retryable, content 500 not, since an agent told to retry a permanently unstorable batch retries forever); the execution-derived batch key dedups a ts-less re-delivered turn; a human principal's batch does not replay an agent's (the scope folds the identity the key omits); and the cap refuses with 429 + Retry-After, with garbage coercing to the default rather than to 0 = unlimited. ent#729: `corrected` reaches the 201 beside the other counts (asymmetric so a swap fails), an ent#478-era snapshot without `corrected` still replays, a restatement logs a count never a value, a store-shape refusal or an unreadable store result is the non-retryable 500 with the claim released, and the stated limit is pinned — an identical earlier batch replays over a later correction (A → B → A ends on B)."
     },
     {
       "file": "unit/test_ent478_cleanup_sweep.py",
@@ -3390,14 +3498,15 @@
     },
     {
       "file": "mcp-server/src/tools/metrics.test.ts",
-      "feature": "abilityai/trinity-enterprise#478, #479",
+      "feature": "abilityai/trinity-enterprise#478, #479, #729",
       "added": "2026-09-22",
+      "updated": "2026-10-01",
       "categories": [
         "mcp-server",
         "typescript",
         "unit"
       ],
-      "description": "`record_metrics` / `refresh_metric_definitions` / `get_metrics`: agent-scoped keys only, refused before any network call and with no agent target parameter to spoof; three separate outcome counts so a dedup cannot read as a write; and the failure classification, which is the load-bearing part — 503 retryable, 500 explicitly not (a tool that tells an agent to retry a permanently unstorable batch turns one bad point into an infinite loop), 409 in-flight, and the two 429s distinguished because 'wait a moment' and 'wait until tomorrow' are different remedies. Per-point reason codes are surfaced verbatim so the agent can self-correct, and an unparseable body degrades to no detail rather than throwing inside the error path. ent#479 adds the READ tool on the same contract: agent-scoped, never throws, forwards `metric`/`window`/`since`/`until` verbatim, and maps a 422 `metric_undeclared` to `{undeclared: true}` with the hint naming `refresh_metric_definitions` rather than letting the #186 uniform-404 convention tell an agent it lacks access to itself."
+      "description": "`record_metrics` / `refresh_metric_definitions` / `get_metrics`: agent-scoped keys only, refused before any network call and with no agent target parameter to spoof; separate outcome counts so a dedup cannot read as a write (`corrected` added by ent#729, `?? 0` against an older backend, and the description teaches the correction rule instead of the retired \"new ts\" one); and the failure classification, which is the load-bearing part — 503 retryable, 500 explicitly not (a tool that tells an agent to retry a permanently unstorable batch turns one bad point into an infinite loop), 409 in-flight, and the two 429s distinguished because 'wait a moment' and 'wait until tomorrow' are different remedies. Per-point reason codes are surfaced verbatim so the agent can self-correct, and an unparseable body degrades to no detail rather than throwing inside the error path. ent#479 adds the READ tool on the same contract: agent-scoped, never throws, forwards `metric`/`window`/`since`/`until` verbatim, and maps a 422 `metric_undeclared` to `{undeclared: true}` with the hint naming `refresh_metric_definitions` rather than letting the #186 uniform-404 convention tell an agent it lacks access to itself."
     },
     {
       "file": "unit/test_ent479_freshness_rule.py",
@@ -3734,6 +3843,37 @@
       "description": "Journey J13 (suggestions): my agent tells me what I can do with it and what is waiting on me, and only things that are true. A strict=True xfail skeleton — the rules, SQL and doors are unit-proven and the verbs mount-proven; the walk needs a real failing schedule, a shared platform user and a magic-link client on one instance."
     },
     {
+      "file": "unit/test_ent610_asks_unavailable.py",
+      "feature": "trinity-enterprise#610",
+      "added": "2026-09-28",
+      "categories": [
+        "backend",
+        "workspace"
+      ],
+      "description": "Workspace asks read fails loud (ent#610 PR A0): a queue-read fault and an unreadable roster each raise AsksUnavailable and the route answers 503 asks_unavailable (never []); a genuinely off-roster agent is still dropped with a 200; answer_ask stays a uniform 404 on a roster outage (Invariant #8); the suggestions build still degrades to no ask ids through its own attempt() (a guard for the new raise path; it also passes pre-fix). Mutations: revert the raise to return [] (2 red), make _on_roster swallow again (3 red incl. the reversed test_ent428 case)."
+    },
+    {
+      "file": "unit/test_ent610_ask_context.py",
+      "feature": "trinity-enterprise#610",
+      "added": "2026-09-29",
+      "categories": [
+        "backend",
+        "workspace",
+        "security"
+      ],
+      "description": "An ask's context (ent#610 PR A2 §3g L7, E1) on a real SQLite: origin = the 3 messages before the ask only from a run thread verified as the viewer's, else the ask's own Main with no excerpt; run shown only for the ask's agent, live when filed (parsed, 300 s grace), schedule/manual or the viewer's own — another user's run on the same agent, another agent's run, a run outside its window and a missing execution are all None; the schedule name for platform principals only; recent_answers = the viewer's own 3 newest from this agent; the route has no cost/execution_id, one 404 body for missing/not-mine/off-roster/invisible kind, 503 on a roster outage (the answer path stays 404), the rate-limit key, and the # mcp header. Mutations: agent check, audience check, _owned_ask, +cost, live window, schedule name to clients, unverified origin, non-strict roster (each red)."
+    },
+    {
+      "file": "unit/test_ent610_inbox.py",
+      "feature": "trinity-enterprise#610",
+      "added": "2026-09-28",
+      "categories": [
+        "backend",
+        "workspace"
+      ],
+      "description": "Workspace Inbox backend (ent#610 PR A), on a real SQLite schema. D3: a report addressed to me and stamped to a chat I own is an unread arrival on the #557 cursor/baseline (own-session join, plain-equality lowercased audience, index not scan; Hypothesis property: the count is exactly the arrivals). D4: resolve_report_session stamps an addressed report to the addressee's own in-flight chat else their Main (minted, touched added=0, one Main under concurrency, fail-soft None). D5: the completion writer's source marker (completion:done/failed); unread_arrivals_with_latest windows the same fragment (property: n == count_unread_by_session, latest = max arrival, first_unread_message_id = earliest unread message); GET /chat-state?previews=true attaches a roster-scoped, 100-bounded, markdown-stripped 160-char preview with outcome from the marker only and NO cost key, reusing the same statement's counts; without previews the payload is the ent#359 shape unchanged; the route forwards the principal kind to the roster read (platform vs portal token) and an unreadable roster fails the previews read with a 5xx, never a preview-less 200. Mutations recorded in the PR (roster filter, unread passthrough, cost, latest order, body-parsed outcome, first-unread order, hard-coded principal kind, swallowed roster read: all red)."
+    },
+    {
       "file": "unit/test_ent713_events_access_scope.py",
       "feature": "ent#713",
       "added": "2026-09-28",
@@ -3797,6 +3937,16 @@
       "description": "ent#527 rider (ruling 2026-09-24): the owner's readiness stamp on the agents list and the fleet grid. One batched read on a real database returns only stamped agents, names a rollout seed as such, never carries who flipped it, skips an unknown state and does not query for an empty list; GET /api/agents attaches it per agent from that one read, None when unstamped. brief_held rides next to it: the role card's shared predicates (is_seat_delivery_schedule, brief_is_held), one batched schedule read over the calibrating+autonomy candidates only, fail-soft to no claim, so the list's calibrating tooltip never says a brief is paused when the card would not."
     },
     {
+      "file": "unit/test_ent676_role_card_join.py",
+      "feature": "abilityai/trinity-enterprise#676",
+      "added": "2026-09-30",
+      "categories": [
+        "backend",
+        "workspace"
+      ],
+      "description": "ent#676: the role card reads the ONE objective-metric join instead of its own. The portal projection is an allowlist (literal key sets for a metric and an objective; a finding crosses as its code, the operator sentence, canon paths and role owner never do; agent-written text is capped). build_role_card is driven through the REAL join with the agent door and the store faked: the store's numbers, stale by the 2x-cadence rule (3h on a 1h cadence is stale; 40 days with no cadence is not), undeclared is a code with no number, achieved objectives are gone, the template is read once and handed over. Every way of showing no objectives is named (door dies mid-read, store raises, every file unreadable, budget refused) and the role, readiness and flip survive each. One budget, two doors on the real in-process limiter: the operator door empties it and the card still answers without objectives, card reads spend the operator's budget, a viewer's own cap is spent first and a refused viewer costs the shared bucket nothing, off-roster is a 404 before any key is minted. Mutations: 10 on role_card.py / router.py, each red."
+    },
+    {
       "file": "unit/test_2996_owner_config_person_only.py",
       "feature": "#2996",
       "added": "2026-09-28",
@@ -3855,6 +4005,71 @@
         "guard"
       ],
       "description": "Route census, live side: imports main in a SUBPROCESS and checks every registered non-enterprise APIRoute maps to a key the AST census found, and every stored METHOD /full/path (baseline + reviewed tables) is what the app registers (rule 7). Fails, never skips, on a failed import, unparseable output or zero routes."
+    },
+    {
+      "file": "unit/test_2973_depth_new_roots.py",
+      "feature": "#2973",
+      "added": "2026-09-30",
+      "categories": [
+        "backend",
+        "scheduler",
+        "security"
+      ],
+      "description": "Loop start, manual schedule trigger and agent event emit inherit the inter-agent chain depth (#2806) through their real routes with a minted agent bearer; loopback JWT claim, terminal-event depth, scheduler origin/insert/retry."
+    },
+    {
+      "file": "unit/test_2973_event_dispatch_budget.py",
+      "feature": "#2973",
+      "added": "2026-09-30",
+      "categories": [
+        "backend",
+        "security"
+      ],
+      "description": "Per source->subscriber hourly event-dispatch budget (fakeredis): cap, pair keying, no cross-source starvation, one alert per window, TTL always set, fail-open."
+    },
+    {
+      "file": "unit/test_ent727_cross_agent_metrics.py",
+      "feature": "abilityai/trinity-enterprise#727",
+      "added": "2026-09-30",
+      "categories": [
+        "backend",
+        "api",
+        "security",
+        "unit"
+      ],
+      "description": "Narrow cross-agent metrics read. The one predicate (self or an agent_permissions grant, directional), the hourly-deduped audit of who read whose numbers (source passed, marker set only after the row is written, written anyway when the marker store is down, never raises into the read), and get_objectives resolving an actual from the agent that serves a metric through the READER's grant: fail-closed with no viewer predicate, ambiguity decided before the viewer filter, a server the viewer cannot see treated as not served, local declaration wins; plus the objectives route passing the viewer predicate and auditing each serving agent. The /metrics and /definitions grant gate itself is in test_ent479_metrics_route.py."
+    },
+    {
+      "file": "unit/test_2968_chat_is_error.py",
+      "feature": "#2968",
+      "added": "2026-10-01",
+      "categories": [
+        "agent-server",
+        "unit",
+        "execution"
+      ],
+      "description": "The synchronous chat path treats an exit-0 is_error result (error_type execution_error) as a failure, parity with the headless #1673 check. Drives the real execute_claude_code against a fake claude on PATH: empty result -> 502 carrying the real errors[] cause (was 500 'returned empty response'); an 'API Error' result text and partial assistant text before is_error are 502s, not successes; is_error false stays a success. #1870 completed-turn recovery runs first: an on-disk end_turn answer is returned with the recovery notice and recovered_terminal; an unfinished transcript still fails. A failed turn never captures its session; the 502 body is structured {message, metadata} for backend telemetry salvage and is credential-sanitized in both fields; the completed-turn recovery's JSONL parse runs off the event loop."
+    },
+    {
+      "file": "unit/test_2969_exec_timeout.py",
+      "feature": "#2969",
+      "added": "2026-10-01",
+      "categories": [
+        "backend",
+        "reliability",
+        "unit"
+      ],
+      "description": "execute_command_in_container enforces its timeout: the command (string or argv) is wrapped in an in-container `timeout -k K N`, the call is bounded by asyncio.wait_for so a wedged exec thread frees the caller, the result carries an honest timed_out flag (exit 124/137 only once the bound elapsed), a non-positive timeout is refused, a hanging pre-check hook returns promptly, and (with GNU coreutils) the built argv ends hung, STOPped and TERM-ignoring processes."
+    },
+    {
+      "file": "unit/test_2971_gemini_runtime.py",
+      "feature": "#2971",
+      "added": "2026-10-01",
+      "categories": [
+        "agent-server",
+        "gemini-runtime"
+      ],
+      "description": "#2971: the Gemini runtime runs a turn on the pinned gemini-cli (0.62.0). Real execute/execute_headless with a captured Popen: argv carries only flags the pinned CLI accepts (no --system-prompt/--max-turns), the system prompt is prepended to the turn input, --skip-trust is always passed, and chat resumes only its own captured session id (never bare --resume; model change/reset start fresh; failed turns don't move it; a missing session gets one cold retry unless cancelled). The build-time smoke harness is exercised against a fake gemini emulating 0.62.0's strict parser, and the Dockerfile pin/smoke placement are asserted. No Docker, no network."
     }
   ]
 }

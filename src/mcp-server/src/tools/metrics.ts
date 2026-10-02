@@ -15,7 +15,8 @@
  * correctable mistake — and the 422 body carries a reason code per point
  * precisely so the agent can fix it and re-send.
  *
- * ent#479 adds `get_metrics` to this module (the read half), and ent#666
+ * ent#479 adds `get_metrics` to this module (the read half) — ent#727 lets it
+ * read another agent's numbers through a permission grant — and ent#666
  * adds `get_objectives` — the same numbers against the targets an objective
  * file sets for them, which is the ONE place a gap is computed.
  */
@@ -107,9 +108,10 @@ export function createMetricsTools(client: TrinityClient, requireApiKey: boolean
         "whole batch is refused and each bad point comes back with a reason code and a fix. " +
         "A metric must be declared in your template.yaml `metrics:` block first — if you get " +
         "`metric_undeclared`, add it there and call refresh_metric_definitions. " +
-        "Identity is (metric, ts, dims): re-sending the same observation is deduplicated " +
-        "rather than double-counted, and a CORRECTION is a new ts, not a new value at the " +
-        "same one. Stamp `ts` yourself (RFC 3339 with an offset, e.g. 2026-09-22T08:00:00Z) " +
+        "Identity is (metric, ts, dims): re-sending the same value is deduplicated rather " +
+        "than double-counted, and a different value at the same (metric, ts, dims) CORRECTS " +
+        "the stored point in place — keep the ts of the period the number describes, and the " +
+        "result counts it as `corrected`. Stamp `ts` yourself (RFC 3339 with an offset, e.g. 2026-09-22T08:00:00Z) " +
         "for an observation about a specific moment; omit it for 'now'. Pass `execution_id` " +
         "(from your Execution Context block) so a re-delivered turn replays instead of " +
         "recording twice — without it, and without `ts`, a retry is a new observation.",
@@ -155,7 +157,9 @@ export function createMetricsTools(client: TrinityClient, requireApiKey: boolean
             "Optional. Re-sending the same batch under the same key returns the FIRST " +
               "result instead of recording again. The key is bound to the batch CONTENT, " +
               "so a different set of points under a reused key is still recorded — you " +
-              "cannot lose data by reusing a key, only by re-sending identical points.",
+              "cannot lose data by reusing a key, only by re-sending identical points. " +
+              "That includes restating a value back after correcting it: an identical " +
+              "earlier batch replays (`replayed: true`, nothing written), so use a new key.",
           ),
         execution_id: z
           .string()
@@ -164,7 +168,10 @@ export function createMetricsTools(client: TrinityClient, requireApiKey: boolean
           .describe(
             "Optional. The execution_id of the turn you are recording from (it is in your " +
               "Execution Context block). Links the batch to the turn and makes a re-delivered " +
-              "turn replay rather than record twice.",
+              "turn replay rather than record twice. Within one turn, re-sending a batch " +
+              "identical to an earlier one replays it (`replayed: true`, nothing written) even " +
+              "if you corrected the value in between — pass a fresh `idempotency_key` to " +
+              "restate it back.",
           ),
       }),
       execute: async (
@@ -206,10 +213,13 @@ export function createMetricsTools(client: TrinityClient, requireApiKey: boolean
             {
               success: true,
               agent_name: result.agent_name,
-              // Three separate counts, on purpose: "we already had this" is an
-              // honest outcome and must not read as a write that happened.
+              // Separate counts, on purpose: "we already had this" is an honest
+              // outcome and must not read as a write that happened, and a
+              // restated point (ent#729) is neither. `?? 0`: a backend that
+              // predates corrections can never restate a row.
               recorded: result.recorded,
               deduplicated: result.deduplicated,
+              corrected: result.corrected ?? 0,
               replayed: result.replayed,
               points: result.points,
             },
@@ -241,12 +251,14 @@ export function createMetricsTools(client: TrinityClient, requireApiKey: boolean
     },
 
     // ========================================================================
-    // get_metrics — read your own recorded metrics, with freshness (ent#479)
+    // get_metrics — read recorded metrics, with freshness (ent#479); another
+    // agent's when you hold a permission grant on it (ent#727)
     // ========================================================================
     getMetrics: {
       name: "get_metrics",
       description:
-        "Read YOUR recorded business metrics: what you declared, the latest value of each, " +
+        "Read recorded business metrics — YOURS by default, or another agent's with `agent`: " +
+        "what it declared, the latest value of each, " +
         "how fresh it is, and a bounded series for charting. Answers from the point store, " +
         "so it works whether or not you are mid-turn and whether or not you have a " +
         "dashboard.yaml. A metric is STALE when no point has arrived within 2x its declared " +
@@ -260,9 +272,20 @@ export function createMetricsTools(client: TrinityClient, requireApiKey: boolean
         "not `series[0]` — `chart` is the one series that matches `latest`: the fold " +
         "across every dimension for sum/avg, and for `last` the single series named by " +
         "`chart.dims` (basis: series), because a cross-series `last` is not one number. " +
-        "This tool reads only your own metrics — there is no agent parameter; another " +
-        "agent's numbers are not readable from here.",
+        "Pass `agent` to read ANOTHER agent's metrics: you must hold a permission grant on " +
+        "it — the same grant that lets you chat_with_agent it, configured by an operator in " +
+        "the Trinity UI. Without one the call is refused with `Access denied` (\"Permission " +
+        "denied: Agent '<you>' is not permitted to communicate with '<agent>'\") or " +
+        "`not_authorized`; that is not retryable. The answer has exactly the same shape and " +
+        "stale rule as your own read.",
       parameters: z.object({
+        agent: z
+          .string()
+          .optional()
+          .describe(
+            "Optional. Another agent whose metrics to read; omit for your own. Requires a " +
+              "permission grant on that agent (the one chat_with_agent uses).",
+          ),
         metric: z
           .string()
           .optional()
@@ -299,6 +322,7 @@ export function createMetricsTools(client: TrinityClient, requireApiKey: boolean
       }),
       execute: async (
         params: {
+          agent?: string;
           metric?: string;
           window?: string;
           since?: string;
@@ -309,20 +333,28 @@ export function createMetricsTools(client: TrinityClient, requireApiKey: boolean
       ) => {
         const authContext = context?.session;
         const apiClient = getClient(authContext);
+        const { agent, ...options } = params;
 
+        // A named target has already passed `checkAgentEdge` (the `enforce`
+        // row on `agent` in access.ts) and the backend re-checks the grant;
+        // an empty string reads as omitted there, and so it does here.
         let agentName: string;
-        try {
-          agentName = getAgentName(authContext, "get_metrics");
-        } catch (error) {
-          return JSON.stringify(
-            { success: false, error: error instanceof Error ? error.message : String(error) },
-            null,
-            2,
-          );
+        if (agent) {
+          agentName = agent;
+        } else {
+          try {
+            agentName = getAgentName(authContext, "get_metrics");
+          } catch (error) {
+            return JSON.stringify(
+              { success: false, error: error instanceof Error ? error.message : String(error) },
+              null,
+              2,
+            );
+          }
         }
 
         try {
-          const result = await apiClient.getAgentMetrics(agentName, params);
+          const result = await apiClient.getAgentMetrics(agentName, options);
           return JSON.stringify({ success: true, ...result }, null, 2);
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);

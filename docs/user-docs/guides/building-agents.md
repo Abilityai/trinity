@@ -7,7 +7,7 @@ Use the **abilities** plugins to create, develop, and deploy agents to Trinity �
 ## Prerequisites
 
 - **Claude Code** installed — `npm install -g @anthropic-ai/claude-code`
-- **Trinity instance** running — either on [ability.ai](https://ability.ai) or [self-hosted](deploying-trinity.md)
+- **Trinity instance** running — Trinity is [self-hosted](deploying-trinity.md). No instance yet? `/trinity:deploy-new-instance` stands one up: the DigitalOcean installer, any server you reach over SSH, or local Docker
 
 ## One-Time Setup
 
@@ -121,7 +121,7 @@ Wizard-created agents include everything needed for Trinity:
 |------|---------|
 | `CLAUDE.md` | Agent identity and instructions |
 | `.claude/skills/` | 2-4 starter skills |
-| `template.yaml` | Trinity deployment config — resources, declared credentials, `schedules:`, `plugins:` |
+| `template.yaml` | Trinity deployment config — resources, declared credentials, `schedules:`, `plugins:`, `metrics:` |
 | `.mcp.json.template` | MCP server configuration with `${VAR}` placeholders |
 | `dashboard.yaml` | Custom metrics dashboard |
 | `onboarding.json` | Setup progress tracker |

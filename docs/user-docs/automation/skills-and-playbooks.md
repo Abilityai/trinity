@@ -80,6 +80,8 @@ The tab shows two lists: **Assigned to this agent** (each skill's version short-
 
 **Sync now** (running agents only) is the repair action: it re-copies every assigned skill unconditionally and is highlighted only when a delivery did not land. Per-skill outcomes are shown honestly — a skill that landed but is missing a declared binary or environment variable is flagged with a warning, not reported as a clean success.
 
+**Name conflict.** If the agent already has its own `.claude/skills/<name>/` directory that the platform did not create — usually a skill the agent wrote itself — the library skill of the same name is **not** installed. The agent's copy is left intact and is the one that runs. The skill shows a **name conflict** badge, on every load, with two ways out: **Unassign library skill** keeps the agent's copy, or rename or remove the agent's directory and sync again to install the library version. **Sync now** does not override a conflict.
+
 #### From the Library
 
 Each skill card on the Library's Skills tab carries an **Assigned to N agents** line with chips linking straight to that agent's Skills tab — the first four, then **+N more**. Under it:
@@ -116,9 +118,17 @@ A set names skills from **its own** source. If it names one that source does not
 
 - **Library → Skills** lists the sets above the skills. Expand one to see its members and each member's version, then assign it to an agent.
 - **An agent's Skills tab** shows its sets, each with a status: **complete**, **partial** (a member is missing upstream, not yet delivered, or in a name conflict), or **unresolved** (the set's source is disabled, removed or unreadable — its skills are kept until it can be read again). A skill that is present because of a set is labelled **via <set>**, and it is ticked and locked in the checklist. **Unassign set** removes only what that set alone brought: a skill you also assigned on its own, or that another assigned set names, stays.
-- **Prerequisites** are never a silent failure. If the agent lacks a credential the set declares, or one its members declare, the set says so and points you to the Credentials tab. The check runs while the agent is running; a stopped agent reports that it will check once started.
+- **Prerequisites** are never a silent failure. If the agent lacks a credential the set declares, or one its members declare, the set says so and points you to the Credentials tab. The check runs inside the agent while it is running, and only for a viewer who may change this agent's skills. Anyone else, and anyone viewing a stopped agent, sees *Credentials are checked while the agent runs.*
 - **Suggested schedules** are shown, never created. Add the ones you want on the agent's Schedules tab.
-- Assigning or unassigning a set is governed by the same permission as assigning a skill. An agent needs the skill-management permission an admin grants.
+- Assigning or unassigning a set is governed by the same permission as assigning a skill. An agent needs the skill-management permission an admin grants (see below). Re-assigning a set records who made the change and when.
+
+### Who can change an agent's skills
+
+People who own an agent (and admins) change its skills as before. **Agents** are different: changing an agent's skills — another agent's or its own — is a separate permission, and no agent holds it by default. Permission to call an agent does not include it.
+
+An admin grants it in **Settings → Agents → Skill managers**. The panel lists every agent that holds the permission, with who granted it and when, and a **Revoke** button. Pick an agent and grant it. The system agent never needs the grant, and an ephemeral agent cannot receive it. Granting and revoking are audited, and only a person at the UI can do either — an API key cannot grant.
+
+An agent without the grant is refused with `403 skill_management_not_permitted` when it assigns, unassigns, replaces, or re-injects skills, or assigns a skill set — for any target, including itself. The same rule covers writing into an agent's `.claude/skills/` through the Files API; people still edit skills in the Files tab. A granted agent still reaches only the agents its owner owns. A fleet orchestrator that applies a skill map needs this grant.
 
 ### Skill injection
 
@@ -195,7 +205,7 @@ Two MCP tools let an agent run a **permitted** self-contained skill without assi
 
 The runner uses a **separate workspace** — it cannot see the calling agent's files. Use it for self-contained skills (call an API, generate an artifact from the `input` you pass). A skill that must operate on the caller's own files goes through assignment and injection instead.
 
-The Skill Runner is an **entitled** surface. In a community build, `run_skill` and `list_runnable_skills` return a "disabled" result.
+The Skill Runner is an **entitled** surface. In a community build, `run_skill` and `list_runnable_skills` return a "disabled" result. On an instance with the entitlement, an admin turns the runner on and grants which agent may run which skill from a **Skill Runner** tab in Settings; the tab is hidden on instances without it.
 
 ## For Agents
 
@@ -231,13 +241,17 @@ MCP tools for skills and playbooks:
 | `/api/agents/{name}/skill-sets` | GET | The agent's sets with their status and prerequisites |
 | `/api/agents/{name}/skill-sets/{set}` | POST/DELETE | Assign / unassign a set |
 | `/api/agents/{name}/skills/inject` | POST | Force re-inject into this agent (owner); 409 while another injection holds the agent |
+| `/api/skills/managers` | GET | Agents that hold the skill-management permission (admin) |
+| `/api/agents/{name}/skill-manager` | PUT | Grant or revoke that permission with `{"granted": true\|false}` (admin, human-only) |
+
+Assignment writes from an agent key (`PUT`/`POST`/`DELETE` on an agent's skills or skill sets, and `inject`) need the skill-management grant described above.
 
 Source management is **REST-only and human-only** — there is no MCP tool for it, and agent-scoped keys are rejected. Registering or syncing a source decides which repository your fleet executes code from, so it is an operator action regardless of the caller's role.
 
 ## Limitations
 
 - Auto-sync is one library-wide timer over every enabled source, not a per-source cadence.
-- Skill names share one flat namespace. Shadowed copies are not offered as separate entries because they are unreachable.
+- Skill names share one flat namespace. Shadowed copies are not offered as separate entries because they are unreachable. A library skill whose name matches a skill the agent authored itself is not installed on that agent.
 - Assignment happens per agent. There is no fleet-wide "assign to everything" action.
 - A skill's `allowed-tools` frontmatter is informational in Trinity, not a restriction. Limit a run's tools on the schedule, loop, or task instead.
 - The declared-`skills_root` layout supports a single flat directory, one level deep. Nested layouts require a future schema version, which current installations refuse (falling back to the probe) rather than misread.

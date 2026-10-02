@@ -62,6 +62,15 @@ users = Table(
     Column("last_login", Text),
     Column("suspended_at", Text),
     Column("github_pat_encrypted", Text),  # ent#162 — per-user GitHub PAT (AES-256-GCM envelope)
+    # ent#720 — a sign-in email belongs to ONE account. Declared here, not only
+    # in schema.py/Alembic, so autogenerate (#746) must not propose dropping it.
+    Index(
+        "idx_users_email_unique",
+        text("lower(email)"),
+        unique=True,
+        sqlite_where=text("email IS NOT NULL"),
+        postgresql_where=text("email IS NOT NULL"),
+    ),
 )
 
 subscription_credentials = Table(
@@ -194,6 +203,7 @@ email_login_codes = Table(
     Column("expires_at", Text),
     Column("verified", Integer),
     Column("used_at", Text),
+    Column("purpose", Text),  # ent#720: NULL = sign-in; 'email_bind:<user id>'
 )
 
 agent_schedules = Table(
@@ -295,6 +305,18 @@ schedule_executions = Table(
     Column("open_canvas_id", Text),
     # #2806 — agent-to-agent hops from a non-agent root; NULL = root (0).
     Column("chain_depth", Integer),
+    # #2843 — the conversation this turn continues. Declared here, not only in
+    # schema.py/Alembic: the unique index IS the one-turn-per-conversation rule
+    # (the pull claim relies on its IntegrityError), so autogenerate must not
+    # propose dropping it.
+    Column("conversation_key", Text),
+    Index(
+        "idx_executions_one_running_turn",
+        "agent_name", "conversation_key",
+        unique=True,
+        sqlite_where=text("status = 'running' AND conversation_key IS NOT NULL"),
+        postgresql_where=text("status = 'running' AND conversation_key IS NOT NULL"),
+    ),
 )
 
 agent_loops = Table(
@@ -333,6 +355,8 @@ agent_loops = Table(
     # already persisted here or derivable from `agent_loop_runs`.
     Column("next_run_at", Text),        # ISO-Z; NULL = not waiting on a delay
     Column("stop_requested_at", Text),  # ISO-Z; replaces the in-memory should_stop
+    # #2973 — the starter's inherited chain depth, stamped on every iteration row.
+    Column("chain_depth", Integer),
 )
 
 agent_loop_runs = Table(
@@ -1654,8 +1678,9 @@ metric_definitions = Table(
     UniqueConstraint("agent_name", "name"),
 )
 
-# Recorded metric points (trinity-enterprise#478) — the append-only store the
-# `record_metrics` write path fills and ent#479 reads.
+# Recorded metric points (trinity-enterprise#478) — the store the
+# `record_metrics` write path fills (inserting, or restating a row whose value
+# changed — ent#729) and ent#479 reads.
 metric_points = Table(
     "metric_points",
     metadata,
@@ -1679,8 +1704,13 @@ metric_points = Table(
     ),
     Column("execution_id", Text),
     Column("created_at", Text, nullable=False),
+    # ent#729 restatement. BigInteger: a monotonic counter is int8 from day one
+    # (learning 2026-09-15). The server default is what keeps pre-ent#729 rows
+    # and pre-ent#729 writers reading/inserting `0`.
+    Column("revision", BigInteger, nullable=False, server_default=text("0")),
+    Column("recorded_at", Text),
     # The identity IS the primary key (no surrogate id): the insert's
-    # `on_conflict_do_nothing` names these columns, and keeping the eventual
+    # `on_conflict_do_update` names these columns, and keeping the eventual
     # partition key (`agent_name`) inside the only unique constraint is what
     # lets ent#80 partition by month without a table rebuild.
     PrimaryKeyConstraint("agent_name", "ts", "idempotency_key"),

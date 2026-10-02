@@ -1,3 +1,4 @@
+# mcp: none — the Workspace's own door (portal tokens and platform sessions via get_portal_principal); an agent answers nothing here and the operator's asks surface is operator_queue.ts
 """FastAPI router for Workspace asks (ent#364).
 
 Portal-scoped: the caller is a **workspace user**, resolved through
@@ -21,7 +22,7 @@ from client_portal.portal_auth import PortalPrincipal, get_portal_principal
 from dependencies import PERSON_REQUIRED_DETAIL
 
 from . import service
-from .models import WorkspaceAsk, WorkspaceAskAnswer
+from .models import WorkspaceAsk, WorkspaceAskAnswer, WorkspaceAskContext
 from .service import AskError, AsksUnavailable
 
 # The 503 `asks_unavailable` Retry-After, in seconds (trinity-enterprise#610,
@@ -51,6 +52,8 @@ def list_asks(
     # changes; the total and the next cursor travel as headers.
     limit: int = Query(default=service.PAGE_MAX, ge=1, le=service.PAGE_MAX),
     cursor: Optional[str] = Query(default=None, max_length=64),
+    # trinity-enterprise#610: one chat's chat-turn asks, ended ones with no window.
+    chat_id: Optional[str] = Query(default=None, min_length=1, max_length=128),
     principal: PortalPrincipal = Depends(get_portal_principal),
 ):
     """Open asks addressed to the caller. `agent_name` narrows to the agent page.
@@ -67,7 +70,8 @@ def list_asks(
     """
     try:
         page = service.list_asks_page(principal.email, principal.is_platform, agent_name,
-                                      include_ended=include_ended, limit=limit, cursor=cursor)
+                                      include_ended=include_ended, limit=limit, cursor=cursor,
+                                      chat_id=chat_id)
     except AsksUnavailable:
         raise HTTPException(status_code=503, detail={
             "code": "asks_unavailable",
@@ -104,5 +108,35 @@ def answer_ask(
             body.response, body.response_text,
             acknowledge_divergence=body.acknowledge_divergence,
         )
+    except AskError as e:
+        _raise(e)
+
+
+@router.get("/{item_id}/context", response_model=WorkspaceAskContext)
+def get_ask_context(
+    item_id: str,
+    principal: PortalPrincipal = Depends(get_portal_principal),
+):
+    """Where an ask came from, the run that raised it, and how you answered this
+    agent lately (trinity-enterprise#610 §3g L7, E1). One lazy read per selected
+    ask — never folded into the polled list.
+
+    404 covers missing / not-mine / off-roster / a kind the Workspace never shows
+    alike (Invariant #8). An unreadable roster or context is **503
+    `asks_unavailable`**, never an empty context. No `cost` and no
+    `execution_id` in the body. Rate-limited per viewer after the principal is
+    resolved: a context read is a handful of queries, and a client that polled
+    it would multiply them.
+    """
+    from services import rate_limiter
+
+    rate_limiter.enforce(f"portal_ask_context:{principal.email}", 120, 60)
+    try:
+        return service.get_ask_context(item_id, principal.email, principal.is_platform)
+    except AsksUnavailable:
+        raise HTTPException(status_code=503, detail={
+            "code": "asks_unavailable",
+            "message": "Couldn't load this ask's context — try again.",
+        }, headers={"Retry-After": ASKS_RETRY_AFTER_SECONDS})
     except AskError as e:
         _raise(e)

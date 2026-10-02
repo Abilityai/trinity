@@ -501,7 +501,7 @@ After execution completes, `error_type` determines the HTTP response:
 | `error_type` | HTTP Status | Handler Location |
 |--------------|-------------|------------------|
 | `"rate_limit"` | 429 | `claude_code.py:583-589` (chat), `claude_code.py:967-973` (headless) |
-| `"execution_error"` | **502** (structured `{message, metadata, execution_log}` body, #1853 — the backend salvages cost/context/session_id + the sanitized transcript onto the FAILED row), or **200 + recovered response** when the transcript shows an in-turn `stop_reason=end_turn` (#1870) | Dedicated branch in `headless_executor._finalize_headless_result` (#1673); body built by `_execution_error_502_detail` (#1853); recovery via `_try_recover_completed_turn` (#1870) |
+| `"execution_error"` | **502** (structured `{message, metadata, execution_log}` body, #1853 — the backend salvages cost/context/session_id + the sanitized transcript onto the FAILED row), or **200 + recovered response** when the transcript shows an in-turn `stop_reason=end_turn` (#1870) | Dedicated branch in `headless_executor._finalize_headless_result` (#1673); body built by `_execution_error_502_detail` (#1853); recovery via `_try_recover_completed_turn` (#1870). Chat twin since #2968: `claude_code._execute_claude_code_once` runs the same recovery core (`_recover_completed_turn_into`, off the event loop) then raises 502 with a `{message, metadata}` body (no `execution_log`) — before #2968 an `is_error` chat turn was a 200 carrying the error/partial text, or a generic 500 |
 | `null` | 200 | Normal success path |
 
 > The `execution_error` row said **503 / "falls through to non-zero return code
@@ -533,8 +533,9 @@ would not have helped either: the boundary rule itself is the defect. #1870 adds
 **new** function; the #678 path is untouched and carries zero regression risk.
 
 **The gate** (`jsonl_recovery._recover_completed_turn_from_jsonl`, called from
-`headless_executor._try_recover_completed_turn`) — three independent conditions,
-all required:
+`headless_executor._recover_completed_turn_into` — the shared core behind
+`_try_recover_completed_turn` on the headless path and, since #2968, the chat
+path's `execution_error` branch) — three independent conditions, all required:
 
 | Gate | Rule |
 |---|---|
@@ -809,7 +810,7 @@ The `max_turns` parameter limits the number of agentic turns an agent can take b
 
 When `max_turns` is specified:
 
-1. **Agent Server** passes `--max-turns N` to the Claude Code or Gemini CLI command
+1. **Agent Server** passes `--max-turns N` to the Claude Code command (Gemini: see below — no equivalent flag)
 2. **CLI** counts each agentic turn (tool use + tool result cycle)
 3. **At limit**: CLI exits with an error, returning partial results
 4. **Response**: Includes whatever work was completed before the limit
@@ -823,11 +824,11 @@ if max_turns is not None:
     logger.info(f"[Headless Task] Limiting to {max_turns} agentic turns")
 ```
 
-**Gemini CLI** (`docker/base-image/agent_server/services/gemini_runtime.py:558-560`):
+**Gemini CLI** (`docker/base-image/agent_server/services/gemini_runtime.py`, #2971): gemini-cli has **no** `--max-turns` (its strict parser rejects it, and `model.maxSessionTurns` is a settings-file value shared by every concurrent run), so `max_turns` is **logged, not enforced**, and the run is bounded by the wall-clock `timeout_seconds` only:
 ```python
 if max_turns is not None:
-    cmd.extend(["--max-turns", str(max_turns)])
-    logger.info(f"[Headless Task {session_id}] Limiting to {max_turns} agentic turns")
+    logger.info(f"[Headless Task {session_id}] max_turns={max_turns} requested; "
+                f"gemini-cli has no per-run turn cap — relying on the {timeout_seconds}s wall-clock timeout")
 ```
 
 ### Usage Examples

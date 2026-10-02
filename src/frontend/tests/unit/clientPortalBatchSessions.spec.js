@@ -238,6 +238,9 @@ describe('#2198 refreshThreads cannot abort bootstrap', () => {
     const body = src.slice(src.indexOf('async function refreshThreads'))
     const block = body.slice(0, body.indexOf('\n}'))
     expect(block).toMatch(/fetchAllSessions\(\)\s*\.catch\(/)
-    expect(block).toMatch(/fetchChatState\(\)\s*\.catch\(/)
+    // trinity-enterprise#610 (D5): the chat-state half is now one of two calls
+    // (with / without previews) inside ONE parenthesised expression that is
+    // caught as a whole — so the catch covers both arms.
+    expect(block).toMatch(/\(withPreviews \? store\.fetchChatState\(\{ previews: true \}\) : store\.fetchChatState\(\)\)\s*\.catch\(/)
   })
 })

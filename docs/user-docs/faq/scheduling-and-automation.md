@@ -18,6 +18,14 @@ The schedule form checks the expression as you type, with the same grammar the s
 
 Yes. Set `deliver_to_workspace_email` on the schedule over the API or with `create_agent_schedule` / `update_agent_schedule` — the UI form has no field for it, and passing `null` on an update stops delivering. The run's output then arrives as a message from the agent in that person's **Main** chat with it, rateable like any reply and delivered at most once per fire; it waits up to two minutes for a reply already in progress in that chat, and it appears on the person's next Workspace load or chat switch rather than popping up mid-conversation. You can always name yourself; naming someone else — who must be the agent's owner or someone it is shared with — takes the agent's owner or an admin. If the address can't reach the agent (never shared, share revoked, unknown), the run fails and says so on its execution row, and a malformed address is rejected when you save rather than hours later. See [Scheduling](../automation/scheduling.md#delivering-a-runs-output-to-someones-workspace).
 
+## Can a scheduled brief remember things about the person it's for?
+
+Yes. A run of a schedule that names a person with `deliver_to_workspace_email` runs as that person's seat: the agent receives their per-person memory before it starts and can write it back with `write_user_memory`, so the next brief builds on the last. Cron, **Run now** and webhook fires all serve the named person. The tool replaces the whole notes blob, so the agent must write the complete updated notes. The person sees every write in their Workspace and can undo the latest one. See [Scheduling](../automation/scheduling.md#the-run-remembers-the-person).
+
+## Why was my companion agent's scheduled brief skipped with "Held"?
+
+An agent whose template declares a role is a companion, and its cron-fired Workspace brief is held until its owner marks it ready on the **Role** card in the Workspace agent details. A held brief is recorded as a `skipped` execution with the reason — not a failure, not retried, not alerted. **Run now** and webhook fires are not held. Agents whose brief was already firing before the upgrade were marked ready automatically. See [Scheduling](../automation/scheduling.md#held-until-a-companion-is-marked-ready).
+
 ## Why didn't my schedule fire even though it's enabled?
 
 The most common cause is the agent-level **autonomy toggle**: it's a master switch, and no schedules fire while it's off, regardless of their individual enabled state. Next, look at the schedule's cron chip in the list — a warning triangle with the tooltip **Invalid cron expression** means the stored expression is one the scheduler can't register, and that schedule never fires until you fix it. Also check that the agent still exists and isn't deleted (schedules stop firing immediately when an agent is deleted) and, if the agent has **freeze schedules if sync failing** enabled, that its git sync hasn't failed three times in a row and that it hasn't been out of step with its repository for more than 24 hours — the skipped run in the execution history names which. If the scheduler was restarted, missed runs are only caught up within a 1-hour grace window; anything older is skipped rather than fired late. See [Scheduling](../automation/scheduling.md).
@@ -44,7 +52,7 @@ Only if you turn retries on. Each schedule has `max_retries` (range 0–5) and `
 
 ## Can Trinity check that a scheduled run actually did its job?
 
-Yes, with post-run validation. Set `validation_enabled: true` on the schedule over the API, or with `create_agent_schedule` / `update_agent_schedule`; the schedule form has no field for it. After each successful run, the same agent runs one extra execution in a clean context that audits the result, and the run's `business_status` becomes `validated` or `failed_validation`. A fail or partial verdict raises one high-priority **Validation Failed** alert in the Operations queue, but it does not trigger a retry. Each validation pass is a real execution, so it costs a run; `validation_prompt` and `validation_timeout_seconds` (30–600, default 120) tune it. See [Scheduling](../automation/scheduling.md#post-run-validation).
+Yes, with post-run validation. Set `validation_enabled: true` on the schedule over the API, or with `create_agent_schedule` / `update_agent_schedule`; the schedule form has no field for it. After each successful run, the same agent runs one extra execution in a clean context that audits the result, and the run's `business_status` becomes `validated` or `failed_validation` (or `validation_unavailable` when the run's response was empty, with no alert). A fail or partial verdict raises one high-priority **Validation Failed** alert in the Operations queue, but it does not trigger a retry. Each validation pass is a real execution, so it costs a run; `validation_prompt` and `validation_timeout_seconds` (30–600, default 120) tune it. See [Scheduling](../automation/scheduling.md#post-run-validation).
 
 ## What happens to the execution history if I delete a schedule?
 
@@ -142,6 +150,14 @@ Not in Trinity. The agent reads the field — in Claude Code's comma-separated f
 ## How do I assign skills to an agent, and do I need to restart it?
 
 No restart. Open the agent's **Skills** tab, tick the skills, and click **Save assignments** — the save delivers straight away to a running agent, and the note beside the button says what happened: *delivered — available now*, *the agent is stopped, so it applies on next start*, *still installing* (a large package outlived the 20-second wait and continues in the background), or a named failure. Each skill lands as a whole directory under `~/.claude/skills/<name>/`, so its scripts and resources come too, and the per-skill result tells you honestly whether it's missing a declared binary or environment variable. **Sync now** is the repair action for a delivery that didn't land, not a required step, and every assignment change refreshes the open **Playbooks** tab and `/` autocomplete without a reload. Admins manage the *sources* the library syncs from in **Settings → Agents**; skills themselves are edited in their GitHub repository, not in Trinity. See [Skills and Playbooks](../automation/skills-and-playbooks.md).
+
+## Why does a library skill show "name conflict" instead of installing?
+
+The agent already has its own `.claude/skills/<name>/` directory that the platform did not create — usually a skill the agent wrote itself. Trinity never overwrites it: the agent's copy stays and is the one that runs, and **Sync now** does not change that. To keep the agent's skill, click **Unassign library skill** on the Skills tab. To use the library version, rename or remove the agent's directory and sync again. See [Skills and Playbooks](../automation/skills-and-playbooks.md#from-the-agents-skills-tab).
+
+## Why is my orchestrator agent refused with `skill_management_not_permitted`?
+
+Changing an agent's skills — another agent's or its own — is a separate permission, and no agent holds it by default. An admin grants it in **Settings → Agents → Skill managers**; only a person at the UI can grant or revoke it. People who own the agent, admins and the system agent are not affected. A granted agent still reaches only its owner's agents. See [Skills and Playbooks](../automation/skills-and-playbooks.md#who-can-change-an-agents-skills).
 
 ## How can I see whether a schedule is actually performing well?
 

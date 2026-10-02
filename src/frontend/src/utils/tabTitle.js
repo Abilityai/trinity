@@ -22,6 +22,19 @@
 // would cost the label its first word for a number nobody acts on differently.
 export const TAB_UNREAD_CAP = 99
 
+/**
+ * trinity-enterprise#610 §3g D-1: the ONE cap every Workspace counter shows —
+ * the tab title, the sidebar pills, the pinned Inbox row, the Inbox tabs. A
+ * count above the cap is `99+`; zero (or junk) is '' so a caller's `v-if` on
+ * the result is the same test as "is there anything to count".
+ */
+export function capCount(count) {
+  const n = Number(count)
+  const safe = Number.isFinite(n) && n > 0 ? Math.floor(n) : 0
+  if (safe <= 0) return ''
+  return safe > TAB_UNREAD_CAP ? `${TAB_UNREAD_CAP}+` : String(safe)
+}
+
 let baseTitle = ''
 let unread = 0
 
@@ -34,11 +47,9 @@ let unread = 0
  * there is nothing to announce.
  */
 export function formatTabTitle(base, count) {
-  const n = Number(count)
-  const safe = Number.isFinite(n) && n > 0 ? Math.floor(n) : 0
+  const shown = capCount(count)
   const label = String(base ?? '')
-  if (safe <= 0) return label
-  const shown = safe > TAB_UNREAD_CAP ? `${TAB_UNREAD_CAP}+` : String(safe)
+  if (!shown) return label
   // Leading, not trailing: a browser truncates a tab from the RIGHT, so a
   // suffix is the first thing to disappear on the tab that most needs it.
   return label ? `(${shown}) ${label}` : `(${shown})`

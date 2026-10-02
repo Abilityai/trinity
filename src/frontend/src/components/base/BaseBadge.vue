@@ -30,6 +30,9 @@ const VARIANT_CLASSES = {
   gemini: 'bg-brand-gemini-100 text-brand-gemini-700 dark:bg-brand-gemini-500/16 dark:text-brand-gemini-300',
   purple: 'bg-accent-purple-100 text-accent-purple-700 dark:bg-accent-purple-500/16 dark:text-accent-purple-300',
   neutral: 'bg-gray-100 text-gray-600 dark:bg-gray-750 dark:text-gray-400',
+  // ent#610 §3g: a per-row "new" fact in the action family — the same hue as
+  // the solid "came back" counter it sums into. 6.41:1 light, 7.53 dark.
+  primary: 'bg-action-primary-100 text-action-primary-700 dark:bg-action-primary-500/16 dark:text-action-primary-300',
 }
 
 defineProps({
@@ -39,7 +42,7 @@ defineProps({
     // Keep in sync with VARIANT_CLASSES (defineProps validators are hoisted
     // and cannot reference it).
     validator: (v) =>
-      ['success', 'warning', 'danger', 'info', 'urgent', 'autonomous', 'locked', 'claude', 'gemini', 'purple', 'neutral'].includes(v),
+      ['success', 'warning', 'danger', 'info', 'urgent', 'autonomous', 'locked', 'claude', 'gemini', 'purple', 'neutral', 'primary'].includes(v),
   },
   // Optional 6px status dot in currentColor.
   dot: {

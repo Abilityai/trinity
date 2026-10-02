@@ -112,7 +112,8 @@ async def create_agent_internal(
     current_user: User,
     request: Request,
     skip_name_sanitization: bool = False,
-    adopt_existing_workspace: bool = False
+    adopt_existing_workspace: bool = False,
+    allow_unforked_pull_only: bool = False,
 ) -> AgentStatus:
     """
     Internal function to create an agent.
@@ -125,7 +126,8 @@ async def create_agent_internal(
         request=request,
         skip_name_sanitization=skip_name_sanitization,
         ws_manager=manager,
-        adopt_existing_workspace=adopt_existing_workspace
+        adopt_existing_workspace=adopt_existing_workspace,
+        allow_unforked_pull_only=allow_unforked_pull_only,
     )
 
 
@@ -610,7 +612,7 @@ async def create_agent_endpoint(
         actor_ip=request.client.host if request.client else None,
         target_type="agent",
         target_id=config.name,
-        endpoint=str(request.url.path),
+        endpoint=request.scope["path"],
         details={
             "template": getattr(config, "template", None),
             "base_image": getattr(config, "base_image", None),
@@ -733,6 +735,7 @@ async def delete_agent_endpoint(agent_name: str, request: Request, current_user:
         if manager:
             await manager.broadcast(json.dumps({
                 "event": "agent_deleted",
+                "type": "agent_deleted",  # #3109: the dashboard keys on `type`
                 "data": {"name": agent_name}
             }))
         # Honest status (review LOW): False = another discard already in
@@ -825,12 +828,13 @@ async def delete_agent_endpoint(agent_name: str, request: Request, current_user:
         actor_ip=request.client.host if request.client else None,
         target_type="agent",
         target_id=agent_name,
-        endpoint=str(request.url.path),
+        endpoint=request.scope["path"],
     )
 
     if manager:
         await manager.broadcast(json.dumps({
             "event": "agent_deleted",
+            "type": "agent_deleted",  # #3109: the dashboard keys on `type`
             "data": {"name": agent_name}
         }))
 
@@ -862,7 +866,7 @@ async def start_agent_endpoint(agent_name: AuthorizedAgentByName, request: Reque
             actor_ip=request.client.host if request.client else None,
             target_type="agent",
             target_id=agent_name,
-            endpoint=str(request.url.path),
+            endpoint=request.scope["path"],
             details={
                 "credentials_injection": credentials_status,
                 # #1809: record container replacement + cause (config_drift |
@@ -953,7 +957,7 @@ async def stop_agent_endpoint(agent_name: AuthorizedAgentByName, request: Reques
             actor_ip=request.client.host if request.client else None,
             target_type="agent",
             target_id=agent_name,
-            endpoint=str(request.url.path),
+            endpoint=request.scope["path"],
         )
 
         event = {

@@ -109,6 +109,8 @@ Every MCP key carries a scope. The scope is fixed at creation and decides what t
 
 The keys page badges non-standard scopes (**Agent**, **Ops (read-only)**, **System**, **Portal Delegate**) so a bounded key is never mistaken for a personal one. Requesting any other scope on `POST /api/mcp/keys` is a 400.
 
+**Creating a key needs a signed-in session.** `POST /api/mcp/keys` (every scope) and `POST /api/mcp/keys/ensure-default` accept only a browser or login (JWT) session. An MCP key of any scope, your own `user` key included, gets a 403 and no key is created. Both routes write a `key_create` entry to the audit log.
+
 **A key is a narrowing of its owner, never a decoupling.** An `ops` key is the bounded machine credential for a monitoring dashboard that must keep working under enforced two-factor authentication (key validation never passes through the second-factor flow). It still requires its owner to hold the admin role at call time: demoting or suspending the owner stops the key. Mint ops keys under a dedicated service admin account, and revoke-and-re-mint any ops key held by a departing admin.
 
 **Every key-authenticated call is attributed to the key.** The audit log records the key id, key name, and scope beside the owner, and `GET /api/audit-log` filters on `mcp_key_id` and `mcp_scope` — see [Audit Trail](../operations/audit-trail.md).
@@ -117,10 +119,11 @@ The keys page badges non-standard scopes (**Agent**, **Ops (read-only)**, **Syst
 
 An MCP key resolves to the user who owns it, **carrying that user's role**. On a default installation where the admin owns the agents, an agent's injected key would otherwise satisfy a plain "admin only" check.
 
-Two gates stop that:
+Three gates stop that:
 
 - **Admin gates are an allowlist over scopes.** Only a browser session, a `user` key, and the `system` key can pass an admin-only endpoint; `agent`, `connector`, `portal_delegate`, `ops` and any scope invented later are refused. An individual read endpoint may opt the `ops` scope in — the ops routes above do — but the owner's admin role is still checked afterwards.
 - **Endpoints whose blast radius is operator-scale require a human caller** in addition to an admin role — API keys are rejected there regardless of the owner's role.
+- **Grant and identity routes require a person.** Some owner-level routes grant an agent new power or change who you are. They reject agent-scoped keys even when the owner is an admin (see the lists below).
 
 The human-only gate applies to:
 
@@ -134,6 +137,11 @@ The human-only gate applies to:
 - Binding an agent to a GitHub repository
 - Writing an agent evaluation
 - Adding or removing organizational (`dept-*` / `reports-to-*`) tags
+
+Two more sets of routes are human-only for any owner, not only admins:
+
+- **A person only** — a browser session or the person's own `user` key. Agent-scoped keys (on their own agent or any other), the system key, and every other scope get a 403 with code `person_required`. This covers every agent configuration write under `PUT /api/agents/{name}/...`: `autonomy`, `read-only`, `resources`, `capabilities`, `capacity`, `timeout`, `public-channel-model`, `guardrails` and `api-key-setting`. The refusal comes before the owner check, so it reveals nothing about whether the agent exists. An agent's own key can still create, enable and disable its schedules; autonomy decides whether they fire.
+- **A signed-in session only** — no MCP key of any scope, your own included. This covers creating an MCP key, changing your sign-in email (`PUT /api/users/me/email`), and setting or clearing your personal GitHub token (`PUT` / `DELETE /api/users/me/github-pat`).
 
 If you hit a 403 on one of these from an automation, that is the gate working as intended — perform the action from the UI or with a user session.
 
@@ -161,7 +169,8 @@ Two real-time endpoints, two credentials:
 | `/api/setup/admin-password` | POST | None | First-run admin creation — provisions the **first** admin only; 403 whenever a usable admin account already exists, whatever the setup flag says |
 | `/health` | GET | None | Health check (503 while schema migrations are incomplete) |
 | `/api/access/request` | POST | None | Public self-signup — adds the submitted email to the login allow-list. **Disabled by default** (403) until an admin enables public access requests |
-| `/api/mcp/keys` | POST | JWT | Create MCP API key — body `{name, description?, scope?}`; `scope` defaults to `user`, admins may request `portal_delegate` or `ops` |
+| `/api/mcp/keys` | POST | JWT only (MCP keys refused) | Create MCP API key — body `{name, description?, scope?}`; `scope` defaults to `user`, admins may request `portal_delegate` or `ops` |
+| `/api/mcp/keys/ensure-default` | POST | JWT only (MCP keys refused) | Create a default `user` key if you have none; returns `null` when one already exists |
 | `/api/mcp/keys` | GET | JWT | List MCP API keys |
 | `/api/mcp/keys/{id}/revoke` | POST | JWT | Revoke (deactivate) an MCP API key |
 | `/api/mcp/keys/{id}` | DELETE | JWT | Permanently delete an MCP API key |

@@ -162,6 +162,43 @@ describe('solid badges carrying white ink', () => {
   })
 })
 
+describe('BaseButton ghost ink (ent#610 §3g B7b)', () => {
+  it('the dark 400 tier clears AA on both surfaces a ghost verb sits on', () => {
+    expect(failures([
+      { name: 'ghost dark ink on gray-900', fg: colors.indigo[400], bg: G[900] },
+      { name: 'ghost dark ink on gray-800', fg: colors.indigo[400], bg: G[800] },
+      { name: 'ghost light ink on white', fg: colors.indigo[600], bg: WHITE },
+    ])).toEqual([])
+    expect(ratio(colors.indigo[400], G[900])).toBe(5.95)
+    expect(ratio(colors.indigo[400], G[800])).toBe(4.92)
+  })
+
+  it('records the 500 tier it replaced', () => {
+    expect(ratio(colors.indigo[500], G[900])).toBe(3.97)
+    expect(ratio(colors.indigo[500], G[800])).toBe(3.29)
+  })
+})
+
+describe('BaseBadge primary (ent#610 §3g)', () => {
+  const blend = (fg, bg, a) => '#' + parseHex(fg).map((v, i) => Math.round(v * a + parseHex(bg)[i] * (1 - a)).toString(16).padStart(2, '0')).join('')
+  it('700 on 100 in light, 300 on 500/16 in dark', () => {
+    const I = colors.indigo
+    expect(ratio(I[700], I[100])).toBe(6.41)
+    expect(ratio(I[300], blend(I[500], G[900], 0.16))).toBe(7.53)
+    expect(meetsAA(I[300], blend(I[500], G[800], 0.16))).toBe(true)
+  })
+})
+
+describe('BaseButton primary fill (round 3)', () => {
+  it('white on 600 / 700 clears AA; the old dark 500 / 400 did not', () => {
+    const I = colors.indigo
+    expect(meetsAA(WHITE, I[600])).toBe(true)
+    expect(meetsAA(WHITE, I[700])).toBe(true)
+    expect(meetsAA(WHITE, I[500])).toBe(false) // 4.47:1, the old dark fill
+    expect(meetsAA(WHITE, I[400])).toBe(false) // the old dark hover
+  })
+})
+
 describe('BaseBadge recipe (token-100 ground, token-700 ink)', () => {
   it('clears AA for every family in light', () => {
     const fams = [colors.green, colors.yellow, colors.red, colors.blue, colors.orange,

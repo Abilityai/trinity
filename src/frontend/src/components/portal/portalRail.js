@@ -93,7 +93,7 @@ export const RAIL_DEFAULT_TAB = 'work'
  * docks later, per #472. Loops, Canvas and Files are slice 2 — they are named
  * here so the order is a contract and not a side effect of registration order.
  */
-export const RAIL_TAB_ORDER = Object.freeze(['work', 'loops', 'canvas', 'files', 'info'])
+export const RAIL_TAB_ORDER = Object.freeze(['work', 'loops', 'canvas', 'files', 'projects', 'info'])
 
 /**
  * The registry. Slice 1 (ent#474) docked ONE tab — Work (#457's Activity),
@@ -210,6 +210,23 @@ export const RAIL_TABS = Object.freeze([
   // one shape, one hue (principle 24) — rather than a numeric badge the design
   // pass never defined. A signalling tab without an empty state is therefore a
   // legal registry shape; `RAIL_SIGNAL_NONE` stays for a tab with neither.
+  // ent#661 — Projects: the projects the current agent can work on, a filter
+  // of the person's Projects list. AUDIENCE door AND a roster capability
+  // (`capability`, checked fail-closed in `tabPassesDoor`). The capability is
+  // what decides who: a platform user on an entitled build, or an outside
+  // client INVITED to a project (v2.4) — the server narrows what a guest sees.
+  // A session without it never gets a tab whose body would 404. No registry
+  // empty state — the body states its own (it needs the store's verdict).
+  Object.freeze({
+    id: 'projects',
+    label: 'Projects',
+    door: RAIL_DOORS.AUDIENCE,
+    capability: 'projects',
+    scope: RAIL_SCOPE_PARTICIPANTS,
+    signal: RAIL_SIGNAL_NONE,
+    icon: 'folder',
+    empty: null,
+  }),
   Object.freeze({
     id: 'info',
     label: 'Info',
@@ -238,6 +255,9 @@ function whoIs(participants) {
  */
 export function tabPassesDoor(tab, session = {}) {
   const participants = participantList(session.participants)
+  // ent#661 — a tab that needs a capability shows only when the session was
+  // told it has it (the roster's strict `=== true`); absent means no.
+  if (tab && tab.capability && (session.capabilities || {})[tab.capability] !== true) return false
   switch (tab && tab.door) {
     case RAIL_DOORS.PLATFORM: return session.isPlatform === true
     case RAIL_DOORS.AUDIENCE: return true
@@ -810,4 +830,15 @@ function participantList(value) {
   return (Array.isArray(value) ? value : [])
     .filter((v) => typeof v === 'string' && v.trim().length > 0)
     .map((v) => v.trim())
+}
+
+// Sign-off round 5: Info's dot. The "answer what this agent asked you"
+// suggestion is left out — Work and the Inbox own the asks, and a third pointer
+// at them read as an unexplained dot. What remains is a real suggestion.
+export const INFO_OMITTED_SOURCES = Object.freeze(['asks'])
+export function infoSignalFrom(suggestions) {
+  const list = Array.isArray(suggestions?.suggestions) ? suggestions.suggestions : []
+  const omitted = list.filter((s) => INFO_OMITTED_SOURCES.includes(s.source)).length
+  const n = Math.max(0, (suggestions?.total || 0) - omitted)
+  return n > 0 ? { updated: true, note: n === 1 ? '1 suggestion' : `${n} suggestions` } : null
 }

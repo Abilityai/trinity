@@ -289,7 +289,9 @@ async def inject_assigned_skills(agent_name: str) -> dict:
 # that can hold an exception string, a transport URL or a path, and is reduced
 # to a code here, never passed through.
 _CODE_RE = re.compile(r"^[a-z][a-z0-9_]{1,63}$")
-_WARNING_RE = re.compile(r"^(missing_binary|missing_env):[A-Za-z0-9_.+-]{1,128}$")
+# `deprecated:<successor>` (#672) joins the two dep codes: its detail is a skill
+# name by construction (`skill_packaging.deprecation_warning`), never prose.
+_WARNING_RE = re.compile(r"^(missing_binary|missing_env|deprecated):[A-Za-z0-9_.+-]{1,128}$")
 _SKILL_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 _PROSE_ERRORS = {
     "Skill not found in library": "not_in_library",
@@ -1110,6 +1112,14 @@ async def recreate_container_with_updated_config(
     # recreate whenever the running token is missing or stale.
     env_vars['TRINITY_AGENT_AUTH_TOKEN'] = derive_agent_token(agent_name)
 
+    # #3106: this path replays the OLD Config.Env, so an agent created before
+    # OTEL_SDK_DISABLED was injected at create would never gain it on restart,
+    # drift self-heal or a rebuild pass. Same rule as create: where Claude
+    # Code's OTEL env is present, opt FastAPI's auto-telemetry out. setdefault,
+    # so a value an operator set on purpose is kept.
+    if 'OTEL_EXPORTER_OTLP_PROTOCOL' in env_vars:
+        env_vars.setdefault('OTEL_SDK_DISABLED', 'true')
+
     # #1081 G2 / #307 / #1083: re-ensure the agent→backend callback URL on
     # recreate. crud.py sets TRINITY_BACKEND_URL only at FRESH create (~#595);
     # recreate seeds env from the OLD container and would otherwise DROP it for a
@@ -1673,6 +1683,10 @@ async def recreate_missing_container(agent_name: str):
         env_vars["OTEL_EXPORTER_OTLP_PROTOCOL"] = os.getenv("OTEL_EXPORTER_OTLP_PROTOCOL", "grpc")
         env_vars["OTEL_EXPORTER_OTLP_ENDPOINT"] = os.getenv("OTEL_COLLECTOR_ENDPOINT", "http://trinity-otel-collector:4317")
         env_vars["OTEL_METRIC_EXPORT_INTERVAL"] = os.getenv("OTEL_METRIC_EXPORT_INTERVAL", "60000")
+        # #3106: the OTEL_* env above is Claude Code's. FastAPI >= 0.142 reads the same
+        # names to auto-configure the agent server itself, refuses grpc, and the server
+        # exits on boot. Claude Code does not read this flag, so its metrics still flow.
+        env_vars["OTEL_SDK_DISABLED"] = "true"
 
     # Mint a fresh agent-scoped MCP key (the old key's plaintext is unrecoverable
     # — only the hash is stored). Same wiring as create: enables collab +

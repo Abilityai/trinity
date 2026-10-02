@@ -91,6 +91,10 @@ class _Db:
         self.series = None
         self.compat = None
         self.raise_on_read = None
+        self.grants = set()  # (source, target) agent_permissions rows
+
+    def is_agent_permitted(self, source, target):
+        return (source, target) in self.grants
 
     def list_metric_definitions(self, name, include_retired=False):
         if self.raise_on_read:
@@ -126,6 +130,13 @@ def ctx(monkeypatch):
     monkeypatch.setattr(database_mod, "db", fake_db)
     monkeypatch.setattr(route_mod, "db", fake_db)
     monkeypatch.setattr(route_mod.rate_limiter, "enforce", lambda *a, **k: None)
+    audits = []
+
+    async def _audit(reader, target, route, **kw):
+        audits.append((reader, target, route))
+
+    monkeypatch.setattr(route_mod.metric_access_service,
+                        "audit_cross_agent_read", _audit)
     monkeypatch.setattr(
         route_mod, "_metric_policy",
         lambda: {"retention_days": 365, "daily_point_cap": 100000,
@@ -166,6 +177,7 @@ def ctx(monkeypatch):
         client = TestClient(app, raise_server_exceptions=False)
         db = fake_db
         users = holder
+        audit = audits
     return Ctx()
 
 
@@ -183,15 +195,140 @@ def test_an_agent_key_reads_its_own_metrics(ctx):
     assert _get(ctx).status_code == 200
 
 
-def test_an_agent_key_may_not_read_another_agents_numbers(ctx):
-    """Cross-agent reads are ent#80's grant, not an oversight here. 403 and
+def test_an_agent_key_without_a_grant_may_not_read_another_agents_numbers(ctx):
+    """ent#727: a cross-agent read needs an `agent_permissions` grant. 403 and
     not 404: the caller already knows this agent exists (the dependency let it
-    through), so the uniform-404 reasoning does not apply to the self-gate."""
-    ctx.users["user"] = User(id=3, username="other", email="o@agents.local",
-                             role="user", agent_name="other-agent")
+    through), so the uniform-404 reasoning does not apply to this gate. The
+    message is the ent#479 one, unchanged."""
+    ctx.users["user"] = _agent_key("other-agent")
     response = _get(ctx)
     assert response.status_code == 403
-    assert "own metrics" in response.json()["detail"]
+    assert response.json()["detail"] == \
+        "Agent-scoped key may only read its own metrics"
+    assert ctx.audit == []
+
+
+def _agent_key(name):
+    return User(id=3, username="operator", email=f"{name}@agents.local",
+                role="user", agent_name=name)
+
+
+def test_a_grant_holder_reads_another_agents_numbers_in_the_SAME_shape(ctx):
+    """ent#727: if A may call B, A may read B's declared series — through the
+    one read, with no cross-agent response variant."""
+    own = _get(ctx).json()  # the human read of the target, for comparison
+    ctx.db.grants.add(("other-agent", AGENT))
+    ctx.users["user"] = _agent_key("other-agent")
+    response = _get(ctx)
+    assert response.status_code == 200
+    body = response.json()
+    assert body["agent_name"] == AGENT
+    assert set(body) == set(own)
+    assert set(body["metrics"][0]) == set(own["metrics"][0])
+    assert body["metrics"][0]["latest"]["value"] == 10.0
+    assert body["metrics"][0]["freshness"] == "fresh"
+
+
+def test_a_grant_is_directional(ctx):
+    """B holding a grant on A does not let A read B."""
+    ctx.db.grants.add((AGENT, "other-agent"))
+    ctx.users["user"] = _agent_key("other-agent")
+    assert _get(ctx).status_code == 403
+
+
+def test_a_cross_agent_read_is_audited_with_the_READER(ctx):
+    ctx.db.grants.add(("other-agent", AGENT))
+    ctx.users["user"] = _agent_key("other-agent")
+    _get(ctx)
+    assert ctx.audit == [("other-agent", AGENT, "metrics")]
+
+
+def test_a_self_read_and_a_human_read_are_not_audited_as_cross_reads(ctx):
+    _get(ctx)
+    ctx.users["user"] = _agent_key(AGENT)
+    _get(ctx)
+    assert ctx.audit == []
+
+
+def test_a_system_key_is_not_grant_gated(ctx):
+    """`agent_name` is populated only for scope == agent, so the platform's
+    system key takes the non-agent path — unchanged by ent#727."""
+    ctx.users["user"] = User(id=9, username="admin", email="a@example.com",
+                             role="admin", mcp_scope="system")
+    assert _get(ctx).status_code == 200
+    assert ctx.audit == []
+
+
+def test_a_cross_agent_read_is_charged_to_the_CALLERS_budget(monkeypatch, ctx):
+    """A fleet fan-out exhausts the reader's own budget, never the target's."""
+    seen = []
+    monkeypatch.setattr(route_mod.rate_limiter, "enforce",
+                        lambda key, *a, **k: seen.append(key))
+    ctx.db.grants.add(("other-agent", AGENT))
+    ctx.users["user"] = _agent_key("other-agent")
+    _get(ctx)
+    assert seen == ["agent_metrics_read_by:other-agent"]
+
+
+def test_the_gate_runs_before_the_limiter_and_the_store(monkeypatch, ctx):
+    """A refused read spends nobody's budget and touches no store."""
+    seen = []
+    monkeypatch.setattr(route_mod.rate_limiter, "enforce",
+                        lambda key, *a, **k: seen.append(key))
+    ctx.db.raise_on_read = AssertionError("store read before the gate")
+    ctx.users["user"] = _agent_key("other-agent")
+    assert _get(ctx).status_code == 403
+    assert seen == []
+
+
+@pytest.mark.parametrize("metric", [None, "revenue", "no-such-metric"])
+def test_a_refusal_does_not_vary_by_whether_the_metric_exists(ctx, metric):
+    """ent#727 AC: the 403 is decided before anything about the target's
+    registry is consulted, so it cannot be used to probe which metrics exist."""
+    ctx.users["user"] = _agent_key("other-agent")
+    response = _get(ctx, **({"metric": metric} if metric else {}))
+    assert (response.status_code, response.json()) == (
+        403, {"detail": "Agent-scoped key may only read its own metrics"})
+
+
+def test_a_revoked_grant_refuses_the_next_read(ctx):
+    ctx.db.grants.add(("other-agent", AGENT))
+    ctx.users["user"] = _agent_key("other-agent")
+    assert _get(ctx).status_code == 200
+    ctx.db.grants.clear()
+    assert _get(ctx).status_code == 403
+
+
+def _defs(ctx):
+    return ctx.client.get(f"/api/agents/{AGENT}/metrics/definitions")
+
+
+@pytest.fixture
+def registry(monkeypatch):
+    from services import metric_registry
+    monkeypatch.setattr(metric_registry, "list_metric_definitions",
+                        lambda name, include_retired=False: [_definition()])
+
+
+def test_definitions_are_readable_by_a_human_self_and_grant_holder(ctx, registry):
+    assert _defs(ctx).status_code == 200
+    ctx.users["user"] = _agent_key(AGENT)
+    assert _defs(ctx).status_code == 200
+    ctx.db.grants.add(("other-agent", AGENT))
+    ctx.users["user"] = _agent_key("other-agent")
+    response = _defs(ctx)
+    assert response.status_code == 200
+    assert response.json()["definitions"][0]["cadence"] == "1h"
+    assert ctx.audit == [("other-agent", AGENT, "definitions")]
+
+
+def test_definitions_are_refused_to_an_agent_key_without_a_grant(ctx, registry):
+    """ent#727 closes the loophole: this route had no self-gate at all."""
+    ctx.users["user"] = _agent_key("other-agent")
+    response = _defs(ctx)
+    assert response.status_code == 403
+    assert response.json()["detail"] == \
+        "Agent-scoped key may only read its own metrics"
 
 
 def test_the_rate_limit_is_enforced_per_agent(monkeypatch, ctx):
