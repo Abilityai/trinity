@@ -248,7 +248,10 @@ async def run_pull_loop(
             await resolve_pull_sync_enabled(client)
         except Exception:  # noqa: BLE001 — loop must never die
             logger.exception("pull: initial flag read raised unexpectedly")
-        await asyncio.sleep(interval)
+        # Half an interval later than the push loop (PR #3021 review): the two
+        # start together and, on the default shared interval, would otherwise
+        # reach the repo lock on the same tick every time.
+        await asyncio.sleep(interval + interval / 2)
         while True:
             try:
                 await run_one_pull_cycle(client, home, _run_pull_once)

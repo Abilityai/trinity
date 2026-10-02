@@ -556,6 +556,52 @@ _GIT_MAINTENANCE_LOOSE_THRESHOLD = int(
 # server's _REPO_LOCK"). Never treat holding it as "no git is running here".
 _REPO_LOCK = threading.Lock()
 
+# PR #3021 review: the push and pull cycles are both background loops on the
+# same lock. Taking it non-blocking made the loser skip silently — and two
+# loops on one interval collide every tick, quietly halving the pull bound.
+# The background cycles wait this long for the other one to finish; operator
+# endpoints keep their immediate 409 (a person is waiting on those).
+_DEFAULT_CYCLE_LOCK_WAIT_SECONDS = 120
+
+
+def _cycle_lock_wait_seconds() -> float:
+    """`GIT_SYNC_LOCK_WAIT_SECONDS` (default 120; 0 = do not wait)."""
+    raw = os.getenv("GIT_SYNC_LOCK_WAIT_SECONDS")
+    try:
+        value = float(raw) if raw else _DEFAULT_CYCLE_LOCK_WAIT_SECONDS
+    except ValueError:
+        return _DEFAULT_CYCLE_LOCK_WAIT_SECONDS
+    return max(0.0, value)
+
+
+def _acquire_for_cycle() -> bool:
+    """The repo lock for a BACKGROUND cycle: wait a bounded time for the other
+    cycle (or an operator op) to finish, then give up as `repo_busy`."""
+    wait = _cycle_lock_wait_seconds()
+    if wait <= 0:
+        return _REPO_LOCK.acquire(blocking=False)
+    return _REPO_LOCK.acquire(timeout=wait)
+
+
+def _merge_in_progress(home_dir: Path) -> bool:
+    """Is a merge actually under way (MERGE_HEAD exists)? `merge --abort`
+    without one fails with "There is no merge to abort" — noise in the
+    recorded error, not information (PR #3021 review)."""
+    probe = run_registered(["git", "rev-parse", "-q", "--verify", "MERGE_HEAD"],
+                           cwd=str(home_dir), timeout=10)
+    return probe.returncode == 0
+
+
+def _safe_to_reset() -> bool:
+    """May the pull reset the tree back to its pre-pull HEAD right now?
+
+    `reset --hard` discards every tracked-file write since the stash — so a
+    turn admitted after the pull's own in-flight check (admission does not wait
+    on a pull) would lose what it wrote. Re-checked immediately before each
+    reset; an unreadable registry counts as busy (PR #3021 review)."""
+    running = _executions_in_flight()
+    return running == 0
+
 
 def _with_repo_lock(fn):
     """Guard a mutating git endpoint with the repo lock (409 on contention)."""
@@ -1089,7 +1135,14 @@ def _with_stash(home_dir: Path, branch: str, step) -> Optional[str]:
             stashed = False
             return None
         # The edits collide with what came in. Undo the pull — the stash is
-        # still there — and re-apply on the base it was taken from.
+        # still there — and re-apply on the base it was taken from. Unless an
+        # execution started meanwhile: then a reset would discard what it
+        # wrote, so the tree is left as it is (its conflict markers make the
+        # push cycle and the next pull refuse until a person resolves them).
+        if not _safe_to_reset():
+            return (f"local edits conflict with incoming changes on {branch}; an "
+                    f"execution started meanwhile, so the tree was left as it is — "
+                    f"resolve the conflicts" + kept)
         reset = git("reset", "--hard", pre_head, timeout=30)
         if reset.returncode != 0:
             return (f"local edits conflict with incoming changes on {branch} and the "
@@ -1107,7 +1160,11 @@ def _with_stash(home_dir: Path, branch: str, step) -> Optional[str]:
         # next push cycle would commit as the agent's own work (PR #3021
         # re-review). Then re-apply the stash on the base it was taken from.
         try:
-            git("merge", "--abort", timeout=30)  # no-op unless MERGE_HEAD exists
+            if _merge_in_progress(home_dir):
+                git("merge", "--abort", timeout=30)
+            if not _safe_to_reset():
+                return (err + f"; an execution started meanwhile, so the tree was not "
+                        f"reset to {pre_head[:12]}" + (kept if stashed else ""))
             reset = git("reset", "--hard", pre_head, timeout=30)
             if reset.returncode != 0:
                 err += (f"; the tree could not be reset to {pre_head[:12]} ("
@@ -1154,14 +1211,18 @@ def _integrate_source(home_dir: Path, branch: str, source: str) -> Optional[str]
         # BEFORE the abort clears them (mirrors `_rebase_onto_remote`).
         conflicted = _unmerged_paths(home_dir)
         output = f"{merge.stdout or ''}\n{merge.stderr or ''}"
-        abort = run_registered(["git", "merge", "--abort"], cwd=str(home_dir), timeout=30)
+        # A merge that refused to START (an untracked file it would overwrite)
+        # leaves no MERGE_HEAD; aborting it only appends git's "There is no
+        # merge to abort" to the recorded error.
+        abort = (run_registered(["git", "merge", "--abort"], cwd=str(home_dir), timeout=30)
+                 if _merge_in_progress(home_dir) else None)
         if conflicted or "CONFLICT" in output:
             files = f" ({', '.join(conflicted[:3])})" if conflicted else ""
             err = f"diverged: merge conflict with {source}{files}"
         else:
             err = f"merging {source}: " + _summarize_git_error(
                 merge.stderr or merge.stdout or "merge failed")
-        if abort.returncode != 0:
+        if abort is not None and abort.returncode != 0:
             err += ("; merge --abort failed ("
                     + _summarize_git_error(abort.stderr or abort.stdout or "abort failed") + ")")
         return err
@@ -1200,7 +1261,7 @@ def _run_pull_once(home_dir: Path) -> Dict:
     `origin/<branch>`, not its lag behind `main`; `behind_main` in the git
     status is the latter.
     """
-    if not _REPO_LOCK.acquire(blocking=False):
+    if not _acquire_for_cycle():
         return {"status": "skipped", "reason": "repo_busy"}
     try:
         _reap_stale_git_litter(
@@ -1305,9 +1366,9 @@ def _run_auto_sync_once(home_dir: Path) -> Dict:
     """
     now = datetime.now(timezone.utc).isoformat()
 
-    if not _REPO_LOCK.acquire(blocking=False):
-        # Operator op in flight — skip quietly; not a sync failure.
-        logger.info("auto-sync: repo busy (operator git op in flight), skipping cycle")
+    if not _acquire_for_cycle():
+        # Still held after the bounded wait — skip quietly; not a sync failure.
+        logger.info("auto-sync: repo busy (git op still in flight after the wait), skipping cycle")
         return {"status": "skipped", "reason": "repo_busy"}
 
     try:

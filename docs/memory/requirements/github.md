@@ -907,7 +907,15 @@
     follow-up.
 - **Flag:** per-agent `pull_sync_enabled` (both migration tracks), read live
   each cycle, with `GIT_SYNC_PULL` as the fallback; interval
-  `GIT_SYNC_PULL_INTERVAL_SECONDS` (defaults to the push interval).
+  `GIT_SYNC_PULL_INTERVAL_SECONDS` (defaults to the push interval), first tick
+  offset half an interval from the push loop. The push and pull cycles wait up
+  to `GIT_SYNC_LOCK_WAIT_SECONDS` (default 120 s) for the shared repo lock rather
+  than skipping, so neither starves the other.
+- **Undo is never a reset over a turn:** the pull undoes a collision with
+  uncommitted edits by `reset --hard` to its pre-pull HEAD only after
+  re-checking that no execution started meanwhile; otherwise the tree is left
+  as it is (conflict markers block the next push and pull) and the failure
+  says so. `merge --abort` runs only when a merge is in progress.
   - on for new `github:` agents, source-mode included
   - on for existing agents only where auto-sync is already on
   - off otherwise; toggle in Settings → Git sync

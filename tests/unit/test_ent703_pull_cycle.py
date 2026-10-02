@@ -178,8 +178,9 @@ class TestPull:
         assert result["status"] == "skipped"
         assert _out(agent, "rev-parse", "HEAD") == before
 
-    def test_a_busy_repo_is_skipped_without_writing_state(self, world):
+    def test_a_busy_repo_is_skipped_without_writing_state(self, world, monkeypatch):
         agent, _, _ = world
+        monkeypatch.setenv("GIT_SYNC_LOCK_WAIT_SECONDS", "0")  # the immediate-skip path
         assert git_router._REPO_LOCK.acquire(blocking=False)
         try:
             assert git_router._run_pull_once(agent) == {"status": "skipped", "reason": "repo_busy"}
@@ -556,6 +557,123 @@ class TestLoopGate:
         assert auto_sync.get_pull_interval_seconds() == 600
         monkeypatch.setenv("GIT_SYNC_PULL_INTERVAL_SECONDS", "300")
         assert auto_sync.get_pull_interval_seconds() == 300
+
+
+# ---------------------------------------------------------------------------
+# PR #3021 third review: the two loops share the lock without starving each
+# other; a reset never runs over a turn's writes; no spurious merge --abort.
+# ---------------------------------------------------------------------------
+
+class TestThirdReviewFixes:
+    def test_a_background_cycle_waits_for_the_lock_instead_of_skipping(self, world, monkeypatch):
+        """The push and pull loops share `_REPO_LOCK`. Skipping on a busy lock
+        made two loops on one interval collide every tick and silently halve
+        the pull bound; a cycle now waits for the other to finish."""
+        import threading
+        import time
+        agent, _, human = world
+        _human_push(human, "role.md", "role v2\n")
+        monkeypatch.setenv("GIT_SYNC_LOCK_WAIT_SECONDS", "10")
+        assert git_router._REPO_LOCK.acquire(blocking=False)
+        threading.Timer(0.3, git_router._REPO_LOCK.release).start()
+
+        started = time.monotonic()
+        result = git_router._run_pull_once(agent)
+
+        assert time.monotonic() - started >= 0.25
+        assert result["status"] == "success"
+        assert (agent / "role.md").read_text() == "role v2\n"
+
+    def test_the_wait_is_bounded(self, world, monkeypatch):
+        import time
+        agent, _, _ = world
+        monkeypatch.setenv("GIT_SYNC_LOCK_WAIT_SECONDS", "0.3")
+        assert git_router._REPO_LOCK.acquire(blocking=False)
+        try:
+            started = time.monotonic()
+            assert git_router._run_pull_once(agent) == {"status": "skipped", "reason": "repo_busy"}
+            assert time.monotonic() - started < 5
+        finally:
+            git_router._REPO_LOCK.release()
+
+    @pytest.mark.parametrize("raw, expected", [(None, 120.0), ("0", 0.0), ("-5", 0.0), ("bad", 120.0), ("2.5", 2.5)])
+    def test_the_wait_setting(self, monkeypatch, raw, expected):
+        if raw is None:
+            monkeypatch.delenv("GIT_SYNC_LOCK_WAIT_SECONDS", raising=False)
+        else:
+            monkeypatch.setenv("GIT_SYNC_LOCK_WAIT_SECONDS", raw)
+        assert git_router._cycle_lock_wait_seconds() == expected
+
+    def test_the_pull_loop_starts_half_an_interval_after_the_push_loop(self, tmp_path, monkeypatch):
+        for var in ("TRINITY_BACKEND_URL", "TRINITY_MCP_API_KEY"):
+            monkeypatch.delenv(var, raising=False)
+        slept = []
+
+        async def first_sleep(seconds):
+            slept.append(seconds)
+            raise asyncio.CancelledError
+
+        monkeypatch.setattr(auto_sync.asyncio, "sleep", first_sleep)
+        with pytest.raises(asyncio.CancelledError):
+            asyncio.new_event_loop().run_until_complete(
+                auto_sync.run_pull_loop(tmp_path, interval_seconds=100))
+        assert slept == [150]
+
+    def test_no_reset_over_a_turn_that_started_mid_pull(self, world, monkeypatch):
+        """Incoming changes collide with uncommitted edits, so the pull would
+        normally be undone with `reset --hard`. A turn admitted after the
+        pull's in-flight checks wrote a file meanwhile: the reset would discard
+        it, so the tree is left as it is and the failure says so."""
+        agent, _, human = world
+        _human_push(human, "notes.md", "notes — human rewrite\n")
+        (agent / "notes.md").write_text("notes — agent's uncommitted edit\n")
+        calls = {"n": 0}
+
+        def in_flight():
+            calls["n"] += 1
+            if calls["n"] >= 3:  # the pre-reset check: a turn has started and written
+                (agent / "role.md").write_text("role — written by the turn\n")
+                return 1
+            return 0
+
+        monkeypatch.setattr(git_router, "_executions_in_flight", in_flight)
+
+        result = git_router._run_pull_once(agent)
+
+        assert result["status"] == "failed"
+        assert "an execution started meanwhile, so the tree was left as it is" in result["error"]
+        assert "local edits are kept in `git stash`" in result["error"]
+        assert (agent / "role.md").read_text() == "role — written by the turn\n"
+        assert "trinity-pull" in _out(agent, "stash", "list")
+
+    def test_a_reset_still_undoes_the_pull_when_nothing_runs(self, world):
+        """The unchanged path, pinned beside the new one: idle → undone."""
+        agent, _, human = world
+        before = _out(agent, "rev-parse", "HEAD")
+        _human_push(human, "notes.md", "notes — human rewrite\n")
+        (agent / "notes.md").write_text("notes — agent's uncommitted edit\n")
+
+        result = git_router._run_pull_once(agent)
+
+        assert result["error"] == "local edits conflict with incoming changes on main"
+        assert _out(agent, "rev-parse", "HEAD") == before
+
+    def test_a_merge_that_never_started_is_not_aborted(self, world):
+        """`git merge` refuses up front when an untracked file would be
+        overwritten: no MERGE_HEAD, so no `merge --abort` and none of git's
+        "There is no merge to abort" in the recorded error."""
+        agent, _, human = world
+        TestWorkingBranchReceivesMain._on_working_branch(agent)
+        _human_push(human, "brief.md", "brief — from main\n")
+        (agent / "brief.md").write_text("brief — the agent's, untracked\n")
+
+        result = git_router._run_pull_once(agent)
+
+        assert result["status"] == "failed"
+        assert result["error"].startswith("merging main: ")
+        assert "merge --abort" not in result["error"]
+        assert "no merge to abort" not in result["error"].lower()
+        assert (agent / "brief.md").read_text() == "brief — the agent's, untracked\n"
 
 
 # ---------------------------------------------------------------------------

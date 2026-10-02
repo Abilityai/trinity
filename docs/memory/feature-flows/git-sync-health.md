@@ -458,7 +458,13 @@ operator's, the fleet orchestrator's daily sweep, or a marketplace
 SessionStart hook, and the 2026-09-24 audit found agents up to 31 commits behind.
 
 - **Loop:** `auto_sync.run_pull_loop`, beside the push loop, every
-  `GIT_SYNC_PULL_INTERVAL_SECONDS` (defaults to the push interval, 900 s).
+  `GIT_SYNC_PULL_INTERVAL_SECONDS` (defaults to the push interval, 900 s). Its
+  first tick is half an interval after the push loop's, so the two do not reach
+  the repo lock together.
+- **Lock:** both background cycles wait up to `GIT_SYNC_LOCK_WAIT_SECONDS`
+  (default 120 s; `0` = skip at once) for `_REPO_LOCK` instead of skipping on
+  sight. Skipping made two loops on one interval collide every tick and halve
+  the pull bound silently. Operator endpoints keep their immediate 409.
 - **Gate:** each cycle reads the owner's `pull_sync_enabled` live
   (`GET .../git/pull-sync`, agent key), with `GIT_SYNC_PULL` as the fallback,
   the #3010 pattern.
