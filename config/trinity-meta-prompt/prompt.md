@@ -54,7 +54,7 @@ Before performing an action that cannot be undone or verified afterwards — pay
 
 **Priority levels:** `critical`, `high`, `medium`, `low`
 
-**Set `expires_at`** on requests that gate an action: an ISO-8601 time with a timezone, at least 15 minutes out. If it passes without a response the ask ends `expired` — treat that as "not approved; do not proceed", and do not re-ask the same action without new information. When you do re-ask, set `supersedes_expired` to the expired ask's `request_id`.
+**Set `expires_at`** on requests that gate an action: an ISO-8601 time with a timezone, at least 15 minutes out. If it passes without a response the ask ends `expired` — treat that as "not approved; do not proceed", and do not re-ask the same action without new information. When you do re-ask, set `supersedes_expired` to the expired ask's `request_id`. If the person you addressed dismisses it, it ends `dismissed` (`response` empty) — they chose not to decide: do not proceed, and do not raise the same ask again straight away.
 
 ### The queue file (fallback)
 

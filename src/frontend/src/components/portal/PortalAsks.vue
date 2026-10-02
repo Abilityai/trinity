@@ -113,6 +113,25 @@
         {{ endingLine(ask) }}
       </p>
 
+      <!-- trinity-enterprise#748: a dismissal is undoable for a few seconds,
+           here on the card it ended — nothing is sent until the window lapses. -->
+      <div
+        v-if="undoable(ask)"
+        class="mt-1.5 flex items-center gap-2"
+        role="status"
+        aria-live="polite"
+        :data-testid="`${tid.prefix}-dismissed-${ask.id}`"
+      >
+        <!-- The card's own ink: no new raw gray (the #2605 ratchet). -->
+        <span class="text-xs">Dismissed — the agent hears nothing until this closes.</span>
+        <BaseButton
+          size="sm"
+          variant="secondary"
+          :data-testid="`${tid.prefix}-undo-${ask.id}`"
+          @click="undoDismiss(ask)"
+        >Undo</BaseButton>
+      </div>
+
       <!-- ent#429: the conversation this ask was raised against. Shown only when
            it is somewhere the reader is not — an ask raised by a scheduled run
            attaches to a thread at RAISE time, and without a way back to it the
@@ -248,7 +267,37 @@
              row — only while the ask can still be answered. -->
         <QueueBrief :item="ask" part="fallback" class="mt-2" />
 
-        <p v-if="errors[ask.id]" class="mt-1.5 text-xs text-red-600 dark:text-red-400">{{ errors[ask.id] }}</p>
+        <!-- trinity-enterprise#747 / #748: talk it through before deciding, or
+             decline to decide. Secondary to the answer above: the answer stays
+             the card's one primary action. Discuss is hidden inside the very
+             chat it would open. -->
+        <div
+          v-if="canDiscuss(ask) || canDismiss(ask)"
+          class="mt-2 flex flex-wrap items-center gap-2"
+          :data-testid="`${tid.prefix}-actions-${ask.id}`"
+        >
+          <BaseButton
+            v-if="canDiscuss(ask)"
+            size="sm"
+            variant="secondary"
+            :loading="discussingId === ask.id"
+            loading-label="Opening…"
+            :disabled="busyId === ask.id"
+            :data-testid="`${tid.prefix}-discuss-${ask.id}`"
+            @click="discuss(ask)"
+          >{{ ask.discussion_chat_id ? 'Continue discussion' : 'Discuss' }}</BaseButton>
+          <BaseButton
+            v-if="canDismiss(ask)"
+            size="sm"
+            variant="ghost"
+            :disabled="busyId === ask.id || discussingId === ask.id"
+            title="End this ask without answering. The agent is told you chose not to decide."
+            :data-testid="`${tid.prefix}-dismiss-${ask.id}`"
+            @click="dismiss(ask)"
+          >Dismiss</BaseButton>
+        </div>
+
+        <p v-if="errors[ask.id] || store.askDismissErrors[ask.id]" class="mt-1.5 text-xs text-red-600 dark:text-red-400">{{ errors[ask.id] || store.askDismissErrors[ask.id] }}</p>
       </template>
     </div>
   </div>
@@ -257,6 +306,7 @@
 <script setup>
 import { computed, nextTick, reactive, ref, watch, onBeforeUnmount } from 'vue'
 import BaseBadge from '../base/BaseBadge.vue'
+import BaseButton from '../base/BaseButton.vue'
 import AskMarkdown from '@/components/operator/AskMarkdown.vue'
 import QueueProposal from '../operator/QueueProposal.vue'
 import QueueBrief from '../operator/QueueBrief.vue'
@@ -408,7 +458,11 @@ const items = computed(() => {
     const ids = new Set(props.askIds.filter(Boolean))
     return store.asks.filter((a) => ids.has(a.id))
   }
-  return props.pendingOnly ? allItems.value.filter((a) => a.status === 'pending') : allItems.value
+  // trinity-enterprise#748: an ask inside its Undo window stays drawn, so the
+  // Undo is reachable even where only waiting asks are shown.
+  return props.pendingOnly
+    ? allItems.value.filter((a) => a.status === 'pending' || store.askDismissals[a.id])
+    : allItems.value
 })
 
 const tid = computed(() => {
@@ -482,6 +536,43 @@ onBeforeUnmount(() => {
 // established. An ask's `kind` is the queue row's `type` verbatim.
 const kindLabel = (kind) => queueTypeLabel(kind) || 'Question'
 const controlsKind = (ask) => queueResponseKind({ type: ask.kind, options: ask.options })
+
+// trinity-enterprise#747: an alert has nothing to decide, so nothing to
+// discuss; and the chat already discussing this ask needs no link to itself.
+const canDiscuss = (ask) => ask.kind !== 'alert'
+  && !(ask.discussion_chat_id && ask.discussion_chat_id === props.currentSessionId)
+// trinity-enterprise#748: a question or an approval can be declined; an alert
+// is acknowledged ("Got it"), which already ends it without a decision.
+const canDismiss = (ask) => ask.kind !== 'alert'
+// Not once the dismissal is on the wire: the server may already have told the agent.
+const undoable = (ask) => !!store.askDismissals[ask.id] && !store.askDismissals[ask.id].committing
+const discussingId = ref(null)
+
+async function discuss(ask) {
+  if (discussingId.value) return
+  discussingId.value = ask.id
+  errors[ask.id] = null
+  try {
+    const out = await store.discussAsk(ask.id)
+    if (out?.chat_id) emit('open-thread', { id: out.chat_id, agent_name: out.agent_name || ask.agent_name })
+  } catch (err) {
+    errors[ask.id] = err.response?.data?.detail?.message || 'Could not open the discussion. Try again.'
+  } finally {
+    discussingId.value = null
+  }
+}
+
+// One click, no confirmation: the Undo on the card is the safety net.
+function dismiss(ask) {
+  errors[ask.id] = null
+  store.dismissAsk(ask.id)
+}
+
+async function undoDismiss(ask) {
+  if (!store.undoDismissAsk(ask.id)) return
+  await nextTick()
+  cardEls.get(ask.id)?.focus?.({ preventScroll: true })
+}
 
 async function submit(ask) {
   // Enter is the main path now (B2): a second Enter while the first is on the

@@ -3660,6 +3660,17 @@ to localStorage in the clear.
   users, Info for everyone — carries one "N ask(s) waiting on you · Open in Inbox" line to
   Action `?from=<agent>`, and each agent row's "needs you" mark counts from the same feed as the
   pinned Inbox row.
+- **Discuss and Dismiss (trinity-enterprise#747, #748)**: every waiting question or approval
+  offers **Discuss** and **Dismiss** wherever it renders (Inbox pane, chat tile, a project's
+  Needs you); an alert offers neither ("Got it" ends it). Discuss opens ONE chat per ask with the
+  asking agent, titled after the ask, whose every turn carries the ask (id, kind, live status,
+  options); later clicks continue it ("Continue discussion"), the ask stays the same pending row
+  drawn as that chat's tile, and it is decided on that row — its card, or for a question the
+  composer's **Send as answer** (the text becomes `response`). Dismiss is one click, undoable for
+  5 s with nothing sent meanwhile; it ends the ask as `dismissed` (status `cancelled`) through the
+  ending sink, wakes the opted-in filer, and the agent's readback shows `dismissed` with an empty
+  `response`. Only the addressee may do either (person gate, uniform 404); a dismiss losing a race
+  is a no-op. Flow: `feature-flows/operating-room.md` → Discuss and Dismiss.
 - **Action by agent (§3g C2, PR A2)**: whenever anything is waiting — from one agent on, so a
   second agent's ask does not push the list down — Action shows a second strip ("All agents",
   then each agent with its count), and choosing one narrows the tab to that agent's asks

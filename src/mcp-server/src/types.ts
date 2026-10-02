@@ -504,7 +504,7 @@ export interface OperatorQueueItem {
   acknowledged_at?: string | null;
   // trinity-enterprise#611 — how the ask ended (NULL on a row that ended before
   // the ledger: read `status`).
-  disposition?: string | null;        // answered | cancelled | expired
+  disposition?: string | null;        // answered | cancelled | dismissed | expired
   disposed_at?: string | null;
   disposed_by?: string | null;        // person | timeout
   disposition_reason?: string | null; // the operator's optional cancel reason

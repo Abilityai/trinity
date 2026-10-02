@@ -234,6 +234,14 @@ def _framed_ending(items, disposition: str, reason: Optional[str]) -> str:
             f"{n} {noun} you parked in the operator queue expired before anyone answered.",
             EXPIRY_RIDER,
         ]
+    elif disposition == "dismissed":
+        # trinity-enterprise#748: the person it was addressed to chose not to
+        # answer — not an answer, not an expiry, not an operator's cancel.
+        lines = [
+            f"The person you addressed dismissed {n} {noun} without answering. "
+            "Treat that as \"no decision\": do not act on them, and do not raise "
+            "the same ask again straight away — only with new information.",
+        ]
     else:
         lines = [
             f"An operator cancelled {n} {noun} you parked in the operator queue. "

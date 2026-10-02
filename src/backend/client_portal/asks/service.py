@@ -72,7 +72,10 @@ ENDED_WINDOW_DAYS = 7
 
 
 def _status_of(item: dict) -> str:
-    """`pending` | `answered` | `cancelled` | `expired`.
+    """`pending` | `answered` | `dismissed` | `cancelled` | `expired`.
+
+    `dismissed` (trinity-enterprise#748) is the addressee's own "no answer"; the
+    row's status is `cancelled`, so the ledger is read before the status.
 
     The ending first (trinity-enterprise#611): `disposition` when the row carries
     the ledger, else its terminal `status` (a row that ended before the ledger).
@@ -86,6 +89,8 @@ def _status_of(item: dict) -> str:
     status = item.get("status") or ""
     if disposition == "answered" or status in _ANSWERED_STATUSES:
         return "answered"
+    if disposition == "dismissed":
+        return "dismissed"
     if disposition == "cancelled" or status == "cancelled":
         return "cancelled"
     if disposition == "expired" or status == "expired":
@@ -129,6 +134,9 @@ def _project(item: dict, *, viewer_email: Optional[str] = None,
     # ent#734: platform-written, stripped from agent content at both ingestion
     # boundaries. Only the platform's literal True counts.
     raised_in_turn = context.get("workspace_raised_in_turn") is True
+    # ent#747: the chat its addressee opened to discuss it — platform-written,
+    # stripped from agent content like the two keys above.
+    discussion = context.get("workspace_discussion_id")
     from services.operator_queue_service import is_aged
     ended_at, ended_by = _ending_of(item, viewer_email)
     return WorkspaceAsk(
@@ -147,6 +155,7 @@ def _project(item: dict, *, viewer_email: Optional[str] = None,
         ended_by=ended_by,
         chat_id=chat_id if isinstance(chat_id, str) else None,
         raised_in_turn=raised_in_turn,
+        discussion_chat_id=discussion if isinstance(discussion, str) and discussion else None,
         resume_requested=resume_requested,
         sync=_coarse_sync(item),
         aging=bool(is_aged(item)),
@@ -280,13 +289,20 @@ def list_asks_page(email: str, is_platform: bool, agent_name: Optional[str] = No
         # AGENT, fail-closed per agent (ent#428) — it is just asked of the
         # agents the viewer's asks span, and the answer goes into the SQL as the
         # access set. Re-implementing membership here is how the two drift.
+        # ent#747: a chat also holds the ask it was opened to DISCUSS — read
+        # here, inside the same 503 boundary, on the first page only.
+        discussed = (_discussed_in(chat_id, email, is_platform, agent_name)
+                     if chat_id is not None and offset == 0 else [])
         allowed = {a for a in db.list_operator_queue_agent_names(**filters)
                    if _on_roster(a, email, is_platform, strict=True)}
-        if not allowed:
-            return AsksPage()
-        total = db.count_operator_queue_items(accessible_agent_names=allowed, **filters)
-        items = db.list_operator_queue_items(accessible_agent_names=allowed,
-                                             limit=limit, offset=offset, **filters)
+        if allowed:
+            total = db.count_operator_queue_items(accessible_agent_names=allowed, **filters)
+            items = db.list_operator_queue_items(accessible_agent_names=allowed,
+                                                 limit=limit, offset=offset, **filters)
+        else:
+            total, items = 0, []
+    except AsksUnavailable:
+        raise
     except Exception as e:  # noqa: BLE001 — surfaced as a 503, never as "nothing" (A0)
         logger.warning("[WorkspaceAsks] list failed", exc_info=True)
         raise AsksUnavailable("queue unreadable") from e
@@ -295,8 +311,31 @@ def list_asks_page(email: str, is_platform: bool, agent_name: Optional[str] = No
     if chat_id is not None:
         out = [a for a in out if _in_chat(a, chat_id)]
     end = offset + len(items or [])
-    return AsksPage(items=out, total=total,
-                    next_cursor=_encode_cursor(end) if end < total else None)
+    next_cursor = _encode_cursor(end) if end < total else None
+    seen = {a.id for a in out}
+    extra = [a for a in discussed if a.id not in seen]
+    return AsksPage(items=out + extra, total=total + len(extra), next_cursor=next_cursor)
+
+
+def _discussed_in(chat_id: str, email: str, is_platform: bool,
+                  agent_name: Optional[str]) -> List[WorkspaceAsk]:
+    """The ask (at most one in practice) whose addressee opened `chat_id` to
+    discuss it (trinity-enterprise#747) — pending or ended, cleared or not, as
+    long as the viewer may still read it. The SQL match on the stored context
+    is a prefilter; the parsed platform key decides."""
+    from services.operator_queue_service import _WORKSPACE_DISCUSSION_KEY
+    fragment = json.dumps({_WORKSPACE_DISCUSSION_KEY: chat_id})[1:-1]
+    rows = db.list_operator_queue_items(
+        agent_name=agent_name, addressed_to_email=email, types=_VISIBLE_KINDS,
+        include_cleared=True, context_contains=(fragment,), limit=5,
+    ) or []
+    out = []
+    for row in rows:
+        ask = _project(row, viewer_email=email)
+        if (ask.discussion_chat_id == chat_id
+                and _on_roster(row.get("agent_name") or "", email, is_platform, strict=True)):
+            out.append(ask)
+    return out
 
 
 def _chat_turn_fragments(chat_id: str) -> tuple:
@@ -435,6 +474,174 @@ def answer_ask(item_id: str, email: str, is_platform: bool,
     agent = updated.get("agent_name") or item.get("agent_name") or ""
     dispatched = bool(ending.observers_ok and _resume_requested(agent))
     return _project(updated, viewer_email=email, resume_requested=dispatched)
+
+
+def dismiss_ask(item_id: str, email: str, is_platform: bool) -> WorkspaceAsk:
+    """The addressee ends an ask WITHOUT answering it (trinity-enterprise#748).
+
+    One click, no reason. Ends through the ask sink as `dismissed`, so the audit
+    row, the thin broadcast and the filer's wake are the same ones every other
+    ending gets. Idempotent from the person's side: an ask that has already
+    ended — or ends first in a race — is returned as it stands, never refused,
+    because the person's intent ("this needs nothing from me") is already true.
+    """
+    item = _owned_ask(item_id, email, is_platform)
+    # Past its deadline it has already ended (expired), whether or not the
+    # poller has swept it: that ending is the true one, not a dismissal.
+    if item.get("status") == "pending" and not _is_expired(item):
+        try:
+            ending = ask_service.dismiss(item_id, actor=ask_service.Actor(email=email))
+            item = ending.rows[0]
+            logger.info("[WorkspaceAsks] %s dismissed by %s (client=%s)",
+                        item_id, email, not is_platform)
+        except ask_service.AskConflict as conflict:
+            item = conflict.item
+        except ask_service.AskNotFound:
+            raise AskError(404, "not_found", "Ask not found")
+    return _project(item, viewer_email=email)
+
+
+#: The opening line of a discussion chat (trinity-enterprise#747). A `system`
+#: row: drawn as a platform line, replayed to the agent on a cold turn, and
+#: never counted as unread. Names the ask by its title only.
+DISCUSSION_NOTICE = ("Discussing the ask \u201c{title}\u201d. It stays open while you talk "
+                     "it through \u2014 answer or dismiss it in its card when you're ready.")
+
+
+def _discussion_title(item: dict) -> Optional[str]:
+    from services.chat_title import CHAT_TITLE_MAX_CHARS, normalize_chat_title
+    raw = " ".join(str(item.get("title") or item.get("question") or "").split())
+    if len(raw) > CHAT_TITLE_MAX_CHARS:
+        raw = raw[:CHAT_TITLE_MAX_CHARS - 1].rstrip() + "\u2026"
+    clean, _ = normalize_chat_title(raw)
+    return clean
+
+
+def discuss_ask(item_id: str, email: str, is_platform: bool):
+    """Open — or continue — the chat in which the addressee discusses an ask
+    with the agent that raised it (trinity-enterprise#747).
+
+    One chat per ask: the link is written first, by a compare-and-set that
+    only a PENDING ask with no link yet accepts, so two clicks racing agree on
+    one chat id. The chat row is then ensured under THAT id — whoever's insert
+    lands seeds it — which also heals a link whose chat insert failed after the
+    link committed. An ended ask continues its discussion but never opens one.
+
+    The ask itself is untouched: still pending, still the one row, answered or
+    dismissed in its own card. `alert` asks are not discussable — there is
+    nothing to decide.
+    """
+    import uuid
+
+    from client_portal import db as portal_db
+    from services.operator_queue_service import _WORKSPACE_DISCUSSION_KEY
+    from .models import WorkspaceAskDiscussion
+
+    item = _owned_ask(item_id, email, is_platform)
+    if (item.get("type") or "question") == "alert":
+        raise AskError(422, "not_discussable", "An update has nothing to decide.")
+    agent = item.get("agent_name") or ""
+
+    def _linked(row: dict) -> Optional[str]:
+        ctx = row.get("context") if isinstance(row.get("context"), dict) else {}
+        link = ctx.get(_WORKSPACE_DISCUSSION_KEY)
+        return link if isinstance(link, str) and link else None
+
+    chat_id = _linked(item)
+    if chat_id is None:
+        if _status_of(item) != "pending":
+            raise AskError(409, "already_resolved",
+                           f"This ask is already {_status_of(item)}.")
+        try:
+            updated = db.set_operator_queue_discussion_link(
+                item_id, _WORKSPACE_DISCUSSION_KEY, uuid.uuid4().hex)
+        except Exception:  # noqa: BLE001 — a concurrent writer (SQLite busy snapshot)
+            # The other click's link is the answer: read what it wrote.
+            logger.info("[WorkspaceAsks] %s discussion link raced; re-reading", item_id)
+            updated = db.get_operator_queue_item(item_id)
+        if not updated:
+            raise AskError(404, "not_found", "Ask not found")
+        item = updated
+        chat_id = _linked(item)
+        if chat_id is None:
+            # Lost to an ending between the read and the write.
+            raise AskError(409, "already_resolved",
+                           f"This ask is already {_status_of(item)}.")
+
+    title = _discussion_title(item)
+    created = False
+    if portal_db.get_portal_session(chat_id, agent, email) is None:
+        now = utc_now_iso()
+        try:
+            portal_db.create_portal_session(chat_id, agent, email, now)
+            created = True
+        except Exception:  # noqa: BLE001 — a racing click inserted it first
+            if portal_db.get_portal_session(chat_id, agent, email) is None:
+                logger.warning("[WorkspaceAsks] discussion chat %s not created", chat_id,
+                               exc_info=True)
+                raise AskError(503, "discussion_unavailable",
+                               "Couldn't open the discussion \u2014 try again.")
+        if created:
+            if title:
+                # Marked as a person's title, so the first turn's generated
+                # title stands down (ent#473) — the chat is named after the ask.
+                portal_db.rename_portal_session(chat_id, agent, email, title)
+            portal_db.add_portal_message(
+                uuid.uuid4().hex, agent, email, "system",
+                DISCUSSION_NOTICE.format(title=title or "from " + agent), None, now,
+                session_id=chat_id,
+            )
+            portal_db.touch_portal_session(chat_id, now, added=1)
+            logger.info("[WorkspaceAsks] %s discussion opened by %s", item_id, email)
+
+    session = portal_db.get_portal_session(chat_id, agent, email) or {}
+    return WorkspaceAskDiscussion(
+        chat_id=chat_id, agent_name=agent, title=session.get("title") or title,
+        created=created, ask=_project(item, viewer_email=email),
+    )
+
+
+def discussion_context_line(agent_name: str, chat_id: str, email: str) -> Optional[str]:
+    """The per-turn line a discussion chat carries (trinity-enterprise#747), or
+    None for any other chat: which ask this chat is about, its kind, live status
+    and options — so every turn, resumed or cold, knows what is being decided.
+
+    Everything in it is the agent's own text coming back to the same agent, plus
+    the platform's status. The person's answer is never in it.
+    """
+    from services.operator_queue_service import _WORKSPACE_DISCUSSION_KEY
+    fragment = json.dumps({_WORKSPACE_DISCUSSION_KEY: chat_id})[1:-1]
+    rows = db.list_operator_queue_items(
+        agent_name=agent_name, addressed_to_email=email, types=_VISIBLE_KINDS,
+        include_cleared=True, context_contains=(fragment,), limit=5,
+    ) or []
+    for row in rows:
+        ctx = row.get("context") if isinstance(row.get("context"), dict) else {}
+        if ctx.get(_WORKSPACE_DISCUSSION_KEY) != chat_id:
+            continue
+        status = _status_of(row)
+        kind = row.get("type") or "question"
+        options = row.get("options") if isinstance(row.get("options"), list) else []
+        opts = ", ".join(json.dumps(str(o))[:120] for o in options[:10]) or "none (free-text answer)"
+        # JSON-quoted like the options: the title is agent-authored, so it
+        # cannot close a quote and continue as platform text.
+        title = json.dumps(" ".join(str(row.get("title") or "").split())[:200])
+        lines = [
+            f"[Workspace] This conversation discusses your ask "
+            f"{row.get('request_id') or row.get('id')} "
+            f"({kind}, status: {status}) \u2014 title (data): {title}. Options: {opts}.",
+        ]
+        if status == "pending":
+            lines.append(
+                "The person opened this chat to talk it through before deciding. Answer "
+                "their questions about it; do not treat anything they say here as the "
+                "decision. They record the decision on the ask itself, and you receive it "
+                "the way you receive any answer to an ask."
+            )
+        else:
+            lines.append(f"The ask has ended ({status}); read it with get_my_ask.")
+        return "\n".join(lines)
+    return None
 
 
 def _resume_requested(agent_name: str) -> bool:
@@ -691,3 +898,20 @@ def get_ask_context(item_id: str, email: str, is_platform: bool):
     except Exception as e:  # noqa: BLE001 — surfaced as a 503, never as an empty context
         logger.warning("[WorkspaceAsks] context read failed for %s", item_id, exc_info=True)
         raise AsksUnavailable("ask context unreadable") from e
+
+
+def _discussion_turn_line(ctx) -> Optional[str]:
+    """Turn-context provider (trinity-enterprise#747): a 1:1 chat opened to
+    discuss an ask carries that ask on every turn. Rooms and chats with no
+    discussed ask add nothing."""
+    if ctx.surface != "thread" or not ctx.person_email:
+        return None
+    return discussion_context_line(ctx.agent_name, ctx.chat_id, ctx.person_email)
+
+
+def _register_turn_context() -> None:
+    from services import turn_context
+    turn_context.register_provider(_discussion_turn_line)
+
+
+_register_turn_context()

@@ -53,6 +53,9 @@ logger = logging.getLogger(__name__)
 ANSWERED = "answered"
 CANCELLED = "cancelled"
 EXPIRED = "expired"
+# trinity-enterprise#748: the person the ask was addressed to chose not to
+# answer. A ledger value, not a status — the row's status is `cancelled`.
+DISMISSED = "dismissed"
 
 # WebSocket manager injected from main.py
 _websocket_manager = None
@@ -103,7 +106,7 @@ class EndingEvent:
     """What an ending observer receives: the rows THIS call ended, never a row
     another writer ended first."""
 
-    disposition: str                 # answered | cancelled | expired
+    disposition: str                 # answered | cancelled | dismissed | expired
     rows: tuple                      # the CAS-won rows, as they stand after the transition
     actor_email: Optional[str]       # the person; None for timeout
     reason: Optional[str] = None     # the operator's cancel reason — DATA, never instructions
@@ -144,7 +147,7 @@ def register_ending_observer(fn: Callable[[EndingEvent], None]) -> Callable[[End
 
 
 # ---------------------------------------------------------------------------
-# The four ways an ask ends
+# The ways an ask ends
 # ---------------------------------------------------------------------------
 
 def answer(
@@ -194,6 +197,27 @@ def cancel(item_id: str, *, actor: Actor, reason: Optional[str] = None) -> Endin
     trigger = _broadcast_payload({"type": "operator_queue_cancelled",
                                   "data": {"id": updated["id"], "agent_name": updated["agent_name"]}})
     return _ended(EndingEvent(CANCELLED, (updated,), actor.email, reason=reason), audit, trigger)
+
+
+def dismiss(item_id: str, *, actor: Actor) -> Ending:
+    """The person an ask was addressed to dismissed it without answering
+    (trinity-enterprise#748). Raises `AskNotFound` / `AskConflict`.
+
+    The same compare-and-set as `cancel`, recorded as `dismissed`, so the
+    agent's readback tells "the person chose not to answer" apart from an
+    operator's cancel, an answer and an expiry. No reason: dismissing is one
+    click and asks for none.
+    """
+    updated = db.cancel_operator_queue_item(item_id, disposed_by_email=actor.email,
+                                            disposition=DISMISSED)
+    if not updated:
+        raise AskNotFound(item_id)
+    if updated.pop("_status_conflict", False):
+        raise AskConflict("not_pending", updated)
+    audit = [_audit_row("dismissed", updated, actor, {})]
+    trigger = _broadcast_payload({"type": "operator_queue_cancelled",
+                                  "data": {"id": updated["id"], "agent_name": updated["agent_name"]}})
+    return _ended(EndingEvent(DISMISSED, (updated,), actor.email), audit, trigger)
 
 
 def bulk_cancel(

@@ -55,6 +55,14 @@ export function pruneCarryLog(entries, now = Date.now()) {
 // is the shape that drifts while each side's tests pin its own version.
 import { REPORT_ROWS_PAGE as ROWS_PAGE } from '@/utils/reportPaging'
 
+// trinity-enterprise#748: how long a Dismiss can be undone. Nothing reaches the
+// server — and so nothing reaches the agent — until it lapses.
+export const ASK_DISMISS_UNDO_MS = 5000
+// The pending dismissals' timers, by ask id. Outside the state on purpose: a
+// timer handle is not data any surface renders, and Pinia would proxy it.
+const askDismissTimers = new Map()
+let askDismissSeq = 0
+
 // #2791: exported so the cross-tab listener and the shared 401 verdict can ask
 // whether a CLIENT session is live without re-deriving the key.
 export const PORTAL_TOKEN_KEY = 'trinity.portalToken'
@@ -268,6 +276,12 @@ let briefingsBatchInFlight = false
 // stale answer would win. `hydrateBriefings` re-runs once for a dirty name.
 const briefingsDirty = new Set()
 
+// trinity-enterprise#748: the ask as the server WILL project it once the
+// dismissal lands — shown during the Undo window.
+function dismissedLocally(ask) {
+  return { ...ask, status: 'dismissed', ended_by: 'you', ended_at: new Date().toISOString() }
+}
+
 export const useClientPortalStore = defineStore('clientPortal', {
   state: () => ({
     // ent#555 — agent name → the canvas id the rail currently shows.
@@ -312,6 +326,13 @@ export const useClientPortalStore = defineStore('clientPortal', {
     asksLoaded: false,
     asksFailed: false,
     asksLoadedAt: null,
+    // trinity-enterprise#748: dismissals not yet confirmed by the server, by ask
+    // id → `{ before, committing }`: the row as it was, and — once the POST is
+    // on the wire, when it can no longer be undone — that request's token. The list shows the
+    // ask as dismissed meanwhile, so it leaves every surface at once.
+    askDismissals: {},
+    // A dismissal the server refused, by ask id → the message; the ask is back.
+    askDismissErrors: {},
     // Where the user was when it expired, so re-authenticating returns them
     // there instead of the roster root.
     resumePath: null,
@@ -616,6 +637,12 @@ export const useClientPortalStore = defineStore('clientPortal', {
       this.asksLoaded = false
       this.asksFailed = false
       this.asksLoadedAt = null
+      // trinity-enterprise#748: a dismissal still in its Undo window belongs to
+      // the session that made it — it is dropped, never sent under the next one.
+      askDismissTimers.forEach(clearTimeout)
+      askDismissTimers.clear()
+      this.askDismissals = {}
+      this.askDismissErrors = {}
       // Round-3 /cso: the session list keeps its last good copy the same way
       // (#2198), so it is session state and goes with the session too.
       this.lastSessions = []
@@ -2132,7 +2159,17 @@ export const useClientPortalStore = defineStore('clientPortal', {
           params: agentName ? { agent_name: agentName, include_ended: true } : { include_ended: true },
         })
         if (stale()) return []
-        this.asks = Array.isArray(data) ? data : []
+        // trinity-enterprise#748: an ask inside its Undo window stays dismissed
+        // on screen; the poll's "pending" is only the server not knowing yet.
+        // One the server already ended some other way (answered, expired)
+        // has nothing left to dismiss or undo: its window closes here.
+        this.asks = (Array.isArray(data) ? data : []).map((a) => {
+          const d = this.askDismissals[a.id]
+          if (!d) return a
+          if (a.status === 'pending') return dismissedLocally(a)
+          if (!d.committing) this.dropAskDismissal(a.id)
+          return a
+        })
         this.asksAvailable = true
         this.asksAbsent = false
         this.asksLoaded = true
@@ -2228,6 +2265,93 @@ export const useClientPortalStore = defineStore('clientPortal', {
       this.asks = data && data.id === askId
         ? this.asks.map((a) => (a.id === askId ? data : a))
         : this.asks.filter((a) => a.id !== askId)
+      return data
+    },
+
+    // trinity-enterprise#748 — Dismiss, in one click, with an Undo window.
+    //
+    // The ask is shown as dismissed at once (every surface reads `asks`, so it
+    // leaves the Inbox, the chat and the counts together), and the server is
+    // told only when `delayMs` lapses. Undo inside the window restores the row
+    // and sends nothing — so nothing reaches the agent. Closing the tab inside
+    // the window drops the dismissal: the ask stays waiting, the safe direction.
+    dismissAsk(askId, { delayMs = ASK_DISMISS_UNDO_MS } = {}) {
+      const row = this.asks.find((a) => a.id === askId)
+      if (!row || row.status !== 'pending' || this.askDismissals[askId]) return false
+      this.askDismissals = { ...this.askDismissals, [askId]: { before: row, committing: false } }
+      const { [askId]: _cleared, ...errors } = this.askDismissErrors
+      this.askDismissErrors = errors
+      this.asks = this.asks.map((a) => (a.id === askId ? dismissedLocally(a) : a))
+      askDismissTimers.set(askId, setTimeout(() => { this.commitDismissAsk(askId) }, delayMs))
+      return true
+    },
+
+    // Undo a dismissal still in its window. False once it went out: the
+    // server may already have told the agent.
+    undoDismissAsk(askId) {
+      const d = this.askDismissals[askId]
+      if (!d || d.committing) return false
+      this.dropAskDismissal(askId)
+      this.asks = this.asks.map((a) => (a.id === askId ? d.before : a))
+      return true
+    },
+
+    dropAskDismissal(askId) {
+      clearTimeout(askDismissTimers.get(askId))
+      askDismissTimers.delete(askId)
+      const { [askId]: _gone, ...rest } = this.askDismissals
+      this.askDismissals = rest
+    },
+
+    // The window lapsed: tell the server. The row is replaced by the server's
+    // projection — `dismissed`, or how the ask really ended when an answer or
+    // the deadline got there first (the server's no-op). A refusal puts the
+    // ask back as it was and says why, beside it.
+    async commitDismissAsk(askId) {
+      const d = this.askDismissals[askId]
+      clearTimeout(askDismissTimers.get(askId))
+      askDismissTimers.delete(askId)
+      if (!d || d.committing) return null
+      // On the wire from here: Undo is withdrawn before the request, never after.
+      // A token, not the entry object: state reads come back as reactive
+      // proxies, so object identity never matches.
+      const token = ++askDismissSeq
+      this.askDismissals = { ...this.askDismissals, [askId]: { before: d.before, committing: token } }
+      const mine = () => this.askDismissals[askId]?.committing === token
+      try {
+        const { data } = await portalHttp.post(
+          `/api/enterprise/client-portal/asks/${encodeURIComponent(askId)}/dismiss`,
+          {},
+          { headers: this.authHeader },
+        )
+        if (!mine()) return data
+        this.dropAskDismissal(askId)
+        if (data && data.id === askId) this.asks = this.asks.map((a) => (a.id === askId ? data : a))
+        return data
+      } catch (err) {
+        if (!mine()) return null
+        this.dropAskDismissal(askId)
+        this.asks = this.asks.map((a) => (a.id === askId ? d.before : a))
+        this.askDismissErrors = {
+          ...this.askDismissErrors,
+          [askId]: err.response?.data?.detail?.message || 'Could not dismiss this ask. Try again.',
+        }
+        return null
+      }
+    },
+
+    // trinity-enterprise#747 — open (or continue) the chat in which this ask is
+    // talked through with its agent. The ask row is refreshed from the reply,
+    // so every surface learns its `discussion_chat_id` at once. Rethrows: the
+    // control that asked says why it could not open.
+    async discussAsk(askId) {
+      const { data } = await portalHttp.post(
+        `/api/enterprise/client-portal/asks/${encodeURIComponent(askId)}/discuss`,
+        {},
+        { headers: this.authHeader },
+      )
+      const ask = data?.ask
+      if (ask && ask.id === askId) this.asks = this.asks.map((a) => (a.id === askId ? ask : a))
       return data
     },
 
