@@ -138,15 +138,15 @@ describe('ent#525 — clocks', () => {
 })
 
 describe('ent#525 — three steps sentences (ruling 2, reviewed)', () => {
-  it('reported → stages; none → "doesn\'t report steps"; unknown → "could not be read"; not-yet → nothing', () => {
+  it('reported → stages; none → nothing (#3001); unknown → "could not be read"; not-yet → nothing', () => {
     const reported = { state: 'reported', stages: [{ id: 'a', name: 'Collect', state: 'done', holder: 'scout' }] }
     expect(stepsLine(reported, 'scout').kind).toBe('stages')
-    expect(stepsLine({ state: 'none' }, 'scout')).toEqual({ kind: 'none', text: "scout doesn't report steps.", who: 'scout' })
+    expect(stepsLine({ state: 'none' }, 'scout')).toEqual({ kind: 'none', text: '' })
     expect(stepsLine({ state: 'unknown' }, 'scout')).toEqual({ kind: 'unknown', text: 'Steps could not be read right now.' })
     expect(stepsLine(null, 'scout').kind).toBe('unknown')
     expect(stepsLine(undefined, 'scout')).toEqual({ kind: 'pending', text: '' })
-    // A reported pipeline with no stages is still "doesn't report steps".
-    expect(stepsLine({ state: 'reported', stages: [] }, null)).toEqual({ kind: 'none', text: "This agent doesn't report steps.", who: 'This agent' })
+    // A reported pipeline with no stages is still `none` — and still says nothing.
+    expect(stepsLine({ state: 'reported', stages: [] }, null)).toEqual({ kind: 'none', text: '' })
   })
 
   it('stage rows normalize state and holder; a masked holder reads "another agent"', () => {
@@ -505,7 +505,8 @@ describe('ent#525 — the tab and the card are wired (source guards)', () => {
     expect(card).not.toMatch(/[^:]animate-pulse/)
     expect(card).toContain('Ask about it')
     expect(card).toContain('Open in Work')
-    expect(card).toContain("steps.kind !== 'pending'")
+    expect(card).toContain("steps.kind === 'stages'")
+    expect(card).toContain('stepsSilent')                    // #3001: pending and none say nothing
   })
 
   it('the WebSocket handler routes activity and loop events to the Work store', () => {

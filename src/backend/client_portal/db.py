@@ -11,12 +11,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional
 
-from sqlalchemy import select, func, and_, or_, text, bindparam
+from sqlalchemy import select, func, and_, or_, text, bindparam, case
 
 from db.engine import get_engine, make_insert
+from db.query_helpers import viewer_scope
 from db.tables import (
     system_settings, agent_sharing, agent_ownership, users,
-    enterprise_portal_chat_state, portal_file_dismissals,
+    enterprise_portal_chat_state, portal_file_dismissals, schedule_executions,
 )
 from utils.helpers import iso_cutoff, utc_now_iso
 
@@ -1301,7 +1302,8 @@ def unread_arrivals_with_latest(client_email: str) -> dict[str, dict]:
 
 # --- Agent page: first-try rate (ent#360) ------------------------------------
 
-def first_try_stats(agent_name: str, hours: int) -> dict:
+def first_try_stats(agent_name: str, hours: int, *, scope_to_viewer: bool = False,
+                    viewer_email: Optional[str] = None) -> dict:
     """Terminal executions in the window, and how many succeeded on the FIRST
     attempt (``retry_count`` 0 or NULL).
 
@@ -1315,20 +1317,29 @@ def first_try_stats(agent_name: str, hours: int) -> dict:
 
     Cutoff via `iso_cutoff` rather than SQL `datetime('now', ...)`: the column is
     an ISO-Z string and the two formats do not compare (Invariant #16).
+
+    `scope_to_viewer` (#3139): the same `query_helpers.viewer_scope` the list and
+    the analytics use, so a client's first-try rate is over their own rows. That
+    is why this is Core rather than the `text()` it was: one predicate, three
+    readers, no hand-copied SQL to drift.
     """
-    stmt = text(
-        "SELECT "
-        "  COUNT(*) AS terminal, "
-        "  SUM(CASE WHEN status = 'success' AND COALESCE(retry_count, 0) = 0 "
-        "           THEN 1 ELSE 0 END) AS first_try "
-        "FROM schedule_executions "
-        "WHERE agent_name = :agent AND started_at >= :cutoff "
-        "  AND status IN ('success', 'failed', 'error')"
+    se = schedule_executions
+    where = and_(
+        se.c.agent_name == agent_name,
+        se.c.started_at >= iso_cutoff(hours),
+        se.c.status.in_(("success", "failed", "error")),
     )
+    if scope_to_viewer:
+        where = and_(where, viewer_scope(se, viewer_email))
+    stmt = select(
+        func.count().label("terminal"),
+        func.sum(case(
+            (and_(se.c.status == "success", func.coalesce(se.c.retry_count, 0) == 0), 1),
+            else_=0,
+        )).label("first_try"),
+    ).where(where)
     with get_engine().connect() as conn:
-        row = conn.execute(stmt, {
-            "agent": agent_name, "cutoff": iso_cutoff(hours),
-        }).mappings().first()
+        row = conn.execute(stmt).mappings().first()
     terminal = int((row or {}).get("terminal") or 0)
     first_try = int((row or {}).get("first_try") or 0)
     return {

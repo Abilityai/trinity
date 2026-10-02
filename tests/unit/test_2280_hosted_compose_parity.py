@@ -19,7 +19,10 @@ maintained by hand and trusted. The rule this enforces:
 
     hosted == prod, MINUS every `build:` block, PLUS a GHCR `image:` for the
     four images Trinity builds. Nothing else may differ — except the three
-    ent#580 environment lines in ``_HOSTED_ONLY_ENV``, exact strings.
+    ent#580 environment lines and the #3159 DATABASE_URL lines in
+    ``_HOSTED_ONLY_ENV`` (exact strings), and the #3159 bundled PostgreSQL:
+    the ``postgres`` service, its volume and the backend/scheduler
+    ``depends_on`` edges to it (``_HOSTED_ONLY_SERVICES`` and friends).
 
 Deliberately compares the RAW yaml rather than ``docker compose config`` output:
 the raw form still contains the unexpanded ``${VAR:-default}`` strings, so a
@@ -68,19 +71,35 @@ _AGENT_BASE_REMOTE = "ghcr.io/abilityai/trinity-agent-base"
 # hole for source builds with nothing gained. Exact strings, per service:
 # (entries only prod carries, entries only hosted carries). Each must still be
 # present, so a stale allowlist fails rather than silently widening.
+_PROD_DB_URL = "DATABASE_URL=${DATABASE_URL:-}"
+_HOSTED_DB_URL = "DATABASE_URL=${DATABASE_URL-postgresql://trinity:${POSTGRES_PASSWORD}@postgres:5432/trinity}"
+
 _HOSTED_ONLY_ENV = {
     "backend": (
-        ["ADMIN_PASSWORD=${ADMIN_PASSWORD:?ADMIN_PASSWORD must be set in .env (admin login + MCP auth)}"],
+        [
+            "ADMIN_PASSWORD=${ADMIN_PASSWORD:?ADMIN_PASSWORD must be set in .env (admin login + MCP auth)}",
+            _PROD_DB_URL,
+        ],
         [
             "ADMIN_PASSWORD=${ADMIN_PASSWORD?ADMIN_PASSWORD must be set in .env (admin login + MCP auth)}",
             "ADMIN_PASSWORD_SOURCE=${ADMIN_PASSWORD_SOURCE:-unset}",
+            _HOSTED_DB_URL,
         ],
     ),
+    "scheduler": ([_PROD_DB_URL], [_HOSTED_DB_URL]),
     "mcp-server": (
         ["TRINITY_PASSWORD=${ADMIN_PASSWORD:?ADMIN_PASSWORD must be set in .env}"],
         ["TRINITY_PASSWORD=${ADMIN_PASSWORD?ADMIN_PASSWORD must be set in .env}"],
     ),
 }
+
+
+# #3159: the bundled PostgreSQL is hosted-only. prod leaves the database to the
+# operator; every one-click channel runs the hosted file. Allowlisted by name so
+# anything else added to one file alone still fails.
+_HOSTED_ONLY_SERVICES = {"postgres"}
+_HOSTED_ONLY_VOLUMES = {"postgres-data"}
+_HOSTED_ONLY_DEPENDS = {"backend": "postgres", "scheduler": "postgres"}
 
 
 def _without(env: list, entries: list, where: str) -> list:
@@ -123,7 +142,8 @@ def test_hosted_has_no_build_blocks(hosted: dict) -> None:
 
 
 def test_same_service_set(prod: dict, hosted: dict) -> None:
-    assert set(hosted["services"]) == set(prod["services"]), (
+    assert _HOSTED_ONLY_SERVICES <= set(hosted["services"]), "stale _HOSTED_ONLY_SERVICES"
+    assert set(hosted["services"]) - _HOSTED_ONLY_SERVICES == set(prod["services"]), (
         "hosted and prod describe different service sets — a service added to "
         "one file and not the other is the #1039/#1707 packaging gap."
     )
@@ -183,6 +203,12 @@ def test_service_parity_wholesale(prod: dict, hosted: dict) -> None:
             prod_only, hosted_only = _HOSTED_ONLY_ENV[name]
             prod_cmp["environment"] = _without(prod_cmp.get("environment") or [], prod_only, f"prod {name}")
             hosted_cmp["environment"] = _without(hosted_cmp.get("environment") or [], hosted_only, f"hosted {name}")
+        if name in _HOSTED_ONLY_DEPENDS:
+            dep = _HOSTED_ONLY_DEPENDS[name]
+            hosted_deps = dict(hosted_cmp.get("depends_on") or {})
+            assert dep in hosted_deps, f"hosted {name}: allowlisted depends_on '{dep}' not found"
+            hosted_deps.pop(dep)
+            hosted_cmp["depends_on"] = hosted_deps
         if prod_cmp != hosted_cmp:
             differing = sorted(
                 set(prod_cmp) ^ set(hosted_cmp)
@@ -197,7 +223,12 @@ def test_service_parity_wholesale(prod: dict, hosted: dict) -> None:
 
 
 def test_top_level_parity(prod: dict, hosted: dict) -> None:
-    for key in ("volumes", "networks"):
+    hosted_volumes = dict(hosted.get("volumes") or {})
+    assert _HOSTED_ONLY_VOLUMES <= set(hosted_volumes), "stale _HOSTED_ONLY_VOLUMES"
+    for v in _HOSTED_ONLY_VOLUMES:
+        hosted_volumes.pop(v)
+    assert hosted_volumes == prod.get("volumes"), "top-level volumes differ between prod and hosted"
+    for key in ("networks",):
         assert hosted.get(key) == prod.get(key), (
             f"top-level '{key}' differs between prod and hosted — named volumes "
             f"and the two-network isolation (#589) must be identical or a hosted "

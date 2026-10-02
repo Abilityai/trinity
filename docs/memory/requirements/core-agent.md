@@ -524,7 +524,12 @@
   `recent_work` drops `message`/`cost`/`model_used`/`source_user_email`, and for
   a CLIENT drops loop-triggered rows entirely (#2423 — a client can neither open
   a loop, read what it produced, nor stop one, so reporting the count without
-  the output was activity it could only misread; operators keep every row); `asks`
+  the output was activity it could only misread; operators keep every row), and
+  for a CLIENT keeps only the rows they can account for — their own turns, what
+  those turns spawned, and the agent's scheduled runs other than a brief
+  delivered to another person's seat (#3139 — otherwise a client
+  learned the run ids and timings of everyone else's use of the agent); the stats
+  band, first-try rate and "last active" use the same scope; `asks`
   admits only agent-authored `approval`/`question` items (never platform
   `alert`s) and never their `context` (free-form agent JSON, a known
   credential-leak surface); report reads are agent-scoped, since report ids are
@@ -1837,6 +1842,9 @@ bounding the table. OSS-core (Workspace rule above). Flow:
   render as "held by B". Three states: stages · **"doesn't report steps"**
   (reachable, publishing nothing) · **"could not be read right now"**
   (stopped, unreachable, unreadable, or two runs on one agent).
+  **#3001 (ruled 2026-10-01):** the `none` sentence is removed — a card for an
+  agent that publishes no stages shows its live activity line or nothing, never
+  "doesn't report steps". "Could not be read right now" stays.
 - **AC-3 — honest terminals**: failed / timed out / stopped by you / no longer
   tracked, each its own word; the terminal card renders FROM the durable
   #2320 verdict (applied on load and on reattach), so it survives a reload;

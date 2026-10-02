@@ -145,6 +145,9 @@ Changing only one leaves the instance running one release's scripts against
 another's images, and it reports success either way. The version shown in the
 web interface reflects the images, so use it to confirm the upgrade landed.
 
+The database is PostgreSQL, bundled in the Droplet as the `trinity-postgres`
+container; its password is `POSTGRES_PASSWORD` in `/opt/trinity/.env`.
+
 Database backups run nightly and before every migration, under
 `/opt/trinity/trinity-data/backups/`. They are on the same disk as the database,
 so they protect against corruption and mistakes, not against losing the Droplet

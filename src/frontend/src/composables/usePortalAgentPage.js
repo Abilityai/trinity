@@ -89,6 +89,9 @@ export function usePortalAgentPage(agentName, timeWindow) {
   const page = ref(null)
   const loading = ref(false)
   const error = ref(null)
+  // #3140: the server refused this viewer the agent (403/404). Retrying cannot
+  // change that answer, so surfaces read this to withhold "Try again".
+  const denied = ref(false)
   // The VERDICT, separate from `loading` (a fetch in flight). #2540/#1927: a
   // skeleton gates on "no data yet", never on a request being open, or a
   // background refresh would blank a band that is already on screen.
@@ -112,6 +115,7 @@ export function usePortalAgentPage(agentName, timeWindow) {
     }
     loading.value = true
     error.value = null
+    denied.value = false
     try {
       const fresh = await store.fetchAgentPage(name, timeWindow.value)
       // The agent may have changed while this was in flight; a late response
@@ -122,7 +126,9 @@ export function usePortalAgentPage(agentName, timeWindow) {
       loaded.value = true
     } catch (e) {
       if (agentName.value !== name) return
-      error.value = e?.response?.status === 404
+      const status = e?.response?.status
+      denied.value = status === 404 || status === 403
+      error.value = denied.value
         ? "You don't have access to this agent."
         : "Couldn't load this agent right now."
       // A failed refresh keeps the data it has (ent#253): `loaded` is not
@@ -171,6 +177,7 @@ export function usePortalAgentPage(agentName, timeWindow) {
     loading,
     loaded,
     error,
+    denied,
     reload,
     stats: computed(() => page.value?.stats || { total_executions: 0, timeline: [] }),
     ratings: computed(() => page.value?.ratings || { up: 0, down: 0, total: 0, unavailable: false }),

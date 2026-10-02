@@ -16,7 +16,7 @@
 **Feature ID**: 9.9
 **Status**: Implemented
 **Date**: 2025-12-10
-**Last Updated**: 2026-09-30 (ent#676 — the role card consumes the objective join)
+**Last Updated**: 2026-10-01 (ent#729 — a corrected value restates its point)
 
 ## The declared metric registry (ent#477)
 
@@ -109,8 +109,10 @@ POST /api/agents/{name}/metrics/points        routers/metric_points.py
   ├─ metric_points_service.validate_batch(defs, points, now)    ← pure leaf
   │     → rows[] | errors[]   422 all-or-nothing, one reason code per point
   ├─ daily write cap → 429 daily_point_cap_exceeded + Retry-After
-  ├─ db.insert_metric_points(name, rows)   ON CONFLICT DO NOTHING on identity
-  └─ 201 {recorded, deduplicated, replayed, points[{index, ts, key}]}
+  ├─ db.insert_metric_points(name, rows)   ON CONFLICT DO UPDATE on identity
+  │     WHERE the value IS DISTINCT FROM the stored one (ent#729); RETURNING
+  │     revision → 0 = recorded, ≥1 = corrected, absent = deduplicated
+  └─ 201 {recorded, deduplicated, corrected, replayed, points[{index, ts, key}]}
 
 cleanup cycle (300 s)  →  _sweep_metric_points  →  guarded ts-range prune
 ```
@@ -121,7 +123,8 @@ a way the platform cannot detect afterwards: declare the metric first (the
 `metric_undeclared` hint names `refresh_metric_definitions`, which ships in the
 same module so the remedy is reachable from where the error is read); values
 are not coerced; identity is `(metric, ts, dims)` and **excludes the value**, so
-a correction is a new `ts` rather than a new number at the same one; and
+the same value again is a duplicate and a different value at the same identity
+**corrects** the stored row in place, `ts` unchanged (ent#729, R45); and
 passing `execution_id` is what makes a re-delivered turn replay instead of
 recording twice.
 
@@ -168,7 +171,56 @@ panel's Save carries only the fields the operator changed
 (`src/frontend/src/utils/retentionFields.js`), so saving one window never
 freezes a code default or an env value into a row.
 
-Requirement: `docs/memory/requirements/lifecycle-observability.md` §48.
+**A correction restates the point (trinity-enterprise#729, R45).** Derived
+numbers (a weekly total, CAC, a funnel end to end) are restated as late data
+lands. The agent re-sends the new value at the **same** `(metric, ts, dims)`;
+the store's upsert updates that one row — value, `revision` (+1), `recorded_at`
+and `execution_id` follow the correcting write, while `ts` (the period),
+`created_at` (the first write) and dims never move. An identical value is still
+a duplicate and writes nothing. Before this a correction was silently dropped
+as `deduplicated: 1`, and the documented workaround (restate at a new `ts`)
+plotted the figure at the restatement's x-position.
+
+```
+insert_points(agent, rows)                         db/metric_points.py
+  ├─ refuse two rows with one identity (ValueError)  — PG/SQLite would disagree
+  ├─ stamp agent_name, revision=0, recorded_at=created_at; sort by (ts, key)
+  ├─ INSERT … ON CONFLICT (agent_name, ts, idempotency_key)
+  │    DO UPDATE SET value_*, execution_id, recorded_at, revision = revision + 1
+  │    WHERE value_numeric IS DISTINCT FROM excluded.value_numeric
+  │       OR value_text    IS DISTINCT FROM excluded.value_text
+  └─ RETURNING revision → PointWriteCounts(recorded = rev 0,
+                                            corrected = rev ≥ 1,
+                                            deduplicated = not returned)
+route  → 201 {…, corrected}  + one INFO line per correcting batch (count only)
+MCP    → record_metrics result {recorded, deduplicated, corrected ?? 0}
+```
+
+What does **not** change: freshness (`last_point_at` is the newest `ts`, and a
+correction keeps its `ts`, so a restated W39 cannot look freshly measured), the
+daily cap ("used today" counts rows *created* today; the pre-check still counts
+every incoming point), and every read — `get_metrics`, the tiles and the
+objective join select explicit columns and read a corrected store exactly as a
+born-correct one (pinned by a parity test). `revision` / `recorded_at` are
+write-side only; `recorded_at` is NULL on rows written before ent#729 (read it
+as `created_at`).
+
+Stated limits: last write wins by arrival order; the replaced value is not
+kept; and a batch identical to an earlier one in the same turn (or under the
+same client key within 24 h) replays and writes nothing, so `A → B → A` ends on
+`B` with `replayed: true`.
+
+Migrations: SQLite `metric_points_restatement` + Alembic
+`0086_metric_points_restatement` (both additive; `revision BIGINT NOT NULL
+DEFAULT 0`, `recorded_at TEXT`, no backfill). Tests:
+`tests/unit/test_ent729_metric_restatement.py` (real rows on SQLite and, under
+`requires_postgres`, PostgreSQL — incl. the Alembic upgrade from 0085 over an
+existing row) and the route/MCP receipt tests in
+`tests/unit/test_ent478_record_route.py` and
+`src/mcp-server/src/tools/metrics.test.ts`.
+
+Requirement: `docs/memory/requirements/lifecycle-observability.md` §48
+(restatement: §48.9).
 
 ---
 
@@ -434,7 +486,7 @@ locally before pushing — the first must report exactly **one** head.
 | Component | File | Purpose |
 |-----------|------|---------|
 | Registry | `src/backend/services/metric_registry.py`, `db/metric_definitions.py` | Declarations (ent#477) |
-| Write | `src/backend/services/metric_points_service.py`, `db/metric_points.py` | `record_metrics` validation + store (ent#478) |
+| Write | `src/backend/services/metric_points_service.py`, `db/metric_points.py` | `record_metrics` validation + store (ent#478); the restating upsert + `PointWriteCounts` (ent#729) |
 | **Read** | `src/backend/services/metric_read_service.py` | `freshness`, `read_agent_metrics`, `latest_by_metric`, `freshness_summary`, `bind_dashboard_widgets` (ent#479, ent#666) |
 | **Join** | `src/backend/services/objective_join_service.py` | `gap`, `join_objectives`, `read_objective_files`, `read_objective_join` (ent#666) — the one objective ↔ metric join |
 | Budget | `src/backend/services/objectives_read_budget.py` | The per-agent bucket on the objective fan-out — `enforce` for the operator route, `admit` for the Workspace role card (ent#676) |
@@ -623,3 +675,4 @@ Still open:
 | 2026-09-22 | Rewrote the READ half (ent#479): the re-backed route, the one `2 x cadence` staleness rule, the declared-metric tiles, MCP `get_metrics`, the health block — and retired `metrics.json` as a source, replacing it with the D-010 finding |
 | 2026-09-29 | Settings → Retention rows for both knobs (ent#671): the `quotas` block on `GET /api/settings/retention`, env-sourced rows read-only, changed-fields-only Save |
 | 2026-09-30 | ent#676: the role card cut over to the objective join — the rebase note became the landed section; one limiter bucket for both doors in `services/objectives_read_budget.py` (the card degrades, the route 429s) |
+| 2026-10-01 | ent#729 (R45): a different value at an existing `(metric, ts, dims)` restates the row (`revision`, `recorded_at`, `execution_id` follow the write; `ts`, `created_at`, freshness unmoved); the receipt gains `corrected` on REST and MCP; dual-track migration `0086` |

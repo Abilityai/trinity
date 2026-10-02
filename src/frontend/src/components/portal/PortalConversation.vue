@@ -983,7 +983,7 @@ const props = defineProps({
 // controls that raised them — the rail strip is the door to both now.
 // Declared emits are the component's contract, so a name left here after
 // its only `$emit` is deleted is a promise nothing keeps.
-const emit = defineEmits(['reply', 'reply-done', 'switch-agent', 'session-adopted', 'sessions-changed', 'open-menu', 'toggle-star', 'escalate-to-room', 'open-thread', 'work-state', 'open-work', 'new-chat', 'main-reset', 'voice-call', 'voice-panel', 'open-project'])
+const emit = defineEmits(['reply', 'reply-done', 'switch-agent', 'session-adopted', 'sessions-changed', 'open-menu', 'toggle-star', 'escalate-to-room', 'open-thread', 'work-state', 'open-work', 'new-chat', 'main-reset', 'voice-call', 'voice-panel', 'open-project', 'thread-missing'])
 
 // ent#451/#473: the active thread as the shell's list knows it. Null until the
 // list carries the thread (a just-adopted session lands on the next refresh),
@@ -1406,7 +1406,12 @@ async function loadThread(sessionId) {
     inFlight = inFlightExecutionId
     inFlightBudget = inFlightWaitBudgetSeconds
     outcome = lastTurnOutcome
-  } catch { /* start empty */ }
+  } catch (err) {
+    // #3140: a 404 means this viewer cannot open the thread the URL named
+    // (someone else's, or gone). Say so through the shell rather than leaving an
+    // empty chat with a live composer under that id. Anything else starts empty.
+    if (sessionId && err?.response?.status === 404) emit('thread-missing', sessionId)
+  }
   // #2624: opening a thread is an intent — it pins and re-arms, so a thread
   // always opens at the bottom however the previous one was left.
   finally { loadingHistory.value = false; historyLoaded.value = true; await pinToBottom() }

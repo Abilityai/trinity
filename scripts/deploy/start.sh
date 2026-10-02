@@ -1333,6 +1333,53 @@ if [ "$_log_src" = "file" ]; then
 fi
 # -----------------------------------------------------------------------------
 
+# --- Hosted database: bundled PostgreSQL (#3159, HOST-022) ------------------
+# SQLite reached end-of-support on 2026-09-01 (#1278). A fresh hosted install
+# gets the bundled `postgres` service; an install that already has
+# /data/trinity.db stays on SQLite, pinned by an explicit empty DATABASE_URL
+# (the hosted compose default treats unset and empty differently). An existing
+# DATABASE_URL line, or one in the shell, is a decision already made and is
+# never touched. POSTGRES_PASSWORD is generated either way because the hosted
+# compose file does not render without it; on a SQLite install the postgres
+# container runs idle. Called after the data-switch guard so a refused run
+# writes nothing, and before `compose pull`, which renders the file.
+ensure_hosted_database() {
+    [ "$HOSTED" = "1" ] || return 0
+    local data_path
+    data_path="${TRINITY_DATA_PATH:-$(env_value TRINITY_DATA_PATH)}"
+    data_path="${data_path:-./trinity-data}"
+
+    if [ -z "$(env_value POSTGRES_PASSWORD)" ]; then
+        # The postgres image applies the password only when it initialises an
+        # empty volume, so a new one would lock the backend out of its data.
+        if docker volume inspect "$(compose_project_name)_postgres-data" >/dev/null 2>&1; then
+            echo "ERROR: the PostgreSQL volume already exists but POSTGRES_PASSWORD is missing from .env." >&2
+            echo "       Restore the original password to .env; a new one cannot open the existing data." >&2
+            return 1
+        fi
+        set_env_key POSTGRES_PASSWORD "$(openssl rand -hex 24)"
+        echo "Auto-generated POSTGRES_PASSWORD"
+    fi
+
+    if [ -z "${DATABASE_URL+x}" ] \
+        && ! grep -qE '^[[:space:]]*(export[[:space:]]+)?DATABASE_URL=' .env 2>/dev/null; then
+        if [ -f "${data_path}/trinity.db" ]; then
+            set_env_key DATABASE_URL ""
+        else
+            set_env_key DATABASE_URL "postgresql://trinity:$(env_value POSTGRES_PASSWORD)@postgres:5432/trinity"
+            echo "Fresh install: database is the bundled PostgreSQL (DATABASE_URL written to .env)."
+        fi
+    fi
+
+    if [ -z "${DATABASE_URL-$(env_value DATABASE_URL)}" ] && [ -f "${data_path}/trinity.db" ]; then
+        echo "⚠️  This install runs on SQLite (${data_path}/trinity.db), which reached end-of-support"
+        echo "    on 2026-09-01. It stays on SQLite. To move to PostgreSQL, see"
+        echo "    docs/migrations/SQLITE_TO_POSTGRES.md"
+    fi
+}
+
+ensure_hosted_database
+
 if [ "$HOSTED" = "1" ]; then
     echo "Pulling platform images (tag: ${TRINITY_IMAGE_TAG})..."
     # Tailored fatal, matching the agent-base pull one screen above. Bare, this

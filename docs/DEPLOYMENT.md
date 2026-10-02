@@ -251,10 +251,13 @@ setting. The AMI is published in us-east-1 only.
 
 ## Configuration
 
-> **Database backend:** Trinity uses **SQLite by default** (zero-config). To run
-> a new instance on **PostgreSQL** instead, see
-> [POSTGRESQL_SETUP.md](POSTGRESQL_SETUP.md) — it is opt-in via the
-> `DATABASE_URL` env var and does not affect the SQLite default (#300).
+> **Database backend:** a hosted install (`start.sh --hosted`, every one-click
+> image) runs on the PostgreSQL service bundled in `docker-compose.hosted.yml`;
+> `start.sh --hosted` generates `POSTGRES_PASSWORD` and `DATABASE_URL` on a new
+> install and keeps an existing `trinity.db` install on SQLite (#3159, see
+> [SQLITE_TO_POSTGRES.md](migrations/SQLITE_TO_POSTGRES.md#hosted-installs-one-click-images-and-startsh---hosted)).
+> The dev and prod compose files default to SQLite; to run them on
+> **PostgreSQL**, see [POSTGRESQL_SETUP.md](POSTGRESQL_SETUP.md) (`DATABASE_URL`, #300).
 
 ### Required Environment Variables
 
