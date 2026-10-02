@@ -71,17 +71,17 @@ describe('#2964 — the chat card reserves its rows from first paint', () => {
     expect(w.emitted('stop')).toBeUndefined()
   })
 
-  it('2. pending → none swaps the text in place; the shape does not change', async () => {
+  it('2. pending → none keeps the row in place, still blank (#3001: no sentence); the shape does not change', async () => {
     const w = mountLive()
     const before = signature(w)
     const row = stepsRow(w)
     await w.setProps({ item: synthetic({ id: 'e1', steps: { state: 'none' } }) })
     expect(signature(w)).toEqual(before)
     expect(stepsRow(w)).toBe(row)
-    const now = w.find('[data-testid="portal-work-steps-none"]')
-    expect(now.text()).toBe("cornelius doesn't report steps.")
-    expect(now.attributes('aria-hidden')).toBeUndefined()
-    expect(w.find('[data-testid="portal-work-reserved-steps"]').exists()).toBe(false)
+    const now = w.find('[data-testid="portal-work-reserved-steps"]')
+    expect(now.text()).toBe('')
+    expect(now.attributes('aria-hidden')).toBe('true')
+    expect(w.find('[data-testid="portal-work-steps-none"]').exists()).toBe(false)
   })
 
   it('3. pending → unknown swaps in place and says the unknown sentence, not the none one', async () => {
@@ -96,17 +96,11 @@ describe('#2964 — the chat card reserves its rows from first paint', () => {
     expect(now.text()).not.toContain("doesn't report")
   })
 
-  it('3b. a long name truncates; the claim never does', async () => {
+  it('3b. a long name never reaches the steps row (#3001: there is no sentence to carry it)', async () => {
     const w = mountLive({ item: synthetic({ agent_name: 'acme-customer-support-scribe', steps: { state: 'none' } }) })
-    const who = w.find('[data-testid="portal-work-sentence-who"]')
-    const claim = w.find('[data-testid="portal-work-sentence-claim"]')
-    expect(who.text()).toBe('acme-customer-support-scribe')
-    expect(who.classes()).toContain('truncate')
-    expect(claim.element.textContent).toBe(" doesn't report steps.")
-    expect(claim.classes()).toContain('shrink-0')
-    expect(claim.classes()).not.toContain('truncate')
-    await w.setProps({ item: synthetic({ agent_name: null, steps: { state: 'none' } }) })
-    expect(w.find('[data-testid="portal-work-sentence-who"]').text()).toBe('This agent')
+    expect(w.find('[data-testid="portal-work-sentence-who"]').exists()).toBe(false)
+    expect(w.find('[data-testid="portal-work-sentence-claim"]').exists()).toBe(false)
+    expect(w.get('[data-testid="portal-work-reserved-steps"]').text()).toBe('')
   })
 
   it('4. Stop arrives in place: same element, same layout, now visible and usable', async () => {
@@ -145,14 +139,12 @@ describe('#2964 — the chat card reserves its rows from first paint', () => {
 describe('#2964 — every other host renders as before (default props)', () => {
   const plain = (props) => mount(PortalWorkCard, { props })
 
-  it('6a. a rail-shaped row: no Stop element, and the sentence is today\'s plain paragraph', () => {
+  it('6a. a rail-shaped row: no Stop element, and no steps line at all for an agent without stages (#3001)', () => {
     const w = plain({ item: synthetic({ id: 'r1', steps: { state: 'none' } }), canStop: false, showOpenInWork: true })
     expect(w.find('[data-testid^="portal-work-stop-"]').exists()).toBe(false)
-    const row = w.find('[data-testid="portal-work-steps-none"]')
-    expect(row.text()).toBe("cornelius doesn't report steps.")
-    for (const c of ['h-4', 'leading-4', 'truncate', 'flex']) expect(row.classes()).not.toContain(c)
-    expect(row.element.children.length).toBe(0)
-    expect(row.attributes('title')).toBeUndefined()
+    expect(w.find('[data-testid^="portal-work-steps-"]').exists()).toBe(false)
+    expect(w.find('[data-testid="portal-work-reserved-steps"]').exists()).toBe(false)
+    expect(w.text()).not.toContain("doesn't report steps")
   })
 
   it('6b. steps not read yet, without the prop: no steps element at all', () => {
