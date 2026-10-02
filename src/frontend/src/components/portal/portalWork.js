@@ -95,11 +95,12 @@ export function soleStoppableItem(items, stoppingIds = []) {
 
 /**
  * #3114: the status of a just-sent turn before the Work feed has read its row.
- * Until the agent streams anything, the turn may still be waiting for a worker,
- * so it reads "Waiting for a slot" rather than claiming "Working".
+ * On a pull agent (`pullsTurns`), until the agent streams anything the turn may
+ * still be waiting for a worker, so it reads "Waiting for a slot". Every other
+ * agent runs the turn on send.
  */
-export function pendingTurnOutcome(streamActivity) {
-  return streamActivity ? 'running' : 'queued'
+export function pendingTurnOutcome(streamActivity, pullsTurns) {
+  return pullsTurns && !streamActivity ? 'queued' : 'running'
 }
 
 /**

@@ -1719,10 +1719,9 @@ def _map_task_failure(name, result, *, idem):
     """
     if result.status in ("failed", "cancelled"):
         idempotency_service.fail(idem)
-        # #2889: the immediate path's result carries the producer-side code;
-        # the backlog-reconstruct path builds its result from the row and has
-        # none — the header is absent there, except on the at-capacity branch
-        # below, where `capacity` (#2919) fills the absent code.
+        # #2889: the producer-side code. The backlog-reconstruct path reads it
+        # from the row's `[code]` prefix (#3114); a row with no prefix has none,
+        # and the at-capacity branch below fills `capacity` (#2919).
         code_headers = _error_code_headers(getattr(result, "error_code", None))
         if "at capacity" in (result.error or ""):
             # #2919: the capacity rejection carries no code, so `capacity`
@@ -1906,8 +1905,11 @@ async def _dispatch_sync_backlog(*, name, execution_id, sync_effective_timeout, 
             }
             idempotency_service.complete(idem, execution_id, receipt)
             raise ChatDispatchError(504, receipt["message"])
-        from services.task_execution_service import TaskExecutionResult
+        from services.task_execution_service import TaskExecutionResult, _split_error_code
 
+        # #3114: a pull-sink terminal stores `[code] text`; keep the code so
+        # `_map_task_failure` answers the producer's status, not a blanket 503.
+        error_code, error = _split_error_code(row.error)
         result = TaskExecutionResult(
             execution_id=execution_id,
             status=row.status,
@@ -1916,7 +1918,8 @@ async def _dispatch_sync_backlog(*, name, execution_id, sync_effective_timeout, 
             context_used=row.context_used,
             context_max=row.context_max,
             session_id=row.claude_session_id,
-            error=row.error,
+            error=error,
+            error_code=error_code,
             raw_response={
                 "response": row.response or "",
                 "cost": row.cost,

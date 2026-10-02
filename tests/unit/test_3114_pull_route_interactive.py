@@ -383,6 +383,17 @@ def _queued_service(eid):
     return svc
 
 
+def _terminal_hooks(monkeypatch, tes):
+    """Record the activity close and terminal event a CAS winner owes."""
+    calls = []
+    monkeypatch.setattr(tes.activity_service, "spawn_close_execution_activity",
+                        lambda eid, st, **k: calls.append(("close", eid, getattr(st, "value", st))))
+    monkeypatch.setattr(tes.event_dispatch_service, "spawn_task_terminal_event",
+                        lambda a, eid, **k: calls.append(
+                            ("event", eid, getattr(k["terminal_status"], "value", k["terminal_status"]))))
+    return calls
+
+
 @pytest.mark.asyncio
 async def test_unclaimed_interactive_turn_fails_as_capacity(seed_agent, monkeypatch):
     seed_agent(timeout=1)
@@ -393,11 +404,13 @@ async def test_unclaimed_interactive_turn_fails_as_capacity(seed_agent, monkeypa
     monkeypatch.setattr(tes, "QUEUE_CLAIM_POLL_INTERVAL", 0.05)
     waited = AsyncMock()
     monkeypatch.setattr("services.sync_waiter.wait_for_sync_terminal", waited)
+    hooks = _terminal_hooks(monkeypatch, tes)
 
     out = await tes.dispatch_and_await_terminal(
         agent_name=AGENT, message="m", triggered_by="session",
         service=_queued_service("e1"), conversation_key="session:k",
     )
+    assert hooks == [("close", "e1", "failed"), ("event", "e1", "failed")]
     assert out.status == "failed"
     assert out.error_code == TaskExecutionErrorCode.CAPACITY
     assert out.error == "Agent at capacity (queued turn not claimed in 1s)"
@@ -456,6 +469,7 @@ async def test_caller_going_away_cancels_the_queued_turn(seed_agent, monkeypatch
     from services import task_execution_service as tes
 
     monkeypatch.setattr(tes, "QUEUE_CLAIM_POLL_INTERVAL", 0.05)
+    hooks = _terminal_hooks(monkeypatch, tes)
     task = asyncio.ensure_future(tes.dispatch_and_await_terminal(
         agent_name=AGENT, message="m", triggered_by="paid", service=_queued_service("e1"),
     ))
@@ -464,6 +478,7 @@ async def test_caller_going_away_cancels_the_queued_turn(seed_agent, monkeypatch
     with pytest.raises(asyncio.CancelledError):
         await task
     assert _db().get_execution("e1").status == "cancelled"
+    assert hooks == [("close", "e1", "cancelled"), ("event", "e1", "cancelled")]
 
 
 @pytest.mark.asyncio

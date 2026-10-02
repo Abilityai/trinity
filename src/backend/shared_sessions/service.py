@@ -1122,15 +1122,20 @@ _held_wake_locks: contextvars.ContextVar[frozenset] = contextvars.ContextVar(
 
 
 async def _wake_agent(current_user, room_id: str, agent_name: str, chain_depth: int) -> None:
-    """Serialise wakes of one agent in one room, then run the turn (#3114).
+    """Serialise wakes of one pull-pilot agent in one room, then run the turn (#3114).
 
     Two posts that both mention an agent wake it twice. Unserialised, both
     read the same cursor, delta and cached session id and both answer the same
     messages. The lock spans the whole turn, so the second wake reads what the
     first left; it waits up to one turn's length, then gives up visibly.
     """
+    from services.pull_pilot import pull_owns_dispatch
     from services.session_turn_service import ResumeLock, ResumeLockBusy
 
+    # Pull pilots only. Push agents keep their wake behaviour unchanged.
+    if not pull_owns_dispatch(agent_name, "room"):
+        await _wake_agent_locked(current_user, room_id, agent_name, chain_depth)
+        return
     key = f"room_wake_lock:{room_id}:{agent_name}"
     held = _held_wake_locks.get()
     if key in held:

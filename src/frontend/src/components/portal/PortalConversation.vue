@@ -1196,7 +1196,7 @@ const liveCardItem = computed(() => {
     id: activeExecutionId.value || 'pending',
     agent_name: props.agent.name,
     status: 'running',
-    outcome: pendingTurnOutcome(liveStreamActivity.value),
+    outcome: pendingTurnOutcome(liveStreamActivity.value, props.agent.pulls_turns),
     kind: 'turn',
     // The feed's own title shape, so its row lands without re-wrapping it (#2964).
     title: previewTitle(pendingUserText.value || lastUserText()),

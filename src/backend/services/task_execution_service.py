@@ -812,7 +812,9 @@ async def dispatch_and_await_terminal(
         except asyncio.CancelledError:
             # The caller went away: a turn still queued must not run later for
             # nobody (a paid turn would run unsettled).
-            db.cancel_queued_execution(result.execution_id, reason="caller went away")
+            if db.cancel_queued_execution(result.execution_id, reason="caller went away"):
+                _close_unclaimed_turn(agent_name, result.execution_id,
+                                      TaskExecutionStatus.CANCELLED, "caller went away")
             raise
         if not claimed:
             error = (
@@ -827,6 +829,8 @@ async def dispatch_and_await_terminal(
                     "[TaskExecService] %s: queued %s turn %s not claimed in %ss; failed",
                     agent_name, triggered_by, result.execution_id, int(claim_budget),
                 )
+                _close_unclaimed_turn(agent_name, result.execution_id,
+                                      TaskExecutionStatus.FAILED, error)
                 return TaskExecutionResult(
                     execution_id=result.execution_id,
                     status=TaskExecutionStatus.FAILED,
@@ -856,6 +860,16 @@ async def dispatch_and_await_terminal(
             error_code=TaskExecutionErrorCode.TIMEOUT,
         )
     return result_from_execution_row(result.execution_id) or result
+
+
+def _close_unclaimed_turn(agent_name: str, execution_id: str, status, error: str) -> None:
+    """#3114: a claim-wait CAS winner (unclaimed FAILED, caller-away CANCELLED)
+    closes its dispatch activity and emits the terminal event, as every other
+    terminal writer does. Fire-and-forget; a running loop is guaranteed here."""
+    activity_service.spawn_close_execution_activity(execution_id, status, error=error)
+    event_dispatch_service.spawn_task_terminal_event(
+        agent_name, execution_id, terminal_status=status, summary_or_error=error,
+    )
 
 
 # Values `mark_execution_dispatched` writes into `claude_session_id` before a

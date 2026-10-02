@@ -519,8 +519,12 @@ describe('ent#525 — the tab and the card are wired (source guards)', () => {
 // when the turn is picked up, so "Working" counts working time only.
 describe('pending turn on a pull agent (#3114)', () => {
   it('reads waiting until the agent streams', () => {
-    expect(workStatusLabel({ outcome: pendingTurnOutcome(null) })).toBe('Waiting for a slot')
-    expect(workStatusLabel({ outcome: pendingTurnOutcome({ text: 'Reading a file' }) })).toBe('Working')
+    expect(workStatusLabel({ outcome: pendingTurnOutcome(null, true) })).toBe('Waiting for a slot')
+    expect(workStatusLabel({ outcome: pendingTurnOutcome({ text: 'Reading a file' }, true) })).toBe('Working')
+  })
+  it('reads working at once on a push agent', () => {
+    expect(workStatusLabel({ outcome: pendingTurnOutcome(null, false) })).toBe('Working')
+    expect(workStatusLabel({ outcome: pendingTurnOutcome(null, undefined) })).toBe('Working')
   })
   it('restarts the clock only on queued -> running', () => {
     expect(clockRestartsAt('queued', 'running')).toBe(true)

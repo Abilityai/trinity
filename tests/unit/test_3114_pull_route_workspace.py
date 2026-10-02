@@ -364,6 +364,7 @@ def _fake_room(monkeypatch, *, on_post=None):
     fake = _FakeRedis()
     monkeypatch.setattr(sts, "get_async_redis", lambda: fake)
     monkeypatch.setattr(sts, "LOCK_POLL_INTERVAL_SECONDS", 0.01)
+    monkeypatch.setenv("PULL_MODE_PILOT_AGENTS", AGENT)
     return service, state, fake
 
 
@@ -399,6 +400,16 @@ async def test_mention_chain_back_to_the_same_agent_does_not_wait_on_itself(monk
     await asyncio.wait_for(service._wake_agent(user, "r1", AGENT, 0), 5)
     assert len(state["dispatches"]) == 2
     assert fake.store == {}
+
+
+@pytest.mark.asyncio
+async def test_push_agent_wake_takes_no_lock(monkeypatch):
+    service, state, fake = _fake_room(monkeypatch)
+    monkeypatch.setenv("PULL_MODE_PILOT_AGENTS", "")
+    await asyncio.wait_for(service._wake_agent(SimpleNamespace(email="c@example.com"),
+                                               "r1", AGENT, 0), 5)
+    assert len(state["dispatches"]) == 1
+    assert fake.ttls == {}
 
 
 # ---------------------------------------------------------------------------

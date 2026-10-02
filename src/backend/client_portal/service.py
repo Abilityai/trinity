@@ -745,6 +745,7 @@ def _row_to_card(r: dict, tts_ready: bool, default_voice_id: str | None = None,
     later silently un-fix #2695 with the whole suite green.
     """
     from services import tts_service
+    from services.pull_pilot import pull_owns_dispatch
     name = r["agent_name"]
     updated = r.get("avatar_updated_at")
     # Only agents with a generated (non-default) avatar get an image URL;
@@ -796,6 +797,8 @@ def _row_to_card(r: dict, tts_ready: bool, default_voice_id: str | None = None,
         # caller knows its own principal kind and this builder is shared with
         # the single-agent lookup.
         can_manage_canvases=can_manage_canvases,
+        # #3114: an env-var read, so cheap per card.
+        pulls_turns=pull_owns_dispatch(name, "public"),
         # ent#403: `None` — no control at all — for every non-platform principal.
         # The roster payload is the ONLY capability channel an external client
         # has (#2128): a UI gate written against `GET /api/settings/feature-flags`
