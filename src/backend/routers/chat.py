@@ -23,7 +23,7 @@ from dependencies import (
 from services.agent_auth import agent_httpx_client
 from services.docker_service import get_agent_container
 from services import sync_waiter
-from services.pull_pilot import pull_queue_allowance
+from services.pull_pilot import is_pull_pilot_agent, pull_queue_allowance
 from services.model_catalog import InvalidModelError, validate_dispatch_model
 from services.capacity_manager import (
     CapacityFull,
@@ -319,6 +319,7 @@ async def chat_with_agent(
             chat_timeout=chat_timeout,
             idem=idem,
             capacity=capacity,
+            chain_depth=admission.chain_depth,
         )
     except ChatDispatchError as e:
         raise HTTPException(status_code=e.status_code, detail=e.detail, headers=e.headers)
@@ -482,10 +483,24 @@ async def get_agent_chat_history(
     name: str = Depends(get_authorized_agent),
     current_user: User = Depends(get_current_user)
 ):
-    """Get agent's conversation history."""
+    """Get agent's conversation history.
+
+    On a pull pilot (#3127) /chat memory is per user, so this returns the
+    caller's active chat session from the database, in the agent's
+    ``[{role, content, timestamp}]`` shape.
+    """
     container = get_agent_container(name)
     if not container:
         raise HTTPException(status_code=404, detail="Agent not found")
+
+    if is_pull_pilot_agent(name):
+        sessions = db.get_agent_chat_sessions(name, user_id=current_user.id, status="active")
+        if not sessions:
+            return []
+        return [
+            {"role": m.role, "content": m.content, "timestamp": m.timestamp.isoformat()}
+            for m in db.get_chat_messages(sessions[0].id)
+        ]
 
     if container.status != "running":
         raise HTTPException(
@@ -515,7 +530,11 @@ async def reset_agent_chat_history(
     name: str = Depends(get_owned_agent),
     current_user: User = Depends(get_current_user)
 ):
-    """Reset/clear agent's conversation history (start a new session)."""
+    """Reset/clear agent's conversation history (start a new session).
+
+    #3127: also forgets the Claude ids of the agent's chat sessions, so each
+    user's next pulled /chat turn on a pull pilot starts a fresh conversation.
+    """
     container = get_agent_container(name)
     if not container:
         raise HTTPException(status_code=404, detail="Agent not found")
@@ -525,6 +544,8 @@ async def reset_agent_chat_history(
             status_code=503,
             detail="Agent is not running"
         )
+
+    db.clear_chat_session_claude_ids(name)
 
     try:
         async with agent_httpx_client(name) as client:
