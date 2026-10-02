@@ -3532,11 +3532,17 @@ export class TrinityClient {
   }
 
   // ==========================================================================
-  // A2A control plane (trinity-enterprise#160)
-  // The management endpoints (config/exposure/allow-list/endpoints) proxy the
+  // A2A control plane (trinity-enterprise#160, abilityai/trinity-enterprise#761)
+  // The INBOUND management endpoints (config/exposure/allow-list) proxy the
   // ENTITLEMENT-GATED enterprise router (`/api/enterprise/a2a/*`) — a 403 in an
   // unentitled build, a 404 in an OSS-only build. The served card is the OSS
   // #737 endpoint.
+  //
+  // The three OUTBOUND endpoint methods below are different: by ruling, outbound
+  // control is available in every edition, so they address the OSS settings
+  // routes over the platform-wide endpoint store (#736) — the same store the
+  // runtime outbound call resolves against. No entitlement is involved on any
+  // build, so a failure there is never "not licensed".
   // ==========================================================================
 
   /** Full A2A control state for one agent (exposure, card URL, allow-list, endpoints). */
@@ -3576,31 +3582,40 @@ export class TrinityClient {
     );
   }
 
-  /** Register (or update by name) an outbound external A2A endpoint. */
+  /**
+   * Register (or update by name) an outbound external A2A endpoint (#736 store).
+   *
+   * Takes no agent name: the store is platform-scope, so there is nothing to
+   * scope the write to. The route is admin and human-only — deciding where a
+   * credentialed server-side request may go is a grant, not a use (Invariant
+   * #8). `credentials` is write-only; `clear_credentials` removes a stored one.
+   */
   async registerA2AEndpoint(
-    name: string,
-    body: { name: string; url: string; credentials?: string },
-  ): Promise<unknown> {
-    return this.request<unknown>(
-      "POST",
-      `/api/enterprise/a2a/${encodeURIComponent(name)}/endpoints`,
+    body: { name: string; url: string; credentials?: string; clear_credentials?: boolean },
+  ): Promise<{ endpoint?: unknown; enabled?: boolean }> {
+    return this.request<{ endpoint?: unknown; enabled?: boolean }>(
+      "PUT",
+      `/api/settings/a2a-endpoints`,
       body,
     );
   }
 
-  /** List the agent's registered outbound endpoints (credentials never returned). */
-  async listA2AEndpoints(name: string): Promise<unknown> {
-    return this.request<unknown>(
+  /**
+   * The registered outbound endpoints plus the outbound kill-switch state
+   * (credentials never returned — each row reports `has_credentials` only).
+   */
+  async listA2AEndpoints(): Promise<{ endpoints?: unknown[]; enabled?: boolean }> {
+    return this.request<{ endpoints?: unknown[]; enabled?: boolean }>(
       "GET",
-      `/api/enterprise/a2a/${encodeURIComponent(name)}/endpoints`,
+      `/api/settings/a2a-endpoints`,
     );
   }
 
-  /** Remove one outbound endpoint by id. */
-  async removeA2AEndpoint(name: string, endpointId: string): Promise<unknown> {
-    return this.request<unknown>(
+  /** Remove one outbound endpoint by id or name (first match wins). */
+  async removeA2AEndpoint(ref: string): Promise<{ removed?: string }> {
+    return this.request<{ removed?: string }>(
       "DELETE",
-      `/api/enterprise/a2a/${encodeURIComponent(name)}/endpoints/${encodeURIComponent(endpointId)}`,
+      `/api/settings/a2a-endpoints/${encodeURIComponent(ref)}`,
     );
   }
   // a2a_exposed is surfaced natively on GET /api/agents (ent#157), so list_agents
