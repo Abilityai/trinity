@@ -3238,6 +3238,11 @@ class FreezeSchedulesToggle(BaseModel):
     enabled: bool
 
 
+class PullSyncToggle(BaseModel):
+    """trinity-enterprise#703: the container's pull cycle on/off."""
+    enabled: bool
+
+
 # =============================================================================
 # Image Generation Models (routers/image_generation.py)
 # =============================================================================

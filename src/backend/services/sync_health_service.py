@@ -322,6 +322,18 @@ def set_websocket_manager(manager):
     _websocket_manager = manager
 
 
+# trinity-enterprise#703: the pull cycle's status vocabulary (agent-written).
+_PULL_STATUSES = frozenset({"success", "failed", "skipped", "never"})
+
+
+def _pull_status(value) -> Optional[str]:
+    return value if isinstance(value, str) and value in _PULL_STATUSES else None
+
+
+def _pull_text(value, limit: int) -> Optional[str]:
+    return value[:limit] if isinstance(value, str) and value else None
+
+
 class SyncHealthService:
     """Background service that keeps agent_sync_state fresh and raises alerts."""
 
@@ -574,6 +586,16 @@ class SyncHealthService:
             pack_count=pack_count,  # #1595
             loose_objects=loose_objects,  # #1595
             maintenance_failures=maintenance_failures,  # #1595
+            # trinity-enterprise#703: the container's pull cycle. Agent-written
+            # JSON, so the status is bounded to the vocabulary and the counter
+            # coerced like its neighbours.
+            last_pull_at=_pull_text(sync_state.get("last_pull_at"), 64),
+            last_pull_status=_pull_status(sync_state.get("last_pull_status")),
+            behind_after_pull=_coerce_nonneg_int(sync_state.get("behind_after_pull")),
+            last_pull_error=_pull_text(sync_state.get("last_pull_error"), 500),
+            last_successful_pull_at=_pull_text(sync_state.get("last_successful_pull_at"), 64),
+            consecutive_pull_failures=_coerce_nonneg_int(sync_state.get("consecutive_pull_failures")),
+            consecutive_pull_skips=_coerce_nonneg_int(sync_state.get("consecutive_pull_skips")),
             diverged_since=diverged_since,  # trinity-enterprise#706
             dirty_files=dirty_files,  # #706: None (garbage/absent) keeps the prior
             dirty_since=dirty_since,  # #706
