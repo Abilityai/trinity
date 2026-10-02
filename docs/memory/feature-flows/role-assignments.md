@@ -83,7 +83,11 @@ not raise — it iterates into single characters and renders
 `Stakeholders: A, .,  , S, m, i, t, h`. Wrong, not absent, and therefore
 invisible. `a2a_gate.py` carries the same check for the same reason. A malformed
 field is dropped and the rest of the answer is kept; a malformed *answer*
-degrades to `None`; both log a WARNING.
+degrades to `None`; both log a WARNING. `proactive_consent` is held to a real
+`bool`, never coerced: `bool("false")` is `True`, so coercion turned a provider's
+string "false" into "proactive contact permitted". A non-bool is dropped like
+any malformed field, the consent is unresolved, and the renderer states the
+restrictive clause (R1, ent#500 PR3; `test_a_non_bool_consent_is_unresolved`).
 
 **Unknown keys are dropped.** The answer is projected onto a fixed key tuple, so
 a provider cannot add a field that reaches the prompt without a change here.
@@ -108,8 +112,10 @@ Two lines join `## Execution Context` between `Execution ID` and
 - **Consent is stated, never implied.** An assignment records who fills a role;
   permission to message them lives on `agent_sharing.allow_proactive`, a
   different table with a different owner. A bare name would read as permission,
-  so the qualifier is rendered in both directions and omitted only when consent
-  is genuinely unresolved (`None`).
+  so the qualifier is ALWAYS rendered and **fails closed**: only an explicit
+  `True` reads as permitted; `False` and an unresolved `None` (a provider may
+  validly answer a name and a role and nothing else) both render the restrictive
+  clause. dolho's [I1] on #2596 — before this, `None` rendered a bare name.
 - Bounds are per field (120 / 64 / 140) rather than the generic 80, which
   truncates a real name mid-word; the stakeholder list is capped like
   collaborators (20, then `… (N more)`).
@@ -156,13 +162,6 @@ inheriting disclosure.
 
 ## MCP — `get_agent_assignments`
 
-> **Fenced in 0.9.5 (release work-order F1).** The module, its client method and its
-> unit tests are in the tree, but `server.ts` does not register `createAssignmentTools`
-> and `access.ts` carries no policy row (the totality test forbids one for an
-> unregistered tool); `tool-visibility.test.ts` pins the *absence*. The layer itself is
-> back to `status-in-progress` on ent#500. Everything below describes the tool as built,
-> for when the registration returns.
-
 The third surface (Invariant #13): `src/mcp-server/src/tools/assignments.ts` +
 `client.getAgentAssignments` + one `toolGroups` entry under `operatorOnly`.
 
@@ -176,7 +175,12 @@ which is precisely why the backend self-scopes an agent principal to its own
 roster. Advertisement is not authorization, and an agent-scoped MCP key resolves
 to its *owner carrying the owner's role*; on a default admin-owned install, an
 un-self-scoped read would hand any agent the whole fleet's roster (the
-ent#293 / #1890 class, moved one layer onto a read).
+ent#293 / #1890 class, moved one layer onto a read). The tool enforces the
+same self-scope itself, deliberately redundant with the backend (dolho's [I2]
+on #2596; the `a2a_call.ts` `checkSelf` precedent): an agent key naming another
+agent — or carrying no agent name — is refused with `not_authorized` before
+any backend call, and audited as a denial. `access.ts` records the row as
+`in-tool`. `user` and `system` keys pass through to the backend.
 
 Degradation is deliberately **narrower** than `credential_vault.ts`. That module
 branches on the detail SHAPE (a `{code, message}` dict vs a plain string) because
@@ -184,7 +188,9 @@ its backend raises coded refusals. This route raises none: its failures are the
 entitlement 403 (plain-string detail) and a **uniform 404** covering both "route
 absent" and "no such agent / no access" (Invariant #8 enumeration safety). So the
 tool merges those in its message rather than claiming a distinction it does not
-have.
+have. The degraded answer is `{enabled: false, agent_name, message}` only — the
+raw error text is never returned ([I3]), because on the unexpected-status branch
+it is a backend body or an internal URL handed to a model.
 
 ## Reserved alert prefix
 
@@ -243,6 +249,7 @@ mattered.
 | Provider raises | `None` + WARNING; the FULL block, platform prompt included, still renders |
 | Provider answers a non-mapping | `None` + WARNING |
 | Provider answers a malformed field | that field dropped, the rest kept, + WARNING |
+| Provider answers a non-bool consent (e.g. `"false"`) | consent dropped as unresolved + WARNING; the line renders the restrictive clause |
 | Outside audience | `None` (the provider's own gate) |
 | `include_execution_context=False` | the whole block is absent, provider never called |
 
@@ -256,12 +263,15 @@ code** — "there is a test" and "the test would have caught it" are different
 claims, and only the second one is worth writing down.
 
 - `tests/unit/test_ent500_assignment_provider.py` — the three degrade paths,
-  last-wins registration, `clear_provider`, unknown-key dropping, and a static
+  last-wins registration, `clear_provider`, unknown-key dropping, a non-bool
+  consent left unresolved rather than coerced (R1), and a static
   assert that the seam file is in `enterprise-docs-guard.yml`'s hardcoded
   `SEAM_FILES` **and** in both `paths:` filters.
 - `tests/unit/test_ent500_execution_context_fields.py` — rendering, ordering,
   bounds, the resolve-exactly-once property, the pre-filled-caller `replace`
-  guard, and a raising provider still yielding the full block.
+  guard, a raising provider still yielding the full block, and a provider
+  answering consent `"false"` rendering the restrictive clause (R1, verified
+  RED against the `bool()` coercion).
 - `tests/unit/test_ent500_public_turn_no_pii.py` — audience suppression in both
   directions, fail-closed on an unknown label, no email-shaped key, and the
   outside-facing routers' trigger labels.

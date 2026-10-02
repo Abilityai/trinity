@@ -138,15 +138,15 @@ describe('ent#525 — clocks', () => {
 })
 
 describe('ent#525 — three steps sentences (ruling 2, reviewed)', () => {
-  it('reported → stages; none → "doesn\'t report steps"; unknown → "could not be read"; not-yet → nothing', () => {
+  it('reported → stages; none → nothing (#3001); unknown → "could not be read"; not-yet → nothing', () => {
     const reported = { state: 'reported', stages: [{ id: 'a', name: 'Collect', state: 'done', holder: 'scout' }] }
     expect(stepsLine(reported, 'scout').kind).toBe('stages')
-    expect(stepsLine({ state: 'none' }, 'scout')).toEqual({ kind: 'none', text: "scout doesn't report steps.", who: 'scout' })
+    expect(stepsLine({ state: 'none' }, 'scout')).toEqual({ kind: 'none', text: '' })
     expect(stepsLine({ state: 'unknown' }, 'scout')).toEqual({ kind: 'unknown', text: 'Steps could not be read right now.' })
     expect(stepsLine(null, 'scout').kind).toBe('unknown')
     expect(stepsLine(undefined, 'scout')).toEqual({ kind: 'pending', text: '' })
-    // A reported pipeline with no stages is still "doesn't report steps".
-    expect(stepsLine({ state: 'reported', stages: [] }, null)).toEqual({ kind: 'none', text: "This agent doesn't report steps.", who: 'This agent' })
+    // A reported pipeline with no stages is still `none` — and still says nothing.
+    expect(stepsLine({ state: 'reported', stages: [] }, null)).toEqual({ kind: 'none', text: '' })
   })
 
   it('stage rows normalize state and holder; a masked holder reads "another agent"', () => {
@@ -402,10 +402,12 @@ describe('ent#525 — the tab and the card are wired (source guards)', () => {
   const card = src('components/portal/PortalWorkCard.vue')
   const ws = src('utils/websocket.js')
 
-  it('the Work body docks into BOTH rail mounts, and the shell hands it the chat id and the prefill path', () => {
+  it('the Work body docks into BOTH rail mounts, and the shell hands the rail store the chat id and Work the prefill path', () => {
     expect((shell.match(/<template #tab-work=/g) || []).length).toBe(2)
     expect((shell.match(/<PortalWork /g) || []).length).toBe(2)
-    expect(shell).toContain(':chat-id="railChatId"')
+    // ent#610 round 2 (review I2): Work's own `chatId` prop had no reader — the
+    // rail store (`chatId: railChatId`, below) is what scopes the children.
+    expect(shell).not.toContain(':chat-id="railChatId"')
     expect(shell).toContain('@ask-about-it="askAboutIt"')
     expect(shell).toMatch(/function askAboutIt\(text\) \{[\s\S]*usePlaybook\(text\)/)
     expect(shell).toContain("@open-work=\"openRailOn('work')\"")
@@ -482,12 +484,16 @@ describe('ent#525 — the tab and the card are wired (source guards)', () => {
     expect(room).toContain("@open-work=\"emit('open-work')\"")
   })
 
-  it('the tab body reads a verdict, never a bare loading flag, and filters asks in a computed', () => {
+  it('the tab body reads a verdict, never a bare loading flag, and counts asks in a computed', () => {
     expect(tab).toContain("v-if=\"view.state === 'loading'\"")
     expect(tab).not.toMatch(/v-if="store\.loading"/)
     expect(tab).toContain('<LoadFailed')
     expect(tab).toContain('<InlineError')
-    expect(tab).toContain('<PortalAsks :agent-names="participants"')
+    // ent#610 (the 09-30 ruling): Work counts the asks and links to the Inbox;
+    // it never draws them (portalWorkAsksLine.spec.js mounts it).
+    expect(tab).not.toMatch(/<PortalAsks\b/)
+    // The line is ONE component, shared with Info (round 2); it reads openAsks.
+    expect(tab).toContain('<PortalAsksWaitingLine')
     expect(tab).not.toContain('fetchAsks(')
     expect(tab).toContain('portal.isPlatformSession')
     expect(tab).toContain('groupByParticipant(')
@@ -499,7 +505,8 @@ describe('ent#525 — the tab and the card are wired (source guards)', () => {
     expect(card).not.toMatch(/[^:]animate-pulse/)
     expect(card).toContain('Ask about it')
     expect(card).toContain('Open in Work')
-    expect(card).toContain("steps.kind !== 'pending'")
+    expect(card).toContain("steps.kind === 'stages'")
+    expect(card).toContain('stepsSilent')                    // #3001: pending and none say nothing
   })
 
   it('the WebSocket handler routes activity and loop events to the Work store', () => {

@@ -981,7 +981,14 @@ reset); one cold retry when a resume fails and its JSONL is absent afterwards (n
 not cancelled); capture the new id after a successful turn unless a reset bumped
 `chat_session_generation` mid-turn; publish it to `~/.trinity/chat-session.json` for the
 JSONL reaper's keep set. The subprocess body is `_execute_claude_code_once`, which also
-reads compact events from the JSONL (the backend writes them to `compact_metadata`):
+reads compact events from the JSONL (the backend writes them to `compact_metadata`). An
+exit-0 `is_error` result (`metadata.error_type == "execution_error"`) is a failure on
+every chat turn (#2968, parity with the headless #1673 check): the shared #1870 core
+`headless_executor._recover_completed_turn_into` runs first (off the event loop), and
+without on-disk `stop_reason=end_turn` evidence the turn raises 502 with a structured
+`{message, metadata}` body that `chat_execution_service._parse_agent_http_error` salvages
+onto the FAILED row — see [parallel-headless-execution.md](parallel-headless-execution.md)
+"How Error Type Drives HTTP Status Codes":
 
 ```python
 async def _execute_claude_code_once(prompt, stream, model, system_prompt, execution_id, resume_session_id, attempt_state=None):

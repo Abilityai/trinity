@@ -735,6 +735,7 @@ async def delete_agent_endpoint(agent_name: str, request: Request, current_user:
         if manager:
             await manager.broadcast(json.dumps({
                 "event": "agent_deleted",
+                "type": "agent_deleted",  # #3109: the dashboard keys on `type`
                 "data": {"name": agent_name}
             }))
         # Honest status (review LOW): False = another discard already in
@@ -833,6 +834,7 @@ async def delete_agent_endpoint(agent_name: str, request: Request, current_user:
     if manager:
         await manager.broadcast(json.dumps({
             "event": "agent_deleted",
+            "type": "agent_deleted",  # #3109: the dashboard keys on `type`
             "data": {"name": agent_name}
         }))
 

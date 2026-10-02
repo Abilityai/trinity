@@ -480,7 +480,7 @@ class ScheduleCleanupMixin:
 
         Args:
             execution_id: The execution to update.
-            business_status: The new business status (pending_validation, validated, failed_validation, skipped).
+            business_status: The new business status (pending_validation, validated, failed_validation, validation_unavailable, skipped).
             validation_execution_id: Optional FK to the validation execution record.
 
         Returns:

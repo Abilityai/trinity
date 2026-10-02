@@ -636,7 +636,7 @@ def test_the_table_is_on_both_tracks_and_in_the_cleanup_registry():
     assert "seat_ask_class_state = Table(" in tables
     assert '("seat_ask_class_state_table", _migrate_seat_ask_class_state_table)' in mig
     assert 'AgentRef("seat_ask_class_state"' in cleanup
-    assert 'down_revision = "0085_ent720_email_identity"' in rev
+    assert 'down_revision = "0086_metric_points_restatement"' in rev
     assert 'has_table("seat_ask_class_state")' in rev
 
 

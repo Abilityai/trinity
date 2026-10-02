@@ -2122,6 +2122,7 @@ export class TrinityClient {
     agent_name: string;
     recorded: number;
     deduplicated: number;
+    corrected?: number;
     replayed: boolean;
     points: Array<{ index: number; ts: string; idempotency_key: string }>;
   }> {

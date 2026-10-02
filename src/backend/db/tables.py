@@ -1701,8 +1701,9 @@ metric_definitions = Table(
     UniqueConstraint("agent_name", "name"),
 )
 
-# Recorded metric points (trinity-enterprise#478) — the append-only store the
-# `record_metrics` write path fills and ent#479 reads.
+# Recorded metric points (trinity-enterprise#478) — the store the
+# `record_metrics` write path fills (inserting, or restating a row whose value
+# changed — ent#729) and ent#479 reads.
 metric_points = Table(
     "metric_points",
     metadata,
@@ -1726,8 +1727,13 @@ metric_points = Table(
     ),
     Column("execution_id", Text),
     Column("created_at", Text, nullable=False),
+    # ent#729 restatement. BigInteger: a monotonic counter is int8 from day one
+    # (learning 2026-09-15). The server default is what keeps pre-ent#729 rows
+    # and pre-ent#729 writers reading/inserting `0`.
+    Column("revision", BigInteger, nullable=False, server_default=text("0")),
+    Column("recorded_at", Text),
     # The identity IS the primary key (no surrogate id): the insert's
-    # `on_conflict_do_nothing` names these columns, and keeping the eventual
+    # `on_conflict_do_update` names these columns, and keeping the eventual
     # partition key (`agent_name`) inside the only unique constraint is what
     # lets ent#80 partition by month without a table rebuild.
     PrimaryKeyConstraint("agent_name", "ts", "idempotency_key"),

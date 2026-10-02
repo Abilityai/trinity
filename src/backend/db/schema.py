@@ -1994,10 +1994,14 @@ TABLES = {
             UNIQUE(agent_name, name)
         )
     """,
-    # Recorded metric points (trinity-enterprise#478) — the append-only store
-    # `record_metrics` writes. No surrogate id: the PK IS the identity
-    # `(agent_name, ts, idempotency_key)`, which keeps the partition key inside
-    # the only unique constraint for the month-partitioning ent#80 wants later.
+    # Recorded metric points (trinity-enterprise#478) — the store
+    # `record_metrics` writes, one row per identity. No surrogate id: the PK IS
+    # the identity `(agent_name, ts, idempotency_key)`, which keeps the
+    # partition key inside the only unique constraint for the
+    # month-partitioning ent#80 wants later. A different value at an existing
+    # identity restates the row (ent#729): `revision` counts the corrections,
+    # `recorded_at` is the write time of the value held (NULL = written before
+    # ent#729; read it as `created_at`).
     # `dims` carries the `/* pg:JSONB */` marker: SQLite reads it as a comment
     # and reports TEXT, `to_postgres_table_ddl` rewrites the column to JSONB, so
     # fresh PG, upgraded PG and SQLite all converge without an ALTER.
@@ -2012,6 +2016,8 @@ TABLES = {
             dims TEXT /* pg:JSONB */,
             execution_id TEXT,
             created_at TEXT NOT NULL,
+            revision BIGINT NOT NULL DEFAULT 0,
+            recorded_at TEXT,
             PRIMARY KEY (agent_name, ts, idempotency_key)
         )
     """,

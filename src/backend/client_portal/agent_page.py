@@ -207,15 +207,30 @@ _CLIENT_HIDDEN_TRIGGERS = frozenset({"loop"})
 _CLIENT_HIDDEN_BUCKETS = frozenset({"Loops"})
 
 
-def _stats(agent_name: str, window: str, *, is_platform: bool = False) -> dict:
+def _client_scope(is_platform: bool, viewer_email: Optional[str]) -> dict:
+    """The executions-read filter for this viewer: nothing for the platform;
+    for a client, no loop rows and only work they can account for (#3139)."""
+    if is_platform:
+        return {"exclude_triggers": None}
+    return {"exclude_triggers": _CLIENT_HIDDEN_TRIGGERS,
+            "scope_to_viewer": True, "viewer_email": viewer_email}
+
+
+def _stats(agent_name: str, window: str, *, is_platform: bool = False,
+           viewer_email: Optional[str] = None) -> dict:
     """Activity chart + headline numbers, from the existing analytics accessor.
 
     The issue's Technical Notes name that accessor specifically, so this adds no
     query of its own: it reshapes what #1107 already computes.
+
+    #3139: a client's numbers are computed over the same viewer scope as their
+    `_recent_work` rows (`query_helpers.viewer_scope`), in SQL, so the band can
+    never count another person's runs that the list withholds.
     """
     hours = WINDOWS.get(window, WINDOWS[DEFAULT_WINDOW])
+    scope = {} if is_platform else {"scope_to_viewer": True, "viewer_email": viewer_email}
     try:
-        a = db.get_agent_analytics(agent_name, hours)
+        a = db.get_agent_analytics(agent_name, hours, **scope)
     except Exception as e:  # noqa: BLE001
         logger.warning("agent page: analytics failed for %s: %s", agent_name, e)
         return {
@@ -227,11 +242,13 @@ def _stats(agent_name: str, window: str, *, is_platform: bool = False) -> dict:
     if not is_platform:
         a = _without_hidden_buckets(a)
     if not is_platform and not a.get("total_executions"):
-        # #2423 review: `success_rate` and `first_try` are deliberately NOT
-        # re-derived over the filtered set — a filtered numerator over an
+        # #2423 review: `success_rate` and `first_try` were deliberately NOT
+        # re-derived over the loop-filtered set — a filtered numerator over an
         # unfiltered denominator is worse than a figure that is merely broad.
-        # But that argument only holds while there is visible work to be broad
-        # ABOUT. With every row hidden the strip read "0 executions · 89%
+        # (#3139 since scopes both to the viewer in SQL, so for a client they
+        # are now over the same rows as the list; the loop bucket is still
+        # removed after the fact, above.) That argument only held while there
+        # was visible work to be broad ABOUT. With every row hidden the strip read "0 executions · 89%
         # success · 33/37 first try", which is not broad, it is a contradiction
         # the client cannot resolve — three numbers describing work the page
         # simultaneously says did not happen.
@@ -253,7 +270,7 @@ def _stats(agent_name: str, window: str, *, is_platform: bool = False) -> dict:
     # Below the zero-gate on purpose: the withheld branch discards this value,
     # so computing it above cost one DB round-trip on exactly the case that
     # cannot use it (#2423 review pass 2).
-    first_try = portal_db.first_try_stats(agent_name, hours)
+    first_try = portal_db.first_try_stats(agent_name, hours, **scope)
     return {
         "window": window,
         "window_hours": a.get("window_hours", hours),
@@ -317,7 +334,7 @@ def _schedule_names(agent_name: str, rows: list[dict]) -> dict:
 
 
 def _recent_work(agent_name: str, limit: int = MAX_RECENT_WORK, *,
-                 is_platform: bool = False) -> list[dict]:
+                 is_platform: bool = False, viewer_email: Optional[str] = None) -> list[dict]:
     """What the agent has been doing — shape, plus the schedule's name.
 
     The accessor returns `message`, `cost`, `model_used` and `source_user_email`
@@ -330,6 +347,12 @@ def _recent_work(agent_name: str, limit: int = MAX_RECENT_WORK, *,
     scheduled row rendered the same three words. It attaches to any row whose id
     resolves — not only `triggered_by == "schedule"` — since a webhook that fires
     a schedule *is* running that schedule, and naming it is the point.
+
+    #3139: the projection hid WHAT other people asked, but the rows themselves
+    still told a client WHEN and for how long everyone else used the agent. A
+    client now gets only the rows `query_helpers.viewer_scope` admits — their
+    own turns, what those turns spawned, and scheduled runs — scoped in SQL
+    before the LIMIT for the reason below. The platform view is unchanged.
     """
     # #2423: a client sees only work it can act on or understand. The exclusion
     # is pushed into SQL rather than applied to the result, because a filter
@@ -351,8 +374,7 @@ def _recent_work(agent_name: str, limit: int = MAX_RECENT_WORK, *,
     # as many to throw most away.
     try:
         rows = db.get_agent_executions_summary(
-            agent_name, limit=limit,
-            exclude_triggers=None if is_platform else _CLIENT_HIDDEN_TRIGGERS)
+            agent_name, limit=limit, **_client_scope(is_platform, viewer_email))
     except Exception as e:  # noqa: BLE001
         logger.warning("agent page: executions read failed for %s: %s", agent_name, e)
         return []
@@ -524,20 +546,20 @@ def build_page(email: str, agent_name: str, card: Optional[dict],
             # an explicit None, so the bare form would 500 the one page ent#360
             # built to always render.
             "availability": card.get("availability") or "unknown",
-            "last_active": _last_active(agent_name, is_platform=is_platform),
+            "last_active": _last_active(agent_name, is_platform=is_platform, viewer_email=email),
         },
         # "What it can do" — a projection of the briefing the roster already
         # carries (#138 / ent#380), NOT a second mechanism. ent#178 is the
         # unified exposable-skills config this becomes a view of when it lands.
         "capabilities": card.get("playbooks") or [],
-        "stats": _stats(agent_name, window, is_platform=is_platform),
+        "stats": _stats(agent_name, window, is_platform=is_platform, viewer_email=email),
         # ent#366 AC #4: a RAW TALLY, never a percentage. At the volumes this
         # page sees, one thumbs-down out of one rating renders as "100%
         # negative" — a number that looks like evidence and is not. Both
         # figures cross so the denominator, which is the honest part, is on
         # screen with them.
         "ratings": _rating_tally(agent_name),
-        "recent_work": _recent_work(agent_name, is_platform=is_platform),
+        "recent_work": _recent_work(agent_name, is_platform=is_platform, viewer_email=email),
     }
 
 
@@ -623,7 +645,8 @@ def undo_memory_write(agent_name: str, email: str, write_id: str) -> dict:
     return {"write_id": write_id, "notes": record.get("agent_notes") or ""}
 
 
-def _last_active(agent_name: str, *, is_platform: bool = False) -> Optional[str]:
+def _last_active(agent_name: str, *, is_platform: bool = False,
+                 viewer_email: Optional[str] = None) -> Optional[str]:
     """When this agent last did anything, from its newest execution row.
 
     Scoped to what the viewer can SEE (#2423 review). Reading the newest row
@@ -632,11 +655,12 @@ def _last_active(agent_name: str, *, is_platform: bool = False) -> Optional[str]
     newest entry is from yesterday, with nothing on the page to reconcile the
     two. Same exclusion, same reason as `_recent_work`, and pushed into SQL for
     the same reason: `limit=1` in Python cannot survive any filtering at all.
+    #3139: the same viewer scope too — another person's turn a minute ago is not
+    something a client may learn from "active 1 minute ago".
     """
     try:
         rows = db.get_agent_executions_summary(
-            agent_name, limit=1,
-            exclude_triggers=None if is_platform else _CLIENT_HIDDEN_TRIGGERS)
+            agent_name, limit=1, **_client_scope(is_platform, viewer_email))
     except Exception as e:  # noqa: BLE001
         logger.warning("agent page: last-active read failed for %s: %s", agent_name, e)
         return None

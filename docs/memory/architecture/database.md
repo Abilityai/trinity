@@ -952,7 +952,7 @@ CREATE TABLE metric_definitions (
 -- idx_metric_definitions_agent_status (agent_name, status)
 ```
 
-**metric_points** (trinity-enterprise#478 — see [requirements §48](../requirements/lifecycle-observability.md) and [agent-custom-metrics.md](../feature-flows/agent-custom-metrics.md)). The **append-only observation store** `record_metrics` writes: one row per observation of a metric the registry above declares for that agent. Dual-track migration (SQLite `metric_points_table` + Alembic `0070_metric_points`); cascade/rename via `AGENT_REFS` (CASCADE).
+**metric_points** (trinity-enterprise#478 — see [requirements §48](../requirements/lifecycle-observability.md) and [agent-custom-metrics.md](../feature-flows/agent-custom-metrics.md)). The **observation store** `record_metrics` writes: one row per observation of a metric the registry above declares for that agent — inserted, or restated in place when a different value arrives at the same identity (ent#729). Dual-track migrations (SQLite `metric_points_table` + Alembic `0070_metric_points`; restatement columns SQLite `metric_points_restatement` + Alembic `0086_metric_points_restatement`); cascade/rename via `AGENT_REFS` (CASCADE).
 
 ```sql
 CREATE TABLE metric_points (
@@ -963,8 +963,10 @@ CREATE TABLE metric_points (
     value_numeric DOUBLE PRECISION,
     value_text TEXT,
     dims TEXT /* pg:JSONB */,
-    execution_id TEXT,                       -- provenance only; NO foreign key
-    created_at TEXT NOT NULL,
+    execution_id TEXT,                       -- provenance only; NO foreign key; follows the correcting write
+    created_at TEXT NOT NULL,                -- first write; never moves (the daily cap counts it)
+    revision BIGINT NOT NULL DEFAULT 0,      -- accepted corrections (ent#729)
+    recorded_at TEXT,                        -- write time of the value held; NULL = pre-ent#729 (read created_at)
     PRIMARY KEY (agent_name, ts, idempotency_key)
 )
 -- idx_metric_points_agent_metric_ts (agent_name, metric, ts DESC)   -- the read (ent#479)
@@ -972,11 +974,13 @@ CREATE TABLE metric_points (
 -- idx_metric_points_agent_created (agent_name, created_at)          -- the daily write cap
 ```
 
-Four column-level decisions are load-bearing, each against a plausible default.
+Five column-level decisions are load-bearing, each against a plausible default.
 
-**No surrogate `id`.** The PRIMARY KEY *is* the point identity, so a re-posted observation conflicts with itself and `on_conflict_do_nothing` drops it — no second unique index to keep in order, and the partition key (`agent_name`) sits inside the only unique constraint, which PostgreSQL requires before ent#80 can partition by month. A UUID id plus `UNIQUE(agent_name, idempotency_key)` — the sibling shape — would mean a table rebuild at that point.
+**No surrogate `id`.** The PRIMARY KEY *is* the point identity, so a re-posted observation conflicts with itself and the upsert's conflict target names it — no second unique index to keep in order, and the partition key (`agent_name`) sits inside the only unique constraint, which PostgreSQL requires before ent#80 can partition by month. A UUID id plus `UNIQUE(agent_name, idempotency_key)` — the sibling shape — would mean a table rebuild at that point.
 
-**`value` is NOT in the hash.** One observation of one metric at one instant with one set of dimensions is one fact; a corrected re-post therefore deduplicates rather than double-counting, and a genuine correction is a new `ts`. Hashing the value would make the same instant hold two contradictory rows.
+**`value` is NOT in the hash.** One observation of one metric at one instant with one set of dimensions is one fact, so one identity is one row. Hashing the value would make the same instant hold two contradictory rows.
+
+**A correction restates the row; it never adds one (ent#729, R45).** `insert_points` is `ON CONFLICT (agent_name, ts, idempotency_key) DO UPDATE … WHERE value_numeric IS DISTINCT FROM excluded.value_numeric OR value_text IS DISTINCT FROM excluded.value_text` (SQLite renders `IS NOT`) — null-safe, because one value column is NULL on every row by type. An identical value matches nothing and writes nothing; a different one sets the value, `execution_id`, `recorded_at` and `revision + 1`, leaving `ts` (the period), `created_at` (the cap's budget) and `dims` alone. `RETURNING revision` is the portable three-way count: 0 = inserted, ≥ 1 = corrected, absent = duplicate. Two consequences of `DO UPDATE` that `DO NOTHING` did not have: it row-locks every conflicting row even when the `WHERE` skips it, so the store writes in `(ts, idempotency_key)` order to keep overlapping batches from deadlocking on PostgreSQL; and PostgreSQL raises a cardinality violation on two rows with one identity in one statement where SQLite applies both, so the store refuses that input itself. `revision` is BIGINT (a monotonic counter, learning 2026-09-15); `recorded_at` is nullable with no backfill, so a writer from before the change still inserts and no boot rewrites the table.
 
 **`dims` is JSONB on PostgreSQL and TEXT on SQLite**, through a per-column marker in the shared DDL (`col TEXT /* pg:JSONB */`, rewritten by a `_PG_TABLE_SUBS` rule declared last so it cannot eat another rule's marker). Fresh PostgreSQL is built by replaying this DDL through `to_postgres_table_ddl` (`0001_baseline`), upgrades run `0067` — one rule converges both with **no** `ALTER … USING` to keep in step in two places. `db/tables.py` declares `JSON(none_as_null=True).with_variant(JSONB(none_as_null=True), "postgresql")`; `none_as_null` is not decoration — without it `None` binds as the four-character JSON text `null`.
 

@@ -25,6 +25,19 @@ if str(_BACKEND) not in sys.path:
 pytestmark = pytest.mark.unit
 
 
+@pytest.fixture(autouse=True)
+def _grant_still_held(monkeypatch):
+    """trinity-enterprise#739: delivery re-reads the subscriber -> source edge.
+    These subscriptions are stubs without one; this file is about what a
+    delivery carries, not whether it is permitted
+    (test_ent739_grant_withdrawal.py covers that), so the grant is held."""
+    try:
+        from services import event_dispatch_service as _eds
+    except ImportError:
+        return
+    monkeypatch.setattr(_eds, "_subscription_still_permitted", lambda sub: True)
+
+
 def _interp(template, payload):
     from services.event_dispatch_service import _interpolate_template
 

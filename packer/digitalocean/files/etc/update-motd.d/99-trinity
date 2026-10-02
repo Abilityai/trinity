@@ -8,6 +8,7 @@
 STATE_DIR=/etc/trinity
 IP="$(cat ${STATE_DIR}/public-ip 2>/dev/null)"
 TAG="$(cat ${STATE_DIR}/baked-image-tag 2>/dev/null)"
+CLOUD="$(cat ${STATE_DIR}/cloud 2>/dev/null)"
 
 echo
 echo "  Trinity ${TAG:-} — the sovereign AI agents platform"
@@ -34,7 +35,7 @@ fi
 if [ -n "$IP" ]; then
     echo "  Web UI:  ${SCHEME}://${IP}"
 else
-    echo "  Web UI:  ${SCHEME}://<this droplet's IP>"
+    echo "  Web UI:  ${SCHEME}://<this server's public IP>"
 fi
 
 if [ "$TLS" != "ok" ] && [ "$TLS" != "unknown" ]; then
@@ -49,6 +50,9 @@ if [ "$SOURCE" = "user-data" ]; then
 elif curl -fsS --max-time 2 http://127.0.0.1:8000/api/setup/status 2>/dev/null \
         | grep -q '"setup_completed": *true'; then
     echo "  Login:   the admin account created in the browser at first visit"
+elif [ "$SOURCE" = "instance-id" ]; then
+    echo "  Admin:   none yet. Open the Web UI above; it asks for this"
+    echo "           instance's EC2 instance ID (starts with i-) first."
 else
     # Unclaimed (or the backend is not answering yet): the one action is to
     # open the URL above. Until someone does, anyone who finds it can.
@@ -60,6 +64,11 @@ echo
 echo "  Next:    open the Web UI and follow the first-run setup"
 echo "           (add a domain, then serve it through a Cloudflare Tunnel)."
 echo "  Docs:    https://docs.ability.ai"
-echo "  Support: https://github.com/abilityai/trinity/issues  (label: do-marketplace)"
-echo "  DigitalOcean does not build or support Trinity."
+if [ "$CLOUD" = "aws" ]; then
+    echo "  Support: https://github.com/abilityai/trinity/issues  (label: aws-marketplace)"
+    echo "  AWS does not build or support Trinity."
+else
+    echo "  Support: https://github.com/abilityai/trinity/issues  (label: do-marketplace)"
+    echo "  DigitalOcean does not build or support Trinity."
+fi
 echo

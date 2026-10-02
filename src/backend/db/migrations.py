@@ -4859,6 +4859,39 @@ def _migrate_execution_conversation_key(cursor, conn):
     conn.commit()
 
 
+def _migrate_metric_points_restatement(cursor, conn):
+    """trinity-enterprise#729 — a corrected value restates its row (R45).
+
+    `revision` counts accepted corrections (0 at insert); `recorded_at` is the
+    write time of the value the row holds. Both are written by the store, never
+    by a caller.
+
+    * `revision BIGINT NOT NULL DEFAULT 0` — existing rows read 0, and a writer
+      from before this change (a rollback, or a checkout switched back) still
+      inserts. BIGINT because it is a monotonic counter (SQLite: one 64-bit
+      affinity either way).
+    * `recorded_at TEXT` — nullable, NO backfill: NULL means "written before
+      ent#729", whose write time is `created_at`. A backfill would buy nothing
+      a reader can rely on (the rollback writer inserts NULL anyway) and would
+      rewrite the whole table at boot.
+
+    Mirrored by the Alembic revision 0086_metric_points_restatement.
+    """
+    _safe_add_column(
+        cursor,
+        "metric_points",
+        "revision",
+        "ALTER TABLE metric_points ADD COLUMN revision BIGINT NOT NULL DEFAULT 0",
+    )
+    _safe_add_column(
+        cursor,
+        "metric_points",
+        "recorded_at",
+        "ALTER TABLE metric_points ADD COLUMN recorded_at TEXT",
+    )
+    conn.commit()
+
+
 def _migrate_ent720_email_identity(cursor, conn):
     """trinity-enterprise#720 — a sign-in email is unique, and a code has a purpose.
 
@@ -5198,5 +5231,6 @@ MIGRATIONS = [
     ("execution_conversation_key", _migrate_execution_conversation_key),
     ("loop_chain_depth", _migrate_loop_chain_depth),
     ("ent720_email_identity", _migrate_ent720_email_identity),
+    ("metric_points_restatement", _migrate_metric_points_restatement),
     ("seat_ask_class_state_table", _migrate_seat_ask_class_state_table),
 ]

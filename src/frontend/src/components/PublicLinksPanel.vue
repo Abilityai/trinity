@@ -72,7 +72,7 @@
             <!-- URL preview -->
             <div class="mt-2 flex items-center space-x-2">
               <code class="flex-1 text-xs text-gray-500 dark:text-gray-400 bg-gray-100 dark:bg-gray-800 px-2 py-1 rounded truncate">
-                {{ link.external_url || link.url }}
+                {{ publicLinkUrl(link) }}
               </code>
               <button
                 @click="copyLink(link)"
@@ -359,6 +359,7 @@
 import { ref, onMounted, watch } from 'vue'
 import axios from 'axios'
 import { useAuthStore } from '../stores/auth'
+import { publicLinkUrl } from '../utils/publicLinkUrl'
 
 const props = defineProps({
   agentName: {
@@ -591,7 +592,7 @@ const disconnectSlack = async (link) => {
 // Copy link to clipboard
 const copyLink = async (link) => {
   try {
-    const url = link.external_url || link.url
+    const url = publicLinkUrl(link)
     await navigator.clipboard.writeText(url)
     copyNotification.value = 'copied'
     setTimeout(() => {
