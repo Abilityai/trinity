@@ -16,12 +16,17 @@ import { mount, flushPromises } from '@vue/test-utils'
 
 vi.hoisted(() => {
   const store = new Map()
-  globalThis.localStorage = {
-    getItem: (k) => (store.has(k) ? store.get(k) : null),
-    setItem: (k, v) => store.set(k, String(v)),
-    removeItem: (k) => store.delete(k),
-    clear: () => store.clear(),
-  }
+  // vitest 5's jsdom exposes `window.localStorage` as a getter-only accessor,
+  // so a plain assignment throws ("has only a getter"). Define it instead.
+  Object.defineProperty(globalThis, 'localStorage', {
+    configurable: true,
+    value: {
+      getItem: (k) => (store.has(k) ? store.get(k) : null),
+      setItem: (k, v) => store.set(k, String(v)),
+      removeItem: (k) => store.delete(k),
+      clear: () => store.clear(),
+    },
+  })
 })
 vi.mock('@/api', () => ({ default: { get: vi.fn(), post: vi.fn(), put: vi.fn(), delete: vi.fn() } }))
 
