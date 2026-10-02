@@ -1864,3 +1864,15 @@ async def test_materialize_swallows_unexpected_errors(tmp_path, monkeypatch, cap
         await codex_runtime._materialize_api_key_auth(str(tmp_path), "sk-new")
     assert "auth materialisation failed unexpectedly" in caplog.text
     assert "sk-new" not in caplog.text
+
+
+def test_classify_rate_status_pattern_is_linear_on_long_whitespace():
+    """#3175 follow-up: stderr is unbounded and classified inline on the event
+    loop, so the status-context regex must not backtrack quadratically on a
+    long run of spaces after `status` (was ~47s at 200k)."""
+    import time
+
+    start = time.monotonic()
+    status, _ = _classify(stderr="status" + " " * 200_000 + "x")
+    assert status == 500
+    assert time.monotonic() - start < 2.0

@@ -1023,8 +1023,10 @@ _AUTH_PATTERNS = (
 _RATE_MARKERS = ("rate limit", "rate_limit", "quota", "too many requests")
 # Numeric 429 needs status context; timestamps, process IDs and ports can
 # contain the same digits without reporting a provider rate limit.
+# One `\s*` per side of the separator: `\s*[:=]?\s*` lets two adjacent
+# `\s*` split a run of spaces every way, quadratic on unbounded stderr.
 _RATE_STATUS_PATTERN = re.compile(
-    r"\b(?:HTTP(?:/\d(?:\.\d)?)?|status(?:[ _]code)?)\s*[:=]?\s*429\b",
+    r"\b(?:HTTP(?:/\d(?:\.\d)?)?|status(?:[ _]code)?)\s*(?:[:=]\s*)?429\b",
     re.IGNORECASE,
 )
 
