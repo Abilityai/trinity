@@ -318,7 +318,9 @@ class AgentStatus(BaseModel):
     # head_sha, file_count}; set only on the create response of a snapshot import.
     import_snapshot: Optional[Dict[str, Any]] = None
     # trinity-enterprise#705: on a `github:` create, how the git mode was decided
-    # — {kind, source_mode, reason} — so "why is this agent pull-only?" has an answer.
+    # — {kind, source_mode, pushes, reason} — so "why is this agent pull-only?" has an
+    # answer. `pushes` (ent#704) is whether it auto-pushes; fork-to-own is
+    # source_mode AND pushes, so the UI must never infer it from source_mode.
     git_mode: Optional[dict] = None
 
     class Config:
@@ -1252,6 +1254,10 @@ class SystemAgentConfig(BaseModel):
     folders: Optional[dict] = None  # {"expose": bool, "consume": bool}
     schedules: Optional[List[dict]] = None  # [{name, cron, message, ...}]
     tags: Optional[List[str]] = None  # Additional tags for this agent (ORG-001 Phase 4)
+    # trinity-enterprise#704: what each member is — "agent" (its repository IS
+    # the agent) or "deployment" (a deployment of a codebase). Omitted → the
+    # platform default (AgentConfig.kind, ent#705).
+    kind: Optional[Literal["agent", "deployment"]] = None
 
 
 class SystemPermissions(BaseModel):
@@ -3235,6 +3241,11 @@ class AutoSyncToggle(BaseModel):
 
 
 class FreezeSchedulesToggle(BaseModel):
+    enabled: bool
+
+
+class PullSyncToggle(BaseModel):
+    """trinity-enterprise#703: the container's pull cycle on/off."""
     enabled: bool
 
 

@@ -3802,6 +3802,16 @@
       "description": "The auto-sync heartbeat reconciles before it pushes (#3011), over real repos with a foreign clone pushing underneath: a foreign commit is rebased over and pushed (linear, across repeated cycles, behind-only fast-forwards, a branch missing on the remote is created); a conflicting one aborts the rebase and records `diverged: rebase conflict on <branch>` with the repo untouched and the remote never overwritten; the post-rebase push carries a lease and a push racing it survives; a source-mode agent on the default branch (origin/HEAD, else main/master) refuses before committing, while fork-to-own (env or upstream remote), other branches and working-branch mode push; sync-state gains behind_after_fetch and last_successful_push_at; the operator sync_to_github path does not use the heartbeat reconcile. 8 of 16 red on the pre-fix cycle."
     },
     {
+      "file": "unit/test_ent704_git_status_binding.py",
+      "feature": "trinity-enterprise#704",
+      "added": "2026-09-25",
+      "categories": [
+        "backend",
+        "git"
+      ],
+      "description": "The git status reports the binding (trinity-enterprise#704): db_config.source_mode and db_config.pushes on GET /api/agents/{name}/git/status — pushes is true for a working branch (auto-sync on or paused) and for fork-to-own (source mode + auto-sync), false for pull-only — feeding the Git panel badge (PR #3022 review: fork-to-own was shown as pull-only). git_mode.pushes on the create response is in test_1484_create_agent_characterization.py; manifest `kind` export round-trip in test_2373_system_endpoints.py. Manifest `kind` (parsed, not warned about; an out-of-range value rejected; passed to create) is in test_2373_system_endpoints.py and test_ent125_resilient_system_deploy.py; the create-modal question in src/frontend/tests/unit/createAgentKind.spec.js."
+    },
+    {
       "file": "unit/test_3010_autosync_toggle.py",
       "feature": "#3010",
       "added": "2026-09-25",
@@ -3915,6 +3925,17 @@
         "git"
       ],
       "description": "`trinity deploy --repo` creates a deployment (trinity-enterprise#705): the CLI's POST /api/agents payload carries kind \"deployment\", so deploying a codebase never takes the agent default's working branch + auto-push. Static (AST) because the unit job does not install the CLI's own deps. The ownership rule itself (catalog template / owner != token login stays pull-only) is in test_1484_create_agent_characterization.py."
+    },
+    {
+      "file": "unit/test_ent703_pull_cycle.py",
+      "feature": "trinity-enterprise#703",
+      "added": "2026-09-25",
+      "categories": [
+        "agent-server",
+        "git",
+        "migrations"
+      ],
+      "description": "The container's pull cycle (ent#703, invariant G3) on real repos with a human clone pushing underneath: behind+clean fast-forwards; a local commit is rebased on top; uncommitted edits survive a pull (stashed and re-applied); incoming changes colliding with uncommitted edits are UNDONE — same HEAD, same edits, empty stash, failure recorded (the autostash trap; red against a naive --autostash mutant); a rebase conflict is aborted and recorded; never while an execution runs, including one starting mid-cycle, and an unknown registry counts as busy; a busy repo is skipped without a state write; a pull never touches the push's fields. The loop gate reads the flag live on /git/pull-sync with the env fallback; the interval defaults to the push interval. Both migration tracks: columns + backfill only where auto-sync is on."
     },
     {
       "file": "unit/test_ent610_asks_unavailable.py",

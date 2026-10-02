@@ -47,6 +47,8 @@ class ScheduleGitConfigMixin:
                 if "auto_sync_enabled" in row_keys else False,
             freeze_schedules_if_sync_failing=bool(row["freeze_schedules_if_sync_failing"])
                 if "freeze_schedules_if_sync_failing" in row_keys else False,
+            pull_sync_enabled=bool(row["pull_sync_enabled"])  # trinity-enterprise#703
+                if "pull_sync_enabled" in row_keys and row["pull_sync_enabled"] is not None else False,
         )
 
     # =========================================================================
@@ -178,6 +180,25 @@ class ScheduleGitConfigMixin:
                 .values(freeze_schedules_if_sync_failing=1 if enabled else 0)
             )
             return result.rowcount > 0
+
+    def set_git_pull_sync_enabled(self, agent_name: str, enabled: bool) -> bool:
+        """trinity-enterprise#703: toggle the container's pull cycle."""
+        with get_engine().begin() as conn:
+            result = conn.execute(
+                update(agent_git_config)
+                .where(agent_git_config.c.agent_name == agent_name)
+                .values(pull_sync_enabled=1 if enabled else 0)
+            )
+            return result.rowcount > 0
+
+    def get_git_pull_sync_enabled(self, agent_name: str) -> bool:
+        """trinity-enterprise#703: read the pull flag. False if config missing."""
+        stmt = select(agent_git_config.c.pull_sync_enabled).where(
+            agent_git_config.c.agent_name == agent_name
+        )
+        with get_engine().connect() as conn:
+            row = conn.execute(stmt).first()
+        return bool(row[0]) if row else False
 
     def get_git_auto_sync_enabled(self, agent_name: str) -> bool:
         """#389: read the auto-sync flag. False if config missing."""
