@@ -264,6 +264,27 @@ describe('a discussed ask is drawn in its discussion chat', () => {
   })
 })
 
+describe('store.answerAsk — where the woken agent\'s result will land (ent#747)', () => {
+  it('watches the discussion chat, else the ask\'s own chat, only when work was resumed', async () => {
+    store.asks = [ask('a1')]
+    portalHttp.post.mockResolvedValueOnce({ data: ask('a1', { status: 'answered', resume_requested: true, chat_id: 'main', discussion_chat_id: 'disc' }) })
+    await store.answerAsk('a1', { response: 'EU' })
+    expect(store.askResultWatch).toMatchObject({ askId: 'a1', agentName: 'scout', chatId: 'disc' })
+
+    store.askResultWatch = null
+    store.asks = [ask('a2')]
+    portalHttp.post.mockResolvedValueOnce({ data: ask('a2', { status: 'answered', resume_requested: true, chat_id: 'main' }) })
+    await store.answerAsk('a2', { response: 'EU' })
+    expect(store.askResultWatch.chatId).toBe('main')
+
+    store.askResultWatch = null
+    store.asks = [ask('a3')]
+    portalHttp.post.mockResolvedValueOnce({ data: ask('a3', { status: 'answered', resume_requested: false, chat_id: 'main' }) })
+    await store.answerAsk('a3', { response: 'EU' })
+    expect(store.askResultWatch).toBeNull()
+  })
+})
+
 describe('store.discussAsk', () => {
   it('rethrows so the control can say why', async () => {
     portalHttp.post.mockRejectedValue(new Error('down'))

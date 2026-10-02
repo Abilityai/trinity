@@ -333,6 +333,10 @@ export const useClientPortalStore = defineStore('clientPortal', {
     askDismissals: {},
     // A dismissal the server refused, by ask id → the message; the ask is back.
     askDismissErrors: {},
+    // trinity-enterprise#747: an answer that woke its agent — `{ askId,
+    // agentName, chatId, since }` — whose result the chat `chatId` is waiting
+    // to show. Cleared when the result lands or the wait gives up.
+    askResultWatch: null,
     // Where the user was when it expired, so re-authenticating returns them
     // there instead of the roster root.
     resumePath: null,
@@ -643,6 +647,7 @@ export const useClientPortalStore = defineStore('clientPortal', {
       askDismissTimers.clear()
       this.askDismissals = {}
       this.askDismissErrors = {}
+      this.askResultWatch = null
       // Round-3 /cso: the session list keeps its last good copy the same way
       // (#2198), so it is session state and goes with the session too.
       this.lastSessions = []
@@ -2265,6 +2270,17 @@ export const useClientPortalStore = defineStore('clientPortal', {
       this.asks = data && data.id === askId
         ? this.asks.map((a) => (a.id === askId ? data : a))
         : this.asks.filter((a) => a.id !== askId)
+      // trinity-enterprise#747: the agent was woken with this answer, and its
+      // result will land as a message in the chat the ask was decided in —
+      // the discussion chat, else the chat it is attached to (the backend's
+      // `_workspace_destination`). The open chat watches for it (no history
+      // poll exists otherwise, ent#457).
+      if (data && data.resume_requested === true) {
+        const chatId = data.discussion_chat_id || data.chat_id || null
+        this.askResultWatch = chatId
+          ? { askId, agentName: data.agent_name, chatId, since: Date.now() }
+          : null
+      }
       return data
     },
 

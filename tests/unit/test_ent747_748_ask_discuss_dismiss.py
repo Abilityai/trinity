@@ -31,6 +31,16 @@ if _BACKEND not in sys.path:
 
 pytestmark = pytest.mark.unit
 
+# Bind the real modules at COLLECTION time. Sibling suites (ent#329) swap
+# `database` / `services.*` in `sys.modules` for stubs while they run; a module
+# first imported under one keeps that stub's `db` for the rest of the session,
+# and the lazy imports on the paths below would otherwise be that first import.
+import services.ask_service  # noqa: E402,F401
+import services.operator_queue_service  # noqa: E402,F401
+import services.operator_resume_service  # noqa: E402,F401
+import client_portal.asks.service  # noqa: E402,F401
+import client_portal.db  # noqa: E402,F401
+
 
 @pytest.fixture
 def real_db():
@@ -486,3 +496,120 @@ def test_the_prompt_copies_agree_on_the_dismissed_rule():
     py = (Path(_BACKEND) / "services" / "platform_prompt_service.py").read_text()
     rule = "If the person you addressed dismisses it, it ends `dismissed`"
     assert rule in md and rule in py
+
+
+# ===========================================================================
+# ent#747 — the woken run's RESULT reaches the chat the ask was decided in
+# ===========================================================================
+
+class TestResumeDeliversIntoTheChat:
+    """An answer wakes an opted-in agent (ent#329/#430). Without a destination
+    its result stayed in the execution history and the person never saw it.
+    The run now carries the Workspace destination, so the ent#457 completion
+    report posts the result into the discussion chat — else the ask's own chat."""
+
+    def _dest(self, item, by):
+        from services.operator_resume_service import _workspace_destination
+        return _workspace_destination(item, by)
+
+    def test_an_answer_in_a_discussion_reports_into_that_chat(self, real_db, agent, email):
+        uid = _raise_ask(agent, email)
+        out = _service().discuss_ask(uid, email, is_platform=False)
+
+        dest = self._dest(real_db.get_operator_queue_item(uid), email.upper())
+
+        assert dest == {"source_channel": "portal", "source_channel_chat_id": out.chat_id,
+                        "source_channel_client": email}
+
+    def test_without_a_discussion_it_reports_into_the_asks_own_chat(self, real_db, agent, email):
+        from services.operator_queue_service import _WORKSPACE_THREAD_KEY
+        uid = _raise_ask(agent, email)          # ingestion attaches it to Main
+        row = real_db.get_operator_queue_item(uid)
+
+        dest = self._dest(row, email)
+
+        assert dest["source_channel_chat_id"] == row["context"][_WORKSPACE_THREAD_KEY]
+
+    def test_an_operator_answering_a_clients_ask_writes_into_no_chat(self, real_db, agent, email):
+        uid = _raise_ask(agent, email)
+        _service().discuss_ask(uid, email, is_platform=False)
+        assert self._dest(real_db.get_operator_queue_item(uid), "operator@example.com") == {}
+
+    def test_an_operator_ask_has_no_destination(self, real_db, agent):
+        uid = _raise_ask(agent, None)
+        assert self._dest(real_db.get_operator_queue_item(uid), "operator@example.com") == {}
+
+    def test_a_chat_that_is_not_the_persons_is_never_a_destination(self, real_db, agent, email):
+        item = {"id": "x", "agent_name": agent, "addressed_to_email": email,
+                "context": {"workspace_discussion_id": "not-a-chat",
+                            "workspace_session_id": "nor-this"}}
+        assert self._dest(item, email) == {}
+
+    @pytest.mark.asyncio
+    async def test_the_woken_run_is_dispatched_with_the_destination(self, real_db, agent, email, monkeypatch):
+        from types import SimpleNamespace
+        import services.task_execution_service as tes
+        import services.operator_resume_service as ors
+        uid = _raise_ask(agent, email)
+        out = _service().discuss_ask(uid, email, is_platform=False)
+        real_db.respond_to_operator_queue_item(uid, "EU", None, None, email)
+        calls = []
+
+        async def _dispatch(**kw):
+            calls.append(kw)
+            return SimpleNamespace(execution_id="exec-747", status="success", error=None, response="")
+
+        async def _no_audit(*a, **kw):
+            return None
+
+        monkeypatch.setattr(tes, "dispatch_and_await_terminal", _dispatch)
+        monkeypatch.setattr(ors, "_audit", _no_audit)
+        monkeypatch.setattr(real_db, "get_operator_resume_enabled", lambda a: True)
+
+        await ors.maybe_dispatch_resume(real_db.get_operator_queue_item(uid), response="EU",
+                                        responded_by_email=email)
+
+        assert len(calls) == 1
+        assert calls[0]["triggered_by"] == "operator_response"
+        assert calls[0]["source_channel"] == "portal"
+        assert calls[0]["source_channel_chat_id"] == out.chat_id
+        assert calls[0]["source_channel_client"] == email
+
+    @pytest.mark.asyncio
+    async def test_the_completion_report_posts_the_result_into_the_chat(self, real_db, agent, email, monkeypatch):
+        """End of the chain: a finished `operator_response` run stamped with the
+        destination is reported into that chat as an agent message (ent#457) —
+        it is not an inline trigger, so the no-double-post rule lets it through."""
+        from types import SimpleNamespace
+        from client_portal import db as portal_db
+        from services import channel_completion_report as ccr
+        uid = _raise_ask(agent, email)
+        out = _service().discuss_ask(uid, email, is_platform=False)
+        row = SimpleNamespace(agent_name=agent, triggered_by="operator_response",
+                              source_channel="portal", source_channel_chat_id=out.chat_id,
+                              source_channel_thread=None, source_channel_agent=None,
+                              source_channel_client=email)
+        monkeypatch.setattr(real_db, "get_execution", lambda eid: row)
+
+        class _Guard:
+            replay = False
+            snapshot = None
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *exc):
+                return False
+
+        import services.idempotency_service as idem
+        monkeypatch.setattr(idem, "effect_guard", lambda *a, **kw: _Guard())
+
+        delivered = await ccr.report_completion(
+            execution_id="exec-747", agent_name=agent, status="success",
+            summary_or_error="Outline updated to KPI dashboard + highlights.")
+
+        assert delivered is True
+        msgs = portal_db.get_portal_messages(agent, email, session_id=out.chat_id)
+        assert msgs[-1]["role"] == "assistant"
+        assert msgs[-1]["source"] == "completion:done"
+        assert "KPI dashboard + highlights" in msgs[-1]["content"]

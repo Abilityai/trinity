@@ -99,6 +99,49 @@ def _framed_message(item: Dict[str, Any], response: str, response_text: Optional
     return "\n".join(lines)
 
 
+def _workspace_destination(item: Dict[str, Any], responded_by_email: Optional[str]) -> Dict[str, Any]:
+    """Where the resumed run's RESULT is delivered — the Workspace chat the
+    person decided the ask in (trinity-enterprise#747), or nowhere.
+
+    Without one the run's output stayed in the execution history: a person
+    who answered in the Workspace saw the agent start and never saw what it
+    did. Stamping the portal destination on the run lets the ent#457
+    completion report post the result as an agent message in that chat, once,
+    through the same consent and recipient checks every portal report takes.
+
+    Only when the person who answered IS the addressee — an operator answering
+    a client's ask on their behalf does not write into the client's chat. The
+    chat is the ask's discussion chat when it has one, else the chat it is
+    attached to (the turn that raised it, or the pair's Main for a background
+    ask); either must be a live chat of that (agent, person). Platform-written
+    context keys only (`_PLATFORM_CONTEXT_KEYS`) — an agent cannot steer it.
+    Fail-soft: any doubt is no destination, i.e. today's behaviour.
+    """
+    addressee = (item.get("addressed_to_email") or "").strip().lower()
+    if not addressee or addressee != (responded_by_email or "").strip().lower():
+        return {}
+    try:
+        from config import PORTAL_SOURCE_CHANNEL
+        from client_portal import db as portal_db
+        from services.operator_queue_service import (
+            _WORKSPACE_DISCUSSION_KEY, _WORKSPACE_THREAD_KEY,
+        )
+
+        agent = item.get("agent_name") or ""
+        context = item.get("context") if isinstance(item.get("context"), dict) else {}
+        for chat in (context.get(_WORKSPACE_DISCUSSION_KEY), context.get(_WORKSPACE_THREAD_KEY)):
+            if isinstance(chat, str) and chat and portal_db.get_portal_session(chat, agent, addressee):
+                return {
+                    "source_channel": PORTAL_SOURCE_CHANNEL,
+                    "source_channel_chat_id": chat,
+                    "source_channel_client": addressee,
+                }
+    except Exception:  # noqa: BLE001 — never block a resume over where it reports
+        logger.warning("operator-resume: no Workspace destination for item=%s",
+                       item.get("id"), exc_info=True)
+    return {}
+
+
 def _idempotency_key(item_id: str, response: str, response_text: Optional[str]) -> str:
     """Stable key over the item and the answer (Invariant #18).
 
@@ -189,6 +232,7 @@ async def maybe_dispatch_resume(
             message=_framed_message(item, response, response_text),
             triggered_by=TRIGGERED_BY,
             source_user_email=responded_by_email,
+            **_workspace_destination(item, responded_by_email),
         )
     except Exception as exc:
         if idem is not None:

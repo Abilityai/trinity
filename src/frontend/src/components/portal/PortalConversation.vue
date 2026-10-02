@@ -2984,4 +2984,47 @@ watch(
   { immediate: true }
 )
 onBeforeUnmount(() => emit('work-state', workSignalFrom({ sending: false })))
+
+// trinity-enterprise#747: an answer here woke the agent, and its result is
+// delivered into this chat as a completion report (ent#457). The chat has no
+// history poll, so it looks for that report itself — every few seconds, for a
+// bounded time, only while this chat is the one on screen — and appends it.
+const ASK_RESULT_POLL_MS = 5000
+const ASK_RESULT_WAIT_MS = 5 * 60 * 1000
+let askResultTimer = null
+function stopAskResultPoll() {
+  if (askResultTimer) { clearInterval(askResultTimer); askResultTimer = null }
+}
+async function checkAskResult(watch) {
+  const sid = currentSessionId.value
+  if (!watch || watch.chatId !== sid || sending.value) return
+  if (Date.now() - watch.since > ASK_RESULT_WAIT_MS) {
+    stopAskResultPoll()
+    if (store.askResultWatch === watch) store.askResultWatch = null
+    return
+  }
+  let data
+  try {
+    data = await store.fetchHistory(props.agent.name, sid, { limit: REPLY_POLL_ROWS })
+  } catch (_) { return }   // the next tick tries again; the report is a row, not an event
+  if (currentSessionId.value !== sid) return
+  const have = new Set(messages.value.map((m) => m.id).filter(Boolean))
+  const fresh = (data.messages || []).filter((m) => (
+    m.id && !have.has(m.id) && m.role === 'assistant' && String(m.source || '').startsWith('completion:')
+  ))
+  if (!fresh.length) return
+  messages.value = [...messages.value, ...fresh.map((m) => ({ ...assistantRow(m), at: m.created_at || null }))]
+  onMessagesArrived(fresh.length)
+  stopAskResultPoll()
+  if (store.askResultWatch === watch) store.askResultWatch = null
+}
+watch(
+  () => [store.askResultWatch, currentSessionId.value, props.agent?.name],
+  ([w, sid, agent]) => {
+    stopAskResultPoll()
+    if (!w || w.chatId !== sid || w.agentName !== agent) return
+    askResultTimer = setInterval(() => checkAskResult(w), ASK_RESULT_POLL_MS)
+  },
+)
+onBeforeUnmount(stopAskResultPoll)
 </script>
