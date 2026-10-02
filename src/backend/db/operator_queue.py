@@ -849,8 +849,14 @@ class OperatorQueueOperations:
         *,
         disposed_by_email: str,
         reason: Optional[str] = None,
+        disposition: str = "cancelled",
     ) -> Optional[Dict]:
         """Cancel a pending queue item, recording who ended it (trinity-enterprise#611).
+
+        `disposition` (trinity-enterprise#748) is `cancelled` (an operator ended
+        it) or `dismissed` (the person it was addressed to chose not to answer).
+        Both leave `status='cancelled'`, so every terminal-status reader is
+        unchanged; only the ledger says which of the two it was.
 
         The status flip and the endings ledger are ONE compare-and-set, the mirror
         of `respond_to_item`: a caller that loses the race (the ask was answered,
@@ -858,6 +864,8 @@ class OperatorQueueOperations:
         writes nothing, so the ending it would have recorded never overwrites the
         one that happened. Returns None when the item does not exist.
         """
+        if disposition not in ("cancelled", "dismissed"):
+            raise ValueError(f"not a cancel disposition: {disposition!r}")
         now = utc_now_iso()
         with get_engine().begin() as conn:
             result = conn.execute(
@@ -870,7 +878,7 @@ class OperatorQueueOperations:
                 )
                 .values(
                     status="cancelled",
-                    disposition="cancelled",
+                    disposition=disposition,
                     disposed_at=now,
                     disposed_by="person",
                     disposed_by_email=disposed_by_email,
@@ -888,6 +896,42 @@ class OperatorQueueOperations:
                 item["_status_conflict"] = True
                 return item
 
+        return self.get_item(item_id)
+
+    def set_discussion_link(self, item_id: str, key: str, chat_id: str) -> Optional[Dict]:
+        """Link a PENDING ask to the chat a person opened to discuss it
+        (trinity-enterprise#747), at most once.
+
+        Writes `context[key] = chat_id` with a compare-and-set on the stored
+        context text as it was read, plus `status='pending'`, so two Discuss
+        clicks racing link ONE chat: the loser writes nothing. Returns the row as
+        it stands after the attempt (its `context[key]` is the chat that won, or
+        absent when the ask was no longer pending), or None when it does not
+        exist. The key is platform-only (stripped from agent content at
+        ingestion), so nothing an agent wrote can pre-empt it.
+        """
+        with get_engine().begin() as conn:
+            row = conn.execute(
+                select(operator_queue.c.status, operator_queue.c.context)
+                .where(operator_queue.c.id == item_id)
+            ).mappings().first()
+            if not row:
+                return None
+            raw = row["context"]
+            context = json.loads(raw) if raw else {}
+            if not isinstance(context, dict):
+                context = {}
+            if row["status"] == "pending" and not context.get(key):
+                context[key] = chat_id
+                same_text = (operator_queue.c.context.is_(None) if raw is None
+                             else operator_queue.c.context == raw)
+                conn.execute(
+                    update(operator_queue)
+                    .where(and_(operator_queue.c.id == item_id,
+                                operator_queue.c.status == "pending",
+                                same_text))
+                    .values(context=json.dumps(context))
+                )
         return self.get_item(item_id)
 
     def bulk_cancel_items(

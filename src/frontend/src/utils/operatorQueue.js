@@ -310,7 +310,9 @@ export const QUEUE_RESPONSE_DIVERGED =
  * item is still pending.
  *
  * `{ kind, label, who, when }`:
- *   - `kind` — `answered | cancelled | expired`: the ledger's `disposition`,
+ *   - `kind` — `answered | dismissed | cancelled | expired`: the ledger's
+ *     `disposition` (`dismissed`, trinity-enterprise#748: the person it was
+ *     addressed to chose not to answer; its status is `cancelled`),
  *     else the terminal status (a row that ended before the ledger). The
  *     Workspace projection's own `status` (`answered`) reads the same way.
  *   - `who` — the person, for the Operating Room (`disposed_by_email`, or a
@@ -323,16 +325,17 @@ export const QUEUE_RESPONSE_DIVERGED =
  */
 export const ENDING_LABELS = Object.freeze({
   answered: 'Answered',
+  dismissed: 'Dismissed',
   cancelled: 'Cancelled',
   expired: 'Expired',
 })
 
 function endingKind(item) {
   const d = item.disposition
-  if (d === 'answered' || d === 'cancelled' || d === 'expired') return d
+  if (d === 'answered' || d === 'dismissed' || d === 'cancelled' || d === 'expired') return d
   const s = item.status
   if (s === 'responded' || s === 'acknowledged' || s === 'answered') return 'answered'
-  if (s === 'cancelled' || s === 'expired') return s
+  if (s === 'dismissed' || s === 'cancelled' || s === 'expired') return s
   return null
 }
 

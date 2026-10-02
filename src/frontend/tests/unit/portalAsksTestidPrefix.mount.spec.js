@@ -89,6 +89,10 @@ describe('testidPrefix — the default keeps every id byte-identical', () => {
       'portal-ask-x1', 'portal-ask-ending',
       // #3115: each title renders through AskMarkdown with its own id.
       'portal-ask-title-q1', 'portal-ask-title-ap1', 'portal-ask-title-al1', 'portal-ask-title-x1',
+      // trinity-enterprise#747/#748: Discuss and Dismiss on each waiting
+      // question and approval (an alert has neither).
+      'portal-ask-actions-q1', 'portal-ask-discuss-q1', 'portal-ask-dismiss-q1',
+      'portal-ask-actions-ap1', 'portal-ask-discuss-ap1', 'portal-ask-dismiss-ap1',
     ]))
   })
 

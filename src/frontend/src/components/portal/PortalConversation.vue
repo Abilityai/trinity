@@ -308,6 +308,7 @@
                 :current-session-id="currentSessionId"
                 :thread-link="false"
                 testid-prefix="portal-tile-ask"
+                @open-thread="(t) => emit('open-thread', t)"
               />
             </div>
           </div>
@@ -681,6 +682,29 @@
             :excerpt="replyTo.excerpt"
             @remove="emit('reply-done')"
           />
+          <!-- trinity-enterprise#747: in the chat opened to discuss a waiting
+               question, what you typed can BE the answer — sent as `response`,
+               the field the agent reads (#2375), not as a chat message. One
+               fixed row, only here (principle 30). An approval is decided by
+               its options, in its card above. -->
+          <div
+            v-if="discussedQuestion"
+            class="mb-2 flex flex-wrap items-center gap-2 text-xs"
+            :class="META_INK_CLASS"
+            data-testid="portal-discussion-answer"
+          >
+            <span class="min-w-0 truncate">Ready to decide? Send what you typed as the answer to this ask.</span>
+            <BaseButton
+              size="sm"
+              variant="secondary"
+              :loading="answeringDiscussion"
+              loading-label="Sending…"
+              :disabled="!input.trim() || sending"
+              data-testid="portal-discussion-answer-send"
+              @click.prevent="answerDiscussedAsk"
+            >Send as answer</BaseButton>
+            <span v-if="discussionAnswerError" class="basis-full text-xs" role="alert" data-testid="portal-discussion-answer-error">{{ discussionAnswerError }}</span>
+          </div>
           <div
             class="rounded-2xl border px-2 py-2 transition has-[textarea:focus]:border-action-primary-600 dark:has-[textarea:focus]:border-action-primary-500 has-[textarea:focus]:ring-[3px] has-[textarea:focus]:ring-action-primary-500/40 dark:has-[textarea:focus]:ring-action-primary-400/40"
             :class="voiceCallActive ? 'border-transparent bg-transparent' : 'border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800'"
@@ -848,7 +872,7 @@ import PortalStarButton from './PortalStarButton.vue'
 import PortalEditableTitle from './PortalEditableTitle.vue'
 import PortalChatTabs from './PortalChatTabs.vue'
 import { newChatHotkeyLabel, MAIN_TAB_LABEL, composerAvailabilityNotice, assistantRow, replyFromHistory, replyBaseline, readReplyBaseline } from './portalUtils'
-import { chatTurnAsks, placeAsksInThread, askTileMode, askHistoryLine } from './portalChatAsks'
+import { chatTurnAsks, placeAsksInThread, askTileMode, askHistoryLine, isDiscussedIn } from './portalChatAsks'
 import AskMarkdown from '@/components/operator/AskMarkdown.vue'
 import { formatLocalDateTime } from '@/utils/timestamps'
 import { usePortalFileDrop, attachmentState } from '@/composables/usePortalFileDrop'
@@ -921,6 +945,7 @@ import {
 // ent#403: the model choice's rules, in their own pure module for the same
 // reason voice mode's are — nothing rendered is reachable from vitest here.
 import BaseSelect from '../base/BaseSelect.vue'
+import BaseButton from '../base/BaseButton.vue'
 import { useUserPreferencesStore } from '@/stores/userPreferences'
 import { PREF_KEYS } from '@/utils/gridStorageKeys'
 import {
@@ -1096,6 +1121,38 @@ const chatTurnAskList = computed(() => {
   const have = new Set(fresh.map((a) => a.id))
   return [...fresh, ...chatTurnAsks(chatRead.value.rows, sid).filter((a) => !have.has(a.id))]
 })
+// trinity-enterprise#747: the waiting QUESTION this chat was opened to discuss
+// — the one ask a typed reply can answer directly. (An approval's decision must
+// be one of its options, #2376, so it is decided in its card.)
+const discussedQuestion = computed(() => chatTurnAskList.value.find((a) => (
+  isDiscussedIn(a, currentSessionId.value) && a.status === 'pending' && a.kind === 'question'
+)) || null)
+const answeringDiscussion = ref(false)
+const discussionAnswerError = ref('')
+watch(currentSessionId, () => { discussionAnswerError.value = '' })
+async function answerDiscussedAsk() {
+  const ask = discussedQuestion.value
+  const text = input.value.trim()
+  if (!ask || !text || answeringDiscussion.value) return
+  // The answer field's own bound (`WorkspaceAskAnswer.response`), named here
+  // rather than met as a bare 422.
+  if (text.length > 500) {
+    discussionAnswerError.value = 'An answer is at most 500 characters — shorten it, or keep discussing.'
+    return
+  }
+  answeringDiscussion.value = true
+  discussionAnswerError.value = ''
+  try {
+    await store.answerAsk(ask.id, { response: text })
+    input.value = ''
+    autoGrowAfterUpdate()
+  } catch (err) {
+    discussionAnswerError.value = err.response?.data?.detail?.message || 'Could not send your answer. Try again.'
+  } finally {
+    answeringDiscussion.value = false
+  }
+}
+
 // An ask seen waiting in this chat keeps its card (ended, with the ent#468
 // confirmation) after you answer it, until you leave the chat. Any other ended
 // ask is one muted history row. ONE watcher over (chat, waiting ids): two — a
@@ -2779,9 +2836,11 @@ const voiceHeaderText = computed(() => voiceHeaderLine({
 const threadItems = computed(() => groupVoiceBlocks(messages.value))
 // trinity-enterprise#610: the thread's rows with this chat's chat-turn asks
 // placed among them by time, each as a card or a history row.
-const threadRows = computed(() => placeAsksInThread(threadItems.value, chatTurnAskList.value, { truncated: historyTruncated.value }).map((row) => (
+const threadRows = computed(() => placeAsksInThread(threadItems.value, chatTurnAskList.value, { truncated: historyTruncated.value, sessionId: currentSessionId.value }).map((row) => (
   row.kind !== 'ask' ? row
-    : askTileMode(row.ask) === 'card' ? { ...row, mode: 'card' }
+    // trinity-enterprise#748: a dismissal inside its Undo window keeps the card,
+    // which is where its Undo is.
+    : askTileMode(row.ask) === 'card' || store.askDismissals[row.ask.id] ? { ...row, mode: 'card' }
       : { ...row, mode: 'row', line: askHistoryLine(row.ask) }
 )))
 // The team's ruling (2026-10-01): the answered card collapses into its row, the
@@ -2925,4 +2984,47 @@ watch(
   { immediate: true }
 )
 onBeforeUnmount(() => emit('work-state', workSignalFrom({ sending: false })))
+
+// trinity-enterprise#747: an answer here woke the agent, and its result is
+// delivered into this chat as a completion report (ent#457). The chat has no
+// history poll, so it looks for that report itself — every few seconds, for a
+// bounded time, only while this chat is the one on screen — and appends it.
+const ASK_RESULT_POLL_MS = 5000
+const ASK_RESULT_WAIT_MS = 5 * 60 * 1000
+let askResultTimer = null
+function stopAskResultPoll() {
+  if (askResultTimer) { clearInterval(askResultTimer); askResultTimer = null }
+}
+async function checkAskResult(watch) {
+  const sid = currentSessionId.value
+  if (!watch || watch.chatId !== sid || sending.value) return
+  if (Date.now() - watch.since > ASK_RESULT_WAIT_MS) {
+    stopAskResultPoll()
+    if (store.askResultWatch === watch) store.askResultWatch = null
+    return
+  }
+  let data
+  try {
+    data = await store.fetchHistory(props.agent.name, sid, { limit: REPLY_POLL_ROWS })
+  } catch (_) { return }   // the next tick tries again; the report is a row, not an event
+  if (currentSessionId.value !== sid) return
+  const have = new Set(messages.value.map((m) => m.id).filter(Boolean))
+  const fresh = (data.messages || []).filter((m) => (
+    m.id && !have.has(m.id) && m.role === 'assistant' && String(m.source || '').startsWith('completion:')
+  ))
+  if (!fresh.length) return
+  messages.value = [...messages.value, ...fresh.map((m) => ({ ...assistantRow(m), at: m.created_at || null }))]
+  onMessagesArrived(fresh.length)
+  stopAskResultPoll()
+  if (store.askResultWatch === watch) store.askResultWatch = null
+}
+watch(
+  () => [store.askResultWatch, currentSessionId.value, props.agent?.name],
+  ([w, sid, agent]) => {
+    stopAskResultPoll()
+    if (!w || w.chatId !== sid || w.agentName !== agent) return
+    askResultTimer = setInterval(() => checkAskResult(w), ASK_RESULT_POLL_MS)
+  },
+)
+onBeforeUnmount(stopAskResultPoll)
 </script>
