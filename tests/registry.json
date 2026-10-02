@@ -1,6 +1,18 @@
 {
   "test_files": [
     {
+      "file": "unit/test_ent761_outbound_control_oss.py",
+      "feature": "trinity-enterprise#761",
+      "added": "2026-10-02",
+      "categories": [
+        "backend",
+        "api",
+        "settings",
+        "a2a"
+      ],
+      "description": "Outbound A2A endpoint control is OSS-core: the settings package's `# mcp:` header names the covering tool module and the /a2a-endpoints routes, the three handlers carry no entitlement gate (AST walk) and stay admin + human-only, PUT /api/settings/a2a-endpoints reports the outbound switch state, and register -> list -> resolve (any agent, platform scope) -> remove works with no resolver provider registered."
+    },
+    {
       "file": "unit/test_ent671_env_backed_ops_forwarding.py",
       "feature": "trinity-enterprise#671",
       "added": "2026-09-29",

@@ -1,4 +1,4 @@
-# mcp: none — platform admin settings — a grant surface, human-only (Invariant #8 grant-vs-use)
+# mcp: tools/a2a.ts — the /a2a-endpoints routes only; every other route in this package is a grant surface, human-only (Invariant #8 grant-vs-use)
 """System settings routes for the Trinity backend.
 
 Endpoints for system-wide configuration. Admin-only for modification, read
