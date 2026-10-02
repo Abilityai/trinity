@@ -31,7 +31,6 @@ from services.platform_prompt_service import (
     format_user_memory_block,
     summarize_user_memory_background,
 )
-from services.task_execution_service import get_task_execution_service
 from services.upload_service import (
     WEB_MAX_FILES,
     WEB_MAX_FILE_SIZE,
@@ -95,11 +94,14 @@ async def _execute_public_chat_background(
     response in the public chat session.
     """
     try:
-        task_execution_service = get_task_execution_service()
-        result = await task_execution_service.execute_task(
+        # #3114: on a pull pilot the turn is queued and awaited here.
+        from services.task_execution_service import dispatch_and_await_terminal
+
+        result = await dispatch_and_await_terminal(
             agent_name=agent_name,
             message=context_prompt,
             triggered_by="public",
+            conversation_key=f"public:{chat_session_id}",
             source_user_email=source_email,
             timeout_seconds=900,
             execution_id=execution_id,
@@ -314,7 +316,6 @@ async def run_public_chat(link: dict, chat_request, client_ip: str):
     # Public executions now get full tracking: execution records, activity stream,
     # slot management, credential sanitization, and Dashboard timeline visibility.
     source_email = verified_email or f"anonymous ({client_ip})"
-    task_execution_service = get_task_execution_service()
 
     # Async mode (THINK-001): return execution_id immediately for SSE streaming
     if chat_request.async_mode:
@@ -351,11 +352,15 @@ async def run_public_chat(link: dict, chat_request, client_ip: str):
             "async_mode": True,
         }
 
-    # Sync mode: wait for result
-    result = await task_execution_service.execute_task(
+    # Sync mode: wait for result. #3114: on a pull pilot the turn is queued
+    # and awaited here.
+    from services.task_execution_service import dispatch_and_await_terminal
+
+    result = await dispatch_and_await_terminal(
         agent_name=agent_name,
         message=context_prompt,
         triggered_by="public",
+        conversation_key=f"public:{chat_session.id}",
         source_user_email=source_email,
         timeout_seconds=900,
         # #894: per-agent public-channel model override (None → platform default).

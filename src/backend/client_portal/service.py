@@ -745,6 +745,7 @@ def _row_to_card(r: dict, tts_ready: bool, default_voice_id: str | None = None,
     later silently un-fix #2695 with the whole suite green.
     """
     from services import tts_service
+    from services.pull_pilot import pull_owns_dispatch
     name = r["agent_name"]
     updated = r.get("avatar_updated_at")
     # Only agents with a generated (non-default) avatar get an image URL;
@@ -796,6 +797,8 @@ def _row_to_card(r: dict, tts_ready: bool, default_voice_id: str | None = None,
         # caller knows its own principal kind and this builder is shared with
         # the single-agent lookup.
         can_manage_canvases=can_manage_canvases,
+        # #3114: an env-var read, so cheap per card.
+        pulls_turns=pull_owns_dispatch(name, "public"),
         # ent#403: `None` — no control at all — for every non-platform principal.
         # The roster payload is the ONLY capability channel an external client
         # has (#2128): a UI gate written against `GET /api/settings/feature-flags`
@@ -3144,7 +3147,13 @@ async def portal_chat(agent_name: str, message: str, email: str,
                 agent_name, message, email, session_id, resolved_model,
                 open_canvas_id=open_canvas_id)
             if execution_id:
-                mark_turn_inflight(session_id, execution_id, turn_timeout + 60)
+                # #3114: plus the claim waits a pull pilot's turn and its cold
+                # retry may spend.
+                from services.pull_pilot import pull_queue_allowance
+                mark_turn_inflight(
+                    session_id, execution_id,
+                    turn_timeout + 60 + 2 * pull_queue_allowance(agent_name),
+                )
                 owns_marker = True
 
         turn = await _run_sync_turn_and_clear_marker(
@@ -3926,7 +3935,10 @@ async def start_portal_turn(agent_name: str, message: str, email: str,
     # the client's budget and the actual turn disagree about one turn's life.
     from services.session_turn_service import resolve_turn_timeout
     turn_timeout = resolve_turn_timeout(agent_name)
-    wait_budget = portal_max_turn_seconds(turn_timeout)
+    # #3114: on a pull pilot each of the two attempts may first wait up to one
+    # agent timeout for a worker to claim it.
+    from services.pull_pilot import pull_queue_allowance
+    wait_budget = portal_max_turn_seconds(turn_timeout) + 2 * pull_queue_allowance(agent_name)
 
     # #2320: drop any verdict left by the PREVIOUS turn on this thread before
     # the new marker lands. Without this, a client polling turn N+1 is handed
@@ -4438,8 +4450,12 @@ def get_history(agent_name: str, email: str, session_id: str | None = None,
                     # (#2133) — a `lost` verdict never retries, so under-waiting
                     # only costs a premature "check shortly" message, but it is
                     # still the dishonest one.
+                    from services.pull_pilot import pull_queue_allowance
                     from services.session_turn_service import resolve_turn_timeout
-                    wait_budget = portal_max_turn_seconds(resolve_turn_timeout(agent_name))
+                    wait_budget = (
+                        portal_max_turn_seconds(resolve_turn_timeout(agent_name))
+                        + 2 * pull_queue_allowance(agent_name)  # #3114
+                    )
                 else:
                     wait_budget = ttl
         except Exception as e:  # noqa: BLE001 — budget None → the client falls back

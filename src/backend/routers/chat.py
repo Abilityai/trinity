@@ -5,6 +5,7 @@ Includes execution queue integration to prevent parallel execution on the same a
 """
 from fastapi import APIRouter, Depends, HTTPException, Header
 from fastapi.responses import StreamingResponse, JSONResponse
+import asyncio
 import httpx
 import json
 import logging
@@ -21,6 +22,8 @@ from dependencies import (
 )
 from services.agent_auth import agent_httpx_client
 from services.docker_service import get_agent_container
+from services import sync_waiter
+from services.pull_pilot import pull_queue_allowance
 from services.model_catalog import InvalidModelError, validate_dispatch_model
 from services.capacity_manager import (
     CapacityFull,
@@ -1013,26 +1016,39 @@ async def stream_execution_log(
     async def proxy_stream():
         """Proxy SSE stream from agent container with connect timeout and keepalive."""
         agent_url = f"http://agent-{name}:8000/api/executions/{execution_id}/stream"
+        # #3114: on a pull pilot the turn can wait on the durable queue, and the
+        # agent knows nothing of it until a worker claims it. Hold the stream
+        # while the row is queued, then retry a 404 briefly while the row is
+        # running (claimed, not yet registered on the agent by the worker).
+        allowance = pull_queue_allowance(name)
+        attach_retries = sync_waiter.STREAM_ATTACH_RETRIES if allowance else 0
         try:
+            async for tick in sync_waiter.wait_while_queued(execution_id, allowance):
+                yield tick
             # Connect timeout prevents hanging if agent is unresponsive,
             # but read timeout is None since SSE streams are long-lived
             timeout = httpx.Timeout(connect=10.0, read=None, write=None, pool=None)
             async with agent_httpx_client(name, timeout=timeout) as client:
-                async with client.stream("GET", agent_url) as response:
-                    if response.status_code == 404:
-                        # Execution not found on agent (race condition: task not started yet)
-                        yield f"data: {json.dumps({'type': 'error', 'message': 'Execution not yet available on agent', 'retryable': True})}\n\n"
-                        yield f"data: {json.dumps({'type': 'stream_end'})}\n\n"
-                        return
-
-                    if response.status_code != 200:
-                        yield f"data: {json.dumps({'type': 'error', 'message': f'Agent returned {response.status_code}'})}\n\n"
-                        yield f"data: {json.dumps({'type': 'stream_end'})}\n\n"
-                        return
-
-                    # Stream through data from agent, adding proxy-level keepalive
-                    async for chunk in response.aiter_text():
-                        yield chunk
+                while True:
+                    async with client.stream("GET", agent_url) as response:
+                        if response.status_code == 404:
+                            if attach_retries > 0 and sync_waiter.execution_is_running(execution_id):
+                                attach_retries -= 1
+                            else:
+                                # Execution not found on agent (race condition: task not started yet)
+                                yield f"data: {json.dumps({'type': 'error', 'message': 'Execution not yet available on agent', 'retryable': True})}\n\n"
+                                yield f"data: {json.dumps({'type': 'stream_end'})}\n\n"
+                                return
+                        elif response.status_code != 200:
+                            yield f"data: {json.dumps({'type': 'error', 'message': f'Agent returned {response.status_code}'})}\n\n"
+                            yield f"data: {json.dumps({'type': 'stream_end'})}\n\n"
+                            return
+                        else:
+                            # Stream through data from agent, adding proxy-level keepalive
+                            async for chunk in response.aiter_text():
+                                yield chunk
+                            return
+                    await asyncio.sleep(sync_waiter.STREAM_ATTACH_RETRY_INTERVAL)
         except httpx.ConnectError:
             yield f"data: {json.dumps({'type': 'error', 'message': 'Failed to connect to agent', 'retryable': True})}\n\n"
             yield f"data: {json.dumps({'type': 'stream_end'})}\n\n"

@@ -340,7 +340,12 @@ class ValidationService:
 
         try:
             # 4. Run validation via TaskExecutionService
-            result = await self._task_service.execute_task(
+            # #3114: on a pull pilot the validation turn is queued and
+            # awaited here.
+            from services.task_execution_service import dispatch_and_await_terminal
+
+            result = await dispatch_and_await_terminal(
+                service=self._task_service,
                 agent_name=agent_name,
                 message=validation_prompt,
                 triggered_by="validation",

@@ -313,12 +313,19 @@ async def paid_chat(
         )
 
     # Step 3: Execute task
-    task_service = get_task_execution_service()
+    from services.task_execution_service import dispatch_and_await_terminal
+
     try:
-        exec_result = await task_service.execute_task(
+        # #3114: on a pull pilot the turn is queued and awaited here; a
+        # resumed session is its conversation key.
+        exec_result = await dispatch_and_await_terminal(
+            service=get_task_execution_service(),
             agent_name=agent_name,
             message=request_body.message,
             triggered_by="paid",
+            conversation_key=(
+                f"paid:{request_body.session_id}" if request_body.session_id else None
+            ),
             system_prompt=build_public_channel_caller_prompt(agent_name),  # #1205
             resume_session_id=request_body.session_id,
             # #894: per-agent public-channel model override (None → platform default).

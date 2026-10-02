@@ -24,7 +24,7 @@ from collections.abc import Coroutine
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
-from typing import Any, Optional
+from typing import Any, Optional, Tuple
 
 import httpx
 
@@ -54,7 +54,11 @@ from services import channel_completion_report
 from services.platform_audit_service import AuditEventType, platform_audit_service
 # #2048: stdlib-only leaf by construction, so this cannot cycle back through the
 # capacity stack at import time (its own reference to this module is lazy).
-from services.pull_pilot import note_unreachable_pull_trigger, pull_owns_dispatch
+from services.pull_pilot import (
+    INTERACTIVE_TRIGGERS,
+    note_unreachable_pull_trigger,
+    pull_owns_dispatch,
+)
 from services.settings_service import settings_service
 from utils.credential_sanitizer import sanitize_dict, sanitize_execution_log, sanitize_response, sanitize_text
 from services.runtime_secret_scrub import get_staged_values, scrub_obj, scrub_text
@@ -604,6 +608,11 @@ def build_pull_queue_payload(
     source_user_email: Optional[str],
     source_agent_name: Optional[str],
     slot_already_held: bool,
+    conversation_key: Optional[str] = None,
+    persist_session: bool = False,
+    schedule_context: Optional[dict] = None,
+    attempt: Optional[int] = None,
+    images: Optional[list] = None,
 ) -> Optional[PersistentTaskPayload]:
     """The #2391 producer gate: the overflow payload that lets THIS producer put
     a row on the durable queue, or ``None`` to keep today's ``"reject"`` policy.
@@ -691,7 +700,40 @@ def build_pull_queue_payload(
         x_source_agent=source_agent_name,
         triggered_by=triggered_by,
         collaboration_activity_id=None,
+        # #3114: what the push payload sends beside the request. The worker
+        # needs persist_session and images to run the same turn; the claim
+        # composes the prompt from schedule_context and attempt; the claim
+        # guard serialises turns sharing conversation_key.
+        conversation_key=conversation_key,
+        persist_session=persist_session,
+        schedule_context=schedule_context,
+        attempt=attempt,
+        images=images or None,
     )
+
+
+# #3114: triggers whose caller holds a person (or a validation verdict) on the
+# answer. On a pull pilot such a turn first waits for a worker to CLAIM it,
+# bounded by one agent timeout, and is cancelled if none does in time.
+_CLAIM_WAITING_TRIGGERS = INTERACTIVE_TRIGGERS | {"validation"}
+# Row-read cadence while a sync turn waits for its claim. Module-level so tests
+# can shorten it.
+QUEUE_CLAIM_POLL_INTERVAL = 1.0
+
+
+async def _wait_until_claimed(execution_id: str, budget: float) -> bool:
+    """Poll the row while it is ``queued``. True once it left ``queued``
+    (claimed, terminal, or gone); False when it is still queued at ``budget``."""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + budget
+    while True:
+        row = db.get_execution(execution_id)
+        if row is None or row.status != TaskExecutionStatus.QUEUED:
+            return True
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            return False
+        await asyncio.sleep(min(QUEUE_CLAIM_POLL_INTERVAL, remaining))
 
 
 async def dispatch_and_await_terminal(
@@ -700,6 +742,8 @@ async def dispatch_and_await_terminal(
     message: str,
     triggered_by: str,
     wait_timeout: Optional[float] = None,
+    claim_budget: Optional[float] = None,
+    service: Optional["TaskExecutionService"] = None,
     **execute_kwargs,
 ) -> TaskExecutionResult:
     """``execute_task`` for a caller that genuinely needs the answer in-line.
@@ -717,17 +761,28 @@ async def dispatch_and_await_terminal(
     block correctly while the work happens somewhere else, which is a different
     thing and one the adapter already does.
 
-    ⚠️ Under pull, nothing signals the waiter directly (the pull sink writes the
-    terminal through the CAS, it does not know about this registry), so the wake
-    comes from ``sync_waiter``'s DB-poll fallback and latency is bounded by
-    ``SYNC_WAITER_POLL_INTERVAL``. For a turn measured in seconds-to-minutes that
-    is noise, and it is deliberately not worth a second signalling path.
+    The pull sink signals the waiter when its CAS write wins (#3114), so a
+    caller in the same process wakes at once; a caller on another uvicorn
+    worker wakes on ``sync_waiter``'s DB poll within
+    ``SYNC_WAITER_POLL_INTERVAL``.
+
+    **Interactive and validation triggers wait in two phases (#3114).** Phase 1
+    holds while the row is ``queued``, for at most ``claim_budget`` seconds
+    (default one agent execution timeout; a room passes a shorter one). If no
+    worker claimed it by then the row is stored FAILED and the caller gets
+    FAILED/``CAPACITY``, which is what push answers for an agent with no free
+    slot. A cancel that loses the race means a worker just claimed the row, so
+    the wait carries on. Phase 2 is the terminal wait, timed from the claim.
+    Other triggers keep the single terminal wait.
 
     A wait that times out returns a FAILED result with ``TIMEOUT`` rather than
     raising — the execution keeps running and its real terminal still lands on
     the row, exactly as for a fan-out deadline (#2524).
+
+    ``service`` is for a caller that holds its own ``TaskExecutionService``
+    (``ValidationService`` takes one by injection); default is the singleton.
     """
-    result = await get_task_execution_service().execute_task(
+    result = await (service or get_task_execution_service()).execute_task(
         agent_name=agent_name,
         message=message,
         triggered_by=triggered_by,
@@ -738,16 +793,59 @@ async def dispatch_and_await_terminal(
 
     from services.sync_waiter import wait_for_sync_terminal
 
+    try:
+        agent_timeout = float(db.get_execution_timeout(agent_name))
+    except Exception:  # noqa: BLE001 — a config read must not break dispatch
+        agent_timeout = 7200.0
     if wait_timeout is None:
-        try:
-            wait_timeout = float(db.get_execution_timeout(agent_name)) + 120.0
-        except Exception:  # noqa: BLE001 — a config read must not break dispatch
-            wait_timeout = 7320.0
+        wait_timeout = agent_timeout + 120.0
+    if claim_budget is None:
+        claim_budget = agent_timeout
 
     logger.info(
         "[TaskExecService] %s dispatch for %s queued as %s; awaiting its terminal",
         triggered_by, agent_name, result.execution_id,
     )
+    if triggered_by in _CLAIM_WAITING_TRIGGERS:
+        try:
+            claimed = await _wait_until_claimed(result.execution_id, claim_budget)
+        except asyncio.CancelledError:
+            # The caller went away: a turn still queued must not run later for
+            # nobody (a paid turn would run unsettled).
+            if db.cancel_queued_execution(result.execution_id, reason="caller went away"):
+                _close_unclaimed_turn(agent_name, result.execution_id,
+                                      TaskExecutionStatus.CANCELLED, "caller went away")
+            raise
+        if not claimed:
+            error = (
+                f"Agent at capacity (queued turn not claimed in {int(claim_budget)}s)"
+            )
+            # #3114: stored FAILED, so it reads as a capacity failure; only a
+            # caller going away (above) leaves a CANCELLED row.
+            if db.cancel_queued_execution(
+                result.execution_id, reason=error, status=TaskExecutionStatus.FAILED
+            ):
+                logger.info(
+                    "[TaskExecService] %s: queued %s turn %s not claimed in %ss; failed",
+                    agent_name, triggered_by, result.execution_id, int(claim_budget),
+                )
+                _close_unclaimed_turn(agent_name, result.execution_id,
+                                      TaskExecutionStatus.FAILED, error)
+                return TaskExecutionResult(
+                    execution_id=result.execution_id,
+                    status=TaskExecutionStatus.FAILED,
+                    response="",
+                    error=error,
+                    error_code=TaskExecutionErrorCode.CAPACITY,
+                )
+            # Lost the cancel: a worker claimed it just now. Phase 2.
+        # A short turn can finish inside one claim poll, before the waiter
+        # registers, and the sink's wake-up is then lost. Read the row first.
+        from services.sync_waiter import TERMINAL_TASK_STATUSES
+
+        done = result_from_execution_row(result.execution_id)
+        if done is not None and done.status in TERMINAL_TASK_STATUSES:
+            return done
     try:
         await wait_for_sync_terminal(result.execution_id, wait_timeout)
     except asyncio.TimeoutError:
@@ -755,10 +853,42 @@ async def dispatch_and_await_terminal(
             execution_id=result.execution_id,
             status=TaskExecutionStatus.FAILED,
             response="",
-            error=f"Timed out after {int(wait_timeout)}s waiting for the queued execution",
+            error=(
+                f"Execution timed out after {int(wait_timeout)}s waiting for "
+                f"the queued execution"
+            ),
             error_code=TaskExecutionErrorCode.TIMEOUT,
         )
     return result_from_execution_row(result.execution_id) or result
+
+
+def _close_unclaimed_turn(agent_name: str, execution_id: str, status, error: str) -> None:
+    """#3114: a claim-wait CAS winner (unclaimed FAILED, caller-away CANCELLED)
+    closes its dispatch activity and emits the terminal event, as every other
+    terminal writer does. Fire-and-forget; a running loop is guaranteed here."""
+    activity_service.spawn_close_execution_activity(execution_id, status, error=error)
+    event_dispatch_service.spawn_task_terminal_event(
+        agent_name, execution_id, terminal_status=status, summary_or_error=error,
+    )
+
+
+# Values `mark_execution_dispatched` writes into `claude_session_id` before a
+# real session id exists. Never a resumable session.
+_DISPATCH_SESSION_SENTINELS = frozenset({"dispatched", "dispatched_async"})
+_ERROR_CODE_VALUES = {code.value: code for code in TaskExecutionErrorCode}
+
+
+def _split_error_code(
+    error: Optional[str],
+) -> Tuple[Optional[TaskExecutionErrorCode], Optional[str]]:
+    """``(code, text)`` from an error the pull sink stored as ``[code] text``
+    (``apply_task_result``). The prefix is removed only when it names a
+    ``TaskExecutionErrorCode``; channel adapters post ``text`` to people."""
+    if not error or not error.startswith("["):
+        return None, error
+    head, sep, rest = error[1:].partition("]")
+    code = _ERROR_CODE_VALUES.get(head.strip().lower()) if sep else None
+    return (code, rest.strip()) if code else (None, error)
 
 
 def result_from_execution_row(execution_id: str) -> Optional[TaskExecutionResult]:
@@ -767,21 +897,46 @@ def result_from_execution_row(execution_id: str) -> Optional[TaskExecutionResult
     The row is the authority once a turn has run somewhere other than inside the
     caller's await — under pull that is every turn. Returns None when the row is
     gone, so the caller can fall back to whatever it already had.
+
+    #3114: shaped like the push result its interactive callers already read.
+    ``response`` is set on success and cancel (#679 returns a cancelled turn's
+    partial reply), ``error_code`` comes back out of the ``[code]`` prefix the
+    pull sink writes and the prefix is removed from ``error``,
+    compact events ride ``raw_response["metadata"]``, and the dispatch
+    sentinels never pass for a session id.
     """
     execution = db.get_execution(execution_id)
     if execution is None:
         return None
     status = getattr(execution, "status", None)
     status = status.value if hasattr(status, "value") else str(status)
+    error = getattr(execution, "error", None)
+    session_id = getattr(execution, "claude_session_id", None)
+    if session_id in _DISPATCH_SESSION_SENTINELS:
+        session_id = None
+    raw_response: dict = {}
+    compact = getattr(execution, "compact_metadata", None)
+    if compact:
+        try:
+            raw_response = {"metadata": {"compact_events": json.loads(compact)}}
+        except (TypeError, ValueError):
+            raw_response = {}
+    keeps_response = status in (
+        TaskExecutionStatus.SUCCESS.value, TaskExecutionStatus.CANCELLED.value
+    )
+    error_code, error = _split_error_code(error)
     return TaskExecutionResult(
         execution_id=execution_id,
         status=status,
-        response=getattr(execution, "response", None) or "",
+        response=(getattr(execution, "response", None) or "") if keeps_response else "",
         cost=getattr(execution, "cost", None),
         context_used=getattr(execution, "context_used", None),
         context_max=getattr(execution, "context_max", None),
-        session_id=getattr(execution, "claude_session_id", None),
-        error=getattr(execution, "error", None),
+        session_id=session_id,
+        execution_log=getattr(execution, "execution_log", None),
+        raw_response=raw_response,
+        error=error,
+        error_code=error_code,
     )
 
 
@@ -1274,6 +1429,10 @@ class TaskExecutionService:
         source_channel_client: Optional[str] = None,
         # ent#555 — which canvas the user had open when they sent this turn.
         open_canvas_id: Optional[str] = None,
+        # #3114: the conversation this turn continues, e.g. "session:<key>".
+        # Only a pull pilot's queue reads it: the claim never runs two queued
+        # turns with the same key at once. Ignored on the push path.
+        conversation_key: Optional[str] = None,
         # #2973: inter-agent chain depth (#2806) the caller already admitted;
         # stamped on the row created here. Ignored when `execution_id` is given.
         chain_depth: Optional[int] = None,
@@ -1399,6 +1558,11 @@ class TaskExecutionService:
             source_user_email=source_user_email,
             source_agent_name=source_agent_name,
             slot_already_held=slot_already_held,
+            conversation_key=conversation_key,
+            persist_session=persist_session,
+            schedule_context=schedule_context,
+            attempt=attempt,
+            images=images,
         )
 
         # Wrap entire execution flow to ensure execution status is updated on any failure.
