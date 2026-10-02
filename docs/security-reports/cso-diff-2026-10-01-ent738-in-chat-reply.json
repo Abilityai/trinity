@@ -1,0 +1,103 @@
+{
+ "version": "1.2",
+ "date": "2026-10-01",
+ "mode": "daily",
+ "scope": "diff",
+ "branch": "feature/738-in-chat-reply",
+ "issue": "abilityai/trinity-enterprise#738",
+ "base": "e51864531",
+ "commits": [
+  "797b73cf3",
+  "4e613b724"
+ ],
+ "phases_run": [
+  0,
+  1,
+  2,
+  6,
+  7,
+  8,
+  9,
+  10,
+  11,
+  12,
+  13,
+  14
+ ],
+ "phases_not_applicable": {
+  "3": "no dependency or lockfile change",
+  "4": "no workflow change",
+  "5": "no Dockerfile/compose change"
+ },
+ "stack_cve_quicklist": "not re-evaluated: no pin, lockfile, Dockerfile, compose or workflow in the diff",
+ "attack_surface": {
+  "new_endpoints": 0,
+  "changed_endpoints": [],
+  "changed_mcp_tools": [],
+  "new_agent_context_ingress": 0,
+  "frontend": [
+   "PortalAgentBubble Reply button (interpolated label)",
+   "PortalReplyChip text span id (useId)",
+   "PortalConversation reply emit + Esc drop-reply",
+   "Portal.vue setReplyTarget + convKey clear"
+  ]
+ },
+ "checks": [
+  {
+   "check": "secrets in added lines",
+   "result": "clean",
+   "evidence": "no known prefix, private IP or email in git log -p e51864531..HEAD"
+  },
+  {
+   "check": "enterprise-docs guard on added doc lines",
+   "result": "clean",
+   "evidence": "75 added lines, 0 hits"
+  },
+  {
+   "check": "concealed Unicode / injection strings",
+   "result": "clean",
+   "evidence": "17 files, 0 hits"
+  },
+  {
+   "check": "new HTML sinks (v-html, innerHTML, bound href)",
+   "result": "clean",
+   "evidence": "none in src; innerHTML='' only in a test fixture"
+  },
+  {
+   "check": "client-chosen reply id (A01)",
+   "result": "clean (challenged)",
+   "evidence": "tests/unit/test_ent610_reply_to_message.py 18 passed: uniform 422 for another user/agent/thread, named thread required, malformed id refused before read, server-built capped quote"
+  },
+  {
+   "check": "failure direction of new guards (A10)",
+   "result": "clean",
+   "evidence": "Esc yields without an on-screen chip or on defaultPrevented; convKey clears a mismatched target; setReplyTarget refuses a target without messageId \u2014 each stated in a comment and pinned by a red mutation"
+  }
+ ],
+ "findings": [],
+ "hypotheses": [],
+ "coverage_gaps": [
+  "stack CVE quicklist and Phase 3 scanner not run (no pins in diff)",
+  "no live-browser verification (operator eyeball pending)",
+  "independent verifier not spawned (no finding reached the gate)"
+ ],
+ "supply_chain_summary": {
+  "scanner": "none (no dependency change in diff)"
+ },
+ "filter_stats": {
+  "candidates": 0,
+  "dropped": 0
+ },
+ "totals": {
+  "critical": 0,
+  "high": 0,
+  "medium": 0,
+  "low": 0
+ },
+ "trend": {
+  "prior_reports_for_branch": 0,
+  "resolved": [],
+  "persistent": [],
+  "new": []
+ }
+}

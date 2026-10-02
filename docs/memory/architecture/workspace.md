@@ -888,6 +888,25 @@ has a way out: the sent message's chip is removable while that message is failed
 Retry then sends it as an ordinary turn (`dropReply`; mounted in
 `portalReplyRefused.mount.spec.js`). A delivered message's chip stays fixed.
 
+**The second door (ent#738).** Reply is also the agent bubble's own action in the 1:1 chat,
+`PortalAgentBubble` `replyLabel`, in the row Copy · Reply · thumbs. The Inbox pane's arrow is
+that same action. It renders on persisted rows only (`item.message.id && currentSessionId`).
+The conversation emits `reply` and the shell (`setReplyTarget`) sets the same `replyTarget`,
+so the chip, the send and the 422 path above are unchanged. The payload names
+`currentSessionId`, never the `sessionId` prop: on a URL with no `:sessionId` the
+conversation resolves the chat itself. For the same reason the shell clears a target on
+`watch(convKey)` as well as on a route `sessionId` change. Otherwise a New chat or an agent
+switch on such a URL left the target hidden, and it came back with that chat. The Inbox path
+keeps its target through its own navigation because the `/c/:id` handler sets
+`pendingSession` in the tick it remounts. Esc in the composer drops the chip through
+`resolveComposerKey`'s `drop-reply`, keyed on the chip ON SCREEN and on `!defaultPrevented`.
+Its `preventDefault` is what makes the turn-cancel listener yield. So it is innermost first:
+typeahead, then chip, then turn. Escape with focus on the chip's own × is claimed by the chip
+itself (`PortalReplyChip` `@keydown.esc`, removable only), for the same reason. An @mention escalation to a room carries the text, not the
+reply (unchanged). The relation is not persisted on the stored user row, so a reload shows no
+quote on a sent reply (ent#746). Pinned by `portalInChatReply.mount.spec.js` and
+`portalInboxShell.mount.spec.js`.
+
 ## Agents at the centre — Main, Reset, and the one page (ent#523, ent#524)
 
 Clicking an agent opens the **conversation** you were last in. `/workspace/a/:agentName`
