@@ -84,7 +84,10 @@ jobs:
             # A backend recreate kills running executions. The 3h window skips
             # rows left `running` by a crash, which would otherwise block forever.
             check_in_flight() {
-              RUNNING=$($PSQL "SELECT count(*) FROM schedule_executions WHERE status='running' AND started_at::timestamptz > now() - interval '3 hours'")
+              if ! RUNNING=$($PSQL "SELECT count(*) FROM schedule_executions WHERE status='running' AND started_at::timestamptz > now() - interval '3 hours'"); then
+                echo "::error::in-flight check failed (psql) -- not deploying."
+                exit 1
+              fi
               if [ "${RUNNING:-0}" != "0" ]; then
                 skip "${RUNNING} execution(s) running"
               fi
@@ -121,7 +124,7 @@ jobs:
             # catches gzip itself failing (disk full).
             ( umask 077; sudo docker exec trinity-postgres pg_dump -U trinity trinity | gzip > "$DUMP" ) \
               || { echo "::error::Writing ${DUMP} failed -- not deploying."; exit 1; }
-            if ! gzip -dc "$DUMP" | tail -n 5 | grep -q 'PostgreSQL database dump complete'; then
+            if ! gzip -dc "$DUMP" | tail -n 20 | grep -q 'PostgreSQL database dump complete'; then
               echo "::error::Pre-deploy dump ${DUMP} is incomplete -- not deploying."
               exit 1
             fi

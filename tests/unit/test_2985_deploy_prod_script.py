@@ -53,21 +53,22 @@ case "$1" in
 esac
 """
 
-# DUMP_MODE: ok (trailer present), fail (pg_dump exits 1 mid-stream),
-# truncated (exits 0 but no trailer).
+# DUMP_MODE: ok (trailer present, followed by pg_dump >=17.6's \unrestrict
+# tail), fail (pg_dump exits 1 mid-stream), truncated (exits 0 but no trailer).
+# PSQL_MODE: ok (0 running), fail (psql exits 2).
 _DOCKER_STUB = """\
 #!/bin/sh
 printf '%s\\n' "$*" >> "$STUB_DIR/docker.log"
 case "$1" in
   exec)
     case "$*" in
-      *psql*) echo 0 ;;
+      *psql*) [ "$PSQL_MODE" = fail ] && exit 2; echo 0 ;;
       *pg_dump*)
         echo "-- partial dump"
         case "$DUMP_MODE" in
           fail) exit 1 ;;
           truncated) exit 0 ;;
-          *) echo "-- PostgreSQL database dump complete" ;;
+          *) printf -- '--\\n-- PostgreSQL database dump complete\\n--\\n\\n\\\\unrestrict abc\\n\\n' ;;
         esac ;;
     esac ;;
   compose|rm) exit 0 ;;
@@ -106,7 +107,7 @@ class Run:
         return f"rc={self.rc}\nstdout:\n{self.stdout}\nstderr:\n{self.stderr}"
 
 
-def _run(shell: str, tmp_path: Path, dump: str = "ok", curl: str = "ok") -> Run:
+def _run(shell: str, tmp_path: Path, dump: str = "ok", curl: str = "ok", psql: str = "ok") -> Run:
     exe = shutil.which(shell)
     if exe is None:
         pytest.skip(f"{shell} not available")
@@ -132,6 +133,7 @@ def _run(shell: str, tmp_path: Path, dump: str = "ok", curl: str = "ok") -> Run:
             "STUB_DIR": str(stubs),
             "DUMP_MODE": dump,
             "CURL_MODE": curl,
+            "PSQL_MODE": psql,
             "HOME": str(tmp_path),
             "LC_ALL": "C",
         },
@@ -167,5 +169,14 @@ def test_bad_dump_blocks_the_deploy(shell, dump, tmp_path):
     r = _run(shell, tmp_path, dump=dump)
     assert r.rc != 0, r.explain()
     assert "incomplete -- not deploying" in r.stdout, r.explain()
+    assert "=== Checkout ===" not in r.stdout, r.explain()
+    assert r.marker == _PREV, r.explain()
+
+
+@pytest.mark.parametrize("shell", _SHELLS)
+def test_failed_in_flight_query_fails_loudly(shell, tmp_path):
+    r = _run(shell, tmp_path, psql="fail")
+    assert r.rc != 0, r.explain()
+    assert "::error::" in r.stdout, r.explain()
     assert "=== Checkout ===" not in r.stdout, r.explain()
     assert r.marker == _PREV, r.explain()
