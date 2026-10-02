@@ -308,6 +308,7 @@
                 :current-session-id="currentSessionId"
                 :thread-link="false"
                 testid-prefix="portal-tile-ask"
+                @open-thread="(t) => emit('open-thread', t)"
               />
             </div>
           </div>

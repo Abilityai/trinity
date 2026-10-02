@@ -186,6 +186,13 @@ const sequence = () => wrapper.findAll('[data-message-id], [data-ask-id]')
   .map((n) => n.attributes('data-message-id') || `ask:${n.attributes('data-ask-id')}`)
 
 describe('the chat thread (mounted)', () => {
+  it("forwards a tile's open-thread (Discuss) to the shell (ent#747)", async () => {
+    store.asks = [ask('here', { created_at: '2026-09-30T10:03:00Z' })]
+    await open()
+    wrapper.findComponent(PortalAsks).vm.$emit('open-thread', { id: 'chat-new', agent_name: 'scout' })
+    expect(wrapper.emitted('open-thread')).toEqual([[{ id: 'chat-new', agent_name: 'scout' }]])
+  })
+
   it("draws this chat's chat-turn ask among its messages, by time, and nothing else", async () => {
     store.asks = [
       ask('here', { created_at: '2026-09-30T10:03:00Z' }),
