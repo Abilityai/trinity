@@ -114,7 +114,7 @@ Settings is visible to every authenticated user, but most tabs are admin-only. N
 
 | Tab | Who | Purpose |
 |-----|-----|---------|
-| **General** | Admin | **First-run setup** (re-run the guided sequence), **Usage sharing** (opt-in telemetry), **Security & product updates** (operator contact), admin sign-in email, platform options and feature flags, proactive message limits, Brain Orb, voice, Trinity prompt, build info, default avatars |
+| **General** | Admin | **First-run setup** (re-run the guided sequence), **Usage sharing** (opt-in telemetry), **Security & product updates** (operator contact), admin sign-in email, platform options and feature flags, proactive message limits, Brain Orb, voice, Trinity prompt (instance-wide instructions for every agent; see the [recommended Trinity prompt](../agents/recommended-fleet-prompt.md)), build info, default avatars |
 | **Access** | Admin | Email whitelist, user management and roles, **SSH Access** toggle |
 | **Integrations** | Admin | Platform keys set in the browser (Anthropic, GitHub, email provider, Gemini), Slack, OAuth credentials, subscriptions (Claude subscription pool with live headroom), transport connection |
 | **MCP Keys** | Everyone | Create and revoke your own MCP API keys; your personal GitHub token |
