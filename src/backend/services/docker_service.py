@@ -3,7 +3,7 @@ Docker service for managing agent containers.
 """
 import logging
 import time
-from typing import Dict, List, Optional, Set
+from typing import Dict, List, Optional, Set, Union
 import docker
 from models import AgentStatus
 from redis_breaker_util import get_breaker_redis
@@ -682,25 +682,75 @@ def get_next_available_port(exclude: Optional[Set[int]] = None) -> int:
     return port
 
 
+# #2969: how `execute_command_in_container` enforces its `timeout`.
+#
+# docker-py's `exec_run` has no timeout, and it runs on
+# `docker_utils._docker_executor` — 4 threads shared by every Docker operation
+# in the backend. So the bound is applied twice, because the halves free
+# different resources:
+#   * an in-container `timeout -k EXEC_KILL_AFTER_S N` prefix ends the PROCESS,
+#     which closes the exec stream and so frees the pool thread. SIGTERM at N
+#     (GNU timeout also sends SIGCONT, so a `kill -STOP`ped process receives
+#     it), then SIGKILL EXEC_KILL_AFTER_S later for one that ignores TERM.
+#   * `asyncio.wait_for` frees the CALLER at N + EXEC_KILL_AFTER_S +
+#     _EXEC_OUTER_GRACE_S. A thread blocked in `exec_run` cannot be cancelled,
+#     so this half alone would leave the thread pinned — it is the backstop for
+#     what the prefix cannot reach (a wedged daemon, an escaped descendant
+#     holding the output pipe open, or the agent stopping `timeout` itself,
+#     which runs as the exec's uid).
+EXEC_KILL_AFTER_S = 5
+_EXEC_OUTER_GRACE_S = 5
+# GNU `timeout`'s documented exit status when the command timed out; the
+# primitive reports its own outer-bound expiry with the same code.
+EXEC_TIMEOUT_EXIT_CODE = 124
+# `timeout` exits 128+9 when the `-k` escalation had to SIGKILL the command.
+_EXEC_KILLED_EXIT_CODE = 137
+
+
+def _format_seconds(value) -> str:
+    value = float(value)
+    return str(int(value)) if value.is_integer() else repr(value)
+
+
+def _bounded_exec_argv(command, timeout) -> List[str]:
+    """`command` (string or argv list) wrapped in an in-container `timeout`.
+
+    A string is split with `shlex.split` — exactly what docker-py's
+    `exec_create` does with a string `cmd` (`utils.split_command`) — so the
+    command reaches the container as the same argv it always did; nothing is
+    routed through a shell that was not there before.
+    """
+    import shlex
+
+    argv = shlex.split(command) if isinstance(command, str) else list(command)
+    return [
+        "timeout",
+        "-k", _format_seconds(EXEC_KILL_AFTER_S),
+        _format_seconds(timeout),
+        *argv,
+    ]
+
+
 async def execute_command_in_container(
     container_name: str,
-    command: str,
-    timeout: int = 60,
+    command: Union[str, List[str]],
+    timeout: float = 60,
     *,
     environment: Optional[Dict[str, str]] = None,
     user: str = "developer",
 ) -> dict:
-    """Execute a command in a Docker container.
+    """Execute a command in a Docker container, bounded by ``timeout``.
 
     Args:
         container_name: Name of the container (e.g., "agent-myagent")
-        command: Command to execute
-        timeout: ACCEPTED AND NOT FORWARDED. Pre-existing (`container_exec_run`
-            has no timeout parameter and docker-py's exec has none either);
-            named here so a caller does not read it as a bound it is not. A
-            call that can hang must bound ITSELF — `asyncio.wait_for` frees the
-            caller, and an in-container `timeout N` prefix frees the pool
-            thread, which `wait_for` alone does not.
+        command: Command to execute — a string (split like docker-py splits
+            it; no shell unless the command invokes one) or an argv list.
+        timeout: Seconds the command may run (#2969). Enforced in the
+            container by a ``timeout -k EXEC_KILL_AFTER_S N`` prefix, which
+            ends the process and frees the Docker pool thread, and around the
+            await by ``asyncio.wait_for``, which frees the caller. Must be
+            positive: GNU ``timeout 0`` means "no timeout". The agent image
+            must ship ``timeout`` (coreutils — the Debian base image does).
         environment: Per-exec env, sent in the Exec Create body — NOT argv
             (ent#615). This is how a credential reaches an in-container git
             without appearing in the process table.
@@ -713,31 +763,65 @@ async def execute_command_in_container(
             root-exec precedent).
 
     Returns:
-        Dictionary with 'exit_code' and 'output' keys
+        Dictionary with 'exit_code', 'output' and 'timed_out'. On a timeout
+        ``timed_out`` is True and ``exit_code`` is non-zero — 124 (GNU
+        ``timeout``'s code, also used when the outer bound fires) or 137 when
+        the KILL escalation was needed — so a caller that only checks
+        ``exit_code != 0`` treats it as an ordinary failure. ``timed_out`` is
+        only claimed when the bound actually elapsed: a command that itself
+        exits 124 early is not a timeout. Never raises for exec failures; a
+        non-positive ``timeout`` raises ``ValueError`` (a programming error).
     """
+    import asyncio
+
     from services.docker_utils import container_exec_run, container_get
 
-    if not docker_client:
-        return {"exit_code": 1, "output": "Docker client not available"}
+    if timeout is None or float(timeout) <= 0:
+        raise ValueError(
+            f"execute_command_in_container needs a positive timeout, got {timeout!r}"
+        )
 
-    try:
+    if not docker_client:
+        return {"exit_code": 1, "output": "Docker client not available", "timed_out": False}
+
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+
+    async def _run() -> dict:
         container = await container_get(container_name)
         result = await container_exec_run(
             container,
-            command,
+            _bounded_exec_argv(command, timeout),
             user=user,
             environment=environment,
         )
-
-        # result.exit_code is the exit code
         # result.output is bytes, decode to string
         output = result.output.decode('utf-8') if isinstance(result.output, bytes) else str(result.output)
+        elapsed = loop.time() - started
+        timed_out = (
+            result.exit_code in (EXEC_TIMEOUT_EXIT_CODE, _EXEC_KILLED_EXIT_CODE)
+            and elapsed >= float(timeout)
+        )
+        return {"exit_code": result.exit_code, "output": output, "timed_out": timed_out}
 
+    try:
+        return await asyncio.wait_for(
+            _run(), timeout=float(timeout) + EXEC_KILL_AFTER_S + _EXEC_OUTER_GRACE_S
+        )
+    except asyncio.TimeoutError:
+        # The in-container bound did not end the exec in time. The caller is
+        # freed here; the pool thread may stay blocked until Docker returns.
+        logger.warning(
+            "[docker-exec] %s: exec exceeded its %ss bound and was abandoned "
+            "(in-container timeout did not end it)",
+            container_name, timeout,
+        )
         return {
-            "exit_code": result.exit_code,
-            "output": output
+            "exit_code": EXEC_TIMEOUT_EXIT_CODE,
+            "output": f"Command timed out after {timeout}s",
+            "timed_out": True,
         }
     except docker.errors.NotFound:
-        return {"exit_code": 1, "output": f"Container {container_name} not found"}
+        return {"exit_code": 1, "output": f"Container {container_name} not found", "timed_out": False}
     except Exception as e:
-        return {"exit_code": 1, "output": f"Error executing command: {str(e)}"}
+        return {"exit_code": 1, "output": f"Error executing command: {str(e)}", "timed_out": False}

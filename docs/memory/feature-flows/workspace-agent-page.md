@@ -13,7 +13,7 @@
 > | Your chats, What it can do, Reports | `PortalAgentDetails.vue`, in the rail's place |
 > | Canvas, Files | rail tabs since ent#475 |
 > | Recent work, Activity | the rail's Work tab since ent#525 |
-> | asks | the conversation's mount, the surviving one after #2449 |
+> | asks | a chat's own chat-turn asks as tiles in its thread; every agent's asks home is the Inbox (ent#610, 2026-09-30 ruling) |
 > | **Start a chat** | gone — the row opens the chat itself |
 >
 > **Status (original)**: ✅ Implemented (2026-08-13)
@@ -53,6 +53,7 @@ that never leaves the service cannot be surfaced by a later edit.
 | `recent_work` | `message`, `cost`, `model_used`, `source_user_email` | `message` is another user's prompt; `cost` and `model_used` are excluded by AC #7 |
 | `recent_work` | — *except* `schedule_name` (#2161) | The one deliberate crossing. See [What crosses, and why it is the name and not the message](#what-crosses-and-why-it-is-the-name-and-not-the-message) |
 | `recent_work`, `stats` | whole ROWS with `triggered_by = "loop"`, for a client only (#2423) | A client cannot open a loop, see what it produced, or start or stop one — the strip is `isPlatformSession`-gated (ent#458) and this page has no Loops tab. So the loop COUNT was client-visible while the loop OUTPUT was operator-only. Same subtractive rule this section states, and the same reason `alert` asks are dropped: operations telemetry, not something the agent is asking a person. **Operators keep every row** — they can click through to Agent Detail → Loops, so hiding it there removes real signal and fixes nothing |
+| `recent_work`, `stats`, `last_active` | whole ROWS another person started, for a client only (#3139) | The projection hid WHAT other people asked, but the rows still told a client WHEN and for how long everyone else used the agent — run id, trigger, start, end, duration (10 of 12 rows in the ent#610 review walk). A client keeps `db/query_helpers.viewer_scope`: their own turns (`source_user_email`), what those turns spawned (the inherited `source_channel_client`), and the agent's scheduled runs — except a run of a schedule that delivers to one person (`agent_schedules.deliver_to_workspace_email`, #498, a seat's brief), which only that person sees; emails compare lower-cased. Applied in SQL before the `LIMIT` and inside every analytics aggregate and `first_try_stats`, so the band's counts and rates are over exactly the listed rows. A `None` viewer admits scheduled runs only — it fails closed. **The platform view is unchanged** |
 
 **The loop exclusion is a row filter, so it runs in SQL — before the `LIMIT`.**
 `get_agent_executions_summary` takes an `exclude_triggers` set and adds it as a
@@ -564,6 +565,9 @@ destination" is finally true.
 | Service | `client_portal/agent_page.py` | `_CLIENT_HIDDEN_TRIGGERS` / `_CLIENT_HIDDEN_BUCKETS`; `is_platform` threaded through `_recent_work`, `_stats`, `_last_active` (#2423) |
 | DB | `db/schedules/executions.py` | `get_agent_executions_summary(..., exclude_triggers=)` — the `WHERE` that must precede the `LIMIT` (#2423) |
 | DB | `database.py` | facade passthrough for `exclude_triggers` (#2423) |
+| DB | `db/query_helpers.py` | `viewer_scope(table, viewer_email)` — the one client-visibility predicate (#3139) |
+| DB | `db/schedules/executions.py`, `db/schedules/analytics.py`, `client_portal/db.py` | `scope_to_viewer=` / `viewer_email=` on `get_agent_executions_summary`, `get_agent_analytics`, `first_try_stats` (now Core, not `text()`) (#3139) |
+| Service | `client_portal/agent_page.py` | `_client_scope()`; `viewer_email` threaded through `_recent_work`, `_stats`, `_last_active` from `build_page` (#3139) |
 | Router | `client_portal/router.py` | forwards `principal.is_platform` into the page build (#2423) |
 | Router | `client_portal/router.py` | `rows_offset`/`rows_limit` on the existing detail route, rate-limited (#2162) |
 | UI | `components/reports/ReportSummary.vue` | **new** — the CLIENT-FACING human-readable fallback; no raw escape hatch (#2162) |
@@ -654,6 +658,17 @@ view is the default so a caller that forgets to say who is looking leaks least.
 Every stub models SQL faithfully (`WHERE` then `LIMIT`) via one shared
 `_sql_like` helper — a stub that limits first and filters second is the bug under
 test and would pass against the broken implementation.
+
+`tests/unit/test_3139_client_recent_work_scope.py` — real SQLite through the
+real accessors and the real page module: two clients on one agent each see only
+their own turns plus scheduled runs, a spawned run inherited via
+`source_channel_client` counts as the client's, the email match ignores case, the
+scope precedes the `LIMIT` (30 newer turns by someone else do not push one of
+yours off), "last active" never reveals a newer foreign run, the stats total and
+day totals equal the visible row count, success and first-try rates are over the
+client's rows, a brief delivered to one person's seat is listed and counted for that person only, and the platform view and the scope-less accessor are unchanged.
+Verified by mutation: reverting `agent_page.py` fails 9 of 12, a predicate that
+admits every row fails 7, and dropping the seat-brief exclusion fails 3.
 
 `tests/unit/test_2423_executions_summary_exclude.py` — the accessor against a
 REAL SQLite through the real engine, because the file above can only prove

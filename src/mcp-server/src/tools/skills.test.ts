@@ -230,3 +230,38 @@ describe("skill sets (ent#530)", () => {
     assert.equal(out.sets, undefined);
   });
 });
+
+// trinity-enterprise#672 — the library's lifecycle keys reach an MCP reader.
+// `list_skills` maps the backend entry field by field, so a key it does not
+// name is invisible here even when REST carries it (Invariant #13).
+describe("deprecated skills (ent#672)", () => {
+  const entry = (extra: Record<string, unknown>) => ({
+    name: "add-backlog", description: "d", path: "skills/add-backlog/SKILL.md", ...extra,
+  });
+
+  it("list_skills carries deprecated and the author's successor text", async () => {
+    const tools = makeTools([], [
+      entry({ deprecated: true, superseded_by: "backlog" }),
+      entry({ name: "prose", deprecated: true, superseded_by: "other-skill — another catalog" }),
+    ]);
+    const out = JSON.parse(await tools.listSkills.execute({}, {}));
+    assert.equal(out.skills[0].deprecated, true);
+    assert.equal(out.skills[0].superseded_by, "backlog");
+    assert.equal(out.skills[1].superseded_by, "other-skill — another catalog");
+  });
+
+  it("a live skill, or a backend that predates the fields, reads not-deprecated", async () => {
+    const tools = makeTools([], [entry({})]);
+    const out = JSON.parse(await tools.listSkills.execute({}, {}));
+    assert.equal(out.skills[0].deprecated, false);
+    assert.equal(out.skills[0].superseded_by, null);
+  });
+
+  it("the descriptions tell an agent where the lifecycle facts are", () => {
+    const tools = makeTools([], {});
+    assert.ok(tools.listSkills.description.includes("deprecated"));
+    assert.ok(tools.listSkills.description.includes("superseded_by"));
+    assert.ok(tools.assignSkillToAgent.description.includes("deprecated:<successor>"));
+    assert.ok(tools.getAgentSkills.description.includes("list_skills"));
+  });
+});

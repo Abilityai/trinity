@@ -49,8 +49,13 @@ describe('ent#557 — the indicator arrives without a navigation', () => {
 
 describe('ent#557 — the tab marker is wired to the same number the rows show', () => {
   it('the shell computes the total through the shared helper', () => {
-    expect(SHELL).toMatch(/const unreadTotal = computed\(\(\) => totalUnread\(threads\.value\)\)/)
-    expect(SIDEBAR).toMatch(/totalUnread\(props\.threads\)/)
+    // D13 (round 3): over `sidebarThreads`, the projection the sidebar and the
+    // Inbox sum — raw `threads` counted a Main the sidebar hides.
+    expect(SHELL).toMatch(/const unreadTotal = computed\(\(\) => totalUnread\(sidebarThreads\.value\)\)/)
+    // trinity-enterprise#610 (D13): the sidebar's aggregate moved to the pinned
+    // Inbox row, whose `came` is `totalUnread` over the same threads
+    // (`inboxCounts`, property-tested in portalInbox.spec.js).
+    expect(SIDEBAR).toMatch(/inboxCounts\(props\.threads/)
   })
 
   it('pushes it at the tab title, and clears on unmount', () => {
@@ -95,7 +100,9 @@ describe('ent#557 — honest counts, and an ask is not an unread reply', () => {
     expect(SIDEBAR).toMatch(/data-testid="agent-ask-count"/)
     expect(SIDEBAR).toMatch(/v-if="waitingFor\(a\.name\)"/)
     // Different tokens, deliberately — the colours carry the distinction.
-    expect(SIDEBAR).toMatch(/bg-status-urgent-500/)
-    expect(SIDEBAR).toMatch(/bg-action-primary-600/)
+    // ent#610 §3g A3b, REVERSED on purpose: both counters moved to the 700
+    // tier (white on urgent-500 was 2.80:1) — still two different tokens.
+    expect(SIDEBAR).toMatch(/bg-status-urgent-700/)
+    expect(SIDEBAR).toMatch(/bg-action-primary-700/)
   })
 })

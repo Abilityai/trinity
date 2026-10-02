@@ -27,13 +27,21 @@
  * ── Gating ────────────────────────────────────────────────────────────────
  * Advertisement: registered in `server.ts`'s `toolGroups`, i.e. the
  * `operatorOnly` ALLOW-list `{user, agent, system}`. `agent` is in that set,
- * which is exactly why the backend self-scopes an agent principal to its own
- * roster: advertisement is not authorization, and an agent-scoped key resolves
- * to its owner carrying the owner's role.
+ * which is exactly why an agent principal is self-scoped to its own roster:
+ * advertisement is not authorization, and an agent-scoped key resolves to its
+ * owner carrying the owner's role.
+ *
+ * Self-scope is enforced HERE as well as by the backend ([I2], #2596 review),
+ * deliberately redundant — the `a2a_call.ts` `checkSelf` precedent. The
+ * backend route lives in a private module, so a promise in this tool's
+ * description must not depend on another repo remembering it. An agent key
+ * with no agent name is refused (fails closed); `user` and `system` keys pass
+ * to the backend, which scopes them to what their owner can access.
  */
 
 import { z } from "zod";
 import { TrinityClient, ApiError } from "../client.js";
+import { accessDenied } from "../access.js";
 import type { McpAuthContext } from "../types.js";
 
 export function createAssignmentTools(
@@ -60,9 +68,13 @@ export function createAssignmentTools(
    * transport failure it cannot reason about, and "who do I work for?" is a
    * question the agent should be able to answer "nobody has told me" to.
    */
+  //
+  // The raw error text is deliberately NOT returned ([I3], #2596 review): the
+  // reader is a model, and `error.message` carries whatever the backend or the
+  // transport produced — a response body, an internal URL — most likely on the
+  // unexpected-status branch. Only the curated sentence reaches the agent.
   const degrade = (agentName: string, error: unknown): string => {
     const status = error instanceof ApiError ? error.status : undefined;
-    const raw = error instanceof Error ? error.message : String(error);
     let human: string;
     if (status === 404) {
       human =
@@ -75,7 +87,7 @@ export function createAssignmentTools(
       human = "The assignment record could not be reached.";
     }
     return JSON.stringify(
-      { enabled: false, agent_name: agentName, message: human, detail: raw },
+      { enabled: false, agent_name: agentName, message: human },
       null,
       2,
     );
@@ -103,6 +115,17 @@ export function createAssignmentTools(
         { agent_name }: { agent_name: string },
         context?: { session?: McpAuthContext },
       ) => {
+        const session = context?.session;
+        if (session?.scope === "agent" && session.agentName !== agent_name) {
+          return accessDenied(context, {
+            success: false,
+            error: "Access denied",
+            reason:
+              "An agent may only read its own roster — call get_agent_assignments " +
+              "with your own agent name.",
+            not_authorized: true,
+          });
+        }
         try {
           const result = await getClient(context?.session).getAgentAssignments(
             agent_name,

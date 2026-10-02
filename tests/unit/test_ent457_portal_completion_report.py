@@ -87,9 +87,11 @@ def test_the_recipient_comes_from_the_session_row_not_the_stamp(ccr, monkeypatch
     from client_portal import db as portal_db
     written = {}
     monkeypatch.setattr(portal_db, "add_portal_message",
-                        lambda mid, agent, email, role, content, cost, now, session_id=None:
+                        # ent#610: the writer now also passes the platform
+                        # `source` outcome marker (completion:done|failed).
+                        lambda mid, agent, email, role, content, cost, now, session_id=None, source=None:
                         written.update(agent=agent, email=email, role=role,
-                                       content=content, session=session_id))
+                                       content=content, session=session_id, source=source))
 
     deliver = _resolve(ccr, monkeypatch,
                        {"agent_name": AGENT, "client_email": CLIENT})
@@ -183,7 +185,7 @@ def test_the_message_is_filed_under_the_agent_whose_chat_it_is(ccr, monkeypatch)
     from client_portal import db as portal_db
     written = {}
     monkeypatch.setattr(portal_db, "add_portal_message",
-                        lambda mid, agent, email, role, content, cost, now, session_id=None:
+                        lambda mid, agent, email, role, content, cost, now, session_id=None, source=None:
                         written.update(agent=agent, content=content))
 
     deliver = _resolve(ccr, monkeypatch, {"agent_name": AGENT, "client_email": CLIENT},

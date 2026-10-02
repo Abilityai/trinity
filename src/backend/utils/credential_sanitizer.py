@@ -12,6 +12,7 @@ import base64
 import re
 import json
 import logging
+from urllib.parse import parse_qs, urlsplit
 from typing import Dict, List, Any, Optional
 
 logger = logging.getLogger(__name__)
@@ -181,6 +182,58 @@ def _is_sensitive_kv_key(key: str) -> bool:
     return any(lit in upper for lit in _SENSITIVE_KEY_LITERALS)
 
 
+def _is_public_google_consent_match(match: "re.Match", credential_values=()) -> bool:
+    """Recognize supported consent links, never OAuth callbacks or tokens.
+
+    Shape validation is not recipient authorization. Opaque OAuth state still
+    belongs only in the intended recipient's consent flow, not a public feed.
+
+    A URL's `/auth` path can be misread as a sensitive KEY before its first
+    query `=`. Only exempt that shape, after exact-value and secret-pattern
+    redaction. A genuine `AUTH_SECRET=<url>` assignment must still redact.
+    """
+    start = match.group(1).find("https://accounts.google.com/")
+    if start < 0:
+        return False
+    candidate = match.group(0)[start:].rstrip(")>`")
+    if len(candidate) > 8192:
+        return False
+    try:
+        url = urlsplit(candidate)
+        if (url.scheme != "https" or url.netloc != "accounts.google.com" or
+                url.path not in ("/o/oauth2/auth", "/o/oauth2/v2/auth") or url.fragment):
+            return False
+        fields = parse_qs(url.query, keep_blank_values=True, strict_parsing=True, max_num_fields=8)
+        allowed = {"access_type", "client_id", "include_granted_scopes", "prompt",
+                   "redirect_uri", "response_type", "scope", "state"}
+        required = {"client_id", "redirect_uri", "response_type", "scope", "state"}
+        if not required <= fields.keys() <= allowed or any(len(values) != 1 for values in fields.values()):
+            return False
+        query = {key: values[0] for key, values in fields.items()}
+        # URL encoding must not hide secrets from the earlier raw-text passes.
+        if any(pattern.search(value) for value in query.values() for pattern in _secret_value_re):
+            return False
+        if any(secret in value for value in query.values() for secret in credential_values):
+            return False
+        if (query["response_type"] != "code" or
+                not re.fullmatch(r"[A-Za-z0-9_-]+\.apps\.googleusercontent\.com", query["client_id"]) or
+                not re.fullmatch(r"[A-Za-z0-9_-]{1,256}", query["state"]) or
+                query.get("access_type", "offline") not in ("offline", "online") or
+                query.get("include_granted_scopes", "true") not in ("true", "false") or
+                query.get("prompt", "consent") not in ("consent", "select_account", "consent select_account", "none")):
+            return False
+        scope_pattern = r"(?:openid|email|profile|https://www\.googleapis\.com/auth/[A-Za-z0-9._/-]+|https://mail\.google\.com/)"
+        if not re.fullmatch(scope_pattern + r"(?: " + scope_pattern + r")*", query["scope"]):
+            return False
+        redirect = urlsplit(query["redirect_uri"])
+        return (redirect.scheme == "http" and redirect.hostname == "127.0.0.1" and
+                redirect.port is not None and redirect.port > 0 and
+                redirect.username is None and redirect.password is None and
+                redirect.path == "/oauth2/callback" and not redirect.query and not redirect.fragment)
+    except (ValueError, TypeError):
+        return False
+
+
 def _redact_kv_match(match: "re.Match") -> str:
     """Redact the value of a sensitive `key=value` pair, keep everything else.
 
@@ -189,6 +242,8 @@ def _redact_kv_match(match: "re.Match") -> str:
     around the pair is untouched.
     """
     key = match.group(1)
+    if _is_public_google_consent_match(match):
+        return match.group(0)
     if _is_sensitive_kv_key(key):
         return f"{key}={REDACTION_PLACEHOLDER}"
     return match.group(0)

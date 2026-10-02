@@ -1010,6 +1010,26 @@ operator can lift the cap without typing a huge number.
 module — `metrics_retention_days` is registered together with its sweeper. The
 cap is deliberately NOT a retention key: it is a write budget, not a window.
 
+**Settings surface (trinity-enterprise#671).** Settings → Retention shows both
+knobs beside the sibling windows: **Metric points** (days — the window, subject
+to the panel's existing floor rule on the managed path) and **Metric point
+quota** (points / agent / day, its own hint "0 = unlimited", no floor). They
+save through the same managed endpoint as the sibling windows, so the rows
+render only in an edition where that endpoint exists; in Community they are
+absent and `PUT /api/settings/ops/config` stays the write path.
+`GET /api/settings/retention` reports the window in `windows`/`sources` and the
+cap in `quotas.metrics_daily_point_cap` (`value` + `source`), where the value is
+read the way the write boundary enforces it. When a knob's source is `env`, its
+row is read-only with an `env` badge naming the variable and what unsetting it
+does (the #2085 seeder then writes the code default as a row), and Save omits
+it. Save sends only the fields the operator changed, so saving one window never
+turns another knob's code default or env value into a stored row.
+`env` has to mean "an operator set the variable", so every compose file forwards
+the env-backed keys with an EMPTY default (`${METRICS_DAILY_POINT_CAP:-}`) and
+`.env.example` leaves them commented — a compose default or a copied example
+line made `env` the reported source on every install and locked both rows
+(`tests/unit/test_ent671_env_backed_ops_forwarding.py`).
+
 ### 47.9 Legacy `metrics.json` — retired as a source, named as a finding (ent#479)
 
 `GET /api/agents/{name}/metrics` keeps its URL and is **re-backed by the point
@@ -1101,10 +1121,12 @@ The same observation posted twice is therefore **one row** with no client key,
 no Redis and no execution id.
 
 `value` is deliberately **outside** the identity: one observation of one metric
-at one instant with one set of dimensions is one fact, so a re-post with a
-different number deduplicates rather than double-counting. **A correction is a
-new `ts`** — this is stated in the tool description because it is the one rule
-an author can get wrong in a way the platform cannot detect.
+at one instant with one set of dimensions is one fact, so the same identity is
+always **one row**. A re-post with the **same** value is a duplicate and writes
+nothing. A re-post with a **different** value is a **correction** and restates
+that row in place (§48.9, trinity-enterprise#729, ruling R45). A correction
+keeps its `ts`: the `ts` is the
+period the number describes, so the chart stays one point per period.
 
 The on-disk `dims` need not be byte-identical to the canonical form the hash
 was taken over; the canonical form exists so the identity is stable across
@@ -1114,9 +1136,11 @@ clients, and the column's serialisation belongs to the driver.
 
 A batch is 1..1000 points and ≤ 2 MiB encoded, **all-or-nothing**: a caller
 never has to reconcile a partial write against what it meant to send. The 201
-returns `recorded`, `deduplicated` and `replayed` as **separate** counts, plus
-each accepted point's assigned `{index, ts, idempotency_key}` — an "we already
-had this" must not read as a write that happened.
+returns `recorded` (new rows), `corrected` (rows restated, §48.9) and
+`deduplicated` (identical repeats, nothing written) as **separate** counts,
+plus `replayed` and each accepted point's assigned `{index, ts,
+idempotency_key}` — an "we already had this" must not read as a write that
+happened, and a restatement must not read as either.
 
 Two idempotency layers, for two different failures:
 
@@ -1193,6 +1217,13 @@ cross", not "how many did today hold"), which means two concurrent batches can
 each pass and overshoot by at most one batch. That is accepted and documented
 rather than serialised.
 
+A correction (§48.9) keeps its row's `created_at`, so it never adds to "used
+today": the cap counts **rows created**. The pre-check still counts every
+incoming point, exactly as it already does for duplicates, so a batch of
+corrections cannot pass a cap that a batch of new points would cross. Ruled
+2026-10-01 for trinity-enterprise#729: no extra read on the write path.
+Corrections are bounded by the per-agent rate limit, not by the cap.
+
 One audit row per (agent, UTC day) on the **first** refusal — a quota event is
 the security-relevant signal. No row per accepted batch: `audit_log` is
 append-only and undeletable for a year, so that would be up to 86 000
@@ -1229,11 +1260,70 @@ refetch route, and that route is ent#479's); no partial-accept mode; no
 per-point caller-supplied key; no refresh-on-miss inside the write path — the
 remedy is the `refresh_metric_definitions` tool the 422's hint names.
 
+### 48.9 Restatement — a corrected value updates the row (trinity-enterprise#729, R45)
+
+Derived and cross-channel numbers (a funnel end to end, CAC, a weekly total)
+are restated as late data lands. Before this, a corrected value posted at the
+same period close was silently dropped (`recorded: 0, deduplicated: 1`). The
+documented workaround, restating at a new `ts`, plotted the W39 figure at the
+restatement's x-position.
+
+* **A different value at an existing identity updates the row.** The upsert
+  keeps the same conflict target `(agent_name, ts, idempotency_key)` and is
+  `DO UPDATE … WHERE` the stored value `IS DISTINCT FROM` the incoming one. The
+  comparison is null-safe because `value_numeric` or `value_text` is NULL by
+  type. An identical value matches nothing, so nothing is written and the
+  revision is not bumped.
+* **What moves:** `value_numeric` / `value_text`, `revision` (+1),
+  `recorded_at` (the correcting write's clock) and `execution_id`. Provenance
+  follows the write that produced the current value, so it is NULL when the
+  correcting call's execution could not be confirmed. It never credits the run
+  that wrote the replaced number.
+* **What does not move:** `ts` (one row per period), `created_at` (the first
+  write, which the daily cap counts, §48.6), `metric` and `dims`. The
+  identity is the same, so the canonical dims are too.
+* **Freshness does not move.** `last_point_at` is the newest `ts` (§49.1). A
+  restated W39 cannot make a series look freshly measured, and the stale rule
+  is untouched.
+* **No read-path change.** `revision` and `recorded_at` are write-side columns.
+  `get_metrics`, the tiles and the §50 objective join select explicit columns
+  and read a corrected store exactly as they would read a store whose final
+  value had been recorded first. A parity test pins that.
+* **Columns.** `revision BIGINT NOT NULL DEFAULT 0`: existing rows read 0. It is
+  BIGINT because it is a monotonic counter. `recorded_at TEXT` is nullable. The
+  store stamps it on every write (equal to `created_at` on insert). NULL
+  means the row was written before ent#729, and its write time is then
+  `created_at`. Nullable and defaulted so code from before this change can
+  still insert during a rollback.
+* **The write order is defined.** Rows are written in `(ts, idempotency_key)`
+  order, so two overlapping batches lock conflicting rows in the same order on
+  PostgreSQL. The store also refuses two rows with one identity in a single call.
+  The service already rejects that as `duplicate_in_batch`, and the guard makes
+  the PostgreSQL cardinality error unreachable rather than merely unlikely.
+
+**Stated limits** (the contract, not defects to rediscover):
+
+* **Last write wins, by arrival order.** A delayed retry carrying an older
+  value restates the row back to it. No `expected_revision` precondition exists
+  yet.
+* **Restatement is lossy.** The replaced value is not kept, and `revision`
+  counts corrections without recording them.
+* **A replayed batch writes nothing, even after a later correction.**
+  Re-sending a batch identical to an earlier one replays the first result
+  (`replayed: true`) and writes nothing. This applies in the same turn (when
+  `execution_id` is passed), or under the same client key within 24 h. So
+  `A → B → A` ends on `B`. To restate back to `A`, send it under a new
+  `idempotency_key`, or in a new turn if you sent no key.
+
 ### Acceptance
 
 - [x] `record_metrics` records validated points and is the only write path
 - [x] A batch is all-or-nothing with a named reason code per rejected point
 - [x] The same observation posted twice is one row, with or without a key
+- [x] A different value at the same identity restates the row in place
+      (`revision` +1, `recorded_at` set; `ts`, `created_at` and freshness
+      unmoved), and the 201 reports it as `corrected` on REST and MCP
+      (trinity-enterprise#729)
 - [x] A re-delivered turn replays rather than recording twice
 - [x] The daily cap refuses with 429 + `Retry-After` and audits once a day
 - [x] A store outage is retryable and never fails the agent's turn; a rejected
@@ -1717,9 +1807,27 @@ Gate order (Invariant #8), copied verbatim from `/metrics`:
 
 `OBJECTIVES_READ_RATE_LIMIT` (env, default **60**/min per agent, window 60 s)
 is its **own** knob, not `/metrics`'s 240. That route is store-only; this one
-drives a container. Ten open role cards polling at 30 s is 20/min, so 60 clears
-normal traffic with room and still stops a loop from pinning an agent-server the
-platform also needs for chat.
+drives a container. The Workspace role card draws on the same bucket (below) but
+loads once per open and never polls, so 60 clears normal traffic from both doors
+with room and still stops a loop from pinning an agent-server the platform also
+needs for chat.
+
+**One budget, every door (trinity-enterprise#676).** The key, the limit and the
+window are spelled once, in `services/objectives_read_budget.py`, and every door
+to the container fan-out draws on it: this route (and MCP `get_objectives`
+through it) with `enforce` — a 429 + `Retry-After` — and the Workspace role card
+with `admit`, which never raises and is asked only once the card is about to read
+the objectives (after the role file), so a card that reads none spends none. The two doors fail differently on purpose. An
+agent polling its own objectives can empty the bucket, and the role card also
+carries the role, the readiness stamp and the owner's flip; refusing the whole
+card would let the agent hide its owner's control. So a refused card read is a
+200 without objectives (`objectives_error: objectives_rate_limited`) and without
+a fan-out. The card additionally takes a per-viewer cap
+(`portal_role_objectives:{email}:{name}`, a third of the limit — 20/min at the
+default, derived rather than fixed so a lowered limit lowers it too) **before** the
+shared key, so
+one Workspace viewer can spend at most a third of the budget and a refused
+viewer spends none of it.
 
 A store outage is `503 metric_store_unavailable` + `Retry-After: 30`.
 **Everything below transport is a named field on a 200** — an agent that is
@@ -1837,7 +1945,7 @@ metric, every one `declared: false` with its `metric_undeclared` finding and
 |---|---|
 | `GET /api/agents/{name}/objectives` | the operator/agent door |
 | MCP `get_objectives` | agent-scoped (no agent parameter), returns the route body verbatim, never throws |
-| Role card (ent#527, PR #2927) | calls `read_objective_join(agent, template=…, client=…)` **in process** behind its own roster gate — one implementation, two doors |
+| Role card (ent#527; cut over in ent#676) | calls `read_objective_join(agent, template=…, client=…)` **in process** behind its own roster gate and the shared budget (§50.6) — one implementation, two doors. It serves a slim client projection (codes, never the operator sentences; `core-agent.md` §5.36) |
 | Project view (ent#661 v3) | composes `read_objective_files` (one file read) with `join_objectives` per participating agent over store-only reads — the agent door stays out of its loop |
 | Proactivity (ent#605) | consumes `summary.behind` and per-row `gap.status == "behind" and not stale`; it owns the "never act on a stale number" rule and the pace maths |
 

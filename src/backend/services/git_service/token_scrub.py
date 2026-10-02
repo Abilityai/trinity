@@ -22,13 +22,11 @@ from . import gitignore
 logger = logging.getLogger(__name__)
 
 
-# How long the in-container remediation sweep may run. Enforced TWICE, because
-# the two bounds free different resources: an in-container `timeout N` prefix
-# frees the `_docker_executor` pool thread (the fixed 6-thread pool the whole
-# backend shares — `to_thread` draws from it too), and `asyncio.wait_for` frees
-# the caller. `execute_command_in_container` accepts a `timeout` and forwards it
-# nowhere, so without both a wedged exec pins a pool thread forever, fleet-wide,
-# from a background pass.
+# How long the in-container remediation sweep may run. Passed to
+# `execute_command_in_container`, which enforces it both in the container
+# (freeing the `_docker_executor` pool thread) and around the await (freeing
+# the caller) — #2969. Without that a wedged exec would pin a pool thread
+# forever, fleet-wide, from a background pass.
 SCRUB_TIMEOUT_S = 60
 
 # One operator alarm per agent per day when the sweep REFUSED to strip: a
@@ -224,23 +222,22 @@ async def scrub_git_remote_tokens(
             git_dir = await gitignore._detect_git_dir(container_name)
         inner = git_credential_helper.scrub_command(git_dir)
         async with _scrub_semaphore:
-            result = await asyncio.wait_for(
-                execute_command_in_container(
-                    container_name=container_name,
-                    command=f"timeout {SCRUB_TIMEOUT_S} bash -c {shlex.quote(inner)}",
-                    user="root",
-                    environment=(
-                        {git_credential_helper.SEED_ENV_VAR: seed_pat}
-                        if seed_pat else None
-                    ),
+            result = await execute_command_in_container(
+                container_name=container_name,
+                command=f"bash -c {shlex.quote(inner)}",
+                timeout=SCRUB_TIMEOUT_S,
+                user="root",
+                environment=(
+                    {git_credential_helper.SEED_ENV_VAR: seed_pat}
+                    if seed_pat else None
                 ),
-                timeout=SCRUB_TIMEOUT_S + 15,
             )
-    except asyncio.TimeoutError:
-        logger.warning("ent#615: remote-token sweep timed out for %s", agent_name)
-        return report
     except Exception as e:  # noqa: BLE001 — best-effort, container may be down
         logger.warning("ent#615: remote-token sweep error for %s: %s", agent_name, e)
+        return report
+
+    if result.get("timed_out"):
+        logger.warning("ent#615: remote-token sweep timed out for %s", agent_name)
         return report
 
     output = result.get("output", "") or ""

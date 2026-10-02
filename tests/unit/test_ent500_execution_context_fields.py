@@ -104,13 +104,77 @@ def test_consent_granted_reads_as_granted():
     assert "- **Primary human**: A. Smith — proactive contact permitted" in block
 
 
-def test_unknown_consent_renders_no_qualifier_either_way():
-    """`None` is 'not resolved', which is neither a grant nor a refusal."""
+_NOT_PERMITTED = (
+    " — proactive contact NOT yet permitted; do not message them unprompted"
+)
+
+
+def test_unknown_consent_fails_closed():
+    """`None` is 'not resolved' — and consent is a permission statement, so an
+    unresolved one reads as NOT permitted (dolho's [I1] on #2596).
+
+    Rendering a bare name is the inference the renderer's own docstring
+    forbids: a name with no qualifier reads as permission to reach out.
+    """
     block = build_execution_context(
-        ExecutionContext(agent_name="ops", primary_user_display="A. Smith")
+        ExecutionContext(
+            agent_name="ops",
+            primary_user_display="Q. Okonkwo-Varga",
+            role_id="finance-controller",
+        )
     )
-    assert "- **Primary human**: A. Smith\n" in block + "\n"
-    assert "permitted" not in block
+    assert (
+        "- **Primary human**: Q. Okonkwo-Varga (role: finance-controller)"
+        + _NOT_PERMITTED
+    ) in block
+    assert "proactive contact permitted" not in block
+
+
+def test_a_provider_that_omits_consent_renders_the_restrictive_clause(quiet_db):
+    """The reachable route to [I1]: `_validated` skips absent keys, so a
+    provider answering display + role and NOTHING else is a documented, valid
+    answer — and it must not render a bare name."""
+    ap.register_provider(
+        _Provider(
+            answer={
+                "primary_user_display": "Q. Okonkwo-Varga",
+                "role_id": "finance-controller",
+            }
+        )
+    )
+    out = compose_system_prompt(
+        ExecutionContext(agent_name="ops-companion", triggered_by="chat")
+    )
+    line = [ln for ln in _lines(out) if "Primary human" in ln][0]
+    assert line == (
+        "- **Primary human**: Q. Okonkwo-Varga (role: finance-controller)"
+        + _NOT_PERMITTED
+    )
+
+
+def test_a_provider_answering_string_false_renders_the_restrictive_clause(quiet_db):
+    """R1 (ent#500 PR3 review): the seam used to coerce consent with ``bool()``,
+    and ``bool("false")`` is ``True`` — so a provider saying "false" as a
+    string rendered "proactive contact permitted". Only a real bool counts; a
+    string is unresolved and fails closed through the [I1] path."""
+    ap.register_provider(
+        _Provider(
+            answer={
+                "primary_user_display": "Q. Okonkwo-Varga",
+                "role_id": "finance-controller",
+                "proactive_consent": "false",
+            }
+        )
+    )
+    out = compose_system_prompt(
+        ExecutionContext(agent_name="ops-companion", triggered_by="chat")
+    )
+    line = [ln for ln in _lines(out) if "Primary human" in ln][0]
+    assert line == (
+        "- **Primary human**: Q. Okonkwo-Varga (role: finance-controller)"
+        + _NOT_PERMITTED
+    )
+    assert "proactive contact permitted" not in out
 
 
 def test_stakeholders_render_as_a_joined_list():
@@ -192,8 +256,11 @@ def test_display_name_is_still_bounded():
         ExecutionContext(agent_name="ops", primary_user_display="N" * 500)
     )
     line = [ln for ln in _lines(block) if "Primary human" in ln][0]
-    assert len(line) < 200
-    assert "…" in line
+    # Measure the NAME, not the line: the line also carries the consent clause,
+    # which is fixed text and always present (consent fails closed, [I1]).
+    name = line.split("**: ", 1)[1].split(" — ", 1)[0]
+    assert len(name) <= MAX_DISPLAY_NAME_LEN + 1
+    assert "…" in name
 
 
 def test_stakeholder_list_is_capped_like_collaborators():

@@ -25,6 +25,14 @@ Explicit permission model controlling which agents can communicate with which. R
 - If permission has not been granted, the MCP tool returns an `Access denied` result and the call is blocked. An agent can always reach itself.
 - The same check gates starting a loop on another agent (`run_agent_loop`) and reading or stopping that loop (`get_loop_status`, `stop_loop`). See [Agent Loops](../automation/agent-loops.md#permission-checks-on-the-loop-tools).
 - Permissions also gate shared folder access and event subscriptions between agents.
+
+**When a withdrawn permission takes effect.** Each control re-reads the permission at a different moment, so removing one (or replacing the set with **Save Permissions**) reaches each at a different time:
+
+| Control | Checked | A withdrawn permission stops it |
+|---|---|---|
+| Calling the agent (`chat_with_agent`, loops, reading its work) | on every call | at the next call |
+| Event subscriptions | when the subscription is created, and again on every delivery | at the next event. The subscription itself is kept, so granting the permission again resumes it |
+| Shared folders the agent reads from the other agent | when the container is built | at the agent's next start, which rebuilds it without that folder. **Restart the agent to apply it immediately**; until then a running agent keeps the folder mounted |
 - A permitted call can still be refused if it is too deep in a chain of agent-to-agent calls. See [Agent Network → Chain-Depth Limit](agent-network.md#concepts).
 - Every blocked call is recorded in the [audit log](../operations/audit-trail.md) as a refusal, so an admin can see which agent tried to reach which.
 

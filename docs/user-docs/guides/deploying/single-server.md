@@ -513,7 +513,7 @@ Every key in `.env.example`, with the compose files that forward it. **A key a c
 
 | Key | Forwarded by | What it does |
 |---|---|---|
-| `TRINITY_INSTALL_SOURCE` | dev · prod · hosted | Install-provenance marker (`do-marketplace`, `vultr-marketplace`, `do-script`, `script`); written by `start.sh --provision`, read once at first boot and recorded permanently. Leave empty on an ordinary install. |
+| `TRINITY_INSTALL_SOURCE` | dev · prod · hosted | Install-provenance marker (`do-marketplace`, `vultr-marketplace`, `aws-marketplace`, `do-script`, `aws-script`, `script`); written by `start.sh --provision`, read once at first boot and recorded permanently. Leave empty on an ordinary install. |
 | `BACKEND_URL` | dev · prod · hosted | Backend base URL used to build OAuth callback URLs (default `http://localhost:8000`). |
 | `FRONTEND_PORT` | dev · prod · hosted | Host port for the web UI (default 80). |
 | `FRONTEND_URL` | dev · prod · hosted | Public UI URL for email links and OAuth callbacks. |

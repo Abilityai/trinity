@@ -186,6 +186,48 @@ test("a successful batch reports recorded, deduplicated and replayed separately"
   assert.equal(result.replayed, false);
 });
 
+test("a restated point is reported as corrected, beside the other two counts", async () => {
+  // ent#729: asymmetric counts, so a field mapped onto the wrong key fails.
+  const t = tools({
+    record: async (agent) => ({
+      success: true,
+      agent_name: agent,
+      recorded: 1,
+      deduplicated: 2,
+      corrected: 3,
+      replayed: false,
+      points: [],
+    }),
+  });
+
+  const result = JSON.parse(
+    (await t.recordMetrics.execute(ONE_POINT, { session: AGENT_AUTH })) as string,
+  );
+  assert.deepEqual(
+    [result.recorded, result.deduplicated, result.corrected],
+    [1, 2, 3],
+  );
+});
+
+test("a backend that predates corrections reports zero corrected, not a missing key", async () => {
+  // An older backend can never restate a row, so 0 is the truthful answer.
+  const t = tools({
+    record: async (agent) => ({
+      success: true,
+      agent_name: agent,
+      recorded: 1,
+      deduplicated: 0,
+      replayed: false,
+      points: [],
+    }),
+  });
+
+  const result = JSON.parse(
+    (await t.recordMetrics.execute(ONE_POINT, { session: AGENT_AUTH })) as string,
+  );
+  assert.equal(result.corrected, 0);
+});
+
 test("a replayed batch says so rather than claiming a fresh write", async () => {
   const t = tools({
     record: async (agent) => ({
@@ -299,9 +341,13 @@ test("the description names the remedy for an undeclared metric", () => {
 });
 
 test("the description states the identity rule and how to correct a point", () => {
+  // ent#729 reversed the ent#478 rule: a correction is a different value at
+  // the SAME (metric, ts, dims), and the description must teach that rather
+  // than the old "new ts" workaround, which plots the fix at the wrong period.
   const description = tools().recordMetrics.description;
   assert.match(description, /deduplicated/);
-  assert.match(description, /CORRECTION is a new ts/);
+  assert.match(description, /different value at the same \(metric, ts, dims\) CORRECTS/);
+  assert.doesNotMatch(description, /CORRECTION is a new ts/);
 });
 
 test("the batch size limit the description quotes is the one the schema enforces", async () => {

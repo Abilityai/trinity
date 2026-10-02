@@ -49,10 +49,8 @@ TEMPLATE_PATH = "/home/developer/template.yaml"
 # the half that matters (a hardened loader still has to read what it is given).
 MAX_TEMPLATE_BYTES = 256 * 1024
 
-# Bounds the exec itself — `execute_command_in_container` does not forward its
-# `timeout`, so the bound has to be in the container (`timeout N`) and around
-# the await (`asyncio.wait_for`). The in-container prefix is the one that frees
-# the Docker pool thread.
+# Bounds the exec — `execute_command_in_container` enforces it both in the
+# container and around the await (#2969).
 _EXEC_TIMEOUT = 15
 
 # Every trigger that may write the registry. Recorded on the row so an operator
@@ -277,24 +275,17 @@ async def _read_template_from_container(agent_name: str) -> str:
 
     # Fixed argv, no interpolation of anything a caller supplies. `head -c`
     # caps the output INSIDE the container so an oversized file never crosses
-    # the socket, and the in-container `timeout` frees the Docker pool thread
-    # (the `timeout=` kwarg is accepted-and-not-forwarded, by its own docstring).
-    command = (
-        f"timeout {_EXEC_TIMEOUT} head -c {MAX_TEMPLATE_BYTES + 1} {TEMPLATE_PATH}"
+    # the socket; the primitive bounds the exec by `_EXEC_TIMEOUT` (#2969).
+    command = f"head -c {MAX_TEMPLATE_BYTES + 1} {TEMPLATE_PATH}"
+    result = await execute_command_in_container(
+        container_name=f"agent-{agent_name}",
+        command=command,
+        timeout=_EXEC_TIMEOUT,
     )
-    try:
-        result = await asyncio.wait_for(
-            execute_command_in_container(
-                container_name=f"agent-{agent_name}",
-                command=command,
-                timeout=_EXEC_TIMEOUT,
-            ),
-            timeout=_EXEC_TIMEOUT + 5,
-        )
-    except asyncio.TimeoutError as e:
+    if result.get("timed_out"):
         raise RefreshUnavailable(
             "template_unreadable", "reading template.yaml timed out"
-        ) from e
+        )
 
     if result.get("exit_code") != 0:
         raise RefreshUnavailable(

@@ -309,7 +309,11 @@ def raise_ask(
     of this agent's own executions it is recorded as the ask's execution,
     winning over an agent-written `context.execution_id`; `manual`, an unknown
     id or another agent's changes nothing. Consumers (a project's asks) read
-    the turn from it, so an agent cannot place its ask in a chat it isn't in.
+    the turn from it, and ent#734 attaches an addressed ask to that turn's
+    Workspace chat. The header is platform-set, but the agent's own process can
+    send any of its executions' ids, so the guarantee is "one of this agent's
+    own turns" — never another agent's, and never (ent#734) another person's
+    chat or a finished turn's.
 
     `addressee` (ent#661) names exactly who is asked, bypassing role
     resolution. Only a `gate` raise may pass it (a platform decision such as an
@@ -377,11 +381,17 @@ def raise_ask(
     if turn:
         context["execution_id"] = turn
     if addressee:
-        # The addressee's Main chat (ent#429/#523), resolved at raise time. Only
-        # after the caps passed: attaching may create the chat.
-        thread = oqs._workspace_thread_for(agent_name, addressee)
+        # The chat the raising turn serves (ent#734), else the addressee's Main
+        # (ent#429/#523), resolved at raise time. Only after the caps passed:
+        # attaching may create Main. Only an AGENT's raise reads the turn: a
+        # gate's ask is a background ask, and belongs to the Inbox only
+        # (the ent#610 amendment of 2026-09-30).
+        thread, in_turn = oqs._workspace_attachment(
+            agent_name, addressee, execution_id=turn if raised_by == "agent" else None)
         if thread:
             context[oqs._WORKSPACE_THREAD_KEY] = thread
+        if thread and in_turn:
+            context[oqs._WORKSPACE_TURN_KEY] = True
     item = {
         "id": norm["request_id"],
         "type": norm["type"],
@@ -521,8 +531,9 @@ def _validated_ask(ask: Any, oqs, *, raised_by: str = "agent") -> Dict[str, Any]
     if not isinstance(context, Mapping):
         raise AskRejected(422, "invalid_context", "context must be an object.")
     # The workspace thread is platform-written: an agent that could author it
-    # would choose which conversation its ask claims to belong to (ent#429).
-    context = {k: v for k, v in context.items() if k != oqs._WORKSPACE_THREAD_KEY}
+    # would choose which conversation its ask claims to belong to (ent#429), and
+    # whether it is drawn in that chat at all (ent#734).
+    context = {k: v for k, v in context.items() if k not in oqs._PLATFORM_CONTEXT_KEYS}
     context_bytes = oqs._json_bytes(context)
     if context_bytes is None:
         raise AskRejected(422, "invalid_context", "context must serialize as JSON.")
@@ -725,7 +736,7 @@ def _differs(row: Dict[str, Any], norm: Dict[str, Any], oqs) -> List[str]:
     An ask-specific comparison: the file fingerprint's addressee arm would call
     every `primary` ask different (the owner is never on its own roster)."""
     stored_context = row.get("context") if isinstance(row.get("context"), dict) else {}
-    stored_context = {k: v for k, v in stored_context.items() if k != oqs._WORKSPACE_THREAD_KEY}
+    stored_context = {k: v for k, v in stored_context.items() if k not in oqs._PLATFORM_CONTEXT_KEYS}
     expires = norm["expires_at"]
     pairs = {
         "title": (norm["title"], row.get("title")),

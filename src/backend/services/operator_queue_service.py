@@ -23,7 +23,7 @@ import re
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
-from typing import Optional
+from typing import Optional, Tuple
 
 from database import db
 from redis_breaker_util import get_breaker_redis
@@ -363,10 +363,40 @@ def _validated_addressee(agent_name: str, raw) -> Optional[str]:
 # the client-facing `chat_id`, and stripped from anything the agent authored —
 # named here so the writer and the stripper cannot drift apart.
 _WORKSPACE_THREAD_KEY = "workspace_session_id"
+# ent#734: true only when the ask was raised BY the turn serving that chat. Main
+# is both a chat-turn ask's home (drawn as a tile there) and a background ask's
+# reply target (drawn in no chat), so `chat_id` alone cannot tell them apart.
+_WORKSPACE_TURN_KEY = "workspace_raised_in_turn"
+# Every context key the platform writes and no agent may author: stripped at both
+# ingestion boundaries and ignored when comparing an agent's content.
+_PLATFORM_CONTEXT_KEYS = frozenset({_WORKSPACE_THREAD_KEY, _WORKSPACE_TURN_KEY})
 
 
 def _workspace_thread_for(agent_name: str, email: str) -> Optional[str]:
-    """The chat an addressed ask attaches to, or None (ent#429).
+    """The chat an addressed ask with no platform-known turn attaches to — the
+    pair's Main — or None (ent#429). The file path's view of
+    `_workspace_attachment`: a file carries only what the agent wrote, so it has
+    no raising turn to offer."""
+    return _workspace_attachment(agent_name, email)[0]
+
+
+def _workspace_attachment(agent_name: str, email: str,
+                          execution_id: Optional[str] = None) -> Tuple[Optional[str], bool]:
+    """`(chat, raised_in_turn)` for an addressed ask (ent#429, ent#734): the
+    chat it attaches to, or None; and whether that chat is the one the raising
+    turn serves, which is what `_WORKSPACE_TURN_KEY` records.
+
+    ent#734: `execution_id` is the RAISING execution as the PLATFORM knows it
+    (the native path's `X-Trinity-Execution-Id`, #2392, validated as this
+    agent's own) — never an agent-written `context.execution_id`, which a model
+    could fill with any turn it has seen. When it is a RUNNING Workspace chat
+    turn of this same (agent, addressee), the ask attaches to
+    that chat; anything else — a schedule, loop or gate run, a finished, unknown
+    or foreign execution, another person's chat, a failed
+    lookup — gets the pair's Main, exactly as before. The header is set by the
+    platform but not unforgeable by the agent's own process, so the bound is
+    "one of this agent's live turns for this addressee", never another person's
+    conversation (`client_portal.service.chat_for_execution`).
 
     Resolved at RAISE time, never at render time: an ask raised by a scheduled
     run has no conversation of its own, and "we will work out where it belongs
@@ -380,10 +410,24 @@ def _workspace_thread_for(agent_name: str, email: str) -> Optional[str]:
     refusing the whole ask over it would lose the question entirely. Never
     raises — the #1632 clamp contract.
     """
+    if execution_id:
+        try:
+            from client_portal.service import chat_for_execution
+
+            chat = chat_for_execution(agent_name, email, execution_id)
+            if chat:
+                return chat, True
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "[OperatorQueue] could not resolve the chat of the turn that raised "
+                "an ask from %s; attaching it to Main (ent#734)",
+                agent_name,
+                exc_info=True,
+            )
     try:
         from client_portal.service import ensure_thread_for_ask
 
-        return ensure_thread_for_ask(agent_name, email) or None
+        return ensure_thread_for_ask(agent_name, email) or None, False
     except Exception:  # noqa: BLE001
         logger.warning(
             "[OperatorQueue] could not attach a workspace chat for an ask from %s; "
@@ -391,7 +435,7 @@ def _workspace_thread_for(agent_name: str, email: str) -> Optional[str]:
             agent_name,
             exc_info=True,
         )
-        return None
+        return None, False
 
 
 def _json_bytes(value) -> Optional[int]:
@@ -480,7 +524,7 @@ def _clamp_ingested_item(req: dict, agent_name: str = "") -> dict:
         # Rebuilt rather than popped: `out = dict(req)` is a SHALLOW copy, so the
         # context dict is still the caller's, and this function's contract is that
         # it never mutates the request it was handed.
-        context = {k: v for k, v in context.items() if k != _WORKSPACE_THREAD_KEY}
+        context = {k: v for k, v in context.items() if k not in _PLATFORM_CONTEXT_KEYS}
         out["context"] = context
         if out["addressed_to_email"]:
             thread_id = _workspace_thread_for(agent_name, out["addressed_to_email"])
@@ -679,8 +723,8 @@ def _comparable_addressee(value) -> Optional[str]:
 
 def _comparable_context(ctx) -> str:
     """The clamp's PURE half for `context` (#2989 review): non-dict → {}, the
-    platform's workspace-thread key stripped (the clamp writes it; it is never
-    agent content), and an oversize / unserialisable value → one sentinel — which
+    platform's workspace keys (`_PLATFORM_CONTEXT_KEYS` — the thread, ent#429,
+    and the raised-in-turn flag, ent#734) stripped (never agent content), and an oversize / unserialisable value → one sentinel — which
     is also what a row holds after ingest (`_truncated`). Compared as canonical
     JSON. Sized the way the clamp sizes it, so the cap is crossed on both sides
     at (very nearly) the same input."""
@@ -688,7 +732,7 @@ def _comparable_context(ctx) -> str:
         return "{}"
     if ctx.get("_truncated") is True:
         return _CONTEXT_TRUNCATED_SENTINEL
-    body = {k: v for k, v in ctx.items() if k != _WORKSPACE_THREAD_KEY}
+    body = {k: v for k, v in ctx.items() if k not in _PLATFORM_CONTEXT_KEYS}
     try:
         if len(json.dumps(body).encode("utf-8")) > OPERATOR_QUEUE_CONTEXT_MAX_BYTES:
             return _CONTEXT_TRUNCATED_SENTINEL
