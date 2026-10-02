@@ -44,8 +44,7 @@ import { createA2ATools } from "./tools/a2a.js";
 import { createA2ACallTools } from "./tools/a2a_call.js";
 import { createCredentialVaultTools } from "./tools/credential_vault.js";
 import { createProjectTools } from "./tools/projects.js";
-// `./tools/assignments.js` (get_agent_assignments, ent#500) exists but is deliberately NOT
-// imported here — see the note beside `createCredentialVaultTools` in `toolGroups`.
+import { createAssignmentTools } from "./tools/assignments.js";
 import { configureAudit, withAudit } from "./audit.js";
 import { installLogRedaction } from "./log-redaction.js";
 import type { McpAuthContext } from "./types.js";
@@ -658,11 +657,7 @@ export async function createServer(config: ServerConfig = {}) {
     createA2ACallTools(client, requireApiKey),       // A2A runtime — outbound call_a2a_agent / get_a2a_task (#736)
     createCredentialVaultTools(client, requireApiKey), // Credential vault runtime — list/fetch (license-blind proxy, ent#279)
     createProjectTools(client, requireApiKey),       // Workspace Projects — list/get read tools (license-blind proxy, ent#661)
-    // get_agent_assignments (tools/assignments.ts, ent#500) is FENCED — not registered.
-    // 0.9.5 release ruling (work-order F1): the assignments layer is not shipping in this
-    // cut, so the tool that reads it must not be advertised. The module and its unit tests
-    // stay; re-enable by importing `createAssignmentTools` and adding it here (the
-    // `access.ts` policy row and the ent#500 visibility test go back with it).
+    createAssignmentTools(client, requireApiKey),     // Role assignments — read who an agent serves (license-blind proxy, ent#500)
   ];
   // Operator tools: visible ONLY to fully-credentialed operator scopes.
   for (const group of toolGroups) {

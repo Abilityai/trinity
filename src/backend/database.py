@@ -1874,7 +1874,8 @@ class DatabaseManager:
         return self._schedule_ops.get_agent_executions(agent_name, limit)
 
     def get_agent_executions_summary(self, agent_name: str, limit: int = 50, *,
-                                     exclude_triggers=None):
+                                     exclude_triggers=None, scope_to_viewer=False,
+                                     viewer_email=None):
         """Get execution summaries for list view - excludes large text fields.
 
         `exclude_triggers` filters before the LIMIT — see the operation's own
@@ -1883,7 +1884,8 @@ class DatabaseManager:
         PERF-001: Task List Performance Optimization
         """
         return self._schedule_ops.get_agent_executions_summary(
-            agent_name, limit, exclude_triggers=exclude_triggers)
+            agent_name, limit, exclude_triggers=exclude_triggers,
+            scope_to_viewer=scope_to_viewer, viewer_email=viewer_email)
 
     def get_execution(self, execution_id: str):
         return self._schedule_ops.get_execution(execution_id)
@@ -3300,8 +3302,11 @@ class DatabaseManager:
             schedule_id, hours, agent_name,
         )
 
-    def get_agent_analytics(self, agent_name: str, hours: int):
-        return self._schedule_ops.get_agent_analytics(agent_name, hours)
+    def get_agent_analytics(self, agent_name: str, hours: int, *,
+                            scope_to_viewer=False, viewer_email=None):
+        # #3139: `scope_to_viewer` narrows to what a Workspace client can account for.
+        return self._schedule_ops.get_agent_analytics(
+            agent_name, hours, scope_to_viewer=scope_to_viewer, viewer_email=viewer_email)
 
     def get_agent_schedules_summary(self, agent_name: str, hours: int):
         return self._schedule_ops.get_agent_schedules_summary(agent_name, hours)
@@ -4054,7 +4059,8 @@ class DatabaseManager:
     # -------------------------------------------------------------------------
 
     def insert_metric_points(self, agent_name: str, rows):
-        """Insert validated points; returns `(recorded, deduplicated)`."""
+        """Insert or restate validated points; returns `PointWriteCounts`
+        (`recorded`, `deduplicated`, `corrected` — ent#729)."""
         return self._metric_point_ops.insert_points(agent_name, rows)
 
     def count_metric_points_today(

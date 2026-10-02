@@ -38,6 +38,30 @@ Nothing in your running instance changes on the date itself — SQLite installs 
 working — but they stop receiving schema migrations and fixes, so staying on SQLite
 past EOL means pinning an older Trinity release.
 
+## Hosted installs (one-click images and `start.sh --hosted`)
+
+Hosted installs default to PostgreSQL (#3159). `docker-compose.hosted.yml` ships a
+`postgres` service (`postgres:16-alpine`, volume `postgres-data`, platform network
+only), and every one-click channel (DigitalOcean 1-Click, the AWS AMI, the Vultr
+startup script, compose-only templates) runs that file.
+
+- **New install:** `start.sh --hosted` generates `POSTGRES_PASSWORD` and writes
+  `DATABASE_URL=postgresql://trinity:<password>@postgres:5432/trinity` to `.env`.
+  The backend builds the schema via Alembic on first boot. No `trinity.db` is created.
+- **Existing install with `trinity-data/trinity.db`:** `start.sh --hosted` writes
+  `DATABASE_URL=` (empty) to `.env`, which keeps SQLite, and prints a pointer to this
+  page on every run. It never points an install that has a `trinity.db` at an empty
+  PostgreSQL. The `postgres` container still starts, idle, because the compose file
+  needs `POSTGRES_PASSWORD` to render. Move the data with
+  [Migrating an existing deployment](#migrating-an-existing-deployment), then set
+  `DATABASE_URL` to the bundled server's URL.
+- **Compose-only (no `start.sh`):** `POSTGRES_PASSWORD` is required; the file does
+  not render without it. Leave `DATABASE_URL` unset and the backend and scheduler
+  use the bundled server. Set `DATABASE_URL=` (empty) to keep an existing SQLite file.
+
+Nightly backups (#2216) on a hosted PostgreSQL install are `pg_dump -Fc` files
+(`trinity-backup-YYYYMMDD.dump`) under `trinity-data/backups/`.
+
 ## Switching to PostgreSQL (fresh deployment)
 
 For a new instance, PostgreSQL is a configuration change. The backend builds the

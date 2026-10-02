@@ -14,7 +14,27 @@ import { test, expect } from '@playwright/test'
  */
 const WIDTHS = [1440, 1024, 768, 640]
 
-async function coldLoadAndTrack(page, width, path = '/workspace') {
+// trinity-enterprise#610: bare `/workspace` now lands on the Inbox, which has
+// no composer. The conversation surface these arms were written for is reached
+// by a stage key instead — `?agent=<first roster agent>` — which is never
+// redirected (D9) and renders that agent's conversation, as bare `/workspace`
+// did before. Resolved once per page, from the roster the Workspace itself reads.
+async function agentStagePath(page) {
+  await page.goto('/workspace/inbox')
+  const name = await page.evaluate(async () => {
+    const res = await fetch('/api/enterprise/client-portal/my-agents', {
+      headers: { Authorization: `Bearer ${localStorage.getItem('token')}` },
+    })
+    if (!res.ok) return null
+    const body = await res.json()
+    const rows = body.agents || (Array.isArray(body) ? body : [])
+    return rows[0]?.name || null
+  })
+  if (!name) throw new Error('agentStagePath: no agent on the roster to open a conversation with')
+  return `/workspace?agent=${encodeURIComponent(name)}`
+}
+
+async function coldLoadAndTrack(page, width, path) {
   await page.setViewportSize({ width, height: 900 })
   await page.goto(path)
   // Sample from the first frame that has a composer through the roster landing.
@@ -33,7 +53,7 @@ async function coldLoadAndTrack(page, width, path = '/workspace') {
 test.describe('workspace rail column reservation (#2711)', () => {
   for (const width of WIDTHS) {
     test(`@interactive the composer does not shift on roster arrival at ${width}px`, async ({ page }) => {
-      const xs = await coldLoadAndTrack(page, width)
+      const xs = await coldLoadAndTrack(page, width, await agentStagePath(page))
       expect(xs.length, 'never measured the composer').toBeGreaterThan(5)
       const spread = Math.max(...xs) - Math.min(...xs)
       expect(
@@ -45,7 +65,7 @@ test.describe('workspace rail column reservation (#2711)', () => {
 
   test('@interactive the column is present while loading and keeps its width after', async ({ page }) => {
     await page.setViewportSize({ width: 1440, height: 900 })
-    await page.goto('/workspace')
+    await page.goto(await agentStagePath(page))
     const column = page.getByTestId('ws-rail-column')
     await column.waitFor({ timeout: 20000 })
     // Reserved first: present, and explicitly marked as holding space only.
@@ -105,7 +125,7 @@ test.describe('workspace rail column reservation (#2711)', () => {
     // measure the right thing only by accident of the fixture. This one loads
     // the conversation URL directly, as a bookmark or a reload does.
     await page.setViewportSize({ width: 1440, height: 900 })
-    await page.goto('/workspace')
+    await page.goto('/workspace/inbox')
     const sessionId = await page.evaluate(async () => {
       const res = await fetch('/api/enterprise/client-portal/sessions', {
         headers: { Authorization: `Bearer ${localStorage.getItem('token')}` },
@@ -135,6 +155,7 @@ test.describe('workspace rail column reservation (#2711)', () => {
     // intermediate width is an animation frame, and an animation frame is the
     // bug.
     await page.setViewportSize({ width: 1440, height: 900 })
+    const stagePath = await agentStagePath(page)
 
     for (const stub of [
       { label: 'empty roster', status: 200, body: '{"agents": []}' },
@@ -142,7 +163,7 @@ test.describe('workspace rail column reservation (#2711)', () => {
     ]) {
       await page.route('**/my-agents*', (route) =>
         route.fulfill({ status: stub.status, contentType: 'application/json', body: stub.body }))
-      await page.goto('/workspace')
+      await page.goto(stagePath)
 
       const widths = new Set()
       for (let i = 0; i < 22; i++) {

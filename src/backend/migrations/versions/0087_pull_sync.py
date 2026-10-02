@@ -9,14 +9,14 @@ last_pull_error / last_successful_pull_at / consecutive_pull_failures /
 consecutive_pull_skips`` (the pull cycle's outcome and health), then turns the pull on only where auto-sync is already
 on (operator ruling 2026-09-25).
 
-Revision ID: 0086_pull_sync
-Revises: 0085_ent720_email_identity
+Revision ID: 0087_pull_sync
+Revises: 0086_metric_points_restatement
 """
 from alembic import op
 
 
-revision = "0086_pull_sync"
-down_revision = "0085_ent720_email_identity"
+revision = "0087_pull_sync"
+down_revision = "0086_metric_points_restatement"
 branch_labels = None
 depends_on = None
 

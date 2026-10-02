@@ -590,11 +590,11 @@ def test_sqlite_migration_adds_columns_and_backfills_only_auto_sync_agents(pre_m
 
 
 def test_alembic_revision_chains_on_the_head_and_backfills_the_same(pre_migration_db, monkeypatch):
-    path = _ROOT / "src/backend/migrations/versions/0086_pull_sync.py"
+    path = _ROOT / "src/backend/migrations/versions/0087_pull_sync.py"
     spec = importlib.util.spec_from_file_location("rev0076_703", path)
     rev = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(rev)
-    assert (rev.revision, rev.down_revision) == ("0086_pull_sync", "0085_ent720_email_identity")
+    assert (rev.revision, rev.down_revision) == ("0087_pull_sync", "0086_metric_points_restatement")
     # PostgreSQL's `ADD COLUMN IF NOT EXISTS` is not SQLite; run the statements
     # through a translating executor so the backfill is exercised for real.
     executed = []

@@ -119,6 +119,20 @@ designated; now there is, and a guess would scatter the agent's own messages
 across whichever chat the person happened to open last. An explicit
 `session_id` still wins.
 
+An ask raised DURING a chat turn is not homeless and skips this rule (ent#734):
+it attaches to the chat of the turn that raised it — see
+[operating-room.md](operating-room.md#which-chat-an-addressed-ask-attaches-to-trinity-enterprise734).
+
+**The Workspace itself lands on the Inbox (ent#610).** A bootstrap on bare
+`/workspace` — no route param, no `agent` / `new` / `voice` key — replaces to
+`/workspace/inbox` before the stage resolves (the route is captured before the first
+await and the replace is awaited inside the `try`, so no conversation flashes). Every
+explicit target still wins, and bare `/workspace` keeps its meaning as the new-chat
+stage `newChatWithAgent` → `escapeStage` lands on. Clicking an agent is unchanged: it
+opens the conversation `landingThread` picks. An addressed report with no chat of its
+addressee joins the agent-initiated things that land in Main, at publish time
+(`report_service.resolve_report_session`).
+
 ---
 
 ## Frontend
@@ -424,7 +438,8 @@ render** (ent#468 Option A), recorded on the issue.
   surface unmounted at the same instant the confirmation was created, so the
   message would have rendered for zero frames. Timers are cleared on unmount —
   this surface unmounts on every chat switch.
-- **The thread link is additive (#3055).** ent#429's "Open the conversation" button has its own `v-if`, and the controls are `<template v-if="!isEnded(ask)">`, so an ask attached to another chat (Main, for every addressed ask) stays answerable in a non-Main chat; `threadLink` (default `true`) lets a host drop the link. Pinned by `portalAskCard.mount.spec.js`.
+- **A chat draws only the asks its own turns raised, as rows of its thread (ent#610, the 2026-09-30 ruling as amended; data from ent#734).** `portalChatAsks.chatTurnAsks` keeps an ask whose `raised_in_turn === true` and whose `chat_id` is this chat; `placeAsksInThread` puts each among the messages by SERVER time only (before the first row strictly newer; history rows and a live reply carry the server's `created_at` as `at`; the person's own message, sent from here, is `local` and sits at the newest server time before it, so no browser clock takes part; a row with no time otherwise is a reply just received, the newest; while earlier messages are not shown, an ask older than the first row shown is left out). While it waits it is the one `PortalAsks` card (`testid-prefix="portal-tile-ask"`, thread link off, capped at 40rem); once ended it is one muted row, kind · title · ending with who · when (`askHistoryLine`, `data-testid="portal-chat-ask-ended"`, gray-500 in light, its full title as `title`, the title on its own line on a phone). **An answer collapses the card at once** (the team's ruling on #3101, 2026-10-01): the row carries the confirmation ("Answered by you · just now"), a persistent `aria-live` region (`portal-chat-ask-announce`) says it, and focus moves to the row (`tabindex=-1`) when the card took it down with it — never out of the composer. A failed answer leaves the ask waiting (the store writes only on success), so the card stays open with its error. One watcher over the chat and its waiting ids tells "ended while on screen" from "already ended" (only the first is announced) and survives a chat switch. The chat reads its own chat-turn asks too (`store.fetchChatTurnAsks` → `GET …/asks?chat_id=`, no 7-day window — the queue's retention is the bound), merged under the store's fresher rows; a read for a chat already left is dropped. The asks are read again when a turn's reply lands, and a new waiting tile counts toward "jump to latest". A background ask (schedule / loop / gate — `raised_in_turn` false, `chat_id` = Main as the reply target only) draws in no chat. Nothing sits between the thread and the composer (principle 30): the round 4–5 pinned box, its "N more asks" line and `splitChatAsks` / `pinnedAskIds` / `chatAsksLabel` / `chatAsksElsewhere` are gone. Specs: `portalChatAskTiles.spec.js`, `portalBackgroundAskInboxOnly.spec.js`, `portalChatAsksElsewhere.spec.js` (the retired line).
+- **The thread link is additive (#3055), and only for a chat-turn ask (ent#610 ruling).** `askThreadLink` returns a target only when `raised_in_turn === true` — a background ask's Main is not where it lives. ent#429's "Open the conversation" button has its own `v-if`, and the controls are `<template v-if="!isEnded(ask)">`, so an ask attached to another chat (Main, for every addressed ask) stays answerable in a non-Main chat; `threadLink` (default `true`) lets a host drop the link. Pinned by `portalAskCard.mount.spec.js`.
 
 ## Tests
 

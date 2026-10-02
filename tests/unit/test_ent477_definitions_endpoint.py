@@ -273,6 +273,7 @@ def test_the_exec_is_a_fixed_argv_with_no_caller_input(db_backend, monkeypatch):
     async def _exec(container_name, command, timeout=None, **kwargs):
         seen["container"] = container_name
         seen["command"] = command
+        seen["timeout"] = timeout
         return {"exit_code": 0, "output": _TEMPLATE}
 
     monkeypatch.setattr("services.docker_service.execute_command_in_container", _exec)
@@ -283,7 +284,8 @@ def test_the_exec_is_a_fixed_argv_with_no_caller_input(db_backend, monkeypatch):
     _refresh()
     assert seen["container"] == f"agent-{AGENT}"
     assert metric_registry.TEMPLATE_PATH in seen["command"]
-    assert seen["command"].startswith("timeout ")
+    # #2969: the primitive bounds the exec from the `timeout` it is handed.
+    assert seen["timeout"] == metric_registry._EXEC_TIMEOUT
     assert "head -c" in seen["command"]
     assert ";" not in seen["command"] and "|" not in seen["command"]
 
@@ -292,6 +294,7 @@ def test_the_exec_is_a_fixed_argv_with_no_caller_input(db_backend, monkeypatch):
     {"exit_code": 1, "output": "cat: no such file"},
     {"exit_code": 0, "output": ""},
     {"exit_code": 0, "output": "   \n"},
+    {"exit_code": 124, "output": "", "timed_out": True},
 ])
 def test_a_failed_or_empty_exec_never_retires(db_backend, monkeypatch, exec_result):
     """Every one of these is "no evidence" — and retiring on any of them wipes

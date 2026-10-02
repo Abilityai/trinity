@@ -31,7 +31,11 @@ import { renderMarkdown, renderInlineMarkdown } from '../../utils/markdown'
 // backticks — so an agent's markdown reads the same in its ask as in its chat.
 const PROSE = 'prose prose-sm dark:prose-invert max-w-none break-words '
   + 'prose-code:before:content-none prose-code:after:content-none prose-code:bg-gray-100 '
-  + 'dark:prose-code:bg-gray-700 prose-code:px-1 prose-code:py-0.5 prose-code:rounded prose-code:break-words'
+  + 'dark:prose-code:bg-gray-700 prose-code:px-1 prose-code:py-0.5 prose-code:rounded prose-code:break-words '
+  // The pill is for INLINE code: inside a fenced block (typography's dark
+  // <pre>, light text) it drew a light strip under light text — unreadable in
+  // the light theme (ent#610 A2 sign-off). A block's code sits on the block.
+  + '[&_pre_code]:bg-transparent [&_pre_code]:p-0'
 
 const props = defineProps({
   text: { type: [String, Number], default: '' },

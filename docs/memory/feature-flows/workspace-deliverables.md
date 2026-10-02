@@ -65,8 +65,20 @@ Two rules make the columns trustworthy:
   — the MEM-001 rule) and reads the session from the ent#286 reverse marker,
   which maps execution → portal session for the duration of a turn. The agent
   never names a conversation, so it cannot post a card into one it was not part
-  of. No marker (a scheduled run, an expired turn) ⇒ NULL, and the deliverable
-  simply lists on the agent page with no card.
+  of. **Since ent#610** the in-flight chat is kept only if it belongs to the
+  **addressee**; otherwise — no marker (a scheduled run, an expired turn), or a
+  turn that was someone else's — and **only when the agent publishes as itself**
+  (an agent-scoped key for this agent; a human sharer's publish stays NULL —
+  in-flight chat included — so one sharer cannot reach another person's Main or
+  their live turn), the report is stamped to the
+  addressee's **Main** (`services/report_service.resolve_report_session` →
+  `ensure_main_session`; after the report row is written the route calls
+  `report_service.touch_report_session` → `touch_portal_session(added=0)` so a
+  report-only Main is listed by the sidebar — never before the insert, so a
+  failed publish leaves no empty Main listed). It therefore always has a chat card and an
+  anchor, and it is an **unread arrival**: the ent#610 Inbox and every unread
+  count include a report addressed to you stamped to a chat you own. Only an
+  unaddressed report stays NULL. Historic NULL rows stay unlinked and uncounted.
 
 ## What a client sees
 
@@ -133,5 +145,6 @@ there.
   directs: the per-agent inbox boundary stays where it is, because that boundary
   is where the last two portal security bugs lived. Shared files are therefore
   not yet addressable, and remain listed per agent.
-- The chat card list is per session; a deliverable published after its turn's
-  marker expires lands on the agent page only.
+- The chat card list is per session. ~~A deliverable published after its turn's
+  marker expires lands on the agent page only.~~ Since ent#610 it lands in the
+  addressee's Main instead.

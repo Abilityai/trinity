@@ -39,7 +39,7 @@
       <InlineError
         v-if="error && !loaded"
         :message="error"
-        retryable
+        :retryable="!denied"
         @retry="reload"
       />
 
@@ -146,7 +146,7 @@
 
     <!-- ent#253: a failed REFRESH keeps the data and says so beside it; it does
          not replace a band that is already reading correctly. -->
-    <InlineError v-if="error && loaded" class="mt-2" :message="error" retryable @retry="reload" />
+    <InlineError v-if="error && loaded" class="mt-2" :message="error" :retryable="!denied" @retry="reload" />
   </div>
 </template>
 
@@ -177,7 +177,7 @@ const props = defineProps({
 // instead of paying for two windows of the same agent.
 const timeWindow = ref('7d')
 const WINDOW_LABEL = '7 days'
-const { stats, ratings, loaded, error, reload } = usePortalAgentPage(
+const { stats, ratings, loaded, error, denied, reload } = usePortalAgentPage(
   toRef(props, 'agentName'), timeWindow,
 )
 const chartBuckets = computed(() => bucketsForChart(stats.value))
@@ -187,8 +187,10 @@ const ratingsCaption = computed(() => (
 ))
 
 // A rate that has never been measured is `—`, not `0%`: zero is a claim about
-// performance, and no runs is a claim about nothing.
+// performance, and no runs is a claim about nothing. `success_rate` and
+// `first_try.rate` are RATIOS in 0..1 (db/schedules/analytics.py), so they
+// are scaled to a percent here, as every other surface does (#3138).
 function pct(v) {
-  return typeof v === 'number' && Number.isFinite(v) ? `${Math.round(v)}%` : '—'
+  return typeof v === 'number' && Number.isFinite(v) ? `${Math.round(v * 100)}%` : '—'
 }
 </script>

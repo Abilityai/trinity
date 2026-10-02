@@ -523,8 +523,9 @@
     by a monotonic deadline (`_MERGE_READY_TIMEOUT_SECONDS`, default 1800, env-tunable,
     sized to a slow full-history clone + startup — decoupled from the 900s cycle) and a
     module-level `asyncio.Semaphore` so batch creation can't starve the shared 4-thread
-    Docker pool. Every exec/HTTP is `asyncio.wait_for`-bounded (honestly: that frees the
-    task, not the pinned pool thread). Non-fatal — logs and swallows on any failure.
+    Docker pool. Every exec/HTTP is `asyncio.wait_for`-bounded (that frees the task; the
+    exec's pool thread is freed by `execute_command_in_container`'s own enforced
+    `timeout`, #2969). Non-fatal — logs and swallows on any failure.
   - **Merge-only at creation = PREVENT** (no `_build_rm_cached_ignored_command`): the
     generated `.env`/`.mcp.json` are written post-clone as **untracked** files, so a
     merge-installed `.gitignore` stops `git add -A` from ever staging them. A template

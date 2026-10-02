@@ -33,20 +33,19 @@ vi.mock('axios', () => {
   }
 })
 
-import { useClientPortalStore, portalHttp } from '@/stores/clientPortal'
-import { usePortalWorkStore } from '@/stores/portalWork'
+import { useClientPortalStore } from '@/stores/clientPortal'
 import PortalAsks from '@/components/portal/PortalAsks.vue'
-import PortalWork from '@/components/portal/PortalWork.vue'
 
 const ENDED = '2026-09-25T10:00:00.000000Z'
 // `chat_id` is the platform-stamped thread the ask was raised against. Main's
 // id here is deliberately NOT null: a null chat_id renders no link, which is
-// exactly how the round-1 review seed hid this bug.
+// exactly how the round-1 review seed hid this bug. `raised_in_turn`: only an
+// ask a chat turn raised links back to its chat (ent#610, the 09-30 ruling).
 const ask = (id, over = {}) => ({
   id, agent_name: 'scout', kind: 'approval', priority: 'medium',
   title: `Ask ${id}`, question: `Ask ${id}`, options: ['Yes', 'No'],
   created_at: '2026-09-20T10:00:00Z', expires_at: null, status: 'pending',
-  chat_id: 'main-1', sync: 'confirmed', aging: false, ended_at: null, ended_by: null, ...over,
+  chat_id: 'main-1', raised_in_turn: true, sync: 'confirmed', aging: false, ended_at: null, ended_by: null, ...over,
 })
 
 const tid = (w, id) => w.find(`[data-testid="${id}"]`)
@@ -111,22 +110,18 @@ describe('an ask attached to another chat (mounted)', () => {
   })
 })
 
-describe('the Work tab\'s "Waiting on you" is answerable in place (mounted)', () => {
-  it('an ask attached to Main, read from another chat\'s rail, shows its controls', async () => {
+// ent#610 (the 09-30 ruling): Work no longer draws asks — #3055's "read from
+// another chat's rail" case moved with them. An ask attached to Main, read from
+// ANOTHER chat's surface, still keeps its controls beside the link: the same
+// card, mounted with the reader in a different chat.
+describe('an ask attached to Main, read from another chat, is answerable in place (mounted)', () => {
+  it('shows its controls and the link back to its chat', async () => {
     store.asks = [ask('ap1')]
     store.asksAvailable = true
-    const work = usePortalWorkStore()
-    work.hasLoaded = true
-    portalHttp.get.mockResolvedValue({ data: { now: [], earlier: [], earlier_total: 0 } })
-    const w = mount(PortalWork, {
-      props: { participants: ['scout'], chatId: 'other-2' },
-      global: { stubs: { PortalWorkCard: true, PortalAvatar: true, PortalSkeleton: true, LoadFailed: true } },
-    })
+    const w = mount(PortalAsks, { props: { agentName: 'scout', currentSessionId: 'other-2' } })
     await flushPromises()
-    const waiting = w.find('[data-testid="portal-work-waiting"]')
-    expect(waiting.exists()).toBe(true)
-    expect(waiting.find('[data-testid="portal-ask-open-thread-ap1"]').exists()).toBe(true)
-    expect(waiting.find('[data-testid="portal-ask-option-ap1"]').exists()).toBe(true)
-    expect(waiting.find('[data-testid="portal-ask-send-ap1"]').exists()).toBe(true)
+    expect(tid(w, 'portal-ask-open-thread-ap1').exists()).toBe(true)
+    expect(tid(w, 'portal-ask-option-ap1').exists()).toBe(true)
+    expect(tid(w, 'portal-ask-send-ap1').exists()).toBe(true)
   })
 })

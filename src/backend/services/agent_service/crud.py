@@ -2289,6 +2289,9 @@ async def _broadcast_agent_created(agent_status: AgentStatus, ws_manager) -> Non
     if ws_manager:
         await ws_manager.broadcast(json.dumps({
             "event": "agent_created",
+            # #3109: `type` too, like agent_started/agent_stopped — the
+            # dashboard's dispatcher (stores/network.js) keys on `type`.
+            "type": "agent_created",
             "data": {
                 "name": agent_status.name,
                 "status": agent_status.status,

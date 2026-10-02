@@ -1189,6 +1189,9 @@ class BusinessStatus(str, Enum):
     VALIDATED = "validated"                     # Validation passed
     FAILED_VALIDATION = "failed_validation"    # Validation found incomplete/incorrect work
     SKIPPED = "skipped"                        # Validation not configured for this schedule
+    # #2959: the run left nothing to inspect (empty response), so no verdict
+    # was possible. Never files the "Validation Failed" alert; never a PASS.
+    VALIDATION_UNAVAILABLE = "validation_unavailable"
 
 
 class QueueItemStatus(str, Enum):
@@ -3942,7 +3945,7 @@ class ExecutionSummary(BaseModel):
     # Fan-out linkage (small) - FANOUT-001
     fan_out_id: Optional[str] = None
     # Validation tracking (small) - VALIDATE-001
-    business_status: Optional[str] = None  # pending_validation, validated, failed_validation, skipped
+    business_status: Optional[str] = None  # pending_validation, validated, failed_validation, validation_unavailable, skipped
     validation_execution_id: Optional[str] = None
     # Auto-compact observability (Bundle B) - small JSON list
     compact_metadata: Optional[str] = None
@@ -4904,14 +4907,19 @@ class MetricPointAccepted(BaseModel):
 
 
 class MetricPointsResult(BaseModel):
-    """The 201 body. `recorded` and `deduplicated` are separate counts on
-    purpose: an honest "we already had this" is not a failure and must not read
-    as a success that wrote something."""
+    """The 201 body. `recorded`, `deduplicated` and `corrected` are separate
+    counts on purpose: an honest "we already had this" is not a failure and
+    must not read as a success that wrote something, and a restated row
+    (ent#729) is neither of the two.
+
+    `corrected` defaults to 0 so an idempotency snapshot stored before it
+    existed still replays (`MetricPointsResult(**snapshot, replayed=True)`)."""
 
     success: bool = True
     agent_name: str
     recorded: int
     deduplicated: int
+    corrected: int = 0
     replayed: bool = False
     points: List[MetricPointAccepted] = []
 

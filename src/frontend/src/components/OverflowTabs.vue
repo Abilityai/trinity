@@ -39,7 +39,7 @@ export const FIXED_TAB_WIDTH = 'w-40'
  * default `flex-shrink: 1` would squeeze the whole row to ~50px per tab for a
  * frame while the `width: max-content` mirror still reports the real 160.
  */
-import { ref, computed, onMounted, onUnmounted, watch, nextTick } from 'vue'
+import { ref, computed, onMounted, onUnmounted, watch, nextTick, h } from 'vue'
 import DraftMark from './base/DraftMark.vue'
 // #1925 — the fit arithmetic moved to a pure module so NavBar's priority+ link
 // row packs by the SAME rule instead of a second copy, and so the rule is
@@ -56,9 +56,25 @@ const props = defineProps({
   // `signal` (ent#474) draws the rail's activity dot after the label — the
   // ringed "live" shape or the plain "updated" one — in the visible row, the
   // overflow menu AND the mirror row, so the measured width includes it.
+  // `badgeVariant` (ent#610 §3g A3a) picks the count's colour: `success` (the
+  // default, the tinted pill every strip has always had), or `urgent` /
+  // `primary` — SOLID white ink on the 700 tier (5.18 / 7.90:1), because a
+  // counter is solid and a per-row fact is tinted (design-system.md) — or
+  // `neutral`, a gray tint for a share of a count that is no event's outcome.
+  // `badgeLabel` (A8c) is the tab's accessible name when the bare count would
+  // be read as "Action 21"; the badge is then aria-hidden. Neither changes the
+  // tab's width, so neither is in the re-measure key.
   // `hasDraft` (trinity-enterprise#657) draws the quiet Draft mark after the
   // label — "this tab holds unsent text" — in the same three places, and in
   // the re-measure key, because it changes the tab's width when it toggles.
+  // `badgeSlot` (#3060) is an OPT-IN reservation for a count that lands after
+  // the strip renders: the badge span is drawn whether or not `badge` has a
+  // value — `invisible` (width kept) while it has none — at a tabular-nums
+  // min-width, so the count's arrival does not slide the neighbouring tabs.
+  // In the visible row AND the mirror (a tab measured narrower than it draws
+  // overflows one tab too late); the dropdown keeps its badge/signal chain
+  // untouched (#2794) — a menu row's count moves nothing beside it. A tab
+  // without it renders exactly what it did.
   tabs: { type: Array, required: true },
   // active tab id
   modelValue: { type: [String, null], required: true },
@@ -75,6 +91,14 @@ const props = defineProps({
   // label-boundedness are different questions, and coupling them would clamp
   // any future dense strip of short fixed labels for nothing.
   fixedWidth: { type: Boolean, default: false },
+  // ent#610 §3g B6a: OPT-IN tab semantics. When set, the inline tabs sit in a
+  // `role="tablist"` named by this string, each a `role="tab"` with
+  // `aria-selected` and a roving tabindex (one tab stop); Arrow Left/Right wrap,
+  // Home/End jump, and activation stays MANUAL — arrows move focus, Enter /
+  // Space (the button's own click) selects. The More trigger is not a tab and
+  // stays outside the tablist. Default off: every strip that does not ask for
+  // it renders exactly what it did (flipping the default is #3056).
+  tablistLabel: { type: String, default: '' },
 })
 const emit = defineEmits(['update:modelValue'])
 
@@ -96,6 +120,50 @@ let ro = null
 let rafId = null
 let lastWidth = -1
 
+
+// Full literal class strings so Tailwind's content scan sees every one. The
+// default arm is the exact string the pill always carried; one arm per
+// variant, never two colours of one property in a string (#2662).
+const BADGE_TONES = {
+  success: 'bg-status-success-100 dark:bg-status-success-900/50 text-status-success-700 dark:text-status-success-300',
+  urgent: 'bg-status-urgent-700 text-white',
+  primary: 'bg-action-primary-700 text-white',
+  // A share of a count (the Inbox's per-agent facets, ent#610 A2): a fact about
+  // the set, not the outcome of an event, so it is gray, never `status-*`.
+  neutral: 'bg-gray-100 dark:bg-gray-750 text-gray-700 dark:text-gray-300',
+}
+const badgeTone = (tab) => BADGE_TONES[tab.badgeVariant] || BADGE_TONES.success
+// #3060: the reserved badge's footprint — one literal, used by both rows.
+const BADGE_SLOT = 'min-w-[1.75rem] text-center tabular-nums'
+const badgeSlotClass = (tab) => (tab.badgeSlot ? BADGE_SLOT : '')
+
+// B6a: the wrapper the inline tabs render in — a labelled tablist when asked
+// for, and NO element at all otherwise (the slot's nodes are returned bare), so
+// a strip that did not opt in keeps its DOM. `<component :is="Fragment">`
+// cannot do this: it renders a Fragment with no children.
+const TablistWrap = (p, { slots }) => (p.label
+  ? h('div', { role: 'tablist', 'aria-label': p.label, class: ['flex', p.clip ? 'min-w-0 overflow-hidden' : ''] }, slots.default?.())
+  : slots.default?.())
+TablistWrap.props = ['label', 'clip']
+// The one tab stop: the selected tab when it is inline, else the first.
+const rovingId = computed(() => {
+  const inline = inlineTabs.value
+  return (inline.find((t) => t.id === props.modelValue) || inline[0])?.id
+})
+function onTabKeydown(e, i) {
+  if (!props.tablistLabel) return
+  const list = rootEl.value?.querySelectorAll('[role="tablist"] [role="tab"]')
+  const n = list ? list.length : 0
+  if (!n) return
+  let to = null
+  if (e.key === 'ArrowRight') to = (i + 1) % n
+  else if (e.key === 'ArrowLeft') to = (i - 1 + n) % n
+  else if (e.key === 'Home') to = 0
+  else if (e.key === 'End') to = n - 1
+  if (to === null) return
+  e.preventDefault()
+  list[to].focus()
+}
 
 const tabPad = computed(() => (props.dense ? 'px-3 py-2 text-xs' : 'px-4 py-3 text-sm'))
 const morePad = computed(() => (props.dense ? 'px-3 py-2 text-xs' : 'px-4 py-3 text-sm'))
@@ -224,12 +292,18 @@ onUnmounted(() => {
   <div ref="rootEl" class="relative border-b border-gray-200 dark:border-gray-700">
     <!-- Visible row: inline tabs + right-pushed More trigger -->
     <nav class="-mb-px flex" :class="fixedWidth ? 'overflow-hidden' : ''">
+      <TablistWrap :label="tablistLabel" :clip="fixedWidth">
       <button
-        v-for="tab in inlineTabs"
+        v-for="(tab, i) in inlineTabs"
         :key="tab.id"
         type="button"
-        :title="fixedWidth ? tab.label : undefined"
+        :title="tab.signalTitle || (fixedWidth ? tab.label : undefined)"
+        :role="tablistLabel ? 'tab' : undefined"
+        :aria-selected="tablistLabel ? String(modelValue === tab.id) : undefined"
+        :tabindex="tablistLabel ? (tab.id === rovingId ? 0 : -1) : undefined"
+        :aria-label="tab.badgeLabel || undefined"
         @click="select(tab.id)"
+        @keydown="onTabKeydown($event, i)"
         :class="[
           tabPad,
           fixedWidth ? `${FIXED_TAB_WIDTH} shrink-0` : '',
@@ -243,8 +317,10 @@ onUnmounted(() => {
         <span class="min-w-0 truncate">{{ tab.label }}</span>
         <DraftMark v-if="tab.hasDraft" class="ml-1.5" />
         <span
-          v-if="tab.badge"
-          class="ml-1.5 shrink-0 px-1.5 py-0.5 text-[10px] font-semibold bg-status-success-100 dark:bg-status-success-900/50 text-status-success-700 dark:text-status-success-300 rounded-full leading-none"
+          v-if="tab.badge || tab.badgeSlot"
+          :class="['ml-1.5 shrink-0 px-1.5 py-0.5 text-[10px] font-semibold', badgeTone(tab), 'rounded-full leading-none', badgeSlotClass(tab), tab.badge ? '' : 'invisible']"
+          :aria-hidden="tab.badgeLabel ? 'true' : undefined"
+          :data-badge-slot="tab.badgeSlot ? '' : undefined"
         >
           {{ tab.badge }}
         </span>
@@ -257,6 +333,7 @@ onUnmounted(() => {
           aria-hidden="true"
         ></span>
       </button>
+      </TablistWrap>
 
       <!-- More trigger (kept fixed-width "More ▾"; reflects active state when
            the selected tab is in the overflow set — AC). -->
@@ -314,6 +391,7 @@ onUnmounted(() => {
         :key="tab.id"
         data-menu-item
         type="button"
+        :aria-label="tab.badgeLabel || undefined"
         :title="fixedWidth ? tab.label : undefined"
         @click="select(tab.id)"
         :class="[
@@ -331,7 +409,8 @@ onUnmounted(() => {
         <DraftMark v-if="tab.hasDraft" />
         <span
           v-if="tab.badge"
-          class="px-1.5 py-0.5 text-[10px] font-semibold bg-status-success-100 dark:bg-status-success-900/50 text-status-success-700 dark:text-status-success-300 rounded-full leading-none"
+          :class="['px-1.5 py-0.5 text-[10px] font-semibold', badgeTone(tab), 'rounded-full leading-none']"
+          :aria-hidden="tab.badgeLabel ? 'true' : undefined"
         >
           {{ tab.badge }}
         </span>
@@ -372,8 +451,9 @@ onUnmounted(() => {
           {{ tab.label }}
           <DraftMark v-if="tab.hasDraft" class="ml-1.5" />
           <span
-            v-if="tab.badge"
+            v-if="tab.badge || tab.badgeSlot"
             class="ml-1.5 px-1.5 py-0.5 text-[10px] font-semibold rounded-full leading-none"
+            :class="badgeSlotClass(tab)"
           >
             {{ tab.badge }}
           </span>

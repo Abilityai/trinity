@@ -121,7 +121,7 @@ an explicit AC that no new endpoint appear (`routers/settings.py:283-312`):
 
 | field | type | notes |
 |---|---|---|
-| `install_source` | string | `do-marketplace` \| `vultr-marketplace` \| `do-script` \| `script` \| `unknown`. A string on a mostly-boolean surface; `platform_default_model` is the precedent |
+| `install_source` | string | `do-marketplace` \| `vultr-marketplace` \| `aws-marketplace` \| `do-script` \| `aws-script` \| `script` \| `unknown`. A string on a mostly-boolean surface; `platform_default_model` is the precedent |
 | `marketplace_install` | bool | Did this come from a vendor listing — `MARKETPLACE_INSTALL_SOURCES` (`config.py:577`). Still served and still means only that; it is **not** the guide's gate |
 | `hardening_guide_eligible` | bool | **The gate.** `HARDENING_GUIDE_INSTALL_SOURCES` (`config.py:592`) = the marketplace set ∪ `do-script`. A separate set, not a widening of `marketplace_install`, which would make a doc-driven install claim a marketplace provenance it does not have. Neither set includes `script` or `unknown` |
 | `install_tls_posture` | string | `unconfigured` \| `http` \| `https-ip` \| `https-domain` |

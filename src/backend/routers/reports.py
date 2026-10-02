@@ -81,40 +81,6 @@ def _hide_audience(row: dict, current_user: User) -> dict:
     return redacted
 
 
-def _resolve_portal_session(execution_id: str, agent_name: str) -> Optional[str]:
-    """The Workspace chat a publishing turn belongs to, or None (ent#365).
-
-    Two gates, in this order: the execution must belong to THIS agent
-    (`resolve_and_validate_execution`, the MEM-001 rule — the agent supplies an
-    id, never its own identity), and the id must be the turn currently in flight
-    for a portal session, which is what the ent#286 reverse marker answers.
-
-    Fail-soft to None everywhere: a report with no chat still lists on the agent
-    page, whereas a 5xx here would fail a publish over a card placement. The
-    marker is Redis-backed with a TTL sized to the turn, so a report published
-    after its own turn ended lands unlinked — correct, since by then the client
-    has the reply and the card belongs to the page, not to a closed exchange.
-    """
-    try:
-        from services.idempotency_service import resolve_and_validate_execution
-        if resolve_and_validate_execution(execution_id, agent_name) is None:
-            return None
-        from client_portal import service as portal_service
-        return portal_service.get_inflight_session_for_execution(execution_id)
-    except Exception as e:  # noqa: BLE001
-        # WARNING, not debug (caught in review on #2383). Fail-soft is right —
-        # a card placement must never fail a publish — but this is the one
-        # function the entire in-chat half of the deliverable depends on. A
-        # Redis outage, an import error or a renamed marker key would make
-        # every card silently stop appearing while the agent page still lists
-        # the reports, so nothing would give anyone a reason to look.
-        logger.warning(
-            "portal session resolution failed for execution %s (%s) — the "
-            "report will publish without an in-chat card",
-            execution_id, type(e).__name__,
-        )
-        return None
-
 _VALID_HOURS = {0, 1, 6, 24, 168, 720}  # 0 = all-time
 
 # Per-agent create rate limit (#918 review I3). Reports can be bursty (an agent
@@ -310,14 +276,18 @@ async def create_report(
                 ),
             )
 
-    # Which Workspace chat this belongs in, resolved from the publishing TURN.
-    # Never read from the request: the agent supplies an execution id, the
-    # backend decides what conversation that is (the MEM-001 rule). Absent,
-    # unresolvable, or a non-portal turn ⇒ NULL, and the report simply lists on
-    # the agent page without a chat card.
+    # Which Workspace chat this belongs in, resolved server-side — never read
+    # from the request: the agent supplies an execution id, the backend decides
+    # what conversation that is (the MEM-001 rule). ent#610: for the agent's
+    # OWN publish only, the turn's chat if the ADDRESSEE owns it, else the
+    # addressee's Main. A human sharer publishing as the agent places no card
+    # anywhere — not in another person's Main, not in their live turn (/cso).
+    # Unaddressed ⇒ NULL (operator-only).
     portal_session_id = None
-    if audience and data.execution_id:
-        portal_session_id = _resolve_portal_session(data.execution_id, name)
+    if audience:
+        portal_session_id = report_service.resolve_report_session(
+            data.execution_id, name, audience,
+            agent_publish=current_user.agent_name == name)
 
     report = await report_service.create_report(
         agent_name=name,
@@ -332,6 +302,10 @@ async def create_report(
         addressed_to_email=audience,
         portal_session_id=portal_session_id,
     )
+    # Only now that the row exists: touching first let a failed insert list an
+    # empty Main in the sidebar (ent#610 review).
+    if portal_session_id:
+        report_service.touch_report_session(portal_session_id)
     # The create dict now carries two fields the response model does not declare.
     # Pydantic v2 ignores unknown keys by default, so this filter is a belt, not
     # the mechanism.
