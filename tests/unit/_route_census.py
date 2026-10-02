@@ -556,6 +556,12 @@ AGENT_CALLABLE: Dict[str, Tuple[str, str]] = {
     # only the agent's own key (or trinity-system as itself) and refuses every person.
     "routers/operator_queue.py::raise_my_ask": (
         "POST /api/agents/{name}/operator-queue", "MCP ask_operator; the agent raises its own ask, self-only (get_self_acting_agent)"),
+    # The autonomy dial (ent#641): reads a companion needs to tell a person why it asks first.
+    # The writes are the GRANT (PUT /api/settings/autonomy-dial, admin + interactive).
+    "routers/seat_decisions.py::get_seat_autonomy": (
+        "GET /api/agents/{agent_name}/seat-autonomy", "ent#641 read of this companion's seat verdict; ask classes only, never a person"),
+    "routers/settings/autonomy_dial.py::get_autonomy_dial": (
+        "GET /api/settings/autonomy-dial", "ent#641 read of the instance ceiling; reading the level is not a grant"),
 }
 
 # Authenticates itself, or unauthenticated by design. key -> ("METHOD /full/path", reason)

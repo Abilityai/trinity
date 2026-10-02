@@ -102,9 +102,37 @@ describe("list_seat_decisions", () => {
   });
 });
 
+describe("get_autonomy (ent#641)", () => {
+  it("GETs by execution_id — the seat is never a parameter", async () => {
+    const calls: Recorded[] = [];
+    const fake = {
+      getBaseUrl: () => "http://backend:8000",
+      async getSeatAutonomy(agent: string, execId: string) {
+        calls.push({ method: "autonomy", agent, execId });
+        return { agent_name: agent, level: "L2", classes: [] };
+      },
+    } as unknown as TrinityClient;
+    const tools = createDecisionTools(fake, false);
+    const out = JSON.parse(await tools.getAutonomy.execute({ execution_id: "exec-1", agent_name: "companion" }, {}));
+    assert.equal(out.level, "L2");
+    assert.deepEqual(calls, [{ method: "autonomy", agent: "companion", execId: "exec-1" }]);
+  });
+
+  it("refuses a user-scoped call with no agent_name, and never reaches the network", async () => {
+    const calls: Recorded[] = [];
+    const fake = {
+      getBaseUrl: () => "http://backend:8000",
+      async getSeatAutonomy(agent: string, execId: string) { calls.push({ method: "autonomy", agent, execId }); return {}; },
+    } as unknown as TrinityClient;
+    const out = JSON.parse(await createDecisionTools(fake, false).getAutonomy.execute({ execution_id: "e" }, {}));
+    assert.equal(out.success, false);
+    assert.equal(calls.length, 0);
+  });
+});
+
 describe("access policy (ent#628 rows)", () => {
-  it("both tools carry an enforce row on agent_name, so the server boots and a foreign target is gated", () => {
-    for (const name of ["record_decision", "list_seat_decisions"]) {
+  it("every tool carries an enforce row on agent_name, so the server boots and a foreign target is gated", () => {
+    for (const name of ["record_decision", "list_seat_decisions", "get_autonomy"]) {
       const policy = policyFor({ name, parameters: { shape: { agent_name: {} } } } as any);
       assert.deepEqual(policy, { kind: "enforce", param: "agent_name" }, name);
     }
