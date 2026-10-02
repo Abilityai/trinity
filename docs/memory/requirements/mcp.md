@@ -324,6 +324,23 @@ outcomes ARE audit-logged (`AuditEventType.AUTHENTICATION`, `login_success`/`log
   allow-list, and registered outbound endpoints; toggle exposure; add
   and remove inbound identities. Mutating tools are owner-gated **and
   human-only** (`reject_agent_principal`) at the backend.
+- **Outbound control is not part of this plane (ent#761)**: the three
+  endpoint-registry tools (`register_a2a_endpoint` / `list_a2a_endpoints` /
+  `remove_a2a_endpoint`) address the **OSS** platform-wide outbound endpoint
+  store through `GET/PUT /api/settings/a2a-endpoints` and
+  `DELETE /api/settings/a2a-endpoints/{ref}` (§32.5 FR-2) — the only store
+  the runtime call resolves against on every build. They are available in
+  **every** edition, are **admin**-tier and human-only rather than
+  owner-tier (a platform-scope write grants a credentialed egress target to
+  every agent on the instance — Invariant #8's grant-vs-use line), and
+  carry a status-based error mapper on which `not_entitled` is structurally
+  unreachable: the previous body-text mapper inferred that flag from any 403
+  mentioning `a2a`, i.e. it told an operator to buy a licence for what was
+  really an auth refusal. `agent_name` is accepted and ignored on all three
+  (the store is not per-agent); keeping it required invited a caller to
+  register under one name, list under another, see the same rows and report
+  a cross-agent leak. The entitled management plane this section describes
+  is therefore exposure + card + inbound allow-list only.
 - **Agent-key gating — corrected (#736)**: an earlier revision of this
   section claimed the MCP layer applied "the same `{self} ∪ permitted`
   gate for agent-scoped keys as the rest of the tool surface". It did
@@ -335,7 +352,15 @@ outcomes ARE audit-logged (`AuditEventType.AUTHENTICATION`, `login_success`/`log
   #736 adds the `{self} ∪ permitted` gate to those two read tools, which
   is what this bullet now describes. The mutating tools need no such
   gate: `reject_agent_principal` at the backend already refuses every
-  agent principal outright.
+  agent principal outright. **Amended by ent#761** for
+  `list_a2a_endpoints` only: its route became the admin + human-only
+  settings read, so the MCP layer refuses an agent-scoped key outright
+  instead of running the `{self} ∪ permitted` lookup — against a
+  platform-scope list "sibling" has no meaning, and the narrower check
+  denied a strict subset of what the backend denies while costing a round
+  trip. An inert check is worse than none, because the next reader
+  believes it does something. `get_agent_a2a_config` keeps the gate
+  unchanged.
 - **Note on the runtime call**: `call_a2a_agent` / `get_a2a_task` are
   **not** part of this management plane — see §32.5. Their MCP-layer gate
   is deliberately **self-only**, not `{self} ∪ permitted`, because the
@@ -429,7 +454,16 @@ raises, and a provider that returns a malformed object all **refuse**.
   `system_settings`, each credential wrapped in an AES-256-GCM envelope —
   the location Invariant #12 already blesses for
   `elevenlabs_api_key_encrypted`. **No new table, no migration, no Alembic
-  revision.** Managed by one admin-only + human-only settings route.
+  revision.** Managed by one admin-only + human-only settings route, and
+  since ent#761 that route is also what the MCP control tools drive
+  (`register_a2a_endpoint` / `list_a2a_endpoints` / `remove_a2a_endpoint`,
+  §32.3) — one store per question, so the tool that registers a target and
+  the resolver the runtime uses can no longer disagree. The `PUT` response
+  reports the outbound switch state (`enabled`) the `GET` has always
+  carried, because the switch defaults OFF: an operator who registers an
+  endpoint on a fresh install would otherwise get a complete-looking
+  registration and a dead call path, and the tool layer turns that into the
+  one admin step that fixes it (FR-11 default unchanged).
 - **Enterprise provider (future)**: a private module may register a provider
   that takes precedence and scope endpoints per agent. OSS ships a working
   source rather than only the seam because a seam with no registered provider
@@ -437,6 +471,9 @@ raises, and a provider that returns a malformed object all **refuse**.
   install — which is not what "outbound = OSS" can mean.
 - Resolution is **platform-scope** in OSS: a named endpoint is available to
   every agent on the instance. Per-agent scoping is the enterprise delta.
+  Because of that scope the control tools accept `agent_name` and ignore it,
+  and the write tier is **admin** rather than owner: registering is a
+  fleet-wide grant of a credentialed egress target, not an agent setting.
 
 #### FR-3 — Every URL is SSRF-validated at CALL time, wherever it came from
 Registration validates a URL with `startswith("http://") or

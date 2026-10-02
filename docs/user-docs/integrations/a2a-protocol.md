@@ -7,7 +7,10 @@ This guide covers both directions:
 - **Inbound** — expose one of your agents so external clients can discover its Agent Card and task it.
 - **Outbound** — register external A2A endpoints your agent may call.
 
-> **Availability.** Exposing an agent over A2A requires the A2A capability to be enabled (entitled) for your instance. When it isn't, the **A2A** tab is hidden and the public routes return `404` — off and invisible by default. Everything below assumes it's enabled.
+> **Availability.** The two directions are not gated alike.
+>
+> - **Inbound** — exposing an agent over A2A requires the A2A capability to be enabled (entitled) for your instance. When it isn't, the **A2A** tab is hidden and the public routes return `404` — off and invisible by default. Parts 1 and 2 assume it's enabled.
+> - **Outbound** — calling an external A2A agent, and managing the registry of endpoints your agents may call, works on **every** edition. It has its own switch instead: outbound calling is off until an admin turns it on ([Part 3](#turn-it-on-admin-once)).
 
 ---
 
@@ -37,7 +40,7 @@ Open the agent's detail page and select the **A2A** tab.
    ![The Agent Card URL section — the public discovery URL with a one-click Copy button.](../../screenshots/a2a-card-url.png)
 3. **Review the advertised skills** — exactly what an external caller sees on the card (derived from the agent's `template.yaml` capabilities).
 4. **Manage the inbound allow-list** (optional) — add the account emails of callers that may task the agent. Leave it empty to allow any authenticated owner/shared caller.
-5. **Register outbound endpoints** (optional) — external A2A endpoints your agent may call, with credentials stored encrypted (never shown again).
+5. **Register outbound endpoints** (optional) — external A2A endpoints, with credentials stored encrypted (never shown again). Read the note under *[Outbound endpoints](#outbound-endpoints)* before you rely on this panel: it is a **separate, per-agent registry**, and in this build `call_a2a_agent` resolves the platform-wide list of [Part 3](#register-an-endpoint-admin-human-only) instead.
 
 ### Using MCP (drive it from an agent / automation)
 
@@ -49,9 +52,11 @@ The same controls are available as MCP tools, so you can expose and configure ag
 | `set_agent_a2a_exposure` | Toggle A2A exposure on/off |
 | `get_agent_a2a_card` | Fetch the served Agent Card JSON |
 | `set_a2a_inbound_allowlist` | Add/remove inbound identities |
-| `register_a2a_endpoint` / `list_a2a_endpoints` / `remove_a2a_endpoint` | Manage the **per-agent** outbound endpoint list (see the note under *Outbound endpoints* for which list `call_a2a_agent` resolves against) |
+| `register_a2a_endpoint` / `list_a2a_endpoints` / `remove_a2a_endpoint` | Manage the **platform-wide** outbound endpoint list — the one `call_a2a_agent` resolves against, and the same list the [Part 3](#register-an-endpoint-admin-human-only) routes manage. `agent_name` is accepted but ignored, because the list is not per-agent |
 
 Exposure and credential operations are **owner/admin and human-only** — an agent-scoped key can't flip its own exposure. Reads use the standard agent-access gate.
+
+The first four tools need the A2A capability enabled; the three outbound-registry tools do not, and work on every edition. Those three are **admin** and human-only — one tier up — because the list they write is platform-wide (see [Part 3](#register-an-endpoint-admin-human-only)).
 
 ---
 
@@ -132,7 +137,7 @@ By default, any caller authenticated as an owner/shared identity for the agent m
 
 Register the external A2A endpoints your agent is allowed to call (name + URL + optional credential). Credentials are stored **encrypted and never shown again** — the UI only indicates whether an endpoint has one (`🔒 credentialed`).
 
-> **Which list does `call_a2a_agent` actually read?** Trinity resolves an outbound target through a provider seam, and in this build the resolver is the **platform-wide** list you manage in [Part 3](#register-an-endpoint-admin-human-only) — not this per-agent panel. If you register a target here and your agent answers `endpoint_not_found`, that is why: register it in Part 3. The per-agent panel becomes the resolver on a build that registers a provider for it, in which case it takes precedence.
+> **Which list does `call_a2a_agent` actually read?** Trinity resolves an outbound target through a provider seam, and in this build the resolver is the **platform-wide** list you manage in [Part 3](#register-an-endpoint-admin-human-only) — not this per-agent panel. If you register a target here and your agent answers `endpoint_not_found`, that is why: register it in Part 3 — either with the routes shown there or with `register_a2a_endpoint`, which address the same list. This per-agent panel is a separate registry; it becomes the resolver on a build that registers a provider for it, in which case it takes precedence.
 
 ---
 
@@ -196,6 +201,20 @@ The URL must be **HTTPS** and must resolve to a public address; Trinity refuses 
 
 > **⚠ Registering an endpoint is a trust decision, not a configuration step.**
 > Trinity removes the literal credential from anything the remote sends back. It **cannot** stop a remote that base64-encodes, splits or otherwise transforms it — and an agent under prompt injection can be talked into asking for exactly that. **Registering an endpoint grants that endpoint the ability to exfiltrate its own credential.** Register peers you would trust with the token you are handing them.
+
+**Owning the agent is not enough.** This registry is **admin and human-only** on every edition. The list is platform-wide, so registering an endpoint hands a credentialed egress target to *every* agent on the instance — a fleet-wide grant rather than one agent's setting, and Trinity keeps grants human-only. An agent-scoped key is refused on all three operations.
+
+The same three operations are available over MCP, so this is not a `curl`-only surface:
+
+```
+register_a2a_endpoint(name        = "research-partner",
+                      url         = "https://partner.example.com/a2a/researcher",
+                      credentials = "their-api-token")  # -> { endpoint, outbound_enabled }
+list_a2a_endpoints()                                    # -> { endpoints, outbound_enabled }
+remove_a2a_endpoint(endpoint_id = "research-partner")    # id or name; first match wins
+```
+
+They need an **admin** key held by a person, and they work whether or not the A2A capability is enabled. `register_a2a_endpoint` reports `outbound_enabled`: when it is `false`, the response also names the one admin step above that makes the endpoint callable — so a registration you cannot yet use says so instead of looking finished. `agent_name` is accepted and ignored.
 
 ### Call it (from an agent)
 
@@ -294,7 +313,7 @@ That receipt matters: a timed-out `call_a2a_agent` returns `possibly_delivered: 
 | GET/PUT | `/api/settings/a2a-endpoints` | admin, human-only | List / register endpoints |
 | DELETE | `/api/settings/a2a-endpoints/{ref}` | admin, human-only | Remove an endpoint — `ref` is its id **or** its name |
 
-The two agent routes return `404` while outbound calling is off. The three settings routes are **not** gated by the flag: an admin can register endpoints before switching the feature on, which is the intended order.
+The two agent routes return `404` while outbound calling is off. The three settings routes are **not** gated by the flag: an admin can register endpoints before switching the feature on, which is the intended order. They are also the routes behind `register_a2a_endpoint` / `list_a2a_endpoints` / `remove_a2a_endpoint`, so the MCP tools and these routes cannot disagree.
 
 `GET /api/settings/a2a-endpoints` answers `{"endpoints": [{"id": …, "name": …, "url": …, "has_credentials": true}], "enabled": false}` — credentials are write-only and never echoed back, and `enabled` is a second way to confirm the flag.
 
