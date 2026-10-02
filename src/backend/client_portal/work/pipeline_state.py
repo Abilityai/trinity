@@ -219,7 +219,7 @@ async def _read(agent_name: str, started_at: Optional[str], roster: Optional[set
         r = await client.get(f"{base}/api/files",
                              params={"path": STATE_DIR, "show_hidden": "true"})
         if r.status_code == 404:
-            # Reachable, and publishing nothing: the honest "doesn't report steps".
+            # Reachable, and publishing nothing: the honest `none`.
             return _NONE
         if r.status_code != 200:
             return _UNKNOWN

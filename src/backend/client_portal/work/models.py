@@ -18,10 +18,10 @@ WorkOutcome = Literal[
 
 #: Three states, not two (ent#457 ruling 2, as reviewed): `reported` — the
 #: agent publishes a pipeline and this is it; `none` — the agent reachable and
-#: publishing nothing, so the card says "this agent doesn't report steps";
+#: publishing nothing (the card shows no sentence for it since #3001);
 #: `unknown` — stopped, unreachable, unreadable, or more than one execution
-#: running on the agent so no instance can be attributed. Telling a user a
-#: stopped agent "doesn't report steps" is the misrender the ruling forbids.
+#: running on the agent so no instance can be attributed. Reading a stopped
+#: agent as `none` would be the misrender the ruling forbids.
 StepsState = Literal["reported", "none", "unknown"]
 
 
