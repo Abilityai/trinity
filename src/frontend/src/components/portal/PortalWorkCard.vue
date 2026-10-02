@@ -80,7 +80,7 @@
            turn — and holds ONE line, so `pending → none | unknown` swaps the
            text in place.
            `w-0 min-w-full`: the row takes the card's width and never sets it,
-           so a long name cannot widen the card when the sentence lands. -->
+           so the sentence cannot widen the card when it lands. -->
       <!-- #3001: `none` (no stages published) is silent like `pending` — no
            sentence at all; in the chat's card the reserved row stays, blank,
            so the card never moves. -->
