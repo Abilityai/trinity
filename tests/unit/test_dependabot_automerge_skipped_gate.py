@@ -32,10 +32,15 @@ _REPO = Path(__file__).resolve().parents[2]
 _WORKFLOW = _REPO / ".github" / "workflows" / "dependabot-auto-merge.yml"
 _STEP = "Wait for build + pytest to pass"
 
-# `gh api … --jq` prints one "<status>\t<conclusion>" row per matching check-run.
+# `gh api … --jq` prints one "<name>\t<status>\t<conclusion>" row per matching
+# check-run. The first poll answers GH_ROWS; every later poll answers
+# GH_ROWS_LATER (when set), so a test can model a check-run that appears or
+# completes between polls -- and prove the gate did not decide on the first.
 _GH_STUB = """\
 #!/bin/sh
-printf '%b' "$GH_ROWS"
+n=$(cat "$GH_CALLS" 2>/dev/null || echo 0)
+echo $((n + 1)) > "$GH_CALLS"
+if [ "$n" -gt 0 ] && [ -n "$GH_ROWS_LATER" ]; then printf '%b' "$GH_ROWS_LATER"; else printf '%b' "$GH_ROWS"; fi
 """
 
 _SLEEP_STUB = """\
@@ -67,7 +72,7 @@ def _gate_script() -> str:
     raise AssertionError(f"no step named {_STEP!r} in {_WORKFLOW.name}")
 
 
-def _run_gate(tmp_path: Path, rows: str) -> subprocess.CompletedProcess[str]:
+def _run_gate(tmp_path: Path, rows: str, later: str = "") -> subprocess.CompletedProcess[str]:
     stub_dir = tmp_path / "bin"
     stub_dir.mkdir()
     for name, body in (("gh", _GH_STUB), ("sleep", _SLEEP_STUB)):
@@ -78,6 +83,8 @@ def _run_gate(tmp_path: Path, rows: str) -> subprocess.CompletedProcess[str]:
         **os.environ,
         "PATH": f"{stub_dir}:{os.environ['PATH']}",
         "GH_ROWS": rows,
+        "GH_ROWS_LATER": later,
+        "GH_CALLS": str(tmp_path / "gh_calls"),
         "GH_TOKEN": "stub",
         "REPO": "example/repo",
         "SHA": "0" * 40,
@@ -91,10 +98,11 @@ def _run_gate(tmp_path: Path, rows: str) -> subprocess.CompletedProcess[str]:
 def test_by_design_skipped_pytest_jobs_do_not_block(tmp_path: Path) -> None:
     """The live shape on every PR: build + head seed green, two tier jobs skipped."""
     rows = (
-        "completed\\tsuccess\\n"      # build
-        "completed\\tskipped\\n"      # pytest (base, inline fallback)
-        "completed\\tsuccess\\n"      # pytest (head, seed 12345)
-        "completed\\tskipped\\n"      # pytest (push, absolute failures)
+        "build\\tcompleted\\tsuccess\\n"
+        "pytest (base, inline fallback)\\tcompleted\\tskipped\\n"
+        "pytest (head, seed 12345)\\tcompleted\\tsuccess\\n"
+        "pytest (push, absolute failures)\\tcompleted\\tskipped\\n"
+        "regression diff\\tcompleted\\tsuccess\\n"
     )
     r = _run_gate(tmp_path, rows)
     assert r.returncode == 0, r.stdout + r.stderr
@@ -104,7 +112,9 @@ def test_by_design_skipped_pytest_jobs_do_not_block(tmp_path: Path) -> None:
 
 def test_a_real_failure_still_blocks(tmp_path: Path) -> None:
     """Exempting `skipped` must not exempt anything else."""
-    rows = "completed\\tsuccess\\ncompleted\\tskipped\\ncompleted\\tfailure\\n"
+    rows = ("build\\tcompleted\\tsuccess\\n"
+            "pytest (base, inline fallback)\\tcompleted\\tskipped\\n"
+            "regression diff\\tcompleted\\tfailure\\n")
     r = _run_gate(tmp_path, rows)
     assert r.returncode == 1, r.stdout + r.stderr
     assert "a gating check failed" in r.stdout
@@ -112,10 +122,37 @@ def test_a_real_failure_still_blocks(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize("conclusion", ["cancelled", "timed_out", "action_required"])
 def test_other_non_success_conclusions_still_block(tmp_path: Path, conclusion: str) -> None:
-    rows = f"completed\\tsuccess\\ncompleted\\t{conclusion}\\n"
+    rows = f"build\\tcompleted\\tsuccess\\nregression diff\\tcompleted\\t{conclusion}\\n"
     r = _run_gate(tmp_path, rows)
     assert r.returncode == 1, r.stdout + r.stderr
 
+
+def test_a_missing_regression_diff_is_pending_not_green(tmp_path: Path) -> None:
+    """`regression diff` needs the pytest jobs, so GitHub creates its check-run
+    only once `pytest (head)` finishes. In that window every row present is
+    green or skipped; a gate that reads "nothing pending" there auto-merges a
+    bump whose unit verdict it never saw. It must poll again -- here the diff
+    then appears red, and that is the answer the gate must give."""
+    early = (
+        "build\\tcompleted\\tsuccess\\n"
+        "pytest (base, inline fallback)\\tcompleted\\tskipped\\n"
+        "pytest (head, seed 12345)\\tcompleted\\tsuccess\\n"
+    )
+    r = _run_gate(tmp_path, early, later=early + "regression diff\\tcompleted\\tfailure\\n")
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert "build + pytest green" not in r.stdout
+    assert int((tmp_path / "gh_calls").read_text()) >= 2
+
+
+def test_all_skipped_is_not_green(tmp_path: Path) -> None:
+    """Exempting `skipped` from *failed* must not make it count as *passed*:
+    a poll where every gating row is skipped proves nothing ran."""
+    skipped = ("build\\tcompleted\\tskipped\\n"
+               "regression diff\\tcompleted\\tskipped\\n")
+    r = _run_gate(tmp_path, skipped, later="build\\tcompleted\\tsuccess\\nregression diff\\tcompleted\\tfailure\\n")
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert "build + pytest green" not in r.stdout
+    assert int((tmp_path / "gh_calls").read_text()) >= 2
 
 
 def _gate_jq_filter() -> str:
@@ -138,7 +175,7 @@ def test_the_regression_verdict_is_a_gating_check() -> None:
     jq = shutil.which("jq")
     if not jq:
         pytest.skip("jq not on PATH")
-    projection = '| "\\(.status)\\t\\(.conclusion)"'
+    projection = '| "\\(.name)\\t\\(.status)\\t\\(.conclusion)"'
     flt = _gate_jq_filter()
     assert flt.endswith(projection), flt
     names = ("build", "pytest (head, seed 12345)", "regression diff",
