@@ -1447,8 +1447,15 @@ class NeverminedConfigCreate(BaseModel):
     @field_validator('credits_per_request')
     @classmethod
     def validate_credits(cls, v: int) -> int:
-        if v < 1:
-            raise ValueError("credits_per_request must be >= 1")
+        # ent#679 T9: 0 is legal. A Nevermined *duration* plan charges by time,
+        # not per call, so Trinity sends no amount to the facilitator and the
+        # burn is whatever the plan defines; `credits_per_request` is display +
+        # `credits_amount` logging only. The old `>= 1` floor made such a plan
+        # impossible to configure honestly — the operator had to claim a
+        # per-call credit price that nothing would ever charge. A NEGATIVE
+        # amount is still a named 422: it is not a plan shape, it is a typo.
+        if v < 0:
+            raise ValueError("credits_per_request must be >= 0")
         return v
 
 

@@ -95,7 +95,10 @@ Shared User (view-only)
 |------|---------|
 | `src/backend/db/nevermined.py` | `NeverminedOperations` — config CRUD + payment log |
 | `src/backend/services/nevermined_payment_service.py` | `NeverminedPaymentService` — SDK verify/settle |
-| `src/backend/routers/paid.py` | Public paid endpoint (`/api/paid/`) |
+| `src/backend/routers/paid.py` | Public paid endpoint (`/api/paid/`) — the HTTP shape over `paid_turn_service` since ent#679 |
+| `src/backend/services/paid_turn_service.py` | **The one paid-turn orchestrator** (ent#679): verify → dedup gate → execute → settle, with the #1018 branches. Shared by the paid door and the A2A inbound door; takes every collaborator as a parameter and imports none |
+| `src/backend/services/a2a_payment_gate.py` | The A2A-shaped adapter over it (ent#679) — token extraction, the 402/403 bodies, the payer's Task. Flow: [a2a-inbound-server.md](a2a-inbound-server.md) |
+| `src/backend/services/a2a_card_service.py` | `with_payment_extension` — a priced agent's A2A card declares its plan (ent#679) |
 | `src/backend/routers/nevermined.py` | Admin config endpoints (`/api/nevermined/`), `_require_agent_exists()` guard |
 | `src/backend/db_models.py` | Pydantic models for config, payment result, payment log |
 | `src/backend/db/schema.py` | Table definitions |
@@ -126,6 +129,7 @@ Shared User (view-only)
 |--------|------|------|-------------|
 | `POST` | `/api/paid/{agent_name}/chat` | x402 | Paid chat (402/403/200/409). Accepts `Idempotency-Key` (#1018); settle-fail → `success_unsettled` |
 | `GET` | `/api/paid/{agent_name}/info` | None | Payment info |
+| `POST` | `/a2a/{agent_name}` | x402 **or** Trinity key | The A2A inbound door (ent#679). A resolved Trinity principal runs free, exactly as before; an anonymous caller is charged when the agent is both A2A-exposed and payments-enabled — same 402 bytes, same settle logic, `resource.url` on this door. See `requirements/mcp.md` §32.6 |
 | `POST` | `/api/nevermined/agents/{name}/config` | JWT (owner) | Configure |
 | `GET` | `/api/nevermined/agents/{name}/config` | JWT (shared+) | Read config |
 | `DELETE` | `/api/nevermined/agents/{name}/config` | JWT (owner) | Remove config |
@@ -161,7 +165,11 @@ Shared User (view-only)
 
 ## Isolation Guarantees
 
-1. All changes are additive — no existing code paths modified
+1. All changes are additive — no existing code paths modified. (ent#679 is the
+   one exception and deliberately behaviour-preserving: `routers/paid.py`'s
+   orchestration moved into `services/paid_turn_service.py` so the A2A door
+   could share it rather than grow a second copy of the #1018 branches. The
+   paid door's three existing test files are the net and were not edited.)
 2. Lazy SDK imports — `payments-py` never imported at module level
 3. Graceful degradation — 501 if SDK not installed
 4. No foreign key constraints to existing tables
@@ -177,6 +185,7 @@ Shared User (view-only)
 | Issue | Change |
 |-------|--------|
 | #1018 | **Settlement-ordering / honest status.** Settle-fail → `success_unsettled` (was lying `"success"`); concurrent effect-guard settle → `settle_in_progress:true`; wired `Idempotency-Key` keyed on `(payment-signature ∥ message)` with in-flight-409 / settled-verbatim-replay / unsettled-re-drive-and-converge (`_finalize_settled` + `upgrade_snapshot`); `fail()` on 403/exception/failed paths; stop leaking the body on `failed` executions (keep it on `cancelled`); `/retry-settlement` stub → honest 501. Tier 2 durable stored-credential retry split to a follow-up. |
+| ent#679 | **The same paywall on the A2A door.** `paid.py`'s 402/verify/settle orchestration extracted to `services/paid_turn_service.py` (behaviour-preserving) and reused by `POST /a2a/{name}`; metadata-first token carriage with the `payment-signature` header as deprecated fallback; the priced agent's A2A card declares its plan; `credits_per_request` accepts **0** for a duration plan (a negative is still a named 422). No migration. Requirement: `requirements/mcp.md` §32.6. |
 | #1084 | `settle_payment_once` + `effect_guard` on `payment:{agent_request_id}` (local exactly-once + receipt replay). |
 | #679 | Cancelled turn must NOT settle (charge-on-cancel money bug). |
 | NVM-001 | Initial x402 integration (2026-03-04). |

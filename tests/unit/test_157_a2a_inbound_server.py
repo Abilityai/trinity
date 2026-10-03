@@ -87,6 +87,11 @@ def client(monkeypatch):
         can_user_access_agent=lambda user, name: name in state["access"],
         get_execution=lambda eid: state["executions"].get(eid),
         cancel_queued_execution=_cancel_queued,
+        # ent#679: the card producer reads the payment config to decide whether
+        # to declare a price. Nothing in this file is priced — stub it
+        # explicitly so the "card unchanged" assertions below prove the
+        # unpriced path rather than the fail-open exception path.
+        get_nevermined_config=lambda name: None,
     )
     monkeypatch.setattr(a2a, "db", fake_db)
 

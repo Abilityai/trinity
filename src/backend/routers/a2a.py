@@ -53,7 +53,7 @@ from services import (
     paid_turn_service,
     rate_limiter,
 )
-from services.a2a_card_service import generate_a2a_card
+from services.a2a_card_service import generate_a2a_card, with_payment_extension
 from services.a2a_client import A2ACallError
 from services.a2a_outbound_service import (
     A2AEndpointNotFound,
@@ -179,7 +179,31 @@ def _card_with_exposed_skills(
         base_url=base_url,
     )
     card["skills"] = a2a_gate.filter_exposed_skills(agent_name, card.get("skills") or [])
-    return card
+    return _priced(agent_name, card, base_url)
+
+
+def _priced(agent_name: str, card: dict, base_url: str) -> dict:
+    """Attach the ent#679 price block when this agent takes payment.
+
+    The config read lives here, not in `a2a_card_service`, so the card builder
+    stays pure (ent#180's rule for the skills provider, same reason). An
+    unpriced agent's card is returned unchanged by identity.
+
+    `get_nevermined_config` is the no-decrypt read: the card publishes plan
+    ids, never the API key. Fail-open and never 5xx — the card must still serve
+    when the payment config is unreadable, exactly as it serves when the agent
+    container is unreachable. The honest cost of failing open is that a priced
+    agent can briefly look free, which costs the operator nothing: the gate
+    itself reads the config independently and still answers 402.
+    """
+    try:
+        config = db.get_nevermined_config(agent_name)
+    except Exception as e:  # noqa: BLE001 — defensive: never 5xx the card
+        logger.warning(f"A2A card: payment config unreadable for {agent_name}: {e}")
+        return card
+    return with_payment_extension(
+        card, config, agent_name=agent_name, base_url=base_url
+    )
 
 
 @router.get("/{agent_name}/a2a/agent-card")

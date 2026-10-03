@@ -271,7 +271,7 @@ const isFormValid = computed(() => {
     form.value.nvm_environment &&
     form.value.nvm_agent_id &&
     form.value.nvm_plan_id &&
-    form.value.credits_per_request >= 1
+    Number.isFinite(form.value.credits_per_request) && form.value.credits_per_request >= 0
 })
 
 // Methods
