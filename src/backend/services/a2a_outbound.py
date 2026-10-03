@@ -394,10 +394,10 @@ def resolve_endpoint(agent_name: str, ref: str) -> Optional[ResolvedEndpoint]:
         # The provider's value is not echoed: it is a field we do not own on a
         # record that also carries the secret, and a provider that put the wrong
         # thing in it would have its credential written to the log.
+        # A constant, not `kind`: anything unrecognised normalises to api_key.
         logger.warning(
             "[a2a_outbound] provider returned an unrecognised credential_kind; "
-            "treating as %s",
-            kind,
+            "treating as api_key"
         )
         resolved = replace(resolved, credential_kind=kind)
     return resolved
