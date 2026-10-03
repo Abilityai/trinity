@@ -133,6 +133,80 @@ By default, any caller authenticated as an owner/shared identity for the agent m
 
 ---
 
+## Charge for inbound A2A calls
+
+If an exposed agent has **Payments** configured (Agent → Payments tab, x402 via
+Nevermined), callers without a Trinity key pay to task it over A2A — the same
+paywall the paid chat endpoint has always had, now on the A2A door.
+
+**Who pays, and who doesn't:**
+
+| Caller | What happens |
+|---|---|
+| Another agent in your fleet, you, or anyone the agent is shared with (a valid Bearer MCP key) | Runs **free**, exactly as before. Nothing about your internal traffic changes. |
+| A subscription tenant | Unaffected. |
+| A stranger, on an agent with payments **off** | `401`, exactly as before. |
+| A stranger, on an exposed agent with payments **on** | `402 Payment Required` with what to pay; a valid token runs the task and settles. |
+
+**How an external client pays.** It reads the price off the discovery card, buys
+plan credits from Nevermined, and sends the payment in the A2A message's
+`metadata` under `x402.payment.payload`. The older `payment-signature` HTTP
+header still works as a fallback, and if a client sends both, the one in the
+message wins. The reply is a normal A2A Task whose metadata carries the payment
+status and a receipt.
+
+**The card tells a client the price before it calls.** An exposed, priced agent's
+`/.well-known/agent-card.json` carries a payment entry under
+`capabilities.extensions` with the plan id, the credits per call, and a
+`paymentInfoUrl` pointing at `/api/paid/{agent}/info` — so a payment-aware client
+can pay on its **first** request instead of being refused once to learn the
+price. An agent with no payment config has a byte-identical card to before.
+
+> **A price on the card does not mean the door is open.** The card says what the
+> agent *costs*; A2A exposure is what makes the paid A2A door reachable. On a
+> build without the exposure feature, a configured price block points at a door
+> that answers `404` — turn exposure on for that agent to open it.
+
+**Time-based (duration) plans.** Set **Credits per Request** to `0`. A duration
+plan charges by time, so Trinity sends no per-call amount and the plan decides
+what a call burns; `0` says that honestly rather than claiming a per-call price
+nothing will charge. The card then advertises the cost as plan-defined. (A
+negative number is rejected.)
+
+**Retrieving a paid result.** If you hold the task id, the payer can poll
+`tasks/get` with the same token — a task is bound to the wallet that paid for
+it, and any other caller gets the ordinary "task not found". If your HTTP client
+timed out before it read the task id, re-send the identical message with the
+same token: that replays the completed result instead of re-running (and
+re-charging) the work.
+
+**Refusals, and what they mean:**
+
+| Answer | Meaning |
+|---|---|
+| `401` | No price configured for this agent (or it isn't exposed) — authenticate with a Trinity key. |
+| `402` | Pay, then retry. The body and the `payment-required` header say what to buy. |
+| `403` | The token was rejected (or your wallet isn't on the agent's inbound allow-list). |
+| `429` | Rate limited. The paying path is capped per source address **and** per agent. |
+| `501` | Payments are configured but this Trinity install can't process one right now. |
+
+A refusal that is **our** side being busy rather than a verdict on your token —
+a payment checker that timed out, or too many payment checks in flight — is not
+a `403`. It comes back as a JSON-RPC error carrying `data.retryable: true`, with
+a `data.code` saying which case it is (`verify_unavailable` — we could not
+check; `in_flight` — your own identical request is still running). Retry those
+with the **same** token; never buy another. `payment_rejected` and `not_allowed`
+carry `retryable: false`. On `message/stream` the same classification arrives as
+an error event, because a status code cannot be sent once the stream has opened.
+
+> **Paid calls are logged as money.** Each settled call records the paying wallet,
+> the execution it paid for, and the source address. A delivered turn whose
+> settlement fails still returns your result and is reported as unsettled rather
+> than as a clean success — Trinity never claims it charged you when it didn't,
+> or that it delivered for free when it is still reconciling.
+
+---
+
 ## Outbound endpoints
 
 Register the external A2A endpoints your agent is allowed to call (name + URL + optional credential). Credentials are stored **encrypted and never shown again** — the UI only indicates whether an endpoint has one (`🔒 credentialed`).
@@ -328,7 +402,7 @@ That receipt matters: a timed-out `call_a2a_agent` returns `possibly_delivered: 
 ## Behavior & security notes
 
 - **Safe by default** — exposure is OFF for every agent until you turn it on; a non-exposed or non-existent agent returns a uniform `404` (no way to enumerate which agents exist).
-- **Auth is fail-closed** — every task call validates the Bearer MCP key; a bad/missing token is `401`.
+- **Auth is fail-closed** — every task call validates the Bearer MCP key; a bad/missing token is `401`. The one exception is an exposed agent with **payments on**, where a caller with no Trinity key gets `402` instead so it can pay (see [Charge for inbound A2A calls](#charge-for-inbound-a2a-calls)). A credential Trinity recognises and then refuses — a connector-scoped or ephemeral key — stays refused and never falls through to the paying path.
 - **The front door must reach it** — external clients hit your public URL, not the backend port directly. Trinity proxies `/a2a/` to the backend (nginx in production, the dev proxy locally). Set `PUBLIC_CHAT_URL` so the card's published `url` is reachable from outside your network.
 - **Stopped agents** still serve a card (from container labels); tasking a stopped/unreachable agent returns a structured JSON-RPC error, never a 5xx.
 - **Every inbound task is audit-logged** (`source=a2a`, with the caller identity).
@@ -347,7 +421,7 @@ That receipt matters: a timed-out `call_a2a_agent` returns `possibly_delivered: 
 | Method | Path | Auth | Purpose |
 |--------|------|------|---------|
 | GET | `/a2a/{agent}/.well-known/agent-card.json` | none | Discovery card |
-| POST | `/a2a/{agent}` | Bearer MCP key | JSON-RPC task endpoint |
+| POST | `/a2a/{agent}` | Bearer MCP key **or** an x402 payment (when the agent is priced) | JSON-RPC task endpoint |
 
 ### Outbound routes (calling out)
 
@@ -381,7 +455,7 @@ The two agent routes return `404` while outbound calling is off. The three setti
 | `-32602` | Invalid params (e.g. no message text) |
 | `-32001` | Task not found |
 
-Auth failures are transport-level `401`; exposure/allow-list failures are `404`/`403`.
+Auth failures are transport-level `401`; exposure/allow-list failures are `404`/`403`. On a priced agent, an unpaid call is `402` and a rejected payment token is `403`.
 
 ---
 

@@ -226,3 +226,140 @@ the seam's other hook.
 so an unadvertised skill is hidden, not unreachable. Anything that constrains
 what an external caller can actually reach would be a different mechanism
 (`allowed_tools`/guardrails) with its own threat model.
+
+## Payment gate (ent#679)
+
+The door authenticated a Trinity MCP key and nothing else, so a stranger —
+including a remote Trinity holding a perfectly good x402 payment token — got
+**401** and could never reach a 402, never pay, never be served. Requirement:
+`requirements/mcp.md` §32.6.
+
+**One branch, decided by the principal.** `Depends(get_current_user)` became
+`Depends(get_user_or_anonymous)`, a sibling that returns `None` on a **401 only**
+and re-raises a **403**. That asymmetry is the point: the connector and
+ephemeral-key fences raise 403, and a credential Trinity recognised and then
+fenced must not slide onto the payment path and buy the access it was refused.
+
+```
+principal is not None  → TODAY'S PATH, byte-identical: the three gates → dispatch.
+                         No facilitator call, no payment row, no payment metadata.
+principal is None      → per-IP + per-agent rate limit (before any DB/SDK work)
+                         → not exposed, or not priced   → today's 401 bytes + WWW-Authenticate
+                         → priced but SDK absent        → 501
+                         → exposed AND priced           → payment path
+```
+
+The free path is unchanged for internal fleet traffic, owner/shared callers and
+subscription tenants — by construction, not by a carve-out. The only agents
+whose anonymous answer differs from before are **exposed AND priced**, which
+their public well-known card already publishes.
+
+**Token, metadata first.** `params.message.metadata["x402.payment.payload"]` is
+re-encoded to the access token the facilitator consumes; the `payment-signature`
+header is the deprecated fallback. Metadata wins when both are present (the
+provider SDK's own precedence), so a client migrating between rails cannot have
+a stale header decide what it pays with. Re-encoding is signature-safe: the
+EIP-712 signature lives *inside* the payload, not over the base64 envelope.
+Every malformed shape falls through to the 402 rather than raising — all of it
+is caller-controlled input on a route reachable with no credential.
+
+**No extension handshake.** Trinity speaks the x402 message vocabulary and does
+not negotiate. Nothing reads or emits `X-A2A-Extensions`.
+
+**402/403 come from the paid door's own builders.** One requirements builder, two
+doors — a 402 built differently from the later verify is a rejection the caller
+cannot act on. `resource.url` names **this** door (`/a2a/{name}`): an x402 token
+signs the resource URL, so a token minted against `/api/paid/{name}/chat` cannot
+authorize an A2A call.
+
+**The money logic is not here.** `services/paid_turn_service.py` is shared with
+`routers/paid.py`, so the #1018 settle/replay/`success_unsettled` branches exist
+once. `services/a2a_payment_gate.py` is only the A2A-shaped adapter: what a token
+looks like on this wire, what a refusal looks like, and how an outcome becomes a
+Task. Settlement detail: [nevermined-payments.md](nevermined-payments.md).
+
+**The allow-list seam flips direction here.** `a2a_gate`'s allow-list fails
+**open** for an authenticated caller (a restriction layered on auth). For a payer
+it is consulted after verify with identity `x402:{payer}` and fails **closed** —
+on this path the payment *is* the authorization, so a seam failure must not
+void a configured control.
+
+**A payer can retrieve what it paid for.** `tasks/get` / `tasks/cancel` are
+allowed when the token verifies **and** the wallet matches that execution's
+payment-log rows. Every mismatch — including payer A polling payer B's existing
+task — answers byte-identical `-32001`, so the binding is not an existence
+oracle. The binding is written **mid-turn**: `run_paid_turn` logs a `verify` row
+carrying the execution id as soon as the execution exists, because when only the
+terminal `settle` / `settle_failed` rows carried the pair, every bound task was
+already finished — a poll during the turn read as not-found and a payer's
+`tasks/cancel` was unreachable by construction. No schema change; those columns
+were already on the row.
+
+**A refusal is classified once, rendered twice.** `routers/a2a.py`'s
+`_classify_paid_refusal` is the single table, consumed by `message/send` (which
+can answer with an HTTP status) and by `message/stream` (which cannot — the
+status line is gone by the time the body generator runs). Two properties it
+exists to hold: a verify that could not DECIDE — facilitator timeout, SDK error,
+saturated concurrency gate — is **our** unavailability, so it answers a JSON-RPC
+error with `data.retryable: true` rather than the 403 a remote Trinity reads as
+"stop retrying and buy another token", and is logged as a `verify` attempt
+rather than a `reject`; and the stream never answers `-32001` for a payment
+condition, since that is A2A **TaskNotFound** and tells a client its task
+vanished when the truth is "pay" / "not allowed" / "retry". `data.code`
+(`payment_rejected` · `verify_unavailable` · `not_allowed` · `in_flight` ·
+`execution_error`) is the discriminator those four instructions need. The paid
+door keeps its own 403 bytes unchanged.
+
+**Attribution, no schema change.** The payer wallet on the `settle` row, the
+execution row (`triggered_by="a2a"` + principal fields) and the platform audit
+row (IP + payer) already carry it. No column, no migration.
+
+**`triggered_by="a2a"` joins `INTERACTIVE_TRIGGERS`.** A remote caller waits
+in-line on both the free and the paid path, so both get the caller-went-away
+cancel and the claim budget — this changes queue treatment for the **principal**
+path too, deliberately, and keeps the `a2a` analytics bucket honest rather than
+filing paid A2A calls as REST paid chats.
+
+### The card states the price
+
+`_card_with_exposed_skills` is still **the** single card producer (ent#180
+FR-3), and it gains one step: `a2a_card_service.with_payment_extension`. A priced
+agent's card declares a `urn:nevermined:payment` extension carrying `agentId`,
+`planId`, `credits`, `paymentType` and `paymentInfoUrl`
+(`GET /api/paid/{name}/info`, the public "where to buy" document), so an
+x402-speaking client mints a token from the card alone and meets the paywall on
+its **first** request.
+
+- The card builder stays pure; the config read lives in the router, like the
+  skills provider lookup, and uses the no-decrypt `get_nevermined_config` — the
+  card publishes plan ids, never the API key.
+- **An unpriced or disabled agent's card is returned by identity** — byte-identical
+  to before. Every install that sells nothing is untouched.
+- The **official** A2A x402 extension URI is deliberately **not** declared, even
+  though the provider SDK's own card helper appends it. Declaring an extension
+  advertises its activation handshake; a generic client would activate it and
+  then wait for a negotiation that never comes.
+- `credits: 0` is a Nevermined **duration** plan (charged by time), declared as
+  `paymentType: "dynamic"` — `fixed`/0 reads as free and the SDK's own card
+  validator rejects that shape for a paid plan.
+- Fail-open: an unreadable payment config serves the card with no price block
+  and logs at WARNING. A card route has never 5xx'd, and the gate re-reads the
+  config and still answers 402, so the only cost is a priced agent briefly
+  looking free.
+
+**In an OSS-only build, a configured price block points at a door that 404s.**
+Exposure is set only by the entitled provider, so the paid A2A door is not
+reachable; the card says what the agent *costs*, not that the door is *open*.
+That is the same open-core line the paid chat door has always had — the gate is
+OSS mechanism with no new entitlement and no enterprise-submodule code.
+
+### Payment-gate testing
+
+`tests/unit/test_ent679_a2a_payment_gate.py` (the gate, over a TestClient),
+`tests/unit/test_ent679_paid_turn_service.py` (the shared orchestrator at its own
+layer, with the paid door's three existing test files unedited as the behaviour
+net) and `tests/unit/test_ent679_a2a_priced_card.py` (the card, both surfaces).
+
+The real facilitator (verify + settle) and what a duration-plan settle actually
+burns are **not** provable from the SDK source and are a live sandbox run before
+merge, not a unit test. Stated rather than hidden.

@@ -434,3 +434,103 @@ def test_the_x402_metadata_keys_are_the_spec_names():
     assert a2a_protocol.X402_PAYLOAD_KEY == "x402.payment.payload"
     assert a2a_protocol.X402_ERROR_KEY == "x402.payment.error"
     assert a2a_protocol.X402_STATUS_SUBMITTED == "payment-submitted"
+
+
+# --------------------------------------------------------------------------- #
+# The PROVIDER side of the same vocabulary (abilityai/trinity-enterprise#679).
+#
+# `payment_payload_from_message` reads the in-band rail this module's client
+# half WRITES, so both live here: a reader and a writer that disagree about
+# where the payload sits is exactly the rot the shared-vocabulary module exists
+# to prevent. The gate that consumes the reader lands in checkpoint B; what is
+# pinned here is the parse, which is the part reachable from an uncredentialed
+# caller and must never raise.
+# --------------------------------------------------------------------------- #
+
+def _message_with(payload):
+    return {
+        "role": "user",
+        "parts": [{"kind": "text", "text": "hi"}],
+        "messageId": "m-1",
+        "metadata": {a2a_protocol.X402_PAYLOAD_KEY: payload},
+    }
+
+
+def test_the_inband_payload_is_read_from_the_messages_metadata():
+    payload = {"x402Version": 1, "payload": {"signature": "0xsig"}}
+    assert a2a_protocol.payment_payload_from_message(_message_with(payload)) == payload
+
+
+def test_a_message_the_client_built_round_trips_through_the_reader():
+    """The writer's own output is readable by the reader (one vocabulary)."""
+    payload = TOKEN_OBJ
+    message = a2a_protocol.text_message("hi", "m-1")
+    message["metadata"] = {
+        a2a_protocol.X402_STATUS_KEY: a2a_protocol.X402_STATUS_SUBMITTED,
+        a2a_protocol.X402_PAYLOAD_KEY: payload,
+    }
+    assert a2a_protocol.payment_payload_from_message(message) == payload
+
+
+@pytest.mark.parametrize("message", [
+    None,
+    "not a message",
+    {},                                                    # no metadata
+    {"metadata": "not a dict"},
+    {"metadata": {}},                                      # no payload key
+    {"metadata": {"x402.payment.payload": "a string"}},    # not an object
+    {"metadata": {"x402.payment.payload": {"payload": {}}}},          # no version
+    {"metadata": {"x402.payment.payload": {"x402Version": "1",
+                                           "payload": {}}}},          # version not int
+    {"metadata": {"x402.payment.payload": {"x402Version": True,
+                                           "payload": {}}}},          # bool is not int
+    {"metadata": {"x402.payment.payload": {"x402Version": 1}}},       # no payload key
+])
+def test_anything_that_is_not_an_x402_payload_reads_as_absent(message):
+    """"Absent" — never an exception: this runs before any credential check."""
+    assert a2a_protocol.payment_payload_from_message(message) is None
+
+
+def test_the_shape_check_matches_the_encoded_codecs():
+    """One definition of "is this an x402 payment", in both encodings.
+
+    A payload the in-band reader accepts must be a payload `decode_payment_token`
+    accepts once encoded, or a provider and a consumer would disagree about what
+    a payment IS.
+    """
+    assert a2a_protocol.payment_payload_from_message(_message_with(TOKEN_OBJ)) == TOKEN_OBJ
+    assert a2a_protocol.decode_payment_token(_b64url(TOKEN_OBJ)) == TOKEN_OBJ
+
+
+def test_verified_is_a_distinct_status_from_completed_and_failed():
+    """The delivered-but-unsettled state needs its own word (#1018 honesty).
+
+    `payment-completed` would claim a receipt that does not exist;
+    `payment-failed` makes the outbound client DISCARD the artifact the payer's
+    turn produced.
+    """
+    assert a2a_protocol.X402_STATUS_VERIFIED == "payment-verified"
+    assert len({
+        a2a_protocol.X402_STATUS_SUBMITTED,
+        a2a_protocol.X402_STATUS_REQUIRED,
+        a2a_protocol.X402_STATUS_FAILED,
+        a2a_protocol.X402_STATUS_COMPLETED,
+        a2a_protocol.X402_STATUS_VERIFIED,
+        a2a_protocol.X402_STATUS_REJECTED,
+    }) == 6
+
+
+def test_the_status_vocabulary_matches_the_sdks():
+    """payments-py 1.18 is the peer; a status we invent is a status nobody reads."""
+    from payments_py.x402.a2a import PaymentStatus
+
+    sdk = {member.value for member in PaymentStatus}
+    for status in (
+        a2a_protocol.X402_STATUS_SUBMITTED,
+        a2a_protocol.X402_STATUS_REQUIRED,
+        a2a_protocol.X402_STATUS_FAILED,
+        a2a_protocol.X402_STATUS_COMPLETED,
+        a2a_protocol.X402_STATUS_VERIFIED,
+        a2a_protocol.X402_STATUS_REJECTED,
+    ):
+        assert status in sdk, f"{status} is not a payments-py PaymentStatus"

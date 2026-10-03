@@ -113,7 +113,10 @@ passlib[bcrypt]>=1.7.4
 bcrypt>=4.2.0,<5
 pydantic-settings>=2.0.0
 google-genai>=1.0.0
-payments-py>=1.0.0
+# Exact, and equal to docker/backend/Dockerfile (ent#679): a floor here is
+# how CI came to run 1.18.0 against a 1.2.1 image (trinity-enterprise#763).
+# Guarded by tests/unit/test_ent679_payments_pin_parity.py.
+payments-py==1.18.0
 # tzdata: the IANA database as a pure-Python fallback for `zoneinfo`. The #1771
 # timestamp properties draw real IANA zones (`st.timezones()`) deliberately —
 # DST transitions, quarter-hour offsets and historical LMT offsets are what stop

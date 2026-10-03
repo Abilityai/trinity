@@ -140,11 +140,23 @@ def test_claim_next_task_passes_the_interactive_set():
     assert db.claim_next_queued.call_args.kwargs["interactive_triggers"] is INTERACTIVE_TRIGGERS
 
 
-def test_interactive_and_autonomous_sets_are_disjoint():
+def test_interactive_and_autonomous_sets_overlap_only_where_documented():
+    """The two sets answer different questions, so an overlap must be argued for.
+
+    ``INTERACTIVE_TRIGGERS`` = a caller is blocked on the reply (claim priority
+    + claim budget). ``_AUTONOMOUS_TRIGGERS`` = no PERSON on this install is
+    reading it (alert the operator instead of relying on them seeing the text).
+
+    ``a2a`` is both, and the only one: an inbound A2A request is held open for
+    the whole turn while its answer leaves over the wire
+    (abilityai/trinity-enterprise#679 T6). The assertion is narrowed rather
+    than deleted so a FOURTH set membership — or a second trigger added to both
+    without the argument — still fails here.
+    """
     from services.pull_pilot import INTERACTIVE_TRIGGERS
     from services.task_execution_service import _AUTONOMOUS_TRIGGERS
 
-    assert not INTERACTIVE_TRIGGERS & _AUTONOMOUS_TRIGGERS
+    assert INTERACTIVE_TRIGGERS & _AUTONOMOUS_TRIGGERS == {"a2a"}
 
 
 def test_every_channel_adapter_trigger_is_interactive():
