@@ -9,7 +9,9 @@
  * around entitlement flags. Folding the runtime call in there would mix an
  * OSS-core surface into a module that reports `not_entitled`, and the first
  * confusing bug report would be an operator told their outbound call needs a
- * licence when the kill switch is simply off.
+ * licence when the kill switch is simply off. (That module's three OUTBOUND
+ * control tools are OSS-core too and use their own status-based mapper, for the
+ * same reason — see its header.)
  *
  * ── The target is a NAME, never a URL ─────────────────────────────────────
  * `endpoint` is a reference into an operator-registered list, resolved by the
@@ -17,9 +19,9 @@
  * LLM-generated and prompt-injectable, so a URL parameter would make any
  * document the agent reads a lever on a credentialed, server-side request from
  * inside the platform network. The issue's filed AC asked for
- * `call_a2a_agent(agent_card_url, …)`; it is rejected, and the pre-existing
- * comment on `register_a2a_endpoint` ("this feeds the runtime call_a2a_agent")
- * says the shipped design always intended a registry.
+ * `call_a2a_agent(agent_card_url, …)`; it is rejected, and `register_a2a_endpoint`
+ * has described itself as feeding this tool since it shipped — the design
+ * always intended a registry.
  *
  * ── Gating ────────────────────────────────────────────────────────────────
  * Advertisement: registered in `server.ts`'s `toolGroups`, i.e. the
@@ -130,8 +132,7 @@ export function createA2ACallTools(client: TrinityClient, requireApiKey: boolean
         "— you choose it by name with `endpoint`, and you cannot supply a URL. Ask your " +
         "operator for the registered name if you do not know it; there is deliberately no " +
         "agent-facing listing, because the registered URLs are the shape of the fleet's " +
-        "integrations. (`list_a2a_endpoints` reads a different, per-agent store and will not " +
-        "name a target this tool can call.) " +
+        "integrations. (`list_a2a_endpoints` (operator-only) shows the registered names.) " +
         "`dedup_label` is required and must DIFFER for each distinct question you ask in this " +
         "turn: calls are deduplicated on the endpoint and conversation, not on your message, so " +
         "reusing a label returns the earlier answer. If the remote replies with state 'working' " +
