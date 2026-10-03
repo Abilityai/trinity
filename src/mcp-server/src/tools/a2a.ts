@@ -259,7 +259,8 @@ export function createA2ATools(client: TrinityClient, requireApiKey: boolean) {
         "on the instance may call what you register here. Optional `credentials` are stored encrypted " +
         "and NEVER returned by any read; `clear_credentials: true` removes a stored one. " +
         "`credential_kind` says what the credential IS: pass 'payment_token' for an x402 token bought " +
-        "after a `payment_required` refusal, so it rides as payment instead of as a Bearer header. " +
+        "after a `payment_required` refusal, so it rides as payment (x402 metadata plus the " +
+        "`payment-signature` header) in addition to the Bearer header every credentialed call carries. " +
         "Omit it and the kind is inferred from the value; the response reports what was stored. " +
         "Admin and human-only — registering an endpoint decides where a credentialed server-side " +
         "request may go, so an agent-scoped key is refused. " +
@@ -278,8 +279,9 @@ export function createA2ATools(client: TrinityClient, requireApiKey: boolean) {
           "Remove the stored secret for this endpoint. Cannot be combined with `credentials`.",
         ),
         credential_kind: z.enum(["api_key", "payment_token"]).optional().describe(
-          "What the credential is: 'payment_token' for an x402 payment token (attached as payment), "
-          + "'api_key' for an ordinary secret (Authorization: Bearer). Omit to let the platform infer "
+          "What the credential is: 'payment_token' for an x402 payment token (attached as payment in "
+          + "addition to the Bearer header), 'api_key' for an ordinary secret (Authorization: Bearer "
+          + "only). Omit to let the platform infer "
           + "it from the value. Send it alone to re-label a credential already stored.",
         ),
       }),

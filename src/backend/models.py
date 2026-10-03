@@ -4757,9 +4757,11 @@ class A2AOutboundEndpointUpsert(BaseModel):
     have); `clear_credentials` removes it.
 
     `credential_kind` (#3185) LABELS that same slot — `payment_token` makes the
-    credential ride as x402 payment instead of `Authorization: Bearer …`. It is
-    optional in both directions: omitted with a new credential the store infers
-    it from the value, and sent alone it re-labels a credential already stored.
+    credential ride as x402 payment (the `x402.payment.payload` metadata plus
+    the `payment-signature` header) **in addition to** `Authorization: Bearer
+    …`, which every credentialed call still carries. It is optional in both
+    directions: omitted with a new credential the store infers it from the
+    value, and sent alone it re-labels a credential already stored.
     """
     model_config = ConfigDict(extra="forbid")
 

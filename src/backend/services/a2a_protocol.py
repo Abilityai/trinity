@@ -91,6 +91,29 @@ X402_PAYMENT_SIGNATURE_HEADER = "payment-signature"
 #: other bound is h11's); the store applies its own, tighter, credential cap.
 X402_JSON_B64_MAX_CHARS = 32 * 1024
 
+#: What kind of secret an outbound endpoint's credential slot holds (#3185).
+#: Canonical home — the store (`services/a2a_outbound.py`) and the client
+#: (`services/a2a_client.py`) both import these rather than re-declaring them,
+#: for the same reason the method names live here: two copies of a vocabulary is
+#: how the two sides come to disagree about what a token *is*.
+#:
+#: `api_key` is the default for EVERY record written before #3185 — the key is
+#: simply absent there — and it means today's behaviour exactly: the credential
+#: rides `Authorization: Bearer …` and nothing else. `payment_token` additionally
+#: attaches the token as x402 payment (in-band metadata + the deprecated
+#: `payment-signature` header); the Bearer header still goes out either way.
+#:
+#: It is a LABEL on the existing credential slot, not a second secret. A
+#: separate store, route or MCP tool for payment tokens would be a fourth write
+#: path to the same AES-256-GCM envelope.
+#:
+#: Anything outside this tuple is treated as `api_key` by
+#: `a2a_outbound.normalize_credential_kind` — the fail-SAFE direction, argued in
+#: full at that function.
+CREDENTIAL_KIND_API_KEY = "api_key"
+CREDENTIAL_KIND_PAYMENT_TOKEN = "payment_token"
+CREDENTIAL_KINDS = (CREDENTIAL_KIND_API_KEY, CREDENTIAL_KIND_PAYMENT_TOKEN)
+
 
 def json_b64_object(raw: Any, *, max_len: int = X402_JSON_B64_MAX_CHARS) -> Optional[Dict[str, Any]]:
     """A base64-JSON (or plain-JSON) **object**, or `None`. Never raises.

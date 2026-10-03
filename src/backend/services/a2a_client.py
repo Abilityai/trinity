@@ -71,7 +71,11 @@ from urllib.parse import urlsplit, urlunsplit
 import httpx
 
 from services import a2a_protocol
-from services.a2a_protocol import Dialect, UnsupportedProtocolVersion
+from services.a2a_protocol import (
+    CREDENTIAL_KIND_PAYMENT_TOKEN,
+    Dialect,
+    UnsupportedProtocolVersion,
+)
 from utils.credential_sanitizer import (
     redact_url_userinfo,
     sanitize_text,
@@ -152,11 +156,6 @@ A2A_SECRET_MAX_DEPTH = 8
 #: hang metadata on) has another carrier. Flipping this to False before then
 #: makes every priced poll fail.
 A2A_SEND_PAYMENT_SIGNATURE_HEADER = True
-
-#: The credential kinds `a2a_outbound.ResolvedEndpoint` can carry. Anything
-#: else is treated as `api_key` — the fail-SAFE direction: a payment token sent
-#: as a Bearer header is refused by the remote, never leaked to a third party.
-CREDENTIAL_KIND_PAYMENT_TOKEN = "payment_token"
 
 #: Statuses whose body we read on the RPC hop. Both mean "the peer answered
 #: about money", and both are useless without the body.
@@ -869,8 +868,10 @@ def sanitize_outbound_text(text: Optional[str], credential: Optional[str],
 # Everything here treats the peer's answer as hostile text: bounded, allowlisted
 # and scrubbed before it reaches an LLM (or, via the add flow, a UI).
 #
-# No payments SDK is imported. The token codec below is a ten-line stdlib mirror
-# of `payments_py.x402.token.decode_access_token` (a pure base64-JSON codec, the
+# No payments SDK is imported. The token codec lives in
+# `services/a2a_protocol.py` (shared with the endpoint store, which infers a
+# credential's kind from the same shape) and is a ten-line stdlib mirror of
+# `payments_py.x402.token.decode_access_token` (a pure base64-JSON codec, the
 # EIP-712 signature living INSIDE the payload so the round trip is byte-safe).
 # The SDK is optional in OSS and pinned old in the image; an outbound OSS path
 # must not depend on it.

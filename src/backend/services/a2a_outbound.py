@@ -57,6 +57,17 @@ import re
 from dataclasses import dataclass, field, replace
 from typing import Any, Dict, List, Optional, Protocol
 
+#: What kind of secret an endpoint's credential slot holds (#3185). Declared
+#: ONCE in `services/a2a_protocol.py` — the vocabulary both directions share,
+#: because two copies of it is how the store and the client come to disagree
+#: about what a token *is* — and re-exported here so every existing
+#: `a2a_outbound.CREDENTIAL_KIND_*` reference keeps resolving.
+from services.a2a_protocol import (  # noqa: F401  (re-export)
+    CREDENTIAL_KIND_API_KEY,
+    CREDENTIAL_KIND_PAYMENT_TOKEN,
+    CREDENTIAL_KINDS,
+)
+
 logger = logging.getLogger(__name__)
 
 #: `system_settings` key holding the OSS named-endpoint list (an AES-256-GCM
@@ -74,21 +85,6 @@ MAX_ENDPOINT_CREDENTIAL_LEN = 8192
 #: Printable ASCII, no whitespace — the same class `models._PAT_SAFE_RE` uses,
 #: and a strict subset of what h11 will put on the wire.
 _HEADER_SAFE_CREDENTIAL = re.compile(r"^[\x21-\x7E]+$")
-
-#: What kind of secret the endpoint's credential slot holds (#3185).
-#:
-#: `api_key` is the default for EVERY record written before #3185 — the key is
-#: simply absent there — and it means today's behaviour exactly: the credential
-#: rides `Authorization: Bearer …` and nothing else. `payment_token` additionally
-#: attaches the token as x402 payment (in-band metadata + the deprecated
-#: `payment-signature` header).
-#:
-#: It is a LABEL on the existing credential slot, not a second secret. A
-#: separate store, route or MCP tool for payment tokens would be a fourth write
-#: path to the same AES-256-GCM envelope.
-CREDENTIAL_KIND_API_KEY = "api_key"
-CREDENTIAL_KIND_PAYMENT_TOKEN = "payment_token"
-CREDENTIAL_KINDS = (CREDENTIAL_KIND_API_KEY, CREDENTIAL_KIND_PAYMENT_TOKEN)
 
 
 def normalize_credential_kind(value: Any) -> str:

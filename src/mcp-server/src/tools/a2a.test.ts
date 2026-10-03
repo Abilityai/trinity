@@ -145,6 +145,7 @@ describe("ent#761 — the three outbound control tools target the OSS endpoint s
       url: "https://x/a2a",
       credentials: undefined,
       clear_credentials: undefined,
+      credential_kind: undefined,
     });
   });
 
