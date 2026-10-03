@@ -391,9 +391,13 @@ def resolve_endpoint(agent_name: str, ref: str) -> Optional[ResolvedEndpoint]:
         # A provider we do not own returned a kind we will not act on. Normalise
         # rather than refuse: the call still works as an `api_key` endpoint, and
         # the remote — not us — decides whether that credential is acceptable.
+        # The provider's value is not echoed: it is a field we do not own on a
+        # record that also carries the secret, and a provider that put the wrong
+        # thing in it would have its credential written to the log.
         logger.warning(
-            "[a2a_outbound] provider returned credential_kind %r; treating as %s",
-            resolved.credential_kind, kind,
+            "[a2a_outbound] provider returned an unrecognised credential_kind; "
+            "treating as %s",
+            kind,
         )
         resolved = replace(resolved, credential_kind=kind)
     return resolved
