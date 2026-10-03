@@ -4115,6 +4115,39 @@
         "security"
       ],
       "description": "The credential KIND on the outbound A2A endpoint store (#3185 checkpoint B): `credential_kind` rides the credential's existing three write paths rather than adding a fourth (set / leave alone / clear), an omitted kind is INFERRED from the value with the same predicate the client sends on (an x402 payload -> payment_token, anything else -> api_key, fail-safe over junk), an explicit kind wins, a kind alone re-labels a stored secret without re-typing it, a kind with no credential under it is refused, `clear_credentials` drops the label and the single-use flag with the value, kind + clear is refused at the model (422, named reason, no echo) and at the store, `api_key` is stored as the ABSENCE of the key so a relabel leaves a pre-#3185-shaped record, an x402 v3 nonce is flagged `credential_single_use` rather than refused and the flag cannot outlive the token it describes, and the settings PUT/GET report the kind (plus a one-time single-use hint) while the audit row records the label and never the value. Real AES-256-GCM envelope over an in-memory settings row; no Docker, no network."
+    },
+    {
+      "file": "unit/test_ent679_payments_pin_parity.py",
+      "feature": "abilityai/trinity-enterprise#679",
+      "added": "2026-10-03",
+      "categories": [
+        "backend",
+        "dependencies",
+        "payments"
+      ],
+      "description": "payments-py pin parity + import smoke (ent#679 checkpoint A), the #1891 shape applied to a dependency: docker/backend/Dockerfile and tests/requirements-test.txt must pin payments-py EXACTLY and EQUALLY (a floor in the test requirements is how CI came to exercise 1.18.0 against a 1.2.1 image, trinity-enterprise#763), the pin must be >= 1.18 (below it the in-band A2A metadata rail does not exist), the installed version must equal the pin, every unconditional runtime requirement of payments-py must be constrained in the image (`requests` the one reasoned pre-existing exemption) and the 13 explicitly pinned transitives must equal what the venv resolved; plus the import smoke that is the real point — `payments_py.payments` imports the a2a package at module load, so one unimportable transitive flips NEVERMINED_AVAILABLE to False and both payment doors answer 501 with a green build and no error anywhere but a WARNING. Also pins the facilitator call signatures Trinity passes positionally. No Docker, no network."
+    },
+    {
+      "file": "unit/test_ent679_paid_turn_service.py",
+      "feature": "abilityai/trinity-enterprise#679",
+      "added": "2026-10-03",
+      "categories": [
+        "backend",
+        "payments",
+        "reliability"
+      ],
+      "description": "The shared x402 paid-turn orchestrator (ent#679 checkpoint A) at its own layer: one test per outcome kind (verify_failed / in_flight / replay_settled / replay_unsettled / settled / unsettled / execution_error / execution_failed / execution_cancelled / aborted) plus the orderings a response body cannot show — verify BEFORE the dedup gate so a rejected token consumes no key, complete()-not-fail() on a delivered-but-unsettled turn so a retry re-drives settle instead of re-running the LLM (#1018), fail() and no settle on a failed/cancelled/raised turn (#679 charge-on-cancel), a replayed unsettled snapshot that re-settles and upgrade_snapshot()s so a third attempt stops re-settling, settle_in_progress logging nothing, phase-aware cancellation (claim released before a result, shielded settle after one), the `endpoint` thread (decision 19, default unchanged) and the payer-derived dedup scope the A2A gate needs. Collaborators are plain stand-ins, which is itself the proof that the service imports none of them (decision 20). routers/paid.py stays covered end-to-end by test_1018_settlement_ordering / test_679_callers / test_3114_pull_route_callers, unedited."
+    },
+    {
+      "file": "unit/test_ent679_nevermined_service_bounds.py",
+      "feature": "abilityai/trinity-enterprise#679",
+      "added": "2026-10-03",
+      "categories": [
+        "backend",
+        "payments",
+        "security"
+      ],
+      "description": "`endpoint`, `retryable` and the facilitator concurrency bound on nevermined_payment_service (ent#679 checkpoint A): the 402's `resource.url` defaults to the paid chat door and can be bound to another door while the plan in `accepts` stays identical (an x402 v3 token signs resourceUrl, so verify and settle must agree with the 402 the client read — decision 19); a facilitator REJECTION is not retryable while a timeout, an SDK error and a saturated gate are (E7), and `retryable` is deliberately absent from the stored settle snapshot so a pre-field receipt still replays; and the fleet-wide NEVERMINED_MAX_INFLIGHT gate admits up to the limit, refuses beyond it within a bounded wait, occupies no thread when it refuses, burns nothing on a refused settle, and is shared across agents because the thread pool is a platform resource (E8)."
     }
   ]
 }

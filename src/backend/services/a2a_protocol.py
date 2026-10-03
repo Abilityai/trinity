@@ -79,6 +79,16 @@ X402_STATUS_SUBMITTED = "payment-submitted"
 X402_STATUS_REQUIRED = "payment-required"
 X402_STATUS_FAILED = "payment-failed"
 X402_STATUS_COMPLETED = "payment-completed"
+#: Verified but NOT settled — payments-py 1.18's own state, and the honest
+#: answer for Trinity's deliver-then-reconcile branch (#1018): the turn ran and
+#: the artifact is attached, but no receipt exists yet. It matters that this is
+#: neither `payment-completed` (which would be a receipt we do not have) nor
+#: `payment-failed` (on which the outbound client DISCARDS the artifact the
+#: payer's turn produced). A client that does not know the value parses the task
+#: normally, which is exactly the required behaviour.
+X402_STATUS_VERIFIED = "payment-verified"
+#: What the provider sends when it accepted no payment and ran nothing.
+X402_STATUS_REJECTED = "payment-rejected"
 
 #: The HTTP response header a priced peer uses to carry its requirements
 #: (base64 JSON `X402PaymentRequired`), and the request header carrying the
@@ -185,6 +195,41 @@ def decode_payment_token(credential: Optional[str], *,
     if "payload" not in obj:
         return None
     return obj
+
+
+def payment_payload_from_message(message: Any) -> Optional[Dict[str, Any]]:
+    """The in-band x402 payment payload on an A2A `message` param, or `None`.
+
+    The provider-side counterpart of what the outbound client WRITES: ruling 3
+    makes task metadata the primary rail (`x402.payment.payload`), with the
+    `payment-signature` header a deprecated fallback. This reads only the rail;
+    turning the payload into a facilitator-valid access token is the SDK's job
+    (`payments_py.x402.token.encode_access_token`) and stays out of this module,
+    which is SDK-free by design — the outbound client imports it and must not
+    acquire a payments-py dependency.
+
+    Tolerant on purpose: every field here is caller-controlled on an endpoint
+    reachable without a Trinity credential, so a missing/odd shape means "no
+    in-band payment" (→ header fallback → 402), never an exception. The shape
+    check is `PaymentPayload`'s own (`x402Version` int + a `payload` key), the
+    same predicate `decode_payment_token` applies to the encoded form — one
+    definition of "is this an x402 payment", so the two directions cannot come
+    to disagree.
+    """
+    if not isinstance(message, dict):
+        return None
+    metadata = message.get("metadata")
+    if not isinstance(metadata, dict):
+        return None
+    payload = metadata.get(X402_PAYLOAD_KEY)
+    if not isinstance(payload, dict):
+        return None
+    version = payload.get("x402Version")
+    if not isinstance(version, int) or isinstance(version, bool):
+        return None
+    if "payload" not in payload:
+        return None
+    return payload
 
 
 @dataclass(frozen=True)

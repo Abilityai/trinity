@@ -1474,6 +1474,14 @@ class NeverminedPaymentResult(BaseModel):
     remaining_balance: Optional[str] = None
     tx_hash: Optional[str] = None
     error: Optional[str] = None
+    #: Is this failure OURS rather than the token's (ent#679 E7)? A facilitator
+    #: timeout, an SDK error or a saturated concurrency gate means we could not
+    #: decide; a facilitator that answered "invalid" means the token is bad.
+    #: Only the second should tell a caller to go buy a new one. Defaulted so a
+    #: stored settle snapshot written before this field replays unchanged
+    #: (`NeverminedPaymentResult(**snapshot)`), and deliberately NOT part of
+    #: `_settle_snapshot` — it is about one attempt, not about the receipt.
+    retryable: bool = False
 
 
 class NeverminedPaymentLog(BaseModel):
