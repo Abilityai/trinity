@@ -129,6 +129,7 @@ describe('optional keys', () => {
     ['resend', 're_abc', ''],
     ['resend', 'sk-abc', /start with re_/],
     ['gemini', 'AIzaAbc', ''],
+    ['gemini', 'AQ.Ab12345', ''],
     ['gemini', 'sk-abc', /start with AIza/],
     ['gemini', '', ''],
   ])('%s %s', (provider, value, expected) => {
