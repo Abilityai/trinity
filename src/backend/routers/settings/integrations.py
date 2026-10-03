@@ -633,6 +633,12 @@ async def upsert_a2a_outbound_endpoint(
     `credentials` is write-only. Omitting it on an update leaves any existing
     secret in place; `clear_credentials` removes it. The audit row records
     whether a credential was set or cleared, never its value.
+
+    `credential_kind` (#3185) is a LABEL on that slot — `payment_token` makes it
+    ride as x402 payment rather than as a Bearer header. Omitted, the store
+    infers it from the value, and the response reports what it concluded, so an
+    operator pasting a token just bought after a 402 does not have to know the
+    field exists. The kind is a label and IS audited; the value never is.
     """
     from dependencies import reject_agent_principal
 
@@ -648,6 +654,7 @@ async def upsert_a2a_outbound_endpoint(
             body.url,
             credential,
             clear_credential=body.clear_credentials,
+            credential_kind=body.credential_kind,
         )
     except a2a_outbound.EndpointValidationError as e:
         raise HTTPException(status_code=422, detail=str(e))
@@ -667,16 +674,30 @@ async def upsert_a2a_outbound_endpoint(
             "url": record["url"],
             "credential_set": bool(credential),
             "credential_cleared": bool(body.clear_credentials),
+            # The KIND, not the value — and the store's conclusion rather than
+            # the request's, so the row says what was actually written when the
+            # operator left the field out.
+            "credential_kind": record.get("credential_kind"),
         },
     )
     # Honest status in the same response as the write: the outbound switch
     # defaults OFF, so a registration that looks complete is not yet callable,
     # and the caller learns that here instead of at first call (ent#761).
-    return {
+    response = {
         "success": True,
         "endpoint": record,
         "enabled": a2a_outbound_service.is_outbound_enabled(),
     }
+    if record.get("credential_single_use"):
+        # Honest status in the same response as the write (#3185 T4): an x402 v3
+        # token authorises ONE settlement, so the second call with it stored is
+        # refused by the remote. Said here rather than refused, because a
+        # provider that issues only single-use tokens must stay usable.
+        response["hint"] = (
+            "This payment token authorises a single settlement: after one paid "
+            "call the remote will refuse it, and a fresh token must be stored."
+        )
+    return response
 
 
 @router.delete("/a2a-endpoints/{ref}")

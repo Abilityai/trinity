@@ -128,6 +128,9 @@ describe("ent#761 — the three outbound control tools target the OSS endpoint s
       url: "https://x/a2a",
       credentials: undefined,
       clear_credentials: undefined,
+      // #3185: absent, not defaulted — the store infers the kind from the value,
+      // and an `api_key` sent here would override that inference with a guess.
+      credential_kind: undefined,
     });
     assert.equal(out.success, true);
     assert.equal(out.endpoint.name, "partner");
@@ -142,6 +145,7 @@ describe("ent#761 — the three outbound control tools target the OSS endpoint s
       url: "https://x/a2a",
       credentials: undefined,
       clear_credentials: undefined,
+      credential_kind: undefined,
     });
   });
 
@@ -520,5 +524,77 @@ describe("#736 F8 / ent#761 — agent-scoped keys on the A2A reads", () => {
       const out = JSON.parse(await tools.list_a2a_endpoints.execute({}, { session: { scope } as any }));
       assert.equal(out.success, true, scope);
     }
+  });
+});
+
+describe("abilityai/trinity#3185 — credential_kind on register_a2a_endpoint", () => {
+  it("passes an explicit kind through to the settings route", async () => {
+    const calls: Recorded[] = [];
+    const tools = makeTools(calls);
+    await tools.register_a2a_endpoint.execute(
+      {
+        name: "partner",
+        url: "https://x/a2a",
+        credentials: "TOK",
+        credential_kind: "payment_token",
+      },
+      {},
+    );
+    assert.equal((calls[0].args[0] as { credential_kind?: string }).credential_kind,
+                 "payment_token");
+  });
+
+  it("refuses a kind together with clear_credentials, and places no call", async () => {
+    // Contradictory instructions about one slot. Refused here as well as at the
+    // route so the caller is never told a payment token is registered when the
+    // clear emptied the slot.
+    const calls: Recorded[] = [];
+    const tools = makeTools(calls);
+    const out = JSON.parse(
+      await tools.register_a2a_endpoint.execute(
+        {
+          name: "partner",
+          url: "https://x/a2a",
+          clear_credentials: true,
+          credential_kind: "payment_token",
+        },
+        {},
+      ),
+    );
+    assert.equal(out.success, false);
+    assert.equal(out.invalid, true);
+    assert.equal(calls.length, 0);
+  });
+
+  it("relays the store's single-use warning instead of swallowing it", async () => {
+    // An x402 v3 token authorises ONE settlement. Dropped here, the operator's
+    // second call reads as a mystery 402 on an endpoint that just worked.
+    const tools = makeTools([], {
+      registerA2AEndpoint: async () => ({
+        endpoint: { id: "ep1", name: "partner", has_credentials: true,
+                    credential_kind: "payment_token", credential_single_use: true },
+        enabled: true,
+        hint: "This payment token authorises a single settlement: …",
+      }),
+    });
+    const out = JSON.parse(
+      await tools.register_a2a_endpoint.execute(
+        { name: "partner", url: "https://x/a2a", credentials: "TOK" }, {},
+      ),
+    );
+    assert.equal(out.endpoint.credential_kind, "payment_token");
+    assert.equal(out.endpoint.credential_single_use, true);
+    assert.match(out.credential_hint, /single settlement/);
+    // The kill-switch hint keeps its own key — two different warnings must not
+    // overwrite each other.
+    assert.equal("hint" in out, false);
+  });
+
+  it("the description tells an operator when to pass payment_token", async () => {
+    const tools = makeTools([]);
+    const text = tools.register_a2a_endpoint.description;
+    assert.match(text, /credential_kind/);
+    assert.match(text, /payment_token/);
+    assert.match(text, /inferred/i);
   });
 });

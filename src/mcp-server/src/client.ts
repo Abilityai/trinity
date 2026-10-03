@@ -3589,11 +3589,19 @@ export class TrinityClient {
    * scope the write to. The route is admin and human-only — deciding where a
    * credentialed server-side request may go is a grant, not a use (Invariant
    * #8). `credentials` is write-only; `clear_credentials` removes a stored one.
+   * `credential_kind` labels it — omitted, the store infers it from the value.
    */
   async registerA2AEndpoint(
-    body: { name: string; url: string; credentials?: string; clear_credentials?: boolean },
-  ): Promise<{ endpoint?: unknown; enabled?: boolean }> {
-    return this.request<{ endpoint?: unknown; enabled?: boolean }>(
+    body: {
+      name: string;
+      url: string;
+      credentials?: string;
+      clear_credentials?: boolean;
+      /** `payment_token` makes the credential ride as x402 payment (#3185). */
+      credential_kind?: "api_key" | "payment_token";
+    },
+  ): Promise<{ endpoint?: unknown; enabled?: boolean; hint?: string }> {
+    return this.request<{ endpoint?: unknown; enabled?: boolean; hint?: string }>(
       "PUT",
       `/api/settings/a2a-endpoints`,
       body,

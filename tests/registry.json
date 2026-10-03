@@ -4093,6 +4093,28 @@
         "gemini-runtime"
       ],
       "description": "#2971: the Gemini runtime runs a turn on the pinned gemini-cli (0.62.0). Real execute/execute_headless with a captured Popen: argv carries only flags the pinned CLI accepts (no --system-prompt/--max-turns), the system prompt is prepended to the turn input, --skip-trust is always passed, and chat resumes only its own captured session id (never bare --resume; model change/reset start fresh; failed turns don't move it; a missing session gets one cold retry unless cancelled). The build-time smoke harness is exercised against a fake gemini emulating 0.62.0's strict parser, and the Dockerfile pin/smoke placement are asserted. No Docker, no network."
+    },
+    {
+      "file": "unit/test_3185_a2a_payment_outcome.py",
+      "feature": "abilityai/trinity#3185",
+      "added": "2026-10-03",
+      "categories": [
+        "backend",
+        "a2a",
+        "security"
+      ],
+      "description": "Outbound A2A payment vocabulary (#3185): the stdlib x402 access-token codec (base64url/base64/plain JSON in, PaymentPayload shape required, opaque token -> None = header-only degrade); the secrets list (token + its base64 forms + the decoded payload's long string leaves, depth/count bounded); the bounded `payment` block (flat Trinity-owned summary + top-level-allowlisted raw x402, per-leaf 512 chars, accepts <= 8, 16 KiB ceiling, truncated reported honestly, token redacted in every encoding); `_raise_payment_outcome` for HTTP 402 (header-preferred, paid-door body fallback, payments-py error.message, unparseable 402 is still a 402, dropped oversized body -> truncated) and HTTP 403 (payment_rejected when the credential kind is payment_token, else rpc_forbidden, both carrying remote_status=403); and the in-band rail `_raise_for_payment_state` (payment-required raises with the task id, payment-failed -> payment_rejected, payment-completed recorded not raised, unrecognised metadata ignored). Pure functions, no socket, no backend."
+    },
+    {
+      "file": "unit/test_3185_a2a_credential_kind.py",
+      "feature": "abilityai/trinity#3185",
+      "added": "2026-10-03",
+      "categories": [
+        "backend",
+        "a2a",
+        "security"
+      ],
+      "description": "The credential KIND on the outbound A2A endpoint store (#3185 checkpoint B): `credential_kind` rides the credential's existing three write paths rather than adding a fourth (set / leave alone / clear), an omitted kind is INFERRED from the value with the same predicate the client sends on (an x402 payload -> payment_token, anything else -> api_key, fail-safe over junk), an explicit kind wins, a kind alone re-labels a stored secret without re-typing it, a kind with no credential under it is refused, `clear_credentials` drops the label and the single-use flag with the value, kind + clear is refused at the model (422, named reason, no echo) and at the store, `api_key` is stored as the ABSENCE of the key so a relabel leaves a pre-#3185-shaped record, an x402 v3 nonce is flagged `credential_single_use` rather than refused and the flag cannot outlive the token it describes, and the settings PUT/GET report the kind (plus a one-time single-use hint) while the audit row records the label and never the value. Real AES-256-GCM envelope over an in-memory settings row; no Docker, no network."
     }
   ]
 }

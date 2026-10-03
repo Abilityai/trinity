@@ -187,6 +187,7 @@ Registry rules worth knowing before your first attempt:
 - **Upsert is by name.** Re-sending the same `name` updates that endpoint. Omitting `credentials` on an update **keeps** the stored secret; send `"clear_credentials": true` to remove it.
 - **Credentials must be printable ASCII with no whitespace or line breaks** (≤8192 chars). A token pasted with a trailing newline is rejected with `422` — that is the single most common first-try failure.
 - **Up to 50 endpoints**, and each URL is SSRF-validated when you register it *and* re-validated on every call.
+- **If the credential is a payment token, say so — or let Trinity notice.** `"credential_kind": "payment_token"` makes Trinity attach it as an x402 payment — the `x402.payment.payload` metadata plus the `payment-signature` header — **in addition to** the `Authorization: Bearer` header every credentialed call already carries, not instead of it. You can leave the field out: Trinity infers it from the value, so a token pasted straight from a paid provider works without you knowing the field exists. The response tells you which it concluded. Send `credential_kind` **alone** (no `credentials`) to re-label a secret you already stored, and note that it cannot be combined with `clear_credentials` — that pair is rejected with `422` rather than guessing which you meant.
 
 ```bash
 # List them (credentials are never returned — only whether one is set)
@@ -209,12 +210,51 @@ The same three operations are available over MCP, so this is not a `curl`-only s
 ```
 register_a2a_endpoint(name        = "research-partner",
                       url         = "https://partner.example.com/a2a/researcher",
-                      credentials = "their-api-token")  # -> { endpoint, outbound_enabled }
+                      credentials = "their-api-token",
+                      # optional — inferred from the value when omitted;
+                      # "payment_token" for an x402 token bought after a 402
+                      credential_kind = "api_key")      # -> { endpoint, outbound_enabled }
 list_a2a_endpoints()                                    # -> { endpoints, outbound_enabled }
 remove_a2a_endpoint(endpoint_id = "research-partner")    # id or name; first match wins
 ```
 
 They need an **admin** key held by a person, and they work whether or not the A2A capability is enabled. `register_a2a_endpoint` reports `outbound_enabled`: when it is `false`, the response also names the one admin step above that makes the endpoint callable — so a registration you cannot yet use says so instead of looking finished. `agent_name` is accepted and ignored.
+
+### When the remote charges for the call
+
+Some A2A agents are priced. Such a remote answers **402 Payment Required**, and Trinity passes that through as a 402 rather than as a generic failure:
+
+```json
+{
+  "detail": {
+    "reason": "payment_required",
+    "message": "This agent charges 1 credit per request.",
+    "payment": {
+      "summary": {"plan_id": "plan_42", "scheme": "exact",
+                  "network": "base-sepolia", "credits_per_request": 1,
+                  "resource_url": "https://partner.example.com/a2a/researcher"},
+      "x402": { "…the remote's own requirements object…" },
+      "truncated": false
+    },
+    "remote_status": 402,
+    "task_id": "task-abc"
+  }
+}
+```
+
+An agent sees `payment_required: true`, the same `payment` block, and `do_not_retry: true`. **Trinity never buys anything.** The sequence is:
+
+1. The agent relays the price to a person **once** and stops. Retrying cannot work, and calling a different endpoint is not a substitute.
+2. A person buys the access token from the provider.
+3. An admin stores it on the endpoint: `register_a2a_endpoint(name="research-partner", url=…, credentials="<the token>")` — the kind is inferred, or pass `credential_kind="payment_token"` explicitly.
+4. The agent calls again, passing the `task_id` the refusal returned, so the remote resumes the same task instead of starting a fresh charge.
+
+Two things worth knowing before you get there:
+
+- **402 means "buy this", 403 means something else.** A remote 403 comes back as a `502` with `reason: "rpc_forbidden"` — or `"payment_rejected"` when the stored credential is a payment token the remote refused (spent, expired, or out of credit). Both carry `remote_status`, so you can always tell the two apart.
+- **Some payment tokens are single-use.** An x402 v3 token authorises exactly one settlement. Trinity flags it (`credential_single_use: true`, plus a hint in the registration response) rather than refusing it: after one paid call you will need to store a fresh token.
+
+Trinity reads the price and attaches a token you stored. It does not negotiate, does not purchase, and does not show the agent payment receipts.
 
 ### Call it (from an agent)
 
@@ -269,6 +309,9 @@ Register the remote instance's agent endpoint (`https://their-trinity.example.co
 | `endpoint_dns_failure` (400) | The hostname does not resolve. Trinity treats a DNS failure as fatal rather than retrying blindly |
 | `card_url_ambiguous` (502) | The remote's card declares a URL that doesn't unambiguously match what you registered. Register the origin, or a URL matching the card's declared `url` exactly |
 | `unsupported_protocol_version` (502) | The remote speaks A2A `1.x`, which Trinity deliberately refuses — there is no peer to verify that dialect against |
+| `payment_required` (402) | The remote charges for this call. `detail.payment` carries its price and plan — relay it to a person once and stop; nothing an agent can do changes the answer |
+| `payment_rejected` (502) | A payment token you stored was refused by the remote (spent, expired, or out of credit). Store a fresh one |
+| `rpc_forbidden` (502) | The remote answered 403 for a reason of its own — check the credential and your access with that provider. Never Trinity's own 403 |
 | `message_too_long` (422) | The message exceeds 100,000 characters |
 | `timeout` (504) | The remote took too long. If it accepted a task, poll with `get_a2a_task` |
 | 409 | The same labelled call is already in flight — use a distinct `dedup_label` |
@@ -291,7 +334,9 @@ That receipt matters: a timed-out `call_a2a_agent` returns `possibly_delivered: 
 - **Every inbound task is audit-logged** (`source=a2a`, with the caller identity).
 - **Outbound is off by default too**, and an agent can only reach endpoints an administrator registered by name — it can never supply a URL of its own, so a prompt injection cannot aim Trinity at an address of the attacker's choosing.
 - **An agent may only call as itself.** Sharing an agent lets someone reach it; it does not let one agent spend another agent's registered endpoint credential.
-- **Outbound calls are audit-logged** with the endpoint name and the remote **host** — never the full URL, the message, or the credential.
+- **Outbound calls are audit-logged** with the endpoint name and the remote **host** — never the full URL, the message, or the credential. For a payment token the audit row records the *kind*, never the value, and a completed payment is recorded so you can see money leaving.
+- **A priced remote is never paid automatically.** Trinity reads a 402 and can attach a token an administrator stored; it never purchases, never retries a priced call, and never replays a stored "payment required" answer after you have paid.
+- **What a remote sends back is treated as untrusted text, including its price.** The payment details that reach an agent are a fixed, size-capped shape with the credential scrubbed out — a remote cannot smuggle extra instructions or your own token back through the price it quotes.
 
 ---
 
@@ -315,7 +360,7 @@ That receipt matters: a timed-out `call_a2a_agent` returns `possibly_delivered: 
 
 The two agent routes return `404` while outbound calling is off. The three settings routes are **not** gated by the flag: an admin can register endpoints before switching the feature on, which is the intended order. They are also the routes behind `register_a2a_endpoint` / `list_a2a_endpoints` / `remove_a2a_endpoint`, so the MCP tools and these routes cannot disagree.
 
-`GET /api/settings/a2a-endpoints` answers `{"endpoints": [{"id": …, "name": …, "url": …, "has_credentials": true}], "enabled": false}` — credentials are write-only and never echoed back, and `enabled` is a second way to confirm the flag.
+`GET /api/settings/a2a-endpoints` answers `{"endpoints": [{"id": …, "name": …, "url": …, "has_credentials": true, "credential_kind": "api_key"}], "enabled": false}` — credentials are write-only and never echoed back, and `enabled` is a second way to confirm the flag. `credential_kind` appears only where a credential is stored (`api_key` or `payment_token`), with `credential_single_use: true` alongside it when the stored payment token is good for one settlement.
 
 ### JSON-RPC methods
 
