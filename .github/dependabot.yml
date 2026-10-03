@@ -132,10 +132,18 @@ updates:
     # needing `pg_config`, which `-slim` does not carry. Ecosystem readiness is
     # the thing to check first, and that is issue work, not PR review.
     # Patch/minor still flow (that is where the CVE fixes are).
+    #
+    # Python's own 3.x step is semver-MINOR to Dependabot, so the rule above
+    # never caught it: #2477 and #3092 were the same 3.13 -> 3.14 migration
+    # arriving as a "minor" base-image bump. Other images' minors still flow;
+    # the Python minor moves only by deliberate issue work.
     ignore:
       - dependency-name: "*"
         update-types:
           - version-update:semver-major
+      - dependency-name: "python"
+        update-types:
+          - version-update:semver-minor
     groups:
       docker-base-images:
         patterns:
