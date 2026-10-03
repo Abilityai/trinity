@@ -19,6 +19,7 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 
+import anyio
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src" / "backend"))
@@ -166,6 +167,21 @@ async def _drive(*, payment_service=None, idem=None, db=None, execute=None,
     )
     return outcome, SimpleNamespace(idem=idem, db=db, payments=payment_service,
                                     order=order)
+
+
+async def _until(predicate, timeout: float = 2.0):
+    """Give the detached settle task its turns, bounded.
+
+    The scope-cancelled turn has already unwound when the test resumes, so the
+    settle's own bookkeeping lands on a later loop iteration. Polling the
+    observable record (rather than reaching for the task object) keeps the
+    assertion about behaviour.
+    """
+    deadline = asyncio.get_running_loop().time() + timeout
+    while asyncio.get_running_loop().time() < deadline:
+        if predicate():
+            return
+        await asyncio.sleep(0.01)
 
 
 # ---------------------------------------------------------------------------
@@ -452,6 +468,9 @@ async def test_disconnect_during_settle_still_settles_and_records_it():
     with pytest.raises(asyncio.CancelledError):
         await task
 
+    # The settle and its bookkeeping are detached (C1), so join on the record.
+    await _until(lambda: db.actions() == ["verify", "settle"])
+
     assert len(payments.settle_calls) == 1
     assert db.actions() == ["verify", "settle"]        # the burn IS recorded
     assert idem.upgrades, "the claim must converge to settled, not stay in-flight"
@@ -480,7 +499,94 @@ async def test_disconnect_during_a_settle_that_fails_persists_the_unsettled_work
     with pytest.raises(asyncio.CancelledError):
         await task
 
+    await _until(lambda: bool(idem.completed))
+
     # complete(), not fail(): the retry re-drives settle, it does not re-run the LLM.
+    assert idem.completed and idem.failed == []
+    assert idem.completed[0][1]["status"] == "success_unsettled"
+
+
+# ---------------------------------------------------------------------------
+# 13b. the cancellation shape the real consumer produces (C1)
+# ---------------------------------------------------------------------------
+
+async def test_cancel_scope_during_settle_still_records_the_burn():
+    """The two tests above cancel the TASK; Starlette cancels a SCOPE.
+
+    `asyncio.Task.cancel()` is edge-triggered: one `CancelledError` is delivered
+    and every later `await` in the handler proceeds normally. `StreamingResponse`
+    runs its body generator inside an anyio task group and cancels that group's
+    **cancel scope** on client disconnect, and anyio cancellation is
+    LEVEL-triggered — every subsequent `await` inside the cancelled scope raises
+    `CancelledError` again. So a recovery handler that awaits the settle before
+    writing its rows never reaches them: the facilitator burns credits, no
+    `settle` row is written, and the claim stays in-flight for the key's whole
+    24 h TTL (C1, abilityai/trinity-enterprise#679).
+
+    The settle's bookkeeping therefore has to live in the DETACHED task, which is
+    not inside the cancelled scope. This test is the probe for that: it cancels
+    the scope, not the task.
+    """
+    settle_started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def _slow_settle(**kwargs):
+        settle_started.set()
+        await release.wait()
+        return _settle_ok()
+
+    idem = FakeIdem()
+    db = FakeDb()
+    payments = FakePaymentService(settle=_slow_settle)
+
+    async def _turn():
+        await _drive(payment_service=payments, idem=idem, db=db)
+
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(_turn)
+        await asyncio.wait_for(settle_started.wait(), timeout=2)
+        tg.cancel_scope.cancel()
+        release.set()
+
+    # The settle outlives the cancelled scope and owns its own bookkeeping.
+    await _until(lambda: db.actions() == ["verify", "settle"])
+
+    assert len(payments.settle_calls) == 1
+    assert db.actions() == ["verify", "settle"], "the burn must still be recorded"
+    assert idem.upgrades, "the claim must converge to settled, not stay in-flight"
+    assert idem.upgrades[-1][2]["payment"]["settled"] is True
+
+
+async def test_cancel_scope_during_a_settle_that_fails_persists_the_unsettled_work():
+    """Same scope-level cancellation, settle-failed branch.
+
+    `complete()` — not `fail()` — so the payer's retry replays the delivered work
+    and re-drives settle instead of paying for a second LLM run.
+    """
+    settle_started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def _slow_bad_settle(**kwargs):
+        settle_started.set()
+        await release.wait()
+        return _settle_bad("chain down")
+
+    idem = FakeIdem()
+    db = FakeDb()
+    payments = FakePaymentService(settle=_slow_bad_settle)
+
+    async def _turn():
+        await _drive(payment_service=payments, idem=idem, db=db)
+
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(_turn)
+        await asyncio.wait_for(settle_started.wait(), timeout=2)
+        tg.cancel_scope.cancel()
+        release.set()
+
+    await _until(lambda: db.actions() == ["verify", "settle_failed"])
+
+    assert db.actions() == ["verify", "settle_failed"]
     assert idem.completed and idem.failed == []
     assert idem.completed[0][1]["status"] == "success_unsettled"
 

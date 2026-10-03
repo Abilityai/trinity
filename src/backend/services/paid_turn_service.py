@@ -32,6 +32,11 @@ from typing import Any, Awaitable, Callable, Optional, Union
 
 logger = logging.getLogger(__name__)
 
+#: Strong references to in-flight detached settle tasks (C1). The settle must
+#: outlive the request that started it, and asyncio holds a running task only
+#: weakly.
+_PENDING_SETTLES: set = set()
+
 
 class PaidTurnAbort(Exception):
     """A caller's `pre_execute` hook refusing the turn after the dedup gate.
@@ -193,11 +198,12 @@ async def run_paid_turn(
 
     `execute()` returns an object with `.status`, `.response` and
     `.execution_id`. Cancellation is phase-aware (#679 E5): before a result
-    exists the claim is released; after the turn succeeded the settle runs under
-    `asyncio.shield` and the claim is completed with the unsettled payload, so a
-    caller that walked away cannot cause the LLM work to be repeated. The
-    `CancelledError` is always re-raised — this function decides the bookkeeping,
-    not whether the request lives.
+    exists the claim is released; after the turn succeeded the settle AND its
+    bookkeeping run in a detached, shielded task, so a caller that walked away
+    cannot cause the LLM work to be repeated or the burn to go unrecorded — see
+    `_settle_and_record` for why the bookkeeping cannot live in a cancellation
+    handler (C1). The `CancelledError` is always re-raised — this function
+    decides the bookkeeping, not whether the request lives.
     """
     # --- 1. verify (before any dedup key is consumed) --------------------
     verify_result = await payment_service.verify_payment(
@@ -385,37 +391,75 @@ async def run_paid_turn(
     # exactly-once token — this local guard is the only settle dedup, and a
     # fresh-id retry's double-settle residual is tracked by #1408.
     #
-    # Shielded (#679 E5): the work is DONE and the payer owes for it. A client
-    # that disconnects here must not abort a settle mid-flight — that strands the
-    # claim in-flight with the money unrecorded, and the retry re-runs the LLM.
-    settle_task = asyncio.ensure_future(
-        payment_service.settle_payment_once(
+    # Detached + shielded (#679 E5, C1): the work is DONE and the payer owes for
+    # it. A client that disconnects here must not abort a settle mid-flight —
+    # that strands the claim in-flight with the money unrecorded, and the retry
+    # re-runs the LLM. The settle and ALL of its bookkeeping therefore run in the
+    # detached task below, never in a cancellation handler.
+    def _record_unsettled(settle_result) -> dict:
+        """The settle-failed row + the claim, as one step.
+
+        `complete()` — NOT `fail()` — so a client re-POST replays the completed
+        work and re-drives settle (idempotent) rather than re-running the LLM
+        (double cost). The snapshot stays 'unsettled' until a settle finally
+        succeeds and upgrades it.
+        """
+        payload = _unsettled_payload(
+            agent_name=agent_name,
             config=config,
-            nvm_api_key=nvm_api_key,
-            nvm_environment=config.nvm_environment,
-            access_token=access_token,
-            agent_request_id=verify_result.agent_request_id,
-            execution_id=exec_result.execution_id,
-            base_url=base_url,
-            endpoint=endpoint,
+            exec_result=exec_result,
+            settle_result=settle_result,
+            verify_result=verify_result,
+            db=db,
         )
-    )
-    try:
-        settle_result = await asyncio.shield(settle_task)
-    except asyncio.CancelledError:
-        # Let the settle finish, then persist the delivered-but-unsettled work so
-        # the payer's retry replays it and re-drives settle rather than paying for
-        # a second LLM run.
+        idem.complete(decision, exec_result.execution_id, payload)
+        return payload
+
+    async def _settle_and_record():
+        """Settle AND every money record it implies, in ONE detached task.
+
+        The bookkeeping lives here rather than in the awaiting frame's
+        `except CancelledError` handler because the two cancellation shapes are
+        not interchangeable (C1). `asyncio.Task.cancel()` is edge-triggered: one
+        `CancelledError` is delivered, so a handler may await the settle and
+        then write its rows. Starlette's `StreamingResponse` — the A2A
+        `message/stream` consumer — runs its body generator inside an anyio task
+        group and cancels that group's cancel SCOPE on client disconnect, and
+        anyio cancellation is LEVEL-triggered: every subsequent `await` inside
+        the cancelled scope raises `CancelledError` again. Such a handler never
+        reaches its rows, so the facilitator burns credits with no `settle` row
+        and the claim strands in-flight for the key's whole 24 h TTL — the retry
+        then re-runs the LLM and re-settles.
+
+        A detached task is not inside that scope, so it completes either way.
+        Returns `(settle_result, payload, exc)`; `exc` is re-raised by the
+        awaiting frame if it is still alive, so a settle that RAISES keeps
+        answering exactly what it answered before (the paid door's 500).
+        """
         try:
-            settle_result = await settle_task
-        except Exception:  # noqa: BLE001 — the raise below is the real outcome
-            logger.warning(
-                "Settle after client disconnect failed for %s; completing the claim "
-                "as unsettled so a retry re-drives it", agent_name,
+            settle_result = await payment_service.settle_payment_once(
+                config=config,
+                nvm_api_key=nvm_api_key,
+                nvm_environment=config.nvm_environment,
+                access_token=access_token,
+                agent_request_id=verify_result.agent_request_id,
+                execution_id=exec_result.execution_id,
+                base_url=base_url,
+                endpoint=endpoint,
             )
-            settle_result = None
-        if settle_result is not None and settle_result.success:
-            finalize_settled(
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 — recorded, then handed back
+            logger.warning(
+                "Settle raised for %s; completing the claim as unsettled so a "
+                "retry re-drives it instead of re-running the LLM: %s",
+                agent_name, exc,
+            )
+            return None, _record_unsettled(None), exc
+
+        if settle_result.success:
+            # Logs settle + completes the idempotency claim with the settled snapshot.
+            return settle_result, finalize_settled(
                 agent_name=agent_name,
                 config=config,
                 response=exec_result.response,
@@ -425,57 +469,40 @@ async def run_paid_turn(
                 idem_decision=decision,
                 idem=idem,
                 db=db,
-            )
-        else:
-            idem.complete(
-                decision,
-                exec_result.execution_id,
-                _unsettled_payload(
-                    agent_name=agent_name,
-                    config=config,
-                    exec_result=exec_result,
-                    settle_result=settle_result,
-                    verify_result=verify_result,
-                    db=db,
-                ),
-            )
+            ), None
+
+        return settle_result, _record_unsettled(settle_result), None
+
+    settle_task = asyncio.ensure_future(_settle_and_record())
+    # asyncio keeps only a weak reference to a running task, so a settle whose
+    # awaiter has walked away could be collected mid-flight — which is the same
+    # lost burn by another route. Hold a strong reference until it finishes.
+    _PENDING_SETTLES.add(settle_task)
+    settle_task.add_done_callback(_PENDING_SETTLES.discard)
+
+    try:
+        settle_result, settle_payload, settle_exc = await asyncio.shield(settle_task)
+    except asyncio.CancelledError:
+        # Re-raise ONLY — never await here. The detached task above owns the
+        # money bookkeeping and finishes it on its own; awaiting it inside a
+        # level-triggered cancelled scope is precisely what C1 was.
         raise
 
+    if settle_exc is not None:
+        raise settle_exc
+
     if settle_result.success:
-        # Logs settle + completes the idempotency claim with the settled snapshot.
         return PaidTurnOutcome(
             kind=SETTLED,
-            payload=finalize_settled(
-                agent_name=agent_name,
-                config=config,
-                response=exec_result.response,
-                execution_id=exec_result.execution_id,
-                settle_result=settle_result,
-                payer=verify_result.payer,
-                idem_decision=decision,
-                idem=idem,
-                db=db,
-            ),
+            payload=settle_payload,
             verify=verify_result,
             settle=settle_result,
             execution_id=exec_result.execution_id,
         )
 
-    unsettled_payload = _unsettled_payload(
-        agent_name=agent_name,
-        config=config,
-        exec_result=exec_result,
-        settle_result=settle_result,
-        verify_result=verify_result,
-        db=db,
-    )
-    # complete() — NOT fail() — so a client re-POST replays the completed work and
-    # re-drives settle (idempotent) rather than re-running the LLM (double cost).
-    # The snapshot stays 'unsettled' until a settle finally succeeds and upgrades it.
-    idem.complete(decision, exec_result.execution_id, unsettled_payload)
     return PaidTurnOutcome(
         kind=UNSETTLED,
-        payload=unsettled_payload,
+        payload=settle_payload,
         verify=verify_result,
         settle=settle_result,
         execution_id=exec_result.execution_id,
