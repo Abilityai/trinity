@@ -53,6 +53,40 @@ A2A_UNSUPPORTED = -32004
 MAX_RPC_BODY_BYTES = 1_000_000
 
 
+# ---------------------------------------------------------------------------
+# x402 payment vocabulary (#3185). Here rather than in `a2a_client.py` for the
+# reason the module docstring gives: two copies of a protocol vocabulary is how
+# a dialect table rots. The outbound client WRITES these keys today; the
+# inbound server (abilityai/trinity-enterprise#679) will READ the same ones,
+# and it imports from here.
+#
+# The names are the a2a-x402 extension's, verified in use against payments-py
+# 1.18 (`x402Metadata`) — see trinity-enterprise#763. They are DOTTED keys
+# inside one flat `metadata` dict, not a nested object: that is the extension's
+# own shape, and writing it as nesting would be a protocol of our own.
+# ---------------------------------------------------------------------------
+X402_STATUS_KEY = "x402.payment.status"
+X402_REQUIRED_KEY = "x402.payment.required"
+X402_PAYLOAD_KEY = "x402.payment.payload"
+X402_ERROR_KEY = "x402.payment.error"
+X402_RECEIPTS_KEY = "x402.payment.receipts"
+
+#: What we SEND when a payment token is attached in-band.
+X402_STATUS_SUBMITTED = "payment-submitted"
+#: What a priced peer sends back. `payment-required` and `payment-failed` are
+#: refusals the client raises on; `payment-completed` is recorded (the operator
+#: must be able to see money leaving) but never surfaced to the calling agent.
+X402_STATUS_REQUIRED = "payment-required"
+X402_STATUS_FAILED = "payment-failed"
+X402_STATUS_COMPLETED = "payment-completed"
+
+#: The HTTP response header a priced peer uses to carry its requirements
+#: (base64 JSON `X402PaymentRequired`), and the request header carrying the
+#: token. Both are x402 v2 names already in use by `routers/paid.py`.
+X402_PAYMENT_REQUIRED_HEADER = "payment-required"
+X402_PAYMENT_SIGNATURE_HEADER = "payment-signature"
+
+
 @dataclass(frozen=True)
 class Dialect:
     """One protocol generation's wire vocabulary."""

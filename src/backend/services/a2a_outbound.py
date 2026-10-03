@@ -54,7 +54,7 @@ from __future__ import annotations
 import json
 import logging
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Dict, List, Optional, Protocol
 
 logger = logging.getLogger(__name__)
@@ -75,6 +75,33 @@ MAX_ENDPOINT_CREDENTIAL_LEN = 8192
 #: and a strict subset of what h11 will put on the wire.
 _HEADER_SAFE_CREDENTIAL = re.compile(r"^[\x21-\x7E]+$")
 
+#: What kind of secret the endpoint's credential slot holds (#3185).
+#:
+#: `api_key` is the default for EVERY record written before #3185 — the key is
+#: simply absent there — and it means today's behaviour exactly: the credential
+#: rides `Authorization: Bearer …` and nothing else. `payment_token` additionally
+#: attaches the token as x402 payment (in-band metadata + the deprecated
+#: `payment-signature` header).
+#:
+#: It is a LABEL on the existing credential slot, not a second secret. A
+#: separate store, route or MCP tool for payment tokens would be a fourth write
+#: path to the same AES-256-GCM envelope.
+CREDENTIAL_KIND_API_KEY = "api_key"
+CREDENTIAL_KIND_PAYMENT_TOKEN = "payment_token"
+CREDENTIAL_KINDS = (CREDENTIAL_KIND_API_KEY, CREDENTIAL_KIND_PAYMENT_TOKEN)
+
+
+def normalize_credential_kind(value: Any) -> str:
+    """Any stored/provider-supplied value → a kind we will act on.
+
+    Fail-SAFE direction, deliberately: anything unrecognised becomes `api_key`.
+    A payment token sent as a Bearer header is refused by the remote and reaches
+    nobody else; the opposite default would announce an ordinary API key in-band
+    as a payment because of a typo in a record we do not control (an enterprise
+    provider may return one).
+    """
+    return value if value in CREDENTIAL_KINDS else CREDENTIAL_KIND_API_KEY
+
 
 @dataclass(frozen=True)
 class ResolvedEndpoint:
@@ -92,11 +119,17 @@ class ResolvedEndpoint:
     name: str
     url: str
     credential: Optional[str] = field(default=None, repr=False)
+    #: `api_key` (default, and what every pre-#3185 record resolves to) or
+    #: `payment_token`. The KIND is metadata and stays in the repr — an operator
+    #: debugging a 402 needs to know which slot they filled; the VALUE never
+    #: appears.
+    credential_kind: str = CREDENTIAL_KIND_API_KEY
 
     def __repr__(self) -> str:  # pragma: no cover - trivial, but load-bearing
         return (
             f"ResolvedEndpoint(id={self.id!r}, name={self.name!r}, url={self.url!r}, "
-            f"credential={'<set>' if self.credential else None})"
+            f"credential={'<set>' if self.credential else None}, "
+            f"credential_kind={self.credential_kind!r})"
         )
 
     __str__ = __repr__
@@ -242,6 +275,9 @@ class SystemSettingsEndpointProvider:
                     name=rname,
                     url=url,
                     credential=str(credential) if credential else None,
+                    credential_kind=normalize_credential_kind(
+                        record.get("credential_kind")
+                    ),
                 )
         return None
 
@@ -287,6 +323,16 @@ def resolve_endpoint(agent_name: str, ref: str) -> Optional[ResolvedEndpoint]:
     if not isinstance(resolved.url, str) or not resolved.url.strip():
         logger.error("[a2a_outbound] provider returned an endpoint with no URL; refusing")
         return None
+    kind = normalize_credential_kind(resolved.credential_kind)
+    if kind != resolved.credential_kind:
+        # A provider we do not own returned a kind we will not act on. Normalise
+        # rather than refuse: the call still works as an `api_key` endpoint, and
+        # the remote — not us — decides whether that credential is acceptable.
+        logger.warning(
+            "[a2a_outbound] provider returned credential_kind %r; treating as %s",
+            resolved.credential_kind, kind,
+        )
+        resolved = replace(resolved, credential_kind=kind)
     return resolved
 
 

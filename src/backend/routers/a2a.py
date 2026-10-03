@@ -649,6 +649,12 @@ _A2A_CLIENT_ERROR_STATUS = {
     "endpoint_invalid": 400,
     "message_too_long": 422,
     "timeout": 504,
+    # #3185. The honest status for "the peer will answer once you pay", and the
+    # one the MCP mapper and the add flow branch on. `payment_rejected` and
+    # `rpc_forbidden` deliberately stay on the 502 default: a remote 403 must
+    # not be echoed as this route's OWN 403, which means "an agent tried to
+    # call as a neighbour". `detail.remote_status` carries the peer's.
+    "payment_required": 402,
 }
 
 
@@ -665,6 +671,16 @@ def _map_call_error(exc: A2ACallError) -> HTTPException:
     detail = {"reason": exc.reason, "message": exc.detail}
     if exc.remote_code is not None:
         detail["remote_code"] = exc.remote_code
+    if exc.remote_status is not None:
+        detail["remote_status"] = exc.remote_status
+    if exc.payment is not None:
+        # Already bounded, allowlisted and credential-scrubbed by the client
+        # (`_bounded_payment_block`) — the router adds no second shape and does
+        # no second sanitisation, so there is one place that decides what peer
+        # text an agent may see.
+        detail["payment"] = exc.payment
+    if exc.task_id is not None:
+        detail["task_id"] = exc.task_id
     return HTTPException(status_code=status_code, detail=detail)
 
 
