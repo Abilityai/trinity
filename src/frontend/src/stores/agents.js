@@ -696,6 +696,24 @@ export const useAgentsStore = defineStore('agents', {
       return response.data
     },
 
+    // trinity-enterprise#703: the container's pull cycle.
+    async getGitPullSync(name) {
+      const authStore = useAuthStore()
+      const response = await axios.get(`/api/agents/${name}/git/pull-sync`, {
+        headers: authStore.authHeader
+      })
+      return response.data
+    },
+
+    async setGitPullSync(name, enabled) {
+      const authStore = useAuthStore()
+      const response = await axios.put(`/api/agents/${name}/git/pull-sync`,
+        { enabled },
+        { headers: authStore.authHeader }
+      )
+      return response.data
+    },
+
     async getGitFreezeSchedules(name) {
       const authStore = useAuthStore()
       const response = await axios.get(`/api/agents/${name}/git/freeze-schedules-if-failing`, {

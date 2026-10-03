@@ -15,11 +15,17 @@ every install, which is not what the ruling can mean. Recorded here so the
 ruling is never re-inferred from the mere fact that this merged (the ent#326 /
 ent#384 discipline).
 
-> **Note for the owner.** Option 4 (an OSS platform-scope list) narrows a
-> private module's role here to **per-agent scoping plus the managed UI**. If
-> that scoping was deliberate monetization, the OSS list becomes the floor and
-> a per-agent provider gates on top — a one-line change at this seam. That is a
-> product call, not an engineering one, and it is deliberately not made here.
+> **Ruled (2026-09-22 on ent#421, reaffirmed 2026-10-02 on ent#761).** The
+> question this note used to pose — whether per-agent scoping was deliberate
+> monetization — is answered: **outbound control is OSS-core too.** The OSS
+> platform-scope list is the floor *and* the managed surface; registering,
+> listing and removing an endpoint works on every edition, and ent#761 pointed
+> the three MCP control tools at this store so the tool that registers a target
+> and the resolver the runtime uses are the same list. Per-agent scoping stays
+> available as a provider that gates on top — still a one-line change at this
+> seam — but nothing in OSS now depends on it existing. Inbound exposure, the
+> inbound allow-list, exposable-skills curation and signed cards are unchanged
+> by that ruling.
 
 Requirements: `docs/memory/requirements/mcp.md` §32.5.
 
@@ -75,14 +81,15 @@ Three placements were available:
 | Layer | File | Notes |
 |-------|------|-------|
 | MCP tools | `src/mcp-server/src/tools/a2a_call.ts` (+ `a2a_call.test.ts`) | `call_a2a_agent`, `get_a2a_task`. Separate module from the ent#160 management plane; registered in `toolGroups` → `operatorOnly` allow-list |
-| MCP client | `src/mcp-server/src/client.ts` | `callA2AAgent` / `getA2ATask` — own `AbortController` (`MCP_A2A_TIMEOUT_MS`, 40s), so **we** abort before the MCP gateway does |
+| MCP client | `src/mcp-server/src/client.ts` | `callA2AAgent` / `getA2ATask` — own `AbortController` (`MCP_A2A_TIMEOUT_MS`, 40s), so **we** abort before the MCP gateway does. Also `registerA2AEndpoint` / `listA2AEndpoints` / `removeA2AEndpoint`, which address the settings routes below (ent#761) |
+| MCP control tools | `src/mcp-server/src/tools/a2a.ts` (+ `a2a.test.ts`) | `register_a2a_endpoint` / `list_a2a_endpoints` / `remove_a2a_endpoint` — the operator path to the same registry this flow resolves against, admin + human-only, on a status-based error mapper that cannot report `not_entitled` (ent#761). They share a module with the entitlement-gated inbound plane; the planes do not share a mapper |
 | Router | `src/backend/routers/a2a.py` | `POST /{name}/a2a/call`, `POST /{name}/a2a/task`. Auth + HTTP error map + audit only |
 | Orchestration | `src/backend/services/a2a_outbound_service.py` | kill switch → bounds → resolve → validate → `effect_guard` → call → activity |
 | Target seam | `src/backend/services/a2a_outbound.py` | **Fail-CLOSED** provider seam + the OSS `system_settings` provider |
 | Protocol client | `src/backend/services/a2a_client.py` | Card fetch, dialect, RPC, pinning, caps, sanitisation. FastAPI-free; raises `A2ACallError` |
 | Shared vocabulary | `src/backend/services/a2a_protocol.py` | JSON-RPC + A2A error codes, the dialect table, envelope helpers — used by **both** directions so they cannot drift |
 | SSRF gate | `src/backend/utils/url_validation.py` | `validate_a2a_endpoint_url` over the shared `_validate_public_https_url` |
-| Admin registry | `src/backend/routers/settings.py` | `GET/PUT /api/settings/a2a-endpoints`, `DELETE /api/settings/a2a-endpoints/{ref}` |
+| Admin registry | `src/backend/routers/settings/integrations.py` | `GET/PUT /api/settings/a2a-endpoints`, `DELETE /api/settings/a2a-endpoints/{ref}`. The package header (`routers/settings/__init__.py`) names `a2a.ts` as the covering MCP module for these three routes and only these (ent#761) |
 | Kill switch | `services/settings_service._resolve_bool_flag` | `system_settings` → `A2A_OUTBOUND_ENABLED` env → **OFF** |
 
 **No DB change.** No table, no SQLite migration, no Alembic revision — the
@@ -193,8 +200,10 @@ metadata live. No amount of IP filtering makes that safe, because filtering is
 a blocklist race (DNS rebinding, CGNAT, IPv6-mapped forms, redirect chains)
 while a registry is a whitelist of things a human deliberately typed.
 
-It is also not an invention. The shipped `register_a2a_endpoint` tool already
-says so: *"this feeds the runtime `call_a2a_agent` (abilityai/trinity#736)"*.
+It is also not an invention. The `register_a2a_endpoint` tool says so in its
+own description — and since ent#761 it writes the store this flow resolves
+against, so "the list the operator registers into" and "the list the runtime
+reads" are one list rather than two that happen to agree.
 
 **The cost, stated:** an agent cannot discover-and-call a novel A2A peer at
 runtime. An operator registers it first. Reversible later behind an explicit
@@ -447,7 +456,8 @@ credentialed send.
 | `tests/unit/test_736_a2a_outbound_transport.py` | Transport properties over a **real** `httpx` client on `MockTransport` with genuinely streaming responses: byte ceilings vs a lying `Content-Length`, refused compression, refused redirects, connect-time IP pin + SNI, proxy neutrality, dialect, HTTP-200-with-error, redaction with a **non-pattern** credential, the truncation-boundary case |
 | `tests/unit/test_736_a2a_outbound_call.py` | Route/auth/dedup/seam over `TestClient` — including the **loopback round trip** against Trinity's own inbound server and the two-different-messages replay regression |
 | `src/mcp-server/src/tools/a2a_call.test.ts` | Proxy shape, self-only gate, schema (no URL, no `stream`, required `dedup_label`), error→flag mapping, `possibly_delivered` on abort |
-| `src/mcp-server/src/tools/a2a.test.ts` | The F8 addition: the two management **reads** now gate agent-scoped keys |
+| `src/mcp-server/src/tools/a2a.test.ts` | The F8 addition (the config read gates agent-scoped keys), plus ent#761: the three outbound control tools proxy the settings routes, `not_entitled` is unreachable on them (proved with a 403 whose body mentions `a2a`, which the old body-text mapper would have mislabelled), `clear_credentials` + `credentials` is refused client-side, and the registered URL is pinned by reading `client.ts` |
+| `tests/unit/test_ent761_outbound_control_oss.py` | The OSS control plane over its own FastAPI app with **no** resolver provider registered: the `# mcp:` header pins to `a2a.ts`, an AST walk asserts the three handlers carry no entitlement gate and keep `assert_admin` + the human-only guard, register → list → resolve-as-two-different-agents → remove, and the 403 detail text the TS mapper matches on |
 | `src/mcp-server/src/tool-visibility.test.ts` | The outbound tools are operator-scope only |
 
 > **A transport test whose mock does not stream is not a transport test.**

@@ -39,6 +39,13 @@ _COLUMNS = (
     "dirty_files",  # trinity-enterprise#706: porcelain change count
     "dirty_since",  # trinity-enterprise#706: dirt episode clock (ISO-Z)
     "last_successful_push_at",  # trinity-enterprise#706: last push that landed
+    "last_pull_at",  # trinity-enterprise#703: the container's pull cycle
+    "last_pull_status",
+    "behind_after_pull",
+    "last_pull_error",
+    "last_successful_pull_at",
+    "consecutive_pull_failures",
+    "consecutive_pull_skips",
     "last_check_at",
     "updated_at",
 )
@@ -168,6 +175,13 @@ class SyncStateOperations:
         pack_count: Optional[int] = None,
         loose_objects: Optional[int] = None,
         maintenance_failures: Optional[int] = None,
+        last_pull_at: Optional[str] = None,
+        last_pull_status: Optional[str] = None,
+        behind_after_pull: Optional[int] = None,
+        last_pull_error: Optional[str] = None,
+        last_successful_pull_at: Optional[str] = None,
+        consecutive_pull_failures: Optional[int] = None,
+        consecutive_pull_skips: Optional[int] = None,
         last_check_at: Optional[str] = None,
         diverged_since=KEEP,
         dirty_since=KEEP,
@@ -230,6 +244,18 @@ class SyncStateOperations:
             "dirty_since": _clock("dirty_since", dirty_since),  # ent#706
             "last_successful_push_at": _merged(  # ent#706
                 "last_successful_push_at", last_successful_push_at),
+            # trinity-enterprise#703: the pull cycle's own outcome. It never
+            # touches consecutive_failures — that counter is the PUSH health.
+            "last_pull_at": _merged("last_pull_at", last_pull_at),
+            "last_pull_status": _merged("last_pull_status", last_pull_status),
+            "behind_after_pull": _merged("behind_after_pull", behind_after_pull),
+            # last_pull_error is written as-is, None included: a success clears
+            # it, so a stale error never outlives the pull that fixed it.
+            "last_pull_error": last_pull_error if last_pull_status is not None
+            else _merged("last_pull_error", None),
+            "last_successful_pull_at": _merged("last_successful_pull_at", last_successful_pull_at),
+            "consecutive_pull_failures": _merged("consecutive_pull_failures", consecutive_pull_failures) or 0,
+            "consecutive_pull_skips": _merged("consecutive_pull_skips", consecutive_pull_skips) or 0,
             "last_check_at": last_check_at or now,
             "updated_at": now,
         }

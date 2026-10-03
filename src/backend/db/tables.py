@@ -1015,6 +1015,7 @@ agent_git_config = Table(
     Column("github_pat_encrypted", Text),
     Column("auto_sync_enabled", Integer),
     Column("freeze_schedules_if_sync_failing", Integer),
+    Column("pull_sync_enabled", Integer),  # trinity-enterprise#703
 )
 
 agent_sync_state = Table(
@@ -1048,6 +1049,13 @@ agent_sync_state = Table(
     Column("dirty_files", Integer),
     Column("dirty_since", Text),
     Column("last_successful_push_at", Text),
+    Column("last_pull_at", Text),  # trinity-enterprise#703: the container's pull cycle
+    Column("last_pull_status", Text),
+    Column("behind_after_pull", Integer),
+    Column("last_pull_error", Text),
+    Column("last_successful_pull_at", Text),
+    Column("consecutive_pull_failures", Integer),
+    Column("consecutive_pull_skips", Integer),
     Column("last_check_at", Text),
     Column("updated_at", Text),
 )

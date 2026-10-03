@@ -98,7 +98,7 @@ A request from a public-facing surface (`public`, `paid`, channels) runs under t
 
 ## Data
 
-`skill_gate_requests` (SQLite `skill_gate_requests_table`, Alembic `0087_skill_gate_requests`): `request_id` PK, `agent_name`, `ask_item_id`, `skills`, `request_text` (sanitised), `fingerprints`, requester (`requester_kind`, `requester_key`, `source_agent`, `requester_email`, `requester_execution_id`, `requester_mcp_key_id`), `origin_execution_id`, `triggered_by`, `dispatch`, `state` (`pending → dispatching → dispatched | stale | not_run | unknown`; `pending → denied | expired | cancelled | refused`), `state_detail`, `dispatched_execution_id` UNIQUE, `created_at`, `decided_at`, `dispatched_at`, `notified_at`. Both agent columns are in `AGENT_REFS` (CASCADE).
+`skill_gate_requests` (SQLite `skill_gate_requests_table`, Alembic `0088_skill_gate_requests`): `request_id` PK, `agent_name`, `ask_item_id`, `skills`, `request_text` (sanitised), `fingerprints`, requester (`requester_kind`, `requester_key`, `source_agent`, `requester_email`, `requester_execution_id`, `requester_mcp_key_id`), `origin_execution_id`, `triggered_by`, `dispatch`, `state` (`pending → dispatching → dispatched | stale | not_run | unknown`; `pending → denied | expired | cancelled | refused`), `state_detail`, `dispatched_execution_id` UNIQUE, `created_at`, `decided_at`, `dispatched_at`, `notified_at`. Both agent columns are in `AGENT_REFS` (CASCADE).
 
 ## Security
 

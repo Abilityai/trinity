@@ -10,14 +10,14 @@ compare-and-set and ``dispatched_execution_id`` is UNIQUE.
 ``IF NOT EXISTS`` because a fresh database is built from ``db/schema.py``'s DDL
 (``0001_baseline``), which already declares the table.
 
-Revision ID: 0087_skill_gate_requests
-Revises: 0086_metric_points_restatement
+Revision ID: 0088_skill_gate_requests
+Revises: 0087_pull_sync
 """
 from alembic import op
 
 
-revision = "0087_skill_gate_requests"
-down_revision = "0086_metric_points_restatement"
+revision = "0088_skill_gate_requests"
+down_revision = "0087_pull_sync"
 branch_labels = None
 depends_on = None
 

@@ -639,7 +639,7 @@ async def upsert_a2a_outbound_endpoint(
     assert_admin(current_user)
     reject_agent_principal(current_user)
 
-    from services import a2a_outbound
+    from services import a2a_outbound, a2a_outbound_service
 
     credential = body.credentials.get_secret_value() if body.credentials else None
     try:
@@ -669,7 +669,14 @@ async def upsert_a2a_outbound_endpoint(
             "credential_cleared": bool(body.clear_credentials),
         },
     )
-    return {"success": True, "endpoint": record}
+    # Honest status in the same response as the write: the outbound switch
+    # defaults OFF, so a registration that looks complete is not yet callable,
+    # and the caller learns that here instead of at first call (ent#761).
+    return {
+        "success": True,
+        "endpoint": record,
+        "enabled": a2a_outbound_service.is_outbound_enabled(),
+    }
 
 
 @router.delete("/a2a-endpoints/{ref}")
