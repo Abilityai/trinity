@@ -483,17 +483,49 @@ async def test_caller_going_away_cancels_the_queued_turn(seed_agent, monkeypatch
 
 @pytest.mark.asyncio
 async def test_autonomous_trigger_skips_the_claim_phase(seed_agent, monkeypatch):
+    """A row nobody is blocked on waits for its terminal, not for a claim.
+
+    Driven with ``schedule``. It used to be driven with ``a2a``, which stopped
+    being purely autonomous in abilityai/trinity-enterprise#679 (T6) — see the
+    companion test below. The property under test is unchanged and still has
+    members; what moved is which trigger demonstrates it.
+    """
     seed_agent(timeout=1)
-    _row("e1", trigger="a2a")
+    _row("e1", trigger="schedule")
     from services import task_execution_service as tes
 
     waited = AsyncMock()
     monkeypatch.setattr("services.sync_waiter.wait_for_sync_terminal", waited)
     await tes.dispatch_and_await_terminal(
-        agent_name=AGENT, message="m", triggered_by="a2a", service=_queued_service("e1"),
+        agent_name=AGENT, message="m", triggered_by="schedule", service=_queued_service("e1"),
     )
     waited.assert_awaited_once()
     assert _db().get_execution("e1").status == "queued"
+
+
+@pytest.mark.asyncio
+async def test_a2a_takes_the_claim_phase(seed_agent, monkeypatch):
+    """ent#679 T6: an inbound A2A caller is blocked in-line, so it waits for a claim.
+
+    This is the principal-path effect of adding ``a2a`` to
+    ``INTERACTIVE_TRIGGERS`` and it is deliberate: the JSON-RPC request is held
+    open for the whole turn, so a row no worker claims within one agent timeout
+    must come back FAILED/CAPACITY — the same answer push gives an agent with
+    no free slot — rather than leaving the caller waiting out its RPC deadline
+    on a row that was never going to run.
+    """
+    seed_agent(timeout=1)
+    _row("e1", trigger="a2a")
+    from services import task_execution_service as tes
+
+    monkeypatch.setattr(tes, "QUEUE_CLAIM_POLL_INTERVAL", 0.05)
+    waited = AsyncMock(side_effect=AssertionError("must not reach the terminal wait"))
+    monkeypatch.setattr("services.sync_waiter.wait_for_sync_terminal", waited)
+    out = await tes.dispatch_and_await_terminal(
+        agent_name=AGENT, message="m", triggered_by="a2a", service=_queued_service("e1"),
+    )
+    assert out.status == "failed"
+    assert out.error_code.value == "capacity"
 
 
 @pytest.mark.asyncio

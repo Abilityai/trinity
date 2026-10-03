@@ -175,7 +175,12 @@ def client(monkeypatch):
     app.include_router(a2a.a2a_server_router)
     user = types.SimpleNamespace(id=1, username="alice", email="alice@example.com",
                                  role="user", agent_name=None, mcp_key_id="k1")
-    app.dependency_overrides[deps.get_current_user] = lambda: user
+    # ent#679: the route's dependency is now `get_user_or_anonymous`, which
+    # CALLS `get_current_user` directly rather than depending on it — so an
+    # override of the latter is never consulted and every test here would
+    # silently exercise the anonymous payment branch instead (→ 401, not the
+    # principal path). Override what the route actually depends on.
+    app.dependency_overrides[deps.get_user_or_anonymous] = lambda: user
 
     return types.SimpleNamespace(http=TestClient(app), state=state, a2a_gate=a2a_gate, user=user)
 

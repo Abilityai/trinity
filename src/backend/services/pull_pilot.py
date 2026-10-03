@@ -135,12 +135,31 @@ PULL_REACHABLE_TRIGGERS = frozenset(
 )
 
 
-# Triggers with a person waiting on the reply. A pull worker claims these ahead
-# of every other queued row (#2842). ⚠️ Adding a human-facing trigger? Add it
-# here, or its turns queue behind batch work.
+# Triggers with a CALLER waiting in-line on the reply. A pull worker claims
+# these ahead of every other queued row (#2842). ⚠️ Adding a human-facing
+# trigger? Add it here, or its turns queue behind batch work.
+#
+# ``a2a`` is here as of abilityai/trinity-enterprise#679 (T6), and it is the one
+# member that is ALSO in ``_AUTONOMOUS_TRIGGERS`` — deliberately, because the
+# two sets answer different questions and an inbound A2A task answers them
+# differently:
+#
+# * "is a caller blocked on this reply?" — YES. The JSON-RPC request is held
+#   open for the whole turn (``dispatch_and_await_terminal``), on the principal
+#   path and the paid path alike. That is what earns the claim priority and the
+#   claim budget (``_CLAIM_WAITING_TRIGGERS``), so a remote caller's turn is not
+#   queued behind an agent's batch work until its RPC times out.
+# * "is a PERSON on this install reading the reply?" — NO. It goes back over
+#   the wire as a Task artifact, which is why ``_AUTONOMOUS_TRIGGERS`` keeps it
+#   (an unresolved skill alerts the operator rather than relying on a human
+#   seeing the error text).
+#
+# The membership overlap is therefore the honest encoding, not a mistake; the
+# disjointness guard in test_2842_2843_pull_claim_order.py is narrowed to this
+# one documented member so a THIRD overlap still fails.
 INTERACTIVE_TRIGGERS = frozenset(
     {"manual", "mcp", "chat", "session", "public", "voice", "voip", "room",
-     "user", "paid", "slack", "telegram", "whatsapp"}
+     "user", "paid", "a2a", "slack", "telegram", "whatsapp"}
 )
 
 

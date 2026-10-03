@@ -4148,6 +4148,18 @@
         "security"
       ],
       "description": "`endpoint`, `retryable` and the facilitator concurrency bound on nevermined_payment_service (ent#679 checkpoint A): the 402's `resource.url` defaults to the paid chat door and can be bound to another door while the plan in `accepts` stays identical (an x402 v3 token signs resourceUrl, so verify and settle must agree with the 402 the client read — decision 19); a facilitator REJECTION is not retryable while a timeout, an SDK error and a saturated gate are (E7), and `retryable` is deliberately absent from the stored settle snapshot so a pre-field receipt still replays; and the fleet-wide NEVERMINED_MAX_INFLIGHT gate admits up to the limit, refuses beyond it within a bounded wait, occupies no thread when it refuses, burns nothing on a refused settle, and is shared across agents because the thread pool is a platform resource (E8)."
+    },
+    {
+      "file": "unit/test_ent679_a2a_payment_gate.py",
+      "feature": "abilityai/trinity-enterprise#679",
+      "added": "2026-10-03",
+      "categories": [
+        "backend",
+        "api",
+        "payments",
+        "security"
+      ],
+      "description": "The x402 payment gate on the A2A inbound door (ent#679 checkpoint B). `dependencies.get_user_or_anonymous` degrades to None on a 401 ONLY and RE-RAISES a 403, so a connector/ephemeral key Trinity recognised and then fenced can never slide onto the payment path and buy the access it was refused. `is_priced` is exposure AND an enabled config AND a key, and deliberately NOT the SDK check — fusing them would answer 401 (\"authenticate\") to a caller holding a valid token for an agent whose card advertises a price. `extract_token` is metadata-first with the deprecated `payment-signature` header as fallback (ruling 3), metadata winning when both are present, and every malformed payload shape falling through rather than raising. The allow-list seam is consulted after verify as `x402:{payer}` and fails CLOSED (T7) — the opposite bias to a2a_gate.check_inbound_allowed, because here the payment IS the authorization. Over a TestClient: today's 401 bytes for anything not exposed-and-priced (uniform with an unknown agent), 501 for a priced agent with no SDK, 402 with the paid door's body + base64 header and `resource.url` on the A2A door (#679 E2), 403 + a reject row on a rejected token with verify BEFORE the dedup gate, the limiter proven to run ahead of any DB read, the settled/unsettled/failed/cancelled Tasks with their x402 metadata (payment-completed with a spec-shaped receipt; payment-verified + a named error code on a delivered-but-unsettled turn, artifact kept per #1018), replay keyed on (token, text) so a fresh messageId does not fork a retry, and per-payer dedup scopes. tasks/get + tasks/cancel are payer-bound via the settle-row join (T5) with EVERY mismatch — including payer A polling payer B's existing task — answering byte-identical -32001. Finally the hard line (AC4): a Trinity principal still runs for free, with no facilitator call, no payment row, no payment metadata, no paying-bucket rate limit and its own attribution. Mutation-proven (limiter dropped / precedence inverted / unsettled claiming payment-completed all go red). No Docker, no live backend, no facilitator."
     }
   ]
 }
