@@ -28,7 +28,6 @@ per-requester rate — before the in-container exec.
 import hashlib
 import json
 import logging
-import os
 import uuid
 from dataclasses import dataclass
 from datetime import timedelta
@@ -51,9 +50,11 @@ from utils.skill_invocation import find_gated_invocations
 logger = logging.getLogger(__name__)
 
 # Caps (user ruling at the #751 plan gate). Only `pending` records count.
-MAX_PENDING_PER_REQUESTER = int(os.getenv("SKILL_GATE_MAX_PENDING_PER_REQUESTER", "10"))
-MAX_PENDING_PER_EXECUTOR = int(os.getenv("SKILL_GATE_MAX_PENDING_PER_EXECUTOR", "50"))
-RATE_PER_REQUESTER = int(os.getenv("SKILL_GATE_RATE_PER_REQUESTER", "10"))
+# Constants, not env knobs: an env read the compose files do not wire is a lever
+# that does nothing on deploy (the #1056 packaging class).
+MAX_PENDING_PER_REQUESTER = 10
+MAX_PENDING_PER_EXECUTOR = 50
+RATE_PER_REQUESTER = 10
 RATE_WINDOW_SECONDS = 60
 
 DEFAULT_DEADLINE_HOURS = 24
