@@ -95,4 +95,15 @@ describe('Settings → Trinity Prompt copy (#3194)', () => {
     expect(text).toMatch(/never copy (the )?platform instructions/i)
     expect(text).toMatch(/keep it short/i)
   })
+
+  it('links the "How it works" box to the published recommended-prompt page (#3206)', () => {
+    const link = wrapper.find('a[data-testid="trinity-prompt-docs-link"]')
+    expect(link.exists()).toBe(true)
+    // The published docs site, never a repo blob path: `main` trails `dev`
+    // between release cuts, so a blob link 404s (see hardeningGuide.js).
+    expect(link.attributes('href')).toBe('https://docs.ability.ai/guides/recommended-fleet-prompt')
+    expect(link.attributes('target')).toBe('_blank')
+    expect(link.attributes('rel')).toBe('noopener noreferrer')
+    expect(link.text()).toMatch(/recommended Trinity prompt/i)
+  })
 })
