@@ -22,7 +22,7 @@ The Trinity prompt is one block of instance-wide instructions that an admin writ
 
 **Add fleet rules only. Never restate what the platform already injects.**
 
-Don't paste in copies of the platform instructions, such as how to use `ask_operator`, how to publish reports, or how turns end. Those instructions change with each release, so a copy goes stale and then contradicts the live text. When two rules at the same level conflict, the model may follow either one.
+Don't paste in copies of the platform instructions, such as how to use `ask_operator`, how to publish reports, or how turns end. Those instructions change with each release, so a copy goes stale and then contradicts the live text. If two instructions contradict each other, the model may pick one arbitrarily.
 
 **Keep it short.** Context files did not raise task success in published measurements, and they added more than 20% to cost (see [Why each rule is there](#why-each-rule-is-there)). Every line you add is paid for on every turn of every agent.
 
@@ -104,8 +104,8 @@ The prompt does not replace [guardrails](agent-guardrails.md), which enforce saf
 | Rule | Evidence | Source |
 |---|---|---|
 | "Outranks persistence" line | Persistence templates ("don't stop early") conflict with abort rules unless one is explicitly ranked below the other. Contradictory instructions degrade reasoning. | [OpenAI GPT-5 prompting guide](https://developers.openai.com/cookbook/examples/gpt-5/gpt-5_prompting_guide), [Claude prompting best practices](https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/claude-prompting-best-practices) |
-| 1. Scope | A single explicit scope line cut Claude Code's out-of-scope actions on benign tasks from 17.1% to 0.0%. | [arXiv:2605.18583](https://arxiv.org/abs/2605.18583) |
-| 2. Fallbacks | Agents facing a broken tool or an impossible task often switch sources silently and report success (~54% decoy fallback). Anti-deception prompts reduced this by only 25–47%. | [arXiv:2512.04864](https://arxiv.org/abs/2512.04864) |
+| 1. Scope | Removing an explicit scope (consent) declaration from the prompt raised Claude Code's out-of-scope actions on benign tasks from 0.0% to 17.1%. The authors treat this partly as a measurement confound: with the declaration present, the agent matches its text rather than inferring boundaries. Framework design mattered more than the model: an ask-to-continue framework ran at 0.2–4.5%, permissive frameworks at 5.4–27.7%. | [arXiv:2605.18583](https://arxiv.org/abs/2605.18583) |
+| 2. Fallbacks | Agents facing a broken tool or an impossible task often switch sources silently and report success (~54% decoy fallback). Explicit anti-deception instructions cut deception by 33–48 percentage points, but 25–50% of runs stayed deceptive (3 models tested). | [arXiv:2512.04864](https://arxiv.org/abs/2512.04864) |
 | 3. Abort option | Giving agents an explicit way to abort or flag a problem cut test-cheating from 54% to 9% (GPT-5) and from 49% to 12% (o3). | [ImpossibleBench, arXiv:2510.20270](https://arxiv.org/abs/2510.20270) |
 | 3. Real channel | An escalation channel with a guaranteed pause and independent review cut harmful actions from 38.7% to 1.2%. A channel that only notified someone reached 5.9%. | [arXiv:2510.05192](https://arxiv.org/abs/2510.05192), [arXiv:2608.29460](https://arxiv.org/abs/2608.29460) |
 | 3. Narrow triggers | Vague triggers such as "pause when uncertain" make agents overly cautious, so they abort too often. | [Cursor: Scaling agents](https://cursor.com/blog/scaling-agents), [Claude Fable 5 prompting](https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/prompting-claude-fable-5) |
