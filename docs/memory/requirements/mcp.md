@@ -776,6 +776,97 @@ sign.
   this), so the client parses the body for `error` even on 200 → **502**,
   `success: false`. A status-only check would read every remote failure as a
   success.
+#### FR-14 — A priced remote is a distinct, non-retryable outcome (#3185)
+`_read_capped` collapsed every HTTP ≥ 400 into `rpc_http_error` **without
+reading the body**, so a remote answering **402 Payment Required** was
+unreachable: the caller saw neither the price nor a way to attach a token. 402
+is now its own outcome, carrying what the remote asked for.
+
+- **Both rails are read**, because the two provider generations differ: the
+  HTTP **402** on the RPC POST (preferring the base64 `payment-required`
+  response header, falling back to the JSON body Trinity's own paid door emits,
+  then to the status alone), and an HTTP 200 Task whose
+  `status.message.metadata` carries `x402.payment.status = "payment-required"`.
+  The in-band check runs **before** the task is parsed, on the send **and** the
+  poll path — parsed as an ordinary task, a priced `input-required` reaches the
+  agent as a prompt it polls forever.
+- **Outcome vocabulary**: `payment_required` (402 at the route),
+  `payment_rejected` (the in-band `payment-failed`, or a 403 to an endpoint whose
+  credential kind is `payment_token`) and `rpc_forbidden` (any other 403), both
+  502 so a remote's 403 is never echoed as this route's own. Every `*_http_error`
+  now carries `remote_status`, so 402 ("buy this") is always distinguishable from
+  403 ("top up") — and any 4xx/5xx is diagnosable.
+- **402/403 are classified before the encoding and length guards.** A
+  CDN-gzipped or oversized "pay me" previously reported `rpc_encoding` /
+  `rpc_too_large` — an outage, for an endpoint working perfectly. The body is
+  still never decoded and is bounded by a ceiling 16× tighter than the answer
+  cap; when it cannot be read the outcome survives from the status alone, flagged
+  `truncated`. The **card** hop is untouched: it is uncredentialed by design
+  (FR-13), so a 402 there stays `card_http_error`.
+- **What the agent receives is an allowlist, like the success shape.** The route
+  answers 402 with `detail = {reason, message, payment, remote_status?,
+  task_id?}`, and `payment = {summary, x402, truncated}` — a flat Trinity-owned
+  summary plus the raw requirements object under a top-level-key allowlist, per
+  leaf 512 characters, `accepts` ≤ 8, 16 KiB ceiling. Every string passes the
+  credential scrubber, whose secret set is the token **and** its base64 forms
+  **and** the decoded payload's long string leaves: a remote echoing the decoded
+  signature back would otherwise walk past exact-value redaction of the base64
+  token. The **success** response allowlist does not grow; receipts
+  (`payment-completed`) are recorded on the activity row and audit details —
+  money leaving must be visible to an operator — and never surfaced to the agent.
+- **No automatic retry, no platform purchase.** A 402 releases the effect claim
+  and is never snapshotted: a stored 402 would replay "pay me" after the operator
+  paid. The MCP tools map it to `payment_required` + `payment` + `task_id` +
+  `do_not_retry` (a non-JSON 402 from a proxy still carries the flag — the status
+  is the fact, the body a courtesy), and the tool description names the actor,
+  because `do_not_retry` with no named actor produces an agent that tries a
+  different endpoint instead: relay it to a person once, then pass the returned
+  `task_id` when told to try again.
+
+#### FR-15 — The credential slot carries a KIND, inferred when omitted (#3185)
+Sending an x402 token as `Authorization: Bearer …` gets a second 402 and no
+explanation, so the stored record says what its credential **is**:
+`credential_kind ∈ {api_key, payment_token}`, **absent ⇒ `api_key`** — which is
+every record written before the field existed, and means today's bytes exactly.
+`payment_token` additionally rides the x402 metadata (`x402.payment.status` /
+`.payload`, the decoded token) **and** the deprecated `payment-signature` header
+on the **same** request: a fallback that waited for a 402 would be an automatic
+retry. An opaque (non-base64-JSON) token degrades to header-only rather than
+announcing undecodable bytes in-band. No new table, no migration, no Alembic
+revision — the kind is a label inside the existing envelope.
+
+- **A label on the existing slot, not a fourth write path.** Omitted with a new
+  credential the kind is **inferred** from the value (an x402 payload →
+  `payment_token`, anything else → `api_key`, fail-safe in that direction);
+  explicit wins; sent alone it **re-labels** the stored secret, so an operator who
+  pasted a token before the field existed need not re-type it; `clear_credentials`
+  drops the label with the value. A kind with no credential under it, and a kind
+  together with `clear_credentials`, are both refused with a named 422 that never
+  echoes the credential — either would report `credential_kind: payment_token`
+  for an endpoint that sends no payment at all, to exactly the person who has just
+  been handed a 402.
+- **One predicate, both sides.** The store infers with the same function the
+  client sends on (`a2a_protocol.decode_payment_token`). Two spellings would
+  produce a credential the store labels `payment_token` while the transport
+  declines to send it as one — a disagreement that reads as a platform bug rather
+  than as the remote's refusal.
+- **Honest status about a single-use token.** An x402 v3 token authorises ONE
+  settlement, so a `payload.authorization.nonce` is flagged
+  `credential_single_use` (on the record, the PUT response and the MCP
+  registration) rather than refused — a provider that issues only single-use
+  tokens must stay usable. The flag describes the stored value and cannot outlive
+  it.
+- **Reads show the label, never the value.** `GET /api/settings/a2a-endpoints`
+  and `list_a2a_endpoints` report `credential_kind` only where a credential
+  exists; the audit row records the label the store actually wrote (not the one
+  the request sent, which may have been omitted).
+- **Protocol-name evidence**: the x402 v2 names in use (`payment-signature` in,
+  base64 `payment-required` on 402, `x402Version: 2`) and the A2A metadata keys
+  were verified against the live provider SDK in trinity-enterprise#763; the
+  outbound path imports no payments SDK, the token codec being a stdlib
+  base64/JSON mirror. The x402 extension's **activation handshake is out of
+  scope** — only the metadata carriage is adopted.
+
 - **Flow**: `docs/memory/feature-flows/a2a-outbound-call.md`
 
 ---

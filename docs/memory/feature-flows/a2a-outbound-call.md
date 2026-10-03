@@ -105,7 +105,7 @@ Invariant #12 already blesses for `elevenlabs_api_key_encrypted`.
 | POST | `/api/agents/{name}/a2a/call` | `AuthorizedAgentByName` + agent self-check | Task a registered external A2A agent |
 | POST | `/api/agents/{name}/a2a/task` | same | Poll a remote task by id |
 | GET | `/api/settings/a2a-endpoints` | admin + human-only | List registered endpoints (`has_credentials` only) |
-| PUT | `/api/settings/a2a-endpoints` | admin + human-only | Register/update one by name; credential write-only |
+| PUT | `/api/settings/a2a-endpoints` | admin + human-only | Register/update one by name; credential write-only, `credential_kind` optional (inferred) |
 | DELETE | `/api/settings/a2a-endpoints/{ref}` | admin + human-only | Remove one |
 
 Both call routes **404 when the kill switch is off** — Trinity's answer for
@@ -137,7 +137,12 @@ services/a2a_client.py               trust_env=False · follow_redirects=False
    │        pinned IP · Host+SNI = registered hostname · identity encoding
    │        └─ same-origin pin on card.url · dialect from protocolVersion
    └─ POST {rpc_url}  Authorization: Bearer <credential>   ≤1 MiB, same pin
-            └─ parse body for `error` EVEN ON HTTP 200
+            │     credential_kind == payment_token → ALSO x402.payment.* in
+            │     message metadata + the deprecated payment-signature header
+            │     (same request — a fallback awaiting a 402 would be a retry)
+            ├─ 402 / 403 classified BEFORE the encoding + length guards
+            └─ parse body for `error` EVEN ON HTTP 200, and the task metadata
+               for x402.payment.status BEFORE parsing the task
    ▼
 scrub_secret_and_urls → sanitize_text → redact_url_userinfo → 32 KiB truncate
    ▼
@@ -367,9 +372,68 @@ agent an error object as if it were an answer.
 | `card_url_ambiguous` | 502 | Registered path the card does not declare |
 | `unsupported_protocol_version` | 502 | A `1.x` card (documented, not claimed) |
 | `remote_error` | 502 | JSON-RPC error, including on HTTP 200 |
+| `payment_required` | **402** | The remote charges (HTTP 402, or an in-band `payment-required` task) — `detail` carries the requirements; see below |
+| `payment_rejected` | 502 | A payment token the remote refused (in-band `payment-failed`, or a 403 to a `payment_token` endpoint) |
+| `rpc_forbidden` | 502 | Any other remote 403 — never echoed as this route's own 403 |
 | `timeout` | 504 | RPC timeout or the wall-clock deadline |
 | *(in-flight duplicate)* | 409 | `EffectInProgressError` — never a silent skip |
 | *(rate bound)* | 429 | Per-agent or fleet |
+
+Every `*_http_error` carries `remote_status` (#3185), so any 4xx/5xx the remote
+returns is diagnosable from the refusal alone rather than from the backend log.
+
+---
+
+## A priced remote: 402 is an outcome, not an outage (#3185)
+
+`_read_capped` used to collapse every HTTP ≥ 400 into `rpc_http_error` **without
+reading the body**, so a remote answering **402 Payment Required** was
+unreachable: the caller saw neither the price nor a way to attach a token.
+
+**Reading it.** Two rails, because the two provider SDK generations differ:
+
+* HTTP **402** on the RPC POST — the base64 `payment-required` response header
+  first, then the JSON body Trinity's own paid door emits, then the status alone.
+* HTTP 200 with a Task whose `status.message.metadata` carries
+  `x402.payment.status = "payment-required"`. Checked **before the task is
+  parsed**, on the send *and* the poll path: parsed as an ordinary task, a priced
+  `input-required` reaches the agent as a prompt it polls forever.
+
+**402 and 403 are classified BEFORE the encoding and length guards.** A
+CDN-gzipped or oversized "pay me" previously reported `rpc_encoding` /
+`rpc_too_large` — an outage, for an endpoint working perfectly. The body is still
+never decoded, and is bounded by a ceiling 16× tighter than the answer cap; when
+it cannot be read, the outcome survives from the status alone and says so
+(`truncated`). The branch keys on the hop, so the **card** fetch's "never read an
+error body" contract is untouched — the card is uncredentialed by design, and a
+402 there stays `card_http_error`.
+
+**What the agent gets** is an allowlist, like the success shape is:
+
+```
+HTTP 402  detail = {reason: "payment_required", message, payment,
+                    remote_status?, task_id?}
+payment  = {summary: {plan_id, scheme, network, resource_url, description,
+                      credits_per_request, error},   # flat, Trinity-owned
+            x402:    <the raw requirements object, top-level-key allowlist,
+                      per leaf 512 chars, accepts <= 8, 16 KiB ceiling>,
+            truncated: bool}
+```
+
+Every string in it passes the credential scrubber. The secret set is the token
+**and its base64 forms and the decoded payload's long string leaves** — a remote
+echoing the decoded signature back would otherwise walk straight past
+exact-value redaction of the base64 token.
+
+**Nothing retries and nothing is snapshotted.** A 402 releases the effect claim:
+a stored 402 would replay "pay me" after the operator paid, which is precisely
+the wrong-answer class `effect_guard`'s identity exists to prevent. The platform
+does not buy tokens — a person does, an admin stores it on the endpoint, and the
+MCP tool says so (`payment_required` + `payment` + `task_id` + `do_not_retry`,
+set even when the 402 body is a proxy's HTML page, because the status is the fact
+and the body is a courtesy). `payment-completed` receipts are recorded on the
+activity row and in audit `details` — money leaving must be visible to an
+operator — and never added to the agent-facing success shape.
 
 ---
 
@@ -396,6 +460,49 @@ longer matches, publishing the surviving prefix.
 > **Registering an endpoint grants that endpoint the ability to exfiltrate its
 > own credential.** Registration is a trust decision about a peer; it is worded
 > that way in the user doc and in `.env.example`.
+
+### What the credential IS: `credential_kind` (#3185)
+
+The record says which of two things its credential is — `api_key` (the default,
+and what every record written before the field existed resolves to: Bearer and
+nothing else) or `payment_token` (also attached as x402 payment). It is a **label
+on the one slot**, never a second secret: a separate store, route or tool for
+payment tokens would be a fourth write path to the same AES-256-GCM envelope.
+
+The label rides the credential's existing three paths rather than adding a
+fourth. Omitted with a new credential it is **inferred** from the value (an x402
+payload → `payment_token`, anything else → `api_key`) — which removes the failure
+the human relay is most likely to hit: an operator who has just been handed a
+402, bought a token and pasted it in would otherwise get `api_key`, the token
+would ride as a Bearer header, and the remote would answer 402 again with nothing
+on either side saying why. Explicit wins. Sent alone it **re-labels** a stored
+secret, so nobody has to re-type a token to fix a label. `clear_credentials`
+drops the label with the value, and a kind with *no* credential under it — or
+sent together with `clear_credentials` — is refused with a named 422 that never
+echoes the credential, because either would report `credential_kind:
+payment_token` for an endpoint that sends no payment at all.
+
+The store infers with the **same** predicate the client sends on
+(`a2a_protocol.decode_payment_token`, which is why the codec lives in the shared
+vocabulary module and not in the client). Two spellings of "is this an x402
+token" would give a credential the store calls `payment_token` while the
+transport declines to send it as one — a disagreement that reads as a platform
+bug rather than as a provider's refusal.
+
+An x402 v3 token authorises ONE settlement, so a `payload.authorization.nonce` is
+**flagged** `credential_single_use` (on the record, in the PUT response, in
+`list_a2a_endpoints`) rather than refused: a provider that issues only single-use
+tokens must stay usable, and the honest version of that is a warning, not a
+closed door. The flag describes the stored value and cannot outlive it. An opaque
+(non-base64-JSON) token degrades to header-only rather than announcing
+undecodable bytes in-band, and the outbound path imports no payments SDK — the
+token codec is a stdlib base64/JSON mirror. The x402 v2 names and A2A metadata
+keys were verified against the live provider SDK in trinity-enterprise#763; the
+extension's activation handshake is out of scope, only the carriage is adopted.
+
+Reads show the label, never the value: `credential_kind` appears only where a
+credential exists, and the audit row records the label the store actually wrote
+(not the one the request sent, which may have been omitted).
 
 ---
 
@@ -445,6 +552,13 @@ credentialed send.
 * **`tasks/cancel` outbound, push notifications, non-text Parts, an `X-API-Key`
   scheme, per-agent endpoint scoping** (the enterprise delta), and **card
   signature verification** (ent#159, defence in depth rather than a blocker).
+* **Buying anything.** Trinity reads a 402 and can attach a token an operator
+  stored; it never purchases, never retries a priced call, and never surfaces
+  `payment-completed` receipts to the calling agent. The x402 extension's
+  activation/negotiation handshake (`X-A2A-Extensions`, card
+  `capabilities.extensions`) is out of scope — only the metadata carriage is
+  adopted — and a price advertised on the **card** is not consumed yet, because
+  the provider side that would define it is still open.
 
 ---
 
@@ -459,6 +573,8 @@ credentialed send.
 | `src/mcp-server/src/tools/a2a.test.ts` | The F8 addition (the config read gates agent-scoped keys), plus ent#761: the three outbound control tools proxy the settings routes, `not_entitled` is unreachable on them (proved with a 403 whose body mentions `a2a`, which the old body-text mapper would have mislabelled), `clear_credentials` + `credentials` is refused client-side, and the registered URL is pinned by reading `client.ts` |
 | `tests/unit/test_ent761_outbound_control_oss.py` | The OSS control plane over its own FastAPI app with **no** resolver provider registered: the `# mcp:` header pins to `a2a.ts`, an AST walk asserts the three handlers carry no entitlement gate and keep `assert_admin` + the human-only guard, register → list → resolve-as-two-different-agents → remove, and the 403 detail text the TS mapper matches on |
 | `src/mcp-server/src/tool-visibility.test.ts` | The outbound tools are operator-scope only |
+| `tests/unit/test_3185_a2a_payment_outcome.py` | The 402 vocabulary as pure functions: the stdlib token codec, the secrets list, the bounded `payment` block, both outcome raisers and the in-band rail |
+| `tests/unit/test_3185_a2a_credential_kind.py` | The kind on the store, the model and the route: inference and its fail-safe direction, the relabel path and its refusals, clear semantics, single-use flagging and its expiry, the shared-codec property, and that the audit row carries the label and never the value |
 
 > **A transport test whose mock does not stream is not a transport test.**
 > `httpx.Response(content=…)` decodes and buffers in the constructor, so
