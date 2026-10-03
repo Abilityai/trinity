@@ -85,6 +85,30 @@ export function createA2ACallTools(client: TrinityClient, requireApiKey: boolean
   };
 
   /**
+   * The backend's own `detail` object, when it sent one (#3185).
+   *
+   * FastAPI serialises `HTTPException(detail={...})` as `{"detail": {...}}`, and
+   * the 402 / 502 payment outcomes carry `{reason, message, payment?,
+   * remote_status?, task_id?}` there. Read defensively, exactly like
+   * `extractIdempotencyExecutionId` and `askRefusal`: this runs on an error
+   * path, so a parser that throws would replace a readable refusal with an
+   * opaque crash. A non-JSON body (an nginx 402 page, a proxy's text) yields
+   * `undefined` and the status still speaks for itself.
+   */
+  const detailOf = (error: unknown): Record<string, unknown> | undefined => {
+    if (!(error instanceof ApiError)) return undefined;
+    try {
+      const parsed = JSON.parse(error.body) as unknown;
+      const root = (parsed as { detail?: unknown })?.detail ?? parsed;
+      return root && typeof root === "object" && !Array.isArray(root)
+        ? (root as Record<string, unknown>)
+        : undefined;
+    } catch {
+      return undefined;
+    }
+  };
+
+  /**
    * Errors → honest structured flags. Tools never throw; a thrown error
    * reaches the agent as an opaque transport failure it cannot reason about.
    */
@@ -92,6 +116,8 @@ export function createA2ACallTools(client: TrinityClient, requireApiKey: boolean
     const message = error instanceof Error ? error.message : String(error);
     const flags: Record<string, unknown> = {};
     const status = error instanceof ApiError ? error.status : undefined;
+    const detail = detailOf(error);
+    const reason = typeof detail?.reason === "string" ? detail.reason : undefined;
 
     if (status === 404) {
       // Two different 404s, and telling them apart is the difference between
@@ -104,10 +130,34 @@ export function createA2ACallTools(client: TrinityClient, requireApiKey: boolean
         flags.outbound_disabled = true;
       }
     }
+    if (status === 402) {
+      // The remote is priced and wants paying (#3185). NOT retryable by the
+      // agent in any form: nothing it can do differs from what it just did, and
+      // the platform does not buy tokens — a person does, and an admin stores
+      // the token on the endpoint. So the flag an agent acts on is
+      // `do_not_retry`, set whatever the body turned out to contain.
+      flags.payment_required = true;
+      flags.do_not_retry = true;
+      if (detail?.payment !== undefined) flags.payment = detail.payment;
+      if (typeof detail?.task_id === "string") flags.task_id = detail.task_id;
+      if (typeof detail?.message === "string") flags.message = detail.message;
+    }
     if (status === 403) flags.not_authorized = true;
     if (status === 409) flags.duplicate_in_flight = true;
     if (status === 429) flags.rate_limited = true;
-    if (status === 502) flags.remote_error = true;
+    if (status === 502) {
+      flags.remote_error = true;
+      // One status, three different next actions. `rpc_forbidden` is the
+      // remote's own 403 (ask the operator about access), `payment_rejected` is
+      // a payment token it refused (the operator tops up or re-pastes), and
+      // anything else is an ordinary remote failure a retry may survive.
+      if (reason === "rpc_forbidden") flags.remote_forbidden = true;
+      if (reason === "payment_rejected") {
+        flags.payment_rejected = true;
+        flags.do_not_retry = true;
+      }
+      if (typeof detail?.message === "string") flags.message = detail.message;
+    }
     if (status === 504) flags.timeout = true;
     if (status === 400 || status === 422) flags.invalid = true;
 
@@ -136,7 +186,12 @@ export function createA2ACallTools(client: TrinityClient, requireApiKey: boolean
         "`dedup_label` is required and must DIFFER for each distinct question you ask in this " +
         "turn: calls are deduplicated on the endpoint and conversation, not on your message, so " +
         "reusing a label returns the earlier answer. If the remote replies with state 'working' " +
-        "or 'submitted', poll get_a2a_task with the returned task_id.",
+        "or 'submitted', poll get_a2a_task with the returned task_id. " +
+        "If the result carries `payment_required`, the remote charges for this call: relay the " +
+        "`payment` details to a person ONCE and stop — do not retry, and do not call a different " +
+        "endpoint instead. Only a person can buy the token, and an admin stores it on the " +
+        "endpoint; when you are told to try again afterwards, pass the `task_id` the refusal " +
+        "returned so the remote resumes the same task rather than starting a new charge.",
       parameters: z.object({
         agent_name: z.string().describe(
           "The Trinity agent placing the call. An agent-scoped key may only pass its own name.",
@@ -201,7 +256,8 @@ export function createA2ACallTools(client: TrinityClient, requireApiKey: boolean
       description:
         "Poll a remote A2A task by id, on the same pre-registered endpoint that started it. " +
         "Use this when call_a2a_agent returned state 'working' or 'submitted', or when a call " +
-        "timed out after the remote had already accepted the task.",
+        "timed out after the remote had already accepted the task. A `payment_required` result " +
+        "here means the same as it does on a call: relay it to a person once and stop polling.",
       parameters: z.object({
         agent_name: z.string().describe("The Trinity agent that placed the original call."),
         endpoint: z.string().min(1).max(200).describe(

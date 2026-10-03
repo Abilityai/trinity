@@ -258,6 +258,9 @@ export function createA2ATools(client: TrinityClient, requireApiKey: boolean) {
         "registry the runtime call_a2a_agent resolves against (abilityai/trinity#736), so every agent " +
         "on the instance may call what you register here. Optional `credentials` are stored encrypted " +
         "and NEVER returned by any read; `clear_credentials: true` removes a stored one. " +
+        "`credential_kind` says what the credential IS: pass 'payment_token' for an x402 token bought " +
+        "after a `payment_required` refusal, so it rides as payment instead of as a Bearer header. " +
+        "Omit it and the kind is inferred from the value; the response reports what was stored. " +
         "Admin and human-only — registering an endpoint decides where a credentialed server-side " +
         "request may go, so an agent-scoped key is refused. " +
         "Outbound calling also has its own switch: the response reports `outbound_enabled`.",
@@ -274,6 +277,11 @@ export function createA2ATools(client: TrinityClient, requireApiKey: boolean) {
         clear_credentials: z.boolean().optional().describe(
           "Remove the stored secret for this endpoint. Cannot be combined with `credentials`.",
         ),
+        credential_kind: z.enum(["api_key", "payment_token"]).optional().describe(
+          "What the credential is: 'payment_token' for an x402 payment token (attached as payment), "
+          + "'api_key' for an ordinary secret (Authorization: Bearer). Omit to let the platform infer "
+          + "it from the value. Send it alone to re-label a credential already stored.",
+        ),
       }),
       execute: async (
         params: {
@@ -282,9 +290,26 @@ export function createA2ATools(client: TrinityClient, requireApiKey: boolean) {
           url: string;
           credentials?: string;
           clear_credentials?: boolean;
+          credential_kind?: "api_key" | "payment_token";
         },
         context?: { session?: McpAuthContext },
       ) => {
+        if (params.clear_credentials && params.credential_kind) {
+          // Contradictory instructions about one slot (#3185). Refused here as
+          // well as at the route, so the caller learns it without spending a
+          // round trip — and is never told a payment token is registered when
+          // the clear emptied the slot.
+          return JSON.stringify(
+            {
+              success: false,
+              error:
+                "Pass either `credential_kind` or `clear_credentials: true`, not both — "
+                + "clearing the credential also drops the kind that described it.",
+              invalid: true,
+            },
+            null, 2,
+          );
+        }
         if (params.clear_credentials && params.credentials) {
           // The store honours the clear and DROPS the supplied secret, so the
           // caller would be left believing a credential is stored.
@@ -305,10 +330,15 @@ export function createA2ATools(client: TrinityClient, requireApiKey: boolean) {
             url: params.url,
             credentials: params.credentials,
             clear_credentials: params.clear_credentials,
+            credential_kind: params.credential_kind,
           });
           return ok({
             endpoint: result?.endpoint,
             outbound_enabled: result?.enabled,
+            // The store's single-use warning, relayed verbatim: an x402 v3 token
+            // authorises ONE settlement, so without this the second call reads
+            // as a mystery 402 on an endpoint that just worked.
+            ...(result?.hint ? { credential_hint: result.hint } : {}),
             // Honest status: a registered endpoint is still uncallable while the
             // switch is off, and that is one admin step away.
             ...(result?.enabled === false

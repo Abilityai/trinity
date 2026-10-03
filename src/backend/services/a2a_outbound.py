@@ -103,6 +103,60 @@ def normalize_credential_kind(value: Any) -> str:
     return value if value in CREDENTIAL_KINDS else CREDENTIAL_KIND_API_KEY
 
 
+def _decode_token(credential: Optional[str]) -> Optional[Dict[str, Any]]:
+    """The credential as an x402 `PaymentPayload`, or `None`.
+
+    Delegates to `a2a_protocol.decode_payment_token`, which the outbound client
+    uses for the same question — "may this value ride as x402 payment?" — so a
+    credential this store labels `payment_token` is one the client will actually
+    announce in-band. Two spellings of that predicate would produce a label the
+    transport silently disagrees with, which reads as a platform bug rather than
+    as the remote's refusal. Bounded by the store's own credential cap.
+    """
+    from services import a2a_protocol
+
+    return a2a_protocol.decode_payment_token(
+        credential, max_len=MAX_ENDPOINT_CREDENTIAL_LEN
+    )
+
+
+def infer_credential_kind(credential: Optional[str]) -> str:
+    """The kind of a credential the operator did not label (#3185 T6).
+
+    `payment_token` iff the value IS an x402 payload (decodes to a JSON object
+    carrying an int `x402Version` and a `payload`), else `api_key`. An explicit
+    kind always wins; this only decides the omitted case.
+
+    Inferring rather than demanding the field removes the failure the human
+    relay is most likely to hit: an operator who has just been handed a 402,
+    bought a token and pasted it in would otherwise get `api_key` by default,
+    the token would ride as `Authorization: Bearer …`, and the remote would
+    answer 402 again — with nothing on either side saying why.
+    """
+    return (
+        CREDENTIAL_KIND_PAYMENT_TOKEN
+        if _decode_token(credential) is not None
+        else CREDENTIAL_KIND_API_KEY
+    )
+
+
+def credential_is_single_use(credential: Optional[str]) -> bool:
+    """Does this payment token carry a one-shot authorization? (#3185 T4)
+
+    An x402 v3 token authorises ONE settlement: `payload.authorization.nonce`
+    is spent when the remote settles, so the second call with the same stored
+    token is refused. The flag is honest status, not a refusal — a provider that
+    issues only single-use tokens must stay usable (the operator re-pastes a
+    token per call), and refusing the write would make the feature unusable
+    against them.
+    """
+    decoded = _decode_token(credential)
+    payload = decoded.get("payload") if isinstance(decoded, dict) else None
+    authorization = payload.get("authorization") if isinstance(payload, dict) else None
+    nonce = authorization.get("nonce") if isinstance(authorization, dict) else None
+    return isinstance(nonce, str) and bool(nonce.strip())
+
+
 @dataclass(frozen=True)
 class ResolvedEndpoint:
     """A resolved outbound target. **Carries a plaintext credential.**
@@ -237,13 +291,26 @@ def _record_matches_ref(record: Dict[str, Any], wanted: str, lowered: str) -> bo
 
 
 def _public_record(record: Dict[str, Any]) -> Dict[str, Any]:
-    """The read shape: metadata plus whether a credential exists, never its value."""
-    return {
+    """The read shape: metadata plus whether a credential exists, never its value.
+
+    `credential_kind` (and the single-use flag) appear only when a credential
+    does. They are properties OF the stored secret: reporting a kind for an
+    empty slot would tell an operator their payment token is registered when
+    nothing is, which is the one wrong answer this read can give about a 402.
+    The kind is a LABEL and always safe to show — an operator debugging a 402
+    needs to know which slot they filled.
+    """
+    out = {
         "id": str(record.get("id") or ""),
         "name": str(record.get("name") or ""),
         "url": str(record.get("url") or ""),
         "has_credentials": bool(record.get("credential")),
     }
+    if out["has_credentials"]:
+        out["credential_kind"] = normalize_credential_kind(record.get("credential_kind"))
+        if record.get("credential_single_use"):
+            out["credential_single_use"] = True
+    return out
 
 
 class SystemSettingsEndpointProvider:
@@ -374,12 +441,41 @@ class EndpointValidationError(ValueError):
     """An operator-supplied endpoint the store refuses to hold."""
 
 
+def _apply_credential_kind(record: Dict[str, Any], kind: Optional[str],
+                           credential: str) -> None:
+    """Record the kind of `credential` — explicit when given, inferred when not.
+
+    Only `payment_token` is written down. `api_key` is the ABSENCE of the key,
+    which is exactly what every record written before #3185 says, so a relabel
+    back to `api_key` returns a record byte-identical to a pre-#3185 one rather
+    than inventing a second spelling of the default that readers would then have
+    to keep in agreement.
+    """
+    effective = kind or infer_credential_kind(credential)
+    if effective == CREDENTIAL_KIND_PAYMENT_TOKEN:
+        record["credential_kind"] = CREDENTIAL_KIND_PAYMENT_TOKEN
+        if credential_is_single_use(credential):
+            record["credential_single_use"] = True
+        else:
+            record.pop("credential_single_use", None)
+    else:
+        _forget_credential_kind(record)
+
+
+def _forget_credential_kind(record: Dict[str, Any]) -> None:
+    """Drop the label and its single-use flag — both describe a value that is
+    gone (or is now an ordinary API key)."""
+    record.pop("credential_kind", None)
+    record.pop("credential_single_use", None)
+
+
 def upsert_endpoint(
     name: str,
     url: str,
     credential: Optional[str] = None,
     *,
     clear_credential: bool = False,
+    credential_kind: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Add or update one named endpoint. Returns its public (credential-free) record.
 
@@ -407,6 +503,18 @@ def upsert_endpoint(
     normalises a blank `SecretStr` to `None` — but this is a public module
     function, and "blank clears the secret" is the wrong default for a value the
     caller may hold no other copy of.
+
+    `credential_kind` (#3185) is a LABEL on that same slot, never a second
+    secret, and it follows the credential's three paths rather than adding a
+    fourth: omitted with a new credential it is **inferred** from the value
+    (T6); given explicitly it wins; given with no credential it RE-LABELS the
+    stored one (an operator who pasted a payment token before the field existed
+    must be able to fix the label without re-typing a secret), which is refused
+    when there is no stored credential to label; and `clear_credential` drops
+    the label with the value it described. Kind + `clear_credential` together is
+    refused — it can only mean the caller believes one of the two is being
+    ignored, and silently honouring the clear is how an operator comes to think
+    a payment token is registered when the slot is empty.
     """
     import uuid
 
@@ -439,6 +547,18 @@ def upsert_endpoint(
                 "Endpoint credential contains characters that are not valid in an "
                 "HTTP header (whitespace, line breaks or control characters)."
             )
+    if credential_kind is not None:
+        if credential_kind not in CREDENTIAL_KINDS:
+            # Name the domain, never the value — the kind is operator input too.
+            raise EndpointValidationError(
+                "Unknown credential kind; expected one of: "
+                + ", ".join(CREDENTIAL_KINDS)
+            )
+        if clear_credential:
+            raise EndpointValidationError(
+                "Pass either credential_kind or clear_credential, not both — "
+                "clearing the credential also drops the kind that described it."
+            )
     # #2175 F5b: ONE normalisation, immediately after the checks above — every
     # blank spelling collapses to None ("leave it alone") before either write
     # path can see it. Done here rather than at each branch so a future third
@@ -459,8 +579,22 @@ def upsert_endpoint(
             record["url"] = clean_url
             if clear_credential:
                 record.pop("credential", None)
+                _forget_credential_kind(record)
             elif clean_credential:
                 record["credential"] = clean_credential
+                _apply_credential_kind(record, credential_kind, clean_credential)
+            elif credential_kind is not None:
+                # Kind-only: re-label the secret already stored. Refused when
+                # there is none, because a kind with nothing to describe would
+                # read back as "a payment token is registered here".
+                if not record.get("credential"):
+                    raise EndpointValidationError(
+                        "There is no stored credential to label; send the "
+                        "credential together with credential_kind."
+                    )
+                _apply_credential_kind(
+                    record, credential_kind, str(record.get("credential"))
+                )
             _store_endpoint_records(records)
             return _public_record(record)
 
@@ -488,6 +622,12 @@ def upsert_endpoint(
     }
     if clean_credential and not clear_credential:
         record["credential"] = clean_credential
+        _apply_credential_kind(record, credential_kind, clean_credential)
+    elif credential_kind is not None:
+        raise EndpointValidationError(
+            "There is no stored credential to label; send the credential "
+            "together with credential_kind."
+        )
     records.append(record)
     _store_endpoint_records(records)
     return _public_record(record)

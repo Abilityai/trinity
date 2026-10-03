@@ -86,6 +86,83 @@ X402_STATUS_COMPLETED = "payment-completed"
 X402_PAYMENT_REQUIRED_HEADER = "payment-required"
 X402_PAYMENT_SIGNATURE_HEADER = "payment-signature"
 
+#: Ceiling on a base64-JSON document we will even attempt to decode. The
+#: outbound client applies it to a peer-controlled response header (whose only
+#: other bound is h11's); the store applies its own, tighter, credential cap.
+X402_JSON_B64_MAX_CHARS = 32 * 1024
+
+
+def json_b64_object(raw: Any, *, max_len: int = X402_JSON_B64_MAX_CHARS) -> Optional[Dict[str, Any]]:
+    """A base64-JSON (or plain-JSON) **object**, or `None`. Never raises.
+
+    `max_len` is a bound as much as the parse is a parse: the outbound caller
+    runs this on a header whose only other ceiling is h11's, so the length is
+    checked BEFORE any decode work. Plain (un-encoded) JSON is accepted too —
+    Trinity's own paid door emits the requirements object in a JSON body, and a
+    provider that puts it in the header unencoded costs us nothing to read.
+
+    `except Exception` is deliberate and wide: the failure set here is
+    `binascii.Error`, `UnicodeDecodeError`, `json.JSONDecodeError`,
+    `RecursionError` on a deeply nested document, and whatever a future codec
+    adds. Every one of them means the same thing — "this is not a JSON object" —
+    and none of them may become a 500.
+    """
+    import base64
+    import json
+
+    if not isinstance(raw, str):
+        return None
+    value = raw.strip()
+    if not value or len(value) > max_len:
+        return None
+    for candidate in (value, None):
+        if candidate is None:
+            try:
+                padded = value + "=" * (-len(value) % 4)
+                decoded = base64.b64decode(padded.replace("-", "+").replace("_", "/"),
+                                           validate=False)
+                text = decoded.decode("utf-8")
+            except Exception:  # noqa: BLE001 — see the docstring
+                return None
+        else:
+            text = candidate
+        try:
+            parsed = json.loads(text)
+        except Exception:  # noqa: BLE001
+            continue
+        return parsed if isinstance(parsed, dict) else None
+    return None
+
+
+def decode_payment_token(credential: Optional[str], *,
+                         max_len: int = X402_JSON_B64_MAX_CHARS) -> Optional[Dict[str, Any]]:
+    """The stored credential as an x402 `PaymentPayload`, or `None`.
+
+    One predicate, two callers, because they must agree: the outbound client
+    asks it "may I announce this token in-band?" and the endpoint store asks it
+    "is this credential a payment token?" (#3185 T6 — the kind is inferred from
+    the value when the operator omits it). Two spellings of "is this an x402
+    token" would mean a credential the store labels `payment_token` and the
+    client then declines to send in-band, which is the one combination that
+    reads as a platform bug rather than as a provider's refusal.
+
+    `None` is the **degrade, not a refusal** (decision 23/29): an opaque token
+    is still sent as the `payment-signature` header, which is exactly today's
+    working x402 path. What `None` prevents is shipping base64 garbage as
+    `x402.payment.payload` — the shape check (`x402Version` int + a `payload`
+    key, per payments-py's own `PaymentPayload`) is what stops a mislabelled API
+    key from being announced in-band as a payment.
+    """
+    obj = json_b64_object(credential, max_len=max_len)
+    if obj is None:
+        return None
+    version = obj.get("x402Version")
+    if not isinstance(version, int) or isinstance(version, bool):
+        return None
+    if "payload" not in obj:
+        return None
+    return obj
+
 
 @dataclass(frozen=True)
 class Dialect:

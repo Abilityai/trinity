@@ -879,43 +879,12 @@ def sanitize_outbound_text(text: Optional[str], credential: Optional[str],
 def _try_json_b64(raw: Any, *, max_len: int = A2A_PAYMENT_HEADER_MAX_CHARS) -> Optional[Dict[str, Any]]:
     """A peer-controlled base64-JSON **object**, or `None`. Never raises.
 
-    `max_len` is a bound as much as the parse is a parse: this runs on a header
-    whose only other ceiling is h11's, so the length is checked BEFORE any
-    decode work. Plain (un-encoded) JSON is accepted too — Trinity's own paid
-    door emits the requirements object in a JSON body, and a provider that puts
-    it in the header unencoded costs us nothing to read.
-
-    `except Exception` is deliberate and wide: the failure set here is
-    `binascii.Error`, `UnicodeDecodeError`, `json.JSONDecodeError`,
-    `RecursionError` on a deeply nested document, and whatever a future codec
-    adds. Every one of them means the same thing — "the peer did not send us a
-    requirements object" — and none of them may become a 500.
+    The codec itself lives in `a2a_protocol` — it is read by the endpoint store
+    too (which infers a credential's kind from its shape, #3185 T6), and a
+    second copy of a decoder is how two callers come to disagree about what a
+    token *is*. This wrapper exists only to pin the outbound ceiling.
     """
-    import base64
-    import json
-
-    if not isinstance(raw, str):
-        return None
-    value = raw.strip()
-    if not value or len(value) > max_len:
-        return None
-    for candidate in (value, None):
-        if candidate is None:
-            try:
-                padded = value + "=" * (-len(value) % 4)
-                decoded = base64.b64decode(padded.replace("-", "+").replace("_", "/"),
-                                           validate=False)
-                text = decoded.decode("utf-8")
-            except Exception:  # noqa: BLE001 — see the docstring
-                return None
-        else:
-            text = candidate
-        try:
-            parsed = json.loads(text)
-        except Exception:  # noqa: BLE001
-            continue
-        return parsed if isinstance(parsed, dict) else None
-    return None
+    return a2a_protocol.json_b64_object(raw, max_len=max_len)
 
 
 def _decode_payment_token(credential: Optional[str]) -> Optional[Dict[str, Any]]:
@@ -924,18 +893,12 @@ def _decode_payment_token(credential: Optional[str]) -> Optional[Dict[str, Any]]
     `None` is the **degrade, not a refusal** (decision 23/29): an opaque token
     is still sent as the `payment-signature` header, which is exactly today's
     working x402 path. What `None` prevents is shipping base64 garbage as
-    `x402.payment.payload` — the shape check (`x402Version` int + a `payload`
-    key, per payments-py's own `PaymentPayload`) is what stops a mislabelled API
-    key from being announced in-band as a payment.
+    `x402.payment.payload`. The shape check is `a2a_protocol`'s, shared with the
+    store so "is this a payment token?" has one answer on both sides.
     """
-    obj = _try_json_b64(credential, max_len=A2A_PAYMENT_HEADER_MAX_CHARS)
-    if obj is None:
-        return None
-    if not isinstance(obj.get("x402Version"), int) or isinstance(obj.get("x402Version"), bool):
-        return None
-    if "payload" not in obj:
-        return None
-    return obj
+    return a2a_protocol.decode_payment_token(
+        credential, max_len=A2A_PAYMENT_HEADER_MAX_CHARS
+    )
 
 
 def _long_string_leaves(obj: Any, *, depth: int = 0) -> list:
