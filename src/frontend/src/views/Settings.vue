@@ -2186,6 +2186,12 @@ Example:
                     <li>Add fleet rules only — never copy platform instructions here, which agents already receive — and keep it short</li>
                     <li>Use Markdown formatting for structured instructions</li>
                   </ul>
+                  <!-- docs/user-docs/agents/recommended-fleet-prompt.md, published under guides/ (#3206) -->
+                  <p class="mt-2">
+                    See the
+                    <a href="https://docs.ability.ai/guides/recommended-fleet-prompt" target="_blank" rel="noopener noreferrer" data-testid="trinity-prompt-docs-link" class="text-action-primary-600 dark:text-action-primary-400 hover:underline">recommended Trinity prompt</a>
+                    for fleet rules worth adding and what to leave out.
+                  </p>
                 </div>
               </div>
             </div>
