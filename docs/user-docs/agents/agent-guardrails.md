@@ -167,3 +167,4 @@ See [Backend API Docs](http://localhost:8000/docs) for full request/response sch
 - [Agent Configuration](agent-configuration.md) -- Other per-agent settings
 - [Managing Agents](managing-agents.md) -- Start/stop to apply changes
 - [Monitoring](../operations/monitoring.md) -- View guardrail events in logs
+- [Recommended Trinity Prompt](recommended-fleet-prompt.md) -- Fleet rules for behaviour that guardrails can't block
