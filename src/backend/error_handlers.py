@@ -74,3 +74,24 @@ async def inter_agent_depth_exceeded(request: Request, exc) -> JSONResponse:
         content={"detail": detail},
         headers={ERROR_CODE_HEADER: detail["error"]},
     )
+
+
+async def skill_gate_error(request: Request, exc) -> JSONResponse:
+    """A request that named a gated skill and was not dispatched
+    (trinity-enterprise#751).
+
+    `SkillApprovalRequired` → **202** with the pending body at the top level: the
+    request was accepted for a decision, not run, so a client must never read it
+    as an empty reply. `SkillGateRefused` → its own status with the body under
+    `detail`, like any other refusal. Both carry the code on
+    `X-Trinity-Error-Code`. The gate runs after each route's access dependency,
+    so neither discloses whether an agent exists (Invariant #8).
+    """
+    from services.chat_execution_service import ERROR_CODE_HEADER
+    from services.skill_gate_errors import SkillApprovalRequired
+
+    detail = exc.detail()
+    headers = {ERROR_CODE_HEADER: exc.code}
+    if isinstance(exc, SkillApprovalRequired):
+        return JSONResponse(status_code=202, content=detail, headers=headers)
+    return JSONResponse(status_code=exc.status_code, content={"detail": detail}, headers=headers)

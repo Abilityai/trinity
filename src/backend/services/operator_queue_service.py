@@ -295,9 +295,11 @@ def is_platform_minted(item) -> bool:
 # #715: the platform alarms whose TEXT is about a person — a Workspace client's
 # complaint (ent#499: their email and verbatim words, which ent#366 withholds from
 # the rated agent) and the client addresses behind a shared legacy inbox (ent#308,
-# whose id also carries an email slug). A subset of `_RESERVED_ID_PREFIXES`, so
-# no agent can mint a row into it.
-_ABOUT_A_PERSON_ID_PREFIXES = ("workspace-problem-", "portal-inbox-collision-")
+# whose id also carries an email slug), and the skill gate's rows
+# (trinity-enterprise#751: the approval card names the person who asked, the
+# notice the person who decided; `gate-` covers `gate-note-`). A subset of
+# `_RESERVED_ID_PREFIXES`, so no agent can mint a row into it.
+_ABOUT_A_PERSON_ID_PREFIXES = ("workspace-problem-", "portal-inbox-collision-", "gate-")
 
 
 def is_about_a_person(item: dict) -> bool:
@@ -1219,6 +1221,16 @@ class OperatorQueueSyncService:
                 logger.info(f"Expired {len(expired)} operator queue items")
         except Exception as e:
             logger.error(f"Operator queue expiry failed: {e}")
+
+        # trinity-enterprise#751: gated-skill approvals whose ending no observer
+        # consumed, and approved runs lost between claim and start. Compare-and-
+        # sets throughout, so every worker may run it; a miss waits a cycle and
+        # never dispatches anything wrongly.
+        try:
+            from services import skill_gate_service
+            await skill_gate_service.sweep()
+        except Exception as e:
+            logger.error(f"Skill gate sweep failed: {e}")
 
         # #2915: TRI-state, deliberately (#2196 class). `list_all_agents_fast`
         # collapses "Docker unreadable" into "no agents"; keyed on that, one

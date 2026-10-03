@@ -300,7 +300,13 @@ def test_facade_passes_each_object_through(tmp_db):
 
     fields = TaskExecutionFields(chain_depth=1)
     mgr.create_task_execution("a", "m", "mcp", fields)
-    mgr._schedule_ops.create_task_execution.assert_called_once_with("a", "m", "mcp", fields)
+    # trinity-enterprise#751: the caller-chosen id rides through too (None here).
+    mgr._schedule_ops.create_task_execution.assert_called_once_with(
+        "a", "m", "mcp", fields, execution_id=None)
+    mgr._schedule_ops.create_task_execution.reset_mock()
+    mgr.create_task_execution("a", "m", "mcp", fields, execution_id="exec-chosen")
+    mgr._schedule_ops.create_task_execution.assert_called_once_with(
+        "a", "m", "mcp", fields, execution_id="exec-chosen")
 
     source = ExecutionSource(source_user_id=1)
     mgr.create_schedule_execution("s", "a", "m", "manual", source)

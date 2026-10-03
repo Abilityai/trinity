@@ -21,6 +21,7 @@ from typing import Optional
 
 from config import ROOM_SOURCE_CHANNEL
 from services.platform_prompt_service import build_user_facing_room_prompt
+from services.skill_gate_errors import SkillGateError
 from utils.helpers import utc_now_iso
 
 from . import db
@@ -1232,6 +1233,10 @@ async def _wake_agent_locked(current_user, room_id: str, agent_name: str,
         result = await dispatch_and_await_terminal(
             agent_name=agent_name,
             message=turn_prefix + manifest_prefix + _build_turn_prompt(room, agent_name, delta, cold, user_facing),
+            # trinity-enterprise#751: the skill gate reads what the participants
+            # wrote since this agent last spoke, never the transcript scaffolding.
+            request_text="\n".join(m.get("content") or "" for m in delta
+                                    if m.get("sender_kind") != "system"),
             triggered_by="room",
             conversation_key=f"room:{room_id}",
             system_prompt=room_prompt,
@@ -1265,6 +1270,10 @@ async def _wake_agent_locked(current_user, room_id: str, agent_name: str,
         logger.warning("room %s: turn for %s was cancelled", room_id, agent_name)
         _post_system(room_id, f"{agent_name}'s turn was interrupted.")
         raise
+    except SkillGateError as e:
+        # trinity-enterprise#751: nothing ran; say why in the room.
+        _post_system(room_id, getattr(e, "message", None) or str(e))
+        return
     except Exception as e:  # noqa: BLE001 — a failed turn is VISIBLE, never silent
         logger.warning("room %s: turn for %s raised: %s", room_id, agent_name, e)
         _post_system(room_id, f"{agent_name} could not respond ({type(e).__name__}).")

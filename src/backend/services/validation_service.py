@@ -348,6 +348,9 @@ class ValidationService:
                 service=self._task_service,
                 agent_name=agent_name,
                 message=validation_prompt,
+                # trinity-enterprise#751: the operator-authored part is the only
+                # request here; the original message and response are context.
+                request_text=custom_prompt or "",
                 triggered_by="validation",
                 timeout_seconds=timeout_seconds,
                 execution_id=validation_execution_id,

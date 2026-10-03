@@ -337,6 +337,81 @@ export function isDepthRefusal(value: unknown): value is DepthRefusal {
   return (value as { status?: unknown })?.status === INTER_AGENT_DEPTH_EXCEEDED;
 }
 
+/**
+ * trinity-enterprise#751: what a request naming a gated skill answers instead
+ * of a reply. Nothing ran. `pending_approval` — an approval was raised and the
+ * outcome is delivered later; `refused` — a named refusal, nothing raised.
+ * Neither may be read as an (empty) answer, nor retried as "agent busy".
+ */
+export interface GateResult {
+  status: "pending_approval" | "refused";
+  agent: string;
+  code: string;
+  request_id?: string;
+  skills?: string[];
+  approver_role?: string;
+  expires_at?: string | null;
+  retryable: false;
+  message: string;
+}
+
+/**
+ * Parse a gate answer from a backend response: a 202 whose body says
+ * `pending_approval`, or a non-2xx whose `detail.status` is `refused` with the
+ * same code on `X-Trinity-Error-Code`. Anything else — including the depth
+ * refusal and an ordinary 429 — is undefined. Never throws.
+ */
+export function parseGateResult(
+  status: number,
+  errorCode: string | null,
+  body: string,
+  agent: string,
+): GateResult | undefined {
+  try {
+    const parsed = JSON.parse(body) as Record<string, unknown>;
+    if (status === 202 && parsed?.status === "pending_approval") {
+      return {
+        status: "pending_approval",
+        agent,
+        code: "approval_pending",
+        request_id: typeof parsed.request_id === "string" ? parsed.request_id : undefined,
+        skills: Array.isArray(parsed.skills) ? (parsed.skills as string[]) : undefined,
+        approver_role: typeof parsed.approver_role === "string" ? parsed.approver_role : undefined,
+        expires_at: typeof parsed.expires_at === "string" ? parsed.expires_at : null,
+        retryable: false,
+        message:
+          `${typeof parsed.message === "string" ? parsed.message : "Not run: this needs approval."} ` +
+          "Do not retry or route it through another agent — the outcome will be sent to you.",
+      };
+    }
+    const d = ((parsed?.detail ?? parsed) as Record<string, unknown>) || {};
+    if (d.status === "refused" && typeof d.code === "string" && d.code === errorCode) {
+      return {
+        status: "refused",
+        agent,
+        code: d.code,
+        retryable: false,
+        message: typeof d.message === "string" ? d.message : "Not run: refused by the skill gate.",
+      };
+    }
+  } catch {
+    // not a gate answer
+  }
+  return undefined;
+}
+
+export function isGateResult(value: unknown): value is GateResult {
+  const s = (value as { status?: unknown })?.status;
+  return (s === "pending_approval" || s === "refused") && typeof (value as { code?: unknown })?.code === "string";
+}
+
+/** The gate answer carried by `response`, read without consuming its body. */
+async function readGateResult(response: Response, agent: string): Promise<GateResult | undefined> {
+  const errorCode = response.headers.get("x-trinity-error-code");
+  if (response.status !== 202 && (response.ok || !errorCode)) return undefined;
+  return parseGateResult(response.status, errorCode, await response.clone().text(), agent);
+}
+
 /** Bound for #848 inline-auth control-plane calls (not chat). */
 const INLINE_AUTH_TIMEOUT_MS = Number(process.env.MCP_INLINE_AUTH_TIMEOUT_MS || 15000);
 
@@ -945,12 +1020,14 @@ export class TrinityClient {
     message: string,
     sourceAgent?: string,
     mcpKeyInfo?: { keyId?: string; keyName?: string },
-    idempotencyKey?: string
+    idempotencyKey?: string,
+    turn?: string
   ): Promise<
     | ChatResponse
     | { error: string; queue_status: "busy" | "queue_full"; retry_after: number; agent: string; details?: Record<string, unknown> }
     | { status: "queued_timeout"; agent: string; execution_id: string; message: string }
     | DepthRefusal
+    | GateResult
   > {
     // Prepare headers
     const headers: Record<string, string> = {
@@ -968,6 +1045,13 @@ export class TrinityClient {
     // Add X-Source-Agent header for collaboration tracking
     if (sourceAgent) {
       headers["X-Source-Agent"] = sourceAgent;
+    }
+
+    // trinity-enterprise#751: the calling turn (#2392), so a gated request's
+    // outcome can name the execution it came from. The backend keeps it only
+    // when it is the caller's own.
+    if (turn) {
+      headers["X-Trinity-Execution-Id"] = turn;
     }
 
     // Add MCP key info headers for execution origin tracking (AUDIT-001).
@@ -1052,6 +1136,11 @@ export class TrinityClient {
     } finally {
       clearTimeout(timeoutId);
     }
+
+    // trinity-enterprise#751: a gated skill — pending approval or refused by
+    // name. Checked first: its 429 (`approval_queue_full`) is not "agent busy".
+    const gate = await readGateResult(response, name);
+    if (gate) return gate;
 
     // Handle 429 Too Many Requests (agent queue full)
     if (response.status === 429) {
@@ -1211,8 +1300,10 @@ export class TrinityClient {
     },
     sourceAgent?: string,
     mcpKeyInfo?: { keyId?: string; keyName?: string },
-    idempotencyKey?: string
+    idempotencyKey?: string,
+    turn?: string
   ): Promise<
+    | GateResult
     | ChatResponse
     | { status: "accepted"; execution_id: string; agent_name: string; message: string; async_mode: true }
     // #2661: sync mode may answer with the gateway-timeout receipt (same shape
@@ -1235,6 +1326,13 @@ export class TrinityClient {
     // Add X-Source-Agent header for collaboration tracking
     if (sourceAgent) {
       headers["X-Source-Agent"] = sourceAgent;
+    }
+
+    // trinity-enterprise#751: the calling turn (#2392), so a gated request's
+    // outcome can name the execution it came from. The backend keeps it only
+    // when it is the caller's own.
+    if (turn) {
+      headers["X-Trinity-Execution-Id"] = turn;
     }
 
     // Add MCP key info headers for execution origin tracking (AUDIT-001).
@@ -1334,6 +1432,10 @@ export class TrinityClient {
     } finally {
       clearTimeout(timeoutId);
     }
+
+    // trinity-enterprise#751: a gated skill — pending approval or refused by name.
+    const gate = await readGateResult(response, name);
+    if (gate) return gate;
 
     if (!response.ok) {
       const error = await response.text();

@@ -414,6 +414,9 @@ def answer_ask(item_id: str, email: str, is_platform: bool,
         raise AskError(422, e.code, str(e), {"offered_options": e.options})
     except ask_service.AskNotFound:
         raise AskError(409, "already_resolved", "This ask was just answered elsewhere.")
+    except ask_service.AskNotAddressee:
+        # trinity-enterprise#751: a gated-skill approval addressed to someone else.
+        raise AskError(403, "not_addressee", "This approval was addressed to someone else.")
     except ask_service.AskConflict as conflict:
         # A lost race writes nothing and dispatches nothing — the sink only
         # reaches its observers on a compare-and-set it WON. Still pending means

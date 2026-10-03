@@ -189,6 +189,7 @@ async def fan_out(
         total=result.total,
         completed=result.completed,
         failed=result.failed,
+        pending_approval=result.pending_approval,
         results=[
             FanOutTaskResponse(
                 id=r.id,
@@ -200,6 +201,7 @@ async def fan_out(
                 cost=r.cost,
                 context_used=r.context_used,
                 duration_ms=r.duration_ms,
+                request_id=r.request_id,
             )
             for r in result.results
         ],

@@ -700,6 +700,8 @@ async def get_current_user(request: Request, token: str = Depends(oauth2_scheme)
             vouched_source_agent=(payload.get("source_agent") or None) if loopback else None,
             # #2973: SECRET_KEY-signed, so only the backend could have set it.
             loopback_chain_depth=_loopback_chain_depth(payload) if loopback else None,
+            # trinity-enterprise#751: never a person, whatever the token resolves to.
+            is_event_loopback=bool(loopback),
         )
     except JWTError:
         # JWT failed, try MCP API key
@@ -1147,6 +1149,9 @@ def is_person_principal(current_user: User) -> bool:
         getattr(current_user, "agent_name", None)
         or getattr(current_user, "connector_agent", None)
         or getattr(current_user, "portal_delegate", False)
+        # trinity-enterprise#751: the EVT-001 loopback resolves to the admin
+        # with no scope — a backend-minted machine token, never a person.
+        or getattr(current_user, "is_event_loopback", False) is True
     )
 
 

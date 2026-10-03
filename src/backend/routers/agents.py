@@ -819,6 +819,16 @@ async def delete_agent_endpoint(agent_name: str, request: Request, current_user:
     # during the retention window.
     db.delete_agent_ownership(agent_name)
 
+    # trinity-enterprise#751: a gated request still waiting on this agent can no
+    # longer run against it — cancel it and tell the requester. Best effort.
+    try:
+        from services import skill_gate_service
+        await skill_gate_service.cancel_pending_for_agent(
+            agent_name, actor_email=current_user.email, actor_user=current_user,
+            reason="agent_deleted")
+    except Exception as e:
+        logger.warning(f"Failed to cancel gated requests for deleted agent {agent_name}: {e}")
+
     # SEC-001: audit delete after all cleanup and ownership removal committed.
     await platform_audit_service.log(
         event_type=AuditEventType.AGENT_LIFECYCLE,

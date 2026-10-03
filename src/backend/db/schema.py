@@ -1737,6 +1737,40 @@ TABLES = {
         )
     """,
 
+    # trinity-enterprise#751 — a request to run a gated skill, frozen while its
+    # approval ask is open. The ask (operator_queue) records the DECISION; this
+    # row records the EFFECT, so an approval runs the request exactly once:
+    # `pending → dispatching` is a compare-and-set, and `dispatched_execution_id`
+    # is UNIQUE. `request_id` is the ask's `gate-…` id (one per occurrence).
+    # `dispatch` holds only the fields the approved run re-uses (a per-field
+    # freeze table in services/skill_gate_service.py), never a session id.
+    "skill_gate_requests": """
+        CREATE TABLE IF NOT EXISTS skill_gate_requests (
+            request_id TEXT PRIMARY KEY,
+            agent_name TEXT NOT NULL,
+            ask_item_id TEXT,
+            skills TEXT NOT NULL,
+            request_text TEXT NOT NULL,
+            fingerprints TEXT,
+            requester_kind TEXT NOT NULL,
+            requester_key TEXT NOT NULL,
+            source_agent TEXT,
+            requester_email TEXT,
+            requester_execution_id TEXT,
+            requester_mcp_key_id TEXT,
+            origin_execution_id TEXT,
+            triggered_by TEXT,
+            dispatch TEXT NOT NULL,
+            state TEXT NOT NULL DEFAULT 'pending',
+            state_detail TEXT,
+            dispatched_execution_id TEXT UNIQUE,
+            created_at TEXT NOT NULL,
+            decided_at TEXT,
+            dispatched_at TEXT,
+            notified_at TEXT
+        )
+    """,
+
     # Nevermined Payment Integration (NVM-001)
     "nevermined_agent_config": """
         CREATE TABLE IF NOT EXISTS nevermined_agent_config (
@@ -2226,6 +2260,12 @@ INDEXES = [
     # platform-minted `id` (uuid) is the global handle; `request_id` carries the
     # agent's string, so two agents can reuse the same id without collision.
     "CREATE UNIQUE INDEX IF NOT EXISTS idx_operator_queue_agent_request ON operator_queue(agent_name, request_id)",
+    # trinity-enterprise#751 — the gate's caps count pending rows per executor
+    # and per requester; the sweep reads by state.
+    "CREATE INDEX IF NOT EXISTS idx_skill_gate_requests_agent_state ON skill_gate_requests(agent_name, state)",
+    "CREATE INDEX IF NOT EXISTS idx_skill_gate_requests_requester ON skill_gate_requests(agent_name, requester_key, state)",
+    # The reconcile sweep reads by state across agents, every poll cycle.
+    "CREATE INDEX IF NOT EXISTS idx_skill_gate_requests_state ON skill_gate_requests(state, decided_at)",
 
     # Nevermined payment indexes (NVM-001)
     "CREATE INDEX IF NOT EXISTS idx_nvm_config_agent ON nevermined_agent_config(agent_name)",
