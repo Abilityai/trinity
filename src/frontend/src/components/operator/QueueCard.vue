@@ -125,6 +125,17 @@
         <InlineError :message="store.QUEUE_RESPONSE_DIVERGED" data-testid="queue-diverged-notice" />
       </div>
 
+      <!-- trinity-enterprise#751: a gated-skill approval addressed to someone
+           else — refused, nothing recorded. Beside the controls and kept until
+           dismissed (p18); the queue's poll never clears it. -->
+      <div v-if="notAddressee" class="px-4 pb-3">
+        <InlineError
+          :message="store.QUEUE_RESPONSE_NOT_ADDRESSEE"
+          data-testid="queue-not-addressee-notice"
+          @dismiss="store.notAddresseeItemId = null"
+        />
+      </div>
+
       <!-- Response area -->
       <div class="px-4 pb-4">
         <!-- Approval: option buttons -->
@@ -231,6 +242,7 @@ const responseKind = computed(() => queueResponseKind(props.item))
 const syncBadge = computed(() => queueSyncBadge(props.item))
 const reaskBadges = computed(() => queueReaskBadges(props.item, store.items))   // trinity-enterprise#611
 const diverged = computed(() => store.divergedItemId === props.item.id)
+const notAddressee = computed(() => store.notAddresseeItemId === props.item.id)
 
 const isExpanded = computed(() => store.expandedItemId === props.item.id)
 const agentAvatarUrl = computed(() => {

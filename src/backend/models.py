@@ -474,6 +474,12 @@ class User(BaseModel):
     # subscriber's execution inherits it instead of starting a new root. Set
     # only on a loopback JWT; None on every other branch.
     loopback_chain_depth: Optional[int] = None
+    # trinity-enterprise#751: True only on the EVT-001 loopback JWT. That token
+    # resolves to `sub: "admin"` with no `mcp_scope` and no agent identity — the
+    # exact shape of a signed-in human — so without this flag a subscription an
+    # agent created could reach `/task` looking like the admin in a browser.
+    # `dependencies.is_person_principal` refuses it.
+    is_event_loopback: bool = False
 
 
 class Token(BaseModel):
@@ -3138,6 +3144,8 @@ class FanOutTaskResponse(BaseModel):
     cost: Optional[float] = None
     context_used: Optional[int] = None
     duration_ms: Optional[int] = None
+    # trinity-enterprise#751: set when `status` is "pending_approval".
+    request_id: Optional[str] = None
 
 
 class FanOutResponse(BaseModel):
@@ -3148,6 +3156,8 @@ class FanOutResponse(BaseModel):
     completed: int
     failed: int
     results: List[FanOutTaskResponse]
+    # trinity-enterprise#751: subtasks held by the skill gate (neither run nor failed).
+    pending_approval: int = 0
 
 
 # --- #2670: the batch's read surface ----------------------------------------

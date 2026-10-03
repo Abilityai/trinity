@@ -61,6 +61,7 @@ from services.idempotency_service import EffectInProgressError, EffectUnguardedE
 from services.agent_auth import agent_httpx_client
 from services.docker_service import get_agent_container
 from services.platform_audit_service import AuditEventType, platform_audit_service
+from services.skill_gate_errors import SkillApprovalRequired, SkillGateError
 from services.task_execution_service import (
     dispatch_and_await_terminal,
     get_task_execution_service,
@@ -300,6 +301,15 @@ def _task_object(execution_id: str, state: str, *, text: Optional[str] = None,
     return task
 
 
+def _gate_task(exc) -> Dict[str, Any]:
+    """trinity-enterprise#751: what an A2A caller is told when the request names
+    a gated skill. Pending → `input-required` keyed on the approval's request id
+    (a retried messageId replays it); a named refusal → `rejected`. Nothing ran."""
+    if isinstance(exc, SkillApprovalRequired):
+        return _task_object(exc.request_id, "input-required", text=exc.message)
+    return _task_object(uuid.uuid4().hex, "rejected", error=str(exc))
+
+
 def _a2a_state_for(status: str) -> str:
     """Map a Trinity TaskExecutionStatus to an A2A task state.
 
@@ -478,6 +488,13 @@ async def a2a_jsonrpc(
 
         try:
             result = await _run_a2a_task(agent_name, text, current_user)
+        except SkillGateError as exc:
+            task = _gate_task(exc)
+            if isinstance(exc, SkillApprovalRequired):
+                idempotency_service.complete(decision, exc.request_id, task)
+            else:
+                idempotency_service.fail(decision)
+            return _rpc_result(rpc_id, task)
         except Exception as exc:  # noqa: BLE001 — never 5xx; A2A wants a JSON-RPC error
             idempotency_service.fail(decision)
             logger.warning("a2a message/send failed for %s: %s", agent_name, exc)
@@ -602,6 +619,14 @@ async def _stream_task(agent_name: str, text: str, current_user: User,
             # progress" for the full 24h TTL.
             idempotency_service.fail(decision)
             raise
+        except SkillGateError as exc:
+            task = _gate_task(exc)
+            if isinstance(exc, SkillApprovalRequired):
+                idempotency_service.complete(decision, exc.request_id, task)
+            else:
+                idempotency_service.fail(decision)
+            yield f"data: {json.dumps({'jsonrpc': '2.0', 'id': rpc_id, 'result': {**task, 'final': True}})}\n\n"
+            return
         except Exception as exc:  # noqa: BLE001
             idempotency_service.fail(decision)
             logger.warning("a2a message/stream failed for %s: %s", agent_name, exc)

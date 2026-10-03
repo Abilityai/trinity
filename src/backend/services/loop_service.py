@@ -65,6 +65,7 @@ from typing import Any, Optional
 
 from database import db
 from services.runtime_secret_scrub import get_staged_values, scrub_text
+from services.skill_gate_errors import SkillGateError
 from services.task_execution_service import get_task_execution_service
 from utils.helpers import utc_now_iso
 from db.write_params import ExecutionResult, TaskExecutionFields
@@ -467,15 +468,27 @@ class LoopService:
         cost = getattr(execution, "cost", None)
         duration_ms = getattr(execution, "duration_ms", None)
 
+        # trinity-enterprise#751: an iteration the skill gate held (SKIPPED, with
+        # a gate record naming this row) did not fail — its run row reads
+        # `skipped`, so `failed_runs` and `on_failure` never count it — and the
+        # loop stops: each further iteration would raise another approval for
+        # the same template.
+        held = status == "skipped" and bool(db.get_gate_requests_by_origin_executions([execution_id]))
+
         db.finalize_loop_run(
             run["id"],
-            status="completed" if succeeded else "failed",
+            status="completed" if succeeded else ("skipped" if held else "failed"),
             response=response,
             error=None if succeeded else (error or "Unknown task failure"),
             cost=cost,
             duration_ms=duration_ms,
             execution_id=execution_id,
         )
+
+        if held:
+            await self._finalize(loop, status="stopped", stop_reason="approval_required",
+                                 error=error)
+            return
 
         runs = db.list_loop_runs(loop_id)
         derived = _DerivedState(runs)
@@ -720,7 +733,17 @@ class LoopService:
                 # already did that. Kept because it is the honest description of
                 # the call and would matter if the row were ever created there.
                 loop_id=loop["id"],
+                # trinity-enterprise#751: no `request_text` — the gate reads the
+                # rendered iteration, because that is what an approval would
+                # run and what the approver must see (a `{{previous_response}}`
+                # that names a gated skill gates the iteration: the safe side).
             )
+        except SkillGateError:
+            # trinity-enterprise#751: the iteration names a gated skill; the row
+            # is already SKIPPED. `_close_run` ends the loop `approval_required`
+            # — every further iteration would raise another approval.
+            await self.advance_on_terminal(execution_id)
+            return
         except Exception as exc:  # noqa: BLE001 — a raise must not strand the loop
             logger.exception(
                 "[Loop] %s iteration %d raised during dispatch", loop["id"], run_number

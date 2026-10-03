@@ -91,6 +91,7 @@ from services.sync_waiter import (
     wait_for_fan_out_batch,
 )
 from services.task_execution_service import get_task_execution_service
+from services.skill_gate_errors import SkillGateError
 from db.write_params import ExecutionResult, TaskExecutionFields
 
 logger = logging.getLogger(__name__)
@@ -134,7 +135,7 @@ class FanOutTaskInput:
 class FanOutTaskResult:
     """Result of a single fan-out subtask."""
     id: str
-    status: str           # "completed" | "failed" | "running"
+    status: str           # "completed" | "failed" | "running" | "pending_approval" | "approved"
     response: Optional[str] = None
     error: Optional[str] = None
     error_code: Optional[str] = None
@@ -142,6 +143,8 @@ class FanOutTaskResult:
     cost: Optional[float] = None
     context_used: Optional[int] = None
     duration_ms: Optional[int] = None
+    # trinity-enterprise#751: the approval a gated subtask is waiting on.
+    request_id: Optional[str] = None
 
 
 @dataclass
@@ -153,6 +156,8 @@ class FanOutResult:
     completed: int
     failed: int
     results: List[FanOutTaskResult]
+    # trinity-enterprise#751: subtasks held by the skill gate — neither run nor failed.
+    pending_approval: int = 0
 
 
 # Row statuses that mean the subtask has not finished. Mirrors
@@ -194,12 +199,21 @@ def build_aggregate(
     """
     error_codes = error_codes or {}
     by_task: Dict[str, FanOutTaskResult] = {}
-    for row in db.get_fan_out_executions(agent_name, fan_out_id):
+    rows = db.get_fan_out_executions(agent_name, fan_out_id)
+    # trinity-enterprise#751: a SKIPPED row the skill gate closed is waiting for
+    # an approval, not failed — read from the gate's own record, never the text.
+    skipped = [r.get("id") for r in rows if _row_status(r.get("status")) == TaskExecutionStatus.SKIPPED]
+    held = db.get_gate_requests_by_origin_executions(skipped) if skipped else {}
+    for row in rows:
         row_status = _row_status(row.get("status"))
         if row_status == TaskExecutionStatus.SUCCESS:
             task_status = "completed"
         elif row_status in _OPEN_STATUSES:
             task_status = "running"
+        elif row.get("id") in held and held[row["id"]].get("state") in ("pending", "dispatching"):
+            task_status = "pending_approval"
+        elif row.get("id") in held and held[row["id"]].get("state") == "dispatched":
+            task_status = "approved"   # it ran later, as its own execution
         else:
             task_status = "failed"
         task_id = row.get("fan_out_task_id") or row.get("id")
@@ -213,6 +227,7 @@ def build_aggregate(
             cost=row.get("cost"),
             context_used=row.get("context_used"),
             duration_ms=row.get("duration_ms"),
+            request_id=(held.get(row.get("id")) or {}).get("request_id"),
         )
 
     def _missing(task_id: str) -> FanOutTaskResult:
@@ -235,6 +250,7 @@ def build_aggregate(
         completed=sum(1 for r in ordered if r.status == "completed"),
         failed=sum(1 for r in ordered if r.status == "failed"),
         results=ordered,
+        pending_approval=sum(1 for r in ordered if r.status == "pending_approval"),
     )
 
 
@@ -501,6 +517,10 @@ class FanOutService:
                     result = await task_service.execute_task(
                         agent_name=agent_name,
                         message=task.message,
+                        # trinity-enterprise#751: the batch's caller-supplied
+                        # system_prompt reaches this subtask's executor too, so
+                        # the skill gate reads it with the subtask's message.
+                        request_text="\n".join(t for t in (task.message, system_prompt) if t),
                         triggered_by="fan_out",
                         source_user_id=source_user_id,
                         source_user_email=source_user_email,
@@ -515,6 +535,12 @@ class FanOutService:
                         fan_out_id=fan_out_id,
                         subscription_id=subscription_id,
                     )
+                except SkillGateError:
+                    # trinity-enterprise#751: the subtask names a gated skill; the
+                    # backstop closed its row SKIPPED and raised its own approval
+                    # (one per subtask). Nudge the join; it is idempotent.
+                    await join_fan_out_on_terminal(execution.id)
+                    return
                 except Exception as exc:  # noqa: BLE001 — must not strand the batch
                     logger.error(
                         f"[FanOut] {fan_out_id} subtask '{task.id}' raised: {exc}"

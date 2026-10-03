@@ -46,6 +46,7 @@ from services.chat_title import (
 # `config.PORTAL_SOURCE_CHANNEL` for why it exists and why it is not a channel.
 from config import PORTAL_SOURCE_CHANNEL
 from services import turn_context
+from services.skill_gate_errors import SkillApprovalRequired, SkillGateError
 from services.channel_completion_report import COMPLETION_SOURCE_DONE, COMPLETION_SOURCE_FAILED
 
 from . import db
@@ -175,6 +176,11 @@ PORTAL_FAILURE_CATEGORIES = (
     # failure. Not `invalid_model`: the client did not choose this model, so
     # there is no stored preference to clear. Only an operator can fix it.
     "model_unsupported",
+    # trinity-enterprise#751 — the message invokes a skill that needs a person's
+    # approval and could not be put up for one (refused by name; nothing ran).
+    # Not retryable: resending meets the same refusal. A request that WAS put up
+    # for approval is not a failure at all — the turn answers with the notice.
+    "gated",
     "internal",            # anything uncategorised; copy is fixed, never raw
 )
 
@@ -2826,7 +2832,12 @@ async def portal_chat(agent_name: str, message: str, email: str,
                       # ent#610 — the quoted block `reply_context` built at the
                       # router from a message id. Server-built text, never a
                       # request field.
-                      reply_context: str = "") -> dict:
+                      reply_context: str = "",
+                      # trinity-enterprise#751 — the ROUTE proved this caller is a
+                      # person (`PortalPrincipal.is_person`), so an approver may run
+                      # their own gated request. False for any caller that did not
+                      # (voice relays a model's paraphrase of the speech).
+                      gate_is_person: bool = False) -> dict:
     """Run one client chat turn against a rostered agent as a standard platform
     execution (``triggered_by="public"`` — the external-caller path, observable +
     cost-tracked). Scoped to the caller's roster; raises ``ClientPortalError`` on
@@ -3096,6 +3107,9 @@ async def portal_chat(agent_name: str, message: str, email: str,
     # On BOTH shapes: a resumed session remembers the thread but not which
     # message the person just pointed at, and the cold retry needs it as much.
     reply_prefix = reply_context or ""
+    # trinity-enterprise#751: what the client typed, before any prefix — the
+    # only text the skill gate reads on this turn.
+    client_text = message
     cold_message = history_prefix + turn_prefix + canvas_prefix + manifest_prefix + reply_prefix + message
     message = (delta_prefix + turn_prefix + canvas_prefix + manifest_prefix + reply_prefix + message) if resuming else cold_message
 
@@ -3192,7 +3206,18 @@ async def portal_chat(agent_name: str, message: str, email: str,
             # the same model as the first. `execute_task` treats a non-None model
             # as final and skips its own platform-default lookup.
             model=resolved_model,
+            # The quoted message is part of the request: a reply to the client's
+            # own held `/x` would otherwise send it to the agent unread.
+            request_text=reply_prefix + client_text,
+            gate_requester=_gate_requester(email, gate_is_person),
         )
+    except SkillApprovalRequired as e:
+        # trinity-enterprise#751: the message names a gated skill — nothing ran,
+        # an approval was raised. Waiting is not failing: the thread renders a
+        # non-retryable error as a Failed turn, so the notice is the reply.
+        return _persist_reply(agent_name, email, session_id, e.message, None, voice_call_id)
+    except SkillGateError as e:
+        raise ClientPortalError(e.status_code, str(e), category="gated", retryable=False)
     except ResumeLockBusy:
         # A concurrent turn holds this thread's lock. Same shape as the "agent
         # is busy" answer below — the client retries, nothing is lost.
@@ -3361,6 +3386,16 @@ async def portal_chat(agent_name: str, message: str, email: str,
     # to rate" are genuinely different facts here, and reporting an id for a row
     # that was never written would hand the client a target the ratings route
     # will 404 on.
+    # #2579: the title spawn used to live here, after the reply was persisted.
+    # It now runs concurrently with the turn, immediately after
+    # `_persist_user_turn` — see the comment there for why, and for the two
+    # behaviour changes that buys.
+    return _persist_reply(agent_name, email, session_id, reply, cost, voice_call_id)
+
+
+def _persist_reply(agent_name: str, email: str, session_id: str, reply: str, cost,
+                   voice_call_id: str | None) -> dict:
+    """Persist the assistant half of a turn and build the turn's answer."""
     message_id = None
     try:
         now = utc_now_iso()
@@ -3372,17 +3407,21 @@ async def portal_chat(agent_name: str, message: str, email: str,
     except Exception as e:  # noqa: BLE001
         logger.warning("portal chat history persist failed for %s/%s: %s", agent_name, email, e)
 
-    # #2579: the title spawn used to live here, after the reply was persisted.
-    # It now runs concurrently with the turn, immediately after
-    # `_persist_user_turn` — see the comment there for why, and for the two
-    # behaviour changes that buys.
-
     # NOTE (#2580, the ent#2320 lesson restated): `message_id` reaches the client
     # only because `PortalChatResponse` DECLARES it. The route's `response_model`
     # strips undeclared keys in silence, so adding a key here alone is a no-op
     # that every service-layer test would still pass.
     return {"response": reply, "cost": cost, "session_id": session_id,
             "message_id": message_id}
+
+
+def _gate_requester(email: str, is_person: bool):
+    """trinity-enterprise#751: who asked, for the skill gate — the Workspace
+    caller is a person; `is_person` says whether the route proved it."""
+    from services import skill_gate_service
+    return skill_gate_service.Requester(kind=skill_gate_service.KIND_PERSON,
+                                        key=f"person:{email.casefold()}",
+                                        email=email, is_person=is_person)
 
 
 def _voice_attribution(voice_call_id: str | None) -> dict:
@@ -3850,7 +3889,9 @@ async def start_portal_turn(agent_name: str, message: str, email: str,
                             # Stamped on the execution so the agent's tools default to it.
                             open_canvas_id: str | None = None,
                             # ent#610 — see `portal_chat`.
-                            reply_context: str = "") -> dict:
+                            reply_context: str = "",
+                            # trinity-enterprise#751 — see `portal_chat`.
+                            gate_is_person: bool = False) -> dict:
     """Begin a turn and return as soon as it is dispatchable.
 
     Returns ``{execution_id, session_id}``. The caller subscribes to the
@@ -3959,7 +4000,8 @@ async def start_portal_turn(agent_name: str, message: str, email: str,
                               # never re-resolves and the two cannot disagree.
                               model=model, resolved_model=resolved_model,
                               open_canvas_id=open_canvas_id,
-                              reply_context=reply_context)
+                              reply_context=reply_context,
+                              gate_is_person=gate_is_person)
         except ClientPortalError as e:
             # There is no request left to raise into — the 202 went out long ago
             # — so the ONLY way this reaches the client is the record written

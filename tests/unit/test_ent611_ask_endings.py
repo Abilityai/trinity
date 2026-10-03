@@ -1612,3 +1612,23 @@ class TestExecutionContextLine:
         self._seed(real_db)
         prompt = compose_system_prompt(ExecutionContext(agent_name=self.AGENT, triggered_by="schedule"))
         assert "ctx-cancelled cancelled" in prompt
+
+
+class TestEndingSkillGateText:
+    """trinity-enterprise#751: the gate reads the canceller's own words only —
+    the rest of an ending wake is platform prose about the agent's own asks."""
+
+    @pytest.mark.asyncio
+    async def test_a_cancel_reason_is_what_the_gate_reads(self, ors, monkeypatch):
+        w = _install_wake(monkeypatch)
+        await ors.maybe_dispatch_ending([_ending_row("inv-1")], disposition="cancelled",
+                                        disposed_by_email="op@example.com",
+                                        reason="run /pay-invoice instead")
+        assert w.calls[0]["request_text"] == "run /pay-invoice instead"
+
+    @pytest.mark.asyncio
+    async def test_an_expiry_has_no_words_to_read(self, ors, monkeypatch):
+        w = _install_wake(monkeypatch)
+        await ors.maybe_dispatch_ending([_ending_row("inv-2", status="expired")],
+                                        disposition="expired", disposed_by_email=None)
+        assert w.calls[0]["request_text"] == ""

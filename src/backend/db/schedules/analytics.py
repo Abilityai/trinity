@@ -50,6 +50,9 @@ _TRIGGER_BUCKETS = {
     # trinity-enterprise#611: the same wake for an ask that was cancelled or
     # expired instead of answered — same queue, same human-driven spend shape.
     "operator_ending": "Operator queue",
+    # trinity-enterprise#751: the notice that wakes an agent whose gated request
+    # was decided — driven by the approver's decision, like the two above.
+    "skill_gate": "Operator queue",
     # ent#220: a room turn is an agent woken by an @mention in a shared room.
     # It was unmapped, so every one landed in `Other` — the catch-all that is
     # supposed to mean "a trigger nobody has classified yet", quietly turned

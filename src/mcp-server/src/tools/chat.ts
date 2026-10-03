@@ -7,7 +7,8 @@
 
 import { z } from "zod";
 import { createHash } from "crypto";
-import { TrinityClient, isDepthRefusal, type DepthRefusal } from "../client.js";
+import { TrinityClient, isDepthRefusal, isGateResult, type DepthRefusal } from "../client.js";
+import { MANUAL_EXECUTION_ID } from "./execution_id.js";
 import type { McpAuthContext, AgentAccessCheckResult } from "../types.js";
 import { accessDenied, checkAgentEdge, resolveClient, uniformDenial } from "../access.js";
 
@@ -170,6 +171,12 @@ export async function runAgentChat(
   // operator_queue.ts) so the #946 scope-based pull routing is decidable
   // in tests; behaviour-equivalent in production (see chat_with_agent note).
   const authContext = context?.session as McpAuthContext | undefined;
+  // trinity-enterprise#751: the caller's turn as the PLATFORM saw it (#2392) —
+  // never the model-typed `execution_id` param. `manual` means no execution.
+  const callerTurn =
+    authContext?.executionId && authContext.executionId !== MANUAL_EXECUTION_ID
+      ? authContext.executionId
+      : undefined;
 
   // Get authenticated client for this request
   const apiClient = resolveClient(baseClient, requireApiKey, authContext);
@@ -272,8 +279,12 @@ export async function runAgentChat(
       },
       sourceAgent,
       mcpKeyInfo,
-      idempotencyKey
+      idempotencyKey,
+      callerTurn
     );
+
+    // trinity-enterprise#751: a gated skill — not run; a result, not an error.
+    if (isGateResult(response)) return JSON.stringify(response, null, 2);
 
     // #2661: the parallel branch surfaces the gateway-timeout receipt exactly
     // as the sequential branch does below. Without the log line the two routes
@@ -303,14 +314,20 @@ export async function runAgentChat(
       { async_mode: true },
       sourceAgent,
       mcpKeyInfo,
-      idempotencyKey
+      idempotencyKey,
+      callerTurn
     );
+    if (isGateResult(receipt)) return JSON.stringify(receipt, null, 2);
     if (isDepthRefusal(receipt)) return depthRefusalResult(receipt);
     return JSON.stringify(receipt, null, 2);
   }
 
   // Sequential chat mode - uses queue, maintains context
-  const response = await apiClient.chat(agent_name, message, sourceAgent, mcpKeyInfo, idempotencyKey);
+  const response = await apiClient.chat(agent_name, message, sourceAgent, mcpKeyInfo, idempotencyKey, callerTurn);
+
+  // trinity-enterprise#751: a gated skill — pending approval or refused by
+  // name. Nothing ran; the model must not retry it or report it as done.
+  if (isGateResult(response)) return JSON.stringify(response, null, 2);
 
   // #2806: chain-depth refusal — a result the model must stop on, not an error.
   if (isDepthRefusal(response)) return depthRefusalResult(response);

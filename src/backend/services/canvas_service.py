@@ -231,6 +231,7 @@ _OPERATOR_SIDE_TRIGGERS = frozenset({
     "manual", "chat", "session", "schedule", "webhook", "mcp",
     "loop", "reminder", "event", "retry", "validation", "operator_response",
     "operator_ending",  # trinity-enterprise#611: the wake for a cancelled/expired ask
+    "skill_gate",       # trinity-enterprise#751: the notice that a gated request was decided
 })
 
 

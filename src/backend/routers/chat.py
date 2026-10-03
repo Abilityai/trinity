@@ -166,6 +166,9 @@ async def chat_with_agent(
     x_source_agent: Optional[str] = Header(None),
     x_via_mcp: Optional[str] = Header(None),
     idempotency_key: Optional[str] = Header(None),
+    # trinity-enterprise#751: the calling agent's own turn (#2392), forwarded by
+    # the MCP server; the skill gate keeps it only if it is that agent's own.
+    x_trinity_execution_id: Optional[str] = Header(None, max_length=128),
 ):
     """
     Proxy chat messages to agent's internal web server and persist to database.
@@ -224,6 +227,7 @@ async def chat_with_agent(
             x_source_agent=x_source_agent,
             x_via_mcp=x_via_mcp,
             idempotency_key=idempotency_key,
+            x_trinity_execution_id=x_trinity_execution_id,
         )
     except InterAgentDepthExceeded as e:
         _raise_depth_exceeded_403(e)
@@ -345,6 +349,7 @@ async def execute_parallel_task(
     idempotency_key: Optional[str] = Header(None),
     x_event_trigger: Optional[str] = Header(None),
     x_internal_secret: Optional[str] = Header(None),
+    x_trinity_execution_id: Optional[str] = Header(None, max_length=128),  # trinity-enterprise#751
 ):
     """
     Execute a stateless task in parallel mode (no conversation context).
@@ -454,6 +459,7 @@ async def execute_parallel_task(
             idempotency_key=idempotency_key,
             x_event_trigger=x_event_trigger,
             x_internal_secret=x_internal_secret,
+            x_trinity_execution_id=x_trinity_execution_id,
         )
     except InterAgentDepthExceeded as e:
         _raise_depth_exceeded_403(e)

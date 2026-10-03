@@ -1510,6 +1510,37 @@ operator_queue = Table(
     Column("supersedes_expired", Text),  # the predecessor row's uuid
 )
 
+skill_gate_requests = Table(
+    # trinity-enterprise#751 — a gated-skill request frozen while its approval
+    # is open. The ask records the decision; this row records the effect. See
+    # the DDL comment in db/schema.py.
+    "skill_gate_requests",
+    metadata,
+    Column("request_id", Text, primary_key=True),  # the ask's `gate-…` id
+    Column("agent_name", Text),                    # the executor
+    Column("ask_item_id", Text),                   # operator_queue.id once raised
+    Column("skills", Text),                        # JSON list of gated names invoked
+    Column("request_text", Text),                  # the requester's own words, sanitised
+    Column("fingerprints", Text),                  # JSON {skill: content hash}
+    Column("requester_kind", Text),
+    Column("requester_key", Text),                 # what the per-requester cap counts
+    Column("source_agent", Text),                  # the requesting agent, if one
+    Column("requester_email", Text),
+    Column("requester_execution_id", Text),
+    Column("requester_mcp_key_id", Text),
+    Column("origin_execution_id", Text),           # the row the gate closed SKIPPED, if any
+    Column("triggered_by", Text),
+    Column("dispatch", Text),                      # JSON — the frozen dispatch fields
+    Column("state", Text),
+    Column("state_detail", Text),
+    Column("dispatched_execution_id", Text),
+    Column("created_at", Text),
+    Column("decided_at", Text),
+    Column("dispatched_at", Text),
+    Column("notified_at", Text),
+    UniqueConstraint("dispatched_execution_id"),
+)
+
 nevermined_agent_config = Table(
     "nevermined_agent_config",
     metadata,

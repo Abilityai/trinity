@@ -22,6 +22,7 @@ from services.nevermined_payment_service import (
 )
 from services.task_execution_service import get_task_execution_service
 from services.platform_prompt_service import build_public_channel_caller_prompt
+from services.skill_gate_errors import SkillApprovalRequired, SkillGateError
 
 router = APIRouter(prefix="/api/paid", tags=["paid"])
 logger = logging.getLogger(__name__)
@@ -331,6 +332,24 @@ async def paid_chat(
             # #894: per-agent public-channel model override (None → platform default).
             model=db.get_public_channel_model(agent_name),
         )
+    except SkillGateError as e:
+        # trinity-enterprise#751: the request names a gated skill — nothing ran,
+        # so nothing is settled (user ruling 2026-10-02: a paid caller may ask;
+        # an approved run later goes through uncharged, because a payment
+        # authorisation cannot be held across the wait). Release the claim.
+        idempotency_service.fail(idem)
+        db.log_nevermined_payment(
+            agent_name=agent_name,
+            action="verify",
+            success=True,
+            subscriber_address=verify_result.payer,
+            error=f"Not run: {e.code}",
+        )
+        payment = {"settled": False, "reason": "Not run — no charge"}
+        if isinstance(e, SkillApprovalRequired):
+            return JSONResponse(status_code=202, content={**e.detail(), "payment": payment})
+        return JSONResponse(status_code=e.status_code,
+                            content={"detail": e.detail(), "payment": payment})
     except Exception as e:
         logger.error(f"Task execution failed for paid request on {agent_name}: {e}")
         # Nothing dispatched — release the claim so a legitimate retry re-executes.

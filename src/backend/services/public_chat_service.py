@@ -20,6 +20,7 @@ routes — one definition, not a copy.
 import asyncio
 import logging
 import secrets
+from types import SimpleNamespace
 
 from database import db
 # PublicChatRequest stays router-side (it types the route body);
@@ -40,6 +41,7 @@ from services.upload_service import (
     process_file_uploads,
 )
 from db.write_params import TaskExecutionFields
+from services.skill_gate_errors import SkillGateError
 # The chat-turn rate constants moved here with the accounting that reads them
 # (per-IP and per-token message caps; the connection-level public-link rate
 # limit stays in the router beside its Redis window).
@@ -85,6 +87,7 @@ async def _execute_public_chat_background(
     verified_email: str = None,
     memory_system_prompt: str = None,
     images: list = None,
+    request_text: str = None,
 ):
     """
     Background task for async public chat execution.
@@ -97,22 +100,32 @@ async def _execute_public_chat_background(
         # #3114: on a pull pilot the turn is queued and awaited here.
         from services.task_execution_service import dispatch_and_await_terminal
 
-        result = await dispatch_and_await_terminal(
-            agent_name=agent_name,
-            message=context_prompt,
-            triggered_by="public",
-            conversation_key=f"public:{chat_session_id}",
-            source_user_email=source_email,
-            timeout_seconds=900,
-            execution_id=execution_id,
-            # #894: per-agent public-channel model override (None → platform default).
-            model=db.get_public_channel_model(agent_name),
-            # #1205: per-agent public/channel custom-instructions fragment.
-            system_prompt=build_public_channel_caller_prompt(
-                agent_name, memory_system_prompt
-            ),
-            images=images or [],
-        )
+        try:
+            result = await dispatch_and_await_terminal(
+                agent_name=agent_name,
+                message=context_prompt,
+                # trinity-enterprise#751: the gate reads the visitor's own words,
+                # never the history `context_prompt` carries.
+                request_text=request_text,
+                triggered_by="public",
+                conversation_key=f"public:{chat_session_id}",
+                source_user_email=source_email,
+                timeout_seconds=900,
+                execution_id=execution_id,
+                # #894: per-agent public-channel model override (None → platform default).
+                model=db.get_public_channel_model(agent_name),
+                # #1205: per-agent public/channel custom-instructions fragment.
+                system_prompt=build_public_channel_caller_prompt(
+                    agent_name, memory_system_prompt
+                ),
+                images=images or [],
+            )
+        except SkillGateError as e:
+            # trinity-enterprise#751: nothing ran — tell the visitor in the thread.
+            db.add_public_chat_message(session_id=chat_session_id, role="assistant",
+                                       content=e.message if hasattr(e, "message") else str(e),
+                                       sender_email=verified_email)
+            return
 
         if result.status == "success" and result.response:
             # #903: single-participant web session — stamp the assistant turn
@@ -342,6 +355,7 @@ async def run_public_chat(link: dict, chat_request, client_ip: str):
             verified_email=verified_email,
             memory_system_prompt=memory_system_prompt,
             images=_pub_image_data,
+            request_text=chat_request.message,
         ))
 
         return {
@@ -356,21 +370,28 @@ async def run_public_chat(link: dict, chat_request, client_ip: str):
     # and awaited here.
     from services.task_execution_service import dispatch_and_await_terminal
 
-    result = await dispatch_and_await_terminal(
-        agent_name=agent_name,
-        message=context_prompt,
-        triggered_by="public",
-        conversation_key=f"public:{chat_session.id}",
-        source_user_email=source_email,
-        timeout_seconds=900,
-        # #894: per-agent public-channel model override (None → platform default).
-        model=db.get_public_channel_model(agent_name),
-        # #1205: per-agent public/channel custom-instructions fragment.
-        system_prompt=build_public_channel_caller_prompt(
-            agent_name, memory_system_prompt
-        ),
-        images=_pub_image_data,
-    )
+    try:
+        result = await dispatch_and_await_terminal(
+            agent_name=agent_name,
+            message=context_prompt,
+            # trinity-enterprise#751: the visitor's own words, not the history.
+            request_text=chat_request.message,
+            triggered_by="public",
+            conversation_key=f"public:{chat_session.id}",
+            source_user_email=source_email,
+            timeout_seconds=900,
+            # #894: per-agent public-channel model override (None → platform default).
+            model=db.get_public_channel_model(agent_name),
+            # #1205: per-agent public/channel custom-instructions fragment.
+            system_prompt=build_public_channel_caller_prompt(
+                agent_name, memory_system_prompt
+            ),
+            images=_pub_image_data,
+        )
+    except SkillGateError as e:
+        # trinity-enterprise#751: nothing ran. The visitor gets the notice as
+        # the reply (stored like any turn), never a 502 or an empty answer.
+        result = SimpleNamespace(status="gated", cost=None, response=getattr(e, "message", None) or str(e))
 
     if result.status in ("failed", "cancelled"):
         # #679: a CANCELLED turn is non-delivery, not a success-like empty
