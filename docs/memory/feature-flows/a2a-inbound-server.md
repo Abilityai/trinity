@@ -288,7 +288,27 @@ void a configured control.
 allowed when the token verifies **and** the wallet matches that execution's
 payment-log rows. Every mismatch — including payer A polling payer B's existing
 task — answers byte-identical `-32001`, so the binding is not an existence
-oracle.
+oracle. The binding is written **mid-turn**: `run_paid_turn` logs a `verify` row
+carrying the execution id as soon as the execution exists, because when only the
+terminal `settle` / `settle_failed` rows carried the pair, every bound task was
+already finished — a poll during the turn read as not-found and a payer's
+`tasks/cancel` was unreachable by construction. No schema change; those columns
+were already on the row.
+
+**A refusal is classified once, rendered twice.** `routers/a2a.py`'s
+`_classify_paid_refusal` is the single table, consumed by `message/send` (which
+can answer with an HTTP status) and by `message/stream` (which cannot — the
+status line is gone by the time the body generator runs). Two properties it
+exists to hold: a verify that could not DECIDE — facilitator timeout, SDK error,
+saturated concurrency gate — is **our** unavailability, so it answers a JSON-RPC
+error with `data.retryable: true` rather than the 403 a remote Trinity reads as
+"stop retrying and buy another token", and is logged as a `verify` attempt
+rather than a `reject`; and the stream never answers `-32001` for a payment
+condition, since that is A2A **TaskNotFound** and tells a client its task
+vanished when the truth is "pay" / "not allowed" / "retry". `data.code`
+(`payment_rejected` · `verify_unavailable` · `not_allowed` · `in_flight` ·
+`execution_error`) is the discriminator those four instructions need. The paid
+door keeps its own 403 bytes unchanged.
 
 **Attribution, no schema change.** The payer wallet on the `settle` row, the
 execution row (`triggered_by="a2a"` + principal fields) and the platform audit

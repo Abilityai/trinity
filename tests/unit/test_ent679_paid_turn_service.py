@@ -325,11 +325,57 @@ async def test_settled_success_logs_the_burn_and_completes_the_claim():
             "remaining_balance": "9", "tx_hash": "0xtx",
         },
     }
-    assert ctx.db.actions() == ["verify", "settle"]
+    # Two verify rows: the attempt, then the payer→task binding written once
+    # the execution exists (I4) — the second is what makes tasks/get reachable
+    # mid-turn instead of only after a settle row lands.
+    assert ctx.db.actions() == ["verify", "verify", "settle"]
     assert ctx.idem.attached == ["exec-1"]
     assert ctx.idem.upgrades[-1][2] is outcome.payload
     # Settle strictly after the turn ran.
     assert ctx.order.index("execute") < ctx.order.index("settle")
+
+
+async def test_the_payer_task_binding_is_written_when_the_execution_exists():
+    """I4: `payer_owns_execution` must be true BEFORE the turn is terminal.
+
+    The binding is a log row carrying both `execution_id` and
+    `subscriber_address`, and only `settle` / `settle_failed` rows carried both
+    — so a payer could not `tasks/get` the task it was waiting on, and its
+    `tasks/cancel` was unreachable by construction (every bound task was
+    already terminal). This row is written the moment the execution id exists,
+    which is the earliest the binding CAN be true.
+    """
+    _, ctx = await _drive()
+
+    bound = [log for log in ctx.db.logs
+             if log["action"] == "verify" and log.get("execution_id")]
+    assert len(bound) == 1
+    assert bound[0]["execution_id"] == "exec-1"
+    assert bound[0]["subscriber_address"] == "0xpayer"
+    assert bound[0]["success"] is True
+    # Mid-turn, not after: it lands before the settle that used to be the only
+    # writer of the pair.
+    assert ctx.db.logs.index(bound[0]) < \
+        next(i for i, log in enumerate(ctx.db.logs) if log["action"] == "settle")
+
+
+async def test_a_retryable_verify_is_logged_as_an_attempt_not_a_rejection():
+    """I1: a verify that never DECIDED is not a rejection of the payer."""
+    payments = FakePaymentService(verify=_verify_bad("timeout", retryable=True))
+    outcome, ctx = await _drive(payment_service=payments)
+
+    assert outcome.kind == pts.VERIFY_FAILED
+    assert ctx.db.actions() == ["verify"], "a `reject` row would read as refused"
+    assert ctx.db.logs[0]["success"] is False
+    assert ctx.db.logs[0]["error"] == "timeout"
+    # Still consumes no key — the ordering invariant is untouched.
+    assert ctx.idem.begin_calls == []
+
+
+async def test_a_real_rejection_is_still_logged_as_a_reject():
+    payments = FakePaymentService(verify=_verify_bad("expired", retryable=False))
+    _, ctx = await _drive(payment_service=payments)
+    assert ctx.db.actions() == ["reject"]
 
 
 async def test_settle_receives_the_verify_agent_request_id():
@@ -352,7 +398,7 @@ async def test_failed_settle_keeps_the_work_tells_the_truth_and_completes():
     assert outcome.payload["payment"] == {
         "settled": False, "error": "chain down", "settle_retry_needed": True,
     }
-    assert ctx.db.actions() == ["verify", "settle_failed"]
+    assert ctx.db.actions() == ["verify", "verify", "settle_failed"]
     # complete(), NOT fail() — fail() would re-run the LLM on the client's retry.
     assert ctx.idem.completed and ctx.idem.failed == []
     assert ctx.idem.completed[0][1] is outcome.payload
@@ -366,7 +412,7 @@ async def test_concurrent_settle_in_progress_is_not_logged_as_a_failure():
     assert outcome.kind == pts.UNSETTLED
     assert outcome.payload["payment"]["settle_in_progress"] is True
     assert "settle_retry_needed" not in outcome.payload["payment"]
-    assert ctx.db.actions() == ["verify"]            # no settle_failed row
+    assert ctx.db.actions() == ["verify", "verify"]  # no settle_failed row
     assert ctx.idem.completed and ctx.idem.failed == []
 
 
@@ -469,10 +515,10 @@ async def test_disconnect_during_settle_still_settles_and_records_it():
         await task
 
     # The settle and its bookkeeping are detached (C1), so join on the record.
-    await _until(lambda: db.actions() == ["verify", "settle"])
+    await _until(lambda: db.actions() == ["verify", "verify", "settle"])
 
     assert len(payments.settle_calls) == 1
-    assert db.actions() == ["verify", "settle"]        # the burn IS recorded
+    assert db.actions() == ["verify", "verify", "settle"]   # the burn IS recorded
     assert idem.upgrades, "the claim must converge to settled, not stay in-flight"
     assert idem.upgrades[-1][2]["payment"]["settled"] is True
 
@@ -549,10 +595,11 @@ async def test_cancel_scope_during_settle_still_records_the_burn():
         release.set()
 
     # The settle outlives the cancelled scope and owns its own bookkeeping.
-    await _until(lambda: db.actions() == ["verify", "settle"])
+    await _until(lambda: db.actions() == ["verify", "verify", "settle"])
 
     assert len(payments.settle_calls) == 1
-    assert db.actions() == ["verify", "settle"], "the burn must still be recorded"
+    assert db.actions() == ["verify", "verify", "settle"], \
+        "the burn must still be recorded"
     assert idem.upgrades, "the claim must converge to settled, not stay in-flight"
     assert idem.upgrades[-1][2]["payment"]["settled"] is True
 
@@ -584,9 +631,9 @@ async def test_cancel_scope_during_a_settle_that_fails_persists_the_unsettled_wo
         tg.cancel_scope.cancel()
         release.set()
 
-    await _until(lambda: db.actions() == ["verify", "settle_failed"])
+    await _until(lambda: db.actions() == ["verify", "verify", "settle_failed"])
 
-    assert db.actions() == ["verify", "settle_failed"]
+    assert db.actions() == ["verify", "verify", "settle_failed"]
     assert idem.completed and idem.failed == []
     assert idem.completed[0][1]["status"] == "success_unsettled"
 

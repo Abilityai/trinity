@@ -104,3 +104,20 @@ def test_a_settle_failed_row_also_binds_the_payer(nevermined_db):
              action="settle_failed")
 
     assert _ops().payer_owns_execution(AGENT, EXEC, PAYER) is True
+
+
+def test_a_verify_row_carrying_the_execution_binds_mid_turn(nevermined_db):
+    """The I4 row, read by the predicate that consumes it.
+
+    `payer_owns_execution` is action-agnostic by design: it asks "did this
+    wallet pay for this execution", and the mid-turn `verify` row written once
+    the execution id exists answers that while the turn is still running — which
+    is the only window in which polling or cancelling a task is useful.
+    """
+    _log_row(nevermined_db, agent=AGENT, execution_id=EXEC, payer=PAYER,
+             action="verify")
+
+    assert _ops().payer_owns_execution(AGENT, EXEC, PAYER) is True
+    # Still scoped: the row binds THIS payer to THIS agent's execution only.
+    assert _ops().payer_owns_execution(AGENT, EXEC, "0x" + "9" * 40) is False
+    assert _ops().payer_owns_execution("other-agent", EXEC, PAYER) is False

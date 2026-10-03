@@ -103,13 +103,15 @@ def _resolve(value: Union[str, Callable[[Any], str], None], verify: Any):
     return value(verify) if callable(value) else value
 
 
-def _log_verify_ok(db, agent_name: str, verify: Any, error: Optional[str] = None) -> None:
+def _log_verify_ok(db, agent_name: str, verify: Any, error: Optional[str] = None,
+                   execution_id: Optional[str] = None) -> None:
     db.log_nevermined_payment(
         agent_name=agent_name,
         action="verify",
         success=True,
         subscriber_address=verify.payer,
         **({"error": error} if error is not None else {}),
+        **({"execution_id": execution_id} if execution_id is not None else {}),
     )
 
 
@@ -216,9 +218,16 @@ async def run_paid_turn(
     )
 
     if not verify_result.success:
+        # A verify that could not DECIDE — facilitator timeout, SDK error, a
+        # saturated concurrency gate (E7) — is OUR side being unavailable, not a
+        # rejection of the payer, so it is logged as the verify ATTEMPT it was.
+        # RELABELLED rather than skipped (I1): an operator reconciling a
+        # facilitator outage needs to see the attempts, and a `reject` row would
+        # read as "this wallet was refused" in the payment log and in anything
+        # that later reports on refusals.
         db.log_nevermined_payment(
             agent_name=agent_name,
-            action="reject",
+            action="verify" if getattr(verify_result, "retryable", False) else "reject",
             success=False,
             subscriber_address=verify_result.payer,
             error=verify_result.error,
@@ -387,6 +396,18 @@ async def run_paid_turn(
 
     # Record the execution on the claim now that it exists (best-effort).
     idem.attach_execution(decision, exec_result.execution_id)
+
+    # The payer→task binding, written NOW rather than only by the settle rows
+    # (I4). `db.payer_owns_execution` is what lets a paying stranger reach
+    # `tasks/get` / `tasks/cancel` on the A2A door, and it matches on
+    # (agent, execution_id, payer) — columns only a `settle` / `settle_failed`
+    # row carried, i.e. only after the turn was terminal AND a settle had been
+    # attempted. So a payer could not poll the task it was waiting on, and its
+    # cancel was unreachable by construction. This row carries both columns at
+    # the moment the execution exists, which is the earliest the binding CAN be
+    # true. No schema change: the columns are already there.
+    _log_verify_ok(db, agent_name, verify_result,
+                   execution_id=exec_result.execution_id)
 
     # --- 5. settle (success only) ----------------------------------------
     # Effect-scoped guard (#1084) so a concurrent settle reusing the SAME

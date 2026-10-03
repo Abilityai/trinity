@@ -34,7 +34,7 @@ import asyncio
 import json
 import logging
 import uuid
-from typing import Any, Dict, Optional
+from typing import Any, Dict, NamedTuple, Optional
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -558,11 +558,10 @@ async def _payer_for_task(
 ) -> bool:
     """May this token's payer see/cancel `exec_id`? (T5)
 
-    The binding with no new schema: the settle / settle_failed rows already
-    carry both `execution_id` and `subscriber_address`, so "did this wallet pay
-    for this task" is a query, not a column. Verifying on each poll costs one
-    facilitator call, which is why the per-IP and per-agent limiters are
-    upstream of here.
+    The binding with no new schema: the payment log rows already carry both
+    `execution_id` and `subscriber_address`, so "did this wallet pay for this
+    task" is a query, not a column. Verifying on each poll costs one facilitator
+    call, which is why the per-IP and per-agent limiters are upstream of here.
 
     EVERY failure — no token, a token that does not verify, a wallet with no
     row for this execution, a row belonging to another agent — returns False,
@@ -571,11 +570,19 @@ async def _payer_for_task(
     into an oracle for "which execution ids exist", and an anonymous caller is
     exactly who must not have one.
 
-    Residual, stated: a poll that arrives BEFORE the turn's settle row exists
-    (the consumer timed out at 30 s, the turn is still running) finds no
-    binding and reads as not-found. The payer's own retry of the original
-    `message/send` is what recovers the artifact — it replays the completed
-    snapshot without re-executing or re-charging.
+    Reachable MID-TURN (I4): `run_paid_turn` writes a `verify` row carrying the
+    execution id the moment the execution exists, so the binding is true while
+    the turn is still running — which is the only window in which polling or
+    cancelling is useful. It used to be written only by the terminal
+    `settle` / `settle_failed` rows, which made every bound task already
+    terminal: a poll during the turn read as not-found, and a payer's
+    `tasks/cancel` was unreachable by construction.
+
+    Residual, stated: a consumer that timed out never received the task id in
+    the first place, so polling is only available to a client that HAS one. The
+    payer's own retry of the original `message/send` is what recovers the
+    artifact in that case — it replays the completed snapshot without
+    re-executing or re-charging.
     """
     if not access_token:
         return False
@@ -686,29 +693,85 @@ async def _anonymous_jsonrpc(agent_name: str, request: Request):
     return _rpc_error(rpc_id, _RPC_METHOD_NOT_FOUND, f"Method not found: {method}")
 
 
-def _paid_outcome_refusal(outcome, rpc_id: Any):
-    """A `PaidTurnOutcome` → the JSON-RPC answer, or None for "render a Task".
+class _PaidRefusal(NamedTuple):
+    """A refusing `PaidTurnOutcome`, classified once for BOTH paid doors.
 
-    The refusal shapes live here, together, because they are the ones a caller
-    must be able to tell apart: a 403 means go buy a token, an in-flight 409
-    means retry, a raised execution means nothing was charged. Everything that
-    IS a task state returns None and is rendered by
-    `a2a_payment_gate.task_from_paid_payload`.
+    `http` is `(status, body)` where the refusal IS an HTTP status on
+    `message/send` — the paid door's 403 bytes (T3) and the allow-list /
+    sentinel abort. `message/stream` cannot use it: the status line is long gone
+    by the time the body generator runs, so the stream renders `code`/`message`/
+    `data` instead. One classification, two renderers — the alternative was a
+    second table in `_stream_paid_task`, which is how it came to answer `-32001`
+    (A2A **TaskNotFound**) for a payment refusal and to flatten "not allowed"
+    and "retry" into one `-32603 Task execution failed`.
     """
-    if outcome.kind == paid_turn_service.VERIFY_FAILED:
-        # The paid door's 403 bytes. #3185's client maps a 403 carrying
-        # `credential_kind=payment_token` to `payment_rejected`, which is what
-        # tells a remote Trinity to stop retrying and go buy a token.
-        return JSONResponse(status_code=403, content=outcome.payload)
-    if outcome.kind == paid_turn_service.ABORTED:
-        return JSONResponse(status_code=outcome.status_code, content=outcome.payload)
-    if outcome.kind == paid_turn_service.IN_FLIGHT:
-        return _rpc_error(rpc_id, _RPC_INTERNAL_ERROR,
-                          "A duplicate paid request is still being processed",
-                          data={"retryable": True})
-    if outcome.kind == paid_turn_service.EXECUTION_ERROR:
-        return _rpc_error(rpc_id, _RPC_INTERNAL_ERROR, "Task execution failed")
+    code: int
+    message: str
+    data: Optional[dict]
+    http: Optional[tuple] = None
+
+
+def _classify_paid_refusal(outcome) -> Optional[_PaidRefusal]:
+    """None when the outcome IS a task state; the refusal otherwise.
+
+    `data.code` is the discriminator a caller needs: "buy a token", "not
+    allowed", "retry — we were busy" and "retry — your own duplicate is still
+    running" are four different instructions, and `data.retryable` says which
+    of them are worth repeating with the SAME token.
+    """
+    kind = outcome.kind
+    if kind == paid_turn_service.VERIFY_FAILED:
+        if getattr(outcome.verify, "retryable", False):
+            # OUR side could not decide — facilitator timeout, SDK error, or a
+            # saturated concurrency gate (E7). A 403 here would tell #3209's
+            # client `payment_rejected`, i.e. stop retrying and go buy another
+            # token, for what is us being busy. Never a 403, and never -32001:
+            # this is not a task condition either.
+            return _PaidRefusal(
+                _RPC_INTERNAL_ERROR,
+                "Payment verification could not be completed",
+                {"code": "verify_unavailable", "retryable": True},
+            )
+        # A real rejection. The paid door's 403 bytes: #3185's client maps a 403
+        # carrying `credential_kind=payment_token` to `payment_rejected`, which
+        # is what tells a remote Trinity to stop retrying and go buy a token.
+        return _PaidRefusal(
+            _RPC_INTERNAL_ERROR,
+            "Payment verification failed",
+            {"code": "payment_rejected", "retryable": False},
+            http=(403, outcome.payload),
+        )
+    if kind == paid_turn_service.ABORTED:
+        return _PaidRefusal(
+            _RPC_INTERNAL_ERROR,
+            outcome.payload.get("detail") or "Request refused",
+            {"code": "not_allowed", "retryable": False},
+            http=(outcome.status_code, outcome.payload),
+        )
+    if kind == paid_turn_service.IN_FLIGHT:
+        return _PaidRefusal(
+            _RPC_INTERNAL_ERROR,
+            "A duplicate paid request is still being processed",
+            {"code": "in_flight", "retryable": True},
+        )
+    if kind == paid_turn_service.EXECUTION_ERROR:
+        return _PaidRefusal(
+            _RPC_INTERNAL_ERROR,
+            "Task execution failed",
+            {"code": "execution_error", "retryable": False},
+        )
     return None
+
+
+def _paid_outcome_refusal(outcome, rpc_id: Any):
+    """A `PaidTurnOutcome` → the `message/send` answer, or None for "render a Task"."""
+    refusal = _classify_paid_refusal(outcome)
+    if refusal is None:
+        return None
+    if refusal.http is not None:
+        status, body = refusal.http
+        return JSONResponse(status_code=status, content=body)
+    return _rpc_error(rpc_id, refusal.code, refusal.message, data=refusal.data)
 
 
 async def _send_paid_task(agent_name: str, text: str, priced, access_token: str,
@@ -800,16 +863,27 @@ async def _stream_paid_task(agent_name: str, text: str, priced, access_token: st
             yield f"data: {json.dumps(err)}\n\n"
             return
 
-        task = a2a_payment_gate.task_from_paid_payload(outcome, task_builder=_task_object)
+        refusal = _classify_paid_refusal(outcome)
+        task = (
+            None if refusal is not None
+            else a2a_payment_gate.task_from_paid_payload(outcome, task_builder=_task_object)
+        )
         if task is None:
-            # A verification failure / in-flight duplicate / raised execution is
-            # not a task state. Same codes as `message/send`, in SSE.
-            code, message = (
-                (_A2A_TASK_NOT_FOUND, "Payment verification failed")
-                if outcome.kind == paid_turn_service.VERIFY_FAILED
-                else (_RPC_INTERNAL_ERROR, "Task execution failed")
-            )
-            err = {"jsonrpc": "2.0", "id": rpc_id, "error": {"code": code, "message": message}}
+            # A payment refusal is not a task state, and the HTTP-shaped ones
+            # (the 403, the abort) cannot be expressed mid-stream — so every one
+            # of them goes out as the SAME classified JSON-RPC error
+            # `message/send` uses, carrying `data.code` + `data.retryable`.
+            # Deliberately never `-32001`: that is A2A TaskNotFound, and telling
+            # a client its task vanished when the truth is "pay" / "not allowed"
+            # / "retry" is a wrong answer it cannot recover from.
+            err = {"jsonrpc": "2.0", "id": rpc_id, "error": (
+                {"code": refusal.code, "message": refusal.message,
+                 "data": refusal.data}
+                if refusal is not None
+                # Defensive: an outcome kind that is neither a refusal nor a
+                # task. Still not -32001.
+                else {"code": _RPC_INTERNAL_ERROR, "message": "Task execution failed"}
+            )}
             yield f"data: {json.dumps(err)}\n\n"
             return
 

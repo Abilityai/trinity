@@ -173,11 +173,12 @@ what a call burns; `0` says that honestly rather than claiming a per-call price
 nothing will charge. The card then advertises the cost as plan-defined. (A
 negative number is rejected.)
 
-**Retrieving a paid result.** If your HTTP client times out mid-turn, the payer
-can poll `tasks/get` with the same token — a task is bound to the wallet that
-paid for it, and any other caller gets the ordinary "task not found". Re-sending
-the identical message with the same token replays the completed result instead of
-re-running (and re-charging) the work.
+**Retrieving a paid result.** If you hold the task id, the payer can poll
+`tasks/get` with the same token — a task is bound to the wallet that paid for
+it, and any other caller gets the ordinary "task not found". If your HTTP client
+timed out before it read the task id, re-send the identical message with the
+same token: that replays the completed result instead of re-running (and
+re-charging) the work.
 
 **Refusals, and what they mean:**
 
@@ -188,6 +189,15 @@ re-running (and re-charging) the work.
 | `403` | The token was rejected (or your wallet isn't on the agent's inbound allow-list). |
 | `429` | Rate limited. The paying path is capped per source address **and** per agent. |
 | `501` | Payments are configured but this Trinity install can't process one right now. |
+
+A refusal that is **our** side being busy rather than a verdict on your token —
+a payment checker that timed out, or too many payment checks in flight — is not
+a `403`. It comes back as a JSON-RPC error carrying `data.retryable: true`, with
+a `data.code` saying which case it is (`verify_unavailable` — we could not
+check; `in_flight` — your own identical request is still running). Retry those
+with the **same** token; never buy another. `payment_rejected` and `not_allowed`
+carry `retryable: false`. On `message/stream` the same classification arrives as
+an error event, because a status code cannot be sent once the stream has opened.
 
 > **Paid calls are logged as money.** Each settled call records the paying wallet,
 > the execution it paid for, and the source address. A delivered turn whose

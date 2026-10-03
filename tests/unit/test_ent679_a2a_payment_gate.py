@@ -259,10 +259,10 @@ class TestPaymentCallerAllowed:
 # Router harness — the anonymous branch end to end
 # --------------------------------------------------------------------------- #
 class _Verify:
-    def __init__(self, success=True, payer=PAYER, error=None):
+    def __init__(self, success=True, payer=PAYER, error=None, retryable=False):
         self.success, self.payer, self.error = success, payer, error
         self.agent_request_id = "req-1"
-        self.retryable = False
+        self.retryable = retryable
 
 
 class _Settle:
@@ -541,6 +541,44 @@ class TestAnonymousRefusals:
         actions = [row["action"] for row in client.state["payment_log"]]
         assert actions == ["reject"]
 
+    def test_a_retryable_verify_is_a_retryable_error_not_a_403(self, client):
+        """I1: a facilitator timeout is OUR outage, not the payer's problem.
+
+        `retryable` is set on a timeout, an SDK error and a saturated
+        concurrency gate (E7) — cases where the facilitator never DECIDED. A 403
+        is read by #3209's client as `payment_rejected`, i.e. stop retrying and
+        go buy another token, which is the wrong instruction and costs the payer
+        money for our unavailability. So: a JSON-RPC error carrying
+        `data.retryable`, and never a -32001 (that is A2A TaskNotFound).
+        """
+        client.state["verify"] = _Verify(
+            success=False, error="facilitator timeout", retryable=True)
+        r = _send(client, header="tok")
+
+        assert r.status_code == 200          # the error rides in the envelope
+        err = r.json()["error"]
+        assert err["code"] == a2a_protocol.RPC_INTERNAL_ERROR
+        assert err["code"] != a2a_protocol.A2A_TASK_NOT_FOUND
+        assert err["data"] == {"code": "verify_unavailable", "retryable": True}
+
+    def test_a_retryable_verify_is_logged_as_an_attempt_not_a_rejection(self, client):
+        """A verify that never decided must not read as "this wallet was refused"."""
+        client.state["verify"] = _Verify(
+            success=False, error="facilitator timeout", retryable=True)
+        _send(client, header="tok")
+
+        rows = client.state["payment_log"]
+        assert [row["action"] for row in rows] == ["verify"]
+        assert rows[0]["success"] is False
+        assert rows[0]["error"] == "facilitator timeout"
+
+    def test_a_rejected_token_still_carries_the_discriminator(self, client):
+        """A real rejection keeps its 403 bytes (T3) — the paid door's shape."""
+        client.state["verify"] = _Verify(success=False, error="expired")
+        r = _send(client, header="tok")
+        assert r.status_code == 403
+        assert r.json() == {"detail": "Payment verification failed", "error": "expired"}
+
     def test_verify_runs_before_the_dedup_gate(self, client):
         """A rejected token must not consume an idempotency key."""
         client.state["verify"] = _Verify(success=False, error="nope")
@@ -625,7 +663,7 @@ class TestPaidSend:
             "creditsRedeemed": 2, "remainingBalance": "41",
         }
         assert [row["action"] for row in client.state["payment_log"]] == [
-            "verify", "settle"]
+            "verify", "verify", "settle"]
 
     def test_the_turn_runs_with_no_trinity_principal_and_public_channel_settings(
             self, client):
@@ -792,6 +830,51 @@ class TestPaidStream:
         events = self._events(r)
         assert "error" in events[-1]
         assert events[-1]["error"]["message"] == "Payment verification failed"
+
+    def test_the_stream_never_answers_task_not_found_for_a_payment_refusal(self, client):
+        """I3: -32001 is A2A TaskNotFound and this is not a task condition.
+
+        A streaming client is told its task does not exist when the truth is
+        "buy a token" — an answer it cannot act on, and one the `message/send`
+        path never gave. The stream now renders the SAME classification `send`
+        does, with `data.code` as the discriminator.
+        """
+        client.state["verify"] = _Verify(success=False, error="nope")
+        err = self._events(_send(client, header="bad", method="message/stream"))[-1]["error"]
+
+        assert err["code"] != a2a_protocol.A2A_TASK_NOT_FOUND
+        assert err["code"] == a2a_protocol.RPC_INTERNAL_ERROR
+        assert err["data"] == {"code": "payment_rejected", "retryable": False}
+
+    def test_a_retryable_verify_on_stream_keeps_its_retryable_flag(self, client):
+        client.state["verify"] = _Verify(
+            success=False, error="facilitator busy", retryable=True)
+        err = self._events(_send(client, header="tok", method="message/stream"))[-1]["error"]
+
+        assert err["code"] != a2a_protocol.A2A_TASK_NOT_FOUND
+        assert err["data"] == {"code": "verify_unavailable", "retryable": True}
+
+    def test_an_unlisted_payer_on_stream_is_named_not_allowed(self, client):
+        """The allow-list 403 cannot be an HTTP status mid-stream (T7 + I3).
+
+        It used to flatten into the same `-32603 Task execution failed` an
+        in-flight duplicate got, so a client could not tell "you are not
+        allowed here" (never retry) from "your own duplicate is still running"
+        (retry shortly).
+        """
+        class _P:
+            def is_inbound_allowed(self, agent, identity):
+                return False
+        a2a_gate.register_provider(_P())
+        try:
+            err = self._events(
+                _send(client, header="tok", method="message/stream"))[-1]["error"]
+        finally:
+            a2a_gate.clear_provider()
+
+        assert err["code"] != a2a_protocol.A2A_TASK_NOT_FOUND
+        assert err["data"] == {"code": "not_allowed", "retryable": False}
+        assert "allow-list" in err["message"]
 
 
 # --------------------------------------------------------------------------- #
