@@ -4128,6 +4128,18 @@
       "description": "payments-py pin parity + import smoke (ent#679 checkpoint A), the #1891 shape applied to a dependency: docker/backend/Dockerfile and tests/requirements-test.txt must pin payments-py EXACTLY and EQUALLY (a floor in the test requirements is how CI came to exercise 1.18.0 against a 1.2.1 image, trinity-enterprise#763), the pin must be >= 1.18 (below it the in-band A2A metadata rail does not exist), the installed version must equal the pin, every unconditional runtime requirement of payments-py must be constrained in the image (`requests` the one reasoned pre-existing exemption) and the 13 explicitly pinned transitives must equal what the venv resolved; plus the import smoke that is the real point — `payments_py.payments` imports the a2a package at module load, so one unimportable transitive flips NEVERMINED_AVAILABLE to False and both payment doors answer 501 with a green build and no error anywhere but a WARNING. Also pins the facilitator call signatures Trinity passes positionally. No Docker, no network."
     },
     {
+      "file": "unit/test_ent679_payer_owns_execution.py",
+      "feature": "abilityai/trinity-enterprise#679",
+      "added": "2026-10-03",
+      "categories": [
+        "backend",
+        "database",
+        "payments",
+        "security"
+      ],
+      "description": "The payer\u2192task binding at the layer that implements it (ent#679 I6): `db/nevermined.py::payer_owns_execution` run against a throwaway SQLite carrying the real `nevermined_payment_log`, because every A2A gate test stubs `db.nevermined_payer_owns_execution` and the one new query on the money path \u2014 the one carrying T5's security property \u2014 never executed in CI. Pins that the payer matches their own settled (and settle_failed) task across the facilitator's unstable checksum casing, that another payer / another agent / an unknown execution are all False, that a SQL-shaped wallet is a bound parameter rather than SQL, and that a missing argument fails closed."
+    },
+    {
       "file": "unit/test_ent679_paid_turn_service.py",
       "feature": "abilityai/trinity-enterprise#679",
       "added": "2026-10-03",

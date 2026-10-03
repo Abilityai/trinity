@@ -633,6 +633,26 @@ async def test_pre_execute_abort_short_circuits_after_the_gate_before_the_turn()
     assert ctx.payments.settle_calls == []
 
 
+async def test_pre_execute_abort_releases_the_fresh_claim():
+    """I2: a refusal that keeps the claim 409s the payer's own retry for 24 h.
+
+    `begin()` has already run when `pre_execute` refuses, so without a release
+    the identical retry is answered IN_FLIGHT ("a duplicate paid request is
+    still being processed") instead of the refusal that says why — for the key's
+    whole TTL. Nothing was charged and nothing was delivered, so the claim must
+    be released, exactly as the cancelled/failed/raised execution branches do.
+    """
+    def _refuse(verify):
+        raise pts.PaidTurnAbort({"detail": "wallet not allowed"}, status_code=403)
+
+    idem = FakeIdem()
+    outcome, _ = await _drive(idem=idem, pre_execute=_refuse)
+
+    assert outcome.kind == pts.ABORTED
+    assert idem.failed, "the refused payer's retry must reach the refusal, not a 409"
+    assert idem.completed == []
+
+
 async def test_scope_may_be_derived_from_the_payer(monkeypatch):
     """The A2A gate namespaces its dedup scope by payer wallet (FR-4).
 

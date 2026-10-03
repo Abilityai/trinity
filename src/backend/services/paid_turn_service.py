@@ -317,6 +317,11 @@ async def run_paid_turn(
         try:
             pre_execute(verify_result)
         except PaidTurnAbort as abort:
+            # Nothing charged, nothing delivered — release the fresh claim (I2).
+            # Keeping it would answer the refused payer's identical retry
+            # IN_FLIGHT ("still being processed") instead of the refusal that
+            # says why, for the key's whole 24 h TTL.
+            idem.fail(decision)
             return PaidTurnOutcome(
                 kind=ABORTED,
                 status_code=abort.status_code,

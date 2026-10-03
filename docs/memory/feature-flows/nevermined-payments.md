@@ -163,6 +163,20 @@ Shared User (view-only)
 | Server-side settlement retry | 501 | `/api/nevermined/retry-settlement/{log_id}` — token not stored (#1018) |
 | SDK not installed | 501 | `_check_sdk()` |
 
+## Configuration (operator knobs)
+
+Both are env-only and read at import, so a change needs a backend restart.
+
+| Variable | Default | What it bounds |
+|----------|---------|----------------|
+| `NEVERMINED_MAX_INFLIGHT` | `8` | Fleet-wide ceiling on **concurrent** facilitator calls. Every verify and settle attempt runs on the default thread executor, so a slow facilitator would otherwise hold backend threads for the whole fleet. Deliberately fleet-wide rather than per agent — the thread pool is a platform resource — and a priced agent's public URL needs no credential to make the backend dial out, so per-IP rate limiting cannot supply this bound (it has to hold *across* IPs). |
+| `NEVERMINED_FACILITATOR_WAIT_SECONDS` | `5.0` | How long a call waits for a free slot before giving up. Bounded because the caller is holding an HTTP request open: "busy, retry" is an honest answer, an unbounded queue is not. A refused call never reaches the facilitator, so it burns nothing. |
+
+The gate is one semaphore **per event loop** (`_FACILITATOR_GATES`, keyed weakly
+on the running loop): a module-level semaphore would bind whichever loop first
+contended on it, which in a test suite is whichever test ran first, while in
+production there is one loop per worker and the bound is per worker.
+
 ## Isolation Guarantees
 
 1. All changes are additive — no existing code paths modified. (ent#679 is the
