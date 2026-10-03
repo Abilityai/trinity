@@ -119,6 +119,10 @@ ACCEPTED_UNTIL_RELEASE: dict[tuple[str, str], str] = {
     ("dev-nightly.yml", "schedule"): "new file; nightly on dev starts at the next release cut",
     ("dev-nightly.yml", "workflow_dispatch"): "new file; manual run available once on main",
     ("dev-ci-status.yml", "workflow_dispatch"): "new file; the push trigger is the live path, dispatch is re-evaluation only",
+    # #2985: nightly prod deploy has no push trigger, so it is fully inert until
+    # the next release cut carries it to `main`.
+    ("deploy-prod-nightly.yml", "schedule"): "new file; nightly prod deploy starts at the next release cut",
+    ("deploy-prod-nightly.yml", "workflow_dispatch"): "new file; manual run available once on main",
 }
 
 
