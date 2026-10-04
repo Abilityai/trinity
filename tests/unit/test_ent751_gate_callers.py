@@ -654,7 +654,11 @@ def a2a_client(monkeypatch):
 
     monkeypatch.setattr(a2a, "db", SimpleNamespace(
         get_a2a_exposed=lambda name: name == AGENT,
-        can_user_access_agent=lambda user, name: name == AGENT))
+        can_user_access_agent=lambda user, name: name == AGENT,
+        # ent#679: the inbound door asks whether the agent declares a price
+        # first; this harness's agent does not (the test_157 stub).
+        get_nevermined_config=lambda name: None,
+        get_nevermined_config_with_key=lambda name: None))
     dispatch = AsyncMock(side_effect=_pending())
     monkeypatch.setattr(a2a, "dispatch_and_await_terminal", dispatch)
 
@@ -675,7 +679,9 @@ def a2a_client(monkeypatch):
                            agent_name=None, mcp_key_id="k1")
     # The dependency object the route itself holds — `dependencies` is re-imported
     # between tests (conftest pop list), so a fresh import would not match.
-    app.dependency_overrides[a2a.get_current_user] = lambda: user
+    # ent#679: the route now depends on `get_user_or_anonymous` (which calls
+    # `get_current_user` directly), so that is the one to override.
+    app.dependency_overrides[a2a.get_user_or_anonymous] = lambda: user
     return SimpleNamespace(http=TestClient(app), dispatch=dispatch, idem=idem)
 
 
@@ -1170,3 +1176,81 @@ def test_the_turns_own_reply_is_still_never_reported_twice(monkeypatch, record):
     ok, written = _drive_report(ccr, monkeypatch, _ReportRow(triggered_by="public"),
                                 session=_REPORT_SESSION)
     assert ok is False and written == []
+
+
+# ---------------------------------------------------------------------------
+# 13. The paid turn (services/paid_turn_service.py) and the paid A2A door
+# ---------------------------------------------------------------------------
+# ent#679 moved the x402 verify → dedup → execute → settle lifecycle out of
+# routers/paid.py into one service both paid doors run. A gated turn is neither a
+# success nor an execution error: nothing ran, nothing is charged, and the claim
+# is released (a completed-unsettled claim would make a retry try to SETTLE).
+# The service's own harness (test_ent679_paid_turn_service) drives it here.
+
+from test_ent679_paid_turn_service import _drive as _drive_paid_turn, pts as _PTS  # noqa: E402
+
+
+@pytest.mark.asyncio
+async def test_a_held_paid_turn_is_its_own_outcome_and_charges_nothing():
+    async def _held():
+        raise _pending()
+
+    outcome, ctx = await _drive_paid_turn(execute=_held)
+    assert outcome.kind == _PTS.GATE_HELD
+    assert outcome.status_code == 202
+    assert outcome.payload["status"] == "pending_approval"
+    assert outcome.payload["request_id"] == REQUEST_ID
+    assert outcome.payload["payment"] == {"settled": False, "reason": "Not run — no charge"}
+    assert ctx.payments.settle_calls == []
+    assert ctx.idem.failed and ctx.idem.completed == []
+    assert ctx.db.logs[-1]["action"] == "verify" and "approval_pending" in ctx.db.logs[-1]["error"]
+
+
+@pytest.mark.asyncio
+async def test_a_refused_paid_turn_keeps_its_status_and_charges_nothing():
+    async def _refusal():
+        raise _refused(429, "approval_queue_full")
+
+    outcome, ctx = await _drive_paid_turn(execute=_refusal)
+    assert outcome.kind == _PTS.GATE_REFUSED
+    assert outcome.status_code == 429
+    assert outcome.payload["detail"]["code"] == "approval_queue_full"
+    assert outcome.payload["payment"]["settled"] is False
+    assert ctx.payments.settle_calls == [] and ctx.idem.failed
+
+
+from test_ent679_a2a_payment_gate import (  # noqa: E402,F401 — `client` is a fixture
+    _payload as _a2a_payload, _send as _a2a_send, _task_of as _a2a_task_of, client)
+
+
+def _a2a_gate_raises(client, monkeypatch, exc):
+    import routers.a2a as a2a
+
+    async def _adapter(**kwargs):
+        client.state["last_dispatch"] = kwargs
+        raise exc
+    monkeypatch.setattr(a2a, "dispatch_and_await_terminal", _adapter)
+
+
+class TestPaidA2A:
+    def test_a_held_paid_send_is_an_input_required_task_keyed_on_the_request(self, client, monkeypatch):
+        _a2a_gate_raises(client, monkeypatch, _pending())
+        task = _a2a_task_of(_a2a_send(client, payload=_a2a_payload()))
+        assert task["id"] == REQUEST_ID
+        assert task["status"]["state"] == "input-required"
+        assert client.state.get("settles", []) == []
+
+    def test_a_refused_paid_send_is_a_rejected_task(self, client, monkeypatch):
+        _a2a_gate_raises(client, monkeypatch, _refused(409, "gated_skill_not_installed"))
+        task = _a2a_task_of(_a2a_send(client, payload=_a2a_payload()))
+        assert task["status"]["state"] == "rejected"
+        assert client.state.get("settles", []) == []
+
+    def test_a_held_paid_stream_ends_input_required(self, client, monkeypatch):
+        import json as _json
+        _a2a_gate_raises(client, monkeypatch, _pending())
+        r = _a2a_send(client, payload=_a2a_payload(), method="message/stream")
+        events = [_json.loads(line[len("data: "):]) for line in r.text.splitlines()
+                  if line.startswith("data: ")]
+        final = events[-1]["result"]
+        assert final["final"] is True and final["status"]["state"] == "input-required"

@@ -159,6 +159,7 @@ All responses go through the app handler `error_handlers.skill_gate_error` (`src
 | Case | Status / code | What the caller sees |
 |---|---|---|
 | Approval raised | 202 `approval_pending` | MCP: `pending_approval` ("do not retry"); fan-out: subtask `pending_approval` + `request_id`; A2A: `input-required` keyed on the request id; paid: 202, not settled; Workspace: the notice as the reply |
+| …on a paid door | `GATE_HELD` / `GATE_REFUSED` | Both paid doors run `services/paid_turn_service.run_paid_turn`, which returns these outcomes. Nothing ran and nothing is charged; the claim is released with `fail()` (a completed-unsettled claim would make a retry try to settle). The x402 door answers 202 or the refusal; the paid A2A door renders the same `input-required` / `rejected` task, with x402 "verified, nothing charged" metadata (`services/a2a_payment_gate.py::_OUTCOME_RENDER`). |
 | Gate map unreadable | 503 `gate_unavailable` | nothing dispatched |
 | Approval could not be raised | 503 `approval_unavailable` | no pending record left behind |
 | Nobody fills the role | 422 `role_unassigned` | nothing raised |

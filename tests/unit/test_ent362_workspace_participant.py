@@ -274,13 +274,22 @@ def test_the_wake_controls_are_actually_wired_into_the_post_path():
     import inspect
     from shared_sessions import service
 
-    src = inspect.getsource(service.post_message)
-    tree = ast.parse(src.lstrip())
-    called = {
-        node.func.id
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
-    }
+    def _calls(fn):
+        tree = ast.parse(inspect.getsource(fn).lstrip())
+        return {
+            node.func.id
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+        }
+
+    # #3210 split `post_message` at the append: what a landed message sets in
+    # motion — these controls included — lives in `_after_landing`. Both links
+    # are pinned, so deleting either call site still fails here.
+    assert "_after_landing" in _calls(service.post_message), (
+        "post_message must hand a landed message to _after_landing"
+    )
+    src = inspect.getsource(service._after_landing)
+    called = _calls(service._after_landing)
     assert "_apply_wake_cap" in called, (
         "post_message must run the per-participant wake cap (ent#362 AC#4)"
     )

@@ -525,6 +525,18 @@
 - **Description**: 4 MCP tools for Nevermined management
 - **Tools**: `configure_nevermined`, `get_nevermined_config`, `toggle_nevermined`, `get_nevermined_payments`
 
+### 23.7 The same paywall on the A2A door (ent#679) — pointer
+- **Status**: 🚧 In Progress
+- **Home**: `docs/memory/requirements/mcp.md` **§32.6**. The A2A inbound door
+  (§32.2 there) owns the gate, so the requirement lives with the door and this
+  is a pointer, not a second description.
+- **What changes here**: §23.3's settle / replay / `success_unsettled` logic is
+  no longer paid-door-only — both doors call one orchestrator
+  (`services/paid_turn_service.py`), so the #1018 branches have one home. The
+  paid door's own behaviour is unchanged. `credits_per_request` now accepts
+  **0** for a Nevermined *duration* plan (charged by time, not per call); a
+  negative is still a named 422 (§32.6 FR-11).
+
 ---
 
 ## 27. Mobile Admin PWA (MOB-001)

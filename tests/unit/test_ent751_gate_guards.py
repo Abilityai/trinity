@@ -179,7 +179,9 @@ _UNWRAPPED = {
     ("routers/a2a.py", "_run_a2a_task"): "the A2A caller's text as sent",
     ("routers/internal.py", "execute_task_internal"): "the schedule message as its owner wrote it",
     ("routers/internal.py", "_execute_task_internal_background"): "the schedule message as its owner wrote it",
-    ("routers/paid.py", "paid_chat"): "the payer's message as sent",
+    # ent#679 moved the paid dispatch into a closure the shared paid turn runs.
+    ("routers/paid.py", "_execute"): "the payer's message as sent",
+    ("routers/a2a.py", "_run_a2a_paid_execution"): "the paying A2A caller's text as sent",
     ("routers/sessions.py", "send_session_message"): "the person's message (resumed session, no prefix)",
     ("services/brain_orb_postprocess.py", "_run"): "a platform frame around a voice transcript",
     ("services/loop_service.py", "_run_and_advance"): "the rendered iteration is what an approval runs and what the approver sees",
