@@ -117,6 +117,39 @@ google-genai>=1.0.0
 # how CI came to run 1.18.0 against a 1.2.1 image (trinity-enterprise#763).
 # Guarded by tests/unit/test_ent679_payments_pin_parity.py.
 payments-py==1.18.0
+# payments-py 1.18.0's own unconditional runtime dependency set, pinned here to
+# exactly what `docker/backend/Dockerfile` pins. Leaving them to pip is what
+# turned this branch red: payments-py declares `pyjwt<3.0.0,>=2.9.0`, nothing in
+# this file constrained it, so CI resolved the newest release (2.15.1) against
+# an image pinning 2.14.0 — the SAME image-vs-CI divergence the exact
+# `payments-py` pin above exists to prevent, one layer down. The other twelve
+# were green only because the newest release still happened to equal the image
+# pin; the Dockerfile's "versions are the ones the test venv resolved" note was
+# true when written and expires the moment any of these publishes a release.
+#
+# Keep this block equal to the Dockerfile's, name for name and version for
+# version: `tests/unit/test_ent679_payments_pin_parity.py` asserts
+# image-pin == installed-version for every one of them, and the whole point of
+# that test is that CI exercises the SDK stack production ships (an import
+# failure in any one of them flips NEVERMINED_AVAILABLE to False and both
+# payment doors answer 501 with a green build). Bump both files together.
+a2a-sdk==0.3.26
+mcp==1.30.0
+python-socketio==5.14.3
+pyjwt==2.14.0
+jsonschema==4.26.0
+websocket-client==1.9.2
+helicone-helpers==1.2.1
+black==26.5.1
+mkdocs==1.6.1
+mkdocs-material==9.7.7
+mkdocstrings[python]==0.29.1
+mike==2.2.0
+# Exact here, and intentionally narrower than the `pytest-asyncio>=0.24.0` floor
+# in this file's test-tooling block above — pip intersects the two to this
+# version. payments-py declares it as a runtime requirement, so the parity test
+# covers it like the rest of the set.
+pytest-asyncio==1.4.0
 # tzdata: the IANA database as a pure-Python fallback for `zoneinfo`. The #1771
 # timestamp properties draw real IANA zones (`st.timezones()`) deliberately —
 # DST transitions, quarter-hour offsets and historical LMT offsets are what stop
