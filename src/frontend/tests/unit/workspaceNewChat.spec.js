@@ -41,8 +41,10 @@ describe('ent#451 — ?new=1 asks for a fresh thread', () => {
   it('the landing function already honoured it', () => {
     expect(resolveAgentLanding({ agent: 'sage', forceNew: true, agents, threads }))
       .toEqual({ agentName: 'sage', sessionId: null })
+    // ent#784 made `forceNew` redundant rather than wrong: a plain landing now
+    // resolves to a fresh chat too, so the flag can never resume a thread.
     expect(resolveAgentLanding({ agent: 'sage', forceNew: false, agents, threads }).sessionId)
-      .toBe('ps_old')
+      .toBeNull()
   })
 
   it('and the view now carries that same answer into the SEND', () => {
@@ -52,7 +54,7 @@ describe('ent#451 — ?new=1 asks for a fresh thread', () => {
     // `new_thread: false` — resuming the thread the user asked to leave.
     const src = codeOnly(PORTAL())
     expect(src).toMatch(/const forceNew = !!route\.query\.new/)
-    expect(src).toMatch(/startingNewChat\.value = forceNew && !landing\.sessionId/)
+    expect(src).toMatch(/startingNewChat\.value = !landing\.sessionId/)
   })
 
   it('reads route.query.new exactly once, so the two consumers cannot drift', () => {
@@ -115,7 +117,11 @@ describe('ent#451 — only the first turn of a new chat opens a thread', () => {
     // variable is one refactor away from being wrong.
     const src = codeOnly(PORTAL())
     const nulls = (src.match(/pendingSession\.value = null/g) || []).length
-    const settles = (src.match(/startingNewChat\.value = (false|forceNew)/g) || []).length
+    // ent#784 widened the spellings rather than keeping a dead `forceNew` in
+    // the assignment to dodge this count: the deep link now settles on the
+    // RESOLVED landing, and the two new-chat doors settle on `true`. The case
+    // counts settles, not spellings.
+    const settles = (src.match(/startingNewChat\.value = (false|true|!landing\.sessionId)/g) || []).length
     expect(settles).toBeGreaterThanOrEqual(nulls)
   })
 })
@@ -148,7 +154,11 @@ describe('#2579 — the fresh chat is visible and focused', () => {
     // New chat bumps `convGen`, which remounts the conversation, so focus set
     // before the press is thrown away. It has to happen in `onMounted`.
     const src = codeOnly(CONV())
-    expect(src).toMatch(/if \(props\.newChat\) nextTick\(focusComposer\)/)
+    expect(src).toMatch(/if \(props\.newChat && mayAutoFocus\(\)\) nextTick\(focusComposer\)/)
+    // ent#784: the gate is a MODE, not a blanket pointer check — a gesture door
+    // (`always`, the default) keeps #2579 AC 2 on every pointer, and only a
+    // landing (`fine-pointer`) consults the media query.
+    expect(src).toMatch(/if \(props\.focusOnMount !== 'fine-pointer'\) return true/)
     expect(src).toMatch(/function focusComposer\(\) \{ textarea\.value\?\.focus\(\) \}/)
     // Membership, not the exact shape: #2559 adds `startVoiceCall` beside it for
     // the Talk door. What this case needs is that the parent can still reach
@@ -168,14 +178,36 @@ describe('#2579 — the fresh chat is visible and focused', () => {
 })
 
 describe('#2579 — Main is listed from the first visit', () => {
-  it('landOnAgent no longer destructures an array, and re-checks the route AFTER the ensure', () => {
-    // `store.fetchSessions` returns `data.sessions || []` — an ARRAY. The old
-    // `const { sessions } = await …` was always undefined, so the repair
-    // branch never ran once. The ensure awaits two round trips where the old
-    // code awaited one, so the overtake guard has to sit between them.
+  it('ent#784 — landOnAgent is synchronous and never waits on the ensure', () => {
+    // The awaited `ensureMainListed` used to sit on the landing path, with an
+    // overtake guard after it because two landings could be in flight at once.
+    // ent#784's rule needs nothing from the network, so the whole await — and
+    // with it that race — is gone from this function. The pinned Main is still
+    // minted on the first visit; the watcher below owns it (T1).
     const src = codeOnly(PORTAL())
-    expect(src).not.toMatch(/const \{ sessions \} = await store\.fetchSessions/)
-    expect(src).toMatch(/await ensureMainListed\(name\)[\s\S]{0,400}?if \(activeAgentPageName\.value !== name\) return/)
+    const fn = src.match(/function landOnAgent\(name\) \{[\s\S]*?\n\}/)
+    expect(fn).not.toBeNull()
+    expect(fn[0]).not.toMatch(/await/)
+    expect(fn[0]).not.toMatch(/ensureMainListed/)
+    expect(src).not.toMatch(/async function landOnAgent/)
+    // ent#551 class (decision #13): back/forward and a typed URL reach the
+    // landing without passing a click door, and `activeAgentName` feeds
+    // `convKey` — so the call has to be guarded BEFORE anything is written.
+    expect(fn[0]).toMatch(/^function landOnAgent\(name\) \{\s*if \(!name\) return\s*if \(guardLeaveCall/)
+    // T4: the landed chat keeps `/workspace/a/:name`, so a reload or a copied
+    // link still names the agent. No escape to bare `/workspace` here.
+    expect(fn[0]).not.toMatch(/escapeStage|router\.push/)
+  })
+
+  it('ent#784 — the landing mints no row, and re-firing does not remount an unsent chat', () => {
+    // AC 4: landing creates nothing server-side — it only raises the intent,
+    // and the thread is born on the first send (`new_thread`, above). The
+    // watcher fires on the route param AND on the thread list arriving, and
+    // this landing no longer navigates away, so the second fire must be a
+    // no-op or it throws away what the person had started typing.
+    const fn = codeOnly(PORTAL()).match(/function landOnAgent\(name\) \{[\s\S]*?\n\}/)[0]
+    expect(fn).not.toMatch(/store\.fetchSessions|createSession|refreshThreads/)
+    expect(fn).toMatch(/if \(activeAgentName\.value === name && startingNewChat\.value && !pendingSession\.value\) return[\s\S]*?convGen\.value\+\+/)
   })
 
   it('the ensure is a deduped, capped promise per agent — and both maps die at sign-out', () => {

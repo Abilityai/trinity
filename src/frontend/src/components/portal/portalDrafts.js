@@ -211,11 +211,16 @@ export function reconcileDraftOnKeyChange({ oldKey = null, newKey = null, compos
 }
 
 /**
- * Focus the restored composer on a fine pointer only. #2579's New chat focus
- * is an explicit gesture; arriving at a drafted chat is not, and on a phone a
- * focus pops the soft keyboard over the transcript.
+ * May the composer take focus by itself? On a fine pointer only — on a phone a
+ * programmatic focus pops the soft keyboard over the transcript.
+ *
+ * Two reasons share this one rule, which is why the name says "auto" rather
+ * than "on restore": arriving at a drafted chat (ent#657), and LANDING on an
+ * agent's new chat (ent#784). Neither is something the person asked for in
+ * those words. An explicit gesture — New chat, ⌘J, the agent picker — does not
+ * consult this at all and focuses on any pointer (#2579 AC 2).
  */
-export function shouldFocusOnRestore(matchMedia) {
+export function shouldAutoFocusComposer(matchMedia) {
   try {
     return typeof matchMedia === 'function' && !!matchMedia('(pointer: fine)')?.matches
   } catch {
