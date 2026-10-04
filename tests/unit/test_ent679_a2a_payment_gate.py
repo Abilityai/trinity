@@ -953,6 +953,14 @@ class TestPayerBoundTaskRpc:
         assert task["status"]["state"] == "working"
 
     def test_a_bound_payer_can_cancel_a_running_task(self, client):
+        """Pins `_bound_task_rpc`'s cancel branch, on a state seeded by hand.
+
+        The paid flow does not produce a binding on a RUNNING row today:
+        `run_paid_turn` writes it once `execute()` has returned, which is at the
+        terminal. So this is the handler's behaviour should the binding ever be
+        written earlier — it must then match the principal path's cancel — and
+        not evidence that a payer can cancel a turn in flight.
+        """
         client.state["executions"]["exec-1"] = {"agent_name": AGENT, "status": "running"}
         client.state["bindings"].add((AGENT, "exec-1", PAYER))
         task = _task_of(_rpc(client, "tasks/cancel", "exec-1", header="tok"))

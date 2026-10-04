@@ -288,12 +288,14 @@ void a configured control.
 allowed when the token verifies **and** the wallet matches that execution's
 payment-log rows. Every mismatch — including payer A polling payer B's existing
 task — answers byte-identical `-32001`, so the binding is not an existence
-oracle. The binding is written **mid-turn**: `run_paid_turn` logs a `verify` row
-carrying the execution id as soon as the execution exists, because when only the
-terminal `settle` / `settle_failed` rows carried the pair, every bound task was
-already finished — a poll during the turn read as not-found and a payer's
-`tasks/cancel` was unreachable by construction. No schema change; those columns
-were already on the row.
+oracle. The binding is written **when the turn's result exists, before the
+settle**: `run_paid_turn` logs a `verify` row carrying the execution id as soon
+as `execute()` returns, because when only the `settle` / `settle_failed` rows
+carried the pair, a payer was locked out of a finished task while its settle was
+still running, and for good when a concurrent settle wrote no row. It is **not**
+written mid-turn — `execute()` returns at the terminal, so a poll during the
+turn reads as not-found and a payer's `tasks/cancel` can only answer "already in
+a terminal state". No schema change; those columns were already on the row.
 
 **A refusal is classified once, rendered twice.** `routers/a2a.py`'s
 `_classify_paid_refusal` is the single table, consumed by `message/send` (which

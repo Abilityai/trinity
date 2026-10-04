@@ -570,13 +570,20 @@ async def _payer_for_task(
     into an oracle for "which execution ids exist", and an anonymous caller is
     exactly who must not have one.
 
-    Reachable MID-TURN (I4): `run_paid_turn` writes a `verify` row carrying the
-    execution id the moment the execution exists, so the binding is true while
-    the turn is still running — which is the only window in which polling or
-    cancelling is useful. It used to be written only by the terminal
-    `settle` / `settle_failed` rows, which made every bound task already
-    terminal: a poll during the turn read as not-found, and a payer's
-    `tasks/cancel` was unreachable by construction.
+    Bound as soon as the turn has a RESULT, not only once a settle row lands
+    (I4): `run_paid_turn` writes a `verify` row carrying the execution id when
+    `execute()` returns, before the settle starts. The settle rows used to be
+    the only writers of the pair, so a payer was locked out of a finished task
+    for as long as the settle ran (three 30-second attempts), and for good when
+    a concurrent settle wrote no row of its own (`settle_in_progress`).
+
+    NOT bound mid-turn, stated: `execute()` is `dispatch_and_await_terminal`,
+    which returns at the terminal on push and pull alike, so the execution id
+    does not exist in `run_paid_turn` while the turn is running. A poll during
+    the turn reads as not-found, and a payer's `tasks/cancel` can only answer
+    "already in a terminal state" — the paying caller holds no task id until
+    the turn ends anyway. Binding earlier needs the execution id minted before
+    dispatch; that is a change to the dispatch contract, not to this function.
 
     Residual, stated: a consumer that timed out never received the task id in
     the first place, so polling is only available to a client that HAS one. The

@@ -326,8 +326,8 @@ async def test_settled_success_logs_the_burn_and_completes_the_claim():
         },
     }
     # Two verify rows: the attempt, then the payer→task binding written once
-    # the execution exists (I4) — the second is what makes tasks/get reachable
-    # mid-turn instead of only after a settle row lands.
+    # the turn's result exists (I4) — the second is what makes tasks/get
+    # reachable before, and without, a settle row.
     assert ctx.db.actions() == ["verify", "verify", "settle"]
     assert ctx.idem.attached == ["exec-1"]
     assert ctx.idem.upgrades[-1][2] is outcome.payload
@@ -336,14 +336,14 @@ async def test_settled_success_logs_the_burn_and_completes_the_claim():
 
 
 async def test_the_payer_task_binding_is_written_when_the_execution_exists():
-    """I4: `payer_owns_execution` must be true BEFORE the turn is terminal.
+    """I4: `payer_owns_execution` must be true BEFORE the settle, not because of it.
 
     The binding is a log row carrying both `execution_id` and
     `subscriber_address`, and only `settle` / `settle_failed` rows carried both
-    — so a payer could not `tasks/get` the task it was waiting on, and its
-    `tasks/cancel` was unreachable by construction (every bound task was
-    already terminal). This row is written the moment the execution id exists,
-    which is the earliest the binding CAN be true.
+    — so a payer could not `tasks/get` a finished task while its settle was
+    still running. This row is written once `execute()` has returned, which is
+    the earliest `run_paid_turn` holds an execution id. That is after the
+    turn's terminal: the binding is not a mid-turn one.
     """
     _, ctx = await _drive()
 
@@ -353,10 +353,48 @@ async def test_the_payer_task_binding_is_written_when_the_execution_exists():
     assert bound[0]["execution_id"] == "exec-1"
     assert bound[0]["subscriber_address"] == "0xpayer"
     assert bound[0]["success"] is True
-    # Mid-turn, not after: it lands before the settle that used to be the only
-    # writer of the pair.
+    # Before the settle that used to be the only writer of the pair.
     assert ctx.db.logs.index(bound[0]) < \
         next(i for i, log in enumerate(ctx.db.logs) if log["action"] == "settle")
+
+
+async def test_the_payer_task_binding_does_not_depend_on_a_settle_row():
+    """I4, the case that locked a payer out for good.
+
+    A concurrent settle (`settle_in_progress`) writes no log row of its own, so
+    with the settle rows as the only writers of (execution_id, payer) this turn
+    had no binding at all — the payer held a delivered task it could never
+    `tasks/get`.
+    """
+    payments = FakePaymentService(settle=_settle_bad("settlement already in progress"))
+    _, ctx = await _drive(payment_service=payments)
+
+    assert not [log for log in ctx.db.logs
+                if log["action"] in ("settle", "settle_failed")]
+    bound = [log for log in ctx.db.logs if log.get("execution_id")]
+    assert [(log["action"], log["execution_id"], log["subscriber_address"])
+            for log in bound] == [("verify", "exec-1", "0xpayer")]
+
+
+async def test_no_payer_task_binding_exists_while_the_turn_is_running():
+    """The binding is NOT a mid-turn one, and nothing here may claim it is.
+
+    `run_paid_turn` learns the execution id from `execute()`'s return value, so
+    while the turn runs there is no row a poll or a cancel could match. The
+    A2A door's `tasks/get` answers not-found in that window by construction.
+    """
+    seen = {}
+    db = FakeDb()
+
+    async def _execute():
+        seen["rows_with_an_execution"] = [
+            log for log in db.logs if log.get("execution_id")]
+        return _exec()
+
+    await _drive(db=db, execute=_execute)
+
+    assert seen["rows_with_an_execution"] == []
+    assert [log["execution_id"] for log in db.logs if log.get("execution_id")]
 
 
 async def test_a_retryable_verify_is_logged_as_an_attempt_not_a_rejection():

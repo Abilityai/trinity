@@ -76,6 +76,12 @@ services:
       # gap here cannot make the feature unreachable — but the env leg still has to
       # be forwarded or an operator setting it in .env silently does nothing.
       - A2A_OUTBOUND_ENABLED=${A2A_OUTBOUND_ENABLED:-false}
+      # Nevermined x402 facilitator concurrency (ent#679). The bound is enforced at
+      # these defaults whether or not they are wired, so a gap here is an inert
+      # tuning lever rather than a dead feature — but this service uses an explicit
+      # environment list, so forward them or the .env knobs do nothing (#1056 class).
+      - NEVERMINED_MAX_INFLIGHT=${NEVERMINED_MAX_INFLIGHT:-8}  # concurrent verify/settle calls, fleet-wide
+      - NEVERMINED_FACILITATOR_WAIT_SECONDS=${NEVERMINED_FACILITATOR_WAIT_SECONDS:-5.0}  # wait for a slot before "busy, retry"
       # Outbound voice replies via shared TTS (epic #24; Telegram #25). The key
       # gates the feature (empty ⇒ adapters deliver text). Must reach the
       # container or the .env lever is inert (the #1056/#1039 packaging class).

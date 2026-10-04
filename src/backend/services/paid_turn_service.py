@@ -399,13 +399,14 @@ async def run_paid_turn(
 
     # The payer→task binding, written NOW rather than only by the settle rows
     # (I4). `db.payer_owns_execution` is what lets a paying stranger reach
-    # `tasks/get` / `tasks/cancel` on the A2A door, and it matches on
-    # (agent, execution_id, payer) — columns only a `settle` / `settle_failed`
-    # row carried, i.e. only after the turn was terminal AND a settle had been
-    # attempted. So a payer could not poll the task it was waiting on, and its
-    # cancel was unreachable by construction. This row carries both columns at
-    # the moment the execution exists, which is the earliest the binding CAN be
-    # true. No schema change: the columns are already there.
+    # `tasks/get` on the A2A door, and it matches on (agent, execution_id,
+    # payer) — columns only a `settle` / `settle_failed` row carried, i.e. only
+    # once a settle had been attempted AND had logged. So a payer could not read
+    # a finished task while its settle was still running, nor at all when a
+    # concurrent settle wrote no row (`settle_in_progress`). This row carries
+    # both columns as soon as `execute()` has returned — which is after the
+    # turn's terminal, not during it: this function has no execution id while
+    # the turn runs. No schema change: the columns are already there.
     _log_verify_ok(db, agent_name, verify_result,
                    execution_id=exec_result.execution_id)
 
