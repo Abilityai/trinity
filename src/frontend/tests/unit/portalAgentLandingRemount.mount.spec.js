@@ -181,6 +181,31 @@ describe('ent#784 — landing on an agent page is idempotent against the thread 
     expect(showing(w).session).toBe(null)
   })
 
+  it('one landing mounts one conversation, however often the list moves (T4)', async () => {
+    // T4's idempotency guard, behaviourally: the watcher fires on the route
+    // param AND on the list, so a single navigation to an agent page must
+    // produce exactly ONE fresh conversation — not one per list refresh.
+    arm()
+    const { w, router } = await boot('/workspace/a/scout')
+    await router.push('/workspace/a/sage')
+    await flushPromises()
+    const minted = showing(w)
+    expect(minted.agent).toBe('sage')
+    expect(minted.newChat).toBe(true)
+
+    await w.vm.refreshThreads()
+    store.fetchAllSessions = vi.fn(async () => {
+      store.sessionsFailed = false
+      return [T1, { id: 't3', session_id: 't3', agent_name: 'scout', last_message_at: '2026-09-29T10:00:00Z', unread: 0 }]
+    })
+    await w.vm.refreshThreads()
+    await flushPromises()
+
+    expect(showing(w).vm).toBe(minted.vm)   // still the one mint
+    expect(showing(w).agent).toBe('sage')
+    expect(showing(w).session).toBe(null)
+  })
+
   it('a cold deep link whose threads arrive after mount still lands', async () => {
     // The watcher's reason for watching the list at all: on a cold load the
     // route param is already in place, so the ONLY fire is the list arriving —
@@ -191,5 +216,75 @@ describe('ent#784 — landing on an agent page is idempotent against the thread 
     expect(seen.agent).toBe('sage')       // not the `store.agents[0]` fallback
     expect(seen.newChat).toBe(true)
     expect(seen.session).toBe(null)
+  })
+})
+
+const dialog = (w) => w.findComponent({ name: 'ConfirmDialog' })
+
+describe('ent#784 decision #13 — a landing during a live call asks before it writes', () => {
+  // ent#551 class: back/forward and a typed `/workspace/a/:name` reach the
+  // landing WITHOUT passing a click door, and `activeAgentName` feeds `convKey`
+  // — so writing it remounts the conversation and ends the call without a word.
+  // `landOnAgent` consults `guardLeaveCall` on its first line for that reason.
+  // Asserted here on STATE (the dialog, the conversation's props, the instance
+  // identity) rather than on the order of lines in the function body, which is
+  // all the regex pins in `workspaceNewChat.spec.js` can see.
+  async function callActiveOnAThread() {
+    arm()
+    const { w, router } = await boot('/workspace/a/scout')
+    await router.push('/workspace/c/t1')
+    await flushPromises()
+    conversation(w).vm.$emit('voice-call', { active: true, agentName: 'scout', voiceSessionId: 'v1' })
+    await flushPromises()
+    return { w, router, live: showing(w) }
+  }
+
+  it('back to the agent page mid-call asks, and writes nothing until it is answered', async () => {
+    const { w, router, live } = await callActiveOnAThread()
+    expect(live.session).toBe('t1')
+
+    await router.push('/workspace/a/scout')
+    await flushPromises()
+
+    expect(dialog(w).props('visible')).toBe(true)
+    // Nothing written: same chat, same instance, call intact.
+    const held = showing(w)
+    expect(held.session).toBe('t1')
+    expect(held.newChat).toBe(false)
+    expect(held.vm).toBe(live.vm)
+  })
+
+  it('confirming the leave then performs the landing it deferred', async () => {
+    const { w, router } = await callActiveOnAThread()
+    await router.push('/workspace/a/scout')
+    await flushPromises()
+    // The landing must have been DEFERRED, not merely performed — without the
+    // ask there is nothing for the confirm to run and this case says nothing.
+    expect(dialog(w).props('visible')).toBe(true)
+    expect(showing(w).newChat).toBe(false)
+
+    dialog(w).vm.$emit('confirm')
+    await flushPromises()
+
+    expect(dialog(w).props('visible')).toBe(false)
+    const landed = showing(w)
+    expect(landed.agent).toBe('scout')
+    expect(landed.newChat).toBe(true)
+    expect(landed.session).toBe(null)
+  })
+
+  it('cancelling leaves the call and the chat exactly as they were', async () => {
+    const { w, router, live } = await callActiveOnAThread()
+    await router.push('/workspace/a/scout')
+    await flushPromises()
+
+    dialog(w).vm.$emit('cancel')
+    await flushPromises()
+
+    expect(dialog(w).props('visible')).toBe(false)
+    const after = showing(w)
+    expect(after.session).toBe('t1')
+    expect(after.newChat).toBe(false)
+    expect(after.vm).toBe(live.vm)
   })
 })
