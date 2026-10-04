@@ -85,15 +85,22 @@ router = APIRouter(prefix="/api/agents", tags=["a2a"])
 a2a_server_router = APIRouter(tags=["a2a-server"])
 
 
-def _base_url_from_request(request: Request) -> str:
-    """Compute the external base URL for the card `url` and for the 402s.
+def _base_url_from_request(request: Request, *,
+                           configured_wins: bool = False) -> str:
+    """Compute the external base URL for the 402s (and, via `_card_base_url`,
+    for the card `url`).
 
     Delegates to `utils.public_url.public_base_url` (#3215), which owns the
     precedence: the operator's configured public origin when it is the host the
     caller actually used, else the request host with an https upgrade taken from
-    the raw `X-Forwarded-Proto` header. One helper for the card and for both
-    payment doors, because a card that advertises one origin while the 402 mints
-    a token for another sends the buyer to a URL it never verifies against.
+    the raw `X-Forwarded-Proto` header. ONE helper for the card and for both
+    payment doors — one parameter apart — because a second copy of the upgrade
+    logic is a second thing to get wrong.
+
+    `configured_wins=True` is the card's precedence, and the card's alone (see
+    `_card_base_url`). The doors take the default: an x402 token is minted and
+    verified against `resource.url`, so the 402 must name the origin the caller
+    actually called.
 
     The configured origin now comes from `settings_service.get_public_chat_url()`
     — the Settings row THEN `PUBLIC_CHAT_URL` — rather than the env var alone, so
@@ -113,7 +120,26 @@ def _base_url_from_request(request: Request) -> str:
         from config import PUBLIC_CHAT_URL
         configured = (PUBLIC_CHAT_URL or "").rstrip("/")
     return public_base_url(request, configured=configured,
-                           frontend_url=FRONTEND_URL)
+                           frontend_url=FRONTEND_URL,
+                           configured_wins=configured_wins)
+
+
+def _card_base_url(request: Request) -> str:
+    """The origin the agent CARD advertises — configured-first (review I3).
+
+    The card is a discovery document, not a minted token: whoever fetched it
+    republishes it to buyers elsewhere, so a configured public origin wins over
+    the host it was read on. The `get_agent_a2a_card` MCP tool proxies the card
+    route from `backend:8000`, and before this split #3215 had the card
+    advertise that internal host to every external buyer — a regression on the
+    card's pre-#3215 behaviour.
+
+    Safe alongside the doors' same-host rule because a buyer that follows the
+    card arrives on the configured host, so the 402 it then meets is minted for
+    that very host: card and 402 still agree for every caller that followed the
+    card. With nothing configured the two are identical.
+    """
+    return _base_url_from_request(request, configured_wins=True)
 
 
 async def _fetch_template_data(agent_name: str, container) -> dict:
@@ -240,7 +266,7 @@ async def get_agent_card(
         raise HTTPException(status_code=404, detail="Agent not found")
 
     template_data = await _fetch_template_data(agent_name, container)
-    base_url = _base_url_from_request(request)
+    base_url = _card_base_url(request)
     card = _card_with_exposed_skills(
         agent_name=agent_name,
         template_data=template_data,
@@ -431,7 +457,7 @@ async def _serve_card(agent_name: str, request: Request) -> Optional[Dict[str, A
     return _card_with_exposed_skills(
         agent_name=agent_name,
         template_data=template_data,
-        base_url=_base_url_from_request(request),
+        base_url=_card_base_url(request),
     )
 
 
@@ -681,8 +707,9 @@ async def _anonymous_jsonrpc(agent_name: str, request: Request):
         return parsed
     method, params, rpc_id = parsed
 
-    # The same origin the agent card advertises (#3215), not `request.base_url`:
-    # the 402's `resource.url` is what the buyer's token is minted against.
+    # The origin the CALLER used (#3215, review I3), not `request.base_url` and
+    # not the card's declared origin: the 402's `resource.url` is what the
+    # buyer's token is minted and facilitator-verified against.
     base_url = _base_url_from_request(request)
     caller_ip = request.client.host if request.client else None
     payment_service = get_nevermined_payment_service()

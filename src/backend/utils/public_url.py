@@ -25,15 +25,26 @@ The rules, in order:
 * **A configured public URL wins, but only for the host the caller actually
   used.** The operator's declared origin (Settings `public_chat_url` →
   `PUBLIC_CHAT_URL` → `FRONTEND_URL`) is the one external consumers reach
-  Trinity through, and it is already what the A2A agent card advertises. It is
-  applied only when its host equals the request host (or there is no request
-  host) because a caller that reached Trinity on a private or alternate host
-  must not be sent to a public host whose tunnel may not route that path.
+  Trinity through. It is applied only when its host equals the request host (or
+  there is no request host) because a caller that reached Trinity on a private
+  or alternate host must not be sent to a public host whose tunnel may not
+  route that path.
 * **Otherwise the request's own host, with the scheme upgraded — never
   downgraded — by `X-Forwarded-Proto: https`.** Upgrade-only because the header
   is caller-controlled: a client that forges it changes only the origin of its
   own 402 (and of the verify built from the same helper), and can never change
   the host.
+
+**One exception, `configured_wins=True`: the A2A agent card** (review I3). A
+402 is minted FOR the caller that is holding it, so its origin must be the one
+that caller used. A card is the opposite kind of document: whoever fetched it
+publishes it to buyers elsewhere, so it must advertise the operator's declared
+origin whatever host it was read on. The `get_agent_a2a_card` MCP tool proxies
+the card route from `backend:8000`, and a card naming that host is unusable to
+every external buyer — which is also the behaviour the card had before #3215.
+The fallback when nothing is configured is the SAME request-host rule, not a
+second copy of it, so the two surfaces can only differ where an origin was
+actually declared.
 """
 
 def _host_of(origin: str) -> str:
@@ -45,7 +56,8 @@ def _host_of(origin: str) -> str:
 
 
 def public_base_url(request, *, configured: str = "",
-                    frontend_url: str = "") -> str:
+                    frontend_url: str = "",
+                    configured_wins: bool = False) -> str:
     """The origin (`scheme://host[:port]`, no trailing slash) to put in a URL
     handed to an external caller.
 
@@ -54,11 +66,17 @@ def public_base_url(request, *, configured: str = "",
     passed in rather than read here so `utils/` keeps importing nothing from
     `services/` (Invariant #1) and this stays testable without a DB.
 
+    `configured_wins` is for a DECLARED document rather than a minted one — the
+    A2A agent card, and only it (see the module docstring). Default False keeps
+    every payment door same-host.
+
     Returns "" only when there is neither a configured origin nor a usable
     request host — the caller then omits the URL rather than emitting a broken
     one.
     """
     declared = (configured or frontend_url or "").rstrip("/")
+    if declared and configured_wins:
+        return declared
 
     request_host = ""
     request_scheme = ""

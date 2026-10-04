@@ -485,11 +485,18 @@
     stayed crypto). Knob: `NEVERMINED_PLAN_LOOKUP_TIMEOUT_SECONDS` (default 5.0),
     `NEVERMINED_PLAN_LOOKUP_MAX_INFLIGHT` (default 2).
 - **Public origin for `resource.url` (#3215)**: `utils/public_url.py::public_base_url`
-  is the single owner, shared by the agent card, the paid door and the A2A door, so
-  one request yields one origin. Configured public origin (Settings `public_chat_url`
-  → `PUBLIC_CHAT_URL` → `FRONTEND_URL`) **only when its host equals the request
+  is the single owner for both surfaces, with two precedences one keyword apart.
+  **Each 402 is minted for the origin the caller actually used** (the paid door, the
+  A2A door, `/info`): configured public origin (Settings `public_chat_url` →
+  `PUBLIC_CHAT_URL` → `FRONTEND_URL`) **only when its host equals the request
   host**; otherwise the request host with an https **upgrade** (never a downgrade)
-  read from the **raw** `X-Forwarded-Proto` header. Raw, not `request.url.scheme`:
+  read from the **raw** `X-Forwarded-Proto` header. **The agent card advertises the
+  configured public origin** (`configured_wins=True`, unchanged from before #3215) —
+  it is a discovery document republished to buyers elsewhere, and the
+  `get_agent_a2a_card` MCP tool reads it from `backend:8000`; with nothing
+  configured it falls back to the request host on the same upgrade-only rule. A
+  buyer that follows the card arrives on the configured host, so the 402 it meets
+  there is minted for that host. Raw, not `request.url.scheme`:
   the prod/hosted compose `command:` overrides the image CMD and drops
   `--proxy-headers --forwarded-allow-ips`, so uvicorn applies no forwarded headers
   there at all. The frontend nginx's `$fwd_proto` map stops it clobbering an

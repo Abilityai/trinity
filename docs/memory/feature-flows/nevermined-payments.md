@@ -100,7 +100,7 @@ Shared User (view-only)
 | `src/backend/services/a2a_payment_gate.py` | The A2A-shaped adapter over it (ent#679) — token extraction, the 402/403 bodies, the payer's Task. Flow: [a2a-inbound-server.md](a2a-inbound-server.md) |
 | `src/backend/services/a2a_card_service.py` | `with_payment_extension` — a priced agent's A2A card declares its plan (ent#679) |
 | `src/backend/routers/nevermined.py` | Admin config endpoints (`/api/nevermined/`), `_require_agent_exists()` guard |
-| `src/backend/utils/public_url.py` | `public_base_url` — the ONE externally-reachable origin for the card and both 402 doors (#3215) |
+| `src/backend/utils/public_url.py` | `public_base_url` — the ONE externally-reachable origin helper: same-host for both 402 doors, `configured_wins=True` for the agent card (#3215, review I3) |
 | `src/backend/db_models.py` | Pydantic models for config, payment result, payment log |
 | `src/backend/db/schema.py` | Table definitions |
 | `src/backend/db/migrations.py` | Migration #23 |
@@ -192,15 +192,29 @@ cannot move a live agent's network silently.
 
 ## Public origin for `resource.url` (#3215)
 
-`utils/public_url.py::public_base_url(request, configured=, frontend_url=)` is the
-single owner, shared by the agent card, the paid door and the A2A door — a card
-advertising one origin while the 402 mints a token for another sends a buyer to a
-URL it never verifies against. Precedence: the configured public origin (Settings
-`public_chat_url` → `PUBLIC_CHAT_URL` → `FRONTEND_URL`) **only when its host
-equals the request host** (a caller on a private host must not be redirected to a
-public one whose narrow tunnel may not route the path), else the request host with
-an https **upgrade** — never a downgrade — from the **raw** `X-Forwarded-Proto`
-header.
+`utils/public_url.py::public_base_url(request, configured=, frontend_url=,
+configured_wins=)` is the single owner — ONE module, one upgrade rule, two
+precedences, because the card and a 402 are different kinds of document.
+
+**Each 402 is minted for the origin the caller actually used** (the default, and
+unchanged for the paid door, the A2A door and `/info`): an x402 token is minted
+and facilitator-verified against `resource.url`, so a 402 quoting any other
+origin mints a token for a URL the client never calls. Precedence: the configured
+public origin (Settings `public_chat_url` → `PUBLIC_CHAT_URL` → `FRONTEND_URL`)
+**only when its host equals the request host** (a caller on a private host must
+not be redirected to a public one whose narrow tunnel may not route the path),
+else the request host with an https **upgrade** — never a downgrade — from the
+**raw** `X-Forwarded-Proto` header.
+
+**The agent card advertises the configured public origin** (`configured_wins=True`
+on both card routes — unchanged from before #3215). A card is a discovery
+document, not a minted token: whoever fetched it republishes it to buyers
+elsewhere, and the `get_agent_a2a_card` MCP tool proxies the card route from
+`backend:8000`, so a same-host card would advertise an internal host to every
+external buyer. Only when nothing is configured does the card fall back to the
+request host, on the same upgrade-only rule as the doors. The two cannot
+disagree where it matters: a buyer that follows the card arrives on the
+configured host, so the 402 it then meets is minted for that very host.
 
 Raw, not `request.url.scheme`: `docker-compose.prod.yml` / `.hosted.yml` override
 the image `command:` and drop the Dockerfile CMD's `--proxy-headers
