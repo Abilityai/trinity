@@ -203,7 +203,11 @@ describe('#3140 — an agent URL that is not shared with you', () => {
     arm()
     const { w, router } = await boot('/workspace/a/scout')
     expect(w.text()).not.toContain("You don't have access to")
-    expect(router.currentRoute.value.path).toBe('/workspace/c/t1')
+    expect(conversation(w).exists()).toBe(true)
+    // ent#784 reversed ent#523's landing: an agent page lands on a FRESH chat
+    // and stays on its own URL, so the proof that it opened is a conversation
+    // on screen, not a hop to the most recent thread.
+    expect(router.currentRoute.value.path).toBe('/workspace/a/scout')
   })
 })
 

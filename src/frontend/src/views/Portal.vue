@@ -2331,10 +2331,8 @@ watch([() => route.params.sessionId, () => threads.value.length], () => {
 // Watched on BOTH the route param and the thread list, for the same reason the
 // `sessionId` watcher above watches both: on a cold deep link the agent name
 // arrives long before the threads do, so a param-only watcher would resolve
-// against an empty list and always mint a new chat. Re-entrancy is guarded by
-// the fact that `landOnAgent` navigates away from this route as soon as it
-// succeeds; while it has not, re-running is harmless and idempotent.
-watch([activeAgentPageName, () => threads.value.length], ([name]) => {
+// against an empty list and always mint a new chat.
+watch([activeAgentPageName, () => threads.value.length], ([name], [prevName]) => {
   if (!name || !store.isClientSignedIn) return
   // Wait for the roster verdict. Landing before it means `activeAgent` cannot
   // resolve the name yet, and the "you don't have access" branch would fire for
@@ -2347,6 +2345,24 @@ watch([activeAgentPageName, () => threads.value.length], ([name]) => {
     unreachableAgent.value = name
     return
   }
+  // ent#784: the landing no longer navigates away, so — unlike every earlier
+  // version of this watcher — it can re-fire with the route unchanged, once per
+  // thread-list refresh, for as long as the person stays on this URL. The
+  // landing rule reads nothing from the list, so a list-only re-fire cannot
+  // change the answer; re-running it would null a session the first send has
+  // since adopted (`onSessionAdopted` writes the state, then replaces the route
+  // asynchronously, and itself ends in a `refreshThreads`) and remount an empty
+  // composer over the thread whose reply is streaming.
+  //
+  // Keyed on "the route did not change on this fire", AND on having already
+  // landed this name — the two have to hold together:
+  //   * the name alone would swallow the cold deep link, whose only fire IS the
+  //     list arriving with the param already in place (the reason above);
+  //   * `pendingSession` must NOT be the key: back/forward from
+  //     `/workspace/c/:id` to `/workspace/a/:name` arrives with a session set
+  //     and has to land fresh. A thread URL carries no `agentName` param, so
+  //     that hop always changes `name` and is never mistaken for a re-fire.
+  if (name === prevName && activeAgentName.value === name) return
   landOnAgent(name)
 })
 
