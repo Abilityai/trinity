@@ -22,9 +22,11 @@ const threads = [
 ]
 
 describe('resolveAgentLanding', () => {
-  it('resumes the most recent thread with that agent', () => {
+  it('starts a new chat even when threads with that agent exist (ent#784)', () => {
+    // ent#784 reversed ent#523's resume-by-default: opening an agent means
+    // starting new work. The deep link and the sidebar row share one rule.
     expect(resolveAgentLanding({ agent: 'scribe', agents, threads }))
-      .toEqual({ agentName: 'scribe', sessionId: 's2' })
+      .toEqual({ agentName: 'scribe', sessionId: null })
   })
 
   it('opens a fresh thread when the agent has none yet', () => {
@@ -32,7 +34,7 @@ describe('resolveAgentLanding', () => {
       .toEqual({ agentName: 'auditor', sessionId: null })
   })
 
-  it('?new=1 starts fresh even when a thread exists', () => {
+  it('?new=1 still starts fresh — now the same answer as without it', () => {
     expect(resolveAgentLanding({ agent: 'scribe', forceNew: true, agents, threads }))
       .toEqual({ agentName: 'scribe', sessionId: null })
   })
@@ -50,9 +52,11 @@ describe('resolveAgentLanding', () => {
   })
 
   it('tolerates a thread list that uses session_id instead of id', () => {
+    // ent#784: the shape no longer changes the answer for this door — a deep
+    // link carries no session memory, so it always resolves to a fresh chat.
     const alt = [{ session_id: 'sX', agent_name: 'scribe' }]
     expect(resolveAgentLanding({ agent: 'scribe', agents, threads: alt }))
-      .toEqual({ agentName: 'scribe', sessionId: 'sX' })
+      .toEqual({ agentName: 'scribe', sessionId: null })
   })
 
   it('survives absent inputs rather than throwing at the landing', () => {

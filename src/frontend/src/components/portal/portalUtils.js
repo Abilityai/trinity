@@ -568,18 +568,14 @@ function isTransportError(err) {
 export function resolveAgentLanding({ agent, forceNew = false, agents = [], threads = [] } = {}) {
   if (!agent || typeof agent !== 'string') return null
   if (!Array.isArray(agents) || !agents.some((a) => a && a.name === agent)) return null
+  // ent#784: the same rule the sidebar's agent row uses (`agentLanding`), not a
+  // second one — a deep link and a sidebar click must land in the same place.
+  // `forceNew` is kept so existing `?new=1` links keep working, but it is now
+  // redundant: the default IS a new chat. This door passes no
+  // `lastOpenSessionId` (a deep link carries no session memory), so it always
+  // resolves to a fresh chat.
   if (forceNew) return { agentName: agent, sessionId: null }
-
-  // ent#523: the same rule the sidebar's agent row uses (`landingThread`), not
-  // a second one. This used to take the first row of an already-sorted list,
-  // which agreed with "most recent" by accident; once Main exists, an unused
-  // Main sorts last on recency and "first row" would skip it, so a deep link
-  // and a sidebar click could land a first-time visitor in different places.
-  const latest = landingThread(threads, agent)
-  return {
-    agentName: agent,
-    sessionId: latest ? (latest.id || latest.session_id || null) : null,
-  }
+  return agentLanding({ agentName: agent, threads })
 }
 
 // ent#358: the Workspace is now the ONLY continuous-conversation surface, so a
@@ -1748,32 +1744,33 @@ export function feedbackAcknowledgement(captureFeedback) {
   return FEEDBACK_REACHED_AGENT.has(captureFeedback) ? FEEDBACK_SENT_TEXT : FEEDBACK_RECORDED_TEXT
 }
 
-// --- Agents at the centre (ent#523) ------------------------------------------
+// --- Agents at the centre (ent#523, landing rule replaced by ent#784) --------
 
-// Which chat opening an agent lands you in. Most recently ACTIVE wins, and Main
-// is the floor — never a blank stage, and never "the oldest thread happened to
-// sort first". Returns null only when the caller has no chats with this agent at
-// all, which the caller reads as "open Main once the list arrives".
+// Where opening an agent lands you. ONE rule, called by every door that has to
+// RESOLVE a landing (the sidebar/rail row via `landOnAgent`, and the `?agent=`
+// deep link via `resolveAgentLanding`). The gesture doors — New chat, the agent
+// picker, the switch-agent key — do not call this: they already mean "fresh".
 //
-// Deliberately NOT `agentChatTabs()[0]`: that pins Main to the front, so it
-// would land you in Main every time regardless of where you were last — the
-// exact behaviour AC 1 replaced.
-export function landingThread(threads, agentName) {
-  if (!agentName) return null
-  const mine = (Array.isArray(threads) ? threads : [])
-    .filter((t) => t && !t.is_room && t.agent_name === agentName && !t.archived_at)
-  if (!mine.length) return null
-  const ts = (t) => {
-    const iso = t.last_message_at || t.created_at
-    const n = iso ? new Date(iso).getTime() : 0
-    return Number.isNaN(n) ? 0 : n
+// ent#784 reverses ent#523's rule. The default is a NEW, empty chat
+// (`sessionId: null`), because most visits to an agent start new work and
+// resuming cost two actions every time. Nothing is minted server-side: the row
+// is born on the first send (`newThread`, ent#451), so landing repeatedly
+// accumulates no empty chats.
+//
+// The ONE exception is `lastOpenSessionId` (the seam ent#621's agent-switch
+// keys will pass). It is honoured only when it still names a live, unarchived
+// chat of THIS agent in `threads` — the principal's own list — so a stale or
+// forged id falls back to the default rather than landing somewhere it should
+// not (the #3140 class).
+export function agentLanding({ agentName, threads = [], lastOpenSessionId = null } = {}) {
+  if (!agentName || typeof agentName !== 'string') return null
+  if (lastOpenSessionId) {
+    const row = (Array.isArray(threads) ? threads : []).find((t) => t && !t.is_room
+      && t.agent_name === agentName && !t.archived_at
+      && (t.id || t.session_id) === lastOpenSessionId)
+    if (row) return { agentName, sessionId: lastOpenSessionId }
   }
-  // An unused Main has no `last_message_at` and would sort last on recency
-  // alone, so a first-time visitor would land on nothing. Falling back to it
-  // explicitly is cheaper to read than a comparator that special-cases zero.
-  const used = mine.filter((t) => t.last_message_at)
-  if (used.length) return used.slice().sort((a, b) => ts(b) - ts(a))[0]
-  return mine.find((t) => t.is_main) || mine[0]
+  return { agentName, sessionId: null }
 }
 
 // The sidebar's agent order (ent#523 AC 6).
