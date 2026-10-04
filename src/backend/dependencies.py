@@ -844,6 +844,40 @@ async def get_optional_user(
         return None
 
 
+async def get_user_or_anonymous(
+    request: Request, token: str = Depends(oauth2_scheme_optional)
+) -> Optional[User]:
+    """The current user, or None when no Trinity credential was recognised.
+
+    abilityai/trinity-enterprise#679. The sibling of :func:`get_optional_user`
+    for a route that must serve a caller holding a credential of a DIFFERENT
+    kind — the A2A inbound door, where an x402 payment token arrives in
+    `Authorization: Bearer` and is not a Trinity credential at all. Same
+    delegate-never-reimplement rule: `get_current_user` stays the only place
+    that decides what a Trinity credential means.
+
+    The difference from `get_optional_user` is the one that matters: **only a
+    401 degrades to None.** A 403 is RE-RAISED, so a credential that WAS
+    recognised and then fenced — a connector key outside its scope, an
+    ephemeral agent key off its allow-list — keeps its refusal instead of
+    silently becoming an anonymous caller who may pay its way in. Collapsing
+    403 into None here would turn every containment fence in `get_current_user`
+    into a downgrade to the payment path.
+
+    Like `get_optional_user`, this is only safe on a route that makes its own
+    authorization decision for the `None` case. `routers/a2a.py::a2a_jsonrpc`
+    answers today's 401 bytes unless the agent is both A2A-exposed and priced.
+    """
+    if not token:
+        return None
+    try:
+        return await get_current_user(request, token)
+    except HTTPException as exc:
+        if exc.status_code == status.HTTP_401_UNAUTHORIZED:
+            return None
+        raise
+
+
 def _enforce_ephemeral_key_fence(request: Request, agent_name: str) -> None:
     """Containment fence for ephemeral agents' own keys (trinity-enterprise#69).
 

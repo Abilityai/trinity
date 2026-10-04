@@ -2002,6 +2002,12 @@ class DatabaseManager:
     def get_git_auto_sync_enabled(self, agent_name: str):
         return self._schedule_ops.get_git_auto_sync_enabled(agent_name)
 
+    def set_git_pull_sync_enabled(self, agent_name: str, enabled: bool):
+        return self._schedule_ops.set_git_pull_sync_enabled(agent_name, enabled)
+
+    def get_git_pull_sync_enabled(self, agent_name: str):
+        return self._schedule_ops.get_git_pull_sync_enabled(agent_name)
+
     def get_all_git_auto_sync_enabled(self, agent_names=None):
         return self._schedule_ops.get_all_git_auto_sync_enabled(agent_names)
 
@@ -3679,6 +3685,11 @@ class DatabaseManager:
 
     def get_nevermined_payment_log(self, agent_name, limit=50):
         return self._nevermined_ops.get_payment_log(agent_name, limit)
+
+    def nevermined_payer_owns_execution(self, agent_name, execution_id, subscriber_address):
+        return self._nevermined_ops.payer_owns_execution(
+            agent_name, execution_id, subscriber_address
+        )
 
     def get_nevermined_settlement_failures(self, limit=50):
         return self._nevermined_ops.get_settlement_failures(limit)

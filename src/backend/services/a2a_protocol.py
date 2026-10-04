@@ -53,6 +53,185 @@ A2A_UNSUPPORTED = -32004
 MAX_RPC_BODY_BYTES = 1_000_000
 
 
+# ---------------------------------------------------------------------------
+# x402 payment vocabulary (#3185). Here rather than in `a2a_client.py` for the
+# reason the module docstring gives: two copies of a protocol vocabulary is how
+# a dialect table rots. The outbound client WRITES these keys today; the
+# inbound server (abilityai/trinity-enterprise#679) will READ the same ones,
+# and it imports from here.
+#
+# The names are the a2a-x402 extension's, verified in use against payments-py
+# 1.18 (`x402Metadata`) — see trinity-enterprise#763. They are DOTTED keys
+# inside one flat `metadata` dict, not a nested object: that is the extension's
+# own shape, and writing it as nesting would be a protocol of our own.
+# ---------------------------------------------------------------------------
+X402_STATUS_KEY = "x402.payment.status"
+X402_REQUIRED_KEY = "x402.payment.required"
+X402_PAYLOAD_KEY = "x402.payment.payload"
+X402_ERROR_KEY = "x402.payment.error"
+X402_RECEIPTS_KEY = "x402.payment.receipts"
+
+#: What we SEND when a payment token is attached in-band.
+X402_STATUS_SUBMITTED = "payment-submitted"
+#: What a priced peer sends back. `payment-required` and `payment-failed` are
+#: refusals the client raises on; `payment-completed` is recorded (the operator
+#: must be able to see money leaving) but never surfaced to the calling agent.
+X402_STATUS_REQUIRED = "payment-required"
+X402_STATUS_FAILED = "payment-failed"
+X402_STATUS_COMPLETED = "payment-completed"
+#: Verified but NOT settled — payments-py 1.18's own state, and the honest
+#: answer for Trinity's deliver-then-reconcile branch (#1018): the turn ran and
+#: the artifact is attached, but no receipt exists yet. It matters that this is
+#: neither `payment-completed` (which would be a receipt we do not have) nor
+#: `payment-failed` (on which the outbound client DISCARDS the artifact the
+#: payer's turn produced). A client that does not know the value parses the task
+#: normally, which is exactly the required behaviour.
+X402_STATUS_VERIFIED = "payment-verified"
+#: What the provider sends when it accepted no payment and ran nothing.
+X402_STATUS_REJECTED = "payment-rejected"
+
+#: The HTTP response header a priced peer uses to carry its requirements
+#: (base64 JSON `X402PaymentRequired`), and the request header carrying the
+#: token. Both are x402 v2 names already in use by `routers/paid.py`.
+X402_PAYMENT_REQUIRED_HEADER = "payment-required"
+X402_PAYMENT_SIGNATURE_HEADER = "payment-signature"
+
+#: Ceiling on a base64-JSON document we will even attempt to decode. The
+#: outbound client applies it to a peer-controlled response header (whose only
+#: other bound is h11's); the store applies its own, tighter, credential cap.
+X402_JSON_B64_MAX_CHARS = 32 * 1024
+
+#: What kind of secret an outbound endpoint's credential slot holds (#3185).
+#: Canonical home — the store (`services/a2a_outbound.py`) and the client
+#: (`services/a2a_client.py`) both import these rather than re-declaring them,
+#: for the same reason the method names live here: two copies of a vocabulary is
+#: how the two sides come to disagree about what a token *is*.
+#:
+#: `api_key` is the default for EVERY record written before #3185 — the key is
+#: simply absent there — and it means today's behaviour exactly: the credential
+#: rides `Authorization: Bearer …` and nothing else. `payment_token` additionally
+#: attaches the token as x402 payment (in-band metadata + the deprecated
+#: `payment-signature` header); the Bearer header still goes out either way.
+#:
+#: It is a LABEL on the existing credential slot, not a second secret. A
+#: separate store, route or MCP tool for payment tokens would be a fourth write
+#: path to the same AES-256-GCM envelope.
+#:
+#: Anything outside this tuple is treated as `api_key` by
+#: `a2a_outbound.normalize_credential_kind` — the fail-SAFE direction, argued in
+#: full at that function.
+CREDENTIAL_KIND_API_KEY = "api_key"
+CREDENTIAL_KIND_PAYMENT_TOKEN = "payment_token"
+CREDENTIAL_KINDS = (CREDENTIAL_KIND_API_KEY, CREDENTIAL_KIND_PAYMENT_TOKEN)
+
+
+def json_b64_object(raw: Any, *, max_len: int = X402_JSON_B64_MAX_CHARS) -> Optional[Dict[str, Any]]:
+    """A base64-JSON (or plain-JSON) **object**, or `None`. Never raises.
+
+    `max_len` is a bound as much as the parse is a parse: the outbound caller
+    runs this on a header whose only other ceiling is h11's, so the length is
+    checked BEFORE any decode work. Plain (un-encoded) JSON is accepted too —
+    Trinity's own paid door emits the requirements object in a JSON body, and a
+    provider that puts it in the header unencoded costs us nothing to read.
+
+    `except Exception` is deliberate and wide: the failure set here is
+    `binascii.Error`, `UnicodeDecodeError`, `json.JSONDecodeError`,
+    `RecursionError` on a deeply nested document, and whatever a future codec
+    adds. Every one of them means the same thing — "this is not a JSON object" —
+    and none of them may become a 500.
+    """
+    import base64
+    import json
+
+    if not isinstance(raw, str):
+        return None
+    value = raw.strip()
+    if not value or len(value) > max_len:
+        return None
+    for candidate in (value, None):
+        if candidate is None:
+            try:
+                padded = value + "=" * (-len(value) % 4)
+                decoded = base64.b64decode(padded.replace("-", "+").replace("_", "/"),
+                                           validate=False)
+                text = decoded.decode("utf-8")
+            except Exception:  # noqa: BLE001 — see the docstring
+                return None
+        else:
+            text = candidate
+        try:
+            parsed = json.loads(text)
+        except Exception:  # noqa: BLE001
+            continue
+        return parsed if isinstance(parsed, dict) else None
+    return None
+
+
+def decode_payment_token(credential: Optional[str], *,
+                         max_len: int = X402_JSON_B64_MAX_CHARS) -> Optional[Dict[str, Any]]:
+    """The stored credential as an x402 `PaymentPayload`, or `None`.
+
+    One predicate, two callers, because they must agree: the outbound client
+    asks it "may I announce this token in-band?" and the endpoint store asks it
+    "is this credential a payment token?" (#3185 T6 — the kind is inferred from
+    the value when the operator omits it). Two spellings of "is this an x402
+    token" would mean a credential the store labels `payment_token` and the
+    client then declines to send in-band, which is the one combination that
+    reads as a platform bug rather than as a provider's refusal.
+
+    `None` is the **degrade, not a refusal** (decision 23/29): an opaque token
+    is still sent as the `payment-signature` header, which is exactly today's
+    working x402 path. What `None` prevents is shipping base64 garbage as
+    `x402.payment.payload` — the shape check (`x402Version` int + a `payload`
+    key, per payments-py's own `PaymentPayload`) is what stops a mislabelled API
+    key from being announced in-band as a payment.
+    """
+    obj = json_b64_object(credential, max_len=max_len)
+    if obj is None:
+        return None
+    version = obj.get("x402Version")
+    if not isinstance(version, int) or isinstance(version, bool):
+        return None
+    if "payload" not in obj:
+        return None
+    return obj
+
+
+def payment_payload_from_message(message: Any) -> Optional[Dict[str, Any]]:
+    """The in-band x402 payment payload on an A2A `message` param, or `None`.
+
+    The provider-side counterpart of what the outbound client WRITES: ruling 3
+    makes task metadata the primary rail (`x402.payment.payload`), with the
+    `payment-signature` header a deprecated fallback. This reads only the rail;
+    turning the payload into a facilitator-valid access token is the SDK's job
+    (`payments_py.x402.token.encode_access_token`) and stays out of this module,
+    which is SDK-free by design — the outbound client imports it and must not
+    acquire a payments-py dependency.
+
+    Tolerant on purpose: every field here is caller-controlled on an endpoint
+    reachable without a Trinity credential, so a missing/odd shape means "no
+    in-band payment" (→ header fallback → 402), never an exception. The shape
+    check is `PaymentPayload`'s own (`x402Version` int + a `payload` key), the
+    same predicate `decode_payment_token` applies to the encoded form — one
+    definition of "is this an x402 payment", so the two directions cannot come
+    to disagree.
+    """
+    if not isinstance(message, dict):
+        return None
+    metadata = message.get("metadata")
+    if not isinstance(metadata, dict):
+        return None
+    payload = metadata.get(X402_PAYLOAD_KEY)
+    if not isinstance(payload, dict):
+        return None
+    version = payload.get("x402Version")
+    if not isinstance(version, int) or isinstance(version, bool):
+        return None
+    if "payload" not in payload:
+        return None
+    return payload
+
+
 @dataclass(frozen=True)
 class Dialect:
     """One protocol generation's wire vocabulary."""

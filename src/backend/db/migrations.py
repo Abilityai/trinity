@@ -5038,6 +5038,47 @@ def _migrate_agent_sync_state_divergence(cursor, conn):
         )
 
 
+def _migrate_pull_sync(cursor, conn):
+    """The container's pull cycle (trinity-enterprise#703).
+
+    * `agent_git_config.pull_sync_enabled` — the per-agent switch the agent's
+      pull loop reads live each cycle (the #3010 one-writer discipline).
+    * `agent_sync_state.last_pull_at / last_pull_status / behind_after_pull /
+      last_pull_error / last_successful_pull_at / consecutive_pull_failures /
+      consecutive_pull_skips` — the pull cycle's own outcome and health,
+      persisted by the sync-health poller.
+
+    Backfill (operator ruling 2026-09-25): on only where auto-sync is already
+    on, so no agent that is not already writing to git starts rebasing its
+    working tree on upgrade; everyone else is off until toggled. New `github:`
+    agents get it at creation. Runs once (schema_migrations).
+
+    Mirrored by the Alembic revision 0087_pull_sync.
+    """
+    _safe_add_column(
+        cursor, "agent_git_config", "pull_sync_enabled",
+        "ALTER TABLE agent_git_config ADD COLUMN pull_sync_enabled INTEGER DEFAULT 0",
+    )
+    for column, ddl in (
+        ("last_pull_at", "TEXT"),
+        ("last_pull_status", "TEXT"),
+        ("behind_after_pull", "INTEGER"),
+        ("last_pull_error", "TEXT"),
+        ("last_successful_pull_at", "TEXT"),
+        ("consecutive_pull_failures", "INTEGER DEFAULT 0"),
+        ("consecutive_pull_skips", "INTEGER DEFAULT 0"),
+    ):
+        _safe_add_column(
+            cursor, "agent_sync_state", column,
+            f"ALTER TABLE agent_sync_state ADD COLUMN {column} {ddl}",
+        )
+    cursor.execute(
+        "UPDATE agent_git_config SET pull_sync_enabled = 1 "
+        "WHERE COALESCE(auto_sync_enabled, 0) = 1"
+    )
+    conn.commit()
+
+
 MIGRATIONS = [
     ("agent_sharing", _migrate_agent_sharing_table),
     ("schedule_executions_observability", _migrate_schedule_executions_observability),
@@ -5194,4 +5235,5 @@ MIGRATIONS = [
     ("loop_chain_depth", _migrate_loop_chain_depth),
     ("ent720_email_identity", _migrate_ent720_email_identity),
     ("metric_points_restatement", _migrate_metric_points_restatement),
+    ("pull_sync", _migrate_pull_sync),
 ]

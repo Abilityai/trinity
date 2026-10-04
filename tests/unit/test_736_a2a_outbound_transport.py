@@ -786,3 +786,340 @@ def test_the_card_fetch_uses_its_own_shorter_timeout():
     # The deadline must still cover both hops end to end.
     assert (a2a_client.A2A_CARD_FETCH_TIMEOUT + a2a_client.A2A_RPC_TIMEOUT
             <= a2a_client.A2A_TOTAL_DEADLINE)
+
+
+# --------------------------------------------------------------------------- #
+# 9. x402 / payment over the real transport (#3185)
+#
+# The pure functions (codec, bounded block, outcome classification) are proven
+# in `test_3185_a2a_payment_outcome.py`. What can ONLY be proven here is what
+# goes ON THE WIRE and what comes back off it: the envelope a `payment_token`
+# endpoint produces, the fact that an `api_key` endpoint's envelope did not
+# change by one byte, and that a 402 survives the refusal order that used to
+# report it as an outage.
+# --------------------------------------------------------------------------- #
+import base64  # noqa: E402
+
+PAYMENT_TOKEN_OBJ = {
+    "x402Version": 2,
+    "scheme": "exact",
+    "network": "base-sepolia",
+    "payload": {"signature": "0x" + "ab" * 32, "authorization": {"nonce": "0x" + "cd" * 16}},
+}
+PAYMENT_TOKEN = base64.urlsafe_b64encode(
+    json.dumps(PAYMENT_TOKEN_OBJ, separators=(",", ":")).encode()
+).decode().rstrip("=")
+
+REQS = {
+    "x402Version": 2,
+    "error": "payment_required",
+    "resource": {"url": "https://peer.example.com/a2a/bot", "description": "One review"},
+    "accepts": [{"scheme": "exact", "network": "base-sepolia", "planId": "plan_42"}],
+}
+
+
+def _required_header(obj=None) -> str:
+    return base64.b64encode(json.dumps(obj if obj is not None else REQS).encode()).decode()
+
+
+def _streaming_response(status, body: bytes, headers=None) -> httpx.Response:
+    return httpx.Response(status, headers=headers or {}, stream=httpx.ByteStream(body))
+
+
+def _card_then(rpc_response, record=None):
+    def _handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET":
+            return _json(CARD)
+        return rpc_response(request) if callable(rpc_response) else rpc_response
+
+    return _factory(_handler, record=record)
+
+
+# --- what we SEND ---------------------------------------------------------- #
+def test_a_payment_token_rides_the_message_metadata_and_the_header():
+    """§6.4 / T2: BOTH carriages on ONE request. Waiting for a 402 before
+    trying the other would be an automatic retry, which AC2 forbids."""
+    seen = []
+    a2a_client.clear_dialect_cache()
+    _call(credential=PAYMENT_TOKEN, credential_kind="payment_token",
+          client_factory=_two_hop(record=seen))
+    rpc = seen[1]
+    body = json.loads(rpc.content)
+    metadata = body["params"]["message"]["metadata"]
+    assert metadata["x402.payment.status"] == "payment-submitted"
+    # The DECODED payload — the in-band rail carries the object, not the blob.
+    assert metadata["x402.payment.payload"] == PAYMENT_TOKEN_OBJ
+    assert rpc.headers["payment-signature"] == PAYMENT_TOKEN
+    # The Bearer header is still there: a peer may authenticate the caller and
+    # charge separately, and removing it would change an unrelated contract.
+    assert rpc.headers["authorization"] == f"Bearer {PAYMENT_TOKEN}"
+
+
+def test_an_api_key_endpoint_sends_byte_identical_bytes_to_today():
+    """The additive-safety proof. Every endpoint registered before #3185 has no
+    `credential_kind`, so this is the envelope the whole installed base gets.
+
+    Literal byte equality is impossible (the rpc id and messageId are uuid4s),
+    so the assertion is: the same header SET, the same `Authorization` value,
+    and NO `metadata` key anywhere on the message."""
+    seen = []
+    a2a_client.clear_dialect_cache()
+    _call(client_factory=_two_hop(record=seen))
+    rpc = seen[1]
+    body = json.loads(rpc.content)
+    assert "metadata" not in body["params"]["message"]
+    assert "payment-signature" not in {k.lower() for k in rpc.headers.keys()}
+    assert rpc.headers["authorization"] == "Bearer tok"
+    assert set(body["params"]["message"]) == {"role", "parts", "messageId"}
+
+
+def test_an_opaque_payment_token_degrades_to_the_header_only():
+    """Decision 23: a token we cannot decode is still SENT — the x402 header
+    path is exactly what works today. What must not happen is announcing
+    undecodable bytes in-band as `x402.payment.payload`."""
+    seen = []
+    a2a_client.clear_dialect_cache()
+    _call(credential="opaque-not-base64-json", credential_kind="payment_token",
+          client_factory=_two_hop(record=seen))
+    rpc = seen[1]
+    assert "metadata" not in json.loads(rpc.content)["params"]["message"]
+    assert rpc.headers["payment-signature"] == "opaque-not-base64-json"
+
+
+def test_the_deprecated_header_can_be_switched_off_in_one_place(monkeypatch):
+    """S2: the fallback must be REMOVABLE, so the constant is the only thing a
+    future PR has to flip (and the removal note says when)."""
+    monkeypatch.setattr(a2a_client, "A2A_SEND_PAYMENT_SIGNATURE_HEADER", False)
+    seen = []
+    a2a_client.clear_dialect_cache()
+    _call(credential=PAYMENT_TOKEN, credential_kind="payment_token",
+          client_factory=_two_hop(record=seen))
+    rpc = seen[1]
+    assert "payment-signature" not in {k.lower() for k in rpc.headers.keys()}
+    # The in-band rail still carries it.
+    assert json.loads(rpc.content)["params"]["message"]["metadata"]["x402.payment.payload"]
+
+
+def test_the_card_fetch_never_carries_the_payment_token():
+    seen = []
+    a2a_client.clear_dialect_cache()
+    _call(credential=PAYMENT_TOKEN, credential_kind="payment_token",
+          client_factory=_two_hop(record=seen))
+    card = seen[0]
+    assert "payment-signature" not in {k.lower() for k in card.headers.keys()}
+    assert "authorization" not in {k.lower() for k in card.headers.keys()}
+
+
+def test_the_poll_path_sends_the_header_only_because_it_has_no_message(monkeypatch):
+    """F2: `tasks/get` sends `{"id": …}` — there is no message to hang metadata
+    on, which is also why the header constant cannot be flipped yet."""
+    seen = []
+    a2a_client.clear_dialect_cache()
+    asyncio.run(a2a_client.get_task(
+        endpoint_url=PEER.url, credential=PAYMENT_TOKEN,
+        credential_kind="payment_token", task_id="t-1",
+        validated=PEER, client_factory=_two_hop(record=seen),
+    ))
+    rpc = seen[-1]
+    body = json.loads(rpc.content)
+    assert body["method"] == "tasks/get"
+    assert body["params"] == {"id": "t-1"}
+    assert rpc.headers["payment-signature"] == PAYMENT_TOKEN
+
+
+# --- what we READ: the HTTP 402/403 rail ----------------------------------- #
+def test_a_402_with_the_payment_required_header_becomes_a_payment_required_outcome():
+    a2a_client.clear_dialect_cache()
+    with pytest.raises(a2a_client.A2ACallError) as exc:
+        _call(client_factory=_card_then(
+            _streaming_response(402, b"{}", {"payment-required": _required_header()})))
+    assert exc.value.reason == "payment_required"
+    assert exc.value.remote_status == 402
+    assert exc.value.payment["summary"]["plan_id"] == "plan_42"
+
+
+def test_a_402_body_is_read_even_though_other_error_bodies_are_not():
+    """The ONE departure from "never read an error body", and the reason: the
+    price lives nowhere else."""
+    a2a_client.clear_dialect_cache()
+    body = json.dumps({"detail": "Payment required",
+                       "payment_required": REQS,
+                       "credits_per_request": 5}).encode()
+    with pytest.raises(a2a_client.A2ACallError) as exc:
+        _call(client_factory=_card_then(_streaming_response(402, body)))
+    assert exc.value.reason == "payment_required"
+    assert exc.value.payment["summary"]["credits_per_request"] == 5
+
+
+def test_a_gzipped_402_is_still_a_402_and_not_an_outage():
+    """S8/F1 — the defect the first plan pass had. The encoding guard runs
+    before the status check, so a CDN-compressed "pay me" reported
+    `rpc_encoding`: an outage, for a priced endpoint working perfectly.
+
+    The body is never decoded (that rule is absolute). The HEADER is read, and
+    when there is no header the status alone still carries the outcome."""
+    a2a_client.clear_dialect_cache()
+    with pytest.raises(a2a_client.A2ACallError) as exc:
+        _call(client_factory=_card_then(_streaming_response(
+            402, gzip.compress(b'{"detail":"pay"}'),
+            {"content-encoding": "gzip", "payment-required": _required_header()})))
+    assert exc.value.reason == "payment_required"
+    assert exc.value.payment["summary"]["plan_id"] == "plan_42"
+
+
+def test_an_oversized_402_body_is_dropped_rather_than_reported_as_too_large():
+    """S8: the declared-length check used the 1 MiB answer cap, so a 100 KiB
+    "pay me" tripped `rpc_too_large` and the agent never learned payment was
+    required. The body is refused; the OUTCOME survives, flagged truncated."""
+    a2a_client.clear_dialect_cache()
+    huge = json.dumps({"detail": "pay up", "padding": "x" * 200_000}).encode()
+    with pytest.raises(a2a_client.A2ACallError) as exc:
+        _call(client_factory=_card_then(_streaming_response(402, huge)))
+    assert exc.value.reason == "payment_required"
+    assert exc.value.payment["truncated"] is True
+
+
+def test_a_402_declaring_an_oversized_length_is_not_read_at_all():
+    a2a_client.clear_dialect_cache()
+    with pytest.raises(a2a_client.A2ACallError) as exc:
+        _call(client_factory=_card_then(_streaming_response(
+            402, b'{"detail":"pay"}',
+            {"content-length": str(a2a_client.A2A_ERROR_BODY_MAX_BYTES + 1)})))
+    assert exc.value.reason == "payment_required"
+    assert exc.value.payment["truncated"] is True
+
+
+def test_a_403_to_a_payment_token_endpoint_is_payment_rejected_over_the_wire():
+    a2a_client.clear_dialect_cache()
+    body = json.dumps({"detail": "Payment verification failed",
+                       "error": "BCK.X402.0059"}).encode()
+    with pytest.raises(a2a_client.A2ACallError) as exc:
+        _call(credential=PAYMENT_TOKEN, credential_kind="payment_token",
+              client_factory=_card_then(_streaming_response(403, body)))
+    assert exc.value.reason == "payment_rejected"
+    assert exc.value.remote_status == 403
+
+
+def test_a_403_to_an_api_key_endpoint_is_rpc_forbidden_over_the_wire():
+    a2a_client.clear_dialect_cache()
+    with pytest.raises(a2a_client.A2ACallError) as exc:
+        _call(client_factory=_card_then(_streaming_response(403, b"nope")))
+    assert exc.value.reason == "rpc_forbidden"
+    assert exc.value.remote_status == 403
+
+
+def test_a_402_that_echoes_the_token_back_is_redacted_on_the_way_out():
+    """The expired-token case: the peer quotes what we sent it."""
+    a2a_client.clear_dialect_cache()
+    signature = PAYMENT_TOKEN_OBJ["payload"]["signature"]
+    body = json.dumps({"detail": f"signature {signature} is spent",
+                       "payment_required": {**REQS, "error": f"token {PAYMENT_TOKEN} spent"}}).encode()
+    with pytest.raises(a2a_client.A2ACallError) as exc:
+        _call(credential=PAYMENT_TOKEN, credential_kind="payment_token",
+              client_factory=_card_then(_streaming_response(402, body)))
+    rendered = json.dumps(exc.value.payment) + exc.value.detail
+    assert PAYMENT_TOKEN not in rendered
+    assert signature not in rendered
+
+
+@pytest.mark.parametrize("status", [400, 401, 404, 429, 500, 503])
+def test_every_other_status_keeps_todays_reason_and_gains_remote_status(status):
+    """Decision 8/18: one line, and every 4xx/5xx becomes diagnosable. The
+    body of these is still NOT read."""
+    a2a_client.clear_dialect_cache()
+    with pytest.raises(a2a_client.A2ACallError) as exc:
+        _call(client_factory=_card_then(_streaming_response(status, b'{"detail":"x"}')))
+    assert exc.value.reason == "rpc_http_error"
+    assert exc.value.remote_status == status
+    assert exc.value.payment is None
+
+
+def test_a_card_402_stays_a_card_http_error():
+    """Decision 10: the card hop is uncredentialed by design, so a gated card
+    cannot be paid for from here. The body-reading branch is keyed on the RPC
+    hop precisely so this contract is untouched."""
+    a2a_client.clear_dialect_cache()
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        return _streaming_response(402, b"{}", {"payment-required": _required_header()})
+
+    with pytest.raises(a2a_client.A2ACallError) as exc:
+        _call(client_factory=_factory(_handler))
+    assert exc.value.reason == "card_http_error"
+    assert exc.value.remote_status == 402
+    assert exc.value.payment is None
+
+
+def test_a_402_redirect_is_still_refused_as_a_redirect():
+    """The redirect guard stays FIRST: a 3xx is an SSRF bypass question, which
+    outranks "what does this cost"."""
+    a2a_client.clear_dialect_cache()
+    with pytest.raises(a2a_client.A2ACallError) as exc:
+        _call(client_factory=_card_then(_streaming_response(
+            302, b"", {"location": "https://elsewhere.example.com/"})))
+    assert exc.value.reason == "rpc_redirect"
+
+
+# --- what we READ: the in-band rail ---------------------------------------- #
+def _inband(status_value, extra=None, state="input-required"):
+    metadata = {"x402.payment.status": status_value}
+    metadata.update(extra or {})
+    return {"jsonrpc": "2.0", "id": "x", "result": {
+        "id": "t-77", "contextId": "c-1", "kind": "task",
+        "status": {"state": state,
+                   "message": {"role": "agent", "parts": [
+                       {"kind": "text", "text": "please pay"}], "metadata": metadata}},
+    }}
+
+
+def test_an_in_band_payment_required_task_is_refused_not_handed_over_as_a_prompt():
+    a2a_client.clear_dialect_cache()
+    with pytest.raises(a2a_client.A2ACallError) as exc:
+        _call(client_factory=_card_then(
+            _json(_inband("payment-required", {"x402.payment.required": REQS}))))
+    assert exc.value.reason == "payment_required"
+    assert exc.value.task_id == "t-77"
+    assert exc.value.payment["summary"]["plan_id"] == "plan_42"
+
+
+def test_an_in_band_payment_failure_is_payment_rejected():
+    a2a_client.clear_dialect_cache()
+    with pytest.raises(a2a_client.A2ACallError) as exc:
+        _call(client_factory=_card_then(_json(_inband(
+            "payment-failed",
+            {"x402.payment.error": {"code": "BCK.X402.0059", "reason": "spent"}}))))
+    assert exc.value.reason == "payment_rejected"
+
+
+def test_the_poll_path_runs_the_same_in_band_check(monkeypatch):
+    """Decision 7: without this, polling a priced task hands the agent "pay me"
+    as an `input-required` prompt it will poll forever."""
+    a2a_client.clear_dialect_cache()
+    with pytest.raises(a2a_client.A2ACallError) as exc:
+        asyncio.run(a2a_client.get_task(
+            endpoint_url=PEER.url, credential="tok", task_id="t-77",
+            validated=PEER,
+            client_factory=_card_then(
+                _json(_inband("payment-required", {"x402.payment.required": REQS}))),
+        ))
+    assert exc.value.reason == "payment_required"
+
+
+def test_payment_completed_is_recorded_on_the_result_and_receipts_are_dropped():
+    """Decision 31/9: money leaving must be visible to the OPERATOR, so it
+    rides `A2AResult.payment_status` (activity + audit). The receipts are not
+    surfaced — no consumer, and the response allowlist does not grow."""
+    a2a_client.clear_dialect_cache()
+    reply = _inband("payment-completed",
+                    {"x402.payment.receipts": [{"txHash": "0xfeedface"}]},
+                    state="completed")
+    result = _call(client_factory=_card_then(_json(reply)))
+    assert result.state == "completed"
+    assert result.payment_status == "payment-completed"
+    assert "0xfeedface" not in (result.text or "")
+
+
+def test_an_ordinary_answer_reports_no_payment_status():
+    a2a_client.clear_dialect_cache()
+    result = _call(client_factory=_two_hop())
+    assert result.payment_status is None
