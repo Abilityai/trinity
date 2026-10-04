@@ -336,6 +336,14 @@ def _task_object(execution_id: str, state: str, *, text: Optional[str] = None,
     metadata always gets a `status.message`, even with no error text, because
     the metadata is the message's only reason to exist on a successful paid
     turn: no message, nowhere for the receipt to go.
+
+    It is MIRRORED onto the top-level `Task.metadata` (#3215). The spec location
+    is still `status.message.metadata` and that is what the docs name, but a
+    typed client (`a2a-sdk`'s `Task.metadata: dict | None`) renders the Task we
+    returned as `metadata: null`, which reads as "nothing was charged". One
+    assignment, the SAME dict object, inside one `if metadata:` — the free path
+    emits no `metadata` key at all, so an unpaid Task's bytes and every
+    idempotency snapshot built from them are unchanged.
     """
     task: Dict[str, Any] = {
         "id": execution_id,
@@ -358,6 +366,7 @@ def _task_object(execution_id: str, state: str, *, text: Optional[str] = None,
         }
         if metadata:
             message["metadata"] = metadata
+            task["metadata"] = metadata
         task["status"]["message"] = message
     return task
 
