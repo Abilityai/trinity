@@ -997,9 +997,15 @@ SIBLING of the rail, never a rail tab (ruled 2026-09-05); **ent#547 reversed tha
 door, the room restriction and why the 2026-09-05 objections are answered rather than
 dropped. Both read one payload through `composables/usePortalAgentPage.js`.
 Canvas, Files and recent work are **not** duplicated here — they have been rail tabs since
-ent#475/#525. `portalUtils.js::landingThread` is the one rule for which chat you land in,
+ent#475/#525. `portalUtils.js::agentLanding` is the one rule for which chat you land in,
 and the `?agent=` deep link's `resolveAgentLanding` defers to it so the two entry points
-cannot disagree. Main is named by its role in both the tab strip and the header and is
+cannot disagree. Since **ent#784** that rule answers "a new, empty chat" (it replaced
+ent#523's most-recently-active `landingThread`); only a validated `lastOpenSessionId`
+— the ent#621 seam, checked against the principal's own thread list — overrides it.
+`landOnAgent` is therefore synchronous, keeps `/workspace/a/:name`, and guards the
+call before writing `activeAgentName`; the composer's mount focus is gated by a
+`focusOnMount` mode (`always` for a gesture, `fine-pointer` for a landing) so an
+unasked-for landing cannot raise a soft keyboard. Main is named by its role in both the tab strip and the header and is
 not renameable; an archived chat stays a tab (ruled “becomes the newest tab”), though you never LAND in one by default;
 an unused Main is filtered from the **sidebar** only (a projection, not a filter on
 `threads`, because the strip must show Main from the first visit).

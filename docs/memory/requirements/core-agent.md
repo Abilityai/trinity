@@ -2311,9 +2311,16 @@ issue if it's ever wanted. Also deferred: `data.json` caching/streaming.
 **One page**
 
 - `/workspace/a/:agentName` keeps its URL and resolves to a chat.
-  `portalUtils.js::landingThread` is the rule — most recently active, Main as
-  the floor — and the `?agent=` deep link's `resolveAgentLanding` defers to it,
-  so the two entry points cannot land a first-time visitor in different places.
+  `portalUtils.js::agentLanding` is the rule and the `?agent=` deep link's
+  `resolveAgentLanding` defers to it, so the two entry points cannot land a
+  first-time visitor in different places. **ent#784 reversed what the rule
+  answers**: opening an agent starts a NEW, empty chat (ent#523's
+  most-recently-active `landingThread` is gone), the URL STAYS on
+  `/workspace/a/:name` until the first send names a thread, and the composer
+  takes focus — on a fine pointer for a landing, on any pointer for an explicit
+  gesture, so a phone never gets an unprompted keyboard. Landing mints no row;
+  the chat is born on the first send. Returning to a previous chat is the tab
+  strip, one click.
 - `PortalAgentPage.vue` is dismantled: stats + the Activity chart to
   `PortalAgentBand.vue` (always visible); chats / what it can do / reports to
   `PortalAgentDetails.vue`; Canvas and Files were already rail tabs (ent#475);
