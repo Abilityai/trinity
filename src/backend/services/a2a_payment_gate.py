@@ -314,6 +314,13 @@ _OUTCOME_RENDER = {
         "failed", a2a_protocol.X402_STATUS_VERIFIED, "execution_failed"),
     paid_turn_service.EXECUTION_CANCELLED: (
         "canceled", a2a_protocol.X402_STATUS_VERIFIED, "execution_cancelled"),
+    # trinity-enterprise#751: nothing ran and nothing was charged. A held request
+    # is `input-required`, keyed on its approval request (the unpaid door's
+    # shape); a refusal is `rejected`, carrying the gate's own code.
+    paid_turn_service.GATE_HELD: (
+        "input-required", a2a_protocol.X402_STATUS_VERIFIED, "approval_pending"),
+    paid_turn_service.GATE_REFUSED: (
+        "rejected", a2a_protocol.X402_STATUS_VERIFIED, "gated"),
 }
 
 
@@ -345,7 +352,11 @@ def task_from_paid_payload(
     state, payment_status, error_code = render
     payload = outcome.payload or {}
     payment = payload.get("payment") or {}
-    execution_id = payload.get("execution_id") or outcome.execution_id or uuid.uuid4().hex
+    gate_detail = payload.get("detail") if isinstance(payload.get("detail"), dict) else {}
+    if outcome.kind == paid_turn_service.GATE_REFUSED:
+        error_code = gate_detail.get("code") or error_code
+    execution_id = (payload.get("execution_id") or outcome.execution_id
+                    or payload.get("request_id") or uuid.uuid4().hex)
 
     metadata: Dict[str, Any] = {a2a_protocol.X402_STATUS_KEY: payment_status}
     if payment_status == a2a_protocol.X402_STATUS_COMPLETED:
@@ -381,13 +392,17 @@ def task_from_paid_payload(
     # garbled and the caller was not charged for it. A cancelled turn keeps its
     # text (#679) — the caller cancelled its own work and may still want it.
     text = payload.get("response") if state in ("completed", "canceled") else None
+    if state == "input-required":
+        text = payload.get("message")          # the gate's notice (trinity-enterprise#751)
     return task_builder(
         execution_id,
         state,
         # A failed turn's honest text is the orchestrator's own reason
         # ("Execution failed — no charge"): the snapshot deliberately carries no
         # response on that branch, so this is the only thing to tell the caller.
-        error=payment.get("reason") if state == "failed" else None,
+        # A gate refusal's is the refusal itself.
+        error=(payment.get("reason") if state == "failed"
+               else gate_detail.get("message") if state == "rejected" else None),
         text=text,
         metadata=metadata,
     )

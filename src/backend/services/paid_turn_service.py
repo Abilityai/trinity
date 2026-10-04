@@ -30,6 +30,10 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Optional, Union
 
+# A leaf module of exception types — not a collaborator (decision 20 is about
+# what a test must be able to patch; nothing patches an exception class).
+from services.skill_gate_errors import SkillApprovalRequired, SkillGateError
+
 logger = logging.getLogger(__name__)
 
 #: Strong references to in-flight detached settle tasks (C1). The settle must
@@ -67,6 +71,10 @@ UNSETTLED = "unsettled"
 EXECUTION_ERROR = "execution_error"
 EXECUTION_FAILED = "execution_failed"
 EXECUTION_CANCELLED = "execution_cancelled"
+# trinity-enterprise#751: the turn names a gated skill. Nothing ran, so nothing is
+# charged and the claim is released; HELD raised an approval, REFUSED did not.
+GATE_HELD = "gate_held"
+GATE_REFUSED = "gate_refused"
 
 
 @dataclass
@@ -347,6 +355,22 @@ async def run_paid_turn(
         # whole TTL.
         idem.fail(decision)
         raise
+    except SkillGateError as e:
+        # trinity-enterprise#751: nothing ran. Released with fail(), never
+        # complete(): a completed claim with an unsettled snapshot is the replay
+        # branch above, which would try to SETTLE a turn that never ran. An
+        # approved run later goes through uncharged (user ruling 2026-10-02).
+        idem.fail(decision)
+        _log_verify_ok(db, agent_name, verify_result, error=f"Not run: {e.code}")
+        payment = {"settled": False, "reason": "Not run — no charge"}
+        held = isinstance(e, SkillApprovalRequired)
+        return PaidTurnOutcome(
+            kind=GATE_HELD if held else GATE_REFUSED,
+            status_code=202 if held else e.status_code,
+            payload=({**e.detail(), "payment": payment} if held
+                     else {"detail": e.detail(), "payment": payment}),
+            verify=verify_result,
+        )
     except Exception as e:
         logger.error(f"Task execution failed for paid request on {agent_name}: {e}")
         # Nothing dispatched — release the claim so a legitimate retry re-executes.

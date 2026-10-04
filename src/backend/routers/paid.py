@@ -226,6 +226,9 @@ async def paid_chat(
         paid_turn_service.ABORTED,
         paid_turn_service.IN_FLIGHT,
         paid_turn_service.EXECUTION_ERROR,
+        # trinity-enterprise#751: 202 pending_approval / the named refusal, unsettled.
+        paid_turn_service.GATE_HELD,
+        paid_turn_service.GATE_REFUSED,
     ):
         return JSONResponse(status_code=turn.status_code, content=turn.payload)
     if turn.kind in (

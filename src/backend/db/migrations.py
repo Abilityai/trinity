@@ -5079,6 +5079,57 @@ def _migrate_pull_sync(cursor, conn):
     conn.commit()
 
 
+def _migrate_skill_gate_requests_table(cursor, conn):
+    """trinity-enterprise#751 — a gated-skill request frozen while its approval
+    ask is open; the ask records the decision, this row the effect (exactly
+    once: a status compare-and-set plus a UNIQUE `dispatched_execution_id`).
+    See the DDL comment in db/schema.py.
+
+    Idempotent. PostgreSQL half: Alembic `0088_skill_gate_requests`.
+    """
+    cursor.execute("PRAGMA table_info(skill_gate_requests)")
+    if not cursor.fetchall():
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS skill_gate_requests (
+                request_id TEXT PRIMARY KEY,
+                agent_name TEXT NOT NULL,
+                ask_item_id TEXT,
+                skills TEXT NOT NULL,
+                request_text TEXT NOT NULL,
+                fingerprints TEXT,
+                requester_kind TEXT NOT NULL,
+                requester_key TEXT NOT NULL,
+                source_agent TEXT,
+                requester_email TEXT,
+                requester_execution_id TEXT,
+                requester_mcp_key_id TEXT,
+                origin_execution_id TEXT,
+                triggered_by TEXT,
+                dispatch TEXT NOT NULL,
+                state TEXT NOT NULL DEFAULT 'pending',
+                state_detail TEXT,
+                dispatched_execution_id TEXT UNIQUE,
+                created_at TEXT NOT NULL,
+                decided_at TEXT,
+                dispatched_at TEXT,
+                notified_at TEXT
+            )
+        """)
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_skill_gate_requests_agent_state "
+        "ON skill_gate_requests(agent_name, state)"
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_skill_gate_requests_requester "
+        "ON skill_gate_requests(agent_name, requester_key, state)"
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_skill_gate_requests_state "
+        "ON skill_gate_requests(state, decided_at)"
+    )
+    conn.commit()
+
+
 MIGRATIONS = [
     ("agent_sharing", _migrate_agent_sharing_table),
     ("schedule_executions_observability", _migrate_schedule_executions_observability),
@@ -5236,4 +5287,5 @@ MIGRATIONS = [
     ("ent720_email_identity", _migrate_ent720_email_identity),
     ("metric_points_restatement", _migrate_metric_points_restatement),
     ("pull_sync", _migrate_pull_sync),
+    ("skill_gate_requests_table", _migrate_skill_gate_requests_table),
 ]

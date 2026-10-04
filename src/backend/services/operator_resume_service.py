@@ -187,6 +187,11 @@ async def maybe_dispatch_resume(
         result = await dispatch_and_await_terminal(
             agent_name=agent_name,
             message=_framed_message(item, response, response_text),
+            # trinity-enterprise#751: the skill gate reads what the PERSON wrote
+            # — the chosen answer AND the free text, since a question with no
+            # options accepts any text as its answer — never the platform frame
+            # around it, which quotes the agent's own question.
+            request_text="\n".join(t for t in (response, response_text) if t),
             triggered_by=TRIGGERED_BY,
             source_user_email=responded_by_email,
         )
@@ -355,6 +360,7 @@ async def maybe_dispatch_ending(
         result = await dispatch_and_await_terminal(
             agent_name=agent_name,
             message=_framed_ending(items, disposition, reason),
+            request_text=reason or "",   # trinity-enterprise#751: the canceller's words only
             triggered_by=TRIGGERED_BY_ENDING,
             source_user_email=disposed_by_email,
         )
