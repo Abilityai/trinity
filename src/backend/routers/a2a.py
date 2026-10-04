@@ -86,27 +86,34 @@ a2a_server_router = APIRouter(tags=["a2a-server"])
 
 
 def _base_url_from_request(request: Request) -> str:
-    """Compute the external base URL for card `url` construction.
+    """Compute the external base URL for the card `url` and for the 402s.
 
-    Order of preference:
-      1. `PUBLIC_CHAT_URL` env if set — this is what external
-         consumers reach Trinity through (Cloudflare tunnel, etc.).
-      2. `FRONTEND_URL` env — second-best for self-hosted setups.
-      3. The request's own scheme + host — works fine for clients
-         that fetched the card from the same host they'll call.
+    Delegates to `utils.public_url.public_base_url` (#3215), which owns the
+    precedence: the operator's configured public origin when it is the host the
+    caller actually used, else the request host with an https upgrade taken from
+    the raw `X-Forwarded-Proto` header. One helper for the card and for both
+    payment doors, because a card that advertises one origin while the 402 mints
+    a token for another sends the buyer to a URL it never verifies against.
 
-    Returns "" if none of the above resolve, signalling the card
-    generator to omit URL fields rather than emit a broken URL.
+    The configured origin now comes from `settings_service.get_public_chat_url()`
+    — the Settings row THEN `PUBLIC_CHAT_URL` — rather than the env var alone, so
+    an operator who set it in the UI is honoured here as they already are for the
+    Telegram and WhatsApp webhook URLs.
+
+    Returns "" if nothing resolves, signalling the card generator to omit URL
+    fields rather than emit a broken URL.
     """
-    from config import FRONTEND_URL, PUBLIC_CHAT_URL  # local import: avoid circular at module load
+    from config import FRONTEND_URL  # local import: avoid circular at module load
+    from services.settings_service import settings_service
+    from utils.public_url import public_base_url
 
-    if PUBLIC_CHAT_URL:
-        return PUBLIC_CHAT_URL.rstrip("/")
-    if FRONTEND_URL:
-        return FRONTEND_URL.rstrip("/")
-    if request.url:
-        return f"{request.url.scheme}://{request.url.netloc}"
-    return ""
+    try:
+        configured = settings_service.get_public_chat_url()
+    except Exception:  # noqa: BLE001 — an unreadable setting falls back to env
+        from config import PUBLIC_CHAT_URL
+        configured = (PUBLIC_CHAT_URL or "").rstrip("/")
+    return public_base_url(request, configured=configured,
+                           frontend_url=FRONTEND_URL)
 
 
 async def _fetch_template_data(agent_name: str, container) -> dict:
@@ -665,7 +672,9 @@ async def _anonymous_jsonrpc(agent_name: str, request: Request):
         return parsed
     method, params, rpc_id = parsed
 
-    base_url = str(request.base_url).rstrip("/")
+    # The same origin the agent card advertises (#3215), not `request.base_url`:
+    # the 402's `resource.url` is what the buyer's token is minted against.
+    base_url = _base_url_from_request(request)
     caller_ip = request.client.host if request.client else None
     payment_service = get_nevermined_payment_service()
 
@@ -679,9 +688,17 @@ async def _anonymous_jsonrpc(agent_name: str, request: Request):
 
         access_token = a2a_payment_gate.extract_token(message, request.headers)
         if not access_token:
+            # The plan's own scheme (#3215), resolved here because the builder
+            # stays synchronous — the lookup is an outbound HTTP call.
+            plan_scheme = await payment_service.resolve_plan_scheme(
+                nvm_api_key=priced.nvm_api_key,
+                nvm_environment=priced.config.nvm_environment,
+                config=priced.config,
+            )
             status_code, body, headers = a2a_payment_gate.payment_required_response(
                 agent_name, priced.config,
                 payment_service=payment_service, base_url=base_url,
+                plan_scheme=plan_scheme,
             )
             return JSONResponse(status_code=status_code, content=body, headers=headers)
 
