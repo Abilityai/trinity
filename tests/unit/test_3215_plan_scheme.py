@@ -400,6 +400,128 @@ class TestLookupIsBounded:
 
 
 # ---------------------------------------------------------------------------
+# Review I4 — a cancelled leader must not hand followers a SILENT default
+# ---------------------------------------------------------------------------
+
+class TestCancelledLeaderFailsFollowersLoudly:
+    """The leader's `finally` answers its followers either way — but *which*
+    answer is the point.
+
+    A cancelled leader resolved nothing, so completing its future with the
+    default is a wrong answer dressed as a right one: the follower returns
+    crypto for a card plan with no WARN, no negative window, and no
+    last-known-good consulted — the exact silent mis-advertisement #3215 exists
+    to stop. It must instead fail the future, so each follower takes its own
+    `except` branch into `_record_plan_lookup_failure`.
+    """
+
+    async def test_a_cancelled_leader_sends_followers_down_the_failure_path(
+            self, caplog):
+        import logging
+
+        started = asyncio.Event()
+        plans = _Plans(CARD_PLAN, delay=0.2)
+        svc = _service(plans=plans)
+
+        async def _leader():
+            started.set()
+            return await svc.resolve_plan_scheme("k", "sandbox", _config())
+
+        leader = asyncio.create_task(_leader())
+        await started.wait()
+        await asyncio.sleep(0)       # let the leader register its in-flight future
+        follower = asyncio.create_task(
+            svc.resolve_plan_scheme("k", "sandbox", _config()))
+        await asyncio.sleep(0)
+        leader.cancel()
+
+        with caplog.at_level(logging.WARNING,
+                             logger="services.nevermined_payment_service"):
+            got = await follower
+        with pytest.raises(asyncio.CancelledError):
+            await leader
+
+        # It still answers — fail-open is the row-19 design — but LOUDLY, via
+        # the one function that opens the negative window.
+        assert got == nps.default_plan_scheme("sandbox")
+        warned = [r.getMessage() for r in caplog.records
+                  if r.levelno >= logging.WARNING]
+        assert any("plan lookup failed" in m for m in warned), caplog.text
+        # The reason names the single-flight wait, not a generic failure.
+        assert any("waiting on in-flight lookup failed" in m for m in warned)
+        entry = nps._PLAN_SCHEME_CACHE[("sandbox", "plan-1")]
+        assert entry.failed_at, "the negative window was never opened"
+
+    async def test_a_cancelled_leader_serves_last_known_good_to_followers(self):
+        """Not merely "a WARN": the failure path's whole value is that a plan
+        resolved an hour ago still wins over the default."""
+        svc = _service(plans=_Plans(CARD_PLAN))
+        first = await svc.resolve_plan_scheme("k", "sandbox", _config())
+        assert first.scheme == "nvm:card-delegation"
+
+        # Expire the positive TTL so the next call is a real lookup again,
+        # keeping the entry (and its scheme) as last-known-good.
+        entry = nps._PLAN_SCHEME_CACHE[("sandbox", "plan-1")]
+        entry.fetched_at -= nps.PLAN_SCHEME_TTL_SECONDS + 1
+
+        started = asyncio.Event()
+        svc2 = _service(plans=_Plans(CARD_PLAN, delay=0.2))
+        svc2._get_payments_client = svc._get_payments_client
+
+        async def _leader():
+            started.set()
+            return await svc2.resolve_plan_scheme("k", "sandbox", _config())
+
+        leader = asyncio.create_task(_leader())
+        await started.wait()
+        await asyncio.sleep(0)
+        follower = asyncio.create_task(
+            svc2.resolve_plan_scheme("k", "sandbox", _config()))
+        await asyncio.sleep(0)
+        leader.cancel()
+        got = await follower
+        with pytest.raises(asyncio.CancelledError):
+            await leader
+        assert got.scheme == "nvm:card-delegation"
+
+    async def test_a_cancelled_leader_with_no_followers_is_silent(self):
+        """The future's exception must be marked retrieved, or asyncio prints
+        "Future exception was never retrieved" at GC for every cancelled 402."""
+        started = asyncio.Event()
+        svc = _service(plans=_Plans(CARD_PLAN, delay=0.2))
+
+        async def _leader():
+            started.set()
+            return await svc.resolve_plan_scheme("k", "sandbox", _config())
+
+        leader = asyncio.create_task(_leader())
+        await started.wait()
+        await asyncio.sleep(0)
+        leader.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await leader
+
+        loop = asyncio.get_running_loop()
+        seen: list = []
+        loop.set_exception_handler(lambda _l, ctx: seen.append(ctx))
+        import gc
+        gc.collect()
+        await asyncio.sleep(0)
+        assert not seen, seen
+
+    async def test_a_successful_leader_still_shares_its_result(self):
+        """The default path is untouched: no WARN, no negative window."""
+        plans = _Plans(CARD_PLAN, delay=0.05)
+        svc = _service(plans=plans)
+        results = await asyncio.gather(*[
+            svc.resolve_plan_scheme("k", "sandbox", _config()) for _ in range(5)
+        ])
+        assert len(plans.calls) == 1
+        assert all(r.scheme == "nvm:card-delegation" for r in results)
+        assert not nps._PLAN_SCHEME_CACHE[("sandbox", "plan-1")].failed_at
+
+
+# ---------------------------------------------------------------------------
 # A6 — the token is an allow-list, not a trusted input
 # ---------------------------------------------------------------------------
 

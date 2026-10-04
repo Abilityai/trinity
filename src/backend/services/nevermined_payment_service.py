@@ -141,6 +141,16 @@ class PlanLookupBusy(Exception):
     """No plan-lookup slot became free within the wait budget."""
 
 
+class PlanLookupLeaderLost(Exception):
+    """The single-flight leader ended without resolving a scheme.
+
+    Raised INTO the followers' awaited future, never out of
+    `resolve_plan_scheme` (review I4) — each follower already catches it and
+    goes through `_record_plan_lookup_failure`, so it degrades loudly instead of
+    silently returning the default scheme the leader never actually confirmed.
+    """
+
+
 @dataclass(frozen=True)
 class PlanScheme:
     """The `(scheme, network)` pair one x402 requirements document advertises."""
@@ -509,13 +519,27 @@ class NeverminedPaymentService:
         finally:
             inflight.pop(key, None)
             if not future.done():
-                # Even on cancellation the followers get an answer rather than
-                # hanging on a future nobody will ever resolve.
-                future.set_result(
-                    resolved
-                    if resolved is not None
-                    else default_plan_scheme(nvm_environment)
-                )
+                if resolved is not None:
+                    future.set_result(resolved)
+                else:
+                    # The leader resolved nothing — it was cancelled (its caller
+                    # disconnected, its request was shut down) or it raised.
+                    # FAIL the future rather than completing it with the
+                    # default (review I4): a default handed over here is a
+                    # wrong answer dressed as a right one, advertising crypto
+                    # for a card plan with no WARN, no negative window and
+                    # last-known-good never consulted — the exact silent
+                    # mis-advertisement #3215 exists to stop. Failing it sends
+                    # each follower down its own `except` branch into
+                    # `_record_plan_lookup_failure`, which still answers (the
+                    # 402 must not fail) but answers loudly and prefers a plan
+                    # resolved minutes ago over the default.
+                    future.set_exception(PlanLookupLeaderLost(
+                        "plan lookup leader did not resolve"))
+                    # Mark it retrieved: with no followers nobody awaits this
+                    # future, and asyncio would log "Future exception was never
+                    # retrieved" at GC for every cancelled 402.
+                    future.exception()
 
     async def _fetch_plan_scheme(
         self,
