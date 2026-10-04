@@ -7,9 +7,15 @@ a 2-CPU host.
 Module: src/backend/services/docker_utils.py
 """
 
+import sys
+from pathlib import Path
+
 import pytest
 
-from test_docker_utils import get_docker_utils
+# Sibling import — the unit dir is not implicitly importable.
+if str(Path(__file__).resolve().parent) not in sys.path:
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+from test_docker_utils import get_docker_utils  # noqa: E402
 
 GB = 1_000_000_000
 
