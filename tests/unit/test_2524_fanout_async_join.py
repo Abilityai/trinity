@@ -579,17 +579,24 @@ class TestSyncEdgeAdapter:
 
     def test_a_queued_dispatch_waits_and_rebuilds_from_the_row(self, monkeypatch):
         """The pull path. QUEUED is not an outcome — the row is on the durable
-        queue and the worker's terminal is the answer."""
+        queue and the worker's terminal is the answer.
+
+        The row starts CLAIMED-and-running and only goes terminal inside the
+        wait, which is the real sequence and the one `a2a` now takes: ent#679 T6
+        put `a2a` in `INTERACTIVE_TRIGGERS` (an inbound JSON-RPC caller is
+        blocked in-line on the reply), so the adapter claim-waits first and then
+        reads the row once before waiting. A fixture that was ALREADY terminal at
+        dispatch time therefore short-circuited on that read and never reached
+        `wait_for_sync_terminal` — a state that cannot precede the wait it is
+        here to exercise. Every assertion below is unchanged; only the fixture
+        now models a row the worker has not finished yet.
+        """
         from services.execution_envelope import TaskExecutionResult
 
         queued = TaskExecutionResult(
             execution_id="exec_9", status="queued", response="",
         )
-        db = _AdapterDB(row={
-            "status": "success", "response": "answered later", "error": None,
-            "cost": 0.02, "context_used": 10, "context_max": 200000,
-            "claude_session_id": "s1",
-        })
+        db = _AdapterDB(row={"status": "running", "response": "", "error": None})
         tes, _svc = self._service(monkeypatch, result=queued, db=db)
 
         seen = {}
@@ -597,6 +604,12 @@ class TestSyncEdgeAdapter:
         async def _wait(execution_id, timeout):
             seen["execution_id"] = execution_id
             seen["timeout"] = timeout
+            # The worker's terminal lands on the row while the caller waits.
+            db.row = {
+                "status": "success", "response": "answered later", "error": None,
+                "cost": 0.02, "context_used": 10, "context_max": 200000,
+                "claude_session_id": "s1",
+            }
             return None  # the poll fallback: "re-read the row"
 
         monkeypatch.setattr("services.sync_waiter.wait_for_sync_terminal", _wait)

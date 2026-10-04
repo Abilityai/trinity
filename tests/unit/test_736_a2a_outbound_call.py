@@ -224,6 +224,11 @@ def test_loopback_round_trip_against_trinitys_own_inbound_server(monkeypatch):
         can_user_access_agent=lambda user, name: True,
         get_execution=lambda eid: state["executions"].get(eid),
         cancel_queued_execution=lambda eid, reason=None: False,
+        # ent#679: the card producer reads the payment config to decide whether
+        # to declare a price. `remotebot` is not priced here — stub it
+        # explicitly so the card this loopback fetches is the unpriced one
+        # rather than the fail-open-on-exception one.
+        get_nevermined_config=lambda name: None,
     )
     monkeypatch.setattr(a2a, "db", fake_db)
     monkeypatch.setattr(
@@ -279,7 +284,15 @@ def test_loopback_round_trip_against_trinitys_own_inbound_server(monkeypatch):
 
     remote = FastAPI()
     remote.include_router(a2a.a2a_server_router)
-    remote.dependency_overrides[deps.get_current_user] = lambda: types.SimpleNamespace(
+    # ent#679: the route's dependency is now `get_user_or_anonymous`, which
+    # CALLS `get_current_user` directly rather than depending on it — so an
+    # override of the latter is never consulted and this loopback would run down
+    # the anonymous x402 branch instead of the fleet path it exists to prove.
+    # Override what the route actually depends on (same fix as test_157's
+    # `client` fixture). The peer here IS a Trinity principal: #738 federation's
+    # premise is a Trinity calling a Trinity with an MCP key, and ruling T6/AC4
+    # says that path is byte-identical to before the gate.
+    remote.dependency_overrides[deps.get_user_or_anonymous] = lambda: types.SimpleNamespace(
         id=2, username="peer", email="peer@example.com", role="user",
         agent_name=None, mcp_key_id="k2",
     )

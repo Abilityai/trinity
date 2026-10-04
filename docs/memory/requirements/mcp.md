@@ -869,6 +869,99 @@ revision — the kind is a label inside the existing envelope.
 
 - **Flow**: `docs/memory/feature-flows/a2a-outbound-call.md`
 
+### 32.6 A2A Inbound Payment Gate — x402 on `POST /a2a/{name}` (ent#679)
+- **Status**: 🚧 In Progress
+- **Implements**: trinity-enterprise#679 (epic trinity-enterprise#156); stacks on
+  abilityai/trinity#3185 (the outbound consumer's 402 handling)
+- **Description**: §32.2 authenticated the inbound door with a Trinity MCP key
+  and nothing else, so a stranger — including a remote Trinity holding a valid
+  x402 payment token — got **401** and could never reach a 402, never pay, and
+  never be served. Meanwhile the paywall (`public-access.md` §23) lived only on
+  the bespoke `POST /api/paid/{name}/chat` door, and the card said nothing about
+  price. This puts the same paywall on the A2A door, in the A2A x402 message
+  vocabulary, and states the price on the card.
+- **FR-1 — One branch, decided by the principal**: the door resolves an
+  *optional* principal (`dependencies.get_user_or_anonymous`). A resolved
+  principal takes **today's path, unchanged**: the §32.2 gates, no payment, no
+  facilitator call, no payment-log row. Only an *anonymous* caller can reach the
+  payment path, and only for an agent that is BOTH A2A-exposed and
+  Nevermined-enabled; anything else answers today's 401 bytes. Internal fleet
+  traffic, owner/shared callers and subscription tenants are therefore
+  unaffected by construction, not by a carve-out.
+- **FR-2 — A refused credential is never downgraded into a payer**: the optional
+  dependency degrades to anonymous on a **401 only**. A **403** (the connector
+  and ephemeral-key fences) is re-raised. A credential Trinity recognised and
+  then fenced must not be able to buy the access it was just refused.
+- **FR-3 — "Takes payment" ≠ "can process one"**: the two facts get different
+  honest answers. No price configured ⇒ 401 (the stranger has no business
+  here). Priced but the payment SDK is absent ⇒ **501** (the door exists and is
+  broken). Fusing them would answer "authenticate" to a caller holding a valid
+  token for an agent whose card advertises a price — telling it to present a
+  credential that does not exist.
+- **FR-4 — 402 parity with the paid door**: a missing or unusable token answers
+  **HTTP 402** with the paid door's body (`detail`, `payment_required`,
+  `credits_per_request`) and base64 `payment-required` header, from the **one**
+  requirements builder both doors share — a 402 built differently from the later
+  verify is a rejection the caller cannot act on. `resource.url` names **this**
+  door (`/a2a/{name}`), not the paid one: an x402 token signs the resource URL,
+  so a token minted against the paid chat door cannot authorize an A2A call. A
+  rejected token answers **403** with a `reject` log row.
+- **FR-5 — Metadata-first token carriage**: the token is read from the A2A
+  message metadata (`x402.payment.payload`) first and from the deprecated
+  `payment-signature` header only as a fallback, matching the provider SDK's own
+  precedence. When both are present the metadata wins, so a client migrating
+  between rails cannot have a stale header silently decide what it pays with.
+  Every malformed payload shape falls through to the 402 rather than raising —
+  all of it is caller-controlled input on a route reachable with no credential.
+  **No extension activation handshake** is implemented or advertised (§32.5's
+  standing scope line): Trinity speaks the vocabulary, it does not negotiate.
+- **FR-6 — One home for the money logic**: the settle/replay/honest-status
+  branches (`public-access.md` §23.3, #1018) are **not** duplicated. Both doors
+  call one orchestrator (`services/paid_turn_service.py`) that takes its
+  collaborators as parameters, so a delivered-but-unsettled turn is
+  `success_unsettled` on both rails, the dedup unit is the same
+  `(token ∥ message)` one, and a replayed unsettled snapshot re-settles and
+  converges identically. The paid door's behaviour is unchanged.
+- **FR-7 — The card states the price (AC2)**: a priced agent's card declares a
+  payment extension carrying `agentId`, `planId`, `credits`, `paymentType` and a
+  `paymentInfoUrl` pointing at the public `GET /api/paid/{name}/info` document,
+  so an x402-speaking client mints a token from the card alone and meets the
+  paywall on its **first** request. Both card surfaces carry it (§32.4 FR-3's
+  single producer). An unpriced or disabled agent's card is **byte-identical**
+  to before. An unreadable payment config fails open (card served, no price
+  block) — a card route has never 5xx'd, and the gate re-reads the config and
+  still answers 402.
+- **FR-8 — Attribution with no schema change**: a settled call is attributable
+  from rows that already exist — the payer wallet on the `settle` log row, the
+  execution row (`triggered_by="a2a"` + its principal fields), and the platform
+  audit row (source IP + payer). No new column, no migration.
+- **FR-9 — The paying path is rate limited before it costs anything**: per-IP
+  **and** per-agent budgets are enforced ahead of any DB read or facilitator
+  call. A distributed flood passes every per-IP bucket while still pinning one
+  agent's facilitator quota, which only the per-agent limit sees.
+- **FR-10 — A payer can retrieve what it paid for**: `tasks/get` and
+  `tasks/cancel` are allowed to a payer whose token verifies **and** whose
+  wallet matches that execution's payment-log rows. Every mismatch — including
+  payer A polling payer B's existing task — answers byte-identical "task not
+  found", so the binding is not an existence oracle.
+- **FR-11 — A duration plan is configurable honestly**: `credits_per_request`
+  accepts **0**. A Nevermined *duration* plan charges by time — Trinity sends no
+  amount to the facilitator and the plan defines the burn — so the old `>= 1`
+  floor forced an operator to claim a per-call price nothing would ever charge.
+  A negative amount is still a named 422. Such a plan's card declares
+  `paymentType: "dynamic"`, not the contradictory `fixed`/0 that reads as free.
+- **FR-12 — Open-core (mechanism in OSS)**: nothing here is edition-aware, the
+  same shape §23.3's paid door has always had. The path is reachable only when
+  the §32.2 exposure flag (settable only by the entitled provider) **and** the
+  OSS Nevermined config are both on, and the enterprise inbound allow-list is
+  consulted after verify as `x402:{payer}` — **fail-closed** on this path, the
+  opposite bias to §32.2's authenticated callers, because here the payment is
+  the authorization. **In an OSS-only build a configured price block on a card
+  points at a door that answers 404**, because exposure is off: the card says
+  what the agent costs, not that the door is open.
+- **Flow**: `docs/memory/feature-flows/a2a-inbound-server.md`,
+  `docs/memory/feature-flows/nevermined-payments.md`
+
 ---
 
 ## 45. Per-Agent MCP Exposure — Dedicated Dynamic Tools (#846)
