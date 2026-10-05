@@ -50,7 +50,6 @@ EMITTERS_NOT_YET_ON_SEAM = {
         ("base-image-stale-", "#3246 C5′"),
     ("services/system_agent_service.py", "SystemAgentService._emit_start_failed_alert"):
         ("base-image-stale-start-", "#3246 C5′"),
-    ("services/agent_client/circuit.py", "_emit_dormant_alert"): ("cb-dormant-", "#3246 C5′"),
     # -- PR 2 ---------------------------------------------------------------
     ("services/skill_service.py", "SkillService._announce_reconcile_refusal"):
         ("skills-reconcile-", _PR2),

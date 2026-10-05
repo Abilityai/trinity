@@ -71,8 +71,6 @@ _ALLOWED_CALLERS = {
         "NOT platform-only — bounded instead by the #1632 depth cap, enforced ATOMICALLY "
         "per agent inside create_native_item, and by the SAME per-agent + fleet rate "
         "buckets as the file seam; every field validated at the call",
-    ("services/agent_client/circuit.py", "_emit_dormant_alert"):  # 1028: package split
-        "platform-only: edge-triggered after consecutive failed CB probes (cb-dormant)",
     ("services/archive_storage.py", "_alarm_unwritable_archive_dir"):
         "platform-only: raised from probe_archive_writability() at the start of an "
         "archival RUN (daily maintenance cadence), and the id is bucketed per path "

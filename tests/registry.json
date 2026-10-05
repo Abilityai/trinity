@@ -1,6 +1,17 @@
 {
   "test_files": [
     {
+      "file": "unit/test_3246_platform_alert_emitters.py",
+      "feature": "#3246",
+      "added": "2026-10-05",
+      "categories": [
+        "backend",
+        "operator-queue",
+        "unit"
+      ],
+      "description": "#3246 C5′: the four named emitter families report through the platform alert seam on the unit island's real SQLite — a repeated reading is one pending row updated in place, and the place the code knows the condition cleared ends it as the platform (circuit breaker: recovery from dormant and the admin reset). No Docker, no Redis (the Lua scripts are stubbed)."
+    },
+    {
       "file": "unit/test_3246_platform_alerts_seam.py",
       "feature": "#3246",
       "added": "2026-10-05",
