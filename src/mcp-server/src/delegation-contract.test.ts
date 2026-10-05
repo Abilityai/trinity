@@ -40,7 +40,16 @@ const CLAUDE_CODE_DESCRIPTION_CAP = 2048;
 
 const CALLER = "alpha";
 const AGENT_KEY = "trinity_mcp_test_agent_key";
-const OWNER_TEXT = 'Chat directly with the "helper-bot" agent.';
+/** What the backend's poll hands the reconciler — distinct from the fallback, so a
+ *  factory that ignores it cannot pass. */
+const BACKEND_LINE = 'Chat directly with the "helper-bot" agent (backend line).';
+/** The factory's own line when the backend's is blank. */
+const FALLBACK_LINE = 'Chat directly with the "helper-bot" agent.';
+/** Every tool the contract tells a caller to use — each must be published to it. */
+const CONTRACT_TOOLS = [
+  "chat_with_agent", "fan_out", "get_execution_result", "get_fan_out_result",
+  "list_recent_executions", "set_reminder", "subscribe_to_event",
+];
 
 describe("ent#568 the shared text", () => {
   it("is the array joined, long enough to be the contract", () => {
@@ -114,7 +123,7 @@ describe("ent#568 what tools/list publishes (real server, real transport)", () =
         ok: true,
         status: 200,
         json: async () => ({
-          agents: [{ agent_name: "helper-bot", tool_name: "chat_with_helper_bot", description: OWNER_TEXT }],
+          agents: [{ agent_name: "helper-bot", tool_name: "chat_with_helper_bot", description: BACKEND_LINE }],
         }),
       })) as unknown as typeof fetch,
     });
@@ -147,11 +156,26 @@ describe("ent#568 what tools/list publishes (real server, real transport)", () =
     assert.ok(d.length <= CLAUDE_CODE_DESCRIPTION_CAP, `chat_with_agent is ${d.length} chars — Claude Code cuts it`);
   });
 
-  it("a dynamic chat_with_<agent> tool carries its owner line and the whole contract, inside the cap", () => {
+  it("a dynamic chat_with_<agent> tool carries the backend's line and the whole contract, inside the cap", () => {
     const d = published("chat_with_helper_bot");
-    assert.ok(d.startsWith(OWNER_TEXT), "the owner's line must lead");
+    assert.ok(d.startsWith(`${BACKEND_LINE}\n\n`), "the backend's line must lead");
     assert.ok(d.includes(DELEGATION_CONTRACT), "the dedicated tool's description lacks the contract");
     assert.ok(d.length <= CLAUDE_CODE_DESCRIPTION_CAP, `chat_with_helper_bot is ${d.length} chars`);
+  });
+
+  it("every chat_with_* tool takes the parallel and async arguments the contract teaches", () => {
+    const chatTools = [...tools.keys()].filter((n) => n.startsWith("chat_with_"));
+    assert.deepEqual(chatTools.sort(), ["chat_with_agent", "chat_with_helper_bot"]);
+    for (const name of chatTools) {
+      const props = tools.get(name)!.inputSchema.properties ?? {};
+      for (const arg of ["parallel", "async"]) {
+        assert.ok(arg in props, `${name} does not take \`${arg}\`, yet its description teaches \`parallel=true, async=true\``);
+      }
+    }
+  });
+
+  it("every tool the contract names is published to the caller", () => {
+    for (const name of CONTRACT_TOOLS) assert.ok(tools.has(name), `the contract names ${name}, which this caller cannot see`);
   });
 
   it("fan_out and send_message carry the rule and point at the contract, inside the cap", () => {
@@ -179,8 +203,7 @@ describe("ent#568 the dedicated-tool factory", () => {
   for (const blank of ["", "   "]) {
     it(`a ${JSON.stringify(blank)} owner description falls back to the default line`, () => {
       const tool = makeDedicatedChatTool({} as TrinityClient, false, false, "helper-bot", "chat_with_helper_bot", blank);
-      assert.ok(tool.description.startsWith(OWNER_TEXT));
-      assert.ok(tool.description.includes(DELEGATION_CONTRACT));
+      assert.equal(tool.description, `${FALLBACK_LINE}\n\n${DELEGATION_CONTRACT}`);
     });
   }
 });
@@ -217,16 +240,20 @@ function hangUntilAbort(_url: string, init: RequestInit): Promise<Response> {
   });
 }
 
-const liveRow = {
-  id: "ex-live",
-  status: "running",
-  triggered_by: "mcp",
-  source_mcp_key_id: "key-1",
-  message: "do the thing",
-  started_at: new Date().toISOString(),
-};
+/** A live row, stamped when the stub serves it — the recovery window is ~10 s. */
+function liveRow() {
+  return {
+    id: "ex-live",
+    status: "running",
+    triggered_by: "mcp",
+    source_mcp_key_id: "key-1",
+    message: "do the thing",
+    started_at: new Date().toISOString(),
+  };
+}
 
 const READ_NOT_RESEND = 'Do not re-send: read the outcome with get_execution_result(agent_name="agent-a", execution_id=';
+const readNotResendFor = (id: string) => `${READ_NOT_RESEND}"${id}").`;
 
 function assertTeaches(message: string, executionId: string) {
   assert.ok(
@@ -249,7 +276,7 @@ describe("ent#568 the receipt message a timed-out or replayed call answers with"
     stubFetch([
       ["/chat", hangUntilAbort],
       ["/task", hangUntilAbort],
-      ["/executions?limit=50", () => json([liveRow])],
+      ["/executions?limit=50", () => json([liveRow()])],
     ]);
     const client = new TrinityClient("http://backend:8000", "tok");
     const viaChat = (await client.chat("agent-a", "do the thing", undefined, { keyId: "key-1" })) as any;
@@ -257,22 +284,52 @@ describe("ent#568 the receipt message a timed-out or replayed call answers with"
     assert.equal(viaChat.status, "queued_timeout");
     assert.deepEqual(viaChat, viaTask);
     assertTeaches(viaChat.message, "ex-live");
+    assert.equal(
+      viaChat.message,
+      `MCP-server timeout (20ms) on chat_with_agent — the task is still running on 'agent-a'. ` +
+        `${readNotResendFor("ex-live")} A timeout is not a failure (#914).`,
+    );
   });
 
   it("a 409 replay of an in-flight call says it was already dispatched and how to read it", async () => {
     stubFetch([["/task", () => json({ detail: { execution_id: "ex-409" } }, 409)]]);
     const out = (await new TrinityClient("http://backend:8000", "tok").task("agent-a", "m")) as any;
     assert.equal(out.status, "queued_timeout");
-    assert.match(out.message, /already dispatched/);
     assertTeaches(out.message, "ex-409");
+    assert.equal(
+      out.message,
+      `This exact call was already dispatched to 'agent-a' and has no result to replay yet. ` +
+        `${readNotResendFor("ex-409")} A reworded re-send would dispatch a SECOND execution (#2661).`,
+    );
   });
 });
 
 describe("ent#568 the async receipt chat_with_agent answers with", () => {
   type Seen = { method: "chat" | "task"; options?: any };
 
-  /** A client whose /task answers the way the backend does — REST wording and all. */
-  function toolWith(status: "accepted" | "queued", pullEnabled: boolean, seen: Seen[]) {
+  /** What the backend writes for each receipt it authors — REST wording and all. */
+  const BACKEND: Record<string, Record<string, unknown>> = {
+    accepted: { status: "accepted", execution_id: "ex_9", agent_name: "agent-a", async_mode: true,
+      message: "Task accepted. Poll GET /api/agents/{name}/executions/{execution_id} for results." },
+    queued: { status: "queued", execution_id: "ex_9", agent_name: "agent-a", async_mode: true,
+      message: "Agent at capacity; task queued. Poll GET /api/agents/agent-a/executions/ex_9 for results." },
+    // The snapshot a sync /task stores when its backlog long-poll gives up
+    // (chat_execution_service) — replayed verbatim for 24 h on an exact repeat.
+    queued_timeout: { status: "queued_timeout", execution_id: "ex_9", task_execution_id: "ex_9",
+      agent_name: "agent-a", async_mode: true,
+      message: "Sync task on agent 'agent-a' did not complete within 600s. Execution ex_9 may still be " +
+        "running; poll GET /api/agents/agent-a/executions/ex_9." },
+  };
+
+  /** The lead each one is rewritten to: liveness-neutral, because a replay can come after the end. */
+  const LEAD: Record<string, string> = {
+    accepted: "Accepted by 'agent-a' as ex_9 — it may still be running or already done.",
+    queued: "Queued on 'agent-a' as ex_9 while it was at capacity — it may have run since.",
+    queued_timeout: "The platform stopped waiting for ex_9 on 'agent-a' — it may still be running.",
+  };
+
+  /** A client whose /task answers with `answer`; /chat answers a plain reply. */
+  function toolAnswering(answer: Record<string, unknown>, pullEnabled: boolean, seen: Seen[]) {
     const fake: Partial<TrinityClient> = {
       getBaseUrl: () => "http://localhost:8000",
       isAgentPermitted: async () => true,
@@ -281,48 +338,68 @@ describe("ent#568 the async receipt chat_with_agent answers with", () => {
         seen.push({ method: "chat" });
         return { response: "a plain reply" } as any;
       },
-      task: async (name: string, _m: string, options?: any) => {
+      task: async (_name: string, _m: string, options?: any) => {
         seen.push({ method: "task", options });
-        return {
-          status,
-          execution_id: "ex_9",
-          agent_name: name,
-          message: "Task accepted. Poll GET /api/agents/{name}/executions/{execution_id} for results.",
-          async_mode: true,
-        } as any;
+        return { ...answer } as any;
       },
     };
     return createChatTools(fake as unknown as TrinityClient, false, pullEnabled).chatWithAgent;
   }
 
   const agentSession = { session: { scope: "agent", agentName: "caller", userId: "u1", keyId: "k1", keyName: "kn" } };
+  const SESSIONS: Record<string, unknown> = {
+    "an agent": agentSession,
+    "a person (user key)": { session: { scope: "user", userId: "u1", keyId: "k2", keyName: "kn" } },
+    "a self-task": { session: { scope: "agent", agentName: "agent-a", userId: "u1", keyId: "k3", keyName: "kn" } },
+  };
 
   for (const status of ["accepted", "queued"] as const) {
-    it(`parallel async: a backend '${status}' receipt is re-worded for an MCP caller`, async () => {
-      const seen: Seen[] = [];
-      const out = JSON.parse(await toolWith(status, false, seen).execute(
-        { agent_name: "agent-a", message: "m", parallel: true, async: true }, agentSession,
-      ));
-      assert.equal(seen[0]?.method, "task");
-      assert.equal(out.status, status);
-      assert.equal(out.execution_id, "ex_9");
-      assertTeaches(out.message, "ex_9");
-    });
+    for (const [who, session] of Object.entries(SESSIONS)) {
+      it(`parallel async, ${who}: the backend's '${status}' receipt is re-worded for an MCP caller`, async () => {
+        const seen: Seen[] = [];
+        const out = JSON.parse(await toolAnswering(BACKEND[status], false, seen).execute(
+          { agent_name: "agent-a", message: "m", parallel: true, async: true }, session,
+        ));
+        assert.equal(seen[0]?.method, "task");
+        assert.deepEqual({ ...out, message: undefined }, { ...BACKEND[status], message: undefined }, "only `message` may change");
+        assert.equal(out.message, `${LEAD[status]} ${readNotResendFor("ex_9")}`);
+        assertTeaches(out.message, "ex_9");
+      });
+    }
   }
+
+  it("a replay of the backend's own sync-/task queued_timeout snapshot is re-worded too", async () => {
+    const seen: Seen[] = [];
+    const out = JSON.parse(await toolAnswering(BACKEND.queued_timeout, false, seen).execute(
+      { agent_name: "agent-a", message: "m", parallel: true }, agentSession,
+    ));
+    assert.equal(out.status, "queued_timeout");
+    assert.equal(out.message, `${LEAD.queued_timeout} ${readNotResendFor("ex_9")}`);
+  });
+
+  it("the MCP server's own queued_timeout (already carrying the read line) is left as it is", async () => {
+    const own = { status: "queued_timeout", agent: "agent-a", execution_id: "ex_9",
+      message: `MCP-server timeout (20ms) on chat_with_agent — the task is still running on 'agent-a'. ` +
+        `${readNotResendFor("ex_9")} A timeout is not a failure (#914).` };
+    const out = JSON.parse(await toolAnswering(own, false, []).execute(
+      { agent_name: "agent-a", message: "m", parallel: true }, agentSession,
+    ));
+    assert.deepEqual(out, own);
+  });
 
   it("the #946 pull-routed sequential call (flag ON) gets the same wording", async () => {
     const seen: Seen[] = [];
-    const out = JSON.parse(await toolWith("accepted", true, seen).execute(
+    const out = JSON.parse(await toolAnswering(BACKEND.accepted, true, seen).execute(
       { agent_name: "agent-a", message: "m" }, agentSession,
     ));
     assert.equal(seen[0]?.method, "task");
     assert.equal(seen[0]?.options?.async_mode, true);
-    assertTeaches(out.message, "ex_9");
+    assert.equal(out.message, `${LEAD.accepted} ${readNotResendFor("ex_9")}`);
   });
 
   it("a completed reply is passed through untouched", async () => {
     const seen: Seen[] = [];
-    const out = JSON.parse(await toolWith("accepted", false, seen).execute(
+    const out = JSON.parse(await toolAnswering(BACKEND.accepted, false, seen).execute(
       { agent_name: "agent-a", message: "m" }, agentSession,
     ));
     assert.equal(seen[0]?.method, "chat");

@@ -138,21 +138,34 @@ function depthRefusalResult(refusal: DepthRefusal): string {
 }
 
 /**
- * ent#568: the backend's async `/task` receipt tells a REST caller to "Poll GET
+ * ent#568: a receipt the BACKEND wrote tells a REST caller to "poll GET
  * /api/agents/{name}/executions/{execution_id}" — a request an MCP caller
  * cannot make, read at the very moment it decides whether to re-send. Keep
  * every field and say what an MCP caller does instead (the backend's text stays
  * right for its REST callers).
+ *
+ * The leads claim nothing about liveness: the backend stores the async receipt
+ * as the idempotency snapshot at dispatch time and replays it for 24 h, after the
+ * run may have finished or failed. Three shapes: async `accepted` / `queued`, and
+ * the `queued_timeout` a sync `/task` stores when its long-poll gives up — told
+ * apart from the MCP server's own `queued_timeout` (client.ts), which already
+ * carries `readNotResend`, by that sentence.
  */
 function asyncReceipt<T extends object>(agent: string, response: T): T {
-  const r = response as { status?: unknown; execution_id?: unknown };
-  if ((r.status !== "accepted" && r.status !== "queued") || typeof r.execution_id !== "string") {
+  const r = response as { status?: unknown; execution_id?: unknown; message?: unknown };
+  const id = r.execution_id;
+  if (typeof id !== "string") return response;
+  let lead: string;
+  if (r.status === "accepted") {
+    lead = `Accepted by '${agent}' as ${id} — it may still be running or already done.`;
+  } else if (r.status === "queued") {
+    lead = `Queued on '${agent}' as ${id} while it was at capacity — it may have run since.`;
+  } else if (r.status === "queued_timeout" && !String(r.message ?? "").includes("Do not re-send:")) {
+    lead = `The platform stopped waiting for ${id} on '${agent}' — it may still be running.`;
+  } else {
     return response;
   }
-  const lead = r.status === "queued"
-    ? `Queued: '${agent}' is at capacity and runs it when a slot frees.`
-    : `Accepted: the task is running on '${agent}'.`;
-  return { ...response, message: `${lead} ${readNotResend(agent, r.execution_id)}` };
+  return { ...response, message: `${lead} ${readNotResend(agent, id)}` };
 }
 
 /**

@@ -48,7 +48,7 @@ Three things to check. First, subscriptions are permission-gated: the subscribin
 
 ## Can an agent be notified the moment another agent's task finishes, instead of polling?
 
-Yes. Rather than polling `get_execution_result` in a loop, the waiting agent subscribes to the worker agent's task-completion event. When the worker's task reaches a terminal state, Trinity wakes the subscriber with an automatic report-back task carrying the outcome — so a long delegation ends by *notifying* the caller instead of the caller busy-checking. See [Event Subscriptions](../collaboration/event-subscriptions.md).
+Yes. Rather than polling `get_execution_result` in a loop, the waiting agent subscribes to the worker agent's task-completion event. When the worker's task reaches a terminal state, Trinity wakes the subscriber with an automatic report-back task carrying the outcome (every task run emits it — `parallel=true` delegations included; only a synchronous `/chat` turn does not) — so a long delegation ends by *notifying* the caller instead of the caller busy-checking. See [Event Subscriptions](../collaboration/event-subscriptions.md).
 
 ## Can a worker agent report back to its caller automatically when it's done or fails?
 

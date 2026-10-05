@@ -49,7 +49,7 @@ TS_CONTRACT = MCP_SRC / "delegation_contract.ts"
 RUNTIMES = ("claude-code", "codex", "gemini-cli", "")
 
 # Claude Code shows the model only the first 2,048 characters of an MCP tool
-# description, and the contract shares them with each tool's own lead (~310
+# description, and the contract shares them with each tool's own lead (346
 # chars on `chat_with_agent`, one name-only line on a `chat_with_<agent>` tool).
 # The MCP suite pins the published descriptions themselves; this keeps the
 # shared text from eating that headroom. Raising it is a decision, not an

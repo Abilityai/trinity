@@ -1118,7 +1118,7 @@ schedules:
   longer than the MCP client's request timeout (~30-60s observed),
   the tool call returns the generic `fetch failed` — but the request
   was successfully queued on Trinity and the agent IS running it.
-  Naive retry then queues a second execution of the same work,
+  A reworded retry then queues a second execution of the same work,
   burning compute and agent time. (Earlier text here blamed a
   "concurrent-duplicate guard" that kills the duplicate mid-execution;
   no such guard exists — see §37.5.) This change is the
@@ -1135,7 +1135,7 @@ schedules:
     "status": "queued_timeout",
     "agent": "bdr-agent",
     "execution_id": "fZv-iXtUXSolY1wzPO7T6w",
-    "message": "MCP gateway timeout — task still running on the agent. Poll get_execution_result(execution_id) instead of retrying."
+    "message": "MCP-server timeout (25000ms) on chat_with_agent — the task is still running on 'bdr-agent'. Do not re-send: read the outcome with get_execution_result(agent_name=\"bdr-agent\", execution_id=\"fZv-iXtUXSolY1wzPO7T6w\"). A timeout is not a failure (#914)."
   }
   ```
 - **No-match fallback**: when the lookup turns up nothing (no rows
@@ -1348,7 +1348,8 @@ schedules:
   multi-worker deployments.
 
 ### 37.5 The Delegation Contract, Taught Where Callers Read (abilityai/trinity-enterprise#568)
-- **Status**: 🚧 In Progress
+- **Status**: ✅ Implemented (PR #3240); AC6 — trinity-pm's canon citing this
+  section instead of restating it — follows the merge
 - **Implements**: abilityai/trinity-enterprise#568 (epic abilityai/trinity-enterprise#565,
   "duplicate-safe delegation — silence is not failure")
 - **Description**: §37.1–37.4 put a receipt on every dispatch route, but
@@ -1372,15 +1373,18 @@ schedules:
     confirmed. Read with `get_execution_result` / `get_fan_out_result`; to
     finish later, `set_reminder` naming the `execution_id` and end the turn;
     never report delegated work as done from a receipt. An error without an
-    `execution_id` is checked against `list_recent_executions` before a
-    word-for-word re-send. `agent_busy` is the "nothing dispatched" case.
+    `execution_id` — `agent_busy` included — is checked against
+    `list_recent_executions` before a word-for-word re-send (`agent_busy` after
+    `retry_after_seconds`). `agent_busy` is not "nothing ran": the MCP client
+    also labels the usage-limit 429 that comes after a turn already ran (#3244).
     `pending_approval` (ent#751): nothing ran, do not retry or route it through
     another agent. A `retryable: false` result: do what its `message` says.
     Long work: `parallel=true, async=true`; that run's end fires the target's
     `agent.task.*`, which wakes only a subscriber.
   - **Truthful today.** It names no status a dispatch route does not emit and
     promises the `agent.task.*` wake only for a parallel run — a sequential
-    `/chat` emits none. **`replayed` is left out on purpose**, although the
+    `/chat` emits none. (`pending_approval` is wired end to end; it reaches a
+    caller once ent#753 stores gate maps.) **`replayed` is left out on purpose**, although the
     issue's acceptance criterion lists it: no dispatch route emits it until
     ent#566 ships intent-scoped dedupe (only `ask_operator` answers
     `replayed`), and the guard that checks every named status against a
@@ -1397,21 +1401,32 @@ schedules:
     the tool description carries the same text.
   - **Fits the client.** Claude Code shows the model only the first 2,048
     characters of an MCP tool description (`CLAUDE_CODE_MAX_MCP_DESCRIPTION_LENGTH`).
-    The pre-#568 `chat_with_agent` description was 2,424 characters, so its
-    async and `list_recent_executions` advice never reached a model. Every
-    description that carries the contract is pinned under the cap on the text
-    the server publishes, and mode details moved into parameter descriptions,
-    which are not cut.
-  - **Receipt text.** Every receipt the MCP server writes ends with the same
-    "do not re-send: read the outcome with `get_execution_result(agent_name=…,
-    execution_id=…)`". The backend's async receipt still tells a REST caller to
-    poll `GET /api/agents/{name}/executions/{id}`; the MCP layer rewrites that
-    line for MCP callers.
+    #2958 (2026-09-24) took the `chat_with_agent` description from 2,035 to
+    2,424 characters — it was 1,436 during the 2026-09-08 cascade — so from then
+    on its `list_recent_executions` advice and "prefer `parallel=true,
+    async=true`" were cut before any model read them. Every description that
+    carries the contract is pinned under the cap on the text the server
+    publishes (1,940 for `chat_with_agent`), and mode details moved into
+    parameter descriptions, which are not cut.
+  - **Receipt text.** Every `execution_id` receipt a `chat_with_*` caller gets
+    carries the same "Do not re-send: read the outcome with
+    `get_execution_result(agent_name=…, execution_id=…)`" line: the
+    `queued_timeout` that `chat()` and `task()` write when they give up, the 409
+    replay, and the receipts the backend wrote — async `accepted` / `queued` and
+    the `queued_timeout` a sync `/task` stores when its long-poll gives up —
+    whose REST "poll GET …" line `runAgentChat` rewrites. Those rewritten leads
+    claim nothing about liveness ("it may still be running or already done"):
+    the backend stores the async receipt as the idempotency snapshot at dispatch
+    and replays it for 24 h, even after the run failed (#3245). `fan_out_timeout`
+    keeps its own `get_fan_out_result` line (#2670). The "concurrent-duplicate
+    guard will kill mid-execution" claim the receipts and the old description
+    made is gone — no such guard exists in the backend or the agent server.
 - **Out of scope**: enforcement (ent#566 intent dedupe, ent#567 one retry
   layer + chain budget), `send_message`'s caller-declared key (ent#665), the
   typed outcome (ent#569), the unforwarded `chat_with_agent` `execution_id`
-  (#3232), the system-scoped gate-outcome gap (#3233), and the trinity-pm
-  canon pointer (AC6, post-merge).
+  (#3232), the system-scoped gate-outcome gap (#3233), the post-run 429
+  labelled `agent_busy` (#3244), the async receipt replayed after a failed run
+  (#3245), and the trinity-pm canon pointer (AC6, post-merge).
 
 ## 38. Sequential Agent Loops (#740)
 

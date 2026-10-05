@@ -20,7 +20,7 @@ Lightweight pub/sub system for inter-agent event pipelines. Agents emit named ev
 
 ## Task-Completion Events (system-emitted)
 
-Trinity deterministically emits `agent.task.completed` and `agent.task.failed` at **every** terminal of a task run of an agent — a schedule, a `parallel=true` delegation, a fan-out subtask and the like. A synchronous chat turn, including a sequential `chat_with_agent` call (`parallel=false`), emits none. These are **system-emitted**: the platform synthesizes them at the execution chokepoint with no agent in the loop. They ride the same subscription machinery as agent-emitted events.
+Trinity deterministically emits `agent.task.completed` and `agent.task.failed` at **every** terminal of a task run of an agent — a schedule, a `parallel=true` delegation, a fan-out subtask, a Chat-tab, Session, Slack/Telegram or public-link turn, and the like. Only the backend's synchronous `/chat` route emits none: a sequential `chat_with_agent` call (`parallel=false`), unless the experimental pull-pilot routing sends it through the task path. These are **system-emitted**: the platform synthesizes them at the execution chokepoint with no agent in the loop. They ride the same subscription machinery as agent-emitted events.
 
 **The win: wake instead of poll.** Subscribe to a worker's `agent.task.completed` (or `agent.task.failed`) and you get an **automatic report-back task** the moment that worker's execution finishes -- no need to hold a call open or poll `get_execution_result`. This is the async-first alternative to `chat_with_agent(parallel=true, async=true)` followed by polling (see [Agent Network](agent-network.md)).
 

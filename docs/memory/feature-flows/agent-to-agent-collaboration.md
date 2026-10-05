@@ -691,7 +691,7 @@ See `scheduling.md` and `mcp-orchestration.md` for full details on schedule mana
 
 An MCP client gives up on a tool call at its own ceiling (30–60 seconds is typical). Trinity's MCP server stops waiting first — at `MCP_CHAT_TIMEOUT_MS`, 25 seconds by default — and answers a synchronous `chat_with_agent` with a `queued_timeout` receipt carrying the `execution_id`, while the target keeps running (#914, #2661; details in [mcp-orchestration.md](mcp-orchestration.md) → "Gateway-Timeout Receipt").
 
-**Impact**: The `timeout_seconds` parameter controls the backend execution timeout (how long Trinity waits for the target agent), not how long the call waits. A long synchronous call no longer fails — but the caller has to know a receipt means "running". Every agent is taught that as the delegation contract (ent#568) in its platform prompt's §Agent Collaboration, and the `chat_with_agent` description carries the same text.
+**Impact**: The `timeout_seconds` parameter controls the backend execution timeout (how long Trinity waits for the target agent), not how long the call waits. A long synchronous call no longer just fails — when the server can match it to its execution it answers with a receipt (otherwise the error names `list_recent_executions`) — but the caller has to know a receipt means "running". Every agent is taught that as the delegation contract (ent#568) in its platform prompt's §Agent Collaboration, and the `chat_with_agent` description carries the same text.
 
 **Workarounds**:
 1. Treat a receipt as running: read it with `get_execution_result`, never re-send

@@ -67,7 +67,7 @@
 Claude Code has a hardcoded 60-second timeout for all MCP HTTP tool calls. This is an upstream limitation in Claude Code's MCP transport layer, not in Trinity. The `timeout_seconds` parameter controls the backend execution timeout, but Claude Code drops the HTTP connection before the backend timeout is reached.
 
 **Workarounds:**
-1. **Design tasks to complete within 60 seconds** — Break complex work into smaller sub-tasks
+1. **Design tasks to complete within the synchronous bound** (`MCP_CHAT_TIMEOUT_MS`, 25 seconds by default) when you need the reply in the same call — break complex work into smaller sub-tasks
 2. **Use async mode with polling** — Fire-and-forget pattern avoids the timeout:
    ```python
    # Start task (returns immediately)

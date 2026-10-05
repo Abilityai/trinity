@@ -4,7 +4,7 @@
 
 ## Architecture (Phase 0)
 
-The change teaches one text — the delegation contract — wherever a caller reads: the platform prompt's §Agent Collaboration (spliced from `DELEGATION_CONTRACT`), the `chat_with_agent` and dynamic `chat_with_<agent>` descriptions (verbatim, from `src/mcp-server/src/delegation_contract.ts`), and a rule sentence in `fan_out` / `send_message`. Every receipt the MCP server writes now ends with one "do not re-send: read the outcome with `get_execution_result(…)`" line, and `runAgentChat` rewrites the backend's REST-only "Poll GET …" line on async `accepted` / `queued` receipts. No dispatch behaviour changes; only text does.
+The change teaches one text — the delegation contract — wherever a caller reads: the platform prompt's §Agent Collaboration (spliced from `DELEGATION_CONTRACT`), the `chat_with_agent` and dynamic `chat_with_<agent>` descriptions (verbatim, from `src/mcp-server/src/delegation_contract.ts`), and a rule sentence in `fan_out` / `send_message`. Every `execution_id` receipt a `chat_with_*` caller gets now carries one "Do not re-send: read the outcome with `get_execution_result(…)`" line, and `runAgentChat` rewrites the backend's REST-only "poll GET …" line on the receipts the backend wrote (async `accepted` / `queued`, the sync-`/task` `queued_timeout` snapshot); `fan_out_timeout` keeps its own line. No dispatch behaviour changes; only text does.
 
 Trust boundaries crossed: none new. The contract is platform-authored; receipt messages echo the caller's own `agent_name` and a backend `execution_id` back to the same caller.
 

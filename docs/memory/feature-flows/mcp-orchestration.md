@@ -489,19 +489,21 @@ chat_with_agent({
 //   "status": "accepted",
 //   "execution_id": "abc123xyz",
 //   "agent_name": "worker-1",
-//   "message": "Accepted: the task is running on 'worker-1'. Do not re-send: read the outcome with get_execution_result(agent_name=\"worker-1\", execution_id=\"abc123xyz\").",
+//   "message": "Accepted by 'worker-1' as abc123xyz — it may still be running or already done. Do not re-send: read the outcome with get_execution_result(agent_name=\"worker-1\", execution_id=\"abc123xyz\").",
 //   "async_mode": true
 // }
 // The backend's own receipt says "Poll GET /api/agents/{name}/executions/{execution_id}" —
 // right for a REST caller, impossible for an MCP one — so `runAgentChat` rewrites the
 // `message` of an `accepted`/`queued` receipt (ent#568); every other field is untouched.
+// The lead claims nothing about liveness: the backend stores this receipt as the
+// idempotency snapshot at dispatch and replays it for 24 h (#3245).
 ```
 
 **When `async: true` (with `parallel: true`)**:
 - Backend spawns task in background thread via `asyncio.create_task()`
 - Returns immediately with `execution_id` for polling
 - Execution status set to "running" in database
-- Poll `GET /api/agents/{name}/executions/{execution_id}` for status and results
+- Read the outcome with `get_execution_result(agent_name, execution_id)` (REST: `GET /api/agents/{name}/executions/{execution_id}`)
 - Background task updates execution record when complete (success/failed)
 - Activities tracked and completed asynchronously
 
@@ -665,22 +667,26 @@ The receipts above only help a caller who knows what they mean. The rule is now
   call timed out or could not be confirmed; read with `get_execution_result` /
   `get_fan_out_result` or `set_reminder` and end the turn; an error without an
   `execution_id` is checked in `list_recent_executions` before a word-for-word
-  re-send; `agent_busy` means nothing was dispatched; `pending_approval` is not
+  re-send (`agent_busy` included — it is not "nothing ran", #3244); `pending_approval` is not
   retried; `parallel=true, async=true` for long work, whose end fires
   `agent.task.*` for a subscriber (a sequential `/chat` turn fires none).
 - **The 2,048-char cap.** Claude Code cuts every MCP tool description at
-  `CLAUDE_CODE_MAX_MCP_DESCRIPTION_LENGTH` (default 2,048). The pre-ent#568
-  `chat_with_agent` description was 2,424 chars, so its last paragraph — the
-  `list_recent_executions` advice and "prefer `parallel=true, async=true`" —
-  never reached a model. It is now a lead, one line of modes and the contract
-  (~1.9 KB); per-mode detail moved into the `parallel` / `async` /
+  `CLAUDE_CODE_MAX_MCP_DESCRIPTION_LENGTH` (default 2,048). #2958 (2026-09-24)
+  took the `chat_with_agent` description from 2,035 to 2,424 chars, so from then
+  on its last paragraph — the `list_recent_executions` advice and "prefer
+  `parallel=true, async=true`" — was cut before any model read it. It is now a
+  lead, one line of modes and the contract (1,940 chars published); per-mode detail moved into the `parallel` / `async` /
   `timeout_seconds` parameter descriptions, which are not cut.
   `src/delegation-contract.test.ts` reads every carrying description back through
   a real `tools/list` and pins it under the cap.
-- **The receipt itself.** Every receipt the MCP server writes ends with
-  `readNotResend(agent, execution_id)` — "Do not re-send: read the outcome with
-  `get_execution_result(agent_name=…, execution_id=…)`". `chat()` now reuses
-  `queuedTimeoutReceipt` (it had its own copy of the string), and the
+- **The receipt itself.** Every `execution_id` receipt a `chat_with_*` caller
+  gets carries `readNotResend(agent, execution_id)` — "Do not re-send: read the
+  outcome with `get_execution_result(agent_name=…, execution_id=…)`": the
+  `queued_timeout` `chat()` / `task()` write, the 409 replay, and the backend's
+  own async `accepted` / `queued` and sync-`/task` `queued_timeout` snapshots,
+  whose REST "poll GET …" line `runAgentChat` rewrites with a liveness-neutral
+  lead. `fan_out_timeout` keeps its `get_fan_out_result` line. `chat()` now
+  reuses `queuedTimeoutReceipt` (it had its own copy of the string), and the
   "concurrent-duplicate guard will kill mid-execution" claim is gone: no such
   guard exists.
 
