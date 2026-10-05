@@ -209,7 +209,7 @@ def answer(
     """
     # #3242: a platform-minted approval (a skill gate) counts only its own
     # options and no agent reads the instruction — refused, named.
-    if response == SOMETHING_ELSE and _decided_by_options(item):
+    if response == SOMETHING_ELSE and decided_by_options(item):
         raise NotOffMenuError()
     validate_response_choice(item, response, response_text=response_text)
     if not may_end(item, actor):
@@ -233,7 +233,7 @@ def answer(
     return _ended(EndingEvent(ANSWERED, (updated,), actor.email), audit, trigger)
 
 
-def _decided_by_options(item: Dict[str, Any]) -> bool:
+def decided_by_options(item: Dict[str, Any]) -> bool:
     """An approval the platform minted (a skill gate, #751): decided only by one
     of its options, so the reserved `SOMETHING_ELSE` never applies (#3242). The
     Workspace projection exposes exactly this boolean, nothing else about it."""

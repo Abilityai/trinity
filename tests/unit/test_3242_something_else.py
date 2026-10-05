@@ -21,6 +21,9 @@ _BACKEND = str(_REPO / "src" / "backend")
 while _BACKEND in sys.path:
     sys.path.remove(_BACKEND)
 sys.path.insert(0, _BACKEND)
+# The ent#715 harnesses below are imported from their sibling module.
+if str(Path(__file__).resolve().parent) not in sys.path:
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from services.operator_queue_choices import (  # noqa: E402
     OPTIONS_DROPPED_MARKER,
@@ -55,9 +58,18 @@ class TestTheSink:
                                      response_text=blank)
         assert e.value.code == "instruction_required"
 
-    def test_a_random_unoffered_string_is_still_refused(self):
+    # The literal is matched exactly: a near-miss falls through to the #2376
+    # membership check and is refused like any other unoffered string.
+    @pytest.mark.parametrize("near_miss", [
+        "something else",
+        " " + SOMETHING_ELSE,
+        SOMETHING_ELSE + " ",
+        SOMETHING_ELSE.title(),
+    ], ids=["bare", "leading-space", "trailing-space", "different-case"])
+    def test_a_random_unoffered_string_is_still_refused(self, near_miss):
+        assert near_miss != SOMETHING_ELSE
         with pytest.raises(ResponseNotOfferedError):
-            validate_response_choice(_approval(["Approve", "Deny"]), "something else",
+            validate_response_choice(_approval(["Approve", "Deny"]), near_miss,
                                      response_text="do X")
 
     @pytest.mark.parametrize("kind", ["question", "alert", "mystery", None])
@@ -265,17 +277,58 @@ class TestConsumers:
 # ---------------------------------------------------------------------------
 
 _MIRRORS = {
-    "src/mcp-server/src/types.ts": r'export const SOMETHING_ELSE = "([^"]*)";',
-    "src/frontend/src/utils/operatorQueue.js": r"export const SOMETHING_ELSE = '([^']*)'",
+    ("src/mcp-server/src/types.ts", "SOMETHING_ELSE"):
+        (r'export const SOMETHING_ELSE = "([^"]*)";', SOMETHING_ELSE),
+    ("src/frontend/src/utils/operatorQueue.js", "SOMETHING_ELSE"):
+        (r"export const SOMETHING_ELSE = '([^']*)'", SOMETHING_ELSE),
+    # `offeredChips` filters it out; a drifted copy renders the cap marker as a
+    # chip again (the E2 regression).
+    ("src/frontend/src/utils/operatorQueue.js", "OPTIONS_DROPPED_MARKER"):
+        (r"export const OPTIONS_DROPPED_MARKER = '([^']*)'", OPTIONS_DROPPED_MARKER),
 }
 
 
-@pytest.mark.parametrize("rel,pattern", sorted(_MIRRORS.items()))
-def test_the_literal_is_one_definition(rel, pattern):
+@pytest.mark.parametrize("rel,name", sorted(_MIRRORS))
+def test_the_literal_is_one_definition(rel, name):
     """Source-text pin, deliberately: the mirrors' live consumers are the MCP
     server and the SPA, which cannot import the backend leaf; their own suites
     execute the constant. This pins that the spelling never forks."""
     import re
+    pattern, expected = _MIRRORS[(rel, name)]
     m = re.search(pattern, (_REPO / rel).read_text(encoding="utf-8"))
-    assert m, f"{rel} lost its SOMETHING_ELSE mirror"
-    assert m.group(1) == SOMETHING_ELSE
+    assert m, f"{rel} lost its {name} mirror"
+    assert m.group(1) == expected
+
+
+# ---------------------------------------------------------------------------
+# The agent reads both fields back, verbatim (the ent#715 harnesses)
+# ---------------------------------------------------------------------------
+
+_INSTRUCTION = "Ship to staging first, then ask again"
+
+
+class TestTheAgentReadsItBack:
+    def test_the_file_write_back_delivers_the_literal_and_the_instruction(self, monkeypatch):
+        from test_ent715_queue_person_fields import _entry, _row, _sync
+        row = _row(response=SOMETHING_ELSE, response_text=_INSTRUCTION)
+        db, client = _sync(monkeypatch, [row], _entry())
+        client.write_file.assert_awaited_once()
+        import json
+        (written,) = json.loads(client.write_file.call_args.args[1])["requests"]
+        assert (written["status"], written["response"], written["response_text"]) == (
+            "responded", SOMETHING_ELSE, _INSTRUCTION)
+
+    def test_get_my_ask_reads_the_literal_and_the_instruction(self):
+        import uuid
+        from database import db
+        from routers.operator_queue import get_my_ask
+        agent, rid = "a3242", f"r3242-{uuid.uuid4().hex[:12]}"
+        uid = db.create_operator_queue_item(agent, {
+            "id": rid, "type": "approval", "status": "pending", "priority": "high",
+            "title": "Deploy?", "question": "Ship to prod?", "options": ["Approve", "Deny"],
+            "context": {}, "created_at": "2026-10-05T10:00:00Z",
+        }, channel="file", raised_by="agent")
+        db.respond_to_operator_queue_item(uid, SOMETHING_ELSE, _INSTRUCTION, "7", "op@example.com")
+        readback = asyncio.run(get_my_ask(request_id=rid, name=agent))
+        assert (readback["status"], readback["response"], readback["response_text"]) == (
+            "responded", SOMETHING_ELSE, _INSTRUCTION)

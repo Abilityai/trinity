@@ -244,7 +244,7 @@ offered the literal itself gets the reserved meaning, not a second one. Every
 other unoffered string is still `response_not_an_offered_option`. Two more
 doors: `ask_service.answer` refuses the literal on a platform-minted approval
 (a skill gate counts only `Approve`, and no agent reads the text) with **422
-`not_off_menu`** via `_decided_by_options(item)`; and `ask_operator`'s raise
+`not_off_menu`** via `decided_by_options(item)`; and `ask_operator`'s raise
 path refuses an option equal to the literal (**422 `invalid_options`**). Both
 writers map the three `ReservedAnswerError` subclasses to named 422s
 (`{code, message}`), and `OperatorResponse.response_text` is bounded at 4000

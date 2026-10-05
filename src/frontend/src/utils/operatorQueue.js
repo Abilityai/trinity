@@ -53,7 +53,7 @@ export const SOMETHING_ELSE = '(something else)'
 export const SOMETHING_ELSE_LABEL = 'Something else'
 
 /** The ingestion clamp's placeholder (#1632) — a record, never a choice. */
-const OPTIONS_DROPPED_MARKER = '(options omitted: exceeded size cap)'
+export const OPTIONS_DROPPED_MARKER = '(options omitted: exceeded size cap)'
 
 /**
  * The agent's own options as pickable chips: `optionsOf` minus the reserved

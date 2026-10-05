@@ -165,7 +165,7 @@ def _project(item: dict, *, viewer_email: Optional[str] = None,
         resume_requested=resume_requested,
         sync=_coarse_sync(item),
         aging=bool(is_aged(item)),
-        decided_by_options=ask_service._decided_by_options(item),
+        decided_by_options=ask_service.decided_by_options(item),
     )
 
 
