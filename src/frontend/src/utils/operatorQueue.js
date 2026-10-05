@@ -126,6 +126,8 @@ export const QUEUE_TYPE_LABELS = Object.freeze({
   approval: 'Needs approval',
   question: 'Question',
   alert: 'Heads up',
+  // #3130: the flood alarm became a budgeted platform type; it is still an alert.
+  queue_flood: 'Heads up',
 })
 
 /**

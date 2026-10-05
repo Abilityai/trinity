@@ -465,6 +465,9 @@ def raise_ask(
         resolved_to=people or None,
         proposal=norm["proposal"],
         supersedes_expired=predecessor["id"] if predecessor else None,
+        # #3130: the cap counts the agent's own asks, never the platform's rows
+        # about it (its flood alarm above all).
+        exclude_request_id_prefixes=oqs._RESERVED_ID_PREFIXES,
     )
     if out["outcome"] == "queue_full":
         raise AskRejected(429, "queue_full",

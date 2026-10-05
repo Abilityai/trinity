@@ -99,9 +99,6 @@ _ALLOWED_CALLERS = {
         "create — must never be throttled (the reason a db-sink bound was rejected)",
     ("services/operator_queue_service.py", "OperatorQueueSyncService._sync_agent"):
         "the #1632-capped agent-file ingestion seam itself (depth+rate+clamp)",
-    ("services/operator_queue_service.py",
-     "OperatorQueueSyncService._maybe_emit_flood_alert"):
-        "the #1632 flood alert: cooldown-gated, one per episode",
     ("services/subscription_headroom_alerts.py", "_emit"):
         "platform-only: edge-triggered per weekly window via a deterministic "
         "id (sub-headroom-{sid}-{reset-day}-{tier}) whose ON CONFLICT DO NOTHING "
@@ -110,7 +107,7 @@ _ALLOWED_CALLERS = {
         "spawn children and name them) but arrive sanitized and capped at five "
         "per alert — it is the VOLUME an agent cannot drive, which is what this "
         "exemption rests on (ent#434)",
-    ("services/operator_queue_service.py", "create_bounded_alert"):
+    ("services/operator_queue_service.py", "create_bounded_alert_outcome"):
         "the #1677 budget helper's own admit-path create (the seam itself)",
     ("services/operator_queue_service.py", "_maybe_emit_alert_budget_episode"):
         "the #1677 budget episode alert: cooldown-gated, bucketed reserved id",

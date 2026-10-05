@@ -1008,6 +1008,9 @@ async def run_pulled_chat_turn(
                 agent_name=name,
                 session_key=f"chat:{session.id}",
                 message=request.message,
+                # ent#751: /chat runs no admission-seam gate, so the executor's
+                # backstop gates on the caller's own words.
+                request_text=request.message,
                 cached_uuid=cached_uuid,
                 triggered_by=triggered_by,
                 on_resume_failure=lambda: db.set_chat_session_claude_id(session.id, None),

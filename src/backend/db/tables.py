@@ -1498,7 +1498,7 @@ operator_queue = Table(
     # ledger reads from `status`.
     Column("disposition", Text),         # answered|cancelled|expired
     Column("disposed_at", Text),
-    Column("disposed_by", Text),         # person|timeout
+    Column("disposed_by", Text),         # person|timeout|platform (#3130: superseded flood alarms)
     Column("disposed_by_email", Text),   # NULL for timeout; withheld from agent principals
     Column("disposition_reason", Text),  # the operator's optional cancel reason
     Column("batch_id", Text),            # one uuid per bulk-cancel sweep
