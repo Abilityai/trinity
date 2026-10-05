@@ -161,8 +161,8 @@ def test_aws_default_provenance_is_aws_script(tmp_path):
 
 def test_the_cloud_allowlist_accepts_aws() -> None:
     body = _START.read_text()
-    assert re.search(r"^\s*digitalocean\|aws\) ;;$", body, re.MULTILINE), "--cloud aws is not accepted"
-    assert "supported: digitalocean, aws" in body
+    assert re.search(r"^\s*digitalocean\|vultr\|aws\) ;;$", body, re.MULTILINE), "--cloud aws is not accepted"
+    assert "supported: digitalocean, vultr, aws" in body
 
 
 # ---------------------------------------------------------------------------
