@@ -1919,6 +1919,7 @@ bounding the table. OSS-core (Workspace rule above). Flow:
 - **Status**: ✅ Implemented (2025-11-29)
 - **Description**: Agents communicate via Trinity MCP with agent-scoped API keys
 - **Flow**: `docs/memory/feature-flows/agent-to-agent-collaboration.md`
+- **Delegation contract**: what a dispatch receipt means, and never re-sending on a timeout, is taught to every agent and every MCP client — [scheduling.md §37.5](scheduling.md#375-the-delegation-contract-taught-where-callers-read-abilityaitrinity-enterprise568) (abilityai/trinity-enterprise#568)
 
 #### 9.1.1 Chain-depth guard (#2806)
 - **Status**: ✅ Implemented (2026-09-22)
