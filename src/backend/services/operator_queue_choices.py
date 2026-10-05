@@ -26,6 +26,16 @@ from typing import Optional, Sequence
 # it has no usable options and is exempt below.
 OPTIONS_DROPPED_MARKER = "(options omitted: exceeded size cap)"
 
+# The ONE platform-reserved decision every approval accepts besides its own
+# options (#3242): "none of these — here is what to do instead". The person's
+# instruction travels in `response_text`, never as `response` (the #2375 class).
+# Markdown-inert and plain English on purpose: a human can read it raw in an
+# export, and `__x__` would render bold wherever it leaks. Mirrored verbatim in
+# `src/frontend/src/utils/operatorQueue.js` and `src/mcp-server/src/types.ts`
+# (parity-tested). Never filtered out of `usable_options`: an approval whose
+# only option is this literal must stay closed to every other string.
+SOMETHING_ELSE = "(something else)"
+
 
 class ResponseNotOfferedError(ValueError):
     """An approval decision that is not one of the item's own options.
@@ -43,6 +53,49 @@ class ResponseNotOfferedError(ValueError):
             f"{response!r} is not one of the options this approval offered: "
             f"{self.options}"
         )
+
+
+class ReservedAnswerError(ValueError):
+    """A refusal of the reserved `SOMETHING_ELSE` decision (#3242). Each
+    subclass carries the named `code` both writers answer with as a 422."""
+
+    code = "reserved_answer"
+
+
+class InstructionRequiredError(ReservedAnswerError):
+    """`SOMETHING_ELSE` with no instruction in `response_text`: an answer the
+    agent cannot act on — "none of these" alone is Deny or a dismissal."""
+
+    code = "instruction_required"
+
+    def __init__(self):
+        super().__init__(
+            f"{SOMETHING_ELSE!r} means none of the offered options; the "
+            "instruction for what to do instead must be in `response_text`."
+        )
+
+
+class ReservedValueError(ReservedAnswerError):
+    """`SOMETHING_ELSE` on an item that is not an approval: there is no menu to
+    step off, and the agent would read a refusal of options it never offered."""
+
+    code = "reserved_value"
+
+    def __init__(self):
+        super().__init__(
+            f"{SOMETHING_ELSE!r} is reserved for approvals; answer a question "
+            "with the answer itself."
+        )
+
+
+class NotOffMenuError(ReservedAnswerError):
+    """`SOMETHING_ELSE` on a platform-minted approval (a skill gate counts only
+    its own options, and no agent reads the text): decided by its options."""
+
+    code = "not_off_menu"
+
+    def __init__(self):
+        super().__init__("This approval is decided by its options; pick one of them.")
 
 
 def usable_options(item: dict) -> Optional[list]:
@@ -65,8 +118,18 @@ def usable_options(item: dict) -> Optional[list]:
     return choices or None
 
 
-def validate_response_choice(item: dict, response: Optional[str]) -> None:
+def validate_response_choice(
+    item: dict, response: Optional[str], *, response_text: Optional[str]
+) -> None:
     """Raise `ResponseNotOfferedError` when an approval's decision was not offered.
+
+    `SOMETHING_ELSE` is handled FIRST (#3242): accepted on any approval whose
+    `response_text` carries an instruction (`InstructionRequiredError` when it is
+    blank), refused on every other item type (`ReservedValueError`). It is
+    checked before membership, so an agent that offered the literal itself gets
+    the reserved meaning, not a second one. `response_text` is keyword-only and
+    required so a stale two-argument call fails loudly instead of skipping the
+    instruction rule.
 
     Exact string match, deliberately. The options are AGENT-authored, so the
     agent is the only party that knows whether `"approve"` and `"Approve"` mean
@@ -84,6 +147,12 @@ def validate_response_choice(item: dict, response: Optional[str]) -> None:
     approval, was it one the agent offered?
     """
     if not response:
+        return
+    if response == SOMETHING_ELSE:
+        if (item or {}).get("type") != "approval":
+            raise ReservedValueError()
+        if not (response_text or "").strip():
+            raise InstructionRequiredError()
         return
     choices = usable_options(item)
     if choices is None:

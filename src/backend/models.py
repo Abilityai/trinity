@@ -3718,7 +3718,9 @@ class DismissAllRequest(BaseModel):
 class OperatorResponse(BaseModel):
     """Body for responding to a queue item."""
     response: str
-    response_text: Optional[str] = None
+    # #3242: carries the instruction with the reserved "(something else)"
+    # decision; bounded like the Workspace answer and the resume frame.
+    response_text: Optional[str] = Field(default=None, max_length=4000)
     # #2915: a response to an item the agent changed or closed on its side is
     # refused with 409 `item_diverged` unless the human has SEEN the divergence
     # and answers anyway. The UI sets this on the second click, after showing it.
