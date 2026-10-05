@@ -573,7 +573,7 @@ Standalone mobile-friendly admin page for managing agents on the go. Designed as
 - **Description**: Mobile-optimized Operating Room showing items needing attention
 - **Key Features**:
   - Needs Response queue with expandable cards
-  - Respond/acknowledge actions inline, by item type (desktop parity, #2370): approval = select an option → restated consequence → optional note → explicit `Send: <option>` (never a one-tap irreversible answer); question = text answer; alert = `Got it`. The payload is the desktop's — the decision in `response`, a note in `response_text` — built by the shared `utils/operatorQueue.js`, so a Deny can no longer be recorded as an approval
+  - Respond/acknowledge actions inline, by item type (desktop parity, #2370): approval = select an option → restated consequence → optional note → explicit `Send: <option>` (never a one-tap irreversible answer), or the **Something else** chip (#3242; hidden on a gate approval) → required instruction → `Send instruction`; question = text answer; alert = `Got it`. The payload is the desktop's — the decision in `response` (an option, or the reserved `(something else)`), a note or the instruction in `response_text` — built by the shared `utils/operatorQueue.js`, so a Deny can no longer be recorded as an approval
   - Notification list with priority badges
   - Badge count on tab icon
   - Cost alerts summary

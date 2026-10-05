@@ -194,11 +194,11 @@ Event handling in the store (`handleWebSocketEvent`, line 177-200):
 
 | Type | UI Control (QueueCard.vue) | Submit Action |
 |------|---------------------------|---------------|
-| Approval | Option buttons (green/red/blue border) + optional text input + Send (line 99-133) | `respondToItem(id, selectedOption, note)` |
+| Approval | Option buttons (green/red/blue border) from `offeredChips(item)` + a neutral **Something else** chip (#3242; hidden on a `gate-` id) + text input + Send | `respondToItem(id, selectedOption, note)` — or `respondToItem(id, '(something else)', instruction)` |
 | Question | Textarea + "Send Answer" button (line 136-156) | `respondToItem(id, answerText, '')` |
 | Alert | "Got it" button (line 159-166) | `acknowledgeItem(id)` |
 
-The type pill text comes from `utils/operatorQueue.js::queueTypeLabel` (`Needs approval` / `Question` / `Heads up`), shared with `/m` (#2370). **The `/m` mobile admin mirrors this table** — approval: select → restated consequence → optional note → `Cancel` + `Send: <option>` (nothing sends on one tap); question: text + Send; alert: `Got it` — and builds the identical body via `buildQueueResponse` (see [mobile-admin-pwa.md](mobile-admin-pwa.md)). The Workspace asks panel posts to its own endpoint/model and is **not** yet a consumer of the shared builder (#2375).
+The type pill text comes from `utils/operatorQueue.js::queueTypeLabel` (`Needs approval` / `Question` / `Heads up`), shared with `/m` (#2370). **The `/m` mobile admin mirrors this table** — approval: select → restated consequence → optional note → `Cancel` + `Send: <option>` (nothing sends on one tap), or the **Something else** chip → instruction (required) → `Send instruction` (#3242); question: text + Send; alert: `Got it` — and builds the identical body via `buildQueueResponse` (see [mobile-admin-pwa.md](mobile-admin-pwa.md)). The Workspace asks panel posts to its own endpoint/model and is **not** yet a consumer of the shared builder (#2375).
 
 **An approval's decision must be one it OFFERED (#2376).** `OperatorResponse.response`
 is a bare `str` and every layer passed it through verbatim — router, DB write,
@@ -223,6 +223,60 @@ actions (#1402, ent#329) with four producers today; both writers
 (`routers/operator_queue.py`, `client_portal/asks/service.py`) call it, and an
 AST caller-parity guard (`tests/unit/test_2376_approval_response_membership.py`,
 the #1677 shape) fails CI if a third writer appears without it.
+
+**One sanctioned off-menu answer: `(something else)` (#3242).** A closed menu
+left a person no way to say "none of these — do this instead". The sink now
+accepts exactly ONE value besides an approval's own options: the
+platform-reserved literal `SOMETHING_ELSE = "(something else)"`, defined once
+beside `OPTIONS_DROPPED_MARKER` in `operator_queue_choices.py` and mirrored
+verbatim in `utils/operatorQueue.js` and `src/mcp-server/src/types.ts` (a
+parity test reads all three). It means *none of the offered options is
+approved — carry out none of them*; the person's instruction travels in
+`response_text`, never as `response` (the #2375 class), and no column was added.
+`validate_response_choice(item, response, *, response_text)` — `response_text`
+keyword-only and required, so a stale two-argument call fails loudly — handles
+the literal **before** membership: on a non-approval it is **422
+`reserved_value`**; with a blank/whitespace instruction it is **422
+`instruction_required`**; otherwise it is accepted regardless of the offered
+list. It is never filtered out of `usable_options`, so an approval whose only
+option is the literal stays closed to every other string, and an agent that
+offered the literal itself gets the reserved meaning, not a second one. Every
+other unoffered string is still `response_not_an_offered_option`. Two more
+doors: `ask_service.answer` refuses the literal on a platform-minted approval
+(a skill gate counts only `Approve`, and no agent reads the text) with **422
+`not_off_menu`** via `_decided_by_options(item)`; and `ask_operator`'s raise
+path refuses an option equal to the literal (**422 `invalid_options`**). Both
+writers map the three `ReservedAnswerError` subclasses to named 422s
+(`{code, message}`), and `OperatorResponse.response_text` is bounded at 4000
+like the Workspace answer and the resume frame. The ent#329 resume frame says
+what the literal means in one platform sentence **above** the data fence; inside
+it the answer is `answer: (something else)` and the instruction stays under
+`notes:`. The contract text (platform prompt `approval` bullet and the queue-file
+write-back paragraph, `prompt.md`, the agent guide, the `ask_operator` /
+`get_my_ask` / `respond_to_operator_queue` descriptions) names the literal; a
+`test_1402_prompt_contract.py` sentinel pins it.
+
+Surfaces: every producer shows a **Something else** chip after the agent's
+chips (`offeredChips(item)` = `optionsOf` minus the literal and the size-cap
+marker, which also stopped the marker rendering as a pickable chip), neutral
+styled, never the index-coloured arms. On `QueueCard` / `QueueItemDetail` and
+the Workspace typing with no pick **auto-arms** the chip; the field label,
+placeholder and Send copy flip ("Send instruction", "Instruction (required)"),
+and Enter never sends an auto-armed state. `/m` gates its form on a pick, so
+there the chip is tapped first. Send needs the instruction everywhere
+(`buildQueueResponse` returns `null` for the literal with a blank note), inputs
+cap at 4000, and `respondToItem` now returns success so `QueueItemDetail`
+clears the form only when the send landed (a 409 divergence no longer wipes the
+typed text). **The chip is hidden on gate approvals on every surface** —
+`decidedByOptions(item)`: the operator surfaces read the platform-reserved
+`gate-` id prefix, and the Workspace ask projection carries a boolean
+`decided_by_options` (it says nothing else about the gate) — so no surface
+offers an answer the sink would refuse; `not_off_menu` is the belt. A human
+never reads the token: resolved views (`ResolvedCard`, the Detail resolved
+view) render `decisionLabel(response)` → "Something else", and the Workspace
+"your recent answers" line is `Something else: <instruction excerpt>`.
+Tests: `tests/unit/test_3242_something_else.py`, the extended #2376 AST guard,
+the five `*SomethingElse*` vitest specs, `src/mcp-server/src/operator_queue.test.ts`.
 
 ### NavBar Badge
 
@@ -283,7 +337,7 @@ All endpoints require JWT authentication via `get_current_user` dependency. Per-
 | POST | `/api/operator-queue/bulk-cancel` | `bulk_cancel_queue_items()` | — | (#1017) Cancel a list of still-pending items in one call. Body `{ids: [...], reason?}` (1-500 ids; `reason` ≤ 500, #611); ids are deduped order-preserving so the `skipped` count is honest. Only listed ids are touched; non-pending/inaccessible ids are skipped. **A person only** (403 `person_required`, #611). Through the ask sink: one `batch_id` stamped on exactly the rows this sweep flipped, ONE `bulk_cancel` audit row (the ids actually cancelled + `batch_id` + `has_reason`), ONE `operator_queue_cleared` trigger (`scope`, `count` — no operator email), ONE ending event to the observers. Returns `{cancelled, skipped, batch_id}` |
 | POST | `/api/operator-queue/clear-resolved` | `clear_resolved_queue_items()` | 158-204 | (#1017) **Hide** terminal items (`acknowledged`/`cancelled`/`expired`) by setting `cleared_at` — NOT a DELETE (a delete would be resurrected by the 5s sync loop; see DB layer). `responded` rows are kept visible so the sync write-back can still deliver the answer. Actual row deletion is deferred to the retention sweep (#1142). Body `{agent_name?}` (403 if inaccessible). Idempotent — empty match returns `{cleared: 0}`. Audit-logged (`clear_resolved`), broadcasts `operator_queue_cleared` (`scope: "resolved"`) when `cleared > 0` |
 | GET | `/api/operator-queue/{item_id}` | `get_queue_item()` | 207-218 | Single item by ID; 404 if not found (does NOT filter on `cleared_at` — hidden items remain fetchable by id) |
-| POST | `/api/operator-queue/{item_id}/respond` | `respond_to_queue_item()` | — | Submit operator response. **A person only** (403 `person_required`, checked before the row is read, #611). Validates status=pending (400), divergence (409 `item_diverged`, #2915), the offered option (422, #2376 — enforced by the ask sink); the sink's CAS writes the answer + ledger; 409 on a lost race (#1017) and 409 `expired` when the deadline passed before the poller swept (#611); audit `answered`, thin `operator_queue_responded`, the ent#329 resume |
+| POST | `/api/operator-queue/{item_id}/respond` | `respond_to_queue_item()` | — | Submit operator response. **A person only** (403 `person_required`, checked before the row is read, #611). Validates status=pending (400), divergence (409 `item_diverged`, #2915), the offered option (422, #2376 — enforced by the ask sink), or the reserved `(something else)` with an instruction in `response_text` (422 `instruction_required` / `reserved_value` / `not_off_menu`, #3242; `response_text` ≤ 4000); the sink's CAS writes the answer + ledger; 409 on a lost race (#1017) and 409 `expired` when the deadline passed before the poller swept (#611); audit `answered`, thin `operator_queue_responded`, the ent#329 resume |
 | POST | `/api/operator-queue/{item_id}/cancel` | `cancel_queue_item()` | — | Cancel pending item. **A person only** (#611). Optional body `{reason}` (≤ 500). Validates status=pending (400); the sink's CAS writes the cancel + ledger; 409 on a lost race (was a silent 200); audit `cancelled` (`has_reason`, never the text), thin `operator_queue_cancelled`, the ending wake |
 | GET | `/api/agents/{name}/operator-queue/{request_id}` | `get_my_ask()` (`agent_router`) | — | (#611) The agent's OWN ask by its own `request_id` — only as itself (`get_self_acting_agent`: agent key == name, system key == `trinity-system`; any other principal or name → one uniform 403 `agent_identity_required`, then `AuthorizedAgent`'s uniform 404). Ignores `cleared_at`. Redacted projection (`_READBACK_FIELDS`: no person email, no `resolved_to`) |
 | POST | `/api/agents/{name}/operator-queue` | `raise_my_ask()` (`agent_router`) | — | (#611 PR B) The agent raises an ask as itself (the same `get_self_acting_agent` gate). Body `OperatorAskCreate` (`extra="forbid"`) into `ask_service.raise_ask`; **201** with the receipt, **200** replaying the first receipt, named 422 / 429 refusals as `{code, message, …}` — see [Raising an ask](#raising-an-ask-trinity-enterprise611-pr-b) |
@@ -448,7 +502,7 @@ Writers are edge-triggered (`WHERE sync_state IS NULL OR != :v …`; the rowcoun
 
 **The writers** (`db/operator_queue.py`): `respond_to_item` (CAS adds `expires_at IS NULL OR expires_at > now` — a late answer returns `_status_conflict` with status still `pending`); `cancel_item(item_id, *, disposed_by_email, reason, disposition='cancelled')` (CAS; a lost race returns `_status_conflict`; `disposition='dismissed'` for the addressee's Dismiss, anything else is a `ValueError`); `bulk_cancel_items(…, *, disposed_by_email, reason) → {batch_id, rows}` (one UPDATE stamps the sweep's own `batch_id`, the re-select `id IN (:ids) AND batch_id = :b` is exactly the winners — dialect-agnostic, no RETURNING); `mark_expired() → rows` (bounded candidate select, then per-id CAS — overlapping leaders end each row once).
 
-**The sink** (`services/ask_service.py`): `answer(item, …)` (runs the #2376 offered-option check first — the one writer of an answer), `cancel`, `bulk_cancel`, `expire`. Each: CAS writer → one audit row per transition (`answered` · `cancelled` (+`has_reason`) · `bulk_cancel` (+`batch_id`, the cancelled ids) · `expired` (`source=system`); ids and enums only) → ONE thin trigger (`operator_queue_responded` / `operator_queue_cancelled` agent-keyed; `operator_queue_cleared` count-only for a sweep; expiry sends none — the poll cycle's one `operator_queue_sync` covers it, its reset now sits above expiry) → the ending observers (`register_ending_observer`), handed only the CAS-won rows. Synchronous: the portal's answer route is a plain `def` on a worker thread, so the audit and broadcast hop to the loop through `operator_resume_service.spawn_on_loop` and are never awaited. `_broadcast_payload` names each trigger so the ent#467 `/ws` guard reads it.
+**The sink** (`services/ask_service.py`): `answer(item, …)` (runs the #2376 offered-option check first — with the #3242 reserved `(something else)` branch and the `not_off_menu` refusal on a platform-minted approval — the one writer of an answer), `cancel`, `bulk_cancel`, `expire`. Each: CAS writer → one audit row per transition (`answered` · `cancelled` (+`has_reason`) · `bulk_cancel` (+`batch_id`, the cancelled ids) · `expired` (`source=system`); ids and enums only) → ONE thin trigger (`operator_queue_responded` / `operator_queue_cancelled` agent-keyed; `operator_queue_cleared` count-only for a sweep; expiry sends none — the poll cycle's one `operator_queue_sync` covers it, its reset now sits above expiry) → the ending observers (`register_ending_observer`), handed only the CAS-won rows. Synchronous: the portal's answer route is a plain `def` on a worker thread, so the audit and broadcast hop to the loop through `operator_resume_service.spawn_on_loop` and are never awaited. `_broadcast_payload` names each trigger so the ent#467 `/ws` guard reads it.
 
 **Only a person ends an ask.** `dependencies.reject_non_person_principal` (an allowlist over `mcp_scope ∈ {None, "user"}`, no `agent_name`/`connector_agent`/`portal_delegate`; a principal with no scope attribute fails closed) guards respond, cancel and bulk-cancel before anything is read → 403 `person_required`. The Workspace answer (`client_portal/asks/router.py`) holds its platform principals to the same rule: `get_portal_principal` sets `PortalPrincipal.is_person` from `is_person_principal`, so a system-scoped key keeps its Workspace read breadth (#2198) but its answer is refused with the same 403 before the row is read.
 
@@ -1022,6 +1076,7 @@ Clear All on **Resolved** instead calls `clearResolved()` -> `POST /api/operator
 
 | Date | Change |
 |------|--------|
+| 2026-10-05 | #3242 — approvals get one sanctioned off-menu answer: the reserved `(something else)` decision with the person's instruction in `response_text`, accepted by the sink on any approval and refused by name elsewhere (`instruction_required`, `reserved_value`, `not_off_menu`, `invalid_options` at raise); a Something else chip on the desktop card and detail, `/m` and the Workspace, hidden on gate approvals on every surface (`decided_by_options` on the Workspace projection); resolved views read "Something else"; the resume frame and the contract text name the value; no schema change |
 | 2026-09-29 | trinity-enterprise#715 — the reads stop handing a person's email to a machine key: the get/list routes give non-person principals the `_MACHINE_ROW_FIELDS` allowlist (no `responded_by_*`, `addressed_to_email` on any row, `disposed_by_email`, `resolved_to`); the platform's heads-ups about a person (ent#499 problem report, ent#308 inbox collision) are skipped for machines (404 on the item route) and `portal-inbox-collision-` is a reserved prefix, so the collision alert never reaches the agent's file or its resume turn; the file write-back no longer writes `responded_by` (both paths; the prompt now says `response`, `response_text` and `responded_at`); the clear-resolved `/ws` trigger is the count only. Tests: `tests/unit/test_ent715_queue_person_fields.py`. |
 | 2026-09-28 | trinity-enterprise#611 PR B, review round — the platform-reserved `gate-` prefix (required for a gate raise, refused for an agent's; gate rows never wake the agent), `raised_by` on the receipt, a provider's empty `primary` answer goes to the operators (ent#606), the rate check before any database read, a file entry racing the native insert replays instead of a 500, and `get_my_ask` names the predecessor by `request_id`. The `proposal` is rendered on every card that offers the decision (Operations, `/m`, the Workspace) and kept on the Resolved tab. Second pass: the gate row's receipt promises no wake, the channel goes with the raiser, a gate raise never replays a non-gate row (409), and the re-ask guard and link stay with their raiser. |
 | 2026-09-25 | trinity-enterprise#611 PR B — agents raise asks natively: `POST /api/agents/{name}/operator-queue` + MCP `ask_operator` (self-acting) into `ask_service.raise_ask` (named 422s, replay-first receipts with `differs`, the 15-minute deadline floor, `supersedes_expired` + `reask_requires_link`, role addressing through an optional provider, the #1632 rate buckets, an atomic per-agent depth cap); native rows outside the file contract; the poller skips re-used native ids, counts only inserted rows and logs the file's deprecation; the prompt leads with `ask_operator`; re-ask badges on the cards |
