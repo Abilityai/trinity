@@ -146,13 +146,19 @@ class TestCreatePlatformItem:
 
 class TestMarkExpired:
     def test_a_refresh_between_select_and_cas_keeps_the_row(self, real_db, agent, subject, monkeypatch):
-        from db import operator_queue as oq
         past = _iso(datetime.now(timezone.utc) - timedelta(minutes=5))
         item = _item("cb-1"); item["expires_at"] = past
         created = real_db.create_platform_operator_queue_item(agent, item, subject=subject)
         row_id = created["row"]["id"]
 
-        real_select = oq.select
+        # Patch the dict the running method reads, not the module name: a sibling
+        # test may leave a stand-in in sys.modules["db.operator_queue"] (or evict
+        # and re-import it) while the `database` singleton's class still reads the
+        # original module dict, so a patch on `db.operator_queue.select` never
+        # fires and the refresh never lands (the module-identity gotcha;
+        # test_1632's `_patch_engine`, test_ent611's race tests).
+        g = type(real_db._operator_queue_ops).mark_expired.__globals__
+        real_select = g["select"]
         state = {"refreshed": False}
 
         def _refreshing_select(*cols, **kw):
@@ -163,7 +169,7 @@ class TestMarkExpired:
                 real_db.create_platform_operator_queue_item(agent, _item("cb-2"), subject=subject)
             return stmt
 
-        monkeypatch.setattr(oq, "select", _refreshing_select)
+        monkeypatch.setitem(g, "select", _refreshing_select)
         ended_ids = {r["id"] for r in real_db.mark_operator_queue_expired()}
         assert state["refreshed"]
         assert row_id not in ended_ids
