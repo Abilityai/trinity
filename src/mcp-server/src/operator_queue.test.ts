@@ -451,3 +451,44 @@ describe("ent#661 ask_operator forwards the turn id", () => {
     assert.deepEqual(turns, ["exec-9", undefined]);
   });
 });
+
+// ---------------------------------------------------------------------------
+// #3243 — atomic asks: the authoring rules ride in the tool's own contract,
+// and a cap refusal reaches the agent with its code and limit.
+// ---------------------------------------------------------------------------
+
+describe("#3243 atomic asks", () => {
+  const tools = createOperatorQueueTools({} as unknown as TrinityClient, false);
+
+  it("the ask_operator description carries the five rules and every cap code", () => {
+    const d = tools.askOperator.description;
+    for (const phrase of [
+      "One decision per ask",
+      "at most 120 (title_too_long)",
+      "Options name the choice only",
+      "at most 5 options, each at most 60 characters",
+      "Context is for people",
+      "too_many_options",
+      "option_too_long",
+      "lookalike",
+    ]) {
+      assert.ok(d.includes(phrase), phrase);
+    }
+  });
+
+  it("a cap refusal comes back with its code and limit, never as a throw", async () => {
+    const fake = {
+      raiseAsk: async () => {
+        throw new ApiError(422, JSON.stringify({ detail: {
+          code: "option_too_long", message: "An option is too long.", limit: 60, index: 0, length: 77,
+        } }));
+      },
+    } as Partial<TrinityClient>;
+    const out = JSON.parse(await createOperatorQueueTools(fake as unknown as TrinityClient, false)
+      .askOperator.execute({ request_id: "r", title: "t", type: "approval", options: ["x"] } as any,
+        agentCtx("self")));
+    assert.equal(out.success, false);
+    assert.equal(out.code, "option_too_long");
+    assert.equal(out.limit, 60);
+  });
+});

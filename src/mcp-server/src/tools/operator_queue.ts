@@ -94,11 +94,14 @@ const askOperatorParameters = z.object({
     .describe(
       "An id YOU choose for this ask: letters, digits, '.', '_', ':' or '-'. Raising again with the same id returns the first receipt instead of a second ask.",
     ),
-  title: z.string().min(1).describe("One line the person reads first (up to 300 characters)."),
+  title: z
+    .string()
+    .min(1)
+    .describe("One line a person reads at a glance — what you need decided (at most 120 characters; aim for well under 100)."),
   question: z
     .string()
     .optional()
-    .describe("The question or the decision you need, with what the person must know to answer (up to 4000 characters)."),
+    .describe("The question or the decision you need, with what the person must know to answer; the reasoning behind the options goes here (up to 4000 characters)."),
   type: z
     .enum(["approval", "question", "alert"])
     .optional()
@@ -107,13 +110,17 @@ const askOperatorParameters = z.object({
   options: z
     .array(z.string().min(1))
     .optional()
-    .describe("The choices a person picks from. Required for an approval."),
+    .describe(
+      "The choices a person picks from, each naming the choice only (at most 5 options, each at most 60 characters; aim for under 40). Required for an approval. Never (something else) or a lookalike — the platform adds it.",
+    ),
   context: anyJsonObject()
     .optional()
-    .describe("Supporting data shown with the ask (JSON, up to 8 KB)."),
+    .describe(
+      'A few labelled facts a person needs to answer, e.g. {"Recipient": "…", "Sends at": "…"} — not raw internal state (JSON, up to 8 KB).',
+    ),
   proposal: anyJsonObject()
     .optional()
-    .describe("For an approval: the exact action you will take if it is approved, frozen with the ask (JSON, up to 8 KB)."),
+    .describe("For an approval: the exact action you will take if it is approved, frozen with the ask — key it by option when the options differ in effect (JSON, up to 8 KB)."),
   to: z
     .enum(["primary", "approver", "viewer", "operator"])
     .optional()
@@ -422,10 +429,28 @@ export function createOperatorQueueTools(
         "supersedes_expired to the expired ask's request_id (repeating its proposal " +
         "without that link is refused with reask_requires_link). Learn how it ended " +
         "from the wake when wakes_on_ending is true, or read it any time with " +
-        `get_my_ask. Never list ${JSON.stringify(SOMETHING_ELSE)} as an option: the ` +
-        "platform offers it on every approval (invalid_options). " +
+        "get_my_ask. " +
+        // #3243: the five authoring rules. The caps are pinned to the backend's
+        // defaults by tests/unit/test_3243_atomic_asks.py.
+        "Write atomic asks. (1) One decision per ask: two independent decisions are " +
+        "two asks. (2) A title is one line a person reads at a glance: aim for well " +
+        "under 100 characters, at most 120 (title_too_long). (3) Options name the " +
+        "choice only — 'Send now', not 'approve — the receptionist sends it with a " +
+        "disclosure and CCs you': the reasoning goes in question, and what each option " +
+        "will do goes in proposal (keyed by option when they differ); aim for under 40 " +
+        "characters. (4) Offer few options — at most 5 options, each at most 60 " +
+        "characters (too_many_options, option_too_long; a refusal names the limit in " +
+        `force): the person can always answer ${JSON.stringify(SOMETHING_ELSE)} with ` +
+        "their own instruction, so never list every variant; for an open choice among " +
+        "many, ask a question instead. (5) Context is for people: a few labelled facts, " +
+        `not raw internal JSON. Never list ${JSON.stringify(SOMETHING_ELSE)} or a ` +
+        "lookalike such as \"Something else\" as an option: the platform offers it on " +
+        "every approval (invalid_options). " +
         "A refusal comes back as {success: false, status, code, message}: " +
-        "422 for a malformed ask (invalid_*, field_too_large, options_required, " +
+        "422 for a malformed ask (invalid_*, field_too_large, title_too_long — shorten " +
+        "the title and move the detail into question, too_many_options — split it into " +
+        "separate asks or drop variants, option_too_long — name the choice and move the " +
+        "rest to question or proposal, options_required, " +
         "role_unassigned, reask_requires_link), 429 rate_limited or queue_full (too " +
         "many open asks: wait for some to end). Acts as the agent your key belongs " +
         "to; there is no agent parameter.",

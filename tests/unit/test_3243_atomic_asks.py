@@ -395,3 +395,44 @@ class TestFileHold:
         _run(svc)
         assert _created_ids(db) == []
         assert _marker(state) is None
+
+
+# ===========================================================================
+# 4. The contract text quotes the configured numbers (drift guard)
+# ===========================================================================
+
+_REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+
+
+class TestContractText:
+    """`operator_queue.ts` and the prompt are static text; the caps are Python
+    constants. A cap change that leaves the text behind makes the tool lie.
+    The live consumer of these files is the agent reading them, so the pin is
+    on the exact phrases built from the constants, not bare digits."""
+
+    def _read(self, rel):
+        with open(os.path.join(_REPO, rel), encoding="utf-8") as f:
+            return f.read()
+
+    def _phrases(self):
+        import services.operator_queue_service as oqs
+        return (f"at most {oqs.OPERATOR_QUEUE_MAX_OPTIONS} options, "
+                f"each at most {oqs.OPERATOR_QUEUE_OPTION_MAX_CHARS} characters",
+                f"at most {oqs.OPERATOR_QUEUE_ASK_TITLE_MAX_CHARS}")
+
+    def test_the_tool_description_quotes_the_caps_and_codes(self):
+        text = self._read("src/mcp-server/src/tools/operator_queue.ts")
+        options_phrase, title_phrase = self._phrases()
+        assert options_phrase in text
+        assert f"{title_phrase} (title_too_long)" in text
+        for code in ("too_many_options", "option_too_long", "title_too_long", "invalid_options"):
+            assert code in text, code
+
+    @pytest.mark.parametrize("rel", ["src/backend/services/platform_prompt_service.py",
+                                     "config/trinity-meta-prompt/prompt.md"])
+    def test_the_prompt_quotes_the_caps_and_points_at_the_tool(self, rel):
+        text = self._read(rel)
+        options_phrase, title_phrase = self._phrases()
+        assert options_phrase in text and f"{title_phrase} characters" in text
+        assert "The `ask_operator` description has the full rules." in text
+        assert "`invalid_options` / `invalid_title`" in text
