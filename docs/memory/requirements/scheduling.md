@@ -1403,8 +1403,9 @@ schedules:
     characters of an MCP tool description (`CLAUDE_CODE_MAX_MCP_DESCRIPTION_LENGTH`).
     #2958 (2026-09-24) took the `chat_with_agent` description from 2,035 to
     2,424 characters — it was 1,436 during the 2026-09-08 cascade — so from then
-    on its `list_recent_executions` advice and "prefer `parallel=true,
-    async=true`" were cut before any model read them. Every description that
+    on Claude Code cut its `list_recent_executions` advice and "prefer
+    `parallel=true, async=true`" before the model read them (other runtimes'
+    MCP clients were not measured). Every description that
     carries the contract is pinned under the cap on the text the server
     publishes (1,940 for `chat_with_agent`), and mode details moved into
     parameter descriptions, which are not cut.

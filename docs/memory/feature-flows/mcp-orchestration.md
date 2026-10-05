@@ -673,8 +673,9 @@ The receipts above only help a caller who knows what they mean. The rule is now
 - **The 2,048-char cap.** Claude Code cuts every MCP tool description at
   `CLAUDE_CODE_MAX_MCP_DESCRIPTION_LENGTH` (default 2,048). #2958 (2026-09-24)
   took the `chat_with_agent` description from 2,035 to 2,424 chars, so from then
-  on its last paragraph — the `list_recent_executions` advice and "prefer
-  `parallel=true, async=true`" — was cut before any model read it. It is now a
+  on Claude Code cut its last paragraph — the `list_recent_executions` advice and
+  "prefer `parallel=true, async=true`" — before the model read it (other
+  runtimes' MCP clients were not measured). It is now a
   lead, one line of modes and the contract (1,940 chars published); per-mode detail moved into the `parallel` / `async` /
   `timeout_seconds` parameter descriptions, which are not cut.
   `src/delegation-contract.test.ts` reads every carrying description back through
