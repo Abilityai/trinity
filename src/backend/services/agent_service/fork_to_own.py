@@ -29,7 +29,7 @@ import shutil
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Literal
+from typing import List, Literal, Optional
 
 from fastapi import HTTPException
 
@@ -214,6 +214,43 @@ async def _resolve_template_tip(template_repo: str, read_pat: str) -> tuple:
             f"Template '{template_repo}' has no '{default_branch}' branch to copy.",
         )
     return default_branch, head_sha
+
+
+# #3164 — which personal token a fork/bind may fall back to, and how a failure
+# of that token is named. The creator's SAVED personal token (Settings → GitHub
+# token, ent#162 `per_user`) is the user's own identity and may stand in for an
+# omitted form token. The PLATFORM token never may: the destination would be
+# created under the platform's account, and the fork path persists its token as
+# the agent's per-agent PAT (`github_pat_tier = "fork"`), which would bake the
+# global PAT into a per-agent row (ent#162 Decision 2).
+SAVED_TOKEN_TIERS = frozenset({"per_user", "per_agent"})
+
+# Refusals that are about the TOKEN — when the saved one was used, the message
+# says so, so the user fixes it in Settings rather than in a form they never
+# filled in.
+_TOKEN_FAILURE_CODES = frozenset({
+    "FORK_PAT_INVALID", "FORK_DESTINATION_FORBIDDEN", "FORK_REPO_CREATE_FAILED",
+    "FORK_PUSH_FAILED", "BIND_PUSH_FAILED",
+})
+
+
+def fork_pat_required():
+    """The named 400 for a fork/bind with no form token and no saved personal one."""
+    return _http_error(
+        400, "FORK_PAT_REQUIRED",
+        "A GitHub token is needed to create the repository in your account. "
+        "Save your personal token in Settings → GitHub token, or enter one here. "
+        "The platform's token is never used to create a repository for you.",
+    )
+
+
+def saved_token_message(code: str, message: str) -> Optional[str]:
+    """The message for a token refusal raised while using the SAVED token, or
+    None when `code` is not about the token."""
+    if code not in _TOKEN_FAILURE_CODES:
+        return None
+    return (f"Your saved GitHub token (Settings → GitHub token) was used and failed: "
+            f"{message} Update it in Settings, or enter a different token here.")
 
 
 async def validate_destination_pat(user_gh: GitHubService) -> str:

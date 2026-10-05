@@ -288,6 +288,20 @@ export const useAuthStore = defineStore('auth', {
       }
     },
 
+    // #3164: whether the signed-in user has a personal GitHub token saved in
+    // Settings — PRESENCE only, the value never leaves the backend. Fork-to-own
+    // and repo binding use it in place of a typed token. A failed read answers
+    // false, so the form keeps asking (the safe direction).
+    async fetchGithubPatStatus() {
+      try {
+        const { data } = await axios.get('/api/users/me/github-pat')
+        return !!data?.configured
+      } catch (e) {
+        console.warn('Failed to read GitHub token status:', e?.message || e)
+        return false
+      }
+    },
+
     // Bind a sign-in email to the current account (#82 / #2381), then re-read
     // the profile so `userEmail` — and every predicate reading it — updates in
     // place. Throws on failure; the caller owns the InlineError (ent#581).

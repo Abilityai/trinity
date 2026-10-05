@@ -115,19 +115,12 @@
         </p>
       </div>
 
-      <div>
-        <label :for="`bind-pat-${agentName}`" class="block text-sm font-medium text-gray-700 dark:text-gray-300">
-          GitHub token
-        </label>
-        <input
-          :id="`bind-pat-${agentName}`"
-          v-model="pat"
-          type="password"
-          autocomplete="off"
-          placeholder="ghp_... or github_pat_..."
-          :disabled="binding"
-          class="mt-1 block w-full rounded-md border-gray-300 dark:border-gray-600 dark:bg-gray-700 dark:text-white shadow-sm focus:border-action-primary-500 focus:ring-action-primary-500 sm:text-sm disabled:opacity-50"
-        />
+      <SavedGithubTokenField
+        v-model="pat"
+        :has-saved="hasSavedGithubPat"
+        :input-id="`bind-pat-${agentName}`"
+        :disabled="binding"
+      >
         <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
           Needs permission to create the repository and push — a classic token with
           <code class="bg-gray-100 dark:bg-gray-700 px-1 rounded">repo</code> scope, or a
@@ -135,7 +128,7 @@
           agent's git credential; the agent can read its own git credential, so prefer
           the narrow token.
         </p>
-      </div>
+      </SavedGithubTokenField>
 
       <fieldset>
         <legend class="block text-sm font-medium text-gray-700 dark:text-gray-300">Visibility</legend>
@@ -205,6 +198,8 @@
 <script setup>
 import { ref, computed } from 'vue'
 import { useAgentsStore } from '../stores/agents'
+import { useAuthStore } from '../stores/auth'
+import SavedGithubTokenField from './SavedGithubTokenField.vue'
 
 const props = defineProps({
   agentName: { type: String, required: true },
@@ -226,6 +221,8 @@ const binding = ref(false)
 const error = ref(null)
 const result = ref(null)
 const destinationError = ref(null)
+// #3164: a saved personal GitHub token (presence only) stands in for a typed one.
+const hasSavedGithubPat = ref(false)
 
 const isRunning = computed(() => props.agentStatus === 'running')
 
@@ -238,6 +235,7 @@ const openForm = () => {
   showForm.value = true
   error.value = null
   result.value = null
+  useAuthStore().fetchGithubPatStatus().then((saved) => { hasSavedGithubPat.value = saved })
 }
 
 const closeForm = () => {
@@ -308,13 +306,23 @@ const submit = async () => {
 
   // Read the secret out of the reactive ref BEFORE the await, so it can be
   // cleared immediately regardless of how the request ends.
-  const token = pat.value
+  const token = pat.value.trim()
   pat.value = ''
+  if (!token && !hasSavedGithubPat.value) {
+    binding.value = false
+    error.value = {
+      message: 'A GitHub token is required — enter one, or save your personal token in Settings → GitHub token.',
+      code: 'FORK_PAT_REQUIRED',
+      partial: false,
+    }
+    return
+  }
 
   try {
     const data = await agentsStore.bindAgentToOwnRepo(props.agentName, {
       destination_repo: dest,
-      github_pat: token,
+      // No token → the backend uses the saved personal one (#3164).
+      ...(token ? { github_pat: token } : {}),
       private: isPrivate.value,
     })
     result.value = data
