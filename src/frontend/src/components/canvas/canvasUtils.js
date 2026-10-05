@@ -297,6 +297,36 @@ export function canvasAutoSelect(visible, selectedId, query) {
 }
 
 /**
+ * #3218 — the canvas a list refresh brought that the panel had not seen: the
+ * one to follow, because the agent just created it for the reader.
+ *
+ * `knownIds` is the id set of the previous non-empty list, or `null` before
+ * the first load (then nothing is "new" — the first load keeps selecting the
+ * first row of the pinned-first order). A list sharing NO id with the previous
+ * one is a different list, not an arrival — the panel is not keyed per agent,
+ * so switching agents swaps the whole list under it, and that must still read
+ * as a first load. Among several arrivals the most
+ * recently updated wins; a missing timestamp sorts last. The rule is "the id
+ * that appeared", never `rows[0]`: a pinned canvas sorting ahead does not
+ * steal the follow.
+ *
+ * @param {Set<string>|null} knownIds
+ * @param {Array<{canvas_id: string, updated_at?: string}>} rows
+ * @returns {string|null}
+ */
+export function canvasesAppeared(knownIds, rows) {
+  if (!knownIds || !Array.isArray(rows)) return null
+  if (knownIds.size && !rows.some((c) => c && knownIds.has(c.canvas_id))) return null
+  let best = null
+  for (const c of rows) {
+    const id = c && typeof c.canvas_id === 'string' ? c.canvas_id : ''
+    if (!id || knownIds.has(id)) continue
+    if (!best || String(c.updated_at || '') > String(best.updated_at || '')) best = c
+  }
+  return best ? best.canvas_id : null
+}
+
+/**
  * The one confirmation a bulk delete shows, naming the count (AC 3).
  *
  * Singular and plural are spelled out rather than pluralised with an "(s)":

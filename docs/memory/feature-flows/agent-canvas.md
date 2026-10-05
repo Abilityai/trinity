@@ -899,6 +899,23 @@ What it pinned, each now structural rather than per-case:
 - **Switching canvases is guarded.** `CanvasPanel.select` drops a fetch a
   later selection superseded — the header used to name one canvas while the
   slower fetch's blocks belonged to another.
+- **A newly created canvas is followed (#3218).** The panel's selection rules,
+  in order: the first load selects the first row of the pinned-first order; a
+  refresh that brings a canvas id the previous list did not have selects it
+  (`canvasesAppeared` — the id that appeared, never `rows[0]`, so a pinned
+  canvas sorting ahead does not steal it; several at once → the most recently
+  updated) and emits `canvas-selected`, so the next turn carries it; a rewrite
+  of the open canvas re-reads it in place (ent#475); a deleted open canvas
+  falls back to the new arrival if there is one, else the first row; a list
+  sharing no id with the previous one (the panel is not keyed per agent, so
+  switching agents swaps the list under it) reads as a first load. A rewrite
+  of a *different*, existing canvas does **not** pull focus — deliberately, so
+  an agent maintaining several canvases cannot keep moving the reader. While
+  the reader is mid-interaction (manage mode, a search query, the share dialog)
+  the switch is **deferred**, never forced: the arrival is remembered and
+  followed when the interaction ends, dropped if the reader picks a canvas
+  meanwhile or the arrival is gone. Applies on every `CanvasPanel` mount
+  (Agent Detail's Canvas tab, the Workspace rail, the voice column).
 - **The call columns are flex shares, not row percentages.** `<main>`
   `sm:flex-[2_1_0%]` and the voice canvas `sm:flex-[3_1_0%]` — the old
   `w-[40%]` + `w-[60%]` beside the 18rem sidebar summed to 100% + 18rem and
@@ -964,3 +981,4 @@ rail's Canvas tab outside a call still refreshes on its own triggers.
 | 2026-09-07 | claude | The render bar (#2583): the canvas gallery e2e (17 canvases, Agent Detail + rail + voice column, both themes, measured), the flex-share call columns, per-block containers, the per-block error boundary, bounded table/timeline/diagram-error viewports, container-keyed KPI grid, long-token wrapping, `min(px, 100%)` inline widths, chart legend/flat-range/isolated-point/axis-spacing fixes, the stale-fetch guard on canvas switching, and the `<script setup>` module-state fix that made diagrams vanish |
 | 2026-09-07 | claude | One rich block vocabulary: `image` + `diagram` kinds, `chart` widened to six types on the metric series shape, rich fences in markdown, block ids + `patch_canvas`, the `main` default canvas, voice tools as block edits through the one write path with the write-side audience rule, `### Your Canvas` prompt guidance (ent#536) |
 | 2026-09-14 | claude | Freshness is two facts, never a verdict (#2734): the header renders `updated_at` and the new `agent_last_run_at` and derives nothing; the `may be out of date` badge and its note are deleted; `stale` stays computed and unrendered in the header |
+| 2026-10-05 | claude | A newly created canvas is followed when another is open; deferred while managing, searching or sharing; a rewrite of another canvas does not pull focus (#3218) |

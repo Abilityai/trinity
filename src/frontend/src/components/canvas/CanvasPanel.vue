@@ -30,7 +30,7 @@
           :disabled="!selectorEnabled"
           aria-label="Canvas"
           data-testid="canvas-select"
-          @update:model-value="select"
+          @update:model-value="pick"
         >
           <option
             v-for="c in options"
@@ -285,6 +285,7 @@ import {
   bulkDeleteOutcome,
   bulkDeletePrompt,
   canvasAutoSelect,
+  canvasesAppeared,
   canvasOptionLabel,
   canvasSearchVisible,
   canvasHeadroom,
@@ -561,18 +562,54 @@ async function select(id) {
   }
 }
 
+// #3218 — the ids of the last non-empty list (`null` before the first load),
+// so a refresh can tell a canvas the agent just CREATED from one already there.
+let knownIds = null
+// A new canvas that arrived while the reader was mid-interaction (manage mode,
+// a search, the share dialog): followed when the interaction ends, never by
+// discarding it. A canvas the reader picks in the meantime cancels it.
+const pendingFollow = ref(null)
+const interacting = computed(() => manage.value || !!String(query.value || '').trim() || shareOpen.value)
+
+/** A pick the READER made — it wins over any follow still waiting. */
+function pick(id) {
+  pendingFollow.value = null
+  select(id)
+}
+
 watch(
   () => props.canvases,
   (rows) => {
     if (!rows?.length) {
       selectedId.value = null
       detail.value = null
+      knownIds = new Set()
+      pendingFollow.value = null
       return
     }
-    if (!rows.some((c) => c.canvas_id === selectedId.value)) select(rows[0].canvas_id)
+    const appeared = canvasesAppeared(knownIds, rows)
+    knownIds = new Set(rows.map((c) => c?.canvas_id).filter(Boolean))
+    if (pendingFollow.value && !knownIds.has(pendingFollow.value)) pendingFollow.value = null
+    // The open canvas is gone (deleted, or a different agent's list): the new
+    // canvas if one just arrived, else the first row — as before.
+    if (!rows.some((c) => c.canvas_id === selectedId.value)) {
+      select(appeared || rows[0].canvas_id)
+      return
+    }
+    if (!appeared) return
+    if (interacting.value) pendingFollow.value = appeared
+    else select(appeared)
   },
   { immediate: true },
 )
+
+// #3218 — the interaction ended: show the canvas that arrived during it.
+watch(interacting, (busy) => {
+  const id = pendingFollow.value
+  if (busy || !id) return
+  pendingFollow.value = null
+  if (knownIds?.has(id) && id !== selectedId.value) select(id)
+})
 
 // ent#553 review — while a search is active the selection follows the MATCHES:
 // the list-watcher above keys off the unfiltered `props.canvases`, so a
