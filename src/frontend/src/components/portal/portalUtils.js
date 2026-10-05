@@ -161,7 +161,15 @@ export const AGENT_COLLAPSE_LIMIT = 5
 // trinity-enterprise#657: an agent holding an UNSENT DRAFT is lifted the same
 // way — "a Draft mark visible without opening the chat" is false for a row
 // hidden under "N more". Same append-not-float rule, same reason.
-export function visibleAgentRows(roster, { expanded = false, askCounts = {}, draftAgents = null, limit = AGENT_COLLAPSE_LIMIT } = {}) {
+//
+// ent#621: `keep` is one more member of the same family — the agent you are
+// LOOKING AT is never collapsed out. It is the belt rather than the braces: the
+// sidebar auto-expands when a key walk lands beyond the fold (Decision 27/37),
+// and this is what holds the active row visible in a list the person collapsed
+// by hand.
+export function visibleAgentRows(roster, {
+  expanded = false, askCounts = {}, draftAgents = null, limit = AGENT_COLLAPSE_LIMIT, keep = null,
+} = {}) {
   const list = Array.isArray(roster) ? roster : []
   if (expanded) return list
 
@@ -170,7 +178,7 @@ export function visibleAgentRows(roster, { expanded = false, askCounts = {}, dra
   const counts = askCounts || {}
   const drafted = draftAgents instanceof Set ? draftAgents : new Set()
   const waiting = list.filter((a) => a?.name && !shown.has(a.name)
-    && ((Number(counts[a.name]) || 0) > 0 || drafted.has(a.name)))
+    && ((Number(counts[a.name]) || 0) > 0 || drafted.has(a.name) || a.name === keep))
   return waiting.length ? [...head, ...waiting] : head
 }
 
@@ -1162,9 +1170,12 @@ export function searchAgents(roster, query, {
   draftAgents = null,
   expanded = false,
   limit = SIDEBAR_AGENT_RESULT_LIMIT,
+  // ent#621: the active agent is held in its own result list for the same
+  // reason #2424 holds an asked one — see `visibleAgentRows`.
+  keep = null,
 } = {}) {
   const { items } = filterAgentCandidates(roster, query, { requireMentionable: false })
-  const visible = visibleAgentRows(items, { expanded, askCounts, draftAgents, limit })
+  const visible = visibleAgentRows(items, { expanded, askCounts, draftAgents, limit, keep })
   return {
     items,
     visible,

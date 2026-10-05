@@ -833,7 +833,10 @@ describe('leaving the stage mid-call asks first', () => {
     // conversation's own exposed action, then runs it.
     expect(SHELL).toContain("await conversationRef.value?.endVoiceCall?.()")
     expect(SHELL).toMatch(/<ConfirmDialog[\s\S]{0,400}v-model:visible="leaveCall\.open"[\s\S]{0,400}@confirm="onLeaveCallConfirm"/)
-    expect(CODE).toContain('defineExpose({ focusComposer, startVoiceCall, endVoiceCall })')
+    // ent#621 re-pin: `cycleChat` joined the exposed surface (the chat keys walk
+    // the strip from here). Still the EXACT string, and still identifiers only —
+    // an inline body's `}` would silently break the two `[^}]*` pins elsewhere.
+    expect(CODE).toContain('defineExpose({ focusComposer, startVoiceCall, endVoiceCall, cycleChat })')
     // The End button itself is unchanged: immediate, no dialog.
     expect(CODE).toMatch(/data-testid="portal-voice-end"[\s\S]{0,40}@click="endVoiceCall\(\)"/)
   })

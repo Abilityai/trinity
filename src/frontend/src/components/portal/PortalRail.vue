@@ -35,10 +35,17 @@
   >
     <div v-if="mode === 'sheet'" class="absolute inset-0 bg-black/30" @click="$emit('close')"></div>
 
+    <!-- ent#621: the shell's modal probe is a DOM query for
+         `[aria-modal="true"]`, and the rail's own sheet is one. The rail keys
+         must be able to act INSIDE it (⌘. closes it, ⌥. cycles its tabs) while
+         every other key still stops at it — so `data-ws-rail-sheet` goes on the
+         SAME element that carries `aria-modal`, which is the node the probe
+         matches: a marker on the wrapper would never exclude anything. -->
     <aside
       :class="ASIDE[mode]"
       :role="mode === 'sheet' ? 'dialog' : undefined"
       :aria-modal="mode === 'sheet' ? 'true' : undefined"
+      :data-ws-rail-sheet="mode === 'sheet' ? 'true' : undefined"
       aria-label="Conversation rail"
     >
       <!-- ============================ COLLAPSED ============================ -->
