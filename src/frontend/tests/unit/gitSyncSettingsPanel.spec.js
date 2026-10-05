@@ -123,6 +123,17 @@ describe('GitSyncSettingsPanel', () => {
     expect(wrapper.find('[data-testid="git-sync-ready"]').exists()).toBe(true)
   })
 
+  it('the pull copy names what a pull does not protect, never "never discards"', async () => {
+    // #3021 withdrew the "never discards its own changes" promise: an undo only
+    // spares registered executions (`_safe_to_reset`), so uploads / terminal
+    // writes made while a pull runs can be lost. A #3022 merge restored the
+    // false claim once; this pins the honest wording on the rendered panel.
+    const wrapper = await mountPanel()
+    const text = wrapper.find('[data-testid="git-sync-ready"]').text().replace(/\s+/g, ' ')
+    expect(text).toMatch(/Edits made outside agent turns \(uploads, terminal\) while a pull runs are not protected/)
+    expect(text).not.toMatch(/never (discards|loses)/i)
+  })
+
   it('shows a skeleton, not the toggles, before the first load resolves', () => {
     getGitAutoSync.mockReturnValue(new Promise(() => {}))
     const wrapper = mount(GitSyncSettingsPanel, { props: { agentName: 'a1' } })

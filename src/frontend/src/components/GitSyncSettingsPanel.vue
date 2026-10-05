@@ -73,8 +73,10 @@
         <p class="mt-1 pl-[46px] text-xs text-gray-500 dark:text-gray-400">
           Brings in edits people and other agents push to the repository, and
           merges main into a working branch. A pull never starts while the
-          agent is working or has a turn queued, and never discards its own
-          changes. With auto-sync on, each push also rebases onto GitHub first.
+          agent is working or has a turn queued, and a conflicting pull is
+          undone with the agent's edits put back. Edits made outside agent
+          turns (uploads, terminal) while a pull runs are not protected. With
+          auto-sync on, each push also rebases onto GitHub first.
         </p>
         <InlineError
           class="mt-2"

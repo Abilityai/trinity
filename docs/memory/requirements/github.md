@@ -898,8 +898,11 @@
   - a `trinity/*` working branch also merges `main` in, so human pushes to
     `main` arrive (a merge — the branch is already pushed; conflict aborted)
   - uncommitted edits stashed and re-applied explicitly
-  - never discards local work: a conflict is aborted or undone, and recorded;
-    an edit that could not be put back is named as kept in `git stash`
+  - does not undo a pull over a registered execution (`_safe_to_reset`): a
+    conflict is aborted or undone, and recorded; an edit that could not be put
+    back is named as kept in `git stash`. Writes outside the process registry
+    (Files API, docker exec, web terminal) during the integrate window are not
+    protected
   - never STARTS while an execution is in flight or queued, nor over unmerged
     paths (and the push cycle never commits them). The gate is check-then-act:
     admission does not wait for a pull, so a turn accepted during the integrate
