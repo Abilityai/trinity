@@ -100,7 +100,11 @@ _MACHINE_ROW_FIELDS = (
 
 def _for_principal(items: List[Dict[str, Any]], current_user: User) -> List[Dict[str, Any]]:
     if is_person_principal(current_user):
-        return items
+        # #3242: whether the reserved "(something else)" answer applies — the
+        # sink's own predicate, so no operator surface offers a chip that 422s.
+        # A bare boolean; the machine view never needs it (it cannot answer).
+        return [{**item, "decided_by_options": ask_service.decided_by_options(item)}
+                for item in items]
     # #715: the platform's heads-ups ABOUT a person (a client's complaint, the
     # client addresses behind a shared inbox) are the operator's, not a machine's.
     return [

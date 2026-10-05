@@ -56,6 +56,11 @@ describe('offeredChips / decisionLabel / decidedByOptions', () => {
     expect(decidedByOptions({ request_id: 'approval-1' })).toBe(false)
     expect(decidedByOptions(null)).toBe(false)
   })
+  it('the projection boolean wins over the id; the prefix is only the fallback', () => {
+    expect(decidedByOptions({ request_id: 'poison-1', decided_by_options: true })).toBe(true)
+    expect(decidedByOptions({ request_id: 'poison-1' })).toBe(false)
+    expect(decidedByOptions({ request_id: 'gate-abc', decided_by_options: false })).toBe(false)
+  })
 })
 
 describe('respondToItem — the body for the reserved answer, and success', () => {

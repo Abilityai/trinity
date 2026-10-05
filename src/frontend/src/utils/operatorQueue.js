@@ -74,14 +74,16 @@ export function decisionLabel(response) {
 }
 
 /**
- * Is this approval decided only by its options (a platform-minted gate)? The
- * sink refuses the reserved answer there (`not_off_menu`), so no surface
- * offers the chip. The Workspace projection says so as `decided_by_options`;
- * the operator surfaces carry the id, whose `gate-` prefix is platform-reserved.
+ * Is this approval decided only by its options (a platform-minted approval)?
+ * The sink refuses the reserved answer there (`not_off_menu`), so no surface
+ * offers the chip. Every projection — the Workspace's and the operator queue's
+ * list and item — carries the sink's own predicate as `decided_by_options`, and
+ * that boolean wins. The `gate-` prefix is only the fallback for an item that
+ * lacks the field (a payload from before #3242).
  */
 export function decidedByOptions(item) {
   if (!item || typeof item !== 'object') return false
-  if (item.decided_by_options === true) return true
+  if (typeof item.decided_by_options === 'boolean') return item.decided_by_options
   const id = String(item.request_id || item.id || '').trim().toLowerCase()
   return id.startsWith('gate-')
 }

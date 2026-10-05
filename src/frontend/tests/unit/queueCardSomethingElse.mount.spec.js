@@ -99,6 +99,14 @@ describe('QueueCard — Something else (#3242)', () => {
     expect(send(w).attributes('disabled')).toBeDefined()
   })
 
+  it('a platform-minted approval under another reserved prefix has no chip (#3242 I3)', async () => {
+    // The id is not `gate-`: only the server's own predicate can hide the chip.
+    const w = await mountCard({ request_id: 'poison-abc', decided_by_options: true })
+    expect(chip(w).exists()).toBe(false)
+    await note(w).setValue('anything')
+    expect(send(w).attributes('disabled')).toBeDefined()
+  })
+
   it('an agent-offered twin of the literal is not rendered as a second chip', async () => {
     const w = await mountCard({ options: ['Approve', '(something else)'] })
     const labels = w.findAll('button').map(b => b.text())

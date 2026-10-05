@@ -56,6 +56,11 @@ describe('QueueItemDetail — Something else (#3242)', () => {
     expect(w.find('[data-testid="something-else-chip"]').exists()).toBe(false)
   })
 
+  it('hides the chip on a platform-minted approval under another reserved prefix (#3242 I3)', () => {
+    const w = mountWith(item({ request_id: 'poison-x', decided_by_options: true }))
+    expect(w.find('[data-testid="something-else-chip"]').exists()).toBe(false)
+  })
+
   it('a resolved reserved answer reads "Something else", never the literal', () => {
     const w = mountWith(item({ status: 'responded', response: '(something else)', response_text: 'Use the blue bucket' }))
     expect(w.find('[data-testid="detail-response"]').text()).toBe('Something else')

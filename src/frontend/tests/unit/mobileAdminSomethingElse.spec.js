@@ -74,4 +74,9 @@ describe('/m — Something else (#3242)', () => {
     const w = await mountView({ request_id: 'gate-abc' })
     expect(w.find('[data-item-id="m1"] [data-testid="queue-something-else"]').exists()).toBe(false)
   })
+
+  it('is hidden on a platform-minted approval under another reserved prefix (#3242 I3)', async () => {
+    const w = await mountView({ request_id: 'poison-abc', decided_by_options: true })
+    expect(w.find('[data-item-id="m1"] [data-testid="queue-something-else"]').exists()).toBe(false)
+  })
 })

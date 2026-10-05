@@ -332,3 +332,42 @@ class TestTheAgentReadsItBack:
         readback = asyncio.run(get_my_ask(request_id=rid, name=agent))
         assert (readback["status"], readback["response"], readback["response_text"]) == (
             "responded", SOMETHING_ELSE, _INSTRUCTION)
+
+
+# ---------------------------------------------------------------------------
+# One predicate on both sinks: the operator-queue projections carry it (I3)
+# ---------------------------------------------------------------------------
+
+class TestTheOperatorProjection:
+    """The SPA's operator surfaces (QueueCard, QueueItemDetail, /m) read this
+    boolean first; the `gate-` prefix is only their fallback. A platform-minted
+    approval under ANY reserved prefix must read `True`, or the chip 422s."""
+
+    def _seed(self, request_id):
+        from database import db
+        return db.create_operator_queue_item("a3242-proj", {
+            "id": request_id, "type": "approval", "status": "pending", "priority": "high",
+            "title": "t", "question": "q", "options": ["Approve", "Deny"], "context": {},
+            "created_at": "2026-10-05T10:00:00Z",
+        }, channel="file", raised_by="agent")
+
+    @pytest.mark.parametrize("route", ["list", "item", "agent_list"])
+    def test_every_route_carries_the_sinks_predicate(self, route):
+        import uuid
+        from test_ent715_queue_person_fields import _as, _client, _read
+        from services import ask_service
+        minted = self._seed(f"poison-{uuid.uuid4().hex[:12]}")
+        own = self._seed(f"approval-{uuid.uuid4().hex[:12]}")
+        _as()
+        client = _client()
+        for uid, expected in ((minted, True), (own, False)):
+            row = _read(client, route, uid, agent="a3242-proj")
+            assert row["decided_by_options"] is expected
+            assert ask_service.decided_by_options(row) is expected
+
+    def test_a_machine_never_reads_it(self):
+        import uuid
+        from test_ent715_queue_person_fields import _as, _client, _read
+        uid = self._seed(f"poison-{uuid.uuid4().hex[:12]}")
+        _as(mcp_scope="system")
+        assert "decided_by_options" not in _read(_client(), "item", uid, agent="a3242-proj")

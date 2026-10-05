@@ -194,7 +194,7 @@ Event handling in the store (`handleWebSocketEvent`, line 177-200):
 
 | Type | UI Control (QueueCard.vue) | Submit Action |
 |------|---------------------------|---------------|
-| Approval | Option buttons (green/red/blue border) from `offeredChips(item)` + a neutral **Something else** chip (#3242; hidden on a `gate-` id) + text input + Send | `respondToItem(id, selectedOption, note)` — or `respondToItem(id, '(something else)', instruction)` |
+| Approval | Option buttons (green/red/blue border) from `offeredChips(item)` + a neutral **Something else** chip (#3242; hidden when `decided_by_options`) + text input + Send | `respondToItem(id, selectedOption, note)` — or `respondToItem(id, '(something else)', instruction)` |
 | Question | Textarea + "Send Answer" button (line 136-156) | `respondToItem(id, answerText, '')` |
 | Alert | "Got it" button (line 159-166) | `acknowledgeItem(id)` |
 
@@ -267,11 +267,14 @@ there the chip is tapped first. Send needs the instruction everywhere
 (`buildQueueResponse` returns `null` for the literal with a blank note), inputs
 cap at 4000, and `respondToItem` now returns success so `QueueItemDetail`
 clears the form only when the send landed (a 409 divergence no longer wipes the
-typed text). **The chip is hidden on gate approvals on every surface** —
-`decidedByOptions(item)`: the operator surfaces read the platform-reserved
-`gate-` id prefix, and the Workspace ask projection carries a boolean
-`decided_by_options` (it says nothing else about the gate) — so no surface
-offers an answer the sink would refuse; `not_off_menu` is the belt. A human
+typed text). **The chip is hidden on platform-minted approvals on every surface** —
+`decidedByOptions(item)` reads the boolean `decided_by_options` that both the
+Workspace ask projection and the operator-queue list/item projections carry
+(`ask_service.decided_by_options`, the sink's own predicate over every reserved
+id prefix; it says nothing else about the item, and the machine view omits it).
+The `gate-` id prefix is only the SPA's fallback for an item without the field.
+MCP `list_operator_queue` / `get_operator_queue_item` pass it through unchanged.
+So no surface offers an answer the sink would refuse; `not_off_menu` is the belt. A human
 never reads the token: resolved views (`ResolvedCard`, the Detail resolved
 view) render `decisionLabel(response)` → "Something else", and the Workspace
 "your recent answers" line is `Something else: <instruction excerpt>`.
