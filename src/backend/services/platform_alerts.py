@@ -564,12 +564,21 @@ def _spawn(factory: Callable[[], Any]) -> None:
         logger.warning("[platform-alerts] could not schedule a follow-up", exc_info=True)
 
 
-async def _broadcast_sync() -> None:
-    """Thin trigger (#918: no payload); listeners refetch the access-controlled list."""
+async def _broadcast_sync(agent_name: str) -> None:
+    """Thin trigger (#918: identifiers only); listeners refetch the access-controlled list.
+
+    Keyed by the row's host agent, like the create path's `operator_queue_new`,
+    so the scope filter delivers it only to clients who may see that agent's
+    queue (ent#467). The poller's fleet-level `operator_queue_sync` is one
+    trigger per cycle spanning agents; this one is always about one row.
+    """
     from services import operator_queue_service as oqs
     manager = oqs._websocket_manager
     if manager:
-        await manager.broadcast(json.dumps({"type": "operator_queue_sync", "data": {}}))
+        await manager.broadcast(json.dumps({
+            "type": "operator_queue_sync",
+            "data": {"agent_name": agent_name},
+        }))
 
 
 def observe(
@@ -633,7 +642,7 @@ def observe(
                 agent_name, k.budgeted_type, ctx.get("triggered_by")))
             return OBSERVED_REFUSED_AT_BUDGET
         if out.get("changed"):
-            _spawn(_broadcast_sync)
+            _spawn(lambda: _broadcast_sync(agent_name))
         return out["outcome"]
     except Exception:  # noqa: BLE001 — an alert must never break its emitter
         logger.error("[platform-alerts] observe failed for %s/%s", agent_name, kind, exc_info=True)
