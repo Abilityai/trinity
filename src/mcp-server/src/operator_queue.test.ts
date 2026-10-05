@@ -471,9 +471,21 @@ describe("#3243 atomic asks", () => {
       "Context is for people",
       "too_many_options",
       "option_too_long",
+      "invalid_options",
       "lookalike",
+      "Fire and park",
     ]) {
       assert.ok(d.includes(phrase), phrase);
+    }
+  });
+
+  it("the ask_operator description leaves headroom under Claude Code's 2,048 cap", () => {
+    // #3234: the client cuts the tail past 2,048. Kept at or under 1,800 so the
+    // next rule fits; field detail belongs in the parameter descriptions.
+    const d = tools.askOperator.description;
+    assert.ok(d.length <= 1800, `ask_operator description is ${d.length} characters`);
+    for (const t of [tools.getMyAsk, tools.respondToOperatorQueue]) {
+      assert.ok(t.description.length <= 2048, `${t.name} description is ${t.description.length} characters`);
     }
   });
 

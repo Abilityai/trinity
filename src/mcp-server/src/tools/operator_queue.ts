@@ -92,16 +92,17 @@ const askOperatorParameters = z.object({
     .min(1)
     .max(256)
     .describe(
-      "An id YOU choose for this ask: letters, digits, '.', '_', ':' or '-'. Raising again with the same id returns the first receipt instead of a second ask.",
+      "An id YOU choose for this ask: letters, digits, '.', '_', ':' or '-'. Raising again with the same id returns the first receipt as status replayed, with differs naming any field that is not the same, so a retry never makes a second ask; use a NEW request_id for a new ask. " +
+        "The receipt: status (created | replayed), id, to_role (the role it went to, never a person's email), resolved (false when nobody could be named and it went to the operators), ask_status, and wakes_on_ending (true when your owner has turned on waking you when your asks end).",
     ),
   title: z
     .string()
     .min(1)
-    .describe("One line a person reads at a glance — what you need decided (by default at most 120 characters; aim for well under 100)."),
+    .describe("One line a person reads at a glance — what you need decided (by default at most 120 characters; aim for well under 100). Over the limit is refused with title_too_long: shorten the title and move the detail into question."),
   question: z
     .string()
     .optional()
-    .describe("The question or the decision you need, with what the person must know to answer; the reasoning behind the options goes here (up to 4000 characters)."),
+    .describe("The question or the decision you need, with what the person must know to answer; the reasoning behind the options goes here (up to 4000 characters; longer is refused with field_too_large)."),
   type: z
     .enum(["approval", "question", "alert"])
     .optional()
@@ -111,32 +112,33 @@ const askOperatorParameters = z.object({
     .array(z.string().min(1))
     .optional()
     .describe(
-      "The choices a person picks from, each naming the choice only (by default at most 5 options, each at most 60 characters; aim for under 40). Required for an approval. Never (something else) or a lookalike — the platform adds it.",
+      "The choices a person picks from, each naming the choice only — 'Send now', not 'approve — the receptionist sends it with a disclosure and CCs you': the reasoning goes in question, what each option will do goes in proposal. By default at most 5 options, each at most 60 characters; aim for under 40. " +
+        "Required for an approval (options_required). Refusals: too_many_options — split it into separate asks or drop variants (the person can always answer (something else) with their own instruction, so never list every variant); option_too_long — name the choice and move the rest to question or proposal; invalid_options — (something else) or a lookalike such as \"Something else\" is listed: remove it, the platform adds it.",
     ),
   context: anyJsonObject()
     .optional()
     .describe(
-      'A few labelled facts a person needs to answer, e.g. {"Recipient": "…", "Sends at": "…"} — not raw internal state (JSON, up to 8 KB).',
+      'A few labelled facts a person needs to answer, e.g. {"Recipient": "…", "Sends at": "…"} — not raw internal state (JSON, up to 8 KB; larger is refused with field_too_large).',
     ),
   proposal: anyJsonObject()
     .optional()
-    .describe("For an approval: the exact action you will take if it is approved, frozen with the ask — key it by option when the options differ in effect (JSON, up to 8 KB)."),
+    .describe("For an approval: the exact action you will take if it is approved, frozen with the ask — key it by option when the options differ in effect (JSON, up to 8 KB; larger is refused with field_too_large)."),
   to: z
     .enum(["primary", "approver", "viewer", "operator"])
     .optional()
     .describe(
-      "Who should answer: primary (your owner; the default for approval and question) or operator (the platform's operators; the default for alert). approver and viewer are refused until someone fills them.",
+      "Who should answer: primary (your owner; the default for approval and question) or operator (the platform's operators; the default for alert). approver and viewer are refused with role_unassigned until someone fills them.",
     ),
   expires_at: z
     .string()
     .optional()
-    .describe("An ISO-8601 time WITH a timezone, at least 15 minutes out, e.g. 2026-10-01T09:00:00Z. When it passes, the ask ends as denied by timeout."),
+    .describe("An ISO-8601 time WITH a timezone, at least 15 minutes out, e.g. 2026-10-01T09:00:00Z. An ask ends when a person answers or cancels it, or at expires_at: when it passes, the ask ends as denied by timeout."),
   supersedes_expired: z
     .string()
     .min(1)
     .max(256)
     .optional()
-    .describe("When re-asking after one of your asks expired: that ask's request_id."),
+    .describe("When re-asking after one of your asks expired: that ask's request_id. Repeating an expired ask's proposal without this link is refused with reask_requires_link."),
 });
 
 export function createOperatorQueueTools(
@@ -413,48 +415,39 @@ export function createOperatorQueueTools(
     // ========================================================================
     askOperator: {
       name: "ask_operator",
+      // #3243 F4: Claude Code shows a model only the first 2,048 characters of a
+      // tool description (#3234), so this is kept under 1,800 and ordered by what
+      // a model must act on first. Field detail — each cap's refusal code and its
+      // remedy, the receipt, idempotency, expiry — lives in the parameter
+      // descriptions below, which are not cut. The caps are env-tunable, so the
+      // text quotes the DEFAULTS ("by default") and the refusal carries the limit
+      // in force; tests/unit/test_3243_atomic_asks.py pins the defaults.
       description:
         "Ask a person for a decision, or tell the operators something, as YOURSELF. " +
-        "The ask is validated, stored and shown at once in the Operating Room (and, " +
-        "when it goes to your owner, in their Workspace), and you get a receipt: " +
-        "status (created | replayed), id, to_role (the role it went to, never a " +
-        "person's email), resolved (false when nobody could be named and it went to " +
-        "the operators), ask_status, and wakes_on_ending (true when your owner has " +
-        "turned on waking you when your asks end). Idempotent by request_id: raising again with the " +
-        "same request_id returns the first receipt as status replayed, with differs " +
-        "naming any field that is not the same, so a retry never makes a second ask; " +
-        "use a NEW request_id for a new ask. An ask ends when a person answers or " +
-        "cancels it, or at expires_at: an expired ask is denied by timeout, so do not " +
-        "re-ask the same action without new information, and when you do re-ask, set " +
-        "supersedes_expired to the expired ask's request_id (repeating its proposal " +
-        "without that link is refused with reask_requires_link). Learn how it ended " +
-        "from the wake when wakes_on_ending is true, or read it any time with " +
-        "get_my_ask. " +
-        // #3243: the five authoring rules. The caps are env-tunable, so the text
-        // quotes the DEFAULTS ("by default") and the refusal carries the limit in
-        // force; tests/unit/test_3243_atomic_asks.py pins the defaults.
-        "Write atomic asks. (1) One decision per ask: two independent decisions are " +
-        "two asks. (2) A title is one line a person reads at a glance: aim for well " +
-        "under 100 characters, by default at most 120 (title_too_long). (3) Options name the " +
-        "choice only — 'Send now', not 'approve — the receptionist sends it with a " +
-        "disclosure and CCs you': the reasoning goes in question, and what each option " +
-        "will do goes in proposal (keyed by option when they differ); aim for under 40 " +
-        "characters. (4) Offer few options — by default at most 5 options, each at most 60 " +
-        "characters (too_many_options, option_too_long; a refusal names the limit in " +
-        `force): the person can always answer ${JSON.stringify(SOMETHING_ELSE)} with ` +
-        "their own instruction, so never list every variant; for an open choice among " +
+        "The ask is validated, stored and shown at once in the Operating Room (and in " +
+        "your owner's Workspace when it goes to them); you get a receipt. Fire and park: " +
+        "raise it, end your turn, never wait in the turn for the answer. Learn how it " +
+        "ended from the wake when the receipt says wakes_on_ending, or any time with " +
+        "get_my_ask. An expired ask is denied by timeout: do not re-ask the same action " +
+        "without new information, and a re-ask sets supersedes_expired. Idempotent by " +
+        "request_id: a retry returns the first receipt as status replayed; a new ask " +
+        "needs a NEW request_id. " +
+        "Write atomic asks. (1) One decision per ask: two independent decisions are two " +
+        "asks. (2) A title is one line read at a glance: " +
+        "by default at most 120 (title_too_long). (3) Options name the choice only: the reasoning goes in " +
+        "question, what each option will do goes in proposal. (4) Offer few options — " +
+        "by default at most 5 options, each at most 60 characters (too_many_options, " +
+        "option_too_long; a refusal names the limit in force); for an open choice among " +
         "many, ask a question instead. (5) Context is for people: a few labelled facts, " +
-        `not raw internal JSON. Never list ${JSON.stringify(SOMETHING_ELSE)} or a ` +
-        "lookalike such as \"Something else\" as an option: the platform offers it on " +
-        "every approval (invalid_options). " +
-        "A refusal comes back as {success: false, status, code, message}: " +
-        "422 for a malformed ask (invalid_*, field_too_large, title_too_long — shorten " +
-        "the title and move the detail into question, too_many_options — split it into " +
-        "separate asks or drop variants, option_too_long — name the choice and move the " +
-        "rest to question or proposal, options_required, " +
-        "role_unassigned, reask_requires_link), 429 rate_limited or queue_full (too " +
-        "many open asks: wait for some to end). Acts as the agent your key belongs " +
-        "to; there is no agent parameter.",
+        "not raw internal JSON. " +
+        `Never list ${JSON.stringify(SOMETHING_ELSE)} or a lookalike such as ` +
+        "\"Something else\" as an option: the platform offers it on every approval " +
+        "(invalid_options), and the person answers it with their own instruction. " +
+        "A refusal comes back as {success: false, status, code, message}: 422 " +
+        "invalid_<field> for a malformed field, and each field's description names its " +
+        "other codes and the fix. 429 rate_limited or queue_full: too " +
+        "many open asks, wait for some to end. Acts as the agent your key belongs to; " +
+        "there is no agent parameter.",
       parameters: askOperatorParameters,
       execute: async (
         params: OperatorAskCreate,
