@@ -294,6 +294,7 @@ A marker for installs that never pass through `start.sh --provision`. A plain or
 working as specified, not a gap — it is what keeps the step off every instance
 whose posture someone already chose.
 
-A Vultr provisioner. `vultr-marketplace` is in both sets, but `--provision`
-accepts only `--cloud digitalocean`, so the domain step's on-demand-TLS promise
-holds only on a host whose Caddyfile `start.sh --provision` wrote.
+A provisioner for any cloud but DigitalOcean and Vultr. `--provision` accepts
+those two, and the domain step's on-demand-TLS promise holds only on a host whose
+Caddyfile `start.sh --provision` wrote — so a hand-rolled install elsewhere records
+`script` and never sees the guide.

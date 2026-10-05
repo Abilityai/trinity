@@ -3781,13 +3781,15 @@ class DatabaseManager:
 
     def create_native_operator_queue_item(self, agent_name, item, *, max_pending, channel,
                                           raised_by, to_role, resolved_to, proposal,
-                                          supersedes_expired):
+                                          supersedes_expired, exclude_request_id_prefixes=None):
         # trinity-enterprise#611: an agent-raised ask — replay, depth cap and insert
-        # in one per-agent serialized step.
+        # in one per-agent serialized step. #3130: the prefixes leave platform
+        # rows out of the depth cap.
         return self._operator_queue_ops.create_native_item(
             agent_name, item, max_pending=max_pending, channel=channel,
             raised_by=raised_by, to_role=to_role, resolved_to=resolved_to,
             proposal=proposal, supersedes_expired=supersedes_expired,
+            exclude_request_id_prefixes=exclude_request_id_prefixes,
         )
 
     def prune_operator_queue_terminal_items(self, retention_days, responded_retention_days, limit=5000):
@@ -3907,14 +3909,17 @@ class DatabaseManager:
         # #1631: agent-scoped — item_id is the agent's request_id, not the uuid.
         return self._operator_queue_ops.item_exists(agent_name, item_id)
 
-    def count_operator_queue_pending_for_agent(self, agent_name, item_type=None):
+    def count_operator_queue_pending_for_agent(self, agent_name, item_type=None,
+                                               exclude_request_id_prefixes=None):
         # #1632: DB-measured per-agent pending depth — the primary ingestion cap.
         # #1677: optional item_type = the per-(agent, type) platform-alert
         # budget read. The pass-through is load-bearing — a missed delegation
         # plus the helper's swallow voids the budget while monkeypatched tests
-        # stay green (pinned by test_1677's real-facade test).
+        # stay green (pinned by test_1677's real-facade test). #3130: the
+        # prefixes leave platform rows out of the agent's own cap.
         return self._operator_queue_ops.count_pending_for_agent(
-            agent_name, item_type=item_type
+            agent_name, item_type=item_type,
+            exclude_request_id_prefixes=exclude_request_id_prefixes,
         )
 
     # =========================================================================

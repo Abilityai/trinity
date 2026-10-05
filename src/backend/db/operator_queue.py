@@ -45,6 +45,25 @@ _DB_BELT_ID_MAX = 512
 # raises. NULL `raised_by` is a legacy or file row, so it counts.
 _NOT_A_GATE_ROW = or_(operator_queue.c.raised_by.is_(None), operator_queue.c.raised_by != "gate")
 
+
+def _own_pending_conds(agent_name: str, exclude_request_id_prefixes=None) -> list:
+    """The pending rows that spend an agent's OWN ask budget — the one predicate
+    both depth caps read (the file seam's #1632 cap and the native `queue_full`,
+    trinity-enterprise#611), so the two cannot drift.
+
+    #3130: the caller passes the platform's reserved id prefixes to leave out the
+    rows the PLATFORM filed against the agent (its flood alarm above all — counted,
+    it kept the cap tripped forever and was re-minted every cooldown window).
+    Agents cannot mint those prefixes on either seam, so the exclusion cannot hide
+    an agent's own row. Gate rows are left out as before (#751).
+    """
+    return [
+        operator_queue.c.agent_name == agent_name,
+        operator_queue.c.status == "pending",
+        _NOT_A_GATE_ROW,
+        *OperatorQueueOperations._not_prefixed(exclude_request_id_prefixes),
+    ]
+
 # trinity-enterprise#611: expiry is swept by a text comparison
 # (`expires_at < now`), so a deadline written with an offset ("…+02:00") or
 # without a zone compared hours off (Invariant #16). Bounded so the per-cycle
@@ -280,6 +299,7 @@ class OperatorQueueOperations:
         resolved_to: Optional[List[str]],
         proposal: Optional[Dict],
         supersedes_expired: Optional[str],
+        exclude_request_id_prefixes=None,
     ) -> Dict:
         """Create an agent-raised ask, atomically per agent (trinity-enterprise#611).
 
@@ -333,10 +353,7 @@ class OperatorQueueOperations:
             if max_pending is not None:
                 pending = conn.execute(
                     select(func.count()).where(and_(
-                        operator_queue.c.agent_name == agent_name,
-                        operator_queue.c.status == "pending",
-                        _NOT_A_GATE_ROW,
-                    ))
+                        *_own_pending_conds(agent_name, exclude_request_id_prefixes)))
                 ).scalar() or 0
                 if pending >= max_pending:
                     return {"outcome": "queue_full", "row": None}
@@ -1602,7 +1619,8 @@ class OperatorQueueOperations:
             return conn.execute(stmt).first() is not None
 
     def count_pending_for_agent(
-        self, agent_name: str, item_type: Optional[str] = None
+        self, agent_name: str, item_type: Optional[str] = None,
+        exclude_request_id_prefixes=None,
     ) -> int:
         """#1632: count an agent's currently-pending operator-queue rows.
 
@@ -1619,12 +1637,12 @@ class OperatorQueueOperations:
 
         trinity-enterprise#751: gate-raised rows are left out — they are not
         the agent's budget to spend.
+
+        #3130: ``exclude_request_id_prefixes`` leaves out platform-minted rows
+        (`_own_pending_conds`). The ingestion cap passes it; the #1677 per-type
+        budget read does not — platform rows are exactly what it budgets.
         """
-        conds = [
-            operator_queue.c.agent_name == agent_name,
-            operator_queue.c.status == "pending",
-            _NOT_A_GATE_ROW,
-        ]
+        conds = _own_pending_conds(agent_name, exclude_request_id_prefixes)
         if item_type is not None:
             conds.append(operator_queue.c.type == item_type)
         stmt = select(func.count()).where(and_(*conds))

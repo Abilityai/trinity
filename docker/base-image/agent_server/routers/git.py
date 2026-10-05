@@ -1177,9 +1177,10 @@ def _with_stash(home_dir: Path, branch: str, step) -> Optional[str]:
 
 
 def _integrate_remote(home_dir: Path, branch: str, ahead: int) -> Optional[str]:
-    """Bring `origin/<branch>` into the checked-out branch without ever losing
-    local work: a fast-forward when nothing is committed locally, a rebase
-    (aborted on conflict) when something is. See `_with_stash`."""
+    """Bring `origin/<branch>` into the checked-out branch, putting uncommitted
+    edits back (or naming the stash): a fast-forward when nothing is committed
+    locally, a rebase (aborted on conflict) when something is. See
+    `_with_stash` / `_safe_to_reset` for what an undo does not protect."""
     def step() -> Optional[str]:
         if ahead == 0:
             ff = run_registered(["git", "merge", "--ff-only", f"origin/{branch}"],
@@ -1254,8 +1255,10 @@ def _run_pull_once(home_dir: Path) -> Dict:
       sync-state.json happens under that lock).
     - Stale lock litter is reaped first, as the push cycle does: a pull-only
       agent has no push cycle to do it.
-    - Refuses to run over unmerged paths. Local work is never discarded; a
-      failure is recorded, not resolved.
+    - Refuses to run over unmerged paths. An undo never resets over a
+      registered execution (`_safe_to_reset`); writes outside the process
+      registry (Files API, docker exec, web terminal) made during the
+      integrate window are not protected. A failure is recorded, not resolved.
 
     `behind_after_pull` is the checked-out branch's own lag behind
     `origin/<branch>`, not its lag behind `main`; `behind_main` in the git
