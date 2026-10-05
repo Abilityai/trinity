@@ -134,6 +134,7 @@ export function createSystemTools(
             "agents:\n" +
             "  orchestrator:\n" +
             "    template: github:Org/repo\n" +
+            "    kind: deployment  # optional: 'agent' (default; own branch + auto-push when the repo is the creator's own) or 'deployment' (pull-only)\n" +
             "    folders: {expose: true, consume: true}\n" +
             "    schedules: [{name: daily, cron: '0 9 * * *', message: '...'}]\n" +
             "permissions:\n" +
