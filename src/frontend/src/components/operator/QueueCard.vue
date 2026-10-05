@@ -283,7 +283,9 @@ function typePill(type) {
   return {
     approval: 'bg-accent-purple-50 text-accent-purple-600 dark:bg-accent-purple-900/20 dark:text-accent-purple-400',
     question: 'bg-blue-50 text-blue-600 dark:bg-blue-900/20 dark:text-blue-400',
-    alert: 'bg-state-autonomous-50 text-state-autonomous-600 dark:bg-state-autonomous-900/20 dark:text-state-autonomous-400'
+    alert: 'bg-state-autonomous-50 text-state-autonomous-600 dark:bg-state-autonomous-900/20 dark:text-state-autonomous-400',
+    // #3130: the budgeted flood alarm keeps the alert's pill.
+    queue_flood: 'bg-state-autonomous-50 text-state-autonomous-600 dark:bg-state-autonomous-900/20 dark:text-state-autonomous-400'
   }[type] || ''
 }
 
