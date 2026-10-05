@@ -500,6 +500,18 @@ class ScheduleExecutionsMixin:
             # caller passes None and this clause never engages.
             if claim_token is not None:
                 conds.append(schedule_executions.c.claim_token == claim_token)
+                if status == TaskExecutionStatus.SUCCESS:
+                    # #2329: the token is never cleared at terminal, so a
+                    # worker's retried result POST would win this CAS a second
+                    # time and re-run the sink's non-idempotent delivery (chat
+                    # messages saved twice). Only a FAILED row may still be
+                    # corrected by a late SUCCESS (#1083).
+                    conds.append(
+                        schedule_executions.c.status.notin_((
+                            TaskExecutionStatus.SUCCESS,
+                            TaskExecutionStatus.SKIPPED,
+                        ))
+                    )
 
             where_clause = and_(*conds)
 

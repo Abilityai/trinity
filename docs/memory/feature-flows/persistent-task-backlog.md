@@ -219,7 +219,19 @@ while it is `queued`, for at most one agent execution timeout, and on expiry
 cancels it (`cancel_queued_execution`) and returns FAILED/`CAPACITY`; a cancel
 that loses to a claim falls through to phase 2, the terminal wait (agent
 timeout + 120s from the claim). The pull sink signals the in-process waiter
-when its CAS write wins. The live-stream proxies (`routers/chat.py`,
+when its CAS write wins.
+
+**Post-turn delivery on pull (#2329).** A queued `/task` row's delivery
+settings (`save_to_session`, `chat_session_id`, `user_message`,
+`create_new_session`, `inject_result`, collaboration / self-task activity ids)
+are applied by both paths through one helper,
+`chat_execution_service.run_post_turn_delivery`, with the request rebuilt by
+`backlog_service.request_from_metadata`. The push drain calls it from
+`run_async_task`; the pull sink spawns it on its CAS-won branch when the
+metadata asks for delivery, then signals the waiter with the chat session id
+(signalled at once when there is nothing to deliver). A token-gated SUCCESS
+write refuses a row already SUCCESS or SKIPPED, so a worker's retried result
+POST cannot run delivery twice. The live-stream proxies (`routers/chat.py`,
 `routers/public.py`, `client_portal/router.py`) hold the SSE connection with
 `: queued` comments while the row is queued (`sync_waiter.wait_while_queued`),
 then retry an agent 404 briefly while the claimed row is `running`.
@@ -328,7 +340,7 @@ if _exec_row and _exec_row.status == TaskExecutionStatus.QUEUED:
 | Method | Purpose |
 |---|---|
 | `enqueue(...)` | Check depth, persist `backlog_metadata`, flip row to QUEUED. Returns False if at cap. |
-| `drain_next(agent_name)` | Acquire sentinel slot → atomically claim row → swap to real execution_id slot → reconstruct `ParallelTaskRequest` (including `inject_result`) → spawn `_run_async_task_with_persistence` (#496: was `_execute_task_background`, deleted by #95). |
+| `drain_next(agent_name)` | Acquire sentinel slot → atomically claim row → swap to real execution_id slot → reconstruct `ParallelTaskRequest` via `request_from_metadata` (including `inject_result`) → spawn `_run_async_task_with_persistence` (#496: was `_execute_task_background`, deleted by #95). |
 | `on_slot_released(agent_name)` | Callback registered with SlotService. Tries `drain_next` once per release. |
 | `expire_stale(max_age_hours=24)` | Maintenance: mark old queued rows as FAILED. |
 | `drain_orphans_all()` | Maintenance: iterate agents with queued work, drain one item each. |
