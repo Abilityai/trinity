@@ -1,6 +1,6 @@
 # Trinity — Guide for AI Agents
 
-Trinity is an autonomous agent orchestration platform: every agent runs in its own Docker container with scheduling, observability, credential injection, channel integrations (Slack/Telegram/WhatsApp), and a tamper-evident audit trail — self-hosted on infrastructure the operator controls. Agents are plain Claude Code (or Gemini CLI) projects; Trinity is where they run in production.
+Trinity is the operating system for the AI-native company — open source, self-hosted, that you own. Every agent runs in its own Docker container with scheduling, observability, credential injection, channel integrations (Slack/Telegram/WhatsApp), and a tamper-evident audit trail, on infrastructure the operator controls. Agents are plain Claude Code (or Gemini CLI) projects; Trinity is where they run in production.
 
 > **Detailed documentation index: [docs/user-docs/README.md](docs/user-docs/README.md)** — guides, agent management, credentials, automation, operations, integrations, and the full API reference live there.
 

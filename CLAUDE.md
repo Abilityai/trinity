@@ -55,7 +55,7 @@ Enterprise **feature designs, paid-module schema, and the open-core gating/monet
 
 ## Project Overview
 
-**Trinity** is an **autonomous agent orchestration and infrastructure platform** — sovereign infrastructure for deploying, orchestrating, and governing fleets of autonomous AI agents on your own hardware.
+**Trinity** is the **operating system for the AI-native company** — open source, self-hosted, that you own. It deploys, orchestrates, and governs fleets of AI agents on your own hardware, and it is model-agnostic: each agent runs on Claude Code or Gemini CLI.
 
 Each agent runs as an isolated Docker container with standardized interfaces for credentials, tools, and MCP server integrations.
 
@@ -332,7 +332,7 @@ curl -X POST http://localhost:8000/api/agents \
 
 | Repository | Description |
 |------------|-------------|
-| [abilityai/trinity](https://github.com/abilityai/trinity) | This repository - Autonomous Agent Orchestration Platform |
+| [abilityai/trinity](https://github.com/abilityai/trinity) | This repository - the operating system for the AI-native company |
 | [abilityai/trinity-ops-public](https://github.com/abilityai/trinity-ops-public) | **Claude Code ops agent** — manage any Trinity instance (health, updates, logs, rollback, provisioning) |
 | [abilityai/abilities](https://github.com/abilityai/abilities) | **Canonical agent development toolkit** — plugins for the full autonomous agent lifecycle (scaffolding, onboarding, deployment, scheduling, ops) |
 
