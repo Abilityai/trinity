@@ -709,13 +709,13 @@
             :class="META_INK_CLASS"
             data-testid="portal-discussion-answer"
           >
-            <span class="min-w-0 truncate">Ready to decide? Send what you typed as the answer to this ask.</span>
+            <span class="min-w-0 truncate">{{ discussionAnswerHint }}</span>
             <BaseButton
               size="sm"
               variant="secondary"
               :loading="answeringDiscussion"
               loading-label="Sending…"
-              :disabled="!input.trim() || sending"
+              :disabled="!input.trim() || sending || discussionAnswerBlocked"
               data-testid="portal-discussion-answer-send"
               @click.prevent="answerDiscussedAsk"
             >Send as answer</BaseButton>
@@ -1164,11 +1164,20 @@ const discussedQuestion = computed(() => chatTurnAskList.value.find((a) => (
 )) || null)
 const answeringDiscussion = ref(false)
 const discussionAnswerError = ref('')
+// An answer is text only (`WorkspaceAskAnswer.response`): a reply chip or an
+// attachment in the composer would be silently dropped by "Send as answer", so
+// the control stands down and says why (#3181 review, × #3168's reply chip).
+const discussionAnswerBlocked = computed(() => !!replyTo.value || attachments.value.length > 0)
+const discussionAnswerHint = computed(() => (
+  discussionAnswerBlocked.value
+    ? 'An answer is text only — remove the reply or attachment to send it as the answer.'
+    : 'Ready to decide? Send what you typed as the answer to this ask.'
+))
 watch(currentSessionId, () => { discussionAnswerError.value = '' })
 async function answerDiscussedAsk() {
   const ask = discussedQuestion.value
   const text = input.value.trim()
-  if (!ask || !text || answeringDiscussion.value) return
+  if (!ask || !text || answeringDiscussion.value || discussionAnswerBlocked.value) return
   // The answer field's own bound (`WorkspaceAskAnswer.response`), named here
   // rather than met as a bare 422.
   if (text.length > 500) {

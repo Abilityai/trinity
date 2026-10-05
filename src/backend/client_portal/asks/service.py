@@ -15,6 +15,8 @@ import re
 from dataclasses import dataclass, field
 from typing import List, Optional
 
+from sqlalchemy.exc import OperationalError
+
 from database import db
 from services import ask_service
 from services.operator_queue_choices import ResponseNotOfferedError
@@ -489,6 +491,10 @@ def dismiss_ask(item_id: str, email: str, is_platform: bool) -> WorkspaceAsk:
     because the person's intent ("this needs nothing from me") is already true.
     """
     item = _owned_ask(item_id, email, is_platform)
+    # Like Discuss and the card's own control (#3181 review F5): an update has
+    # nothing to decide, so there is no ending to choose for it.
+    if (item.get("type") or "question") == "alert":
+        raise AskError(422, "not_dismissable", "An update has nothing to decide.")
     # Past its deadline it has already ended (expired), whether or not the
     # poller has swept it: that ending is the true one, not a dismissal.
     if item.get("status") == "pending" and not _is_expired(item):
@@ -506,9 +512,11 @@ def dismiss_ask(item_id: str, email: str, is_platform: bool) -> WorkspaceAsk:
 
 #: The opening line of a discussion chat (trinity-enterprise#747). A `system`
 #: row: drawn as a platform line, replayed to the agent on a cold turn, and
-#: never counted as unread. Names the ask by its title only.
-DISCUSSION_NOTICE = ("Discussing the ask \u201c{title}\u201d. It stays open while you talk "
-                     "it through \u2014 answer or dismiss it in its card when you're ready.")
+#: never counted as unread. It does not repeat the ask's title (the chat is
+#: named after it and the pinned tile shows it): the title is agent-written,
+#: and inside a platform row it would replay as platform text (#3181 review F3).
+DISCUSSION_NOTICE = ("Discussing this ask. It stays open while you talk it through "
+                     "\u2014 answer or dismiss it in its card when you're ready.")
 
 
 def _discussion_title(item: dict) -> Optional[str]:
@@ -558,18 +566,30 @@ def discuss_ask(item_id: str, email: str, is_platform: bool):
         try:
             updated = db.set_operator_queue_discussion_link(
                 item_id, _WORKSPACE_DISCUSSION_KEY, uuid.uuid4().hex)
-        except Exception:  # noqa: BLE001 — a concurrent writer (SQLite busy snapshot)
-            # The other click's link is the answer: read what it wrote.
+        except OperationalError:
+            # A concurrent writer (SQLite busy snapshot): the other click's
+            # link is the answer — read what it wrote.
             logger.info("[WorkspaceAsks] %s discussion link raced; re-reading", item_id)
             updated = db.get_operator_queue_item(item_id)
+        except Exception:  # noqa: BLE001 — anything else is a fault, not a race
+            logger.warning("[WorkspaceAsks] %s discussion link not written", item_id,
+                           exc_info=True)
+            raise AskError(503, "discussion_unavailable",
+                           "Couldn't open the discussion \u2014 try again.")
         if not updated:
             raise AskError(404, "not_found", "Ask not found")
         item = updated
         chat_id = _linked(item)
         if chat_id is None:
-            # Lost to an ending between the read and the write.
-            raise AskError(409, "already_resolved",
-                           f"This ask is already {_status_of(item)}.")
+            if _status_of(item) != "pending":
+                # Lost to an ending between the read and the write.
+                raise AskError(409, "already_resolved",
+                               f"This ask is already {_status_of(item)}.")
+            # Still pending and still unlinked: the write did not land (a busy
+            # snapshot with no racing link). Nothing ended — retryable, never
+            # "already pending" (#3181 review F2).
+            raise AskError(503, "discussion_unavailable",
+                           "Couldn't open the discussion \u2014 try again.")
 
     title = _discussion_title(item)
     created = False
@@ -591,7 +611,7 @@ def discuss_ask(item_id: str, email: str, is_platform: bool):
                 portal_db.rename_portal_session(chat_id, agent, email, title)
             portal_db.add_portal_message(
                 uuid.uuid4().hex, agent, email, "system",
-                DISCUSSION_NOTICE.format(title=title or "from " + agent), None, now,
+                DISCUSSION_NOTICE, None, now,
                 session_id=chat_id,
             )
             portal_db.touch_portal_session(chat_id, now, added=1)
@@ -625,7 +645,7 @@ def discussion_context_line(agent_name: str, chat_id: str, email: str) -> Option
         status = _status_of(row)
         kind = row.get("type") or "question"
         options = row.get("options") if isinstance(row.get("options"), list) else []
-        opts = ", ".join(json.dumps(str(o))[:120] for o in options[:10]) or "none (free-text answer)"
+        opts = ", ".join(json.dumps(str(o)[:118]) for o in options[:10]) or "none (free-text answer)"
         # JSON-quoted like the options: the title is agent-authored, so it
         # cannot close a quote and continue as platform text.
         title = json.dumps(" ".join(str(row.get("title") or "").split())[:200])

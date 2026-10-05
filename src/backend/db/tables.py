@@ -1494,7 +1494,7 @@ operator_queue = Table(
     # compare-and-set UPDATE that flips `status`, so only the winning writer
     # records an ending. Nullable, no backfill: a row that ended before the
     # ledger reads from `status`.
-    Column("disposition", Text),         # answered|cancelled|expired
+    Column("disposition", Text),         # answered|cancelled|expired|dismissed
     Column("disposed_at", Text),
     Column("disposed_by", Text),         # person|timeout
     Column("disposed_by_email", Text),   # NULL for timeout; withheld from agent principals

@@ -2271,12 +2271,12 @@ export const useClientPortalStore = defineStore('clientPortal', {
         ? this.asks.map((a) => (a.id === askId ? data : a))
         : this.asks.filter((a) => a.id !== askId)
       // trinity-enterprise#747: the agent was woken with this answer, and its
-      // result will land as a message in the chat the ask was decided in —
-      // the discussion chat, else the chat it is attached to (the backend's
-      // `_workspace_destination`). The open chat watches for it (no history
-      // poll exists otherwise, ent#457).
+      // result will land as a message in the ask's DISCUSSION chat, and only
+      // there (the backend's `_workspace_destination`, #3181 review F1 — an
+      // undiscussed ask's run stays owner-only). The open chat watches for it
+      // (no history poll exists otherwise, ent#457).
       if (data && data.resume_requested === true) {
-        const chatId = data.discussion_chat_id || data.chat_id || null
+        const chatId = data.discussion_chat_id || null
         this.askResultWatch = chatId
           ? { askId, agentName: data.agent_name, chatId, since: Date.now() }
           : null

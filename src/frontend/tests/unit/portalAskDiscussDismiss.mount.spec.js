@@ -265,7 +265,8 @@ describe('a discussed ask is drawn in its discussion chat', () => {
 })
 
 describe('store.answerAsk — where the woken agent\'s result will land (ent#747)', () => {
-  it('watches the discussion chat, else the ask\'s own chat, only when work was resumed', async () => {
+  // #3181 review F1: only a discussed ask's run reports into a chat.
+  it('watches the discussion chat only, and only when work was resumed', async () => {
     store.asks = [ask('a1')]
     portalHttp.post.mockResolvedValueOnce({ data: ask('a1', { status: 'answered', resume_requested: true, chat_id: 'main', discussion_chat_id: 'disc' }) })
     await store.answerAsk('a1', { response: 'EU' })
@@ -275,7 +276,7 @@ describe('store.answerAsk — where the woken agent\'s result will land (ent#747
     store.asks = [ask('a2')]
     portalHttp.post.mockResolvedValueOnce({ data: ask('a2', { status: 'answered', resume_requested: true, chat_id: 'main' }) })
     await store.answerAsk('a2', { response: 'EU' })
-    expect(store.askResultWatch.chatId).toBe('main')
+    expect(store.askResultWatch).toBeNull()
 
     store.askResultWatch = null
     store.asks = [ask('a3')]
