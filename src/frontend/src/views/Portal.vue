@@ -848,7 +848,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { useClientPortalStore, MULTI_AGENT_UNAVAILABLE, PLATFORM_LOGIN_ROUTE } from '@/stores/clientPortal'
 import { useAuthStore } from '@/stores/auth'
 import { usePortalDraftsStore } from '@/stores/portalDrafts'
-import { threadKey } from '@/components/portal/portalDrafts'
+import { threadKey, shouldAutoFocusComposer } from '@/components/portal/portalDrafts'
 import { safeStorage } from '@/utils/safeStorage'
 import PortalSidebar from '@/components/portal/PortalSidebar.vue'
 import PortalBrand from '@/components/portal/PortalBrand.vue'
@@ -1059,9 +1059,20 @@ const inboxAgentLabels = computed(() => agentLabels(store.agents))
 // ent#661: `/workspace/projects` and `/workspace/projects/:projectId`.
 const projectsRoute = computed(() => route.name === 'WorkspaceProjects' || route.name === 'WorkspaceProject')
 const activeProjectId = computed(() => route.params.projectId || null)
-// A stage page that never carries a rail: the agent page (ent#360) and the
-// Projects pages (ent#661). Both rail rules read it as their `agentPage`.
-const railFreePage = computed(() => activeAgentPageName.value || (projectsRoute.value ? 'projects' : null))
+// ent#784 (review): `/workspace/a/:name` used to be left within a tick, so the
+// rail rules could read it as "a page, not a conversation". It is now where a
+// landed new chat RESTS — the same conversation `/workspace` and
+// `/workspace/c/:id` show, one URL apart — so it is rail-free only until the
+// landing has put the named agent on stage. Reading it as a page for longer
+// gave a new chat no rail, and the first send (which moves the URL to the
+// thread's own) then slid one in beside a reply already streaming.
+const unlandedAgentPage = computed(() => (
+  activeAgentPageName.value && activeAgentName.value !== activeAgentPageName.value
+    ? activeAgentPageName.value
+    : null))
+// A stage page that carries no rail: an agent URL that has not landed yet, and
+// the Projects pages (ent#661). The rail rules read it as their `agentPage`.
+const railFreePage = computed(() => unlandedAgentPage.value || (projectsRoute.value ? 'projects' : null))
 const activeAgent = computed(() => {
   if (isInboxRoute.value) {
     return inboxSelectedAgent({ item: inboxSelection.value, threads: threads.value, asks: store.asks, agents: store.agents })
@@ -1221,7 +1232,7 @@ const roomParticipants = ref([])
 const workSignal = ref(emptySignal())
 
 const railParticipants = computed(() => railParticipantsFor({
-  agentPage: activeAgentPageName.value,
+  agentPage: unlandedAgentPage.value,
   roomId: activeRoomIdFromRoute.value,
   roomParticipants: roomParticipants.value,
   activeAgent: activeAgent.value?.name,
@@ -1262,9 +1273,13 @@ const railVisible = computed(() => railVisibleFor({
 const RAIL_MOTION = 'transition-[width] duration-300 ease-out overflow-hidden '
   + 'motion-reduce:transition-none motion-reduce:duration-0'
 
+// ent#784 (review): NOT `railFreePage` here. That is true for an agent URL
+// until it lands, which on a cold link is the whole of the loading stage — the
+// only stage this rule answers for — so reading it would never reserve the
+// column for a route that is now a 1:1 conversation like `/workspace/c/:id`.
 const railColumnReserved = computed(() => Boolean(
   railColumnReservedFor({
-    agentPage: railFreePage.value,
+    agentPage: projectsRoute.value ? 'projects' : null,
     stageState: stage.value.state,
     roomId: activeRoomIdFromRoute.value,
   }) && !voiceCanvasHasColumn.value
@@ -1405,6 +1420,17 @@ function openSuggestionSection(name) {
 }
 function focusConversationComposer() {
   conversationRef.value?.focusComposer?.()
+}
+// ent#784 (review): the caret for a LANDING, under the landing's own rule. A
+// new chat focuses itself when it mounts (`focusOnMount`); a landing that
+// reuses a chat — the agent's empty one, a remembered one — mounts as a thread,
+// and a thread mount focuses nothing. So the shell hands the caret over for
+// those, reading the same `composerFocusMode` the mount reads: a landing on a
+// touch device still does not summon the keyboard.
+function focusLandedComposer() {
+  if (composerFocusMode.value === 'fine-pointer'
+    && !shouldAutoFocusComposer(typeof window !== 'undefined' ? window.matchMedia?.bind(window) : null)) return
+  nextTick(focusConversationComposer)
 }
 function onRoomParticipants(list) { roomParticipants.value = Array.isArray(list) ? list : [] }
 
@@ -1755,6 +1781,20 @@ function openAgentPage(name) {
   // ent#551 QA: the rail's agent row. It pushed a route with no guard, so the
   // conversation remounted and the call ended without a word.
   if (guardLeaveCall(() => openAgentPage(name))) return
+  // ent#784 (review): the row of the agent whose landed new chat is ALREADY on
+  // stage. The push below would be a no-op (same URL), so the route watcher
+  // would not re-fire and nothing would re-land — while the two writes above it
+  // would still spend `startingNewChat`. The composer then kept reading "New
+  // chat" and sent its first message without `new_thread`, which the server
+  // files in the agent's MAIN chat. There is nothing to open: the person is
+  // where the click leads, so it only hands the caret back to the field the
+  // click took it from.
+  if (activeAgentPageName.value === name && activeAgentName.value === name
+    && startingNewChat.value && !pendingSession.value) {
+    composerFocusMode.value = 'fine-pointer'
+    focusLandedComposer()
+    return
+  }
   unreachableAgent.value = null
   pendingSession.value = null
   startingNewChat.value = false
@@ -1805,7 +1845,11 @@ function landOnAgent(name) {
     // `thread:<id>` at setup and `PortalConversation`'s mount then puts the
     // caret at its end, on a fine pointer only — the same rule as above, shared
     // through `shouldAutoFocusComposer` rather than re-decided here.
-    if (row) { openThread(row); return }
+    //
+    // (review) A landing on a chat with NO draft — the agent's empty one — is
+    // restored by nothing, so that mount leaves focus on the sidebar row the
+    // click came from. `focusLandedComposer` covers it under the same rule.
+    if (row) { openThread(row); focusLandedComposer(); return }
   }
   // Idempotent: the watcher fires on the route param AND on the thread list
   // arriving, and this landing no longer navigates away — so without this the

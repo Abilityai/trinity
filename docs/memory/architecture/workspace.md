@@ -1024,7 +1024,15 @@ arm opens a row that already exists.
 `landOnAgent` is therefore synchronous, keeps `/workspace/a/:name`, and guards the
 call before writing `activeAgentName`; the composer's mount focus is gated by a
 `focusOnMount` mode (`always` for a gesture, `fine-pointer` for a landing) so an
-unasked-for landing cannot raise a soft keyboard. Main is named by its role in both the tab strip and the header and is
+unasked-for landing cannot raise a soft keyboard. Because that URL is now where a new chat
+RESTS, three things follow from it. It carries the **rail** like every other chat: the rail
+rules read it as a rail-free page only until the landing has put the named agent on stage
+(`unlandedAgentPage`), and its column is reserved mid-load like `/workspace/c/:id`. Clicking
+the row of the agent whose new chat is **already on stage** is a no-op in `openAgentPage`
+— the push would not re-fire the landing, and clearing `startingNewChat` there sent the
+first message without `new_thread`, i.e. into Main. And a landing that **reuses a chat**
+(the empty one, a remembered one) mounts as a thread, which focuses nothing, so the shell
+hands the caret over under the same pointer rule (`focusLandedComposer`). Main is named by its role in both the tab strip and the header and is
 not renameable; an archived chat stays a tab (ruled “becomes the newest tab”), though you never LAND in one by default;
 an unused Main is filtered from the **sidebar** only (a projection, not a filter on
 `threads`, because the strip must show Main from the first visit).
