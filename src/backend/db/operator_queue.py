@@ -632,6 +632,40 @@ class OperatorQueueOperations:
             row = conn.execute(stmt).mappings().first()
         return self._row_to_item(row) if row else None
 
+    def list_pending_proposals_for_agent(
+        self, agent_name: str, limit: int, raised_by: Optional[str] = None,
+    ) -> List[Dict]:
+        """`{id, request_id, proposal}` of this agent's PENDING asks that carry a
+        proposal, newest first (#3247 T8). With `raised_by`, only that raiser's.
+
+        Read by the native create's pending-proposal guard: an agent that
+        repeats the exact action it is already asking about is refused
+        `already_pending` unless the new ask replaces that one.
+        """
+        conditions = [
+            operator_queue.c.agent_name == agent_name,
+            operator_queue.c.status == "pending",
+            operator_queue.c.proposal.isnot(None),
+        ]
+        if raised_by is not None:
+            conditions.append(operator_queue.c.raised_by == raised_by)
+        stmt = (
+            select(operator_queue.c.id, operator_queue.c.request_id, operator_queue.c.proposal)
+            .where(and_(*conditions))
+            .order_by(operator_queue.c.created_at.desc())
+            .limit(limit)
+        )
+        with get_engine().connect() as conn:
+            rows = conn.execute(stmt).all()
+        out = []
+        for item_id, request_id, proposal in rows:
+            try:
+                parsed = json.loads(proposal)
+            except (TypeError, ValueError):
+                continue
+            out.append({"id": item_id, "request_id": request_id, "proposal": parsed})
+        return out
+
     def list_expired_proposals_for_agent(
         self, agent_name: str, limit: int, raised_by: Optional[str] = None,
     ) -> List[Dict]:

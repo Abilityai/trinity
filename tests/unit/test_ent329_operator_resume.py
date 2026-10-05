@@ -412,7 +412,13 @@ _SPAWNERS = ("spawn_resume_dispatch(", "spawn_ending_dispatch(")
 _SINK = "services/ask_service.py"
 # The set-based CAS writers: their RETURN is the set of rows this call ended
 # (bulk: the sweep's own batch_id re-select; expiry: per-id CAS winners).
-_SET_CAS_ACCESSORS = ("bulk_cancel_operator_queue_items(", "mark_operator_queue_expired(")
+_SET_CAS_ACCESSORS = (
+    "bulk_cancel_operator_queue_items(",
+    "mark_operator_queue_expired(",
+    # #3247: the native create ends a replace's predecessor by compare-and-set
+    # inside its own transaction; `predecessor` is the row AS THE CAS LEFT IT
+    "create_native_operator_queue_item(",
+)
 
 
 def _dispatch_call_sites(spawner: str = "spawn_resume_dispatch(") -> list[pathlib.Path]:

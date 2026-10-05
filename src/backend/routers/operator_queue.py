@@ -125,6 +125,7 @@ _READBACK_FIELDS = (
     "response", "response_text", "responded_at",
     "disposition", "disposed_at", "disposed_by", "disposition_reason",
     "raised_by", "channel", "to_role", "proposal", "supersedes_expired",
+    "replaces", "replaced_by",  # #3247 — mapped to request_ids below
 )
 
 
@@ -522,4 +523,7 @@ async def get_my_ask(
     # The row stores the predecessor's uuid; the agent knows its asks by the
     # request_id it chose, and the receipt names the predecessor that way too.
     readback["supersedes_expired"] = ask_service.request_id_of(item.get("supersedes_expired"))
+    # #3247: the replace link, both ways, the same way.
+    readback["replaces"] = ask_service.request_id_of(item.get("replaces"))
+    readback["replaced_by"] = ask_service.request_id_of(item.get("replaced_by"))
     return readback

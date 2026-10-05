@@ -317,3 +317,332 @@ class TestReplaceCas:
         pending = [i for i in real_db.list_operator_queue_items(agent_name=agent)
                    if i["status"] == "pending"]
         assert [i["request_id"] for i in pending] == ["d-new"]
+
+
+# ===========================================================================
+# 3. The sink — ownership gate, the two refusals, the ending, the receipt (CP3)
+# ===========================================================================
+
+OWNER = "owner-3247@example.com"
+RECEIPT_KEYS = {"status", "id", "request_id", "raised_by", "channel", "type", "to_role",
+                "resolved", "ask_status", "disposition", "disposed_at", "expires_at",
+                "wakes_on_ending", "supersedes_expired",
+                "replaces", "replaced_by", "disposed_by"}
+
+
+class _Rejected:
+    def __init__(self, svc, status, code):
+        self.svc, self.status, self.code = svc, status, code
+
+    def __enter__(self):
+        self._cm = pytest.raises(self.svc.AskRejected)
+        self._info = self._cm.__enter__()
+        return self._info
+
+    def __exit__(self, *exc):
+        ok = self._cm.__exit__(*exc)
+        assert (self._info.value.status_code, self._info.value.code) == (self.status, self.code)
+        return ok
+
+
+@pytest.fixture
+def ask(real_db, monkeypatch):
+    """The real sink over the real SQLite; the world around it stubbed (the
+    ent#611 fixture): audit + broadcast recorded, owner, thread, opt-in, rate."""
+    import json as _json
+    from types import SimpleNamespace
+    import services.ask_service as svc
+    import services.operator_queue_service as oqs
+    import services.operator_resume_service as ors
+    from services import assignment_provider
+    from services.rate_limiter import RateLimitResult
+
+    audit, sent, events, wakes = [], [], [], []
+    state = {"owner": OWNER, "rate_ok": True, "opted_in": False}
+
+    class _Audit:
+        async def log(self, **kw):
+            audit.append(kw)
+            return "evt"
+
+    class _WS:
+        async def broadcast(self, message):
+            sent.append(_json.loads(message))
+
+    monkeypatch.setattr(svc, "platform_audit_service", _Audit())
+    monkeypatch.setattr(svc, "_websocket_manager", _WS())
+    monkeypatch.setattr(svc, "_owner_email", lambda agent: state["owner"])
+    monkeypatch.setattr(oqs, "_workspace_attachment", lambda agent, email, **_: (f"thread-{email}", False))
+    monkeypatch.setattr(real_db, "get_operator_resume_enabled", lambda agent: state["opted_in"], raising=False)
+    monkeypatch.setattr(oqs.rate_limiter, "check",
+                        lambda *a, **k: RateLimitResult(state["rate_ok"], 10, 0, 60))
+    monkeypatch.setattr(ors, "spawn_ending_dispatch", lambda rows, **kw: wakes.append(("ending", rows, kw)))
+    monkeypatch.setattr(ors, "spawn_resume_dispatch", lambda item, **kw: wakes.append(("resume", item, kw)))
+    svc.register_ending_observer(events.append)
+    assignment_provider.clear_provider()
+    yield SimpleNamespace(svc=svc, audit=audit, sent=sent, events=events, wakes=wakes,
+                          state=state, db=real_db)
+    svc._observers.remove(events.append)
+    assignment_provider.clear_provider()
+
+
+async def _drain():
+    import asyncio
+    import services.operator_resume_service as ors
+    for _ in range(5):
+        await asyncio.sleep(0)
+        pending = list(ors._inflight)
+        if not pending:
+            return
+        await asyncio.gather(*pending, return_exceptions=True)
+
+
+def _body(request_id, **over):
+    b = {"request_id": request_id, "type": "approval", "title": "Pay invoice",
+         "question": "Release 500 USDC to the vendor?", "options": ["approve", "reject"],
+         "proposal": {"pay": 500, "to": f"vendor-{request_id}"}}
+    b.update(over)
+    return b
+
+
+def _raise(ask, agent, body):
+    return ask.svc.raise_ask(agent, body, raised_by="agent", channel="mcp")
+
+
+class TestSinkOwnership:
+    AGENT = "agent-3247-sink-own"
+
+    def test_the_model_accepts_replaces(self):
+        from models import OperatorAskCreate
+        assert OperatorAskCreate(request_id="m-1", title="t", replaces="m-0").replaces == "m-0"
+
+    @pytest.mark.parametrize("bad", ["", "has space", "x" * 300, 7])
+    def test_a_malformed_replaces_is_refused_before_anything_is_read(self, ask, bad):
+        with _Rejected(ask.svc, 422, "invalid_replaces"):
+            _raise(ask, self.AGENT, _body("own-bad", replaces=bad))
+
+    def test_replacing_itself_is_refused(self, ask):
+        with _Rejected(ask.svc, 422, "invalid_replaces"):
+            _raise(ask, self.AGENT, _body("own-self", replaces="own-self"))
+
+    def test_a_missing_predecessor_is_one_uniform_refusal(self, ask):
+        with _Rejected(ask.svc, 422, "invalid_replaces"):
+            _raise(ask, self.AGENT, _body("own-missing", replaces="never-raised"))
+
+    def test_another_agents_ask_is_not_found(self, ask):
+        other = _raise(ask, "agent-3247-sink-other", _body("theirs-1"))
+        with _Rejected(ask.svc, 422, "invalid_replaces"):
+            _raise(ask, self.AGENT, _body("own-theirs", replaces="theirs-1"))
+        assert ask.db.get_operator_queue_item(other["id"])["status"] == "pending"
+
+    def test_a_gate_row_is_refused(self, ask):
+        ask.db.create_operator_queue_item(
+            self.AGENT, {"id": "gate-own-1", "type": "approval", "title": "Run gated skill",
+                         "question": "?", "created_at": _iso()}, channel="gate", raised_by="gate")
+        with _Rejected(ask.svc, 422, "invalid_replaces"):
+            _raise(ask, self.AGENT, _body("own-gate", replaces="gate-own-1"))
+        assert ask.db.get_operator_queue_item_for_agent_by_request_id(
+            self.AGENT, "gate-own-1")["status"] == "pending"
+
+    @pytest.mark.parametrize("rid", [
+        pytest.param("queue-flood-own", id="reserved-prefix-platform-alarm"),
+        pytest.param("skills-reconcile-own", id="unreserved-prefix-null-raiser-alarm"),
+        pytest.param("legacy-file-own", id="pre-611-file-row"),
+    ])
+    def test_a_null_raiser_row_under_the_agents_name_is_refused(self, ask, rid):
+        """`_raiser_of` calls an unreserved NULL-raiser row "agent"; the gate
+        must check the column itself, or an agent could end the alarm about
+        its own leaked credential and stop it counting."""
+        uid = _pending(ask.db, self.AGENT, rid)
+        assert ask.db.get_operator_queue_item(uid)["raised_by"] is None
+        with _Rejected(ask.svc, 422, "invalid_replaces"):
+            _raise(ask, self.AGENT, _body(f"own-{rid}", replaces=rid))
+        row = ask.db.get_operator_queue_item(uid)
+        assert row["status"] == "pending" and row["replaced_by"] is None
+
+
+class TestSinkReplace:
+    AGENT = "agent-3247-sink"
+
+    @pytest.mark.asyncio
+    async def test_a_replace_ends_the_old_shows_the_new_and_records_both(self, ask):
+        old = _raise(ask, self.AGENT, _body("sr-old-1"))
+        await _drain()                       # the predecessor's own announcement lands first
+        ask.audit.clear(); ask.sent.clear()
+        r = _raise(ask, self.AGENT, _body("sr-new-1", replaces="sr-old-1"))
+        await _drain()
+        assert set(r) == RECEIPT_KEYS
+        assert r["status"] == "created" and r["replaces"] == "sr-old-1"
+        assert r["replaced_by"] is None and r["disposed_by"] is None
+        ended = ask.db.get_operator_queue_item(old["id"])
+        assert (ended["status"], ended["disposition"], ended["disposed_by"],
+                ended["disposition_reason"]) == ("cancelled", "cancelled", "agent", "replaced")
+        assert ended["replaced_by"] == r["id"] and ended["disposed_by_email"] is None
+        # the ending reached the observers with the row AS THE CAS LEFT IT
+        [ev] = [e for e in ask.events if e.disposition == "cancelled"]
+        assert ev.reason == "replaced" and ev.actor_email is None
+        assert ev.rows[0]["id"] == old["id"] and ev.rows[0]["disposed_by"] == "agent"
+        assert ev.rows[0]["replaced_by"] == r["id"]
+        # two audit rows, ids and enums only; the `replaced` row is agent-keyed
+        actions = {a["event_action"]: a for a in ask.audit}
+        assert set(actions) == {"raised", "replaced"}
+        assert actions["raised"]["details"]["replaces"] == old["id"]
+        replaced = actions["replaced"]
+        assert replaced["actor_agent_name"] == self.AGENT and replaced["target_id"] == old["id"]
+        assert replaced["details"] == {"agent_name": self.AGENT, "request_id": "sr-old-1",
+                                       "replaced_by": r["id"]}
+        assert "actor_user" not in replaced
+        # two thin triggers
+        assert sorted(s["type"] for s in ask.sent) == ["operator_queue_cancelled", "operator_queue_new"]
+        assert all(set(s["data"]) == {"id", "agent_name"} for s in ask.sent)
+
+    def test_an_ending_the_agent_authored_wakes_nobody(self, ask):
+        ask.state["opted_in"] = True
+        _raise(ask, self.AGENT, _body("sw-old"))
+        _raise(ask, self.AGENT, _body("sw-new", replaces="sw-old"))
+        [ev] = [e for e in ask.events if e.disposition == "cancelled"]
+        assert ev.rows[0]["disposed_by"] == "agent"      # the post-CAS row, not a hand-built one
+        assert ask.wakes == []
+        # the skip is the row's author, not the event: the same observer still
+        # wakes for a person's cancel
+        ask.svc._wake_filer(ask.svc.EndingEvent("cancelled", (
+            {**ev.rows[0], "disposed_by": "person", "disposed_by_email": "op@example.com"},), "op@example.com"))
+        assert len(ask.wakes) == 1
+
+    def test_a_person_who_answered_first_wins_with_ids_and_enums_only(self, ask):
+        old = _raise(ask, self.AGENT, _body("sa-old"))
+        ask.db.respond_to_operator_queue_item(old["id"], "approve", "the secret words", None,
+                                              "op-3247@example.com")
+        with _Rejected(ask.svc, 409, "replaces_ended") as info:
+            _raise(ask, self.AGENT, _body("sa-new", replaces="sa-old"))
+        extra = info.value.extra
+        assert extra == {"replaces": "sa-old", "ask_status": "responded", "disposition": "answered",
+                         "disposed_at": extra["disposed_at"], "replaced_by": None}
+        assert "secret" not in str(info.value.extra) and "secret" not in info.value.message
+        assert "get_my_ask" in info.value.message
+        assert ask.db.get_operator_queue_item_for_agent_by_request_id(self.AGENT, "sa-new") is None
+
+    def test_a_cancelled_predecessor_names_the_operators_act(self, ask):
+        old = _raise(ask, self.AGENT, _body("sc-old"))
+        ask.db.cancel_operator_queue_item(old["id"], disposed_by_email="op-3247@example.com")
+        with _Rejected(ask.svc, 409, "replaces_ended") as info:
+            _raise(ask, self.AGENT, _body("sc-new", replaces="sc-old"))
+        assert info.value.extra["disposition"] == "cancelled" and "operator" in info.value.message
+
+    def test_an_already_replaced_predecessor_names_its_successor(self, ask):
+        _raise(ask, self.AGENT, _body("sx-old"))
+        _raise(ask, self.AGENT, _body("sx-mid", replaces="sx-old"))
+        with _Rejected(ask.svc, 409, "replaces_ended") as info:
+            _raise(ask, self.AGENT, _body("sx-new", replaces="sx-old"))
+        assert info.value.extra["replaced_by"] == "sx-mid"
+        assert "sx-mid" in info.value.message
+
+    @pytest.mark.asyncio
+    async def test_a_past_deadline_predecessor_is_expired_announced_then_refused(self, ask):
+        ask.state["opted_in"] = True
+        old = _raise(ask, self.AGENT, _body("se-old", expires_at=_iso(20)))
+        # the clock moved past the deadline without a sweep
+        from sqlalchemy import update
+        from db.engine import get_engine
+        from db.tables import operator_queue
+        with get_engine().begin() as conn:
+            conn.execute(update(operator_queue).where(operator_queue.c.id == old["id"])
+                         .values(expires_at=_iso(-5)))
+        await _drain()                       # the predecessor's `raised` row lands first
+        ask.audit.clear()
+        with _Rejected(ask.svc, 409, "replaces_ended") as info:
+            _raise(ask, self.AGENT, _body("se-new", replaces="se-old"))
+        await _drain()
+        assert info.value.extra["disposition"] == "expired"
+        assert "supersedes_expired" in info.value.message
+        row = ask.db.get_operator_queue_item(old["id"])
+        assert row["status"] == "expired" and row["disposed_by"] == "timeout"
+        # the normal expiry event: observers, audit, and the ent#329 expiry wake
+        [ev] = [e for e in ask.events if e.disposition == "expired"]
+        assert ev.rows[0]["id"] == old["id"] and ev.actor_email is None
+        assert [a["event_action"] for a in ask.audit] == ["expired"]
+        assert [w[0] for w in ask.wakes] == ["ending"] and ask.wakes[0][2]["disposition"] == "expired"
+        # and now the re-ask link works at once
+        r = _raise(ask, self.AGENT, _body("se-again", supersedes_expired="se-old",
+                                         proposal={"pay": 500, "to": "vendor-se-old"}))
+        assert r["status"] == "created" and r["supersedes_expired"] == "se-old"
+
+    def test_a_retry_replays_and_does_not_replace_again(self, ask):
+        _raise(ask, self.AGENT, _body("rr-old"))
+        first = _raise(ask, self.AGENT, _body("rr-new", replaces="rr-old"))
+        _raise(ask, self.AGENT, _body("rr-later"))
+        again = _raise(ask, self.AGENT, _body("rr-new", replaces="rr-later"))
+        assert again["status"] == "replayed" and again["id"] == first["id"]
+        assert "replaces" in again["differs"]
+        assert ask.db.get_operator_queue_item_for_agent_by_request_id(self.AGENT, "rr-later")["status"] == "pending"
+        same = _raise(ask, self.AGENT, _body("rr-new", replaces="rr-old"))
+        assert "replaces" not in same["differs"]
+
+    def test_a_file_channel_predecessor_is_replaceable(self, ask):
+        """T7: ingest stamps `raised_by='agent'`; the terminal write-back selects
+        a `cancelled` row, so the entry's status flips within a cycle."""
+        from services.operator_queue_service import _FLIPPED_BY_WRITE_BACK
+        uid = ask.db.create_operator_queue_item(
+            self.AGENT, {"id": "file-old", "type": "approval", "title": "From the file",
+                         "question": "?", "created_at": _iso()}, channel="file", raised_by="agent")
+        r = _raise(ask, self.AGENT, _body("file-new", replaces="file-old"))
+        assert r["replaces"] == "file-old"
+        row = ask.db.get_operator_queue_item(uid)
+        assert row["status"] in _FLIPPED_BY_WRITE_BACK and row["disposed_by"] == "agent"
+
+    def test_a_replay_of_a_replaced_ask_says_who_ended_it(self, ask):
+        _raise(ask, self.AGENT, _body("rp-old"))
+        _raise(ask, self.AGENT, _body("rp-new", replaces="rp-old"))
+        r = _raise(ask, self.AGENT, _body("rp-old"))
+        assert r["status"] == "replayed"
+        assert (r["disposition"], r["disposed_by"], r["replaced_by"]) == ("cancelled", "agent", "rp-new")
+
+    @pytest.mark.asyncio
+    async def test_the_readback_maps_both_links_to_request_ids(self, ask):
+        from routers import operator_queue as r
+        _raise(ask, self.AGENT, _body("rb-old"))
+        _raise(ask, self.AGENT, _body("rb-new", replaces="rb-old"))
+        assert {"replaces", "replaced_by"} <= set(r._READBACK_FIELDS)
+        old = await r.get_my_ask("rb-old", name=self.AGENT)
+        new = await r.get_my_ask("rb-new", name=self.AGENT)
+        assert old["replaced_by"] == "rb-new" and old["replaces"] is None
+        assert new["replaces"] == "rb-old" and new["replaced_by"] is None
+        assert old["disposed_by"] == "agent"
+
+
+class TestAlreadyPending:
+    AGENT = "agent-3247-t8"
+
+    def test_repeating_a_pending_proposal_is_refused_naming_the_ask(self, ask):
+        _raise(ask, self.AGENT, _body("t8-first", proposal={"pay": 1, "to": "v"}))
+        with _Rejected(ask.svc, 409, "already_pending") as info:
+            _raise(ask, self.AGENT, _body("t8-second", proposal={"to": "v", "pay": 1}))
+        assert info.value.extra == {"request_id": "t8-first"}
+        assert ask.db.get_operator_queue_item_for_agent_by_request_id(self.AGENT, "t8-second") is None
+
+    def test_replacing_that_ask_passes(self, ask):
+        _raise(ask, self.AGENT, _body("t8-a", proposal={"pay": 2, "to": "v"}))
+        r = _raise(ask, self.AGENT, _body("t8-b", proposal={"pay": 2, "to": "v"}, replaces="t8-a"))
+        assert r["status"] == "created" and r["replaces"] == "t8-a"
+
+    def test_replacing_a_different_ask_does_not_lift_the_guard(self, ask):
+        _raise(ask, self.AGENT, _body("t8-c", proposal={"pay": 3, "to": "v"}))
+        _raise(ask, self.AGENT, _body("t8-d", proposal={"pay": 4, "to": "v"}))
+        with _Rejected(ask.svc, 409, "already_pending") as info:
+            _raise(ask, self.AGENT, _body("t8-e", proposal={"pay": 3, "to": "v"}, replaces="t8-d"))
+        assert info.value.extra["request_id"] == "t8-c"
+        assert ask.db.get_operator_queue_item_for_agent_by_request_id(self.AGENT, "t8-d")["status"] == "pending"
+
+    def test_an_ended_or_proposal_less_ask_is_not_compared(self, ask):
+        old = _raise(ask, self.AGENT, _body("t8-f", proposal={"pay": 5, "to": "v"}))
+        ask.db.cancel_operator_queue_item(old["id"], disposed_by_email="op@example.com")
+        assert _raise(ask, self.AGENT, _body("t8-g", proposal={"pay": 5, "to": "v"}))["status"] == "created"
+        _raise(ask, self.AGENT, _body("t8-h", proposal=None))
+        assert _raise(ask, self.AGENT, _body("t8-i", proposal=None))["status"] == "created"
+
+    def test_another_raisers_pending_proposal_is_not_the_agents(self, ask):
+        ask.db.create_native_operator_queue_item(
+            self.AGENT, {"id": "gate-t8-1", "type": "approval", "title": "g", "question": "?"},
+            max_pending=None, channel="gate", raised_by="gate", to_role="primary",
+            resolved_to=None, proposal={"pay": 6, "to": "v"}, supersedes_expired=None)
+        assert _raise(ask, self.AGENT, _body("t8-j", proposal={"pay": 6, "to": "v"}))["status"] == "created"

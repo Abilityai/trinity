@@ -3769,6 +3769,7 @@ class OperatorAskCreate(BaseModel):
     expires_at: Optional[str] = None
     to: Optional[str] = None
     supersedes_expired: Optional[str] = None
+    replaces: Optional[str] = None  # #3247 — one of the agent's own PENDING asks this one replaces
 
 
 class SkillGateCheckRequest(BaseModel):

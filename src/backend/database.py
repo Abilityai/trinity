@@ -3812,6 +3812,10 @@ class DatabaseManager:
         # trinity-enterprise#611: the native create's re-ask guard (C6).
         return self._operator_queue_ops.list_expired_proposals_for_agent(agent_name, limit, raised_by)
 
+    def list_pending_operator_queue_proposals(self, agent_name, limit, raised_by=None):
+        # #3247 T8: the native create's pending-proposal guard (`already_pending`).
+        return self._operator_queue_ops.list_pending_proposals_for_agent(agent_name, limit, raised_by)
+
     def list_recent_operator_queue_endings(self, agent_name, since, limit,
                                            exclude_request_id_prefixes=None):
         # trinity-enterprise#611: ids + endings for the Execution Context line.
