@@ -252,6 +252,12 @@ describe('ent#523 — roster order and preview', () => {
     expect(PORTAL).toMatch(/:roster="orderedRoster"/)
     expect(SIDEBAR).not.toMatch(/orderRosterAgents/)
     expect(SIDEBAR).toMatch(/visibleAgentRows\(props\.roster/)
+    // ent#621: and the active agent is passed to it. The behaviour of `keep` is
+    // proven below against the function itself; this is the structural half —
+    // which argument the sidebar actually hands it — and there is no second way
+    // to see it, because the sidebar's collapse is not reachable without a
+    // mount of its own.
+    expect(SIDEBAR).toMatch(/visibleAgentRows\(props\.roster,[\s\S]{0,240}?keep: props\.activeAgentName/)
   })
 
   it('ent#621 — the active agent is never collapsed out of the sidebar', () => {
