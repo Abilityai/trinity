@@ -182,9 +182,31 @@ def test_stakeholder_entries_are_coerced_to_str():
     }
 
 
-def test_proactive_consent_is_coerced_to_bool():
-    ap.register_provider(_Provider(answer={"proactive_consent": 1}))
-    assert ap.resolve_assignment("ops", "chat") == {"proactive_consent": True}
+@pytest.mark.parametrize("consent", [True, False])
+def test_a_real_bool_consent_is_kept(consent):
+    ap.register_provider(_Provider(answer={"proactive_consent": consent}))
+    assert ap.resolve_assignment("ops", "chat") == {"proactive_consent": consent}
+
+
+@pytest.mark.parametrize("consent", ["false", "False", "0", "no", "true", 1, 0])
+def test_a_non_bool_consent_is_unresolved(consent, caplog):
+    """Consent is a permission statement, so only a real ``bool`` counts.
+
+    ``bool("false")`` is ``True``: coercing a provider's string answer turned
+    "not permitted" into "proactive contact permitted" (R1, the ent#500 PR3
+    review). A non-bool is dropped with a warning, so the field is unresolved
+    and the renderer's [I1] path states the restrictive clause instead.
+    """
+    ap.register_provider(
+        _Provider(
+            answer={"primary_user_display": "A. Smith", "proactive_consent": consent}
+        )
+    )
+    with caplog.at_level(logging.WARNING):
+        assert ap.resolve_assignment("ops", "chat") == {
+            "primary_user_display": "A. Smith"
+        }
+    assert "proactive_consent" in caplog.text
 
 
 def test_a_partial_answer_keeps_the_good_fields():

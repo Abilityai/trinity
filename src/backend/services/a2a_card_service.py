@@ -166,3 +166,110 @@ def generate_a2a_card(
         card["documentationUrl"] = f"{b}/a2a/{agent_name}/.well-known/agent-card.json"
 
     return card
+
+
+# ===========================================================================
+# ent#679 — the card states the price
+# ===========================================================================
+
+#: Nevermined's own payment-extension URI, as emitted by the provider SDK's
+#: `payments_py.a2a.agent_card.build_payment_agent_card`. We speak that
+#: vocabulary verbatim so a payments-py client reads `agentId` / `planId`
+#: straight off our card with no Trinity-specific knowledge.
+#:
+#: The **official A2A x402 extension URI** (`A2A_X402_EXTENSION_URI`, which the
+#: SDK's helper also appends) is deliberately NOT declared. Per the A2A
+#: extension spec, declaring an extension advertises the activation handshake
+#: for it (`X-A2A-Extensions` negotiation), and Trinity runs no handshake — it
+#: reads the in-band payment metadata and answers 402. Declaring the URI would
+#: promise a protocol we do not implement, which is worse for a generic client
+#: than saying nothing: it would activate the extension and then wait.
+NEVERMINED_PAYMENT_EXTENSION_URI = "urn:nevermined:payment"
+
+
+def _cost_description(credits: int, plan_id: str) -> str:
+    """Human-readable price line for the extension's `description`.
+
+    `credits == 0` is a duration/time-based Nevermined plan (ent#679 T9): the
+    burn is whatever the plan defines and the per-call amount is not a fixed
+    number, so saying "0 credits per call" would read as free. Say what is
+    true instead — the plan sets the cost.
+    """
+    if credits <= 0:
+        return f"Cost per call is set by Nevermined plan {plan_id}"
+    unit = "credit" if credits == 1 else "credits"
+    return f"{credits} {unit} per call via Nevermined plan {plan_id}"
+
+
+def with_payment_extension(
+    card: Dict[str, Any],
+    pricing: Any,
+    *,
+    agent_name: str,
+    base_url: str = "",
+) -> Dict[str, Any]:
+    """Declare the agent's price on its A2A card (ent#679 AC2).
+
+    A stranger that gets a 402 from `POST /a2a/{name}` can act on it, but it
+    has to call first to learn there is a price at all. The card is the
+    discovery document, so the price belongs on the card: an x402-speaking
+    client can mint a token from `agentId` + `planId` and meet the paywall on
+    its first request, and a human following `paymentInfoUrl` lands on the
+    public `GET /api/paid/{name}/info` document that says what to buy.
+
+    **Pure.** No I/O, no edition awareness — the caller does the config read
+    and decides whether this agent is priced. `pricing` is a Nevermined config
+    (anything carrying `nvm_agent_id` / `nvm_plan_id` / `credits_per_request` /
+    `nvm_environment` / `enabled`); `None`, a disabled config, or one missing
+    its plan/agent ids returns **the card object unchanged, by identity**, so
+    an unpriced agent's card is byte-identical to before this change. A priced
+    agent gets a new dict — the input is never mutated.
+
+    The declared `paymentType` follows the credit amount rather than being
+    hardcoded "fixed": a 0-credit duration plan charges by time, and declaring
+    `{paymentType: "fixed", credits: 0}` is a contradiction the SDK's own card
+    validator rejects for a paid plan.
+
+    Note for an OSS reader: this block says what the agent costs, not that the
+    door is open. The paid A2A door also needs A2A exposure to be ON, which is
+    the entitled enterprise setter's flag — so in an OSS-only build a
+    configured price block points at a door that answers 404 (ent#679 T1).
+    """
+    if pricing is None or not getattr(pricing, "enabled", False):
+        return card
+
+    agent_id = getattr(pricing, "nvm_agent_id", None)
+    plan_id = getattr(pricing, "nvm_plan_id", None)
+    if not agent_id or not plan_id:
+        # A config that cannot tell a client what to buy is worse than silence:
+        # the client would activate a payment flow with no plan to pay into.
+        return card
+
+    try:
+        credits = int(getattr(pricing, "credits_per_request", 0) or 0)
+    except (TypeError, ValueError):
+        credits = 0
+
+    params: Dict[str, Any] = {
+        "agentId": agent_id,
+        "planId": plan_id,
+        "credits": credits,
+        "paymentType": "fixed" if credits > 0 else "dynamic",
+        "costDescription": _cost_description(credits, plan_id),
+    }
+    environment = getattr(pricing, "nvm_environment", None)
+    if environment:
+        params["environment"] = environment
+    if base_url:
+        params["paymentInfoUrl"] = f"{base_url.rstrip('/')}/api/paid/{agent_name}/info"
+
+    capabilities = dict(card.get("capabilities") or {})
+    extensions = list(capabilities.get("extensions") or [])
+    extensions.append({
+        "uri": NEVERMINED_PAYMENT_EXTENSION_URI,
+        "description": params["costDescription"],
+        "required": False,
+        "params": params,
+    })
+    capabilities["extensions"] = extensions
+    return {**card, "capabilities": capabilities}

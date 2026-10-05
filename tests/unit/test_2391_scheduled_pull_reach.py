@@ -107,6 +107,7 @@ def _run(
     acquire_result=None,
     acquire_raises=None,
     dispatch_async=False,
+    capacity=None,
     **execute_kwargs,
 ):
     """Drive the real `execute_task` and return `(result, mocks)`.
@@ -124,14 +125,17 @@ def _run(
     mock_db.get_execution.return_value = MagicMock(status="cancelled")
     mock_db.update_execution_status.return_value = True
 
-    mock_capacity = MagicMock()
-    if acquire_raises is not None:
-        mock_capacity.acquire = AsyncMock(side_effect=acquire_raises)
-    else:
-        mock_capacity.acquire = AsyncMock(
-            return_value=acquire_result or MagicMock(state="admitted")
-        )
-    mock_capacity.release = AsyncMock()
+    # `capacity`: a real CapacityManager, for the end-to-end class (#3114).
+    mock_capacity = capacity
+    if mock_capacity is None:
+        mock_capacity = MagicMock()
+        if acquire_raises is not None:
+            mock_capacity.acquire = AsyncMock(side_effect=acquire_raises)
+        else:
+            mock_capacity.acquire = AsyncMock(
+                return_value=acquire_result or MagicMock(state="admitted")
+            )
+        mock_capacity.release = AsyncMock()
 
     mock_circuit = MagicMock()
     mock_circuit.allow_request.return_value = True
@@ -316,11 +320,18 @@ class TestStrandedTriggersStayPushed:
             assert kw["overflow_policy"] == "queue_persistent", trigger
             assert kw["overflow_payload"] is not None, trigger
 
-    @pytest.mark.parametrize("trigger", ["manual", "mcp", "chat", "public", "voice"])
-    def test_interactive_triggers_are_untouched(self, pilot, trigger):
-        """Until #2842/#2843 land (#1989), a human turn keeps the synchronous
-        push path and today's Redis session lock."""
+    @pytest.mark.parametrize("trigger", ["manual", "mcp", "public", "voice"])
+    def test_interactive_triggers_are_queued(self, pilot, trigger):
+        """#3114: an interactive turn on a pilot reaches the durable queue too;
+        its sync caller waits on the row via ``dispatch_and_await_terminal``."""
         _, m = _run(triggered_by=trigger)
+        kw = _acquire_kwargs(m["capacity"])
+        assert kw["overflow_policy"] == "queue_persistent", trigger
+        assert kw["overflow_payload"] is not None, trigger
+
+    def test_chat_trigger_is_untouched(self, pilot):
+        """The UI ``/chat`` trigger keeps the push path (#3114)."""
+        _, m = _run(triggered_by="chat")
         assert _acquire_kwargs(m["capacity"])["overflow_policy"] == "reject"
 
 
@@ -417,6 +428,7 @@ class _FakeQueueDb:
 
     def __init__(self):
         self.queued: dict[str, str] = {}
+        self.keys: dict[str, str | None] = {}
 
     def get_queued_count(self, agent_name):
         return 0
@@ -426,6 +438,7 @@ class _FakeQueueDb:
 
     def update_execution_to_queued(self, execution_id, metadata, queued_at, conversation_key=None):
         self.queued[execution_id] = metadata
+        self.keys[execution_id] = conversation_key
         return True
 
 
@@ -550,6 +563,41 @@ class TestEnqueuedScheduledRowIsClaimable:
         execution-context mode from."""
         _, fake_db, _ = self._enqueue_via_capacity(monkeypatch)
         assert json.loads(fake_db.queued["exec-e2e"])["triggered_by"] == "schedule"
+
+
+class TestInteractiveTurnReachesTheQueue:
+    """#3114: the real `execute_task` -> real `CapacityManager.acquire` -> real
+    `BacklogService.enqueue` for an interactive trigger. The producer's
+    conversation key must land on the row, or the claim guard stops
+    serialising rooms, public links and channels."""
+
+    @pytest.mark.parametrize("trigger, key", [
+        ("room", "room:r1"), ("public", "public:s1"), ("slack", "channel:c1"),
+    ])
+    def test_turn_is_enqueued_under_its_conversation_key(self, pilot, monkeypatch, trigger, key):
+        from services import capacity_manager as cm_module
+        from services.backlog_service import BacklogService
+
+        monkeypatch.setattr(cm_module.redis, "from_url", lambda *_a, **_kw: MagicMock())
+        slots = AsyncMock()
+        slots.slots_prefix = "agent:slots:"
+        slots.acquire_slot = AsyncMock(return_value=True)
+        slots.register_on_release = lambda cb: None
+        capacity = cm_module.CapacityManager(
+            redis_url="redis://test", slot_service=slots, backlog_service=BacklogService()
+        )
+        fake_db = _FakeQueueDb()
+        with (
+            patch("database.db", fake_db),
+            patch("services.settings_service.clamp_to_ceiling", lambda v: v),
+        ):
+            result, m = _run(triggered_by=trigger, capacity=capacity, conversation_key=key)
+
+        assert result.status == "queued"
+        assert fake_db.keys["exec-2391"] == key
+        assert json.loads(fake_db.queued["exec-2391"])["triggered_by"] == trigger
+        slots.acquire_slot.assert_not_awaited()
+        m["post"].assert_not_awaited()
 
 
 # ---------------------------------------------------------------------------

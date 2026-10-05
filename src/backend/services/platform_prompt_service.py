@@ -801,6 +801,11 @@ def _render_assignment(ctx: ExecutionContext) -> Optional[str]:
     presence of a name (the assignment is a RECORD of who fills the role, not a
     grant of contact permission, which lives on the separate sharing consent
     bit).
+
+    Consent FAILS CLOSED: only an explicit ``True`` renders as permitted. An
+    unresolved bit (``None`` — a provider may validly answer a name and a role
+    and nothing else) renders the restrictive clause, exactly like ``False``,
+    because a permission statement that nobody made is not a permission.
     """
     display = _sanitize_field(ctx.primary_user_display, max_len=MAX_DISPLAY_NAME_LEN)
     if not display:
@@ -809,14 +814,12 @@ def _render_assignment(ctx: ExecutionContext) -> Optional[str]:
     role = _sanitize_field(ctx.role_id, max_len=MAX_ROLE_ID_LEN)
     if role:
         line = f"{line} (role: {role})"
-    if ctx.proactive_consent is not None:
-        line = (
-            f"{line} — proactive contact permitted"
-            if ctx.proactive_consent
-            else f"{line} — proactive contact NOT yet permitted; do not message "
-                 "them unprompted"
-        )
-    return line
+    if ctx.proactive_consent is True:
+        return f"{line} — proactive contact permitted"
+    return (
+        f"{line} — proactive contact NOT yet permitted; do not message "
+        "them unprompted"
+    )
 
 
 def _render_stakeholders(ctx: ExecutionContext) -> Optional[str]:

@@ -39,6 +39,12 @@ _DB_BELT_QUESTION_MAX_BYTES = 16 * 1024
 _DB_BELT_CONTEXT_MAX_BYTES = 64 * 1024
 _DB_BELT_ID_MAX = 512
 
+# trinity-enterprise#751: gate-raised rows (gated-skill approvals and the
+# gate's notices) never count toward an AGENT's pending budget — neither the
+# native ask cap nor the file poller's #1632 depth cap. The gate caps its own
+# raises. NULL `raised_by` is a legacy or file row, so it counts.
+_NOT_A_GATE_ROW = or_(operator_queue.c.raised_by.is_(None), operator_queue.c.raised_by != "gate")
+
 # trinity-enterprise#611: expiry is swept by a text comparison
 # (`expires_at < now`), so a deadline written with an offset ("…+02:00") or
 # without a zone compared hours off (Invariant #16). Bounded so the per-cycle
@@ -267,7 +273,7 @@ class OperatorQueueOperations:
         agent_name: str,
         item: Dict,
         *,
-        max_pending: int,
+        max_pending: Optional[int],
         channel: str,
         raised_by: str,
         to_role: Optional[str],
@@ -293,7 +299,9 @@ class OperatorQueueOperations:
           what would be a unique-index error (a 500 for the agent) into a
           replay of the row that won.
         - `queue_full` — `max_pending` of this agent's asks are pending; `row`
-          is None and nothing is written.
+          is None and nothing is written. The count leaves gate rows out, and
+          `max_pending=None` (a gate raise) skips the cap: the gate caps its own
+          raises (trinity-enterprise#751).
         - `created` — `row` is the new row.
 
         The row never takes part in the file contract: `delivery_state` is
@@ -322,14 +330,16 @@ class OperatorQueueOperations:
             existing = conn.execute(select(*self._SELECT_COLS).where(mine)).mappings().first()
             if existing:
                 return {"outcome": "replayed", "row": self._row_to_item(existing)}
-            pending = conn.execute(
-                select(func.count()).where(and_(
-                    operator_queue.c.agent_name == agent_name,
-                    operator_queue.c.status == "pending",
-                ))
-            ).scalar() or 0
-            if pending >= max_pending:
-                return {"outcome": "queue_full", "row": None}
+            if max_pending is not None:
+                pending = conn.execute(
+                    select(func.count()).where(and_(
+                        operator_queue.c.agent_name == agent_name,
+                        operator_queue.c.status == "pending",
+                        _NOT_A_GATE_ROW,
+                    ))
+                ).scalar() or 0
+                if pending >= max_pending:
+                    return {"outcome": "queue_full", "row": None}
             inserted = bool(conn.execute(
                 make_insert(operator_queue).values(**values).on_conflict_do_nothing(
                     index_elements=["agent_name", "request_id"])
@@ -1650,10 +1660,14 @@ class OperatorQueueOperations:
         emitters (``operator_queue_service.create_bounded_alert``). ``None``
         keeps the #1632 all-types semantics unchanged. Query-only change — no
         schema change, so no migration on either track.
+
+        trinity-enterprise#751: gate-raised rows are left out — they are not
+        the agent's budget to spend.
         """
         conds = [
             operator_queue.c.agent_name == agent_name,
             operator_queue.c.status == "pending",
+            _NOT_A_GATE_ROW,
         ]
         if item_type is not None:
             conds.append(operator_queue.c.type == item_type)

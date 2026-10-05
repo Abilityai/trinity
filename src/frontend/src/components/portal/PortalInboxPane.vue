@@ -221,19 +221,15 @@
                   <div v-for="(m, i) in run.messages" :key="m.id || i" class="max-w-[85%]" :data-testid="`inbox-pane-message-${m.id || i}`">
                     <!-- Sign-off round 6/8: no Copy here — an arrow that opens the
                          chat AT this message with a "replying to" chip on the
-                         composer; the send carries the message id. -->
-                    <PortalAgentBubble :content="m.content || ''" :copyable="false">
-                      <button
-                        type="button"
-                        class="p-1 rounded-md text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200 focus:outline-none focus-visible:ring-2 focus-visible:ring-action-primary-500/40"
-                        title="Reply to this message in the chat"
-                        aria-label="Reply to this message in the chat"
-                        :data-testid="`inbox-pane-reply-to-${m.id || i}`"
-                        @click="$emit('reply', messageReplyTarget(item, m), { sessionId: item.id, messageId: m.id, excerpt: replyExcerpt(m.content) })"
-                      >
-                        <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 10h10a8 8 0 018 8v2M3 10l6 6m-6-6l6-6" /></svg>
-                      </button>
-                    </PortalAgentBubble>
+                         composer; the send carries the message id.
+                         trinity-enterprise#738: the bubble's own Reply, the same
+                         action the chat offers on every message. -->
+                    <PortalAgentBubble
+                      :content="m.content || ''"
+                      :copyable="false"
+                      reply-label="Reply to this message in the chat"
+                      @reply="$emit('reply', messageReplyTarget(item, m), { sessionId: item.id, messageId: m.id, excerpt: replyExcerpt(m.content) })"
+                    />
                   </div>
                 </div>
               </div>

@@ -573,9 +573,33 @@ async def containers_run(
     loop = asyncio.get_event_loop()
 
     def _run():
+        _cap_nano_cpus_to_host(kwargs)
         return docker_client.containers.run(image, command=command, **kwargs)
 
     return await loop.run_in_executor(_docker_executor, _run)
+
+
+def _cap_nano_cpus_to_host(kwargs: Dict[str, Any]) -> None:
+    """#2318: Docker rejects NanoCpus above the host's CPU count with a 400, so a
+    template asking for more CPUs than the host has (trinity-system asks for 4)
+    could never be created on a smaller host. Cap the limit here, the one seam
+    every agent create/recreate goes through. The `trinity.cpu` label keeps the
+    requested value: the resource drift check compares it with the DB setting,
+    and a capped label would recreate the agent on every start."""
+    requested = kwargs.get("nano_cpus")
+    if not requested:
+        return
+    try:
+        host_nano = int(docker_client.info()["NCPU"]) * 1_000_000_000
+    except Exception as e:  # noqa: BLE001 — unknown host size: let Docker decide
+        logger.warning(f"[#2318] could not read host CPU count, CPU limit not capped: {e}")
+        return
+    if requested > host_nano:
+        logger.warning(
+            f"[#2318] CPU limit {requested / 1e9:g} exceeds the host's "
+            f"{host_nano / 1e9:g} CPUs; capping to {host_nano / 1e9:g}"
+        )
+        kwargs["nano_cpus"] = host_nano
 
 
 # =============================================================================

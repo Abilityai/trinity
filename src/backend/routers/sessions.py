@@ -427,8 +427,10 @@ async def send_session_message(
         if result.status != "success":
             # Bubble execute_task's classified error up. The user message is
             # already persisted; we don't insert an empty assistant row.
+            # #3114: an agent at capacity (incl. a pull pilot's turn that no
+            # worker claimed in time) is a retryable 429.
             raise HTTPException(
-                status_code=502,
+                status_code=429 if result.error_code == "capacity" else 502,
                 detail={
                     "error": result.error or "Agent execution failed",
                     "execution_id": result.execution_id,

@@ -128,10 +128,18 @@ def resolve_lock_ttl(agent_name: str) -> int:
     buffer, capped at ``LOCK_TTL_FALLBACK``. Falls back to the cap on any
     lookup failure — safer to over-TTL than under-TTL since both keys are
     auto-expiring strings, not state we care to keep precise.
+
+    #3114: on a pull pilot a turn can wait up to one agent timeout for a worker
+    to claim it, and the cold retry after a resume-not-found waits again, so
+    twice that allowance is added to both the TTL and its cap. The lock is held
+    for every wait.
     """
     try:
+        from services.pull_pilot import pull_queue_allowance
+
         timeout = db.get_execution_timeout(agent_name)
-        return min(timeout + 30, LOCK_TTL_FALLBACK)
+        allowance = 2 * pull_queue_allowance(agent_name)
+        return min(timeout + 30 + allowance, LOCK_TTL_FALLBACK + allowance)
     except Exception as e:
         logger.warning(
             "[SessionTurn] get_execution_timeout failed for %s (%s) — using fallback %ds",
@@ -288,13 +296,19 @@ class ResumeLock:
         claude_session_id: Optional[str],
         session_id: str,
         ttl_seconds: int = LOCK_TTL_FALLBACK,
+        *,
+        key: Optional[str] = None,
+        wait_seconds: Optional[float] = None,
     ):
-        self._key = (
+        # #3114: `key` / `wait_seconds` let a room wake reuse this lock under
+        # its own key with a wait as long as one turn.
+        self._key = key or (
             session_lock_key(agent_name, claude_session_id)
             if claude_session_id
             else f"session_lock:cold:{session_id}"
         )
         self._ttl = ttl_seconds
+        self._wait = wait_seconds
         self._token = secrets.token_urlsafe(16)
         self._redis = None
         self._held = False
@@ -308,7 +322,9 @@ class ResumeLock:
             )
             return self
 
-        deadline = asyncio.get_event_loop().time() + LOCK_WAIT_TOTAL_SECONDS
+        deadline = asyncio.get_event_loop().time() + (
+            LOCK_WAIT_TOTAL_SECONDS if self._wait is None else self._wait
+        )
         while True:
             try:
                 acquired = await self._redis.set(
@@ -459,19 +475,23 @@ async def run_resumable_turn(
 
     ttl = lock_ttl if lock_ttl is not None else resolve_lock_ttl(agent_name)
 
-    from services.task_execution_service import get_task_execution_service
-    service = get_task_execution_service()
+    # #3114: both attempts go through the sync adapter, so on a pull pilot the
+    # turn is queued under this conversation's key and awaited; on push it is
+    # plain `execute_task`.
+    from services.task_execution_service import dispatch_and_await_terminal
 
+    conversation_key = f"session:{session_key}"
     fallback_fired = False
     fallback_reason: Optional[str] = None
 
     async with ResumeLock(agent_name, resumed_with, session_key, ttl_seconds=ttl):
-        result = await service.execute_task(
+        result = await dispatch_and_await_terminal(
             agent_name=agent_name,
             message=message,
             triggered_by=triggered_by,
             resume_session_id=resumed_with,
             persist_session=True,
+            conversation_key=conversation_key,
             **execute_kwargs,
         )
 
@@ -507,12 +527,13 @@ async def run_resumable_turn(
             # has already stopped watching. `execute_task` creates the row when
             # none is supplied.
             retry_kwargs = {k: v for k, v in execute_kwargs.items() if k != "execution_id"}
-            result = await service.execute_task(
+            result = await dispatch_and_await_terminal(
                 agent_name=agent_name,
                 message=cold_message if cold_message is not None else message,
                 triggered_by=triggered_by,
                 resume_session_id=None,
                 persist_session=True,
+                conversation_key=conversation_key,
                 **retry_kwargs,
             )
             resumed_with = None

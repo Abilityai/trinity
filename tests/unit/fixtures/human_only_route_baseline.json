@@ -6,7 +6,6 @@
   "client_portal/router.py::unblock_agent_client": "DELETE /api/enterprise/client-portal/agents/{agent_name}/clients/{email}/block",
   "main.py::get_current_user_info": "GET /api/users/me",
   "main.py::get_version": "GET /api/version",
-  "routers/a2a.py::a2a_jsonrpc": "POST /a2a/{agent_name}",
   "routers/a2a.py::call_a2a_agent": "POST /api/agents/{agent_name}/a2a/call",
   "routers/a2a.py::get_a2a_task": "POST /api/agents/{agent_name}/a2a/task",
   "routers/a2a.py::get_agent_card": "GET /api/agents/{agent_name}/a2a/agent-card",
