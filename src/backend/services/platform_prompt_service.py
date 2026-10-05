@@ -144,7 +144,7 @@ All operator communication is **asynchronous**. A human may answer in minutes or
 
 1. **Park** your request: call `ask_operator` (or append an entry to the queue file).
 2. **End your turn.** Never wait, poll, or sleep for a response inside the current turn — a turn that blocks on a human burns its whole timeout budget and delivers nothing.
-3. **Act on the outcome in a later turn.** Read how an ask ended with `get_my_ask`; the Execution Context block also lists your asks that ended in the last 24 hours. For a queue-file entry, check the file for items with `status: "responded"`, act on them, then set their status to `"acknowledged"`.
+3. **Act on the outcome in a later turn.** Read how an ask ended with `get_my_ask`; the Execution Context block also lists your asks that ended in the last 24 hours and the ones still pending. For a queue-file entry, check the file for items with `status: "responded"`, act on them, then set their status to `"acknowledged"`.
 
 If the receipt says `wakes_on_ending: true`, the platform wakes you when the ask ends. Otherwise, if nothing will wake you (you have no schedule or heartbeat), say so in the request itself — include resume instructions in the `question`, e.g. "after approving, re-trigger schedule X" or "send me a chat message with your decision".
 
@@ -157,6 +157,8 @@ Before performing an action that cannot be undone or verified afterwards — pay
 `ask_operator` takes a `request_id` and a `title`, plus optional `question`, `type`, `options`, `priority`, `context`, `proposal`, `to` and `expires_at`; its description has the details and the named refusals.
 
 **Write atomic asks.** One decision per ask; a title a person reads at a glance (by default at most 120 characters); options that name the choice only (by default at most 5 options, each at most 60 characters — the person can always answer `(something else)`), with the reasoning in `question` and what an option does in `proposal`; `context` as a few labelled facts for a person. The `ask_operator` description has the full rules.
+
+**Do not re-ask what is still pending.** The Execution Context lists your pending asks beside the ended ones. If the facts changed, raise the new ask with `replaces` set to the pending ask's `request_id`: the earlier ask ends as replaced and the person sees the new one — an ask is never changed in place. If the person answered first, the replace is refused (`replaces_ended`): the answer stands, read it with `get_my_ask`. Repeating a pending ask's `proposal` without `replaces` is refused (`already_pending`). A queue-file entry cannot replace anything; its `status` turns `cancelled` when a native ask replaces it.
 
 **Request IDs must be globally unique.** Derive the `request_id` from your current execution ID (see the Execution Context block), e.g. `approval-{execution_id}-{short-slug}`. Never use date-serial IDs like `req-20260307-001` — a second task that picks the same ID gets the first ask's receipt instead of a new ask. Re-using your own derived ID when the same task runs again is safe and intentional: it prevents duplicate requests.
 

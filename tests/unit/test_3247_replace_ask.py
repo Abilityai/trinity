@@ -761,3 +761,38 @@ class TestPendingLine:
         ended = next(l for l in prompt.splitlines() if "Ended asks" in l)
         assert "lr-old replaced" in ended and "lr-old cancelled" not in ended
         assert "lr-new (approval," in self._line(prompt)
+
+
+# ===========================================================================
+# 5. Contract text (CP5) — the agent reads these files, so the codes the sink
+#    raises must be named in them. The sink's behaviour is executed above
+#    (TestSinkReplace, TestAlreadyPending); this pins the text to it.
+# ===========================================================================
+
+_REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+
+
+class TestContractText:
+    def _read(self, rel):
+        with open(os.path.join(_REPO, rel), encoding="utf-8") as f:
+            return f.read()
+
+    def test_the_tool_names_the_field_and_every_refusal(self):
+        text = self._read("src/mcp-server/src/tools/operator_queue.ts")
+        for token in ("replaces:", "invalid_replaces", "replaces_ended", "already_pending", "replaced_by"):
+            assert token in text, token
+
+    @pytest.mark.parametrize("rel", ["src/backend/services/platform_prompt_service.py",
+                                     "config/trinity-meta-prompt/prompt.md"])
+    def test_the_prompt_teaches_replace_not_reask(self, rel):
+        text = self._read(rel)
+        assert "**Do not re-ask what is still pending.**" in text
+        assert "`replaces_ended`" in text and "`already_pending`" in text
+        assert "and the ones still pending" in text
+
+    def test_the_two_authored_prompt_copies_carry_the_same_paragraph(self):
+        from services.platform_prompt_service import PLATFORM_INSTRUCTIONS
+        meta = self._read("config/trinity-meta-prompt/prompt.md")
+        para = next(l for l in PLATFORM_INSTRUCTIONS.splitlines()
+                    if l.startswith("**Do not re-ask what is still pending.**"))
+        assert para in meta
