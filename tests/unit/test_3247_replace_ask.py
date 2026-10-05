@@ -796,3 +796,77 @@ class TestContractText:
         para = next(l for l in PLATFORM_INSTRUCTIONS.splitlines()
                     if l.startswith("**Do not re-ask what is still pending.**"))
         assert para in meta
+
+
+# ===========================================================================
+# 7. The Workspace projection (CP6b) — a replaced ask reads "Replaced by the
+#    agent", names its successor by request_id only, and only to an addressee
+#    who could already see that successor.
+# ===========================================================================
+
+class TestWorkspaceProjection:
+    AGENT = "agent-3247-ws"
+
+    @pytest.fixture(autouse=True)
+    def _roster(self, monkeypatch):
+        import client_portal.service as portal_service
+        monkeypatch.setattr(portal_service, "agent_on_roster", lambda *a, **k: True)
+
+    def _pair(self, real_db, tag, *, old_to, new_to, new_type="approval"):
+        old = _native(real_db, self.AGENT, f"ws-old-{tag}", addressed_to_email=old_to)
+        assert old["outcome"] == "created", old
+        new = _native(real_db, self.AGENT, f"ws-new-{tag}", replaces=old["row"]["id"],
+                      addressed_to_email=new_to, type=new_type)
+        assert new["outcome"] == "created", new
+        return real_db.get_operator_queue_item(old["row"]["id"]), new["row"]
+
+    def test_an_agent_ending_is_read_before_the_email_arm(self):
+        from client_portal.asks.service import _ending_of
+        row = {"status": "cancelled", "disposition": "cancelled", "disposed_by": "agent",
+               "disposed_at": "2026-10-05T10:00:00Z", "disposed_by_email": "c@example.com"}
+        # even a stray email on the row never turns the agent's ending into a person's
+        assert _ending_of(row, "c@example.com") == ("2026-10-05T10:00:00Z", "agent")
+        assert _ending_of(dict(row, disposed_by_email=None), "c@example.com")[1] == "agent"
+        # the person / operator arms are unchanged
+        person = dict(row, disposed_by="person")
+        assert _ending_of(person, "c@example.com")[1] == "you"
+        assert _ending_of(person, "other@example.com")[1] == "operator"
+
+    def test_both_ends_name_each_other_by_request_id_only(self, real_db):
+        from client_portal.asks.service import _project
+        to = "ws-a@example.com"
+        old, new = self._pair(real_db, "a", old_to=to, new_to=to)
+        p_old = _project(old, viewer_email=to)
+        p_new = _project(new, viewer_email=to)
+        assert (p_old.status, p_old.ended_by) == ("cancelled", "agent")
+        assert p_old.ended_at == old["disposed_at"]
+        assert p_old.replaced_by == "ws-new-a" and p_old.replaces is None
+        assert p_new.replaces == "ws-old-a" and p_new.replaced_by is None
+        # the link carries the request_id and nothing else — never the other uuid
+        assert new["id"] not in p_old.model_dump_json()
+        assert old["id"] not in p_new.model_dump_json()
+
+    @pytest.mark.parametrize("new_to", ["ws-other@example.com", None])
+    def test_a_successor_the_addressee_cannot_see_is_never_named(self, real_db, new_to):
+        from client_portal.asks.service import _project
+        to = "ws-b@example.com"
+        tag = f"b-{new_to or 'op'}"
+        old, new = self._pair(real_db, tag, old_to=to, new_to=new_to)
+        p_old = _project(old, viewer_email=to)
+        assert p_old.ended_by == "agent"
+        assert p_old.replaced_by is None
+        if new_to:
+            # nor does the other addressee learn the old ask's name
+            assert _project(new, viewer_email=new_to).replaces is None
+
+    def test_a_replaced_ask_leaves_the_pending_listing(self, real_db):
+        from client_portal.asks.service import list_asks_page
+        to = "ws-c@example.com"
+        old, new = self._pair(real_db, "c", old_to=to, new_to=to)
+        pending = list_asks_page(to, False, agent_name=self.AGENT)
+        assert [a.id for a in pending.items] == [new["id"]]
+        assert pending.total == 1
+        ended = list_asks_page(to, False, agent_name=self.AGENT, include_ended=True)
+        by_id = {a.id: a for a in ended.items}
+        assert by_id[old["id"]].ended_by == "agent"
+        assert by_id[old["id"]].replaced_by == "ws-new-c"

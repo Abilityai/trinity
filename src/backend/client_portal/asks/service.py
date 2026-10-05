@@ -108,7 +108,7 @@ def _ending_of(item: dict, viewer_email: Optional[str]) -> tuple:
     """`(ended_at, ended_by)` for a client — COARSE on purpose.
 
     `ended_by` is `you` (the viewer answered), `operator` (another person
-    answered or cancelled) or `timeout`; never an email and never the cancel
+    answered or cancelled), `agent` (the agent replaced it, #3247) or `timeout`; never an email and never the cancel
     reason (both are the operator's, not the client's). `ended_at` is the
     ledger's time, or a legacy answer's time — never `created_at`, which is when
     the ask was filed, not when it ended.
@@ -118,10 +118,35 @@ def _ending_of(item: dict, viewer_email: Optional[str]) -> tuple:
         return None, None
     if status == "expired":
         return item.get("disposed_at"), "timeout"
+    # #3247: the agent replaced it with a newer ask. Read BEFORE the email arm,
+    # which would otherwise call an ending with no email the operator's.
+    if item.get("disposed_by") == "agent":
+        return item.get("disposed_at"), "agent"
     by = item.get("disposed_by_email") or (item.get("responded_by_email") if status == "answered" else None)
     who = "you" if by and viewer_email and by.lower() == viewer_email.lower() else "operator"
     at = item.get("disposed_at") or (item.get("responded_at") if status == "answered" else None)
     return at, who
+
+
+def _linked_request_id(item: dict, key: str) -> Optional[str]:
+    """#3247: the `request_id` of the ask `item[key]` names (`replaces` /
+    `replaced_by` store the other row's uuid), and nothing else about it.
+
+    Only when the addressee of THIS ask could already see the other one: same
+    agent, same addressee, a kind the Workspace shows. A replacement addressed
+    to someone else, or to the operator, stays invisible — the link reads None
+    and the surface says "Replaced by the agent" without a name."""
+    other_id = item.get(key)
+    if not other_id:
+        return None
+    other = db.get_operator_queue_item(other_id)
+    if not other or other.get("agent_name") != item.get("agent_name"):
+        return None
+    mine = (item.get("addressed_to_email") or "").strip().lower()
+    theirs = (other.get("addressed_to_email") or "").strip().lower()
+    if not mine or mine != theirs or other.get("type") not in _VISIBLE_KINDS:
+        return None
+    return other.get("request_id")
 
 
 def _project(item: dict, *, viewer_email: Optional[str] = None,
@@ -166,6 +191,8 @@ def _project(item: dict, *, viewer_email: Optional[str] = None,
         sync=_coarse_sync(item),
         aging=bool(is_aged(item)),
         decided_by_options=ask_service.decided_by_options(item),
+        replaces=_linked_request_id(item, "replaces"),
+        replaced_by=_linked_request_id(item, "replaced_by"),
     )
 
 

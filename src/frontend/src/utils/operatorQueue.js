@@ -443,6 +443,21 @@ export function queueEndingText(ending) {
   return ending.who ? `${ending.label} by ${ending.who}` : ending.label
 }
 
+/** #3247 — a Workspace ask's ending in words. On a Workspace ask `replaced_by`
+ *  and `replaces` are the OTHER ask's request_id (the server projects them only
+ *  when this ask's addressee could already see that ask), not the operator
+ *  row's uuids — so the successor is named, never linked. */
+export function workspaceEndingText(ask) {
+  const ending = queueEnding(ask)
+  const text = queueEndingText(ending)
+  return ending?.kind === 'replaced' && ask.replaced_by ? `${text} with ${ask.replaced_by}` : text
+}
+
+/** #3247 — the successor's own line: "Replaces <request_id>", or '' . */
+export function workspaceReplacesText(ask) {
+  return ask && ask.replaces ? `Replaces ${ask.replaces}` : ''
+}
+
 /** What the resolved feed sorts by (#627 AC6): when the item ended; a legacy
  *  answer's time; else — the only timestamp such a row has — when it was filed. */
 export function queueEndingSortTime(item) {
