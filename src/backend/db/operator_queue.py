@@ -71,6 +71,18 @@ def _own_pending_conds(agent_name: str, exclude_request_id_prefixes=None) -> lis
 _EXPIRY_BATCH_MAX = 500
 
 
+class _RollBack(Exception):
+    """Unwind a native create's transaction and answer with `outcome` (#3247).
+
+    Raised INSIDE `Engine.begin()` so the context manager rolls back (the CAS
+    on the predecessor included) and caught OUTSIDE it; never escapes.
+    """
+
+    def __init__(self, outcome: Dict):
+        super().__init__(outcome["outcome"])
+        self.outcome = outcome
+
+
 def _iso_z_deadline(value) -> Optional[str]:
     """A deadline as ISO-8601 UTC with a `Z` suffix; text that does not parse —
     or lands past the year range once moved to UTC — is kept as written, and a
@@ -305,6 +317,7 @@ class OperatorQueueOperations:
         proposal: Optional[Dict],
         supersedes_expired: Optional[str],
         exclude_request_id_prefixes=None,
+        replaces: Optional[str] = None,
     ) -> Dict:
         """Create an agent-raised ask, atomically per agent (trinity-enterprise#611).
 
@@ -334,6 +347,30 @@ class OperatorQueueOperations:
         `sync_state` stays NULL — there is no file entry to be out of sync with.
         Every platform column is a keyword-only argument, never read from
         `item` (the item is agent-authored).
+
+        `replaces` (#3247) — the uuid of one of the agent's OWN pending asks
+        that this ask replaces. Inside the same lock, after the replay check
+        and before the count: a compare-and-set ends the predecessor
+        (`cancelled` / `disposed_by='agent'` / `disposition_reason='replaced'`,
+        `replaced_by` = the uuid this call minted) if it is still pending, not
+        past its deadline, and carries `raised_by='agent'` under this agent —
+        the belt beneath the sink's ownership gate. The successor is inserted
+        with `replaces` = the predecessor's uuid. A replay never re-applies the
+        replace. Extra outcomes:
+        - `replaces_ended` — the predecessor already ended (a person's answer
+          always wins); `row` is None, `predecessor` is the row as it stands,
+          and NOTHING was written — except when it was still pending past its
+          deadline: then it is expired here as the clock would (`expired` /
+          `timeout`, `expired_now=True`) so the refusal names a state the row
+          really carries and `supersedes_expired` works at once.
+        - `replaces_not_own` — the row is not this agent's own pending
+          agent-raised ask (missing, another agent's, NULL raiser, gate);
+          nothing written, `predecessor` is the row if it is this agent's.
+        Over the cap after the CAS, or a colliding insert after it (a file
+        entry re-using the id landed between the replay check and the insert
+        on PostgreSQL), the WHOLE transaction rolls back: a half-replace — the
+        predecessor ended, no successor shown — must never commit. `created`
+        then also carries `predecessor` (post-CAS row).
         """
         request_id, values = self._insert_values(
             agent_name, item, channel=channel, raised_by=raised_by,
@@ -350,24 +387,105 @@ class OperatorQueueOperations:
             operator_queue.c.agent_name == agent_name,
             operator_queue.c.request_id == request_id,
         )
-        with get_engine().begin() as conn:
-            self._lock_agent_for_create(conn, agent_name)
-            existing = conn.execute(select(*self._SELECT_COLS).where(mine)).mappings().first()
-            if existing:
-                return {"outcome": "replayed", "row": self._row_to_item(existing)}
-            if max_pending is not None:
-                pending = conn.execute(
-                    select(func.count()).where(and_(
-                        *_own_pending_conds(agent_name, exclude_request_id_prefixes)))
-                ).scalar() or 0
-                if pending >= max_pending:
-                    return {"outcome": "queue_full", "row": None}
-            inserted = bool(conn.execute(
-                make_insert(operator_queue).values(**values).on_conflict_do_nothing(
-                    index_elements=["agent_name", "request_id"])
-            ).rowcount)
+        values["replaces"] = replaces
+        predecessor = None
+        try:
+            with get_engine().begin() as conn:
+                self._lock_agent_for_create(conn, agent_name)
+                existing = conn.execute(select(*self._SELECT_COLS).where(mine)).mappings().first()
+                if existing:
+                    return {"outcome": "replayed", "row": self._row_to_item(existing)}
+                if replaces is not None:
+                    predecessor, refusal = self._replace_predecessor(
+                        conn, agent_name, replaces, values["id"])
+                    if refusal is not None:
+                        # commits: the only write on this path is the expire-now
+                        return {**refusal, "row": None, "predecessor": predecessor}
+                if max_pending is not None:
+                    pending = conn.execute(
+                        select(func.count()).where(and_(
+                            *_own_pending_conds(agent_name, exclude_request_id_prefixes)))
+                    ).scalar() or 0
+                    if pending >= max_pending:
+                        if replaces is not None:
+                            raise _RollBack({"outcome": "queue_full", "row": None})
+                        return {"outcome": "queue_full", "row": None}
+                inserted = bool(conn.execute(
+                    make_insert(operator_queue).values(**values).on_conflict_do_nothing(
+                        index_elements=["agent_name", "request_id"])
+                ).rowcount)
+                if not inserted and replaces is not None:
+                    raise _RollBack({"outcome": "replayed", "row": None})
+                row = conn.execute(select(*self._SELECT_COLS).where(mine)).mappings().first()
+        except _RollBack as rolled:
+            # `Engine.begin()` rolled the CAS back with the exception (the PG
+            # advisory xact lock released with it); the predecessor stands.
+            out = rolled.outcome
+            if out["outcome"] == "replayed":
+                with get_engine().connect() as conn:
+                    winner = conn.execute(select(*self._SELECT_COLS).where(mine)).mappings().first()
+                out["row"] = self._row_to_item(winner) if winner else None
+            return out
+        out = {"outcome": "created" if inserted else "replayed", "row": self._row_to_item(row)}
+        if replaces is not None:
+            out["predecessor"] = predecessor
+        return out
+
+    def _replace_predecessor(
+        self, conn, agent_name: str, pred_id: str, new_id: str,
+    ) -> Tuple[Optional[Dict], Optional[Dict]]:
+        """End the predecessor of a replace by compare-and-set, on the create's
+        own connection (#3247). Returns `(predecessor_row, refusal)`: a won CAS
+        gives `(ended row, None)`; a lost one gives the row as it stands and the
+        outcome dict the create returns instead of inserting.
+
+        The predicate is respond's (`pending` AND not past the deadline) plus
+        the ownership belt (`agent_name`, `raised_by='agent'`): one writer sees
+        `rowcount 1` whatever races it — a person's answer, a cancel, the expiry
+        sweep — and "denied by timeout" cannot be sidestepped by a replace.
+        """
+        now = utc_now_iso()
+        mine = and_(operator_queue.c.id == pred_id, operator_queue.c.agent_name == agent_name)
+        result = conn.execute(
+            update(operator_queue)
+            .where(and_(
+                mine,
+                operator_queue.c.raised_by == "agent",
+                operator_queue.c.status == "pending",
+                or_(operator_queue.c.expires_at.is_(None), operator_queue.c.expires_at > now),
+            ))
+            .values(
+                status="cancelled",
+                disposition="cancelled",
+                disposed_at=now,
+                disposed_by="agent",
+                disposed_by_email=None,
+                disposition_reason="replaced",
+                replaced_by=new_id,
+            )
+        )
+        if result.rowcount:
             row = conn.execute(select(*self._SELECT_COLS).where(mine)).mappings().first()
-        return {"outcome": "created" if inserted else "replayed", "row": self._row_to_item(row)}
+            return self._row_to_item(row), None
+        row = conn.execute(select(*self._SELECT_COLS).where(mine)).mappings().first()
+        if row is None:
+            return None, {"outcome": "replaces_not_own"}
+        if row["status"] == "pending":
+            if row["expires_at"] is not None and row["expires_at"] <= now and row["raised_by"] == "agent":
+                # T5b: still pending past its deadline — end it as the clock
+                # would, in this transaction, so the refusal states a real
+                # disposition instead of a dead zone until the sweep.
+                expired = conn.execute(
+                    update(operator_queue)
+                    .where(and_(mine, operator_queue.c.status == "pending"))
+                    .values(status="expired", disposition="expired",
+                            disposed_at=now, disposed_by="timeout")
+                ).rowcount
+                row = conn.execute(select(*self._SELECT_COLS).where(mine)).mappings().first()
+                return self._row_to_item(row), {"outcome": "replaces_ended", "expired_now": bool(expired)}
+            # pending but not this agent's own agent-raised ask: the belt held
+            return self._row_to_item(row), {"outcome": "replaces_not_own"}
+        return self._row_to_item(row), {"outcome": "replaces_ended", "expired_now": False}
 
     @staticmethod
     def _lock_agent_for_create(conn, agent_name: str) -> None:
