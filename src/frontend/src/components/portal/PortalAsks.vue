@@ -164,7 +164,7 @@
                consequence as the button's description; otherwise chips. -->
           <div class="mt-2 flex gap-2" :class="stacked(ask) ? 'flex-col' : 'flex-wrap'">
             <button
-              v-for="(opt, i) in optionsOf(ask)"
+              v-for="(opt, i) in offeredChips(ask)"
               :key="`${i}:${opt}`"
               type="button"
               :disabled="busyId === ask.id"
@@ -191,6 +191,19 @@
               </template>
               <AskMarkdown v-else :text="opt" inline />
             </button>
+            <!-- #3242: the platform's off-menu answer, after the agent's options;
+                 hidden on an approval decided by its options (a gate). -->
+            <button
+              v-if="offersSomethingElse(ask)"
+              type="button"
+              :disabled="busyId === ask.id"
+              :class="[CHIP_BASE, somethingElseArmed(ask)
+                ? 'bg-action-primary-600 border-action-primary-600 text-white'
+                : CHIP_IDLE, 'border-dashed', stacked(ask) ? 'w-full text-left' : '']"
+              :aria-pressed="somethingElseArmed(ask)"
+              :data-testid="`${tid.prefix}-something-else-${ask.id}`"
+              @click="pick(ask, SOMETHING_ELSE)"
+            >{{ SOMETHING_ELSE_LABEL }}</button>
           </div>
           <form class="mt-2 flex items-center gap-2" @submit.prevent="submit(ask)">
             <!-- ent#610 §3g B2: a pick moves focus here, so the Enter that
@@ -202,14 +215,17 @@
               type="text"
               maxlength="4000"
               :disabled="busyId === ask.id"
-              placeholder="Add a note (optional)…"
+              :placeholder="somethingElseArmed(ask) ? 'What should it do instead? None of the options will run.' : 'Add a note (optional)…'"
+              :aria-label="somethingElseArmed(ask) ? 'Instruction' : 'Note'"
               :class="FIELD"
               :data-testid="`${tid.prefix}-note-${ask.id}`"
+              @keydown.enter="!picks[ask.id] && $event.preventDefault()"
             />
             <button
               type="submit"
-              :disabled="busyId === ask.id || !picks[ask.id]"
+              :disabled="busyId === ask.id || !approvalSendable(ask)"
               :class="SEND"
+              :aria-label="somethingElseArmed(ask) ? 'Send instruction' : undefined"
               :data-testid="`${tid.prefix}-send-${ask.id}`"
             >{{ busyId === ask.id ? 'Sending…' : 'Send' }}</button>
           </form>
@@ -323,6 +339,8 @@ import { queueEnding, queueEndingText } from '@/utils/operatorQueue'
 import { workspaceAskBadge, questionQuickPicks } from '@/utils/operatorQueue'
 // trinity-enterprise#610 §3g L6 (E2 seam): the brief's per-option consequence.
 import { briefImpactFor } from '@/utils/operatorQueue'
+// #3242: the reserved off-menu approval answer.
+import { SOMETHING_ELSE, SOMETHING_ELSE_LABEL, offeredChips, decidedByOptions } from '@/utils/operatorQueue'
 import { formatLocalDateTime, formatRelativeTime } from '@/utils/timestamps'
 // trinity-enterprise#610 A2 round 1: the row's urgency rule, for the pane's card header.
 import { priorityBadge, expiresSoonLabel, needsExpiryTick } from './portalAskUrgency'
@@ -427,6 +445,15 @@ function pick(ask, opt) {
   if (!next || coarsePointer()) return
   nextTick(() => noteEls.get(ask.id)?.focus())
 }
+// #3242: the platform's off-menu answer, unless the approval is decided by
+// its options. With no pick, typing arms it (the note box is the instruction);
+// Enter never sends that auto-armed state — the person clicks Send.
+const offersSomethingElse = (ask) => !decidedByOptions(ask)
+const approvalOption = (ask) => picks[ask.id]
+  ?? (offersSomethingElse(ask) && (notes[ask.id] || '').trim() ? SOMETHING_ELSE : null)
+const somethingElseArmed = (ask) => approvalOption(ask) === SOMETHING_ELSE
+const approvalSendable = (ask) =>
+  buildQueueResponse({ kind: 'approval', option: approvalOption(ask), note: notes[ask.id] || '' }) !== null
 // E2 seam: an approval whose brief says what an option does stacks its options.
 const impactOf = (ask) => briefImpactFor(ask)
 const stacked = (ask) => Object.keys(impactOf(ask)).length > 0
@@ -584,7 +611,7 @@ async function submit(ask) {
   // blank answer — and the controls stay armed.
   const body = buildQueueResponse({
     kind: controlsKind(ask),
-    option: picks[ask.id],
+    option: approvalOption(ask),
     note: notes[ask.id] || '',
     answer: drafts[ask.id] || '',
   })
