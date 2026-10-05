@@ -646,3 +646,118 @@ class TestAlreadyPending:
             max_pending=None, channel="gate", raised_by="gate", to_role="primary",
             resolved_to=None, proposal={"pay": 6, "to": "v"}, supersedes_expired=None)
         assert _raise(ask, self.AGENT, _body("t8-j", proposal={"pay": 6, "to": "v"}))["status"] == "created"
+
+
+# ===========================================================================
+# 4. The pending line in the Execution Context (CP4, T4)
+# ===========================================================================
+
+def _aged(real_db, row_id, *, hours):
+    from datetime import datetime, timedelta, timezone
+    from sqlalchemy import update
+    from db.engine import get_engine
+    from db.tables import operator_queue
+    at = (datetime.now(timezone.utc) - timedelta(hours=hours)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    with get_engine().begin() as conn:
+        conn.execute(update(operator_queue).where(operator_queue.c.id == row_id).values(created_at=at))
+
+
+class TestPendingLine:
+    AGENT = "agent-3247-line"
+
+    def _line(self, prompt):
+        return next((l for l in prompt.splitlines() if "Pending asks" in l), None)
+
+    def _seed(self, real_db):
+        old = _pending(real_db, self.AGENT, "pl-old", type="question",
+                       title="Which vendor should receive the quarterly payout batch this time")
+        _aged(real_db, old, hours=50)
+        mid = _pending(real_db, self.AGENT, "pl-mid", title="Approve payout")
+        _aged(real_db, mid, hours=3)
+        _pending(real_db, self.AGENT, "pl-new", title="Approve\nnew `thing`", created_at=_iso(-5))
+        # Not the agent's budget: a platform alarm, a gate row, an ended ask, another agent.
+        _pending(real_db, self.AGENT, "queue-flood-agent-3247-line-1", title="flood")
+        real_db.create_native_operator_queue_item(
+            self.AGENT, {"id": "gate-pl-1", "type": "approval", "title": "gate", "question": "?"},
+            max_pending=None, channel="gate", raised_by="gate", to_role="primary",
+            resolved_to=None, proposal=None, supersedes_expired=None)
+        gone = _pending(real_db, self.AGENT, "pl-gone")
+        real_db.cancel_operator_queue_item(gone, disposed_by_email="op@example.com")
+        _pending(real_db, "agent-3247-line-other", "pl-other")
+
+    def test_the_line_lists_own_pending_asks_oldest_first_with_type_age_and_title(self, real_db):
+        from services.platform_prompt_service import ExecutionContext, compose_system_prompt
+        self._seed(real_db)
+        line = self._line(compose_system_prompt(
+            ExecutionContext(agent_name=self.AGENT, triggered_by="schedule")))
+        assert line is not None
+        assert line.index("pl-old") < line.index("pl-mid") < line.index("pl-new")
+        assert 'pl-old (question, 2d) "Which vendor should receive the quarterly payou' in line
+        assert 'pl-mid (approval, 3h) "Approve payout"' in line
+        assert 'pl-new (approval, <1h) "Approve new' in line and "\n" not in line
+        for absent in ("queue-flood", "gate-pl-1", "pl-gone", "pl-other"):
+            assert absent not in line, absent
+        assert "replaces" in line
+
+    def test_the_line_is_drawn_from_the_budget_predicate(self, real_db):
+        from services import platform_prompt_service as pps
+        from services.operator_queue_service import _RESERVED_ID_PREFIXES
+        self._seed(real_db)
+        listed, total = pps._resolve_pending_asks(self.AGENT)
+        assert len(listed) == total == real_db.count_operator_queue_pending_for_agent(
+            self.AGENT, exclude_request_id_prefixes=_RESERVED_ID_PREFIXES) == 3
+
+    def test_the_line_is_bounded_with_a_count_of_the_rest(self, real_db):
+        from services.platform_prompt_service import (
+            ExecutionContext, compose_system_prompt, MAX_PENDING_ASKS)
+        agent = "agent-3247-line-many"
+        for i in range(MAX_PENDING_ASKS + 3):
+            _aged(real_db, _pending(real_db, agent, f"pm-{i:02d}"), hours=20 - i)
+        line = self._line(compose_system_prompt(ExecutionContext(agent_name=agent, triggered_by="schedule")))
+        assert line.count("(approval,") == MAX_PENDING_ASKS
+        assert "pm-00" in line and f"pm-{MAX_PENDING_ASKS:02d}" not in line
+        assert "and 3 more — list them with list_operator_queue" in line
+
+    def test_no_pending_asks_no_line(self, real_db):
+        from services.platform_prompt_service import ExecutionContext, compose_system_prompt
+        prompt = compose_system_prompt(ExecutionContext(agent_name="agent-3247-line-none", triggered_by="schedule"))
+        assert "## Execution Context" in prompt and "Pending asks" not in prompt
+
+    def test_a_failed_read_omits_the_line_never_the_turn(self, real_db, monkeypatch):
+        from services import platform_prompt_service as pps
+        from services.platform_prompt_service import ExecutionContext, compose_system_prompt
+        self._seed(real_db)
+
+        def _boom(*a, **k):
+            raise RuntimeError("db down")
+
+        monkeypatch.setattr(pps.db, "list_pending_operator_queue_asks", _boom)
+        prompt = compose_system_prompt(ExecutionContext(agent_name=self.AGENT, triggered_by="schedule"))
+        assert "## Execution Context" in prompt and "Pending asks" not in prompt
+
+    def test_the_pull_composer_carries_the_line(self, real_db):
+        from services.pull_coordination_service import _compose_pull_system_prompt
+        self._seed(real_db)
+        prompt = _compose_pull_system_prompt(self.AGENT, "schedule", None, execution_id="e-3247")
+        assert 'pl-mid (approval, 3h) "Approve payout"' in self._line(prompt)
+
+    def test_the_push_composer_carries_the_line(self, real_db):
+        from services.task_execution_service import TaskExecutionService
+        self._seed(real_db)
+        svc = TaskExecutionService.__new__(TaskExecutionService)
+        prompt = svc._compose_effective_system_prompt(
+            agent_name=self.AGENT, triggered_by="schedule", source_user_email=None,
+            source_agent_name=None, source_mcp_key_name=None, model=None, timeout_seconds=None,
+            attempt=None, schedule_context=None, execution_id="e-3247", system_prompt=None)
+        assert 'pl-mid (approval, 3h) "Approve payout"' in self._line(prompt)
+
+    def test_an_ending_the_agent_authored_reads_replaced(self, real_db):
+        from services.platform_prompt_service import ExecutionContext, compose_system_prompt
+        agent = "agent-3247-line-replaced"
+        _native(real_db, agent, "lr-old")
+        _native(real_db, agent, "lr-new", replaces=real_db.get_operator_queue_item_for_agent_by_request_id(
+            agent, "lr-old")["id"])
+        prompt = compose_system_prompt(ExecutionContext(agent_name=agent, triggered_by="schedule"))
+        ended = next(l for l in prompt.splitlines() if "Ended asks" in l)
+        assert "lr-old replaced" in ended and "lr-old cancelled" not in ended
+        assert "lr-new (approval," in self._line(prompt)

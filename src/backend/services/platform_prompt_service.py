@@ -44,6 +44,10 @@ MAX_STAKEHOLDER_LEN = 140
 MAX_ENDED_ASKS = 5
 MAX_REQUEST_ID_LEN = 64
 ENDED_ASKS_WINDOW_HOURS = 24
+# Pending asks (#3247): the agent's own still-open asks, oldest first — a
+# scheduled run that cannot see them re-asks what it already asked.
+MAX_PENDING_ASKS = 8
+MAX_PENDING_TITLE_LEN = 48
 
 # Static platform instructions — moved from agent-side trinity.py
 PLATFORM_INSTRUCTIONS = """# Trinity Platform Instructions
@@ -725,6 +729,11 @@ class ExecutionContext:
     # from the DB; stateless, so a wake that was lost (a crash, a stopped agent)
     # still reaches the agent on its next turn.
     ended_asks: Optional[List[dict]] = None
+    # #3247: this agent's own PENDING asks, oldest first — `{request_id, type,
+    # title, created_at}` each, at most MAX_PENDING_ASKS — and how many there
+    # are in all (the rest are named as a count). Auto-filled from the DB.
+    pending_asks: Optional[List[dict]] = None
+    pending_asks_total: Optional[int] = None
 
     @staticmethod
     def derive_mode(triggered_by: Optional[str]) -> str:
@@ -809,6 +818,8 @@ def _render_ended_asks(ctx: ExecutionContext) -> Optional[str]:
     for ask in ctx.ended_asks[:MAX_ENDED_ASKS]:
         rid = _sanitize_field(ask.get("request_id"), max_len=MAX_REQUEST_ID_LEN)
         how = _sanitize_field(ask.get("disposition"), max_len=16)
+        if ask.get("disposed_by") == "agent":
+            how = "replaced"  # #3247: the agent ended it itself by replacing it
         when = _sanitize_field(ask.get("disposed_at"), max_len=MAX_TIMESTAMP_LEN)
         if rid and how:
             entries.append(" ".join(x for x in (rid, how, when) if x))
@@ -816,6 +827,56 @@ def _render_ended_asks(ctx: ExecutionContext) -> Optional[str]:
         return None
     more = ", and more" if len(ctx.ended_asks) > MAX_ENDED_ASKS else ""
     return "; ".join(entries) + f"{more} — read one with get_my_ask"
+
+
+def _coarse_age(created_at: Optional[str], now: Optional[datetime] = None) -> Optional[str]:
+    """`<1h`, `3h`, `2d` — how long an ask has waited. The raw timestamp when it
+    does not parse; None when there is none."""
+    if not created_at:
+        return None
+    try:
+        at = datetime.fromisoformat(str(created_at).replace("Z", "+00:00"))
+        if at.tzinfo is None:
+            at = at.replace(tzinfo=timezone.utc)
+        hours = int(((now or datetime.now(timezone.utc)) - at).total_seconds() // 3600)
+    except (TypeError, ValueError):
+        return _sanitize_field(created_at, max_len=MAX_TIMESTAMP_LEN)
+    if hours < 1:
+        return "<1h"
+    if hours < 48:
+        return f"{hours}h"
+    return f"{hours // 24}d"
+
+
+def _render_pending_asks(ctx: ExecutionContext) -> Optional[str]:
+    """The `Pending asks` line body (#3247): `request_id (type, age) "title"`,
+    oldest first, bounded, the rest as a count. The title is the agent's own,
+    sanitized and cut — never a question or anything a person wrote."""
+    if not ctx.pending_asks:
+        return None
+    entries: List[str] = []
+    for ask in ctx.pending_asks[:MAX_PENDING_ASKS]:
+        rid = _sanitize_field(ask.get("request_id"), max_len=MAX_REQUEST_ID_LEN)
+        if not rid:
+            continue
+        meta = ", ".join(x for x in (
+            _sanitize_field(ask.get("type"), max_len=16),
+            _coarse_age(ask.get("created_at")),
+        ) if x)
+        entry = f"{rid} ({meta})" if meta else rid
+        title = _sanitize_field(ask.get("title"), max_len=MAX_PENDING_TITLE_LEN)
+        if title:
+            entry += f' "{title.replace(chr(34), chr(39))}"'
+        entries.append(entry)
+    if not entries:
+        return None
+    total = max(ctx.pending_asks_total or 0, len(ctx.pending_asks))
+    shown = min(len(ctx.pending_asks), MAX_PENDING_ASKS)
+    more = (f", and {total - shown} more — list them with list_operator_queue"
+            if total > shown else "")
+    return ("; ".join(entries) + more
+            + " — do not re-ask one of these; if the facts changed, replace it"
+              " (ask_operator, replaces)")
 
 
 def _render_assignment(ctx: ExecutionContext) -> Optional[str]:
@@ -934,6 +995,10 @@ def build_execution_context(ctx: ExecutionContext) -> str:
         if collaborators:
             lines.append(f"- **Collaborators**: {collaborators}")
 
+        pending_asks = _render_pending_asks(ctx)
+        if pending_asks:
+            lines.append(f"- **Pending asks**: {pending_asks}")
+
         ended_asks = _render_ended_asks(ctx)
         if ended_asks:
             lines.append(f"- **Ended asks (last {ENDED_ASKS_WINDOW_HOURS} h)**: {ended_asks}")
@@ -1002,6 +1067,30 @@ def _resolve_ended_asks(agent_name: Optional[str]) -> List[dict]:
         return []
 
 
+def _resolve_pending_asks(agent_name: Optional[str]) -> tuple:
+    """This agent's own pending asks, oldest first, and how many there are —
+    `(rows ≤ MAX_PENDING_ASKS, total)`. Drawn from the predicate that spends the
+    open-ask budget. `([], 0)` on any failure: the line is omitted, never the
+    turn (#3247)."""
+    if not agent_name:
+        return [], 0
+    try:
+        from services.operator_queue_service import _RESERVED_ID_PREFIXES
+
+        rows = db.list_pending_operator_queue_asks(
+            agent_name, MAX_PENDING_ASKS,
+            exclude_request_id_prefixes=_RESERVED_ID_PREFIXES,
+        ) or []
+        total = len(rows)
+        if total >= MAX_PENDING_ASKS:
+            total = db.count_operator_queue_pending_for_agent(
+                agent_name, exclude_request_id_prefixes=_RESERVED_ID_PREFIXES)
+        return rows, max(total, len(rows))
+    except Exception as e:
+        logger.debug(f"_resolve_pending_asks({agent_name}) failed: {e}")
+        return [], 0
+
+
 def _resolve_platform_url() -> Optional[str]:
     """Best-effort lookup of the platform's public URL."""
     try:
@@ -1061,11 +1150,17 @@ def compose_system_prompt(
         # otherwise skip the whole replace block, and the assignment fields
         # would silently never render.
         if (ctx.collaborators is None or ctx.platform_url is None or needs_assignment
-                or ctx.ended_asks is None):
+                or ctx.ended_asks is None or ctx.pending_asks is None):
             assignment = (
                 _resolve_assignment(ctx.agent_name, ctx.triggered_by)
                 if needs_assignment
                 else {}
+            )
+            # The rows and their total are one answer, resolved once (#3247).
+            pending, pending_total = (
+                (ctx.pending_asks, ctx.pending_asks_total)
+                if ctx.pending_asks is not None
+                else _resolve_pending_asks(ctx.agent_name)
             )
             ctx = replace(
                 ctx,
@@ -1104,6 +1199,8 @@ def compose_system_prompt(
                     if ctx.ended_asks is not None
                     else _resolve_ended_asks(ctx.agent_name)
                 ),
+                pending_asks=pending,
+                pending_asks_total=pending_total,
             )
         block = build_execution_context(ctx)
         if block:

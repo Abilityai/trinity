@@ -703,6 +703,36 @@ class OperatorQueueOperations:
                 continue
         return out
 
+    def list_pending_asks_for_agent(
+        self,
+        agent_name: str,
+        limit: int,
+        exclude_request_id_prefixes=None,
+    ) -> List[Dict]:
+        """The agent's own pending asks, OLDEST first (#3247 — the Execution
+        Context's `Pending asks` line).
+
+        Exactly the rows that spend the agent's open-ask budget
+        (`_own_pending_conds`), so the line and `queue_full` cannot disagree.
+        Oldest first: the stale duplicates a scheduled run piles up are the
+        oldest, and newest-first would hide them behind "and N more". The id,
+        type, the agent's own title and when it was filed — never a question,
+        an answer or anything a person wrote.
+        """
+        stmt = (
+            select(
+                operator_queue.c.request_id,
+                operator_queue.c.type,
+                operator_queue.c.title,
+                operator_queue.c.created_at,
+            )
+            .where(and_(*_own_pending_conds(agent_name, exclude_request_id_prefixes)))
+            .order_by(operator_queue.c.created_at.asc(), operator_queue.c.request_id.asc())
+            .limit(limit)
+        )
+        with get_engine().connect() as conn:
+            return [dict(r) for r in conn.execute(stmt).mappings().all()]
+
     def list_recent_endings_for_agent(
         self,
         agent_name: str,
@@ -713,8 +743,8 @@ class OperatorQueueOperations:
         """The asks this agent raised that ENDED at or after `since`, newest first
         (trinity-enterprise#611 — the Execution Context line).
 
-        Ids and the ending only — `request_id`, `disposition`, `disposed_at` —
-        never a title, an answer or a reason: the line reaches every composed
+        Ids and the ending only — `request_id`, `disposition`, `disposed_at`,
+        `disposed_by` (#3247: `agent` reads `replaced`) — never a title, an answer or a reason: the line reaches every composed
         turn. Only rows that carry the ledger (a row that ended before it has no
         ending time to show); platform alarms excluded by prefix (the agent
         raised none of them, ent#499).
@@ -724,6 +754,7 @@ class OperatorQueueOperations:
                 operator_queue.c.request_id,
                 operator_queue.c.disposition,
                 operator_queue.c.disposed_at,
+                operator_queue.c.disposed_by,
             )
             .where(
                 and_(

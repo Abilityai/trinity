@@ -3816,6 +3816,11 @@ class DatabaseManager:
         # #3247 T8: the native create's pending-proposal guard (`already_pending`).
         return self._operator_queue_ops.list_pending_proposals_for_agent(agent_name, limit, raised_by)
 
+    def list_pending_operator_queue_asks(self, agent_name, limit, exclude_request_id_prefixes=None):
+        # #3247: the agent's own pending asks for the Execution Context line.
+        return self._operator_queue_ops.list_pending_asks_for_agent(
+            agent_name, limit, exclude_request_id_prefixes)
+
     def list_recent_operator_queue_endings(self, agent_name, since, limit,
                                            exclude_request_id_prefixes=None):
         # trinity-enterprise#611: ids + endings for the Execution Context line.

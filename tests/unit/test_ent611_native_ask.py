@@ -252,6 +252,7 @@ _FACADE = [
     ("create_operator_queue_item_with_outcome", "create_item_with_outcome"),
     ("list_expired_operator_queue_proposals", "list_expired_proposals_for_agent"),
     ("list_pending_operator_queue_proposals", "list_pending_proposals_for_agent"),  # #3247 T8
+    ("list_pending_operator_queue_asks", "list_pending_asks_for_agent"),  # #3247 pending line
 ]
 
 
