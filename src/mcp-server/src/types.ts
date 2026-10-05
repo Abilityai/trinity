@@ -514,7 +514,7 @@ export interface OperatorQueueItem {
   // the ledger: read `status`).
   disposition?: string | null;        // answered | cancelled | dismissed | expired
   disposed_at?: string | null;
-  disposed_by?: string | null;        // person | timeout
+  disposed_by?: string | null;        // person | timeout | platform | agent (#3247: replaced its own ask)
   disposition_reason?: string | null; // the operator's optional cancel reason
 }
 

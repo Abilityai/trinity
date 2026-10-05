@@ -517,10 +517,11 @@ export function createOperatorQueueTools(
         "instruction_required, reserved_value, not_off_menu. Only items in the " +
         "'pending' state can be resolved — responding to an already-resolved, " +
         "expired, or cancelled item, or one past its deadline, returns a " +
-        "structured error. Only a person ends an ask: this works with a " +
+        "structured error. A person answers or cancels an ask: this works with a " +
         "person's user-scoped key; agent- and system-scoped keys are refused " +
-        "by the platform (403 person_required). To learn how one of your own " +
-        "asks ended, use get_my_ask.",
+        "by the platform (403 person_required). An agent can only replace its " +
+        "own pending ask (ask_operator, replaces); the platform expires one at " +
+        "its deadline. To learn how one of your own asks ended, use get_my_ask.",
       parameters: z.object({
         item_id: z.string().min(1).describe("Operator queue item id to resolve."),
         response: z

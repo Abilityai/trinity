@@ -448,13 +448,15 @@ def raise_ask(
        (#3247: `replaces` must name the agent's OWN pending ask — a row with
        `raised_by == 'agent'` under its name, checked on the column itself,
        never inferred — one uniform 422 `invalid_replaces` otherwise) and the
-       pending-proposal guard (T8: an AGENT raise whose `proposal` one of the
-       agent's own pending agent-raised asks already carries, not replaced
-       here → 409 `already_pending`; a gate raise is neither refused nor
-       counted), then the role (`to:`)
-       resolved to a person;
-    5. the create: replay, depth cap and insert in one per-agent serialized
-       step (`queue_full` → 429). The depth cap counts the agent's own asks
+       then the role (`to:`) resolved to a person;
+    5. the create: replay, the replace's compare-and-set, the pending-proposal
+       guard (T8: an AGENT's approval whose non-empty `proposal` one of the
+       agent's own pending agent-raised approvals already carries, not
+       replaced here → 409 `already_pending`; a question, an alert, an empty
+       proposal and a gate raise are neither refused nor counted), depth cap
+       and insert in one per-agent serialized step (`queue_full` → 429); the
+       guard sits inside that lock so two concurrent raises with one
+       proposal have exactly one winner. The depth cap counts the agent's own asks
        and applies to them only — gate rows are neither counted nor capped
        here (#751, same reason as step 3). With `replaces`, the predecessor
        is ended in that same transaction by compare-and-set (#3247): if it
@@ -495,8 +497,6 @@ def raise_ask(
     if norm["proposal"] is not None and predecessor is None:
         _refuse_unlinked_reask(agent_name, norm["proposal"], raised_by)
     target = _replace_target(agent_name, norm["replaces"])
-    if raised_by == "agent" and norm["proposal"] is not None:
-        _refuse_already_pending(agent_name, norm["proposal"], target)
     if named:
         people, addressee, resolved = [named], named, True
     else:
@@ -543,7 +543,19 @@ def raise_ask(
         # about it (its flood alarm above all).
         exclude_request_id_prefixes=oqs._RESERVED_ID_PREFIXES,
         replaces=target["id"] if target else None,
+        # T8 (#3247): an AGENT's approval with a non-empty proposal only. A
+        # question or an alert is never guarded; a missing or empty proposal is
+        # not a proposal. A gate raise is never refused by it and never counted
+        # by it (trinity-enterprise#751 raises one approval per occurrence).
+        guard_pending_proposal=(raised_by == "agent" and norm["type"] == "approval"
+                                and bool(norm["proposal"])),
     )
+    if out["outcome"] == "already_pending":
+        raise AskRejected(
+            409, "already_pending",
+            "You already asked this and it is still pending; replace it (set replaces to "
+            "that ask's request_id) or wait for the answer.",
+            request_id=out["request_id"])
     if out["outcome"] == "queue_full":
         raise AskRejected(429, "queue_full",
                           "You already have the maximum number of open asks; wait for one to end.",
@@ -904,31 +916,6 @@ def _replace_target(agent_name: str, request_id: Optional[str]) -> Optional[Dict
     return row
 
 
-def _refuse_already_pending(agent_name: str, proposal: Dict[str, Any],
-                            target: Optional[Dict[str, Any]]) -> None:
-    """T8 (#3247): the exact action is already being asked about. Refused unless
-    this ask replaces THAT ask — so the pile-up the pending line warns about is
-    stopped even when the agent never reads the line.
-
-    The AGENT's own asks only, on both sides: the caller runs this for an
-    agent-raised ask alone, and it compares against the pending asks the same
-    agent raised itself (`raised_by == 'agent'` on the column). A gate raise is
-    never refused by it and never counted by it — the gate deliberately raises
-    one approval per occurrence with the same proposal (trinity-enterprise#751)
-    — and neither is a platform row filed under the agent's name."""
-    wanted = _canon(proposal)
-    for prior in db.list_pending_operator_queue_proposals(agent_name, _REASK_SCAN, raised_by="agent"):
-        if _canon(prior["proposal"]) != wanted:
-            continue
-        if target is not None and prior["id"] == target["id"]:
-            continue
-        raise AskRejected(
-            409, "already_pending",
-            "You already asked this and it is still pending; replace it (set replaces to "
-            "that ask's request_id) or wait for the answer.",
-            request_id=prior["request_id"])
-
-
 def _refuse_ended_predecessor(pred: Optional[Dict[str, Any]]) -> None:
     """The predecessor ended before the replace could (#3247): one 409 that
     names its real state — ids and enums only, never a person's words."""
@@ -943,12 +930,20 @@ def _refuse_ended_predecessor(pred: Optional[Dict[str, Any]]) -> None:
                    "with new information.")
     elif pred.get("disposed_by") == "agent" and successor:
         message = f"That ask was already replaced by {successor}."
-    else:
+    elif pred.get("disposed_by") == "platform":
+        message = "The platform ended that ask; do not re-raise it unchanged."
+    elif pred.get("disposed_by") == "person":
         message = "An operator cancelled that ask; do not re-raise it unchanged."
+    else:
+        message = "That ask was cancelled; do not re-raise it unchanged."
+    # `disposed_by` is an enum (person | timeout | platform | agent) — who ended
+    # it, never who they are; the message is branched on it so a platform
+    # ending (#3246) is not called an operator's.
     raise AskRejected(409, "replaces_ended", message,
                       replaces=pred.get("request_id"),
                       ask_status=pred.get("status"),
                       disposition=pred.get("disposition"),
+                      disposed_by=pred.get("disposed_by"),
                       disposed_at=pred.get("disposed_at"),
                       replaced_by=successor)
 

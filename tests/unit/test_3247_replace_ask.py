@@ -117,14 +117,14 @@ def _iso(delta_minutes=0):
     )
 
 
-def _native(real_db, agent, rid, *, replaces=None, max_pending=10, proposal=None, **over):
+def _native(real_db, agent, rid, *, replaces=None, max_pending=10, proposal=None, guard=False, **over):
     item = {"id": rid, "type": "approval", "priority": "high", "title": f"Ask {rid}",
             "question": "Release 500 USDC?", "options": ["approve", "reject"]}
     item.update(over)
     return real_db.create_native_operator_queue_item(
         agent, item, max_pending=max_pending, channel="mcp", raised_by="agent",
         to_role=None, resolved_to=None, proposal=proposal, supersedes_expired=None,
-        replaces=replaces,
+        replaces=replaces, guard_pending_proposal=guard,
     )
 
 
@@ -517,7 +517,8 @@ class TestSinkReplace:
             _raise(ask, self.AGENT, _body("sa-new", replaces="sa-old"))
         extra = info.value.extra
         assert extra == {"replaces": "sa-old", "ask_status": "responded", "disposition": "answered",
-                         "disposed_at": extra["disposed_at"], "replaced_by": None}
+                         "disposed_by": "person", "disposed_at": extra["disposed_at"],
+                         "replaced_by": None}
         assert "secret" not in str(info.value.extra) and "secret" not in info.value.message
         assert "get_my_ask" in info.value.message
         assert ask.db.get_operator_queue_item_for_agent_by_request_id(self.AGENT, "sa-new") is None
@@ -528,6 +529,26 @@ class TestSinkReplace:
         with _Rejected(ask.svc, 409, "replaces_ended") as info:
             _raise(ask, self.AGENT, _body("sc-new", replaces="sc-old"))
         assert info.value.extra["disposition"] == "cancelled" and "operator" in info.value.message
+        assert info.value.extra["disposed_by"] == "person"
+
+    @pytest.mark.parametrize("by, word, not_word", [
+        ("platform", "platform", "operator"),   # I4: a platform ending is not an operator's
+        (None, "cancelled", "operator"),        # a pre-ledger row: no author is claimed
+    ])
+    def test_a_non_person_cancel_is_not_called_an_operators(self, ask, by, word, not_word):
+        from sqlalchemy import update
+        from db.engine import get_engine
+        from db.tables import operator_queue
+        rid = f"sp-old-{by}"
+        old = _raise(ask, self.AGENT, _body(rid))
+        with get_engine().begin() as conn:
+            conn.execute(update(operator_queue).where(operator_queue.c.id == old["id"]).values(
+                status="cancelled", disposition="cancelled", disposed_by=by,
+                disposed_at="2026-10-05T10:00:00Z"))
+        with _Rejected(ask.svc, 409, "replaces_ended") as info:
+            _raise(ask, self.AGENT, _body(f"sp-new-{by}", replaces=rid))
+        assert info.value.extra["disposed_by"] == by
+        assert word in info.value.message and not_word not in info.value.message
 
     def test_an_already_replaced_predecessor_names_its_successor(self, ask):
         _raise(ask, self.AGENT, _body("sx-old"))
@@ -665,6 +686,55 @@ class TestAlreadyPending:
         assert info.value.extra == {"request_id": "t8-k3"}           # names the agent's own, never a gate's
         assert _gate("gate-t8-k5")["status"] == "created"           # a pending agent ask never refuses a gate raise
 
+    def test_a_question_an_alert_or_an_empty_proposal_is_never_guarded(self, ask):
+        """I3: an approval with a non-empty proposal is the only guarded ask."""
+        P = {"pay": 7, "to": "v"}
+        _raise(ask, self.AGENT, _body("t8-m1", proposal=P))
+        assert _raise(ask, self.AGENT, _body("t8-m2", type="question", proposal=P))["status"] == "created"
+        assert _raise(ask, self.AGENT, _body("t8-m3", type="alert", options=None, proposal=P))["status"] == "created"
+        assert _raise(ask, self.AGENT, _body("t8-m4", proposal={}))["status"] == "created"
+        assert _raise(ask, self.AGENT, _body("t8-m5", proposal={}))["status"] == "created"
+        # a pending question carrying P does not block an approval for P once m1 is gone
+        ask.db.cancel_operator_queue_item(
+            ask.db.get_operator_queue_item_for_agent_by_request_id(self.AGENT, "t8-m1")["id"],
+            disposed_by_email="op@example.com")
+        assert _raise(ask, self.AGENT, _body("t8-m6", proposal=P))["status"] == "created"
+
+    def test_two_concurrent_raises_with_one_proposal_have_exactly_one_winner(self, real_db):
+        """I2: the guard runs inside the per-agent lock, with the count and the
+        insert — the second raise sees the first's row, whichever started first."""
+        import threading
+        agent = "agent-3247-t8-race"
+        for n in range(6):
+            P = {"pay": n, "to": "race"}
+            results = {}
+            go = threading.Barrier(2)
+
+            def run(tag):
+                go.wait()
+                results[tag] = _native(real_db, agent, f"t8r-{n}-{tag}", proposal=P, guard=True)
+
+            ts = [threading.Thread(target=run, args=("a",)), threading.Thread(target=run, args=("b",))]
+            [t.start() for t in ts]
+            [t.join() for t in ts]
+            outcomes = sorted(r["outcome"] for r in results.values())
+            assert outcomes == ["already_pending", "created"], outcomes
+            winner = next(t for t, r in results.items() if r["outcome"] == "created")
+            loser = next(r for r in results.values() if r["outcome"] == "already_pending")
+            assert loser["request_id"] == f"t8r-{n}-{winner}" and loser["row"] is None
+            assert real_db.get_operator_queue_item_for_agent_by_request_id(
+                agent, f"t8r-{n}-{'b' if winner == 'a' else 'a'}") is None
+
+    def test_a_refused_duplicate_rolls_a_replace_back(self, real_db):
+        """The guard sits after the CAS: refusing e for duplicating c must leave d pending."""
+        agent = "agent-3247-t8-rb"
+        _native(real_db, agent, "rb-c", proposal={"pay": 1}, guard=True)
+        d = _native(real_db, agent, "rb-d", proposal={"pay": 2}, guard=True)["row"]
+        out = _native(real_db, agent, "rb-e", proposal={"pay": 1}, replaces=d["id"], guard=True)
+        assert out["outcome"] == "already_pending" and out["request_id"] == "rb-c"
+        still = real_db.get_operator_queue_item(d["id"])
+        assert still["status"] == "pending" and still["replaced_by"] is None
+
 
 # ===========================================================================
 # 4. The pending line in the Execution Context (CP4, T4)
@@ -716,6 +786,28 @@ class TestPendingLine:
         for absent in ("queue-flood", "gate-pl-1", "pl-gone", "pl-other"):
             assert absent not in line, absent
         assert "replaces" in line
+
+    @pytest.mark.parametrize("triggered_by", ["public", "paid", "Public"])
+    def test_an_outside_turn_lists_ids_type_and_age_without_titles(self, real_db, triggered_by):
+        """I1: a turn serving someone other than the owner or an operator never
+        sees the agent's own ask titles — each entry is `request_id (type, age)`."""
+        from services.platform_prompt_service import ExecutionContext, compose_system_prompt
+        self._seed(real_db)
+        line = self._line(compose_system_prompt(
+            ExecutionContext(agent_name=self.AGENT, triggered_by=triggered_by)))
+        assert line is not None
+        assert "pl-old (question, 2d); pl-mid (approval, 3h); pl-new (approval, <1h)" in line
+        for title in ("Which vendor", "Approve payout", "Approve new", '"'):
+            assert title not in line.split("**Pending asks**:")[1], title
+        assert "replaces" in line
+
+    @pytest.mark.parametrize("triggered_by", ["chat", "user", "manual", "schedule", "agent"])
+    def test_an_owner_or_operator_turn_keeps_the_titles(self, real_db, triggered_by):
+        from services.platform_prompt_service import ExecutionContext, compose_system_prompt
+        self._seed(real_db)
+        line = self._line(compose_system_prompt(
+            ExecutionContext(agent_name=self.AGENT, triggered_by=triggered_by)))
+        assert 'pl-mid (approval, 3h) "Approve payout"' in line
 
     def test_the_line_is_drawn_from_the_budget_predicate(self, real_db):
         from services import platform_prompt_service as pps

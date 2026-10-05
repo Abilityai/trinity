@@ -1162,8 +1162,10 @@ PERSON_SCOPES = frozenset({None, "user"})
 def is_person_principal(current_user: User) -> bool:
     """Is this caller a PERSON — the only author an ask's ending may record?
 
-    The endings ledger records `disposed_by` as an enum of two, `person` or
-    `timeout` (trinity-enterprise#611). An agent-scoped key resolves to its OWNER
+    The endings ledger records `disposed_by` as an enum — `person` or `timeout`
+    (trinity-enterprise#611), `platform` (#3130) and `agent` (#3247: an agent
+    replacing its OWN pending ask, the one ending an agent may author). This
+    gate decides who may record `person`. An agent-scoped key resolves to its OWNER
     carrying the owner's role, so before this an agent could answer or cancel any
     ask its owner could reach — its own approval included — and the row recorded
     the owner. Recording that as `person` would make the ledger lie.

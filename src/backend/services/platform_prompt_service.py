@@ -48,6 +48,11 @@ ENDED_ASKS_WINDOW_HOURS = 24
 # scheduled run that cannot see them re-asks what it already asked.
 MAX_PENDING_ASKS = 8
 MAX_PENDING_TITLE_LEN = 48
+# The trigger labels of a turn that serves someone OTHER than the agent's owner
+# or an operator (an anonymous public link, a Workspace client, an x402 paid
+# turn). The pending line shows the agent's own ask titles only on the other
+# turns; here each entry is `request_id (type, age)` and nothing more.
+_OUTSIDE_AUDIENCES = frozenset({"public", "paid"})
 
 # Static platform instructions — moved from agent-side trinity.py
 PLATFORM_INSTRUCTIONS = """# Trinity Platform Instructions
@@ -850,10 +855,13 @@ def _coarse_age(created_at: Optional[str], now: Optional[datetime] = None) -> Op
     return f"{hours // 24}d"
 
 
-def _render_pending_asks(ctx: ExecutionContext) -> Optional[str]:
+def _render_pending_asks(ctx: ExecutionContext, *, titles: bool = True) -> Optional[str]:
     """The `Pending asks` line body (#3247): `request_id (type, age) "title"`,
     oldest first, bounded, the rest as a count. The title is the agent's own,
-    sanitized and cut — never a question or anything a person wrote."""
+    sanitized and cut — never a question or anything a person wrote — and is
+    rendered only when `titles` is set: the caller clears it on a turn that
+    serves someone other than the owner or an operator (`_OUTSIDE_AUDIENCES`),
+    so each entry is then `request_id (type, age)` alone."""
     if not ctx.pending_asks:
         return None
     entries: List[str] = []
@@ -866,7 +874,7 @@ def _render_pending_asks(ctx: ExecutionContext) -> Optional[str]:
             _coarse_age(ask.get("created_at")),
         ) if x)
         entry = f"{rid} ({meta})" if meta else rid
-        title = _sanitize_field(ask.get("title"), max_len=MAX_PENDING_TITLE_LEN)
+        title = _sanitize_field(ask.get("title"), max_len=MAX_PENDING_TITLE_LEN) if titles else None
         if title:
             entry += f' "{title.replace(chr(34), chr(39))}"'
         entries.append(entry)
@@ -997,7 +1005,10 @@ def build_execution_context(ctx: ExecutionContext) -> str:
         if collaborators:
             lines.append(f"- **Collaborators**: {collaborators}")
 
-        pending_asks = _render_pending_asks(ctx)
+        # The one place the turn's audience is known: titles only when the
+        # turn serves the owner or an operator, never a public or paid caller.
+        outside = (ctx.triggered_by or "").strip().lower() in _OUTSIDE_AUDIENCES
+        pending_asks = _render_pending_asks(ctx, titles=not outside)
         if pending_asks:
             lines.append(f"- **Pending asks**: {pending_asks}")
 

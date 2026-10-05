@@ -71,6 +71,15 @@ def _own_pending_conds(agent_name: str, exclude_request_id_prefixes=None) -> lis
 _EXPIRY_BATCH_MAX = 500
 
 
+# #3247 T8: how many of the agent's pending proposals the duplicate guard reads.
+_PENDING_PROPOSAL_SCAN = 200
+
+
+def _canon_json(value) -> str:
+    """Key-order- and whitespace-insensitive form of a stored proposal."""
+    return json.dumps(value, sort_keys=True, separators=(",", ":"))
+
+
 class _RollBack(Exception):
     """Unwind a native create's transaction and answer with `outcome` (#3247).
 
@@ -318,6 +327,7 @@ class OperatorQueueOperations:
         supersedes_expired: Optional[str],
         exclude_request_id_prefixes=None,
         replaces: Optional[str] = None,
+        guard_pending_proposal: bool = False,
     ) -> Dict:
         """Create an agent-raised ask, atomically per agent (trinity-enterprise#611).
 
@@ -371,6 +381,16 @@ class OperatorQueueOperations:
         on PostgreSQL), the WHOLE transaction rolls back: a half-replace — the
         predecessor ended, no successor shown — must never commit. `created`
         then also carries `predecessor` (post-CAS row).
+
+        `guard_pending_proposal` (#3247 T8) — refuse the ask when one of this
+        agent's own pending agent-raised approvals already carries the same
+        canonical `proposal`: outcome `already_pending` with that ask's
+        `request_id`, nothing written. Checked INSIDE this lock, after the
+        replace's compare-and-set (the ask it replaces is no longer pending on
+        this connection, so it is not a duplicate of itself) and before the
+        count, so two concurrent raises with one proposal have exactly one
+        winner; a refusal rolls the CAS back with everything else. The caller
+        decides when it applies (an agent's approval with a non-empty proposal).
         """
         request_id, values = self._insert_values(
             agent_name, item, channel=channel, raised_by=raised_by,
@@ -401,6 +421,10 @@ class OperatorQueueOperations:
                     if refusal is not None:
                         # commits: the only write on this path is the expire-now
                         return {**refusal, "row": None, "predecessor": predecessor}
+                if guard_pending_proposal and proposal is not None:
+                    dup = self._pending_proposal_match(conn, agent_name, proposal)
+                    if dup is not None:
+                        raise _RollBack({"outcome": "already_pending", "row": None, "request_id": dup})
                 if max_pending is not None:
                     pending = conn.execute(
                         select(func.count()).where(and_(
@@ -486,6 +510,36 @@ class OperatorQueueOperations:
             # pending but not this agent's own agent-raised ask: the belt held
             return self._row_to_item(row), {"outcome": "replaces_not_own"}
         return self._row_to_item(row), {"outcome": "replaces_ended", "expired_now": False}
+
+    @staticmethod
+    def _pending_proposal_match(conn, agent_name: str, proposal: Dict) -> Optional[str]:
+        """The `request_id` of this agent's own pending agent-raised APPROVAL that
+        carries `proposal` (canonical JSON), newest first, or None (#3247 T8).
+        Read on the create's connection, under its lock. An empty proposal is
+        not a proposal: `{}` never matches and is never matched."""
+        if not proposal:
+            return None
+        wanted = _canon_json(proposal)
+        rows = conn.execute(
+            select(operator_queue.c.request_id, operator_queue.c.proposal)
+            .where(and_(
+                operator_queue.c.agent_name == agent_name,
+                operator_queue.c.status == "pending",
+                operator_queue.c.raised_by == "agent",
+                operator_queue.c.type == "approval",
+                operator_queue.c.proposal.isnot(None),
+            ))
+            .order_by(operator_queue.c.created_at.desc())
+            .limit(_PENDING_PROPOSAL_SCAN)
+        ).all()
+        for request_id, stored in rows:
+            try:
+                parsed = json.loads(stored)
+            except (TypeError, ValueError):
+                continue
+            if parsed and _canon_json(parsed) == wanted:
+                return request_id
+        return None
 
     @staticmethod
     def _lock_agent_for_create(conn, agent_name: str) -> None:

@@ -3782,7 +3782,7 @@ class DatabaseManager:
     def create_native_operator_queue_item(self, agent_name, item, *, max_pending, channel,
                                           raised_by, to_role, resolved_to, proposal,
                                           supersedes_expired, exclude_request_id_prefixes=None,
-                                          replaces=None):
+                                          replaces=None, guard_pending_proposal=False):
         # trinity-enterprise#611: an agent-raised ask — replay, depth cap and insert
         # in one per-agent serialized step. #3130: the prefixes leave platform
         # rows out of the depth cap. #3247: `replaces` ends one of the agent's
@@ -3793,6 +3793,7 @@ class DatabaseManager:
             proposal=proposal, supersedes_expired=supersedes_expired,
             exclude_request_id_prefixes=exclude_request_id_prefixes,
             replaces=replaces,
+            guard_pending_proposal=guard_pending_proposal,
         )
 
     def prune_operator_queue_terminal_items(self, retention_days, responded_retention_days, limit=5000):
