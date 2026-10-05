@@ -1286,21 +1286,34 @@ class SchedulerService:
             # the execution (e.g., marked it as 'success') before the scheduler
             # caught a connection error or polling timeout.
             current = self.db.get_execution(execution.id)
-            if current and current.status != ExecutionStatus.RUNNING:
+            if current and current.status not in _NON_TERMINAL_POLL_STATES:
                 # Backend already finalized — don't overwrite with 'failed'
                 logger.info(
                     f"Schedule {schedule.name} execution {execution.id} already finalized "
                     f"as '{current.status}' — not overwriting with 'failed'"
                 )
                 actual_status = current.status
-            else:
-                # Genuinely failed — mark as failed
-                self.db.update_execution_status(
-                    execution_id=execution.id,
-                    status=ExecutionStatus.FAILED,
-                    error=error_msg
-                )
+            elif current is None or self.db.update_execution_status(
+                execution_id=execution.id,
+                status=ExecutionStatus.FAILED,
+                error=error_msg,
+                expected_status=ExecutionStatus.RUNNING,
+                require_unclaimed=True,
+            ):
+                # Genuinely failed — nothing else owns the row
                 actual_status = ExecutionStatus.FAILED
+            else:
+                # #2514: the row is `queued` or claimed — the backend handed it
+                # to the durable queue before the dispatch call failed, and a
+                # pull worker owns it (or it finished between the read and the
+                # write). Poll it to its real terminal, which publishes the
+                # completion and runs retry/validation.
+                logger.info(
+                    f"Schedule {schedule.name} execution {execution.id} is owned by "
+                    f"the pull queue ('{current.status}') — polling for its terminal"
+                )
+                self._spawn_poll(execution.id, schedule.timeout_seconds, schedule.agent_name)
+                return
 
             await self._publish_event({
                 "type": "schedule_execution_completed",
@@ -1490,16 +1503,7 @@ class SchedulerService:
                 f"Backend accepted async execution for {agent_name}, "
                 f"execution_id={execution_id}, spawning background poll task"
             )
-            task = asyncio.create_task(
-                self._poll_and_finalize(
-                    execution_id=execution_id,
-                    timeout_seconds=timeout_seconds,
-                    agent_name=agent_name,
-                )
-            )
-            # Track task for graceful shutdown
-            self._active_poll_tasks.add(task)
-            task.add_done_callback(self._active_poll_tasks.discard)
+            self._spawn_poll(execution_id, timeout_seconds, agent_name)
 
             # Return immediately with "dispatched" status
             return {
@@ -1511,6 +1515,18 @@ class SchedulerService:
         # Backward compatibility: backend returned a sync result (old backend
         # without async_mode support). Use the result directly.
         return result
+
+    def _spawn_poll(self, execution_id: str, timeout_seconds: Optional[int], agent_name: str):
+        """Start `_poll_and_finalize` in the background, tracked for graceful shutdown."""
+        task = asyncio.create_task(
+            self._poll_and_finalize(
+                execution_id=execution_id,
+                timeout_seconds=timeout_seconds,
+                agent_name=agent_name,
+            )
+        )
+        self._active_poll_tasks.add(task)
+        task.add_done_callback(self._active_poll_tasks.discard)
 
     async def _poll_execution_completion(
         self,
