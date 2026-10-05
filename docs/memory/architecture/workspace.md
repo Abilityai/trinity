@@ -999,9 +999,20 @@ dropped. Both read one payload through `composables/usePortalAgentPage.js`.
 Canvas, Files and recent work are **not** duplicated here — they have been rail tabs since
 ent#475/#525. `portalUtils.js::agentLanding` is the one rule for which chat you land in,
 and the `?agent=` deep link's `resolveAgentLanding` defers to it so the two entry points
-cannot disagree. Since **ent#784** that rule answers "a new, empty chat" (it replaced
-ent#523's most-recently-active `landingThread`); only a validated `lastOpenSessionId`
-— the ent#621 seam, checked against the principal's own thread list — overrides it.
+cannot disagree. Since **ent#784** that rule replaced ent#523's most-recently-active
+`landingThread` with a **precedence**, settled by the operator's 2026-10-05 ruling: a link
+naming a CHAT wins (and never reaches the rule); then a validated `lastOpenSessionId` — the
+ent#621 seam, checked against the principal's own thread list; then the agent's chat
+holding an unsent **draft**, newest `updatedAt` first, where a `new:<agent>` winner lands on
+a new chat (that key IS where the words are) and a thread winner opens that thread; then
+the agent's existing **empty** chat, reused; then a new, empty chat. The drafts arm reads
+`portalDrafts.js::isDraftedThread` — the SAME predicate `agentsWithDrafts` lights the
+sidebar's agent-row mark from, shared rather than copied so "the mark means click here to
+continue" cannot drift (a room and an **archived** thread are excluded on both sides). The
+drafts map is passed IN by each door (`landOnAgent`, `resolveAgentLanding`), never read
+inside the rule, so it stays pure; `?new=1` outranks the whole precedence. Nothing in it
+mints a row: the drafted-`new:` and fresh arms are both `sessionId: null`, and the empty
+arm opens a row that already exists.
 `landOnAgent` is therefore synchronous, keeps `/workspace/a/:name`, and guards the
 call before writing `activeAgentName`; the composer's mount focus is gated by a
 `focusOnMount` mode (`always` for a gesture, `fine-pointer` for a landing) so an

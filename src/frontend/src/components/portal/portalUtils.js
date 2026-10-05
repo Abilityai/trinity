@@ -1,5 +1,12 @@
 // Shared helpers for the client-portal chat shell (#138).
 
+// ent#784: the landing rule's drafts arm reads the drafts module's predicate
+// rather than a second copy of it. `portalDrafts.js` imports nothing, so this
+// edge adds no cycle — and it must stay that way: `portalInbox.js` already
+// imports THIS file, so an import of `portalInbox` from either of these two
+// would close one.
+import { draftedLandingFor } from './portalDrafts'
+
 // Deterministic per-agent color — used for the avatar tint and the small thread
 // color dots in the sidebar so a thread visually ties to its agent.
 export function agentColor(name) {
@@ -565,17 +572,18 @@ function isTransportError(err) {
     || code === 'ECONNABORTED' || code === 'ERR_NETWORK' || code === 'ETIMEDOUT'
 }
 
-export function resolveAgentLanding({ agent, forceNew = false, agents = [], threads = [] } = {}) {
+export function resolveAgentLanding({ agent, forceNew = false, agents = [], threads = [], drafts = null } = {}) {
   if (!agent || typeof agent !== 'string') return null
   if (!Array.isArray(agents) || !agents.some((a) => a && a.name === agent)) return null
   // ent#784: the same rule the sidebar's agent row uses (`agentLanding`), not a
   // second one — a deep link and a sidebar click must land in the same place.
-  // `forceNew` is kept so existing `?new=1` links keep working, but it is now
-  // redundant: the default IS a new chat. This door passes no
-  // `lastOpenSessionId` (a deep link carries no session memory), so it always
-  // resolves to a fresh chat.
+  // `forceNew` is the one way past the whole precedence: `?new=1` says "a fresh
+  // chat" in so many words, so it outranks a waiting draft and an empty chat
+  // alike. Without it this door passes no `lastOpenSessionId` (a deep link
+  // carries no session memory) but DOES pass the drafts map, so a deep link and
+  // a sidebar click land on the same words.
   if (forceNew) return { agentName: agent, sessionId: null }
-  return agentLanding({ agentName: agent, threads })
+  return agentLanding({ agentName: agent, threads, drafts })
 }
 
 // ent#358: the Workspace is now the ONLY continuous-conversation surface, so a
@@ -1751,18 +1759,36 @@ export function feedbackAcknowledgement(captureFeedback) {
 // deep link via `resolveAgentLanding`). The gesture doors — New chat, the agent
 // picker, the switch-agent key — do not call this: they already mean "fresh".
 //
-// ent#784 reverses ent#523's rule. The default is a NEW, empty chat
+// ent#784 reverses ent#523's rule: the default is a NEW, empty chat
 // (`sessionId: null`), because most visits to an agent start new work and
-// resuming cost two actions every time. Nothing is minted server-side: the row
-// is born on the first send (`newThread`, ent#451), so landing repeatedly
-// accumulates no empty chats.
+// resuming cost two actions every time.
 //
-// The ONE exception is `lastOpenSessionId` (the seam ent#621's agent-switch
-// keys will pass). It is honoured only when it still names a live, unarchived
-// chat of THIS agent in `threads` — the principal's own list — so a stale or
-// forged id falls back to the default rather than landing somewhere it should
-// not (the #3140 class).
-export function agentLanding({ agentName, threads = [], lastOpenSessionId = null } = {}) {
+// The operator's 2026-10-05 ruling on ent#784 settles the precedence, and
+// these are the arms, in order:
+//
+//   1. a link that names a CHAT opens that chat — not this function's job, and
+//      unchanged (the `/workspace/c/:id` route never reaches here);
+//   2. `lastOpenSessionId`, the seam ent#621's agent-switch keys pass. Honoured
+//      only when it still names a live, unarchived chat of THIS agent in
+//      `threads` — the principal's own list — so a stale or forged id falls
+//      through rather than landing somewhere it should not (the #3140 class);
+//   3. the agent's chat holding an unsent DRAFT, newest edit first
+//      (`draftedLandingFor`). A draft mark on the agent's row has to mean
+//      "click here to continue", so this and the mark share one predicate
+//      rather than two rules that agree today;
+//   4. the agent's existing EMPTY chat, reused rather than adding another one;
+//   5. a new chat.
+//
+// Arms 3 and 5 mint nothing server-side: a drafted `new:` chat and a fresh one
+// are both `sessionId: null`, and the row is born on the first send
+// (`newThread`, ent#451). Arm 4 opens a row that already exists. So landing
+// repeatedly, however often, accumulates no empty chats.
+//
+// `drafts` is the drafts store's map (`{ key: { text, updatedAt } }`) passed in
+// by the caller, never read from the store here: this stays a pure function
+// every door can test without mounting the shell. Omitting it simply disables
+// arm 3 — the old behaviour — rather than throwing.
+export function agentLanding({ agentName, threads = [], lastOpenSessionId = null, drafts = null } = {}) {
   if (!agentName || typeof agentName !== 'string') return null
   if (lastOpenSessionId) {
     const row = (Array.isArray(threads) ? threads : []).find((t) => t && !t.is_room
@@ -1770,6 +1796,8 @@ export function agentLanding({ agentName, threads = [], lastOpenSessionId = null
       && (t.id || t.session_id) === lastOpenSessionId)
     if (row) return { agentName, sessionId: lastOpenSessionId }
   }
+  const drafted = draftedLandingFor({ agentName, threads, drafts })
+  if (drafted) return { agentName, sessionId: drafted.sessionId }
   return { agentName, sessionId: null }
 }
 

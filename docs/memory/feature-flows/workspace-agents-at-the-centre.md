@@ -129,8 +129,10 @@ it attaches to the chat of the turn that raised it — see
 await and the replace is awaited inside the `try`, so no conversation flashes). Every
 explicit target still wins, and bare `/workspace` keeps its meaning as the new-chat
 stage `newChatWithAgent` → `escapeStage` lands on. Clicking an agent opens a NEW chat
-with it (ent#784) and STAYS on `/workspace/a/:name`, which says exactly that — so a
-reload or a copied link keeps the agent. An addressed report with no chat of its
+with it (ent#784) — unless a draft or an existing empty chat is waiting, per the
+precedence above — and STAYS on `/workspace/a/:name`, which says exactly that, so a
+reload or a copied link keeps the agent. (A drafted THREAD is the one winner that
+leaves the URL: it opens that chat, at `/workspace/c/:id`.) An addressed report with no chat of its
 addressee joins the agent-initiated things that land in Main, at publish time
 (`report_service.resolve_report_session`).
 
@@ -201,7 +203,7 @@ rule is a plain function (the ent#392 precedent):
 | Function | Rule |
 |---|---|
 | `agentChatTabs` | Main first, then recency; an archive stays a tab (ruled “becomes the newest tab”); Main is labelled by its **role** |
-| `agentLanding` | **a new, empty chat** (ent#784, replacing ent#523's `landingThread`); the one exception is a `lastOpenSessionId`, honoured only when it still names a live, unarchived chat of this agent |
+| `agentLanding` | a **precedence** (ent#784, replacing ent#523's `landingThread`; operator ruling 2026-10-05): a validated `lastOpenSessionId` (live, unarchived, this agent's), then the chat holding an unsent **draft** (newest `updatedAt`; a `new:<agent>` winner = a new chat), then the agent's existing **empty** chat, then a new, empty chat |
 | `resolveAgentLanding` | the `?agent=` deep link, delegating to `agentLanding` so there is one answer |
 | `orderRosterAgents` | most recent collaboration, then name; `primaryName` is ent#491's seam |
 | `agentPreview` | the newest chat's **title** — the sidebar list carries no message content (#2198), so a body preview would reinstate the N+1 |
@@ -216,9 +218,21 @@ rule is a plain function (the ent#392 precedent):
   ruled it "becomes the newest tab", and hiding what the system line just pointed
   at is exactly where the person looks next — but `agentLanding` never puts you
   in one without asking. Two rules, two questions: where can I go, and where am
-  I put. Since ent#784 the landing answer is "a new chat", so the strip is the
-  ONLY way back into an old one — which is the point: continuity is one click,
-  starting fresh is zero.
+  I put. Since ent#784 the landing answer is a new chat unless something of the
+  person's own is waiting (a draft, or an empty chat already open), so the strip
+  is the ONLY way back into a USED one — which is the point: continuity is one
+  click, starting fresh is zero.
+- **A draft outranks a fresh chat, and shares the mark's predicate.** The
+  2026-10-05 ruling: if a chat with the agent holds unsent words, opening the
+  agent goes THERE, because the mark on the agent's row already promises
+  "click here to continue". So the landing's candidate set and that mark's are
+  one set — `portalDrafts.js::isDraftedThread`, read by both `agentsWithDrafts`
+  and `draftedLandingFor` — and a room and an archived thread are excluded on
+  both sides rather than on one. Several drafts resolve by newest `updatedAt`,
+  with the unsaved `new:<agent>` chat weighed on the same clock; a `new:`
+  winner lands on a new chat, which is where those words already live. Each
+  door passes the drafts map IN (`landOnAgent`, `resolveAgentLanding`), so the
+  rule stays pure and testable without the shell.
 - **Two doors RESOLVE, the rest ASSERT.** Only `landOnAgent` (the sidebar/rail
   row, back/forward, a typed URL) and `resolveAgentLanding` (`?agent=`) ask
   `agentLanding` where to land. New chat, ⌘J, the agent picker and switch-agent
@@ -461,6 +475,15 @@ render** (ent#468 Option A), recorded on the issue.
 - `src/frontend/tests/unit/portalAgentsAtCentre.spec.js` — every pure rule
   above, the ent#524 drop/batch rules, and the source guards that no unit test
   can reach (which surface mounts what, no `[0]` left anywhere)
+- `src/frontend/tests/unit/portalDraftLanding.spec.js` — ent#784's drafts arm as
+  a pure rule: each precedence arm, newest-edit-wins both ways round, the tie,
+  the room and archived exclusions, and the property that every row the sidebar
+  MARKS is a landing candidate (the shared-predicate guarantee)
+- `src/frontend/tests/unit/portalDraftLanding.mount.spec.js` — the same two
+  flows `e2e/workspace-drafts.spec.js:92`/`:116` walk, at the shell's seam: the
+  shell must hand the rule its drafts map and then open the chat it names. Red
+  at `c8af3d70` on exactly the e2e's symptom (`sessionId: null` where the draft
+  was), which is why the pure specs alone were not enough
 - Re-pointed rather than deleted when their subject moved: `portalRatings`,
   `portalReportsRendering`, `portalAvailabilityChip`, `portalAskSingleSource`,
   `portalAgentPageUx`, `portalRail`, `portalLoadingTreatment`,

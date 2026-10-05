@@ -237,9 +237,13 @@
              agent — it resolves to the chat you were last in and renders the
              conversation, with the agent's numbers in the band above it and its
              context one click away in Agent details. The URL is kept (every
-             link to it still works); `landOnAgent` replaces it with the
-             thread's own URL as soon as the list is in hand. The skeleton below
-             covers that beat, so nothing renders here.
+             link to it still works). ent#784 then made the landing a
+             PRECEDENCE — a validated `lastOpenSessionId`, else the chat holding
+             an unsent draft (newest first), else the agent's existing empty
+             chat, else a new one — and only the two arms that name a THREAD
+             replace this URL with the thread's own (via `openThread`); a new
+             chat stays here, which is what makes it reloadable. The skeleton
+             below covers that beat, so nothing renders here.
 
              ent#360's reasoning is not reverted — an agent still has a home with
              its history, what it can do and a place to ask you something. It is
@@ -1779,10 +1783,28 @@ function landOnAgent(name) {
   // first; back/forward and a typed `/workspace/a/:name` come through here, and
   // did not. Ask before touching anything.
   if (guardLeaveCall(() => landOnAgent(name))) return
-  const landing = agentLanding({ agentName: name, threads: threads.value })
+  // ent#784: landing is not a gesture, so the composer focuses only where that
+  // cannot summon an on-screen keyboard (see `focusOnMount` below). Set BEFORE
+  // the branch, not only on the new-chat path: a landing on a drafted chat is
+  // the same kind of arrival, and `openThread` does not touch this ref — so
+  // leaving a gesture's `always` standing would make the next landing focus on
+  // a touch device (the T3(b) rule, one door at a time).
+  composerFocusMode.value = 'fine-pointer'
+  const landing = agentLanding({
+    agentName: name,
+    threads: threads.value,
+    // The drafts arm's candidates. Passed in rather than read inside the rule,
+    // so `agentLanding` stays a pure function both doors can be tested through.
+    drafts: drafts.drafts,
+  })
   if (!landing) return
   if (landing.sessionId) {
     const row = threads.value.find((t) => (t.id || t.session_id) === landing.sessionId)
+    // `openThread` remounts the conversation on the landed session, which is
+    // what restores the draft: the fresh instance's `useComposerDraft` reads
+    // `thread:<id>` at setup and `PortalConversation`'s mount then puts the
+    // caret at its end, on a fine pointer only — the same rule as above, shared
+    // through `shouldAutoFocusComposer` rather than re-decided here.
     if (row) { openThread(row); return }
   }
   // Idempotent: the watcher fires on the route param AND on the thread list
@@ -1793,9 +1815,6 @@ function landOnAgent(name) {
   unreachableAgent.value = null
   activeAgentName.value = name
   activeRoomId.value = null
-  // ent#784: landing is not a gesture, so the composer focuses only where that
-  // cannot summon an on-screen keyboard (see `focusOnMount` below).
-  composerFocusMode.value = 'fine-pointer'
   startingNewChat.value = true
   pendingSession.value = null; prefill.value = ''; convGen.value++
 }
@@ -2396,6 +2415,9 @@ function resolveAgentQuery() {
     forceNew,
     agents: store.agents,
     threads: threads.value,
+    // ent#784: the same drafts map `landOnAgent` passes — ONE rule for every
+    // door, so a `?agent=` link and a sidebar click land on the same chat.
+    drafts: drafts.drafts,
   })
   if (!landing) {
     // The link named an agent this caller cannot reach (un-shared since the URL
