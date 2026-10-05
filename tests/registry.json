@@ -1,6 +1,17 @@
 {
   "test_files": [
     {
+      "file": "unit/test_3246_platform_alerts_leaf.py",
+      "feature": "#3246",
+      "added": "2026-10-05",
+      "categories": [
+        "backend",
+        "operator-queue",
+        "unit"
+      ],
+      "description": "#3246 C1: the platform-alert leaf (services/platform_alerts.py) — loads by path in a bare interpreter (stdlib-only, so both migration tracks can import it); kind registry with lifetime classes (14 d default + env knob, 30 d net, none for the four a person must act on) and the 7-day snooze knob; key belt (id-shaped kept, else sha256[:16]); every legacy id shape mapped to its subject or to 'known kind, no subject', unknown/external prefixes never derived; plan_sweep keeps the newest pending row per (agent, subject), ends the rest, stamps survivors, gives subject-less known kinds a lifetime stamp, stamps person-ended rows inside the snooze window, and is idempotent on its own output. Mutation-checked (survivor rule, sid greediness, snooze window, prefix order). No DB, no Docker."
+    },
+    {
       "file": "unit/test_3237_system_agent_after_setup.py",
       "feature": "#3237",
       "added": "2026-10-06",
@@ -4367,7 +4378,7 @@
         "payments",
         "security"
       ],
-      "description": "The payer\u2192task binding at the layer that implements it (ent#679 I6): `db/nevermined.py::payer_owns_execution` run against a throwaway SQLite carrying the real `nevermined_payment_log`, because every A2A gate test stubs `db.nevermined_payer_owns_execution` and the one new query on the money path \u2014 the one carrying T5's security property \u2014 never executed in CI. Pins that the payer matches their own settled (and settle_failed) task across the facilitator's unstable checksum casing, that another payer / another agent / an unknown execution are all False, that a SQL-shaped wallet is a bound parameter rather than SQL, and that a missing argument fails closed."
+      "description": "The payer→task binding at the layer that implements it (ent#679 I6): `db/nevermined.py::payer_owns_execution` run against a throwaway SQLite carrying the real `nevermined_payment_log`, because every A2A gate test stubs `db.nevermined_payer_owns_execution` and the one new query on the money path — the one carrying T5's security property — never executed in CI. Pins that the payer matches their own settled (and settle_failed) task across the facilitator's unstable checksum casing, that another payer / another agent / an unknown execution are all False, that a SQL-shaped wallet is a bound parameter rather than SQL, and that a missing argument fails closed."
     },
     {
       "file": "unit/test_ent679_paid_turn_service.py",
@@ -4424,7 +4435,7 @@
         "reliability",
         "mcp"
       ],
-      "description": "The delegation contract (ent#568): what a dispatch receipt means and what to do instead of re-sending, taught as ONE text in the platform prompt (\u00a7Agent Collaboration, spliced from DELEGATION_CONTRACT) and, byte-identical, in src/mcp-server/src/delegation_contract.ts, which the chat_with_agent and chat_with_<agent> descriptions carry. Pins: the contract renders once inside \u00a7Agent Collaboration for every runtime with no unspliced __MARKER__ left; it is runtime-neutral (no mcp__trinity__, no heading); the TS array parses strictly as JSON (exactly one anchored declaration) and equals the Python constant, with guard-the-guard cases proving a comment inside the array raises and a one-character edit is seen; the rule sentence fan_out/send_message repeat is the contract's own; every backticked token is classified and proven real -- each tool exists in a non-test MCP module with each named argument in its zod schema, each status is emitted by a pinned DISPATCH-route file (so ask_operator's `replayed` cannot vouch for it), the events are TASK_COMPLETED_EVENT/TASK_FAILED_EVENT; the Codex orientation lists the tools; the contract stays under its 1,650-char budget and \u00a7Agent Collaboration stays shorter than \u00a7Operator Communication (AC4). The MCP half -- published tools/list descriptions under Claude Code's 2,048-char cap, receipt messages -- is src/mcp-server/src/delegation-contract.test.ts. Mutation-proven (splice dropped / Codex name dropped / TS copy drifted each go red). No Docker, no live backend."
+      "description": "The delegation contract (ent#568): what a dispatch receipt means and what to do instead of re-sending, taught as ONE text in the platform prompt (§Agent Collaboration, spliced from DELEGATION_CONTRACT) and, byte-identical, in src/mcp-server/src/delegation_contract.ts, which the chat_with_agent and chat_with_<agent> descriptions carry. Pins: the contract renders once inside §Agent Collaboration for every runtime with no unspliced __MARKER__ left; it is runtime-neutral (no mcp__trinity__, no heading); the TS array parses strictly as JSON (exactly one anchored declaration) and equals the Python constant, with guard-the-guard cases proving a comment inside the array raises and a one-character edit is seen; the rule sentence fan_out/send_message repeat is the contract's own; every backticked token is classified and proven real -- each tool exists in a non-test MCP module with each named argument in its zod schema, each status is emitted by a pinned DISPATCH-route file (so ask_operator's `replayed` cannot vouch for it), the events are TASK_COMPLETED_EVENT/TASK_FAILED_EVENT; the Codex orientation lists the tools; the contract stays under its 1,650-char budget and §Agent Collaboration stays shorter than §Operator Communication (AC4). The MCP half -- published tools/list descriptions under Claude Code's 2,048-char cap, receipt messages -- is src/mcp-server/src/delegation-contract.test.ts. Mutation-proven (splice dropped / Codex name dropped / TS copy drifted each go red). No Docker, no live backend."
     }
   ]
 }
