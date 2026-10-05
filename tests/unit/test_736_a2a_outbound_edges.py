@@ -793,6 +793,62 @@ def test_F3_the_refusal_order_is_redirect_then_encoding_then_length_then_status(
     assert exc.value.reason == "card_http_error"
 
 
+def _read_rpc(body: bytes, max_bytes: int, headers=None, status=200, **kw):
+    """`_read` for the RPC hop — the one with the payment branch (#3185)."""
+    transport = httpx.MockTransport(lambda request: _streaming(status, body, headers))
+
+    async def _run():
+        async with httpx.AsyncClient(transport=transport) as client:
+            return await a2a_client._read_capped(
+                client, "POST", "https://1.2.3.4/x",
+                sni="h.example", host_header="h.example",
+                max_bytes=max_bytes, headers={}, error_prefix="rpc", **kw,
+            )
+
+    return asyncio.run(_run())
+
+
+def test_F3b_the_rpc_hop_classifies_402_and_403_before_the_other_guards():
+    """Matrix F4, extended for #3185 — and the ONE place the two hops diverge.
+
+    The card hop's order is unchanged (`test_F3…` above). For the RPC hop the
+    payment statuses are classified BEFORE the encoding and length guards, so a
+    gzipped or oversized "pay me" reports `payment_required` rather than
+    `rpc_encoding` / `rpc_too_large`. That divergence is the fix, not an
+    accident: the previous order described a priced endpoint as an outage.
+
+    The redirect guard still wins — an SSRF bypass outranks a price — and every
+    status outside {402, 403} keeps the original precedence exactly.
+    """
+    # Payment before encoding…
+    with pytest.raises(A2ACallError) as exc:
+        _read_rpc(b"x", 1000, headers={"content-encoding": "gzip"}, status=402)
+    assert exc.value.reason == "payment_required"
+
+    # …and before the declared-length check.
+    with pytest.raises(A2ACallError) as exc:
+        _read_rpc(b"x", 10, headers={"content-length": "999999"}, status=403)
+    assert exc.value.reason == "rpc_forbidden"
+
+    # The redirect guard is still first.
+    with pytest.raises(A2ACallError) as exc:
+        _read_rpc(b"x", 1000, headers={"content-encoding": "gzip"}, status=302)
+    assert exc.value.reason == "rpc_redirect"
+
+    # Everything else is untouched: encoding still beats status.
+    with pytest.raises(A2ACallError) as exc:
+        _read_rpc(b"x", 1000, headers={"content-encoding": "gzip"}, status=500)
+    assert exc.value.reason == "rpc_encoding"
+
+    with pytest.raises(A2ACallError) as exc:
+        _read_rpc(b"x", 1000, status=500)
+    assert exc.value.reason == "rpc_http_error"
+    assert exc.value.remote_status == 500
+
+    # And a 200 still reads its body normally.
+    assert _read_rpc(b"hello", 1000) == b"hello"
+
+
 # =========================================================================== #
 # G. The OSS endpoint store (matrix G1–G8)
 # =========================================================================== #

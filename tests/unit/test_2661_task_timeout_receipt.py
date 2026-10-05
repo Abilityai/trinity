@@ -203,6 +203,17 @@ def test_long_poll_timeout_that_missed_a_failure_releases_the_claim():
     isvc.complete.assert_not_called()
 
 
+def test_backlog_row_keeps_the_pull_sinks_error_code():
+    """#3114: a pull-sink terminal stores `[code] text`. The backlog path reads
+    the code back, so a pilot's `/task` answers what the push path answers."""
+    out, _ = _run_backlog(
+        wait=None, row=_row("failed", error="[model_unsupported] model x refused"),
+        idem=MagicMock(),
+    )
+    assert isinstance(out, ChatDispatchError) and out.status_code == 400
+    assert out.detail == "model x refused"
+
+
 def test_a_vanished_row_releases_the_claim():
     """Nothing is running under this key that anyone can find — hold nothing."""
     idem = MagicMock()

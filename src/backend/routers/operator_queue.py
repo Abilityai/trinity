@@ -356,6 +356,13 @@ async def respond_to_queue_item(
         )
     except ask_service.AskNotFound:
         raise HTTPException(status_code=404, detail="Queue item not found")
+    except ask_service.AskNotAddressee:
+        # trinity-enterprise#751: a gated-skill approval is decided only by a
+        # person it was addressed to.
+        raise HTTPException(status_code=403, detail={
+            "code": "not_addressee",
+            "message": "This approval was addressed to someone else; only they can decide it.",
+        })
     except ask_service.AskConflict as conflict:
         # The response was NOT recorded — surfaced instead of a silent 200
         # (#1017). `expired`: still pending but past its deadline (#611) — the
@@ -409,6 +416,13 @@ async def cancel_queue_item(
         )
     except ask_service.AskNotFound:
         raise HTTPException(status_code=404, detail="Queue item not found")
+    except ask_service.AskNotAddressee:
+        # trinity-enterprise#751: only its addressee or an admin cancels a
+        # gated-skill approval.
+        raise HTTPException(status_code=403, detail={
+            "code": "not_addressee",
+            "message": "This approval was addressed to someone else; only they or an admin can cancel it.",
+        })
     except ask_service.AskConflict as conflict:
         raise HTTPException(
             status_code=409,
@@ -490,7 +504,10 @@ async def get_my_ask(
     (`_READBACK_FIELDS`) that never carries a person's email.
     """
     item = db.get_operator_queue_item_for_agent_by_request_id(name, request_id)
-    if not item:
+    # #715 / trinity-enterprise#751: a row whose text names a person (a skill-gate
+    # card or notice — its id is readable in the executor's own skipped run) is
+    # the operator's; the same 404 as an unknown id.
+    if not item or operator_queue_service.is_about_a_person(item):
         raise HTTPException(status_code=404, detail="Ask not found")
     readback = {key: item.get(key) for key in _READBACK_FIELDS}
     # The row stores the predecessor's uuid; the agent knows its asks by the

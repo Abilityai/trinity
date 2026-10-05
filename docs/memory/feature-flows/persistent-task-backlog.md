@@ -205,9 +205,24 @@ ON schedule_executions(agent_name, conversation_key)
 WHERE status = 'running' AND conversation_key IS NOT NULL;
 ```
 
-`backlog_service.enqueue` stamps `conversation_key` (`chat_session_id`, else
-`resume_session_id`) on pilot agents only. The ordering expression cannot use
+`backlog_service.enqueue` stamps `conversation_key` on pilot agents only: the
+explicit key `execute_task` was given (`session:<key>`, `public:<id>`,
+`channel:<id>`, `room:<id>`, `paid:<id>`, #3114), else `chat_session_id`, else
+`resume_session_id`. The ordering expression cannot use
 `idx_executions_queued`; per-agent queues are small.
+
+**Interactive turns on a pilot (#3114).** `pull_pilot.pull_owns_dispatch`
+covers every interactive trigger except `chat` (the UI `/chat` path, which
+still pushes), plus `validation`. Their sync callers go through
+`task_execution_service.dispatch_and_await_terminal`: phase 1 polls the row
+while it is `queued`, for at most one agent execution timeout, and on expiry
+cancels it (`cancel_queued_execution`) and returns FAILED/`CAPACITY`; a cancel
+that loses to a claim falls through to phase 2, the terminal wait (agent
+timeout + 120s from the claim). The pull sink signals the in-process waiter
+when its CAS write wins. The live-stream proxies (`routers/chat.py`,
+`routers/public.py`, `client_portal/router.py`) hold the SSE connection with
+`: queued` comments while the row is queued (`sync_waiter.wait_while_queued`),
+then retry an agent 404 briefly while the claimed row is `running`.
 
 ### backlog_metadata JSON Shape
 
@@ -237,9 +252,19 @@ identity and request parameters:
   "triggered_by": "manual",
   "collaboration_activity_id": null,
   "is_self_task": false,
-  "self_task_activity_id": null
+  "self_task_activity_id": null,
+  "persist_session": false,
+  "schedule_context": null,
+  "attempt": null,
+  "images": null
 }
 ```
+
+`persist_session`, `schedule_context`, `attempt` and `images` (#3114) are read
+by the pull claim only: the envelope hands `persist_session` and `images`
+(base64 vision input) to the worker, and the claim-time prompt uses
+`schedule_context` and `attempt`. Canary G-04 skips `images` when scanning for
+credentials.
 
 ## Lifecycle
 

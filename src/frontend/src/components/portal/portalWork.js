@@ -94,6 +94,24 @@ export function soleStoppableItem(items, stoppingIds = []) {
 }
 
 /**
+ * #3114: the status of a just-sent turn before the Work feed has read its row.
+ * On a pull agent (`pullsTurns`), until the agent streams anything the turn may
+ * still be waiting for a worker, so it reads "Waiting for a slot". Every other
+ * agent runs the turn on send.
+ */
+export function pendingTurnOutcome(streamActivity, pullsTurns) {
+  return pullsTurns && !streamActivity ? 'queued' : 'running'
+}
+
+/**
+ * #3114: the card's clock restarts when a worker picks the turn up, so
+ * "Working" counts working time only.
+ */
+export function clockRestartsAt(before, now) {
+  return before === 'queued' && now === 'running'
+}
+
+/**
  * The status word a person reads. Honest about WHY it ended (the
  * `loopStatusLabel` rule, applied to executions): a timeout, a cancel and a
  * failure are three situations with three next actions.

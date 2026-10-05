@@ -588,6 +588,14 @@ async def _start_maintenance_services() -> None:
     except Exception as e:
         logger.error(f"Error starting operator queue sync service: {e}")
 
+    # trinity-enterprise#751: an approval can be answered on any worker, so every
+    # worker observes ask endings; the poll cycle's sweep catches what it misses.
+    try:
+        from services import skill_gate_service
+        skill_gate_service.register_ending_observer()
+    except Exception as e:
+        logger.error(f"Error registering the skill gate ending observer: {e}")
+
 
 async def _schedule_staggered_services() -> None:
     """PERF-269 staggered starts. Each spawns a delayed task; none blocks boot.
@@ -1218,6 +1226,13 @@ from services.chat_signals import InterAgentDepthExceeded as _InterAgentDepthExc
 from error_handlers import inter_agent_depth_exceeded as _inter_agent_depth_exceeded
 
 app.add_exception_handler(_InterAgentDepthExceeded, _inter_agent_depth_exceeded)
+
+# trinity-enterprise#751: a request naming a gated skill is not dispatched — 202
+# pending_approval, or a named refusal — wherever in the stack the gate fired.
+from services.skill_gate_errors import SkillGateError as _SkillGateError
+from error_handlers import skill_gate_error as _skill_gate_error
+
+app.add_exception_handler(_SkillGateError, _skill_gate_error)
 
 # Add CORS middleware
 app.add_middleware(

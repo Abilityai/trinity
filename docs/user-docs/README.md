@@ -43,6 +43,7 @@
 - [Agent Logs](agents/agent-logs.md) — Log viewing, telemetry, Vector aggregation
 - [Agent Configuration](agents/agent-configuration.md) — The Settings tab: guardrails, capacity, MCP exposure, access key, reliability (breaker, wake on answer), autonomy, resources, timeout
 - [Agent Guardrails](agents/agent-guardrails.md) — Deterministic safety enforcement, bash deny-lists, credential protection, tamper-proof hook registration
+- [Recommended Trinity Prompt](agents/recommended-fleet-prompt.md) — Research-backed fleet rules for the instance-wide Trinity prompt, and what not to put there
 - [Self-Execute](agents/self-execute.md) — Background tasks during chat, result injection
 
 ## Credentials

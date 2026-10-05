@@ -654,7 +654,8 @@ import { viewState, staleBannerMessage, listFrom } from '../utils/loadingState'
 import {
   optionsOf, queueResponseKind, buildQueueResponse, queueTypeLabel,
   QUEUE_RESPONSE_NOT_RECORDED, respondRefusedAsNotPending, queueSyncBadge,
-  QUEUE_RESPONSE_DIVERGED, respondRefusedAsDiverged } from '../utils/operatorQueue'
+  QUEUE_RESPONSE_DIVERGED, respondRefusedAsDiverged,
+  QUEUE_RESPONSE_NOT_ADDRESSEE, respondRefusedAsNotAddressee } from '../utils/operatorQueue'
 // trinity-enterprise#611: a second line so the #2370 import pin above stays byte-exact.
 import { queueEnding, queueEndingText, recentlyEnded } from '../utils/operatorQueue'
 import { formatLocalDateTime } from '../utils/timestamps'
@@ -1288,6 +1289,13 @@ async function sendQueueResponse(item, body) {
       divergedQueueItems[id] = true
       respondErrors[id] = { message: QUEUE_RESPONSE_DIVERGED }
       await fetchQueue()
+      return false
+    }
+    if (respondRefusedAsNotAddressee(e)) {
+      // trinity-enterprise#751: a gated-skill approval addressed to someone else.
+      // Refused, nothing recorded, and a retry can never succeed — say why,
+      // beside the control (p18), and keep the card.
+      respondErrors[id] = { message: QUEUE_RESPONSE_NOT_ADDRESSEE }
       return false
     }
     if (respondRefusedAsNotPending(e)) {

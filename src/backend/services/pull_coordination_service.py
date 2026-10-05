@@ -31,6 +31,7 @@ from typing import Any, Dict, Optional, Tuple
 from config import MAX_REDELIVERY
 from database import db
 from models import TaskExecutionStatus
+from services import channel_completion_report
 from services import event_dispatch_service
 from services import subscription_auto_switch
 from services.activity_service import activity_service
@@ -78,6 +79,12 @@ def _compose_pull_system_prompt(
     *,
     execution_id: Optional[str],
     model: Optional[str] = None,
+    source_user_email: Optional[str] = None,
+    source_agent_name: Optional[str] = None,
+    source_mcp_key_name: Optional[str] = None,
+    timeout_seconds: Optional[int] = None,
+    schedule_context: Optional[dict] = None,
+    attempt: Optional[int] = None,
 ) -> Optional[str]:
     """Compose platform prompt + execution context + caller override for a
     pull-claimed turn (#1629). Fail-open: on ANY composition error the turn runs
@@ -87,13 +94,26 @@ def _compose_pull_system_prompt(
     ``model`` (ent#243) selects the prompt tier. It is passed explicitly rather
     than left to default because this context previously omitted the field
     entirely — not ``None``-valued, absent — so every pull-claimed turn would
-    have resolved VERBOSE forever with nothing to indicate why."""
+    have resolved VERBOSE forever with nothing to indicate why.
+
+    #3114: the provenance, timeout, schedule and attempt fields match what
+    ``task_execution_service._compose_effective_system_prompt`` builds on
+    push, so an interactive turn routed to the queue sees the same context."""
     runtime = _resolve_agent_runtime(agent_name)
     try:
+        schedule_context = schedule_context or {}
         exec_ctx = ExecutionContext(
             agent_name=agent_name,
             mode=ExecutionContext.derive_mode(triggered_by),
             triggered_by=triggered_by,
+            source_user_email=source_user_email,
+            source_agent_name=source_agent_name,
+            source_mcp_key_name=source_mcp_key_name,
+            timeout_seconds=timeout_seconds,
+            attempt=attempt,
+            schedule_name=schedule_context.get("name"),
+            schedule_cron=schedule_context.get("cron"),
+            schedule_next_run=schedule_context.get("next_run"),
             execution_id=execution_id,
             model=model,
         )
@@ -332,6 +352,12 @@ def _build_claim_response(row: Dict[str, Any]) -> Dict[str, Any]:
     }
     if meta.get("file_ids") is not None:
         payload["file_ids"] = meta.get("file_ids")
+    # #3114: the push payload's `persist_session` and `images`, carried for
+    # rows `execute_task` queued. Absent on every other producer's row.
+    if meta.get("persist_session") is not None:
+        payload["persist_session"] = bool(meta.get("persist_session"))
+    if meta.get("images"):
+        payload["images"] = meta.get("images")
 
     # #1629: compose the platform system prompt (parity with the push path) and
     # hand it to the worker via task_overrides.system_prompt — the field the pull
@@ -361,6 +387,12 @@ def _build_claim_response(row: Dict[str, Any]) -> Dict[str, Any]:
         overrides.get("system_prompt"),
         execution_id=row["id"],
         model=overrides.get("model") or row.get("model_used"),
+        source_user_email=row.get("source_user_email"),
+        source_agent_name=row.get("source_agent_name"),
+        source_mcp_key_name=row.get("source_mcp_key_name"),
+        timeout_seconds=overrides.get("timeout_seconds"),
+        schedule_context=meta.get("schedule_context") if isinstance(meta.get("schedule_context"), dict) else None,
+        attempt=meta.get("attempt"),
     )
     payload["task_overrides"] = overrides
 
@@ -520,6 +552,11 @@ def apply_task_result(
 
     sanitized_content = sanitize_response(content) if content is not None else None
 
+    # #3114: the Session tab reads compact events off the result; persist them
+    # so a sync caller rebuilding its result from this row still gets them.
+    compact_events = metadata.get("compact_events") or []
+    compact_json = json.dumps(compact_events) if compact_events else None
+
     if row_status == TaskExecutionStatus.SUCCESS:
         won = db.update_execution_status(
             execution_id=execution_id,
@@ -532,6 +569,7 @@ def apply_task_result(
                 execution_log=log_json,
                 tool_calls=log_json,
                 claude_session_id=session_id,
+                compact_metadata=compact_json,
             ),
             claim_token=claim_token,
         )
@@ -553,6 +591,7 @@ def apply_task_result(
                 cost=cost,
                 context_used=context_used,
                 context_max=context_max,
+                compact_metadata=compact_json,
             ),
             claim_token=claim_token,
         )
@@ -579,6 +618,15 @@ def apply_task_result(
             terminal_status=row_status,
             summary_or_error=summary,
             cost=cost,
+        )
+        # #3114: a delegated child that ran on a pull pilot reports back to the
+        # channel / portal / room it came from, exactly as the push terminals
+        # do. `report_completion` skips INLINE_CHANNEL_TRIGGERS turns itself.
+        channel_completion_report.spawn_completion_report(
+            execution_id=execution_id,
+            agent_name=execution.agent_name,
+            status=str(getattr(row_status, "value", row_status)),
+            summary_or_error=summary,
         )
         # #1804: the pull sink is a CAS-won terminal writer, so it owns closing
         # the paired dispatch activity — the issue names this as one of the next
@@ -630,6 +678,11 @@ def apply_task_result(
                 error_message=err_text or f"[{error_code}] pull terminal",
                 failure_kind=switch_kind,
             )
+        # #3114: wake a `dispatch_and_await_terminal` caller in this process
+        # now; its DB poll covers a caller held by another worker.
+        from services.sync_waiter import signal_sync_waiter
+
+        signal_sync_waiter(execution_id, None, None)
         return ResultApplyOutcome("applied", row_status)
 
     # CAS lost — reclassify against the freshly-read row.

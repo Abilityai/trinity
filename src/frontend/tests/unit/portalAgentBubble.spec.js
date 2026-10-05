@@ -184,7 +184,9 @@ describe('both transcripts delegate to it', () => {
   }
 
   it('the rating stays a child of the bubble, on a persisted message only', () => {
-    expect(code(CONVERSATION)).toMatch(/<PortalAgentBubble[\s\S]{0,200}<PortalRating/)
+    // trinity-enterprise#738: the window spans the bubble's Reply props
+    // (label, disabled, @reply), which sit between the tag and its slot.
+    expect(code(CONVERSATION)).toMatch(/<PortalAgentBubble[\s\S]{0,400}<PortalRating/)
     // ent#534: the thread loop iterates `threadItems` (voice calls fold into one
     // block), so the message is `item.message` — the rule is unchanged: a thumb
     // only on a PERSISTED message.

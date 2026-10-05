@@ -116,6 +116,13 @@ class PersistentTaskPayload:
     collaboration_activity_id: Optional[str]
     is_self_task: bool = False
     self_task_activity_id: Optional[str] = None
+    # #3114: pull-pilot rows from `execute_task`. The conversation key feeds
+    # the claim guard; the rest reach the worker and the claim-time prompt.
+    conversation_key: Optional[str] = None
+    persist_session: bool = False
+    schedule_context: Optional[dict] = None
+    attempt: Optional[int] = None
+    images: Optional[list] = None
 
 
 class CapacityFull(Exception):
@@ -348,15 +355,16 @@ class CapacityManager:
                         raise CircuitOpen(agent_name, breaker.retry_after_seconds())
                     return AcquireResult(state="admitted", execution_id=execution_id)
 
-        # ---- #1766: a pull pilot's autonomous work is queue-ONLY -----------
+        # ---- #1766: a pull pilot's queued work is queue-ONLY ---------------
         # The pilot flag used to be purely additive: the agent started pulling,
         # but the backend kept admitting-and-pushing whenever a slot was free, so
         # the two paths ran in parallel over one queue with two independent
         # capacity counters. Skipping admission here makes the durable queue the
         # single entry point for this agent, so its worker pool IS its capacity
-        # (#1081 Phase 5, pilot-scoped). `pull_owns_dispatch` excludes
-        # interactive triggers (temporary, until they are routed — #1989) and fails safe to
-        # push, so a non-pilot's path is byte-for-byte unchanged.
+        # (#1081 Phase 5, pilot-scoped). `pull_owns_dispatch` covers the
+        # autonomous triggers and, since #3114, every interactive trigger but
+        # `chat`; it fails safe to push, so a non-pilot's path is byte-for-byte
+        # unchanged.
         from services.pull_pilot import pull_owns_dispatch
 
         pull_exclusive = (
@@ -421,6 +429,11 @@ class CapacityManager:
                 collaboration_activity_id=overflow_payload.collaboration_activity_id,
                 is_self_task=overflow_payload.is_self_task,
                 self_task_activity_id=overflow_payload.self_task_activity_id,
+                conversation_key=overflow_payload.conversation_key,
+                persist_session=overflow_payload.persist_session,
+                schedule_context=overflow_payload.schedule_context,
+                attempt=overflow_payload.attempt,
+                images=overflow_payload.images,
             )
             if not enqueued:
                 raise CapacityFull(agent_name, max_concurrent, "persistent_full")

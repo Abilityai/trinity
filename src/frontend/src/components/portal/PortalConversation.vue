@@ -418,7 +418,19 @@
                  copy controls are ONE component now. The rating lands in the
                  bubble's action row beside the message Copy — same row, one
                  line of controls under the answer they are about. -->
-            <PortalAgentBubble :content="item.message.content">
+            <!-- trinity-enterprise#738: Reply, on the same persisted-id rule as
+                 the thumbs below — a reply needs a stored row to point at, and
+                 the server quotes it from there. `currentSessionId`, never the
+                 prop: on a URL that does not name the chat, the chat this
+                 conversation resolved lives only there. Disabled, not hidden,
+                 during a call: the composer it would focus is inert, and the
+                 row must not reflow. -->
+            <PortalAgentBubble
+              :content="item.message.content"
+              :reply-label="item.message.id && currentSessionId ? 'Reply to this message' : ''"
+              :reply-disabled="voiceCallActive"
+              @reply="replyToMessage(item.message)"
+            >
               <!-- ent#366: one click, on the answer being judged. Only on a
                    PERSISTED agent message — a thumb needs a row to point at, and
                    a client-fabricated id would simply 404 against the ratings
@@ -676,10 +688,14 @@
           <!-- ent#610 round 8: "replying to" — a tab on top of the composer
                (Codex-style). The turn carries only the message id; the agent
                gets the stored message quoted server-side. -->
+          <!-- ent#738: the chip describes the field (`aria-describedby` below), so
+               the focus Reply moves here announces what the message answers;
+               removing it hands the caret back rather than dropping it on body. -->
           <PortalReplyChip
             v-if="replyTo"
+            :text-id="replyChipId"
             :excerpt="replyTo.excerpt"
-            @remove="emit('reply-done')"
+            @remove="dropComposerReply"
           />
           <div
             class="rounded-2xl border px-2 py-2 transition has-[textarea:focus]:border-action-primary-600 dark:has-[textarea:focus]:border-action-primary-500 has-[textarea:focus]:ring-[3px] has-[textarea:focus]:ring-action-primary-500/40 dark:has-[textarea:focus]:ring-action-primary-400/40"
@@ -708,6 +724,7 @@
                 rows="1"
                 :placeholder="composerPlaceholder"
                 :disabled="voiceCallActive"
+                :aria-describedby="replyTo ? replyChipId : undefined"
                 class="block w-full resize-none border-0 bg-transparent text-sm text-gray-900 dark:text-gray-100 px-2 py-2 leading-6 focus:outline-none focus:ring-0 max-h-40"
                 @input="onComposerInput"
                 @keydown="onComposerKeydown"
@@ -835,19 +852,22 @@
 <script setup>
 import ProjectChatControls from './projects/ProjectChatControls.vue'
 import { wrapUpPrompt } from './projects/projectsUtils'
-import { ref, computed, watch, nextTick, onMounted, onBeforeUnmount } from 'vue'
+import { ref, computed, watch, nextTick, onMounted, onBeforeUnmount, useId } from 'vue'
 import { useClientPortalStore } from '@/stores/clientPortal'
 import { agentDisplayName } from '@/utils/agentName'
 import PortalAgentBubble from './PortalAgentBubble.vue'
 import PortalWorkCard from './PortalWorkCard.vue'
 import { usePortalWorkStore } from '@/stores/portalWork'
-import { askAboutItPrefill, childrenForChat, itemById, previewTitle } from './portalWork'
+import { askAboutItPrefill, childrenForChat, clockRestartsAt, itemById, pendingTurnOutcome, previewTitle } from './portalWork'
 import { activityFromStreamEvent, resolveActivityText } from '@/utils/workActivity'
 import PortalAvatar from './PortalAvatar.vue'
 import PortalStarButton from './PortalStarButton.vue'
 import PortalEditableTitle from './PortalEditableTitle.vue'
 import PortalChatTabs from './PortalChatTabs.vue'
 import { newChatHotkeyLabel, MAIN_TAB_LABEL, composerAvailabilityNotice, assistantRow, replyFromHistory, replyBaseline, readReplyBaseline } from './portalUtils'
+// ent#738: the chip's one-line excerpt — the same one the Inbox's arrow hands over.
+// Aliased: `submitUserText` already takes a `replyExcerpt` (the excerpt itself).
+import { replyExcerpt as excerptForReply } from './portalInbox'
 import { chatTurnAsks, placeAsksInThread, askTileMode, askHistoryLine } from './portalChatAsks'
 import AskMarkdown from '@/components/operator/AskMarkdown.vue'
 import { formatLocalDateTime } from '@/utils/timestamps'
@@ -963,7 +983,7 @@ const props = defineProps({
 // controls that raised them — the rail strip is the door to both now.
 // Declared emits are the component's contract, so a name left here after
 // its only `$emit` is deleted is a promise nothing keeps.
-const emit = defineEmits(['reply-done', 'switch-agent', 'session-adopted', 'sessions-changed', 'open-menu', 'toggle-star', 'escalate-to-room', 'open-thread', 'work-state', 'open-work', 'new-chat', 'main-reset', 'voice-call', 'voice-panel', 'open-project', 'thread-missing'])
+const emit = defineEmits(['reply', 'reply-done', 'switch-agent', 'session-adopted', 'sessions-changed', 'open-menu', 'toggle-star', 'escalate-to-room', 'open-thread', 'work-state', 'open-work', 'new-chat', 'main-reset', 'voice-call', 'voice-panel', 'open-project', 'thread-missing'])
 
 // ent#451/#473: the active thread as the shell's list knows it. Null until the
 // list carries the thread (a just-adopted session lands on the next refresh),
@@ -1064,6 +1084,21 @@ const replyTo = computed(() => (
   props.replyTarget && props.replyTarget.messageId && props.replyTarget.sessionId === currentSessionId.value
     ? props.replyTarget : null
 ))
+const replyChipId = `portal-reply-chip-${useId()}`
+// trinity-enterprise#738: Reply on a message in THIS chat. The shell owns the
+// target (it is what drops it when the person leaves the chat), so this asks
+// rather than sets; what comes back is the same `replyTarget` the Inbox's arrow
+// hands over. Focus is synchronous: the textarea exists whatever the prop says,
+// and a phone opens its keyboard only inside the tap's own gesture.
+function replyToMessage(message) {
+  if (!message?.id || !currentSessionId.value) return
+  emit('reply', { sessionId: currentSessionId.value, messageId: message.id, excerpt: excerptForReply(message.content) })
+  focusComposer()
+}
+function dropComposerReply() {
+  emit('reply-done')
+  focusComposer()
+}
 const isMainChat = computed(() => {
   const id = currentSessionId.value
   if (!id) return false
@@ -1196,7 +1231,7 @@ const liveCardItem = computed(() => {
     id: activeExecutionId.value || 'pending',
     agent_name: props.agent.name,
     status: 'running',
-    outcome: 'running',
+    outcome: pendingTurnOutcome(liveStreamActivity.value, props.agent.pulls_turns),
     kind: 'turn',
     // The feed's own title shape, so its row lands without re-wrapping it (#2964).
     title: previewTitle(pendingUserText.value || lastUserText()),
@@ -1816,11 +1851,18 @@ function onComposerKeydown(e) {
     open: typeaheadOpen.value,
     hasActive: activeIndex.value >= 0,
     hasCandidates: length > 0,
+    // ent#738: the chip ON SCREEN, never the raw prop — a target for another
+    // chat must not eat the Escape that would stop this one's turn. And never
+    // a keystroke an overlay already claimed (the `ownsEscape` protocol).
+    hasReply: !!replyTo.value && !e.defaultPrevented,
   })) {
     case 'move-down': e.preventDefault(); activeIndex.value = nextActiveIndex(activeIndex.value, 1, length); break
     case 'move-up': e.preventDefault(); activeIndex.value = nextActiveIndex(activeIndex.value, -1, length); break
     case 'accept': e.preventDefault(); acceptActive(activeIndex.value >= 0 ? activeIndex.value : 0); break
     case 'dismiss': e.preventDefault(); dismissTypeahead(); break
+    // Claimed here so the document-level turn-cancel yields: one Escape drops
+    // the reply, the next reaches the turn (innermost first, the ent#738 ruling).
+    case 'drop-reply': e.preventDefault(); emit('reply-done'); break
     case 'close': closeTypeahead(); break
     case 'send': e.preventDefault(); send(); break
     default: break
@@ -2146,6 +2188,9 @@ async function cancelTurn() {
 // stream-json frames never carry, so the card only ever said nothing.)
 const streaming = ref(false)
 const liveStreamActivity = ref(null)
+watch(() => liveCardItem.value.outcome, (now, before) => {
+  if (clockRestartsAt(before, now)) elapsed.value = 0
+})
 // Bumped after each completed turn; `PortalDeliverables` watches it.
 const deliverableTick = ref(0)
 

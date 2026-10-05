@@ -337,6 +337,81 @@ export function isDepthRefusal(value: unknown): value is DepthRefusal {
   return (value as { status?: unknown })?.status === INTER_AGENT_DEPTH_EXCEEDED;
 }
 
+/**
+ * trinity-enterprise#751: what a request naming a gated skill answers instead
+ * of a reply. Nothing ran. `pending_approval` — an approval was raised and the
+ * outcome is delivered later; `refused` — a named refusal, nothing raised.
+ * Neither may be read as an (empty) answer, nor retried as "agent busy".
+ */
+export interface GateResult {
+  status: "pending_approval" | "refused";
+  agent: string;
+  code: string;
+  request_id?: string;
+  skills?: string[];
+  approver_role?: string;
+  expires_at?: string | null;
+  retryable: false;
+  message: string;
+}
+
+/**
+ * Parse a gate answer from a backend response: a 202 whose body says
+ * `pending_approval`, or a non-2xx whose `detail.status` is `refused` with the
+ * same code on `X-Trinity-Error-Code`. Anything else — including the depth
+ * refusal and an ordinary 429 — is undefined. Never throws.
+ */
+export function parseGateResult(
+  status: number,
+  errorCode: string | null,
+  body: string,
+  agent: string,
+): GateResult | undefined {
+  try {
+    const parsed = JSON.parse(body) as Record<string, unknown>;
+    if (status === 202 && parsed?.status === "pending_approval") {
+      return {
+        status: "pending_approval",
+        agent,
+        code: "approval_pending",
+        request_id: typeof parsed.request_id === "string" ? parsed.request_id : undefined,
+        skills: Array.isArray(parsed.skills) ? (parsed.skills as string[]) : undefined,
+        approver_role: typeof parsed.approver_role === "string" ? parsed.approver_role : undefined,
+        expires_at: typeof parsed.expires_at === "string" ? parsed.expires_at : null,
+        retryable: false,
+        message:
+          `${typeof parsed.message === "string" ? parsed.message : "Not run: this needs approval."} ` +
+          "Do not retry or route it through another agent — the outcome will be sent to you.",
+      };
+    }
+    const d = ((parsed?.detail ?? parsed) as Record<string, unknown>) || {};
+    if (d.status === "refused" && typeof d.code === "string" && d.code === errorCode) {
+      return {
+        status: "refused",
+        agent,
+        code: d.code,
+        retryable: false,
+        message: typeof d.message === "string" ? d.message : "Not run: refused by the skill gate.",
+      };
+    }
+  } catch {
+    // not a gate answer
+  }
+  return undefined;
+}
+
+export function isGateResult(value: unknown): value is GateResult {
+  const s = (value as { status?: unknown })?.status;
+  return (s === "pending_approval" || s === "refused") && typeof (value as { code?: unknown })?.code === "string";
+}
+
+/** The gate answer carried by `response`, read without consuming its body. */
+async function readGateResult(response: Response, agent: string): Promise<GateResult | undefined> {
+  const errorCode = response.headers.get("x-trinity-error-code");
+  if (response.status !== 202 && (response.ok || !errorCode)) return undefined;
+  return parseGateResult(response.status, errorCode, await response.clone().text(), agent);
+}
+
 /** Bound for #848 inline-auth control-plane calls (not chat). */
 const INLINE_AUTH_TIMEOUT_MS = Number(process.env.MCP_INLINE_AUTH_TIMEOUT_MS || 15000);
 
@@ -945,12 +1020,14 @@ export class TrinityClient {
     message: string,
     sourceAgent?: string,
     mcpKeyInfo?: { keyId?: string; keyName?: string },
-    idempotencyKey?: string
+    idempotencyKey?: string,
+    turn?: string
   ): Promise<
     | ChatResponse
     | { error: string; queue_status: "busy" | "queue_full"; retry_after: number; agent: string; details?: Record<string, unknown> }
     | { status: "queued_timeout"; agent: string; execution_id: string; message: string }
     | DepthRefusal
+    | GateResult
   > {
     // Prepare headers
     const headers: Record<string, string> = {
@@ -968,6 +1045,13 @@ export class TrinityClient {
     // Add X-Source-Agent header for collaboration tracking
     if (sourceAgent) {
       headers["X-Source-Agent"] = sourceAgent;
+    }
+
+    // trinity-enterprise#751: the calling turn (#2392), so a gated request's
+    // outcome can name the execution it came from. The backend keeps it only
+    // when it is the caller's own.
+    if (turn) {
+      headers["X-Trinity-Execution-Id"] = turn;
     }
 
     // Add MCP key info headers for execution origin tracking (AUDIT-001).
@@ -1052,6 +1136,11 @@ export class TrinityClient {
     } finally {
       clearTimeout(timeoutId);
     }
+
+    // trinity-enterprise#751: a gated skill — pending approval or refused by
+    // name. Checked first: its 429 (`approval_queue_full`) is not "agent busy".
+    const gate = await readGateResult(response, name);
+    if (gate) return gate;
 
     // Handle 429 Too Many Requests (agent queue full)
     if (response.status === 429) {
@@ -1211,8 +1300,10 @@ export class TrinityClient {
     },
     sourceAgent?: string,
     mcpKeyInfo?: { keyId?: string; keyName?: string },
-    idempotencyKey?: string
+    idempotencyKey?: string,
+    turn?: string
   ): Promise<
+    | GateResult
     | ChatResponse
     | { status: "accepted"; execution_id: string; agent_name: string; message: string; async_mode: true }
     // #2661: sync mode may answer with the gateway-timeout receipt (same shape
@@ -1235,6 +1326,13 @@ export class TrinityClient {
     // Add X-Source-Agent header for collaboration tracking
     if (sourceAgent) {
       headers["X-Source-Agent"] = sourceAgent;
+    }
+
+    // trinity-enterprise#751: the calling turn (#2392), so a gated request's
+    // outcome can name the execution it came from. The backend keeps it only
+    // when it is the caller's own.
+    if (turn) {
+      headers["X-Trinity-Execution-Id"] = turn;
     }
 
     // Add MCP key info headers for execution origin tracking (AUDIT-001).
@@ -1334,6 +1432,10 @@ export class TrinityClient {
     } finally {
       clearTimeout(timeoutId);
     }
+
+    // trinity-enterprise#751: a gated skill — pending approval or refused by name.
+    const gate = await readGateResult(response, name);
+    if (gate) return gate;
 
     if (!response.ok) {
       const error = await response.text();
@@ -3532,11 +3634,17 @@ export class TrinityClient {
   }
 
   // ==========================================================================
-  // A2A control plane (trinity-enterprise#160)
-  // The management endpoints (config/exposure/allow-list/endpoints) proxy the
+  // A2A control plane (trinity-enterprise#160, abilityai/trinity-enterprise#761)
+  // The INBOUND management endpoints (config/exposure/allow-list) proxy the
   // ENTITLEMENT-GATED enterprise router (`/api/enterprise/a2a/*`) — a 403 in an
   // unentitled build, a 404 in an OSS-only build. The served card is the OSS
   // #737 endpoint.
+  //
+  // The three OUTBOUND endpoint methods below are different: by ruling, outbound
+  // control is available in every edition, so they address the OSS settings
+  // routes over the platform-wide endpoint store (#736) — the same store the
+  // runtime outbound call resolves against. No entitlement is involved on any
+  // build, so a failure there is never "not licensed".
   // ==========================================================================
 
   /** Full A2A control state for one agent (exposure, card URL, allow-list, endpoints). */
@@ -3576,31 +3684,48 @@ export class TrinityClient {
     );
   }
 
-  /** Register (or update by name) an outbound external A2A endpoint. */
+  /**
+   * Register (or update by name) an outbound external A2A endpoint (#736 store).
+   *
+   * Takes no agent name: the store is platform-scope, so there is nothing to
+   * scope the write to. The route is admin and human-only — deciding where a
+   * credentialed server-side request may go is a grant, not a use (Invariant
+   * #8). `credentials` is write-only; `clear_credentials` removes a stored one.
+   * `credential_kind` labels it — omitted, the store infers it from the value.
+   */
   async registerA2AEndpoint(
-    name: string,
-    body: { name: string; url: string; credentials?: string },
-  ): Promise<unknown> {
-    return this.request<unknown>(
-      "POST",
-      `/api/enterprise/a2a/${encodeURIComponent(name)}/endpoints`,
+    body: {
+      name: string;
+      url: string;
+      credentials?: string;
+      clear_credentials?: boolean;
+      /** `payment_token` makes the credential ride as x402 payment (#3185). */
+      credential_kind?: "api_key" | "payment_token";
+    },
+  ): Promise<{ endpoint?: unknown; enabled?: boolean; hint?: string }> {
+    return this.request<{ endpoint?: unknown; enabled?: boolean; hint?: string }>(
+      "PUT",
+      `/api/settings/a2a-endpoints`,
       body,
     );
   }
 
-  /** List the agent's registered outbound endpoints (credentials never returned). */
-  async listA2AEndpoints(name: string): Promise<unknown> {
-    return this.request<unknown>(
+  /**
+   * The registered outbound endpoints plus the outbound kill-switch state
+   * (credentials never returned — each row reports `has_credentials` only).
+   */
+  async listA2AEndpoints(): Promise<{ endpoints?: unknown[]; enabled?: boolean }> {
+    return this.request<{ endpoints?: unknown[]; enabled?: boolean }>(
       "GET",
-      `/api/enterprise/a2a/${encodeURIComponent(name)}/endpoints`,
+      `/api/settings/a2a-endpoints`,
     );
   }
 
-  /** Remove one outbound endpoint by id. */
-  async removeA2AEndpoint(name: string, endpointId: string): Promise<unknown> {
-    return this.request<unknown>(
+  /** Remove one outbound endpoint by id or name (first match wins). */
+  async removeA2AEndpoint(ref: string): Promise<{ removed?: string }> {
+    return this.request<{ removed?: string }>(
       "DELETE",
-      `/api/enterprise/a2a/${encodeURIComponent(name)}/endpoints/${encodeURIComponent(endpointId)}`,
+      `/api/settings/a2a-endpoints/${encodeURIComponent(ref)}`,
     );
   }
   // a2a_exposed is surfaced natively on GET /api/agents (ent#157), so list_agents
