@@ -28,6 +28,8 @@ The `PreToolUse` hook on `Bash` matches commands against a deny-list of dangerou
 | `kill -9 1` | `kill -9 1` | Killing the init process |
 | Fork bombs | `:(){ :\|:& };:` | Process explosion |
 | `shutdown`, `reboot` | `shutdown -h now` | Host shutdown |
+| `sudo` naming `/etc/claude-code`, `/opt/trinity`, `/etc/sudoers`; `visudo` | `sudo tee /etc/claude-code/managed-settings.json` | Rewriting the guardrail registration, hooks or sudoers |
+| Root shells | `sudo -i`, `sudo su`, `su -` | Interactive root shell |
 
 When a command is blocked, the agent sees a clear denial message with the reason. The event is logged to `/logs/guardrails.jsonl`.
 
@@ -129,7 +131,7 @@ Headless runs (tasks, schedules, loops, MCP calls) also withhold a fixed family 
 Guardrails are enforced at the infrastructure layer. Agents cannot:
 
 - Modify hook scripts (`/opt/trinity/hooks/` is root-owned)
-- Change which hooks run — registration lives in Claude Code's admin-controlled managed settings (`/etc/claude-code/managed-settings.json`, root-owned and read-only), which take precedence over user and project settings and sit outside the git-synced working tree. Neither an edit inside the container nor a push to the agent's repository can remove them. On every boot the container checks that the registration is present and unwritable and logs `GUARDRAILS: ERROR` if not.
+- Change which hooks run — registration lives in Claude Code's admin-controlled managed settings (`/etc/claude-code/managed-settings.json`, root-owned and read-only), which take precedence over user and project settings and sit outside the git-synced working tree. Neither an edit inside the container nor a push to the agent's repository can remove them. The agent user has passwordless `sudo`, so a determined agent can still rewrite the file; the Bash deny-list refuses the obvious `sudo` commands against it. On every boot the container checks that the registration is present and unwritable and logs `GUARDRAILS: ERROR` if not, and the agent's `/health` reports `guardrails_registration` on every request.
 - Bypass `--max-turns` limits
 - Disable `--dangerously-skip-permissions` protections (hooks still fire)
 
@@ -165,3 +167,4 @@ See [Backend API Docs](http://localhost:8000/docs) for full request/response sch
 - [Agent Configuration](agent-configuration.md) -- Other per-agent settings
 - [Managing Agents](managing-agents.md) -- Start/stop to apply changes
 - [Monitoring](../operations/monitoring.md) -- View guardrail events in logs
+- [Recommended Trinity Prompt](recommended-fleet-prompt.md) -- Fleet rules for behaviour that guardrails can't block

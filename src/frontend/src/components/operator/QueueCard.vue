@@ -28,7 +28,7 @@
 
           <!-- Title -->
           <h3 class="text-base text-gray-900 dark:text-white leading-snug">
-            {{ item.title }}
+            <AskMarkdown :text="item.title" inline data-testid="queue-card-title" />
           </h3>
 
           <!-- Type + priority pills (subtle) -->
@@ -83,7 +83,7 @@
     <div v-if="isExpanded" class="border-t border-gray-100 dark:border-gray-700">
       <!-- Question body -->
       <div class="px-4 pt-3 pb-4">
-        <div class="prose prose-sm dark:prose-invert max-w-none text-gray-700 dark:text-gray-300" v-html="renderMarkdown(item.question)"></div>
+        <AskMarkdown :text="item.question" class="text-gray-700 dark:text-gray-300" data-testid="queue-card-question" />
       </div>
 
       <!-- trinity-enterprise#611: the exact action this approval would run, always
@@ -125,6 +125,17 @@
         <InlineError :message="store.QUEUE_RESPONSE_DIVERGED" data-testid="queue-diverged-notice" />
       </div>
 
+      <!-- trinity-enterprise#751: a gated-skill approval addressed to someone
+           else — refused, nothing recorded. Beside the controls and kept until
+           dismissed (p18); the queue's poll never clears it. -->
+      <div v-if="notAddressee" class="px-4 pb-3">
+        <InlineError
+          :message="store.QUEUE_RESPONSE_NOT_ADDRESSEE"
+          data-testid="queue-not-addressee-notice"
+          @dismiss="store.notAddresseeItemId = null"
+        />
+      </div>
+
       <!-- Response area -->
       <div class="px-4 pb-4">
         <!-- Approval: option buttons -->
@@ -139,7 +150,7 @@
                 ? optionClass(idx)
                 : 'border-gray-200 dark:border-gray-600 text-gray-600 dark:text-gray-400 hover:border-gray-300 dark:hover:border-gray-500'"
             >
-              {{ option }}
+              <AskMarkdown :text="option" inline />
             </button>
           </div>
           <div class="flex gap-2">
@@ -203,7 +214,7 @@
 
 <script setup>
 import { ref, computed, watch } from 'vue'
-import { renderMarkdown } from '../../utils/markdown'
+import AskMarkdown from './AskMarkdown.vue'
 import { useOperatorQueueStore } from '../../stores/operatorQueue'
 import { useAgentsStore } from '../../stores/agents'
 import { agentNameTooltip } from '../../utils/agentName'
@@ -231,6 +242,7 @@ const responseKind = computed(() => queueResponseKind(props.item))
 const syncBadge = computed(() => queueSyncBadge(props.item))
 const reaskBadges = computed(() => queueReaskBadges(props.item, store.items))   // trinity-enterprise#611
 const diverged = computed(() => store.divergedItemId === props.item.id)
+const notAddressee = computed(() => store.notAddresseeItemId === props.item.id)
 
 const isExpanded = computed(() => store.expandedItemId === props.item.id)
 const agentAvatarUrl = computed(() => {
@@ -282,7 +294,6 @@ function priorityPill(priority) {
   }[priority] || ''
 }
 
-// renderMarkdown imported from utils/markdown
 
 function timeAgo(isoString) {
   const now = new Date()

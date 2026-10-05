@@ -93,10 +93,28 @@ def work_kind(row: dict) -> WorkKind:
     return "other"
 
 
+def awaits_claim(row: dict) -> bool:
+    """A pull pilot's ``running`` row that no worker holds yet (#3114).
+
+    A Workspace turn's row is pre-created ``running`` and enqueued a moment
+    later (after the conversation's resume lock). On a pilot every such turn
+    reaches the agent only through a worker claim, and a claim writes a lease,
+    so an un-leased running row is still waiting for a slot.
+    """
+    from services.pull_pilot import pull_owns_dispatch
+    return (
+        (row.get("status") or "").strip().lower() == "running"
+        and not row.get("lease_expires_at")
+        and pull_owns_dispatch(row.get("agent_name") or "", row.get("triggered_by"))
+    )
+
+
 def work_outcome(row: dict, *, stale: bool = False) -> WorkOutcome:
     """The honest word: `timeout` is a failure whose error says so; `lost` is a
     running row nothing is watching any more."""
     status = (row.get("status") or "").strip().lower()
+    if awaits_claim(row):
+        return "lost" if stale else "queued"
     if status in ("running", "pending_retry"):
         return "lost" if stale else "running"
     if status == "queued":

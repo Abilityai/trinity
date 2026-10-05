@@ -30,6 +30,7 @@ from models import (
 )
 from services.activity_service import activity_service
 from services.task_execution_service import get_task_execution_service
+from services.skill_gate_errors import SkillGateError
 from services.platform_audit_service import platform_audit_service, AuditEventType
 from services import (
     heartbeat_service, idempotency_service, schedule_seat_memory, schedule_workspace_delivery,
@@ -283,25 +284,34 @@ async def internal_agent_brief_readiness(agent_name: str):
 
 @router.get("/agents/{agent_name}/sync-health-status")
 async def internal_agent_sync_health(agent_name: str):
-    """#389: lightweight read used by the dedicated scheduler before dispatching.
+    """#389: the per-agent freeze decision, as the backend computes it.
 
-    Returns both the per-agent `freeze_schedules_if_sync_failing` flag and
-    whether the current sync state would trip it. The scheduler multiplies
-    the two to decide whether to skip the fire.
+    Returns the per-agent `freeze_schedules_if_sync_failing` flag, whether sync
+    is failing, and `should_freeze`. Since trinity-enterprise#706 the decision
+    is `sync_freeze_policy.classify` — the same module the scheduler vendors —
+    so `should_freeze` also covers a work agent diverged from origin for more
+    than 24 h, and `freeze_reason` / `divergence_age_s` / `work_agent` say why.
+
+    The dedicated scheduler does NOT call this endpoint: it reads the database
+    directly (`SchedulerDatabase.sync_freeze_reason`) with the vendored copy of
+    the same policy. This is the backend's read of the same decision.
     """
     from database import db as _db
+    from services.sync_health_view import sync_view
+
     freeze_flag = _db.get_freeze_schedules_if_sync_failing(agent_name)
+    config = _db.get_git_config(agent_name)
     state = _db.get_sync_state(agent_name) or {}
-    failing = (
-        state.get("last_sync_status") == "failed"
-        and (state.get("consecutive_failures") or 0) >= 3
-    )
+    view = sync_view(state or None, config)
     return {
         "agent_name": agent_name,
         "freeze_schedules_if_sync_failing": bool(freeze_flag),
-        "sync_failing": bool(failing),
-        "should_freeze": bool(freeze_flag and failing),
+        "sync_failing": bool(view["sync_failing"]),
+        "should_freeze": bool(freeze_flag and view["freeze"]),
         "consecutive_failures": state.get("consecutive_failures") or 0,
+        "freeze_reason": view["freeze_reason"] if freeze_flag else None,
+        "divergence_age_s": view["divergence_age_s"],
+        "work_agent": bool(config is not None and view["work_agent"]),
     }
 
 
@@ -561,9 +571,13 @@ async def execute_task_internal(
         idempotency_service.complete(idem, request.execution_id, accepted)
         return accepted
 
-    # Synchronous mode (default, backward compatible)
+    # Synchronous mode (default, backward compatible). #3114: on a pull pilot
+    # the turn is queued and awaited here.
+    from services.task_execution_service import dispatch_and_await_terminal
+
     try:
-        result = await task_service.execute_task(
+        result = await dispatch_and_await_terminal(
+            service=task_service,
             agent_name=request.agent_name,
             message=request.message,
             triggered_by=request.triggered_by,
@@ -703,6 +717,12 @@ async def _execute_task_internal_background(
             except Exception as db_err:
                 logger.error(f"Failed to update execution status on cancel: {db_err}")
         raise
+
+    except SkillGateError as e:
+        # trinity-enterprise#751: the run names a gated skill. Not a failure —
+        # the backstop already closed the row SKIPPED (the scheduler does not
+        # retry SKIPPED) and raised the approval or refused by name.
+        logger.info(f"Scheduled task on {request.agent_name} not run by the skill gate: {e.code}")
 
     except Exception as e:
         # If an exception escapes TaskExecutionService, ensure execution is marked failed
@@ -870,14 +890,20 @@ async def agent_files_share(payload: ShareFileRequest):
     /internal/execute-task (forging requires the internal secret).
     """
     from services.agent_shared_files_service import create_share
+    from services.idempotency_service import EffectUnguardedError
 
-    result = await create_share(
-        agent_name=payload.agent_name,
-        filename=payload.filename,
-        display_name=payload.display_name,
-        expires_in=payload.expires_in,
-        created_by=payload.agent_name,
-    )
+    try:
+        result = await create_share(
+            agent_name=payload.agent_name,
+            filename=payload.filename,
+            display_name=payload.display_name,
+            expires_in=payload.expires_in,
+            created_by=payload.agent_name,
+        )
+    except EffectUnguardedError as e:
+        # #2392: this path carries no execution id, so a pull-mode agent's share
+        # is refused here; the MCP route (`/api/agents/{name}/shared-files`) is the one to use.
+        raise HTTPException(status_code=422, detail={"reason": "effect_unguarded", "message": str(e)})
     return ShareFileResponse(**result)
 
 

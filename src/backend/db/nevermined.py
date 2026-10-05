@@ -8,7 +8,7 @@ NVM_API_KEY is encrypted using the same AES-256-GCM system as subscription token
 import uuid
 from typing import Optional, List
 
-from sqlalchemy import select, insert, update, delete
+from sqlalchemy import select, insert, update, delete, func
 
 from .engine import get_engine
 from .tables import nevermined_agent_config, nevermined_payment_log
@@ -246,6 +246,41 @@ class NeverminedOperations:
                 .limit(limit)
             ).mappings().all()
             return [self._row_to_payment_log(row) for row in rows]
+
+    def payer_owns_execution(
+        self, agent_name: str, execution_id: str, subscriber_address: str
+    ) -> bool:
+        """Did this payer wallet pay for this execution? (ent#679 T5)
+
+        The no-schema payer→task binding the A2A payment path uses to decide
+        whether an anonymous x402 caller may `tasks/get` / `tasks/cancel` a
+        task: the settle / settle_failed rows already carry both
+        ``execution_id`` and ``subscriber_address``, so the join exists without
+        a new column.
+
+        A targeted query rather than a scan of ``get_payment_log``'s newest 50:
+        on a busy agent a payer's own row rolls out of that window within
+        minutes, and the payer would then lose access to the task it paid for
+        — a correctness bug that only appears under load.
+
+        Matching is case-insensitive because an EVM address is hex and the
+        facilitator's checksum casing is not guaranteed stable across a verify
+        and a settle.
+        """
+        if not (agent_name and execution_id and subscriber_address):
+            return False
+        with get_engine().connect() as conn:
+            row = conn.execute(
+                select(nevermined_payment_log.c.id)
+                .where(nevermined_payment_log.c.agent_name == agent_name)
+                .where(nevermined_payment_log.c.execution_id == execution_id)
+                .where(
+                    func.lower(nevermined_payment_log.c.subscriber_address)
+                    == subscriber_address.lower()
+                )
+                .limit(1)
+            ).first()
+        return row is not None
 
     def get_settlement_failures(self, limit: int = 50) -> List[NeverminedPaymentLog]:
         """Get all failed settlements across all agents (admin view)."""

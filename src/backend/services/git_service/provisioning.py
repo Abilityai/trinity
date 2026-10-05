@@ -452,6 +452,11 @@ async def create_git_config_for_agent(
     return config
 
 
+# #2969: per-step bound, now ENFORCED (it was decorative) — must cover a first
+# fetch / `add .` / push of a large workspace over a slow link.
+GIT_INIT_STEP_TIMEOUT_S = 600
+
+
 @dataclass
 class GitInitResult:
     """Result of git initialization in container."""
@@ -580,8 +585,13 @@ async def initialize_git_in_container(
         result = await execute_command_in_container(
             container_name=container_name,
             command=f'bash -c "cd {git_dir} && {cmd}"',
-            timeout=60
+            timeout=GIT_INIT_STEP_TIMEOUT_S,
         )
+        if result.get("timed_out"):
+            # #2969: a timed-out fetch is NOT an empty remote — falling through
+            # would take the `push --force` branch over the remote's history.
+            return GitInitResult(success=False, git_dir=git_dir, error=(
+                f"Git command timed out after {GIT_INIT_STEP_TIMEOUT_S}s: {cmd}"))
         if result.get("exit_code", 0) != 0 and required:
             output = result.get("output", "")
             return GitInitResult(
@@ -622,7 +632,7 @@ async def initialize_git_in_container(
         result = await execute_command_in_container(
             container_name=container_name,
             command=f'bash -c "cd {git_dir} && {cmd}"',
-            timeout=60
+            timeout=GIT_INIT_STEP_TIMEOUT_S,
         )
         if result.get("exit_code", 0) != 0:
             output = result.get("output", "")
@@ -648,7 +658,7 @@ async def initialize_git_in_container(
             result = await execute_command_in_container(
                 container_name=container_name,
                 command=f'bash -c "cd {git_dir} && {cmd}"',
-                timeout=60,
+                timeout=GIT_INIT_STEP_TIMEOUT_S,
             )
             if result.get("exit_code", 0) != 0:
                 logger.warning(
@@ -676,7 +686,7 @@ async def initialize_git_in_container(
             result = await execute_command_in_container(
                 container_name=container_name,
                 command=f'bash -c "cd {git_dir} && {cmd}"',
-                timeout=60
+                timeout=GIT_INIT_STEP_TIMEOUT_S
             )
             if result.get("exit_code", 0) != 0:
                 # Working branch creation is optional - log but don't fail

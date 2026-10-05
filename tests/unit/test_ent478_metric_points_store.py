@@ -72,8 +72,8 @@ def _stored(agent=AGENT):
 # ---------------------------------------------------------------------------
 
 def test_a_validated_point_becomes_a_real_row(db_backend):
-    recorded, deduplicated = db.insert_metric_points(AGENT, [_row()])
-    assert (recorded, deduplicated) == (1, 0)
+    recorded, deduplicated, corrected = db.insert_metric_points(AGENT, [_row()])
+    assert (recorded, deduplicated, corrected) == (1, 0, 0)
 
     row = _stored()[0]
     assert row["agent_name"] == AGENT
@@ -93,34 +93,34 @@ def test_the_agent_name_is_stamped_by_the_store_not_carried_in_the_row(db_backen
 
 def test_the_same_observation_twice_is_one_row(db_backend):
     db.insert_metric_points(AGENT, [_row()])
-    recorded, deduplicated = db.insert_metric_points(AGENT, [_row()])
+    recorded, deduplicated, corrected = db.insert_metric_points(AGENT, [_row()])
 
-    assert (recorded, deduplicated) == (0, 1)
+    assert (recorded, deduplicated, corrected) == (0, 1, 0)
     assert len(_stored()) == 1
 
 
-def test_a_corrected_value_at_the_same_identity_does_not_overwrite(db_backend):
-    """`on_conflict_do_nothing`, not `do_update`: the first observation stands,
-    and the caller learns it was deduplicated rather than silently rewriting
-    history."""
+def test_a_corrected_value_at_the_same_identity_restates_the_one_row(db_backend):
+    """ent#729 (R45) reversed the ent#478 rule: a different value at the same
+    identity is a correction and updates the row, still ONE row. The full
+    restatement contract is `test_ent729_metric_restatement.py`."""
     db.insert_metric_points(AGENT, [_row(value=1.0)])
     db.insert_metric_points(AGENT, [_row(value=999.0)])
 
-    assert [r["value_numeric"] for r in _stored()] == [1.0]
+    assert [r["value_numeric"] for r in _stored()] == [999.0]
 
 
 def test_recorded_counts_only_what_survived_the_conflict(db_backend):
-    """E9: across a multi-VALUES insert with DO NOTHING, `rowcount` is not a
-    portable count of the surviving rows — `.returning` is."""
+    """E9: across a multi-VALUES upsert, `rowcount` is not a portable count
+    of what was written — `.returning(revision)` is."""
     db.insert_metric_points(AGENT, [_row(ts="2026-09-22T10:00:00.000000Z")])
 
-    recorded, deduplicated = db.insert_metric_points(AGENT, [
+    recorded, deduplicated, corrected = db.insert_metric_points(AGENT, [
         _row(ts="2026-09-22T10:00:00.000000Z"),   # stored twin
         _row(ts="2026-09-22T11:00:00.000000Z"),
         _row(ts="2026-09-22T12:00:00.000000Z"),
     ])
 
-    assert (recorded, deduplicated) == (2, 1)
+    assert (recorded, deduplicated, corrected) == (2, 1, 0)
     assert len(_stored()) == 3
 
 
@@ -144,7 +144,7 @@ def test_a_status_point_stores_text_and_no_number(db_backend):
 
 
 def test_an_empty_batch_writes_nothing_and_says_so(db_backend):
-    assert db.insert_metric_points(AGENT, []) == (0, 0)
+    assert db.insert_metric_points(AGENT, []) == (0, 0, 0)
 
 
 def test_the_value_column_keeps_its_cents(db_backend):
@@ -275,7 +275,7 @@ def test_every_column_of_the_new_table_is_selectable(db_backend):
     row = _stored()[0]
     for column in ("agent_name", "metric", "ts", "idempotency_key",
                    "value_numeric", "value_text", "dims", "execution_id",
-                   "created_at"):
+                   "created_at", "revision", "recorded_at"):
         assert column in row, f"{column} is not reachable through tables.py"
 
 
@@ -291,7 +291,7 @@ def test_the_ddl_column_set_and_the_metadata_column_set_agree(db_backend):
     body = ddl[ddl.index("(") + 1:ddl.rindex(")")]
     declared = {
         m.group(1) for line in body.splitlines()
-        if (m := re.match(r"\s*([a-z_]+)\s+(TEXT|DOUBLE|INTEGER|REAL)", line))
+        if (m := re.match(r"\s*([a-z_]+)\s+(TEXT|DOUBLE|BIGINT|INTEGER|REAL)", line))
     }
     assert declared == {c.name for c in metric_points.columns}
 

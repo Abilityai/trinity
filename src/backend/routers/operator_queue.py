@@ -13,7 +13,7 @@ gate and map errors. Only a person ends an ask (`reject_non_person_principal`).
 
 import json
 from typing import Any, Dict, List, Optional, Set
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, Response
 from models import (
     BulkCancelRequest,
     ClearResolvedRequest,
@@ -74,27 +74,40 @@ def _assert_agent_accessible(agent_name: str, accessible: Optional[Set[str]]) ->
         raise HTTPException(status_code=403, detail="Access denied")
 
 
-# trinity-enterprise#611: the person fields that arrived with the ask object. A
-# machine principal (an agent-, system- or ops-scoped key) reads the queue for its
-# own work, never to learn which person ended an ask or whom it was resolved to.
-# The PRE-existing person fields on the row (`responded_by_email`,
-# `addressed_to_email`) still pass here — a registered residual, not a decision.
-_PERSON_FIELDS_WITHHELD_FROM_MACHINES = ("disposed_by_email", "resolved_to")
+# What a MACHINE principal (an agent-, system-, ops-, connector- or
+# portal_delegate key, and whatever scope ships next) reads of a queue row
+# (trinity-enterprise#611, #715). It reads the queue for its own work, never to
+# learn which person answered or ended an ask, or whom it was for. An ALLOWLIST,
+# like `_READBACK_FIELDS` below, so a column added later stays out until someone
+# decides a machine should read it. Withheld: `responded_by_id`,
+# `responded_by_email`, `addressed_to_email` (a file entry's too — a sibling's
+# rows are readable by the same key), `disposed_by_email`, `resolved_to`.
+# A person — a JWT session or the person's own user-scoped key
+# (`is_person_principal`) — reads the whole row.
+_MACHINE_ROW_FIELDS = (
+    "id", "agent_name", "request_id", "type", "status", "priority",
+    "title", "question", "options", "context", "execution_id",
+    "created_at", "expires_at", "response", "response_text", "responded_at",
+    "acknowledged_at", "cleared_at",
+    "sync_state", "sync_detail", "sync_updated_at", "last_confirmed_at",
+    "delivery_state", "delivery_detail", "delivery_updated_at",
+    "divergence_acknowledged_at",
+    "disposition", "disposed_at", "disposed_by", "disposition_reason", "batch_id",
+    "raised_by", "channel", "to_role", "proposal", "supersedes_expired",
+    "aging", "aged_since",
+)
 
 
 def _for_principal(items: List[Dict[str, Any]], current_user: User) -> List[Dict[str, Any]]:
     if is_person_principal(current_user):
         return items
-    for item in items:
-        for key in _PERSON_FIELDS_WITHHELD_FROM_MACHINES:
-            item.pop(key, None)
-        # trinity-enterprise#611: a native ask's addressee is the person the
-        # PLATFORM resolved a role to — the email `resolved_to` also holds — so a
-        # machine does not get it back (the receipt's rule). A file entry's
-        # addressee is the agent's own input and stays (the registered residual).
-        if item.get("channel") not in (None, "file"):
-            item.pop("addressed_to_email", None)
-    return items
+    # #715: the platform's heads-ups ABOUT a person (a client's complaint, the
+    # client addresses behind a shared inbox) are the operator's, not a machine's.
+    return [
+        {key: item[key] for key in _MACHINE_ROW_FIELDS if key in item}
+        for item in items
+        if not operator_queue_service.is_about_a_person(item)
+    ]
 
 
 # The agent's own readback (trinity-enterprise#611). An ALLOWLIST, so a column
@@ -115,7 +128,7 @@ def _actor(current_user: User, request: Request) -> ask_service.Actor:
         email=current_user.email or current_user.username,
         user=current_user,
         ip=request.client.host if request.client else None,
-        endpoint=str(request.url.path),
+        endpoint=request.scope["path"],
     )
 
 
@@ -228,16 +241,17 @@ async def clear_resolved_queue_items(
             actor_ip=request.client.host if request.client else None,
             target_type="operator_queue",
             target_id=body.agent_name,
-            endpoint=str(request.url.path),
+            endpoint=request.scope["path"],
             details={"cleared": cleared, "agent_name": body.agent_name},
         )
         if _websocket_manager:
+            # #715: the count only. A fleet-level trigger reaches every `/ws`
+            # connection, and any key can mint a ticket; listeners refetch.
             await _websocket_manager.broadcast(json.dumps({
                 "type": "operator_queue_cleared",
                 "data": {
                     "scope": "resolved",
                     "count": cleared,
-                    "cleared_by": current_user.email or current_user.username,
                 }
             }))
 
@@ -255,7 +269,11 @@ async def get_queue_item(
         raise HTTPException(status_code=404, detail="Queue item not found")
     accessible = _accessible_set(current_user)
     _assert_agent_accessible(item["agent_name"], accessible)
-    return _for_principal(operator_queue_service.annotate_aging([item]), current_user)[0]
+    visible = _for_principal(operator_queue_service.annotate_aging([item]), current_user)
+    if not visible:
+        # #715: a row about a person reads, to a machine, like one that is not there.
+        raise HTTPException(status_code=404, detail="Queue item not found")
+    return visible[0]
 
 
 @router.post("/{item_id}/respond")
@@ -338,6 +356,13 @@ async def respond_to_queue_item(
         )
     except ask_service.AskNotFound:
         raise HTTPException(status_code=404, detail="Queue item not found")
+    except ask_service.AskNotAddressee:
+        # trinity-enterprise#751: a gated-skill approval is decided only by a
+        # person it was addressed to.
+        raise HTTPException(status_code=403, detail={
+            "code": "not_addressee",
+            "message": "This approval was addressed to someone else; only they can decide it.",
+        })
     except ask_service.AskConflict as conflict:
         # The response was NOT recorded — surfaced instead of a silent 200
         # (#1017). `expired`: still pending but past its deadline (#611) — the
@@ -391,6 +416,13 @@ async def cancel_queue_item(
         )
     except ask_service.AskNotFound:
         raise HTTPException(status_code=404, detail="Queue item not found")
+    except ask_service.AskNotAddressee:
+        # trinity-enterprise#751: only its addressee or an admin cancels a
+        # gated-skill approval.
+        raise HTTPException(status_code=403, detail={
+            "code": "not_addressee",
+            "message": "This approval was addressed to someone else; only they or an admin can cancel it.",
+        })
     except ask_service.AskConflict as conflict:
         raise HTTPException(
             status_code=409,
@@ -428,6 +460,7 @@ async def raise_my_ask(
     response: Response,
     name: str = Depends(get_self_acting_agent),
     current_user: User = Depends(get_current_user),
+    x_trinity_execution_id: Optional[str] = Header(None, max_length=128),
 ):
     """An agent asks a person for a decision — one call, validated here, stored,
     broadcast, and answered with a receipt. No file is written.
@@ -445,6 +478,8 @@ async def raise_my_ask(
             raised_by="agent",
             channel="mcp",
             actor_user=current_user,
+            # ent#661 v3: the raising turn as the platform saw it (#2392).
+            platform_execution_id=x_trinity_execution_id,
         )
     except ask_service.AskRejected as e:
         raise HTTPException(
@@ -469,7 +504,10 @@ async def get_my_ask(
     (`_READBACK_FIELDS`) that never carries a person's email.
     """
     item = db.get_operator_queue_item_for_agent_by_request_id(name, request_id)
-    if not item:
+    # #715 / trinity-enterprise#751: a row whose text names a person (a skill-gate
+    # card or notice — its id is readable in the executor's own skipped run) is
+    # the operator's; the same 404 as an unknown id.
+    if not item or operator_queue_service.is_about_a_person(item):
         raise HTTPException(status_code=404, detail="Ask not found")
     readback = {key: item.get(key) for key in _READBACK_FIELDS}
     # The row stores the predecessor's uuid; the agent knows its asks by the

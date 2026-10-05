@@ -100,6 +100,19 @@
       <span v-else-if="!currentSessionId" class="hidden sm:inline min-w-0 flex-1 truncate text-sm text-gray-500 dark:text-gray-400">New chat</span>
 
       <div class="ml-auto flex items-center gap-1 shrink-0">
+        <!-- ent#661: the chat's project — its badge and Detach, or one
+             "Project" button. Hidden in Main, for an outside client, before
+             the chat exists, and on a build without projects. -->
+        <ProjectChatControls
+          v-if="currentSessionId"
+          kind="thread"
+          :agent-name="agent.name"
+          :target-id="currentSessionId"
+          :session-title="currentTitle"
+          :is-main="isMainChat"
+          @open-project="(id) => emit('open-project', id)"
+          @wrap-up="wrapUp"
+        />
         <!-- ent#451: New chat lives in the header, with its hotkey (⌘J /
              Ctrl+J, ruled 2026-09-06). Starts a fresh thread with THIS agent —
              the sidebar's button is the cross-agent one (the picker). -->
@@ -279,11 +292,51 @@
           :class="PLATFORM_LINE_CLASS"
           data-testid="portal-history-truncated"
         >Earlier messages in this chat aren't shown</p>
-        <template v-for="(item, k) in threadItems" :key="item.kind === 'voice-call' ? `call-${item.callId}` : `m-${item.index}`">
+        <template v-for="(item, k) in threadRows" :key="rowKey(item)">
+        <!-- trinity-enterprise#610 (the 09-30 ruling, amended) × ent#734: an
+             ask this chat's own turn raised is a row of the thread, placed by
+             time (portalChatAsks). While it waits it is the one ask card,
+             answerable here; once ended it is one muted line of history. A
+             background ask never reaches this loop — its home is the Inbox. -->
+        <div v-if="item.kind === 'ask'" :data-ask-id="item.ask.id">
+          <div v-if="item.mode === 'card'" class="flex items-start gap-2.5" data-testid="portal-chat-ask-tile">
+            <PortalAvatar :name="agent.name" :avatar-url="agent.avatar_url" :size="28" class="mt-0.5" />
+            <!-- `relative`: each card's sr-only text stays inside the thread's scroll box. -->
+            <div class="relative min-w-0 flex-1 max-w-[min(85%,40rem)]">
+              <PortalAsks
+                :ask-ids="[item.ask.id]"
+                :current-session-id="currentSessionId"
+                :thread-link="false"
+                testid-prefix="portal-tile-ask"
+              />
+            </div>
+          </div>
+          <p
+            v-else
+            class="flex items-baseline justify-center gap-1 min-w-0 text-xs max-sm:flex-wrap rounded focus:outline-none focus-visible:ring-2 focus-visible:ring-action-primary-500/40 dark:focus-visible:ring-action-primary-400/40"
+            :class="META_INK_CLASS"
+            :title="item.line.plain"
+            tabindex="-1"
+            data-testid="portal-chat-ask-ended"
+          >
+            <span class="shrink-0">{{ item.line.kind }}</span>
+            <!-- On a phone the title takes its own full line (below sm the
+                 fixed parts left it ~120px and it clipped even on two lines). -->
+            <span class="max-sm:hidden" aria-hidden="true">·</span>
+            <AskMarkdown :text="item.line.title" inline class="min-w-0 truncate max-sm:whitespace-normal max-sm:line-clamp-2 max-sm:basis-full max-sm:order-last max-sm:text-center" />
+            <span aria-hidden="true">·</span>
+            <span class="shrink-0">{{ item.line.ending }}</span>
+            <template v-if="item.line.when">
+              <span aria-hidden="true">·</span>
+              <time class="shrink-0" :datetime="item.line.at" :title="formatLocalDateTime(item.line.at)">{{ item.line.when }}</time>
+            </template>
+          </p>
+        </div>
         <details
-          v-if="item.kind === 'voice-call'"
+          v-else-if="item.kind === 'voice-call'"
           class="rounded-xl border border-gray-200 dark:border-gray-800 bg-gray-50 dark:bg-gray-950"
           data-testid="portal-voice-call-block"
+          :data-message-ids="item.turns.map((t) => t.id).filter(Boolean).join(' ') || undefined"
         >
           <summary class="cursor-pointer select-none flex items-center gap-2 px-3 py-2 text-xs text-gray-600 dark:text-gray-300">
             <svg class="w-3.5 h-3.5 shrink-0 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11a7 7 0 01-14 0m7 7v3m0-3a4 4 0 004-4V7a4 4 0 10-8 0v6a4 4 0 004 4z" /></svg>
@@ -295,6 +348,7 @@
               v-for="(t, j) in item.turns"
               :key="t.id || j"
               :class="t.role === 'user' ? 'flex justify-end' : 'flex items-start gap-2.5'"
+              :data-message-id="t.id || undefined"
               data-testid="portal-voice-turn"
             >
               <PortalAvatar v-if="t.role !== 'user'" :name="agent.name" :avatar-url="agent.avatar_url" :size="24" class="mt-0.5" />
@@ -308,7 +362,11 @@
             </div>
           </div>
         </details>
-        <div v-else>
+        <!-- trinity-enterprise#610 (D11): a real DOM target per message, so the
+             Inbox's "Open in chat" anchor can land on the arrival. Rows are
+             keyed by index (and a live row has no id until history reloads),
+             so the id rides as data, never as the key. -->
+        <div v-else :data-message-id="item.message.id || undefined">
         <p
           v-if="item.message.role === 'system'"
           :class="PLATFORM_LINE_CLASS"
@@ -317,6 +375,18 @@
         <div v-else :class="item.message.role === 'user' ? 'flex justify-end' : 'flex items-start gap-2.5'">
           <PortalAvatar v-if="item.message.role !== 'user'" :name="agent.name" :avatar-url="agent.avatar_url" :size="28" class="mt-0.5" />
           <div v-if="item.message.role === 'user'" class="max-w-[85%] flex flex-col items-end gap-1">
+            <!-- ent#610 round 8: what this message replied to (this visit —
+                 the stored row keeps only what was typed). Removable only while
+                 the message failed (#3054 review): the server refuses a reply
+                 target it cannot prove, and Retry must be able to send without it. -->
+            <PortalReplyChip
+              v-if="item.message.replyTo"
+              :excerpt="item.message.replyTo.excerpt"
+              placement="message"
+              :removable="!!item.message.failed"
+              class="max-w-full"
+              @remove="dropReply(item.index)"
+            />
             <div
               class="rounded-2xl rounded-br-md px-3.5 py-3 text-sm leading-relaxed whitespace-pre-wrap"
               :class="item.message.failed ? 'bg-status-danger-50 dark:bg-status-danger-900/30 text-status-danger-800 dark:text-status-danger-200 ring-1 ring-status-danger-300 dark:ring-status-danger-800' : 'bg-action-primary-600 text-white'"
@@ -348,7 +418,19 @@
                  copy controls are ONE component now. The rating lands in the
                  bubble's action row beside the message Copy — same row, one
                  line of controls under the answer they are about. -->
-            <PortalAgentBubble :content="item.message.content">
+            <!-- trinity-enterprise#738: Reply, on the same persisted-id rule as
+                 the thumbs below — a reply needs a stored row to point at, and
+                 the server quotes it from there. `currentSessionId`, never the
+                 prop: on a URL that does not name the chat, the chat this
+                 conversation resolved lives only there. Disabled, not hidden,
+                 during a call: the composer it would focus is inert, and the
+                 row must not reflow. -->
+            <PortalAgentBubble
+              :content="item.message.content"
+              :reply-label="item.message.id && currentSessionId ? 'Reply to this message' : ''"
+              :reply-disabled="voiceCallActive"
+              @reply="replyToMessage(item.message)"
+            >
               <!-- ent#366: one click, on the answer being judged. Only on a
                    PERSISTED agent message — a thumb needs a row to point at, and
                    a client-fabricated id would simply 404 against the ratings
@@ -421,27 +503,34 @@
           :agent-name="agent.name"
           :session-id="currentSessionId"
           :refresh-key="deliverableTick"
+          @loaded="anchor.afterDeliverables"
         />
       </div>
       </div>
     </div>
+    <!-- trinity-enterprise#610: an "Open in chat" anchor that pointed further up
+         than the loaded window says so, rather than silently opening at the
+         bottom as if it had found nothing to show. -->
+    <p
+      v-if="anchor.notice.value"
+      class="shrink-0 px-3 sm:px-6"
+      :class="PLATFORM_LINE_CLASS"
+      role="status"
+      aria-live="polite"
+      data-testid="portal-anchor-notice"
+    >{{ anchor.notice.value }}</p>
+    <!-- trinity-enterprise#610 (the team's ruling, 2026-10-01): an ask answered
+         here collapses into its muted row at once; the row's confirmation is
+         said here. Always mounted, so a screen reader hears the change. -->
+    <p class="sr-only" aria-live="polite" data-testid="portal-chat-ask-announce">{{ askAnnouncement }}</p>
     <PortalJumpToLatest :show="showJumpToLatest" :count="unreadBelow" @jump="scrollToLatest" />
     </div>
 
-    <!-- ent#364: asks this agent raised, immediately above the composer — the
-         third rendering of the SAME row the sidebar counts and the agent page
-         shows, so answering here clears it in both. Directly above the input
-         because it is a turn that is waiting on the person about to type. -->
-    <div v-if="agentAsks.length" class="shrink-0 px-3 sm:px-6 pt-2">
-      <div class="max-w-[var(--ws-message-max,64rem)] mx-auto">
-        <PortalAsks
-          :agent-name="agent.name"
-          :current-session-id="currentSessionId"
-          @open-thread="(t) => emit('open-thread', t)"
-        />
-      </div>
-    </div>
-
+    <!-- trinity-enterprise#610 (the 09-30 ruling): nothing of variable height
+         sits between the thread and the composer (principle 30). The asks box
+         that was pinned here (ent#364 → #3115 → PR A's closed disclosure row)
+         and the line under it are gone: an ask this chat raised is a
+         row of the thread above, and every other ask lives in the Inbox. -->
     <!-- ent#474: the rail's mobile collapsed form — a strip above the
          composer, supplied by the shell, which owns the rail's tabs and
          signals. Renders nothing above `sm`, where the column beside the
@@ -596,6 +685,18 @@
                of an equal-specificity pair survives. Dark hid it, because every
                `dark:` variant is emitted after both. Mutually exclusive arms have
                no ordering to get wrong. -->
+          <!-- ent#610 round 8: "replying to" — a tab on top of the composer
+               (Codex-style). The turn carries only the message id; the agent
+               gets the stored message quoted server-side. -->
+          <!-- ent#738: the chip describes the field (`aria-describedby` below), so
+               the focus Reply moves here announces what the message answers;
+               removing it hands the caret back rather than dropping it on body. -->
+          <PortalReplyChip
+            v-if="replyTo"
+            :text-id="replyChipId"
+            :excerpt="replyTo.excerpt"
+            @remove="dropComposerReply"
+          />
           <div
             class="rounded-2xl border px-2 py-2 transition has-[textarea:focus]:border-action-primary-600 dark:has-[textarea:focus]:border-action-primary-500 has-[textarea:focus]:ring-[3px] has-[textarea:focus]:ring-action-primary-500/40 dark:has-[textarea:focus]:ring-action-primary-400/40"
             :class="voiceCallActive ? 'border-transparent bg-transparent' : 'border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800'"
@@ -623,6 +724,7 @@
                 rows="1"
                 :placeholder="composerPlaceholder"
                 :disabled="voiceCallActive"
+                :aria-describedby="replyTo ? replyChipId : undefined"
                 class="block w-full resize-none border-0 bg-transparent text-sm text-gray-900 dark:text-gray-100 px-2 py-2 leading-6 focus:outline-none focus:ring-0 max-h-40"
                 @input="onComposerInput"
                 @keydown="onComposerKeydown"
@@ -748,27 +850,38 @@
 </template>
 
 <script setup>
-import { ref, computed, watch, nextTick, onMounted, onBeforeUnmount } from 'vue'
+import ProjectChatControls from './projects/ProjectChatControls.vue'
+import { wrapUpPrompt } from './projects/projectsUtils'
+import { ref, computed, watch, nextTick, onMounted, onBeforeUnmount, useId } from 'vue'
 import { useClientPortalStore } from '@/stores/clientPortal'
 import { agentDisplayName } from '@/utils/agentName'
 import PortalAgentBubble from './PortalAgentBubble.vue'
 import PortalWorkCard from './PortalWorkCard.vue'
 import { usePortalWorkStore } from '@/stores/portalWork'
-import { askAboutItPrefill, childrenForChat, itemById, previewTitle } from './portalWork'
+import { askAboutItPrefill, childrenForChat, clockRestartsAt, itemById, pendingTurnOutcome, previewTitle } from './portalWork'
 import { activityFromStreamEvent, resolveActivityText } from '@/utils/workActivity'
 import PortalAvatar from './PortalAvatar.vue'
 import PortalStarButton from './PortalStarButton.vue'
 import PortalEditableTitle from './PortalEditableTitle.vue'
 import PortalChatTabs from './PortalChatTabs.vue'
 import { newChatHotkeyLabel, MAIN_TAB_LABEL, composerAvailabilityNotice, assistantRow, replyFromHistory, replyBaseline, readReplyBaseline } from './portalUtils'
+// ent#738: the chip's one-line excerpt — the same one the Inbox's arrow hands over.
+// Aliased: `submitUserText` already takes a `replyExcerpt` (the excerpt itself).
+import { replyExcerpt as excerptForReply } from './portalInbox'
+import { chatTurnAsks, placeAsksInThread, askTileMode, askHistoryLine } from './portalChatAsks'
+import AskMarkdown from '@/components/operator/AskMarkdown.vue'
+import { formatLocalDateTime } from '@/utils/timestamps'
 import { usePortalFileDrop, attachmentState } from '@/composables/usePortalFileDrop'
 import { useStickToBottom } from '@/composables/useStickToBottom'
+import { useConversationAnchor } from '@/composables/useConversationAnchor'
+import { useRoute, useRouter } from 'vue-router'
 import { useComposerDraft } from '@/composables/useComposerDraft'
 import { usePortalDraftsStore } from '@/stores/portalDrafts'
 import { draftKeyFor, shouldFocusOnRestore } from './portalDrafts'
 import PortalTypeahead from './PortalTypeahead.vue'
 import PortalJumpToLatest from './PortalJumpToLatest.vue'
 import PortalAsks from './PortalAsks.vue'
+import PortalReplyChip from './PortalReplyChip.vue'
 import PortalDeliverables from './PortalDeliverables.vue'
 import PortalSkeleton from './PortalSkeleton.vue'
 import { workSignalFrom } from './portalRail'
@@ -854,6 +967,9 @@ const props = defineProps({
   // backend's `new_thread`.
   newChat: { type: Boolean, default: false },
   prefill: { type: String, default: '' },
+  // ent#610 round 8: `{ sessionId, messageId, excerpt }` from the Inbox arrow.
+  // Shown only on the chat it belongs to; the shell clears it on `reply-done`.
+  replyTarget: { type: Object, default: null },
   // ent#359: whether the CURRENT thread is starred. Owned by the shell (it
   // holds the per-viewer chat state), rendered here.
   starred: { type: Boolean, default: false },
@@ -867,7 +983,7 @@ const props = defineProps({
 // controls that raised them — the rail strip is the door to both now.
 // Declared emits are the component's contract, so a name left here after
 // its only `$emit` is deleted is a promise nothing keeps.
-const emit = defineEmits(['switch-agent', 'session-adopted', 'sessions-changed', 'open-menu', 'toggle-star', 'escalate-to-room', 'open-thread', 'work-state', 'open-work', 'new-chat', 'main-reset', 'voice-call', 'voice-panel'])
+const emit = defineEmits(['reply', 'reply-done', 'switch-agent', 'session-adopted', 'sessions-changed', 'open-menu', 'toggle-star', 'escalate-to-room', 'open-thread', 'work-state', 'open-work', 'new-chat', 'main-reset', 'voice-call', 'voice-panel', 'open-project', 'thread-missing'])
 
 // ent#451/#473: the active thread as the shell's list knows it. Null until the
 // list carries the thread (a just-adopted session lands on the next refresh),
@@ -945,7 +1061,7 @@ const PLATFORM_LINE_CLASS = 'my-3 text-center text-xs text-gray-400 dark:text-gr
 // Meta ink for a label beside a message (the block's "· spoken", a task's
 // "asked during a voice call"): tertiary in light, and gray-400 in dark — the
 // dark ink ladder's floor for meta text is gray-400, never gray-500.
-const META_INK_CLASS = 'text-gray-400 dark:text-gray-400'
+const META_INK_CLASS = 'text-gray-500 dark:text-gray-400'
 const input = ref('')
 // trinity-enterprise#657: the composer's text outlives this instance. The key
 // is the conversation's identity — the thread once known, the agent's unsaved
@@ -964,12 +1080,85 @@ const resetting = ref(false)
 // ent#523 AC 10 — the same pure rule the sidebar chip and the details header
 // read, so the four surfaces cannot disagree about one agent.
 const availabilityNotice = computed(() => composerAvailabilityNotice(props.agent))
+const replyTo = computed(() => (
+  props.replyTarget && props.replyTarget.messageId && props.replyTarget.sessionId === currentSessionId.value
+    ? props.replyTarget : null
+))
+const replyChipId = `portal-reply-chip-${useId()}`
+// trinity-enterprise#738: Reply on a message in THIS chat. The shell owns the
+// target (it is what drops it when the person leaves the chat), so this asks
+// rather than sets; what comes back is the same `replyTarget` the Inbox's arrow
+// hands over. Focus is synchronous: the textarea exists whatever the prop says,
+// and a phone opens its keyboard only inside the tap's own gesture.
+function replyToMessage(message) {
+  if (!message?.id || !currentSessionId.value) return
+  emit('reply', { sessionId: currentSessionId.value, messageId: message.id, excerpt: excerptForReply(message.content) })
+  focusComposer()
+}
+function dropComposerReply() {
+  emit('reply-done')
+  focusComposer()
+}
 const isMainChat = computed(() => {
   const id = currentSessionId.value
   if (!id) return false
   const row = (props.threads || []).find((t) => !t.is_room && (t.id || t.session_id) === id)
   return !!row?.is_main
 })
+
+// trinity-enterprise#610 (the 09-30 ruling, amended) × ent#734: the asks THIS
+// chat's own turns raised — rows of the thread (`threadRows`). Declared after
+// `currentSessionId`: the `immediate` watcher below reads it at setup.
+// Round 2 (review I3, codex C3): the store's list keeps ended asks 7 days and
+// one page, so the chat also reads its own (`fetchChatTurnAsks`, no ended
+// window — the queue's retention is the bound, as the ruling says). The
+// store's rows are the fresher (the poll), so they win for the same id.
+const chatRead = ref({ sid: null, rows: [] })
+watch(currentSessionId, async (sid) => {
+  chatRead.value = { sid: null, rows: [] }
+  if (!sid) return
+  try {
+    const rows = await store.fetchChatTurnAsks(sid)
+    if (currentSessionId.value === sid) chatRead.value = { sid, rows }
+  } catch (e) {
+    console.warn('[workspace] chat asks unavailable:', e?.message || e)
+  }
+}, { immediate: true })
+const chatTurnAskList = computed(() => {
+  const sid = currentSessionId.value
+  const fresh = chatTurnAsks(agentAsks.value, sid)
+  if (chatRead.value.sid !== sid) return fresh
+  const have = new Set(fresh.map((a) => a.id))
+  return [...fresh, ...chatTurnAsks(chatRead.value.rows, sid).filter((a) => !have.has(a.id))]
+})
+// An ask seen waiting in this chat keeps its card (ended, with the ent#468
+// confirmation) after you answer it, until you leave the chat. Any other ended
+// ask is one muted history row. ONE watcher over (chat, waiting ids): two — a
+// reset on the chat and an add on the ids — ran add-then-reset on a switch, so
+// an ask answered before the next poll lost its card (review round 2, C1).
+// A new waiting tile in the chat you are on is an arrival, like a message: it
+// counts toward "jump to latest" while you read above (round 2, QA mobile F3).
+const seenPendingAsks = ref(new Set())
+watch(
+  () => [currentSessionId.value, chatTurnAskList.value.filter((a) => a.status === 'pending').map((a) => a.id)],
+  ([sid, ids], old) => {
+    const sameChat = old && old[0] === sid
+    const base = sameChat ? seenPendingAsks.value : new Set()
+    const fresh = ids.filter((id) => !base.has(id))
+    if (!sameChat || fresh.length) seenPendingAsks.value = new Set([...base, ...ids])
+    if (sameChat && fresh.length) onMessagesArrived(fresh.length)
+    // An ask that waited on screen and has now ENDED: its card is already the
+    // muted row (askTileMode). Say so, and move focus there when the card took
+    // it down with it — never out of the composer or anywhere else it sits.
+    if (sameChat) {
+      const ended = old[1].filter((id) => !ids.includes(id))
+        .map((id) => chatTurnAskList.value.find((a) => a.id === id && a.status !== 'pending'))
+        .filter(Boolean)
+      if (ended.length) announceEnded(ended[ended.length - 1])
+    }
+  },
+  { immediate: true },
+)
 
 // Archive this conversation and start the agent cold. No confirmation dialog
 // (operator, 2026-09-06) — nothing is lost, and the archived chat is one click
@@ -1042,7 +1231,7 @@ const liveCardItem = computed(() => {
     id: activeExecutionId.value || 'pending',
     agent_name: props.agent.name,
     status: 'running',
-    outcome: 'running',
+    outcome: pendingTurnOutcome(liveStreamActivity.value, props.agent.pulls_turns),
     kind: 'turn',
     // The feed's own title shape, so its row lands without re-wrapping it (#2964).
     title: previewTitle(pendingUserText.value || lastUserText()),
@@ -1152,11 +1341,18 @@ const {
   pinToBottom,
   scrollToLatest,
   reset: resetFollowing,
+  detach: detachFollowing,
 } = useStickToBottom(scrollEl, {
   // An empty chat is not a transcript: it reads from the top, and a section that
   // arrives late (the suggestions) grows downward without moving the hints or
   // scrolling the agent's identity away. Sticking resumes with the first turn.
   enabled: () => messages.value.length > 0 || sending.value,
+})
+// trinity-enterprise#610 (D11): the one-shot `?anchor=m:<id>|d:<id>` the
+// Inbox's "Open in chat" sets. Resolved after the history lands (messages) or
+// when "Delivered here" reports its cards (deliverables); stripped either way.
+const anchor = useConversationAnchor({
+  scrollEl, detach: detachFollowing, pinToBottom, route: useRoute(), router: useRouter(),
 })
 const textarea = ref(null)
 const fileInput = ref(null)
@@ -1197,20 +1393,30 @@ async function loadThread(sessionId) {
     // #2580: through the shared mapper, which is what keeps this site and the
     // two live-turn sites agreeing about the row's shape. A user row keeps its
     // own role; only the assistant shape is shared.
-    messages.value = (msgs || []).map((m) => (
-      m.role === 'assistant'
+    // trinity-enterprise#610: `at` is the row's persisted time, which is what
+    // places a chat-turn ask among the messages (`threadRows`).
+    messages.value = (msgs || []).map((m) => ({
+      ...(m.role === 'assistant'
         ? assistantRow(m)
         // ent#534: spoken rows and the call they belong to — folded by `threadItems`.
         : { role: m.role, content: m.content, id: m.id, myRating: m.my_rating || null,
-            source: m.source || null, voiceCallId: m.voice_call_id || null }
-    ))
+            source: m.source || null, voiceCallId: m.voice_call_id || null }),
+      at: m.created_at || null,
+    }))
     inFlight = inFlightExecutionId
     inFlightBudget = inFlightWaitBudgetSeconds
     outcome = lastTurnOutcome
-  } catch { /* start empty */ }
+  } catch (err) {
+    // #3140: a 404 means this viewer cannot open the thread the URL named
+    // (someone else's, or gone). Say so through the shell rather than leaving an
+    // empty chat with a live composer under that id. Anything else starts empty.
+    if (sessionId && err?.response?.status === 404) emit('thread-missing', sessionId)
+  }
   // #2624: opening a thread is an intent — it pins and re-arms, so a thread
   // always opens at the bottom however the previous one was left.
   finally { loadingHistory.value = false; historyLoaded.value = true; await pinToBottom() }
+  // trinity-enterprise#610: after the pin, so a found anchor wins over it.
+  await anchor.afterHistory()
 
   // ent#286: a turn was still running when this client loaded — reattach to it
   // rather than showing a thread that looks finished. The user's message is
@@ -1304,7 +1510,8 @@ async function reattach(executionId, budgetSeconds, budgetReadAt) {
     if (data?.response) {
       // #2580: `id` + `myRating` from the persisted row, so a reattached reply is
       // rateable the moment it lands rather than on the next load.
-      messages.value.push(assistantRow({ content: data.response, id: data.id, my_rating: data.myRating }))
+      messages.value.push({ ...assistantRow({ content: data.response, id: data.id, my_rating: data.myRating }), at: data.at || null })
+      refreshAsksAfterTurn()
       // A reattached reply is still a reply the user just watched land, so it
       // has to announce itself like `deliver()` does. Without this the thread
       // keeps its server-side unread count and the sidebar badges the
@@ -1644,11 +1851,18 @@ function onComposerKeydown(e) {
     open: typeaheadOpen.value,
     hasActive: activeIndex.value >= 0,
     hasCandidates: length > 0,
+    // ent#738: the chip ON SCREEN, never the raw prop — a target for another
+    // chat must not eat the Escape that would stop this one's turn. And never
+    // a keystroke an overlay already claimed (the `ownsEscape` protocol).
+    hasReply: !!replyTo.value && !e.defaultPrevented,
   })) {
     case 'move-down': e.preventDefault(); activeIndex.value = nextActiveIndex(activeIndex.value, 1, length); break
     case 'move-up': e.preventDefault(); activeIndex.value = nextActiveIndex(activeIndex.value, -1, length); break
     case 'accept': e.preventDefault(); acceptActive(activeIndex.value >= 0 ? activeIndex.value : 0); break
     case 'dismiss': e.preventDefault(); dismissTypeahead(); break
+    // Claimed here so the document-level turn-cancel yields: one Escape drops
+    // the reply, the next reaches the turn (innermost first, the ent#738 ruling).
+    case 'drop-reply': e.preventDefault(); emit('reply-done'); break
     case 'close': closeTypeahead(); break
     case 'send': e.preventDefault(); send(); break
     default: break
@@ -1695,7 +1909,7 @@ let elapsedTimer = null
 // "Thinking… / Working on it… / Still working…" label went with the dots.
 const elapsed = ref(0)
 
-async function deliver(text) {
+async function deliver(text, { replyId = null } = {}) {
   terminalOutcome.value = null
   sending.value = true
   elapsed.value = 0
@@ -1725,7 +1939,9 @@ async function deliver(text) {
                                             { newThread: props.newChat && !currentSessionId.value,
                                               model: chosenModel,
                                               // ent#555 — what the user is looking at.
-                                              openCanvasId: openCanvasId.value })
+                                              openCanvasId: openCanvasId.value,
+                                              // ent#610 — the message this replies to.
+                                              replyToMessageId: replyId })
     } catch (dispatchErr) {
       // Nothing was created, so a retry is safe — but only retry when the
       // ROUTE is what failed. A 404/405 means an older backend without this
@@ -1744,7 +1960,8 @@ async function deliver(text) {
                                           model: chosenModel,
                                           // ent#555 — the fallback carries it too, or the
                                           // context silently depends on streaming working.
-                                          openCanvasId: openCanvasId.value })
+                                          openCanvasId: openCanvasId.value,
+                                          replyToMessageId: replyId })
     }
 
     if (started) {
@@ -1825,11 +2042,15 @@ async function deliver(text) {
     // (the server used to mint that id inline and throw it away). Either way the
     // gate below is the id itself, never a flag that rose before it existed —
     // the 2026-09-07 ledger rule.
-    messages.value.push(assistantRow({
-      content: data.response || '(no response)',
-      id: data.id || data.message_id,
-      my_rating: data.myRating,
-    }))
+    messages.value.push({
+      ...assistantRow({
+        content: data.response || '(no response)',
+        id: data.id || data.message_id,
+        my_rating: data.myRating,
+      }),
+      at: data.at || null,
+    })
+    refreshAsksAfterTurn()
     terminalOutcome.value = null   // ent#525: the reply IS the outcome
     // ent#534: never narrate over a live voice call — the orb owns playback
     // then (the speaker toggle is hidden for the call's duration).
@@ -1967,6 +2188,9 @@ async function cancelTurn() {
 // stream-json frames never carry, so the card only ever said nothing.)
 const streaming = ref(false)
 const liveStreamActivity = ref(null)
+watch(() => liveCardItem.value.outcome, (now, before) => {
+  if (clockRestartsAt(before, now)) elapsed.value = 0
+})
 // Bumped after each completed turn; `PortalDeliverables` watches it.
 const deliverableTick = ref(0)
 
@@ -2192,7 +2416,12 @@ async function send() {
 
   input.value = ''
   autoGrowAfterUpdate()
-  await submitUserText(text)
+  // ent#610 round 8: read the chip ONCE, with the text it belongs to.
+  // The chip leaves WITH the text: the message it belongs to now carries it
+  // (its label, and Retry resends it), so the next message is not a reply.
+  const reply = replyTo.value
+  if (reply) emit('reply-done')
+  await submitUserText(text, { replyId: reply?.messageId || null, replyExcerpt: reply?.excerpt || '' })
 }
 
 // The tail every user utterance shares, typed or spoken (ent#440). Extracted
@@ -2200,7 +2429,7 @@ async function send() {
 // be a second conversation wearing the same thread, which is the whole thing
 // this feature exists not to be. Returns the outcome so a caller that is not a
 // person watching the screen — the voice loop — can decide what to do next.
-async function submitUserText(text) {
+async function submitUserText(text, { replyId = null, replyExcerpt = '' } = {}) {
   // ent#491: the user's own activity is the ordering signal, so the bump happens
   // HERE — on send — and not when a reply lands. Any agent this message wakes
   // counts, mirroring the room fan-out (`unreadByAgent`): if you @mention two
@@ -2213,14 +2442,21 @@ async function submitUserText(text) {
   } catch {
     // Ordering is a convenience; it must never be able to block a send.
   }
-  const index = messages.value.push({ role: 'user', content: text, failed: false, error: null }) - 1
+  const index = messages.value.push({
+    role: 'user', content: text, failed: false, error: null,
+    replyTo: replyId ? { messageId: replyId, excerpt: replyExcerpt } : null,
+    // trinity-enterprise#610: sent from here — placed at the newest server time
+    // before it, so an ask this turn raises lands below it without the browser's
+    // clock taking part (`placeAsksInThread`); the reload brings the server's time.
+    local: true,
+  }) - 1
   // #2624: sending is an explicit intent to follow the bottom — it pins and
   // re-arms whatever the prior scroll position, so the reader is never handed
   // an unread badge for their own message.
   await pinToBottom()
   // A stale "couldn't stop the turn" must not outlive the turn it described.
   cancelError.value = ''
-  const res = await deliver(text)
+  const res = await deliver(text, { replyId })
   return settleDelivery(index, text, res)
 }
 
@@ -2275,6 +2511,13 @@ function settleDelivery(index, text, res) {
   return { ok: false, error: res?.error, lost: res?.lost }
 }
 
+// #3054 review: a failed message lets go of what it replied to, so the next
+// Retry is an ordinary turn. Only a failed one — a delivered reply is history.
+function dropReply(i) {
+  const msg = messages.value[i]
+  if (msg && msg.failed) msg.replyTo = null
+}
+
 async function retry(i) {
   const msg = messages.value[i]
   if (!msg || sending.value) return
@@ -2284,7 +2527,7 @@ async function retry(i) {
   // A stale "couldn't stop the turn" must not outlive the turn it described —
   // and `retry` is a new turn, so it clears it for the same reason `send` does.
   cancelError.value = ''
-  const res = await deliver(content)
+  const res = await deliver(content, { replyId: msg.replyTo?.messageId || null })
   settleDelivery(i, content, res)
 }
 
@@ -2579,6 +2822,39 @@ const voiceHeaderText = computed(() => voiceHeaderLine({
 }))
 // The thread, with each voice call's rows folded into one block.
 const threadItems = computed(() => groupVoiceBlocks(messages.value))
+// trinity-enterprise#610: the thread's rows with this chat's chat-turn asks
+// placed among them by time, each as a card or a history row.
+const threadRows = computed(() => placeAsksInThread(threadItems.value, chatTurnAskList.value, { truncated: historyTruncated.value }).map((row) => (
+  row.kind !== 'ask' ? row
+    : askTileMode(row.ask) === 'card' ? { ...row, mode: 'card' }
+      : { ...row, mode: 'row', line: askHistoryLine(row.ask) }
+)))
+// The team's ruling (2026-10-01): the answered card collapses into its row, the
+// row's confirmation is announced, and focus lands on the row, not <body>.
+const askAnnouncement = ref('')
+async function announceEnded(ask) {
+  const line = askHistoryLine(ask)
+  askAnnouncement.value = `${line.kind}: ${line.plain} — ${line.ending}${line.when ? ` · ${line.when}` : ''}`
+  await nextTick()
+  if (typeof document === 'undefined') return
+  const at = document.activeElement
+  if (at && at !== document.body) return
+  const scope = scrollEl.value || document
+  const row = [...scope.querySelectorAll('[data-ask-id]')]
+    .find((n) => n.getAttribute('data-ask-id') === ask.id)
+    ?.querySelector('[data-testid="portal-chat-ask-ended"]')
+  row?.focus?.({ preventScroll: true })
+}
+
+// Round 2 (plan-design P1-B): an ask a turn raised is on the server before its
+// reply lands, and the reply may say "see the question above" — read the asks
+// then, instead of leaving the tile to the next 20 s poll.
+function refreshAsksAfterTurn() {
+  store.fetchAsks().catch(() => {})
+}
+const rowKey = (item) => (
+  item.kind === 'ask' ? `ask-${item.ask.id}` : item.kind === 'voice-call' ? `call-${item.callId}` : `m-${item.index}`
+)
 
 // The shell reads these to swap the rail for the canvas column and to refuse
 // chat navigation while the call is on.
@@ -2670,6 +2946,16 @@ async function endVoiceCall() {
 // either is a break, not dead-code cleanup.
 // ent#551 QA: the shell ends the call through this when the person confirms
 // leaving the stage — the one path that ends a call from outside this component.
+// ent#661 v2.6 — Wrap up: an ordinary message from the person, asking the
+// agent to record this chat's outcomes in the project through its tools. It
+// goes through `send()` like anything typed, so it is visible in the thread
+// and the agent's log entries are attributed to the agent.
+function wrapUp(project) {
+  if (!project || sending.value) return
+  input.value = wrapUpPrompt(project.name)
+  void send()
+}
+
 defineExpose({ focusComposer, startVoiceCall, endVoiceCall })
 
 // ent#474 — the rail's Work signal for a 1:1, DERIVED from the in-flight flag

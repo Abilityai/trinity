@@ -32,6 +32,8 @@ from services.agent_auth import agent_httpx_client
 from services.chat_execution_service import terminate_execution as _terminate_execution
 from services.chat_signals import ChatDispatchError
 from services.docker_service import get_agent_container
+from services import sync_waiter
+from services.pull_pilot import pull_queue_allowance
 from services.email_service import email_service
 from services.settings_service import PUBLIC_URL_REACHED_KEY, settings_service
 from services.task_execution_service import get_task_execution_service
@@ -822,16 +824,30 @@ async def public_stream_execution(
     async def proxy_stream():
         """Proxy SSE stream from agent container."""
         agent_url = f"http://agent-{agent_name}:8000/api/executions/{execution_id}/stream"
+        # #3114: hold while a pull pilot's turn is queued, then retry a 404
+        # briefly while the claimed row is running (see routers/chat.py).
+        allowance = pull_queue_allowance(agent_name)
+        attach_retries = sync_waiter.STREAM_ATTACH_RETRIES if allowance else 0
         try:
+            async for tick in sync_waiter.wait_while_queued(execution_id, allowance):
+                yield tick
             async with agent_httpx_client(agent_name, timeout=None) as client:
-                async with client.stream("GET", agent_url) as response:
-                    if response.status_code != 200:
-                        yield f"data: {json.dumps({'type': 'error', 'message': f'Agent returned {response.status_code}'})}\n\n"
-                        yield f"data: {json.dumps({'type': 'stream_end'})}\n\n"
-                        return
-
-                    async for chunk in response.aiter_text():
-                        yield chunk
+                while True:
+                    async with client.stream("GET", agent_url) as response:
+                        if response.status_code == 200:
+                            async for chunk in response.aiter_text():
+                                yield chunk
+                            return
+                        if not (
+                            response.status_code == 404
+                            and attach_retries > 0
+                            and sync_waiter.execution_is_running(execution_id)
+                        ):
+                            yield f"data: {json.dumps({'type': 'error', 'message': f'Agent returned {response.status_code}'})}\n\n"
+                            yield f"data: {json.dumps({'type': 'stream_end'})}\n\n"
+                            return
+                        attach_retries -= 1
+                    await asyncio.sleep(sync_waiter.STREAM_ATTACH_RETRY_INTERVAL)
         except httpx.ConnectError:
             yield f"data: {json.dumps({'type': 'error', 'message': 'Failed to connect to agent'})}\n\n"
             yield f"data: {json.dumps({'type': 'stream_end'})}\n\n"

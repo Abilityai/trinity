@@ -525,6 +525,18 @@
 - **Description**: 4 MCP tools for Nevermined management
 - **Tools**: `configure_nevermined`, `get_nevermined_config`, `toggle_nevermined`, `get_nevermined_payments`
 
+### 23.7 The same paywall on the A2A door (ent#679) — pointer
+- **Status**: 🚧 In Progress
+- **Home**: `docs/memory/requirements/mcp.md` **§32.6**. The A2A inbound door
+  (§32.2 there) owns the gate, so the requirement lives with the door and this
+  is a pointer, not a second description.
+- **What changes here**: §23.3's settle / replay / `success_unsettled` logic is
+  no longer paid-door-only — both doors call one orchestrator
+  (`services/paid_turn_service.py`), so the #1018 branches have one home. The
+  paid door's own behaviour is unchanged. `credits_per_request` now accepts
+  **0** for a Nevermined *duration* plan (charged by time, not per call); a
+  negative is still a named 422 (§32.6 FR-11).
+
 ---
 
 ## 27. Mobile Admin PWA (MOB-001)
@@ -935,3 +947,57 @@ spoken replies (#2157) stay as composer affordances.
   frame after persistence tells the client when to reload; End always works.
 - **FR-9 — Out of scope**: rooms; acting as the agent (#535); the external
   projection (#285/#446); provider choice (#354, seam kept provider-neutral).
+
+### 48.4 Workspace Projects — the open-core surface (trinity-enterprise#661)
+
+**Description**: An internal user runs sustained work as a **project**: a
+record that links the Workspace chats and rooms where the work happens, with
+members and the agents that may work on it. The record and its rules are a
+private module; this section is the edition-agnostic surface it needs.
+
+- **FR-1 — Capability on the roster**: `projects_available` is true only when
+  the module is entitled AND the principal is a platform user or an outside
+  client invited to a project (asked through the `portal_capabilities` seam,
+  since the core holds no invitations). Fails closed on an older backend, a
+  failed read, or an uninvited outside client.
+- **FR-2 — Turn-context seam**: a provider registry both Workspace composers
+  call on every turn (chat: resumed and cold arms; room: ahead of the file
+  manifest). The platform fills the context from the chat row or room,
+  including whether the audience is internal. No provider → no change.
+- **FR-3 — Addressed gate asks**: a platform (`gate`) raise may name exactly
+  one addressee; an agent's raise may not.
+- **FR-4 — Workspace UI, gated on FR-1**: a Projects list across agents, a
+  project page (goal, status, steward, my chats, others' chats as a count only,
+  agents with consent state, members, rooms), a rail tab for the current agent,
+  and chat-header controls (link, detach, make a project) — never in Main.
+- **FR-5 — Agent tools over MCP**: `list_projects` / `get_project` (with the
+  recent log and open tasks), `list_project_tasks`, `get_project_log`,
+  `create_project_task`, `update_project_task`, `add_project_task_note`,
+  `add_project_log_entry`, `link_to_project` (a file, report, decision or an
+  ask it raised), and for a steward agent `get_steward_digest` /
+  `set_project_health`. License-blind (404 = no module, string 403 =
+  unlicensed); an agent reaches only projects it is active on, and only in a
+  turn whose audience is internal: every call forwards the platform-supplied
+  `X-Trinity-Execution-Id` (#2392), never a tool parameter, and a refusal is a
+  coded 403 the agent can relay.
+- **FR-6 — v2 Workspace surface, gated on FR-1**: a project page with Tasks
+  (the ent#673 fields and status set), an append-only Log, and Files & reports
+  (link a file, report or decision you can already see; the creator may share
+  a file or report with guests); guest invites and a narrow guest view; a
+  one-shot import of a folder project from an agent; a room-header link
+  control; editing name, goal, steward and tracker; and **Wrap up** in a
+  linked chat, which asks the agent to record the chat's outcomes itself.
+- **FR-7 — v3 hub surface, gated on FR-1**: on a project's Overview, its
+  health (on track / at risk / off track and a line, set by its steward or
+  creator), where it stands (tasks by status, and what needs attention, each
+  opening Tasks), the declared agent metrics a member picked (value, a small
+  trend, and the platform's one stale verdict), and **Needs you**: the
+  viewer's own open asks on the project, answered in place with the Inbox's
+  component (`PortalAsks` narrowed by `askIds` — it can only narrow the
+  viewer's own list), with everyone else's as a count. The Projects list shows
+  health and an attention count per row, and an **I steward** tab lists what
+  needs the steward across their projects. Guests see none of it. An ask an
+  agent raises over MCP records the raising turn from the same
+  platform-supplied `X-Trinity-Execution-Id` (only when it is that agent's own
+  execution, winning over an agent-written `context.execution_id`), which is
+  how an ask raised in a project's chat is found on the project.

@@ -121,6 +121,7 @@ from db.activities import ActivityOperations
 from db.reports import ReportOperations
 from db.canvas import CanvasOperations
 from db.canvas_shares import CanvasShareOperations
+from db.skill_gate_requests import SkillGateRequestOperations
 from db.user_preferences import UserPreferenceOperations
 from db.product_events import ProductEventOperations
 from db.evaluations import EvaluationOperations
@@ -1001,6 +1002,7 @@ class DatabaseManager:
         self._report_ops = ReportOperations()
         self._canvas_ops = CanvasOperations()
         self._canvas_share_ops = CanvasShareOperations()
+        self._skill_gate_request_ops = SkillGateRequestOperations()
         self._user_preference_ops = UserPreferenceOperations()
         self._product_event_ops = ProductEventOperations()
         self._evaluation_ops = EvaluationOperations()
@@ -1564,11 +1566,11 @@ class DatabaseManager:
     # Backlog Execution Queries (delegated to db/schedules.py) - BACKLOG-001
     # =========================================================================
 
-    def update_execution_to_queued(self, execution_id: str, backlog_metadata: str, queued_at: str) -> bool:
-        return self._schedule_ops.update_execution_to_queued(execution_id, backlog_metadata, queued_at)
+    def update_execution_to_queued(self, execution_id: str, backlog_metadata: str, queued_at: str, conversation_key: str = None) -> bool:
+        return self._schedule_ops.update_execution_to_queued(execution_id, backlog_metadata, queued_at, conversation_key)
 
-    def claim_next_queued(self, agent_name: str, worker_id: str = None, lease_seconds: int = None):
-        return self._schedule_ops.claim_next_queued(agent_name, worker_id, lease_seconds)
+    def claim_next_queued(self, agent_name: str, worker_id: str = None, lease_seconds: int = None, interactive_triggers=None):
+        return self._schedule_ops.claim_next_queued(agent_name, worker_id, lease_seconds, interactive_triggers)
 
     def release_claim_to_queued(self, execution_id: str) -> bool:
         return self._schedule_ops.release_claim_to_queued(execution_id)
@@ -1588,14 +1590,19 @@ class DatabaseManager:
     def count_active_leased_by_agent(self, agent_names):
         return self._schedule_ops.count_active_leased_by_agent(agent_names)
 
+    def execution_awaits_claim(self, execution_id: str) -> bool:
+        return self._schedule_ops.execution_awaits_claim(execution_id)
+
     def count_active_leased(self, agent_name: str) -> int:
         return self._schedule_ops.count_active_leased(agent_name)
 
     def get_queued_count(self, agent_name: str) -> int:
         return self._schedule_ops.get_queued_count(agent_name)
 
-    def cancel_queued_execution(self, execution_id: str, reason: str = "cancelled") -> bool:
-        return self._schedule_ops.cancel_queued_execution(execution_id, reason)
+    def cancel_queued_execution(
+        self, execution_id: str, reason: str = "cancelled", status: str = "cancelled"
+    ) -> bool:
+        return self._schedule_ops.cancel_queued_execution(execution_id, reason, status)
 
     def cancel_queued_for_agent(self, agent_name: str, reason: str = "agent_deleted") -> int:
         return self._schedule_ops.cancel_queued_for_agent(agent_name, reason)
@@ -1744,6 +1751,9 @@ class DatabaseManager:
     def get_agent_schedule_names(self, agent_name: str):
         return self._schedule_ops.get_agent_schedule_names(agent_name)
 
+    def get_workspace_delivery_schedules_for_agents(self, agent_names):
+        return self._schedule_ops.get_workspace_delivery_schedules_for_agents(agent_names)
+
     def find_active_schedules_exceeding_timeout(self, agent_name: str, ceiling_seconds: int):
         return self._schedule_ops.find_active_schedules_exceeding_timeout(
             agent_name, ceiling_seconds
@@ -1817,10 +1827,14 @@ class DatabaseManager:
         message: str,
         triggered_by: str = "manual",
         fields: Optional[TaskExecutionFields] = None,
+        *,
+        execution_id: Optional[str] = None,
     ):
         """Create an execution record for a manual/API-triggered task (no schedule).
-        Optional columns ride `fields` (#1482, `db/write_params.py`)."""
-        return self._schedule_ops.create_task_execution(agent_name, message, triggered_by, fields)
+        Optional columns ride `fields` (#1482, `db/write_params.py`).
+        `execution_id`: a caller-chosen id (trinity-enterprise#751)."""
+        return self._schedule_ops.create_task_execution(
+            agent_name, message, triggered_by, fields, execution_id=execution_id)
 
     def get_max_running_chain_depth(self, agent_name: str) -> int:
         """Deepest chain_depth among the agent's running rows, 0 if none (#2806)."""
@@ -1871,7 +1885,8 @@ class DatabaseManager:
         return self._schedule_ops.get_agent_executions(agent_name, limit)
 
     def get_agent_executions_summary(self, agent_name: str, limit: int = 50, *,
-                                     exclude_triggers=None):
+                                     exclude_triggers=None, scope_to_viewer=False,
+                                     viewer_email=None):
         """Get execution summaries for list view - excludes large text fields.
 
         `exclude_triggers` filters before the LIMIT — see the operation's own
@@ -1880,7 +1895,8 @@ class DatabaseManager:
         PERF-001: Task List Performance Optimization
         """
         return self._schedule_ops.get_agent_executions_summary(
-            agent_name, limit, exclude_triggers=exclude_triggers)
+            agent_name, limit, exclude_triggers=exclude_triggers,
+            scope_to_viewer=scope_to_viewer, viewer_email=viewer_email)
 
     def get_execution(self, execution_id: str):
         return self._schedule_ops.get_execution(execution_id)
@@ -1992,6 +2008,12 @@ class DatabaseManager:
     def get_git_auto_sync_enabled(self, agent_name: str):
         return self._schedule_ops.get_git_auto_sync_enabled(agent_name)
 
+    def set_git_pull_sync_enabled(self, agent_name: str, enabled: bool):
+        return self._schedule_ops.set_git_pull_sync_enabled(agent_name, enabled)
+
+    def get_git_pull_sync_enabled(self, agent_name: str):
+        return self._schedule_ops.get_git_pull_sync_enabled(agent_name)
+
     def get_all_git_auto_sync_enabled(self, agent_names=None):
         return self._schedule_ops.get_all_git_auto_sync_enabled(agent_names)
 
@@ -2047,6 +2069,9 @@ class DatabaseManager:
 
     def list_sync_states(self):
         return self._sync_state_ops.list_all()
+
+    def list_sync_health_rows(self, agent_names=None):
+        return self._sync_state_ops.list_health_rows(agent_names)
 
     def upsert_sync_state(self, agent_name: str, **fields):
         return self._sync_state_ops.upsert(agent_name, **fields)
@@ -2246,6 +2271,54 @@ class DatabaseManager:
 
     def record_canvas_share_view(self, share_id: str) -> None:
         return self._canvas_share_ops.record_view(share_id)
+
+    # --- gated-skill requests (trinity-enterprise#751) ------------------------
+    # Signatures mirror db/skill_gate_requests.py exactly; a parity test in
+    # tests/unit/test_ent751_skill_gate_requests_db.py fails when they drift.
+
+    def create_gate_request(self, **fields):
+        return self._skill_gate_request_ops.create_gate_request(**fields)
+
+    def get_gate_request(self, request_id: str):
+        return self._skill_gate_request_ops.get_gate_request(request_id)
+
+    def get_gate_request_by_dispatched_execution(self, execution_id: str):
+        return self._skill_gate_request_ops.get_gate_request_by_dispatched_execution(execution_id)
+
+    def get_gate_requests_by_origin_executions(self, execution_ids):
+        return self._skill_gate_request_ops.get_gate_requests_by_origin_executions(execution_ids)
+
+    def attach_gate_ask(self, request_id: str, ask_item_id: str) -> bool:
+        return self._skill_gate_request_ops.attach_gate_ask(request_id, ask_item_id)
+
+    def count_pending_gate_requests(self, agent_name: str, requester_key=None) -> int:
+        return self._skill_gate_request_ops.count_pending_gate_requests(
+            agent_name, requester_key=requester_key)
+
+    def claim_gate_request_for_dispatch(self, request_id: str, execution_id: str) -> bool:
+        return self._skill_gate_request_ops.claim_gate_request_for_dispatch(request_id, execution_id)
+
+    def transition_gate_request(self, request_id: str, to_state: str, *, detail=None) -> bool:
+        return self._skill_gate_request_ops.transition_gate_request(
+            request_id, to_state, detail=detail)
+
+    def mark_gate_request_notified(self, request_id: str) -> bool:
+        return self._skill_gate_request_ops.mark_gate_request_notified(request_id)
+
+    def list_pending_gate_requests(self, agent_name: str):
+        return self._skill_gate_request_ops.list_pending_gate_requests(agent_name)
+
+    def list_gate_requests_with_ended_asks(self, limit: int = 200):
+        return self._skill_gate_request_ops.list_gate_requests_with_ended_asks(limit)
+
+    def list_gate_requests_lost_in_dispatch(self, claimed_before: str, limit: int = 200):
+        return self._skill_gate_request_ops.list_gate_requests_lost_in_dispatch(claimed_before, limit)
+
+    def list_gate_requests_dispatched_unrecorded(self, claimed_before: str, limit: int = 200):
+        return self._skill_gate_request_ops.list_gate_requests_dispatched_unrecorded(claimed_before, limit)
+
+    def list_gate_requests_without_live_ask(self, created_before: str, limit: int = 200):
+        return self._skill_gate_request_ops.list_gate_requests_without_live_ask(created_before, limit)
 
     def last_completed_execution_at(self, agent_name: str):
         return self._canvas_ops.last_completed_execution_at(agent_name)
@@ -2638,14 +2711,20 @@ class DatabaseManager:
     def list_whitelist(self, limit: int = 100):
         return self._email_auth_ops.list_whitelist(limit)
 
-    def create_login_code(self, email: str, expiry_minutes: int = 10):
-        return self._email_auth_ops.create_login_code(email, expiry_minutes)
+    def create_login_code(self, email: str, expiry_minutes: int = 10, purpose=None):
+        return self._email_auth_ops.create_login_code(email, expiry_minutes, purpose=purpose)
 
-    def verify_login_code(self, email: str, code: str):
-        return self._email_auth_ops.verify_login_code(email, code)
+    def is_email_account_suspended(self, email: str) -> bool:
+        return self._user_ops.is_email_account_suspended(email)
+
+    def verify_login_code(self, email: str, code: str, purpose=None):
+        return self._email_auth_ops.verify_login_code(email, code, purpose=purpose)
 
     def count_recent_code_requests(self, email: str, minutes: int = 10):
         return self._email_auth_ops.count_recent_code_requests(email, minutes)
+
+    def count_recent_codes_for_purpose(self, purpose: str, minutes: int = 10):
+        return self._email_auth_ops.count_recent_codes_for_purpose(purpose, minutes)
 
     def cleanup_old_codes(self, days: int = 1):
         return self._email_auth_ops.cleanup_old_codes(days)
@@ -2735,6 +2814,9 @@ class DatabaseManager:
 
     def set_agent_role_readiness(self, agent_name: str, status: str, changed_by: str):
         return self._role_readiness_ops.set_role_readiness(agent_name, status, changed_by)
+
+    def get_role_readiness_for_agents(self, agent_names):
+        return self._role_readiness_ops.get_role_readiness_for_agents(agent_names)
 
     # Seat decisions (delegated to db/seat_decisions.py) — ent#638 / R25.
     # Explicit signatures on purpose (learnings 2026-09-01: a kwarg the mixin
@@ -3279,8 +3361,11 @@ class DatabaseManager:
             schedule_id, hours, agent_name,
         )
 
-    def get_agent_analytics(self, agent_name: str, hours: int):
-        return self._schedule_ops.get_agent_analytics(agent_name, hours)
+    def get_agent_analytics(self, agent_name: str, hours: int, *,
+                            scope_to_viewer=False, viewer_email=None):
+        # #3139: `scope_to_viewer` narrows to what a Workspace client can account for.
+        return self._schedule_ops.get_agent_analytics(
+            agent_name, hours, scope_to_viewer=scope_to_viewer, viewer_email=viewer_email)
 
     def get_agent_schedules_summary(self, agent_name: str, hours: int):
         return self._schedule_ops.get_agent_schedules_summary(agent_name, hours)
@@ -3654,6 +3739,11 @@ class DatabaseManager:
 
     def get_nevermined_payment_log(self, agent_name, limit=50):
         return self._nevermined_ops.get_payment_log(agent_name, limit)
+
+    def nevermined_payer_owns_execution(self, agent_name, execution_id, subscriber_address):
+        return self._nevermined_ops.payer_owns_execution(
+            agent_name, execution_id, subscriber_address
+        )
 
     def get_nevermined_settlement_failures(self, limit=50):
         return self._nevermined_ops.get_settlement_failures(limit)
@@ -4033,7 +4123,8 @@ class DatabaseManager:
     # -------------------------------------------------------------------------
 
     def insert_metric_points(self, agent_name: str, rows):
-        """Insert validated points; returns `(recorded, deduplicated)`."""
+        """Insert or restate validated points; returns `PointWriteCounts`
+        (`recorded`, `deduplicated`, `corrected` — ent#729)."""
         return self._metric_point_ops.insert_points(agent_name, rows)
 
     def count_metric_points_today(

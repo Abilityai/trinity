@@ -38,7 +38,8 @@ Dispatch topology, not policy. `pull_pilot.PULL_REACHABLE_TRIGGERS` is the sourc
 |---|---|---|
 | **On `dev` today** | `agent`, `event`, `schedule`, `webhook`, `reminder`, `loop` | 6 of 9 |
 | **Adds with Phase 4** | `fan_out`, `a2a`, `operator_response` | → 9 of 9 |
-| **Pending** | interactive chat / Session-tab turns | joins the queue once #2842 + #2843 land (decided 2026-09-16, #1989) |
+| **Interactive (#3114)** | `manual`, `mcp`, `session`, `public`, `voice`, `voip`, `room`, `user`, `paid`, `slack`, `telegram`, `whatsapp`, plus `validation` (`pull_pilot.PULL_REACHABLE_NON_AUTONOMOUS`) | routed on pilots; sync callers wait through `dispatch_and_await_terminal` |
+| **Pending** | `chat` — the UI `/chat` path (`dispatch_admission_service` → `chat_execution_service.run_chat_turn`) | still pushes on pilots; routed in a later change |
 | **Unreached, unclassified** | `retry` | in neither trigger set — #2845. 4.7% of `eu2` traffic; looks like an oversight, not a decision |
 
 `schedule` / `webhook` / `reminder` landed with #2391; `loop` with #2523. Before #2391 the pilot flag was
@@ -51,20 +52,23 @@ The spec names the gates (`TARGET_ARCHITECTURE.md`, §Re-Delivery and Side-Effec
 > Default-on for effect-bearing agents is still gated on trace fidelity (#548/#333), `prior_trace`
 > injection (#1401), and **fail-closed `execution_id` injection**.
 
-**Two of those three are shipped.** The full remaining list, in order:
+**All three are built** (fail-closed injection by #2392). The full remaining list, in order:
 
 1. **Land Phase 4** — [#2532](https://github.com/abilityai/trinity/pull/2532). Rebased on `dev`, migration
    renumbered to `0059`, full unit suite matched against unmodified `dev` (same single pre-existing
    failure, 21 net new tests). Blocked only on review.
 2. **Fail-closed `execution_id` injection** — [#2392](https://github.com/abilityai/trinity/issues/2392).
-   **The policy is decided, not open**: the spec says fail-closed. What is missing is the build —
-   platform-side injection, reject + operator alarm when the id is still absent, and a regression test that
-   a re-delivered execution emits each effect once. *(Trace fidelity #548/#333 closed Aug/Jun; `prior_trace`
-   injection #1401 closed 2026-07-08; #1402 closed 2026-07-26.)*
-3. **A soak on an agent that actually emits.** The current pilot (`cornelius-oracle` on eu2) emits no
-   messages, calls or shares — measured 2026-09-02: 219 `idempotency_keys` rows, all `agent:*`, zero
-   `effect:*`. It has therefore never entered the code path item 2 protects, so a clean window on it is not
-   evidence about that gate. Mechanics for a second, disposable emitting pilot are in the ops repo
+   The agent's MCP config sends each turn's id as `X-Trinity-Execution-Id`; on a pull-mode agent an effect
+   without a usable id is refused with an operator alarm, and a person's terminal session (`manual`) is sent
+   and logged. Pilots must run a base image with #2392, or every effect call whose model omits the id is
+   refused. *(Trace fidelity #548/#333 closed Aug/Jun; `prior_trace` injection #1401 closed 2026-07-08;
+   #1402 closed 2026-07-26.)*
+3. **A soak on an agent that actually emits.** eu2 runs three pilot arms: `cornelius-oracle` and
+   `oracle-6-science` emit no messages, calls or shares; `oracle-7-ai-semi` (flipped 2026-09-15) is the
+   emitting arm, with a 2-hourly schedule that writes a byte-stable file to its public folder and calls
+   `share_file`, so a re-delivered execution must emit once. What the gate still needs is the pulled-run rate on
+   that arm: effect rows per pulled execution, with no duplicate share on a re-delivery. All three arms share
+   one subscription seat, so a quota blackout darkens every arm at once. Mechanics are in the ops repo
    (`trinity-ops-agent:docs/pull-soak-eu2.md`). System of record for the soak is
    [#1766](https://github.com/abilityai/trinity/issues/1766)'s comment thread — read it before measuring.
 4. **Phase 5: flip default-ON and delete the legacy machinery** — the 9-path cleanup pyramid, the slot ZSET,
@@ -77,8 +81,36 @@ The spec names the gates (`TARGET_ARCHITECTURE.md`, §Re-Delivery and Side-Effec
    synchronous push path is deleted afterwards. Two pieces gate the move —
    [#2842](https://github.com/abilityai/trinity/issues/2842) (interactive turns jump the queue, so a person's
    wait is no worse than today) and [#2843](https://github.com/abilityai/trinity/issues/2843) (one turn per
-   conversation at a time, so two workers never resume one transcript). Until both land, interactive turns
-   still run on the old path — that is a **migration state, not a design boundary**.
+   conversation at a time, so two workers never resume one transcript). Both are in the pull claim:
+   interactive triggers (`pull_pilot.INTERACTIVE_TRIGGERS`) are claimed first with strict precedence and **no
+   anti-starvation rule** (steady chat that fills every worker is answered by raising the worker count); a
+   row whose `conversation_key` already has a `running` row is skipped, and the unique index
+   `idx_executions_one_running_turn` stops two concurrent claimers. **No worker is reserved** for interactive
+   arrivals: one of N held idle is 33% of a 3-worker agent. Multi-container affinity (`replica_count > 1`,
+   #927) is out of scope.
+
+   **Routed on pilots (#3114)** for every interactive trigger except `chat` (the UI `/chat` path, still
+   pushed). Sync callers (Session tab, Workspace, public links, channels, rooms, paid, MCP key auth,
+   validation, internal run-now) go through `task_execution_service.dispatch_and_await_terminal`: it waits up
+   to one agent execution timeout for a worker to claim the row (rooms: `ROOM_CLAIM_BUDGET_SECONDS`, 300s,
+   via `claim_budget`), stores it FAILED/`CAPACITY` if none does (a caller that went away leaves it
+   CANCELLED), then waits for the terminal. Each producer passes a `conversation_key` (`session:`, `public:`, `channel:`,
+   `room:`, `paid:`), which is what the claim guard serialises on. Images ride the queue in
+   `backlog_metadata`, which the #1449 retention sweep NULLs once the row is terminal. Live-stream proxies hold the SSE connection
+   while the row is queued.
+
+   **The Session-tab `ResumeLock` and the Workspace in-flight markers are retained** and span the queued
+   wait: their TTLs add `pull_pilot.pull_queue_allowance` (one agent timeout on a pilot). The lock also
+   keeps the cached resume id fresh across turns, which the claim guard does not do. Rooms take a
+   per-(room, agent) wake lock (`ResumeLock` under `room_wake_lock:<room>:<agent>`) from the cursor read
+   through the posted reply, so a second wake reads what the first left; a mention chain back to the same
+   agent re-enters it. The room working marker adds the queue allowance (capped at the room claim budget).
+   The claim guard is the only serialisation for public links and channels.
+
+   **Report-back and stop.** The pull sink (`apply_task_result`) spawns the channel / portal / room
+   completion report on its CAS-won branch, as the push terminals do. The agent's pull worker registers a
+   claimed turn as pending in the process registry, so `/api/executions/{id}/terminate` before spawn skips
+   the turn and reports it `cancelled`.
 
 ### The soak duration requirement is mis-cited — correct it when you touch it
 

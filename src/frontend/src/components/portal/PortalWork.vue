@@ -2,18 +2,24 @@
   The rail's Work tab body (trinity-enterprise#525 — ent#457's Activity, homed
   by the 2026-09-02 ruling as the first docked tab of the ent#474 rail).
 
-  Three sections, in the order a person needs them:
+  Two sections, in the order a person needs them:
 
-    Waiting on you   open asks of this chat's participants, answerable in
-                     place — the FOURTH rendering of the same operator-queue
-                     row (ent#428), a computed over `store.asks`, never a
-                     narrowed fetch (that replaces the list the sidebar reads)
     Now              a live card per in-flight job — Stop where the platform
                      would accept it, steps where the agent publishes them
     Earlier          bounded history: "N in the last 30 days · latest 3
                      shown", Show all expands inside the rail's own scroll
                      axis (principle 28); loop runs are one kind here, not a
                      second surface (ent#458 AC 3)
+
+  Asks are not drawn here (trinity-enterprise#610, the 2026-09-30 ruling —
+  round 5's "Work is the asks' home" is reversed): their home is the Inbox,
+  filtered to the agent, on every door. While any of this chat's agents waits on
+  you, ONE line says so and links there (`PortalAsksWaitingLine`, which Info
+  mounts too) — on the top row, which is always drawn with one line's height,
+  so the line arriving moves nothing (principle 30), and it sits there in the
+  empty state as well (round 2: it was last, under the empty copy, and jumped
+  181px when work started). It counts from the one store list the sidebar
+  reads (`portal.openAsks`), never a narrowed fetch.
 
   A room groups everything by participating agent, and an agent with nothing
   in flight still gets its row (the rail's own rule, `groupByParticipant`).
@@ -42,23 +48,26 @@
       <InlineError v-if="view.stale" :message="store.error" @dismiss="store.error = null" />
       <InlineError v-if="stopError" :message="stopError" @dismiss="stopError = ''" />
 
-      <!-- Waiting on you -->
-      <section v-if="asks.length" data-testid="portal-work-waiting">
-        <h3 :class="OVERLINE">Waiting on you</h3>
-        <PortalAsks :agent-names="participants" pending-only :show-agent="participants.length > 1" :current-session-id="chatId" @open-thread="(t) => $emit('open-thread', t)" />
-      </section>
-
-      <!-- Empty: teaches the next action (principle 16). -->
-      <div v-if="view.state === 'empty' && !asks.length" class="py-8 text-center" data-testid="portal-work-empty">
-        <p class="text-sm font-semibold">{{ emptyCopy.title }}</p>
-        <p class="mt-1.5 text-xs text-gray-500 dark:text-gray-400 max-w-[36ch] mx-auto">{{ emptyCopy.body }}</p>
-        <BaseButton v-if="emptyCopy.action" size="sm" variant="secondary" class="mt-4" @click="$emit('see-hints')">{{ emptyCopy.action }}</BaseButton>
-      </div>
+      <!-- Empty: teaches the next action (principle 16). The top row stays,
+           one line tall, so what waits on you sits where it does with work. -->
+      <template v-if="view.state === 'empty'">
+        <div class="flex items-baseline justify-end gap-3 min-h-[1.25rem]" data-testid="portal-work-now-head">
+          <PortalAsksWaitingLine :agent-names="participants" />
+        </div>
+        <div class="py-8 text-center" data-testid="portal-work-empty">
+          <p class="text-sm font-semibold">{{ emptyCopy.title }}</p>
+          <p class="mt-1.5 text-xs text-gray-500 dark:text-gray-400 max-w-[36ch] mx-auto">{{ emptyCopy.body }}</p>
+          <BaseButton v-if="emptyCopy.action" size="sm" variant="secondary" class="mt-4" @click="$emit('see-hints')">{{ emptyCopy.action }}</BaseButton>
+        </div>
+      </template>
 
       <template v-else>
         <!-- Now -->
         <section data-testid="portal-work-now">
-          <h3 :class="OVERLINE">Now</h3>
+          <div class="flex items-baseline justify-between gap-3 mb-2" data-testid="portal-work-now-head">
+            <h3 :class="OVERLINE_ROW">Now</h3>
+            <PortalAsksWaitingLine :agent-names="participants" />
+          </div>
           <template v-if="participants.length > 1">
             <div v-for="[agent, list] in groupedNow" :key="agent" class="mb-3 last:mb-0">
               <div class="flex items-center gap-2 min-w-0 mb-1.5">
@@ -143,7 +152,7 @@ import BaseBadge from '@/components/base/BaseBadge.vue'
 import BaseButton from '@/components/base/BaseButton.vue'
 import LoadFailed from '@/components/LoadFailed.vue'
 import InlineError from '@/components/InlineError.vue'
-import PortalAsks from './PortalAsks.vue'
+import PortalAsksWaitingLine from './PortalAsksWaitingLine.vue'
 import PortalAvatar from './PortalAvatar.vue'
 import PortalSkeleton from './PortalSkeleton.vue'
 import PortalWorkCard from './PortalWorkCard.vue'
@@ -157,8 +166,6 @@ import { resolveActivityText } from '@/utils/workActivity'
 const props = defineProps({
   participants: { type: Array, default: () => [] },
   tab: { type: Object, default: null },
-  // The open thread in a 1:1 — scopes "Waiting on you" links and the children.
-  chatId: { type: String, default: null },
 })
 const emit = defineEmits(['open-thread', 'see-hints', 'ask-about-it'])
 
@@ -175,11 +182,6 @@ const view = computed(() => workView({
   count: store.now.length + store.earlier.length,
 }))
 
-// ent#428: the same rows the sidebar counts, narrowed to this chat.
-const asks = computed(() => {
-  const names = new Set(participants.value)
-  return portal.asks.filter((a) => a.status === 'pending' && names.has(a.agent_name))
-})
 
 const expanded = ref(false)
 const shownEarlier = computed(() => earlierSlice(store.earlier, expanded.value))
@@ -235,4 +237,6 @@ function onAsk(item) {
 }
 
 const OVERLINE = 'text-[11px] font-semibold uppercase tracking-wide text-gray-400 mb-2'
+// The Now heading shares its row with the waiting line; the row owns the gap.
+const OVERLINE_ROW = OVERLINE.replace(' mb-2', '')
 </script>

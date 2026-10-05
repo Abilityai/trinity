@@ -70,6 +70,58 @@ def decide(agent_name: str, stamp: Optional[dict], companion: Optional[bool]) ->
     return Verdict(False, held_reason(agent_name), "unstamped_companion")
 
 
+def is_seat_delivery_schedule(enabled, deliver_to_workspace_email) -> bool:
+    """A live schedule that delivers into someone's Workspace — the seat brief the
+    gate holds. Shared by the role card and the agents list (PR #3038)."""
+    return bool(enabled) and bool((deliver_to_workspace_email or "").strip())
+
+
+def brief_is_held(stamp_status: Optional[str], autonomy_enabled, has_seat_delivery_schedule) -> bool:
+    """Whether "its scheduled brief is paused until it is marked ready" is TRUE.
+
+    Not `ready`, a seat-delivery schedule to hold, and autonomy on — with
+    autonomy off every schedule is stopped before readiness is asked, so the
+    sentence would promise a flip that starts nothing. The role card and the
+    agents list both say it from this one predicate, so they cannot disagree.
+    """
+    if stamp_status == "ready":
+        return False
+    return bool(autonomy_enabled) and bool(has_seat_delivery_schedule)
+
+
+def briefs_held_for_list(agents: list, readiness_by_name: dict) -> set:
+    """The names on `GET /api/agents` whose brief is held — one batched read.
+
+    Only a `calibrating` STAMP can be held here: the list never reads a template,
+    so an unstamped agent (companion or not) carries no badge and no claim.
+    Autonomy comes from the rows themselves. Fail-soft like the role card: an
+    unreadable schedule list claims no pause.
+    """
+    from database import db
+
+    candidates = [
+        a.get("name") for a in agents
+        if a.get("name")
+        and (readiness_by_name.get(a.get("name")) or {}).get("status") == "calibrating"
+        and a.get("autonomy_enabled")
+    ]
+    if not candidates:
+        return set()
+    try:
+        rows = db.get_workspace_delivery_schedules_for_agents(candidates)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("[ent#527] schedule read for the agents list failed: %s", e)
+        return set()
+    seated = {
+        r["agent_name"] for r in rows
+        if is_seat_delivery_schedule(r.get("enabled"), r.get("deliver_to_workspace_email"))
+    }
+    return {
+        n for n in candidates
+        if brief_is_held(readiness_by_name[n]["status"], True, n in seated)
+    }
+
+
 async def _is_companion(agent_name: str) -> Optional[bool]:
     """Whether template.yaml declares `x-role` — True / False, or None when that
     cannot be read right now (not running, Docker unreadable, slow, unparsable)."""

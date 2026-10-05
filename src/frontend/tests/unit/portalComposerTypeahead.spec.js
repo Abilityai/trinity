@@ -454,6 +454,19 @@ describe('resolveComposerKey', () => {
     expect(resolveComposerKey({ key: 'Escape', open: false })).toBe('pass')
   })
 
+  it('drops a reply on Escape only once the popup is closed — innermost first (ent#738)', () => {
+    expect(resolveComposerKey({ key: 'Escape', hasReply: true })).toBe('drop-reply')
+    expect(resolveComposerKey({ key: 'Escape', open: true, hasReply: true })).toBe('dismiss')
+    expect(resolveComposerKey({ key: 'Escape', hasReply: false })).toBe('pass')
+    // An IME session uses Escape to abandon a candidate, never to drop the reply.
+    expect(resolveComposerKey({ key: 'Escape', hasReply: true, isComposing: true })).toBe('pass')
+    expect(resolveComposerKey({ key: 'Escape', hasReply: true, keyCode: 229 })).toBe('pass')
+    // Only Escape: every other key resolves exactly as it does without a reply.
+    for (const key of ['Enter', 'a', 'Tab', 'ArrowUp', 'Home']) {
+      expect(resolveComposerKey({ key, hasReply: true }), key).toBe(resolveComposerKey({ key }))
+    }
+  })
+
   it('closes on a caret-moving key rather than accepting against stale bounds', () => {
     for (const key of ['ArrowLeft', 'ArrowRight', 'Home', 'End', 'PageUp', 'PageDown']) {
       expect(resolveComposerKey({ key, open: true, hasCandidates: true })).toBe('close')

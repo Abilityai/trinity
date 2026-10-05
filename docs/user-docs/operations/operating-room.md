@@ -41,6 +41,7 @@ Besides agent-authored items, the platform files its own alerts into this tab:
 
 - Git sync failures — see [Sync Health Alerts](#sync-health-alerts) below.
 - Weekly-limit subscription alerts, titled **Subscription '<name>' passed N% of its weekly limit** (or **… is at N% of its weekly limit** at the critical tier) and, when two or more are all saturated, **All N subscriptions are near their weekly limit**. The thresholds are described in [Subscription Credentials](../credentials/subscription-credentials.md).
+- **Side effect refused: no execution id** (high priority) — an agent on the durable pull queue tried to send a message, place a call, share a file, or call an external A2A agent without a usable execution id. Such a turn can be re-delivered, so the send was refused rather than risk a duplicate reaching a real person. The usual fix is rebuilding the base image and restarting the agent.
 - A notice after a push whose `.gitignore` sweep changed which files are tracked — see [GitHub Sync](../integrations/github-sync.md).
 - **Legacy skills-library adoption refused** — filed when an install still carries a legacy skills-library address that matches none of its configured skill sources. One low-priority row per refused address, and it stays until you clear it. Clear it with **Clear All** on this tab, which cancels it, rather than **Got it**: an acknowledged row moves to Resolved and cannot be cleared from there, because it waits for a delivery to an agent that does not exist. Copies of this alert filed by earlier releases at high priority clear the same way, followed by **Clear All** on Resolved.
 
@@ -83,7 +84,9 @@ All clear operations are scoped to agents you can access, affect all operators o
 
 For agents with GitHub sync enabled, the Sync Health Service polls every 60 seconds by default (`SYNC_HEALTH_POLL_INTERVAL_SECONDS`) and writes `sync_failing` queue entries when an agent's `consecutive_failures` hits 3. These appear in the Needs Response tab alongside agent-emitted items, so a broken git remote, expired PAT, or upstream divergence surfaces in the same place operators already watch.
 
-Per-agent sync state (last sync at, last error, ahead/behind counts on `main` and the working branch) is also visible on the agent header dot and at `GET /api/agents/{name}/git/sync-state`.
+When an agent's schedules are paused because it has been out of step with its repository for more than 24 hours, one **Agent diverged from GitHub — schedules paused** (`sync_diverged`) entry appears per episode, with the ahead/behind counts and a suggested fix. It stays until you clear it; if the agent drifts out of step again later, that is a new entry. See [GitHub Sync → Pausing schedules](../integrations/github-sync.md#pausing-schedules-when-sync-is-unhealthy).
+
+Per-agent sync state (last sync at, last error, ahead/behind counts on `main` and the working branch, uncommitted-file count, last successful push, and the computed state with its reason) is also visible on the agent header dot and at `GET /api/agents/{name}/git/sync-state`.
 
 ## For Agents
 

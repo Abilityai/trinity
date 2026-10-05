@@ -12,6 +12,7 @@ View, monitor, and manage task executions across all agents. Executions are crea
 |---------|--------|
 | `manual` | Tasks tab in agent detail |
 | `schedule` | Cron-based schedule |
+| `retry` | An automatic retry of a failed run (charted under **Scheduled**) |
 | `chat` | Chat tab in agent detail |
 | `session` | A resumable conversation turn (the Workspace) |
 | `agent` | Agent-to-agent call |
@@ -97,13 +98,12 @@ Platform users see their executions inside the [Workspace](../sharing-and-access
 
 **The live card.** When a message starts a longer job, a card under it shows the status word, how long it has been going, what the agent is doing right now, and — where the agent publishes a pipeline — the steps with the agent holding each one. Its controls are only those the platform can honour: **Stop** (where a stop would be accepted — your own turn, a job it handed on, or a room turn your message started), **Open in Work** (the rail, on this tab), and after a job that failed, timed out, was stopped or was lost, **Ask about it**, which pre-fills the composer with a question naming the job and how it ended and never sends on its own. A card for a finished job survives a reload; a reply that lands replaces it.
 
-Steps are one of three sentences, never two: the stages themselves, *{agent} doesn't report steps.* when a reachable agent publishes none, or *Steps could not be read right now.* when nobody can tell (a stopped or unreachable agent, or two runs on the same agent).
+Steps show as the stages themselves when the agent publishes them. An agent that publishes none shows no steps line; the card shows what it is doing right now instead. When nobody can tell (a stopped or unreachable agent, or two runs on the same agent), the card says *Steps could not be read right now.*
 
-**The Work tab** in the rail has three sections:
+**The Work tab** in the rail has two sections, plus one line — *N asks waiting on you · Open in Inbox* — while something waits on you (questions are answered in the Inbox, see [Approvals](../automation/approvals.md)):
 
 | Section | Holds |
 |---------|-------|
-| **Waiting on you** | Open asks from this chat's participants, answerable in place — see [Approvals](../automation/approvals.md) |
 | **Now** | A live card per job in flight; *Nothing running right now.* otherwise |
 | **Earlier** | The last 30 days: *N in the last 30 days · latest 3 shown*, with **Show all N** / **Show fewer** |
 
@@ -138,6 +138,7 @@ Full API reference: http://localhost:8000/docs
 | `list_recent_executions(name)` | List recent executions for an agent |
 | `get_execution_result(id)` | Get the result of a specific execution |
 | `get_agent_activity_summary(name)` | Get activity summary including execution stats |
+| `search_executions(query, ...)` | Search execution messages, responses, and errors across the agents you can access. Offered only to user- and system-scoped keys, never to agent keys. It needs a matching entitlement; where the search is not available it answers `available: false` rather than "no results" |
 
 ## See Also
 

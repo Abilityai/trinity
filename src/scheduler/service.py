@@ -978,37 +978,41 @@ class SchedulerService:
 
         # #1808: git-sync freeze gate. The owner opted in via
         # `freeze_schedules_if_sync_failing` (#389) so the agent stops doing
-        # autonomous work while its repo is broken — until now the flag was
-        # stored, reported back as enabled, and never enforced, and
-        # docs/user-docs/faq/troubleshooting.md told users it worked.
+        # autonomous work while its repo is broken — until #1808 the flag was
+        # stored, reported back as enabled, and never enforced.
+        # trinity-enterprise#706: the gate also fires when a WORK agent has
+        # been diverged from origin for more than 24 h (on a fresh
+        # observation), and the reason is carried into the skipped row.
         #
         # Cron only: a manual trigger is an operator explicitly asking, exactly
         # like the autonomy gate above.
         #
-        # Unlike the autonomy branch this DOES record a skipped execution row.
-        # Autonomy-off is a static config gate on a default-OFF fleet, so a row
-        # per tick would flood the table; a sync freeze needs BOTH an opt-in
-        # toggle AND 3+ consecutive real sync failures, so the row count is
-        # bounded and it is exactly the signal an operator needs to see. Uses
-        # the same audit path as the max_instances skip.
-        if triggered_by == "schedule" and self.db.should_freeze_schedules(schedule.agent_name):
+        # Unlike the autonomy branch this DOES record a skipped execution row:
+        # one per cron tick for as long as the freeze lasts. That is not
+        # "bounded" — a push-denied agent can fail for days, and a diverged one
+        # stays frozen until someone pushes — but each row IS the operator's
+        # signal, it needs an opt-in to exist at all, and execution retention
+        # prunes it. Uses the same audit path as the max_instances skip.
+        freeze_reason = (
+            self.db.sync_freeze_reason(schedule.agent_name)
+            if triggered_by == "schedule"
+            else None
+        )
+        if freeze_reason:
             logger.warning(
-                f"Schedule {schedule_id} skipped: agent {schedule.agent_name} git sync is "
-                f"failing and freeze_schedules_if_sync_failing is enabled"
+                f"Schedule {schedule_id} skipped: agent {schedule.agent_name} "
+                f"git sync frozen ({freeze_reason})"
             )
             self._record_skipped_agent_schedule(
                 schedule_id,
-                skip_reason=(
-                    "Git sync is failing and freeze_schedules_if_sync_failing is "
-                    "enabled for this agent"
-                ),
-                event_reason="Git sync failing (schedules frozen)",
+                skip_reason=f"Git sync frozen: {freeze_reason}",
+                event_reason="Git sync frozen (schedules paused)",
             )
             # Same projection advance as the autonomy branch (#1472) so the
             # schedule never renders a receding "Next: Nd ago" while frozen.
             self._advance_next_run_only(schedule)
             self._abandon_precreated_execution(
-                execution, "Git sync started failing before the run started"
+                execution, f"Git sync frozen before the run started: {freeze_reason}"
             )
             return
 
@@ -1053,7 +1057,8 @@ class SchedulerService:
                 source_user_email=origin.user_email,
                 source_agent_name=origin.agent_name,
                 source_mcp_key_id=origin.mcp_key_id,
-                source_mcp_key_name=origin.mcp_key_name
+                source_mcp_key_name=origin.mcp_key_name,
+                chain_depth=origin.chain_depth,
             )
 
             if not execution:
@@ -1852,6 +1857,8 @@ class SchedulerService:
                     agent_name=original.source_agent_name,
                     mcp_key_id=original.source_mcp_key_id,
                     mcp_key_name=original.source_mcp_key_name,
+                    # #2973: a retry is the same hop, so it keeps the depth.
+                    chain_depth=original.chain_depth,
                 )
         except Exception as exc:
             logger.warning(
@@ -1872,7 +1879,8 @@ class SchedulerService:
             source_user_email=origin.user_email,
             source_agent_name=origin.agent_name,
             source_mcp_key_id=origin.mcp_key_id,
-            source_mcp_key_name=origin.mcp_key_name
+            source_mcp_key_name=origin.mcp_key_name,
+            chain_depth=origin.chain_depth,
         )
 
         if not retry_execution:

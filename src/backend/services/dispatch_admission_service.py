@@ -30,7 +30,7 @@ from typing import Optional
 
 from models import User, ChatMessageRequest, ExecutionSource
 from database import db
-from services import idempotency_service
+from services import idempotency_service, skill_gate_service
 from services.capacity_manager import (
     CapacityFull,
     CircuitOpen,
@@ -94,7 +94,10 @@ def _chain_caller(current_user) -> Optional[str]:
         return agent
     if getattr(current_user, "mcp_scope", None) == "system":
         return SYSTEM_AGENT_NAME
-    return None
+    # #2973: the EVT-001 loopback carries the emitting agent the backend
+    # vouched for; its dispatch is a hop from that agent, not a new root.
+    vouched = getattr(current_user, "vouched_source_agent", None)
+    return vouched if isinstance(vouched, str) and vouched else None
 
 
 async def _record_depth_refusal(*, exc, current_user, endpoint, x_via_mcp):
@@ -114,6 +117,10 @@ async def _record_depth_refusal(*, exc, current_user, endpoint, x_via_mcp):
         endpoint=endpoint,
         details={"depth": exc.depth, "max_depth": exc.max_depth},
     )
+    if exc.caller is None:
+        # #2973: an unvouched event loopback names no calling agent; the audit
+        # row above is the record, and there is no edge to draw.
+        return
     activity_id = await activity_service.track_activity(
         agent_name=exc.caller,
         activity_type=ActivityType.AGENT_COLLABORATION,
@@ -152,10 +159,19 @@ async def enforce_inter_agent_depth(
     query is NOT guarded: the row insert that follows would fail the same way.
     """
     caller = _chain_caller(current_user)
-    if caller is None:
+    # #2973: an EVT-001 loopback carries the depth the backend computed at
+    # emit (or the terminal row's depth + 1) as a signed claim. It must be read
+    # BEFORE the root early-return: an event emitted on another agent's behalf
+    # is not vouched, so it has no caller but still has a depth.
+    claimed = getattr(current_user, "loopback_chain_depth", None)
+    if isinstance(claimed, bool) or not isinstance(claimed, int):
+        claimed = None
+    if caller is None and claimed is None:
         return None
     max_depth = _max_chain_depth()
-    depth = 1 + db.get_max_running_chain_depth(caller)
+    depth = 1 + db.get_max_running_chain_depth(caller) if caller else 0
+    if claimed is not None:
+        depth = max(depth, claimed)
     if depth <= max_depth:
         return depth
     exc = InterAgentDepthExceeded(caller, target, depth, max_depth)
@@ -268,6 +284,7 @@ async def admit_chat_request(
     x_source_agent: Optional[str],
     x_via_mcp: Optional[str],
     idempotency_key: Optional[str],
+    x_trinity_execution_id: Optional[str] = None,
 ):
     """Admission gate for chat_with_agent (#1026 slice 1), HTTP-free.
 
@@ -285,12 +302,37 @@ async def admit_chat_request(
 
     Raises ``InterAgentDepthExceeded`` (#2806) FIRST — before the claim, the
     breaker read and the acquire — so a refused hop leaves nothing behind.
+
+    trinity-enterprise#751: then the skill gate, at the same point and for the
+    same reason — ``SkillApprovalRequired`` / ``SkillGateRefused`` propagate to
+    the app handler (202 pending / named refusal) with nothing claimed, acquired
+    or written. The same Idempotency-Key replays the same approval.
     """
     chain_depth = await enforce_inter_agent_depth(
         current_user=current_user,
         target=name,
         endpoint=f"/api/agents/{name}/chat",
         x_via_mcp=x_via_mcp,
+    )
+
+    gate_trigger = "agent" if x_source_agent else ("mcp" if x_via_mcp else "chat")
+    gate = await skill_gate_service.enforce(
+        name,
+        request_text=request.message,
+        requester=skill_gate_service.requester_from_principal(
+            current_user, source_agent=x_source_agent, execution_id=x_trinity_execution_id),
+        triggered_by=gate_trigger,
+        occurrence_key=idempotency_key,
+        dispatch=skill_gate_service.frozen_dispatch(
+            triggered_by=gate_trigger,
+            model=request.model,
+            source_user_id=current_user.id,
+            source_user_email=current_user.email or current_user.username,
+            source_agent_name=x_source_agent,
+            source_mcp_key_id=getattr(current_user, "mcp_key_id", None),
+            source_mcp_key_name=getattr(current_user, "mcp_key_name", None),
+            chain_depth=chain_depth,
+        ),
     )
 
     # RELIABILITY-006 (#525): idempotency gate. Short-circuit duplicate
@@ -356,6 +398,9 @@ async def admit_chat_request(
             current_user=current_user, execution_id=chat_execution_id,
             queue_result=queue_result, source=source, message=request.message,
         )
+        await skill_gate_service.audit_self_approved(
+            name, gate, current_user=current_user,
+            endpoint=f"/api/agents/{name}/chat", execution_id=chat_execution_id)
     except EphemeralBudgetExhausted:
         # trinity-enterprise#69: ghost budget spent — nothing admitted/enqueued.
         idempotency_service.fail(idem)

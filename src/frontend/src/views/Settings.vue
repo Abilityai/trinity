@@ -81,7 +81,7 @@
                 <div>
                   <h3 class="text-lg font-medium text-gray-900 dark:text-gray-100">Data Retention</h3>
                   <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
-                    How long Trinity keeps logs, executions, health checks, and soft-deleted agents/schedules.
+                    How long Trinity keeps logs, executions, health checks, metric points, and soft-deleted agents/schedules.
                   </p>
                 </div>
                 <span
@@ -140,17 +140,27 @@
                 </div>
 
                 <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                  <div v-for="f in RETENTION_FIELDS" :key="f.key">
-                    <label class="block text-sm font-medium text-gray-700 dark:text-gray-300">{{ f.label }}</label>
-                    <div class="mt-1 flex items-center gap-2">
+                  <!-- ent#671: the field list and its render/save rules live in
+                       utils/retentionFields.js. An env-sourced row is read-only
+                       and never sent; the enterprise-only rows come and go with
+                       the same response's `edition`, so nothing pops in. -->
+                  <div v-for="f in retentionFields" :key="f.key">
+                    <label :for="`retention-${f.key}`" class="flex items-center gap-2 text-sm font-medium text-gray-700 dark:text-gray-300">
+                      {{ f.label }}
+                      <BaseBadge v-if="isEnvSourced(retention, f)" :title="f.envTitle">env</BaseBadge>
+                    </label>
+                    <div class="mt-1 flex items-center gap-2" :title="isEnvSourced(retention, f) ? f.envTitle : null">
                       <input
-                        type="number" min="0" max="3650"
+                        :id="`retention-${f.key}`"
+                        type="number" min="0" :max="f.max"
                         v-model.number="retentionForm[f.key]"
-                        :disabled="!retentionEntitled || retentionSaving"
+                        :disabled="!retentionEntitled || retentionSaving || isEnvSourced(retention, f)"
+                        :aria-describedby="isEnvSourced(retention, f) ? `retention-${f.key}-env` : null"
                         :class="RETENTION_INPUT_CLASS"
                       />
-                      <span class="text-sm text-gray-500 dark:text-gray-400">days</span>
+                      <span class="text-sm text-gray-500 dark:text-gray-400">{{ f.unit }}<template v-if="f.hint"> · {{ f.hint }}</template></span>
                     </div>
+                    <span v-if="isEnvSourced(retention, f)" :id="`retention-${f.key}-env`" class="sr-only">{{ f.envTitle }}</span>
                   </div>
                   <!-- Audit log — always shown, never editable (integrity floor) -->
                   <div>
@@ -165,12 +175,16 @@
 
                 <div v-if="retentionEntitled" class="flex items-center gap-3 pt-2">
                   <button
-                    @click="saveRetention" :disabled="retentionSaving"
+                    @click="saveRetention" :disabled="retentionSaving || !retentionDirty"
                     class="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md text-white bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50"
                   >{{ retentionSaving ? 'Saving…' : 'Save retention' }}</button>
                   <span v-if="retentionSaved" class="text-sm text-green-600 dark:text-green-400">Saved — applied live.</span>
                   <span class="text-xs text-gray-400">0 disables a sweep · values below the {{ retention.community_floor_days }}-day floor are raised to it.</span>
                 </div>
+                <!-- ent#671: a rejected save (e.g. a value out of bounds) stays
+                     beside the form it came from — it used to replace the whole
+                     panel, leaving no way to correct the value short of a reload. -->
+                <InlineError :message="retentionSaveError" @dismiss="retentionSaveError = ''" />
 
               </div>
             </div>
@@ -229,7 +243,7 @@
             <div class="px-6 py-4 border-b border-gray-200 dark:border-gray-700">
               <h2 class="text-lg font-medium text-gray-900 dark:text-white">Admin sign-in email</h2>
               <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
-                Sign in with this email and your password instead of the <code class="px-1 py-0.5 bg-gray-100 dark:bg-gray-700 rounded text-xs">admin</code> username. No verification email is sent.
+                Sign in with this email and your password instead of the <code class="px-1 py-0.5 bg-gray-100 dark:bg-gray-700 rounded text-xs">admin</code> username. We email a 6-digit code to confirm the address is yours.
               </p>
             </div>
             <div class="px-6 py-4">
@@ -242,17 +256,33 @@
                   :placeholder="adminEmailCurrent || 'you@company.com'"
                   :disabled="savingAdminEmail"
                   :class="[SETTINGS_TEXT_INPUT_CLASS, 'flex-1']"
+                  data-testid="admin-email-input"
+                />
+                <!-- ent#720: the mailbox proof. Shown once the code is sent;
+                     editing the address above starts over. -->
+                <input
+                  v-if="adminEmailCodeSent"
+                  type="text"
+                  inputmode="numeric"
+                  autocomplete="one-time-code"
+                  aria-label="Confirmation code"
+                  placeholder="6-digit code"
+                  v-model="adminEmailCode"
+                  :disabled="savingAdminEmail"
+                  :class="[SETTINGS_TEXT_INPUT_CLASS, 'w-32']"
+                  data-testid="admin-email-code"
                 />
                 <button
                   @click="saveAdminEmail"
-                  :disabled="!adminEmailInput || savingAdminEmail"
+                  :disabled="!adminEmailInput || savingAdminEmail || (adminEmailCodeSent && adminEmailCode.trim().length !== 6)"
+                  data-testid="admin-email-save"
                   class="inline-flex items-center px-4 py-2 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-action-primary-600 hover:bg-action-primary-700 disabled:opacity-50 disabled:cursor-not-allowed"
                 >
                   <svg v-if="savingAdminEmail" class="animate-spin -ml-1 mr-2 h-4 w-4" fill="none" viewBox="0 0 24 24">
                     <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
                     <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
                   </svg>
-                  Save
+                  {{ adminEmailCodeSent ? 'Confirm' : 'Save' }}
                 </button>
               </div>
               <div class="mt-2 flex items-center text-sm">
@@ -265,8 +295,8 @@
                 <template v-else-if="adminEmailError">
                   <span class="text-status-danger-600 dark:text-status-danger-400">{{ adminEmailError }}</span>
                 </template>
-                <template v-else-if="adminEmailCurrent">
-                  <span class="text-gray-500 dark:text-gray-400">Current: {{ adminEmailCurrent }}</span>
+                <template v-else-if="adminEmailCodeSent || adminEmailCurrent">
+                  <span class="text-gray-500 dark:text-gray-400" data-testid="admin-email-status">{{ adminEmailCodeSent ? `Code sent to ${adminEmailInput.trim()} — it expires in 10 minutes.` : `Current: ${adminEmailCurrent}` }}</span>
                 </template>
                 <template v-else>
                   <span class="text-state-autonomous-700 dark:text-state-autonomous-400">No email set — you currently sign in as <code class="px-1 py-0.5 bg-gray-100 dark:bg-gray-700 rounded text-xs">admin</code></span>
@@ -1256,8 +1286,8 @@
             <div class="px-6 py-4 border-b border-gray-200 dark:border-gray-700">
               <h2 class="text-lg font-medium text-gray-900 dark:text-white">Trinity Prompt</h2>
               <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
-                Custom instructions that are injected into all agents' CLAUDE.md at startup.
-                Changes apply to newly started or restarted agents.
+                Custom instructions added to every agent's instructions on each chat and task turn.
+                A saved change applies from the next turn — no restart needed.
               </p>
             </div>
 
@@ -1283,7 +1313,7 @@ Example:
                     ></textarea>
                   </div>
                   <p class="mt-2 text-sm text-gray-500 dark:text-gray-400">
-                    This content will appear under a "## Custom Instructions" section in each agent's CLAUDE.md.
+                    This content appears under a "## Custom Instructions" heading in each agent's instructions.
                     Supports Markdown formatting.
                   </p>
                 </div>
@@ -2150,11 +2180,18 @@ Example:
                 <h3 class="text-sm font-medium text-blue-800 dark:text-blue-300">How it works</h3>
                 <div class="mt-2 text-sm text-blue-700 dark:text-blue-400">
                   <ul class="list-disc list-inside space-y-1">
-                    <li>The Trinity Prompt is injected into each agent's CLAUDE.md when the agent starts</li>
-                    <li>Existing agents need to be restarted to receive the updated prompt</li>
-                    <li>The prompt appears as a "## Custom Instructions" section after the Trinity Planning System section</li>
+                    <li>The Trinity Prompt is read on every chat and task turn, so a saved change reaches running agents from the next turn — no restart</li>
+                    <li>It is added after Trinity's platform instructions, under a "## Custom Instructions" heading</li>
+                    <li>Deploying a system manifest with a top-level <code>prompt:</code> replaces this setting for every agent</li>
+                    <li>Add fleet rules only — never copy platform instructions here, which agents already receive — and keep it short</li>
                     <li>Use Markdown formatting for structured instructions</li>
                   </ul>
+                  <!-- docs/user-docs/agents/recommended-fleet-prompt.md, published under guides/ (#3206) -->
+                  <p class="mt-2">
+                    See the
+                    <a href="https://docs.ability.ai/guides/recommended-fleet-prompt" target="_blank" rel="noopener noreferrer" data-testid="trinity-prompt-docs-link" class="text-action-primary-600 dark:text-action-primary-400 hover:underline">recommended Trinity prompt</a>
+                    for fleet rules worth adding and what to leave out.
+                  </p>
                 </div>
               </div>
             </div>
@@ -2214,6 +2251,12 @@ import { useSettingsStore } from '../stores/settings'
 import { useSessionsStore } from '../stores/sessions'
 import { apiErrorMessage } from '../utils/apiError'
 import { readOpsBool, opsBoolValue } from '../utils/opsSettings'
+import {
+  visibleRetentionFields,
+  isEnvSourced,
+  retentionFormFromStatus,
+  retentionSaveBody,
+} from '../utils/retentionFields'
 import OperatorQueueAgingSetting from '../components/settings/OperatorQueueAgingSetting.vue'
 import { describeSttCapability, describeSttLastFailure } from '../utils/sttCapability'
 import { useEnterpriseStore } from '../stores/enterprise'
@@ -2248,6 +2291,8 @@ import { MODEL_CATALOG } from '../constants/modelCatalog'
 import TemplateRegistryPanel from '../components/settings/TemplateRegistryPanel.vue'
 import PlatformKeyField from '../components/settings/PlatformKeyField.vue'
 import ConfirmDialog from '../components/ConfirmDialog.vue'
+import BaseBadge from '../components/base/BaseBadge.vue'
+import InlineError from '../components/InlineError.vue'
 
 const router = useRouter()
 const route = useRoute()
@@ -2271,6 +2316,8 @@ const INSTALL_SOURCE_LABELS = {
   'do-marketplace': 'DigitalOcean Marketplace',
   'do-script': 'DigitalOcean (install script)',
   'vultr-marketplace': 'Vultr Marketplace',
+  'aws-marketplace': 'AWS Marketplace',
+  'aws-script': 'AWS (install script)',
   script: 'Install script',
   unknown: 'Not recorded',
 }
@@ -2367,16 +2414,13 @@ const umEntitled = computed(() => enterpriseStore.isEntitled('user_management'))
 // /api/enterprise/retention/config). Community shows the fixed 5-day floor +
 // an upgrade hint.
 const retentionEntitled = computed(() => enterpriseStore.isEntitled('retention'))
-const RETENTION_FIELDS = [
-  { key: 'log_retention_days', label: 'Log archival' },
-  { key: 'execution_log_retention_days', label: 'Execution logs' },
-  { key: 'execution_row_retention_days', label: 'Execution rows' },
-  { key: 'health_check_retention_days', label: 'Health checks' },
-  { key: 'agent_soft_delete_retention_days', label: 'Soft-deleted agents' },
-  { key: 'schedule_soft_delete_retention_days', label: 'Soft-deleted schedules' },
-]
-const retention = ref(null)        // { edition, community_floor_days, windows{} }
-const retentionForm = reactive({}) // editable copy of the OPS/log windows
+const retention = ref(null)        // { edition, community_floor_days, windows{}, sources{}, quotas{} }
+const retentionForm = reactive({}) // editable copy of the visible fields
+const retentionLoaded = ref({})    // the values as loaded — Save sends only what differs (ent#671)
+const retentionFields = computed(() => visibleRetentionFields(retention.value))
+const retentionDirty = computed(() =>
+  Object.keys(retentionSaveBody(retentionFields.value, retentionForm, retentionLoaded.value, retention.value)).length > 0
+)
 
 // Shared styling for this panel's number inputs.
 //
@@ -2397,7 +2441,10 @@ const RETENTION_INPUT_CLASS = SETTINGS_NUMBER_INPUT_CLASS
 const retentionLoading = ref(false)
 const retentionSaving = ref(false)
 const retentionError = ref('')
+const retentionSaveError = ref('') // a failed Save — shown beside the form, never instead of it (ent#671)
 const retentionSaved = ref(false)
+// "Saved" describes the values on screen; the first new edit makes it untrue.
+watch(retentionDirty, (dirty) => { if (dirty) retentionSaved.value = false })
 
 // #1709: in-product approval of a guard-refused (over-threshold) retention prune.
 // POST /api/settings/retention/acknowledge is the GATE (admin + human only,
@@ -2438,9 +2485,12 @@ async function loadRetention() {
   try {
     const r = await axios.get('/api/settings/retention', { headers: authStore.authHeader })
     retention.value = r.data
-    for (const f of RETENTION_FIELDS) {
-      retentionForm[f.key] = r.data?.windows?.[f.key]
-    }
+    const values = retentionFormFromStatus(r.data)
+    Object.assign(retentionForm, values)
+    retentionLoaded.value = values
+    // The form now shows the stored values, so an error about a rejected
+    // value that is no longer on screen would describe nothing (ent#671).
+    retentionSaveError.value = ''
   } catch (e) {
     retentionError.value = apiErrorMessage(e, 'Failed to load retention settings.')
   } finally {
@@ -2451,20 +2501,18 @@ async function loadRetention() {
 
 async function saveRetention() {
   if (!retentionEntitled.value) return
+  // Only the fields the operator changed, never an env-sourced one (ent#671).
+  const body = retentionSaveBody(retentionFields.value, retentionForm, retentionLoaded.value, retention.value)
+  if (!Object.keys(body).length) return
   retentionSaving.value = true
-  retentionError.value = ''
+  retentionSaveError.value = ''
   retentionSaved.value = false
   try {
-    const body = {}
-    for (const f of RETENTION_FIELDS) {
-      const n = parseInt(retentionForm[f.key], 10)
-      if (!Number.isNaN(n)) body[f.key] = n
-    }
     await axios.put('/api/enterprise/retention/config', body, { headers: authStore.authHeader })
     retentionSaved.value = true
     await loadRetention()
   } catch (e) {
-    retentionError.value = apiErrorMessage(e, 'Failed to save retention settings.')
+    retentionSaveError.value = apiErrorMessage(e, 'Failed to save retention settings.')
   } finally {
     retentionSaving.value = false
   }
@@ -2591,6 +2639,10 @@ const adminEmailInput = ref('')
 const savingAdminEmail = ref(false)
 const adminEmailSaveSuccess = ref(false)
 const adminEmailError = ref('')
+// ent#720 — the bind's second step: a code was emailed to the new address.
+const adminEmailCodeSent = ref(false)
+const adminEmailCode = ref('')
+watch(adminEmailInput, () => { adminEmailCodeSent.value = false; adminEmailCode.value = '' })
 // Only a real email (with @) counts as "set"; the legacy admin row stores the
 // placeholder 'admin' until one is registered.
 const adminEmailCurrent = computed(() => {
@@ -3253,14 +3305,16 @@ async function saveAdminEmail() {
   adminEmailSaveSuccess.value = false
   adminEmailError.value = ''
   try {
-    await axios.put('/api/users/me/email', { email }, { headers: authStore.authHeader })
-    // Refresh so the displayed "current" email updates immediately.
-    await authStore.fetchUserProfile()
+    const out = await authStore.bindOwnEmail(email, adminEmailCodeSent.value ? adminEmailCode.value.trim() : null)
+    if (out.needsCode) {
+      adminEmailCodeSent.value = true
+      return
+    }
     adminEmailInput.value = ''
     adminEmailSaveSuccess.value = true
     setTimeout(() => { adminEmailSaveSuccess.value = false }, 4000)
   } catch (e) {
-    adminEmailError.value = e?.response?.data?.detail || 'Failed to save email'
+    adminEmailError.value = apiErrorMessage(e, 'Failed to save email')
   } finally {
     savingAdminEmail.value = false
   }

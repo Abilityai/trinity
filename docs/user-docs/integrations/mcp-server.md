@@ -1,6 +1,6 @@
 # MCP Server
 
-Trinity's MCP server exposes 131 tools across 33 modules for agent orchestration via the Model Context Protocol, enabling programmatic control from Claude Code, other MCP clients, or agent-to-agent communication. 126 of them are the operator tool set; three consumption-only tools are visible only to connector keys, and two sign-in tools are registered only when inline email auth is enabled. A few operator tools are enterprise-gated and return `"disabled"` (or a `not available` result) where not entitled.
+Trinity's MCP server exposes 143 tools across 35 modules for agent orchestration via the Model Context Protocol, enabling programmatic control from Claude Code, other MCP clients, or agent-to-agent communication. 138 of them are the operator tool set; three consumption-only tools are visible only to connector keys, and two sign-in tools are registered only when inline email auth is enabled. A few operator tools are enterprise-gated and return `"disabled"` (or a `not available` result) where not entitled.
 
 > 📺 **Watch:** [From Zero to Deployed AI Agent — MCP setup](https://youtu.be/-TSZyekDS6o) *(Apr 2026)* · [all videos](../videos.md)
 
@@ -67,13 +67,14 @@ The URL Trinity advertises — in the MCP Keys page's connection snippet and in 
 |--------|-------|-------------|
 | `agents.ts` | 22 | Agent lifecycle, credentials, SSH, local deploy, GitHub sync, per-agent PAT, runtime-data export/import, compatibility report |
 | `chat.ts` | 4 | `chat_with_agent`, `get_chat_history`, `get_agent_logs`, `fan_out` — chat and parallel dispatch, all gateway-timeout safe |
-| `executions.ts` | 4 | `list_recent_executions`, `get_execution_result`, `get_fan_out_result`, `get_agent_activity_summary` — execution queries, polling for async tasks and fan-out batches, activity monitoring |
+| `executions.ts` | 5 | `list_recent_executions`, `get_execution_result`, `get_fan_out_result`, `get_agent_activity_summary`, `search_executions` — execution queries, polling for async tasks and fan-out batches, activity monitoring; `search_executions` needs a matching entitlement and is never offered to agent keys |
 | `schedules.ts` | 8 | Schedule CRUD (including retries, post-run validation and Workspace delivery) and execution history |
-| `skills.ts` | 9 | Skill management and assignment, plus the skill-runner tools `run_skill` and `list_runnable_skills` (enterprise-gated — return `"disabled"` in community builds) |
+| `skills.ts` | 11 | Skill management and assignment (including skill sets: `list_skill_sets`, `unassign_skill_set`), plus the skill-runner tools `run_skill` and `list_runnable_skills` (enterprise-gated — return `"disabled"` in community builds) |
 | `tags.ts` | 5 | Agent tagging |
-| `systems.ts` | 4 | `deploy_system`, `list_systems`, `restart_system`, `get_system_manifest` — see [System Manifest](../collaboration/system-manifest.md) |
+| `systems.ts` | 5 | `deploy_system`, `list_systems`, `restart_system`, `get_system_manifest`, `teardown_system` (needs a matching entitlement; previews by default) — see [System Manifest](../collaboration/system-manifest.md) |
 | `subscriptions.ts` | 6 | Subscription management |
-| `monitoring.ts` | 3 | Fleet health |
+| `monitoring.ts` | 4 | `get_fleet_health`, `get_fleet_sync_audit`, `get_agent_health`, `trigger_health_check` — fleet health, git sync health, and the fleet sync audit (see [Monitoring](../operations/monitoring.md)) |
+| `metrics.ts` | 4 | `record_metrics`, `get_metrics`, `get_objectives`, `refresh_metric_definitions` — the calling agent's declared business metrics and objectives (see [Dynamic Dashboards](../advanced/dynamic-dashboards.md#declared-metrics)) |
 | `nevermined.ts` | 4 | Payment configuration |
 | `notifications.ts` | 1 | `send_notification` — agent-to-platform notifications (`alert`, `info`, `status`, `completion`, `question`) |
 | `events.ts` | 4 | Agent event pub/sub |
@@ -83,6 +84,7 @@ The URL Trinity advertises — in the MCP Keys page's connection snippet and in 
 | `voice.ts` | 1 | `send_voice_reply` — speak one reply of the current channel turn as a voice note (see [Voice Replies](../advanced/voice-replies.md)) |
 | `files.ts` | 1 | `share_file` — publish file to a signed download URL |
 | `memory.ts` | 1 | `write_user_memory` — per-user memory blob, isolated server-side |
+| `decisions.ts` | 2 | `record_decision`, `list_seat_decisions` — record why something was approved, deferred or killed for the seat an agent serves, and read that seat's standing decisions back |
 | `loops.ts` | 3 | `run_agent_loop`, `get_loop_status`, `stop_loop` — sequential bounded task loops |
 | `voip.ts` | 1 | `call_user` — outbound phone call (flag-gated, requires a per-agent voice binding) |
 | `operator_queue.ts` | 5 | `list_operator_queue`, `get_operator_queue_item`, `respond_to_operator_queue`, `get_my_ask`, `ask_operator` — read and resolve Operating Room queue items; an agent raises its own asks and reads them back |
@@ -95,7 +97,7 @@ The URL Trinity advertises — in the MCP Keys page's connection snippet and in 
 | `a2a.ts` | 7 | A2A management plane — per-agent exposure and card, inbound allow-list, outbound endpoint registry (entitlement-gated; see [A2A Protocol](a2a-protocol.md)) |
 | `a2a_call.ts` | 2 | `call_a2a_agent`, `get_a2a_task` — task a registered external A2A agent by endpoint name and poll it |
 | `credential_vault.ts` | 2 | `list_available_credentials`, `fetch_credential` — pull a granted vault credential by name at runtime (see [Credential Management](../credentials/credential-management.md#credential-vault)) |
-| `assignments.ts` | 0 (fenced) | `get_agent_assignments` is built but **not registered** in 0.9.5 — it returns with the assignments layer |
+| `assignments.ts` | 1 | `get_agent_assignments` — read who an agent works for (read-only; degrades to a not-available result where unsupported) |
 | `connector.ts` | 3 | `list_playbooks`, `run_playbook`, `ask` — the consumption-only set a **connector key** sees; operator tools stay hidden from connector keys |
 | `auth.ts` | 2 | `request_login`, `verify_login` — registered only when inline email auth is on, advertised only to keyless sessions |
 
@@ -168,10 +170,11 @@ Every refusal is recorded in the audit log as a refusal, not as a successful cal
 | `call_user` | Place an outbound phone call to a user and hold a voice conversation. Server-gated: works only when VoIP is enabled platform-wide and the agent has a voice binding; rate-limited and daily-capped. See [VoIP Telephony](../advanced/voip-telephony.md). |
 | `share_file` | The agent drops a file into `/home/developer/public/` and calls this tool to mint a signed, expiring download URL (universal — works for web, Slack, Telegram, WhatsApp, email). |
 | `write_user_memory` | Per-user memory blob in an isolated store. Trinity resolves the user's email from `execution_id` server-side, so an agent cannot accidentally cross-write another user's memory. |
-| `send_message` | Proactive message to a specific user by verified email. Rate-limited and audit-logged. |
+| `send_message` | Proactive message to a person, addressed by role (`to`: `primary`, `approver`, `viewer`); the platform resolves who fills it. `recipient_email` is deprecated. Rate-limited and audit-logged. |
 | `send_group_message` | Proactive message to a channel group (Slack channel, Telegram chat). Discovered via `list_channel_groups`. |
 | `ask_trinity` | Grounded Q&A about Trinity itself, answered from the documentation. Pass the `session_id` it returns to ask follow-ups; the tool tells you when a session reset dropped your context. Also available standalone as the `trinity-docs-mcp` npx package, with no Trinity instance or API key required. |
-| `report` | Publish a structured report (table, KPI set, markdown, timeline). Read them back with `list_reports` / `get_report`. See [Agent Reports](../operations/agent-reports.md). |
+| `record_metrics` | Record observations of the agent's declared business metrics as data. A batch is all-or-nothing, with a reason code per bad point; declare a metric in `template.yaml` first and call `refresh_metric_definitions`. Read back with `get_metrics`, and targets vs actuals with `get_objectives`. See [Dynamic Dashboards](../advanced/dynamic-dashboards.md#declared-metrics). |
+| `report` | Publish a structured report (table, KPI set, markdown, timeline); `to` addresses it to a role's person. Read them back with `list_reports` / `get_report`. See [Agent Reports](../operations/agent-reports.md). |
 
 ## For Agents
 
@@ -200,6 +203,7 @@ Every refusal is recorded in the audit log as a refusal, not as a successful cal
 - `chat_with_agent` and `fan_out` sync modes cap at `MCP_CHAT_TIMEOUT_MS` (default 25s). Longer calls switch to poll-mode via the returned `execution_id` (or `fan_out_id`); a receipt is issued only when the running work can be attributed to your call unambiguously.
 - A `model` passed to `chat_with_agent` (it applies with `parallel=true`) must look like a model id — a short alias such as `sonnet` or a full id such as `claude-sonnet-4-6`. Anything else is refused with `422` before the task starts. See [Chat API](../api-reference/chat-api.md#model-override).
 - Fan-out is self-only: an agent fans out to itself, not to another agent.
+- `chat_with_agent` and `fan_out` stop at the agent-to-agent chain-depth limit (default 8 hops) and return a result marked `retryable: false`. See [Agent Network](../collaboration/agent-network.md#concepts).
 
 ## See Also
 

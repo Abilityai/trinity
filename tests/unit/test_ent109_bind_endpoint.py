@@ -99,7 +99,7 @@ def _user(*, agent_name=None, role="admin", username="alice"):
 def _request():
     return types.SimpleNamespace(
         client=types.SimpleNamespace(host="127.0.0.1"),
-        url=types.SimpleNamespace(path="/api/agents/bot/git/bind-to-own-repo"),
+        scope={"path": "/api/agents/bot/git/bind-to-own-repo"},
         state=types.SimpleNamespace(request_id="req-1"),
     )
 

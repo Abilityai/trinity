@@ -1456,11 +1456,17 @@ Four rules are worth knowing before your first call:
 - **Values are not coerced.** `"42"` is not `42`, `true` is not `1`, and a
   `status` metric takes one of its declared labels, not a number.
 - **Identity is `(metric, ts, dims)` — the value is not part of it.** Sending
-  the same observation twice deduplicates instead of double-counting, and a
-  **correction is a new `ts`**, not a new value at the same one.
+  the same value twice deduplicates instead of double-counting. Sending a
+  **different value at the same `(metric, ts, dims)` corrects** the stored point
+  in place, and the result counts it as `corrected`. Keep the `ts` of the
+  period the number describes (the week's close, say), so the chart stays one
+  point per period. Last write wins.
 - **Pass `execution_id`.** It links the batch to the turn and makes a
   re-delivered turn replay instead of recording twice. Without it, and without
-  your own `ts`, a retry is treated as a new observation.
+  your own `ts`, a retry is treated as a new observation. Within one turn,
+  re-sending a batch identical to an earlier one replays it (`replayed: true`,
+  nothing written) even if you corrected the value in between. To restate it
+  back, pass a fresh `idempotency_key`.
 
 The old path — writing `metrics.json` into the workspace — is **retired**
 (trinity-enterprise#479). Nothing reads that file any more:
@@ -1774,8 +1780,10 @@ record_metrics(points=[
 ```
 
 No timestamp is needed — Trinity stamps it. Pass your own `ts` only when you are
-recording an observation from a *different* moment (a backfill, or a correction,
-which is a new `ts` and never a new value at the old one).
+recording an observation from a *different* moment: a backfill, or a period
+close (a weekly total stamped at the week's end). To correct that figure later,
+send the new value with the **same** `ts` and dims. It restates the point
+rather than adding a second one.
 
 **In CLAUDE.md instructions:**
 ```markdown

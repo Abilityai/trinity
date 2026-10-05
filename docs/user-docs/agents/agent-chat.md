@@ -65,7 +65,7 @@ Oversized files are rejected client-side with an alert. Files that exceed the to
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `/api/agents/{name}/chat` | POST | Send chat message (stream-json output) |
+| `/api/agents/{name}/chat` | POST | Send chat message (stream-json output). The response's `execution.compaction` reports an auto-compaction during the turn, or is `null` |
 | `/api/agents/{name}/chat/sessions` | GET | List all sessions |
 | `/api/agents/{name}/chat/sessions/{id}` | GET | Get session with messages |
 | `/api/agents/{name}/chat/sessions/{id}/close` | POST | Close session |
@@ -75,7 +75,7 @@ Oversized files are rejected client-side with an alert. Files that exceed the to
 
 ### MCP Tools
 
-- `chat_with_agent(agent_name, message)` -- Send a message to an agent.
+- `chat_with_agent(agent_name, message)` -- Send a message to an agent. In its default sequential mode it continues the agent's **own** chat session, shared by every caller of that agent. It never picks up a scheduled or other headless run's session. The session starts fresh after a model change or a history reset (`DELETE /api/agents/{name}/chat/history`). A turn that crosses the context limit can pay a one-off auto-compaction, which is recorded as `compact_metadata` (read it with `get_execution_result`) and does not mean the agent is degraded.
 - `get_chat_history(agent_name)` -- Retrieve chat history for an agent.
 
 ## See Also

@@ -6,7 +6,7 @@ is it now, and is that number still true?". An objective (Tandem framework
 what that name means; the point store (ent#478) says what it currently reads;
 `metric_read_service.freshness` says whether to believe it. This module is the
 join of those four, and it is the only one — the role card (ent#527 / #2927),
-the project hub (ent#661) and proactivity (ent#605) all consume it rather than
+the project view (ent#661 v3) and proactivity (ent#605) all consume it rather than
 each growing their own.
 
 **Files are truth; this is a projection** (framework E7/E13). Objectives are
@@ -80,7 +80,7 @@ import logging
 import math
 import re
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from services.metric_read_service import STALE_RULE, latest_by_metric
 from utils.helpers import to_utc_iso
@@ -337,7 +337,7 @@ def parse_objective(
     if raw_id is not None and declared_id is None:
         # A MISSING id falling back to the filename is the deliberate,
         # documented behaviour. An id the author WROTE and that this read
-        # refused is different: ent#661 keys objectives by id across agents, so
+        # refused is different: the ent#661 v3 project view keys objectives by id across agents, so
         # the author has to learn the canonical id is not the one they typed.
         findings.append(_finding(
             "objective_id_invalid",
@@ -443,8 +443,16 @@ def join_objectives(
     *,
     agent_name: str,
     role_id: Optional[str],
+    served: Optional[Dict[str, Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """The pure join. Every unit test drives this; nothing here does I/O.
+
+    `served` (ent#727) maps a metric name this agent does NOT declare to what
+    `resolve_served_metrics` found among the agents it holds a grant on:
+    `{"agent", "definition", "latest"}` for exactly one serving agent, or
+    `{"candidates": [...], "candidate_count": n}` when more than one serves it
+    (`candidates` names only those the viewer may see). Absent → the row is
+    judged exactly as before.
 
     `objectives` are already parsed and filtered (`select_objectives`);
     `definitions` are the registry rows INCLUDING retired ones, because a
@@ -459,7 +467,7 @@ def join_objectives(
     summary = {
         "objectives": 0, "metrics": 0, "behind": 0, "ahead": 0,
         "on_target": 0, "off_target": 0, "not_computable": 0, "stale": 0,
-        "undeclared": 0, "declared_elsewhere": 0,
+        "undeclared": 0, "declared_elsewhere": 0, "served_elsewhere": 0,
     }
 
     seen_ids: Dict[str, str] = {}
@@ -483,6 +491,7 @@ def join_objectives(
             row, row_findings = _metric_row(
                 spec, obj, by_name, latest_by_name,
                 owned=owned, agent_name=agent_name,
+                served=(served or {}).get(spec["name"]),
             )
             metrics_out.append(row)
             findings.extend(row_findings)
@@ -490,7 +499,9 @@ def join_objectives(
             summary[row["gap"]["status"]] += 1
             if row["stale"]:
                 summary["stale"] += 1
-            if row["declared_elsewhere"]:
+            if row["served_by"]:
+                summary["served_elsewhere"] += 1
+            elif row["declared_elsewhere"]:
                 summary["declared_elsewhere"] += 1
             elif not row["declared"]:
                 summary["undeclared"] += 1
@@ -522,6 +533,7 @@ def _metric_row(
     *,
     owned: bool,
     agent_name: str,
+    served: Optional[Dict[str, Any]] = None,
 ) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
     """One objective metric: target from the file, everything else from the join."""
     name = spec["name"]
@@ -533,9 +545,20 @@ def _metric_row(
     retired = bool(definition) and definition.get("status") != ACTIVE_STATUS
     declared = bool(definition) and not retired
     # A supporting agent does not declare the owner's metric, and never will:
-    # the registry is per-agent and cross-agent reads are ent#80's grant.
-    # Telling it to "declare it and refresh" would be advice it cannot take.
+    # the registry is per-agent. Telling it to "declare it and refresh" would
+    # be advice it cannot take.
     declared_elsewhere = (not definition) and (not owned)
+
+    # ent#727: the number is served by exactly one agent this one holds a
+    # grant on — read it there, through the same freshness fold. `declared`
+    # stays about THIS agent's registry; `served_by` says whose it is.
+    served_by = None
+    if not definition and served and served.get("agent"):
+        served_by = served["agent"]
+        definition = served["definition"]
+        latest = served.get("latest") or {}
+        declared_elsewhere = False
+    has_number = declared or served_by is not None
 
     direction, direction_source, mismatch = resolve_direction(
         definition.get("direction") if definition else None,
@@ -543,7 +566,7 @@ def _metric_row(
     )
 
     actual = None
-    if declared:
+    if has_number:
         latest_value = latest.get("latest")
         actual = latest_value.get("value") if latest_value else None
 
@@ -557,18 +580,42 @@ def _metric_row(
         "objective_direction": spec.get("direction"),
         "declared": declared,
         "declared_elsewhere": declared_elsewhere,
+        "served_by": served_by,
         "direction": direction,
         "direction_source": direction_source,
         "unit": definition.get("unit") if definition else None,
         "type": definition.get("type") if definition else None,
         "label": (definition.get("label") or name) if definition else None,
         "actual": actual,
-        "last_point_at": latest.get("last_point_at") if declared else None,
-        "stale": bool(latest.get("stale")) if declared else False,
-        "freshness": latest.get("freshness") if declared else None,
-        "stale_after": latest.get("stale_after") if declared else None,
+        "last_point_at": latest.get("last_point_at") if has_number else None,
+        "stale": bool(latest.get("stale")) if has_number else False,
+        "freshness": latest.get("freshness") if has_number else None,
+        "stale_after": latest.get("stale_after") if has_number else None,
         "finding": None,
     }
+
+    ambiguous = (served or {}).get("candidate_count", 0) if not definition else 0
+    if ambiguous:
+        candidates = served.get("candidates") or []
+        hidden = ambiguous - len(candidates)
+        named = [f"`{c}`" for c in candidates] + (
+            [f"{hidden} you cannot access"] if hidden else [])
+        row["gap"] = {"status": "not_computable", "delta": None,
+                      "reason": "served_by_ambiguous"}
+        row["finding"] = {
+            "code": "metric_served_ambiguously",
+            "message": (
+                f"objective `{obj_id}` names metric `{name}`, which "
+                f"{ambiguous} agents `{agent_name}` holds a grant on "
+                f"declare ({', '.join(named)}) — one "
+                "number has one serving agent, so no actual is shown. Retire "
+                "the duplicate declaration, or remove the grant that is not "
+                "the source."),
+        }
+        findings.append(_finding(
+            "metric_served_ambiguously", row["finding"]["message"],
+            objective_id=obj_id, metric=name, path=obj["path"]))
+        return row, findings
 
     if declared_elsewhere:
         row["gap"] = {"status": "not_computable", "delta": None,
@@ -578,8 +625,9 @@ def _metric_row(
             "message": (
                 f"objective `{obj_id}` names metric `{name}`, which is "
                 f"declared by the owning role's agent, not by `{agent_name}` — "
-                "this agent supports the objective without measuring it "
-                "(cross-agent metric reads are ent#80)."),
+                "this agent supports the objective without measuring it. "
+                "To show its actual here, grant this agent permission on the "
+                "agent that serves it."),
         }
         findings.append(_finding(
             "metric_not_declared_here", row["finding"]["message"],
@@ -604,7 +652,7 @@ def _metric_row(
             objective_id=obj_id, metric=name, path=obj["path"]))
         return row, findings
 
-    if not declared:
+    if not has_number:
         row["gap"] = {"status": "not_computable", "delta": None,
                       "reason": "undeclared"}
         row["finding"] = {
@@ -772,7 +820,7 @@ async def read_objective_files(
 ) -> Dict[str, Any]:
     """List, read and filter `<root>/objectives/*.yaml` through the agent door.
 
-    Exported so a cross-agent consumer (the ent#661 project hub) can do ONE
+    Exported so a cross-agent consumer (the ent#661 v3 project view) can do ONE
     file read and then compose `join_objectives` per agent over store-only
     reads, rather than putting the agent door inside its loop. Still one join.
 
@@ -926,7 +974,7 @@ def _empty(agent_name: str, now: datetime, *, unavailable=None, role=None,
         "summary": {
             "objectives": 0, "metrics": 0, "behind": 0, "ahead": 0,
             "on_target": 0, "off_target": 0, "not_computable": 0, "stale": 0,
-            "undeclared": 0, "declared_elsewhere": 0,
+            "undeclared": 0, "declared_elsewhere": 0, "served_elsewhere": 0,
         },
         "message": message,
     }
@@ -942,17 +990,92 @@ _UNAVAILABLE_COPY = {
 }
 
 
+def resolve_served_metrics(
+    agent_name: str,
+    names: List[str],
+    *,
+    can_view: Optional[Callable[[str], bool]],
+    now: datetime,
+) -> Dict[str, Dict[str, Any]]:
+    """Which granted agent serves each metric `agent_name` does not declare
+    (ent#727). Store-only.
+
+    Candidates are the agents `agent_name` holds an `agent_permissions` grant
+    on — the READER's grants, never the objective owner's, so this never reads
+    through a grant the reader lacks. Each candidate still passes
+    `metric_access_service.can_read_agent_metrics`, the one predicate the
+    `/metrics` route gates on.
+
+    Ambiguity is decided over the FULL grant set, before `can_view` filters
+    anything, so every viewer gets the same answer to the same question. A
+    single server the viewer cannot access reads as not served at all: a
+    human who can see this agent but not the server must never see the
+    server's number through this agent's objectives.
+
+    `can_view` is required to resolve anything — `None` (a caller that did not
+    say who is looking) fails closed and resolves nothing.
+    """
+    from database import db  # deferred: the pure half imports without a store
+    from services import metric_access_service
+
+    if can_view is None or not names:
+        return {}
+    wanted = set(names)
+    servers: Dict[str, List[Tuple[str, Dict[str, Any]]]] = {}
+    for target in db.get_permitted_agents(agent_name) or []:
+        if target == agent_name:
+            continue
+        if not metric_access_service.can_read_agent_metrics(agent_name, target):
+            continue
+        for d in db.list_metric_definitions(target) or []:
+            if d.get("name") in wanted and d.get("status") == ACTIVE_STATUS:
+                servers.setdefault(d["name"], []).append((target, d))
+
+    out: Dict[str, Dict[str, Any]] = {}
+    per_target: Dict[str, List[Dict[str, Any]]] = {}
+    for name, found in servers.items():
+        if len(found) > 1:
+            # Named only where the viewer may see them; the rest are counted,
+            # so the answer (ambiguous) is the same for everyone but an agent
+            # name the viewer cannot access is not disclosed through it.
+            out[name] = {
+                "candidates": sorted(t for t, _ in found if can_view(t)),
+                "candidate_count": len(found),
+            }
+            continue
+        target, definition = found[0]
+        if not can_view(target):
+            continue
+        out[name] = {"agent": target, "definition": definition, "latest": {}}
+        per_target.setdefault(target, []).append(definition)
+
+    for target, definitions in per_target.items():
+        latest = latest_by_metric(
+            target, definitions=definitions,
+            names=[d["name"] for d in definitions], now=now)
+        for d in definitions:
+            out[d["name"]]["latest"] = latest.get(d["name"]) or {}
+    return out
+
+
 async def read_objective_join(
     agent_name: str,
     *,
     now: Optional[datetime] = None,
     template: Optional[dict] = None,
     client=None,
+    can_view: Optional[Callable[[str], bool]] = None,
 ) -> Dict[str, Any]:
     """The composition: container state → template → objective files → store.
 
     `template` and `client` are accepted so a caller that has already read the
     template through the same door (the role card) does not read it twice.
+
+    `can_view(agent)` says whether the principal asking may see another
+    agent's numbers; it is what lets a metric served by a granted agent
+    resolve (ent#727, `resolve_served_metrics`). Omitted, nothing is read
+    from another agent — the fail-closed default for a caller that did not
+    say who is looking.
 
     The store is touched only for metric names an objective actually
     references, and not at all when there is nothing to join — an agent with no
@@ -1083,9 +1206,14 @@ async def read_objective_join(
     latest = latest_by_metric(
         agent_name, definitions=definitions, names=declared_names, now=now)
 
+    local_names = {d.get("name") for d in definitions}
+    served = resolve_served_metrics(
+        agent_name, sorted(referenced - local_names),
+        can_view=can_view, now=now)
+
     joined = join_objectives(
         objectives, definitions, latest,
-        agent_name=agent_name, role_id=role_id)
+        agent_name=agent_name, role_id=role_id, served=served)
 
     return {
         "agent_name": agent_name,

@@ -469,6 +469,17 @@ class User(BaseModel):
     # `X-Source-Agent` header is honoured for this one value and nothing else.
     # None on every other branch, JWT humans included.
     vouched_source_agent: Optional[str] = None
+    # #2973: the inter-agent chain depth (#2806) the backend computed when it
+    # dispatched an EVT-001 event, carried as a signed loopback claim so the
+    # subscriber's execution inherits it instead of starting a new root. Set
+    # only on a loopback JWT; None on every other branch.
+    loopback_chain_depth: Optional[int] = None
+    # trinity-enterprise#751: True only on the EVT-001 loopback JWT. That token
+    # resolves to `sub: "admin"` with no `mcp_scope` and no agent identity — the
+    # exact shape of a signed-in human — so without this flag a subscription an
+    # agent created could reach `/task` looking like the admin in a browser.
+    # `dependencies.is_person_principal` refuses it.
+    is_event_loopback: bool = False
 
 
 class Token(BaseModel):
@@ -966,6 +977,11 @@ class ReportCreate(BaseModel):
     # the router against the agent's own roster: an agent may hand a report to
     # someone it already talks to, never to an arbitrary address.
     audience_email: Optional[str] = Field(None, max_length=320)
+    # ent#606 — who the report is FOR, as a ROLE the platform resolves through
+    # the agent's assignments (`services/role_addressing`), never a person the
+    # agent picks. Mutually exclusive with `audience_email`, which stays accepted
+    # (deprecated) for two releases. Neither = operator-only, as before.
+    to: Optional[Literal["primary", "approver", "viewer", "operator"]] = None
     # The turn the agent is publishing from. Used ONLY to resolve which
     # Workspace chat the deliverable card belongs in, server-side — the session
     # is never accepted from the agent, or a report could be posted into a
@@ -1177,6 +1193,9 @@ class BusinessStatus(str, Enum):
     VALIDATED = "validated"                     # Validation passed
     FAILED_VALIDATION = "failed_validation"    # Validation found incomplete/incorrect work
     SKIPPED = "skipped"                        # Validation not configured for this schedule
+    # #2959: the run left nothing to inspect (empty response), so no verdict
+    # was possible. Never files the "Validation Failed" alert; never a PASS.
+    VALIDATION_UNAVAILABLE = "validation_unavailable"
 
 
 class QueueItemStatus(str, Enum):
@@ -3004,10 +3023,27 @@ class CanaryStatusResponse(BaseModel):
 # =============================================================================
 
 
+# #3104: the payload reaches subscriber prompts via {{payload.*}}; bound it.
+EVENT_PAYLOAD_MAX_BYTES = 64 * 1024
+
+
 class EmitEventRequest(BaseModel):
     """Request body for emitting an event."""
     event_type: str  # Namespaced event type (e.g., "prediction.resolved")
     payload: Optional[dict] = None  # Structured data
+
+    @field_validator("payload")
+    @classmethod
+    def _bound_payload(cls, v):
+        if v is not None:
+            import json
+            # UTF-8 bytes: ASCII escapes would count "é" as 6 and reject valid payloads.
+            size = len(json.dumps(v, ensure_ascii=False, default=str).encode("utf-8"))
+            if size > EVENT_PAYLOAD_MAX_BYTES:
+                raise ValueError(
+                    f"payload is {size} bytes serialized; max {EVENT_PAYLOAD_MAX_BYTES}"
+                )
+        return v
 
 
 # =============================================================================
@@ -3108,6 +3144,8 @@ class FanOutTaskResponse(BaseModel):
     cost: Optional[float] = None
     context_used: Optional[int] = None
     duration_ms: Optional[int] = None
+    # trinity-enterprise#751: set when `status` is "pending_approval".
+    request_id: Optional[str] = None
 
 
 class FanOutResponse(BaseModel):
@@ -3118,6 +3156,8 @@ class FanOutResponse(BaseModel):
     completed: int
     failed: int
     results: List[FanOutTaskResponse]
+    # trinity-enterprise#751: subtasks held by the skill gate (neither run nor failed).
+    pending_approval: int = 0
 
 
 # --- #2670: the batch's read surface ----------------------------------------
@@ -3205,6 +3245,11 @@ class AutoSyncToggle(BaseModel):
 
 
 class FreezeSchedulesToggle(BaseModel):
+    enabled: bool
+
+
+class PullSyncToggle(BaseModel):
+    """trinity-enterprise#703: the container's pull cycle on/off."""
     enabled: bool
 
 
@@ -3569,10 +3614,26 @@ class Reminder(ReminderSummary):
 
 
 class SendMessageRequest(BaseModel):
-    """Request to send a proactive message to a user."""
-    recipient_email: EmailStr = Field(
-        ...,
-        description="Verified email of the recipient. Must be in agent_sharing with allow_proactive=1."
+    """Request to send a proactive message to a user.
+
+    Address it with ``to`` — a ROLE the platform resolves through the agent's
+    assignments (ent#606) — or, deprecated, with ``recipient_email``. Exactly
+    one of the two.
+    """
+    recipient_email: Optional[EmailStr] = Field(
+        default=None,
+        description=(
+            "Deprecated — name a role with `to` instead. Verified email of the recipient. "
+            "Must be in agent_sharing with allow_proactive=1."
+        ),
+    )
+    to: Optional[Literal["primary", "approver", "viewer"]] = Field(
+        default=None,
+        description=(
+            "The role to message (ent#606): primary | approver | viewer. The platform "
+            "resolves the person. `operator` is not a message recipient — raise an "
+            "ask of type alert instead."
+        ),
     )
     text: str = Field(
         ...,
@@ -3605,6 +3666,12 @@ class SendMessageRequest(BaseModel):
             "messages to the same recipient in one turn. Default → at-most-one."
         ),
     )
+
+    @model_validator(mode="after")
+    def _one_address(self):
+        if bool(self.to) == bool(self.recipient_email):
+            raise ValueError("address the message with exactly one of `to` (a role) or recipient_email")
+        return self
 
 
 class SendMessageResponse(BaseModel):
@@ -3882,7 +3949,7 @@ class ExecutionSummary(BaseModel):
     # Fan-out linkage (small) - FANOUT-001
     fan_out_id: Optional[str] = None
     # Validation tracking (small) - VALIDATE-001
-    business_status: Optional[str] = None  # pending_validation, validated, failed_validation, skipped
+    business_status: Optional[str] = None  # pending_validation, validated, failed_validation, validation_unavailable, skipped
     validation_execution_id: Optional[str] = None
     # Auto-compact observability (Bundle B) - small JSON list
     compact_metadata: Optional[str] = None
@@ -4264,6 +4331,16 @@ class UserRoleUpdate(BaseModel):
 
 
 class UpdateMyEmailRequest(BaseModel):
+    email: str
+    # trinity-enterprise#720: the 6-digit code sent to `email` by
+    # `POST /api/users/me/email/code` — proof the caller holds the mailbox.
+    # Optional only for the audited admin transition on an install that cannot
+    # deliver mail; everywhere else a missing code is a 400.
+    code: Optional[str] = None
+
+
+class RequestEmailBindCodeRequest(BaseModel):
+    """`POST /api/users/me/email/code` — send a bind code to a NEW address (ent#720)."""
     email: str
 
 
@@ -4688,6 +4765,13 @@ class A2AOutboundEndpointUpsert(BaseModel):
     read. Omitting it on an update leaves an existing secret in place (so an
     operator can repoint or rename without re-typing something they may not
     have); `clear_credentials` removes it.
+
+    `credential_kind` (#3185) LABELS that same slot — `payment_token` makes the
+    credential ride as x402 payment (the `x402.payment.payload` metadata plus
+    the `payment-signature` header) **in addition to** `Authorization: Bearer
+    …`, which every credentialed call still carries. It is optional in both
+    directions: omitted with a new credential the store infers it from the
+    value, and sent alone it re-labels a credential already stored.
     """
     model_config = ConfigDict(extra="forbid")
 
@@ -4695,6 +4779,33 @@ class A2AOutboundEndpointUpsert(BaseModel):
     url: str = Field(..., min_length=1, max_length=2048)
     credentials: Optional[SecretStr] = Field(default=None)
     clear_credentials: bool = False
+    credential_kind: Optional[Literal["api_key", "payment_token"]] = Field(
+        default=None,
+        description=(
+            "What the credential slot holds. Omit it and the kind is inferred "
+            "from the value (an x402 payload → payment_token, otherwise "
+            "api_key); send it alone to re-label a stored credential."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _kind_needs_a_credential_to_describe(self) -> "A2AOutboundEndpointUpsert":
+        """Refuse `credential_kind` together with `clear_credentials`.
+
+        The two are contradictory instructions about one slot: whichever the
+        store honoured, the caller would be told their write succeeded while
+        believing the other happened — and "a payment token is registered here"
+        is precisely the belief that makes the next 402 unreadable. Refused at
+        the boundary with a named reason, and it never echoes the credential
+        (`error_handlers.validation_error_without_input` strips `input`, which is
+        what keeps a 422 on this model from relocating the ent#109 leak).
+        """
+        if self.credential_kind is not None and self.clear_credentials:
+            raise ValueError(
+                "Pass either credential_kind or clear_credentials, not both — "
+                "clearing the credential also drops the kind that described it."
+            )
+        return self
 
     @field_validator("credentials")
     @classmethod
@@ -4834,14 +4945,19 @@ class MetricPointAccepted(BaseModel):
 
 
 class MetricPointsResult(BaseModel):
-    """The 201 body. `recorded` and `deduplicated` are separate counts on
-    purpose: an honest "we already had this" is not a failure and must not read
-    as a success that wrote something."""
+    """The 201 body. `recorded`, `deduplicated` and `corrected` are separate
+    counts on purpose: an honest "we already had this" is not a failure and
+    must not read as a success that wrote something, and a restated row
+    (ent#729) is neither of the two.
+
+    `corrected` defaults to 0 so an idempotency snapshot stored before it
+    existed still replays (`MetricPointsResult(**snapshot, replayed=True)`)."""
 
     success: bool = True
     agent_name: str
     recorded: int
     deduplicated: int
+    corrected: int = 0
     replayed: bool = False
     points: List[MetricPointAccepted] = []
 
@@ -4908,6 +5024,10 @@ class ObjectiveMetricRead(BaseModel):
     #: Declared by the OWNING role's agent, not by this one — a supporting
     #: agent cannot fix that and must not be told to.
     declared_elsewhere: bool
+    #: The granted agent whose registry and point store supplied this row's
+    #: number (ent#727) — set only when this agent does not declare the metric
+    #: and exactly one agent it holds an `agent_permissions` grant on does.
+    served_by: Optional[str] = None
     #: The REGISTRY's vocabulary and nothing else — `up_good` | `down_good` |
     #: `neutral` | `null` — so a direction-aware formatter needs no fourth
     #: case. An objective's declared `hold` resolves to `neutral`; what tells
@@ -4988,6 +5108,8 @@ class ObjectiveJoinSummary(BaseModel):
     stale: int = 0
     undeclared: int = 0
     declared_elsewhere: int = 0
+    #: Rows whose number came from a granted agent (`served_by`, ent#727).
+    served_elsewhere: int = 0
 
 
 class ObjectiveJoinRead(BaseModel):

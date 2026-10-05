@@ -185,7 +185,7 @@ Until it is removed, an entry appended to the `requests` array of `~/.trinity/op
 }
 ```
 
-The operator's answer is written back into the entry: `status: "responded"` with `response`, `responded_by` and `responded_at`. An item that has waited past the operator's aging bound carries a `platform.aging_since` timestamp written by Trinity — read it, never write to `platform`. After processing a response, update the item's status to `"acknowledged"`. Keep only `pending` and `responded` items plus up to 3 recent `acknowledged` items. An ID you raised with `ask_operator` is never read from the file.
+The operator's answer is written back into the entry: `status: "responded"` with `response`, `response_text` and `responded_at` — never who answered. An item that has waited past the operator's aging bound carries a `platform.aging_since` timestamp written by Trinity — read it, never write to `platform`. After processing a response, update the item's status to `"acknowledged"`. Keep only `pending` and `responded` items plus up to 3 recent `acknowledged` items. An ID you raised with `ask_operator` is never read from the file.
 
 #### When to Use
 
@@ -801,6 +801,11 @@ def _render_assignment(ctx: ExecutionContext) -> Optional[str]:
     presence of a name (the assignment is a RECORD of who fills the role, not a
     grant of contact permission, which lives on the separate sharing consent
     bit).
+
+    Consent FAILS CLOSED: only an explicit ``True`` renders as permitted. An
+    unresolved bit (``None`` — a provider may validly answer a name and a role
+    and nothing else) renders the restrictive clause, exactly like ``False``,
+    because a permission statement that nobody made is not a permission.
     """
     display = _sanitize_field(ctx.primary_user_display, max_len=MAX_DISPLAY_NAME_LEN)
     if not display:
@@ -809,14 +814,12 @@ def _render_assignment(ctx: ExecutionContext) -> Optional[str]:
     role = _sanitize_field(ctx.role_id, max_len=MAX_ROLE_ID_LEN)
     if role:
         line = f"{line} (role: {role})"
-    if ctx.proactive_consent is not None:
-        line = (
-            f"{line} — proactive contact permitted"
-            if ctx.proactive_consent
-            else f"{line} — proactive contact NOT yet permitted; do not message "
-                 "them unprompted"
-        )
-    return line
+    if ctx.proactive_consent is True:
+        return f"{line} — proactive contact permitted"
+    return (
+        f"{line} — proactive contact NOT yet permitted; do not message "
+        "them unprompted"
+    )
 
 
 def _render_stakeholders(ctx: ExecutionContext) -> Optional[str]:

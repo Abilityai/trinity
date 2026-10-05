@@ -276,7 +276,7 @@ class ScheduleExecution(BaseModel):
     retry_of_execution_id: Optional[str] = None  # Links retry to original execution
     retry_scheduled_at: Optional[datetime] = None  # When retry is scheduled (for restart recovery)
     # Validation tracking (VALIDATE-001)
-    business_status: Optional[str] = None       # pending_validation, validated, failed_validation, skipped
+    business_status: Optional[str] = None       # pending_validation, validated, failed_validation, validation_unavailable, skipped
     validated_at: Optional[datetime] = None     # When validation completed
     validation_execution_id: Optional[str] = None  # FK to the validation execution record
     validates_execution_id: Optional[str] = None   # FK to execution being validated (for validation records)
@@ -332,6 +332,7 @@ class AgentGitConfig(BaseModel):
     # #389 sync health observability
     auto_sync_enabled: bool = False
     freeze_schedules_if_sync_failing: bool = False
+    pull_sync_enabled: bool = False  # trinity-enterprise#703: the container's pull cycle
 
 
 class GitSyncResult(BaseModel):
@@ -795,6 +796,12 @@ class SkillInfo(BaseModel):
     # version of this skill than a given source intended — AC#4 requires that be
     # visible, never a silent overwrite.
     shadowed_by: List[Dict[str, str]] = Field(default_factory=list)
+    # trinity-enterprise#672 lifecycle. A deprecated skill stays listed and
+    # assignable — flagged, never hidden. `superseded_by` is the library
+    # author's text (one printable line, <= 200 chars), NOT a resolved skill
+    # name, and is None unless `deprecated` is true.
+    deprecated: bool = False
+    superseded_by: Optional[str] = None
 
 
 class AgentSkillsUpdate(BaseModel):
@@ -1133,6 +1140,37 @@ class AgentHealthDetail(BaseModel):
     metrics: Optional[dict] = None
 
 
+class AgentSyncHealth(BaseModel):
+    """One agent's git sync health on the fleet surfaces (trinity-enterprise#707).
+
+    Read from `agent_sync_state` through the shared reader and the one policy
+    (`services/sync_health_view.py`); the counts are None until the poller has
+    observed the agent. `reason` never carries the agent-written git error.
+    """
+    binding: str  # "agent" | "deployment"
+    auto_sync_enabled: bool = False
+    ahead: Optional[int] = None  # origin on the agent's own branch (#2105)
+    behind: Optional[int] = None
+    dirty_files: Optional[int] = None
+    last_successful_push_at: Optional[str] = None
+    divergence_age_s: Optional[int] = None
+    state: str  # green | yellow | red | unknown
+    reason: str
+    recommendation: Optional[str] = None
+    frozen: bool = False
+
+
+class FleetSyncSummary(BaseModel):
+    """Fleet totals over the git-bound agents the caller can see (trinity-enterprise#707)."""
+    git_bound: int = 0
+    diverged: int = 0
+    frozen: int = 0
+    auto_sync_off: int = 0
+    dirty: int = 0
+    red: int = 0
+    yellow: int = 0
+
+
 class AgentHealthSummary(BaseModel):
     """Summary health info for fleet overview."""
     name: str
@@ -1151,6 +1189,10 @@ class AgentHealthSummary(BaseModel):
     heartbeat_active_executions: Optional[int] = None
     heartbeat_memory_mb: Optional[float] = None
     heartbeat_state: Optional[str] = None
+    # trinity-enterprise#707: git sync health, an annotation like the heartbeat
+    # layer — it never changes `status`. None = no git binding (or the sync
+    # read degraded).
+    sync: Optional[AgentSyncHealth] = None
 
 
 class FleetHealthSummary(BaseModel):
@@ -1170,6 +1212,7 @@ class FleetHealthStatus(BaseModel):
     summary: FleetHealthSummary
     agents: List[AgentHealthSummary] = []
     circuit_breakers: Optional[Dict[str, Any]] = None
+    sync_summary: Optional[FleetSyncSummary] = None  # trinity-enterprise#707
 
 
 class MonitoringConfig(BaseModel):
@@ -1404,8 +1447,15 @@ class NeverminedConfigCreate(BaseModel):
     @field_validator('credits_per_request')
     @classmethod
     def validate_credits(cls, v: int) -> int:
-        if v < 1:
-            raise ValueError("credits_per_request must be >= 1")
+        # ent#679 T9: 0 is legal. A Nevermined *duration* plan charges by time,
+        # not per call, so Trinity sends no amount to the facilitator and the
+        # burn is whatever the plan defines; `credits_per_request` is display +
+        # `credits_amount` logging only. The old `>= 1` floor made such a plan
+        # impossible to configure honestly — the operator had to claim a
+        # per-call credit price that nothing would ever charge. A NEGATIVE
+        # amount is still a named 422: it is not a plan shape, it is a typo.
+        if v < 0:
+            raise ValueError("credits_per_request must be >= 0")
         return v
 
 
@@ -1431,6 +1481,14 @@ class NeverminedPaymentResult(BaseModel):
     remaining_balance: Optional[str] = None
     tx_hash: Optional[str] = None
     error: Optional[str] = None
+    #: Is this failure OURS rather than the token's (ent#679 E7)? A facilitator
+    #: timeout, an SDK error or a saturated concurrency gate means we could not
+    #: decide; a facilitator that answered "invalid" means the token is bad.
+    #: Only the second should tell a caller to go buy a new one. Defaulted so a
+    #: stored settle snapshot written before this field replays unchanged
+    #: (`NeverminedPaymentResult(**snapshot)`), and deliberately NOT part of
+    #: `_settle_snapshot` — it is about one attempt, not about the receipt.
+    retryable: bool = False
 
 
 class NeverminedPaymentLog(BaseModel):

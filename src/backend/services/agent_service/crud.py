@@ -1873,6 +1873,10 @@ def _apply_gemini_and_otel_env(config: AgentConfig, env_vars: dict) -> None:
         env_vars['OTEL_EXPORTER_OTLP_PROTOCOL'] = os.getenv('OTEL_EXPORTER_OTLP_PROTOCOL', 'grpc')
         env_vars['OTEL_EXPORTER_OTLP_ENDPOINT'] = os.getenv('OTEL_COLLECTOR_ENDPOINT', 'http://trinity-otel-collector:4317')
         env_vars['OTEL_METRIC_EXPORT_INTERVAL'] = os.getenv('OTEL_METRIC_EXPORT_INTERVAL', '60000')
+        # #3106: the OTEL_* env above is Claude Code's. FastAPI >= 0.142 reads the same
+        # names to auto-configure the agent server itself, refuses grpc, and the server
+        # exits on boot. Claude Code does not read this flag, so its metrics still flow.
+        env_vars['OTEL_SDK_DISABLED'] = 'true'
 
 
 def _apply_mcp_and_auth_env(
@@ -1951,6 +1955,10 @@ def _apply_github_env(
             config, github_repo_for_agent, github_pat_for_agent, fork_upstream_repo
         ):
             env_vars['GIT_SYNC_AUTO'] = 'true'
+        # trinity-enterprise#703: the pull cycle's fallback env — the DB flag
+        # written below at creation is the one the loop reads live.
+        if not config.ephemeral:
+            env_vars['GIT_SYNC_PULL'] = 'true'
 
         # Source mode (default): Track source branch directly for pull-only sync
         # Legacy mode: Create a unique working branch for bidirectional sync
@@ -2275,6 +2283,9 @@ async def _broadcast_agent_created(agent_status: AgentStatus, ws_manager) -> Non
     if ws_manager:
         await ws_manager.broadcast(json.dumps({
             "event": "agent_created",
+            # #3109: `type` too, like agent_started/agent_stopped — the
+            # dashboard's dispatcher (stores/network.js) keys on `type`.
+            "type": "agent_created",
             "data": {
                 "name": agent_status.name,
                 "status": agent_status.status,
@@ -2664,6 +2675,15 @@ async def _materialize_agent_files(
                 logger.error(
                     f"Failed to enable freeze-on-sync-failure for {config.name}: {e}"
                 )
+
+    # trinity-enterprise#703: the container pulls origin on its own — for every
+    # `github:` agent, source mode included (a pull-only agent is exactly the one
+    # that needs a pull). Ghosts are excluded: their workspace is throwaway.
+    if github_repo_for_agent and not config.ephemeral:
+        try:
+            db.set_git_pull_sync_enabled(config.name, True)
+        except Exception as e:
+            logger.error(f"Failed to enable the pull cycle for {config.name}: {e}")
 
     # #2069: the fleet-wide `.gitignore` merge never ran at creation, so the
     # 15-min in-container auto-sync loop (on from birth for the GIT_SYNC_AUTO

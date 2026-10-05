@@ -1,4 +1,4 @@
-FROM python:3.13-slim
+FROM python:3.13-slim-trixie
 
 WORKDIR /app
 
@@ -10,10 +10,11 @@ ENV PYTHONUNBUFFERED=1
 # Install curl for healthcheck, git for GitHub cloning, libmagic for file type detection
 #
 # `tzdata-legacy` carries the IANA *backward-compatibility links* (#1823). Debian
-# 13 "trixie" split them out of `tzdata`, and this image is `FROM python:3.13-slim`
+# 13 "trixie" split them out of `tzdata`, and this image was `FROM python:3.13-slim`
 # with no codename pin — so it silently migrated bookworm→trixie and lost
 # `/usr/share/zoneinfo/Europe/Kiev` (and every other legacy alias) without anyone
-# changing a line. `zoneinfo.ZoneInfo("Europe/Kiev")` then raises
+# changing a line. The codename is now pinned (#3079), so the next Debian release
+# is a reviewed diff here rather than a rebuild side effect. `zoneinfo.ZoneInfo("Europe/Kiev")` then raises
 # ZoneInfoNotFoundError inside APScheduler's `astimezone()`, which is how a
 # perfectly ordinary schedule create started 500ing. Do NOT drop this when
 # slimming the image — `tests/unit/test_1823_tz_capability_parity.py` fails if
@@ -97,7 +98,34 @@ RUN pip install --no-cache-dir \
     # bump this pin with the rest of the file.
     tzdata==2026.3 \
     psutil==6.1.1 \
-    payments-py==1.2.1 \
+    # payments-py 1.18.0 (abilityai/trinity-enterprise#679, trinity-enterprise#763):
+    # the A2A x402 flow carries payment IN-BAND in task metadata, which 1.2.1
+    # cannot read. tests/requirements-test.txt pins the SAME exact version —
+    # CI previously ran 1.18.0 against a 1.2.1 image, which is the one
+    # divergence a dependency guard exists to catch
+    # (tests/unit/test_ent679_payments_pin_parity.py, the #1891 shape).
+    payments-py==1.18.0 \
+    # 1.18.0's own runtime dependency set, pinned explicitly rather than left to
+    # pip. `payments_py.payments` imports the a2a package at module load, so any
+    # one of these failing to import flips NEVERMINED_AVAILABLE to False and both
+    # payment doors answer 501 with a green build — the failure mode that makes
+    # ~15 floating transitive packages unacceptable here. Versions are the ones
+    # the test venv resolved, so image and CI agree; Dependabot bumps them like
+    # any other pin. The docs/test extras (black, mkdocs*, mike, pytest-asyncio)
+    # are runtime deps in the sdist's METADATA, not an authoring choice of ours.
+    a2a-sdk==0.3.26 \
+    mcp==1.30.0 \
+    python-socketio==5.14.3 \
+    pyjwt==2.14.0 \
+    jsonschema==4.26.0 \
+    websocket-client==1.9.2 \
+    helicone-helpers==1.2.1 \
+    black==26.5.1 \
+    mkdocs==1.6.1 \
+    mkdocs-material==9.7.7 \
+    "mkdocstrings[python]==0.29.1" \
+    mike==2.2.0 \
+    pytest-asyncio==1.4.0 \
     Pillow==11.1.0 \
     # #1536 report export. Both are pure-Python wheels — no system libraries, so
     # the image build is unchanged beyond these two lines (WeasyPrint was

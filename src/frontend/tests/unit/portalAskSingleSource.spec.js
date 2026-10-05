@@ -70,7 +70,12 @@ describe('#2449 — one ask entity, one rendering per surface', () => {
   })
 
   it('renders the section from the store list, not a page payload', () => {
-    expect(page).toContain('store.asksForAgent(props.agent.name)')
+    // ent#610 (the 09-30 ruling) × ent#734: the conversation reads the ONE
+    // store list for this agent (agentAsks → chatTurnAsks) and hands each tile's
+    // PortalAsks its ask's id; PortalAsks renders it from the same store list.
+    expect(page).toContain('store.asksForAgent(')
+    expect(page).toMatch(/chatTurnAsks\(agentAsks\.value/)
+    expect(page).toMatch(/<PortalAsks[\s\S]{0,200}:ask-ids="\[item\.ask\.id\]"/)
   })
 
   it('counts the surviving badge from the SAME store, pending-only', () => {

@@ -11,10 +11,10 @@ one stale rule and exactly one series shape to bind to.
     stale  ⟺  cadence declared  AND  now − last_point_at > 2 × cadence
 
 `freshness()` is a pure function at module top with **no database import at
-call time** — `services/client_portal/role_card.py` (#2927) and the ent#666
-objective join import it without pulling the store in, which is what keeps
-"stale" from being re-derived a fourth time with a fourth threshold. Three
-answers are deliberately NOT `stale = True`:
+call time** — the ent#666 objective join imports it without pulling the store
+in, and the Workspace role card reaches it only through that join (ent#676),
+which is what keeps "stale" from being re-derived a fourth time with a fourth
+threshold. Three answers are deliberately NOT `stale = True`:
 
 * **no cadence declared** → `stale: None`, `freshness: "no_cadence"`. A metric
   whose author never promised a rhythm cannot be late.

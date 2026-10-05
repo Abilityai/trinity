@@ -227,6 +227,11 @@ def verify_login_code(email: str, code: str) -> Optional[dict]:
     if not user:
         logger.error("[#848] verified code but failed to resolve user for %s", email)
         return None
+    # ent#720: the same account-state rule as `/verify` + `get_current_user` —
+    # a suspended account is refused here, not handed an MCP key.
+    if user.get("suspended_at"):
+        logger.info("[ent#720] inline redeem refused: account suspended")
+        return None
 
     try:
         db.update_last_login(user["username"])
@@ -360,9 +365,10 @@ async def dispatch_chat(email: str, agent: str, message: str) -> "object":
     assert_email_may_reach_agent(email, agent)
     email = normalize_email(email)
 
-    from services.task_execution_service import get_task_execution_service
+    from services.task_execution_service import dispatch_and_await_terminal
 
-    result = await get_task_execution_service().execute_task(
+    # #3114: on a pull pilot the turn is queued and awaited here.
+    result = await dispatch_and_await_terminal(
         agent_name=agent,
         message=message,
         triggered_by=CHAT_TRIGGERED_BY,

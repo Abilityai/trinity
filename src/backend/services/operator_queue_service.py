@@ -23,7 +23,7 @@ import re
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
-from typing import Optional
+from typing import Optional, Tuple
 
 from database import db
 from redis_breaker_util import get_breaker_redis
@@ -140,6 +140,10 @@ _BUDGETED_ALERT_TYPES = frozenset({
     # tool, which an agent-scoped key may call on itself — so an agent CAN drive
     # the volume, which is the whole test the #1677 classification applies.
     "gitignore_untracked",
+    # #2392: an effect refused on a pull-mode agent for lack of an execution id.
+    # Budgeted because the agent drives the volume — every send it attempts
+    # without an id is one refusal.
+    "effect_unguarded",
 })
 
 # Shape guard for the episode alert's `last_triggered_by` triage field: a
@@ -181,6 +185,9 @@ _RESERVED_ID_PREFIXES = (
     "cb-dormant-",       # agent_client circuit-breaker-dormant alert
     "sync-failing-",     # sync_health_service
     "git-bloat-",        # sync_health_service
+    "sync-diverged-",    # sync_health_service divergence-freeze episode item
+                         # (trinity-enterprise#706) — deterministic id, so the
+                         # reservation is what keeps it unsuppressible
     "skill-not-found-",  # task_execution_service
     "val_",              # validation_service
     "system-seed-",      # system_seed_service first-run seed alerts (ent#124)
@@ -188,6 +195,7 @@ _RESERVED_ID_PREFIXES = (
     "alert-budget-",     # this service's #1677 budget episode alert (deterministic
                          # bucketed id — reservation is what keeps the DB
                          # on-conflict dedup from being agent-pre-suppressible)
+    "effect-unguarded-", # idempotency_service refused-effect alarm (#2392)
     "db-backup-",        # db_backup_service failure/staleness alarms (#2216)
     "log-archive-",      # archive_storage unwritable-directory alarm (#2205)
     "sub-headroom-",     # subscription_headroom_alerts weekly-window alarm (ent#434)
@@ -205,6 +213,11 @@ _RESERVED_ID_PREFIXES = (
     "workspace-problem-",  # client_portal report-a-problem (ent#499) — reserved
                            # so an agent cannot pre-create the id of a complaint
                            # ABOUT ITSELF and silence it through ON CONFLICT
+    "portal-inbox-collision-",  # client_portal shared legacy inbox (ent#308).
+                           # Its text lists client addresses: reserved (#715) so
+                           # `is_platform_minted` keeps it out of the agent's file
+                           # and its resume turn, and so an agent cannot pre-create
+                           # the id and swallow the alert through ON CONFLICT
     # git_service per-Push sweep alert (#2529). Reserved for the #1632 reason
     # above, and — since ent#499 keyed `is_platform_minted` on this very tuple —
     # this listing is ALSO what keeps the alert out of the agent's own
@@ -279,6 +292,23 @@ def is_platform_minted(item) -> bool:
     return str(candidate).strip().lower().startswith(_RESERVED_ID_PREFIXES)
 
 
+# #715: the platform alarms whose TEXT is about a person — a Workspace client's
+# complaint (ent#499: their email and verbatim words, which ent#366 withholds from
+# the rated agent) and the client addresses behind a shared legacy inbox (ent#308,
+# whose id also carries an email slug), and the skill gate's rows
+# (trinity-enterprise#751: the approval card names the person who asked, the
+# notice the person who decided; `gate-` covers `gate-note-`). A subset of
+# `_RESERVED_ID_PREFIXES`, so no agent can mint a row into it.
+_ABOUT_A_PERSON_ID_PREFIXES = ("workspace-problem-", "portal-inbox-collision-", "gate-")
+
+
+def is_about_a_person(item: dict) -> bool:
+    """Is this row one of the platform's heads-ups ABOUT a person (#715)? They
+    are the operator's: the queue's reads never return one to a machine key."""
+    candidate = item.get("request_id") or ""
+    return str(candidate).strip().lower().startswith(_ABOUT_A_PERSON_ID_PREFIXES)
+
+
 def _truncate_with_marker(text: str, max_len: int) -> str:
     """Truncate so the RESULT (content + marker) is ≤ max_len chars."""
     if len(text) <= max_len:
@@ -335,10 +365,40 @@ def _validated_addressee(agent_name: str, raw) -> Optional[str]:
 # the client-facing `chat_id`, and stripped from anything the agent authored —
 # named here so the writer and the stripper cannot drift apart.
 _WORKSPACE_THREAD_KEY = "workspace_session_id"
+# ent#734: true only when the ask was raised BY the turn serving that chat. Main
+# is both a chat-turn ask's home (drawn as a tile there) and a background ask's
+# reply target (drawn in no chat), so `chat_id` alone cannot tell them apart.
+_WORKSPACE_TURN_KEY = "workspace_raised_in_turn"
+# Every context key the platform writes and no agent may author: stripped at both
+# ingestion boundaries and ignored when comparing an agent's content.
+_PLATFORM_CONTEXT_KEYS = frozenset({_WORKSPACE_THREAD_KEY, _WORKSPACE_TURN_KEY})
 
 
 def _workspace_thread_for(agent_name: str, email: str) -> Optional[str]:
-    """The chat an addressed ask attaches to, or None (ent#429).
+    """The chat an addressed ask with no platform-known turn attaches to — the
+    pair's Main — or None (ent#429). The file path's view of
+    `_workspace_attachment`: a file carries only what the agent wrote, so it has
+    no raising turn to offer."""
+    return _workspace_attachment(agent_name, email)[0]
+
+
+def _workspace_attachment(agent_name: str, email: str,
+                          execution_id: Optional[str] = None) -> Tuple[Optional[str], bool]:
+    """`(chat, raised_in_turn)` for an addressed ask (ent#429, ent#734): the
+    chat it attaches to, or None; and whether that chat is the one the raising
+    turn serves, which is what `_WORKSPACE_TURN_KEY` records.
+
+    ent#734: `execution_id` is the RAISING execution as the PLATFORM knows it
+    (the native path's `X-Trinity-Execution-Id`, #2392, validated as this
+    agent's own) — never an agent-written `context.execution_id`, which a model
+    could fill with any turn it has seen. When it is a RUNNING Workspace chat
+    turn of this same (agent, addressee), the ask attaches to
+    that chat; anything else — a schedule, loop or gate run, a finished, unknown
+    or foreign execution, another person's chat, a failed
+    lookup — gets the pair's Main, exactly as before. The header is set by the
+    platform but not unforgeable by the agent's own process, so the bound is
+    "one of this agent's live turns for this addressee", never another person's
+    conversation (`client_portal.service.chat_for_execution`).
 
     Resolved at RAISE time, never at render time: an ask raised by a scheduled
     run has no conversation of its own, and "we will work out where it belongs
@@ -352,10 +412,24 @@ def _workspace_thread_for(agent_name: str, email: str) -> Optional[str]:
     refusing the whole ask over it would lose the question entirely. Never
     raises — the #1632 clamp contract.
     """
+    if execution_id:
+        try:
+            from client_portal.service import chat_for_execution
+
+            chat = chat_for_execution(agent_name, email, execution_id)
+            if chat:
+                return chat, True
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "[OperatorQueue] could not resolve the chat of the turn that raised "
+                "an ask from %s; attaching it to Main (ent#734)",
+                agent_name,
+                exc_info=True,
+            )
     try:
         from client_portal.service import ensure_thread_for_ask
 
-        return ensure_thread_for_ask(agent_name, email) or None
+        return ensure_thread_for_ask(agent_name, email) or None, False
     except Exception:  # noqa: BLE001
         logger.warning(
             "[OperatorQueue] could not attach a workspace chat for an ask from %s; "
@@ -363,7 +437,7 @@ def _workspace_thread_for(agent_name: str, email: str) -> Optional[str]:
             agent_name,
             exc_info=True,
         )
-        return None
+        return None, False
 
 
 def _json_bytes(value) -> Optional[int]:
@@ -452,7 +526,7 @@ def _clamp_ingested_item(req: dict, agent_name: str = "") -> dict:
         # Rebuilt rather than popped: `out = dict(req)` is a SHALLOW copy, so the
         # context dict is still the caller's, and this function's contract is that
         # it never mutates the request it was handed.
-        context = {k: v for k, v in context.items() if k != _WORKSPACE_THREAD_KEY}
+        context = {k: v for k, v in context.items() if k not in _PLATFORM_CONTEXT_KEYS}
         out["context"] = context
         if out["addressed_to_email"]:
             thread_id = _workspace_thread_for(agent_name, out["addressed_to_email"])
@@ -651,8 +725,8 @@ def _comparable_addressee(value) -> Optional[str]:
 
 def _comparable_context(ctx) -> str:
     """The clamp's PURE half for `context` (#2989 review): non-dict → {}, the
-    platform's workspace-thread key stripped (the clamp writes it; it is never
-    agent content), and an oversize / unserialisable value → one sentinel — which
+    platform's workspace keys (`_PLATFORM_CONTEXT_KEYS` — the thread, ent#429,
+    and the raised-in-turn flag, ent#734) stripped (never agent content), and an oversize / unserialisable value → one sentinel — which
     is also what a row holds after ingest (`_truncated`). Compared as canonical
     JSON. Sized the way the clamp sizes it, so the cap is crossed on both sides
     at (very nearly) the same input."""
@@ -660,7 +734,7 @@ def _comparable_context(ctx) -> str:
         return "{}"
     if ctx.get("_truncated") is True:
         return _CONTEXT_TRUNCATED_SENTINEL
-    body = {k: v for k, v in ctx.items() if k != _WORKSPACE_THREAD_KEY}
+    body = {k: v for k, v in ctx.items() if k not in _PLATFORM_CONTEXT_KEYS}
     try:
         if len(json.dumps(body).encode("utf-8")) > OPERATOR_QUEUE_CONTEXT_MAX_BYTES:
             return _CONTEXT_TRUNCATED_SENTINEL
@@ -693,10 +767,11 @@ def _well_formed_queue(data) -> bool:
 
 
 def _deliver_into(req: dict, resp: dict) -> None:
+    # #715: never who answered — the agent's file carries the answer, not a
+    # person's email.
     req["status"] = "responded"
     req["response"] = resp["response"]
     req["response_text"] = resp.get("response_text")
-    req["responded_by"] = resp.get("responded_by_email")
     req["responded_at"] = resp.get("responded_at")
 
 
@@ -1146,6 +1221,16 @@ class OperatorQueueSyncService:
                 logger.info(f"Expired {len(expired)} operator queue items")
         except Exception as e:
             logger.error(f"Operator queue expiry failed: {e}")
+
+        # trinity-enterprise#751: gated-skill approvals whose ending no observer
+        # consumed, and approved runs lost between claim and start. Compare-and-
+        # sets throughout, so every worker may run it; a miss waits a cycle and
+        # never dispatches anything wrongly.
+        try:
+            from services import skill_gate_service
+            await skill_gate_service.sweep()
+        except Exception as e:
+            logger.error(f"Skill gate sweep failed: {e}")
 
         # #2915: TRI-state, deliberately (#2196 class). `list_all_agents_fast`
         # collapses "Docker unreadable" into "no agents"; keyed on that, one
@@ -1907,8 +1992,7 @@ class OperatorQueueSyncService:
                     "created_at": resp.get("created_at", ""),
                     "response": resp["response"],
                     "response_text": resp.get("response_text"),
-                    "responded_by": resp.get("responded_by_email"),
-                    "responded_at": resp.get("responded_at"),
+                    "responded_at": resp.get("responded_at"),  # #715: never who
                 })
                 updated = True
                 delivered[resp["id"]] = resp

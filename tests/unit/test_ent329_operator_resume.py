@@ -276,6 +276,9 @@ async def test_dispatch_goes_through_execute_task_not_a_bespoke_path(service, mo
     await service.maybe_dispatch_resume(ITEM, response="approve")
     assert set(recorder.calls[0]) <= {
         "agent_name", "message", "triggered_by", "source_user_email",
+        # trinity-enterprise#751: the person's own answer, for the skill gate —
+        # not a second surface, the same `execute_task` reads it.
+        "request_text",
     }
 
 
@@ -621,3 +624,28 @@ def test_the_names_this_service_imports_actually_exist_on_the_real_modules():
                 f"swallowed as a fire-and-forget task exception."
             )
     assert checked, "no services.* imports found — did the module move?"
+
+
+# ---------------------------------------------------------------------------
+# trinity-enterprise#751 — what the skill gate reads on a resume
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("response, response_text, expected", [
+    ("/pay-invoice 42", None, "/pay-invoice 42"),               # the chosen option
+    ("approve", "then /pay-invoice 42", "approve\nthen /pay-invoice 42"),
+])
+async def test_the_skill_gate_reads_the_persons_whole_answer_not_the_frame(
+    service, monkeypatch, response, response_text, expected
+):
+    """A question with no options accepts any text as its answer, so the
+    chosen answer is the person's words as much as the free text is (review
+    C3). The frame around it quotes the agent's OWN question and is not a
+    request anyone made of the agent."""
+    recorder, _ = _install(monkeypatch, enabled=True)
+    await service.maybe_dispatch_resume(ITEM, response=response, response_text=response_text)
+    call = recorder.calls[0]
+    assert call["request_text"] == expected
+    assert ITEM["question"] in call["message"]
+    assert ITEM["question"] not in call["request_text"]

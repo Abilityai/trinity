@@ -8,6 +8,9 @@ import { isOrgTag } from '@/utils/gridOrg'
 import { agentDisplayName } from '@/utils/agentName'
 import { VIEW_MODES, DEFAULT_VIEW_MODE } from '@/utils/viewModes'
 
+// #3109: how long a burst of `agent_created` events is gathered into one refetch.
+export const AGENT_CREATED_COALESCE_MS = 300
+
 export const useNetworkStore = defineStore('network', () => {
   // State
   const agents = ref([])
@@ -703,8 +706,16 @@ export const useNetworkStore = defineStore('network', () => {
               agent_name: data.data?.name,
               display_label: data.data?.display_label
             })
+          } else if (data.type === 'agent_created') {
+            // #3109: a trigger, not a payload (the #918 thin-trigger rule). The
+            // REST list is the one access-controlled, tag-filtered source of the
+            // full row shape the dashboard renders, so refetch rather than
+            // insert the broadcast's partial row.
+            handleAgentCreated()
           } else if (data.type === 'agent_deleted') {
-            handleAgentDeleted(data)
+            // #3109: the name rides in `data.data` (agent_* shape); this branch
+            // read `agent_name` off the envelope and was dead.
+            handleAgentDeleted({ agent_name: data.data?.name ?? data.agent_name })
           } else if (data.type === 'agent_activity') {
             handleActivityStatusChange(data)
           } else if (data.type === 'pong') {
@@ -880,6 +891,17 @@ export const useNetworkStore = defineStore('network', () => {
     const agent = agents.value.find(a => a.name === reportName)
     const current = agent ? agent.tags || [] : []
     return setAgentTags(reportName, current.filter(t => t !== `reports-to-${managerName}`))
+  }
+
+  // #3109: several creates arrive together (setup seeds four agents), so
+  // coalesce them into one refetch per burst rather than one per event.
+  let agentCreatedTimer = null
+  function handleAgentCreated() {
+    if (agentCreatedTimer) return
+    agentCreatedTimer = setTimeout(() => {
+      agentCreatedTimer = null
+      fetchAgents()
+    }, AGENT_CREATED_COALESCE_MS)
   }
 
   function handleAgentDeleted(event) {
@@ -1363,6 +1385,23 @@ export const useNetworkStore = defineStore('network', () => {
     }
   }
 
+  // The readiness stamp and whether it holds a brief (ent#527 rider) are the
+  // two per-row fields expected to change while a dashboard stays open. Only
+  // a changed value is written, so an unchanged poll triggers nothing.
+  function patchReadinessInPlace(freshAgents) {
+    const byName = new Map(freshAgents.map(a => [a.name, a]))
+    for (const row of agents.value) {
+      const fresh = byName.get(row.name)
+      if (!fresh) continue
+      const readiness = fresh.readiness ?? null
+      if (JSON.stringify(row.readiness ?? null) !== JSON.stringify(readiness)) {
+        row.readiness = readiness
+      }
+      const briefHeld = fresh.brief_held === true
+      if (row.brief_held !== briefHeld) row.brief_held = briefHeld
+    }
+  }
+
   // Start polling agent list every 30 seconds (PERF-269: was 10s)
   function startAgentRefresh() {
     if (agentRefreshInterval.value) {
@@ -1395,6 +1434,11 @@ export const useNetworkStore = defineStore('network', () => {
           // Pre-query, owner-filtered rebuild (ent#261) — this poll previously
           // rebuilt nodes from the RAW list, ignoring even the owner filter.
           convertAgentsToNodes(ownerFilteredAgents.value)
+        } else {
+          // ent#527 rider (PR #3038 review): a readiness flip changes no name
+          // and emits no WS event, so patch the stamp in place on the rows
+          // already present — no node rebuild, no row replacement.
+          patchReadinessInPlace(newAgents)
         }
       } catch (error) {
         console.error('[Collaboration] Failed to refresh agents:', error)

@@ -190,6 +190,14 @@ For a fully non-interactive bring-up, run `./scripts/deploy/start.sh --unattende
 > **Don't want to run it on your laptop?** Trinity is self-hosted, and the least work is a server of your own. The **[DigitalOcean 1-Click](https://marketplace.digitalocean.com/apps/trinity?refcode=d1f053807871&action=deploy)** deploys Trinity from the DigitalOcean Marketplace: pick at least 4 GB RAM (8 GB recommended), open `https://<your-droplet-ip>` as soon as it is up, and create your admin account. Prefer a script? The guided **[DigitalOcean install](https://docs.ability.ai/getting-started/deploying/digitalocean)** gets you a Droplet behind HTTPS in about ten minutes. Questions about a deployment? [Talk to an engineer →](mailto:hello@ability.ai) — an engineer reads this, not a CRM. Reply in one business day, your time zone.
 >
 > [![Deploy to DigitalOcean](https://www.deploytodo.com/do-btn-blue.svg)](https://marketplace.digitalocean.com/apps/trinity?refcode=d1f053807871&action=deploy)
+<!--
+  AWS Launch Stack (#3004) — PLACEHOLDER, kept commented out until the template
+  is hosted in a public S3 bucket and a public AMI exists. Replace
+  <TEMPLATE_URL> (the S3 URL of packer/aws/trinity.cfn.yaml) and <AMI_ID>
+  (the us-east-1 AMI from packer/aws/README.md), then uncomment:
+
+> [![Launch Stack on AWS](https://s3.amazonaws.com/cloudformation-examples/cloudformation-launch-stack.png)](https://console.aws.amazon.com/cloudformation/home?region=us-east-1#/stacks/quickcreate?templateURL=<TEMPLATE_URL>&stackName=trinity&param_ImageId=<AMI_ID>)
+-->
 
 > **On DigitalOcean?** The guided installer (`scripts/deploy/trinity-do-create.sh`) takes a few steps and about ten minutes. You install `doctl`, create a Claude subscription token, choose an admin password, and run one command. The result is Trinity on its own Droplet behind HTTPS. See [Deploy on DigitalOcean](https://docs.ability.ai/getting-started/deploying/digitalocean).
 

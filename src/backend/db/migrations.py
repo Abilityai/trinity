@@ -4231,6 +4231,25 @@ def _migrate_execution_chain_depth(cursor, conn):
     conn.commit()
 
 
+def _migrate_loop_chain_depth(cursor, conn):
+    """#2973 — the inter-agent chain depth a loop inherits from its starter.
+
+    Captured when an agent principal starts the loop and stamped on every
+    iteration's execution row, because later iterations run after the
+    starter's own turn has ended and its running rows can no longer be read.
+    NULL on a loop started by a human (a root). Nullable, no backfill.
+
+    Mirrored by the Alembic revision 0084_agent_loops_chain_depth.
+    """
+    _safe_add_column(
+        cursor,
+        "agent_loops",
+        "chain_depth",
+        "ALTER TABLE agent_loops ADD COLUMN chain_depth INTEGER",
+    )
+    conn.commit()
+
+
 def _migrate_agent_canvas_shares_table(cursor, conn):
     """ent#554 — share links for a canvas.
 
@@ -4780,6 +4799,124 @@ def _migrate_portal_messages_unread_index(cursor, conn):
     )
 
 
+def _migrate_execution_conversation_key(cursor, conn):
+    """#2843 — one turn per conversation at a time on the pull queue.
+
+    `schedule_executions.conversation_key` names the conversation a queued turn
+    continues; the partial unique index allows at most one `running` row per
+    (agent, key). Nullable, no backfill: existing rows carry no guard.
+    PostgreSQL half: Alembic `0083_execution_conversation_key`.
+    """
+    _safe_add_column(
+        cursor,
+        "schedule_executions",
+        "conversation_key",
+        "ALTER TABLE schedule_executions ADD COLUMN conversation_key TEXT",
+    )
+    cursor.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_executions_one_running_turn "
+        "ON schedule_executions(agent_name, conversation_key) "
+        "WHERE status = 'running' AND conversation_key IS NOT NULL"
+    )
+    conn.commit()
+
+
+def _migrate_metric_points_restatement(cursor, conn):
+    """trinity-enterprise#729 — a corrected value restates its row (R45).
+
+    `revision` counts accepted corrections (0 at insert); `recorded_at` is the
+    write time of the value the row holds. Both are written by the store, never
+    by a caller.
+
+    * `revision BIGINT NOT NULL DEFAULT 0` — existing rows read 0, and a writer
+      from before this change (a rollback, or a checkout switched back) still
+      inserts. BIGINT because it is a monotonic counter (SQLite: one 64-bit
+      affinity either way).
+    * `recorded_at TEXT` — nullable, NO backfill: NULL means "written before
+      ent#729", whose write time is `created_at`. A backfill would buy nothing
+      a reader can rely on (the rollback writer inserts NULL anyway) and would
+      rewrite the whole table at boot.
+
+    Mirrored by the Alembic revision 0086_metric_points_restatement.
+    """
+    _safe_add_column(
+        cursor,
+        "metric_points",
+        "revision",
+        "ALTER TABLE metric_points ADD COLUMN revision BIGINT NOT NULL DEFAULT 0",
+    )
+    _safe_add_column(
+        cursor,
+        "metric_points",
+        "recorded_at",
+        "ALTER TABLE metric_points ADD COLUMN recorded_at TEXT",
+    )
+    conn.commit()
+
+
+def _migrate_ent720_email_identity(cursor, conn):
+    """trinity-enterprise#720 — a sign-in email is unique, and a code has a purpose.
+
+    1. `email_login_codes.purpose` (NULL = sign-in; `email_bind:<user id>` for
+       the mailbox proof a bind now requires).
+    2. Resolve pre-existing duplicate `users.email` values, then add
+       `idx_users_email_unique ON users(lower(email)) WHERE email IS NOT NULL`.
+       Blank addresses become NULL first (they would collide under the index).
+       Per lower-cased address the EARLIEST-created account keeps it; the others
+       are set to NULL and named by USERNAME only in the log — the address itself
+       never is. Duplicates only exist because nothing stopped them; the oldest
+       row is the original owner.
+
+    Idempotent; a fresh install whose tables do not exist yet on the first pass
+    gets both from `db/schema.py`. PostgreSQL half: Alembic
+    `0085_ent720_email_identity` (same decision function, `resolve_duplicate_emails`).
+    """
+    cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='email_login_codes'")
+    if cursor.fetchone():
+        cursor.execute("PRAGMA table_info(email_login_codes)")
+        if "purpose" not in {r[1] for r in cursor.fetchall()}:
+            cursor.execute("ALTER TABLE email_login_codes ADD COLUMN purpose TEXT")
+
+    cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='users'")
+    if not cursor.fetchone():
+        return
+    cursor.execute("UPDATE users SET email = NULL WHERE email IS NOT NULL AND TRIM(email) = ''")
+    # Every real `users` table carries username + created_at; a reduced legacy
+    # shape (the #1160 boot fixture) lacks them, so read them only when present.
+    cursor.execute("PRAGMA table_info(users)")
+    cols = {r[1] for r in cursor.fetchall()}
+    name_col = "username" if "username" in cols else "CAST(id AS TEXT)"
+    created_col = "created_at" if "created_at" in cols else "''"
+    cursor.execute(
+        f"SELECT id, {name_col}, email, {created_col} FROM users WHERE email IS NOT NULL")
+    losers = resolve_duplicate_emails(cursor.fetchall())
+    for user_id, username in losers:
+        cursor.execute("UPDATE users SET email = NULL WHERE id = ?", (user_id,))
+        print(f"[ent#720] duplicate sign-in email: cleared on account '{username}' "
+              "(an earlier account holds it)")
+    cursor.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email_unique "
+        "ON users(lower(email)) WHERE email IS NOT NULL"
+    )
+
+
+def resolve_duplicate_emails(rows):
+    """[(id, username, email, created_at)] → [(id, username)] that must LOSE
+    their email: per lower-cased address, all but the earliest-created account
+    (ties broken by the lower id). Shared by both migration tracks (ent#720)."""
+    groups = {}
+    for user_id, username, email, created_at in rows:
+        groups.setdefault((email or "").strip().lower(), []).append(
+            (created_at or "", user_id, username))
+    losers = []
+    for key, members in groups.items():
+        if not key or len(members) < 2:
+            continue
+        members.sort()
+        losers += [(uid, uname) for _, uid, uname in members[1:]]
+    return losers
+
+
 def _migrate_agent_skill_sets(cursor, conn):
     """trinity-enterprise#530 — skill sets.
 
@@ -4872,6 +5009,123 @@ def _migrate_auto_sync_enabled_backfill(cursor, conn):
               WHERE is_ephemeral = 1 AND deleted_at IS NULL
           )
         """
+    )
+    conn.commit()
+
+
+def _migrate_agent_sync_state_divergence(cursor, conn):
+    """Add the divergence / dirt episode columns to agent_sync_state (trinity-enterprise#706).
+
+    `diverged_since` / `dirty_since` are ISO-Z episode clocks the
+    SyncHealthService sets once and clears on a return to 0; `dirty_files` is
+    the porcelain change count the agent's status call already computed and
+    threw away; `last_successful_push_at` is the last push that landed. All
+    nullable with NO backfill: the clocks cannot be known retroactively, and
+    starting them at the first post-upgrade poll is the 24 h soak before any
+    divergence freeze can fire.
+    """
+    for column, sql_type in (
+        ("diverged_since", "TEXT"),
+        ("dirty_files", "INTEGER"),
+        ("dirty_since", "TEXT"),
+        ("last_successful_push_at", "TEXT"),
+    ):
+        _safe_add_column(
+            cursor,
+            "agent_sync_state",
+            column,
+            f"ALTER TABLE agent_sync_state ADD COLUMN {column} {sql_type}",
+        )
+
+
+def _migrate_pull_sync(cursor, conn):
+    """The container's pull cycle (trinity-enterprise#703).
+
+    * `agent_git_config.pull_sync_enabled` — the per-agent switch the agent's
+      pull loop reads live each cycle (the #3010 one-writer discipline).
+    * `agent_sync_state.last_pull_at / last_pull_status / behind_after_pull /
+      last_pull_error / last_successful_pull_at / consecutive_pull_failures /
+      consecutive_pull_skips` — the pull cycle's own outcome and health,
+      persisted by the sync-health poller.
+
+    Backfill (operator ruling 2026-09-25): on only where auto-sync is already
+    on, so no agent that is not already writing to git starts rebasing its
+    working tree on upgrade; everyone else is off until toggled. New `github:`
+    agents get it at creation. Runs once (schema_migrations).
+
+    Mirrored by the Alembic revision 0087_pull_sync.
+    """
+    _safe_add_column(
+        cursor, "agent_git_config", "pull_sync_enabled",
+        "ALTER TABLE agent_git_config ADD COLUMN pull_sync_enabled INTEGER DEFAULT 0",
+    )
+    for column, ddl in (
+        ("last_pull_at", "TEXT"),
+        ("last_pull_status", "TEXT"),
+        ("behind_after_pull", "INTEGER"),
+        ("last_pull_error", "TEXT"),
+        ("last_successful_pull_at", "TEXT"),
+        ("consecutive_pull_failures", "INTEGER DEFAULT 0"),
+        ("consecutive_pull_skips", "INTEGER DEFAULT 0"),
+    ):
+        _safe_add_column(
+            cursor, "agent_sync_state", column,
+            f"ALTER TABLE agent_sync_state ADD COLUMN {column} {ddl}",
+        )
+    cursor.execute(
+        "UPDATE agent_git_config SET pull_sync_enabled = 1 "
+        "WHERE COALESCE(auto_sync_enabled, 0) = 1"
+    )
+    conn.commit()
+
+
+def _migrate_skill_gate_requests_table(cursor, conn):
+    """trinity-enterprise#751 — a gated-skill request frozen while its approval
+    ask is open; the ask records the decision, this row the effect (exactly
+    once: a status compare-and-set plus a UNIQUE `dispatched_execution_id`).
+    See the DDL comment in db/schema.py.
+
+    Idempotent. PostgreSQL half: Alembic `0088_skill_gate_requests`.
+    """
+    cursor.execute("PRAGMA table_info(skill_gate_requests)")
+    if not cursor.fetchall():
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS skill_gate_requests (
+                request_id TEXT PRIMARY KEY,
+                agent_name TEXT NOT NULL,
+                ask_item_id TEXT,
+                skills TEXT NOT NULL,
+                request_text TEXT NOT NULL,
+                fingerprints TEXT,
+                requester_kind TEXT NOT NULL,
+                requester_key TEXT NOT NULL,
+                source_agent TEXT,
+                requester_email TEXT,
+                requester_execution_id TEXT,
+                requester_mcp_key_id TEXT,
+                origin_execution_id TEXT,
+                triggered_by TEXT,
+                dispatch TEXT NOT NULL,
+                state TEXT NOT NULL DEFAULT 'pending',
+                state_detail TEXT,
+                dispatched_execution_id TEXT UNIQUE,
+                created_at TEXT NOT NULL,
+                decided_at TEXT,
+                dispatched_at TEXT,
+                notified_at TEXT
+            )
+        """)
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_skill_gate_requests_agent_state "
+        "ON skill_gate_requests(agent_name, state)"
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_skill_gate_requests_requester "
+        "ON skill_gate_requests(agent_name, requester_key, state)"
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_skill_gate_requests_state "
+        "ON skill_gate_requests(state, decided_at)"
     )
     conn.commit()
 
@@ -5027,4 +5281,11 @@ MIGRATIONS = [
     ("telegram_group_context", _migrate_telegram_group_context),
     ("agent_skill_sets", _migrate_agent_skill_sets),
     ("portal_messages_unread_index", _migrate_portal_messages_unread_index),
+    ("agent_sync_state_divergence", _migrate_agent_sync_state_divergence),
+    ("execution_conversation_key", _migrate_execution_conversation_key),
+    ("loop_chain_depth", _migrate_loop_chain_depth),
+    ("ent720_email_identity", _migrate_ent720_email_identity),
+    ("metric_points_restatement", _migrate_metric_points_restatement),
+    ("pull_sync", _migrate_pull_sync),
+    ("skill_gate_requests_table", _migrate_skill_gate_requests_table),
 ]

@@ -962,7 +962,8 @@ that rather than blocking on it:
   still runs, so only an account *with* a password hash (the admin) authenticates
   — email-code-only users (no password) never can.
 - **`PUT /api/users/me/email`** (`routers/users.py`) — own-account scoped; 409 if
-  the email belongs to another account; no verification email.
+  the email belongs to another account; no verification email. Signed-in session
+  only (`Depends(require_interactive)`, trinity-enterprise#711): every MCP key gets 403.
 
 ### Hosted intake endpoint (out-of-repo Cloudflare Worker)
 

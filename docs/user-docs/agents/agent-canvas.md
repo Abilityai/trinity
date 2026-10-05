@@ -16,7 +16,7 @@ Every agent has a **Canvas** tab on its detail page. In the Workspace the same c
 
 1. Ask the agent in chat: "Put a dashboard of this week's pipeline on your canvas." (In the Workspace, the rail's Canvas tab shows **Ask for a canvas** while the agent has none; it pre-fills the request.)
 2. The agent writes its canvas — a layout, KPI tiles, a chart, a short callout — and tells you.
-3. Open the agent's **Canvas** tab, or the rail's **Canvas** tab in the Workspace. A dot on the rail tab means the canvas changed since you last looked. Narrow screens and the rail collapse layouts to one column.
+3. Open the agent's **Canvas** tab, or the rail's **Canvas** tab in the Workspace. A dot on the rail tab means the canvas changed since you last looked. Narrow screens and the rail collapse layouts to one column. Pick which canvas to show from the dropdown in the one-line control row above it: pinned canvases come first with 📌, long titles are shortened (the full title is in the canvas header), and with a single canvas the dropdown is disabled rather than hidden, so the row stays the same height for any number of canvases.
 4. Ask for changes the same way. The agent patches only the blocks that changed; the header timestamp moves.
 
 In the Workspace, the canvas you have open on the rail is the one the agent means by "this". A request that names no canvas lands on the open one, then on `main` if nothing is open, and the agent says which canvas it changed when you did not name one. If you delete the open canvas mid-conversation, the agent's next write does not recreate it. The Chat tab on Agent Detail does not carry an open canvas — name the canvas there.
@@ -37,6 +37,8 @@ During a [voice call](../advanced/voice-chat.md) the agent draws on `main` while
 - **Prefer data blocks.** Ask for "a KPI row" or "a table of open items" and the agent uses the `kpi` / `table` kinds, which render with the same look as the kit and stay live-updatable.
 - **Shared or private.** A canvas is private to the operator unless the agent publishes it to its roster. Ask the agent to "share this canvas with the team" and it appears in your clients' Workspace. When an agent writes a canvas from a public-link conversation, the write tells it whether the person asking can actually see the result, so it can widen the audience instead of reporting a success nobody sees.
 - **No skill needed.** The platform prompt every agent receives teaches the canvas itself — every block kind with a payload example, the fences, the four layouts and their slots, the design kit's classes, and one worked dashboard — so a fresh agent produces a designed canvas without coaching — including when to *retire* a canvas rather than add another. (A fuller `canvas` reference skill is planned for the skills library but is not yet published to the catalog.)
+- **Markdown in table cells.** Cells and column headers of a `table` block — and of a ```table fence — render inline Markdown: bold, italics, strikethrough, `code` and links. Block Markdown such as a heading or a list inside a cell shows as plain text. Numbers and objects are shown as values, never parsed. Report tables render cells the same way.
+- **Short titles.** Readers pick canvases from a one-line list, so a title of 60 characters or fewer reads best. Name what the canvas is; where it came from belongs in the body.
 - **Markdown and raw HTML.** In a `markdown` block, kit markup must not contain blank lines (Markdown treats a blank line as the end of the HTML). For a fully custom layout the agent uses an `html` block.
 - **Nothing vanishes.** A block Trinity cannot draw — a chart with no points, an image whose source was refused, a diagram that does not parse — shows its data, or a contained error with the source, in place. Long tables and timelines scroll inside a bounded box rather than stretching the page, and a wide diagram scrolls inside its own frame.
 
@@ -69,8 +71,8 @@ An agent that uses its canvas well accumulates them — one per report, per topi
 per run. You can clear the pile from either the **Canvas tab** on Agent Detail or
 the **Canvas tab in the Workspace rail**.
 
-- **Delete one**, or switch on **Manage** to select several and delete them in
-  one action. You are asked to confirm once, and the confirmation names how many
+- **Delete one**, or press **Manage** at the end of the control row to select several and delete them in
+  one action. Manage opens a list below the row, so the row itself never moves; **Done** closes it and returns to the canvas you had open. You are asked to confirm once, and the confirmation names how many
   will go. Deleting is recorded in the audit log — from the Workspace as well as
   from Agent Detail, attributed to the person who did it either way.
 - **Only the agent's owner (or an admin) can delete, pin or share.** If you can
@@ -124,7 +126,7 @@ All canvas content is sanitised before it renders. Scripts never execute, `<styl
 | `/api/agents/{name}/canvas/shares/{share_id}` | DELETE | Revoke a link. The row is kept so the link can say it was turned off |
 | `/api/public/canvas/{token}` | GET | What a shared link opens. Answers with the canvas, or a status: `sign_in_required`, `not_authorized`, `not_found`, `revoked` or `expired` |
 
-An agent-scoped key writes only its own canvas; an operator with access to the agent may write through the REST routes too. Reads follow the audience rules above. Per-kind limits: Mermaid source up to 20,000 characters, inline images up to 64 KB.
+An agent-scoped key writes only its own canvas; an operator with access to the agent may write through the REST routes too. The MCP canvas tools act as the caller and take no agent name: they work with an agent's own key, and with the platform's system agent key, which acts as that system agent. A user, connector or other key is refused before any request is made. Reads follow the audience rules above. Per-kind limits: Mermaid source up to 20,000 characters, inline images up to 64 KB.
 
 ### MCP Tools
 

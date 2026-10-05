@@ -62,6 +62,15 @@ users = Table(
     Column("last_login", Text),
     Column("suspended_at", Text),
     Column("github_pat_encrypted", Text),  # ent#162 — per-user GitHub PAT (AES-256-GCM envelope)
+    # ent#720 — a sign-in email belongs to ONE account. Declared here, not only
+    # in schema.py/Alembic, so autogenerate (#746) must not propose dropping it.
+    Index(
+        "idx_users_email_unique",
+        text("lower(email)"),
+        unique=True,
+        sqlite_where=text("email IS NOT NULL"),
+        postgresql_where=text("email IS NOT NULL"),
+    ),
 )
 
 subscription_credentials = Table(
@@ -194,6 +203,7 @@ email_login_codes = Table(
     Column("expires_at", Text),
     Column("verified", Integer),
     Column("used_at", Text),
+    Column("purpose", Text),  # ent#720: NULL = sign-in; 'email_bind:<user id>'
 )
 
 agent_schedules = Table(
@@ -295,6 +305,18 @@ schedule_executions = Table(
     Column("open_canvas_id", Text),
     # #2806 — agent-to-agent hops from a non-agent root; NULL = root (0).
     Column("chain_depth", Integer),
+    # #2843 — the conversation this turn continues. Declared here, not only in
+    # schema.py/Alembic: the unique index IS the one-turn-per-conversation rule
+    # (the pull claim relies on its IntegrityError), so autogenerate must not
+    # propose dropping it.
+    Column("conversation_key", Text),
+    Index(
+        "idx_executions_one_running_turn",
+        "agent_name", "conversation_key",
+        unique=True,
+        sqlite_where=text("status = 'running' AND conversation_key IS NOT NULL"),
+        postgresql_where=text("status = 'running' AND conversation_key IS NOT NULL"),
+    ),
 )
 
 agent_loops = Table(
@@ -333,6 +355,8 @@ agent_loops = Table(
     # already persisted here or derivable from `agent_loop_runs`.
     Column("next_run_at", Text),        # ISO-Z; NULL = not waiting on a delay
     Column("stop_requested_at", Text),  # ISO-Z; replaces the in-memory should_stop
+    # #2973 — the starter's inherited chain depth, stamped on every iteration row.
+    Column("chain_depth", Integer),
 )
 
 agent_loop_runs = Table(
@@ -991,6 +1015,7 @@ agent_git_config = Table(
     Column("github_pat_encrypted", Text),
     Column("auto_sync_enabled", Integer),
     Column("freeze_schedules_if_sync_failing", Integer),
+    Column("pull_sync_enabled", Integer),  # trinity-enterprise#703
 )
 
 agent_sync_state = Table(
@@ -1017,6 +1042,20 @@ agent_sync_state = Table(
     Column("pack_count", Integer),  # #1595: packs from `git count-objects -v`
     Column("loose_objects", Integer),  # #1595: loose objects (gc-health signal)
     Column("maintenance_failures", Integer),  # #1595: consecutive failed maintenance
+    # trinity-enterprise#706: the divergence / dirt episode clocks (ISO-Z, set
+    # once, cleared on return to 0), the porcelain change count, and the last
+    # push that actually landed. All nullable, no backfill.
+    Column("diverged_since", Text),
+    Column("dirty_files", Integer),
+    Column("dirty_since", Text),
+    Column("last_successful_push_at", Text),
+    Column("last_pull_at", Text),  # trinity-enterprise#703: the container's pull cycle
+    Column("last_pull_status", Text),
+    Column("behind_after_pull", Integer),
+    Column("last_pull_error", Text),
+    Column("last_successful_pull_at", Text),
+    Column("consecutive_pull_failures", Integer),
+    Column("consecutive_pull_skips", Integer),
     Column("last_check_at", Text),
     Column("updated_at", Text),
 )
@@ -1471,6 +1510,37 @@ operator_queue = Table(
     Column("supersedes_expired", Text),  # the predecessor row's uuid
 )
 
+skill_gate_requests = Table(
+    # trinity-enterprise#751 — a gated-skill request frozen while its approval
+    # is open. The ask records the decision; this row records the effect. See
+    # the DDL comment in db/schema.py.
+    "skill_gate_requests",
+    metadata,
+    Column("request_id", Text, primary_key=True),  # the ask's `gate-…` id
+    Column("agent_name", Text),                    # the executor
+    Column("ask_item_id", Text),                   # operator_queue.id once raised
+    Column("skills", Text),                        # JSON list of gated names invoked
+    Column("request_text", Text),                  # the requester's own words, sanitised
+    Column("fingerprints", Text),                  # JSON {skill: content hash}
+    Column("requester_kind", Text),
+    Column("requester_key", Text),                 # what the per-requester cap counts
+    Column("source_agent", Text),                  # the requesting agent, if one
+    Column("requester_email", Text),
+    Column("requester_execution_id", Text),
+    Column("requester_mcp_key_id", Text),
+    Column("origin_execution_id", Text),           # the row the gate closed SKIPPED, if any
+    Column("triggered_by", Text),
+    Column("dispatch", Text),                      # JSON — the frozen dispatch fields
+    Column("state", Text),
+    Column("state_detail", Text),
+    Column("dispatched_execution_id", Text),
+    Column("created_at", Text),
+    Column("decided_at", Text),
+    Column("dispatched_at", Text),
+    Column("notified_at", Text),
+    UniqueConstraint("dispatched_execution_id"),
+)
+
 nevermined_agent_config = Table(
     "nevermined_agent_config",
     metadata,
@@ -1647,8 +1717,9 @@ metric_definitions = Table(
     UniqueConstraint("agent_name", "name"),
 )
 
-# Recorded metric points (trinity-enterprise#478) — the append-only store the
-# `record_metrics` write path fills and ent#479 reads.
+# Recorded metric points (trinity-enterprise#478) — the store the
+# `record_metrics` write path fills (inserting, or restating a row whose value
+# changed — ent#729) and ent#479 reads.
 metric_points = Table(
     "metric_points",
     metadata,
@@ -1672,8 +1743,13 @@ metric_points = Table(
     ),
     Column("execution_id", Text),
     Column("created_at", Text, nullable=False),
+    # ent#729 restatement. BigInteger: a monotonic counter is int8 from day one
+    # (learning 2026-09-15). The server default is what keeps pre-ent#729 rows
+    # and pre-ent#729 writers reading/inserting `0`.
+    Column("revision", BigInteger, nullable=False, server_default=text("0")),
+    Column("recorded_at", Text),
     # The identity IS the primary key (no surrogate id): the insert's
-    # `on_conflict_do_nothing` names these columns, and keeping the eventual
+    # `on_conflict_do_update` names these columns, and keeping the eventual
     # partition key (`agent_name`) inside the only unique constraint is what
     # lets ent#80 partition by month without a table rebuild.
     PrimaryKeyConstraint("agent_name", "ts", "idempotency_key"),

@@ -246,7 +246,7 @@ async def update_skills_library_automation_setting(
             source="api",
             actor_user=current_user,
             actor_ip=request.client.host if request.client else None,
-            endpoint=str(request.url.path),
+            endpoint=request.scope["path"],
             request_id=getattr(request.state, "request_id", None),
             details={"setting": "skills_library_automation", "changed": changed},
         )
@@ -328,7 +328,7 @@ async def update_proactive_rate_limits_setting(
             source="api",
             actor_user=current_user,
             actor_ip=request.client.host if request.client else None,
-            endpoint=str(request.url.path),
+            endpoint=request.scope["path"],
             request_id=getattr(request.state, "request_id", None),
             details={"setting": "proactive_rate_limits", "action": "update", "updated": updated},
         )
@@ -443,7 +443,7 @@ async def update_brain_orb_settings(
             source="api",
             actor_user=current_user,
             actor_ip=request.client.host if request.client else None,
-            endpoint=str(request.url.path),
+            endpoint=request.scope["path"],
             request_id=getattr(request.state, "request_id", None),
             details={
                 "setting": "brain_orb_flags",
@@ -576,7 +576,7 @@ async def update_elevenlabs_settings(
             source="api",
             actor_user=current_user,
             actor_ip=request.client.host if request.client else None,
-            endpoint=str(request.url.path),
+            endpoint=request.scope["path"],
             request_id=getattr(request.state, "request_id", None),
             details={
                 "setting": "elevenlabs",
@@ -633,13 +633,19 @@ async def upsert_a2a_outbound_endpoint(
     `credentials` is write-only. Omitting it on an update leaves any existing
     secret in place; `clear_credentials` removes it. The audit row records
     whether a credential was set or cleared, never its value.
+
+    `credential_kind` (#3185) is a LABEL on that slot — `payment_token` makes it
+    ride as x402 payment rather than as a Bearer header. Omitted, the store
+    infers it from the value, and the response reports what it concluded, so an
+    operator pasting a token just bought after a 402 does not have to know the
+    field exists. The kind is a label and IS audited; the value never is.
     """
     from dependencies import reject_agent_principal
 
     assert_admin(current_user)
     reject_agent_principal(current_user)
 
-    from services import a2a_outbound
+    from services import a2a_outbound, a2a_outbound_service
 
     credential = body.credentials.get_secret_value() if body.credentials else None
     try:
@@ -648,6 +654,7 @@ async def upsert_a2a_outbound_endpoint(
             body.url,
             credential,
             clear_credential=body.clear_credentials,
+            credential_kind=body.credential_kind,
         )
     except a2a_outbound.EndpointValidationError as e:
         raise HTTPException(status_code=422, detail=str(e))
@@ -658,7 +665,7 @@ async def upsert_a2a_outbound_endpoint(
         source="api",
         actor_user=current_user,
         actor_ip=request.client.host if request.client else None,
-        endpoint=str(request.url.path),
+        endpoint=request.scope["path"],
         request_id=getattr(request.state, "request_id", None),
         details={
             "setting": "a2a_outbound_endpoints",
@@ -667,9 +674,30 @@ async def upsert_a2a_outbound_endpoint(
             "url": record["url"],
             "credential_set": bool(credential),
             "credential_cleared": bool(body.clear_credentials),
+            # The KIND, not the value — and the store's conclusion rather than
+            # the request's, so the row says what was actually written when the
+            # operator left the field out.
+            "credential_kind": record.get("credential_kind"),
         },
     )
-    return {"success": True, "endpoint": record}
+    # Honest status in the same response as the write: the outbound switch
+    # defaults OFF, so a registration that looks complete is not yet callable,
+    # and the caller learns that here instead of at first call (ent#761).
+    response = {
+        "success": True,
+        "endpoint": record,
+        "enabled": a2a_outbound_service.is_outbound_enabled(),
+    }
+    if record.get("credential_single_use"):
+        # Honest status in the same response as the write (#3185 T4): an x402 v3
+        # token authorises ONE settlement, so the second call with it stored is
+        # refused by the remote. Said here rather than refused, because a
+        # provider that issues only single-use tokens must stay usable.
+        response["hint"] = (
+            "This payment token authorises a single settlement: after one paid "
+            "call the remote will refuse it, and a fresh token must be stored."
+        )
+    return response
 
 
 @router.delete("/a2a-endpoints/{ref}")
@@ -696,7 +724,7 @@ async def remove_a2a_outbound_endpoint(
         source="api",
         actor_user=current_user,
         actor_ip=request.client.host if request.client else None,
-        endpoint=str(request.url.path),
+        endpoint=request.scope["path"],
         request_id=getattr(request.state, "request_id", None),
         details={
             "setting": "a2a_outbound_endpoints",

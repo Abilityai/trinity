@@ -418,7 +418,7 @@ def _resolve_portal(
             now = utc_now_iso()
             portal_db.add_portal_message(
                 _uuid.uuid4().hex, session_agent, client_email, "assistant", body,
-                None, now, session_id=chat_id,
+                None, now, session_id=chat_id, source=_portal_source(status),
             )
             # Every other writer of a portal message touches its session, and
             # this one has to for the same reason: `last_message_at` is what
@@ -529,6 +529,29 @@ def _resolve_portal(
     return deliver
 
 
+# trinity-enterprise#610: the platform-written outcome marker on the portal
+# message this module writes. The Inbox's done/failed pill is read from it —
+# never parsed out of the body, where any agent reply beginning "**Finished**"
+# would classify as a finished run. `source` is platform-written only (ent#534).
+#
+# NOT inert on the agent's side (#3054 review): any non-NULL `source` takes the
+# row out of `client_portal.db._TYPED`. So the row is never the resumed-turn
+# cursor (`get_platform_rows_since_last_reply`), is replayed into the next
+# resumed turn's context, rides inside the cold history window without taking a
+# typed slot, and both blocks tell it as `[Background task report: …]`
+# (`client_portal.service._context_lines`). Deliberate: the agent's live session
+# never saw the background run, and this is how it learns it finished and what
+# it found. Frontend readers compare `source` to 'voice' only.
+COMPLETION_SOURCE_DONE = "completion:done"
+COMPLETION_SOURCE_FAILED = "completion:failed"
+
+
+def _portal_source(status: str) -> str:
+    """The marker for `status`, decided by the SAME test `_portal_body` uses for
+    its wording, so the pill and the sentence cannot disagree."""
+    return COMPLETION_SOURCE_DONE if status == "success" else COMPLETION_SOURCE_FAILED
+
+
 def _portal_body(*, executing_agent: str, session_agent: str, status: str,
                  summary_or_error: Optional[str]) -> str:
     """The message a person reads when background work finishes.
@@ -589,7 +612,7 @@ async def report_completion(
         resolver = _CHANNEL_RESOLVERS.get(source_channel)
         if resolver is None:
             return False                      # channel without a delivery leg
-        if (triggered_by or "") in INLINE_CHANNEL_TRIGGERS:
+        if (triggered_by or "") in INLINE_CHANNEL_TRIGGERS and not _is_approved_gate_run(execution_id):
             return False                      # the adapter already replied — no double-post
 
         # ent#265 D1: deliver through the bot the user actually addressed.
@@ -654,6 +677,20 @@ async def report_completion(
         return True
     except Exception as e:  # noqa: BLE001 — never disturb a completed execution
         logger.warning("[ent#224] completion report raised for %s: %s", execution_id, e)
+        return False
+
+
+def _is_approved_gate_run(execution_id: str) -> bool:
+    """trinity-enterprise#751: an approved gated request keeps its requester's
+    trigger (`public`, a channel) but runs long after that turn answered, so
+    nothing replied inline — its result is reported like any background
+    completion. An unreadable record reads as "inline": the failure direction is
+    a missing report, never a second post."""
+    try:
+        from database import db
+        return db.get_gate_request_by_dispatched_execution(execution_id) is not None
+    except Exception:  # noqa: BLE001
+        logger.warning("[ent#751] gate-record read failed for %s; not reporting", execution_id)
         return False
 
 

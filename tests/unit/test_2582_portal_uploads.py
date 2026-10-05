@@ -108,7 +108,7 @@ class _Request:
     """The two attributes the audit helper reads off a request."""
 
     def __init__(self, path="/api/enterprise/client-portal/x"):
-        self.url = type("U", (), {"path": path})()
+        self.scope = {"path": path}
         self.client = type("C", (), {"host": "10.0.0.1"})()
         self.state = type("S", (), {})()
 

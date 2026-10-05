@@ -16,8 +16,10 @@ import {
   queueResponseBody,
   QUEUE_RESPONSE_NOT_RECORDED,
   QUEUE_RESPONSE_DIVERGED,
+  QUEUE_RESPONSE_NOT_ADDRESSEE,
   respondRefusedAsNotPending,
   respondRefusedAsDiverged,
+  respondRefusedAsNotAddressee,
   queueEndingSortTime,
 } from '../utils/operatorQueue'
 
@@ -60,6 +62,10 @@ export const useOperatorQueueStore = defineStore('operatorQueue', () => {
   const undeliveredCount = ref(0)
   const closedByFilerCount = ref(0)
   const divergedItemId = ref(null)
+  // trinity-enterprise#751: the card whose answer was refused because it was not
+  // addressed to this person. Its own ref, not `error`: `fetchItems` clears
+  // `error` on every poll, and a failed verb must persist beside its control (p18).
+  const notAddresseeItemId = ref(null)
   let _pollTimer = null
 
   // Getters
@@ -150,6 +156,7 @@ export const useOperatorQueueStore = defineStore('operatorQueue', () => {
         { headers: authStore.authHeader }
       )
       if (divergedItemId.value === id) divergedItemId.value = null
+      if (notAddresseeItemId.value === id) notAddresseeItemId.value = null
 
       // Optimistic update — mirror the body that was sent
       item.status = 'responded'
@@ -165,6 +172,10 @@ export const useOperatorQueueStore = defineStore('operatorQueue', () => {
         expandedItemId.value = nextOpen.id
       }
     } catch (err) {
+      if (respondRefusedAsNotAddressee(err)) {
+        notAddresseeItemId.value = id
+        return
+      }
       if (respondRefusedAsDiverged(err)) {
         // #2915: the agent rewrote or closed this item after the card was read.
         // Refetch so the badge shows the divergence, keep the card open, and let
@@ -315,6 +326,8 @@ export const useOperatorQueueStore = defineStore('operatorQueue', () => {
     closedByFilerCount,
     divergedItemId,
     QUEUE_RESPONSE_DIVERGED,
+    notAddresseeItemId,
+    QUEUE_RESPONSE_NOT_ADDRESSEE,
     openItems,
     resolvedItems,
     pendingCount,

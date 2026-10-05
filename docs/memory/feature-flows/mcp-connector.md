@@ -99,6 +99,11 @@ backend re-gates EVERY call: email_has_agent_access(agent, email) AND connector 
   → uniform 403 otherwise; chat runs through TaskExecutionService (triggered_by="mcp")
 ```
 
+`run_playbook` sends `/<name> <input>` (trinity-enterprise#751; it used to send the prose
+`Please run the "<name>" playbook.`), so a playbook marked "requires approval" is
+recognised by the skill gate and the call answers `pending_approval` or a named refusal
+instead of running ([skill-gate.md](skill-gate.md)).
+
 **Keyless setup (AC6).** With the flag on, the owner shares the agent WITHOUT minting
 a key — the collaborator drops in a keyless config and signs in by email. The connector
 panel surfaces this ("Share without a key — sign in by email") whenever

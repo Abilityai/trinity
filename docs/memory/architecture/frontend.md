@@ -29,9 +29,11 @@
 
 **Real-time:** WebSocket client at `utils/websocket.js` with auto-reconnect; tracks `_eid` and replays via `last-event-id` — see [Real-time Delivery](integrations.md#real-time-delivery-reliability-003-306).
 
-**Operator-queue honesty (#2915):** the sync/delivery/aging badge is ONE rule, `utils/operatorQueue.js::queueSyncBadge(item)` → `{label, variant, title} | null`, rendered as a `BaseBadge` by `QueueCard` / `ResolvedCard` / `PortalAsks` and as a currentColor pill in `MobileAdmin.vue`; `stores/operatorQueue.js` turns a 409 `item_diverged` into `divergedItemId` (refetch, keep the card open, `InlineError` beside the controls, the next Send carries `acknowledge_divergence`) and carries `undeliveredCount` / `closedByFilerCount` from the list response; `utils/websocket.js` routes `operator_queue_sync` to a refetch; the aging bound lives in `components/settings/OperatorQueueAgingSetting.vue` (its own file so `Settings.vue`'s raw-colour count cannot move; `BaseInput`; `utils/opsSettings.js::readOpsInt/opsIntValue`). Mounted specs: `queueCardSyncBadge.spec.js`, `operatorQueueAgingSetting.spec.js`.
+**Operator-queue honesty (#2915):** the sync/delivery/aging badge is ONE rule, `utils/operatorQueue.js::queueSyncBadge(item)` → `{label, variant, title} | null`, rendered as a `BaseBadge` by `QueueCard` / `ResolvedCard` / `PortalAsks` and as a currentColor pill in `MobileAdmin.vue`; `stores/operatorQueue.js` turns a 409 `item_diverged` into `divergedItemId` (refetch, keep the card open, `InlineError` beside the controls, the next Send carries `acknowledge_divergence`), turns a 403 `not_addressee` (a gated-skill approval addressed to someone else, trinity-enterprise#751) into `notAddresseeItemId` (an `InlineError` on that card, kept until dismissed; never `error`, which every poll clears) and carries `undeliveredCount` / `closedByFilerCount` from the list response; `utils/websocket.js` routes `operator_queue_sync` to a refetch; the aging bound lives in `components/settings/OperatorQueueAgingSetting.vue` (its own file so `Settings.vue`'s raw-colour count cannot move; `BaseInput`; `utils/opsSettings.js::readOpsInt/opsIntValue`). Mounted specs: `queueCardSyncBadge.spec.js`, `operatorQueueAgingSetting.spec.js`.
 
 **An approval shows its proposal (trinity-enterprise#611):** `utils/operatorQueue.js::proposalRows(proposal)` → `{key, value}` rows (top-level fields in the agent's order; text verbatim, anything else compact JSON), rendered read-only by `components/operator/QueueProposal.vue` on every card that offers the decision — the open `QueueCard` (above the collapsed context), `MobileAdmin.vue`'s ops card and `PortalAsks` — and on `ResolvedCard`, so an ended ask says what was decided. Agent-authored, so interpolation only, never `v-html`; gray tokens only; the box scrolls inside `max-h-48`. Mounted specs: `operatorQueueProposal.spec.js`, `portalAskProposal.spec.js`, `mobileAdminProposal.spec.js`.
+
+**An ask's brief — the render seam (trinity-enterprise#610 PR A2 §3g L6):** `components/operator/QueueBrief.vue` renders an ask's agent-authored `brief = {why, recommendation, if_no_answer, impact}` in two parts that sit on either side of the options — `part="lead"` (Why now → "{agent} recommends", after `QueueProposal`) and `part="fallback"` ("If you don't answer by {time}" / plain "If you don't answer", beside the answer row, pending only). `utils/operatorQueue.js::briefOf` keeps the non-empty strings (nothing → `null` → no block), `briefImpactFor` keeps an approval's `impact` for OFFERED options only, and with any impact the card's options stack full-width with the consequence as each button's `aria-describedby` hint. Agent text goes through `PortalMarkdown` only (DOMPurify; guarded: no `v-html` in the file). Mounted in `PortalAsks` now against fixtures; the backend field and the operator mounts (QueueCard, QueueItemDetail, MobileAdmin) are L8. Spec: `queueBrief.mount.spec.js`.
 
 **Top-nav IA — Operations (#1109):** former Health/Ops/Executions nav entries are one **Operations** entry (`views/Operations.vue`, `/operations`) — a `?tab=`-driven view: Needs Response · Notifications · Health · Executions · Resolved. Tab content in embeddable `components/MonitoringPanel.vue` / `ExecutionsPanel.vue`; tabs toggle by `v-if` so store-owned polling tears down on leave. Health tab admin-gated. NavBar carries one unified badge (pending operator-queue + notifications, critical-pulse). Legacy `/monitoring`, `/executions`, `/operating-room`, `/events` redirect (query-preserving) to the matching tab.
 
@@ -56,6 +58,30 @@
 
 **Agent-to-agent collaboration data** (`stores/network.js`): the Vue Flow node-graph rendering of collaboration (the Dashboard's Graph mode + `AgentNode.vue`) was **decommissioned in #1689**; the underlying collaboration data still flows and feeds the Timeline replay. Detection: the backend chat endpoint accepts `X-Source-Agent` and broadcasts `agent_collaboration` WS events; `activity_service` broadcasts `agent_activity` (`activity_type`: chat_start/chat_end/tool_call/schedule_start/schedule_end/agent_collaboration; `activity_state`: started/completed/failed/cancelled — a user-cancelled terminal is recorded as `cancelled`, distinct from `failed`, #1332).
 
+
+**The Workspace Inbox (ent#610).** Route `/workspace/inbox` (`WorkspaceInbox`) is a
+stage of the same `views/Portal.vue` shell, not a new view. `components/portal/PortalInbox.vue`
+(container: header, `OverflowTabs` Action · Unread · All, list + pane, phone collapse),
+`PortalInboxList.vue`, `PortalInboxPane.vue` and the sidebar's pinned
+`PortalInboxRow.vue` compose existing surfaces — `PortalAsks`
+filtered to one ask by its `askIds` prop and namespaced by `testidPrefix` (default
+`portal-ask`, so every existing test id is unchanged), `PortalMarkdown`, and
+`ReportRenderer` with the `ReportSummary` fallback. **No new store** (Invariant #6):
+Action reads `clientPortal.openAsks`/`asks`; Unread and All read the shell's
+`sidebarThreads` snapshot plus the previews from `store.fetchChatState({previews})`,
+passed as props exactly as the sidebar receives them. Every decidable rule is pure in
+`components/portal/portalInbox.js` (`inboxLandingTarget`, the item builders,
+`inboxCounts`, `itemKey`). Honesty fields: `asksLoaded`/`asksFailed`/`asksLoadedAt` on
+the store (PR A0), `asksAbsent` (the 404/403 verdict, so an instance without asks shows
+an empty Action rather than a skeleton) and `threadsLoaded` on the shell; the skeleton is keyed on
+`viewState({hasLoaded})`, never on a loading flag. `markChatReadStrict` (rethrows) exists
+for Mark all read only; the per-row open keeps the fire-and-forget `markRead`.
+`fetchSessionDeliverablesStrict` (rethrows) lets the pane tell "no deliverables"
+from "the read failed"; `fetchSessionDeliverables` stays fail-soft on top of it. Opening a
+chat at an arrival is a one-shot `?anchor=m:<id>|d:<id>` resolved by
+`composables/useConversationAnchor.js` inside `PortalConversation`
+against `data-message-id` / `data-report-id` targets, with `useStickToBottom().detach()`
+so the ResizeObserver does not re-pin the view to the bottom.
 
 **Voice has one consumer, and Agent Detail has a door (#2559).** The orb
 (`components/chat/VoiceOverlay.vue`) and the session composable

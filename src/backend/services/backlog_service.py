@@ -70,6 +70,11 @@ class BacklogService:
         collaboration_activity_id: Optional[str],
         is_self_task: bool = False,
         self_task_activity_id: Optional[str] = None,
+        conversation_key: Optional[str] = None,
+        persist_session: bool = False,
+        schedule_context: Optional[dict] = None,
+        attempt: Optional[int] = None,
+        images: Optional[list] = None,
     ) -> bool:
         """Persist an async task request as a QUEUED backlog item.
 
@@ -116,10 +121,35 @@ class BacklogService:
             "collaboration_activity_id": collaboration_activity_id,
             "is_self_task": is_self_task,
             "self_task_activity_id": self_task_activity_id,
+            # #3114: pull-pilot rows only. The claim hands persist_session and
+            # images to the worker and composes the prompt from
+            # schedule_context and attempt. `images` is base64 vision input in
+            # the push payload's shape; the #1449 scrub NULLs the whole blob
+            # once the row is authoritative-terminal.
+            "persist_session": persist_session,
+            "schedule_context": schedule_context,
+            "attempt": attempt,
+            "images": images or None,
         }
         queued_at = utc_now_iso()
+        # #2843: a pilot's worker claims these, so tag the conversation a turn
+        # continues and the claim will never run two of its turns at once.
+        # Non-pilots are drained by the backend and keep today's behaviour.
+        from services.pull_pilot import is_pull_pilot_agent
+
+        # #3114: an explicit key from `execute_task` names the conversation
+        # directly ("session:<key>", "public:<id>", ...) and wins.
+        if is_pull_pilot_agent(agent_name):
+            conversation_key = (
+                conversation_key
+                or request.chat_session_id
+                or request.resume_session_id
+                or None
+            )
+        else:
+            conversation_key = None
         ok = db.update_execution_to_queued(
-            execution_id, json.dumps(metadata), queued_at
+            execution_id, json.dumps(metadata), queued_at, conversation_key
         )
         if not ok:
             # update_execution_to_queued is CAS-guarded on status == RUNNING

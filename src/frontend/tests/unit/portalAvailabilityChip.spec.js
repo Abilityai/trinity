@@ -30,6 +30,29 @@ const SIDEBAR = read('../../src/components/portal/PortalSidebar.vue')
 // two rules are now pinned.
 const AGENT_PAGE = read('../../src/components/portal/PortalAgentDetails.vue')
 
+/**
+ * Remove every `<!-- … -->` span from a checked-in SFC's source text.
+ * Index-walked, as `portalComposerAlignment.spec.js` does, rather than one
+ * `replace(/<!--[\s\S]*?-->/g, '')`: a single pass leaves a `<!--` assembled
+ * from the halves of two removed spans (`<!<!-- -->--` → `<!--`), so text the
+ * assertions below then read could still sit inside a comment. The walk drops
+ * everything from an opener to its closer, and an unterminated opener drops
+ * the rest — no residue. (This is a source scrub, not an HTML sanitizer; it
+ * is also what CodeQL's js/incomplete-multi-character-sanitization asks for.)
+ */
+function stripHtmlComments(text) {
+  let out = ''
+  let i = 0
+  for (;;) {
+    const open = text.indexOf('<!--', i)
+    if (open === -1) return out + text.slice(i)
+    out += text.slice(i, open)
+    const close = text.indexOf('-->', open + 4)
+    if (close === -1) return out
+    i = close + 3
+  }
+}
+
 describe('#2196 which states get a chip', () => {
   it('labels an agent whose container is gone', () => {
     const chip = availabilityChip({ availability: 'unavailable', owner: 'alice' })
@@ -161,10 +184,22 @@ describe('#2196 the surfaces consume the shared rule', () => {
     expect(shown[0]).not.toMatch(/sort|availability/)
   })
 
-  it('the chip slot reserves its footprint so the row does not reflow', () => {
-    const block = SIDEBAR.slice(SIDEBAR.indexOf('v-for="a in shownAgents"'))
+  it('a start/stop never moves the row\'s horizontal layout', () => {
+    // ent#610 sign-off: was "the chip slot reserves its footprint". The
+    // reservation (#2641: on every row once any visible row had a chip) left
+    // the names 0px in the sidebar, so the chip moved to the subtitle line
+    // under the name. The right-hand strip — date, draft, counts — now carries
+    // nothing that depends on availability, which is the no-reflow property
+    // itself: the name's truncation point cannot change when an agent stops.
+    const bare = stripHtmlComments(SIDEBAR)
+    const block = bare.slice(bare.indexOf('v-for="a in shownAgents"'))
     const row = block.slice(0, block.indexOf('</button>'))
-    expect(row).toMatch(/min-w-\[[\d.]+rem\][^"]*flex justify-end/)
+    const DATE = 'class="shrink-0 w-14 text-right'
+    expect(row.indexOf(DATE)).toBeGreaterThan(-1)
+    const strip = row.slice(row.indexOf(DATE))
+    expect(strip).not.toMatch(/chipFor\(a\)|availability/i)
+    const name = row.slice(row.indexOf('{{ agentLabel(a) }}'), row.indexOf(DATE))
+    expect(name).toMatch(/<BaseBadge v-if="chipFor\(a\)"/)
   })
 
   it('the row title carries the state, so it is reachable without colour', () => {

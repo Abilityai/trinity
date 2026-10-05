@@ -183,8 +183,12 @@ RUN set -eu; \
     fi; \
     claude --version
 
-# Install Gemini CLI for multi-runtime support
-RUN npm install -g @google/gemini-cli
+# Install Gemini CLI for multi-runtime support.
+# Pinned (#2971): an unpinned install took 0.60.0, which rejected the flags the
+# runtime passed. Bump together with GEMINI_CLI_VERSION in
+# agent_server/services/gemini_cli_args.py; the build-time smoke below parses
+# the runtime's real argv against this binary.
+RUN npm install -g @google/gemini-cli@0.62.0
 
 # Install OpenAI Codex CLI for multi-runtime support (#1187).
 # Pinned (not @latest) so base-image rebuilds are reproducible and a
@@ -213,16 +217,13 @@ ENV USER=developer
 USER developer
 WORKDIR /home/developer
 
+# #3106: the build installs EXACT pins (reproducible rebuilds, no unvetted
+# upstream release); startup.sh's per-boot repair uses the floors in
+# agent-server-requirements.txt, so it never downgrades a template's packages.
+COPY --chown=root:root ./agent-image-requirements.txt /opt/trinity/agent-image-requirements.txt
+COPY --chown=root:root ./agent-server-requirements.txt /opt/trinity/agent-server-requirements.txt
 RUN python3 -m pip install --user --upgrade pip && \
-    python3 -m pip install --user \
-        fastapi \
-        uvicorn \
-        httpx \
-        pydantic \
-        python-multipart \
-        pyyaml \
-        rich \
-        cryptography
+    python3 -m pip install --user -r /opt/trinity/agent-image-requirements.txt
 
 RUN mkdir -p /home/developer/.claude-agent
 
@@ -330,6 +331,8 @@ COPY --chown=developer:developer ./agent-server.py /app/agent-server.py
 COPY --chown=developer:developer ./agent_server /app/agent_server
 COPY --chown=developer:developer ./startup.sh /app/startup.sh
 RUN chmod +x /app/startup.sh /app/agent-server.py
+# #2971: fail the build if the pinned gemini-cli rejects any argv the runtime builds.
+RUN python3 /app/agent_server/services/gemini_cli_args.py --smoke
 
 # Add /app to Python path so agent_server module can be imported
 ENV PYTHONPATH="/app:${PYTHONPATH}"

@@ -186,7 +186,8 @@ TABLES = {
             created_at TEXT NOT NULL,
             expires_at TEXT NOT NULL,
             verified INTEGER DEFAULT 0,
-            used_at TEXT
+            used_at TEXT,
+            purpose TEXT
         )
     """,
 
@@ -295,6 +296,9 @@ TABLES = {
             open_canvas_id TEXT,
             -- #2806: agent-to-agent hops from a non-agent root. NULL = root (0).
             chain_depth INTEGER,
+            -- #2843: the conversation this turn continues; at most one running
+            -- row per (agent, key). NULL = no conversation guard.
+            conversation_key TEXT,
             FOREIGN KEY (schedule_id) REFERENCES agent_schedules(id)
         )
     """,
@@ -333,7 +337,8 @@ TABLES = {
             started_at TEXT,
             completed_at TEXT,
             next_run_at TEXT,
-            stop_requested_at TEXT
+            stop_requested_at TEXT,
+            chain_depth INTEGER
         )
     """,
 
@@ -1170,6 +1175,10 @@ TABLES = {
             github_pat_encrypted TEXT,
             auto_sync_enabled INTEGER DEFAULT 0,
             freeze_schedules_if_sync_failing INTEGER DEFAULT 0,
+            -- trinity-enterprise#703. No trailing comment on the column above the
+            -- FK clause: _PG_TABLE_SUBS strips the clause only when it follows
+            -- the comma directly, so a comment there breaks PostgreSQL.
+            pull_sync_enabled INTEGER DEFAULT 0,
             FOREIGN KEY (agent_name) REFERENCES agent_ownership(agent_name)
         )
     """,
@@ -1194,6 +1203,17 @@ TABLES = {
             pack_count INTEGER,
             loose_objects INTEGER,
             maintenance_failures INTEGER DEFAULT 0,
+            diverged_since TEXT,
+            dirty_files INTEGER,
+            dirty_since TEXT,
+            last_successful_push_at TEXT,
+            last_pull_at TEXT,  -- trinity-enterprise#703: the container's pull cycle
+            last_pull_status TEXT,
+            behind_after_pull INTEGER,
+            last_pull_error TEXT,
+            last_successful_pull_at TEXT,
+            consecutive_pull_failures INTEGER DEFAULT 0,
+            consecutive_pull_skips INTEGER DEFAULT 0,
             last_check_at TEXT,
             updated_at TEXT NOT NULL,
             FOREIGN KEY (agent_name) REFERENCES agent_ownership(agent_name)
@@ -1728,6 +1748,40 @@ TABLES = {
         )
     """,
 
+    # trinity-enterprise#751 — a request to run a gated skill, frozen while its
+    # approval ask is open. The ask (operator_queue) records the DECISION; this
+    # row records the EFFECT, so an approval runs the request exactly once:
+    # `pending → dispatching` is a compare-and-set, and `dispatched_execution_id`
+    # is UNIQUE. `request_id` is the ask's `gate-…` id (one per occurrence).
+    # `dispatch` holds only the fields the approved run re-uses (a per-field
+    # freeze table in services/skill_gate_service.py), never a session id.
+    "skill_gate_requests": """
+        CREATE TABLE IF NOT EXISTS skill_gate_requests (
+            request_id TEXT PRIMARY KEY,
+            agent_name TEXT NOT NULL,
+            ask_item_id TEXT,
+            skills TEXT NOT NULL,
+            request_text TEXT NOT NULL,
+            fingerprints TEXT,
+            requester_kind TEXT NOT NULL,
+            requester_key TEXT NOT NULL,
+            source_agent TEXT,
+            requester_email TEXT,
+            requester_execution_id TEXT,
+            requester_mcp_key_id TEXT,
+            origin_execution_id TEXT,
+            triggered_by TEXT,
+            dispatch TEXT NOT NULL,
+            state TEXT NOT NULL DEFAULT 'pending',
+            state_detail TEXT,
+            dispatched_execution_id TEXT UNIQUE,
+            created_at TEXT NOT NULL,
+            decided_at TEXT,
+            dispatched_at TEXT,
+            notified_at TEXT
+        )
+    """,
+
     # Nevermined Payment Integration (NVM-001)
     "nevermined_agent_config": """
         CREATE TABLE IF NOT EXISTS nevermined_agent_config (
@@ -1952,10 +2006,14 @@ TABLES = {
             UNIQUE(agent_name, name)
         )
     """,
-    # Recorded metric points (trinity-enterprise#478) — the append-only store
-    # `record_metrics` writes. No surrogate id: the PK IS the identity
-    # `(agent_name, ts, idempotency_key)`, which keeps the partition key inside
-    # the only unique constraint for the month-partitioning ent#80 wants later.
+    # Recorded metric points (trinity-enterprise#478) — the store
+    # `record_metrics` writes, one row per identity. No surrogate id: the PK IS
+    # the identity `(agent_name, ts, idempotency_key)`, which keeps the
+    # partition key inside the only unique constraint for the
+    # month-partitioning ent#80 wants later. A different value at an existing
+    # identity restates the row (ent#729): `revision` counts the corrections,
+    # `recorded_at` is the write time of the value held (NULL = written before
+    # ent#729; read it as `created_at`).
     # `dims` carries the `/* pg:JSONB */` marker: SQLite reads it as a comment
     # and reports TEXT, `to_postgres_table_ddl` rewrites the column to JSONB, so
     # fresh PG, upgraded PG and SQLite all converge without an ALTER.
@@ -1970,6 +2028,8 @@ TABLES = {
             dims TEXT /* pg:JSONB */,
             execution_id TEXT,
             created_at TEXT NOT NULL,
+            revision BIGINT NOT NULL DEFAULT 0,
+            recorded_at TEXT,
             PRIMARY KEY (agent_name, ts, idempotency_key)
         )
     """,
@@ -1984,6 +2044,12 @@ INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_users_username ON users(username)",
     "CREATE INDEX IF NOT EXISTS idx_users_auth0_sub ON users(auth0_sub)",
     "CREATE INDEX IF NOT EXISTS idx_users_email ON users(email)",
+    # trinity-enterprise#720 — a sign-in email belongs to ONE account. Every
+    # sign-in path resolves the account by email alone, so a duplicate is an
+    # identity coin toss. Lower-cased (addresses are compared that way), NULL
+    # allowed (password-only accounts, the pre-#82 placeholder).
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email_unique "
+    "ON users(lower(email)) WHERE email IS NOT NULL",
     "CREATE INDEX IF NOT EXISTS idx_agent_ownership_owner ON agent_ownership(owner_id)",
     "CREATE INDEX IF NOT EXISTS idx_agent_ownership_name ON agent_ownership(agent_name)",
     # Issue #834: partial index for the retention sweep — narrow scan to
@@ -2205,6 +2271,12 @@ INDEXES = [
     # platform-minted `id` (uuid) is the global handle; `request_id` carries the
     # agent's string, so two agents can reuse the same id without collision.
     "CREATE UNIQUE INDEX IF NOT EXISTS idx_operator_queue_agent_request ON operator_queue(agent_name, request_id)",
+    # trinity-enterprise#751 — the gate's caps count pending rows per executor
+    # and per requester; the sweep reads by state.
+    "CREATE INDEX IF NOT EXISTS idx_skill_gate_requests_agent_state ON skill_gate_requests(agent_name, state)",
+    "CREATE INDEX IF NOT EXISTS idx_skill_gate_requests_requester ON skill_gate_requests(agent_name, requester_key, state)",
+    # The reconcile sweep reads by state across agents, every poll cycle.
+    "CREATE INDEX IF NOT EXISTS idx_skill_gate_requests_state ON skill_gate_requests(state, decided_at)",
 
     # Nevermined payment indexes (NVM-001)
     "CREATE INDEX IF NOT EXISTS idx_nvm_config_agent ON nevermined_agent_config(agent_name)",
@@ -2310,6 +2382,11 @@ INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_executions_queued "
     "ON schedule_executions(agent_name, queued_at) "
     "WHERE status = 'queued'",
+    # #2843: one turn per conversation at a time. The pull claim relies on the
+    # IntegrityError this raises when two workers claim one conversation at once.
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_executions_one_running_turn "
+    "ON schedule_executions(agent_name, conversation_key) "
+    "WHERE status = 'running' AND conversation_key IS NOT NULL",
     "CREATE INDEX IF NOT EXISTS idx_executions_pending_retry "
     "ON schedule_executions(retry_scheduled_at) "
     "WHERE retry_scheduled_at IS NOT NULL AND status = 'pending_retry'",

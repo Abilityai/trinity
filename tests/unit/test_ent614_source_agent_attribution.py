@@ -50,6 +50,19 @@ if str(_BACKEND) not in sys.path:
 pytestmark = pytest.mark.unit
 
 
+@pytest.fixture(autouse=True)
+def _grant_still_held(monkeypatch):
+    """trinity-enterprise#739: delivery re-reads the subscriber -> source edge.
+    These subscriptions are stubs without one; this file is about what a
+    delivery carries, not whether it is permitted
+    (test_ent739_grant_withdrawal.py covers that), so the grant is held."""
+    try:
+        from services import event_dispatch_service as _eds
+    except ImportError:
+        return
+    monkeypatch.setattr(_eds, "_subscription_still_permitted", lambda sub: True)
+
+
 def _p(**over):
     """A principal shaped like ``models.User`` (every attribute present, nothing invented)."""
     base = dict(
@@ -582,7 +595,7 @@ def _admin_row():
 def _resolve_principal(token, *, method="POST", path="/api/agents/orch/task"):
     import dependencies as dep
 
-    req = SimpleNamespace(method=method, url=SimpleNamespace(path=path))
+    req = SimpleNamespace(method=method, scope={"path": path})
     with patch.object(dep, "db") as db:
         db.get_user_by_username.return_value = _admin_row()
         return asyncio.run(dep.get_current_user(req, token))

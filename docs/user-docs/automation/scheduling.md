@@ -140,6 +140,41 @@ has to retry internally.
 **Rateable.** The delivered message is an ordinary reply from the agent, so the
 person can rate it like any other — see [Workspace](../sharing-and-access/workspace.md#reading-replies).
 
+### The run remembers the person
+
+A run of a schedule that names a person runs as that person's seat. Before it
+starts, the agent receives that person's per-person memory — the same notes it
+sees in a chat with them — and it can write them back with `write_user_memory`,
+passing the run's `execution_id`. So a morning brief can carry open loops and
+commitments forward to the next one. This holds for a cron fire, **Run now**, and
+a webhook fire alike: the run serves the named person, not whoever pressed the
+button. A scheduled run that names no one still cannot write anyone's memory.
+
+`write_user_memory` replaces the whole notes blob, so the agent must write the
+complete updated notes, not just the new part. Every write is recorded, and the
+person can see what the agent changed and undo the latest write in their
+Workspace. Another agent cannot write through this agent's run.
+
+### Held until a companion is marked ready
+
+An agent whose template declares a role is a **companion**. While its owner has
+not marked it ready, its cron-fired Workspace brief is **held**: the run is
+recorded as a `skipped` execution with the reason (*"… is a calibrating companion —
+its proactive brief runs once its owner marks it ready"*) and the next run time
+advances. A held brief is never a failure, never retried and never alerted. The
+owner flips the companion between **calibrating** and **ready** on its **Role**
+card in the Workspace agent details; only the owner's mark counts, not what the
+agent writes about itself.
+
+- The hold applies only to cron fires of a schedule with a Workspace recipient.
+  **Run now**, webhook fires and schedules without a recipient always fire.
+- Agents that declare no role are never held.
+- When the readiness cannot be read (the backend, Docker or the template is
+  unreachable), the brief fires and the reason is logged.
+- On upgrade, every agent whose brief was already firing was marked ready, so no
+  existing brief stops. The role card shows that mark as *carried over*.
+- `READINESS_CHECK_TIMEOUT` in `.env` bounds the scheduler's check.
+
 ## Per-Schedule Analytics
 
 Each schedule has an analytics view summarizing how it has been performing over a selectable time window.
@@ -222,13 +257,15 @@ It is off by default, and the schedule form in the UI has no field for it. Set i
 | Field | Default | Range | Description |
 |-------|---------|-------|-------------|
 | `validation_enabled` | `false` | — | Run the validation pass after each successful run |
-| `validation_prompt` | built-in auditor prompt | — | Your own auditor instructions |
+| `validation_prompt` | built-in auditor prompt | — | Your own auditor instructions. The run's task and response are attached automatically; to place them yourself, write a full template with `{original_message}` and `{execution_response}` |
 | `validation_timeout_seconds` | 120 | 30-600 | Timeout for the validation execution. The API clamps a value outside the range; the MCP tools refuse it |
 
 What to expect:
 
 - **It costs a run.** The validation pass is a real execution. It goes through the agent's normal capacity and appears in the execution list with trigger `validation`.
 - **The verdict is recorded on the original run.** Its `business_status` becomes `validated` on a pass, or `failed_validation` on a fail or partial. A successful run on a schedule with validation off is marked `skipped`.
+- **A run with nothing to inspect is not judged.** If the run's response is empty, no validation pass runs and `business_status` becomes `validation_unavailable`. That raises no alert and never counts as a pass.
+- **Long responses keep their ending.** The validator sees up to 16,000 characters of the response; beyond that it sees the beginning and the last 12,000 characters, so a closing status line is always included.
 - **A failed verdict raises one high-priority alert**, titled **Validation Failed**, in the Operations queue. It carries the verdict summary and the individual checks.
 - **It does not retry.** Retries only follow a technical failure, and validation only runs after a technical success.
 
@@ -288,6 +325,7 @@ Raise the agent cap first, then raise the schedule timeout.
 - Retries count against the agent's parallel capacity slots.
 - Pre-check hooks run with the same permissions as the agent's normal tool calls (`developer` user inside the container).
 - A template may declare at most 20 schedules. Beyond that the list is truncated, with the reason reported.
+- A companion's brief stays held until its owner marks it ready. An agent that removes its own role declaration before its owner has marked it takes itself out of the hold.
 - If the agent has **freeze schedules if sync failing** enabled and its git sync has failed three times in a row, the scheduler skips firing until sync recovers.
 
 ## See Also

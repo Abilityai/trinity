@@ -8,7 +8,7 @@ from typing import Optional, List, Dict
 from sqlalchemy import select, insert, update, and_, func, or_
 
 from ..engine import get_engine
-from ..query_helpers import latest_per_group
+from ..query_helpers import latest_per_group, viewer_scope
 from ..tables import (
     schedule_executions,
 )
@@ -116,6 +116,8 @@ class ScheduleExecutionsMixin:
         message: str,
         triggered_by: str = "manual",
         fields: Optional[TaskExecutionFields] = None,
+        *,
+        execution_id: Optional[str] = None,
     ) -> Optional[ScheduleExecution]:
         """Create a new execution record for a manual/API-triggered task (no schedule).
 
@@ -148,7 +150,10 @@ class ScheduleExecutionsMixin:
                 (read as 0) on every root.
         """
         f = asdict(fields or TaskExecutionFields())
-        execution_id = self._generate_id()
+        # trinity-enterprise#751: a caller may pass the id it already wrote
+        # elsewhere — the skill gate claims its approved run under an id before
+        # the row exists, so a crash in between is detectable, not lost.
+        execution_id = execution_id or self._generate_id()
         now = utc_now_iso()
 
         with get_engine().begin() as conn:
@@ -592,8 +597,15 @@ class ScheduleExecutionsMixin:
         limit: int = 50,
         *,
         exclude_triggers: Optional[frozenset] = None,
+        scope_to_viewer: bool = False,
+        viewer_email: Optional[str] = None,
     ) -> List[Dict]:
         """Get execution summaries for list view - excludes large text fields.
+
+        `scope_to_viewer` (#3139) keeps only what a Workspace client can account
+        for — `query_helpers.viewer_scope(viewer_email)` — and, like
+        `exclude_triggers`, applies BEFORE the LIMIT, so another person's busy
+        day cannot push the viewer's own turns off their list.
 
         `exclude_triggers` (#2423 review) filters BEFORE the LIMIT, which is the
         whole point of it living here rather than in the caller. A caller that
@@ -655,6 +667,8 @@ class ScheduleExecutionsMixin:
                 schedule_executions.c.triggered_by.is_(None),
                 schedule_executions.c.triggered_by.notin_(sorted(exclude_triggers)),
             ))
+        if scope_to_viewer:
+            stmt = stmt.where(viewer_scope(schedule_executions, viewer_email))
         with get_engine().connect() as conn:
             rows = []
             for row in conn.execute(stmt).mappings():

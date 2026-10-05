@@ -76,6 +76,12 @@ services:
       # gap here cannot make the feature unreachable — but the env leg still has to
       # be forwarded or an operator setting it in .env silently does nothing.
       - A2A_OUTBOUND_ENABLED=${A2A_OUTBOUND_ENABLED:-false}
+      # Nevermined x402 facilitator concurrency (ent#679). The bound is enforced at
+      # these defaults whether or not they are wired, so a gap here is an inert
+      # tuning lever rather than a dead feature — but this service uses an explicit
+      # environment list, so forward them or the .env knobs do nothing (#1056 class).
+      - NEVERMINED_MAX_INFLIGHT=${NEVERMINED_MAX_INFLIGHT:-8}  # concurrent verify/settle calls, fleet-wide
+      - NEVERMINED_FACILITATOR_WAIT_SECONDS=${NEVERMINED_FACILITATOR_WAIT_SECONDS:-5.0}  # wait for a slot before "busy, retry"
       # Outbound voice replies via shared TTS (epic #24; Telegram #25). The key
       # gates the feature (empty ⇒ adapters deliver text). Must reach the
       # container or the .env lever is inert (the #1056/#1039 packaging class).
@@ -100,10 +106,16 @@ services:
       - REPORT_RATE_LIMIT=${REPORT_RATE_LIMIT:-30}               # reports per agent per 60s
       # trinity-enterprise#478 — metric write path. The two policy values are a
       # bootstrap fallback; a Settings row wins over them.
+      # The three ENV-BACKED ops keys below (METRICS_RETENTION_DAYS,
+      # METRICS_DAILY_POINT_CAP, INTER_AGENT_MAX_CHAIN_DEPTH) are forwarded with
+      # an EMPTY default (ent#671): an unset variable must reach the container
+      # unset, or GET /api/settings/retention reports `source: env` for a value
+      # nobody chose and the Settings rows lock read-only. The code default is
+      # the fallback. Pinned by tests/unit/test_ent671_env_backed_ops_forwarding.py.
       - METRICS_RATE_LIMIT=${METRICS_RATE_LIMIT:-60}             # record_metrics calls per agent per 60s
-      - METRICS_RETENTION_DAYS=${METRICS_RETENTION_DAYS:-365}    # recorded point retention (0 = forever)
-      - METRICS_DAILY_POINT_CAP=${METRICS_DAILY_POINT_CAP:-100000}  # points per agent per UTC day (0 = unlimited)
-      - INTER_AGENT_MAX_CHAIN_DEPTH=${INTER_AGENT_MAX_CHAIN_DEPTH:-8}  # max agent-to-agent hops per call chain (#2806)
+      - METRICS_RETENTION_DAYS=${METRICS_RETENTION_DAYS:-}    # recorded point retention (0 = forever)
+      - METRICS_DAILY_POINT_CAP=${METRICS_DAILY_POINT_CAP:-}  # points per agent per UTC day (0 = unlimited)
+      - INTER_AGENT_MAX_CHAIN_DEPTH=${INTER_AGENT_MAX_CHAIN_DEPTH:-}  # max agent-to-agent hops per call chain (#2806)
       - METRICS_READ_RATE_LIMIT=${METRICS_READ_RATE_LIMIT:-240}   # GET /metrics reads per agent per 60s (tiles, dashboard binds, get_metrics)
       - OBJECTIVES_READ_RATE_LIMIT=${OBJECTIVES_READ_RATE_LIMIT:-60}  # GET /objectives reads per agent per 60s (fans out into the agent container)
       # Agent canvases (ent#438/ent#553) — per-agent ceiling on the canvas pile.

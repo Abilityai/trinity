@@ -607,15 +607,13 @@ if [ "${AGENT_RUNTIME}" = "codex" ]; then
 fi
 
 # Ensure core agent-server dependencies are installed correctly
-# This prevents template repos from breaking the agent server with incompatible packages
+# This prevents template repos from breaking the agent server with incompatible packages.
+# #3106: floors for the server's own packages, never `--upgrade` — an unpinned
+# upgrade here took whatever PyPI published last on every boot, and FastAPI
+# 0.142 then stopped every OTEL-enabled agent's server from starting. Installs
+# what is missing or too old; leaves a newer version a template brought alone.
 echo "Verifying agent-server dependencies..."
-python3 -m pip install --user --quiet --upgrade \
-    fastapi \
-    uvicorn \
-    httpx \
-    pydantic \
-    python-multipart \
-    pyyaml
+python3 -m pip install --user --quiet -r /opt/trinity/agent-server-requirements.txt
 
 # Start SSH if enabled
 if [ "${ENABLE_SSH}" = "true" ]; then

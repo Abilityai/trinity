@@ -1,0 +1,58 @@
+{
+  "version": "1.1",
+  "date": "2026-09-29",
+  "mode": "daily",
+  "scope": "diff",
+  "confidence_gate": 8,
+  "branch": "feature/2392-inject-execution-id",
+  "issue": "abilityai/trinity#2392",
+  "phases_run": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    9,
+    12,
+    13,
+    14
+  ],
+  "attack_surface": {
+    "new_endpoints": 0,
+    "new_headers": [
+      "X-Trinity-Execution-Id (MCP server inbound)"
+    ],
+    "validator_shapes_added": 1,
+    "new_error_paths": [
+      "422 effect_unguarded"
+    ],
+    "new_alert_types": [
+      "effect_unguarded"
+    ]
+  },
+  "findings": [],
+  "fixed_during_audit": [],
+  "appendix": [
+    "agent-typed execution_id 'manual' bypasses refusal (hostile-agent class, accepted)",
+    "Codex terminal / user-scoped key on pull agent refused (fail-closed, documented)"
+  ],
+  "supply_chain_summary": "no dependency changes",
+  "filter_stats": {
+    "candidates": 2,
+    "below_gate": 2,
+    "reported": 0
+  },
+  "totals": {
+    "critical": 0,
+    "high": 0,
+    "medium": 0,
+    "low": 0
+  },
+  "mutations": [
+    "effect_dedup_required -> False: 5 refusal tests red"
+  ],
+  "trend": "n/a (diff mode)"
+}

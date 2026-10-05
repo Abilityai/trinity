@@ -302,6 +302,19 @@ PORTAL_SESSION_SCOPE = "portal_session"
 EVENT_LOOPBACK_SCOPE = "event_loopback"
 EVENT_LOOPBACK_ROUTE = re.compile(r"^/api/agents/[^/]+/task$")
 
+
+def _loopback_chain_depth(payload: dict) -> Optional[int]:
+    """The loopback's signed ``chain_depth`` claim (#2973), or None.
+
+    A non-int or non-positive value reads as absent rather than failing the
+    dispatch; only the backend mints this token, so that is a bug, not an attack.
+    """
+    value = payload.get("chain_depth")
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        return None
+    return value
+
+
 # RETIRED as a lifetime (ent#375). The session now slides: `_portal_session_policy()`
 # supplies an idle window and an absolute cap, and every consumer reads those.
 #
@@ -649,10 +662,13 @@ async def get_current_user(request: Request, token: str = Depends(oauth2_scheme)
         # ONLY `POST /api/agents/{subscriber}/task`. Fenced here at the auth
         # entry point (the connector / portal_delegate pattern below) so a
         # leaked loopback bearer is not a five-minute admin session.
+        # #3102 — every fence here reads scope["path"], the path the router
+        # dispatched. request.url is rebuilt from the Host header, so a Host
+        # carrying "/" or "?" makes request.url.path name a different route.
         loopback = payload.get("scope") == EVENT_LOOPBACK_SCOPE
         if loopback and (
             request.method.upper() != "POST"
-            or not EVENT_LOOPBACK_ROUTE.match(request.url.path)
+            or not EVENT_LOOPBACK_ROUTE.match(request.scope["path"])
         ):
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
@@ -682,6 +698,10 @@ async def get_current_user(request: Request, token: str = Depends(oauth2_scheme)
             # ent#614: only a loopback token carries this, and only when the
             # backend derived the source from an agent-originated event.
             vouched_source_agent=(payload.get("source_agent") or None) if loopback else None,
+            # #2973: SECRET_KEY-signed, so only the backend could have set it.
+            loopback_chain_depth=_loopback_chain_depth(payload) if loopback else None,
+            # trinity-enterprise#751: never a person, whatever the token resolves to.
+            is_event_loopback=bool(loopback),
         )
     except JWTError:
         # JWT failed, try MCP API key
@@ -713,7 +733,7 @@ async def get_current_user(request: Request, token: str = Depends(oauth2_scheme)
             # reach anything else, including the portal endpoints themselves.
             portal_delegate = scope == PORTAL_DELEGATE_SCOPE
             if portal_delegate and (
-                (request.method.upper(), request.url.path) not in PORTAL_DELEGATE_ALLOWED_ROUTES
+                (request.method.upper(), request.scope["path"]) not in PORTAL_DELEGATE_ALLOWED_ROUTES
             ):
                 raise HTTPException(
                     status_code=status.HTTP_403_FORBIDDEN,
@@ -734,7 +754,7 @@ async def get_current_user(request: Request, token: str = Depends(oauth2_scheme)
                     ("POST", f"/api/agents/{connector_agent}/chat"),
                     ("GET", f"/api/agents/{connector_agent}/connector/playbooks"),
                 }
-                if (request.method.upper(), request.url.path) not in allowed:
+                if (request.method.upper(), request.scope["path"]) not in allowed:
                     raise HTTPException(
                         status_code=status.HTTP_403_FORBIDDEN,
                         detail="Connector keys may only chat their bound agent and list its playbooks",
@@ -826,6 +846,40 @@ async def get_optional_user(
         return None
 
 
+async def get_user_or_anonymous(
+    request: Request, token: str = Depends(oauth2_scheme_optional)
+) -> Optional[User]:
+    """The current user, or None when no Trinity credential was recognised.
+
+    abilityai/trinity-enterprise#679. The sibling of :func:`get_optional_user`
+    for a route that must serve a caller holding a credential of a DIFFERENT
+    kind — the A2A inbound door, where an x402 payment token arrives in
+    `Authorization: Bearer` and is not a Trinity credential at all. Same
+    delegate-never-reimplement rule: `get_current_user` stays the only place
+    that decides what a Trinity credential means.
+
+    The difference from `get_optional_user` is the one that matters: **only a
+    401 degrades to None.** A 403 is RE-RAISED, so a credential that WAS
+    recognised and then fenced — a connector key outside its scope, an
+    ephemeral agent key off its allow-list — keeps its refusal instead of
+    silently becoming an anonymous caller who may pay its way in. Collapsing
+    403 into None here would turn every containment fence in `get_current_user`
+    into a downgrade to the payment path.
+
+    Like `get_optional_user`, this is only safe on a route that makes its own
+    authorization decision for the `None` case. `routers/a2a.py::a2a_jsonrpc`
+    answers today's 401 bytes unless the agent is both A2A-exposed and priced.
+    """
+    if not token:
+        return None
+    try:
+        return await get_current_user(request, token)
+    except HTTPException as exc:
+        if exc.status_code == status.HTTP_401_UNAUTHORIZED:
+            return None
+        raise
+
+
 def _enforce_ephemeral_key_fence(request: Request, agent_name: str) -> None:
     """Containment fence for ephemeral agents' own keys (trinity-enterprise#69).
 
@@ -842,7 +896,7 @@ def _enforce_ephemeral_key_fence(request: Request, agent_name: str) -> None:
     if not isinstance(info, dict) or not info.get("is_ephemeral"):
         return
     method = request.method.upper()
-    path = request.url.path
+    path = request.scope["path"]
     for allowed_method, pattern in _EPHEMERAL_ALLOWED_ROUTES:
         if method != allowed_method:
             continue
@@ -1020,7 +1074,7 @@ def _enforce_ops_key_fence(request: Request) -> None:
     membership a settings lookup.
     """
     method = request.method.upper()
-    path = request.url.path
+    path = request.scope["path"]
     for allowed_method, pattern in _OPS_ALLOWED_ROUTES:
         if method == allowed_method and pattern.fullmatch(path):
             return
@@ -1129,6 +1183,9 @@ def is_person_principal(current_user: User) -> bool:
         getattr(current_user, "agent_name", None)
         or getattr(current_user, "connector_agent", None)
         or getattr(current_user, "portal_delegate", False)
+        # trinity-enterprise#751: the EVT-001 loopback resolves to the admin
+        # with no scope — a backend-minted machine token, never a person.
+        or getattr(current_user, "is_event_loopback", False) is True
     )
 
 
@@ -1817,7 +1874,7 @@ async def enforce_agent_capability(
             actor_ip=request.client.host if request.client else None,
             target_type="agent",
             target_id=target,
-            endpoint=str(request.url.path),
+            endpoint=request.scope["path"],
             request_id=getattr(request.state, "request_id", None),
             details={"capability": capability, "code": code, "method": request.method},
         )

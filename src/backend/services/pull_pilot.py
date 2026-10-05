@@ -48,6 +48,25 @@ def is_pull_pilot_agent(agent_name: str) -> bool:
     return agent_name in _pilot_allowlist()
 
 
+def pull_queue_allowance(agent_name: str) -> int:
+    """Seconds a turn may wait on the durable queue before a worker claims it
+    (#3114): the agent's execution timeout on a pull pilot, 0 elsewhere.
+
+    Sync callers wait up to this long for a claim, and the Redis locks that
+    span a turn (Session ResumeLock, portal in-flight markers) add it to their
+    TTL so a turn still waiting for a worker keeps its lock. Fail-safe → 0.
+    """
+    if not is_pull_pilot_agent(agent_name):
+        return 0
+    try:
+        # Lazy: this module stays stdlib-only at import time.
+        from database import db
+
+        return max(int(db.get_execution_timeout(agent_name)), 0)
+    except Exception:  # noqa: BLE001 — a config read must not break a turn
+        return 0
+
+
 # Which autonomous triggers can STRUCTURALLY reach the durable queue
 # (#2048 named the set; #2391 widened it).
 #
@@ -98,9 +117,8 @@ def is_pull_pilot_agent(agent_name: str) -> bool:
 # the cron fire (``_execute_retry`` → ``_call_backend_execute_task``), so it is
 # exactly as pullable as the run it retries. Without it a pilot's scheduled run
 # was pulled and its retry pushed — the second attempt, which exists because the
-# first failed, ran on the path with no lease and no reaper recovery. A retry of
-# a MANUAL run still changes system (push → pull) until interactive triggers are
-# pullable (#1989); that direction lands on the durable path, not off it.
+# first failed, ran on the path with no lease and no reaper recovery. A manual
+# run is itself pulled on a pilot (#3114), so its retry stays on the same path.
 #
 # **The set is currently equal to ``_AUTONOMOUS_TRIGGERS``, and it stays an
 # explicit allow-list anyway.** That is the point of it: a trigger added to the
@@ -115,6 +133,44 @@ PULL_REACHABLE_TRIGGERS = frozenset(
     {"agent", "event", "schedule", "webhook", "reminder", "loop", "fan_out",
      "a2a", "operator_response", "operator_ending", "retry"}
 )
+
+
+# Triggers with a CALLER waiting in-line on the reply. A pull worker claims
+# these ahead of every other queued row (#2842). ⚠️ Adding a human-facing
+# trigger? Add it here, or its turns queue behind batch work.
+#
+# ``a2a`` is here as of abilityai/trinity-enterprise#679 (T6), and it is the one
+# member that is ALSO in ``_AUTONOMOUS_TRIGGERS`` — deliberately, because the
+# two sets answer different questions and an inbound A2A task answers them
+# differently:
+#
+# * "is a caller blocked on this reply?" — YES. The JSON-RPC request is held
+#   open for the whole turn (``dispatch_and_await_terminal``), on the principal
+#   path and the paid path alike. That is what earns the claim priority and the
+#   claim budget (``_CLAIM_WAITING_TRIGGERS``), so a remote caller's turn is not
+#   queued behind an agent's batch work until its RPC times out.
+# * "is a PERSON on this install reading the reply?" — NO. It goes back over
+#   the wire as a Task artifact, which is why ``_AUTONOMOUS_TRIGGERS`` keeps it
+#   (an unresolved skill alerts the operator rather than relying on a human
+#   seeing the error text).
+#
+# The membership overlap is therefore the honest encoding, not a mistake; the
+# disjointness guard in test_2842_2843_pull_claim_order.py is narrowed to this
+# one documented member so a THIRD overlap still fails.
+INTERACTIVE_TRIGGERS = frozenset(
+    {"manual", "mcp", "chat", "session", "public", "voice", "voip", "room",
+     "user", "paid", "a2a", "slack", "telegram", "whatsapp"}
+)
+
+
+# Non-autonomous triggers a pull pilot takes ONLY from the durable queue (#3114):
+# every interactive trigger except ``chat``, plus ``validation``. Their sync
+# callers go through ``task_execution_service.dispatch_and_await_terminal``,
+# which waits for a worker to claim the row (bounded by one agent timeout) and
+# then for its terminal. ``chat`` is the UI ``/chat`` path
+# (``dispatch_admission_service`` → ``chat_execution_service.run_chat_turn``),
+# which still pushes; it is routed in a later change.
+PULL_REACHABLE_NON_AUTONOMOUS = (INTERACTIVE_TRIGGERS - {"chat"}) | {"validation"}
 
 
 def pull_owns_dispatch(agent_name: str, triggered_by: Optional[str]) -> bool:
@@ -132,17 +188,12 @@ def pull_owns_dispatch(agent_name: str, triggered_by: Optional[str]) -> bool:
     S-02, which counts ``ZCARD`` only. Making the pilot flag a true either/or
     restores one capacity owner per agent.
 
-    **Interactive turns are excluded — temporarily.** Only the autonomous
-    trigger set queues; a human chat / Session-tab turn keeps today's synchronous
-    push path and today's Redis session lock. ``TARGET_ARCHITECTURE.md`` Open
-    Question 7 is decided the other way (#1989): the queue carries ALL traffic,
-    interactive included, and the push path is deleted afterwards. The exclusion
-    is a migration state, not a design boundary, and it stays load-bearing until
-    two pieces land: interactive turns claimed ahead of autonomous ones (#2842) —
-    otherwise one FIFO ordered by ``queued_at`` parks a human turn behind N batch
-    tasks — and one turn per conversation at a time (#2843) — otherwise N
-    competing workers can claim two turns of one session concurrently, the
-    concurrent ``--resume`` on one JSONL the session lock exists to prevent.
+    **Interactive turns are pulled too (#3114),** except the UI ``/chat`` path
+    (trigger ``chat``). ``PULL_REACHABLE_NON_AUTONOMOUS`` lists them. The claim
+    orders them ahead of batch work (#2842, ``INTERACTIVE_TRIGGERS``) and runs
+    one turn per conversation at a time (#2843, ``conversation_key``). Session
+    tab and portal turns keep their Redis locks as well; the lock TTLs carry
+    ``pull_queue_allowance`` so a turn still waiting for a claim keeps its lock.
 
     Fail-safe: any error resolving the trigger set returns ``False``, i.e. the
     unchanged push behaviour. The dangerous direction would be silently claiming
@@ -162,6 +213,8 @@ def pull_owns_dispatch(agent_name: str, triggered_by: Optional[str]) -> bool:
         # instead of ``"reject"``, so a False here is the exact condition under
         # which scheduled capacity semantics stay byte-for-byte as they were.
         # See ``PULL_REACHABLE_TRIGGERS`` for why each trigger is in or out.
+        if triggered_by in PULL_REACHABLE_NON_AUTONOMOUS:
+            return True
         return triggered_by in (_AUTONOMOUS_TRIGGERS & PULL_REACHABLE_TRIGGERS)
     except Exception:  # noqa: BLE001 — unresolvable trigger set ⇒ push, as today
         logger.warning(

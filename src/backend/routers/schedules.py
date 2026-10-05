@@ -37,6 +37,7 @@ from dependencies import (
     resolve_source_agent,
 )
 from database import db, Schedule, ScheduleCreate, ScheduleExecution
+from services import dispatch_admission_service
 from services.platform_audit_service import platform_audit_service, AuditEventType
 from services.schedule_validation import (
     ScheduleValidationError,
@@ -119,7 +120,8 @@ def _enforce_timeout_below_agent_cap(agent_name: str, requested_seconds: int) ->
                 "message": (
                     f"Schedule timeout {requested_seconds}s exceeds agent "
                     f"execution_timeout_seconds {cap}s. Raise the agent cap "
-                    f"first via PUT /api/agents/{agent_name}/timeout."
+                    f"first: the agent's owner sets it via PUT /api/agents/{agent_name}/timeout "
+                    "(an agent key cannot)."
                 ),
                 "agent_cap_seconds": cap,
                 "requested_seconds": requested_seconds,
@@ -560,7 +562,17 @@ async def trigger_schedule(
     )
     _source_agent = current_user.agent_name or _resolved_source
 
+    # #2973: inherit the caller's chain depth; refuse past the max (named 403,
+    # main.py) before the try below could turn it into a 500.
+    chain_depth = await dispatch_admission_service.enforce_inter_agent_depth(
+        current_user=current_user,
+        target=name,
+        endpoint=f"/api/agents/{name}/schedules/{schedule_id}/trigger",
+        x_via_mcp=None,
+    )
+
     source_payload = {
+        "chain_depth": chain_depth,
         "source_user_id": current_user.id,
         "source_user_email": current_user.email,
         "source_agent_name": _source_agent,

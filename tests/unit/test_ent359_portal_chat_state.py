@@ -50,11 +50,15 @@ def chat_db(tmp_path, monkeypatch):
     from db.engine import get_engine
     from db.tables import (
         metadata as oss_metadata,
+        agent_reports,
         enterprise_portal_chat_state,
         enterprise_portal_messages,
         enterprise_portal_sessions,
     )
+    # ent#610: the unread count reads `agent_reports` too (addressed
+    # deliverables are arrivals), so the fixture carries it.
     oss_metadata.create_all(get_engine(), tables=[
+        agent_reports,
         enterprise_portal_chat_state,
         enterprise_portal_messages,
         enterprise_portal_sessions,
