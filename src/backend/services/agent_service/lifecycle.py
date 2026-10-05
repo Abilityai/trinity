@@ -654,6 +654,22 @@ async def start_agent_internal(agent_name: str) -> dict:
             e,
         )
 
+    # trinity-enterprise#752: the skill-gate marker tells the in-container hook
+    # to refuse skills while the platform cannot be reached — only on an agent
+    # that has gates. It lives on the writable layer, so a fresh container has
+    # none. Fire-and-forget like the spawns above, and for gated agents only:
+    # the common agent with no gates costs no exec.
+    try:
+        from services import skill_gate_service
+        skill_gate_service.spawn_gate_marker_sync(agent_name)
+    except Exception as e:
+        logger.warning(
+            "[ent#752] failed to spawn the skill-gate marker sync for %s on "
+            "start: %s",
+            agent_name,
+            e,
+        )
+
     return {
         "message": f"Agent {agent_name} started",
         "credentials_injection": credentials_status,
@@ -1290,6 +1306,19 @@ async def recreate_container_with_updated_config(
         # helper — that one also serves agent creation, where "the original was
         # stopped" is meaningless and stopping the result would be wrong.
         await _restore_stopped_state(agent_name, new_container, preserve_run_state, was_running)
+        # trinity-enterprise#752: the replacement has no skill-gate marker (it
+        # lived on the old writable layer). Re-sync it for a gated agent; a
+        # container left stopped just fails the exec, and its next start syncs.
+        try:
+            from services import skill_gate_service
+            skill_gate_service.spawn_gate_marker_sync(agent_name)
+        except Exception as e:
+            logger.warning(
+                "[ent#752] failed to spawn the skill-gate marker sync for %s on "
+                "recreate: %s",
+                agent_name,
+                e,
+            )
         return new_container
     except docker.errors.APIError as e:
         # #1809: 409 name-conflict — a concurrent start won the recreate race

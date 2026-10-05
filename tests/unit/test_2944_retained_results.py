@@ -246,7 +246,7 @@ def _drive_chat(rt, *, execution_id="exec-chat-1"):
         session_total_output_tokens=0, session_context_tokens=0, session_context_window=200000,
     )
     request = SimpleNamespace(message="hello", model=None, stream=False, system_prompt=None,
-                              execution_id=execution_id)
+                              execution_id=execution_id, isolated_session=False)
     with (
         patch.object(chat_mod, "get_execution_lock", return_value=_Lock()),
         patch.object(chat_mod, "get_runtime", return_value=rt),

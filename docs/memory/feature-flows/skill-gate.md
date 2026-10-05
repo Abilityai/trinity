@@ -6,6 +6,8 @@ A person marks a skill on an agent "requires approval by role X". When a request
 
 The per-agent gate map is stored by trinity-enterprise#753. Until it lands, `skill_gate_service.list_skill_gates` returns nothing and the gate is inert.
 
+The dispatch-time check reads what a requester typed. A request that names a skill only in prose ("please pay the invoice") reaches the executor, and the agent's own `Skill` call would load the skill. On Claude Code agents, an **in-container hook** (trinity-enterprise#752, §5 below) asks the platform before the skill loads into a run: it is refused unless that run was approved for it, or self-approved by its approver.
+
 Requirement: `requirements/security.md` §26.13 (OPS-001-GATE).
 
 ## User Story
@@ -19,6 +21,7 @@ As the owner of a finance agent, I want "pay an invoice" to run only after the p
 - **The Workspace (the agent page's main chat)**: `client_portal/router.py::portal_chat` and `portal_chat_stream` → `client_portal/service.py::portal_chat`. The route passes `PortalPrincipal.is_person` through as `gate_is_person`.
 - **Every other producer**: the backstop at step 1b of `TaskExecutionService.execute_task` (`src/backend/services/task_execution_service.py:1887`). This covers the scheduler, loops, fan-out, channels, rooms, sessions, A2A, public links, paid calls, operator resumes, validation and voice post-processing.
 - **Voice tool**: `gemini_voice._execute_tool` (`src/backend/services/gemini_voice.py:1483`) reaches the agent without `execute_task`, so it refuses a gated skill instead of raising an approval.
+- **Inside the agent (trinity-enterprise#752)**: Claude Code's PreToolUse hook `docker/base-image/hooks/skill-gate.py` → `POST /api/skill-gate/check` (`src/backend/routers/skill_gate.py`) → `skill_gate_service.check_invocation`, on every `Skill` call and every `Agent`/`Task` call whose subagent preloads skills.
 
 ## Frontend Layer
 
@@ -77,7 +80,7 @@ request → entry point
 | Fan-out | each subtask's message + the batch's `system_prompt` |
 | Loops | no `request_text`, so the rendered iteration is read (what an approval would run) |
 
-On `/task`, `message` is caller-supplied and may carry history, so an invocation quoted there is held: the gate cannot tell a quote from a request. Where the platform composes the history itself (the Workspace, channels, rooms, public links), only the new words are read. A held request replayed in a later cold turn's history therefore reaches the agent as text. That is the prose lane (trinity-enterprise#752) and is a stated limit, because scanning that history would re-hold every later turn of the thread.
+On `/task`, `message` is caller-supplied and may carry history, so an invocation quoted there is held: the gate cannot tell a quote from a request. Where the platform composes the history itself (the Workspace, channels, rooms, public links), only the new words are read. A held request replayed in a later cold turn's history therefore reaches the agent as text; scanning that history would re-hold every later turn of the thread. On Claude Code, if the agent acts on it, the in-container hook (§5) refuses the skill. On Codex and Gemini it is a stated limit.
 
 **Who asked.**
 - `/chat` and `/task` build the requester from the authenticated principal (`requester_from_principal`, `:570`).
@@ -89,6 +92,13 @@ On `/task`, `message` is caller-supplied and may carry history, so an invocation
 - the Workspace caller its route verified: `PortalPrincipal.is_person` → `portal_chat(gate_is_person=…)` → `execute_task(gate_requester=…)`.
 
 The backstop never self-approves otherwise. Voice relays a model's paraphrase and stays unproven. Nothing is dispatched on a read that failed.
+
+**A self-approval is recorded where it happens** (trinity-enterprise#752). `record_self_approval` writes a `self_approved` row in `skill_gate_requests`, keyed `gate-self-<sha(agent, run)>`, whose `dispatched_execution_id` is the execution the agent receives, and then #751's audit row. It is the only caller of `audit_self_approved`. The three seams:
+- `/task`: after `create_task_execution_and_activities`, on the row it made;
+- `/chat`: in `prepare_chat_execution`, on `task_execution_id` — the id `build_chat_payload` sends. The admission only decides; its decision rides `ChatAdmission.gate`, because the admission's own id is the capacity slot's, which no agent sees;
+- the backstop: on the row `execute_task` created or was given.
+
+A failed write is logged and the run proceeds; the hook then refuses the skill inside it. A self-approved `/chat` turn also runs in its own session (§5).
 
 ### 2. The decision — `may_end` and the observer
 
@@ -127,6 +137,31 @@ sweep (each a compare-and-set, after 5 min):
 - it ends the record's ask as the acting person, but only when that person may end it, and only a person: an agent key carries its owner's email, so under one the ask stays open and inert;
 - it notifies the requester.
 
+### 5. The in-container hook (trinity-enterprise#752, Claude Code only)
+
+```
+claude --print (2.1.281)  PreToolUse Skill | Agent | Task
+  └─ /usr/bin/env -i /usr/local/bin/python3 -I -S /opt/trinity/hooks/skill-gate.py      (exec form, no shell)
+       └─ _skill_gate.main — clears its env; decides in a daemon thread under a 10 s deadline
+            ├─ Skill → tool_input.skill (trim, strip one /)       ─┐ names: invoked, its last `:` segment, and every
+            ├─ Agent/Task → the subagent definition's `skills:`  ─┘ name each matching skill dir answers to
+            │     (no subagent_type = general-purpose; CLAUDE_CONFIG_DIR from the claude env adds its dirs)
+            │     no definition (a built-in) / nothing preloaded → exit 0, no call
+            │     a name or front matter it cannot read, that may be the one → resolved: false
+            ├─ run  = TRINITY_EXECUTION_ID from /proc/<parent>/environ   (the claude process's launch env)
+            ├─ key, URL = /proc/1/environ   (the container's; URL defaults to http://backend:8000)
+            └─ POST /api/skill-gate/check  {via, invoked, names, resolved, subagent, execution_id, marker}
+                  one retry on a refused / dropped connection; no proxy, no redirect
+                  200 allowed:true → exit 0 · 200 allowed:false → its message on stderr, exit 2
+                  anything else → /opt/trinity/skill-gates-active present ? exit 2 "could not be checked" : exit 0
+```
+
+- **The check** (`routers/skill_gate.py` → `skill_gate_service.check_invocation`): `get_self_agent` takes the agent from the key (`trinity-system` for the system key) and refuses every other principal with the uniform 403 `agent_identity_required`, then the access 404. `read_gates` comes first: an unreadable map — or a store that returns `None` — is 503 `gate_unavailable`, the only non-200. With no gates the answer is "allowed". An unresolved call on a gated agent is refused ("could not tell"). Otherwise the gate keys are matched, casefolded, against the names. Each hit must be cleared: the gate record whose `dispatched_execution_id` is the run (`dispatching`, `dispatched` or `self_approved`, on this agent), with the run's row this agent's and live (`running`, `queued`, `pending_retry`). Both reads always run, so an unknown, another agent's and a finished run answer identically. A refusal is returned, never raised, and audited `skill_gate_refused` (at most once per run and skill, and 20 per agent, per 10 minutes — the run id is the caller's), with the reason logged: `no_run`, `run_not_live`, `not_cleared` or `could_not_tell`.
+- **The copy** (`hook_refusal_text`) hands the request back (D1). It names the skill and the form to send ("a message that includes /pay-invoice and what they want done"), and no person and no role. A session with no run (web terminal, SSH) gets the "this session is not a Trinity run" variant (D2), and a preload names the subagent.
+- **The marker** (`sync_gate_marker`): a root `docker exec` with a constant argv (`marker_command`). On an agent with gates it writes the file through a temp file at 0444; on one without, it removes it; an unreadable map or a failed or timed-out exec changes nothing. `spawn_gate_marker_sync` runs it fire-and-forget at the tail of `start_agent_internal` and of `recreate_container_with_updated_config` (a recreate drops the writable layer), for gated agents only. It also runs from the check when the hook's reported `marker` disagrees with the map (`rate_limiter`, once per agent per 5 minutes). Ordering contract for gate writers (ent#753): sync before an agent's first gate, remove after its last; syncs of one agent are serialised in a worker.
+- **A self-approved `/chat` turn runs in its own session.** `prepare_chat_execution` sets `ChatExecutionContext.isolated_session`, `run_chat_turn` passes it through, and `build_chat_payload` puts `isolated_session: true` on the agent's `/api/chat` payload. The agent server (`execute_claude_code`) then runs the turn with no `--resume`, keeps no session id, leaves the shared model and session counters alone, and does no cold retry. The next ordinary turn resumes the shared session, without the skill. Workspace threads and the session tab keep their continuity.
+- **Registration**: `/etc/claude-code/managed-settings.d/50-skill-gate.json` (root:root 0444 in a 0755 dir), separate from `managed-settings.json` so a rejected entry voids only itself. It pins `LD_PRELOAD` / `LD_LIBRARY_PATH` / `LD_AUDIT` empty. The build smoke is `RUN … skill-gate.py --self-test`. Agent `/health` reports `skill_gate_hook`.
+
 ### Database Operations
 
 `skill_gate_requests` exists on both tracks: SQLite `skill_gate_requests_table`, and Alembic `0088_skill_gate_requests` on top of `0087_pull_sync`. Columns:
@@ -140,7 +175,7 @@ sweep (each a compare-and-set, after 5 min):
 | State | `state`, `state_detail` |
 | Timestamps | `created_at`, `decided_at`, `dispatched_at`, `notified_at` |
 
-`state` moves `pending → dispatching → dispatched | stale | not_run | unknown`, or `pending → denied | expired | cancelled | refused`. Both agent columns are in `AGENT_REFS` (CASCADE).
+`state` moves `pending → dispatching → dispatched | stale | not_run | unknown`, or `pending → denied | expired | cancelled | refused`. A `self_approved` row (trinity-enterprise#752, no migration — a new value in the same column) is inserted in that state by `record_self_approved_run` and never moves; it is never pending work, so no cap, sweep or ask reads it. Both agent columns are in `AGENT_REFS` (CASCADE).
 
 ## Side Effects
 
@@ -148,8 +183,9 @@ sweep (each a compare-and-set, after 5 min):
   - **Agent requester:** a platform task, trigger `skill_gate` (analytics bucket "Operator queue"), naming the request, the outcome, the originating execution and the run's execution id. It never says which person decided (#715), and it contains no slash.
   - **Person requester, including a Workspace caller:** an Inbox `alert` addressed to them, with a `gate-note-…` id that never counts against the agent's ask budget. It is worded for a person, without the `[Trinity]` marker. A person who decided their own request is not told of that decision (approved, rejected, cancelled). An approval that then could not run (`stale`, `not_run`, `unknown`) is news, and is sent once.
   - **Schedules, channel users, public visitors, paid callers, connectors:** the request id in the immediate answer only.
-- **The approved run's result** goes back to the Workspace thread or the channel conversation it came from (`channel_completion_report._is_approved_gate_run`, `src/backend/services/channel_completion_report.py:683`), because an approved run was never answered inline.
-- **Audit rows:** `skill_gate_outcome` once per decided record (ids only); `skill_gate_self_approved` once per execution the gate let through on the approver's own request.
+- **The approved run's result** goes back to the Workspace thread or the channel conversation it came from (`channel_completion_report._is_approved_gate_run`, `src/backend/services/channel_completion_report.py:683`), because an approved run was never answered inline. Only a `dispatching` or `dispatched` record counts: a `self_approved` one names a run that already answered inline.
+- **Audit rows:** `skill_gate_outcome` once per decided record (ids only); `skill_gate_self_approved` once per execution the gate let through on the approver's own request; `skill_gate_refused` when the in-container hook is refused (at most once per run and skill, and 20 per agent, per 10 minutes).
+- **The marker** in a gated agent's container (`/opt/trinity/skill-gates-active`), written and removed by root `docker exec`.
 - **A held run's row** is closed `skipped` with "Awaiting approval (gate-…)". The scheduler does not retry it, and a loop stops with `approval_required`.
 
 ## Error Handling
@@ -173,6 +209,18 @@ All responses go through the app handler `error_handlers.skill_gate_error` (`src
 
 On a refusal: the scheduler leaves the row `skipped`; channels, rooms and public links reply with the refusal text; the Workspace raises a named `gated` portal error; A2A returns `rejected`.
 
+**The in-container hook** (no HTTP caller sees these; the model reads them as a tool result):
+
+| Case | Hook exit | What the model reads |
+|---|---|---|
+| Not gated, or the run is cleared | 0 | nothing — the skill loads |
+| Gated, the run not approved for it | 2 | the hand-back ("… request it through Trinity with a message that includes /pay-invoice …") |
+| Gated, no platform run | 2 | "… this session is not a Trinity run, so it cannot carry an approval …" |
+| Gated, the call could not be resolved | 2 | "… Trinity could not tell which skill this call loads …" |
+| No verdict (unreachable, 404 from an older backend, 5xx, 401/403/422, malformed, deadline, no key) and the marker present | 2 | "Trinity could not be reached to check whether this skill needs approval …" |
+| No verdict, no marker (an agent with no gates) | 0 | nothing — the skill loads |
+| The hook module cannot import or crashes | 0 / 2 | the bootstrap's marker fallback; never exit 1, which would let the tool run |
+
 ## Security Considerations
 
 - **Budget:** gate asks have their own budget. The agent's ask caps and rate buckets never count them (`db/operator_queue._NOT_A_GATE_ROW`).
@@ -185,8 +233,17 @@ On a refusal: the scheduler leaves the row `skipped`; channels, rooms and public
   - the gap between the dispatch-time fingerprint and the moment the agent reads the files;
   - a revoked agent permission between request and approval is not re-checked;
   - plugin (`plugin:skill`) names are not matched;
-  - prose-only requests and history replays (trinity-enterprise#752);
   - a session minted by a delegate key counts as a person (registered as debt).
+- **Stated limits of the in-container hook (trinity-enterprise#752):**
+  - Claude Code only: Codex and Gemini have no hook (D4). On Codex, which has no `--resume`, a held request sits in replayed Workspace history on every later turn;
+  - not a boundary against an adversarial executor: passwordless `sudo` (the registration, the hook and the marker are root-owned, which stops accidents only); reading a SKILL.md and acting on it; calling the skill's own tools, such as an MCP tool, directly; a nested `claude` started from Bash, whose environment — the execution id — is the agent's to set, and in which a prompt that starts with `/<skill>` expands with no tool call at all. The boundary is credential confinement (R23, trinity-enterprise#558);
+  - a leading `/skill` in a dispatched message expands without a tool call, so the hook never sees it. That is the dispatch-time check's lane;
+  - plugin and nested names follow #751 (the hook over-matches the last segment);
+  - voice-tool calls carry no platform execution and are always refused on a gated agent;
+  - it needs a base-image rebuild and an agent recreate, and an older backend answers 404, so nothing is refused;
+  - server-managed claude.ai settings outrank the files;
+  - a self-approved turn in a Workspace thread or the session tab keeps the loaded skill in that conversation;
+  - inert until trinity-enterprise#753 supplies the gate map.
 - Security audit: `docs/security-reports/cso-diff-2026-10-02-ent751-gated-skills.md`.
 
 ## Testing
@@ -206,6 +263,13 @@ Until trinity-enterprise#753 ships, a gate exists only in a local build where `l
    - the notice comes back as a normal reply;
    - an admin's Approve is refused on the card (`not_addressee`);
    - when the approver approves, the result lands back in the asker's thread, and the asker's Inbox notice names the decider.
+7. **The in-container hook** (#752; needs a rebuilt base image and a recreated agent; the agent's `/health` shows `skill_gate_hook: ok`):
+   - **prose:** another agent asks "please pay invoice INV-1" with no slash → the model's `Skill` call is refused with the hand-back, and a `skill_gate_refused` audit row is written;
+   - **approved:** the same request with `/pay-invoice` → card → Approve → the approved run loads the skill (cleared);
+   - **self-approved:** the owner sends `/pay-invoice …` in chat → it runs, and the agent's chat session id does not change;
+   - **preload:** `Task` with a subagent whose definition has `skills: [pay-invoice]` → refused;
+   - **outage:** stop the backend briefly → on the gated agent a skill is refused ("could not be checked"); on an agent with no gates it runs;
+   - `/logs/guardrails.jsonl` has a `skill_gate_allow` / `skill_gate_deny` / `skill_gate_unknown` line per call.
 
 ### Edge Cases
 
@@ -241,10 +305,18 @@ These are covered by unit tests:
 | `tests/unit/test_ent329_operator_resume.py`, `tests/unit/test_ent611_ask_endings.py` | what the gate reads on a resume and an ending |
 | `src/frontend/tests/unit/queueCardNotAddressee.spec.js`, `mobileAdminNotAddressee.spec.js` | the refusal shown on the card |
 | `src/mcp-server/src/chat-gate.test.ts` | the MCP results and the forwarded turn |
+| `tests/unit/test_ent752_skill_gate_hook.py` | the hook executed in its own process (`-I -S`, import-level seam): the verdict table, every no-verdict path × marker, the deadline, one retry, identity from `/proc` not its env, crash injection through the bootstrap, FIFO traps, the log |
+| `tests/unit/test_ent752_name_resolution.py` | generous name resolution ⊇ #751's `_FINGERPRINT_SCRIPT`; the `skills:` forms; subagent lookup |
+| `tests/unit/test_ent752_check_endpoint.py` | the route over the real DB: who may ask, every verdict, uniform answers, 503 / 422, the throttled audit, the marker heal, and the hook's own request replayed against it |
+| `tests/unit/test_ent752_self_approval_clearance.py` | the record at `/task`, `/chat` and the backstop on the id the agent receives; the record's lattice; the completion-report filter; the AST guard (`audit_self_approved` only in `record_self_approval`) |
+| `tests/unit/test_ent752_marker_sync.py` | the marker's argv executed; failure handling; the spawn; both lifecycle tails driven |
+| `tests/unit/test_ent752_isolated_chat_session.py` | the isolated `/chat` turn through the router, the payload, the agent server and the real `execute_claude_code` (#2958 fake CLI) |
+| `tests/unit/test_ent752_managed_registration.py`, `test_ent752_cli_pin.py` | the drop-in's exact shape, the matcher through a port of the CLI's own branch, the image wiring, the CLI pin |
+| `tests/unit/test_ent752_health_skill_gate.py` | `/health` `skill_gate_hook` |
 
 ### Status
 
-✅ Implemented and eyeballed on localhost (2026-10-03). It is inert until the gate map lands.
+✅ Implemented and eyeballed on localhost (2026-10-03). It is inert until the gate map lands. The in-container hook (trinity-enterprise#752) is implemented, unit-tested with every call site mutation-checked; its proof inside a real agent container is the verify-local run and the localhost eyeball.
 
 ## Related Flows
 
@@ -253,5 +325,6 @@ These are covered by unit tests:
   - the ask sink and its endings (`operating-room.md`, trinity-enterprise#611);
   - the approval card (trinity-enterprise#755);
   - the completion report back to a channel or thread (ent#457);
-  - the connector playbooks (`mcp-connector.md`).
-- **Sibling:** the in-container hook for skills named only in prose (trinity-enterprise#752).
+  - the connector playbooks (`mcp-connector.md`);
+  - the guardrail hooks this hook sits beside (GUARD-002, `requirements/security.md` §28.2) and the chat's own session (#2958).
+- **Part of this flow:** the in-container hook (trinity-enterprise#752, §5).

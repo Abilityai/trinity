@@ -41,6 +41,11 @@ class ChatAdmission(NamedTuple):
     # principal (a root). Last, with a default, so the NamedTuple stays
     # positionally compatible.
     chain_depth: Optional[int] = None
+    # trinity-enterprise#752: the skill gate's decision (a
+    # `skill_gate_service.GateDecision`), recorded by the row's setup once the
+    # execution the agent will receive exists — never under this admission's
+    # capacity-slot id. Last, with a default, for the same reason.
+    gate: Optional[object] = None
 
 
 class ChatExecutionContext(NamedTuple):
@@ -56,6 +61,10 @@ class ChatExecutionContext(NamedTuple):
     chat_activity_id: object
     session: object
     is_queued: bool
+    # trinity-enterprise#752: a self-approved turn of a gated skill runs in its
+    # own session, never the agent's shared one (the next caller would resume
+    # it with the skill loaded). Last, with a default.
+    isolated_session: bool = False
 
 
 class ChatAdmissionReplay(NamedTuple):
