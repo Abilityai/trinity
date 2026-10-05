@@ -50,7 +50,7 @@ PLATFORM_INSTRUCTIONS = """# Trinity Platform Instructions
 
 ## Trinity Agent System
 
-This agent is part of the Trinity Deep Agent Orchestration Platform.
+This agent runs on Trinity, the operating system for AI-native companies.
 
 ### Agent Collaboration
 
