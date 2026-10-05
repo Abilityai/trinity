@@ -1,6 +1,40 @@
 {
   "test_files": [
     {
+      "file": "unit/test_3247_replace_ask.py",
+      "feature": "#3247",
+      "added": "2026-10-05",
+      "categories": [
+        "backend",
+        "operator-queue",
+        "database",
+        "security",
+        "prompt"
+      ],
+      "description": "Replace a pending ask (#3247): both link columns on both schema tracks; the atomic replace in the db layer (compare-and-set on the agent's OWN pending raised_by='agent' row, depth count, insert, all in one locked transaction; a person's answer first wins and nothing is created; a past-deadline predecessor is expired then refused; a colliding insert rolls the CAS back; respond-vs-replace race has one winner); the sink (uniform 422 invalid_replaces for a gate / platform / NULL-raiser / other agent's row, 409 replaces_ended with ids and enums only, 409 already_pending for a duplicate pending proposal, no wake for the replaced ask, receipt and readback name the other ask by request_id); the Pending asks Execution Context line; the contract text pins; and the Workspace projection (ended_by 'agent' read before the email arm; replaces / replaced_by as the other ask's request_id only when the addressee could already see it; a replaced ask leaves the pending listing)."
+    },
+{
+      "file": "../src/frontend/tests/unit/operatorQueueReplace.spec.js",
+      "feature": "#3247",
+      "added": "2026-10-05",
+      "categories": [
+        "frontend",
+        "operator-queue"
+      ],
+      "description": "Operations and /m show a replaced ask (#3247): endingKind 'replaced' for an agent-authored cancel, 'Replaced by the agent', the Replaces / Replaced by badges from each row's own link, and ResolvedCard hiding the raw disposition_reason token."
+    },
+{
+      "file": "../src/frontend/tests/unit/workspaceReplacedAsk.mount.spec.js",
+      "feature": "#3247",
+      "added": "2026-10-05",
+      "categories": [
+        "frontend",
+        "workspace",
+        "operator-queue"
+      ],
+      "description": "The Workspace shows a replaced ask (#3247), mounted: PortalAsks' ending line and the successor's 'Replaces <request_id>' line, the Inbox row's 'Replaced by the agent with <request_id>' badge (an operator cancel still reads 'Cancelled') and the replacement's Replaces badge, the chat history row, and the 'needs you' count (openAsks / actionItems / inboxCounts) dropping the replaced ask."
+    },
+    {
       "file": "unit/test_3243_atomic_asks.py",
       "feature": "#3243",
       "added": "2026-10-05",

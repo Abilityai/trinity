@@ -751,8 +751,8 @@ CREATE TABLE operator_queue (
     -- trinity-enterprise#611 (SQLite `operator_queue_ask_object` / Alembic `0076_operator_queue_ask_object`; nullable, no backfill):
     disposition TEXT,                   -- answered|cancelled|expired — written in the SAME CAS UPDATE that flips `status`; NULL = ended before the ledger
     disposed_at TEXT,
-    disposed_by TEXT,                   -- person|timeout (an enum of two: only a person or the clock ends an ask)
-    disposed_by_email TEXT,             -- NULL for timeout; withheld from machine keys on get/list
+    disposed_by TEXT,                   -- person|timeout|platform|agent (`platform`: #3130 flood-backlog supersede; `agent`: an agent replacing its OWN pending ask, reason `replaced`, #3247)
+    disposed_by_email TEXT,             -- NULL unless disposed_by = person; withheld from machine keys on get/list
     disposition_reason TEXT,            -- the operator's optional cancel reason (≤ 500); never in an audit row, never to a Workspace client
     batch_id TEXT,                      -- one uuid per bulk-cancel sweep; its re-select is the sweep's CAS winners
     raised_by TEXT,                     -- agent|gate (PR B); NULL for a legacy row or a platform alarm
@@ -761,6 +761,9 @@ CREATE TABLE operator_queue (
     resolved_to TEXT,                   -- PR B: JSON list of person refs; withheld from machine keys
     proposal TEXT,                      -- PR B: JSON, the frozen action
     supersedes_expired TEXT,            -- PR B: the agent's own expired predecessor (row uuid)
+    -- #3247 (SQLite `operator_queue_replace` / Alembic `0090_operator_queue_replace`, renumbered at merge; nullable, no index):
+    replaces TEXT,                      -- on the successor: the replaced predecessor (row uuid)
+    replaced_by TEXT,                   -- on the predecessor: its successor (row uuid); both stamped in one transaction
     FOREIGN KEY (responded_by_id) REFERENCES users(id)
 );
 CREATE INDEX idx_operator_queue_agent ON operator_queue(agent_name);
