@@ -43,9 +43,10 @@ def _iso(dt):
 
 def _row(id, request_id, *, agent="_sub-headroom", created_at=None, status="pending",
          context=None, subject=None, expires_at=None, disposed_by=None,
-         disposed_at=None, priority="high"):
+         disposed_at=None, priority="high", raised_by=None):
     return {
         "id": id,
+        "raised_by": raised_by,
         "agent_name": agent,
         "request_id": request_id,
         "status": status,
@@ -298,6 +299,34 @@ def _ids(stamps):
 
 
 class TestPlanSweep:
+    @pytest.mark.parametrize("prefix,tail", [
+        ("skills-reconcile-", "worker-a-3"),
+        ("skills-fleet-reinject-", TS),
+        ("retention-guard-", "execution_retention_days-30"),
+        ("ent615-git-token-scrub-", "worker-a-2026-09-25"),
+    ])
+    @pytest.mark.parametrize("raised_by", ["agent", "gate"])
+    def test_a_row_the_platform_did_not_raise_is_skipped_even_when_handed_in(
+            self, prefix, tail, raised_by):
+        """The SELECT already excludes them; the planner must not depend on it."""
+        rid = f"{prefix}{tail}"
+        rows = [
+            _row("older", rid, agent="worker-a", created_at="2026-09-20T00:00:00Z", raised_by=raised_by),
+            _row("platform", rid, agent="worker-a", created_at="2026-09-25T00:00:00Z"),
+            _row("newer", rid, agent="worker-a", created_at="2026-09-30T00:00:00Z", raised_by=raised_by),
+            _row("ended", rid, agent="worker-a", status="responded", disposed_by="person",
+                 disposed_at=_iso(NOW - timedelta(days=1)), raised_by=raised_by),
+        ]
+        plan = pa.plan_sweep(rows, now=NOW)
+        assert plan.ended_ids == ()
+        assert [s.id for s in plan.survivor_stamps] == ["platform"]
+        assert _ids(plan.lifetime_stamps) == [] and _ids(plan.snooze_stamps) == []
+
+    def test_a_gate_row_is_skipped_even_when_handed_in(self):
+        rows = [_row("g", "gate-abc", agent="x", raised_by="gate"),
+                _row("g2", "gate-abc", agent="x", created_at="2026-10-02T00:00:00Z", raised_by="gate")]
+        assert pa.plan_sweep(rows, now=NOW).is_empty()
+
     def test_keeps_newest_per_subject_and_ends_the_rest(self, monkeypatch):
         monkeypatch.delenv(pa.LIFETIME_ENV, raising=False)
         rows = [

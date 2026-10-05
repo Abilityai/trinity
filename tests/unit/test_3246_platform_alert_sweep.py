@@ -57,13 +57,14 @@ def conn():
 
 
 def _add(conn, id_, agent, rid, created, *, status="pending", context=None,
-         expires_at=None, disposed_by=None, disposed_at=None, type_="alert"):
+         expires_at=None, disposed_by=None, disposed_at=None, type_="alert", raised_by=None):
     conn.execute(
         "INSERT INTO operator_queue (id, agent_name, request_id, type, status, priority, title, "
-        "question, created_at, context, expires_at, disposed_by, disposed_at) "
-        "VALUES (?, ?, ?, ?, ?, 'high', 't', 'q', ?, ?, ?, ?, ?)",
+        "question, created_at, context, expires_at, disposed_by, disposed_at, raised_by) "
+        "VALUES (?, ?, ?, ?, ?, 'high', 't', 'q', ?, ?, ?, ?, ?, ?)",
         (id_, agent, rid, type_, status, created,
-         json.dumps(context) if context is not None else None, expires_at, disposed_by, disposed_at),
+         json.dumps(context) if context is not None else None, expires_at, disposed_by, disposed_at,
+         raised_by),
     )
 
 
@@ -246,3 +247,54 @@ class TestBothTracks:
         assert str(idx[UNIQUE_INDEX].dialect_options["postgresql"]["where"]) == \
             "status = 'pending' AND subject IS NOT NULL"
         assert PLAIN_INDEX in idx and idx[PLAIN_INDEX].unique is False
+
+
+# The four prefixes #3246 reserves were open to agents before this upgrade, so
+# an agent may hold a pending ask under one of them ON ITS OWN NAME — the host
+# the platform's alarm about that agent also uses. Older or newer, the agent's
+# row is not the platform's: it must neither hold the slot nor be ended.
+# Three ids per family (the table is unique on agent + request_id), each
+# deriving to the SAME subject, so the three rows form one group.
+_NEWLY_RESERVED = (
+    ("skills-reconcile-", ("{agent}-3", "{agent}-5", "{agent}-7")),
+    ("skills-fleet-reinject-", ("2026-09-20T00:00:00.000000Z", "2026-09-25T00:00:00.000000Z",
+                                "2026-09-30T00:00:00.000000Z")),
+    ("retention-guard-", ("execution_retention_days-30", "execution_retention_days-45",
+                          "execution_retention_days-60")),
+    ("ent615-git-token-scrub-", ("{agent}-2026-09-20", "{agent}-2026-09-25", "{agent}-2026-09-30")),
+)
+
+
+class TestRaisedByIsTheDiscriminator:
+    @pytest.mark.parametrize("prefix,tails", _NEWLY_RESERVED, ids=[p for p, _ in _NEWLY_RESERVED])
+    @pytest.mark.parametrize("raised_by", ["agent", "gate"])
+    def test_a_row_the_platform_did_not_raise_never_holds_the_slot_and_is_never_ended(
+            self, conn, prefix, tails, raised_by):
+        agent = "worker-a"
+        older, mine, newer = (f"{prefix}{t.format(agent=agent)}" for t in tails)
+        _add(conn, "older", agent, older, "2026-09-20T00:00:00.000000Z", raised_by=raised_by)
+        _add(conn, "platform", agent, mine, "2026-09-25T00:00:00.000000Z")
+        _add(conn, "newer", agent, newer, "2026-09-30T00:00:00.000000Z", raised_by=raised_by)
+        _run(conn)
+        rows = {r[0]: r[1:] for r in conn.execute(
+            "SELECT id, status, subject, last_seen_at, raised_by FROM operator_queue").fetchall()}
+        assert rows["platform"][0] == "pending", rows
+        assert rows["platform"][1] is not None  # the platform's row holds the subject
+        for id_ in ("older", "newer"):
+            status, subject, last_seen, who = rows[id_]
+            assert (status, subject, last_seen, who) == ("pending", None, None, raised_by), (id_, rows)
+
+    def test_a_gate_row_under_its_own_prefix_is_untouched_either_way(self, conn):
+        _add(conn, "gate-old", "x", "gate-abc", "2026-09-20T00:00:00.000000Z",
+             type_="approval", raised_by="gate")
+        _add(conn, "gate-new", "x", "gate-def", "2026-09-30T00:00:00.000000Z",
+             type_="approval", raised_by="gate")
+        _run(conn)
+        rows = conn.execute(
+            "SELECT status, subject, last_seen_at, expires_at FROM operator_queue").fetchall()
+        assert rows == [("pending", None, None, None)] * 2
+
+    def test_the_select_and_every_write_carry_the_platform_predicate(self):
+        from db import migrations as m
+        assert "raised_by IS NULL" in m._PLATFORM_ALERT_SWEEP_SELECT
+        assert "raised_by IS NULL" in m._PLATFORM_ALERT_SWEEP_END

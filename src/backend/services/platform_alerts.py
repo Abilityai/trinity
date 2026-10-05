@@ -447,10 +447,11 @@ def plan_sweep(rows: Iterable[Mapping], *, now: datetime) -> SweepPlan:
     """Plan the one-shot upgrade sweep over fetched queue rows.
 
     ``rows``: mappings with ``id, agent_name, request_id, status, created_at,
-    expires_at, context, subject, disposed_by, disposed_at``. Rules:
+    expires_at, context, subject, disposed_by, disposed_at, raised_by``. Rules:
 
-    * Only rows whose request id derives to an in-repo kind are considered;
-      unknown and external prefixes are never touched.
+    * Only platform-raised rows (``raised_by`` NULL) whose request id derives
+      to an in-repo kind are considered; agent-raised and gate rows, unknown
+      and external prefixes are never touched.
     * Pending rows are grouped by ``(agent_name, subject)``. A row that already
       carries a subject holds the slot (it is the seam's live row); otherwise
       the newest by ``created_at`` then ``id`` survives. Every other pending
@@ -471,6 +472,10 @@ def plan_sweep(rows: Iterable[Mapping], *, now: datetime) -> SweepPlan:
     groups: Dict[Tuple[Any, str], list] = {}
     lifetime_stamps, snooze_stamps = [], []
     for row in rows:
+        if row.get("raised_by") is not None:
+            # An agent's own ask or a gate row: never the platform's, whatever
+            # its id looks like (the prefix was unreserved when it was minted).
+            continue
         match = derive_legacy_subject(row.get("request_id"), row.get("context"))
         if match is None:
             continue

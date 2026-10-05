@@ -5182,12 +5182,17 @@ def _migrate_supersede_queue_flood_backlog(cursor, conn):
 # connection (the Alembic revision imports it), so the survivor rule cannot
 # drift between them. `run(sql, params, fetch=False)` is the one driver seam:
 # sqlite3 and SQLAlchemy `text()` both bind `:name` parameters.
+# `raised_by IS NULL` is the platform-row discriminator: the agent file seam
+# writes 'agent' and gates write 'gate', and an agent can mint an id under a
+# reserved prefix on its own name (the git-token-scrub prefix was unreserved
+# before #3246), so the id shape alone must never pick a survivor.
 _PLATFORM_ALERT_SWEEP_SELECT = """
 SELECT id, agent_name, request_id, status, created_at, expires_at, context,
-       subject, disposed_by, disposed_at
+       subject, disposed_by, disposed_at, raised_by
 FROM operator_queue
-WHERE status = 'pending'
-   OR (disposed_by = 'person' AND subject IS NULL AND disposed_at >= :since)
+WHERE raised_by IS NULL
+  AND (status = 'pending'
+       OR (disposed_by = 'person' AND subject IS NULL AND disposed_at >= :since))
 """
 
 _PLATFORM_ALERT_SWEEP_END = """
@@ -5199,7 +5204,7 @@ SET status = 'cancelled',
     disposed_by_email = NULL,
     disposition_reason = 'superseded',
     batch_id = :batch_id
-WHERE status = 'pending' AND id IN ({ids})
+WHERE status = 'pending' AND raised_by IS NULL AND id IN ({ids})
 """
 
 _SWEEP_CHUNK = 400  # well under every driver's bound-parameter limit
@@ -5223,8 +5228,9 @@ def run_platform_alert_sweep(run, *, now=None, batch_id=None) -> dict:
       leaves on its own; nothing is merged on a guess);
     * person-ended rows inside the snooze window: ``subject`` only.
 
-    Agent-raised rows, ``gate-`` rows and external prefixes never derive and
-    are never touched. Idempotent: a second run finds the survivors stamped
+    Agent-raised rows and gate rows (``raised_by IS NOT NULL``) are excluded
+    by the SELECT and skipped again by the planner; external prefixes never
+    derive. None of them is ever stamped or ended. Idempotent: a second run finds the survivors stamped
     and plans nothing. Returns the write counts for the boot log.
     """
     import json as _json
@@ -5237,7 +5243,7 @@ def run_platform_alert_sweep(run, *, now=None, batch_id=None) -> dict:
     now_iso = now.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
     since_iso = (now - snooze_window()).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
     cols = ("id", "agent_name", "request_id", "status", "created_at", "expires_at",
-            "context", "subject", "disposed_by", "disposed_at")
+            "context", "subject", "disposed_by", "disposed_at", "raised_by")
     rows = [dict(zip(cols, r)) for r in run(_PLATFORM_ALERT_SWEEP_SELECT, {"since": since_iso}, fetch=True)]
     plan = plan_sweep(rows, now=now)
     counts = {"survivors": 0, "ended": 0, "lifetime_only": 0, "snoozed": 0}
@@ -5245,13 +5251,20 @@ def run_platform_alert_sweep(run, *, now=None, batch_id=None) -> dict:
         return counts
 
     for stamp in plan.survivor_stamps:
+        # `expires_at` is only in the statement when the planner set one: an
+        # untyped NULL bound into COALESCE is driver-dependent on PostgreSQL,
+        # and a stamp that carries none has nothing to write there.
+        params = {"id": stamp.id, "subject": stamp.subject, "last_seen_at": stamp.last_seen_at,
+                  "context": _json.dumps(stamp.context) if stamp.context is not None else None}
+        expiry_sql = ""
+        if stamp.expires_at is not None:
+            expiry_sql = ", expires_at = COALESCE(expires_at, :expires_at)"
+            params["expires_at"] = stamp.expires_at
         run(
             "UPDATE operator_queue SET subject = :subject, last_seen_at = :last_seen_at, "
-            "context = :context, expires_at = COALESCE(expires_at, :expires_at) "
-            "WHERE id = :id AND status = 'pending'",
-            {"id": stamp.id, "subject": stamp.subject, "last_seen_at": stamp.last_seen_at,
-             "context": _json.dumps(stamp.context) if stamp.context is not None else None,
-             "expires_at": stamp.expires_at},
+            f"context = :context{expiry_sql} "
+            "WHERE id = :id AND status = 'pending' AND raised_by IS NULL",
+            params,
         )
         counts["survivors"] += 1
 
@@ -5267,12 +5280,13 @@ def run_platform_alert_sweep(run, *, now=None, batch_id=None) -> dict:
 
     for stamp in plan.lifetime_stamps:
         run("UPDATE operator_queue SET expires_at = :expires_at "
-            "WHERE id = :id AND status = 'pending' AND expires_at IS NULL",
+            "WHERE id = :id AND status = 'pending' AND expires_at IS NULL AND raised_by IS NULL",
             {"id": stamp.id, "expires_at": stamp.expires_at})
         counts["lifetime_only"] += 1
 
     for stamp in plan.snooze_stamps:
-        run("UPDATE operator_queue SET subject = :subject WHERE id = :id AND subject IS NULL",
+        run("UPDATE operator_queue SET subject = :subject "
+            "WHERE id = :id AND subject IS NULL AND raised_by IS NULL",
             {"id": stamp.id, "subject": stamp.subject})
         counts["snoozed"] += 1
     return counts
