@@ -273,7 +273,7 @@ def test_an_oversized_execution_id_is_never_sent(world):
     assert world.backend.bodies()[0]["execution_id"] is None
 
 
-@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="reads the real /proc")
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="reads the real /proc (Linux only)")
 def test_the_environ_reader_reads_a_real_processs_launch_environment():
     g = H.load_module()
     child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"],
