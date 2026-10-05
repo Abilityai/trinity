@@ -79,13 +79,28 @@ export const WORKSPACE_KEYMAP = Object.freeze([
     chord: chord({ key: '.', code: 'Period', primary: true }),
   }),
   Object.freeze({
+    id: 'search-focus',
+    action: 'search-focus',
+    surface: 'workspace',
+    owner: OWNER_SHELL,
+    scope: SCOPE_DOING,
+    // The Dashboard's `/` filter key, with the modifier a key needs to work
+    // from INSIDE a text field. It focuses the sidebar search that exists —
+    // it is not the reserved `⌘K` surface above, and adds no second search.
+    label: 'Search agents and chats',
+    note: 'Press again to return to the message field.',
+    chord: chord({ key: '/', code: 'Slash', primary: true, shiftOnKey: true }),
+  }),
+  Object.freeze({
     id: 'key-list',
     action: 'key-list',
     surface: 'workspace',
     owner: OWNER_SHELL,
     scope: SCOPE_DOING,
     label: 'Keyboard shortcuts',
-    chord: chord({ key: '/', code: 'Slash', primary: true, shiftOnKey: true }),
+    // ⌥/ since `⌘/` went to search: the same pairing as `⌘.` / `⌥.`. On a US
+    // Mac it types `÷`, so the physical `Slash` arm is the one that answers.
+    chord: chord({ key: '/', code: 'Slash', alt: true, shiftOnKey: true }),
   }),
   Object.freeze({
     id: 'agent-next',
@@ -325,11 +340,11 @@ export function keymapCollisions(map = WORKSPACE_KEYMAP) {
  * drawer — suppresses EVERY shell key, ⌘J included (today it remounts the
  * conversation under an open file preview). A voice call suppresses the keys
  * that would change what is on stage, plus the rail toggle; ⌘J keeps its own
- * "leave the call?" ask (ent#534/551) and ⌘/ is allowed, because opening a
+ * "leave the call?" ask (ent#534/551) and ⌥/ is allowed, because opening a
  * dialog leaves nothing.
  *
  * Per-action exemptions are the CALLER's: it passes `hasModalOpen`'s `ignore`
- * so rail keys do not see the rail's own sheet and ⌘/ can close its own list,
+ * so rail keys do not see the rail's own sheet and ⌥/ can close its own list,
  * and `railAvailable` for the two entries marked `needsRail`.
  */
 export function keymapSuppressed({
@@ -520,4 +535,56 @@ export function keyHint(actions, platform, map = WORKSPACE_KEYMAP) {
 /** The same binding as `aria-keyshortcuts` — ARIA's spelling, space-separated. */
 export function keyShortcutsFor(actions, platform, map = WORKSPACE_KEYMAP) {
   return ariaKeyshortcuts(bindingsFor(actions, map), platform)
+}
+
+/**
+ * The rail's tips panel — the handful of chords worth learning first.
+ *
+ * Declared as ACTIONS, never as glyphs: `keyTipRows` reads each row's keys
+ * from the map, so a chord that moves there moves on the panel in the same
+ * commit. Four on purpose — the panel is a nudge, and the full list is one
+ * button away.
+ */
+export const KEY_TIPS = Object.freeze([
+  Object.freeze({ id: 'agent', label: 'Switch agent', actions: Object.freeze(['agent-prev', 'agent-next']) }),
+  Object.freeze({ id: 'chat', label: 'Switch chat', actions: Object.freeze(['chat-prev', 'chat-next']) }),
+  Object.freeze({ id: 'search', label: 'Search', actions: Object.freeze(['search-focus']) }),
+  Object.freeze({ id: 'new-chat', label: 'New chat', actions: Object.freeze(['new-chat']) }),
+])
+
+/** The panel's rows. A tip whose actions the map no longer binds is dropped. */
+export function keyTipRows(platform, map = WORKSPACE_KEYMAP, tips = KEY_TIPS) {
+  return (Array.isArray(tips) ? tips : []).filter(Boolean).map((t) => ({
+    id: t.id,
+    label: t.label,
+    keys: keyHint(t.actions, platform, map),
+    ariaKeyshortcuts: keyShortcutsFor(t.actions, platform, map),
+  })).filter((r) => r.keys)
+}
+
+/**
+ * Whether this browser closed the tips panel. A per-viewer convenience, so it
+ * lives in `localStorage` and nowhere else; a storage that refuses (private
+ * mode, blocked site data) simply shows the panel again next load.
+ */
+export const KEY_TIPS_STORAGE_KEY = 'trinity-workspace-key-tips'
+
+export function loadKeyTipsDismissed(storage) {
+  try {
+    return !!storage && typeof storage.getItem === 'function'
+      && storage.getItem(KEY_TIPS_STORAGE_KEY) === 'dismissed'
+  } catch {
+    return false
+  }
+}
+
+export function saveKeyTipsDismissed(storage, dismissed) {
+  try {
+    if (!storage || typeof storage.setItem !== 'function') return false
+    if (dismissed) storage.setItem(KEY_TIPS_STORAGE_KEY, 'dismissed')
+    else storage.removeItem(KEY_TIPS_STORAGE_KEY)
+    return true
+  } catch {
+    return false
+  }
 }

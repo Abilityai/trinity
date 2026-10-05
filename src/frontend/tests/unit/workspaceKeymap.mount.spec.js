@@ -114,7 +114,7 @@ function arm(threads = THREADS, roster = ROSTER) {
 // wiring. Unmounted in `afterEach`, which is also what proves the teardown
 // removes the listener.
 let mounted = []
-async function boot(path, { threads = THREADS, roster = ROSTER } = {}) {
+async function boot(path, { threads = THREADS, roster = ROSTER, stubs = {} } = {}) {
   arm(threads, roster)
   const router = makeRouter()
   await router.push(path)
@@ -138,6 +138,7 @@ async function boot(path, { threads = THREADS, roster = ROSTER } = {}) {
         PortalKeyList: false,
         BaseModal: false,
         teleport: false,
+        ...stubs,
       },
     },
   })
@@ -648,12 +649,12 @@ describe('ent#621 [C] — ⌥. walks the rail tabs', () => {
   })
 })
 
-describe('ent#621 [C] — ⌘/ opens the key list', () => {
+describe('ent#621 [C] — ⌥/ opens the key list', () => {
   it('opens, lists every key the map declares but the reserved one, and toggles shut', async () => {
     const { w } = await boot('/workspace/c/s-main')
     expect(document.querySelector('[data-testid="ws-key-list"]')).toBe(null)
 
-    await press(w, { key: '/', meta: true })
+    await press(w, { key: '/', alt: true })
     const dialog = document.querySelector('[data-ws-key-list]')
     expect(dialog).not.toBe(null)
     expect(dialog.getAttribute('role')).toBe('dialog')
@@ -674,13 +675,13 @@ describe('ent#621 [C] — ⌘/ opens the key list', () => {
     // The one action allowed to see through its own dialog: the chord that
     // opened the list closes it, rather than being swallowed by the modal
     // suppression the list itself triggers.
-    await press(w, { key: '/', meta: true })
+    await press(w, { key: '/', alt: true })
     expect(document.querySelector('[data-ws-key-list]')).toBe(null)
   })
 
   it('suppresses every other key while it is open', async () => {
     const { w } = await boot('/workspace/c/s-main')
-    await press(w, { key: '/', meta: true })
+    await press(w, { key: '/', alt: true })
     await press(w, { key: 'ArrowDown', alt: true })
     expect(showing(w).agent).toBe('scout')
   })
@@ -689,7 +690,103 @@ describe('ent#621 [C] — ⌘/ opens the key list', () => {
     const { w } = await boot('/workspace/c/s-main')
     w.vm.voiceCall = { active: true, agentName: 'scout', voiceSessionId: 'v1' }
     await w.vm.$nextTick()
+    await press(w, { key: '/', alt: true })
+    expect(document.querySelector('[data-ws-key-list]')).not.toBe(null)
+  })
+})
+
+// The sidebar, stubbed but honest about the two things the shell reaches
+// through its ref for the search key. Passed per-case (`boot(..., { stubs })`)
+// so every other case keeps the auto-stub it was written against.
+function sidebarStub({ focused = false } = {}) {
+  const focusSearch = vi.fn()
+  const stub = defineComponent({
+    name: 'PortalSidebar',
+    props: ['roster', 'activeAgentName', 'threads', 'search'],
+    setup(_, { expose }) {
+      expose({ focusSearch, searchHasFocus: () => focused })
+      return () => h('div')
+    },
+  })
+  return { stub, focusSearch }
+}
+
+describe('ent#621 (follow-up) — ⌘/ puts the cursor in the sidebar search', () => {
+  it('focuses the desktop sidebar\'s search field, and claims the chord', async () => {
+    viewport(true)
+    const { stub, focusSearch } = sidebarStub()
+    const { w } = await boot('/workspace/c/s-main', { stubs: { PortalSidebar: stub } })
+    const e = await press(w, { key: '/', meta: true })
+    expect(focusSearch).toHaveBeenCalledTimes(1)
+    expect(e.defaultPrevented).toBe(true)
+    expect(w.vm.mobileNav).toBe(false)             // the column, not the drawer
+    expect(showing(w).agent).toBe('scout')          // and the stage did not move
+  })
+
+  it('pressed again from the search field, hands the caret back to the message field', async () => {
+    viewport(true)
+    const { stub, focusSearch } = sidebarStub({ focused: true })
+    const { w } = await boot('/workspace/c/s-main', { stubs: { PortalSidebar: stub } })
+    focusComposer.mockClear()
     await press(w, { key: '/', meta: true })
+    expect(focusComposer).toHaveBeenCalled()
+    expect(focusSearch).not.toHaveBeenCalled()
+  })
+
+  it('below `sm` it opens the drawer and focuses THAT sidebar\'s field', async () => {
+    viewport(false)
+    const { stub, focusSearch } = sidebarStub()
+    const { w } = await boot('/workspace/c/s-main', { stubs: { PortalSidebar: stub } })
+    await press(w, { key: '/', meta: true })
+    expect(w.vm.mobileNav).toBe(true)
+    expect(focusSearch).toHaveBeenCalledTimes(1)
+  })
+
+  it('is suppressed under a dialog, like every other shell key', async () => {
+    viewport(true)
+    const { stub, focusSearch } = sidebarStub()
+    const { w } = await boot('/workspace/c/s-main', { stubs: { PortalSidebar: stub } })
+    await press(w, { key: '/', alt: true })         // the key list — a real modal
+    expect(document.querySelector('[data-ws-key-list]')).not.toBe(null)
+    const e = await press(w, { key: '/', meta: true })
+    expect(focusSearch).not.toHaveBeenCalled()
+    expect(e.defaultPrevented).toBe(false)
+  })
+
+  it('works during a voice call — focusing a field leaves nothing', async () => {
+    viewport(true)
+    const { stub, focusSearch } = sidebarStub()
+    const { w } = await boot('/workspace/c/s-main', { stubs: { PortalSidebar: stub } })
+    w.vm.voiceCall = { active: true, agentName: 'scout', voiceSessionId: 'v1' }
+    await w.vm.$nextTick()
+    await press(w, { key: '/', meta: true })
+    expect(focusSearch).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('ent#621 (follow-up) — the rail\'s shortcut tips', () => {
+  const railOf = (w) => w.findComponent({ name: 'PortalRail' })
+
+  it('are on until dismissed, and a dismissal is remembered across a reload', async () => {
+    viewport(true)
+    const { w } = await boot('/workspace/c/s-main')
+    expect(railOf(w).props('keyTips')).toBe(true)
+
+    railOf(w).vm.$emit('dismiss-key-tips')
+    await w.vm.$nextTick()
+    expect(railOf(w).props('keyTips')).toBe(false)
+
+    // A fresh shell — the reload — reads the same browser's storage.
+    const again = await boot('/workspace/c/s-main')
+    expect(railOf(again.w).props('keyTips')).toBe(false)
+  })
+
+  it('the panel\'s button opens the same list ⌥/ opens', async () => {
+    viewport(true)
+    const { w } = await boot('/workspace/c/s-main')
+    expect(document.querySelector('[data-ws-key-list]')).toBe(null)
+    railOf(w).vm.$emit('open-keys')
+    await flushPromises()
     expect(document.querySelector('[data-ws-key-list]')).not.toBe(null)
   })
 })

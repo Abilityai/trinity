@@ -84,6 +84,10 @@
             <span v-if="s.shape" class="absolute top-1 right-1" :class="dotClass(s.shape)" aria-hidden="true"></span>
           </button>
         </div>
+        <!-- ent#621 (follow-up): 48px holds no panel, so the collapsed strip
+             carries the tips as ONE door at its foot — the same list the open
+             rail's panel opens, and gone with it once dismissed. -->
+        <PortalKeyTips v-if="keyTips" compact class="mt-auto" @open-keys="$emit('open-keys')" />
       </template>
 
       <!-- ========================== OPEN / SHEET ========================== -->
@@ -177,6 +181,18 @@
             </div>
           </slot>
         </div>
+
+        <!-- ent#621 (follow-up): the tips panel, pinned to the bottom of the
+             OPEN column. After the body and outside it, so the body keeps its
+             own scroll axis and the panel never covers what it shows; `mt-auto`
+             holds it at the foot even when no tab body is mounted. Not on the
+             sheet: a phone has no keyboard to hint at. -->
+        <PortalKeyTips
+          v-if="keyTips && mode === 'open'"
+          class="mt-auto"
+          @open-keys="$emit('open-keys')"
+          @dismiss="$emit('dismiss-key-tips')"
+        />
       </template>
     </aside>
   </div>
@@ -188,6 +204,7 @@ import OverflowTabs from '../OverflowTabs.vue'
 import BaseButton from '@/components/base/BaseButton.vue'
 import BaseBadge from '@/components/base/BaseBadge.vue'
 import PortalAvatar from './PortalAvatar.vue'
+import PortalKeyTips from './PortalKeyTips.vue'
 import {
   RAIL_SIGNAL_LIVE,
   RAIL_SIGNAL_UPDATED,
@@ -221,9 +238,13 @@ const props = defineProps({
   participants: { type: Array, default: () => [] },
   // The mobile bottom-sheet form. A sheet is always "open".
   sheet: { type: Boolean, default: false },
+  // ent#621 (follow-up): show the shortcut tips — the panel at the foot of the
+  // open column, the icon at the foot of the collapsed strip. The shell turns
+  // it off once the person has closed it; the rail holds no memory of its own.
+  keyTips: { type: Boolean, default: false },
 })
 
-const emit = defineEmits(['update:open', 'update:activeTab', 'close', 'see-hints'])
+const emit = defineEmits(['update:open', 'update:activeTab', 'close', 'see-hints', 'open-keys', 'dismiss-key-tips'])
 
 const mode = computed(() => (props.sheet ? 'sheet' : props.open ? 'open' : 'collapsed'))
 

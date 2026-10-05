@@ -26,6 +26,7 @@ import {
   entryChords, findBinding, matchesChord, resolveWorkspaceKey, workspaceChord, keymapCollisions,
   keymapSuppressed, cycleIndex, nextAgent, recordLastOpen, nextRailTab,
   chordLabel, ariaKeyshortcuts, keyListRows,
+  KEY_TIPS, keyTipRows, keyHint, KEY_TIPS_STORAGE_KEY, loadKeyTipsDismissed, saveKeyTipsDismissed,
 } from '../../src/components/portal/portalKeymap'
 import { isNewChatHotkey, newChatHotkeyLabel } from '../../src/components/portal/portalUtils'
 
@@ -60,10 +61,10 @@ describe('the map as a declaration', () => {
     }
   })
 
-  it('declares the nine chords the issue names, plus the protocol keys', () => {
+  it('declares the ten shell chords, plus the protocol keys', () => {
     const shell = WORKSPACE_KEYMAP.filter((e) => e.owner === OWNER_SHELL)
     expect(shell.map((e) => e.action)).toEqual([
-      'find-anything', 'new-chat', 'rail-toggle', 'key-list',
+      'find-anything', 'new-chat', 'rail-toggle', 'search-focus', 'key-list',
       'agent-next', 'agent-prev', 'chat-next', 'chat-prev', 'rail-tab-next',
     ])
     expect(shell.filter((e) => e.reserved).map((e) => e.action)).toEqual(['find-anything'])
@@ -95,6 +96,7 @@ describe('the map as a declaration', () => {
 describe('matchesChord', () => {
   const railToggle = chordOf('rail-toggle')
   const keyList = chordOf('key-list')
+  const search = chordOf('search-focus')
   const agentNext = chordOf('agent-next')
   const chatNext = chordOf('chat-next')
   const railTab = chordOf('rail-tab-next')
@@ -118,11 +120,17 @@ describe('matchesChord', () => {
 
   it('accepts Shift on the printed key but never on the physical one (Decision 29)', () => {
     // DE: `/` is Shift+7. FR: `.` is a shifted key. Both must work.
-    expect(matchesChord(ev({ key: '/', code: 'Digit7', metaKey: true, shiftKey: true }), keyList)).toBe(true)
-    expect(matchesChord(ev({ key: '/', code: 'Slash', metaKey: true }), keyList)).toBe(true)
+    expect(matchesChord(ev({ key: '/', code: 'Digit7', metaKey: true, shiftKey: true }), search)).toBe(true)
+    expect(matchesChord(ev({ key: '/', code: 'Slash', metaKey: true }), search)).toBe(true)
     // macOS ⌘? (Help search) is Shift on the Slash POSITION with `key: '?'`:
     // neither arm may claim it.
-    expect(matchesChord(ev({ key: '?', code: 'Slash', metaKey: true, shiftKey: true }), keyList)).toBe(false)
+    expect(matchesChord(ev({ key: '?', code: 'Slash', metaKey: true, shiftKey: true }), search)).toBe(false)
+    // ⌥/ on a US Mac types `÷`: the Slash position is the arm that answers.
+    expect(matchesChord(ev({ key: '÷', code: 'Slash', altKey: true }), keyList)).toBe(true)
+    expect(matchesChord(ev({ key: '/', code: 'Slash', altKey: true }), keyList)).toBe(true)
+    // …and the two `/` chords never answer for each other.
+    expect(matchesChord(ev({ key: '/', code: 'Slash', metaKey: true }), keyList)).toBe(false)
+    expect(matchesChord(ev({ key: '÷', code: 'Slash', altKey: true }), search)).toBe(false)
     // A chord without `shiftOnKey` rejects Shift outright.
     expect(matchesChord(ev({ key: '.', metaKey: true, shiftKey: true }), railToggle)).toBe(false)
   })
@@ -148,7 +156,9 @@ describe('resolveWorkspaceKey', () => {
     expect(resolveWorkspaceKey(ev({ key: 'j', metaKey: true }))).toBe('new-chat')
     expect(resolveWorkspaceKey(ev({ key: 'j', ctrlKey: true }))).toBe('new-chat')
     expect(resolveWorkspaceKey(ev({ key: '.', metaKey: true }))).toBe('rail-toggle')
-    expect(resolveWorkspaceKey(ev({ key: '/', metaKey: true }))).toBe('key-list')
+    expect(resolveWorkspaceKey(ev({ key: '/', metaKey: true }))).toBe('search-focus')
+    expect(resolveWorkspaceKey(ev({ key: '/', ctrlKey: true }))).toBe('search-focus')
+    expect(resolveWorkspaceKey(ev({ key: '÷', code: 'Slash', altKey: true }))).toBe('key-list')
     expect(resolveWorkspaceKey(ev({ key: 'ArrowDown', altKey: true }))).toBe('agent-next')
     expect(resolveWorkspaceKey(ev({ key: 'ArrowUp', altKey: true }))).toBe('agent-prev')
     expect(resolveWorkspaceKey(ev({ key: 'ArrowDown', altKey: true, shiftKey: true }))).toBe('chat-next')
@@ -326,7 +336,10 @@ describe('what people and screen readers read', () => {
     expect(chordLabel(chordOf('new-chat'), 'MacIntel')).toBe('⌘J')
     expect(chordLabel(chordOf('new-chat'), 'Win32')).toBe('Ctrl+J')
     expect(chordLabel(chordOf('rail-toggle'), 'MacIntel')).toBe('⌘.')
-    expect(chordLabel(chordOf('key-list'), 'Linux x86_64')).toBe('Ctrl+/')
+    expect(chordLabel(chordOf('key-list'), 'Linux x86_64')).toBe('Alt+/')
+    expect(chordLabel(chordOf('key-list'), 'MacIntel')).toBe('⌥/')
+    expect(chordLabel(chordOf('search-focus'), 'Linux x86_64')).toBe('Ctrl+/')
+    expect(chordLabel(chordOf('search-focus'), 'MacIntel')).toBe('⌘/')
     expect(chordLabel(chordOf('agent-next'), 'MacIntel')).toBe('⌥↓')
     expect(chordLabel(chordOf('agent-prev'), 'Win32')).toBe('Alt+↑')
     expect(chordLabel(chordOf('chat-next'), 'MacIntel')).toBe('⌥⇧↓')
@@ -348,7 +361,8 @@ describe('what people and screen readers read', () => {
     expect(ariaKeyshortcuts(chordOf('rail-tab-next'), 'Win32')).toBe('Alt+.')
     expect(ariaKeyshortcuts(chordOf('rail-toggle'), 'MacIntel')).toBe('Meta+.')
     expect(ariaKeyshortcuts(chordOf('rail-toggle'), 'Win32')).toBe('Control+.')
-    expect(ariaKeyshortcuts(chordOf('key-list'), 'MacIntel')).toBe('Meta+/')
+    expect(ariaKeyshortcuts(chordOf('key-list'), 'MacIntel')).toBe('Alt+/')
+    expect(ariaKeyshortcuts(chordOf('search-focus'), 'MacIntel')).toBe('Meta+/')
     expect(ariaKeyshortcuts(chordOf('new-chat'), 'MacIntel')).toBe('Meta+J')
     // Alternatives are space-separated, which is the attribute's own grammar.
     expect(ariaKeyshortcuts(entryChords(findBinding('tab-roving')), 'Win32'))
@@ -384,5 +398,59 @@ describe('keyListRows', () => {
   it('names where a protocol key applies, so Esc does not read as global', () => {
     expect(rows.find((r) => r.action === 'close-top').note).toMatch(/innermost/i)
     expect(rows.find((r) => r.action === 'call-mute').note).toMatch(/voice call/i)
+  })
+})
+
+describe('ent#621 — the search key and the tips panel (follow-up)', () => {
+  const sup = (o) => keymapSuppressed({ action: 'search-focus', ...o })
+
+  it('⌘/ is a key you may use during a call, and never under a dialog', () => {
+    // Focusing a field leaves nothing, so a call does not suppress it; anything
+    // modal does, like every other shell key.
+    expect(sup({ callActive: true })).toBe(false)
+    expect(sup({ modalOpen: true })).toBe(true)
+    expect(sup({ drawerOpen: true })).toBe(true)
+    expect(findBinding('search-focus').scope).toBe(SCOPE_DOING)
+  })
+
+  it('the tips are four headline chords, every one read from the map', () => {
+    expect(KEY_TIPS.map((t) => t.id)).toEqual(['agent', 'chat', 'search', 'new-chat'])
+    for (const tip of KEY_TIPS) {
+      // A tip naming an action the map does not declare would render a row
+      // with no key — the dead row the key list already refuses.
+      for (const action of tip.actions) expect(findBinding(action), action).not.toBeNull()
+    }
+    const mac = keyTipRows('MacIntel')
+    expect(mac.map((r) => r.keys)).toEqual(['⌥↑ / ⌥↓', '⌥⇧↑ / ⌥⇧↓', '⌘/', '⌘J'])
+    expect(keyTipRows('Win32').map((r) => r.keys)).toEqual(['Alt+↑ / Alt+↓', 'Alt+Shift+↑ / Alt+Shift+↓', 'Ctrl+/', 'Ctrl+J'])
+    // DERIVED, not typed: the row is whatever `keyHint` says for its actions.
+    for (const [i, tip] of KEY_TIPS.entries()) expect(mac[i].keys).toBe(keyHint(tip.actions, 'MacIntel'))
+    expect(mac.every((r) => r.label && r.ariaKeyshortcuts)).toBe(true)
+  })
+
+  it('a tip whose actions the map no longer binds is dropped, not shown keyless', () => {
+    const rows = keyTipRows('MacIntel', WORKSPACE_KEYMAP, [{ id: 'gone', label: 'Gone', actions: ['no-such-action'] }, KEY_TIPS[2]])
+    expect(rows.map((r) => r.id)).toEqual(['search'])
+  })
+
+  it('remembers a dismissal per browser, and survives a storage that refuses', () => {
+    const mem = new Map()
+    const storage = {
+      getItem: (k) => (mem.has(k) ? mem.get(k) : null),
+      setItem: (k, v) => mem.set(k, String(v)),
+      removeItem: (k) => mem.delete(k),
+    }
+    expect(loadKeyTipsDismissed(storage)).toBe(false)
+    expect(saveKeyTipsDismissed(storage, true)).toBe(true)
+    expect(mem.has(KEY_TIPS_STORAGE_KEY)).toBe(true)
+    expect(loadKeyTipsDismissed(storage)).toBe(true)
+    saveKeyTipsDismissed(storage, false)
+    expect(loadKeyTipsDismissed(storage)).toBe(false)
+    // Private mode / blocked site data: shown, and the close still works for
+    // this page load (the shell holds the ref) — it just is not remembered.
+    const broken = { getItem() { throw new Error('denied') }, setItem() { throw new Error('denied') }, removeItem() { throw new Error('denied') } }
+    expect(loadKeyTipsDismissed(broken)).toBe(false)
+    expect(saveKeyTipsDismissed(broken, true)).toBe(false)
+    expect(loadKeyTipsDismissed(null)).toBe(false)
   })
 })

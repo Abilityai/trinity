@@ -123,6 +123,7 @@
       <!-- Sidebar: persistent on desktop, drawer on mobile -->
       <div class="hidden sm:flex shrink-0 min-w-0 overflow-hidden sm:w-[var(--ws-sidebar,18rem)]">
         <PortalSidebar
+          ref="sidebarRef"
           :roster="orderedRoster"
           :active-agent-name="activeAgentName"
           :threads="sidebarThreads"
@@ -171,6 +172,7 @@
         <div class="absolute inset-0 bg-black/40" @click="mobileNav = false"></div>
         <div class="absolute inset-y-0 left-0">
           <PortalSidebar
+            ref="drawerSidebarRef"
             :roster="orderedRoster"
             :active-agent-name="activeAgentName"
             :threads="sidebarThreads"
@@ -719,9 +721,12 @@
         :open="railState.open"
         :signals="railSignals"
         :participants="railParticipants"
+        :key-tips="!keyTipsDismissed"
         @update:open="setRailOpen"
         @update:active-tab="setRailTab"
         @see-hints="seeHints"
+        @open-keys="keyListOpen = true"
+        @dismiss-key-tips="dismissKeyTips"
       >
         <!-- ent#475: the three re-homed tabs dock into the shell's slots. Each
              body READS a shell-owned store (`usePortalRailFeeds`) and never
@@ -841,7 +846,7 @@
          unmount it mid-sentence. -->
     <p class="sr-only" aria-live="polite" data-testid="ws-key-announce">{{ keyAnnouncement }}</p>
 
-    <!-- ent#621: `⌘/`. ALWAYS mounted and v-model driven — a `v-if` toggle
+    <!-- ent#621: `⌥/`. ALWAYS mounted and v-model driven — a `v-if` toggle
          unmounts past `BaseModal`'s close branch and focus never comes back to
          the message field. Rows come from the map, never from this template. -->
     <PortalKeyList
@@ -949,6 +954,7 @@ import {
 import {
   resolveWorkspaceKey, workspaceChord, keymapSuppressed, hasModalOpen, nextAgent, recordLastOpen,
   nextRailTab, keyListRows, hostPlatform, WORKSPACE_KEYMAP,
+  loadKeyTipsDismissed, saveKeyTipsDismissed,
 } from '@/components/portal/portalKeymap'
 // ent#557: the tab title's unread half. The router owns the label; this pushes
 // the count. See `utils/tabTitle.js` for why neither writes `document.title`.
@@ -2453,7 +2459,36 @@ function stepRailTab() {
 
 const railTabLabel = (id) => (railTabs.value.find((t) => t.id === id) || {}).label || 'Rail'
 
-// ⌘/ — the key list. It toggles rather than only opening, because the chord
+// ⌘/ — the cursor into the sidebar's search field (the Dashboard's `/` filter
+// key, with the modifier a key needs to work from inside a text field). The
+// shell has TWO sidebars and asks the one on screen: the column at and above
+// `sm`, the drawer below it — which the key opens first, since a field inside
+// a closed drawer cannot take focus. Pressed again from the field, it hands the
+// caret back to the message field: the chord that took you there is the one
+// your hand is still on.
+const sidebarRef = ref(null)
+const drawerSidebarRef = ref(null)
+function focusSearch() {
+  if (isWideViewport(typeof window !== 'undefined' ? window : null)) {
+    if (sidebarRef.value?.searchHasFocus?.()) { focusConversationComposer(); return }
+    sidebarRef.value?.focusSearch?.()
+    return
+  }
+  mobileNav.value = true
+  nextTick(() => drawerSidebarRef.value?.focusSearch?.())
+}
+
+// The rail's shortcut tips — on until the person closes them, and the close is
+// remembered for this browser (a per-viewer convenience, so `localStorage`; a
+// storage that refuses just shows them again next load). The ref lives here,
+// beside `railState`, so a chat switch never brings a closed panel back.
+const keyTipsDismissed = ref(loadKeyTipsDismissed(safeStorage()))
+function dismissKeyTips() {
+  keyTipsDismissed.value = true
+  saveKeyTipsDismissed(safeStorage(), true)
+}
+
+// ⌥/ — the key list. It toggles rather than only opening, because the chord
 // that showed you the list is the chord your hand is already on; `key-list` is
 // the one action allowed to see through its own dialog (`MODAL_IGNORE`).
 const keyListOpen = ref(false)
@@ -2489,6 +2524,7 @@ const KEY_DISPATCH = Object.freeze({
   'chat-prev': () => stepChat(-1),
   'rail-toggle': toggleRail,
   'rail-tab-next': stepRailTab,
+  'search-focus': focusSearch,
   'key-list': () => { keyListOpen.value = !keyListOpen.value },
 })
 
