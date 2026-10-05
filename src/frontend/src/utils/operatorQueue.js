@@ -381,6 +381,9 @@ export const QUEUE_RESPONSE_NOT_ADDRESSEE =
  *     addressed to chose not to answer; its status is `cancelled`),
  *     else the terminal status (a row that ended before the ledger). The
  *     Workspace projection's own `status` (`answered`) reads the same way.
+ *     #3247: `replaced` — a cancel the AGENT authored by replacing its own
+ *     ask (`disposed_by` / the projection's `ended_by` is `agent`); never a
+ *     person's cancel, a timeout or a platform ending.
  *   - `who` — the person, for the Operating Room (`disposed_by_email`, or a
  *     legacy answer's `responded_by_email`); the Workspace projection's coarse
  *     `ended_by` (`you` / `the operator`); `timeout` for an expiry; `null` when
@@ -394,9 +397,16 @@ export const ENDING_LABELS = Object.freeze({
   dismissed: 'Dismissed',
   cancelled: 'Cancelled',
   expired: 'Expired',
+  replaced: 'Replaced',   // #3247
 })
 
 function endingKind(item) {
+  const kind = ledgerKind(item)
+  if (kind === 'cancelled' && (item.disposed_by === 'agent' || item.ended_by === 'agent')) return 'replaced'
+  return kind
+}
+
+function ledgerKind(item) {
   const d = item.disposition
   if (d === 'answered' || d === 'dismissed' || d === 'cancelled' || d === 'expired') return d
   const s = item.status
@@ -413,6 +423,8 @@ export function queueEnding(item) {
   let who = null
   if (kind === 'expired') {
     who = 'timeout'
+  } else if (kind === 'replaced') {
+    who = 'the agent'
   } else if (item.ended_by === 'you') {
     who = 'you'
   } else if (item.ended_by === 'operator') {
@@ -455,6 +467,10 @@ export function recentlyEnded(items, max = 5) {
  * predecessor is not loaded still says it is one. One fact per badge: an ask in
  * a chain gets both. Each badge is `{ key, prefix, id, title }`; `id` is the
  * other ask's request_id (machine text), or null when it is not loaded.
+ *
+ * #3247 — a replace is linked on BOTH rows (`replaces` on the successor,
+ * `replaced_by` on the predecessor, platform ids), so each side is said from
+ * its own row; the loaded list only supplies the other ask's request_id.
  */
 export function queueReaskBadges(item, items = []) {
   if (!item || typeof item !== 'object') return []
@@ -474,6 +490,18 @@ export function queueReaskBadges(item, items = []) {
       id: succ.request_id || null,
       title: `The agent asked again after this expired: "${succ.title}".`,
     })
+  }
+  if (item.replaces) {
+    const pred = list.find((i) => i && i.id === item.replaces)
+    out.push(pred?.request_id
+      ? { key: 'replaces', prefix: 'Replaces', id: pred.request_id, title: `The agent replaced "${pred.title}" with this ask.` }
+      : { key: 'replaces', prefix: 'Replaces an earlier ask', id: null, title: 'The agent replaced an earlier ask with this one.' })
+  }
+  if (item.replaced_by) {
+    const next = list.find((i) => i && i.id === item.replaced_by)
+    out.push(next?.request_id
+      ? { key: 'replaced-by', prefix: 'Replaced by', id: next.request_id, title: `The agent replaced this ask with "${next.title}".` }
+      : { key: 'replaced-by', prefix: 'Replaced by a newer ask', id: null, title: 'The agent replaced this ask with a newer one.' })
   }
   return out
 }
