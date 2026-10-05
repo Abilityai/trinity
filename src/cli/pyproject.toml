@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "trinity-cli"
 version = "0.0.0"  # Replaced at build time by CI (auto-publishes on push to main)
-description = "CLI for the Trinity Autonomous Agent Orchestration Platform"
+description = "CLI for Trinity, the operating system for the AI-native company"
 readme = "README.md"
 license = "Apache-2.0"
 requires-python = ">=3.10"
