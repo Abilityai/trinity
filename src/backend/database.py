@@ -3823,12 +3823,18 @@ class DatabaseManager:
             divergence_acknowledged=divergence_acknowledged,
         )
 
-    def cancel_operator_queue_item(self, item_id, *, disposed_by_email, reason=None):
+    def cancel_operator_queue_item(self, item_id, *, disposed_by_email, reason=None,
+                                   disposition="cancelled"):
         # trinity-enterprise#611: CAS + endings ledger; a lost race carries
-        # `_status_conflict` (the mirror of respond).
+        # `_status_conflict` (the mirror of respond). ent#748: `dismissed`.
         return self._operator_queue_ops.cancel_item(
             item_id, disposed_by_email=disposed_by_email, reason=reason,
+            disposition=disposition,
         )
+
+    def set_operator_queue_discussion_link(self, item_id, key, chat_id):
+        # trinity-enterprise#747: link a pending ask to its discussion chat, once.
+        return self._operator_queue_ops.set_discussion_link(item_id, key, chat_id)
 
     def bulk_cancel_operator_queue_items(self, ids, accessible_agent_names=None, *,
                                          disposed_by_email, reason=None):

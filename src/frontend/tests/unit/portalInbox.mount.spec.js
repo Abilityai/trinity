@@ -972,6 +972,19 @@ describe('an ask attached to a chat is answerable in the pane (#3055 / §3g L0)'
     await w.find('[data-testid="inbox-ask-context-open"]').trigger('click')
     expect(w.emitted('open-chat')?.at(-1)).toEqual(['/workspace/c/main-1'])
   })
+  it('Discuss hands the shell the new chat to adopt, never a bare URL (ent#747)', async () => {
+    // A bare `/workspace/c/<id>` for a chat the thread list has not loaded yet
+    // reads as "This chat isn't available" (#3140); the shell's openThread
+    // adopts it instead.
+    store.asksLoaded = true
+    store.asks = [ask('q1', { chat_id: 'main-1' })]
+    store.discussAsk = vi.fn(async () => ({ chat_id: 'chat-new', agent_name: 'scout', created: true }))
+    const w = await mountInbox({}, { query: { tab: 'action', item: 'ask:q1' } })
+    await w.find('[data-testid="inbox-ask-discuss-q1"]').trigger('click')
+    await flushPromises()
+    expect(w.emitted('open-thread')?.at(-1)).toEqual([{ id: 'chat-new', agent_name: 'scout' }])
+    expect(w.emitted('open-chat')).toBeUndefined()
+  })
   it('an approval with a chat shows its options and Send', async () => {
     store.asksLoaded = true
     store.asks = [ask('ap1', { kind: 'approval', options: ['Yes', 'No'], chat_id: 'main-1' })]

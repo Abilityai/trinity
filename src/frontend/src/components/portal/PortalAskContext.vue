@@ -125,8 +125,11 @@
         <h3 :class="OVERLINE">Your recent answers</h3>
         <ul class="mt-1 space-y-2">
           <li v-for="r in ctx.recent_answers" :key="r.id" class="text-[12.5px] text-gray-900 dark:text-gray-100">
-            <span class="font-medium">{{ r.title }}</span>
-            <span v-if="r.answer"> — you answered “{{ r.answer }}”</span>
+            <!-- #3115: an ask's title — and an answer that was one of its
+                 options — is agent markdown, rendered like every other ask
+                 surface (this list was the one #3122 missed). -->
+            <AskMarkdown :text="r.title" inline class="font-medium" data-testid="inbox-ask-context-answer-title" />
+            <span v-if="r.answer"> — you answered “<AskMarkdown :text="r.answer" inline data-testid="inbox-ask-context-answer-text" />”</span>
             <span v-if="r.ended_at" class="text-gray-600 dark:text-gray-300"> · {{ relativeTime(r.ended_at) }}</span>
           </li>
         </ul>
@@ -138,6 +141,7 @@
 <script setup>
 import { computed, ref, watch } from 'vue'
 import LoadFailed from '@/components/LoadFailed.vue'
+import AskMarkdown from '@/components/operator/AskMarkdown.vue'
 import { useClientPortalStore } from '@/stores/clientPortal'
 import { viewState } from '@/utils/loadingState'
 import { askContextMeta } from './portalAskUrgency'

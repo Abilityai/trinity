@@ -375,9 +375,15 @@ _WORKSPACE_THREAD_KEY = "workspace_session_id"
 # is both a chat-turn ask's home (drawn as a tile there) and a background ask's
 # reply target (drawn in no chat), so `chat_id` alone cannot tell them apart.
 _WORKSPACE_TURN_KEY = "workspace_raised_in_turn"
+# trinity-enterprise#747: the chat the addressee opened to DISCUSS this ask.
+# Separate from the two keys above on purpose: discussing an ask moves neither
+# where it was raised nor where a background ask's reply goes.
+_WORKSPACE_DISCUSSION_KEY = "workspace_discussion_id"
 # Every context key the platform writes and no agent may author: stripped at both
 # ingestion boundaries and ignored when comparing an agent's content.
-_PLATFORM_CONTEXT_KEYS = frozenset({_WORKSPACE_THREAD_KEY, _WORKSPACE_TURN_KEY})
+_PLATFORM_CONTEXT_KEYS = frozenset({
+    _WORKSPACE_THREAD_KEY, _WORKSPACE_TURN_KEY, _WORKSPACE_DISCUSSION_KEY,
+})
 
 
 def _workspace_thread_for(agent_name: str, email: str) -> Optional[str]:

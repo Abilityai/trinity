@@ -15,9 +15,20 @@ import { relativeTime } from './portalUtils'
 // The asks drawn in the chat on screen. Only the platform's literal `true`
 // counts (ent#734 writes it; the backend projection already coerces, and this
 // repeats the rule so a stray truthy value can never draw a background ask).
+// trinity-enterprise#747: a chat opened to DISCUSS an ask draws that ask too,
+// whatever raised it — the discussion is where it is decided.
 export function chatTurnAsks(asks, sessionId) {
   if (!sessionId || !Array.isArray(asks)) return []
-  return asks.filter((a) => a && a.raised_in_turn === true && a.chat_id === sessionId)
+  return asks.filter((a) => a && (
+    (a.raised_in_turn === true && a.chat_id === sessionId)
+    || isDiscussedIn(a, sessionId)
+  ))
+}
+
+// trinity-enterprise#747: is `sessionId` the chat this ask's addressee opened
+// to discuss it?
+export function isDiscussedIn(ask, sessionId) {
+  return !!sessionId && !!ask && ask.discussion_chat_id === sessionId
 }
 
 const ms = (iso) => {
@@ -50,15 +61,20 @@ function rowTime(item) {
 // `truncated` (earlier messages are not shown): an ask older than the first row
 // shown belongs to the part that is not, so it is left out rather than stacked
 // on top with none of its conversation around it.
-export function placeAsksInThread(items, asks, { truncated = false } = {}) {
+//
+// `sessionId` (trinity-enterprise#747): the ask a chat was opened to DISCUSS is
+// the chat's subject, not a row of its history — it heads the thread (it
+// predates every message there) and survives `truncated`, so a long
+// discussion never loses the card it is about.
+export function placeAsksInThread(items, asks, { truncated = false, sessionId = null } = {}) {
   const rows = Array.isArray(items) ? items : []
   if (!Array.isArray(asks) || !asks.length) return rows
   let pending = asks
-    .map((a) => ({ a, at: ms(a.created_at) ?? -Infinity }))
+    .map((a) => ({ a, at: isDiscussedIn(a, sessionId) ? -Infinity : (ms(a.created_at) ?? -Infinity) }))
     .sort((x, y) => (x.at - y.at) || String(x.a.id).localeCompare(String(y.a.id)))
   if (truncated) {
     const first = rows.map(rowTime).find((t) => t !== null)
-    if (first !== undefined) pending = pending.filter((p) => p.at >= first)
+    if (first !== undefined) pending = pending.filter((p) => p.at >= first || isDiscussedIn(p.a, sessionId))
   }
   const out = []
   let next = 0
