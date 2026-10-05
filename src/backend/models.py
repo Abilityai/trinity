@@ -4730,6 +4730,24 @@ class SkillManagerGrantRequest(BaseModel):
     granted: bool
 
 
+class CapabilityGrantRequest(BaseModel):
+    """`PUT /api/agents/{agent_name}/capability-grants/{capability}` (ent#164)."""
+    granted: bool
+
+
+class AgentCapabilityGrant(BaseModel):
+    """One capability on one agent, for its Settings (ent#164 / ent#756)."""
+    capability: str
+    granted: bool
+    granted_by: Optional[str] = None
+    granted_at: Optional[str] = None
+
+
+class AgentCapabilityGrants(BaseModel):
+    agent_name: str
+    grants: List[AgentCapabilityGrant]
+
+
 class SkillManagerGrantResult(BaseModel):
     """What the grant route did. `changed` is False on an idempotent repeat."""
     agent_name: str

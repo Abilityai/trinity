@@ -1789,12 +1789,41 @@ def get_owned_agent_by_name(
 
 # The named refusal per capability: the machine-readable code an agent can branch
 # on, and a sentence that says what is missing and where it is granted.
+# trinity-enterprise#164: every refusal also tells the agent how to ASK for the
+# permission. Approving that ask is a notification only — the grant itself is
+# made by an admin in a signed-in session, never by answering a queue item.
+_ASK_FOR_IT = (
+    " To request it, raise an ask to your operator with ask_class "
+    "'permission-request' naming the permission; approving the ask does not grant "
+    "it — an admin grants it in the agent's Settings."
+)
+
 _CAPABILITY_REFUSALS = {
     "skills.manage": (
         "skill_management_not_permitted",
         "This agent does not hold the skill-management permission, which changing "
         "any agent's skills requires \u2014 its own included. An instance admin can "
-        "grant it in Settings \u2192 Agents \u2192 Skill managers.",
+        "grant it in Settings \u2192 Agents \u2192 Skill managers." + _ASK_FOR_IT,
+    ),
+    "schedules.manage": (
+        "schedule_management_not_permitted",
+        "This agent does not hold the schedule-management permission, which "
+        "creating, changing, enabling, disabling or deleting ANOTHER agent's "
+        "schedules (and their webhooks) requires. An agent's own schedules need "
+        "no grant." + _ASK_FOR_IT,
+    ),
+    "instructions.manage": (
+        "instruction_management_not_permitted",
+        "This agent does not hold the instruction-management permission, which "
+        "writing an agent's CLAUDE.md, AGENTS.md or .claude/ files (other than "
+        "skills), or resetting its git workspace, requires \u2014 its own "
+        "included." + _ASK_FOR_IT,
+    ),
+    "agents.manage": (
+        "agent_management_not_permitted",
+        "This agent does not hold the agent-management permission, which creating, "
+        "deleting, deploying or reconfiguring agents requires (spawning an "
+        "ephemeral helper does not)." + _ASK_FOR_IT,
     ),
 }
 
@@ -1905,6 +1934,69 @@ def can_manage_agent_skills(current_user: User, agent_name: str) -> bool:
     if capability_refusal(current_user, CAPABILITY_SKILLS_MANAGE) is not None:
         return False
     return bool(db.can_user_share_agent(current_user.username, agent_name))
+
+
+def _path_agent(request: Request) -> Optional[str]:
+    params = getattr(request, "path_params", None) or {}
+    return params.get("agent_name") or params.get("name")
+
+
+def capability_fence(capability: str, *, own_agent_exempt: bool = False,
+                     ephemeral_target_exempt: bool = False):
+    """A route-level dependency: refuse an agent principal that does not hold
+    `capability` (trinity-enterprise#164), with the same named 403 and audit
+    row as `skills.manage`. Humans, `user`- and `system`-scoped keys pass —
+    the route's own owner/access check still applies to them.
+
+    Attach as `dependencies=[Depends(capability_fence(X))]` so it runs before
+    the route's parameters — a non-holder gets one uniform 403 whether or not
+    the target exists (#186). The returned function's name carries the
+    capability, so the guard tests can read it off FastAPI's dependant graph.
+
+    `own_agent_exempt`: an agent acting on ITSELF passes without the grant. Used
+    for `schedules.manage` (decided 2026-10-05): an agent's own schedules are its
+    own use (#2996 — `create_schedule` / `enable_schedule` via MCP), already
+    bounded by autonomy, which stays person-only; the grant is what it needs to
+    change ANOTHER agent's schedules.
+
+    `ephemeral_target_exempt`: discarding an ephemeral ("ghost") agent needs no
+    grant — ent#69 governs ghosts (spawn and discard), decided 2026-10-05.
+    """
+    async def fence(request: Request, current_user: User = Depends(get_current_user)) -> None:
+        target = _path_agent(request)
+        if (own_agent_exempt and target
+                and getattr(current_user, "mcp_scope", None) == "agent"
+                and getattr(current_user, "agent_name", None) == target):
+            return
+        if ephemeral_target_exempt and target:
+            from database import db as _db
+            info = _db.get_agent_ephemeral_info(target)
+            if isinstance(info, dict) and info.get("is_ephemeral"):
+                return
+        await enforce_agent_capability(request, current_user, capability, target=target)
+    fence.__name__ = f"capability_fence_{capability.replace('.', '_')}"
+    return fence
+
+
+def require_person_or_capability(capability: str):
+    """`require_person`, except that an AGENT holding `capability` passes
+    (trinity-enterprise#164 — the reconfigure routes were person-only, so no
+    agent could hold the power the grant exists to give an orchestrator).
+
+    Only the agent case changes: an agent key without the grant gets the named
+    capability refusal; every other principal meets `assert_person` exactly as
+    before, so a user-scoped or connector key gains nothing.
+    """
+    async def dep(request: Request, current_user: User = Depends(get_current_user)) -> User:
+        if (getattr(current_user, "mcp_scope", None) == "agent"
+                and getattr(current_user, "agent_name", None)
+                and not getattr(current_user, "vouched_source_agent", None)):
+            await enforce_agent_capability(request, current_user, capability, target=_path_agent(request))
+            return current_user
+        assert_person(current_user)
+        return current_user
+    dep.__name__ = f"require_person_or_{capability.replace('.', '_')}"
+    return dep
 
 
 async def get_skill_managed_agent_by_name(

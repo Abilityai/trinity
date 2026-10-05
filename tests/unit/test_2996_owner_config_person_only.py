@@ -366,6 +366,18 @@ CONFIG_WRITES = {
 }
 
 WRITE_IDS = sorted(CONFIG_WRITES)
+# trinity-enterprise#164: these five are `agents.manage`-grantable — an agent
+# holding the grant may change them; one without it gets the NAMED refusal.
+GRANTABLE = {"read-only", "resources", "timeout", "public-channel-model", "guardrails"}
+
+
+def _is_capability_refusal(res) -> bool:
+    detail = res.json().get("detail")
+    return (
+        res.status_code == 403
+        and isinstance(detail, dict)
+        and detail.get("code") == "agent_management_not_permitted"
+    )
 
 
 def _seeded(name: str):
@@ -386,11 +398,37 @@ class TestConfigWritesRealKeys:
         pytest.param(lambda: _agent_key(), id="agent-key-own-agent"),
         pytest.param(lambda: _system_key(), id="system-key"),
     ])
-    def test_a_machine_key_is_refused_and_the_value_does_not_move(self, world, name, headers):
+    def test_a_machine_key_is_refused_and_the_value_does_not_move(self, world, name, headers, request):
         w, before = _seeded(name)
         res = _put(world, w, headers())
-        assert _is_human_only_refusal(res), res.text
+        if name in GRANTABLE and "agent-key" in request.node.callspec.id:
+            assert _is_capability_refusal(res), res.text      # ent#164: named, askable
+        else:
+            assert _is_human_only_refusal(res), res.text
         assert w.read() == before
+
+    @pytest.mark.parametrize("name", sorted(GRANTABLE))
+    def test_an_agent_holding_agents_manage_changes_the_stored_value(self, world, name):
+        """ent#164 through the REAL `get_current_user` and the real grant table."""
+        w, before = _seeded(name)
+        db.grant_agent_capability(AGENT, "agents.manage", "admin")
+        try:
+            res = _put(world, w, _agent_key())
+            assert 200 <= res.status_code < 300, res.text
+            assert w.read() == w.expected_after
+        finally:
+            db.revoke_agent_capability(AGENT, "agents.manage")
+
+    @pytest.mark.parametrize("name", sorted(set(WRITE_IDS) - GRANTABLE))
+    def test_the_grant_does_not_open_the_person_only_writes(self, world, name):
+        w, before = _seeded(name)
+        db.grant_agent_capability(AGENT, "agents.manage", "admin")
+        try:
+            res = _put(world, w, _agent_key())
+            assert _is_human_only_refusal(res), res.text
+            assert w.read() == before
+        finally:
+            db.revoke_agent_capability(AGENT, "agents.manage")
 
     @pytest.mark.parametrize("name", WRITE_IDS)
     @pytest.mark.parametrize("headers", [
@@ -417,10 +455,56 @@ class TestConfigWritesEveryOtherPrincipal:
 
 def test_every_write_in_the_file_is_person_gated():
     """The eight writes above plus autonomy are every PUT in agent_config.py —
-    a ninth would need a row here (and the route census names it too)."""
+    a ninth would need a row here (and the route census names it too). The
+    ent#164 grant route is admin-and-interactive, pinned by its own suite."""
     puts = sorted(
         r.path.rsplit("/", 1)[-1]
         for r in _CFG.router.routes
         if "PUT" in getattr(r, "methods", set())
+        and not r.path.endswith("/capability-grants/{capability}")
     )
     assert puts == sorted(WRITE_IDS + ["autonomy"])
+
+
+# ===========================================================================
+# trinity-enterprise#164 — the grant route: interactive admin only
+# ===========================================================================
+
+
+class TestCapabilityGrantRoute:
+    URL = f"/api/agents/{AGENT}/capability-grants"
+
+    def _held(self, world, headers):
+        res = world.client.get(self.URL, headers=headers)
+        assert res.status_code == 200, res.text
+        return {g["capability"] for g in res.json()["grants"] if g["granted"]}
+
+    def test_an_admin_session_grants_and_revokes(self, world, monkeypatch):
+        audit = []
+
+        async def log(**kw):
+            audit.append(kw)
+        monkeypatch.setattr(_CFG.platform_audit_service, "log", log)
+        res = world.client.put(f"{self.URL}/agents.manage", json={"granted": True}, headers=_jwt(ADMIN))
+        assert res.status_code == 200 and res.json()["changed"] is True, res.text
+        assert db.agent_has_capability(AGENT, "agents.manage")
+        assert self._held(world, _jwt(OWNER)) == {"agents.manage"}
+        again = world.client.put(f"{self.URL}/agents.manage", json={"granted": True}, headers=_jwt(ADMIN))
+        assert again.json()["changed"] is False                     # idempotent, one audit row
+        world.client.put(f"{self.URL}/agents.manage", json={"granted": False}, headers=_jwt(ADMIN))
+        assert not db.agent_has_capability(AGENT, "agents.manage")
+        assert [a["event_action"] for a in audit] == ["capability_grant", "capability_revoke"]
+
+    @pytest.mark.parametrize("headers", [
+        pytest.param(lambda: _jwt(OWNER), id="owner-non-admin"),
+        pytest.param(lambda: _agent_key(), id="agent-key"),
+        pytest.param(lambda: _system_key(), id="system-key"),
+    ])
+    def test_nobody_else_can_grant(self, world, headers):
+        res = world.client.put(f"{self.URL}/agents.manage", json={"granted": True}, headers=headers())
+        assert res.status_code == 403, res.text
+        assert not db.agent_has_capability(AGENT, "agents.manage")
+
+    def test_an_unknown_capability_is_a_named_422(self, world):
+        res = world.client.put(f"{self.URL}/autonomy.manage", json={"granted": True}, headers=_jwt(ADMIN))
+        assert res.status_code == 422, res.text

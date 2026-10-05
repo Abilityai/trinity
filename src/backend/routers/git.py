@@ -30,6 +30,7 @@ from models import (
 )
 from database import db
 from dependencies import (
+    capability_fence,
     get_current_user,
     reject_agent_principal,
     require_person,
@@ -775,7 +776,7 @@ async def clear_agent_github_pat(
 # ============================================================================
 
 
-@router.post("/{agent_name}/git/reset-to-main-preserve-state")
+@router.post("/{agent_name}/git/reset-to-main-preserve-state", dependencies=[Depends(capability_fence("instructions.manage"))])
 async def reset_to_main_preserve_state(
     agent_name: OwnedAgentByName,
     request: Request,
