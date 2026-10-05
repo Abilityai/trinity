@@ -106,8 +106,9 @@ FR's shifted `.` reach ⌘/ while macOS's `⌘?` stays the browser's Help search
 asserted empty, which is the test that would have caught a new chord shadowing
 a protocol key.
 
-**One dispatcher — `Portal.vue::onGlobalKeydown`**, still the single `window`
-listener armed above `bootstrap()`'s `await` (contract #23) and removed in
+**One dispatcher — `Portal.vue::onGlobalKeydown`**, still the single chord
+dispatcher (`PortalRail.vue`'s sheet-only Esc `window` listener is the `close-top`
+protocol entry the map declares, not a second dispatcher), armed above `bootstrap()`'s `await` (contract #23) and removed in
 `onBeforeUnmount`. The ladder, in order, because the order is the design:
 
 1. `resolveWorkspaceKey(e)` — a chord nobody owns, a **key repeat**, or an IME
