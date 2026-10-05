@@ -95,6 +95,7 @@ _MACHINE_ROW_FIELDS = (
     "disposition", "disposed_at", "disposed_by", "disposition_reason", "batch_id",
     "raised_by", "channel", "to_role", "proposal", "supersedes_expired",
     "aging", "aged_since",
+    "subject", "last_seen_at",  # #3246: a platform alert's condition key + latest reading
 )
 
 

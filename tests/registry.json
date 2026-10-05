@@ -1,6 +1,28 @@
 {
   "test_files": [
     {
+      "file": "unit/test_3246_platform_alerts_seam.py",
+      "feature": "#3246",
+      "added": "2026-10-05",
+      "categories": [
+        "backend",
+        "operator-queue",
+        "unit"
+      ],
+      "description": "#3246 C4: platform_alerts.observe / clear / reconcile at the seam on the unit island's real SQLite — two readings are one row updated in place (fields, seen_count, last_seen_at, expires_at), the kind's lifetime is the deadline (30 d net, 14 d default, none for person kinds) and a real mark_expired ends it, rows wear their kind prefix and are platform-minted, an unregistered kind is refused and a DB fault returns FAILED without raising; clear ends the pending row as the platform (condition_cleared) and is a no-op otherwise; reconcile ends only subjects no longer live; T5 snooze: after a person's ending the same reading files nothing for 7 days, a priority increase or material change files a fresh row, a platform ending never snoozes. No Docker."
+    },
+    {
+      "file": "unit/test_3246_platform_alerts_registry.py",
+      "feature": "#3246",
+      "added": "2026-10-05",
+      "categories": [
+        "backend",
+        "operator-queue",
+        "unit"
+      ],
+      "description": "#3246 C4: the seam's static guards — two-way prefix parity between the kind registry and _RESERVED_ID_PREFIXES (the four newly reserved families are platform-minted); the EMITTERS_NOT_YET_ON_SEAM ratchet (every direct or #1677-budgeted platform emitter listed with its follow-up, no stale entries, prefixes registered); the clear-site check (every hook kind on the seam has a platform_alerts.clear/reconcile call naming it, or a named NO_CLEAR_SITE reason); the caller guard (only the seam calls the #3246 accessors). AST, no DB."
+    },
+    {
       "file": "unit/test_3246_platform_alert_sweep.py",
       "feature": "#3246",
       "added": "2026-10-05",

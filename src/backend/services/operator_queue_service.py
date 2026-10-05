@@ -230,6 +230,14 @@ _RESERVED_ID_PREFIXES = (
     # `~/.trinity/operator-queue.json`. Correct: the sweep alarm is a platform
     # alarm ABOUT the agent, not a loop the agent opened and is waiting on.
     "gitignore-untracked-",
+    # #3246: four platform families that were never reserved. Reserving them
+    # also makes `is_platform_minted` true for their rows, which keeps them out
+    # of the agent's own file and its answer wake — intended: each is an alarm
+    # ABOUT the agent (or the install), not a loop the agent opened.
+    "skills-reconcile-",       # skill_service reconcile refusal (ent#236)
+    "skills-fleet-reinject-",  # skills_sync_service fleet re-inject failures (ent#236)
+    "retention-guard-",        # retention_guard prune refusal (#1644)
+    "ent615-git-token-scrub-", # git_service/token_scrub refusal + unreadable (ent#615)
     ROLE_DRIFT_ALERT_PREFIX,  # role-assignment drift (trinity-enterprise#500) —
                            # the role file lives in the AGENT'S OWN workspace, so
                            # an unreserved prefix would let it pre-create the id

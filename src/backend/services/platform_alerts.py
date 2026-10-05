@@ -519,3 +519,157 @@ def plan_sweep(rows: Iterable[Mapping], *, now: datetime) -> SweepPlan:
         lifetime_stamps=tuple(lifetime_stamps),
         snooze_stamps=tuple(snooze_stamps),
     )
+
+
+# ---------------------------------------------------------------------------
+# The seam: observe / clear / reconcile (#3246 C4)
+#
+# Every import below is function-local: this module stays a stdlib-only leaf
+# at import time (the migration tracks import `plan_sweep` from it, and
+# `operator_queue_service` calls back into it — a module-level import of the
+# service graph would close the cycle E1 names).
+# ---------------------------------------------------------------------------
+
+OBSERVED_CREATED = "created"
+OBSERVED_UPDATED = "updated"
+OBSERVED_SNOOZED = "snoozed"
+OBSERVED_REFUSED_UNREGISTERED = "refused_unregistered"
+OBSERVED_REFUSED_AT_BUDGET = "refused_at_budget"
+OBSERVED_FAILED = "failed"
+
+_PRIORITY_RANK = {"low": 0, "medium": 1, "high": 2, "critical": 3}
+
+
+def _snoozed_by(kind: Kind, ended: Optional[Mapping], priority: str, context: Mapping) -> bool:
+    """A person ended this subject's row inside the snooze window, and the new
+    reading is neither a priority increase nor a material change."""
+    if not ended:
+        return False
+    if _PRIORITY_RANK.get(priority, 0) > _PRIORITY_RANK.get(ended.get("priority"), 0):
+        return False
+    old = _as_context(ended.get("context"))
+    return all(context.get(k) == old.get(k) for k in kind.material_keys)
+
+
+def _spawn(factory: Callable[[], Any]) -> None:
+    try:
+        from services import operator_resume_service
+        operator_resume_service.spawn_on_loop(factory)
+    except Exception:  # noqa: BLE001 — the row is committed; a lost trigger is not fatal
+        logger.warning("[platform-alerts] could not schedule a follow-up", exc_info=True)
+
+
+async def _broadcast_sync() -> None:
+    """Thin trigger (#918: no payload); listeners refetch the access-controlled list."""
+    from services import operator_queue_service as oqs
+    manager = oqs._websocket_manager
+    if manager:
+        await manager.broadcast(json.dumps({"type": "operator_queue_sync", "data": {}}))
+
+
+def observe(
+    agent_name: str,
+    kind: str,
+    key: Any = None,
+    *,
+    title: str,
+    question: str,
+    priority: str = "high",
+    context: Optional[Mapping] = None,
+) -> str:
+    """Report a new reading of a platform condition (#3246). Never raises.
+
+    The subject's pending row is updated in place (one row per subject, the
+    latest reading); with no pending row, a reading a person ended inside the
+    snooze window (`OPERATOR_PLATFORM_ALERT_SNOOZE_DAYS`, default 7) files
+    nothing unless its priority rose or a `material_keys` value changed; else
+    a fresh row is filed with the kind's lifetime as `expires_at`, measured
+    from this reading. Returns one of the ``OBSERVED_*`` outcomes.
+    """
+    try:
+        k = KINDS.get(kind)
+        if k is None:
+            logger.error("[platform-alerts] refusing an alert of unregistered kind %r for %s",
+                         kind, agent_name)
+            return OBSERVED_REFUSED_UNREGISTERED
+        from database import db
+        from utils.helpers import utc_now_iso
+
+        subject = subject_for(kind, key)
+        ctx = dict(context) if isinstance(context, Mapping) else {}
+        now = datetime.now(timezone.utc)
+        if subject is not None and db.find_pending_operator_queue_by_subject(agent_name, subject) is None:
+            since = _iso_z(now - snooze_window())
+            ended = db.find_person_ended_operator_queue_by_subject(agent_name, subject, since)
+            if _snoozed_by(k, ended, priority, ctx):
+                return OBSERVED_SNOOZED
+        lifetime = lifetime_for(kind)
+        stem = _belt_key(key) + "-" if subject is not None else ""
+        item = {
+            "id": f"{k.prefix}{stem}{utc_now_iso()}",
+            "type": k.budgeted_type or "alert",
+            "status": "pending",
+            "priority": priority,
+            "title": title,
+            "question": question,
+            "context": ctx,
+            "created_at": utc_now_iso(),
+            "expires_at": _iso_z(now + lifetime) if lifetime is not None else None,
+        }
+        cap = None
+        if k.budgeted_type:
+            from services import operator_queue_service as oqs
+            cap = oqs.OPERATOR_ALERT_MAX_PENDING_PER_TYPE
+        out = db.create_platform_operator_queue_item(
+            agent_name, item, subject=subject, max_pending_for_type=cap)
+        if out["outcome"] == OBSERVED_REFUSED_AT_BUDGET:
+            from services import operator_queue_service as oqs
+            _spawn(lambda: oqs._maybe_emit_alert_budget_episode(
+                agent_name, k.budgeted_type, ctx.get("triggered_by")))
+            return OBSERVED_REFUSED_AT_BUDGET
+        if out.get("changed"):
+            _spawn(_broadcast_sync)
+        return out["outcome"]
+    except Exception:  # noqa: BLE001 — an alert must never break its emitter
+        logger.error("[platform-alerts] observe failed for %s/%s", agent_name, kind, exc_info=True)
+        return OBSERVED_FAILED
+
+
+def _end(rows: Iterable[Mapping], reason: Optional[str]) -> int:
+    ids = [r["id"] for r in rows if r]
+    if not ids:
+        return 0
+    from services import ask_service
+    return len(ask_service.clear_platform(ids, reason=reason or ask_service.CONDITION_CLEARED).rows)
+
+
+def clear(agent_name: str, kind: str, key: Any = None, *, reason: Optional[str] = None) -> int:
+    """The condition behind `(agent, kind, key)` cleared: the platform ends its
+    pending row (ent#611 ledger, `disposed_by = 'platform'`). A row a person
+    ended first is untouched. Returns the number ended; never raises."""
+    try:
+        subject = subject_for(kind, key)
+        if subject is None:
+            return 0
+        from database import db
+        return _end([db.find_pending_operator_queue_by_subject(agent_name, subject)], reason)
+    except Exception:  # noqa: BLE001
+        logger.error("[platform-alerts] clear failed for %s/%s", agent_name, kind, exc_info=True)
+        return 0
+
+
+def reconcile(agent_name: str, kind: str, live_keys: Iterable[Any]) -> int:
+    """End every pending row of `kind` for `agent_name` whose key is not in
+    `live_keys` — for an emitter that knows the full current set rather than
+    each clear. Returns the number ended; never raises."""
+    try:
+        _kind(kind)
+        live = {subject_for(kind, key) for key in live_keys}
+        from database import db
+        rows = db.list_operator_queue_items(agent_name=agent_name, status="pending", limit=1000)
+        stale = [r for r in rows
+                 if (r.get("subject") or "").startswith(f"{kind}:") and r["subject"] not in live]
+        return _end(stale, None)
+    except Exception:  # noqa: BLE001
+        logger.error("[platform-alerts] reconcile failed for %s/%s", agent_name, kind, exc_info=True)
+        return 0
