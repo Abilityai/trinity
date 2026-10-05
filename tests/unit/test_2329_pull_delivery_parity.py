@@ -299,6 +299,22 @@ class TestDuplicateSuccess:
         assert len(_messages(_own_session_id())) == 2
 
 
+    @pytest.mark.asyncio
+    async def test_late_success_after_failed_delivers_once(self, seed_agent, enqueue):
+        """FAILED then SUCCESS under one token before either delivery runs: the
+        FAILED delivery must not re-read the corrected row and save it too."""
+        from services import pull_coordination_service as pcs
+
+        seed_agent(AGENT)
+        enqueue(AGENT, backlog_metadata=_meta())
+        eid, token = _claim()
+
+        pcs.apply_task_result(eid, token, status="failed", content="x", error_code="runtime")
+        pcs.apply_task_result(eid, token, status="success", content="late")
+        await _settle()
+
+        assert _messages(_own_session_id()) == [("user", "hi"), ("assistant", "late")]
+
 # ---------------------------------------------------------------------------
 # Collaboration / self-task activity close
 # ---------------------------------------------------------------------------
@@ -382,6 +398,38 @@ class TestQueuedActivityClose:
         await activity_service.close_execution_activity(eid, TaskExecutionStatus.FAILED)
 
         assert db.get_activity(dispatch)["activity_state"] == "failed"
+
+    @pytest.mark.asyncio
+    async def test_requeue_leaves_the_collaboration_activity_to_the_next_attempt(
+        self, seed_agent, enqueue
+    ):
+        """The lease reaper closes the dead attempt as CANCELLED on a row it has
+        just re-queued. The collaboration activity belongs to the re-delivered
+        attempt and must stay open: a CANCELLED close is never upgraded."""
+        from database import db
+        from db_harness import run as _hrun
+        from models import TaskExecutionStatus
+        from services import pull_coordination_service as pcs
+        from services.activity_service import activity_service
+
+        seed_agent(AGENT)
+        collab = _collab_activity()
+        enqueue(AGENT, backlog_metadata=_meta(
+            save_to_session=False, collaboration_activity_id=collab,
+        ))
+        eid, _ = _claim()
+        _hrun("UPDATE schedule_executions SET status='queued' WHERE id=:i", i=eid)
+
+        await activity_service.close_execution_activity(
+            eid, TaskExecutionStatus.CANCELLED, error="lease expired"
+        )
+        assert db.get_activity(collab)["activity_state"] == "started"
+
+        _eid, token = _claim()
+        pcs.apply_task_result(eid, token, status="success", content="ok")
+        await _settle()
+        await asyncio.gather(*list(_close_tasks()), return_exceptions=True)
+        assert db.get_activity(collab)["activity_state"] == "completed"
 
     def test_bulk_close_covers_collaboration_activity(self, seed_agent, enqueue):
         from database import db

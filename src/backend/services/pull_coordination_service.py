@@ -510,7 +510,9 @@ def _delivery_metadata(execution: Any) -> Optional[Dict[str, Any]]:
     return meta if wants else None
 
 
-async def _deliver_and_signal(execution: Any, meta: Dict[str, Any]) -> None:
+async def _deliver_and_signal(
+    execution: Any, meta: Dict[str, Any], applied_status: Any
+) -> None:
     """Run the shared post-turn delivery for a pulled turn, then wake the sync
     waiter with the chat session it was saved to. The waiter is signalled even
     when delivery fails: the terminal is already committed."""
@@ -522,7 +524,10 @@ async def _deliver_and_signal(execution: Any, meta: Dict[str, Any]) -> None:
     chat_session_id = None
     try:
         result = result_from_execution_row(execution.id)
-        if result is not None:
+        # Deliver only the terminal this CAS wrote. A late SUCCESS correcting a
+        # FAILED row spawns its own delivery; the FAILED one must not re-read
+        # the corrected row and deliver it a second time.
+        if result is not None and result.status == applied_status:
             # The terminal CAS wrote duration_ms from the claim-time started_at.
             applied = db.get_execution(execution.id)
             execution_time_ms = getattr(applied, "duration_ms", None)
@@ -547,7 +552,7 @@ async def _deliver_and_signal(execution: Any, meta: Dict[str, Any]) -> None:
         signal_sync_waiter(execution.id, None, chat_session_id)
 
 
-def _spawn_post_turn_delivery(execution: Any) -> None:
+def _spawn_post_turn_delivery(execution: Any, applied_status: Any) -> None:
     """Sync entry from the CAS-won branch. Nothing to deliver, or no running
     loop: wake the waiter now. Otherwise deliver first, then wake it."""
     from services.sync_waiter import signal_sync_waiter
@@ -556,7 +561,7 @@ def _spawn_post_turn_delivery(execution: Any) -> None:
     if meta is not None:
         try:
             task = asyncio.get_running_loop().create_task(
-                _deliver_and_signal(execution, meta)
+                _deliver_and_signal(execution, meta, applied_status)
             )
         except RuntimeError as e:
             logger.warning("[#2329] post-turn delivery skipped for %s (no loop): %s",
@@ -766,7 +771,7 @@ def apply_task_result(
         # save, collaboration / self-task finalisation) exactly as the push
         # drain does, then wake a sync waiter in this process. Its DB poll
         # covers a caller held by another worker (#3114).
-        _spawn_post_turn_delivery(execution)
+        _spawn_post_turn_delivery(execution, row_status)
         return ResultApplyOutcome("applied", row_status)
 
     # CAS lost — reclassify against the freshly-read row.

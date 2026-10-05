@@ -22,6 +22,7 @@ from models import (
     activity_state_for_terminal,
 )
 from database import db
+from services.sync_waiter import TERMINAL_TASK_STATUSES
 from db.activities import queued_activity_ids
 from utils.helpers import utc_now_iso
 
@@ -283,7 +284,11 @@ class ActivityService:
         Details carry the keys the push closers write, because whichever
         closer wins the CAS is the one whose details persist."""
         execution = db.get_execution(execution_id)
-        if execution is None:
+        # Only a row that is terminal NOW. The lease reaper closes the dead
+        # attempt's dispatch activity as CANCELLED and re-queues the row with the
+        # same metadata: its collaboration / self-task activity belongs to the
+        # re-delivered attempt, and a CANCELLED close can never be upgraded.
+        if execution is None or execution.status not in TERMINAL_TASK_STATUSES:
             return
         raw = getattr(execution, "backlog_metadata", None)
         ids = queued_activity_ids(raw)
