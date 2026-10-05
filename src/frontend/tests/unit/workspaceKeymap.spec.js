@@ -23,7 +23,7 @@
 import { describe, it, expect } from 'vitest'
 import {
   WORKSPACE_KEYMAP, OWNER_SHELL, OWNER_PROTOCOL, SCOPE_MOVING, SCOPE_DOING, SCOPE_PROTOCOL,
-  entryChords, findBinding, matchesChord, resolveWorkspaceKey, keymapCollisions,
+  entryChords, findBinding, matchesChord, resolveWorkspaceKey, workspaceChord, keymapCollisions,
   keymapSuppressed, cycleIndex, nextAgent, recordLastOpen, nextRailTab,
   chordLabel, ariaKeyshortcuts, keyListRows,
 } from '../../src/components/portal/portalKeymap'
@@ -171,6 +171,21 @@ describe('resolveWorkspaceKey', () => {
     expect(resolveWorkspaceKey(ev({ key: 'ArrowDown', altKey: true, isComposing: true }))).toBeNull()
     expect(resolveWorkspaceKey(ev({ key: 'ArrowDown', altKey: true, keyCode: 229 }))).toBeNull()
     expect(resolveWorkspaceKey(null)).toBeNull()
+  })
+
+  it('still knows whose chord a held key is, so its repeat can be kept from the browser', () => {
+    // One press is one action, so `resolveWorkspaceKey` answers null for a
+    // repeat — but the repeat of a chord the shell claimed is not the
+    // browser's either: a held ⌥. types `≥` into the message field on a Mac,
+    // and a held Ctrl+J opens the browser's Downloads.
+    expect(workspaceChord(ev({ key: '≥', code: 'Period', altKey: true, repeat: true }))).toBe('rail-tab-next')
+    expect(workspaceChord(ev({ key: 'j', code: 'KeyJ', ctrlKey: true, repeat: true }))).toBe('new-chat')
+    expect(workspaceChord(ev({ key: 'ArrowDown', altKey: true }))).toBe('agent-next')
+    // Never for a chord the shell does not dispatch, and never mid-composition.
+    expect(workspaceChord(ev({ key: 'k', code: 'KeyK', metaKey: true, repeat: true }))).toBeNull()
+    expect(workspaceChord(ev({ key: 'Escape', repeat: true }))).toBeNull()
+    expect(workspaceChord(ev({ key: 'ArrowDown', altKey: true, repeat: true, isComposing: true }))).toBeNull()
+    expect(workspaceChord(null)).toBeNull()
   })
 
   it('says nothing about plain typing', () => {

@@ -254,6 +254,25 @@ export function resolveWorkspaceKey(e, map = WORKSPACE_KEYMAP) {
   if (!e) return null
   // A held key must not remount the conversation N times a second.
   if (e.repeat) return null
+  return workspaceChord(e, map)
+}
+
+/**
+ * The action whose CHORD this event is — a press or its auto-repeat alike.
+ *
+ * `resolveWorkspaceKey` answers "should something happen", and for a repeat
+ * the answer is no: one press is one action. But a repeat of a chord the shell
+ * claimed is still not the browser's, and the dispatcher cannot say so with a
+ * null: left alone, a held ⌥. types `≥` into the message field on a Mac and a
+ * held Ctrl+J opens the browser's Downloads. This is the half of the question
+ * the repeat can still answer — WHOSE chord it is — and the dispatcher pairs it
+ * with the press it claimed.
+ *
+ * Reserved and protocol entries are null here for the same reason they are
+ * null there, and an IME composition is never a chord.
+ */
+export function workspaceChord(e, map = WORKSPACE_KEYMAP) {
+  if (!e) return null
   if (e.isComposing || e.keyCode === 229) return null
   const list = Array.isArray(map) ? map : []
   for (const entry of list) {

@@ -947,7 +947,7 @@ import {
 // ent#621 — the Workspace key map. The rules are pure and live there; this view
 // owns the one listener and the dispatch table (T3).
 import {
-  resolveWorkspaceKey, keymapSuppressed, hasModalOpen, nextAgent, recordLastOpen,
+  resolveWorkspaceKey, workspaceChord, keymapSuppressed, hasModalOpen, nextAgent, recordLastOpen,
   nextRailTab, keyListRows, hostPlatform, WORKSPACE_KEYMAP,
 } from '@/components/portal/portalKeymap'
 // ent#557: the tab title's unread half. The router owns the label; this pushes
@@ -2496,9 +2496,11 @@ const KEY_DISPATCH = Object.freeze({
 // bootstrap's await (contract #23, guarded by `mountListenerOrdering.spec.js`),
 // and inert until signed in. In order, because the order IS the design:
 //
-//   1. `resolveWorkspaceKey` — a chord we do not own, a key repeat or an IME
-//      composition returns null, and we return WITHOUT `preventDefault`: ⌘K
-//      must keep reaching the browser until ent#577 binds it.
+//   0. A key REPEAT never dispatches — one press is one action — but the repeat
+//      of the press the shell just claimed is swallowed (`heldKey`, below).
+//   1. `resolveWorkspaceKey` — a chord we do not own or an IME composition
+//      returns null, and we return WITHOUT `preventDefault`: ⌘K must keep
+//      reaching the browser until ent#577 binds it.
 //   2. Signed in. The OTP form answers no keys.
 //   3. ⌘J keeps its place at the top AND its own "leave the call?" ask
 //      (ent#534/551) — the one key a call answers rather than swallows.
@@ -2512,13 +2514,30 @@ const KEY_DISPATCH = Object.freeze({
 //      (`defaultPrevented` — the Esc protocol, the typeahead's bare arrows),
 //      anything modal, the mobile drawer, or a live voice call.
 // Only then `preventDefault`, and only then the action.
+//
+// (review) `heldKey` is the action of the press the shell last CLAIMED. A held
+// key auto-repeats, and those repeats used to fall out at step 1 unprevented —
+// so the browser got them: a held ⌥. typed `≥` into the message field on a
+// Mac, a held Ctrl+J opened Downloads. The repeat is matched to the claimed
+// PRESS rather than re-run down the ladder, for two reasons: the action has
+// usually changed what the ladder would say (⌘J has just opened the picker,
+// which is modal), and the repeat of a press the shell did NOT claim must stay
+// the browser's exactly as the press did (⌘. on a page with no rail). Any new
+// press ends the hold, so a stale claim can never eat a later key.
+let heldKey = null
 function onGlobalKeydown(e) {
+  if (e.repeat) {
+    if (heldKey && workspaceChord(e) === heldKey) e.preventDefault()
+    return
+  }
+  heldKey = null
   const action = resolveWorkspaceKey(e)
   if (!action) return
   if (!store.isClientSignedIn) return
   if (action === 'new-chat') {
     if (voiceCall.value.active) {        // ent#534/ent#551: the call owns the stage — ask first
       e.preventDefault()
+      heldKey = action
       guardLeaveCall(() => onGlobalKeydown(e))
       return
     }
@@ -2535,6 +2554,7 @@ function onGlobalKeydown(e) {
     railAvailable: railKeysAvailable(),
   })) return
   e.preventDefault()
+  heldKey = action
   run()
   if (STAGE_KEYS.includes(action)) nextTick(focusConversationComposer)
 }

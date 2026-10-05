@@ -453,6 +453,80 @@ describe('ent#621 — the suppression ladder', () => {
   })
 })
 
+// A raw keydown with every field the cases below need (`press` has no `code`,
+// `ctrlKey` or `repeat`).
+async function fire(w, init) {
+  const e = new KeyboardEvent('keydown', { bubbles: true, cancelable: true, ...init })
+  window.dispatchEvent(e)
+  await flushPromises()
+  await w.vm.$nextTick()
+  return e
+}
+
+describe('ent#621 (review) — a held key stays the shell\'s', () => {
+  // The auto-repeat of a chord the shell CLAIMED was left to the browser: the
+  // resolver answers null for a repeat, and the dispatcher returned on null
+  // before `preventDefault`. Reproduced in a browser — a held ⌥. types `≥`
+  // into the message field on a Mac, a held Ctrl+J opens Downloads on
+  // Chrome/Firefox for Windows and Linux (⌘J's repeats were swallowed before
+  // this map existed).
+  it('swallows the repeat of a press it claimed, and does not act again', async () => {
+    const { w } = await boot('/workspace/c/s-main')
+    await fire(w, { key: 'ArrowDown', altKey: true })
+    const moved = showing(w).agent
+    expect(moved).not.toBe('scout')
+
+    const e = await fire(w, { key: 'ArrowDown', altKey: true, repeat: true })
+    expect(e.defaultPrevented).toBe(true)      // not the browser's
+    expect(showing(w).agent).toBe(moved)       // and not a second move
+  })
+
+  it('a held ⌥. never types into the message field', async () => {
+    viewport(true)
+    const { w } = await boot('/workspace/c/s-main')
+    // A US Mac: ⌥. arrives as `key: '≥'`, matched on its physical `code`.
+    await fire(w, { key: '≥', code: 'Period', altKey: true })
+    expect(w.vm.railState.open).toBe(true)
+    const tab = w.vm.railState.tab
+
+    const e = await fire(w, { key: '≥', code: 'Period', altKey: true, repeat: true })
+    expect(e.defaultPrevented).toBe(true)
+    expect(w.vm.railState.tab).toBe(tab)       // one press, one tab
+  })
+
+  it('a held Ctrl+J makes one new chat and never reaches the browser', async () => {
+    const { w } = await boot('/workspace/c/s-main')
+    await fire(w, { key: 'j', code: 'KeyJ', ctrlKey: true })
+    expect(showing(w).newChat).toBe(true)
+    const uid = conversation(w).vm.$.uid
+
+    const e = await fire(w, { key: 'j', code: 'KeyJ', ctrlKey: true, repeat: true })
+    expect(e.defaultPrevented).toBe(true)
+    expect(conversation(w).vm.$.uid).toBe(uid) // not remounted per repeat
+  })
+
+  it('leaves the repeat of a press it did NOT claim to the browser', async () => {
+    viewport(true)
+    // Nothing owns ⌘. where there is no rail, so neither the press nor its
+    // repeat may be taken from the browser (Safari's Stop).
+    const { w } = await boot('/workspace/a/ghost')
+    const first = await fire(w, { key: '.', code: 'Period', metaKey: true })
+    expect(first.defaultPrevented).toBe(false)
+    const e = await fire(w, { key: '.', code: 'Period', metaKey: true, repeat: true })
+    expect(e.defaultPrevented).toBe(false)
+  })
+
+  it('stops swallowing once another key has been pressed', async () => {
+    // The claim belongs to ONE physical press. A later repeat event that does
+    // not continue it must not be eaten on the strength of an old one.
+    const { w } = await boot('/workspace/c/s-main')
+    await fire(w, { key: 'ArrowDown', altKey: true })
+    await fire(w, { key: 'a' })
+    const e = await fire(w, { key: 'ArrowDown', altKey: true, repeat: true })
+    expect(e.defaultPrevented).toBe(false)
+  })
+})
+
 describe('ent#621 [C] — ⌘. shows and hides the rail', () => {
   it('toggles the rail column, remembers the tab, and persists', async () => {
     viewport(true)
@@ -496,11 +570,25 @@ describe('ent#621 [C] — ⌘. shows and hides the rail', () => {
     expect(w.vm.railSheetOpen).toBe(false)
   })
 
+  it('works on the new chat an agent landing rests on', async () => {
+    viewport(true)
+    // ent#784 (review): `/workspace/a/:name` is a chat like any other once it
+    // has landed, so it has the rail — and the rail's key. It used to read as
+    // a rail-free page, which left ⌘. dead on the commonest stage there is.
+    const { w } = await boot('/workspace/a/nova')
+    expect(w.vm.railHasColumn).toBe(true)
+    const before = w.vm.railState.open
+    const e = await press(w, { key: '.', meta: true })
+    expect(w.vm.railState.open).toBe(!before)
+    expect(e.defaultPrevented).toBe(true)
+  })
+
   it('is a silent no-op on a page with no rail', async () => {
     viewport(true)
-    // The agent page has no rail column at all. A key that toggled hidden
-    // state there would be a key that does nothing visible — twice.
-    const { w } = await boot('/workspace/a/nova')
+    // The refusal for an agent this link cannot reach holds no conversation,
+    // so no rail column at all. A key that toggled hidden state there would be
+    // a key that does nothing visible — twice.
+    const { w } = await boot('/workspace/a/ghost')
     expect(w.vm.railHasColumn).toBe(false)
     const before = w.vm.railState.open
     const e = await press(w, { key: '.', meta: true })

@@ -1855,6 +1855,10 @@ bounding the table. OSS-core (Workspace rule above). Flow:
   call suppress the moving and rail keys **silently**; `⌘J` keeps its own ask
   during a call, and `⌘/` stays available. A held key does not walk the list
   (`e.repeat` resolves to nothing) and an IME composition is never a chord.
+  The auto-repeat of a press the shell **claimed** is still swallowed
+  (`heldKey` + `workspaceChord`), so a held `⌥.` cannot type `≥` into the
+  message field and a held `Ctrl+J` cannot open the browser's Downloads; the
+  repeat of a press it did not claim stays the browser's.
 - **AC-6 — non-US layouts**: a chord matches by `key` **or** by physical
   `code`, so the US position works on a non-Latin layout; `Shift` is accepted
   on a `key` match only, so DE's `Shift+7` → `/` and FR's shifted `.` reach

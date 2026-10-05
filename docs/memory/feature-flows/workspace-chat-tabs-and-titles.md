@@ -111,8 +111,12 @@ dispatcher (`PortalRail.vue`'s sheet-only Esc `window` listener is the `close-to
 protocol entry the map declares, not a second dispatcher), armed above `bootstrap()`'s `await` (contract #23) and removed in
 `onBeforeUnmount`. The ladder, in order, because the order is the design:
 
-1. `resolveWorkspaceKey(e)` — a chord nobody owns, a **key repeat**, or an IME
-   composition returns null and we return **without** `preventDefault`;
+0. a **key repeat** never dispatches (one press is one action), but the repeat
+   of the press the shell last claimed is `preventDefault`ed — `heldKey`,
+   matched with `workspaceChord(e)` — so a held `⌥.` cannot type `≥` into the
+   message field; the repeat of an unclaimed press is left to the browser;
+1. `resolveWorkspaceKey(e)` — a chord nobody owns or an IME composition returns
+   null and we return **without** `preventDefault`;
 2. signed in (the OTP form answers no keys);
 3. ⌘J keeps its place at the top and its own "leave the call?" ask — the one
    key a live voice call answers rather than swallows;

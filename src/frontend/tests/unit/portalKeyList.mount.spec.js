@@ -66,7 +66,8 @@ describe('ent#621 — the key list is the map, rendered', () => {
     expect(rowFor('rail-tab-next').textContent).not.toContain('no rail')
     w.unmount()
 
-    // On the agent page there is no rail. The row STAYS and says so: a key
+    // On a page with no rail (Projects, the Inbox with nothing selected) the
+    // row STAYS and says so: a key
     // that vanishes from the list and does nothing on the page is the one a
     // person retries forever.
     const bare = open({ rows: keyListRows(WORKSPACE_KEYMAP, MAC, { railAvailable: false }) })
