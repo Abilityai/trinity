@@ -46,10 +46,6 @@ EMITTERS_NOT_YET_ON_SEAM = {
     ("services/subscription_headroom_alerts.py", "_emit"): ("sub-headroom-", "#3246 C5′"),
     ("services/skill_service.py", "SkillService._record_adoption_failure"):
         ("skills-legacy-adoption-", "#3246 C5′"),
-    ("services/system_agent_service.py", "SystemAgentService._emit_base_image_stale_alert"):
-        ("base-image-stale-", "#3246 C5′"),
-    ("services/system_agent_service.py", "SystemAgentService._emit_start_failed_alert"):
-        ("base-image-stale-start-", "#3246 C5′"),
     # -- PR 2 ---------------------------------------------------------------
     ("services/skill_service.py", "SkillService._announce_reconcile_refusal"):
         ("skills-reconcile-", _PR2),

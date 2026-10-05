@@ -228,17 +228,26 @@ def test_running_and_current_is_the_quiet_path(sas, monkeypatch):
     assert emitted == []
 
 
+def _record_observations(monkeypatch):
+    """#3246: the alarms report through `platform_alerts.observe`; record each
+    reading as the row it would file (agent_name / kind / priority / text)."""
+    from services import platform_alerts
+    created = []
+
+    def observe(agent_name, kind, key=None, **kw):
+        created.append({"agent_name": agent_name, "kind": kind, "key": key, **kw})
+        return platform_alerts.OBSERVED_CREATED
+
+    monkeypatch.setattr(platform_alerts, "observe", observe)
+    return created
+
+
 def test_stale_alarm_fires_once_then_is_suppressed_by_cooldown(sas, monkeypatch):
     """'running + stale' persists across every backend restart until an operator
     acts, and a restart resets the in-memory edge — so without a cooldown a
     restart loop files one queue item per boot."""
     monkeypatch.setattr(sas, "check_base_image_state", AsyncMock(return_value="drift"))
-    created = []
-    fake_db = MagicMock()
-    fake_db.create_operator_queue_item.side_effect = lambda name, item: created.append(
-        item
-    )
-    monkeypatch.setattr(sas, "db", fake_db)
+    created = _record_observations(monkeypatch)
 
     svc = sas.SystemAgentService()
     _run(svc.ensure_deployed())
@@ -246,22 +255,16 @@ def test_stale_alarm_fires_once_then_is_suppressed_by_cooldown(sas, monkeypatch)
 
     assert len(created) == 1, "the second cycle must be suppressed by the cooldown"
     item = created[0]
-    assert item["id"].startswith(sas.BASE_IMAGE_STALE_ALERT_PREFIX)
+    assert item["kind"] == "base_image_stale" and item["key"] == "trinity-system"
     assert item["priority"] == "high"
     assert item["agent_name"] == "trinity-system"
-    assert item["status"] == "pending"
 
 
 def test_stale_alarm_payload_carries_no_image_identifiers(sas, monkeypatch):
     """canary G-04's lesson: this row is durable and operator-visible, so it
     carries identifiers and instructions — never image ids or digests."""
     monkeypatch.setattr(sas, "check_base_image_state", AsyncMock(return_value="drift"))
-    created = []
-    fake_db = MagicMock()
-    fake_db.create_operator_queue_item.side_effect = lambda name, item: created.append(
-        item
-    )
-    monkeypatch.setattr(sas, "db", fake_db)
+    created = _record_observations(monkeypatch)
 
     _run(sas.SystemAgentService().ensure_deployed())
 
@@ -330,12 +333,7 @@ def test_delegated_start_failure_alarms_and_does_not_raise(sas, monkeypatch):
     monkeypatch.setattr(
         sas, "start_agent_internal", AsyncMock(side_effect=RuntimeError("no network"))
     )
-    created = []
-    fake_db = MagicMock()
-    fake_db.create_operator_queue_item.side_effect = lambda name, item: created.append(
-        item
-    )
-    monkeypatch.setattr(sas, "db", fake_db)
+    created = _record_observations(monkeypatch)
 
     result = _run(sas.SystemAgentService().ensure_deployed())
 
@@ -1337,8 +1335,7 @@ def test_start_failure_alarm_sanitizes_the_interpolated_reason(sas, monkeypatch)
     """`reason` is an arbitrary exception string and lands in
     `operator_queue.question` — durable, operator-visible state. Canary G-04's
     rule: the emit chokepoint sanitizes."""
-    created = []
-    monkeypatch.setattr(sas.db, "create_operator_queue_item", lambda agent, item: created.append(item))
+    created = _record_observations(monkeypatch)
 
     sas.SystemAgentService()._emit_start_failed_alert(
         "docker refused: token=sk-ant-api03-DEADBEEFDEADBEEFDEADBEEFDEADBEEF"
@@ -1379,21 +1376,25 @@ def test_the_destructive_system_agent_endpoints_are_human_only():
 
 def test_start_failure_alarm_is_deduped_across_processes(sas, monkeypatch):
     """A per-process cursor cannot bound this alarm: a crash-looping backend
-    re-emits from a FRESH process every time. The bucketed id collapses the
-    burst in the DB via create_item's (agent_name, request_id) conflict target.
+    re-emits from a FRESH process every time. #3246: the platform alert seam
+    keys it by subject, so every process's reading lands on the ONE pending
+    row (the bucketed id it replaced only collapsed a burst within a bucket).
     """
-    created = []
-    monkeypatch.setattr(sas.db, "create_operator_queue_item", lambda agent, item: created.append(item))
+    from database import db as real_db
+    from services import operator_resume_service
+    monkeypatch.setattr(operator_resume_service, "spawn_on_loop", lambda factory: None)
+    for row in real_db.list_operator_queue_items(agent_name="trinity-system", status="pending"):
+        real_db.end_operator_queue_items_by_platform([row["id"]], reason="superseded")
 
     # Two emissions from two distinct service instances — the cross-process case.
     sas.SystemAgentService()._emit_start_failed_alert("network missing")
     sas.SystemAgentService()._emit_start_failed_alert("network missing")
 
-    assert len(created) == 2, "both still attempt the write — the DB dedupes"
-    assert created[0]["id"] == created[1]["id"], (
-        "same bucket must yield the same request_id so on_conflict_do_nothing collapses them"
-    )
-    assert not created[0]["id"].endswith("Z"), "a raw timestamp would defeat the dedup"
+    rows = [r for r in real_db.list_operator_queue_items(agent_name="trinity-system", status="pending")
+            if r["subject"] == "system_agent_start_failed:trinity-system"]
+    assert len(rows) == 1, "both readings land on one pending row"
+    assert rows[0]["context"]["seen_count"] == 2
+    assert rows[0]["request_id"].startswith(sas.BASE_IMAGE_STALE_ALERT_PREFIX + "start-")
 
 
 def test_start_failure_alarm_bucket_re_arms():

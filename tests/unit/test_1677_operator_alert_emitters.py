@@ -131,11 +131,6 @@ _ALLOWED_CALLERS = {
         "platform-only: deterministic per-episode id (sync-diverged-{agent}-"
         "{diverged_since}), and an episode must last > 24 h before it can raise "
         "one, so at most one per agent per day (trinity-enterprise#706)",
-    ("services/system_agent_service.py",
-     "SystemAgentService._emit_base_image_stale_alert"):
-        "platform-only: per-process cooldown, hosted on trinity-system (#1816)",
-    ("services/system_agent_service.py", "SystemAgentService._emit_start_failed_alert"):
-        "platform-only: time-bucketed idempotent id, hosted on trinity-system (#1816)",
     ("services/system_seed_service.py", "SystemSeedService._notify_operator"):
         "platform-only: deterministic id ⇒ ≤1 open row per seed kind (ent#124)",
     ("services/validation_service.py", "ValidationService._notify_operator_on_failure"):

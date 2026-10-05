@@ -82,3 +82,32 @@ class TestCircuitDormant:
         monkeypatch.setattr(circuit, "_get_circuit_redis", lambda: _Redis())
         circuit.reset_circuit(agent)
         assert _pending(db, agent) == []
+
+
+class TestSystemAgent:
+    AGENT = "trinity-system"
+
+    def _rows(self, db, kind):
+        return [r for r in _pending(db, self.AGENT) if r["subject"] == f"{kind}:{self.AGENT}"]
+
+    def test_stale_image_is_one_row_ended_when_the_image_is_current(self, db, monkeypatch):
+        from services import system_agent_service as sas
+        monkeypatch.setattr(sas.SystemAgentService, "_last_base_image_alert_at", None)
+        sas.SystemAgentService._clear_alert("base_image_stale")
+        sas.SystemAgentService()._emit_base_image_stale_alert()
+        rows = self._rows(db, "base_image_stale")
+        assert len(rows) == 1 and rows[0]["request_id"].startswith("base-image-stale-trinity-system-")
+        sas.SystemAgentService._clear_alert("base_image_stale")
+        assert self._rows(db, "base_image_stale") == []
+        assert _ended(db, rows[0])["disposed_by"] == "platform"
+
+    def test_start_failure_is_one_row_ended_when_a_start_succeeds(self, db):
+        from services import system_agent_service as sas
+        sas.SystemAgentService._clear_alert("system_agent_start_failed")
+        sas.SystemAgentService()._emit_start_failed_alert("network missing")
+        sas.SystemAgentService()._emit_start_failed_alert("still missing")
+        rows = self._rows(db, "system_agent_start_failed")
+        assert len(rows) == 1 and "still missing" in rows[0]["question"]
+        assert rows[0]["priority"] == "critical"
+        sas.SystemAgentService._clear_alert("system_agent_start_failed")
+        assert self._rows(db, "system_agent_start_failed") == []
