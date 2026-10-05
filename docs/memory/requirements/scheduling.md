@@ -1378,9 +1378,17 @@ schedules:
     another agent. A `retryable: false` result: do what its `message` says.
     Long work: `parallel=true, async=true`; that run's end fires the target's
     `agent.task.*`, which wakes only a subscriber.
-  - **Truthful today.** It names no status a dispatch route does not emit (no
-    `replayed` until ent#566 ships one) and promises the `agent.task.*` wake
-    only for a parallel run — a sequential `/chat` emits none.
+  - **Truthful today.** It names no status a dispatch route does not emit and
+    promises the `agent.task.*` wake only for a parallel run — a sequential
+    `/chat` emits none. **`replayed` is left out on purpose**, although the
+    issue's acceptance criterion lists it: no dispatch route emits it until
+    ent#566 ships intent-scoped dedupe (only `ask_operator` answers
+    `replayed`), and the guard that checks every named status against a
+    dispatch-route producer would refuse it. A replay is still covered — by
+    "whatever its status" and by "an exact repeat is normally answered with the
+    original" (observed live 2026-10-05: an identical repeat came back in 28 ms
+    with the first call's `execution_id`, and only one task ran). When ent#566
+    ships `replayed`, it adds the status to the list and to the guard together.
   - **Where it appears.** In full: `chat_with_agent` and every dynamic
     `chat_with_<agent>` tool (#846). `fan_out` and `send_message` carry the
     rule sentence and point at it. Tool names are bare (runtime-neutral,
