@@ -677,7 +677,7 @@ def test_the_reply_is_posted_before_the_cursor_advances(rooms_db, allow_all, fak
     import ast, inspect
     from shared_sessions import service
 
-    src = inspect.getsource(service._wake_agent)
+    src = inspect.getsource(service._wake_agent_locked)
     tree = ast.parse(src.strip())
     order = []
     for node in ast.walk(tree):

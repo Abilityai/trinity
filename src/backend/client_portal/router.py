@@ -44,6 +44,8 @@ from models import (
 from services.agent_auth import agent_httpx_client
 from services.docker_service import get_agent_container
 from services.platform_audit_service import AuditEventType, platform_audit_service
+from services import sync_waiter
+from services.pull_pilot import pull_queue_allowance
 
 from database import db
 from . import agent_page, autonomy, chat_previews, role_card, seat_decisions, service
@@ -1364,7 +1366,10 @@ async def portal_chat(
                                               getattr(body, "open_canvas_id", None),
                                               is_platform=principal.is_platform),
                                           model=requested_model,
-                                          reply_context=reply_context)
+                                          reply_context=reply_context,
+                                          # trinity-enterprise#751: whether this
+                                          # route proved a person (self-approval).
+                                          gate_is_person=principal.is_person)
     except ClientPortalError as e:
         raise HTTPException(status_code=e.status_code, detail=e.detail)
     return PortalChatResponse(**result)
@@ -2047,6 +2052,7 @@ async def portal_chat_stream(
                 is_platform=principal.is_platform),
             model=requested_model,   # ent#403, same rule as the flag above
             reply_context=reply_context,
+            gate_is_person=principal.is_person,   # trinity-enterprise#751, same rule
         )
     except ClientPortalError as e:
         idempotency_service.fail(decision)
@@ -2151,8 +2157,15 @@ async def portal_stream_execution(
         # cleanly (never `error`) when it simply is not streamable. The client
         # reads the persisted reply on `stream_end` either way.
         agent_url = f"http://agent-{agent_name}:8000/api/executions/{execution_id}/stream"
-        deadline = asyncio.get_event_loop().time() + _STREAM_ATTACH_TIMEOUT_S
         try:
+            # #3114: on a pull pilot the turn can wait on the durable queue
+            # until a worker claims it. Hold while the row is queued; the attach
+            # window below starts from the claim.
+            async for tick in sync_waiter.wait_while_queued(
+                execution_id, pull_queue_allowance(agent_name)
+            ):
+                yield tick
+            deadline = asyncio.get_event_loop().time() + _STREAM_ATTACH_TIMEOUT_S
             async with agent_httpx_client(agent_name, timeout=None) as client:
                 while True:
                     async with client.stream("GET", agent_url) as response:

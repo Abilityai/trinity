@@ -280,6 +280,14 @@ AGENT_REFS: List[AgentRef] = [
 
     # --- Operations ---------------------------------------------------------
     AgentRef("operator_queue",               "agent_name",        Policy.CASCADE),
+    # trinity-enterprise#751 — gated-skill requests. The executor column follows
+    # its asks (CASCADE: the gate cancels pending asks through the ask sink
+    # before the purge, so the requester is told). The requesting agent
+    # (`source_agent`) is CASCADE too: a rename re-keys where the outcome is
+    # sent, and a deleted requester has nobody left to tell — an ask still open
+    # for it finds no record on its ending and runs nothing.
+    AgentRef("skill_gate_requests",          "agent_name",        Policy.CASCADE),
+    AgentRef("skill_gate_requests",          "source_agent",      Policy.CASCADE),
     AgentRef("access_requests",              "agent_name",        Policy.CASCADE),
 
     # --- MCP keys (scope='agent' only — user/system keys are not per-agent)

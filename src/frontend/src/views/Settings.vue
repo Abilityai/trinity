@@ -1297,8 +1297,8 @@
             <div class="px-6 py-4 border-b border-gray-200 dark:border-gray-700">
               <h2 class="text-lg font-medium text-gray-900 dark:text-white">Trinity Prompt</h2>
               <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
-                Custom instructions that are injected into all agents' CLAUDE.md at startup.
-                Changes apply to newly started or restarted agents.
+                Custom instructions added to every agent's instructions on each chat and task turn.
+                A saved change applies from the next turn — no restart needed.
               </p>
             </div>
 
@@ -1324,7 +1324,7 @@ Example:
                     ></textarea>
                   </div>
                   <p class="mt-2 text-sm text-gray-500 dark:text-gray-400">
-                    This content will appear under a "## Custom Instructions" section in each agent's CLAUDE.md.
+                    This content appears under a "## Custom Instructions" heading in each agent's instructions.
                     Supports Markdown formatting.
                   </p>
                 </div>
@@ -2191,11 +2191,18 @@ Example:
                 <h3 class="text-sm font-medium text-blue-800 dark:text-blue-300">How it works</h3>
                 <div class="mt-2 text-sm text-blue-700 dark:text-blue-400">
                   <ul class="list-disc list-inside space-y-1">
-                    <li>The Trinity Prompt is injected into each agent's CLAUDE.md when the agent starts</li>
-                    <li>Existing agents need to be restarted to receive the updated prompt</li>
-                    <li>The prompt appears as a "## Custom Instructions" section after the Trinity Planning System section</li>
+                    <li>The Trinity Prompt is read on every chat and task turn, so a saved change reaches running agents from the next turn — no restart</li>
+                    <li>It is added after Trinity's platform instructions, under a "## Custom Instructions" heading</li>
+                    <li>Deploying a system manifest with a top-level <code>prompt:</code> replaces this setting for every agent</li>
+                    <li>Add fleet rules only — never copy platform instructions here, which agents already receive — and keep it short</li>
                     <li>Use Markdown formatting for structured instructions</li>
                   </ul>
+                  <!-- docs/user-docs/agents/recommended-fleet-prompt.md, published under guides/ (#3206) -->
+                  <p class="mt-2">
+                    See the
+                    <a href="https://docs.ability.ai/guides/recommended-fleet-prompt" target="_blank" rel="noopener noreferrer" data-testid="trinity-prompt-docs-link" class="text-action-primary-600 dark:text-action-primary-400 hover:underline">recommended Trinity prompt</a>
+                    for fleet rules worth adding and what to leave out.
+                  </p>
                 </div>
               </div>
             </div>

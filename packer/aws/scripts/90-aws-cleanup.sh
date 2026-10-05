@@ -19,8 +19,13 @@ fail() { echo "[FAIL] $1" >&2; FAIL=1; }
     || { echo "FATAL: /etc/trinity/cloud is not 'aws' — first boot would take the DigitalOcean path." >&2; exit 1; }
 
 # Checked while the host keys still exist: `sshd -T` refuses to print the
-# effective config without them.
-sshd -T 2>/dev/null | grep -qx 'passwordauthentication no' \
+# effective config without them. Ubuntu 24.04 socket-activates ssh, so
+# /run/sshd (tmpfs, not baked) may be absent and `sshd -T` exits 255 on it.
+# Captured, not piped: `grep -q` exits on the match, sshd dies of SIGPIPE, and
+# pipefail fails the check although the setting is right.
+install -d -m 0755 /run/sshd
+_sshd="$(sshd -T 2>&1)" || fail "sshd -T failed: ${_sshd##*$'\n'}"
+grep -qx 'passwordauthentication no' <<<"$_sshd" \
     || fail "SSH password authentication is not disabled."
 
 # `cloud-init clean` deletes everything under /var/lib/cloud except seed/,
@@ -47,8 +52,9 @@ rm -f /dev/shm/001-trinity
 echo "=== logs ==="
 # The journal is journald's: truncating its files under it corrupts them. It is
 # rotated and vacuumed instead; everything else under /var/log is emptied.
-find /var/log -path /var/log/journal -prune -o -type f -name '*.gz' -delete
-find /var/log -path /var/log/journal -prune -o -type f -name '*.[0-9]' -delete
+# No `-delete`: it implies -depth, which disables -prune, and GNU find exits 1.
+find /var/log -path /var/log/journal -prune -o -type f -name '*.gz' -print0 | xargs -0r rm -f
+find /var/log -path /var/log/journal -prune -o -type f -name '*.[0-9]' -print0 | xargs -0r rm -f
 find /var/log -path /var/log/journal -prune -o -type f -exec truncate -s 0 {} +
 journalctl --rotate >/dev/null 2>&1 || true
 journalctl --vacuum-time=1s >/dev/null 2>&1 || true

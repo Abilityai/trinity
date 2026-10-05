@@ -184,9 +184,9 @@ export function keyFormatError(provider, raw) {
   if (provider === 'resend' && !v.startsWith('re_')) {
     return "That doesn't look like a Resend API key. Resend keys start with re_ — create one at resend.com/api-keys."
   }
-  if (provider === 'gemini' && !v.startsWith('AIza')) {
+  if (provider === 'gemini' && !(v.startsWith('AIza') || v.startsWith('AQ.'))) {
     return (
-      "That doesn't look like a Gemini API key. Keys from Google AI Studio start with AIza — " +
+      "That doesn't look like a Gemini API key. Keys from Google AI Studio start with AIza or AQ. — " +
       'create one at aistudio.google.com/apikey.'
     )
   }

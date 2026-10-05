@@ -1,6 +1,18 @@
 {
   "test_files": [
     {
+      "file": "unit/test_ent761_outbound_control_oss.py",
+      "feature": "trinity-enterprise#761",
+      "added": "2026-10-02",
+      "categories": [
+        "backend",
+        "api",
+        "settings",
+        "a2a"
+      ],
+      "description": "Outbound A2A endpoint control is OSS-core: the settings package's `# mcp:` header names the covering tool module and the /a2a-endpoints routes, the three handlers carry no entitlement gate (AST walk) and stay admin + human-only, PUT /api/settings/a2a-endpoints reports the outbound switch state, and register -> list -> resolve (any agent, platform scope) -> remove works with no resolver provider registered."
+    },
+    {
       "file": "unit/test_ent671_env_backed_ops_forwarding.py",
       "feature": "trinity-enterprise#671",
       "added": "2026-09-29",
@@ -3928,6 +3940,17 @@
       "description": "`trinity deploy --repo` creates a deployment (trinity-enterprise#705): the CLI's POST /api/agents payload carries kind \"deployment\", so deploying a codebase never takes the agent default's working branch + auto-push. Static (AST) because the unit job does not install the CLI's own deps. The ownership rule itself (catalog template / owner != token login stays pull-only) is in test_1484_create_agent_characterization.py."
     },
     {
+      "file": "unit/test_ent703_pull_cycle.py",
+      "feature": "trinity-enterprise#703",
+      "added": "2026-09-25",
+      "categories": [
+        "agent-server",
+        "git",
+        "migrations"
+      ],
+      "description": "The container's pull cycle (ent#703, invariant G3) on real repos with a human clone pushing underneath: behind+clean fast-forwards; a local commit is rebased on top; uncommitted edits survive a pull (stashed and re-applied); incoming changes colliding with uncommitted edits are UNDONE — same HEAD, same edits, empty stash, failure recorded (the autostash trap; red against a naive --autostash mutant); a rebase conflict is aborted and recorded; never while an execution runs, including one starting mid-cycle, and an unknown registry counts as busy; a busy repo is skipped without a state write; a pull never touches the push's fields. The loop gate reads the flag live on /git/pull-sync with the env fallback; the interval defaults to the push interval. Both migration tracks: columns + backfill only where auto-sync is on."
+    },
+    {
       "file": "unit/test_ent610_asks_unavailable.py",
       "feature": "trinity-enterprise#610",
       "added": "2026-09-28",
@@ -4081,6 +4104,207 @@
         "gemini-runtime"
       ],
       "description": "#2971: the Gemini runtime runs a turn on the pinned gemini-cli (0.62.0). Real execute/execute_headless with a captured Popen: argv carries only flags the pinned CLI accepts (no --system-prompt/--max-turns), the system prompt is prepended to the turn input, --skip-trust is always passed, and chat resumes only its own captured session id (never bare --resume; model change/reset start fresh; failed turns don't move it; a missing session gets one cold retry unless cancelled). The build-time smoke harness is exercised against a fake gemini emulating 0.62.0's strict parser, and the Dockerfile pin/smoke placement are asserted. No Docker, no network."
+    },
+    {
+      "file": "unit/test_ent751_skill_invocation.py",
+      "feature": "ent#751",
+      "added": "2026-10-02",
+      "categories": [
+        "backend",
+        "security",
+        "unit"
+      ],
+      "description": "trinity-enterprise#751: which gated skills a request's own text invokes — any /<name> token of the agent's gated set, case-insensitive, NFKC-normalised, zero-width/bidi stripped; trailing punctuation ends the name, a dot continuing into a name does not; paths and URLs are not invocations. Mutation-proven."
+    },
+    {
+      "file": "unit/test_ent751_skill_gate_requests_db.py",
+      "feature": "ent#751",
+      "added": "2026-10-02",
+      "categories": [
+        "backend",
+        "database",
+        "security",
+        "unit"
+      ],
+      "description": "trinity-enterprise#751: the gate's durable record over the real schema (SQLite; PostgreSQL with TEST_POSTGRES_URL) — insert-once, pending counts, the pending→dispatching claim with a UNIQUE run id, the terminal lattice incl. refused reflexive edges, the reconcile reads, lookup by origin execution, the registered SQLite migration run twice, and facade signature parity."
+    },
+    {
+      "file": "unit/test_ent751_gate_budget.py",
+      "feature": "ent#751",
+      "added": "2026-10-02",
+      "categories": [
+        "backend",
+        "operator-queue",
+        "unit"
+      ],
+      "description": "trinity-enterprise#751: gate asks have their own budget — a gate raise is neither refused by nor counted in the agent's 25-pending cap or rate buckets, and the file poller's count leaves gate rows out."
+    },
+    {
+      "file": "unit/test_ent751_skill_gate_enforce.py",
+      "feature": "ent#751",
+      "added": "2026-10-02",
+      "categories": [
+        "backend",
+        "security",
+        "unit"
+      ],
+      "description": "trinity-enterprise#751: the gate's decision matrix over the real ask sink — ungated, approval raised and frozen (sanitised, card input truncated), per-occurrence ids and replay, self-approval only for a proven person, named refusals (gate map unreadable, skill unreadable/missing/ambiguous, role unassigned, mixed approvers, refuse-only), and the caps checked before the in-container read."
+    },
+    {
+      "file": "unit/test_ent751_skill_fingerprint_script.py",
+      "feature": "ent#751",
+      "added": "2026-10-02",
+      "categories": [
+        "backend",
+        "security",
+        "unit"
+      ],
+      "description": "trinity-enterprise#751: the in-container fingerprint script executed under python3 -I -S against a real skills tree — resolution by directory then frontmatter name, case-insensitive, ambiguity and symlink refusal, the platform meta file ignored, any content/exec-bit/file change changes the hash."
+    },
+    {
+      "file": "unit/test_ent751_gate_http_mapping.py",
+      "feature": "ent#751",
+      "added": "2026-10-02",
+      "categories": [
+        "backend",
+        "api",
+        "unit"
+      ],
+      "description": "trinity-enterprise#751: the app handler answers 202 pending_approval / the refusal's own status, both with X-Trinity-Error-Code, and main.py registers it."
+    },
+    {
+      "file": "unit/test_ent751_gate_entries.py",
+      "feature": "ent#751",
+      "added": "2026-10-02",
+      "categories": [
+        "backend",
+        "security",
+        "unit"
+      ],
+      "description": "trinity-enterprise#751: the entry points driven for real — /task and /chat raise before the idempotency key, slot, row and dispatch; same key replays; the requester's own words are scanned; the approver signed in runs and is audited; the event loopback never self-approves; the execute_task backstop closes a pre-created row SKIPPED, releases the caller's slot and opens no activity; gate_checked and the approved run skip it; the requester execution id is kept only when it is its own. Wiring lines mutation-proven."
+    },
+    {
+      "file": "unit/test_ent751_gate_callers.py",
+      "feature": "ent#751",
+      "added": "2026-10-02",
+      "categories": [
+        "backend",
+        "unit"
+      ],
+      "description": "trinity-enterprise#751: each producer handles a gated request — fan-out aggregate and response, loop stop, paid (never settles), A2A task states, public chat, channel router, voice tool, scheduler wrapper, rooms."
+    },
+    {
+      "file": "unit/test_ent751_gate_dispatch.py",
+      "feature": "ent#751",
+      "added": "2026-10-02",
+      "categories": [
+        "backend",
+        "security",
+        "operator-queue",
+        "unit"
+      ],
+      "description": "trinity-enterprise#751: from an ending to the run, exactly once — approve dispatches once and tells the requester, reject/expiry/stale/unreachable run nothing, an approval from someone not addressed is denied, two resolvers that both read pending dispatch once, the observer and the sweep (unknown, never re-run), person notices, may_end (addressee only; admin cancels, never approves; bulk skips), the real approved dispatch (admitted / queued / backlog full), and delete/rename cancellation."
+    },
+    {
+      "file": "unit/test_ent751_gate_guards.py",
+      "feature": "ent#751",
+      "added": "2026-10-02",
+      "categories": [
+        "backend",
+        "security",
+        "unit"
+      ],
+      "description": "trinity-enterprise#751: discovery guards — every function that posts to an agent is behind the gate (structural checks per site), every producer passes the requester's own words or is named unwrapped, and every execute_task keyword is classified in the frozen dispatch."
+    },
+    {
+      "file": "unit/test_3185_a2a_payment_outcome.py",
+      "feature": "abilityai/trinity#3185",
+      "added": "2026-10-03",
+      "categories": [
+        "backend",
+        "a2a",
+        "security"
+      ],
+      "description": "Outbound A2A payment vocabulary (#3185): the stdlib x402 access-token codec (base64url/base64/plain JSON in, PaymentPayload shape required, opaque token -> None = header-only degrade); the secrets list (token + its base64 forms + the decoded payload's long string leaves, depth/count bounded); the bounded `payment` block (flat Trinity-owned summary + top-level-allowlisted raw x402, per-leaf 512 chars, accepts <= 8, 16 KiB ceiling, truncated reported honestly, token redacted in every encoding); `_raise_payment_outcome` for HTTP 402 (header-preferred, paid-door body fallback, payments-py error.message, unparseable 402 is still a 402, dropped oversized body -> truncated) and HTTP 403 (payment_rejected when the credential kind is payment_token, else rpc_forbidden, both carrying remote_status=403); and the in-band rail `_raise_for_payment_state` (payment-required raises with the task id, payment-failed -> payment_rejected, payment-completed recorded not raised, unrecognised metadata ignored). Pure functions, no socket, no backend."
+    },
+    {
+      "file": "unit/test_3185_a2a_credential_kind.py",
+      "feature": "abilityai/trinity#3185",
+      "added": "2026-10-03",
+      "categories": [
+        "backend",
+        "a2a",
+        "security"
+      ],
+      "description": "The credential KIND on the outbound A2A endpoint store (#3185 checkpoint B): `credential_kind` rides the credential's existing three write paths rather than adding a fourth (set / leave alone / clear), an omitted kind is INFERRED from the value with the same predicate the client sends on (an x402 payload -> payment_token, anything else -> api_key, fail-safe over junk), an explicit kind wins, a kind alone re-labels a stored secret without re-typing it, a kind with no credential under it is refused, `clear_credentials` drops the label and the single-use flag with the value, kind + clear is refused at the model (422, named reason, no echo) and at the store, `api_key` is stored as the ABSENCE of the key so a relabel leaves a pre-#3185-shaped record, an x402 v3 nonce is flagged `credential_single_use` rather than refused and the flag cannot outlive the token it describes, and the settings PUT/GET report the kind (plus a one-time single-use hint) while the audit row records the label and never the value. Real AES-256-GCM envelope over an in-memory settings row; no Docker, no network."
+    },
+    {
+      "file": "unit/test_ent679_payments_pin_parity.py",
+      "feature": "abilityai/trinity-enterprise#679",
+      "added": "2026-10-03",
+      "categories": [
+        "backend",
+        "dependencies",
+        "payments"
+      ],
+      "description": "payments-py pin parity + import smoke (ent#679 checkpoint A), the #1891 shape applied to a dependency: docker/backend/Dockerfile and tests/requirements-test.txt must pin payments-py EXACTLY and EQUALLY (a floor in the test requirements is how CI came to exercise 1.18.0 against a 1.2.1 image, trinity-enterprise#763), the pin must be >= 1.18 (below it the in-band A2A metadata rail does not exist), the installed version must equal the pin, every unconditional runtime requirement of payments-py must be constrained in the image (`requests` the one reasoned pre-existing exemption) and the 13 explicitly pinned transitives must equal what the venv resolved; plus the import smoke that is the real point — `payments_py.payments` imports the a2a package at module load, so one unimportable transitive flips NEVERMINED_AVAILABLE to False and both payment doors answer 501 with a green build and no error anywhere but a WARNING. Also pins the facilitator call signatures Trinity passes positionally. No Docker, no network."
+    },
+    {
+      "file": "unit/test_ent679_payer_owns_execution.py",
+      "feature": "abilityai/trinity-enterprise#679",
+      "added": "2026-10-03",
+      "categories": [
+        "backend",
+        "database",
+        "payments",
+        "security"
+      ],
+      "description": "The payer\u2192task binding at the layer that implements it (ent#679 I6): `db/nevermined.py::payer_owns_execution` run against a throwaway SQLite carrying the real `nevermined_payment_log`, because every A2A gate test stubs `db.nevermined_payer_owns_execution` and the one new query on the money path \u2014 the one carrying T5's security property \u2014 never executed in CI. Pins that the payer matches their own settled (and settle_failed) task across the facilitator's unstable checksum casing, that another payer / another agent / an unknown execution are all False, that a SQL-shaped wallet is a bound parameter rather than SQL, and that a missing argument fails closed."
+    },
+    {
+      "file": "unit/test_ent679_paid_turn_service.py",
+      "feature": "abilityai/trinity-enterprise#679",
+      "added": "2026-10-03",
+      "categories": [
+        "backend",
+        "payments",
+        "reliability"
+      ],
+      "description": "The shared x402 paid-turn orchestrator (ent#679 checkpoint A) at its own layer: one test per outcome kind (verify_failed / in_flight / replay_settled / replay_unsettled / settled / unsettled / execution_error / execution_failed / execution_cancelled / aborted) plus the orderings a response body cannot show — verify BEFORE the dedup gate so a rejected token consumes no key, complete()-not-fail() on a delivered-but-unsettled turn so a retry re-drives settle instead of re-running the LLM (#1018), fail() and no settle on a failed/cancelled/raised turn (#679 charge-on-cancel), a replayed unsettled snapshot that re-settles and upgrade_snapshot()s so a third attempt stops re-settling, settle_in_progress logging nothing, phase-aware cancellation (claim released before a result, shielded settle after one), the `endpoint` thread (decision 19, default unchanged) and the payer-derived dedup scope the A2A gate needs. Collaborators are plain stand-ins, which is itself the proof that the service imports none of them (decision 20). routers/paid.py stays covered end-to-end by test_1018_settlement_ordering / test_679_callers / test_3114_pull_route_callers, unedited."
+    },
+    {
+      "file": "unit/test_ent679_nevermined_service_bounds.py",
+      "feature": "abilityai/trinity-enterprise#679",
+      "added": "2026-10-03",
+      "categories": [
+        "backend",
+        "payments",
+        "security"
+      ],
+      "description": "`endpoint`, `retryable` and the facilitator concurrency bound on nevermined_payment_service (ent#679 checkpoint A): the 402's `resource.url` defaults to the paid chat door and can be bound to another door while the plan in `accepts` stays identical (an x402 v3 token signs resourceUrl, so verify and settle must agree with the 402 the client read — decision 19); a facilitator REJECTION is not retryable while a timeout, an SDK error and a saturated gate are (E7), and `retryable` is deliberately absent from the stored settle snapshot so a pre-field receipt still replays; and the fleet-wide NEVERMINED_MAX_INFLIGHT gate admits up to the limit, refuses beyond it within a bounded wait, occupies no thread when it refuses, burns nothing on a refused settle, and is shared across agents because the thread pool is a platform resource (E8)."
+    },
+    {
+      "file": "unit/test_ent679_a2a_payment_gate.py",
+      "feature": "abilityai/trinity-enterprise#679",
+      "added": "2026-10-03",
+      "categories": [
+        "backend",
+        "api",
+        "payments",
+        "security"
+      ],
+      "description": "The x402 payment gate on the A2A inbound door (ent#679 checkpoint B). `dependencies.get_user_or_anonymous` degrades to None on a 401 ONLY and RE-RAISES a 403, so a connector/ephemeral key Trinity recognised and then fenced can never slide onto the payment path and buy the access it was refused. `is_priced` is exposure AND an enabled config AND a key, and deliberately NOT the SDK check — fusing them would answer 401 (\"authenticate\") to a caller holding a valid token for an agent whose card advertises a price. `extract_token` is metadata-first with the deprecated `payment-signature` header as fallback (ruling 3), metadata winning when both are present, and every malformed payload shape falling through rather than raising. The allow-list seam is consulted after verify as `x402:{payer}` and fails CLOSED (T7) — the opposite bias to a2a_gate.check_inbound_allowed, because here the payment IS the authorization. Over a TestClient: today's 401 bytes for anything not exposed-and-priced (uniform with an unknown agent), 501 for a priced agent with no SDK, 402 with the paid door's body + base64 header and `resource.url` on the A2A door (#679 E2), 403 + a reject row on a rejected token with verify BEFORE the dedup gate, the limiter proven to run ahead of any DB read, the settled/unsettled/failed/cancelled Tasks with their x402 metadata (payment-completed with a spec-shaped receipt; payment-verified + a named error code on a delivered-but-unsettled turn, artifact kept per #1018), replay keyed on (token, text) so a fresh messageId does not fork a retry, and per-payer dedup scopes. tasks/get + tasks/cancel are payer-bound via the settle-row join (T5) with EVERY mismatch — including payer A polling payer B's existing task — answering byte-identical -32001. Finally the hard line (AC4): a Trinity principal still runs for free, with no facilitator call, no payment row, no payment metadata, no paying-bucket rate limit and its own attribution. Mutation-proven (limiter dropped / precedence inverted / unsettled claiming payment-completed all go red). No Docker, no live backend, no facilitator."
+    },
+    {
+      "file": "unit/test_ent679_a2a_priced_card.py",
+      "feature": "abilityai/trinity-enterprise#679",
+      "added": "2026-10-03",
+      "categories": [
+        "backend",
+        "api",
+        "payments"
+      ],
+      "description": "The priced A2A agent card (ent#679 checkpoint C, AC2). A stranger could previously learn an agent's price only by calling and being refused; the card is A2A's discovery document, so a priced agent now declares `agentId` / `planId` / `credits` there and an x402 client meets the paywall on its first request. The hard line first: no config, a DISABLED config, or an enabled one missing its plan or agent id all return the card object BY IDENTITY, so every install that sells nothing is byte-identical and `generate_a2a_card` stays pure with no payment knowledge and no I/O. The declared vocabulary is Nevermined's own `urn:nevermined:payment` (the provider SDK's card helper's URI) and the official Google/Coinbase x402 extension URI is asserted ABSENT — declaring it would advertise an `X-A2A-Extensions` activation handshake Trinity does not run, leaving a generic client waiting for a negotiation that never comes. Both card surfaces are driven over a real TestClient (ent#180 FR-3: the public well-known card and the authenticated per-agent card must not disagree) and `paymentInfoUrl` is proven to be built from the requesting instance's own origin rather than a hardcoded host, omitted entirely when there is no base URL. T9: `credits_per_request = 0` is a Nevermined DURATION plan (charged by time, so Trinity sends no amount and the plan defines the burn) — the model accepts 0, a negative is still a named 422, the default is still 1, and 0 declares `paymentType: dynamic` rather than the contradictory `fixed`/0 that reads as free and that the SDK's own card validator rejects. Fail-open is asserted with its WARNING: an unreadable payment config still serves the card, because a card route has never 5xx'd and the gate reads the config independently and still answers 402. Mutation-proven (router wiring dropped / official URI declared / paymentType hardcoded / credits floor restored each go red). No Docker, no live backend, no facilitator."
     }
   ]
 }

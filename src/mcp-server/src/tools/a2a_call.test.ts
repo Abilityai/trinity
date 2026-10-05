@@ -279,3 +279,123 @@ describe("#736 — errors are honest structured flags, never throws", () => {
     assert.equal(JSON.parse(b).success, false);
   });
 });
+
+// ===========================================================================
+// abilityai/trinity#3185 — the payment outcomes reach the agent as flags
+//
+// The backend answers a priced remote with HTTP 402 and
+// `detail = {reason, message, payment, remote_status?, task_id?}`, and keeps a
+// remote 403 / a refused token on 502 with a `reason`. What is pinned here is
+// the mapper: the agent must be able to tell "a person has to buy this" from
+// "the remote is down and a retry may work", because one of those is retryable
+// and the other is a side effect nobody can spend their way out of.
+// ===========================================================================
+describe("#3185 payment outcomes", () => {
+  const PAYMENT = {
+    summary: { plan_id: "plan_42", scheme: "exact", credits_per_request: 1 },
+    x402: { x402Version: 2, accepts: [{ scheme: "exact", planId: "plan_42" }] },
+    truncated: false,
+  };
+
+  const failing = (status: number, body: string) =>
+    makeTools([], {
+      callA2AAgent: async () => {
+        throw new ApiError(status, body);
+      },
+      getA2ATask: async () => {
+        throw new ApiError(status, body);
+      },
+    });
+
+  it("a 402 is payment_required, carries the requirements, and says do_not_retry", async () => {
+    const tools = failing(402, JSON.stringify({
+      detail: {
+        reason: "payment_required",
+        message: "This agent charges 1 credit per request.",
+        payment: PAYMENT,
+        remote_status: 402,
+        task_id: "t-402",
+      },
+    }));
+    const out = JSON.parse(await tools.call_a2a_agent.execute(CALL_ARGS, {}));
+    assert.equal(out.success, false);
+    assert.equal(out.payment_required, true);
+    assert.equal(out.do_not_retry, true);
+    assert.equal(out.task_id, "t-402");
+    assert.equal(out.message, "This agent charges 1 credit per request.");
+    assert.deepEqual(out.payment, PAYMENT);
+    // Not a transport failure and not an access denial — those lead the agent
+    // to retry or to re-route, and neither can ever succeed here.
+    assert.equal(out.remote_error, undefined);
+    assert.equal(out.not_authorized, undefined);
+  });
+
+  it("a 402 with a non-JSON body is still flagged payment_required", async () => {
+    // A proxy or CDN in front of the remote answers its own 402 page. The status
+    // is the fact; the body is a courtesy. Flagging only the parsable case would
+    // hand the agent an opaque failure for the commonest deployment shape.
+    const tools = failing(402, "<html>Payment Required</html>");
+    const out = JSON.parse(await tools.call_a2a_agent.execute(CALL_ARGS, {}));
+    assert.equal(out.payment_required, true);
+    assert.equal(out.do_not_retry, true);
+    assert.equal(out.payment, undefined);
+  });
+
+  it("a 502 naming rpc_forbidden is remote_forbidden, not a payment problem", async () => {
+    const tools = failing(502, JSON.stringify({
+      detail: { reason: "rpc_forbidden", message: "Remote refused", remote_status: 403 },
+    }));
+    const out = JSON.parse(await tools.call_a2a_agent.execute(CALL_ARGS, {}));
+    assert.equal(out.remote_error, true);
+    assert.equal(out.remote_forbidden, true);
+    assert.equal(out.payment_rejected, undefined);
+    assert.equal(out.payment_required, undefined);
+  });
+
+  it("a 502 naming payment_rejected is terminal, not a retryable remote error", async () => {
+    // The stored token was refused. Retrying spends the same token against the
+    // same refusal; an operator has to top up or re-paste.
+    const tools = failing(502, JSON.stringify({
+      detail: { reason: "payment_rejected", message: "Payment verification failed" },
+    }));
+    const out = JSON.parse(await tools.call_a2a_agent.execute(CALL_ARGS, {}));
+    assert.equal(out.remote_error, true);
+    assert.equal(out.payment_rejected, true);
+    assert.equal(out.do_not_retry, true);
+    assert.equal(out.remote_forbidden, undefined);
+  });
+
+  it("an ordinary 502 keeps today's single flag", async () => {
+    const tools = failing(502, JSON.stringify({ detail: "Remote call failed" }));
+    const out = JSON.parse(await tools.call_a2a_agent.execute(CALL_ARGS, {}));
+    assert.equal(out.remote_error, true);
+    assert.equal(out.remote_forbidden, undefined);
+    assert.equal(out.payment_rejected, undefined);
+    assert.equal(out.do_not_retry, undefined);
+  });
+
+  it("the poll path maps a 402 identically", async () => {
+    // A priced task polled with no token answers the same way as the call that
+    // started it; a poll that read as a plain failure would have the agent
+    // keep polling a task that will never progress.
+    const tools = failing(402, JSON.stringify({
+      detail: { reason: "payment_required", message: "pay up", payment: PAYMENT },
+    }));
+    const out = JSON.parse(await tools.get_a2a_task.execute(
+      { agent_name: "bot", endpoint: "partner", task_id: "t-1" }, {},
+    ));
+    assert.equal(out.payment_required, true);
+    assert.equal(out.do_not_retry, true);
+  });
+
+  it("the description tells the agent to relay a payment_required once and stop", async () => {
+    // The flag is only half the contract: an agent that reads `do_not_retry` but
+    // was never told who CAN act will try a different endpoint instead.
+    const tools = makeTools([]);
+    const text = tools.call_a2a_agent.description;
+    assert.match(text, /payment_required/);
+    assert.match(text, /do not retry/i);
+    assert.match(text, /person/i);
+    assert.match(text, /task_id/);
+  });
+});

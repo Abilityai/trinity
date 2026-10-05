@@ -211,8 +211,10 @@ boundCandidates(items, 8) → {visible, overflow}                       ← pure
         └─ visible empty AND query !== ''    → popup CLOSES (AC#6)
         │
         ▼
-resolveComposerKey({key, modifiers, isComposing, open, hasActive, …})  ← pure
+resolveComposerKey({key, modifiers, isComposing, open, hasActive, hasReply, …})  ← pure
         │  'move-down' | 'move-up' | 'accept' | 'dismiss' | 'close' | 'send' | 'pass'
+        │  | 'drop-reply' (ent#738: Escape with a "replying to" chip on screen and the
+        │    popup closed — the popup takes the first Escape, the chip the next)
         ▼
 accept → applyTypeaheadInsert(input, trigger, insert)                 ← pure
              insert = '/' ? starterFor(row) : buildMentionToken(row.name)
@@ -304,7 +306,7 @@ The one genuine *contract* — the mention grammar — is single-sourced by
 | 6 | `filterAgentCandidates` | slug **and** label; substring for shared deployment prefixes; case-insensitivity; self excluded; un-mentionable excluded; `enabled:false → []` (the #2128 gate, tested not grepped) |
 | 7 | `filterPlaybookCandidates` | word-start ranking beating source order; no substring free-for-all; source-empty vs filter-empty |
 | 8 | `typeaheadEmptyMessage` | three distinct statements; room wording; silence without the capability; copy asserts nothing about operator configuration |
-| 9 | `resolveComposerKey` | all 16 Enter modifier combinations (the `.exact` table), open × hasActive × hasCandidates, IME, Tab/Shift+Tab, Escape, caret keys |
+| 9 | `resolveComposerKey` | all 16 Enter modifier combinations (the `.exact` table), open × hasActive × hasCandidates, IME, Tab/Shift+Tab, Escape, caret keys; ent#738 `hasReply` → `drop-reply` only with the popup closed and never under IME |
 | 10 | dismissal | Esc-then-keep-typing stays closed; retype re-arms; a cleared sentinel re-opens (the session-long-dead-feature guard) |
 | 10b | post-pick settle | a mid-sentence pick leaves a re-detectable trigger at the new caret; `dismissAfterInsert` suppresses exactly it; nothing to settle when a separator was appended; editing the name back re-arms |
 | 11 | active index | wrap both ends; no-op on empty; a stale index is **dropped**, not clamped |

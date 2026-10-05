@@ -1,5 +1,6 @@
 """Persistent backlog (BACKLOG-001) + #1081 dark pull/lease/CAS seams."""
 
+import logging
 import secrets
 from datetime import datetime, timedelta, timezone
 from typing import AbstractSet, Optional, List, Dict
@@ -14,6 +15,8 @@ from ..tables import (
 )
 from models import TaskExecutionStatus
 from utils.helpers import utc_now_iso, to_utc_iso
+
+logger = logging.getLogger(__name__)
 
 class ScheduleQueueMixin:
     """Queued/backlog accessors + pull-lease reaper seams."""
@@ -219,6 +222,12 @@ class ScheduleQueueMixin:
                 return dict(row) if row else None
             except IntegrityError:
                 if attempt == 2:
+                    # #3114: three straight lost races on one conversation read
+                    # as an empty queue to the worker; log it so a stall shows.
+                    logger.info(
+                        "[Backlog] claim for %s lost the one-running-turn race "
+                        "3 times; returning no row this poll", agent_name,
+                    )
                     return None
                 if worker_id is not None:
                     stmt = stmt.values(claim_token=secrets.token_urlsafe(32))
@@ -462,6 +471,29 @@ class ScheduleQueueMixin:
                 for row in conn.execute(stmt).mappings()
             }
 
+    def execution_awaits_claim(self, execution_id: str) -> bool:
+        """True while no worker holds the row yet (#3114): ``queued``, or a
+        ``running`` row with neither a lease nor a dispatch sentinel, which is a
+        pre-created portal row in the moment before it is enqueued. A pushed row
+        carries ``claude_session_id='dispatched'`` before the agent is called and
+        a claimed row carries a lease, so neither matches. Read-only.
+        """
+        c = schedule_executions.c
+        stmt = select(c.status, c.lease_expires_at, c.claude_session_id).where(
+            c.id == execution_id
+        )
+        with get_engine().connect() as conn:
+            row = conn.execute(stmt).mappings().first()
+        if row is None:
+            return False
+        if row["status"] == TaskExecutionStatus.QUEUED:
+            return True
+        return (
+            row["status"] == TaskExecutionStatus.RUNNING
+            and row["lease_expires_at"] is None
+            and row["claude_session_id"] is None
+        )
+
     def count_active_leased(self, agent_name: str) -> int:
         """Scalar single-agent variant of ``count_active_leased_by_agent``.
 
@@ -491,11 +523,19 @@ class ScheduleQueueMixin:
             row = conn.execute(stmt).mappings().first()
         return int(row["c"]) if row else 0
 
-    def cancel_queued_execution(self, execution_id: str, reason: str = "cancelled") -> bool:
+    def cancel_queued_execution(
+        self,
+        execution_id: str,
+        reason: str = "cancelled",
+        status: str = TaskExecutionStatus.CANCELLED,
+    ) -> bool:
         """Cancel a single queued execution. No container interaction.
 
+        ``status`` is the terminal written (#3114): CANCELLED by default, FAILED
+        for an interactive turn no worker claimed in time. Same CAS either way.
+
         Returns:
-            True if the row was still queued and is now cancelled, False otherwise.
+            True if the row was still queued and is now terminal, False otherwise.
         """
         now = utc_now_iso()
         with get_engine().begin() as conn:
@@ -508,7 +548,7 @@ class ScheduleQueueMixin:
                     )
                 )
                 .values(
-                    status=TaskExecutionStatus.CANCELLED,
+                    status=status,
                     completed_at=now,
                     error=reason,
                 )

@@ -1254,11 +1254,16 @@ export function roomMentionSource(participantNames, roster) {
  * to 500 characters over the message), while an accidental send is the thing the
  * user was reaching for anyway. Tab still accepts the top row, and nobody
  * presses Tab to send.
+ *
+ * trinity-enterprise#738: Escape drops a "replying to" chip — innermost first.
+ * An open popup takes the first Escape (`dismiss`), the chip the next one, and
+ * only then does Escape reach the turn (the caller `preventDefault`s
+ * `drop-reply`, which is what makes the turn-cancel listener yield).
  */
 export function resolveComposerKey({
   key, shiftKey = false, ctrlKey = false, metaKey = false, altKey = false,
   isComposing = false, keyCode = 0,
-  open = false, hasActive = false, hasCandidates = false,
+  open = false, hasActive = false, hasCandidates = false, hasReply = false,
 } = {}) {
   if (isComposing || keyCode === 229) return 'pass'
   // A faithful reproduction of Vue's `.exact`: any modifier falls through
@@ -1273,6 +1278,7 @@ export function resolveComposerKey({
     if (plainEnter && hasCandidates && hasActive) return 'accept'
     if (CARET_KEYS.has(key)) return 'close'
   }
+  if (key === 'Escape' && hasReply) return 'drop-reply'
   if (plainEnter) return 'send'
   return 'pass'
 }

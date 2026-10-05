@@ -106,6 +106,10 @@ class PortalAgentCard(BaseModel):
     # affordance, so this is the field that decides it. UX, not containment —
     # the routes re-check with the same predicate.
     can_manage_canvases: bool = False
+    # #3114 — this agent's Workspace turns wait on the durable queue for a
+    # worker (pull pilot). The pending-turn card reads "Waiting for a slot"
+    # only when this is true.
+    pulls_turns: bool = False
     # #138 briefing — ships with the roster at sign-in so the new-chat screen
     # renders with zero extra fetches. Best-effort live data (a stopped/slow
     # agent yields None/[]). `playbooks` is the hint-card set (ent#380): the

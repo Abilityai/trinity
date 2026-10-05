@@ -389,6 +389,7 @@ async def _run_and_report(
     ``persist_session``), matching the SESSION_TAB ``--resume`` convention — the
     minimal reversible reading of the schema's "presence ⇒ persist/resume"."""
     from ..services.runtime_adapter import get_runtime
+    from .process_registry import get_process_registry
 
     execution_id = claim.get("execution_id")
     claim_token = claim.get("claim_token")
@@ -398,9 +399,25 @@ async def _run_and_report(
     session_id = payload.get("session_id")
     overrides = payload.get("task_overrides") or {}
     turn_timeout = _resolve_turn_timeout(overrides)
+    # #3114: a turn queued by the backend's `execute_task` carries the push
+    # payload's `persist_session` and `images`. Older rows carry neither, so
+    # persistence falls back to "a session id means resume and persist".
+    persist_session = payload.get("persist_session")
+    if persist_session is None:
+        persist_session = bool(session_id)
 
+    # #3114: a claimed turn is ACCEPTED-not-spawned until the runtime starts it.
+    # Registered as pending, `/api/executions/{id}/terminate` reaches it in that
+    # window (#2433): the cancel is recorded, the turn is skipped (or killed at
+    # spawn) and reported `cancelled` below.
+    registry = get_process_registry()
+    registry.register_pending(
+        execution_id, timeout_seconds=turn_timeout, metadata={"type": "pull"},
+    )
     agent_state.record_task_start()
     try:
+        if execution_id and registry.was_terminated(execution_id):
+            raise HTTPException(status_code=409, detail="Execution cancelled before it started")
         response_text, raw_messages, metadata, ran_session_id = await get_runtime().execute_headless(
             prompt=message,
             model=overrides.get("model"),
@@ -410,7 +427,8 @@ async def _run_and_report(
             max_turns=overrides.get("max_turns"),
             execution_id=execution_id,
             resume_session_id=session_id,
-            persist_session=bool(session_id),
+            persist_session=bool(persist_session),
+            images=payload.get("images") or None,
         )
         body = _success_result_body(claim_token, response_text, raw_messages, metadata, ran_session_id)
         finish_success: Optional[bool] = True
@@ -424,6 +442,25 @@ async def _run_and_report(
     except Exception as exc:  # noqa: BLE001 — any failure must still report a terminal
         finish_success = False
         body = _failed_result_body(claim_token, str(exc) or type(exc).__name__)
+    finally:
+        # #2433: promoted at spawn; dropped here if it never spawned.
+        registry.discard_pending(execution_id)
+
+    # #679 / #3114: a terminated turn reports `cancelled` (result_callback
+    # parity). Auth and rate-limit terminals keep their class so the breaker
+    # and SUB-003 still see them.
+    if (
+        execution_id
+        and registry.was_terminated(execution_id)
+        and body.get("error_code") not in ("auth", "billing")
+    ):
+        body = {
+            **body,
+            "status": "cancelled",
+            "error_code": None,
+            "error": "Execution terminated by user",
+        }
+        finish_success = None
 
     agent_state.record_task_finish(success=finish_success)
 

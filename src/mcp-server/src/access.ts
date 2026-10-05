@@ -222,6 +222,10 @@ const REPORTS_GATE = "reports.ts checkAgentAccess ({self} ∪ permitted)";
 const OPERATOR_QUEUE_GATE = "operator_queue.ts checkAgentAccess ({self} ∪ permitted)";
 const GIT_GATE = "git.ts `run` wrapper → checkAgentAccess ({self} ∪ permitted)";
 const A2A_GATE = "a2a.ts checkAgentAccess ({self} ∪ permitted)";
+const A2A_OUTBOUND_ADMIN =
+  ADMIN_ONLY + "; OSS settings route over the platform-wide outbound endpoint registry, admin + human-only";
+const A2A_OUTBOUND_LIST =
+  "a2a.ts refuses agent-scoped keys itself (human_only, no round trip) — the OSS settings route behind it is admin + human-only, not self-scoped, so a permission lookup would be inert";
 const ASSIGNMENTS_SELF =
   "assignments.ts — an agent key reads only its own roster (fails closed without an agent name); user/system keys are scoped by the backend, whose 404 is uniform (ent#500)";
 const A2A_CALL_SELF = "a2a_call.ts checkSelf — self-only by design (an agent spends only its own endpoint credential)";
@@ -420,9 +424,9 @@ export const TOOL_ACCESS_POLICY: Readonly<Record<string, ToolAccessPolicy>> = {
   set_agent_a2a_exposure: { kind: "baselined", owner: ADMIN_ONLY + "; enterprise route, human-only" },
   get_agent_a2a_card: { kind: "baselined", owner: ENT629 },
   set_a2a_inbound_allowlist: { kind: "baselined", owner: ADMIN_ONLY + "; enterprise route, human-only" },
-  register_a2a_endpoint: { kind: "baselined", owner: ADMIN_ONLY + "; enterprise route, human-only" },
-  list_a2a_endpoints: { kind: "in-tool", how: A2A_GATE },
-  remove_a2a_endpoint: { kind: "baselined", owner: ADMIN_ONLY + "; enterprise route, human-only" },
+  register_a2a_endpoint: { kind: "baselined", owner: A2A_OUTBOUND_ADMIN },
+  list_a2a_endpoints: { kind: "in-tool", how: A2A_OUTBOUND_LIST },
+  remove_a2a_endpoint: { kind: "baselined", owner: A2A_OUTBOUND_ADMIN },
   // --- a2a_call.ts ---
   call_a2a_agent: { kind: "in-tool", how: A2A_CALL_SELF },
   get_a2a_task: { kind: "in-tool", how: A2A_CALL_SELF },

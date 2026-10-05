@@ -340,9 +340,17 @@ class ValidationService:
 
         try:
             # 4. Run validation via TaskExecutionService
-            result = await self._task_service.execute_task(
+            # #3114: on a pull pilot the validation turn is queued and
+            # awaited here.
+            from services.task_execution_service import dispatch_and_await_terminal
+
+            result = await dispatch_and_await_terminal(
+                service=self._task_service,
                 agent_name=agent_name,
                 message=validation_prompt,
+                # trinity-enterprise#751: the operator-authored part is the only
+                # request here; the original message and response are context.
+                request_text=custom_prompt or "",
                 triggered_by="validation",
                 timeout_seconds=timeout_seconds,
                 execution_id=validation_execution_id,

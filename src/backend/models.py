@@ -474,6 +474,12 @@ class User(BaseModel):
     # subscriber's execution inherits it instead of starting a new root. Set
     # only on a loopback JWT; None on every other branch.
     loopback_chain_depth: Optional[int] = None
+    # trinity-enterprise#751: True only on the EVT-001 loopback JWT. That token
+    # resolves to `sub: "admin"` with no `mcp_scope` and no agent identity — the
+    # exact shape of a signed-in human — so without this flag a subscription an
+    # agent created could reach `/task` looking like the admin in a browser.
+    # `dependencies.is_person_principal` refuses it.
+    is_event_loopback: bool = False
 
 
 class Token(BaseModel):
@@ -3138,6 +3144,8 @@ class FanOutTaskResponse(BaseModel):
     cost: Optional[float] = None
     context_used: Optional[int] = None
     duration_ms: Optional[int] = None
+    # trinity-enterprise#751: set when `status` is "pending_approval".
+    request_id: Optional[str] = None
 
 
 class FanOutResponse(BaseModel):
@@ -3148,6 +3156,8 @@ class FanOutResponse(BaseModel):
     completed: int
     failed: int
     results: List[FanOutTaskResponse]
+    # trinity-enterprise#751: subtasks held by the skill gate (neither run nor failed).
+    pending_approval: int = 0
 
 
 # --- #2670: the batch's read surface ----------------------------------------
@@ -3235,6 +3245,11 @@ class AutoSyncToggle(BaseModel):
 
 
 class FreezeSchedulesToggle(BaseModel):
+    enabled: bool
+
+
+class PullSyncToggle(BaseModel):
+    """trinity-enterprise#703: the container's pull cycle on/off."""
     enabled: bool
 
 
@@ -4760,6 +4775,13 @@ class A2AOutboundEndpointUpsert(BaseModel):
     read. Omitting it on an update leaves an existing secret in place (so an
     operator can repoint or rename without re-typing something they may not
     have); `clear_credentials` removes it.
+
+    `credential_kind` (#3185) LABELS that same slot — `payment_token` makes the
+    credential ride as x402 payment (the `x402.payment.payload` metadata plus
+    the `payment-signature` header) **in addition to** `Authorization: Bearer
+    …`, which every credentialed call still carries. It is optional in both
+    directions: omitted with a new credential the store infers it from the
+    value, and sent alone it re-labels a credential already stored.
     """
     model_config = ConfigDict(extra="forbid")
 
@@ -4767,6 +4789,33 @@ class A2AOutboundEndpointUpsert(BaseModel):
     url: str = Field(..., min_length=1, max_length=2048)
     credentials: Optional[SecretStr] = Field(default=None)
     clear_credentials: bool = False
+    credential_kind: Optional[Literal["api_key", "payment_token"]] = Field(
+        default=None,
+        description=(
+            "What the credential slot holds. Omit it and the kind is inferred "
+            "from the value (an x402 payload → payment_token, otherwise "
+            "api_key); send it alone to re-label a stored credential."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _kind_needs_a_credential_to_describe(self) -> "A2AOutboundEndpointUpsert":
+        """Refuse `credential_kind` together with `clear_credentials`.
+
+        The two are contradictory instructions about one slot: whichever the
+        store honoured, the caller would be told their write succeeded while
+        believing the other happened — and "a payment token is registered here"
+        is precisely the belief that makes the next 402 unreadable. Refused at
+        the boundary with a named reason, and it never echoes the credential
+        (`error_handlers.validation_error_without_input` strips `input`, which is
+        what keeps a 422 on this model from relocating the ent#109 leak).
+        """
+        if self.credential_kind is not None and self.clear_credentials:
+            raise ValueError(
+                "Pass either credential_kind or clear_credentials, not both — "
+                "clearing the credential also drops the kind that described it."
+            )
+        return self
 
     @field_validator("credentials")
     @classmethod

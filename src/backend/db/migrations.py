@@ -4712,7 +4712,7 @@ def _migrate_seat_ask_class_state_table(cursor, conn):
     (`autonomy_dial_service.LEVEL_KEY`). The live conjuncts (level, the agent's
     autonomy switch, the clock) are read, never written.
 
-    Mirrored by the Alembic revision 0087_seat_ask_class_state.
+    Mirrored by the Alembic revision 0089_seat_ask_class_state.
     """
     cursor.execute(
         """
@@ -5076,6 +5076,98 @@ def _migrate_agent_sync_state_divergence(cursor, conn):
         )
 
 
+def _migrate_pull_sync(cursor, conn):
+    """The container's pull cycle (trinity-enterprise#703).
+
+    * `agent_git_config.pull_sync_enabled` — the per-agent switch the agent's
+      pull loop reads live each cycle (the #3010 one-writer discipline).
+    * `agent_sync_state.last_pull_at / last_pull_status / behind_after_pull /
+      last_pull_error / last_successful_pull_at / consecutive_pull_failures /
+      consecutive_pull_skips` — the pull cycle's own outcome and health,
+      persisted by the sync-health poller.
+
+    Backfill (operator ruling 2026-09-25): on only where auto-sync is already
+    on, so no agent that is not already writing to git starts rebasing its
+    working tree on upgrade; everyone else is off until toggled. New `github:`
+    agents get it at creation. Runs once (schema_migrations).
+
+    Mirrored by the Alembic revision 0087_pull_sync.
+    """
+    _safe_add_column(
+        cursor, "agent_git_config", "pull_sync_enabled",
+        "ALTER TABLE agent_git_config ADD COLUMN pull_sync_enabled INTEGER DEFAULT 0",
+    )
+    for column, ddl in (
+        ("last_pull_at", "TEXT"),
+        ("last_pull_status", "TEXT"),
+        ("behind_after_pull", "INTEGER"),
+        ("last_pull_error", "TEXT"),
+        ("last_successful_pull_at", "TEXT"),
+        ("consecutive_pull_failures", "INTEGER DEFAULT 0"),
+        ("consecutive_pull_skips", "INTEGER DEFAULT 0"),
+    ):
+        _safe_add_column(
+            cursor, "agent_sync_state", column,
+            f"ALTER TABLE agent_sync_state ADD COLUMN {column} {ddl}",
+        )
+    cursor.execute(
+        "UPDATE agent_git_config SET pull_sync_enabled = 1 "
+        "WHERE COALESCE(auto_sync_enabled, 0) = 1"
+    )
+    conn.commit()
+
+
+def _migrate_skill_gate_requests_table(cursor, conn):
+    """trinity-enterprise#751 — a gated-skill request frozen while its approval
+    ask is open; the ask records the decision, this row the effect (exactly
+    once: a status compare-and-set plus a UNIQUE `dispatched_execution_id`).
+    See the DDL comment in db/schema.py.
+
+    Idempotent. PostgreSQL half: Alembic `0088_skill_gate_requests`.
+    """
+    cursor.execute("PRAGMA table_info(skill_gate_requests)")
+    if not cursor.fetchall():
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS skill_gate_requests (
+                request_id TEXT PRIMARY KEY,
+                agent_name TEXT NOT NULL,
+                ask_item_id TEXT,
+                skills TEXT NOT NULL,
+                request_text TEXT NOT NULL,
+                fingerprints TEXT,
+                requester_kind TEXT NOT NULL,
+                requester_key TEXT NOT NULL,
+                source_agent TEXT,
+                requester_email TEXT,
+                requester_execution_id TEXT,
+                requester_mcp_key_id TEXT,
+                origin_execution_id TEXT,
+                triggered_by TEXT,
+                dispatch TEXT NOT NULL,
+                state TEXT NOT NULL DEFAULT 'pending',
+                state_detail TEXT,
+                dispatched_execution_id TEXT UNIQUE,
+                created_at TEXT NOT NULL,
+                decided_at TEXT,
+                dispatched_at TEXT,
+                notified_at TEXT
+            )
+        """)
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_skill_gate_requests_agent_state "
+        "ON skill_gate_requests(agent_name, state)"
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_skill_gate_requests_requester "
+        "ON skill_gate_requests(agent_name, requester_key, state)"
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_skill_gate_requests_state "
+        "ON skill_gate_requests(state, decided_at)"
+    )
+    conn.commit()
+
+
 MIGRATIONS = [
     ("agent_sharing", _migrate_agent_sharing_table),
     ("schedule_executions_observability", _migrate_schedule_executions_observability),
@@ -5232,5 +5324,7 @@ MIGRATIONS = [
     ("loop_chain_depth", _migrate_loop_chain_depth),
     ("ent720_email_identity", _migrate_ent720_email_identity),
     ("metric_points_restatement", _migrate_metric_points_restatement),
+    ("pull_sync", _migrate_pull_sync),
+    ("skill_gate_requests_table", _migrate_skill_gate_requests_table),
     ("seat_ask_class_state_table", _migrate_seat_ask_class_state_table),
 ]

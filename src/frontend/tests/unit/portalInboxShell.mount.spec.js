@@ -381,3 +381,87 @@ describe('§3g C10 — Open canvas from the Inbox', () => {
     expect(w.findComponent({ name: 'PortalRail' }).props('activeTab')).toBe('canvas')
   })
 })
+
+// trinity-enterprise#738 — the reply target's owner. The conversation asks
+// (`reply`); the SHELL holds the target and is the one place that drops it when
+// the person leaves that chat, so a chip never follows them into another one.
+describe('ent#738 — Reply from inside the chat', () => {
+  const conv = (w) => w.findComponent({ name: 'PortalConversation' })
+  const TWO = [
+    THREADS[0],
+    { id: 't2', session_id: 't2', agent_name: 'scout', is_main: false, title: 'Other', last_message_at: '2026-09-27T09:00:00Z', unread: 0 },
+  ]
+  const target = (sessionId) => ({ sessionId, messageId: 'm2', excerpt: 'Heads up' })
+
+  it('a reply asked for by the conversation comes back to it as its reply target', async () => {
+    arm()
+    const { w } = await boot('/workspace/c/t1')
+    expect(conv(w).props('replyTarget')).toBeNull()
+    conv(w).vm.$emit('reply', target('t1'))
+    await flushPromises()
+    expect(conv(w).props('replyTarget')).toEqual(target('t1'))
+  })
+
+  it('a target with no message id is refused, as from the Inbox', async () => {
+    arm()
+    const { w } = await boot('/workspace/c/t1')
+    conv(w).vm.$emit('reply', { sessionId: 't1', messageId: '', excerpt: 'x' })
+    await flushPromises()
+    expect(conv(w).props('replyTarget')).toBeNull()
+  })
+
+  // Pins the route watcher (it predates ent#738): the in-chat door relies on it.
+  it('leaving the chat drops it — and coming back does not bring it back', async () => {
+    arm()
+    store.fetchAllSessions = vi.fn(async () => { store.sessionsFailed = false; return TWO })
+    const { w, router } = await boot('/workspace/c/t1')
+    conv(w).vm.$emit('reply', target('t1'))
+    await flushPromises()
+    await router.push('/workspace/c/t2')
+    await flushPromises()
+    expect(conv(w).props('replyTarget')).toBeNull()
+    router.back()
+    await flushPromises(); await flushPromises()
+    expect(router.currentRoute.value.path).toBe('/workspace/c/t1')
+    expect(conv(w).props('replyTarget')).toBeNull()
+  })
+
+  it('on a URL that does not name the chat, a new chat drops the reply too', async () => {
+    // `sage` has no listed thread, so its landing stays on a URL with no
+    // session id — the route watcher never sees the chat change. The chat the
+    // conversation resolved for itself is the target's session.
+    arm()
+    const { w, router } = await boot('/workspace?agent=sage')
+    expect(router.currentRoute.value.params.sessionId).toBeUndefined()
+    expect(conv(w).exists()).toBe(true)
+    conv(w).vm.$emit('reply', target('s-sage'))
+    await flushPromises()
+    expect(conv(w).props('replyTarget')).toEqual(target('s-sage'))
+    conv(w).vm.$emit('new-chat')
+    await flushPromises()
+    expect(router.currentRoute.value.params.sessionId).toBeUndefined()
+    expect(conv(w).props('replyTarget')).toBeNull()
+  })
+
+  it('on a URL that does not name the chat, switching agent drops the reply too', async () => {
+    arm()
+    const { w, router } = await boot('/workspace?agent=sage')
+    conv(w).vm.$emit('reply', target('s-sage'))
+    await flushPromises()
+    expect(conv(w).props('replyTarget')).toEqual(target('s-sage'))
+    conv(w).vm.$emit('switch-agent', 'scout')
+    await flushPromises()
+    expect(router.currentRoute.value.params.sessionId).toBeUndefined()
+    expect(conv(w).props('agent').name).toBe('scout')
+    expect(conv(w).props('replyTarget')).toBeNull()
+  })
+
+  it('the Inbox path keeps its target through the navigation it starts', async () => {
+    arm()
+    const { w, router } = await boot('/workspace/inbox')
+    w.findComponent({ name: 'PortalInbox' }).vm.$emit('reply', '/workspace/c/t1?anchor=m%3Am2', target('t1'))
+    await flushPromises(); await flushPromises()
+    expect(router.currentRoute.value.path).toBe('/workspace/c/t1')
+    expect(conv(w).props('replyTarget')).toEqual(target('t1'))
+  })
+})

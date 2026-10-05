@@ -420,6 +420,7 @@
           :threads="threads"
           :rename="renameChat"
           @switch-agent="switchAgent"
+          @reply="setReplyTarget"
           @reply-done="replyTarget = null"
           @new-chat="newChatWithAgent(activeAgent.name)"
           @session-adopted="onSessionAdopted"
@@ -2244,9 +2245,26 @@ async function replyInChat(url, reply = null) {
   await nextTick(); await nextTick()
   focusConversationComposer()
 }
+// trinity-enterprise#738: Reply on a message inside the chat — the same target,
+// asked for by the conversation instead of the Inbox. No navigation: the chat
+// is already on screen, and the conversation has focused its own composer.
+function setReplyTarget(reply) {
+  replyTarget.value = reply && reply.messageId ? reply : null
+}
 // A reply belongs to one chat: leaving it drops the chip.
 watch(() => route.params.sessionId, (sid) => {
   if (replyTarget.value && sid !== replyTarget.value.sessionId) replyTarget.value = null
+})
+// ent#738: …and the URL does not always name the chat. On a landing with no
+// session id the conversation resolves the chat itself, so New chat or another
+// agent changes the conversation (`convKey`) without the route watcher above
+// seeing anything — the target lingered, hidden, and came back with that chat.
+// Not cleared on EVERY remount: the Inbox's "Reply in chat" sets the target
+// first and then navigates, and the `/c/:id` handler names the same session
+// (`pendingSession`) in the same tick it remounts.
+watch(convKey, () => {
+  const t = replyTarget.value
+  if (t && t.sessionId !== (activeSessionId.value || pendingSession.value)) replyTarget.value = null
 })
 
 // ---- Cross-chat search (sidebar) ----------------------------------------------

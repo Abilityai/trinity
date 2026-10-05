@@ -612,7 +612,7 @@ async def report_completion(
         resolver = _CHANNEL_RESOLVERS.get(source_channel)
         if resolver is None:
             return False                      # channel without a delivery leg
-        if (triggered_by or "") in INLINE_CHANNEL_TRIGGERS:
+        if (triggered_by or "") in INLINE_CHANNEL_TRIGGERS and not _is_approved_gate_run(execution_id):
             return False                      # the adapter already replied — no double-post
 
         # ent#265 D1: deliver through the bot the user actually addressed.
@@ -677,6 +677,20 @@ async def report_completion(
         return True
     except Exception as e:  # noqa: BLE001 — never disturb a completed execution
         logger.warning("[ent#224] completion report raised for %s: %s", execution_id, e)
+        return False
+
+
+def _is_approved_gate_run(execution_id: str) -> bool:
+    """trinity-enterprise#751: an approved gated request keeps its requester's
+    trigger (`public`, a channel) but runs long after that turn answered, so
+    nothing replied inline — its result is reported like any background
+    completion. An unreadable record reads as "inline": the failure direction is
+    a missing report, never a second post."""
+    try:
+        from database import db
+        return db.get_gate_request_by_dispatched_execution(execution_id) is not None
+    except Exception:  # noqa: BLE001
+        logger.warning("[ent#751] gate-record read failed for %s; not reporting", execution_id)
         return False
 
 

@@ -224,6 +224,11 @@ def test_loopback_round_trip_against_trinitys_own_inbound_server(monkeypatch):
         can_user_access_agent=lambda user, name: True,
         get_execution=lambda eid: state["executions"].get(eid),
         cancel_queued_execution=lambda eid, reason=None: False,
+        # ent#679: the card producer reads the payment config to decide whether
+        # to declare a price. `remotebot` is not priced here — stub it
+        # explicitly so the card this loopback fetches is the unpriced one
+        # rather than the fail-open-on-exception one.
+        get_nevermined_config=lambda name: None,
     )
     monkeypatch.setattr(a2a, "db", fake_db)
     monkeypatch.setattr(
@@ -279,7 +284,15 @@ def test_loopback_round_trip_against_trinitys_own_inbound_server(monkeypatch):
 
     remote = FastAPI()
     remote.include_router(a2a.a2a_server_router)
-    remote.dependency_overrides[deps.get_current_user] = lambda: types.SimpleNamespace(
+    # ent#679: the route's dependency is now `get_user_or_anonymous`, which
+    # CALLS `get_current_user` directly rather than depending on it — so an
+    # override of the latter is never consulted and this loopback would run down
+    # the anonymous x402 branch instead of the fleet path it exists to prove.
+    # Override what the route actually depends on (same fix as test_157's
+    # `client` fixture). The peer here IS a Trinity principal: #738 federation's
+    # premise is a Trinity calling a Trinity with an MCP key, and ruling T6/AC4
+    # says that path is byte-identical to before the gate.
+    remote.dependency_overrides[deps.get_user_or_anonymous] = lambda: types.SimpleNamespace(
         id=2, username="peer", email="peer@example.com", role="user",
         agent_name=None, mcp_key_id="k2",
     )
@@ -737,6 +750,13 @@ def test_agent_principals_are_NOT_rejected_outright(client):
         ("unsupported_protocol_version", 502),
         ("remote_error", 502),
         ("rpc_unreachable", 502),
+        # #3185: a 402 is its own status — the one the MCP mapper and the add
+        # flow branch on. 403 and a rejected token stay 502, so neither can be
+        # confused with the route's OWN self-check 403.
+        ("payment_required", 402),
+        ("payment_rejected", 502),
+        ("rpc_forbidden", 502),
+        ("rpc_http_error", 502),
     ],
 )
 def test_refusal_reasons_map_to_stable_status_codes(client, monkeypatch, reason, expected):
@@ -1128,3 +1148,228 @@ def test_an_activity_write_failure_never_breaks_the_call(monkeypatch):
     asyncio.run(a2a_outbound_service._record_activity(
         "bot", "partner", "peer.example.com", "completed"
     ))  # must not raise
+
+
+# =========================================================================== #
+# 11. The 402 reaches the agent as a 402 (#3185)
+#
+# The client tier is proven in `test_3185_a2a_payment_outcome.py` and
+# `test_736_a2a_outbound_transport.py`. What is proven HERE is the route
+# contract: the status, the shape of `detail`, that the SUCCESS allowlist did
+# not grow, and that a 402 releases the effect claim rather than being
+# snapshotted as an answer.
+# =========================================================================== #
+import base64 as _b64  # noqa: E402
+
+_REQS = {
+    "x402Version": 2,
+    "error": "payment_required",
+    "resource": {"url": PEER.url, "description": "One review"},
+    "accepts": [{"scheme": "exact", "network": "base-sepolia", "planId": "plan_42"}],
+}
+
+
+def _priced_peer(status=402, body=None, headers=None):
+    """A peer that serves its card and then demands payment."""
+    def _handler(request):
+        if request.method == "GET":
+            return httpx.Response(200, json=CARD)
+        return httpx.Response(
+            status,
+            headers=headers if headers is not None else {
+                "payment-required": _b64.b64encode(json.dumps(_REQS).encode()).decode()},
+            stream=httpx.ByteStream(body if body is not None else b"{}"),
+        )
+
+    return _factory(_handler)
+
+
+def test_a_priced_remote_answers_the_agent_with_http_402(client):
+    client.set_factory(_priced_peer())
+    r = client.http.post("/api/agents/bot/a2a/call", json=_body())
+    assert r.status_code == 402, r.text
+    detail = r.json()["detail"]
+    assert detail["reason"] == "payment_required"
+    assert detail["remote_status"] == 402
+    assert detail["payment"]["summary"]["plan_id"] == "plan_42"
+    assert detail["message"]
+
+
+def test_the_402_detail_is_itself_an_allowlist(client):
+    """Peer-controlled data reaching an LLM gets a fixed shape, like the success
+    response does. A key appearing here that nothing maps is how an endpoint
+    URL or a credential ends up in an agent's context."""
+    client.set_factory(_priced_peer())
+    detail = client.http.post("/api/agents/bot/a2a/call", json=_body()).json()["detail"]
+    assert set(detail) <= {"reason", "message", "payment", "remote_status", "task_id",
+                           "remote_code"}
+    assert set(detail["payment"]) == {"summary", "x402", "truncated"}
+
+
+def test_a_402_never_leaks_the_endpoint_credential_or_url(client):
+    client.set_factory(_priced_peer(
+        body=json.dumps({"detail": "you sent s3cret-token, it is spent"}).encode(),
+        headers={}))
+    r = client.http.post("/api/agents/bot/a2a/call", json=_body())
+    assert r.status_code == 402
+    assert "s3cret-token" not in r.text
+
+
+def test_a_remote_403_is_a_502_the_caller_can_tell_from_a_402(client):
+    """AC4. The route's own self-check also answers 403, so a remote 403 must
+    NOT become one — `remote_status` is how the caller reads the peer's."""
+    client.set_factory(_priced_peer(status=403, headers={},
+                                    body=json.dumps({"detail": "no"}).encode()))
+    r = client.http.post("/api/agents/bot/a2a/call", json=_body())
+    assert r.status_code == 502
+    detail = r.json()["detail"]
+    assert detail["reason"] == "rpc_forbidden"
+    assert detail["remote_status"] == 403
+
+
+def test_the_success_response_allowlist_did_not_grow(client):
+    """T1's whole reason: a 402 is `success:false` by construction, so no
+    `payment` / `payment_status` field joins the success shape — and the
+    receipts an operator can see in the audit row never reach the agent."""
+    r = client.http.post("/api/agents/bot/a2a/call", json=_body())
+    assert r.status_code == 200
+    assert set(r.json()) == {
+        "success", "state", "text", "task_id", "context_id",
+        "truncated", "protocol_version", "endpoint", "replayed",
+    }
+
+
+def test_a_402_releases_the_claim_and_is_never_snapshotted(monkeypatch, endpoint):
+    """Decision 17 — the C2 wrong-answer class, in its most expensive form.
+
+    A snapshotted 402 would replay "pay me" to the call made AFTER the operator
+    paid and registered the token: the money is spent, the claim says the effect
+    already happened, and the agent is told to pay again. So the 402 must leave
+    the guard by the SAME door a transient failure does — the exception path,
+    which releases the claim and writes no snapshot."""
+    import services.idempotency_service as idem
+
+    released = []
+    completed = []
+    monkeypatch.setattr(idem.db, "idempotency_claim",
+                        lambda scope, key: {"state": "new"}, raising=False)
+    monkeypatch.setattr(idem.db, "idempotency_release",
+                        lambda scope, key: released.append(key), raising=False)
+    monkeypatch.setattr(idem.db, "idempotency_complete",
+                        lambda *a, **k: completed.append(a), raising=False)
+    monkeypatch.setattr(idem, "resolve_and_validate_execution",
+                        lambda eid, agent: {"id": eid} if eid else None)
+
+    async def _pay_me(**kwargs):
+        raise a2a_client.A2ACallError("payment_required", "pay up", remote_status=402,
+                                      payment={"summary": {}, "x402": {}, "truncated": False})
+
+    monkeypatch.setattr(a2a_client, "call_endpoint", _pay_me)
+    with pytest.raises(a2a_client.A2ACallError) as exc:
+        asyncio.run(a2a_outbound_service.call_agent(
+            agent_name="bot", endpoint_ref="partner", message="hi",
+            dedup_label="step-1", execution_id="exec-402",
+        ))
+    assert exc.value.reason == "payment_required"
+    assert released, "the 402 wedged the claim; the call after payment would be blocked"
+    assert not completed, "the 402 was snapshotted and would replay as an answer"
+
+
+def test_a_402_is_recorded_as_a_failed_activity_naming_the_reason(monkeypatch, endpoint):
+    recorded = []
+
+    async def _record(agent_name, endpoint_name, host, state, error=None, **kw):
+        recorded.append((state, error))
+
+    monkeypatch.setattr(a2a_outbound_service, "_record_activity", _record)
+
+    async def _pay_me(**kwargs):
+        raise a2a_client.A2ACallError("payment_required", "pay up", remote_status=402)
+
+    monkeypatch.setattr(a2a_client, "call_endpoint", _pay_me)
+    with pytest.raises(a2a_client.A2ACallError):
+        asyncio.run(a2a_outbound_service.call_agent(
+            agent_name="bot", endpoint_ref="partner", message="hi",
+            dedup_label="step-1",
+        ))
+    assert recorded == [("failed", "payment_required")]
+
+
+# =========================================================================== #
+# 12. The credential kind travels from the record to the wire (#3185)
+# =========================================================================== #
+def test_a_resolved_endpoint_defaults_to_api_key():
+    """Additive-safe: every row written before #3185 has no kind, and must keep
+    sending exactly today's bytes."""
+    ep = a2a_outbound.ResolvedEndpoint(id="i", name="n", url=PEER.url, credential="c")
+    assert ep.credential_kind == "api_key"
+
+
+def test_a_resolved_endpoint_still_never_reprs_its_credential_with_a_kind():
+    ep = a2a_outbound.ResolvedEndpoint(id="i", name="n", url=PEER.url,
+                                       credential="s3cret-token",
+                                       credential_kind="payment_token")
+    assert "s3cret-token" not in repr(ep)
+    assert "s3cret-token" not in str(ep)
+    # The KIND is metadata, not a secret — an operator debugging a 402 needs it.
+    assert "payment_token" in repr(ep)
+
+
+def test_the_service_passes_the_records_kind_to_the_client(monkeypatch):
+    """The wiring test: without it the store could grow a kind that never
+    reaches the wire, and every priced call would 402 forever."""
+    seen = {}
+
+    ep = a2a_outbound.ResolvedEndpoint(id="a2aep_2", name="priced", url=PEER.url,
+                                       credential="tok", credential_kind="payment_token")
+    a2a_outbound.register_provider(_StubProvider({"priced": ep}))
+
+    async def _capture(**kwargs):
+        seen.update(kwargs)
+        return a2a_client.A2AResult(state="completed", text="ok", host="peer.example.com")
+
+    monkeypatch.setattr(a2a_client, "call_endpoint", _capture)
+    asyncio.run(a2a_outbound_service.call_agent(
+        agent_name="bot", endpoint_ref="priced", message="hi", dedup_label="s"))
+    assert seen["credential_kind"] == "payment_token"
+
+
+def test_the_poll_path_passes_the_kind_too(monkeypatch):
+    seen = {}
+    ep = a2a_outbound.ResolvedEndpoint(id="a2aep_2", name="priced", url=PEER.url,
+                                       credential="tok", credential_kind="payment_token")
+    a2a_outbound.register_provider(_StubProvider({"priced": ep}))
+
+    async def _capture(**kwargs):
+        seen.update(kwargs)
+        return a2a_client.A2AResult(state="completed", host="peer.example.com")
+
+    monkeypatch.setattr(a2a_client, "get_task", _capture)
+    asyncio.run(a2a_outbound_service.poll_task(
+        agent_name="bot", endpoint_ref="priced", task_id="t-1"))
+    assert seen["credential_kind"] == "payment_token"
+
+
+def test_a_junk_kind_on_a_provider_record_degrades_to_api_key():
+    """Fail-SAFE direction (F6): a payment token sent as a Bearer header is
+    refused by the remote. The opposite default would announce a credential
+    in-band as a payment because of a typo."""
+    ep = a2a_outbound.ResolvedEndpoint(id="i", name="n", url=PEER.url,
+                                       credential="c", credential_kind="PAYMENT_TOKEN!!")
+    a2a_outbound.register_provider(_StubProvider({"n": ep}))
+    resolved = a2a_outbound.resolve_endpoint("bot", "n")
+    assert resolved.credential_kind == "api_key"
+
+
+def test_the_payment_status_reaches_the_audit_row_but_not_the_agent(monkeypatch, endpoint):
+    """Decision 31/S5: money leaving must be visible to the operator."""
+    async def _paid(**kwargs):
+        return a2a_client.A2AResult(state="completed", text="done",
+                                    host="peer.example.com",
+                                    payment_status="payment-completed")
+
+    monkeypatch.setattr(a2a_client, "call_endpoint", _paid)
+    outcome = asyncio.run(a2a_outbound_service.call_agent(
+        agent_name="bot", endpoint_ref="partner", message="hi", dedup_label="s"))
+    details = a2a_outbound_service.audit_details(outcome)
+    assert details["payment_status"] == "payment-completed"
