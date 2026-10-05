@@ -142,6 +142,20 @@ class TestSubscriptionHeadroom:
         assert rows[0]["request_id"].startswith(f"sub-headroom-{key}-")
         assert "93%" in rows[0]["title"] and rows[0]["context"]["tier"] == "crit"
 
+    def test_a_persons_ending_snoozes_the_same_reading_at_the_emitter(self, db, sid):
+        """T5 at the emitter: the warning a person just ended is not re-filed by
+        the next identical reading inside the snooze window (a zero-day window
+        would re-file it); an escalation to critical still is."""
+        from services import subscription_headroom_alerts as a
+        key = a.subject_key(sid)
+        assert self._alert(sid, "warn", 78.0) is True
+        row = self._rows(db, key)[0]
+        db.respond_to_operator_queue_item(row["id"], "ack", "seen", None, "person@example.com")
+        assert self._alert(sid, "warn", 79.0) is False
+        assert self._rows(db, key) == []
+        assert self._alert(sid, "crit", 93.0) is True
+        assert len(self._rows(db, key)) == 1
+
     def test_the_evaluation_pass_ends_a_row_it_no_longer_backs(self, db, sid):
         from services import subscription_headroom_alerts as a
         other = f"{sid}-x"
