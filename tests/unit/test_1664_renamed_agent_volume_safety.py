@@ -263,7 +263,7 @@ class TestOrphanSweepRenameSafety:
         rm.assert_not_awaited()
 
         rm = await self._run_cycles(svc, report, db=db, vols=vols, attached=set())
-        rm.assert_awaited_once_with("gone")
+        assert [c.args[0] for c in rm.await_args_list] == ["gone"]  # #3214: + instance id
         assert report.orphan_agent_volumes_reclaimed == 1
 
     @pytest.mark.asyncio

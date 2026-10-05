@@ -263,7 +263,7 @@ class TestCleanupOrchestration:
         # renamed agent owns volumes named after its former self.
         db.is_volume_base_reserved.side_effect = lambda base: base == "live-agent"
 
-        async def fake_remove(name):
+        async def fake_remove(name, instance_id=None):  # #3214: + this instance
             return 1
 
         with patch.object(cs, "db", db), \
@@ -279,7 +279,7 @@ class TestCleanupOrchestration:
             for _ in range(cs.ORPHAN_VOLUME_UNATTACHED_STRIKES):
                 await svc._sweep_orphan_agent_volumes(report)
 
-        rm.assert_awaited_once_with("orphan-old")
+        assert [c.args[0] for c in rm.await_args_list] == ["orphan-old"]
         assert report.orphan_agent_volumes_reclaimed == 1
 
     @pytest.mark.asyncio
