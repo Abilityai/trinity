@@ -99,9 +99,6 @@ _ALLOWED_CALLERS = {
         "create — must never be throttled (the reason a db-sink bound was rejected)",
     ("services/operator_queue_service.py", "OperatorQueueSyncService._sync_agent"):
         "the #1632-capped agent-file ingestion seam itself (depth+rate+clamp)",
-    ("services/operator_queue_service.py",
-     "OperatorQueueSyncService._maybe_emit_flood_alert"):
-        "the #1632 flood alert: cooldown-gated, one per episode",
     ("services/subscription_headroom_alerts.py", "_emit"):
         "platform-only: edge-triggered per weekly window via a deterministic "
         "id (sub-headroom-{sid}-{reset-day}-{tier}) whose ON CONFLICT DO NOTHING "

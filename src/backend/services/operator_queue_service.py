@@ -92,7 +92,8 @@ OPERATOR_QUEUE_EXECUTION_ID_MAX = int(os.getenv("OPERATOR_QUEUE_EXECUTION_ID_MAX
 # ent#364: RFC 5321 caps an address at 320 chars; anything longer is not an
 # email and never matches a roster row, so it is refused before the DB read.
 OPERATOR_QUEUE_EMAIL_MAX = int(os.getenv("OPERATOR_QUEUE_EMAIL_MAX", "320"))
-# Flood alert: one per episode, un-guessable id, in-memory cooldown.
+# Flood alert: one per over-cap episode (edge-triggered, #3130), un-guessable
+# id, budgeted (#1677); the cooldown is the minimum spacing between episodes.
 OPERATOR_QUEUE_FLOOD_ALERT_COOLDOWN_SECONDS = int(
     os.getenv("OPERATOR_QUEUE_FLOOD_ALERT_COOLDOWN_SECONDS", "300")
 )
@@ -144,6 +145,11 @@ _BUDGETED_ALERT_TYPES = frozenset({
     # Budgeted because the agent drives the volume — every send it attempts
     # without an id is one refusal.
     "effect_unguarded",
+    # #3130: the file seam's own flood alarm. An agent's filing volume is what
+    # trips it, so it is agent-influenceable by construction; as a raw create it
+    # was the dominant producer of the depth it reported on (386 of one agent's
+    # 435 rows). Edge-triggered at the emitter, budgeted here as the backstop.
+    "queue_flood",
 })
 
 # Shape guard for the episode alert's `last_triggered_by` triage field: a
@@ -766,6 +772,69 @@ def _well_formed_queue(data) -> bool:
     return isinstance(data, dict) and isinstance(data.get("requests", []), list)
 
 
+# #3130: why a queue file's new entries were held — the file-level
+# `platform.ingestion.reason`, a closed vocabulary (never agent text). The
+# strongest reason in a cycle wins: a full queue needs the agent to wait for an
+# ask to end, a rate hold clears by itself, a malformed id needs a fix.
+HOLD_QUEUE_FULL = "queue_full"
+HOLD_RATE_LIMITED = "rate_limited"
+HOLD_INVALID_ID = "invalid_id"
+_HOLD_RANK = {HOLD_INVALID_ID: 1, HOLD_RATE_LIMITED: 2, HOLD_QUEUE_FULL: 3}
+_INGESTION_KEY = "ingestion"
+# "Leave the marker as it is" — distinct from None, which means "remove it".
+_MARKER_UNCHANGED = object()
+
+
+def _stronger_hold(current: Optional[str], new: str) -> str:
+    return new if current is None or _HOLD_RANK[new] > _HOLD_RANK[current] else current
+
+
+def _ingestion_marker(reason: Optional[str]) -> Optional[dict]:
+    """The marker a held file should carry, or None when nothing is held. `since`
+    is stamped when it is written (`_apply_ingestion_marker`)."""
+    if reason is None:
+        return None
+    return {"reason": reason, "max_pending": OPERATOR_QUEUE_MAX_PENDING_PER_AGENT}
+
+
+def _current_marker(queue_data) -> Optional[dict]:
+    block = queue_data.get(_PLATFORM_BLOCK_KEY) if isinstance(queue_data, dict) else None
+    marker = block.get(_INGESTION_KEY) if isinstance(block, dict) else None
+    return marker if isinstance(marker, dict) else None
+
+
+def _marker_differs(queue_data, wanted: Optional[dict]) -> bool:
+    """Whether the file's marker is not the one wanted. Compared on the fields
+    the platform decides (`reason`, `max_pending`), never on `since`: a hold
+    that continues keeps its start time and is not rewritten. A marker the agent
+    wrote itself is read as data only — a different value is overwritten."""
+    current = _current_marker(queue_data)
+    if wanted is None:
+        return current is not None
+    return current is None or any(current.get(k) != v for k, v in wanted.items())
+
+
+def _apply_ingestion_marker(queue_data: dict, wanted: Optional[dict], now: str) -> bool:
+    """Set or remove `platform.ingestion` on the freshly re-read file. True when
+    the file changed."""
+    if not _marker_differs(queue_data, wanted):
+        return False
+    block = queue_data.get(_PLATFORM_BLOCK_KEY)
+    if wanted is None:
+        if isinstance(block, dict):
+            block.pop(_INGESTION_KEY, None)
+            if not block:
+                queue_data.pop(_PLATFORM_BLOCK_KEY, None)
+        return True
+    if not isinstance(block, dict):
+        block = {}
+        queue_data[_PLATFORM_BLOCK_KEY] = block
+    current = _current_marker(queue_data)
+    since = current.get("since") if current and current.get("reason") == wanted["reason"] else None
+    block[_INGESTION_KEY] = {**wanted, "since": since if isinstance(since, str) else now}
+    return True
+
+
 def _deliver_into(req: dict, resp: dict) -> None:
     # #715: never who answered — the agent's file carries the answer, not a
     # person's email.
@@ -1098,9 +1167,20 @@ class OperatorQueueSyncService:
         # ever refreshes/releases ITS OWN lease (mirror monitoring #1464).
         self._worker_id = f"{os.getpid()}:{uuid.uuid4().hex[:8]}"
         self._is_leader = False  # last observed leadership, for transition logs
-        # #1632: agent_name → monotonic ts of the last flood alert, so a sustained
-        # flood emits one alert per cooldown episode, not one per 5s cycle.
+        # #1632: agent_name → monotonic ts of the last flood alert — now the
+        # minimum spacing between episodes, so a flapping cap cannot re-alert
+        # every cycle.
         self._flood_alert_cooldown: dict[str, float] = {}
+        # #3130: (agent_name, reason) pairs whose over-cap episode has already
+        # been alerted. An episode ends when a cycle reads the file and holds
+        # nothing (`ingestion_cap`) or reads a sane-size file (`oversize_file`);
+        # only then can the next one alert. In-memory like the cooldown: a
+        # leader failover may re-alert once, and the #1677 budget bounds that.
+        self._flood_episodes: set = set()
+        # #3130: agent_name → the queue-file sha a `platform.ingestion` write was
+        # refused against. Retried only once the file has changed, so a 412
+        # from an agent still rewriting its file is not a write every 5 s.
+        self._ingestion_write_refused: dict[str, str] = {}
         # #2915: consecutive failed reads per agent — hysteresis before a row is
         # called `unconfirmed` (a busy container times out intermittently).
         self._read_failures: dict[str, int] = {}
@@ -1438,6 +1518,8 @@ class OperatorQueueSyncService:
             return
 
         if file_exists:
+            # #3130: a sane-size read ends an oversize episode.
+            self._flood_episodes.discard((agent_name, "oversize_file"))
             try:
                 queue_data = json.loads(content)
             except json.JSONDecodeError:
@@ -1506,9 +1588,16 @@ class OperatorQueueSyncService:
 
         # DEPTH cap baseline — one DB count per cycle; `admitted` tracks this
         # cycle's creates so the cap holds without re-counting per item.
-        pending_count = db.count_operator_queue_pending_for_agent(agent_name)
+        # #3130: the agent's OWN rows only — a platform row about the agent (its
+        # flood alarm above all) never spends the agent's budget.
+        pending_count = db.count_operator_queue_pending_for_agent(
+            agent_name, exclude_request_id_prefixes=_RESERVED_ID_PREFIXES,
+        )
         admitted = 0
         held = 0
+        # #3130: why entries were held this cycle — reported to the agent in its
+        # file (`platform.ingestion`). The most actionable reason wins.
+        hold_reason = None
 
         for req in requests[:OPERATOR_QUEUE_MAX_SCAN_PER_CYCLE]:
             if not isinstance(req, dict):
@@ -1674,12 +1763,14 @@ class OperatorQueueSyncService:
                     f"Rejecting malformed operator-queue id from {agent_name}: {req_id!r}"
                 )
                 held += 1
+                hold_reason = _stronger_hold(hold_reason, HOLD_INVALID_ID)
                 continue
 
             # #1632 C3: DEPTH cap (hard, primary). At the cap STOP ingesting —
             # `admitted` only grows, so every later item is over too → break.
             if pending_count + admitted >= OPERATOR_QUEUE_MAX_PENDING_PER_AGENT:
                 held += 1
+                hold_reason = _stronger_hold(hold_reason, HOLD_QUEUE_FULL)
                 break
 
             # #1632: RATE cap (per-agent + fleet, fail-open). Charged only at the
@@ -1698,6 +1789,7 @@ class OperatorQueueSyncService:
                 OPERATOR_QUEUE_CREATE_RATE_WINDOW,
             ).allowed:
                 held += 1
+                hold_reason = _stronger_hold(hold_reason, HOLD_RATE_LIMITED)
                 break
 
             # New item — clamp then create. The clamp runs INSIDE the try so any
@@ -1783,6 +1875,9 @@ class OperatorQueueSyncService:
         # (depth cap, rate cap, or malformed ids) — never one per skipped item.
         if held > 0:
             await self._maybe_emit_flood_alert(agent_name, held=held)
+        else:
+            # #3130: nothing held — the episode is over; the next one alerts.
+            self._flood_episodes.discard((agent_name, "ingestion_cap"))
 
         # 3. Broadcast new items via WebSocket
         if new_items and _websocket_manager:
@@ -1822,12 +1917,26 @@ class OperatorQueueSyncService:
         # never silently skipped. The aging receipt rides the same write.
         responded_items = db.get_operator_queue_responded_for_agent(agent_name)
         terminal_items = db.get_operator_queue_terminal_for_agent(agent_name)
-        if responded_items or terminal_items or receipt_rids:
-            await self._write_responses_to_agent(
+        # #3130: tell a held file so — but only when the marker it carries is not
+        # already the one wanted, and never again against a file a write was
+        # already refused on.
+        ingestion = _ingestion_marker(hold_reason)
+        marker_due = (
+            file_exists
+            and _marker_differs(queue_data, ingestion)
+            and self._ingestion_write_refused.get(agent_name) != content_sha
+        )
+        if responded_items or terminal_items or receipt_rids or marker_due:
+            wrote = await self._write_responses_to_agent(
                 agent_name, client, queue_data, responded_items,
                 terminal_items, file_exists,
                 content_sha=content_sha, receipt_request_ids=receipt_rids,
+                ingestion=ingestion if marker_due else _MARKER_UNCHANGED,
             )
+            if marker_due and wrote is False:
+                self._ingestion_write_refused[agent_name] = content_sha
+            elif wrote:
+                self._ingestion_write_refused.pop(agent_name, None)
 
     async def _write_responses_to_agent(
         self,
@@ -1840,7 +1949,8 @@ class OperatorQueueSyncService:
         *,
         content_sha: Optional[str] = None,
         receipt_request_ids=None,
-    ):
+        ingestion=_MARKER_UNCHANGED,
+    ) -> Optional[bool]:
         """Write operator responses back to the agent's queue file.
 
         #2915 — the write is honest and narrow. Before writing, the file is
@@ -1852,12 +1962,19 @@ class OperatorQueueSyncService:
         whose content still matches the row (an answer to a rewritten question
         is `undelivered:entry_changed`). Every outcome lands on the row as a
         delivery state; nothing is dropped silently.
+
+        #3130: ``ingestion`` is the file-level `platform.ingestion` marker to
+        leave in the file (a dict), to remove (``None``), or
+        ``_MARKER_UNCHANGED``. Returns True when a write landed, False when one
+        was attempted and refused or failed, None when nothing was written.
         """
         now = utc_now_iso()
         terminal_items = terminal_items or []
         receipt_request_ids = set(receipt_request_ids or ())
-        if not responded_items and not terminal_items and not receipt_request_ids:
-            return
+        marker_wanted = ingestion is not _MARKER_UNCHANGED
+        if (not responded_items and not terminal_items and not receipt_request_ids
+                and not marker_wanted):
+            return None
 
         # Re-read immediately before writing (the cycle-start read may be a whole
         # cycle old). A transient failure here means "try next cycle" — the
@@ -2011,10 +2128,14 @@ class OperatorQueueSyncService:
         for row, detail in undelivered.values():
             await self._apply_delivery_state(agent_name, row, DELIVERY_UNDELIVERED, detail, now)
 
+        # #3130: the file-level hold marker rides the same guarded write.
+        if marker_wanted and _apply_ingestion_marker(queue_data, ingestion, now):
+            updated = True
+
         if not updated:
             for row in delivered.values():
                 await self._apply_delivery_state(agent_name, row, DELIVERY_DELIVERED, None, now)
-            return
+            return None
 
         queue_data["requests"] = requests
 
@@ -2038,6 +2159,7 @@ class OperatorQueueSyncService:
             )
             for row in delivered.values():
                 await self._apply_delivery_state(agent_name, row, DELIVERY_DELIVERED, None, now)
+            return True
         else:
             code = result.get("status_code")
             if code == 412:
@@ -2051,26 +2173,41 @@ class OperatorQueueSyncService:
             )
             for row in delivered.values():
                 await self._apply_delivery_state(agent_name, row, DELIVERY_UNDELIVERED, detail, now)
+            return False
 
     async def _maybe_emit_flood_alert(
         self, agent_name: str, held: int = 0, reason: str = "ingestion_cap"
     ):
-        """#1632: emit ONE aggregated flood alert per episode (cooldown-gated).
+        """#1632 / #3130: ONE flood alert per over-cap EPISODE.
 
         Fired when this agent's ingestion was depth-held / rate-skipped, or its
-        queue file was oversized. A platform **direct-DB create** — exempt from
-        the caps; an **un-guessable** `queue-flood-{agent}-{utc_now_iso()}` id so
-        the agent can't pre-suppress it (C2); softened wording to avoid cry-wolf
-        (C9). Wrapped so an emit failure never kills the sync
-        (sync_health_service precedent). The single leader means no WS
-        double-broadcast.
+        queue file was oversized.
 
-        The cooldown is stamped BEFORE the create so a persistently-failing alert
-        create backs off for the cooldown window rather than retrying every 5s
-        (its id changes each cycle, so it would otherwise dodge the #1525
-        quarantine map). At most one duplicate alert can follow a leader failover
-        (in-memory cooldown resets) — harmless.
+        Edge-triggered (#3130): an episode alerts once, however many cycles or
+        cooldown windows it lasts, and the next alert needs the condition to
+        have cleared first (`_sync_agent` ends the episode). It used to be one
+        alert per cooldown window for as long as the condition held — and since
+        the alert counted toward the very depth it reported, the condition never
+        cleared: 241 alerts in one day on one agent. The cooldown stays as the
+        minimum spacing between episodes, so a cap that flaps cannot re-alert
+        every cycle.
+
+        Budgeted (#1677, #3130): created through `create_bounded_alert` as type
+        `queue_flood` — an agent's own filing volume drives this emitter, which
+        is the test that classification applies. The budget is the backstop for
+        what the in-memory episode state cannot see (a leader failover re-alerts
+        once). Excluded from the agent's own depth read by its reserved prefix.
+
+        An **un-guessable** `queue-flood-{agent}-{utc_now_iso()}` id so the
+        agent can't pre-suppress it (C2); softened wording to avoid cry-wolf
+        (C9). Never raises — an emit failure must not kill the sync.
+
+        The cooldown and the episode are stamped BEFORE the create, so a
+        persistently failing create backs off instead of retrying every 5s.
         """
+        key = (agent_name, reason)
+        if key in self._flood_episodes:
+            return  # this episode already alerted
         now = time.monotonic()
         # `None` = never alerted for this agent. A `0.0` default would be wrong:
         # `time.monotonic()` is seconds from an arbitrary reference and can be
@@ -2078,14 +2215,15 @@ class OperatorQueueSyncService:
         # suppress the FIRST-ever alert for the first COOLDOWN seconds of uptime.
         last = self._flood_alert_cooldown.get(agent_name)
         if last is not None and now - last < OPERATOR_QUEUE_FLOOD_ALERT_COOLDOWN_SECONDS:
-            return  # already alerted this episode
+            return  # too soon after the last episode — the next cycle retries
         self._flood_alert_cooldown[agent_name] = now
+        self._flood_episodes.add(key)
 
         if reason == "oversize_file":
             title = f"Agent '{agent_name}' produced an oversized operator-queue file"
             question = (
                 f"Agent '{agent_name}' wrote an operator-queue.json larger than the "
-                f"allowed size; its requests were not ingested this cycle. This can "
+                f"allowed size; its requests are not being ingested. This can "
                 f"indicate a runaway or compromised agent — review its recent "
                 f"activity before acting on its requests."
             )
@@ -2093,14 +2231,16 @@ class OperatorQueueSyncService:
             title = f"Agent '{agent_name}' exceeded its operator-queue ingestion limit"
             question = (
                 f"Agent '{agent_name}' produced more operator-queue requests than the "
-                f"per-agent ingestion limit allows; {held} request(s) were held this "
-                f"cycle and are not shown. This can indicate a runaway or compromised "
-                f"agent — review its recent activity before acting on its requests."
+                f"per-agent ingestion limit allows; {held} request(s) were held and "
+                f"are not shown. Held requests stay in the agent's file and are read "
+                f"again once it is under the limit; the agent is told they are held. "
+                f"This can indicate a runaway or compromised agent — review its "
+                f"recent activity before acting on its requests."
             )
 
         alert = {
             "id": f"queue-flood-{agent_name}-{utc_now_iso()}",
-            "type": "alert",
+            "type": "queue_flood",
             "status": "pending",
             "priority": "high",
             "title": title,
@@ -2110,9 +2250,11 @@ class OperatorQueueSyncService:
         }
 
         try:
-            db.create_operator_queue_item(agent_name, alert)
-        except Exception as e:
+            created = await create_bounded_alert(agent_name, alert)
+        except Exception as e:  # the helper never raises; belt for the sync loop
             logger.error(f"Failed to emit operator-queue flood alert for {agent_name}: {e}")
+            return
+        if not created:
             return
 
         logger.warning(
@@ -2127,7 +2269,7 @@ class OperatorQueueSyncService:
                     "data": {
                         "id": alert["id"],
                         "agent_name": agent_name,
-                        "type": "alert",
+                        "type": alert["type"],
                         "priority": "high",
                         "title": alert["title"],
                         "created_at": alert["created_at"],

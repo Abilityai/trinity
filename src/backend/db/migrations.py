@@ -5130,6 +5130,54 @@ def _migrate_skill_gate_requests_table(cursor, conn):
     conn.commit()
 
 
+# #3130: the shared statement — both tracks run the same SQL (the Alembic
+# revision imports it), so the survivor rule cannot drift between them.
+SUPERSEDE_QUEUE_FLOOD_BACKLOG_SQL = """
+UPDATE operator_queue
+SET status = 'cancelled',
+    disposition = 'cancelled',
+    disposed_at = :now,
+    disposed_by = 'platform',
+    disposed_by_email = NULL,
+    disposition_reason = 'superseded',
+    batch_id = :batch_id
+WHERE status = 'pending'
+  AND request_id LIKE 'queue-flood-%'
+  AND EXISTS (
+    SELECT 1 FROM operator_queue AS newer
+    WHERE newer.agent_name = operator_queue.agent_name
+      AND newer.status = 'pending'
+      AND newer.request_id LIKE 'queue-flood-%'
+      AND (newer.created_at > operator_queue.created_at
+           OR (newer.created_at = operator_queue.created_at AND newer.id > operator_queue.id))
+  )
+"""
+
+
+def _migrate_supersede_queue_flood_backlog(cursor, conn):
+    """#3130: collapse the flood-alert backlog to one pending alert per agent.
+
+    Before #3130 the file seam's flood alert counted toward the depth it
+    reported, and a sustained over-cap condition minted a new one every
+    cooldown window — 386 of one agent's 435 queue rows. The fix stops new
+    ones; this clears the ones already there, once. For each agent it keeps
+    the NEWEST pending `queue-flood-` row (by `created_at`, then `id`, so the
+    survivor is deterministic) and ends the rest as `cancelled`, disposed by
+    the platform with reason `superseded`. Never touches an agent's own rows,
+    a non-pending row, or an agent with a single flood row.
+
+    No wake and no file write follow: these are platform-minted rows
+    (`is_platform_minted`), which take no part in either. Idempotent.
+
+    Mirrored by the Alembic revision 0089_supersede_queue_flood_backlog.
+    """
+    import uuid as _uuid
+    from utils.helpers import utc_now_iso
+    sql = SUPERSEDE_QUEUE_FLOOD_BACKLOG_SQL.replace(":now", "?").replace(":batch_id", "?")
+    cursor.execute(sql, (utc_now_iso(), _uuid.uuid4().hex))
+    conn.commit()
+
+
 MIGRATIONS = [
     ("agent_sharing", _migrate_agent_sharing_table),
     ("schedule_executions_observability", _migrate_schedule_executions_observability),
@@ -5288,4 +5336,5 @@ MIGRATIONS = [
     ("metric_points_restatement", _migrate_metric_points_restatement),
     ("pull_sync", _migrate_pull_sync),
     ("skill_gate_requests_table", _migrate_skill_gate_requests_table),
+    ("supersede_queue_flood_backlog", _migrate_supersede_queue_flood_backlog),
 ]
