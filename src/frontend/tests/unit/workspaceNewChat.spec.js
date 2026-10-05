@@ -41,9 +41,17 @@ describe('ent#451 — ?new=1 asks for a fresh thread', () => {
   it('the landing function already honoured it', () => {
     expect(resolveAgentLanding({ agent: 'sage', forceNew: true, agents, threads }))
       .toEqual({ agentName: 'sage', sessionId: null })
-    // ent#784 made `forceNew` redundant rather than wrong: a plain landing now
-    // resolves to a fresh chat too, so the flag can never resume a thread.
+    // ent#784's first shape made `forceNew` redundant — every landing was a
+    // fresh chat. The operator's 2026-10-05 ruling gave it back its job: the
+    // precedence can now answer an existing chat (a draft, or the empty one
+    // being reused — `ps_old` here has no message), and `?new=1` is the one
+    // way past ALL of it. So the flag is load-bearing again, and the two
+    // answers must differ or nothing is checking it.
     expect(resolveAgentLanding({ agent: 'sage', forceNew: false, agents, threads }).sessionId)
+      .toBe('ps_old')
+    // A USED thread is still never resumed, with or without the flag.
+    const used = [{ id: 'ps_old', agent_name: 'sage', last_message_at: '2026-09-07T10:00:00Z', message_count: 2 }]
+    expect(resolveAgentLanding({ agent: 'sage', forceNew: false, agents, threads: used }).sessionId)
       .toBeNull()
   })
 

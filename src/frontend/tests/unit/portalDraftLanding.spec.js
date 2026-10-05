@@ -15,7 +15,7 @@
  * "the mark means click here to continue" is only true by coincidence.
  */
 import { describe, it, expect } from 'vitest'
-import { agentLanding } from '@/components/portal/portalUtils'
+import { agentEmptyChat, agentLanding } from '@/components/portal/portalUtils'
 import {
   agentsWithDrafts, draftedLandingFor, isDraftedThread,
 } from '@/components/portal/portalDrafts'
@@ -160,5 +160,78 @@ describe('agentLanding — arm 3, the chat holding a draft', () => {
     expect(isDraftedThread({ id: 'r', is_room: true, hasDraft: true, agent_name: 'a' })).toBe(false)
     expect(isDraftedThread({ id: 's', hasDraft: true })).toBe(false)
     expect(isDraftedThread(null)).toBe(false)
+  })
+})
+
+/**
+ * ent#784 arm 4 — "reuse the empty chat" (operator ruling, 2026-10-05).
+ *
+ * Opening an agent must not create a new chat every time, and at most one
+ * empty chat per agent may exist at any moment. "Empty" is ent#523's own
+ * "unused" test (no message sent) applied to any row that fits it, not only to
+ * Main — and both fields are checked, because the cross-agent batch omits
+ * `message_count` while the per-agent read carries it.
+ */
+describe('agentEmptyChat / agentLanding — arm 4, the existing empty chat', () => {
+  const empty = (id, over = {}) => ({ id, agent_name: 'a', created_at: '2026-09-01T10:00:00Z', ...over })
+
+  it('reuses an unused Main instead of starting another chat', () => {
+    expect(agentEmptyChat([empty('main', { is_main: true })], 'a')).toBe('main')
+    expect(agentLanding({ agentName: 'a', threads: [empty('main', { is_main: true })], drafts: {} }))
+      .toEqual({ agentName: 'a', sessionId: 'main' })
+  })
+
+  it('counts a row as used on EITHER field', () => {
+    // Different reads supply different fields, so one of them missing must not
+    // decide it: a count of 2 is used even with no `last_message_at`, and an
+    // arrival time is used even where the count never came down the wire.
+    expect(agentEmptyChat([empty('s1', { message_count: 2 })], 'a')).toBeNull()
+    expect(agentEmptyChat([empty('s1', { last_message_at: '2026-09-02T10:00:00Z' })], 'a')).toBeNull()
+    // …and absent/zero on both IS empty, which is what the batch read looks like.
+    expect(agentEmptyChat([empty('s1')], 'a')).toBe('s1')
+    expect(agentEmptyChat([empty('s1', { message_count: 0 })], 'a')).toBe('s1')
+  })
+
+  it('skips an archived empty chat, a room, and another agent', () => {
+    expect(agentEmptyChat([empty('s1', { archived_at: '2026-09-02T10:00:00Z' })], 'a')).toBeNull()
+    expect(agentEmptyChat([{ id: 'r1', agent_name: 'a', is_room: true }], 'a')).toBeNull()
+    expect(agentEmptyChat([empty('s1', { agent_name: 'b' })], 'a')).toBeNull()
+    expect(agentEmptyChat([], 'a')).toBeNull()
+    expect(agentEmptyChat([empty('s1')], '')).toBeNull()
+  })
+
+  it('picks Main first, then the newest, whatever order the list is in', () => {
+    // Legacy data can hold several. The answer must not depend on list order,
+    // or two doors reading the same list could reuse two different rows.
+    const rows = [
+      empty('old', { created_at: '2026-08-01T10:00:00Z' }),
+      empty('main', { is_main: true, created_at: '2026-07-01T10:00:00Z' }),
+      empty('new', { created_at: '2026-09-01T10:00:00Z' }),
+    ]
+    expect(agentEmptyChat(rows, 'a')).toBe('main')
+    expect(agentEmptyChat([...rows].reverse(), 'a')).toBe('main')
+    const noMain = rows.filter((r) => !r.is_main)
+    expect(agentEmptyChat(noMain, 'a')).toBe('new')
+    expect(agentEmptyChat([...noMain].reverse(), 'a')).toBe('new')
+  })
+
+  it('a draft outranks it, and it outranks a new chat', () => {
+    // The whole precedence in one case, which is the part a per-arm test
+    // cannot show: arms 3, 4 and 5 over the same list.
+    const threads = [
+      empty('main', { is_main: true }),
+      { id: 's1', agent_name: 'a', last_message_at: '2026-09-02T10:00:00Z', message_count: 2, hasDraft: true },
+    ]
+    expect(agentLanding({ agentName: 'a', threads, drafts: { 'thread:s1': at('words', 100) } }).sessionId)
+      .toBe('s1')
+    expect(agentLanding({ agentName: 'a', threads, drafts: {} }).sessionId).toBe('main')
+    expect(agentLanding({ agentName: 'a', threads: threads.slice(1), drafts: {} }).sessionId).toBeNull()
+  })
+
+  it('reusing it is what keeps "at most one empty chat" true', () => {
+    // The write-side twin is `Portal.vue::ensureMainListed`, which is a GET
+    // that INSERTS: it must not add a Main to an agent that already has an
+    // empty chat. This is the predicate it asks (pinned in the mount spec).
+    expect(agentEmptyChat([empty('s1')], 'a')).toBe('s1')
   })
 })

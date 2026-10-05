@@ -97,26 +97,36 @@ describe('ent#523 — Main is pinned, archives stay reachable', () => {
 // ---------------------------------------------------------------------------
 
 describe('ent#784 — landing', () => {
-  it('lands on a NEW chat even when recent chats exist', () => {
+  it('never resumes a USED chat, however recent', () => {
     // ent#784 reverses ent#523: most visits start new work, so resuming cost
     // two actions every time. Continuity is one click away in the tab strip.
+    // The 2026-10-05 ruling did not soften this — it reuses the EMPTY chat
+    // (arm 4 below), never a conversation that has been spoken in.
     const landed = agentLanding({
       agentName: 'a',
       threads: [
-        main(),
-        chat('c1', { last_message_at: '2026-09-07T09:00:00Z' }),
-        chat('c2', { last_message_at: '2026-09-07T12:00:00Z' }),
+        main({ last_message_at: '2026-09-07T08:00:00Z', message_count: 4 }),
+        chat('c1', { last_message_at: '2026-09-07T09:00:00Z', message_count: 2 }),
+        chat('c2', { last_message_at: '2026-09-07T12:00:00Z', message_count: 2 }),
       ],
     })
     expect(landed).toEqual({ agentName: 'a', sessionId: null })
   })
 
-  it('lands a first-time visitor on a new chat, minting no row', () => {
-    // AC 4: the landing itself creates nothing server-side. The helper is pure
-    // and returns a null session; the row is born on the first send
-    // (`newThread`, ent#451), so repeated visits accumulate no empty chats.
+  it('reuses the agent\'s unused Main rather than adding a chat beside it', () => {
+    // Arm 4 (ruling 2026-10-05): "opening an agent must not create a new chat
+    // every time; at most one empty chat per agent exists at any time". A
+    // post-ent#523 pair always HAS an unused Main, so this is the ordinary
+    // answer, and it mints nothing — the row is already there.
     expect(agentLanding({ agentName: 'a', threads: [main()] }))
-      .toEqual({ agentName: 'a', sessionId: null })
+      .toEqual({ agentName: 'a', sessionId: 'main' })
+  })
+
+  it('lands a first-time visitor on a new chat, minting no row', () => {
+    // AC 4: the landing itself creates nothing server-side. With no row to
+    // reuse the helper returns a null session; the row is born on the first
+    // send (`newThread`, ent#451), so repeated visits accumulate no empty
+    // chats either way.
     expect(agentLanding({ agentName: 'a', threads: [] }))
       .toEqual({ agentName: 'a', sessionId: null })
   })
@@ -141,12 +151,15 @@ describe('ent#784 — landing', () => {
     expect(landed.sessionId).toBe('s9')
   })
 
-  it('falls back to the new-chat rule for an id it cannot vouch for', () => {
+  it('falls back through the rest of the rule for an id it cannot vouch for', () => {
     // Validated against the principal's OWN thread list, so an archived chat,
     // another agent's chat, a room, or an id that simply is not there all fall
     // back rather than landing somewhere they should not (the #3140 class).
+    // "Falls back" means into the arms below it, not past them to a new chat:
+    // with a used Main present there is nothing to reuse and the answer is
+    // null; the unused-Main case is the arm-4 test above.
     const threads = [
-      main(),
+      main({ last_message_at: '2026-09-07T08:00:00Z', message_count: 2 }),
       chat('arch', { archived_at: 'x', last_message_at: '2026-09-07T23:00:00Z' }),
       chat('other', { agent_name: 'b', last_message_at: '2026-09-07T23:00:00Z' }),
       { id: 'room1', agent_name: 'a', is_room: true },
@@ -166,9 +179,17 @@ describe('ent#784 — landing', () => {
   it('is the SAME rule the ?agent= deep link uses', () => {
     // Two answers to "which chat do I land in" is how a deep link and a
     // sidebar click put a first-time visitor in different places.
-    const threads = [main(), chat('c2', { last_message_at: '2026-09-07T12:00:00Z' })]
+    const threads = [
+      main({ last_message_at: '2026-09-07T08:00:00Z', message_count: 2 }),
+      chat('c2', { last_message_at: '2026-09-07T12:00:00Z', message_count: 2 }),
+    ]
     const agents = [{ name: 'a' }]
     expect(resolveAgentLanding({ agent: 'a', agents, threads }).sessionId).toBeNull()
+    // …including the arm that reuses an empty chat: one rule, both doors.
+    expect(resolveAgentLanding({ agent: 'a', agents, threads: [main()] }).sessionId).toBe('main')
+    // `?new=1` is the one way past the whole precedence.
+    expect(resolveAgentLanding({ agent: 'a', agents, threads: [main()], forceNew: true }).sessionId)
+      .toBeNull()
   })
 })
 

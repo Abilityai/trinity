@@ -907,7 +907,7 @@ import { stageZone } from '@/components/portal/portalBriefingState'
 import {
   isNewChatHotkey, resolveAgentLanding, shouldMarkTurnRead, shouldEscapeStage,
   agentLanding,
-  agentHasMain, titleSettling, shouldFetchTitleHealth, titleGenerationNotice,
+  agentHasMain, agentEmptyChat, titleSettling, shouldFetchTitleHealth, titleGenerationNotice,
   TITLE_SETTLE_DELAYS_MS,
   // ent#557: the SAME sum the sidebar renders, so the tab and the rows cannot
   // disagree about the number.
@@ -1845,6 +1845,15 @@ const MAIN_ENSURE_ATTEMPTS = 2
 function ensureMainListed(name) {
   if (!name) return Promise.resolve()
   if (agentHasMain(threads.value, name)) return Promise.resolve()
+  // ent#784 arm 4, the write side of "at most one empty chat per agent at any
+  // time" (operator ruling 2026-10-05). This is a GET that INSERTS, so for an
+  // agent that already has an empty chat but no Main — legacy data, since
+  // nothing mints a non-Main empty row today — visiting it would add a SECOND
+  // empty chat and then land on one of them. The ruling outranks #2579's "the
+  // pinned tab has to be there": the empty chat that exists is the one arm 4
+  // reuses, and the person is never shown two. An agent whose chats are all
+  // used still gets its Main on this visit, which is the case #2579 was about.
+  if (agentEmptyChat(threads.value, name)) return Promise.resolve()
   const inflight = mainEnsured.get(name)
   if (inflight) return inflight
   const spent = mainAttempts.get(name) || 0

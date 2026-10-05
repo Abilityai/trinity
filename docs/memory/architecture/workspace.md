@@ -1005,7 +1005,15 @@ naming a CHAT wins (and never reaches the rule); then a validated `lastOpenSessi
 ent#621 seam, checked against the principal's own thread list; then the agent's chat
 holding an unsent **draft**, newest `updatedAt` first, where a `new:<agent>` winner lands on
 a new chat (that key IS where the words are) and a thread winner opens that thread; then
-the agent's existing **empty** chat, reused; then a new, empty chat. The drafts arm reads
+the agent's existing **empty** chat, reused (`agentEmptyChat` — an unarchived,
+non-room thread of this agent with no message sent: no `last_message_at` AND
+`message_count` 0 or absent, since the two fields come from different reads;
+Main first, then newest `created_at`, so list order never decides); then a new,
+empty chat. The write-side twin of that arm is `ensureMainListed`, a GET that
+INSERTS: it now also returns early when the agent already has an empty chat, so
+visiting an agent can never add a SECOND empty row ("at most one empty chat per
+agent at any time"). An agent whose chats are all used still gets its Main on
+the visit, which is the case #2579 was about. The drafts arm reads
 `portalDrafts.js::isDraftedThread` — the SAME predicate `agentsWithDrafts` lights the
 sidebar's agent-row mark from, shared rather than copied so "the mark means click here to
 continue" cannot drift (a room and an **archived** thread are excluded on both sides). The

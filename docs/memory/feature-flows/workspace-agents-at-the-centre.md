@@ -205,6 +205,7 @@ rule is a plain function (the ent#392 precedent):
 | `agentChatTabs` | Main first, then recency; an archive stays a tab (ruled “becomes the newest tab”); Main is labelled by its **role** |
 | `agentLanding` | a **precedence** (ent#784, replacing ent#523's `landingThread`; operator ruling 2026-10-05): a validated `lastOpenSessionId` (live, unarchived, this agent's), then the chat holding an unsent **draft** (newest `updatedAt`; a `new:<agent>` winner = a new chat), then the agent's existing **empty** chat, then a new, empty chat |
 | `resolveAgentLanding` | the `?agent=` deep link, delegating to `agentLanding` so there is one answer |
+| `agentEmptyChat` | arm 4's "empty": unarchived, non-room, no `last_message_at` and `message_count` 0/absent; Main first, then newest `created_at` |
 | `orderRosterAgents` | most recent collaboration, then name; `primaryName` is ent#491's seam |
 | `agentPreview` | the newest chat's **title** — the sidebar list carries no message content (#2198), so a body preview would reinstate the N+1 |
 | `composerAvailabilityNotice` | what the composer says for a stopped/unavailable agent |
@@ -233,6 +234,17 @@ rule is a plain function (the ent#392 precedent):
   winner lands on a new chat, which is where those words already live. Each
   door passes the drafts map IN (`landOnAgent`, `resolveAgentLanding`), so the
   rule stays pure and testable without the shell.
+- **The empty chat is reused, and only the frontend can hold that.** Arm 4
+  (`agentEmptyChat`): an unarchived, non-room thread with no message sent — no
+  `last_message_at` AND `message_count` 0 or absent, because the cross-agent
+  batch omits the count while the per-agent read carries it, so either field
+  alone would misjudge a row. Main first, then newest `created_at`, so two
+  doors reading one list cannot reuse two different rows. The matching promise
+  on the WRITE side is `ensureMainListed`, which is a GET that INSERTS: it
+  returns early for an agent that already has an empty chat, or visiting one
+  would add a second empty row and then land on one of the two. #2579's "the
+  pinned tab has to be there" still holds for every agent whose chats are all
+  used, which is what it was about.
 - **Two doors RESOLVE, the rest ASSERT.** Only `landOnAgent` (the sidebar/rail
   row, back/forward, a typed URL) and `resolveAgentLanding` (`?agent=`) ask
   `agentLanding` where to land. New chat, ⌘J, the agent picker and switch-agent

@@ -14,17 +14,22 @@ import { describe, it, expect } from 'vitest'
 import { resolveAgentLanding, deliveryFailureReason } from '@/components/portal/portalUtils'
 
 const agents = [{ name: 'scribe' }, { name: 'auditor' }]
-// As `fetchAllSessions` returns them: most recent first.
+// As `fetchAllSessions` returns them: most recent first. Every one of them has
+// been spoken in (`last_message_at` + a count), which is what "threads with
+// that agent exist" has meant here since ent#784's 2026-10-05 ruling gave an
+// UNUSED chat its own arm — a row with neither field is an empty chat the rule
+// now reuses, so leaving these bare would have tested the opposite case.
 const threads = [
-  { id: 's3', agent_name: 'auditor' },
-  { id: 's2', agent_name: 'scribe' },
-  { id: 's1', agent_name: 'scribe' },
+  { id: 's3', agent_name: 'auditor', last_message_at: '2026-09-07T12:00:00Z', message_count: 2 },
+  { id: 's2', agent_name: 'scribe', last_message_at: '2026-09-07T11:00:00Z', message_count: 2 },
+  { id: 's1', agent_name: 'scribe', last_message_at: '2026-09-07T10:00:00Z', message_count: 4 },
 ]
 
 describe('resolveAgentLanding', () => {
   it('starts a new chat even when threads with that agent exist (ent#784)', () => {
     // ent#784 reversed ent#523's resume-by-default: opening an agent means
-    // starting new work. The deep link and the sidebar row share one rule.
+    // starting new work, and a chat that has been spoken in is never resumed.
+    // The deep link and the sidebar row share one rule.
     expect(resolveAgentLanding({ agent: 'scribe', agents, threads }))
       .toEqual({ agentName: 'scribe', sessionId: null })
   })
@@ -52,10 +57,15 @@ describe('resolveAgentLanding', () => {
   })
 
   it('tolerates a thread list that uses session_id instead of id', () => {
-    // ent#784: the shape no longer changes the answer for this door — a deep
-    // link carries no session memory, so it always resolves to a fresh chat.
+    // Either shape has to be readable, because the two reads disagree: the
+    // row below is an empty chat, and the arm that reuses one has to find its
+    // id under whichever key this list carries.
     const alt = [{ session_id: 'sX', agent_name: 'scribe' }]
     expect(resolveAgentLanding({ agent: 'scribe', agents, threads: alt }))
+      .toEqual({ agentName: 'scribe', sessionId: 'sX' })
+    // …and a USED chat under that same key is still never resumed.
+    const used = [{ session_id: 'sX', agent_name: 'scribe', last_message_at: '2026-09-07T10:00:00Z', message_count: 2 }]
+    expect(resolveAgentLanding({ agent: 'scribe', agents, threads: used }))
       .toEqual({ agentName: 'scribe', sessionId: null })
   })
 

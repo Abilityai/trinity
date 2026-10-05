@@ -438,6 +438,48 @@ export function agentHasMain(threads, agentName) {
     .some((t) => t && !t.is_room && t.agent_name === agentName && !!t.is_main)
 }
 
+/**
+ * ent#784 arm 4 — has this agent an EMPTY chat already? Its id, or null.
+ *
+ * The operator's 2026-10-05 ruling: opening an agent must not create a new
+ * chat every time, so an empty one is REUSED and at most one exists per agent
+ * at any moment. "Empty" is the same "unused" test ent#523 applied to an
+ * unused Main, widened to any row that fits it: an unarchived, non-room thread
+ * of this agent with no message sent — no `last_message_at`, and
+ * `message_count` 0 or absent. Both halves are required, because the two
+ * fields come from different reads: the cross-agent batch omits
+ * `message_count` entirely, so counting an absent count as "used" would make
+ * every row non-empty there, and treating a present count of 2 as empty
+ * because `last_message_at` is missing would land the person in a used chat.
+ *
+ * Deterministic when legacy data holds several: **Main first**, then the newest
+ * `created_at`, then the id — so the answer never depends on list order. Main
+ * first is not a tiebreak detail: it is the row the tab strip pins and the one
+ * every post-ent#523 pair already has, so reusing anything else would leave an
+ * unused Main sitting beside the chat being typed in.
+ *
+ * Pure, like the rest of the rule: it reads the list it is handed and mints
+ * nothing. The matching promise on the WRITE side is `Portal.vue`'s
+ * `ensureMainListed`, which must not add a Main to an agent that already has
+ * an empty chat.
+ */
+export function agentEmptyChat(threads, agentName) {
+  if (!agentName) return null
+  const empty = (Array.isArray(threads) ? threads : []).filter((t) => t
+    && !t.is_room && t.agent_name === agentName && !t.archived_at
+    && !t.last_message_at && !Number(t.message_count || 0))
+  if (!empty.length) return null
+  const ts = (t) => {
+    const n = Date.parse(t.created_at || '')
+    return Number.isFinite(n) ? n : 0
+  }
+  const id = (t) => t.id || t.session_id || ''
+  empty.sort((a, b) => (b.is_main ? 1 : 0) - (a.is_main ? 1 : 0)
+    || ts(b) - ts(a)
+    || String(id(a)).localeCompare(String(id(b))))
+  return id(empty[0]) || null
+}
+
 // #2579: is this thread inside the window where a generated title may still
 // land? Two `touch_portal_session(added=1)` calls happen per exchange (the
 // user's message and the reply), and `_title_plan` gates on the PRE-turn
@@ -1798,6 +1840,8 @@ export function agentLanding({ agentName, threads = [], lastOpenSessionId = null
   }
   const drafted = draftedLandingFor({ agentName, threads, drafts })
   if (drafted) return { agentName, sessionId: drafted.sessionId }
+  const empty = agentEmptyChat(threads, agentName)
+  if (empty) return { agentName, sessionId: empty }
   return { agentName, sessionId: null }
 }
 

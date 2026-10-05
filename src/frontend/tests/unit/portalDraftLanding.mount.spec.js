@@ -86,7 +86,7 @@ const THREADS = [
 ]
 
 let store
-function arm() {
+function arm(threads = THREADS) {
   store = useClientPortalStore()
   store.portalToken = 'tok'
   store.fetchRoster = vi.fn(async () => {
@@ -98,9 +98,9 @@ function arm() {
     store.error = null
     store.rosterLoaded = true
   })
-  store.fetchAllSessions = vi.fn(async () => { store.sessionsFailed = false; return THREADS })
+  store.fetchAllSessions = vi.fn(async () => { store.sessionsFailed = false; return threads })
   store.fetchChatState = vi.fn(async (opts) => (opts ? { state: {}, previews: {} } : {}))
-  store.fetchSessions = vi.fn(async () => THREADS)
+  store.fetchSessions = vi.fn(async () => threads)
   store.fetchAsks = vi.fn(async () => [])
   store.seedAgentRecency = vi.fn()
   store.ensureBriefing = vi.fn()
@@ -192,6 +192,32 @@ describe('ent#784 — the shell lands on the chat holding the draft', () => {
       agentName: 'drafts-a', sessionId: 'sess-a', newChat: false, draftKey: 'thread:sess-a',
     })
     expect(drafts.get('thread:sess-a')).toBe('for A')
+  })
+
+  it('an agent with an empty chat reuses it, and the GET that INSERTS is not called', async () => {
+    // F2 / arm 4, both halves. `ensureMainListed` is a GET that INSERTS
+    // (`list_sessions` → `ensure_main_session`), so for an agent that already
+    // has an empty chat but no Main it would add a SECOND empty row — which
+    // the 2026-10-05 ruling forbids ("at most one empty chat per agent at any
+    // time"). The frontend guard is the only place this can be held; the read
+    // must simply not happen.
+    setActivePinia(createPinia())
+    arm([
+      { id: 'spare', session_id: 'spare', agent_name: 'drafts-a', created_at: '2026-09-05T10:00:00Z' },
+      sess('sess-b', 'drafts-b', '2026-09-01T10:00:00Z'),
+    ])
+    const { w } = await boot('/workspace/a/drafts-a')
+    expect(landed(w)).toMatchObject({ agentName: 'drafts-a', sessionId: 'spare', newChat: false })
+    expect(store.fetchSessions).not.toHaveBeenCalled()
+  })
+
+  it('an agent whose chats are all used still gets its Main on this visit (#2579)', async () => {
+    // The guard above must not swallow the case #2579 was about: with nothing
+    // empty to reuse, the pinned Main is still ensured on the first visit.
+    setActivePinia(createPinia())
+    arm([sess('sess-a', 'drafts-a', '2026-09-03T10:00:00Z')])
+    await boot('/workspace/a/drafts-a')
+    expect(store.fetchSessions).toHaveBeenCalledWith('drafts-a')
   })
 
   it('the landing is not a gesture: the composer may focus only on a fine pointer', async () => {
