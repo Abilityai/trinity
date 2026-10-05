@@ -826,9 +826,8 @@
   The 2026-09-24 fleet audit found every git-bound agent with auto-sync off and
   work on container disks that existed nowhere else.
 - **Create-time `kind`:** `agent` (the default) or `deployment`, on
-  `POST /api/agents` and MCP `create_agent`. The UI half of the choice is
-  trinity-enterprise#704. An **explicit `source_mode` always wins for the
-  mode**. Every auto-pushing agent, including an explicit working branch and
+  `POST /api/agents` and MCP `create_agent`. An **explicit `source_mode`
+  always wins for the mode**. Every auto-pushing agent, including an explicit working branch and
   fork-to-own, also gets freeze-on-failure; a `deployment` never does.
 - **An agent** gets a working branch (`trinity/<agent>/<id>`) it alone writes,
   `auto_sync_enabled=1` and `freeze_schedules_if_sync_failing=1`. It only gets
@@ -856,9 +855,24 @@
 - **Fork-to-own** gets the trio (it owns its fork). **Cornelius** is pinned
   pull-only: it is built from a shared public upstream.
 - **Other create paths:** `trinity deploy --repo` sends `kind: "deployment"` (it
-  deploys a codebase). System manifests gain a per-agent `kind` with
-  trinity-enterprise#704 (PR #3022); until then a manifest agent takes the
-  default, which the ownership rule above already keeps off shared templates.
+  deploys a codebase); a system manifest takes `kind` per agent (below).
+- **Asked in the UI and the manifest (trinity-enterprise#704):**
+  - the create modal asks "What is this repository?" (an agent / a deployment
+    of a codebase) exactly when the answer can matter: a custom repository with
+    the *clone* intent. It is never asked for blank or local agents, copy or
+    fork, a fork-to-own template, or a GitHub template from the list — every
+    list template is a shared catalog entry, always pull-only whatever `kind`
+    says (fork it to keep the agent's work in git). Unasked, no `kind` is sent.
+  - the create response's `git_mode` is shown after creation, and it says so
+    plainly when an agent was created pull-only, with the reason.
+  - the Git panel shows the binding as a badge (`Agent · own branch` /
+    `Agent · own repo` / `Pull-only`). The badge and the post-create notice key
+    on whether the agent **pushes** (`git_mode.pushes`, `db_config.pushes`),
+    never on `source_mode` alone: a fork-to-own agent is source-mode and
+    pushes to its own repo.
+  - a system manifest takes `kind` per agent; an unset `kind` uses the create
+    default. Export writes `kind: deployment` for a pull-only git member, so a
+    deployment stays pull-only across export → redeploy.
 - **Not changed:**
   - existing agents (the default applies to new creates; migration is per
     agent and explicit — runbook `docs/migrations/AGENT_WORKING_BRANCH_DEFAULT_2026-09.md`)
@@ -884,11 +898,8 @@
   - a `trinity/*` working branch also merges `main` in, so human pushes to
     `main` arrive (a merge — the branch is already pushed; conflict aborted)
   - uncommitted edits stashed and re-applied explicitly
-  - does not undo a pull over a registered execution (`_safe_to_reset`): a
-    conflict is aborted or undone, and recorded; an edit that could not be put
-    back is named as kept in `git stash`. Writes outside the process registry
-    (Files API, docker exec, web terminal) during the integrate window are not
-    protected
+  - never discards local work: a conflict is aborted or undone, and recorded;
+    an edit that could not be put back is named as kept in `git stash`
   - never STARTS while an execution is in flight or queued, nor over unmerged
     paths (and the push cycle never commits them). The gate is check-then-act:
     admission does not wait for a pull, so a turn accepted during the integrate

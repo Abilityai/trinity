@@ -232,6 +232,9 @@
                   </div>
                 </div>
 
+                <!-- trinity-enterprise#704: agent vs deployment, on the paths that bind git -->
+                <AgentKindPicker v-if="showKindPicker" v-model="agentKind" />
+
                 <!-- Fork-to-own fields (trinity-enterprise#93; also shown for
                      the github-custom 'fork' intent, trinity-enterprise#15) -->
                 <div v-if="showForkFields" class="mt-3 p-3 border border-action-primary-200 dark:border-action-primary-800 rounded-lg space-y-3">
@@ -331,6 +334,7 @@
           v-else
           :agent-name="postCreate.name"
           :import-snapshot="postCreate.snapshot"
+          :git-mode="postCreate.gitMode"
           @close="$emit('close')"
         />
       </div>
@@ -343,6 +347,7 @@ import { ref, reactive, onMounted, computed, watch, nextTick } from 'vue'
 import { useAgentsStore } from '../stores/agents'
 import api from '../api'
 import ImportIntentPicker from './ImportIntentPicker.vue'
+import AgentKindPicker from './AgentKindPicker.vue'
 import ImportValidationStep from './ImportValidationStep.vue'
 
 const props = defineProps({
@@ -367,6 +372,12 @@ const githubRepoInput = ref(null)
 // trinity-enterprise#15: import intent for the github-custom path.
 // 'clone' (default) | 'copy' | 'fork'. Featured templates never send it.
 const importIntent = ref('clone')
+
+// trinity-enterprise#704: 'agent' (default) | 'deployment'. Asked only where the
+// create binds git: a GitHub template from the list, or a custom repo CLONE.
+// Copy has no git link; Fork is an agent in the user's own repo by definition;
+// featured fork-to-own templates are the same case.
+const agentKind = ref('agent')
 
 // trinity-enterprise#15: post-create validation context. Non-null swaps the
 // modal body to ImportValidationStep ({name, snapshot}) — set only for
@@ -423,6 +434,13 @@ const isGithubCustomFork = computed(
   () => form.template === 'github-custom' && importIntent.value === 'fork'
 )
 const showForkFields = computed(() => isForkToOwn.value || isGithubCustomFork.value)
+
+// Only a custom-repo clone can come out as an agent with its own branch: every
+// list template is a catalog entry, which the backend always makes pull-only
+// (`_apply_agent_kind_default`, catalog_template) — PR #3022 review.
+const showKindPicker = computed(
+  () => form.template === 'github-custom' && importIntent.value === 'clone'
+)
 
 const selectedTemplate = computed(() => {
   if (!form.template) return null
@@ -516,6 +534,9 @@ const createAgent = async () => {
       payload.template = form.template
     }
 
+    // trinity-enterprise#704: the answer to "what is this repository?"
+    if (showKindPicker.value) payload.kind = agentKind.value
+
     // Fork-to-own (trinity-enterprise#93): destination + token are required
     // for templates that declare it — and for the github-custom 'fork' intent
     // (trinity-enterprise#15). Shape check only — the backend owns the
@@ -546,13 +567,16 @@ const createAgent = async () => {
     // unmounts us on `created`, so the validation step never renders there).
     emit('created', agent)
     // trinity-enterprise#15: github-sourced creates (github-custom any intent,
-    // or a featured fork template) swap to the post-create validation step
-    // instead of auto-closing. Skippable — Close is always available there.
-    const githubSourced = form.template === 'github-custom' || isForkToOwn.value
+    // or a GitHub template from the list, fork-to-own included) swap to the
+    // post-create validation step instead of auto-closing. Skippable — Close
+    // is always available there. trinity-enterprise#704: a list template is
+    // the path most likely to come back pull-only, so it must reach the notice.
+    const githubSourced = form.template === 'github-custom' || selectedTemplate.value?.source === 'github'
     if (githubSourced) {
       postCreate.value = {
         name: agent?.name || form.name,
         snapshot: agent?.import_snapshot || null,
+        gitMode: agent?.git_mode || null,  // trinity-enterprise#704
       }
     } else {
       emit('close')
