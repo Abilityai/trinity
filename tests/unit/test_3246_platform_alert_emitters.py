@@ -111,3 +111,62 @@ class TestSystemAgent:
         assert rows[0]["priority"] == "critical"
         sas.SystemAgentService._clear_alert("system_agent_start_failed")
         assert self._rows(db, "system_agent_start_failed") == []
+
+
+class TestSubscriptionHeadroom:
+    AGENT = "_sub-headroom"
+
+    @pytest.fixture
+    def sid(self):
+        return f"sub/3246-{uuid.uuid4().hex[:6]}"
+
+    def _rows(self, db, key):
+        return [r for r in _pending(db, self.AGENT)
+                if r["subject"] == f"subscription_headroom:{key}"]
+
+    def _alert(self, sid, tier, util):
+        from services import subscription_headroom_alerts as a
+        return a.emit_subscription_alert(
+            subscription_id=sid, subscription_name="one", tier=tier,
+            utilization_pct=util, projected_end=None,
+            resets_at="2026-10-09T00:00:00Z", threshold_pct=75, agents=[])
+
+    def test_a_critical_reading_replaces_the_warning_on_one_row(self, db, sid):
+        from services import subscription_headroom_alerts as a
+        key = a.subject_key(sid)
+        assert self._alert(sid, "warn", 78.0) is True
+        assert self._alert(sid, "warn", 84.0) is True
+        assert self._alert(sid, "crit", 93.0) is True
+        rows = self._rows(db, key)
+        assert len(rows) == 1
+        assert rows[0]["request_id"].startswith(f"sub-headroom-{key}-")
+        assert "93%" in rows[0]["title"] and rows[0]["context"]["tier"] == "crit"
+
+    def test_the_evaluation_pass_ends_a_row_it_no_longer_backs(self, db, sid):
+        from services import subscription_headroom_alerts as a
+        other = f"{sid}-x"
+        self._alert(sid, "warn", 80.0)
+        self._alert(other, "warn", 80.0)
+        a.clear_recovered([a.subject_key(other), a.FLEET_KEY])
+        assert self._rows(db, a.subject_key(sid)) == []
+        assert len(self._rows(db, a.subject_key(other))) == 1
+        ended = [r for r in db.list_operator_queue_items(agent_name=self.AGENT, limit=1000)
+                 if r["subject"] == f"subscription_headroom:{a.subject_key(sid)}"]
+        assert ended and ended[0]["disposed_by"] == "platform"
+
+    def test_the_sweep_keeps_an_unassessable_row_and_clears_a_measured_recovery(
+            self, db, sid, monkeypatch):
+        """Only a MEASURED `HAS_HEADROOM` clears — no evidence is not recovery."""
+        import asyncio
+        from services import subscription_headroom_alerts as a
+        from services import subscription_recovery_service as svc
+        recovered, unknown = sid, f"{sid}-u"
+        self._alert(recovered, "warn", 80.0)
+        self._alert(unknown, "warn", 80.0)
+        subs = [type("S", (), {"id": recovered, "name": "r"})(),
+                type("S", (), {"id": unknown, "name": "u"})()]
+        results = [{"sid": recovered, "classification": a.HAS_HEADROOM, "reading": None},
+                   {"sid": unknown, "classification": None, "reading": None}]
+        asyncio.run(svc.SubscriptionRecoveryService()._evaluate_alerts(subs, results, 75))
+        assert self._rows(db, a.subject_key(recovered)) == []
+        assert len(self._rows(db, a.subject_key(unknown))) == 1

@@ -43,7 +43,6 @@ _PR2 = "follow-up PR 2 of #3246 (the remaining emitters)"
 # value: (the id prefix it writes, the follow-up that moves it).
 # ---------------------------------------------------------------------------
 EMITTERS_NOT_YET_ON_SEAM = {
-    ("services/subscription_headroom_alerts.py", "_emit"): ("sub-headroom-", "#3246 C5′"),
     ("services/skill_service.py", "SkillService._record_adoption_failure"):
         ("skills-legacy-adoption-", "#3246 C5′"),
     # -- PR 2 ---------------------------------------------------------------
