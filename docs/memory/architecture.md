@@ -6,7 +6,7 @@
 
 ## System Overview
 
-**Trinity** is the **operating system for the AI-native company** — open source, self-hosted, that you own. It deploys, orchestrates, and governs fleets of AI agents on your own hardware, and it is model-agnostic: each agent runs on Claude Code or Gemini CLI. Each agent runs as an isolated Docker container with standardized interfaces for credentials, tools, and MCP server integrations.
+**Trinity** is the **operating system for the AI-native company** — open source, self-hosted, that you own. It deploys, orchestrates, and governs fleets of AI agents on your own hardware, and it is model-agnostic: each agent runs on Claude Code, Gemini CLI or OpenAI Codex. Each agent runs as an isolated Docker container with standardized interfaces for credentials, tools, and MCP server integrations.
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐

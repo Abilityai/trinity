@@ -15,7 +15,7 @@ Trinity deploys, orchestrates, and governs AI agents on your own hardware. Agent
 - 🤝 **Collaborate autonomously** — Delegate work to specialized sub-agents
 - ⏰ **Run on schedules** — Execute workflows without human intervention
 - 🔄 **Recover from failures** — Handle errors and continue execution
-- 🔀 **Multi-runtime support** — Choose between Claude Code or Gemini CLI per agent
+- 🔀 **Multi-runtime support** — Choose Claude Code, Gemini CLI or OpenAI Codex per agent
 
 ---
 
