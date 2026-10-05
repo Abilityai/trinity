@@ -1828,15 +1828,22 @@ bounding the table. OSS-core (Workspace rule above). Flow:
   `⌥.` next rail tab; `⌘/`/`Ctrl+/` the keyboard-shortcuts list.
 - **AC-2 — one declaration**: every chord lives in
   `src/frontend/src/components/portal/portalKeymap.js` (pure — no DOM, no
-  store), with its scope, its owner, and its label. `keymapCollisions(map,
-  platform)` must be **empty on mac and on Windows/Linux**; a key that exists
-  without a map entry, or a shell chord that shadows a protocol key, is the
-  defect this prevents.
+  store), with its scope, its owner, and its label. `keymapCollisions(map)`
+  must be **empty**: matching is platform-free, so the checker takes no
+  platform argument and one call is the whole proof — not one per OS. A key
+  that exists without a map entry, or a shell chord that shadows a protocol
+  key, is the defect this prevents.
 - **AC-3 — one dispatcher**: `Portal.vue::onGlobalKeydown` is the Workspace's
-  single `window` keydown listener, armed at mount above the bootstrap `await`
-  and removed on unmount. Its ladder: resolve → signed in → ⌘J's
-  leave-the-call ask → undispatched actions pass through → a focused
-  `<select>` keeps its native `Alt+↓` → suppression → `preventDefault` → act.
+  single chord dispatcher, armed at mount above the bootstrap `await` and
+  removed on unmount (`PortalRail.vue`'s sheet-only Esc `window` listener
+  predates the map and dispatches no chord — it is the `close-top` protocol
+  entry). Its ladder: resolve → signed in → ⌘J's leave-the-call ask →
+  undispatched actions pass through → a focused `<select>` keeps its native
+  `Alt+↓` → suppression → `preventDefault` → act. The ⌘J step is the ONE
+  exception to "the ladder runs before any `preventDefault`": during an
+  active voice call it claims the event and routes to the leave-call guard
+  above the suppression rung, which is the pre-existing ent#534/551 ask kept
+  deliberately (ruling T8) rather than an oversight.
 - **AC-4 — every key works from the message field**: the conventional
   "ignore an editable target" guard is deliberately **inverted**; the composer
   is a textarea and the keys must work while typing. A nearer owner still wins

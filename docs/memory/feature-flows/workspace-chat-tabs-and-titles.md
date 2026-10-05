@@ -101,9 +101,10 @@ non-Latin layout — and on a US Mac it is the *only* arm for `⌥.`, which type
 `≥`. Shift is accepted on a `key` match only, so DE's `Shift+7` → `/` and
 FR's shifted `.` reach ⌘/ while macOS's `⌘?` stays the browser's Help search.
 `chordLabel` / `ariaKeyshortcuts` take the platform and render `⌥↓` vs
-`Alt+↓` and `Alt+ArrowDown`; `keymapCollisions(map, platform)` is asserted
-empty for mac **and** win, which is the test that would have caught a new chord
-shadowing a protocol key.
+`Alt+↓` and `Alt+ArrowDown`. `keymapCollisions(map)` does NOT take a platform
+— matching is platform-free, so one call is the whole proof — and it is
+asserted empty, which is the test that would have caught a new chord shadowing
+a protocol key.
 
 **One dispatcher — `Portal.vue::onGlobalKeydown`**, still the single `window`
 listener armed above `bootstrap()`'s `await` (contract #23) and removed in
@@ -543,8 +544,8 @@ never-opened chat count at all.
   capped/deduped ensure and its sign-out clear, and the settle cycle's bails
   and three clear sites.
 - **ent#621 — the key map.** `workspaceKeymap.spec.js` (pure: the chord table,
-  the `e.repeat` / IME bails, `keymapCollisions` empty on mac **and** win, the
-  label and `aria-keyshortcuts` spellings, `cycleIndex` / `nextRailTab`
+  the `e.repeat` / IME bails, `keymapCollisions` empty in its one
+  platform-free call, the label and `aria-keyshortcuts` spellings, `cycleIndex` / `nextRailTab`
   wrapping, `keyListRows` minus the reserved row, and ⌘J answering exactly as
   `isNewChatHotkey` does — the equivalence that makes the delegation safe);
   `workspaceKeymap.dom.spec.js` (the `[aria-modal]` probe and its per-action
