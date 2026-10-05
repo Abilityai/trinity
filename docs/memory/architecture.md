@@ -1,4 +1,4 @@
-# Trinity - Autonomous Agent Orchestration Platform - Architecture
+# Trinity - The Operating System for the AI-Native Company - Architecture
 
 > **Purpose**: The always-loaded core — system shape, the full invariant list, and a map to every area file. Deep detail lives in `docs/memory/architecture/`, read on demand.
 >
@@ -6,7 +6,7 @@
 
 ## System Overview
 
-**Trinity** is an **autonomous agent orchestration and infrastructure platform** — sovereign infrastructure for deploying, orchestrating, and governing fleets of autonomous AI agents on your own hardware. Each agent runs as an isolated Docker container with standardized interfaces for credentials, tools, and MCP server integrations.
+**Trinity** is the **operating system for the AI-native company** — open source, self-hosted, that you own. It deploys, orchestrates, and governs fleets of AI agents on your own hardware, and it is model-agnostic: each agent runs on Claude Code or Gemini CLI. Each agent runs as an isolated Docker container with standardized interfaces for credentials, tools, and MCP server integrations.
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐

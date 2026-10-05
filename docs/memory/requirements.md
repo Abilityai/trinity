@@ -1,4 +1,4 @@
-# Trinity - Autonomous Agent Orchestration Platform - Requirements
+# Trinity - The Operating System for the AI-Native Company - Requirements
 
 > **SINGLE SOURCE OF TRUTH** — all development must trace back to these documents.
 > Update the relevant area file **BEFORE** implementing any new feature.

@@ -6,7 +6,7 @@
 
 ## Vision
 
-Trinity is autonomous agent orchestration and infrastructure — sovereign infrastructure for deploying, orchestrating, and governing fleets of autonomous AI agents on your own hardware.
+Trinity is the operating system for the AI-native company — open source, self-hosted, that you own. It deploys, orchestrates, and governs fleets of AI agents on your own hardware, and it is model-agnostic: each agent runs on Claude Code or Gemini CLI.
 
 | Capability | Description | Implementation Status |
 |------------|-------------|----------------------|

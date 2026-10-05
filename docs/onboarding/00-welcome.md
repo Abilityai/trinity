@@ -1,6 +1,6 @@
 # Welcome to Trinity 🚀
 
-**Autonomous agent orchestration and infrastructure**
+**The operating system for the AI-native company — open source, self-hosted, that you own.**
 
 Trinity transforms the way you deploy and manage autonomous AI agents. Whether you're building a single intelligent assistant or orchestrating a network of specialized agents working together, Trinity provides the infrastructure you need.
 
@@ -8,13 +8,12 @@ Trinity transforms the way you deploy and manage autonomous AI agents. Whether y
 
 ## What is Trinity?
 
-Trinity is a **sovereign infrastructure platform** for deploying, orchestrating, and governing autonomous AI agents. Agents can:
+Trinity deploys, orchestrates, and governs AI agents on your own hardware. Agents can:
 
 - 🎯 **Plan independently** — Break down complex goals into executable tasks
 - 🧠 **Remember persistently** — Store knowledge across sessions using vector databases
 - 🤝 **Collaborate autonomously** — Delegate work to specialized sub-agents
 - ⏰ **Run on schedules** — Execute workflows without human intervention
-- 📊 **Learn from experience** — Build semantic memory over time
 - 🔄 **Recover from failures** — Handle errors and continue execution
 - 🔀 **Multi-runtime support** — Choose between Claude Code or Gemini CLI per agent
 

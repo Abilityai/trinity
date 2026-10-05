@@ -2,7 +2,7 @@
 
 ## What This Diagram Shows
 
-This document provides a high-level architectural overview of the Trinity autonomous agent platform. It illustrates:
+This document provides a high-level architectural overview of the Trinity platform. It illustrates:
 
 1. **Platform Layers**: How the web interface, platform services, and agent runtime relate to each other
 2. **Key Differentiators**: How autonomous agents differ from reactive chatbots
@@ -13,13 +13,13 @@ Use this as a starting point for understanding Trinity's architecture before div
 
 ## What is Trinity?
 
-Trinity is an **autonomous agent orchestration and infrastructure platform** — sovereign infrastructure for deploying, orchestrating, and governing fleets of autonomous AI agents on your own hardware.
+Trinity is the **operating system for the AI-native company** — open source, self-hosted, that you own. It deploys, orchestrates, and governs fleets of AI agents on your own hardware, and it is model-agnostic: each agent runs on Claude Code or Gemini CLI.
 
 ```
 +---------------------------------------------------------------------------------+
 |                                                                                 |
 |                         TRINITY PLATFORM                                        |
-|                  "Autonomous Agent Orchestration"                               |
+|                  "The operating system for the AI-native company"               |
 |                                                                                 |
 |   +-------------------------------------------------------------------------+  |
 |   |                         WEB INTERFACE                                    |  |
