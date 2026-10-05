@@ -35,7 +35,7 @@ class WorkspaceAsk(BaseModel):
     # (trinity-enterprise#611); the ANSWER response projects the row it recorded.
     status: str
     # How the ask ended, COARSE on purpose (trinity-enterprise#611): `ended_by`
-    # is `you` | `operator` | `timeout`, never an email, and the operator's
+    # is `you` | `operator` | `platform` (#3246) | `timeout`, never an email, and the operator's
     # cancel reason never crosses. `ended_at` is when it ended — None when the
     # platform does not know (a row that ended before the ledger), never the
     # time the ask was filed.

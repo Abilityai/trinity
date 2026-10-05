@@ -40,6 +40,8 @@
             <h2 class="text-lg font-semibold text-gray-900 dark:text-white">
               {{ item.title }}
             </h2>
+            <!-- #3246: one row per condition, updated in place — say how often. -->
+            <p v-if="seenLine" class="mt-0.5 text-xs opacity-75" data-testid="queue-seen-line">{{ seenLine }}</p>
           </div>
         </div>
 
@@ -98,11 +100,18 @@
       <div v-if="item.status !== 'pending'" class="p-4 border-b border-gray-200 dark:border-gray-700">
         <h3 class="text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wider mb-2">Response</h3>
         <div class="bg-status-success-50 dark:bg-status-success-900/20 rounded-lg p-3 space-y-1">
-          <p class="text-sm font-medium text-status-success-800 dark:text-status-success-300">{{ item.response }}</p>
-          <p v-if="item.response_text" class="text-sm text-status-success-700 dark:text-status-success-400">{{ item.response_text }}</p>
-          <p class="text-xs text-status-success-600 dark:text-status-success-500">
-            by {{ item.responded_by_email }} &middot; {{ formatDate(item.responded_at) }}
+          <!-- #3246: a row the platform ended is not a person's answer — say who
+               ended it and why (utils/operatorQueue.js::queueEndingText). -->
+          <p v-if="endedByPlatform" class="text-sm font-medium text-status-success-800 dark:text-status-success-300" data-testid="queue-detail-ending">
+            {{ endingText }}<template v-if="item.disposed_at"> &middot; {{ formatDate(item.disposed_at) }}</template>
           </p>
+          <template v-else>
+            <p class="text-sm font-medium text-status-success-800 dark:text-status-success-300">{{ item.response }}</p>
+            <p v-if="item.response_text" class="text-sm text-status-success-700 dark:text-status-success-400">{{ item.response_text }}</p>
+            <p class="text-xs text-status-success-600 dark:text-status-success-500">
+              by {{ item.responded_by_email }} &middot; {{ formatDate(item.responded_at) }}
+            </p>
+          </template>
         </div>
       </div>
 
@@ -195,7 +204,7 @@ import { renderMarkdown } from '../../utils/markdown'
 import { useOperatorQueueStore } from '../../stores/operatorQueue'
 import { useAgentsStore } from '../../stores/agents'
 import { agentNameTooltip } from '../../utils/agentName'
-import { queueResponseKind, queueTypeLabel } from '../../utils/operatorQueue'
+import { queueResponseKind, queueTypeLabel, queueEnding, queueEndingText, queueSeenLine } from '../../utils/operatorQueue'
 
 const store = useOperatorQueueStore()
 const agentsStore = useAgentsStore()
@@ -209,6 +218,10 @@ const item = computed(() => store.selectedItem)
 // closed from the queue at all — and a budgeted alert type whose items
 // cannot be closed jams its own pending cap permanently.
 const responseKind = computed(() => queueResponseKind(item.value))
+const ending = computed(() => queueEnding(item.value))
+const endedByPlatform = computed(() => ending.value?.who === 'the platform')
+const endingText = computed(() => queueEndingText(ending.value))
+const seenLine = computed(() => queueSeenLine(item.value))
 
 const selectedOption = ref(null)
 const responseText = ref('')

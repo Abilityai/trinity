@@ -334,8 +334,15 @@ export const QUEUE_RESPONSE_NOT_ADDRESSEE =
  *     Workspace projection's own `status` (`answered`) reads the same way.
  *   - `who` — the person, for the Operating Room (`disposed_by_email`, or a
  *     legacy answer's `responded_by_email`); the Workspace projection's coarse
- *     `ended_by` (`you` / `the operator`); `timeout` for an expiry; `null` when
- *     the platform does not know.
+ *     `ended_by` (`you` / `the operator`); `timeout` for an expiry; `the
+ *     platform` for a row the platform itself ended (#3246: `disposed_by =
+ *     'platform'`, or the projection's `ended_by = 'platform'`); `null` when the
+ *     platform does not know.
+ *   - `reason` — #3246: the platform's ending in words (`condition_cleared`,
+ *     `superseded`); `null` for every other ending. A platform ending is never a
+ *     person's answer and never a timeout.
+ *   - `alert` — the row is an alert: its expiry reads "nobody acted on it",
+ *     because nobody was asked anything.
  *   - `when` — the ledger's `disposed_at`, the projection's `ended_at`, or a
  *     legacy answer's `responded_at`. NEVER `created_at`: that is when the ask
  *     was filed, and showing it as the ending time is the defect this replaces.
@@ -345,6 +352,13 @@ export const ENDING_LABELS = Object.freeze({
   dismissed: 'Dismissed',
   cancelled: 'Cancelled',
   expired: 'Expired',
+})
+
+/** #3246 — why the platform ended a row, in words. An unknown reason token
+ *  falls back to nothing rather than being printed raw. */
+export const PLATFORM_ENDING_REASONS = Object.freeze({
+  condition_cleared: 'the condition cleared',
+  superseded: 'superseded by a newer reading',
 })
 
 function endingKind(item) {
@@ -362,8 +376,12 @@ export function queueEnding(item) {
   if (!kind) return null
   const when = item.disposed_at || item.ended_at || (kind === 'answered' ? item.responded_at : null) || null
   let who = null
+  let reason = null
   if (kind === 'expired') {
     who = 'timeout'
+  } else if (item.disposed_by === 'platform' || item.ended_by === 'platform') {
+    who = 'the platform'
+    reason = PLATFORM_ENDING_REASONS[item.disposition_reason] || null
   } else if (item.ended_by === 'you') {
     who = 'you'
   } else if (item.ended_by === 'operator') {
@@ -371,15 +389,47 @@ export function queueEnding(item) {
   } else {
     who = item.disposed_by_email || (kind === 'answered' ? item.responded_by_email : null) || null
   }
-  return { kind, label: ENDING_LABELS[kind], who, when }
+  return { kind, label: ENDING_LABELS[kind], who, when, reason, alert: item.type === 'alert' }
 }
 
 /** The ending in words: "Cancelled by op@…", "Answered by you",
- *  "Expired — nobody answered in time", or the bare label when nobody is known. */
+ *  "Ended by the platform — the condition cleared", "Expired — nobody answered
+ *  in time" ("nobody acted on it" for an alert), or the bare label when nobody
+ *  is known. */
 export function queueEndingText(ending) {
   if (!ending) return ''
-  if (ending.kind === 'expired') return `${ending.label} — nobody answered in time`
+  if (ending.kind === 'expired') {
+    return `${ending.label} — ${ending.alert ? 'nobody acted on it' : 'nobody answered in time'}`
+  }
+  if (ending.who === 'the platform') {
+    return ending.reason ? `Ended by the platform — ${ending.reason}` : 'Ended by the platform'
+  }
   return ending.who ? `${ending.label} by ${ending.who}` : ending.label
+}
+
+function relativeAgo(iso, now) {
+  const then = new Date(iso).getTime()
+  if (Number.isNaN(then)) return null
+  const diffMin = Math.floor((now - then) / 60000)
+  if (diffMin < 1) return 'just now'
+  if (diffMin < 60) return `${diffMin}m ago`
+  const diffHr = Math.floor(diffMin / 60)
+  if (diffHr < 24) return `${diffHr}h ago`
+  return `${Math.floor(diffHr / 24)}d ago`
+}
+
+/**
+ * #3246 — a pending platform alert is ONE row per condition, updated in place by
+ * every new reading, so a row seen many times must not read as a fresh alert.
+ * "seen N times · last seen 5m ago" when `context.seen_count > 1`; `''` for an
+ * ended row, a row seen once, and anything that is not an alert.
+ */
+export function queueSeenLine(item, now = Date.now()) {
+  if (!item || item.status !== 'pending' || item.type !== 'alert') return ''
+  const n = Number(item.context && item.context.seen_count)
+  if (!Number.isInteger(n) || n < 2) return ''
+  const ago = item.last_seen_at ? relativeAgo(item.last_seen_at, now) : null
+  return ago ? `seen ${n} times · last seen ${ago}` : `seen ${n} times`
 }
 
 /** What the resolved feed sorts by (#627 AC6): when the item ended; a legacy
