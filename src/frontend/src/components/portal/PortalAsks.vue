@@ -330,7 +330,7 @@ import { useClientPortalStore } from '@/stores/clientPortal'
 import {
   expiredLabel, askThreadLink, answerConfirmation, ANSWER_CONFIRMATION_MS,
 } from './portalUtils'
-import { optionsOf, queueResponseKind, buildQueueResponse, queueTypeLabel } from '@/utils/operatorQueue'
+import { queueResponseKind, buildQueueResponse, queueTypeLabel } from '@/utils/operatorQueue'
 // #2915: the same home; a second line so the #2375 import pin above stays byte-exact.
 import { respondRefusedAsDiverged, QUEUE_RESPONSE_DIVERGED } from '@/utils/operatorQueue'
 // trinity-enterprise#611: the one ending rule, a third line for the same reason.
