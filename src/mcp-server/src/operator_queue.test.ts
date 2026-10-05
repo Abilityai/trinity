@@ -464,9 +464,10 @@ describe("#3243 atomic asks", () => {
     const d = tools.askOperator.description;
     for (const phrase of [
       "One decision per ask",
-      "at most 120 (title_too_long)",
+      "by default at most 120 (title_too_long)",
       "Options name the choice only",
-      "at most 5 options, each at most 60 characters",
+      "by default at most 5 options, each at most 60 characters",
+      "a refusal names the limit in force",
       "Context is for people",
       "too_many_options",
       "option_too_long",

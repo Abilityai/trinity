@@ -97,7 +97,7 @@ const askOperatorParameters = z.object({
   title: z
     .string()
     .min(1)
-    .describe("One line a person reads at a glance — what you need decided (at most 120 characters; aim for well under 100)."),
+    .describe("One line a person reads at a glance — what you need decided (by default at most 120 characters; aim for well under 100)."),
   question: z
     .string()
     .optional()
@@ -111,7 +111,7 @@ const askOperatorParameters = z.object({
     .array(z.string().min(1))
     .optional()
     .describe(
-      "The choices a person picks from, each naming the choice only (at most 5 options, each at most 60 characters; aim for under 40). Required for an approval. Never (something else) or a lookalike — the platform adds it.",
+      "The choices a person picks from, each naming the choice only (by default at most 5 options, each at most 60 characters; aim for under 40). Required for an approval. Never (something else) or a lookalike — the platform adds it.",
     ),
   context: anyJsonObject()
     .optional()
@@ -430,15 +430,16 @@ export function createOperatorQueueTools(
         "without that link is refused with reask_requires_link). Learn how it ended " +
         "from the wake when wakes_on_ending is true, or read it any time with " +
         "get_my_ask. " +
-        // #3243: the five authoring rules. The caps are pinned to the backend's
-        // defaults by tests/unit/test_3243_atomic_asks.py.
+        // #3243: the five authoring rules. The caps are env-tunable, so the text
+        // quotes the DEFAULTS ("by default") and the refusal carries the limit in
+        // force; tests/unit/test_3243_atomic_asks.py pins the defaults.
         "Write atomic asks. (1) One decision per ask: two independent decisions are " +
         "two asks. (2) A title is one line a person reads at a glance: aim for well " +
-        "under 100 characters, at most 120 (title_too_long). (3) Options name the " +
+        "under 100 characters, by default at most 120 (title_too_long). (3) Options name the " +
         "choice only — 'Send now', not 'approve — the receptionist sends it with a " +
         "disclosure and CCs you': the reasoning goes in question, and what each option " +
         "will do goes in proposal (keyed by option when they differ); aim for under 40 " +
-        "characters. (4) Offer few options — at most 5 options, each at most 60 " +
+        "characters. (4) Offer few options — by default at most 5 options, each at most 60 " +
         "characters (too_many_options, option_too_long; a refusal names the limit in " +
         `force): the person can always answer ${JSON.stringify(SOMETHING_ELSE)} with ` +
         "their own instruction, so never list every variant; for an open choice among " +

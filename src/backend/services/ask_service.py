@@ -645,6 +645,13 @@ def _validated_ask(ask: Any, oqs, *, raised_by: str = "agent") -> Dict[str, Any]
     if not isinstance(title, str) or not title.strip():
         raise AskRejected(422, "invalid_title", "An ask needs a title.")
     if len(title) > oqs.OPERATOR_QUEUE_TITLE_MAX:
+        if raised_by == "agent":
+            # #3243: name the agent's limit on the FIRST refusal, so a title
+            # over the outer 300 belt is not refused twice by two codes.
+            raise AskRejected(
+                422, "title_too_long", _CAP_MESSAGES["title_too_long"],
+                limit=min(oqs.OPERATOR_QUEUE_TITLE_MAX, oqs.OPERATOR_QUEUE_ASK_TITLE_MAX_CHARS),
+                length=len(title))
         raise _too_large("title", oqs.OPERATOR_QUEUE_TITLE_MAX, "characters")
     question = ask.get("question")
     if question is not None and not isinstance(question, str):

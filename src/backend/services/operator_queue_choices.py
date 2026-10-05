@@ -18,6 +18,7 @@ singleton and imports `AgentClient` at module scope, and the Workspace asks path
 must not drag either in to answer a question about a list of strings.
 """
 
+import unicodedata
 from typing import Optional, Sequence, Tuple
 
 # The placeholder `operator_queue_service` substitutes when an agent's own
@@ -36,6 +37,10 @@ OPTIONS_DROPPED_MARKER = "(options omitted: exceeded size cap)"
 # only option is this literal must stay closed to every other string.
 SOMETHING_ELSE = "(something else)"
 
+# Zero-width / invisible format characters an agent could slip into a lookalike
+# of the chip (#3243): ZWSP, ZWNJ, ZWJ, LRM, RLM, word joiner, BOM. `str.split()`
+# does not treat them as whitespace, so they are removed before the compare.
+_ZERO_WIDTH = dict.fromkeys(map(ord, "\u200b\u200c\u200d\u200e\u200f\u2060\ufeff"))
 
 
 def reads_as_something_else(option) -> bool:
@@ -43,10 +48,16 @@ def reads_as_something_else(option) -> bool:
     (#3243, from the #3242 security pass): "Something else" in any case, with or
     without surrounding whitespace or parentheses. The exact literal included —
     a lookalike next to the real chip lets an ask show two "something else"
-    choices that mean different things."""
+    choices that mean different things.
+
+    NFKC folds fullwidth letters and fullwidth parentheses onto ASCII, and the
+    zero-width characters are dropped first, so neither hides the chip.
+    Cross-script confusables (Cyrillic "е", Greek "ο", …) are deliberately out
+    of scope: closing them needs a confusables table, not a normal form."""
     if not isinstance(option, str):
         return False
-    core = option.strip().strip("()").strip()
+    folded = unicodedata.normalize("NFKC", option.translate(_ZERO_WIDTH))
+    core = folded.strip().strip("()").strip()
     return " ".join(core.split()).casefold() == "something else"
 
 

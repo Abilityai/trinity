@@ -152,7 +152,7 @@ Before performing an action that cannot be undone or verified afterwards — pay
 
 `ask_operator` takes a `request_id` and a `title`, plus optional `question`, `type`, `options`, `priority`, `context`, `proposal`, `to` and `expires_at`; its description has the details and the named refusals.
 
-**Write atomic asks.** One decision per ask; a title a person reads at a glance (at most 120 characters); options that name the choice only (at most 5 options, each at most 60 characters — the person can always answer `(something else)`), with the reasoning in `question` and what an option does in `proposal`; `context` as a few labelled facts for a person. The `ask_operator` description has the full rules.
+**Write atomic asks.** One decision per ask; a title a person reads at a glance (by default at most 120 characters); options that name the choice only (by default at most 5 options, each at most 60 characters — the person can always answer `(something else)`), with the reasoning in `question` and what an option does in `proposal`; `context` as a few labelled facts for a person. The `ask_operator` description has the full rules.
 
 **Request IDs must be globally unique.** Derive the `request_id` from your current execution ID (see the Execution Context block), e.g. `approval-{execution_id}-{short-slug}`. Never use date-serial IDs like `req-20260307-001` — a second task that picks the same ID gets the first ask's receipt instead of a new ask. Re-using your own derived ID when the same task runs again is safe and intentional: it prevents duplicate requests.
 

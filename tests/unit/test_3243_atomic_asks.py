@@ -72,13 +72,26 @@ class TestOptionsCapViolation:
     @pytest.mark.parametrize("lookalike", [
         "Something else", "something else", "SOMETHING ELSE", "  something else  ",
         "(Something Else)", "( something else )", "something  else",
+        # NFKC: fullwidth letters and fullwidth parentheses fold onto ASCII.
+        "\uff33\uff4f\uff4d\uff45\uff54\uff48\uff49\uff4e\uff47 \uff45\uff4c\uff53\uff45",
+        "\uff08something else\uff09",
+        # Zero-width characters inserted anywhere are dropped before the compare.
+        "Some\u200bthing else", "\u200bSomething else\ufeff", "something\u200d else\u2060",
+        "(\u200csomething else\u200e)",
     ])
     def test_an_option_that_reads_as_the_chip_is_refused(self, lookalike):
         assert self.check(["approve", lookalike]) == ("invalid_options", {"index": 1})
 
-    @pytest.mark.parametrize("fine", ["Something else entirely", "else", "Do something"])
+    @pytest.mark.parametrize("fine", ["Something else entirely", "else", "Do something",
+                                      "Something else entirely: escalate",
+                                      "\uff33omething else entirely"])
     def test_an_option_that_merely_mentions_it_is_fine(self, fine):
         assert self.check(["approve", fine]) is None
+
+    def test_a_cross_script_confusable_is_out_of_scope(self):
+        """Cyrillic "е" (U+0435) is not folded by NFKC — closing that class
+        needs a confusables table, which #3243 does not take on."""
+        assert self.check(["approve", "Som\u0435thing \u0435lse"]) is None
 
     def test_not_a_list_is_not_this_rules_question(self):
         assert self.check(None) is None and self.check("a,b") is None
@@ -90,14 +103,25 @@ class TestOptionsCapViolation:
             "title_too_long", {"limit": 120, "length": 121})
 
 
+# The operator's ruling (#3243): (env name, default, floor). The contract text
+# quotes these defaults, never the env-resolved constants.
+_DEFAULT_CAPS = (("OPERATOR_QUEUE_MAX_OPTIONS", 5, 2),
+                 ("OPERATOR_QUEUE_OPTION_MAX_CHARS", 60, 16),
+                 ("OPERATOR_QUEUE_ASK_TITLE_MAX_CHARS", 120, 40))
+
+
 class TestEnvCaps:
     """Through the loader the module constants use — never a module reload,
     which would hand other suites a stale `OperatorQueueSyncService`."""
 
     def test_defaults_are_the_operators_ruling(self):
+        """The DEFAULTS as written in the module, not the constants — those are
+        read from env at import, and a re-tuned install must not go red here."""
         import services.operator_queue_service as oqs
-        assert (oqs.OPERATOR_QUEUE_MAX_OPTIONS, oqs.OPERATOR_QUEUE_OPTION_MAX_CHARS,
-                oqs.OPERATOR_QUEUE_ASK_TITLE_MAX_CHARS) == (5, 60, 120)
+        with open(oqs.__file__, encoding="utf-8") as f:
+            src = f.read()
+        for name, default, floor in _DEFAULT_CAPS:
+            assert f'_floored_env_cap("{name}", {default}, {floor})' in src, name
 
     def test_a_mis_set_env_is_floored_so_a_skill_gate_can_still_ask(self, monkeypatch):
         from services.operator_queue_service import _floored_env_cap
@@ -195,7 +219,9 @@ class TestNativeRaise:
         # Never echoes the agent's text back.
         assert long not in message and "proposal" in message
 
-    @pytest.mark.parametrize("lookalike", ["Something else", "(SOMETHING ELSE)", " something else "])
+    @pytest.mark.parametrize("lookalike", ["Something else", "(SOMETHING ELSE)", " something else ",
+                                           "\uff08\uff33omething else\uff09",
+                                           "Some\u200bthing\u200b else"])
     def test_a_lookalike_of_the_chip_is_refused_like_the_literal(self, ask, lookalike):
         status, code, extra, _ = _refused(
             ask, self.AGENT, _body("n-look", options=["approve", lookalike]))
@@ -210,6 +236,19 @@ class TestNativeRaise:
         assert (status, code, extra) == (422, "title_too_long", {"limit": 120, "length": 121})
         assert "question" in message
         assert ask.state["spent"] == 0
+
+    def test_an_agent_title_over_the_outer_belt_names_the_agent_limit_first(self, ask):
+        """A title over 300 is refused ONCE, with the limit that will admit it —
+        not `field_too_large` at 300 and then `title_too_long` at 120."""
+        status, code, extra, message = _refused(ask, self.AGENT, _body("n-title-301", title="t" * 301))
+        assert (status, code, extra) == (422, "title_too_long", {"limit": 120, "length": 301})
+        assert "question" in message
+
+    def test_a_gate_title_over_the_outer_belt_is_still_field_too_large(self, ask):
+        status, code, extra, _ = _refused(
+            ask, "agent-3243-gate", _body("gate-3243-301", title="g" * 301,
+                                          options=["Approve", "Reject"]), raised_by="gate")
+        assert (status, code, extra["limit"]) == (422, "field_too_large", 300)
 
     def test_an_ask_at_the_caps_is_raised(self, ask):
         receipt = ask.svc.raise_ask(
@@ -339,6 +378,17 @@ class TestFileHold:
         assert (marker["max_options"], marker["max_option_chars"], marker["max_title_chars"]) == (5, 60, 120)
         assert state["rate"] == 2  # only the admitted entry spent tokens (agent + fleet)
 
+    @pytest.mark.parametrize("lookalike", ["\uff33omething else", "\uff08something else\uff09",
+                                           "some\u200bthing else"])
+    def test_a_normalised_lookalike_is_held_on_the_file_path(self, monkeypatch, lookalike):
+        db = _fake_db()
+        svc, state = _wire(monkeypatch, db, [
+            _entry("look", options=["approve", lookalike]),
+            _entry("fine", options=["approve", "Something else entirely: escalate"])])
+        _run(svc)
+        assert _created_ids(db) == ["fine"]
+        assert _marker(state)["invalid_options"] == ["look"]
+
     def test_the_reserved_literal_is_admitted_and_not_counted(self, monkeypatch):
         db = _fake_db()
         svc, _ = _wire(monkeypatch, db, [
@@ -415,16 +465,18 @@ class TestContractText:
             return f.read()
 
     def _phrases(self):
-        import services.operator_queue_service as oqs
-        return (f"at most {oqs.OPERATOR_QUEUE_MAX_OPTIONS} options, "
-                f"each at most {oqs.OPERATOR_QUEUE_OPTION_MAX_CHARS} characters",
-                f"at most {oqs.OPERATOR_QUEUE_ASK_TITLE_MAX_CHARS}")
+        # The literal defaults: the text says "by default", and the refusal
+        # carries the limit in force, so this stays green on a re-tuned install.
+        (_, options, _), (_, chars, _), (_, title, _) = _DEFAULT_CAPS
+        return (f"by default at most {options} options, each at most {chars} characters",
+                f"by default at most {title}")
 
     def test_the_tool_description_quotes_the_caps_and_codes(self):
         text = self._read("src/mcp-server/src/tools/operator_queue.ts")
         options_phrase, title_phrase = self._phrases()
         assert options_phrase in text
         assert f"{title_phrase} (title_too_long)" in text
+        assert "a refusal names the limit in " in text  # the value in force rides on the refusal
         for code in ("too_many_options", "option_too_long", "title_too_long", "invalid_options"):
             assert code in text, code
 
