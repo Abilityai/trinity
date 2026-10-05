@@ -91,19 +91,8 @@ class TestOptionsCapViolation:
 
 
 class TestEnvCaps:
-    def _reload(self, monkeypatch, **env):
-        import importlib
-        import services.operator_queue_service as oqs
-        for k, v in env.items():
-            monkeypatch.setenv(k, v)
-        try:
-            importlib.reload(oqs)
-            return (oqs.OPERATOR_QUEUE_MAX_OPTIONS, oqs.OPERATOR_QUEUE_OPTION_MAX_CHARS,
-                    oqs.OPERATOR_QUEUE_ASK_TITLE_MAX_CHARS)
-        finally:
-            for k in env:
-                monkeypatch.delenv(k, raising=False)
-            importlib.reload(oqs)
+    """Through the loader the module constants use — never a module reload,
+    which would hand other suites a stale `OperatorQueueSyncService`."""
 
     def test_defaults_are_the_operators_ruling(self):
         import services.operator_queue_service as oqs
@@ -111,14 +100,16 @@ class TestEnvCaps:
                 oqs.OPERATOR_QUEUE_ASK_TITLE_MAX_CHARS) == (5, 60, 120)
 
     def test_a_mis_set_env_is_floored_so_a_skill_gate_can_still_ask(self, monkeypatch):
-        assert self._reload(monkeypatch, OPERATOR_QUEUE_MAX_OPTIONS="1",
-                            OPERATOR_QUEUE_OPTION_MAX_CHARS="3",
-                            OPERATOR_QUEUE_ASK_TITLE_MAX_CHARS="5") == (2, 16, 40)
+        from services.operator_queue_service import _floored_env_cap
+        monkeypatch.setenv("OPERATOR_QUEUE_MAX_OPTIONS", "1")
+        assert _floored_env_cap("OPERATOR_QUEUE_MAX_OPTIONS", 5, 2) == 2
 
-    def test_env_raises_the_caps(self, monkeypatch):
-        assert self._reload(monkeypatch, OPERATOR_QUEUE_MAX_OPTIONS="8",
-                            OPERATOR_QUEUE_OPTION_MAX_CHARS="80",
-                            OPERATOR_QUEUE_ASK_TITLE_MAX_CHARS="200") == (8, 80, 200)
+    def test_env_raises_the_cap(self, monkeypatch):
+        from services.operator_queue_service import _floored_env_cap
+        monkeypatch.setenv("OPERATOR_QUEUE_OPTION_MAX_CHARS", "80")
+        assert _floored_env_cap("OPERATOR_QUEUE_OPTION_MAX_CHARS", 60, 16) == 80
+        monkeypatch.delenv("OPERATOR_QUEUE_OPTION_MAX_CHARS")
+        assert _floored_env_cap("OPERATOR_QUEUE_OPTION_MAX_CHARS", 60, 16) == 60
 
 
 # ===========================================================================
@@ -252,3 +243,155 @@ class TestNativeRaise:
                                   raised_by="agent", channel="mcp")
         assert again["status"] == "replayed" and again["id"] == out["row"]["id"]
         assert "options" not in again["differs"] and "title" not in again["differs"]
+
+
+# ===========================================================================
+# 3. The queue-file ingest — held, the ids named, never a flood alert
+# ===========================================================================
+
+import asyncio  # noqa: E402
+import json  # noqa: E402
+from unittest.mock import AsyncMock, MagicMock  # noqa: E402
+
+
+def _fake_db(pending=0, rows=None):
+    db = MagicMock()
+    db.count_operator_queue_pending_for_agent.side_effect = (
+        lambda agent, item_type=None, exclude_request_id_prefixes=None:
+        0 if item_type == "queue_flood" else pending)
+    db.get_operator_queue_responded_for_agent.return_value = []
+    db.get_operator_queue_terminal_for_agent.return_value = []
+    db.get_operator_queue_sync_index_for_agent.return_value = {
+        "open": rows or [], "terminal": {}, "foreign": []}
+    db.set_operator_queue_sync_state.return_value = False
+    db.set_operator_queue_delivery_state.return_value = False
+    db.create_operator_queue_item_with_outcome.side_effect = (
+        lambda agent, item, **kw: (db.create_operator_queue_item(agent, item, **kw), True))
+    db.mark_operator_queue_unconfirmed.return_value = 0
+    db.refresh_operator_queue_last_confirmed.return_value = 0
+    db.get_setting_value.return_value = "24"
+    return db
+
+
+def _wire(monkeypatch, db, requests):
+    import services.operator_queue_service as oqs
+    from services.rate_limiter import RateLimitResult
+    monkeypatch.setattr(oqs, "db", db)
+    state = {"content": json.dumps({"requests": requests}), "writes": [], "rate": 0}
+    client = MagicMock()
+
+    async def _read(path, timeout=5.0):
+        return {"success": True, "content": state["content"]}
+
+    async def _write(path, content, **kw):
+        state["writes"].append(json.loads(content))
+        state["content"] = content
+        return {"success": True}
+
+    def _check(*a, **k):
+        state["rate"] += 1
+        return RateLimitResult(True, 10, 0, 60)
+
+    client.read_file = AsyncMock(side_effect=_read)
+    client.write_file = AsyncMock(side_effect=_write)
+    monkeypatch.setattr(oqs, "AgentClient", lambda name: client)
+    monkeypatch.setattr(oqs.rate_limiter, "check", _check)
+    oqs.reset_alert_budget_state()
+    return oqs.OperatorQueueSyncService(), state
+
+
+def _entry(rid, **over):
+    e = {"id": rid, "type": "approval", "status": "pending", "title": "Ship it?",
+         "question": "q", "options": ["approve", "reject"]}
+    e.update(over)
+    return e
+
+
+def _run(svc, cycles=1):
+    for _ in range(cycles):
+        asyncio.run(svc._sync_agent("agent-3243-file"))
+
+
+def _marker(state):
+    return json.loads(state["content"]).get("platform", {}).get("ingestion")
+
+
+def _created_ids(db):
+    return [c.args[1].get("id") for c in db.create_operator_queue_item.call_args_list]
+
+
+class TestFileHold:
+    def test_an_over_cap_entry_is_held_and_named_while_a_good_one_is_ingested(self, monkeypatch):
+        db = _fake_db()
+        svc, state = _wire(monkeypatch, db, [
+            _entry("too-many", options=list("abcdef")),
+            _entry("too-long", options=["x" * 61, "no"]),
+            _entry("lookalike", options=["approve", "(Something Else)"]),
+            _entry("long-title", type="question", options=None, title="t" * 121),
+            _entry("fine"),
+        ])
+        _run(svc)
+        assert _created_ids(db) == ["fine"]
+        marker = _marker(state)
+        assert marker["reason"] in ("invalid_options", "invalid_title")
+        assert marker["invalid_options"] == ["too-many", "too-long", "lookalike"]
+        assert marker["invalid_title"] == ["long-title"]
+        assert (marker["max_options"], marker["max_option_chars"], marker["max_title_chars"]) == (5, 60, 120)
+        assert state["rate"] == 2  # only the admitted entry spent tokens (agent + fleet)
+
+    def test_the_reserved_literal_is_admitted_and_not_counted(self, monkeypatch):
+        db = _fake_db()
+        svc, _ = _wire(monkeypatch, db, [
+            _entry("five-plus", options=list("abcde") + ["(something else)"])])
+        _run(svc)
+        assert _created_ids(db) == ["five-plus"]
+
+    def test_a_cap_hold_never_fires_the_flood_alert(self, monkeypatch):
+        db = _fake_db()
+        svc, _ = _wire(monkeypatch, db, [_entry(f"bad-{i}", options=list("abcdef")) for i in range(30)])
+        _run(svc, cycles=3)
+        assert not [i for i in _created_ids(db) if str(i).startswith("queue-flood-")]
+
+    def test_a_full_queue_keeps_its_reason_and_still_names_the_held_ids(self, monkeypatch):
+        import services.operator_queue_service as oqs
+        db = _fake_db(pending=oqs.OPERATOR_QUEUE_MAX_PENDING_PER_AGENT)
+        svc, state = _wire(monkeypatch, db, [_entry("bad", options=list("abcdef")), _entry("ok")])
+        _run(svc)
+        marker = _marker(state)
+        assert marker["reason"] == "queue_full" and marker["invalid_options"] == ["bad"]
+
+    def test_an_unchanged_hold_is_not_rewritten_and_a_fix_clears_it(self, monkeypatch):
+        db = _fake_db()
+        svc, state = _wire(monkeypatch, db, [_entry("bad", options=list("abcdef"))])
+        _run(svc, cycles=3)
+        assert len(state["writes"]) == 1
+        data = json.loads(state["content"])
+        data["requests"][0]["options"] = ["approve", "reject"]
+        state["content"] = json.dumps(data)
+        _run(svc)
+        assert _created_ids(db) == ["bad"]
+        assert _marker(state) is None
+
+    def test_a_fixed_entry_drops_its_id_while_the_queue_stays_full(self, monkeypatch):
+        import services.operator_queue_service as oqs
+        db = _fake_db(pending=oqs.OPERATOR_QUEUE_MAX_PENDING_PER_AGENT)
+        svc, state = _wire(monkeypatch, db, [_entry("bad", options=list("abcdef")), _entry("ok")])
+        _run(svc)
+        data = json.loads(state["content"])
+        data["requests"][0]["options"] = ["approve", "reject"]
+        state["content"] = json.dumps(data)
+        _run(svc)
+        marker = _marker(state)
+        assert marker["reason"] == "queue_full" and "invalid_options" not in marker
+
+    def test_an_ask_already_in_the_queue_is_never_re_judged(self, monkeypatch):
+        """A pending row ingested before the caps existed stays as it is: no
+        hold, no marker, no new create."""
+        row = {"id": "row-1", "request_id": "old", "status": "pending", "type": "approval",
+               "title": "t", "question": "q", "options": list("abcdefg"), "context": {},
+               "priority": "medium", "expires_at": None, "channel": "file"}
+        db = _fake_db(rows=[row])
+        svc, state = _wire(monkeypatch, db, [_entry("old", options=list("abcdefg"), title="t")])
+        _run(svc)
+        assert _created_ids(db) == []
+        assert _marker(state) is None
