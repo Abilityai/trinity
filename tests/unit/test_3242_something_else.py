@@ -266,6 +266,7 @@ class TestConsumers:
 
 _MIRRORS = {
     "src/mcp-server/src/types.ts": r'export const SOMETHING_ELSE = "([^"]*)";',
+    "src/frontend/src/utils/operatorQueue.js": r"export const SOMETHING_ELSE = '([^']*)'",
 }
 
 

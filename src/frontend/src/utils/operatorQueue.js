@@ -43,6 +43,50 @@ export function optionsOf(item) {
 }
 
 /**
+ * #3242: the ONE platform-reserved approval answer — "none of the offered
+ * options; the instruction is in `response_text`". Mirrors `SOMETHING_ELSE` in
+ * `src/backend/services/operator_queue_choices.py` and
+ * `src/mcp-server/src/types.ts` (parity-tested). Never shown raw to a person:
+ * see `decisionLabel`.
+ */
+export const SOMETHING_ELSE = '(something else)'
+export const SOMETHING_ELSE_LABEL = 'Something else'
+
+/** The ingestion clamp's placeholder (#1632) — a record, never a choice. */
+const OPTIONS_DROPPED_MARKER = '(options omitted: exceeded size cap)'
+
+/**
+ * The agent's own options as pickable chips: `optionsOf` minus the reserved
+ * literal (rendered once, by the surface, as its own chip) and the size-cap
+ * marker. `optionsOf` and `queueResponseKind` stay unfiltered — they must agree
+ * with the sink about whether an approval offered anything.
+ *
+ * @param {{options?: unknown}|undefined} item
+ * @returns {string[]}
+ */
+export function offeredChips(item) {
+  return optionsOf(item).filter((o) => o !== SOMETHING_ELSE && o !== OPTIONS_DROPPED_MARKER)
+}
+
+/** A recorded decision as a person reads it: the reserved value is "Something else". */
+export function decisionLabel(response) {
+  return response === SOMETHING_ELSE ? SOMETHING_ELSE_LABEL : response
+}
+
+/**
+ * Is this approval decided only by its options (a platform-minted gate)? The
+ * sink refuses the reserved answer there (`not_off_menu`), so no surface
+ * offers the chip. The Workspace projection says so as `decided_by_options`;
+ * the operator surfaces carry the id, whose `gate-` prefix is platform-reserved.
+ */
+export function decidedByOptions(item) {
+  if (!item || typeof item !== 'object') return false
+  if (item.decided_by_options === true) return true
+  const id = String(item.request_id || item.id || '').trim().toLowerCase()
+  return id.startsWith('gate-')
+}
+
+/**
  * Which controls an item gets — by TYPE, and total:
  *
  *   approval with usable options → 'approval'    (option buttons → note → Send)
@@ -107,6 +151,9 @@ export function buildQueueResponse({ kind, option, note = '', answer = '' } = {}
     case 'approval': {
       const opt = typeof option === 'string' ? option : option == null ? '' : String(option)
       if (!opt.length) return null
+      // #3242: the reserved answer needs the instruction — the agent cannot act
+      // on "none of these" alone.
+      if (opt === SOMETHING_ELSE && !(typeof note === 'string' && note.trim())) return null
       return queueResponseBody(opt, note)
     }
     case 'question': {
