@@ -1,6 +1,29 @@
 {
   "test_files": [
     {
+      "file": "unit/test_3246_platform_alert_sweep.py",
+      "feature": "#3246",
+      "added": "2026-10-05",
+      "categories": [
+        "backend",
+        "operator-queue",
+        "migrations",
+        "unit"
+      ],
+      "description": "#3246 C2: the upgrade sweep, driven as the registered SQLite migration (`platform_alert_subjects`) against the real schema.py operator_queue DDL with the two new columns and indexes stripped (a pre-upgrade install holding duplicates). Ordered columns → sweep → index: `subject` / `last_seen_at` added PRAGMA-guarded; the newest pending row per derived subject survives stamped (subject, last_seen_at, context.seen_count=1, expires_at only where NULL — opt-out kinds keep NULL) and the rest end as ONE batch (cancelled / platform / superseded / NULL email / one batch_id); known kinds without a derivable subject get a lifetime stamp only (never merged on a guess); person-ended rows inside the 7-day snooze window get subject only; agent-raised, gate- and external-prefix rows untouched; a second run changes nothing; the partial unique index exists only after the run, bites on a second pending row, and matches schema.py's DDL; both tracks registered after the #3130 flood sweep, tables.py declares columns and both indexes. No Docker."
+    },
+    {
+      "file": "unit/test_3246_platform_alerts_db.py",
+      "feature": "#3246",
+      "added": "2026-10-05",
+      "categories": [
+        "backend",
+        "operator-queue",
+        "unit"
+      ],
+      "description": "#3246 C3: the locked platform-alert accessors and the platform ending, on the unit island's real SQLite. `create_platform_item` is find → touch → count → insert in one locked transaction: two readings of a subject are one pending row updated in place (seen_count+1, rendered fields, last_seen_at), a bare repeat is `changed=False`, a budgeted kind is refused only when there is nothing to update, `subject=None` always inserts, and a person-ended row is never overwritten (the next reading opens a fresh row); the partial unique index refuses a second pending row. `mark_expired` keeps a row refreshed between its candidate select and its per-id CAS and still expires an overdue one. `end_items_by_platform` / `ask_service.clear_platform` end only CAS-won rows in the ent#611 vocabulary authored by the platform (no actor), refuse a reason outside `PLATFORM_ENDING_REASONS`, announce once per call, and hand observers exactly the rows won. No Docker."
+    },
+    {
       "file": "unit/test_3246_platform_alerts_leaf.py",
       "feature": "#3246",
       "added": "2026-10-05",
