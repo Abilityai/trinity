@@ -55,6 +55,8 @@ SENTINELS = (
     "Request IDs must be globally unique",
     "approval-{execution_id}",
     "expires_at",
+    # #3242: the platform-reserved off-menu approval answer.
+    "(something else)",
 )
 
 # The pre-#1402 wording that invited in-turn polling. Must not reappear.

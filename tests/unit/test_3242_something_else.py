@@ -258,3 +258,23 @@ class TestConsumers:
         msg = _framed_message({"id": "q1", "question": "Deploy?"}, "Approve", None)
         assert "carry out none of them" not in msg
         assert "answer: Approve" in msg
+
+
+# ---------------------------------------------------------------------------
+# One literal, mirrored (the vendored-mirror convention, Invariant #5 spirit)
+# ---------------------------------------------------------------------------
+
+_MIRRORS = {
+    "src/mcp-server/src/types.ts": r'export const SOMETHING_ELSE = "([^"]*)";',
+}
+
+
+@pytest.mark.parametrize("rel,pattern", sorted(_MIRRORS.items()))
+def test_the_literal_is_one_definition(rel, pattern):
+    """Source-text pin, deliberately: the mirrors' live consumers are the MCP
+    server and the SPA, which cannot import the backend leaf; their own suites
+    execute the constant. This pins that the spelling never forks."""
+    import re
+    m = re.search(pattern, (_REPO / rel).read_text(encoding="utf-8"))
+    assert m, f"{rel} lost its SOMETHING_ELSE mirror"
+    assert m.group(1) == SOMETHING_ELSE
