@@ -35,12 +35,7 @@ export const CLAUDE_CODE_DESCRIPTION_CAP = 2048;
  * Shrink-only: an entry may not grow, and an entry that fits the cap FAILS so it
  * is removed with the fix that shortened it. Never add one to make a new tool pass.
  */
-const PENDING: Record<string, [number, string]> = {
-  // abilityai/trinity-enterprise#568 rewrites this description (the delegation
-  // contract) and brings it, the dynamic chat_with_<agent> tools, fan_out and
-  // send_message under the cap; editing it here would collide with that change.
-  chat_with_agent: [2424, "abilityai/trinity-enterprise#568"],
-};
+const PENDING: Record<string, [number, string]> = {};
 
 describe("#3234 published tool descriptions fit Claude Code's description cap", () => {
   let backend: Server;
