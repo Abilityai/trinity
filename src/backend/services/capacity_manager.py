@@ -323,6 +323,24 @@ class CapacityManager:
                 if _usage and (_usage["terminal"] + _usage["active"]) >= _max_exec:
                     raise EphemeralBudgetExhausted(agent_name, "budget_exhausted")
 
+        # ---- #1766: a pull pilot's queued work is queue-ONLY ---------------
+        # The pilot flag used to be purely additive: the agent started pulling,
+        # but the backend kept admitting-and-pushing whenever a slot was free, so
+        # the two paths ran in parallel over one queue with two independent
+        # capacity counters. Skipping admission here makes the durable queue the
+        # single entry point for this agent, so its worker pool IS its capacity
+        # (#1081 Phase 5, pilot-scoped). `pull_owns_dispatch` covers the
+        # autonomous triggers and, since #3114, every interactive trigger but
+        # `chat`; it fails safe to push, so a non-pilot's path is byte-for-byte
+        # unchanged.
+        from services.pull_pilot import pull_owns_dispatch
+
+        pull_exclusive = (
+            overflow_policy == "queue_persistent"
+            and overflow_payload is not None
+            and pull_owns_dispatch(agent_name, overflow_payload.triggered_by)
+        )
+
         # ---- 0. Dispatch breaker gate (#526) ----------------------------
         # Checked FIRST so a raised CircuitOpen never reaches the overflow
         # branch → no backlog poisoning. Per-agent opt-in short-circuits the
@@ -343,7 +361,12 @@ class CapacityManager:
                 # breaker is open, admit the probe ONLY into a free slot and
                 # NEVER enqueue — extending the no-enqueue invariant (D2) across
                 # the half-open window.
-                if breaker.to_dict().get("state") == "open":
+                #
+                # #2514: except on a pull pilot, where the queue IS the real
+                # dispatch — the worker runs the row and the pull sink records
+                # the verdict. A slot here would push the probe past the pool
+                # the pilot's work must go through (#1982).
+                if breaker.to_dict().get("state") == "open" and not pull_exclusive:
                     probe_admitted = await self._slots.acquire_slot(
                         agent_name=agent_name,
                         execution_id=execution_id,
@@ -354,24 +377,6 @@ class CapacityManager:
                     if not probe_admitted:
                         raise CircuitOpen(agent_name, breaker.retry_after_seconds())
                     return AcquireResult(state="admitted", execution_id=execution_id)
-
-        # ---- #1766: a pull pilot's queued work is queue-ONLY ---------------
-        # The pilot flag used to be purely additive: the agent started pulling,
-        # but the backend kept admitting-and-pushing whenever a slot was free, so
-        # the two paths ran in parallel over one queue with two independent
-        # capacity counters. Skipping admission here makes the durable queue the
-        # single entry point for this agent, so its worker pool IS its capacity
-        # (#1081 Phase 5, pilot-scoped). `pull_owns_dispatch` covers the
-        # autonomous triggers and, since #3114, every interactive trigger but
-        # `chat`; it fails safe to push, so a non-pilot's path is byte-for-byte
-        # unchanged.
-        from services.pull_pilot import pull_owns_dispatch
-
-        pull_exclusive = (
-            overflow_policy == "queue_persistent"
-            and overflow_payload is not None
-            and pull_owns_dispatch(agent_name, overflow_payload.triggered_by)
-        )
 
         if pull_exclusive:
             # No ZADD: the row falls through to the persistent enqueue below and

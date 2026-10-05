@@ -184,8 +184,8 @@ async def run_one_cycle(client: httpx.AsyncClient, home: Path, run_once) -> Opti
 # trinity-enterprise#703 — the pull cycle (invariant G3: human and fleet work
 # reaches the agent within a bound). A second loop beside the push loop, gated
 # per cycle on the owner's `pull_sync_enabled`; the cycle itself is
-# `routers/git.py::_run_pull_once` (never under a running execution, never
-# discards local work).
+# `routers/git.py::_run_pull_once` (never starts under a running execution,
+# never resets over a registered one).
 # ---------------------------------------------------------------------------
 
 _last_pull_resolved: Optional[bool] = None
