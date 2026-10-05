@@ -5,14 +5,14 @@ session's next pulled ``/chat`` turn resumes. Nullable, no backfill.
 
 Mirrors the SQLite ``chat_session_claude_id`` migration.
 
-Revision ID: 0086_chat_session_claude_id
-Revises: 0085_ent720_email_identity
+Revision ID: 0089_chat_session_claude_id
+Revises: 0088_skill_gate_requests
 """
 from alembic import op
 
 
-revision = "0086_chat_session_claude_id"
-down_revision = "0085_ent720_email_identity"
+revision = "0089_chat_session_claude_id"
+down_revision = "0088_skill_gate_requests"
 branch_labels = None
 depends_on = None
 

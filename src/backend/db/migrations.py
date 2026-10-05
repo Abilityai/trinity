@@ -4921,7 +4921,7 @@ def _migrate_chat_session_claude_id(cursor, conn):
     `chat_sessions.cached_claude_session_id` holds the Claude session id the
     session's next pulled `/chat` turn resumes. Nullable, no backfill: a session
     without one starts a fresh conversation.
-    PostgreSQL half: Alembic `0086_chat_session_claude_id`.
+    PostgreSQL half: Alembic `0089_chat_session_claude_id`.
     """
     _safe_add_column(
         cursor,
