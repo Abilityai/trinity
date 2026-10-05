@@ -118,6 +118,26 @@ describe('a newly created canvas is followed (#3218)', () => {
   })
 })
 
+describe('a panel that mounts BEFORE its list loads (#3218 review C1)', () => {
+  // Agent Detail's Canvas tab mounts the panel with `canvases: []` and loads
+  // the real list afterwards. An empty list is not a baseline: the first real
+  // list is a first load, so the pinned-first order's first row opens.
+  it('empty mount, then a list with a pinned older row ahead of a newer one: the pinned row opens', async () => {
+    await mountPanel([])
+    await refresh([row('p', '2026-09-01T10:00:00Z', { pinned: true }), row('x', '2026-10-05T10:00:00Z')])
+    expect(open()).toBe('p')
+    expect(selected()).toEqual(['p'])
+  })
+
+  it('empty mount, then the list, then the list plus a new canvas: the new one is still followed', async () => {
+    await mountPanel([])
+    await refresh(BASE)
+    expect(open()).toBe('a')
+    await refresh([...BASE, row('new', '2026-10-05T10:00:00Z')])
+    expect(open()).toBe('new')
+  })
+})
+
 describe('the reader is never yanked mid-interaction (#3218)', () => {
   it('in manage mode the switch waits, and happens when manage ends', async () => {
     await mountPanel(BASE)
@@ -161,5 +181,22 @@ describe('the reader is never yanked mid-interaction (#3218)', () => {
     await wrapper.find('[data-testid="canvas-manage-toggle"]').trigger('click')
     await flushPromises()
     expect(open()).toBe('a')
+  })
+
+  it('a match the search selects while a switch is waiting cancels it (#3218 review I2)', async () => {
+    // More than six canvases, so the search box renders.
+    const many = ['a', 'b', 'c', 'd', 'e', 'f', 'g'].map((id, i) => row(id, `2026-09-2${i}T10:00:00Z`))
+    await mountPanel(many)
+    const search = wrapper.find('[data-testid="canvas-search"]')
+    await search.setValue('zz')
+    await flushPromises()
+    await refresh([...many, row('new', '2026-10-05T10:00:00Z')])
+    // Narrowing to one hit selects it (ent#553) — the reader found it by searching.
+    await search.setValue('canvas c')
+    await flushPromises()
+    expect(open()).toBe('c')
+    await search.setValue('')
+    await flushPromises()
+    expect(open()).toBe('c')
   })
 })

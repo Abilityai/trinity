@@ -562,7 +562,8 @@ async function select(id) {
   }
 }
 
-// #3218 — the ids of the last non-empty list (`null` before the first load),
+// #3218 — the ids of the last non-empty list (`null` before the first load
+// and after an empty list),
 // so a refresh can tell a canvas the agent just CREATED from one already there.
 let knownIds = null
 // A new canvas that arrived while the reader was mid-interaction (manage mode,
@@ -583,7 +584,11 @@ watch(
     if (!rows?.length) {
       selectedId.value = null
       detail.value = null
-      knownIds = new Set()
+      // An empty list is not a baseline (#3218 review C1): Agent Detail mounts
+      // the panel with `[]` before its list loads, and a `new Set()` here made
+      // every row of that first real list an "arrival" — opening the most
+      // recently updated instead of the pinned-first row. Back to "never loaded".
+      knownIds = null
       pendingFollow.value = null
       return
     }
@@ -619,7 +624,9 @@ watch(
   () => [visible.value, query.value],
   () => {
     const next = canvasAutoSelect(visible.value, selectedId.value, query.value)
-    if (next) select(next)
+    // A match the reader's search selected is the reader's pick: it cancels a
+    // follow still waiting, or clearing the query would move them off it.
+    if (next) pick(next)
   },
 )
 

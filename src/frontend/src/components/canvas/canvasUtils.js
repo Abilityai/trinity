@@ -301,11 +301,14 @@ export function canvasAutoSelect(visible, selectedId, query) {
  * one to follow, because the agent just created it for the reader.
  *
  * `knownIds` is the id set of the previous non-empty list, or `null` before
- * the first load (then nothing is "new" — the first load keeps selecting the
- * first row of the pinned-first order). A list sharing NO id with the previous
- * one is a different list, not an arrival — the panel is not keyed per agent,
- * so switching agents swaps the whole list under it, and that must still read
- * as a first load. Among several arrivals the most
+ * the first load and after an empty list (then nothing is "new" — the first
+ * load keeps selecting the first row of the pinned-first order). The panel
+ * never passes an empty Set: an empty list is not a baseline (#3218 review C1).
+ * A list sharing NO id with the previous one is a different list, not an
+ * arrival — the panel is not keyed per agent, so switching agents swaps the
+ * whole list under it, and that must still read as a first load. Known limit:
+ * an agent that deletes every old canvas and creates one in the same refresh
+ * reads the same way, so that refresh opens `rows[0]`. Among several arrivals the most
  * recently updated wins; a missing timestamp sorts last. The rule is "the id
  * that appeared", never `rows[0]`: a pinned canvas sorting ahead does not
  * steal the follow.

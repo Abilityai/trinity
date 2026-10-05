@@ -908,13 +908,16 @@ What it pinned, each now structural rather than per-case:
   of the open canvas re-reads it in place (ent#475); a deleted open canvas
   falls back to the new arrival if there is one, else the first row; a list
   sharing no id with the previous one (the panel is not keyed per agent, so
-  switching agents swaps the list under it) reads as a first load. A rewrite
+  switching agents swaps the list under it) reads as a first load, and so does
+  the first list after an empty one (Agent Detail mounts the panel with `[]`
+  before its list loads; an empty list is not a baseline). A rewrite
   of a *different*, existing canvas does **not** pull focus — deliberately, so
   an agent maintaining several canvases cannot keep moving the reader. While
   the reader is mid-interaction (manage mode, a search query, the share dialog)
   the switch is **deferred**, never forced: the arrival is remembered and
   followed when the interaction ends, dropped if the reader picks a canvas
-  meanwhile or the arrival is gone. Applies on every `CanvasPanel` mount
+  meanwhile (a match the search selects counts as a pick) or the arrival is
+  gone. Applies on every `CanvasPanel` mount
   (Agent Detail's Canvas tab, the Workspace rail, the voice column).
 - **The call columns are flex shares, not row percentages.** `<main>`
   `sm:flex-[2_1_0%]` and the voice canvas `sm:flex-[3_1_0%]` — the old
