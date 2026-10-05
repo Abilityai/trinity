@@ -1,6 +1,17 @@
 {
   "test_files": [
     {
+      "file": "unit/test_3246_platform_alert_surfaces.py",
+      "feature": "#3246",
+      "added": "2026-10-05",
+      "categories": [
+        "backend",
+        "operator-queue",
+        "unit"
+      ],
+      "description": "#3246 C8′: a row the platform ended reads `platform` on the Workspace projection (`client_portal/asks/service.py::_ending_of`), never a person's answer or a timeout; the canary L-03 orphan scan exempts the `_skills-sync` alarm host."
+    },
+    {
       "file": "unit/test_3246_platform_alert_emitters.py",
       "feature": "#3246",
       "added": "2026-10-05",
