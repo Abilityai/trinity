@@ -7,6 +7,15 @@
 // would close one.
 import { draftedLandingFor } from './portalDrafts'
 
+// ent#621: the key map is the single declaration of every Workspace chord, so
+// the two hotkey helpers below delegate to it rather than keeping a second
+// definition of "⌘J". That closes a cycle with `portalKeymap.js` (which reuses
+// `isMacLike` and `nextActiveIndex` from here) — benign, and it must STAY
+// benign: neither module may touch an import of the other at module-evaluation
+// time. Both init orders are exercised, by `workspaceKeymap.spec.js` (map
+// first) and `portalChatTabsAndTitles.spec.js` (utils first).
+import { resolveWorkspaceKey, findBinding, chordLabel } from './portalKeymap'
+
 // Deterministic per-agent color — used for the avatar tint and the small thread
 // color dots in the sidebar so a thread visually ties to its agent.
 export function agentColor(name) {
@@ -522,14 +531,16 @@ export function moreTabsLabel(n) {
   return `${n} more`
 }
 
-// --- New chat hotkey (ent#451) ----------------------------------------------
+// --- New chat hotkey (ent#451, now one entry in the ent#621 map) ------------
 // ⌘J on Mac, Ctrl+J elsewhere — ruled 2026-09-06 (⌘N is the browser's, ⌘⇧O
 // declined). Plain modifier only: Shift/Alt variants are someone else's.
+//
+// The predicate is kept (its callers and its truth table are the contract) but
+// the RULE now lives in `portalKeymap.js` with the other eight chords, so
+// "what ⌘J means" has one answer. The map adds the physical `KeyJ` arm, which
+// only widens the set: a layout whose `key` is not `j` now works too.
 export function isNewChatHotkey(e) {
-  if (!e || typeof e.key !== 'string') return false
-  if (e.key.toLowerCase() !== 'j') return false
-  if (e.shiftKey || e.altKey) return false
-  return !!(e.metaKey || e.ctrlKey) && !(e.metaKey && e.ctrlKey)
+  return resolveWorkspaceKey(e) === 'new-chat'
 }
 
 export function isMacLike(platform) {
@@ -564,7 +575,7 @@ export function titleGenerationNotice(health) {
 }
 
 export function newChatHotkeyLabel(platform) {
-  return isMacLike(platform) ? '⌘J' : 'Ctrl+J'
+  return chordLabel(findBinding('new-chat').chord, platform)
 }
 
 // #2101: bounded briefing hint grid. Order deterministically — a card with a
@@ -1315,11 +1326,17 @@ export function resolveComposerKey({
   // A faithful reproduction of Vue's `.exact`: any modifier falls through
   // unprevented and inserts a newline, exactly as today.
   const plainEnter = key === 'Enter' && !shiftKey && !ctrlKey && !metaKey && !altKey
+  // ent#621 (Decision 36): the popup owns BARE arrows only. Claiming `⌥↓` —
+  // and `preventDefault`ing it, which is what the caller does with `move-down`
+  // — was a handler claiming a chord it never declared, so the Workspace's
+  // switch-chat key died over an open @-popup. A modified arrow now falls
+  // through to `pass`, where the shell's declared binding can have it.
+  const bareArrow = !shiftKey && !ctrlKey && !metaKey && !altKey
 
   if (open) {
     if (key === 'Escape') return 'dismiss'
-    if (key === 'ArrowDown') return hasCandidates ? 'move-down' : 'close'
-    if (key === 'ArrowUp') return hasCandidates ? 'move-up' : 'close'
+    if (key === 'ArrowDown' && bareArrow) return hasCandidates ? 'move-down' : 'close'
+    if (key === 'ArrowUp' && bareArrow) return hasCandidates ? 'move-up' : 'close'
     if (key === 'Tab' && !shiftKey) return hasCandidates ? 'accept' : 'pass'
     if (plainEnter && hasCandidates && hasActive) return 'accept'
     if (CARET_KEYS.has(key)) return 'close'
@@ -1797,9 +1814,11 @@ export function feedbackAcknowledgement(captureFeedback) {
 // --- Agents at the centre (ent#523, landing rule replaced by ent#784) --------
 
 // Where opening an agent lands you. ONE rule, called by every door that has to
-// RESOLVE a landing (the sidebar/rail row via `landOnAgent`, and the `?agent=`
-// deep link via `resolveAgentLanding`). The gesture doors — New chat, the agent
-// picker, the switch-agent key — do not call this: they already mean "fresh".
+// RESOLVE a landing: the sidebar/rail row via `landOnAgent`, the `?agent=` deep
+// link via `resolveAgentLanding`, and — since ent#621 — the switch-agent KEYS,
+// which call `landOnAgent` with the `lastOpenSessionId` arm 2 reads. The gesture
+// doors still do not call this, because they already mean "fresh": New chat, the
+// agent picker, and ⌘J.
 //
 // ent#784 reverses ent#523's rule: the default is a NEW, empty chat
 // (`sessionId: null`), because most visits to an agent start new work and
