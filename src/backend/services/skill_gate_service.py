@@ -247,7 +247,7 @@ async def enforce(
         receipt = _raise_ask(agent_name, ask)
     except AskRejected as e:
         db.transition_gate_request(request_id, "refused", detail=e.code)
-        raise SkillGateRefused(e.status, e.code, e.message, **e.extra) from e
+        raise SkillGateRefused(e.status_code, e.code, e.message, **e.extra) from e
     except Exception as e:
         # Never leave a pending record with no ask behind it: it would count
         # against the caps forever and no ending would ever consume it.

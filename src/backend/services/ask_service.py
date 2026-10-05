@@ -448,8 +448,10 @@ def raise_ask(
        (#3247: `replaces` must name the agent's OWN pending ask — a row with
        `raised_by == 'agent'` under its name, checked on the column itself,
        never inferred — one uniform 422 `invalid_replaces` otherwise) and the
-       pending-proposal guard (T8: the same `proposal` already pending and
-       not replaced here → 409 `already_pending`), then the role (`to:`)
+       pending-proposal guard (T8: an AGENT raise whose `proposal` one of the
+       agent's own pending agent-raised asks already carries, not replaced
+       here → 409 `already_pending`; a gate raise is neither refused nor
+       counted), then the role (`to:`)
        resolved to a person;
     5. the create: replay, depth cap and insert in one per-agent serialized
        step (`queue_full` → 429). The depth cap counts the agent's own asks
@@ -493,8 +495,8 @@ def raise_ask(
     if norm["proposal"] is not None and predecessor is None:
         _refuse_unlinked_reask(agent_name, norm["proposal"], raised_by)
     target = _replace_target(agent_name, norm["replaces"])
-    if norm["proposal"] is not None:
-        _refuse_already_pending(agent_name, norm["proposal"], target, raised_by)
+    if raised_by == "agent" and norm["proposal"] is not None:
+        _refuse_already_pending(agent_name, norm["proposal"], target)
     if named:
         people, addressee, resolved = [named], named, True
     else:
@@ -903,12 +905,19 @@ def _replace_target(agent_name: str, request_id: Optional[str]) -> Optional[Dict
 
 
 def _refuse_already_pending(agent_name: str, proposal: Dict[str, Any],
-                            target: Optional[Dict[str, Any]], raised_by: str = "agent") -> None:
+                            target: Optional[Dict[str, Any]]) -> None:
     """T8 (#3247): the exact action is already being asked about. Refused unless
     this ask replaces THAT ask — so the pile-up the pending line warns about is
-    stopped even when the agent never reads the line. Same raiser only, like C6."""
+    stopped even when the agent never reads the line.
+
+    The AGENT's own asks only, on both sides: the caller runs this for an
+    agent-raised ask alone, and it compares against the pending asks the same
+    agent raised itself (`raised_by == 'agent'` on the column). A gate raise is
+    never refused by it and never counted by it — the gate deliberately raises
+    one approval per occurrence with the same proposal (trinity-enterprise#751)
+    — and neither is a platform row filed under the agent's name."""
     wanted = _canon(proposal)
-    for prior in db.list_pending_operator_queue_proposals(agent_name, _REASK_SCAN, raised_by=raised_by):
+    for prior in db.list_pending_operator_queue_proposals(agent_name, _REASK_SCAN, raised_by="agent"):
         if _canon(prior["proposal"]) != wanted:
             continue
         if target is not None and prior["id"] == target["id"]:

@@ -647,6 +647,24 @@ class TestAlreadyPending:
             resolved_to=None, proposal={"pay": 6, "to": "v"}, supersedes_expired=None)
         assert _raise(ask, self.AGENT, _body("t8-j", proposal={"pay": 6, "to": "v"}))["status"] == "created"
 
+    def test_a_gate_raise_is_neither_refused_nor_counted_by_the_guard(self, ask):
+        """F1: the gate raises one approval per occurrence with the SAME
+        proposal (trinity-enterprise#751); the guard is the agent's own."""
+        def _gate(rid):
+            return ask.svc.raise_ask(
+                self.AGENT, {"request_id": rid, "type": "approval", "title": "Run pay-invoice",
+                             "question": "?", "options": ["approve", "reject"],
+                             "proposal": {"skill": "pay-invoice", "args": "1"}},
+                raised_by="gate", channel="gate", addressee=OWNER)
+        assert _gate("gate-t8-k1")["status"] == "created"
+        assert _gate("gate-t8-k2")["status"] == "created"          # second gate raise: not refused
+        own = _raise(ask, self.AGENT, _body("t8-k3", proposal={"skill": "pay-invoice", "args": "1"}))
+        assert own["status"] == "created"                            # gate rows: not counted
+        with _Rejected(ask.svc, 409, "already_pending") as info:
+            _raise(ask, self.AGENT, _body("t8-k4", proposal={"skill": "pay-invoice", "args": "1"}))
+        assert info.value.extra == {"request_id": "t8-k3"}           # names the agent's own, never a gate's
+        assert _gate("gate-t8-k5")["status"] == "created"           # a pending agent ask never refuses a gate raise
+
 
 # ===========================================================================
 # 4. The pending line in the Execution Context (CP4, T4)
