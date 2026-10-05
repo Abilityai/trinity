@@ -107,7 +107,7 @@ _ALLOWED_CALLERS = {
         "spawn children and name them) but arrive sanitized and capped at five "
         "per alert — it is the VOLUME an agent cannot drive, which is what this "
         "exemption rests on (ent#434)",
-    ("services/operator_queue_service.py", "create_bounded_alert"):
+    ("services/operator_queue_service.py", "create_bounded_alert_outcome"):
         "the #1677 budget helper's own admit-path create (the seam itself)",
     ("services/operator_queue_service.py", "_maybe_emit_alert_budget_episode"):
         "the #1677 budget episode alert: cooldown-gated, bucketed reserved id",

@@ -269,6 +269,66 @@ class TestFloodAlertIsBoundedAndEdgeTriggered:
         assert _flood_alerts(db) == []
 
 
+class TestAFailedCreateDoesNotConsumeTheEpisode:
+    """Review I1: the episode is stamped before the create, so a create that
+    FAILS (a transient `database is locked` at the onset) must release it —
+    otherwise one failure silences the alarm until the condition clears, which
+    for a runaway agent is never. The cooldown stamp still spaces the retries."""
+
+    def _flaky(self, db, fail_times):
+        calls = {"n": 0}
+
+        def _create(agent, item, **kw):
+            if str(item.get("id", "")).startswith("queue-flood-"):
+                calls["n"] += 1
+                if fail_times is None or calls["n"] <= fail_times:
+                    raise RuntimeError("database is locked")
+            return None
+
+        db.create_operator_queue_item.side_effect = _create
+
+    def test_a_failed_first_create_is_retried_after_the_cooldown(self, monkeypatch):
+        clock = {"t": 1000.0}
+        monkeypatch.setattr(oqs.time, "monotonic", lambda: clock["t"])
+        db = _fake_db(pending=OPERATOR_QUEUE_MAX_PENDING_PER_AGENT)
+        self._flaky(db, fail_times=1)
+        svc, _ = _wire(monkeypatch, db, _file(_pending(3)))
+        for _ in range(20):
+            _run(svc)
+            clock["t"] += oqs.OPERATOR_QUEUE_FLOOD_ALERT_COOLDOWN_SECONDS + 1
+        attempts = _flood_alerts(db)
+        assert len(attempts) == 2  # the failed one, then exactly one success
+        # ...and the success consumed the episode: no further alert.
+
+    def test_continuous_failure_retries_at_most_once_per_cooldown_window(self, monkeypatch):
+        clock = {"t": 1000.0}
+        monkeypatch.setattr(oqs.time, "monotonic", lambda: clock["t"])
+        db = _fake_db(pending=OPERATOR_QUEUE_MAX_PENDING_PER_AGENT)
+        self._flaky(db, fail_times=None)
+        svc, _ = _wire(monkeypatch, db, _file(_pending(3)))
+        windows = 6
+        for _ in range(windows):
+            _run(svc, cycles=5)  # 5 sync cycles inside one window
+            clock["t"] += oqs.OPERATOR_QUEUE_FLOOD_ALERT_COOLDOWN_SECONDS + 1
+        assert len(_flood_alerts(db)) == windows  # retried every window, never more
+
+    def test_a_budget_refusal_consumes_the_episode(self, monkeypatch):
+        """At-budget is a deliberate refusal, not a failure: the agent already
+        has a full budget of pending flood alerts and the budget's own episode
+        alert covers it, so the flood emitter does not re-knock every window."""
+        clock = {"t": 1000.0}
+        monkeypatch.setattr(oqs.time, "monotonic", lambda: clock["t"])
+        db = _fake_db(pending=OPERATOR_QUEUE_MAX_PENDING_PER_AGENT,
+                      flood_pending=oqs.OPERATOR_ALERT_MAX_PENDING_PER_TYPE)
+        svc, _ = _wire(monkeypatch, db, _file(_pending(3)))
+        for _ in range(10):
+            _run(svc)
+            clock["t"] += oqs.OPERATOR_QUEUE_FLOOD_ALERT_COOLDOWN_SECONDS + 1
+        budget_reads = [c for c in db._counts if c["item_type"] == "queue_flood"]
+        assert len(budget_reads) == 1
+        assert _flood_alerts(db) == []
+
+
 # ---------------------------------------------------------------------------
 # AC 3 — a held file is told so
 # ---------------------------------------------------------------------------

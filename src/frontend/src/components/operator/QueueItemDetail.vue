@@ -21,7 +21,7 @@
                 class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium"
                 :class="typeBadge(item.type)"
               >
-                {{ item.type }}
+                {{ queueTypeLabel(item.type) }}
               </span>
               <span
                 class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium"
@@ -195,7 +195,7 @@ import { renderMarkdown } from '../../utils/markdown'
 import { useOperatorQueueStore } from '../../stores/operatorQueue'
 import { useAgentsStore } from '../../stores/agents'
 import { agentNameTooltip } from '../../utils/agentName'
-import { queueResponseKind } from '../../utils/operatorQueue'
+import { queueResponseKind, queueTypeLabel } from '../../utils/operatorQueue'
 
 const store = useOperatorQueueStore()
 const agentsStore = useAgentsStore()
@@ -248,7 +248,9 @@ function typeBadge(type) {
   const badges = {
     approval: 'bg-accent-purple-100 text-accent-purple-700 dark:bg-accent-purple-900/30 dark:text-accent-purple-400',
     question: 'bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400',
-    alert: 'bg-state-autonomous-100 text-state-autonomous-700 dark:bg-state-autonomous-900/30 dark:text-state-autonomous-400'
+    alert: 'bg-state-autonomous-100 text-state-autonomous-700 dark:bg-state-autonomous-900/30 dark:text-state-autonomous-400',
+    // #3130: the budgeted flood alarm is still an alert — same badge as the card.
+    queue_flood: 'bg-state-autonomous-100 text-state-autonomous-700 dark:bg-state-autonomous-900/30 dark:text-state-autonomous-400'
   }
   return badges[type] || ''
 }

@@ -942,7 +942,24 @@ def reset_alert_budget_state() -> None:
     _alert_budget_cooldown.clear()
 
 
+# `create_bounded_alert_outcome` results. Only `ALERT_CREATED` means a row was
+# written; the rest separate a deliberate REFUSAL (unregistered type, budget
+# full) from a FAILURE (count read or create raised) for a caller that must
+# treat them differently (#3130 review I1: the flood emitter retries a failure
+# but not a refusal).
+ALERT_CREATED = "created"
+ALERT_REFUSED_UNREGISTERED = "refused_unregistered"
+ALERT_REFUSED_AT_BUDGET = "refused_at_budget"
+ALERT_FAILED_COUNT = "failed_count"
+ALERT_FAILED_CREATE = "failed_create"
+
+
 async def create_bounded_alert(agent_name: str, item: dict) -> bool:
+    """#1677: the bool view of `create_bounded_alert_outcome` (see there)."""
+    return await create_bounded_alert_outcome(agent_name, item) == ALERT_CREATED
+
+
+async def create_bounded_alert_outcome(agent_name: str, item: dict) -> str:
     """#1677: the create seam for agent-INFLUENCEABLE platform alert emitters.
 
     Platform-only emitters (edge-triggered, idempotent-id, operator-cadence
@@ -965,6 +982,9 @@ async def create_bounded_alert(agent_name: str, item: dict) -> bool:
       * else                      → create; ``True`` on success, ERROR log +
         ``False`` on a create raise (NO episode alert).
 
+    Returns one of the ``ALERT_*`` outcome constants (the bullets above map
+    onto them in order); ``create_bounded_alert`` is the bool view.
+
     Callers gate every paired side-effect (e.g. the skill-not-found
     notification) on the returned bool, so a secondary surface can never
     outlive its queue item.
@@ -978,7 +998,7 @@ async def create_bounded_alert(agent_name: str, item: dict) -> bool:
             "(fail-closed; no item created)",
             agent_name, item_type, sorted(_BUDGETED_ALERT_TYPES),
         )
-        return False
+        return ALERT_REFUSED_UNREGISTERED
 
     try:
         pending = int(
@@ -991,7 +1011,7 @@ async def create_bounded_alert(agent_name: str, item: dict) -> bool:
             "rows remain the primary surface)",
             agent_name, item_type, e,
         )
-        return False
+        return ALERT_FAILED_COUNT
 
     if pending >= OPERATOR_ALERT_MAX_PENDING_PER_TYPE:
         context = item.get("context")
@@ -1013,7 +1033,7 @@ async def create_bounded_alert(agent_name: str, item: dict) -> bool:
                 "swallowed (the refusal itself stands)",
                 agent_name, item_type, e,
             )
-        return False
+        return ALERT_REFUSED_AT_BUDGET
 
     # NO `await` between the count read above and this create — the
     # check-then-act overshoot window stays cross-worker-only (bounded by the
@@ -1027,8 +1047,8 @@ async def create_bounded_alert(agent_name: str, item: dict) -> bool:
             "suppressed (fail-closed, NO episode alert)",
             agent_name, item_type, e,
         )
-        return False
-    return True
+        return ALERT_FAILED_CREATE
+    return ALERT_CREATED
 
 
 async def _maybe_emit_alert_budget_episode(
@@ -2202,8 +2222,18 @@ class OperatorQueueSyncService:
         agent can't pre-suppress it (C2); softened wording to avoid cry-wolf
         (C9). Never raises — an emit failure must not kill the sync.
 
-        The cooldown and the episode are stamped BEFORE the create, so a
-        persistently failing create backs off instead of retrying every 5s.
+        The cooldown and the episode are stamped BEFORE the create. Outcomes:
+          * created → the episode is consumed (one alert per episode);
+          * FAILED (count read or create raised) → the episode is RELEASED so
+            the alarm is retried, and the cooldown stamp spaces those retries
+            to at most one per window (review I1: holding the episode on a
+            failure silenced the alarm until the condition cleared — for a
+            runaway agent, never);
+          * REFUSED at budget → the episode is consumed. The agent already has
+            a full budget of pending flood alerts and the budget emits its own
+            `alert-budget-` episode alert, so re-knocking every window would
+            add nothing but budget-episode churn. Unregistered type is the same
+            (a code defect retrying cannot fix).
         """
         key = (agent_name, reason)
         if key in self._flood_episodes:
@@ -2250,12 +2280,15 @@ class OperatorQueueSyncService:
         }
 
         try:
-            created = await create_bounded_alert(agent_name, alert)
+            outcome = await create_bounded_alert_outcome(agent_name, alert)
         except Exception as e:  # the helper never raises; belt for the sync loop
             logger.error(f"Failed to emit operator-queue flood alert for {agent_name}: {e}")
+            outcome = ALERT_FAILED_CREATE
+        if outcome in (ALERT_FAILED_COUNT, ALERT_FAILED_CREATE):
+            self._flood_episodes.discard(key)  # retry next window (I1)
             return
-        if not created:
-            return
+        if outcome != ALERT_CREATED:
+            return  # refused: the episode stays consumed
 
         logger.warning(
             f"Operator-queue flood alert emitted for {agent_name} "
