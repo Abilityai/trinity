@@ -34,8 +34,8 @@ def _surfaces():
 
 @pytest.mark.parametrize("surface", ["platform_prompt", "meta_prompt", "system_agent_seed"])
 def test_old_taglines_absent(surface):
-    text = _surfaces()[surface]
-    assert [p for p in OLD_PHRASES if p in text] == []
+    text = _surfaces()[surface].lower()
+    assert [p for p in OLD_PHRASES if p.lower() in text] == []
 
 
 @pytest.mark.parametrize("surface", ["platform_prompt", "meta_prompt"])
