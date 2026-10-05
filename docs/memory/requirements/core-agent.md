@@ -1900,8 +1900,13 @@ bounding the table. OSS-core (Workspace rule above). Flow:
   key steps to its neighbour).
 - **AC-12 — the tips panel**: the open rail carries a small panel pinned to its
   bottom edge listing four headline chords (switch agent, switch chat, search,
-  new chat) and a button that opens the shortcuts dialog. Rows are derived from
-  the map (`KEY_TIPS` → `keyTipRows`), never typed. The collapsed strip carries
+  new chat) and a button that opens the shortcuts dialog. It is **two rows of
+  two** and nothing else — no heading line, no footer: the close and the
+  open-the-list controls stack beside the rows. A pair of chords prints its
+  modifiers once (`⌥↑↓`, `Alt+Shift+↑↓` — `keyHintCompact`), and when the rail
+  is dragged narrow a label shortens (full text on hover) while a key cap never
+  wraps and a row never becomes two. Rows are derived from the map (`KEY_TIPS`
+  → `keyTipRows`), never typed. The collapsed strip carries
   the same door as one icon button at its foot; the mobile sheet carries
   neither. The panel is dismissible, and the dismissal is remembered per
   browser (`localStorage['trinity-workspace-key-tips']`, a per-viewer

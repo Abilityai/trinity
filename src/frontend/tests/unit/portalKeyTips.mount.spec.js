@@ -3,7 +3,8 @@
  * ent#621 (follow-up) — the rail's shortcut tips panel, mounted.
  *
  * A small panel pinned to the bottom of the OPEN rail: four headline chords
- * and a button that opens the full shortcuts dialog. The collapsed strip
+ * packed as two rows of two, a button that opens the full shortcuts dialog and
+ * a close — all inside those two rows. The collapsed strip
  * carries the same door as one icon; the mobile sheet carries neither. It is
  * dismissible, and the rail only REPORTS the dismissal — the shell owns the
  * memory (`workspaceKeymap.mount.spec.js`).
@@ -51,6 +52,27 @@ describe('ent#621 (follow-up) — the tips panel in the open rail', () => {
     w.unmount()
   })
 
+  it('is two rows of two: agent over chat, search over new chat', () => {
+    // jsdom lays nothing out, so this pins the three things the packing rests
+    // on (the real geometry is checked in a browser): the list flows by COLUMN
+    // into two rows, a label may shorten but a key cap never wraps, and a
+    // shortened label is still readable on hover.
+    const w = mountRail()
+    const list = panel(w).find('ul')
+    expect(list.classes()).toEqual(expect.arrayContaining(['grid', 'grid-flow-col', 'grid-rows-2']))
+    const rows = list.findAll('li')
+    expect(rows.map((r) => r.attributes('data-ws-key-tip'))).toEqual(['agent', 'chat', 'search', 'new-chat'])
+    for (const row of rows) {
+      expect(row.find('kbd').classes()).toContain('whitespace-nowrap')
+      const label = row.find('[data-ws-key-tip-label]')
+      expect(label.classes()).toContain('truncate')
+      expect(row.attributes('title')).toContain(label.text())
+    }
+    // Nothing above or below the two rows: no heading line, no footer button.
+    expect(panel(w).find('h3').exists()).toBe(false)
+    w.unmount()
+  })
+
   it('sits AFTER the body, so it is the bottom of the rail and never over its content', () => {
     const w = mountRail()
     const body = w.find('[data-testid="portal-rail-body"]').element
@@ -63,7 +85,11 @@ describe('ent#621 (follow-up) — the tips panel in the open rail', () => {
 
   it('its button asks the shell for the full list', async () => {
     const w = mountRail()
-    await panel(w).find('[data-testid="ws-key-tips-all"]').trigger('click')
+    const all = panel(w).find('[data-testid="ws-key-tips-all"]')
+    // Icon-only to fit the two rows, so the name has to be in the label.
+    expect(all.attributes('aria-label')).toContain('All shortcuts')
+    expect(all.attributes('title')).toContain(keyHint('key-list', P))
+    await all.trigger('click')
     expect(w.emitted('open-keys')).toHaveLength(1)
     w.unmount()
   })

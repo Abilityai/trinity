@@ -532,6 +532,26 @@ export function keyHint(actions, platform, map = WORKSPACE_KEYMAP) {
   return bindingsFor(actions, map).map((c) => chordLabel(c, platform)).join(' / ')
 }
 
+/**
+ * The same hint, PACKED: chords that share every modifier and differ only in a
+ * one-glyph key print the modifiers once — `⌥↑↓` for `⌥↑ / ⌥↓`,
+ * `Alt+Shift+↑↓` for the Windows pair. For a place too small for the long form
+ * (the rail's two-row tips); anything that cannot be packed without losing
+ * something — different modifiers, a key that is a word — falls back to
+ * `keyHint`, so the packed form is never a guess.
+ */
+export function keyHintCompact(actions, platform, map = WORKSPACE_KEYMAP) {
+  const chords = bindingsFor(actions, map)
+  if (chords.length < 2) return keyHint(actions, platform, map)
+  const [first] = chords
+  const glyphs = chords.map((c) => keyGlyph(c.key))
+  const packable = glyphs.every((g) => g.length === 1) && chords.every((c) =>
+    !!c.alt === !!first.alt && !!c.shift === !!first.shift && !!c.primary === !!first.primary)
+  if (!packable) return keyHint(actions, platform, map)
+  // `chordLabel` owns the modifier spelling and order; hand it the packed key.
+  return chordLabel({ ...first, key: null }, platform) + glyphs.join('')
+}
+
 /** The same binding as `aria-keyshortcuts` — ARIA's spelling, space-separated. */
 export function keyShortcutsFor(actions, platform, map = WORKSPACE_KEYMAP) {
   return ariaKeyshortcuts(bindingsFor(actions, map), platform)
@@ -557,7 +577,10 @@ export function keyTipRows(platform, map = WORKSPACE_KEYMAP, tips = KEY_TIPS) {
   return (Array.isArray(tips) ? tips : []).filter(Boolean).map((t) => ({
     id: t.id,
     label: t.label,
-    keys: keyHint(t.actions, platform, map),
+    // Packed for the key cap (the panel is two rows of two); the long form is
+    // kept for the hover, where there is room to spell it out.
+    keys: keyHintCompact(t.actions, platform, map),
+    fullKeys: keyHint(t.actions, platform, map),
     ariaKeyshortcuts: keyShortcutsFor(t.actions, platform, map),
   })).filter((r) => r.keys)
 }

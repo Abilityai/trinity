@@ -163,7 +163,9 @@ that instance's field on the next tick. The field shows the chord in a
 **Tips panel.** `PortalKeyTips.vue` is pinned to the bottom of the OPEN rail
 (`PortalRail`'s `keyTips` prop; an icon button at the foot of the collapsed
 strip is the same door; the sheet has neither). Its rows are
-`keyTipRows(platform)` over `KEY_TIPS`, its button emits `open-keys`, and its
+`keyTipRows(platform)` over `KEY_TIPS`, laid out as two rows of two with the
+two controls stacked beside them (`keyHintCompact` packs a chord pair into one
+cap; labels truncate, caps never wrap). Its keyboard button emits `open-keys`, and its
 close emits `dismiss-key-tips`, which the shell persists with
 `saveKeyTipsDismissed` (`localStorage['trinity-workspace-key-tips']`).
 

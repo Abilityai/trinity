@@ -26,7 +26,7 @@ import {
   entryChords, findBinding, matchesChord, resolveWorkspaceKey, workspaceChord, keymapCollisions,
   keymapSuppressed, cycleIndex, nextAgent, recordLastOpen, nextRailTab,
   chordLabel, ariaKeyshortcuts, keyListRows,
-  KEY_TIPS, keyTipRows, keyHint, KEY_TIPS_STORAGE_KEY, loadKeyTipsDismissed, saveKeyTipsDismissed,
+  KEY_TIPS, keyTipRows, keyHint, keyHintCompact, KEY_TIPS_STORAGE_KEY, loadKeyTipsDismissed, saveKeyTipsDismissed,
 } from '../../src/components/portal/portalKeymap'
 import { isNewChatHotkey, newChatHotkeyLabel } from '../../src/components/portal/portalUtils'
 
@@ -421,11 +421,29 @@ describe('ent#621 — the search key and the tips panel (follow-up)', () => {
       for (const action of tip.actions) expect(findBinding(action), action).not.toBeNull()
     }
     const mac = keyTipRows('MacIntel')
-    expect(mac.map((r) => r.keys)).toEqual(['⌥↑ / ⌥↓', '⌥⇧↑ / ⌥⇧↓', '⌘/', '⌘J'])
-    expect(keyTipRows('Win32').map((r) => r.keys)).toEqual(['Alt+↑ / Alt+↓', 'Alt+Shift+↑ / Alt+Shift+↓', 'Ctrl+/', 'Ctrl+J'])
-    // DERIVED, not typed: the row is whatever `keyHint` says for its actions.
-    for (const [i, tip] of KEY_TIPS.entries()) expect(mac[i].keys).toBe(keyHint(tip.actions, 'MacIntel'))
+    // PACKED: the panel is two rows of two, so a pair of chords that differ
+    // only in their last key prints its modifiers once.
+    expect(mac.map((r) => r.keys)).toEqual(['⌥↑↓', '⌥⇧↑↓', '⌘/', '⌘J'])
+    expect(keyTipRows('Win32').map((r) => r.keys)).toEqual(['Alt+↑↓', 'Alt+Shift+↑↓', 'Ctrl+/', 'Ctrl+J'])
+    // DERIVED, not typed: the row is whatever the map says for its actions —
+    // packed for the cap, spelled out in full for the hover.
+    for (const [i, tip] of KEY_TIPS.entries()) {
+      expect(mac[i].keys).toBe(keyHintCompact(tip.actions, 'MacIntel'))
+      expect(mac[i].fullKeys).toBe(keyHint(tip.actions, 'MacIntel'))
+    }
     expect(mac.every((r) => r.label && r.ariaKeyshortcuts)).toBe(true)
+  })
+
+  it('packs a pair of chords only when nothing is lost by it', () => {
+    expect(keyHintCompact(['agent-prev', 'agent-next'], 'MacIntel')).toBe('⌥↑↓')
+    expect(keyHintCompact(['chat-prev', 'chat-next'], 'Linux x86_64')).toBe('Alt+Shift+↑↓')
+    // One chord is just that chord.
+    expect(keyHintCompact('search-focus', 'MacIntel')).toBe(keyHint('search-focus', 'MacIntel'))
+    // Different modifiers cannot share a prefix: spelled out, as `keyHint` does.
+    expect(keyHintCompact(['rail-toggle', 'rail-tab-next'], 'MacIntel')).toBe(keyHint(['rail-toggle', 'rail-tab-next'], 'MacIntel'))
+    // …and neither can a key that is a word rather than a glyph.
+    expect(keyHintCompact(['close-top', 'call-mute'], 'MacIntel')).toBe(keyHint(['close-top', 'call-mute'], 'MacIntel'))
+    expect(keyHintCompact(['no-such-action'], 'MacIntel')).toBe('')
   })
 
   it('a tip whose actions the map no longer binds is dropped, not shown keyless', () => {
