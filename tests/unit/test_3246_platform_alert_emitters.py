@@ -170,3 +170,49 @@ class TestSubscriptionHeadroom:
         asyncio.run(svc.SubscriptionRecoveryService()._evaluate_alerts(subs, results, 75))
         assert self._rows(db, a.subject_key(recovered)) == []
         assert len(self._rows(db, a.subject_key(unknown))) == 1
+
+
+class TestSkillsLegacyAdoption:
+    AGENT = "_skills-sync"
+
+    @pytest.fixture
+    def svc(self):
+        from services.skill_service import SkillService
+        return SkillService.__new__(SkillService)
+
+    @pytest.fixture
+    def url(self):
+        return f"https://github.com/acme/skills-{uuid.uuid4().hex[:6]}"
+
+    def _rows(self, db, svc, url):
+        subject = f"skills_legacy_adoption:{svc._adoption_alert_key(url)}"
+        return [r for r in _pending(db, self.AGENT) if r["subject"] == subject]
+
+    def test_repeated_syncs_and_a_failure_are_one_row(self, db, svc, url):
+        """#2744's guarantee on the real DB: no sync files a second row."""
+        for _ in range(3):
+            svc._record_adoption_failure(url, "already has sources", steady_state=True)
+        svc._record_adoption_failure(url, "adoption failed: boom")
+        rows = self._rows(db, svc, url)
+        assert len(rows) == 1
+        assert rows[0]["priority"] == "high" and "boom" in rows[0]["question"]
+
+    def test_removing_the_setting_ends_the_row_as_the_platform(self, db, svc, url):
+        svc._record_adoption_failure(url, "already has sources", steady_state=True)
+        [row] = self._rows(db, svc, url)
+        svc._reconcile_adoption_alerts(None)
+        assert self._rows(db, svc, url) == []
+        assert _ended(db, row)["disposed_by"] == "platform"
+
+    def test_a_changed_setting_ends_only_the_old_urls_row(self, db, svc, url):
+        new = url + "-new"
+        svc._record_adoption_failure(url, "already has sources", steady_state=True)
+        svc._record_adoption_failure(new, "already has sources", steady_state=True)
+        svc._reconcile_adoption_alerts(new)
+        assert self._rows(db, svc, url) == []
+        assert len(self._rows(db, svc, new)) == 1
+
+    def test_adoption_success_ends_the_row(self, db, svc, url):
+        svc._record_adoption_failure(url, "adoption failed: boom")
+        svc._clear_adoption_alert(url)
+        assert self._rows(db, svc, url) == []
