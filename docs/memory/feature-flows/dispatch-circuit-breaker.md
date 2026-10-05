@@ -86,6 +86,8 @@ CapacityManager.acquire (services/capacity_manager.py)
       slots full ─► raise CircuitOpen (NEVER enqueue). Guarantees the probe leads to
       a recorded dispatch instead of a verdict-less backlog row that stalls backoff
       (#526 F1). No-enqueue invariant now spans the half-open window too.
+      Pull pilot (pull_exclusive): the probe is ENQUEUED instead — the queue is
+      the pilot's real dispatch and the pull sink records the verdict (#2514).
    3. closed breaker: acquire_slot() (unchanged) ─► overflow policy
           │                                   (CircuitOpen raised BEFORE overflow → NO enqueue)
    routers/chat.py  : except CircuitOpen ─► mark pre-created /task row FAILED(circuit_open)
@@ -93,6 +95,8 @@ CapacityManager.acquire (services/capacity_manager.py)
    task_exec_service: except CircuitOpen ─► TaskExecutionResult(CIRCUIT_OPEN) + FAILED row
                       AUTH terminal  ─► DispatchBreaker.record_outcome(AUTH)  ┐
                       success terminal ─► record_outcome(None)                │
+   pull sink (apply_task_result, CAS-won): success ─► record_outcome(None);
+                      auth ─► record_outcome("auth"); other failures ─► nothing (#2514)
                                                                               ▼ on →open (caller backgrounds)
                       _spawn_bg(_fail_backlog_and_audit(agent)) =   # strong ref held → no GC mid-flight
                           db.fail_queued_for_agent(agent,"circuit_open")  → status FAILED
