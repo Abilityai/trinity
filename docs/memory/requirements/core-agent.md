@@ -1813,6 +1813,85 @@ bounding the table. OSS-core (Workspace rule above). Flow:
   source pin can execute it).
 - **Flow**: `docs/memory/feature-flows/workspace-chat-tabs-and-titles.md`
 
+### 5.21a Workspace key map (trinity-enterprise#621)
+
+- **Status**: ✅ Implemented (2026-10-05) · **ID**: `WORKSPACE_KEY_MAP`
+- **Description**: §5.21's ⌘J was the Workspace's only key and was matched
+  inline. This makes the keyboard a **declared map with one dispatcher**: nine
+  working chords for moving between agents and chats and for the rail, a
+  reserved chord for search, and the component-owned protocol keys (Esc and
+  friends) declared alongside them so collisions are visible across the whole
+  surface rather than within one owner's share.
+- **AC-1 — the keys**: `⌘J`/`Ctrl+J` new chat with this agent (§5.21,
+  unchanged); `⌥↓`/`⌥↑` next / previous **agent**; `⌥⇧↓`/`⌥⇧↑` next /
+  previous **chat with this agent**; `⌘.`/`Ctrl+.` show or hide the rail;
+  `⌥.` next rail tab; `⌘/`/`Ctrl+/` the keyboard-shortcuts list.
+- **AC-2 — one declaration**: every chord lives in
+  `src/frontend/src/components/portal/portalKeymap.js` (pure — no DOM, no
+  store), with its scope, its owner, and its label. `keymapCollisions(map,
+  platform)` must be **empty on mac and on Windows/Linux**; a key that exists
+  without a map entry, or a shell chord that shadows a protocol key, is the
+  defect this prevents.
+- **AC-3 — one dispatcher**: `Portal.vue::onGlobalKeydown` is the Workspace's
+  single `window` keydown listener, armed at mount above the bootstrap `await`
+  and removed on unmount. Its ladder: resolve → signed in → ⌘J's
+  leave-the-call ask → undispatched actions pass through → a focused
+  `<select>` keeps its native `Alt+↓` → suppression → `preventDefault` → act.
+- **AC-4 — every key works from the message field**: the conventional
+  "ignore an editable target" guard is deliberately **inverted**; the composer
+  is a textarea and the keys must work while typing. A nearer owner still wins
+  through `defaultPrevented` (the Esc protocol, the composer typeahead's bare
+  arrows, which claim bare arrows only).
+- **AC-5 — suppression**: anything modal (`[aria-modal="true"]`, with a
+  per-action exemption so `⌘/` can close its own dialog and the rail sheet
+  does not count as modal over the rail), the mobile drawer, and a live voice
+  call suppress the moving and rail keys **silently**; `⌘J` keeps its own ask
+  during a call, and `⌘/` stays available. A held key does not walk the list
+  (`e.repeat` resolves to nothing) and an IME composition is never a chord.
+- **AC-6 — non-US layouts**: a chord matches by `key` **or** by physical
+  `code`, so the US position works on a non-Latin layout; `Shift` is accepted
+  on a `key` match only, so DE's `Shift+7` → `/` and FR's shifted `.` reach
+  `⌘/` while macOS's `⌘?` stays the browser's Help search. Matching is
+  platform-free (`primary` = meta XOR ctrl everywhere); only labels take a
+  platform (`⌥↓` vs `Alt+↓`, and `Alt+ArrowDown` for `aria-keyshortcuts`).
+- **AC-7 — the walk follows the order the eye reads**: the sidebar roster is
+  ordered **once in the shell** and handed to every sidebar instance, so the
+  agent keys step through the list on screen rather than a second ordering. An
+  agent reached by key is shown rather than left behind "N more" (the block
+  expands), and the active row carries `aria-current`.
+- **AC-8 — switching agents returns you where you were**: the shell remembers,
+  per agent, the chat last open **in this Workspace session** (in memory; a
+  reload starts fresh) and each switch-agent press passes it to the one landing
+  rule, which honours it only while it still names a live, unarchived chat of
+  that agent. An unsent new chat records nothing, so its draft is reached
+  through the landing rule's own arms rather than a second rule. Every moving
+  key focuses the composer afterwards.
+- **AC-9 — discoverable**: `⌘/` opens a shortcuts dialog built **from the
+  map**, so a key cannot ship without a row (the reserved chord is excluded —
+  nothing binds it, and a dead row in a help dialog is worse than an
+  undocumented key). The sidebar footer offers the same dialog, and every
+  surface a key drives (agent rows, the rail expander and its tabs, chat tabs)
+  carries the chord in `title` and `aria-keyshortcuts`.
+- **AC-10 — reserved, not bound**: `⌘K`/`Ctrl+K` is declared and
+  **unhandled** — no `preventDefault`, no row in the list — so the browser's
+  own behaviour stands until the search surface ships.
+- **Not this slice**: a search/spotlight surface behind `⌘K`; remapping or
+  disabling the chords in settings (they are modifier chords; nothing conflicts
+  with typing); the mobile drawer's own Esc/focus-trap contract (#1923).
+- **OSS-core by decision**: inherits §5.21's ruling for the client-portal
+  surface — deliberately ungated, no `requires_entitlement`, logic in the OSS
+  tree. Recorded so it is never inferred from the mere fact that it merged.
+- **Tests**: `src/frontend/tests/unit/workspaceKeymap.spec.js` (pure map,
+  collisions, labels, `keyListRows`, the ⌘J equivalence),
+  `workspaceKeymap.dom.spec.js` (the modal probe),
+  `workspaceKeymap.mount.spec.js` (the shell: dispatch, the walk, the memory,
+  the bails and suppression), `portalChatCycle.mount.spec.js`,
+  `portalKeyList.mount.spec.js`, `portalKeyHints.mount.spec.js`,
+  `portalRosterRow.spec.js` (the bound and the handed-down order, mounted).
+- **Flow**: `docs/memory/feature-flows/workspace-chat-tabs-and-titles.md`
+  (→ The key map); the landing rule it calls is
+  `docs/memory/feature-flows/workspace-agents-at-the-centre.md`
+
 ### 5.22 Workspace work — the live execution card and the Work tab (trinity-enterprise#525, the visual half of ent#457)
 
 - **Status**: ✅ Implemented · **ID**: `WORKSPACE_WORK_TAB`

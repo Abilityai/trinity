@@ -2489,8 +2489,9 @@ const KEY_DISPATCH = Object.freeze({
 //   2. Signed in. The OTP form answers no keys.
 //   3. ⌘J keeps its place at the top AND its own "leave the call?" ask
 //      (ent#534/551) — the one key a call answers rather than swallows.
-//   4. An action nothing dispatches yet (the rail keys land in the next
-//      checkpoint) is left to the browser rather than silently eaten.
+//   4. An action with no entry in `KEY_DISPATCH` (a declared protocol key a
+//      component owns, a reserved chord) is left to the browser rather than
+//      silently eaten.
 //   5. A focused `<select>` owns Alt+↓ natively on Firefox/Windows — the one
 //      editable target the agent keys step aside for (the composer is a
 //      textarea and must keep working).
