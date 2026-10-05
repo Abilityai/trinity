@@ -289,6 +289,48 @@ describe('ent#621 — the last chat open with each agent', () => {
     expect(showing(w).session).toBe(null)
   })
 
+  it('a new chat started on the agent already on stage is what ⌥↑ comes back to', async () => {
+    // Review H1. ⌘J on the agent you are already in nulls `pendingSession`
+    // under an UNCHANGED agent — the same shape as a load-instruction clear —
+    // so the writer needs `startingNewChat` to tell the two apart. Without it
+    // the memory still names the chat ⌘J just left, and ⌥↑ reopens it.
+    const { w } = await boot('/workspace/c/s-old')
+    expect(showing(w).session).toBe('s-old')
+
+    await press(w, { key: 'j', meta: true })                 // ⌘J — a fresh chat with scout
+    expect(showing(w).agent).toBe('scout')
+    expect(showing(w).newChat).toBe(true)
+    expect(showing(w).session).toBe(null)
+
+    await press(w, { key: 'ArrowDown', alt: true })           // → sage
+    expect(showing(w).agent).toBe('sage')
+    await press(w, { key: 'ArrowUp', alt: true })             // ← scout
+    expect(showing(w).agent).toBe('scout')
+    expect(showing(w).newChat).toBe(true)                     // not 's-old' again
+    expect(showing(w).session).toBe(null)
+  })
+
+  it('a load-instruction clear under an unchanged agent is still ignored', async () => {
+    // The other half of H1: `startingNewChat` false means the null is an
+    // instruction, not an intent (`openAgentPage`, `openRoom` and the
+    // unreachable arm all clear it), and the chat the person was reading a
+    // moment ago must survive it. Written as the clear itself because every
+    // live door either leaves the stage or pushes a route that then lands a
+    // new chat — what is pinned here is the writer's rule.
+    const { w } = await boot('/workspace/c/s-old')
+    expect(showing(w).session).toBe('s-old')
+
+    w.vm.pendingSession = null                                // agent unchanged, no new-chat intent
+    await w.vm.$nextTick()
+    expect(w.vm.startingNewChat).toBe(false)
+
+    await press(w, { key: 'ArrowDown', alt: true })           // → sage
+    expect(showing(w).agent).toBe('sage')
+    await press(w, { key: 'ArrowUp', alt: true })             // ← scout
+    expect(showing(w).agent).toBe('scout')
+    expect(showing(w).session).toBe('s-old')
+  })
+
   it('a stale id is not honoured — the landing validates it', async () => {
     // The memory is in-session, so the only way to hold an id the list no longer
     // has is for the list to change under it. The rule lives in `agentLanding`

@@ -2346,13 +2346,26 @@ const lastOpen = new Map()
 // chat, or a fresh one. The rule is `recordLastOpen` (pure, ent#621 Decision 35);
 // this reads REFS rather than route computeds, because every writer here fires
 // before its own push has resolved.
+//
+// Review H1: "the agent changed" is not the only real null. ⌘J and the strip's
+// New chat tab (both `newChatWithAgent`) null `pendingSession` on the agent
+// ALREADY on stage, which is the commonest way to be sitting on an unsent chat
+// — and under the agent-only test that read as an instruction, so ⌥↑ came back
+// to the chat ⌘J had just left. `startingNewChat` is what separates the two: a
+// deliberate fresh chat sets it, while every load-instruction clear
+// (`openAgentPage`, `openRoom`, the unreachable arm, `openThread`) clears it,
+// so the ignore rule still holds for them.
 let lastOpenAgent = null
-watch([activeAgentName, pendingSession], ([agent, sid]) => {
+watch([activeAgentName, pendingSession, startingNewChat], ([agent, sid, fresh]) => {
   const onStage = !!agent && !activeRoomId.value && !unreachableAgent.value
   const keyChanged = agent !== lastOpenAgent
   lastOpenAgent = agent
   if (!onStage) return
-  recordLastOpen(lastOpen, { agentName: agent, sessionId: sid, keyChanged })
+  recordLastOpen(lastOpen, {
+    agentName: agent,
+    sessionId: sid,
+    keyChanged: keyChanged || (fresh && !sid),
+  })
 })
 
 // What assistive tech hears after a key move. The shell says it once; the band,
