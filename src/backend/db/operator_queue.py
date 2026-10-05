@@ -172,6 +172,9 @@ class OperatorQueueOperations:
             "resolved_to": json.loads(row["resolved_to"]) if row["resolved_to"] else None,
             "proposal": json.loads(row["proposal"]) if row["proposal"] else None,
             "supersedes_expired": row["supersedes_expired"],
+            # #3247 — the replace link, one uuid each way
+            "replaces": row["replaces"],
+            "replaced_by": row["replaced_by"],
         }
 
     # Columns selected for a full queue-item record, in the canonical order.
@@ -217,6 +220,8 @@ class OperatorQueueOperations:
         operator_queue.c.resolved_to,
         operator_queue.c.proposal,
         operator_queue.c.supersedes_expired,
+        operator_queue.c.replaces,  # #3247 — the replace link
+        operator_queue.c.replaced_by,
     )
 
     def create_item(

@@ -94,6 +94,7 @@ _MACHINE_ROW_FIELDS = (
     "divergence_acknowledged_at",
     "disposition", "disposed_at", "disposed_by", "disposition_reason", "batch_id",
     "raised_by", "channel", "to_role", "proposal", "supersedes_expired",
+    "replaces", "replaced_by",  # #3247 — uuids; the readback maps them to request_ids
     "aging", "aged_since",
 )
 

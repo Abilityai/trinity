@@ -3720,6 +3720,31 @@ def _migrate_operator_queue_ask_object(cursor, conn):
     conn.commit()
 
 
+def _migrate_operator_queue_replace(cursor, conn):
+    """#3247 — an agent replaces one of its OWN pending asks.
+
+    Two nullable TEXT link columns on `operator_queue`: `replaces` on the
+    successor (the predecessor row's uuid) and `replaced_by` on the predecessor
+    (the successor row's uuid). Both are stamped inside the one per-agent
+    locked transaction that ends the predecessor (`cancelled` /
+    `disposed_by='agent'` / `disposition_reason='replaced'`) and inserts the
+    successor, so each row is self-describing: a surface that holds only one
+    of the pair still knows the other.
+
+    No default and no backfill; nothing indexes them (nothing queries by them).
+    PostgreSQL twin: Alembic `0090_operator_queue_replace`.
+    """
+    for column in ("replaces", "replaced_by"):
+        _safe_add_column(
+            cursor,
+            "operator_queue",
+            column,
+            f"ALTER TABLE operator_queue ADD COLUMN {column} TEXT",
+            log_msg=f"Adding {column} to operator_queue for the replace link (#3247)",
+        )
+    conn.commit()
+
+
 def _migrate_channel_report_client(cursor, conn):
     """ent#457 review — WHICH client a portal channel context belongs to.
 
@@ -5337,4 +5362,5 @@ MIGRATIONS = [
     ("pull_sync", _migrate_pull_sync),
     ("skill_gate_requests_table", _migrate_skill_gate_requests_table),
     ("supersede_queue_flood_backlog", _migrate_supersede_queue_flood_backlog),
+    ("operator_queue_replace", _migrate_operator_queue_replace),
 ]

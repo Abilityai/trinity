@@ -1496,7 +1496,7 @@ operator_queue = Table(
     # ledger reads from `status`.
     Column("disposition", Text),         # answered|cancelled|expired|dismissed
     Column("disposed_at", Text),
-    Column("disposed_by", Text),         # person|timeout|platform (#3130: superseded flood alarms)
+    Column("disposed_by", Text),         # person|timeout|platform (#3130: superseded flood alarms)|agent (#3247: replaced by its own successor)
     Column("disposed_by_email", Text),   # NULL for timeout; withheld from agent principals
     Column("disposition_reason", Text),  # the operator's optional cancel reason
     Column("batch_id", Text),            # one uuid per bulk-cancel sweep
@@ -1508,6 +1508,10 @@ operator_queue = Table(
     Column("resolved_to", Text),         # JSON list of person refs
     Column("proposal", Text),            # JSON — the frozen action
     Column("supersedes_expired", Text),  # the predecessor row's uuid
+    # #3247: an agent replaced one of its OWN pending asks. Both stamped in the
+    # one locked transaction that ends the predecessor and inserts the successor.
+    Column("replaces", Text),            # on the successor: the predecessor row's uuid
+    Column("replaced_by", Text),         # on the predecessor: the successor row's uuid
 )
 
 skill_gate_requests = Table(

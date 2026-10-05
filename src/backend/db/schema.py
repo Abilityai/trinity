@@ -1744,6 +1744,8 @@ TABLES = {
             resolved_to TEXT,
             proposal TEXT,
             supersedes_expired TEXT,
+            replaces TEXT,
+            replaced_by TEXT,
             FOREIGN KEY (responded_by_id) REFERENCES users(id)
         )
     """,
