@@ -84,6 +84,14 @@ OPERATOR_QUEUE_TITLE_MAX = int(os.getenv("OPERATOR_QUEUE_TITLE_MAX", "300"))
 OPERATOR_QUEUE_QUESTION_MAX = int(os.getenv("OPERATOR_QUEUE_QUESTION_MAX", "4000"))
 OPERATOR_QUEUE_CONTEXT_MAX_BYTES = int(os.getenv("OPERATOR_QUEUE_CONTEXT_MAX_BYTES", "8192"))
 OPERATOR_QUEUE_OPTIONS_MAX_BYTES = int(os.getenv("OPERATOR_QUEUE_OPTIONS_MAX_BYTES", "4096"))
+# #3243: the authoring caps on an agent's ask, refused (never truncated) on the
+# native path and held on the queue-file path. Floored at load so a mis-set env
+# cannot refuse every skill-gate approval (two short options) or every title.
+OPERATOR_QUEUE_MAX_OPTIONS = max(2, int(os.getenv("OPERATOR_QUEUE_MAX_OPTIONS", "5")))
+OPERATOR_QUEUE_OPTION_MAX_CHARS = max(16, int(os.getenv("OPERATOR_QUEUE_OPTION_MAX_CHARS", "60")))
+OPERATOR_QUEUE_ASK_TITLE_MAX_CHARS = max(
+    40, int(os.getenv("OPERATOR_QUEUE_ASK_TITLE_MAX_CHARS", "120"))
+)
 # trinity-enterprise#611: the frozen action an agent-raised ask carries (the
 # values a decision would submit). Refused above this on the native path.
 OPERATOR_QUEUE_PROPOSAL_MAX_BYTES = int(os.getenv("OPERATOR_QUEUE_PROPOSAL_MAX_BYTES", "8192"))

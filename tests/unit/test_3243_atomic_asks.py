@@ -1,0 +1,254 @@
+"""Atomic asks: hard caps on an agent's ask (#3243).
+
+Agents wrote paragraph-length options, folded several decisions into one menu
+and wrote titles a person cannot read at a glance. The ask contract now caps:
+at most `OPERATOR_QUEUE_MAX_OPTIONS` options (the platform's reserved
+`(something else)` never counted), at most `OPERATOR_QUEUE_OPTION_MAX_CHARS`
+characters per option, and — for an agent's raise — a title of at most
+`OPERATOR_QUEUE_ASK_TITLE_MAX_CHARS`. An option that reads as the platform's
+chip ("Something else" in any case, parenthesised or not) is refused like the
+literal itself. Refused with a named code on the native path, never truncated.
+
+Part 1 — the shared predicate and the native raise (`ask_service.raise_ask`).
+Part 2 — the queue-file ingest hold.
+
+Related flow: docs/memory/feature-flows/operating-room.md (Raising an ask)
+Requirement: docs/memory/requirements/security.md §26 (operator queue)
+"""
+from __future__ import annotations
+
+import os
+import sys
+
+import pytest
+
+pytest.importorskip("sqlalchemy")
+
+os.environ.setdefault("REDIS_URL", "redis://u:p@localhost:6379")
+os.environ.setdefault("SECRET_KEY", "test-secret")
+
+_BACKEND = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "src", "backend"))
+if _BACKEND not in sys.path:
+    sys.path.insert(0, _BACKEND)
+
+pytestmark = pytest.mark.unit
+
+OWNER = "owner-3243@example.com"
+
+
+# ===========================================================================
+# 1. The predicate — one rule both creation paths call
+# ===========================================================================
+
+class TestOptionsCapViolation:
+    @staticmethod
+    def check(options, max_options=5, max_chars=60):
+        from services.operator_queue_choices import options_cap_violation
+        return options_cap_violation(options, max_options=max_options, max_chars=max_chars)
+
+    def test_five_options_pass_and_six_are_too_many(self):
+        assert self.check(["a", "b", "c", "d", "e"]) is None
+        assert self.check(["a", "b", "c", "d", "e", "f"]) == (
+            "too_many_options", {"limit": 5, "count": 6})
+
+    def test_the_reserved_literal_is_never_counted(self):
+        from services.operator_queue_choices import SOMETHING_ELSE
+        assert self.check(["a", "b", "c", "d", "e", SOMETHING_ELSE]) is None
+
+    def test_sixty_characters_pass_and_sixty_one_are_too_long(self):
+        assert self.check(["x" * 60, "ok"]) is None
+        assert self.check(["ok", "x" * 61]) == (
+            "option_too_long", {"limit": 60, "index": 1, "length": 61})
+
+    def test_an_astral_character_counts_as_one(self):
+        assert self.check(["\U0001F600" * 60]) is None
+
+    def test_count_is_checked_before_length(self):
+        assert self.check(["x" * 99] * 6)[0] == "too_many_options"
+
+    def test_a_mixed_list_is_counted(self):
+        assert self.check([1, 2, 3, 4, 5, "six"])[0] == "too_many_options"
+
+    @pytest.mark.parametrize("lookalike", [
+        "Something else", "something else", "SOMETHING ELSE", "  something else  ",
+        "(Something Else)", "( something else )", "something  else",
+    ])
+    def test_an_option_that_reads_as_the_chip_is_refused(self, lookalike):
+        assert self.check(["approve", lookalike]) == ("invalid_options", {"index": 1})
+
+    @pytest.mark.parametrize("fine", ["Something else entirely", "else", "Do something"])
+    def test_an_option_that_merely_mentions_it_is_fine(self, fine):
+        assert self.check(["approve", fine]) is None
+
+    def test_not_a_list_is_not_this_rules_question(self):
+        assert self.check(None) is None and self.check("a,b") is None
+
+    def test_title_cap(self):
+        from services.operator_queue_choices import title_cap_violation
+        assert title_cap_violation("t" * 120, max_chars=120) is None
+        assert title_cap_violation("t" * 121, max_chars=120) == (
+            "title_too_long", {"limit": 120, "length": 121})
+
+
+class TestEnvCaps:
+    def _reload(self, monkeypatch, **env):
+        import importlib
+        import services.operator_queue_service as oqs
+        for k, v in env.items():
+            monkeypatch.setenv(k, v)
+        try:
+            importlib.reload(oqs)
+            return (oqs.OPERATOR_QUEUE_MAX_OPTIONS, oqs.OPERATOR_QUEUE_OPTION_MAX_CHARS,
+                    oqs.OPERATOR_QUEUE_ASK_TITLE_MAX_CHARS)
+        finally:
+            for k in env:
+                monkeypatch.delenv(k, raising=False)
+            importlib.reload(oqs)
+
+    def test_defaults_are_the_operators_ruling(self):
+        import services.operator_queue_service as oqs
+        assert (oqs.OPERATOR_QUEUE_MAX_OPTIONS, oqs.OPERATOR_QUEUE_OPTION_MAX_CHARS,
+                oqs.OPERATOR_QUEUE_ASK_TITLE_MAX_CHARS) == (5, 60, 120)
+
+    def test_a_mis_set_env_is_floored_so_a_skill_gate_can_still_ask(self, monkeypatch):
+        assert self._reload(monkeypatch, OPERATOR_QUEUE_MAX_OPTIONS="1",
+                            OPERATOR_QUEUE_OPTION_MAX_CHARS="3",
+                            OPERATOR_QUEUE_ASK_TITLE_MAX_CHARS="5") == (2, 16, 40)
+
+    def test_env_raises_the_caps(self, monkeypatch):
+        assert self._reload(monkeypatch, OPERATOR_QUEUE_MAX_OPTIONS="8",
+                            OPERATOR_QUEUE_OPTION_MAX_CHARS="80",
+                            OPERATOR_QUEUE_ASK_TITLE_MAX_CHARS="200") == (8, 80, 200)
+
+
+# ===========================================================================
+# 2. The native raise
+# ===========================================================================
+
+@pytest.fixture
+def real_db():
+    from database import db as real
+    return real
+
+
+@pytest.fixture
+def ask(real_db, monkeypatch):
+    """The real sink over the real SQLite, the world around it stubbed (the
+    ent#611 suite's harness, trimmed): audit, broadcast, owner, workspace
+    thread, resume opt-in, and a rate limiter that records every spend."""
+    from types import SimpleNamespace
+    import services.ask_service as svc
+    import services.operator_queue_service as oqs
+    from services import assignment_provider
+    from services.rate_limiter import RateLimitResult
+
+    state = {"spent": 0}
+
+    class _Audit:
+        async def log(self, **kw):
+            return "evt"
+
+    class _WS:
+        async def broadcast(self, message):
+            pass
+
+    def _check(*a, **k):
+        state["spent"] += 1
+        return RateLimitResult(True, 10, 0, 60)
+
+    monkeypatch.setattr(svc, "platform_audit_service", _Audit())
+    monkeypatch.setattr(svc, "_websocket_manager", _WS())
+    monkeypatch.setattr(svc, "_owner_email", lambda agent: OWNER)
+    monkeypatch.setattr(oqs, "_workspace_attachment", lambda agent, email, **_: (f"thread-{email}", False))
+    monkeypatch.setattr(real_db, "get_operator_resume_enabled", lambda agent: False, raising=False)
+    monkeypatch.setattr(oqs.rate_limiter, "check", _check)
+    assignment_provider.clear_provider()
+    yield SimpleNamespace(svc=svc, state=state, db=real_db)
+    assignment_provider.clear_provider()
+
+
+def _body(request_id, **over):
+    b = {"request_id": request_id, "type": "approval", "title": "Pay invoice",
+         "question": "Release 500 USDC to the vendor?", "options": ["approve", "reject"],
+         "proposal": {"pay": 500}}
+    b.update(over)
+    return b
+
+
+def _refused(ask, agent, body, *, raised_by="agent"):
+    with pytest.raises(ask.svc.AskRejected) as info:
+        ask.svc.raise_ask(agent, body, raised_by=raised_by,
+                          channel="gate" if raised_by == "gate" else "mcp")
+    e = info.value
+    return e.status_code, e.code, e.extra, e.message
+
+
+class TestNativeRaise:
+    AGENT = "agent-3243-native"
+
+    def test_six_options_are_refused_by_name_and_spend_no_rate_token(self, ask):
+        status, code, extra, message = _refused(
+            ask, self.AGENT, _body("n-many", options=list("abcdef")))
+        assert (status, code, extra) == (422, "too_many_options", {"limit": 5, "count": 6})
+        assert "split" in message.lower() and "Do not retry unchanged" in message
+        assert ask.state["spent"] == 0
+        assert ask.db.get_operator_queue_item_for_agent_by_request_id(self.AGENT, "n-many") is None
+
+    def test_an_option_over_sixty_characters_is_refused_by_name(self, ask):
+        long = "approve — the receptionist sends it with a disclosure and CCs you"
+        assert len(long) > 60
+        status, code, extra, message = _refused(
+            ask, self.AGENT, _body("n-long", options=[long, "reject"]))
+        assert (status, code, extra) == (
+            422, "option_too_long", {"limit": 60, "index": 0, "length": len(long)})
+        # Never echoes the agent's text back.
+        assert long not in message and "proposal" in message
+
+    @pytest.mark.parametrize("lookalike", ["Something else", "(SOMETHING ELSE)", " something else "])
+    def test_a_lookalike_of_the_chip_is_refused_like_the_literal(self, ask, lookalike):
+        status, code, extra, _ = _refused(
+            ask, self.AGENT, _body("n-look", options=["approve", lookalike]))
+        assert (status, code, extra) == (422, "invalid_options", {"index": 1})
+
+    @pytest.mark.parametrize("kind", ["approval", "question", "alert"])
+    def test_a_title_over_120_is_refused_for_every_type(self, ask, kind):
+        over = {"type": kind, "title": "t" * 121}
+        if kind != "approval":
+            over["options"] = None
+        status, code, extra, message = _refused(ask, self.AGENT, _body(f"n-title-{kind}", **over))
+        assert (status, code, extra) == (422, "title_too_long", {"limit": 120, "length": 121})
+        assert "question" in message
+        assert ask.state["spent"] == 0
+
+    def test_an_ask_at_the_caps_is_raised(self, ask):
+        receipt = ask.svc.raise_ask(
+            self.AGENT, _body("n-ok", title="t" * 120, options=["x" * 60] + list("abcd")),
+            raised_by="agent", channel="mcp")
+        assert receipt["status"] == "created"
+
+    def test_a_gate_raise_passes_and_its_title_is_not_capped(self, ask):
+        receipt = ask.svc.raise_ask(
+            "agent-3243-gate", _body("gate-3243-a", title="g" * 200, options=["Approve", "Reject"]),
+            raised_by="gate", channel="gate")
+        assert receipt["status"] == "created"
+
+    def test_a_gate_raise_is_still_held_to_the_option_caps(self, ask):
+        status, code, _, _ = _refused(
+            ask, "agent-3243-gate", _body("gate-3243-b", options=list("abcdef")), raised_by="gate")
+        assert (status, code) == (422, "too_many_options")
+
+    def test_a_retry_of_an_ask_raised_before_the_caps_replays(self, ask, real_db):
+        """An over-cap ask already stored (raised before the caps existed) gets
+        its first receipt back on retry, never a refusal it did not earn."""
+        agent, rid = "agent-3243-replay", "n-pre-cap"
+        out = real_db.create_native_operator_queue_item(
+            agent, {"id": rid, "type": "approval", "priority": "high", "title": "T" * 200,
+                    "question": "q", "options": list("abcdefg"), "context": {},
+                    "expires_at": None},
+            max_pending=25, channel="mcp", raised_by="agent", to_role="primary",
+            resolved_to=[OWNER], proposal={"pay": 500}, supersedes_expired=None)
+        assert out["outcome"] == "created"
+        again = ask.svc.raise_ask(agent, _body(rid, title="T" * 200, options=list("abcdefg")),
+                                  raised_by="agent", channel="mcp")
+        assert again["status"] == "replayed" and again["id"] == out["row"]["id"]
+        assert "options" not in again["differs"] and "title" not in again["differs"]
