@@ -62,6 +62,8 @@ You can collaborate with other agents using the Trinity MCP tools:
 **Note**: You can only communicate with agents you have been granted permission to access.
 Use `list_agents` to discover your available collaborators.
 
+__DELEGATION_CONTRACT__
+
 ### Sharing Files with Users
 
 When the user asks for a file (image, PDF, document, generated asset) or when your answer is best delivered as a file instead of inline text — but see **Publishing Reports** below first: rows-and-columns results belong in a report, which the user can already export to Excel or PDF, and which works even when file sharing is off:
@@ -266,6 +268,28 @@ The `execution_id` is in the **Execution Context** block below. The platform sto
 PLATFORM_INSTRUCTIONS = PLATFORM_INSTRUCTIONS.replace(
     "__REPORT_PAYLOAD_MAX__", f"{REPORT_PAYLOAD_MAX_BYTES // (1024 * 1024)} MB"
 )
+# The delegation contract (trinity-enterprise#568, epic ent#565 "duplicate-safe
+# delegation — silence is not failure"): what a dispatch receipt means and what
+# to do instead of re-sending. In the 2026-09-08 cascade every duplicate was an
+# agent re-sending after "could not confirm delivery". ONE text, byte-identical
+# here and in src/mcp-server/src/delegation_contract.ts, which the
+# `chat_with_agent` / `chat_with_<agent>` descriptions carry verbatim — the copy
+# an external MCP client, or an agent at PromptTier.MINIMAL, reads.
+# tests/unit/test_ent568_delegation_contract.py fails on a one-byte drift, and on
+# any tool, argument or status it names that the platform does not produce.
+# Tool names are bare: the same words must work inside a tool description and
+# survive the Codex prefix strip (#1187). Keep it short — it also has to fit
+# inside Claude Code's 2,048-char cap on an MCP tool description.
+DELEGATION_CONTRACT = """\
+**The delegation contract: a receipt means the work is running. Never re-send on silence.**
+- A `chat_with_*` or `fan_out` call answers with the reply or with a receipt: an `execution_id` (a `fan_out_id` for a batch) in place of the reply, whatever its status (`accepted`, `queued`, `queued_timeout`, `fan_out_timeout`). The work arrived and is queued, running or done, even if your call timed out.
+- Never re-send because a call timed out or its delivery could not be confirmed. An exact repeat is normally answered with the original; a reworded one can run the work twice.
+- Read the result with `get_execution_result(agent_name, execution_id)` (`get_fan_out_result` for a batch); `running` is not stuck. To finish later, call `set_reminder` with a message naming the `execution_id`, then end your turn. A receipt is not a result: never report the work as done.
+- An error without an `execution_id` is not proof of failure. Look for your exact message in `list_recent_executions(agent_name)`: one match is your receipt; otherwise re-send it word for word, same options. `agent_busy` means nothing was dispatched: retry after `retry_after_seconds`.
+- `pending_approval`: nothing ran. Do not retry or route it through another agent — the outcome will be sent to you. On `retryable: false`, do what its `message` says.
+- For long work use `parallel=true, async=true`: the receipt comes back at once, and the run's end fires the target's `agent.task.completed` / `agent.task.failed`. A `subscribe_to_event` subscription to those wakes you for every run of that agent, so match the `execution_id`."""
+PLATFORM_INSTRUCTIONS = PLATFORM_INSTRUCTIONS.replace("__DELEGATION_CONTRACT__", DELEGATION_CONTRACT)
+
 # The canvas ceilings the same way (ent#536): four numbers the platform already
 # owns, none of them typed twice.
 for _marker, _value in (
@@ -298,7 +322,7 @@ _SECTION_DELIMITER = "\n\n### "
 # real home is the corresponding MCP tool description — the "single source of
 # truth" rule. Dropping them is inert until _MINIMAL_PREFIXES is non-empty.
 _MINIMAL_DROP_SECTIONS = frozenset({
-    "Agent Collaboration",              # → list_agents / chat_with_agent descriptions
+    "Agent Collaboration",              # → list_agents / chat_with_agent descriptions (which carry the ent#568 delegation contract verbatim)
     "Sharing Files with Users",         # → share_file description
     "Publishing Reports",               # → report description (+ #1535 display_hint enum)
     "Your Canvas",                      # → set_canvas description (ent#536 kinds + payloads, ent#537 layouts + kit)
@@ -409,7 +433,8 @@ _CODEX_MCP_ORIENTATION = (
     "by the bare names documented below — `list_agents`, `chat_with_agent`, "
     "`share_file`, `report`, `list_reports`, `get_report`, `set_canvas`, "
     "`patch_canvas`, `get_canvas`, `write_user_memory`, "
-    "`set_reminder`, `run_agent_loop` — "
+    "`set_reminder`, `run_agent_loop`, `fan_out`, `get_execution_result`, "
+    "`get_fan_out_result`, `list_recent_executions`, `subscribe_to_event` — "
     "exactly as your client "
     "auto-discovers them. Do not add any vendor-specific tool-name prefix."
     "\n\n---\n\n"

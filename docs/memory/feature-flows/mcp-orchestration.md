@@ -489,9 +489,12 @@ chat_with_agent({
 //   "status": "accepted",
 //   "execution_id": "abc123xyz",
 //   "agent_name": "worker-1",
-//   "message": "Task accepted. Poll GET /api/agents/{name}/executions/{execution_id} for results.",
+//   "message": "Accepted: the task is running on 'worker-1'. Do not re-send: read the outcome with get_execution_result(agent_name=\"worker-1\", execution_id=\"abc123xyz\").",
 //   "async_mode": true
 // }
+// The backend's own receipt says "Poll GET /api/agents/{name}/executions/{execution_id}" —
+// right for a REST caller, impossible for an MCP one — so `runAgentChat` rewrites the
+// `message` of an `accepted`/`queued` receipt (ent#568); every other field is untouched.
 ```
 
 **When `async: true` (with `parallel: true`)**:
@@ -612,7 +615,7 @@ default 25000, under the gateway ceiling) and answers with a receipt:
 ```jsonc
 { "status": "queued_timeout", "agent": "bdr-agent",
   "execution_id": "fZv-iXtUXSolY1wzPO7T6w",
-  "message": "… Poll get_execution_result(execution_id) instead of retrying …" }
+  "message": "… Do not re-send: read the outcome with get_execution_result(agent_name=\"bdr-agent\", execution_id=\"fZv-…\"). A timeout is not a failure (#914)." }
 ```
 
 **#914 covered `/chat` only.** `parallel=true, async=false` dispatches through
@@ -646,6 +649,40 @@ deduplicated server-side and answers with the original `execution_id`; a
 **reworded** one derives a different idempotency key and dispatches a second
 execution. That asymmetry is why the opaque error was dangerous — it invited the
 rewrite.
+
+#### The delegation contract — one text on every surface (ent#568)
+
+The receipts above only help a caller who knows what they mean. The rule is now
+**one text** (`src/delegation_contract.ts`), byte-identical to
+`DELEGATION_CONTRACT` in the platform prompt's §Agent Collaboration
+(`tests/unit/test_ent568_delegation_contract.py` parses the TS array):
+
+- **Where it is read.** The platform prompt (every agent, every turn), the
+  `chat_with_agent` description and every dynamic `chat_with_<agent>` tool
+  (verbatim — the only copy an external MCP client sees), and `fan_out` /
+  `send_message`, which repeat its rule sentence (`DELEGATION_RULE`) and point at it.
+- **What it says.** A receipt means the work arrived; never re-send because a
+  call timed out or could not be confirmed; read with `get_execution_result` /
+  `get_fan_out_result` or `set_reminder` and end the turn; an error without an
+  `execution_id` is checked in `list_recent_executions` before a word-for-word
+  re-send; `agent_busy` means nothing was dispatched; `pending_approval` is not
+  retried; `parallel=true, async=true` for long work, whose end fires
+  `agent.task.*` for a subscriber (a sequential `/chat` turn fires none).
+- **The 2,048-char cap.** Claude Code cuts every MCP tool description at
+  `CLAUDE_CODE_MAX_MCP_DESCRIPTION_LENGTH` (default 2,048). The pre-ent#568
+  `chat_with_agent` description was 2,424 chars, so its last paragraph — the
+  `list_recent_executions` advice and "prefer `parallel=true, async=true`" —
+  never reached a model. It is now a lead, one line of modes and the contract
+  (~1.9 KB); per-mode detail moved into the `parallel` / `async` /
+  `timeout_seconds` parameter descriptions, which are not cut.
+  `src/delegation-contract.test.ts` reads every carrying description back through
+  a real `tools/list` and pins it under the cap.
+- **The receipt itself.** Every receipt the MCP server writes ends with
+  `readNotResend(agent, execution_id)` — "Do not re-send: read the outcome with
+  `get_execution_result(agent_name=…, execution_id=…)`". `chat()` now reuses
+  `queuedTimeoutReceipt` (it had its own copy of the string), and the
+  "concurrent-duplicate guard will kill mid-execution" claim is gone: no such
+  guard exists.
 
 **Backend counterpart (#2661):** a failed/cancelled/timed-out sync `/task` now
 releases its idempotency claim (`_map_task_failure`). It previously left the

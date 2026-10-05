@@ -1118,10 +1118,11 @@ schedules:
   longer than the MCP client's request timeout (~30-60s observed),
   the tool call returns the generic `fetch failed` — but the request
   was successfully queued on Trinity and the agent IS running it.
-  Naive retry then queues duplicates that Trinity's
-  concurrent-duplicate guard kills mid-execution, burning compute and
-  agent time. This change is the MCP-client-surface fix for #408 /
-  #428's long-running dispatch family.
+  Naive retry then queues a second execution of the same work,
+  burning compute and agent time. (Earlier text here blamed a
+  "concurrent-duplicate guard" that kills the duplicate mid-execution;
+  no such guard exists — see §37.5.) This change is the
+  MCP-client-surface fix for #408 / #428's long-running dispatch family.
 - **Approach**: an MCP-server-side timeout (~25s, under the typical
   gateway ceiling) aborts the backend `fetch` early. The MCP server
   then queries `GET /api/agents/{name}/executions` for a recent
@@ -1345,6 +1346,64 @@ schedules:
   and is lost on backend restart; `error_code` exists only on push results;
   the in-process waiter registry makes the 5s DB poll the wake path on
   multi-worker deployments.
+
+### 37.5 The Delegation Contract, Taught Where Callers Read (abilityai/trinity-enterprise#568)
+- **Status**: 🚧 In Progress
+- **Implements**: abilityai/trinity-enterprise#568 (epic abilityai/trinity-enterprise#565,
+  "duplicate-safe delegation — silence is not failure")
+- **Description**: §37.1–37.4 put a receipt on every dispatch route, but
+  nothing told the caller what a receipt means. In the 2026-09-08 cascade
+  every duplicate dispatch was a re-send by an agent that read "could not
+  confirm delivery" as "not delivered". The contract is now taught where a
+  caller actually reads: the platform prompt (every agent, every turn, no
+  image rebuild), the dispatch tool descriptions (every MCP client, including
+  those that never see the prompt) and the receipt `message` itself (the
+  moment the re-send decision is made). Instructions are not the enforcement
+  — the dedupe and budget siblings in the epic are.
+- **Requirements**:
+  - **One text.** `DELEGATION_CONTRACT` is byte-identical in
+    `services/platform_prompt_service.py` (spliced into §Agent Collaboration)
+    and `src/mcp-server/src/delegation_contract.ts`; a unit test parses the
+    TypeScript array and fails on any drift.
+  - **What it says.** A `chat_with_*` / `fan_out` receipt (`execution_id` or
+    `fan_out_id`, whatever its status: `accepted`, `queued`, `queued_timeout`,
+    `fan_out_timeout`) means the work arrived and is queued, running or done.
+    Never re-send because a call timed out or its delivery could not be
+    confirmed. Read with `get_execution_result` / `get_fan_out_result`; to
+    finish later, `set_reminder` naming the `execution_id` and end the turn;
+    never report delegated work as done from a receipt. An error without an
+    `execution_id` is checked against `list_recent_executions` before a
+    word-for-word re-send. `agent_busy` is the "nothing dispatched" case.
+    `pending_approval` (ent#751): nothing ran, do not retry or route it through
+    another agent. A `retryable: false` result: do what its `message` says.
+    Long work: `parallel=true, async=true`; that run's end fires the target's
+    `agent.task.*`, which wakes only a subscriber.
+  - **Truthful today.** It names no status a dispatch route does not emit (no
+    `replayed` until ent#566 ships one) and promises the `agent.task.*` wake
+    only for a parallel run — a sequential `/chat` emits none.
+  - **Where it appears.** In full: `chat_with_agent` and every dynamic
+    `chat_with_<agent>` tool (#846). `fan_out` and `send_message` carry the
+    rule sentence and point at it. Tool names are bare (runtime-neutral,
+    #1187). It adds no `###` section; §Agent Collaboration stays shorter than
+    §Operator Communication and stays droppable at `PromptTier.MINIMAL`, where
+    the tool description carries the same text.
+  - **Fits the client.** Claude Code shows the model only the first 2,048
+    characters of an MCP tool description (`CLAUDE_CODE_MAX_MCP_DESCRIPTION_LENGTH`).
+    The pre-#568 `chat_with_agent` description was 2,424 characters, so its
+    async and `list_recent_executions` advice never reached a model. Every
+    description that carries the contract is pinned under the cap on the text
+    the server publishes, and mode details moved into parameter descriptions,
+    which are not cut.
+  - **Receipt text.** Every receipt the MCP server writes ends with the same
+    "do not re-send: read the outcome with `get_execution_result(agent_name=…,
+    execution_id=…)`". The backend's async receipt still tells a REST caller to
+    poll `GET /api/agents/{name}/executions/{id}`; the MCP layer rewrites that
+    line for MCP callers.
+- **Out of scope**: enforcement (ent#566 intent dedupe, ent#567 one retry
+  layer + chain budget), `send_message`'s caller-declared key (ent#665), the
+  typed outcome (ent#569), the unforwarded `chat_with_agent` `execution_id`
+  (#3232), the system-scoped gate-outcome gap (#3233), and the trinity-pm
+  canon pointer (AC6, post-merge).
 
 ## 38. Sequential Agent Loops (#740)
 
