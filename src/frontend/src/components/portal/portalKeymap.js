@@ -310,10 +310,12 @@ export function keymapCollisions(map = WORKSPACE_KEYMAP) {
  * dialog leaves nothing.
  *
  * Per-action exemptions are the CALLER's: it passes `hasModalOpen`'s `ignore`
- * so rail keys do not see the rail's own sheet and ⌘/ can close its own list.
+ * so rail keys do not see the rail's own sheet and ⌘/ can close its own list,
+ * and `railAvailable` for the two entries marked `needsRail`.
  */
 export function keymapSuppressed({
   action, modalOpen = false, drawerOpen = false, callActive = false, defaultPrevented = false,
+  railAvailable = true,
 } = {}, map = WORKSPACE_KEYMAP) {
   const entry = findBinding(action, map)
   // Not ours to dispatch → suppressed, which fails closed for an action id
@@ -323,6 +325,11 @@ export function keymapSuppressed({
   // typeahead's bare arrows): yielding is the protocol.
   if (defaultPrevented) return true
   if (modalOpen || drawerOpen) return true
+  // A rail key on a page with no rail is suppressed rather than dispatched to a
+  // no-op: the difference is `preventDefault`. An action the shell will not
+  // perform must leave the chord to the browser, or `⌘.` silently eats
+  // Safari's Stop on every page that has no rail.
+  if (entry.needsRail && !railAvailable) return true
   return !!(callActive && entry.callSuppressed)
 }
 
@@ -460,4 +467,38 @@ export function keyListRows(map = WORKSPACE_KEYMAP, platform, { railAvailable = 
       note: notes.join(' ') || null,
     }
   })
+}
+
+/**
+ * The platform string the LABELS read.
+ *
+ * One reader, because a tooltip that says `Ctrl+.` while the key list says
+ * `⌘.` is worse than no tooltip: five components asking `navigator` their own
+ * way is five chances to disagree about the same keyboard.
+ */
+export function hostPlatform(nav = typeof navigator !== 'undefined' ? navigator : null) {
+  return (nav && (nav.platform || nav.userAgent)) || ''
+}
+
+const bindingsFor = (actions, map) =>
+  (Array.isArray(actions) ? actions : [actions])
+    .map((a) => findBinding(a, map))
+    .filter(Boolean)
+    .flatMap(entryChords)
+
+/**
+ * What a tooltip says for an action (or a pair of them): `⌥↑ / ⌥↓`.
+ *
+ * Every visible key hint in the Workspace comes through here, so a chord that
+ * changes in the map changes on the control the same commit — a hand-typed
+ * glyph is a second declaration, and the one that goes stale is always the one
+ * nobody is testing.
+ */
+export function keyHint(actions, platform, map = WORKSPACE_KEYMAP) {
+  return bindingsFor(actions, map).map((c) => chordLabel(c, platform)).join(' / ')
+}
+
+/** The same binding as `aria-keyshortcuts` — ARIA's spelling, space-separated. */
+export function keyShortcutsFor(actions, platform, map = WORKSPACE_KEYMAP) {
+  return ariaKeyshortcuts(bindingsFor(actions, map), platform)
 }

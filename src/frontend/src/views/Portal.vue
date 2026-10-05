@@ -142,6 +142,7 @@
           @open-agent="openAgentPage"
           @open-thread="openThread"
           @open-projects="openProjects(null)"
+          @open-keys="keyListOpen = true"
           @toggle-star="toggleStar"
           @sign-out="onSignOut"
         />
@@ -190,6 +191,7 @@
             @open-thread="(t) => { mobileNav = false; openThread(t) }"
             @open-inbox="mobileNav = false"
             @open-projects="openProjects(null)"
+            @open-keys="() => { mobileNav = false; keyListOpen = true }"
             @toggle-star="toggleStar"
             @sign-out="onSignOut"
           />
@@ -839,6 +841,15 @@
          unmount it mid-sentence. -->
     <p class="sr-only" aria-live="polite" data-testid="ws-key-announce">{{ keyAnnouncement }}</p>
 
+    <!-- ent#621: `⌘/`. ALWAYS mounted and v-model driven — a `v-if` toggle
+         unmounts past `BaseModal`'s close branch and focus never comes back to
+         the message field. Rows come from the map, never from this template. -->
+    <PortalKeyList
+      v-model="keyListOpen"
+      :rows="keyListRowsNow"
+      :platform="keyPlatform"
+    />
+
     <!-- ent#361: picking who is in a chat is an explicit act now -->
     <PortalAgentPicker
       v-if="pickerOpen"
@@ -891,6 +902,7 @@ import { useColumnResize, RAIL_COLLAPSED } from '@/composables/useColumnResize'
 import { useContainerWidth } from '@/composables/useContainerWidth'
 import PortalSkeleton from '@/components/portal/PortalSkeleton.vue'
 import PortalThemeSwitch from '@/components/portal/PortalThemeSwitch.vue'
+import PortalKeyList from '@/components/portal/PortalKeyList.vue'
 import PortalRail from '@/components/portal/PortalRail.vue'
 import PortalRailPlaceholder from '@/components/portal/PortalRailPlaceholder.vue'
 import PortalRailStrip from '@/components/portal/PortalRailStrip.vue'
@@ -909,6 +921,7 @@ import {
   railSizedOpen,
   railParticipantsFor,
   railVisibleFor,
+  activeTabFor,
   saveRailState,
   visibleTabs,
   infoSignalFrom,
@@ -935,6 +948,7 @@ import {
 // owns the one listener and the dispatch table (T3).
 import {
   resolveWorkspaceKey, keymapSuppressed, hasModalOpen, nextAgent, recordLastOpen,
+  nextRailTab, keyListRows, hostPlatform, WORKSPACE_KEYMAP,
 } from '@/components/portal/portalKeymap'
 // ent#557: the tab title's unread half. The router owns the label; this pushes
 // the count. See `utils/tabTitle.js` for why neither writes `document.title`.
@@ -2374,6 +2388,70 @@ function stepChat(delta) {
   conversationRef.value?.cycleChat?.(delta)
 }
 
+// Which FORM the rail keys act on right now — the column at and above `sm`,
+// the bottom sheet below it — or null when they have nothing to act on at all:
+// the agent page and Projects have no rail, and during a call its column is the
+// voice canvas. `null` is what makes the key leave the chord to the BROWSER
+// (`keymapSuppressed`'s `railAvailable`) rather than claim it for a no-op.
+function railKeyForm() {
+  const narrow = !isWideViewport(typeof window !== 'undefined' ? window : null)
+  if (narrow) return railVisible.value && railTabs.value.length ? 'sheet' : null
+  return railHasColumn.value ? 'column' : null
+}
+const railKeysAvailable = () => railKeyForm() !== null
+
+// ⌘. — exactly what the expand/collapse button does, in whichever form the
+// viewport is showing. Nothing new is stored: the remembered tab and the
+// remembered width come back with it, because they are the button's memory too
+// (T5). A phone's sheet never persists `open`.
+function toggleRail() {
+  const form = railKeyForm()
+  if (!form) return
+  const open = form === 'sheet' ? !railSheetOpen.value : !railState.value.open
+  if (form === 'sheet') railSheetOpen.value = open
+  else setRailOpen(open)
+  // Reopening says which tab came back — the part a person cannot predict from
+  // the key itself.
+  announceKey(open ? `${railTabLabel(railState.value.tab)} — rail open` : 'Rail closed')
+}
+
+// ⌥. — the next tab the rail is SHOWING. A closed rail opens on its remembered
+// tab first (one press to see it, a second to move on), and the walk is over
+// `railTabs` — the tabs this session may see — never the registry, so a
+// door-failed tab stays as unreachable by key as it is by click (Decision 25).
+function stepRailTab() {
+  const form = railKeyForm()
+  if (!form) return
+  const showing = form === 'sheet' ? railSheetOpen.value : railState.value.open
+  if (!showing) {
+    const tab = activeTabFor(railState.value, railTabs.value)
+    if (!tab) return
+    setRailTab(tab)
+    if (form === 'sheet') railSheetOpen.value = true
+    else setRailOpen(true)
+    announceKey(`${railTabLabel(tab)} — rail open`)
+    return
+  }
+  const next = nextRailTab(railTabs.value, railState.value.tab)
+  if (!next) return
+  setRailTab(next)
+  announceKey(railTabLabel(next))
+}
+
+const railTabLabel = (id) => (railTabs.value.find((t) => t.id === id) || {}).label || 'Rail'
+
+// ⌘/ — the key list. It toggles rather than only opening, because the chord
+// that showed you the list is the chord your hand is already on; `key-list` is
+// the one action allowed to see through its own dialog (`MODAL_IGNORE`).
+const keyListOpen = ref(false)
+const keyPlatform = hostPlatform()
+// Rendered FROM the map, with the live answer to "is there a rail on this
+// page" — a rail row that silently disappears where there is no rail is the
+// row a person retries forever.
+const keyListRowsNow = computed(() => keyListRows(WORKSPACE_KEYMAP, keyPlatform, {
+  railAvailable: Boolean(railVisible.value && railTabs.value.length),
+}))
+
 // Which overlay a given key is allowed to see THROUGH. Per action, never
 // blanket: a sheet the rail keys may act inside must still stop the agent keys
 // from moving the stage behind it (Decision 28).
@@ -2396,6 +2474,9 @@ const KEY_DISPATCH = Object.freeze({
   'agent-prev': () => stepAgent(-1),
   'chat-next': () => stepChat(1),
   'chat-prev': () => stepChat(-1),
+  'rail-toggle': toggleRail,
+  'rail-tab-next': stepRailTab,
+  'key-list': () => { keyListOpen.value = !keyListOpen.value },
 })
 
 // ent#621 — the ONE listener, and the whole ladder. Armed at mount, above
@@ -2437,6 +2518,7 @@ function onGlobalKeydown(e) {
     drawerOpen: mobileNav.value,
     callActive: voiceCall.value.active,
     defaultPrevented: e.defaultPrevented,
+    railAvailable: railKeysAvailable(),
   })) return
   e.preventDefault()
   run()

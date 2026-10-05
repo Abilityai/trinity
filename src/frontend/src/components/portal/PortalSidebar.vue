@@ -95,7 +95,8 @@
           class="w-full flex items-center gap-2.5 rounded-lg px-2 py-2 transition hover:bg-gray-50 dark:hover:bg-gray-800"
           :class="a.name === activeAgentName ? ROW_ACTIVE : ''"
           :aria-current="a.name === activeAgentName ? 'true' : undefined"
-          :title="agentRowTitle(a)"
+          :title="`${agentRowTitle(a)} · ${AGENT_KEY_HINT} switch agent`"
+          :aria-keyshortcuts="AGENT_KEY_SHORTCUTS"
           @click="onAgentClick(a.name)"
         >
           <PortalAvatar :name="a.name" :avatar-url="a.avatar_url" :size="26" />
@@ -320,9 +321,23 @@
         <div class="text-xs" :class="META_INK">{{ isPlatformSession ? 'Signed in to Trinity' : 'Signed in' }}</div>
         <div class="text-sm truncate" :title="clientEmail">{{ clientEmail }}</div>
       </div>
+      <!-- ent#621: the keys are only discoverable if something shows them, and
+           a key chord cannot show itself. Mouse and touch reach the same list
+           the `⌘/` chord opens (the ent#261 `<kbd>` precedent). -->
       <button
         type="button"
-        class="shrink-0 p-2 rounded-lg text-gray-400 hover:text-gray-700 dark:hover:text-gray-200 hover:bg-white dark:hover:bg-gray-900 transition"
+        :class="FOOTER_BTN"
+        :title="`Keyboard shortcuts (${KEY_LIST_HINT})`"
+        :aria-label="`Keyboard shortcuts (${KEY_LIST_HINT})`"
+        :aria-keyshortcuts="KEY_LIST_SHORTCUTS"
+        data-testid="portal-sidebar-keys"
+        @click="$emit('open-keys')"
+      >
+        <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 8a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2V8zm4 1v.01M11 9v.01M15 9v.01M7 13h10" /></svg>
+      </button>
+      <button
+        type="button"
+        :class="FOOTER_BTN"
         :title="signOutLabel"
         :aria-label="signOutLabel"
         @click="$emit('sign-out')"
@@ -356,6 +371,10 @@ import {
   WORKSPACE_INBOX, askBadgeTitle,
 } from './portalUtils'
 import { inboxCounts } from './portalInbox'
+// ent#621: every key hint on this sidebar is DERIVED from the one map. A typed
+// glyph here would be a second declaration of the same chord, free to go stale
+// the day the map changes.
+import { keyHint, keyShortcutsFor, hostPlatform } from './portalKeymap'
 import { capCount } from '@/utils/tabTitle'
 
 // ent#610 §3g B7a: the sidebar's meta ink, ONE string for every meta text
@@ -397,10 +416,21 @@ const props = defineProps({
 })
 const emit = defineEmits([
   'new-chat', 'new-chat-with-agent', 'open-agent', 'open-thread', 'toggle-star', 'open-inbox',
-  'update:search', 'sign-out', 'open-projects',
+  'update:search', 'sign-out', 'open-projects', 'open-keys',
 ])
 
 const isSearching = computed(() => (props.search || '').trim().length >= 2)
+
+// The footer's icon buttons, ONE class string for both (the `ICON_BTN` shape
+// `PortalRail` uses): two identical inline copies is two places for a hover
+// state to drift, and the raw-colour ratchet counts every copy.
+const FOOTER_BTN = 'shrink-0 p-2 rounded-lg text-gray-400 hover:text-gray-700 dark:hover:text-gray-200 hover:bg-white dark:hover:bg-gray-900 transition'
+
+const KEY_PLATFORM = hostPlatform()
+const AGENT_KEY_HINT = keyHint(['agent-prev', 'agent-next'], KEY_PLATFORM)
+const AGENT_KEY_SHORTCUTS = keyShortcutsFor(['agent-prev', 'agent-next'], KEY_PLATFORM)
+const KEY_LIST_HINT = keyHint('key-list', KEY_PLATFORM)
+const KEY_LIST_SHORTCUTS = keyShortcutsFor('key-list', KEY_PLATFORM)
 
 // #2258: the accessible name of the footer button, per principal kind.
 const signOutLabel = computed(() => signOutLabelFor(props.isPlatformSession))

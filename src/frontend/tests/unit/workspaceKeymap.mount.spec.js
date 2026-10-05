@@ -121,7 +121,25 @@ async function boot(path, { threads = THREADS, roster = ROSTER } = {}) {
   await router.isReady()
   const w = shallowMount(Portal, {
     attachTo: document.body,
-    global: { plugins: [router], stubs: { PortalConversation: ConversationStub } },
+    global: {
+      plugins: [router],
+      // `PortalKeyList` and `BaseModal` under it are NOT stubbed: what the
+      // ⌘/ cases prove is that a REAL `aria-modal` dialog appears, carrying
+      // the `data-ws-key-list` marker on the same element — which is what lets
+      // ⌘/ close its own list while every other key is suppressed under it. A
+      // stub renders an empty tag and passes all of that with the dialog
+      // unplugged and the marker on the wrong element.
+      // `teleport: false` as well: `shallowMount` stubs `<Teleport>`, and
+      // `BaseModal` teleports its overlay to `<body>` — with the stub in place
+      // the dialog never reaches the document, which is the only place the
+      // dispatcher's `[aria-modal]` probe can see it.
+      stubs: {
+        PortalConversation: ConversationStub,
+        PortalKeyList: false,
+        BaseModal: false,
+        teleport: false,
+      },
+    },
   })
   mounted.push(w)
   await flushPromises(); await flushPromises()
@@ -139,6 +157,18 @@ async function press(w, { key, alt = false, shift = false, meta = false, target 
   await flushPromises()
   await w.vm.$nextTick()
   return e
+}
+
+// The rail takes the COLUMN form at and above `sm` and the bottom-sheet form
+// below it, and `isWideViewport` asks `matchMedia`. jsdom answers every query
+// with `matches: false`, i.e. a phone — so a test about the column has to say
+// so, and a test about the sheet has to say that.
+function viewport(wide) {
+  window.matchMedia = (q) => ({
+    matches: wide && q.includes('min-width'),
+    media: q,
+    addEventListener() {}, removeEventListener() {}, addListener() {}, removeListener() {},
+  })
 }
 
 const conversation = (w) => w.findComponent({ name: 'PortalConversation' })
@@ -378,5 +408,158 @@ describe('ent#621 — the suppression ladder', () => {
     await flushPromises()
     expect(showing(w).agent).toBe('scout')
     expect(e.defaultPrevented).toBe(false)
+  })
+})
+
+describe('ent#621 [C] — ⌘. shows and hides the rail', () => {
+  it('toggles the rail column, remembers the tab, and persists', async () => {
+    viewport(true)
+    const { w } = await boot('/workspace/c/s-main')
+    // The rail starts collapsed; `⌘.` is the expand button's chord.
+    expect(w.vm.railState.open).toBe(false)
+    await press(w, { key: '.', meta: true })
+    expect(w.vm.railState.open).toBe(true)
+    // Persisted under the rail's own key — the key writes nothing new (T5).
+    expect(localStorage.getItem('trinity-workspace-rail')).toContain('"open":true')
+
+    // Moving to another tab and closing, then reopening: the rail comes back
+    // where it was, because the key reuses `railState.tab` rather than
+    // keeping a second memory that could disagree with the button's.
+    w.vm.setRailTab(w.vm.railTabs[1].id)
+    await press(w, { key: '.', meta: true })
+    expect(w.vm.railState.open).toBe(false)
+    await press(w, { key: '.', meta: true })
+    expect(w.vm.railState.open).toBe(true)
+    expect(w.vm.railState.tab).toBe(w.vm.railTabs[1].id)
+  })
+
+  it('says which tab came back, for anyone who cannot see it', async () => {
+    viewport(true)
+    const { w } = await boot('/workspace/c/s-main')
+    await press(w, { key: '.', meta: true })
+    expect(announced(w)).toContain('rail open')
+    await press(w, { key: '.', meta: true })
+    expect(announced(w)).toBe('Rail closed')
+  })
+
+  it('below `sm` it opens and closes the bottom sheet instead, persisting nothing', async () => {
+    // The sheet is the phone's rail. `open` must NOT be written: a tap on a
+    // phone that reloads into a pushed-open column is the ent#474 rule.
+    viewport(false)
+    const { w } = await boot('/workspace/c/s-main')
+    await press(w, { key: '.', meta: true })
+    expect(w.vm.railSheetOpen).toBe(true)
+    expect(w.vm.railState.open).toBe(false)
+    await press(w, { key: '.', meta: true })
+    expect(w.vm.railSheetOpen).toBe(false)
+  })
+
+  it('is a silent no-op on a page with no rail', async () => {
+    viewport(true)
+    // The agent page has no rail column at all. A key that toggled hidden
+    // state there would be a key that does nothing visible — twice.
+    const { w } = await boot('/workspace/a/nova')
+    expect(w.vm.railHasColumn).toBe(false)
+    const before = w.vm.railState.open
+    const e = await press(w, { key: '.', meta: true })
+    expect(w.vm.railState.open).toBe(before)
+    // Not claimed either: nothing here owns the chord.
+    expect(e.defaultPrevented).toBe(false)
+  })
+
+  it('stays out of the way during a voice call', async () => {
+    viewport(true)
+    const { w } = await boot('/workspace/c/s-main')
+    w.vm.voiceCall = { active: true, agentName: 'scout', voiceSessionId: 'v1' }
+    await w.vm.$nextTick()
+    const before = w.vm.railState.open
+    await press(w, { key: '.', meta: true })
+    expect(w.vm.railState.open).toBe(before)
+  })
+})
+
+describe('ent#621 [C] — ⌥. walks the rail tabs', () => {
+  it('opens a closed rail on its remembered tab first, then moves on', async () => {
+    viewport(true)
+    const { w } = await boot('/workspace/c/s-main')
+    expect(w.vm.railState.open).toBe(false)
+    const first = w.vm.railTabs[0].id
+
+    await press(w, { key: '.', alt: true })
+    expect(w.vm.railState.open).toBe(true)
+    expect(w.vm.railState.tab).toBe(first)
+
+    await press(w, { key: '.', alt: true })
+    expect(w.vm.railState.tab).toBe(w.vm.railTabs[1].id)
+    expect(announced(w)).toBe(w.vm.railTabs[1].label)
+  })
+
+  it('cycles only the tabs this session may SEE, and wraps', async () => {
+    viewport(true)
+    const { w } = await boot('/workspace/c/s-main')
+    const visible = w.vm.railTabs.map((t) => t.id)
+    expect(visible.length).toBeGreaterThan(1)
+    await press(w, { key: '.', alt: true })          // opens on the first
+    for (let i = 1; i < visible.length; i += 1) {
+      await press(w, { key: '.', alt: true })
+      expect(w.vm.railState.tab).toBe(visible[i])
+    }
+    // Past the last visible tab is the first visible one — never a tab the
+    // door closed, which `RAIL_TAB_ORDER` cycling would have reached.
+    await press(w, { key: '.', alt: true })
+    expect(w.vm.railState.tab).toBe(visible[0])
+  })
+
+  it('does not move the agent behind it', async () => {
+    viewport(true)
+    const { w } = await boot('/workspace/c/s-main')
+    await press(w, { key: '.', alt: true })
+    expect(showing(w).agent).toBe('scout')
+  })
+})
+
+describe('ent#621 [C] — ⌘/ opens the key list', () => {
+  it('opens, lists every key the map declares but the reserved one, and toggles shut', async () => {
+    const { w } = await boot('/workspace/c/s-main')
+    expect(document.querySelector('[data-testid="ws-key-list"]')).toBe(null)
+
+    await press(w, { key: '/', meta: true })
+    const dialog = document.querySelector('[data-ws-key-list]')
+    expect(dialog).not.toBe(null)
+    expect(dialog.getAttribute('role')).toBe('dialog')
+    expect(dialog.getAttribute('aria-modal')).toBe('true')
+
+    // Rendered FROM the map: every non-reserved entry has a row, and ⌘K — the
+    // chord ent#577 owns and nothing binds — has none.
+    const rows = Array.from(document.querySelectorAll('[data-ws-key-row]'))
+      .map((el) => el.getAttribute('data-ws-key-row'))
+    // Same SET as the map's rows (the dialog groups them — what moves you,
+    // what you do here, what works anywhere — so the order differs on purpose).
+    expect([...rows].sort()).toEqual(w.vm.keyListRowsNow.map((r) => r.action).sort())
+    expect(rows).not.toContain('find-anything')
+    expect(rows).toContain('agent-next')
+    expect(rows).toContain('rail-tab-next')
+    expect(rows).toContain('close-top')
+
+    // The one action allowed to see through its own dialog: the chord that
+    // opened the list closes it, rather than being swallowed by the modal
+    // suppression the list itself triggers.
+    await press(w, { key: '/', meta: true })
+    expect(document.querySelector('[data-ws-key-list]')).toBe(null)
+  })
+
+  it('suppresses every other key while it is open', async () => {
+    const { w } = await boot('/workspace/c/s-main')
+    await press(w, { key: '/', meta: true })
+    await press(w, { key: 'ArrowDown', alt: true })
+    expect(showing(w).agent).toBe('scout')
+  })
+
+  it('is allowed during a voice call — opening a dialog leaves nothing', async () => {
+    const { w } = await boot('/workspace/c/s-main')
+    w.vm.voiceCall = { active: true, agentName: 'scout', voiceSessionId: 'v1' }
+    await w.vm.$nextTick()
+    await press(w, { key: '/', meta: true })
+    expect(document.querySelector('[data-ws-key-list]')).not.toBe(null)
   })
 })
