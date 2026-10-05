@@ -435,10 +435,12 @@ const isGithubCustomFork = computed(
 )
 const showForkFields = computed(() => isForkToOwn.value || isGithubCustomFork.value)
 
-const showKindPicker = computed(() => {
-  if (form.template === 'github-custom') return importIntent.value === 'clone'
-  return selectedTemplate.value?.source === 'github' && !isForkToOwn.value
-})
+// Only a custom-repo clone can come out as an agent with its own branch: every
+// list template is a catalog entry, which the backend always makes pull-only
+// (`_apply_agent_kind_default`, catalog_template) — PR #3022 review.
+const showKindPicker = computed(
+  () => form.template === 'github-custom' && importIntent.value === 'clone'
+)
 
 const selectedTemplate = computed(() => {
   if (!form.template) return null

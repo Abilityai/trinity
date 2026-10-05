@@ -31,7 +31,7 @@ const label = computed(() => {
 })
 
 const title = computed(() => {
-  if (!props.pushes) return 'Pull-only: this agent tracks the branch and never pushes to it.'
+  if (!props.pushes) return 'Pull-only: this agent tracks the branch, and auto-sync does not push its work.'
   return props.sourceMode
     ? 'This agent owns its repository and saves its work to its default branch.'
     : 'This agent writes its own branch and saves its work there.'

@@ -858,10 +858,11 @@
   deploys a codebase); a system manifest takes `kind` per agent (below).
 - **Asked in the UI and the manifest (trinity-enterprise#704):**
   - the create modal asks "What is this repository?" (an agent / a deployment
-    of a codebase) exactly when the create binds git: a GitHub template from the
-    list, or a custom repository with the *clone* intent. It is never asked for
-    blank or local agents, copy or fork, or a fork-to-own template. Unasked, no
-    `kind` is sent.
+    of a codebase) exactly when the answer can matter: a custom repository with
+    the *clone* intent. It is never asked for blank or local agents, copy or
+    fork, a fork-to-own template, or a GitHub template from the list — every
+    list template is a shared catalog entry, always pull-only whatever `kind`
+    says (fork it to keep the agent's work in git). Unasked, no `kind` is sent.
   - the create response's `git_mode` is shown after creation, and it says so
     plainly when an agent was created pull-only, with the reason.
   - the Git panel shows the binding as a badge (`Agent · own branch` /

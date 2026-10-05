@@ -69,14 +69,17 @@ describe('the create flow asks what the repository is', () => {
     expect(await submit(wrapper)).not.toHaveProperty('kind')
   })
 
-  it('is asked for a GitHub template, defaults to an agent, and sends the answer', async () => {
+  // PR #3022 review: every list template is a catalog entry, and the backend
+  // makes a catalog template pull-only whatever kind is asked for
+  // (`_apply_agent_kind_default`, catalog_template=True). Offering "An agent"
+  // there only promised a working branch that could never happen.
+  it('is not asked for a catalog GitHub template, which is always pull-only', async () => {
     const wrapper = await mountModal()
     await pickTemplate(wrapper, 'Helper')
-    expect(picker(wrapper).exists()).toBe(true)
-    expect(wrapper.find('[data-testid="agent-kind-agent"]').element.checked).toBe(true)
-    await wrapper.find('[data-testid="agent-kind-deployment"]').setValue(true)
+    expect(picker(wrapper).exists()).toBe(false)
     const payload = await submit(wrapper)
-    expect(payload).toMatchObject({ template: 'github:acme/helper', kind: 'deployment' })
+    expect(payload).toMatchObject({ template: 'github:acme/helper' })
+    expect(payload).not.toHaveProperty('kind')
   })
 
   it('is asked for a custom repo clone, and not for copy or fork', async () => {
@@ -114,8 +117,8 @@ describe('the create flow asks what the repository is', () => {
   })
 
   it('hands git_mode to the post-create step for a GitHub template picked from the list', async () => {
-    // The path the kind picker is shown on, and the one most likely to fall
-    // back to pull-only: the modal must not close before the notice renders.
+    // Always pull-only (a catalog template): the modal must not close before
+    // the notice that says so renders.
     const gitMode = { kind: 'agent', source_mode: true, reason: 'no GitHub token: pull-only' }
     createAgent.mockResolvedValue({ name: 'my-agent', git_mode: gitMode })
     const wrapper = await mountModal()
@@ -161,6 +164,16 @@ describe('GitModeNotice', () => {
     expect(w.text()).toContain('owns its repository')
     expect(w.find('[data-testid="git-mode-notice"]').classes().join(' ')).not.toContain('status-warning')
   })
+
+  // PR #3022 review nit: without `pushes` (an older backend) the binding is
+  // unknown; guessing from source_mode is the misread this PR fixed.
+  it('stays neutral when the response does not say whether the agent pushes', () => {
+    const w = mount(GitModeNotice, { props: { gitMode: { kind: 'agent', source_mode: true, reason: 'fork-to-own: the agent owns its fork' } } })
+    expect(w.text()).not.toContain('Created pull-only')
+    expect(w.text()).not.toContain('never pushes')
+    expect(w.text()).toContain('fork-to-own: the agent owns its fork')
+    expect(w.find('[data-testid="git-mode-notice"]').classes().join(' ')).not.toContain('status-warning')
+  })
 })
 
 describe('GitBindingBadge', () => {
@@ -173,6 +186,12 @@ describe('GitBindingBadge', () => {
   it('names a fork-to-own agent as owning its repo, not pull-only', () => {
     const w = mount(GitBindingBadge, { props: { pushes: true, sourceMode: true } })
     expect(w.text()).toBe('Agent · own repo')
+    expect(w.attributes('title')).not.toContain('never pushes')
+  })
+
+  it('says pull-only is about auto-sync, not that a manual push is impossible', () => {
+    const w = mount(GitBindingBadge, { props: { pushes: false, sourceMode: true } })
+    expect(w.attributes('title')).toContain('auto-sync')
     expect(w.attributes('title')).not.toContain('never pushes')
   })
 })

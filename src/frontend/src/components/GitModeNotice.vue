@@ -36,13 +36,15 @@ const props = defineProps({
   gitMode: { type: Object, required: true },
 })
 
-// A response without `pushes` (an older backend) falls back to the binding.
-const pushes = computed(() => props.gitMode.pushes ?? !props.gitMode.source_mode)
+// A response without `pushes` (an older backend) leaves the binding unknown:
+// guessing it from `source_mode` is the misread this component exists to fix.
+const pushes = computed(() => props.gitMode.pushes ?? null)
 
 // Asked for an agent, got pull-only: say so plainly.
-const fellBack = computed(() => props.gitMode.kind === 'agent' && !pushes.value)
+const fellBack = computed(() => props.gitMode.kind === 'agent' && pushes.value === false)
 
 const headline = computed(() => {
+  if (pushes.value === null) return 'Created from GitHub'
   if (pushes.value) {
     return props.gitMode.source_mode
       ? 'An agent that owns its repository — its work is saved to GitHub'

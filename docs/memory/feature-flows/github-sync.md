@@ -30,10 +30,11 @@ Cornelius is pinned `kind=deployment`: it is built from a shared public upstream
 
 **Where `kind` is chosen (trinity-enterprise#704):**
 
-- **Create modal:** `CreateAgentModal.vue` shows `AgentKindPicker.vue` when
-  the create binds git (a GitHub template from the list, or a custom repo
-  with the *clone* intent). The answer rides the payload as `kind`.
-  Otherwise nothing is sent.
+- **Create modal:** `CreateAgentModal.vue` shows `AgentKindPicker.vue` only
+  for a custom repo with the *clone* intent — the one path where "an agent"
+  can produce a working branch. A GitHub template from the list is a catalog
+  entry, which `_apply_agent_kind_default` always makes pull-only, so it is
+  not asked. The answer rides the payload as `kind`; otherwise nothing is sent.
 - **After create:** `ImportValidationStep.vue` renders `GitModeNotice.vue` from
   the response's `git_mode`. It warns when an agent fell back to pull-only.
 - **Git panel:** `GitPanel.vue` renders `GitBindingBadge.vue` (`Agent · own

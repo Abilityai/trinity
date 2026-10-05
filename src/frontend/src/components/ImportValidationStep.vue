@@ -35,9 +35,6 @@
         Agent <span class="font-mono">{{ agentName }}</span> created
       </h3>
 
-      <!-- trinity-enterprise#704: what the git binding came out as, and why. -->
-      <GitModeNotice v-if="gitMode" :git-mode="gitMode" class="mt-3" />
-
       <!-- Copy-intent provenance: the only durable record of what a snapshot
            agent was cloned from (present only on copy-intent responses). -->
       <p v-if="importSnapshot" class="mt-1 text-xs text-gray-500 dark:text-gray-400">
@@ -47,6 +44,10 @@
           · <span class="tabular-nums">{{ importSnapshot.file_count }}</span> files
         </template>
       </p>
+
+      <!-- trinity-enterprise#704: what the git binding came out as, and why.
+           After the provenance line so the heading keeps its subtitle. -->
+      <GitModeNotice v-if="gitMode" :git-mode="gitMode" class="mt-3" />
 
       <!-- One shared footprint for every state — nothing shifts on arrival. -->
       <div class="mt-4 min-h-28" aria-live="polite">
