@@ -595,9 +595,10 @@ def list_for_principal(
     is in offset mode, ordered exactly as before, and `next_cursor` is None.
 
     `project` is the router's per-principal projection (`_for_principal`). It
-    stays a BELT: the SQL exclusion equals `is_about_a_person` exactly, so it
-    should never fire, but if it drops a row the SQL page returned, `total`
-    becomes None and `warnings` says so. The paging fields are
+    stays a BELT: on SQLite and a UTF-8, non-Turkic PostgreSQL the SQL
+    exclusion equals `is_about_a_person` exactly, so it should never fire;
+    under a Turkic collation a legacy upper-case row can reach it. If it drops
+    a row the SQL page returned, `total` becomes None and `warnings` says so. The paging fields are
     unaffected — they describe the SQL page.
     """
     agents = _effective_agents(narrow_to_agent_key(current_user, accessible), agent_names)

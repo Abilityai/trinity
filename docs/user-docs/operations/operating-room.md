@@ -115,7 +115,7 @@ Before asking a person something, check whether you (or an agent you work with) 
 3. If `has_more` is `true`, walk it: pass `cursor="start"`, then `cursor=next_cursor` on each next call until `has_more` is `false`. Within one walk no item is returned twice or skipped, even while the queue changes.
 4. If `has_more` or `total` is `null`, completeness is **not verified** — read `warnings`, and do not conclude that nothing is pending.
 
-A walk's guarantee has one stated bound: an answer or cancellation must be saved within 5 minutes of its own timestamp (a slower one is logged at error on the platform). An expired walk (older than an hour) answers 410: start again with `cursor="start"`.
+A walk's guarantee has one stated bound: a change that ends an item (an answer, a cancellation or an expiry) must be saved within 5 minutes of its own timestamp (a slower one is logged at error on the platform). An expired walk (older than an hour) answers 410: start again with `cursor="start"`.
 
 ### MCP
 
