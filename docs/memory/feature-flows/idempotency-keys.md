@@ -147,7 +147,7 @@ CREATE TABLE idempotency_keys (
    **Expected**: normal dispatch; **no** `idempotency_keys` row created.
 6. **TTL purge**: age a row past 24h (or wait), run a cleanup cycle.
    **Verify**: cleanup report shows `idempotency_keys_purged > 0`; row gone.
-7. **Retry after a failed async run (#3245)**: `POST /api/agents/{name}/task` with `{"message": "...", "async_mode": true}` and `Idempotency-Key: t7` to a stopped agent (or terminate the run) so the execution ends `failed`/`cancelled`; re-send the identical request.
+7. **Retry after a failed async run (#3245)**: `POST /api/agents/{name}/task` with `{"message": "...", "async_mode": true}` and `Idempotency-Key: t7` to a running agent, then end the run `failed`/`cancelled` (for example `POST /api/agents/{name}/executions/{execution_id}/terminate`; a request to a stopped agent is refused with 503 before any key is claimed, so it tests nothing); re-send the identical request.
    **Expected**: a 200 receipt with a **new** `execution_id` and no `X-Idempotent-Replay` header. A third identical send while that new run is still running replays it (`X-Idempotent-Replay: true`, same new id).
 
 Unit coverage: `tests/unit/test_3245_async_replay_after_failure.py` (verdict matrix, `lease_expired` time axis, both seams incl. the pulled `/chat` receipt, AC2 over the real `/task` endpoint, the race, the log lines, structural pins); `src/mcp-server/src/task-receipt.test.ts` (the `idempotent_replay` marker).

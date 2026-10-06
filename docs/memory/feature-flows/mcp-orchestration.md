@@ -653,7 +653,8 @@ silent wrong data, strictly worse than the loud error it replaced.
 | `/task` recovers on `AbortError` **only** | A `TypeError` may mean the request never landed, and on this route a concurrent peer row is the normal state |
 
 **Retry guidance the tool description now states:** an *identical* re-send is
-deduplicated server-side and answers with the original `execution_id`; a
+deduplicated server-side and answers with the original `execution_id` (since
+#3245, not once that run ended `failed` or `cancelled`); a
 **reworded** one derives a different idempotency key and dispatches a second
 execution. That asymmetry is why the opaque error was dangerous — it invited the
 rewrite.

@@ -107,7 +107,7 @@ curl -X POST http://localhost:8000/api/agents/my-agent/task \
 
 ### Retrying after a failed run (`/chat` and `/task`)
 
-An async `/task` (and a sync `/task` or `/chat` that outlived its wait) answers with a receipt — `{"status": "accepted" | "queued" | "queued_timeout", "execution_id": ..., "async_mode": true}` — and that receipt is what an identical request replays. Whether it is replayed depends on how its run is doing:
+An async `/task` answers with a receipt — `{"status": "accepted" | "queued" | "queued_timeout", "execution_id": ..., "async_mode": true}`. A sync `/task`, or a `/chat` turn on a pull-mode agent, that outlives its wait answers `504` but stores the same kind of receipt (`queued_timeout`). That stored receipt is what an identical request replays, as a `200` with `X-Idempotent-Replay: true`. Whether it is replayed depends on how its run is doing:
 
 | The receipt's run is… | An identical request with the same key gets |
 |---|---|
