@@ -503,7 +503,8 @@
 - **Status**: ✅ Implemented (2026-03-07)
 - **Requirement ID**: OPS-001-AGENT
 - **Description**: File-based operator queue (`~/.trinity/operator-queue.json`) for agent-to-platform communication. Request types: approval, question, alert. Meta-prompt section teaches agents the protocol. Since trinity-enterprise#611 agents raise asks natively with the `ask_operator` MCP tool (OPS-001-RAISE, §26.10) and the file is the fallback for two releases; the platform prompt's Operator Communication section teaches the tool first.
-- **Files**: `src/backend/services/platform_prompt_service.py` (Operator Communication section), `config/trinity-meta-prompt/prompt.md` (reference copy)
+  - **The reserved off-menu answer (#3242):** an approval's `response` is one of the agent's own options **or** the platform-reserved value `(something else)` — the same on every approval, never one of the agent's options (an agent must not list it; `ask_operator` refuses it as an option with 422 `invalid_options`). It means none of the offered options is approved: carry out none of them, and re-plan from the person's instruction, which is always in `response_text` (required with it). The `approval` bullet and the queue-file write-back paragraph of the prompt say so, `get_my_ask` returns both fields, and the ent#329 resume turn states the meaning in one platform sentence above its data fence (the instruction stays under `notes:`). Pinned by a `test_1402_prompt_contract.py` sentinel.
+- **Files**: `src/backend/services/platform_prompt_service.py` (Operator Communication section), `config/trinity-meta-prompt/prompt.md` (reference copy), `src/backend/services/operator_queue_choices.py` (`SOMETHING_ELSE`)
 
 ### 26.2 Platform File Sync Service
 - **Status**: ✅ Implemented (2026-03-07)
@@ -515,14 +516,16 @@
 - **Status**: ✅ Implemented (2026-03-07)
 - **Requirement ID**: OPS-001-API
 - **Description**: REST API for queue items — list with filters, get single item, submit response, cancel, stats, agent-specific queries. WebSocket events for real-time updates.
-- **Files**: `src/backend/routers/operator_queue.py`, `src/backend/db/operator_queue.py`
-- **Tests**: `tests/test_operator_queue.py` (37 tests)
+  - **What an approval's answer may be (#2376, #3242):** one of its offered options (exact match; anything else is 422 `response_not_an_offered_option` with the offered list) **or** the reserved `(something else)` with a non-blank instruction in `response_text`. The reserved value is refused by name at the sink (`services/operator_queue_choices.py::validate_response_choice`, `response_text` keyword-only and required) and at both writers (`POST /api/operator-queue/{id}/respond`, the Workspace answer route): **422 `instruction_required`** (blank instruction), **422 `reserved_value`** (on a question, alert or unknown type), **422 `not_off_menu`** (on a platform-minted approval — a skill gate, decided only by its options). `response_text` is bounded at 4000 characters on both routes. No schema change: the instruction rides the existing `response_text` column.
+- **Files**: `src/backend/routers/operator_queue.py`, `src/backend/db/operator_queue.py`, `src/backend/services/operator_queue_choices.py`, `src/backend/services/ask_service.py`
+- **Tests**: `tests/test_operator_queue.py` (37 tests), `tests/unit/test_2376_approval_response_membership.py`, `tests/unit/test_3242_something_else.py`
 
 ### 26.4 Operating Room UI
 - **Status**: ✅ Implemented (2026-03-07)
 - **Requirement ID**: OPS-001-UI
 - **Description**: Card-based inbox for processing agent requests. Single-column feed with agent avatars, Open/Resolved tabs, inline response controls with auto-advance. NavBar badge for pending count. WebSocket real-time updates with polling fallback.
-- **Files**: OperatingRoom.vue, QueueCard.vue, ResolvedCard.vue, operatorQueue.js store, NavBar badge
+  - **Something else (#3242):** every approval with options gets a **Something else** chip after the agent's own chips, on the desktop card and detail panel, `/m` and the Workspace asks panel. Choosing it makes the text field the instruction (required — Send stays disabled until it has text; label and Send copy flip to "Instruction" / "Send instruction"). On the desktop surfaces and the Workspace, typing with no option picked arms the chip, but Enter never sends an auto-armed state; on `/m` the chip is tapped first. The chip is **hidden on platform-minted approvals on every surface**: the Workspace ask projection and the operator-queue list/item projections all carry the sink's own `decided_by_options` boolean (any reserved id prefix, not only `gate-`); the `gate-` prefix is only the SPA's fallback for an item without the field. Resolved views and the Workspace's recent answers show "Something else" (with the instruction), never the raw value.
+- **Files**: OperatingRoom.vue, QueueCard.vue, QueueItemDetail.vue, ResolvedCard.vue, operatorQueue.js store, `utils/operatorQueue.js` (`SOMETHING_ELSE`, `offeredChips`, `decisionLabel`, `decidedByOptions`, `buildQueueResponse`), NavBar badge
 - **Remaining**: Sound/desktop notifications for critical items
 
 ### 26.5 Agent Collaboration Skill
@@ -534,7 +537,8 @@
 - **Status**: ✅ Implemented (read #1101, respond #1104; `get_my_ask`, `ask_operator` and person-only respond — trinity-enterprise#611)
 - **Requirement ID**: OPS-001-MCP
 - **Description**: MCP tools for programmatic queue access: `list_operator_queue` and `get_operator_queue_item` (read; an agent-scoped key sees its own items plus the agents it has explicit permission for), `respond_to_operator_queue` (resolve a pending item), `get_my_ask` (an agent reads back one of its OWN asks by its own `request_id` — OPS-001-ENDINGS), and `ask_operator` (an agent raises an ask as itself and gets a receipt — OPS-001-RAISE, §26.10). Since trinity-enterprise#611 only a person ends an ask: `respond_to_operator_queue` works for a user-scoped key, and the backend refuses agent- and system-scoped keys with 403 `person_required`. The original "orchestrator agents auto-process queue items" use had no consumer, and an agent answering its own approval is self-approval.
-- **Files**: `src/mcp-server/src/tools/operator_queue.ts`, `src/mcp-server/src/client.ts`, `src/mcp-server/src/access.ts`
+  - **Something else (#3242):** no new parameter. `respond_to_operator_queue`'s `response` description names `(something else)` for none of an approval's options and `response_text` as required with it; `ask_operator` says never to list it as an option; `get_my_ask` says what it means when it comes back. `types.ts` exports `SOMETHING_ELSE`. A refusal from the respond tool keeps `error` and adds the backend's `{status, code, message, offered_options?}` (e.g. `instruction_required`).
+- **Files**: `src/mcp-server/src/tools/operator_queue.ts`, `src/mcp-server/src/client.ts`, `src/mcp-server/src/access.ts`, `src/mcp-server/src/types.ts`
 
 ### 26.7 Ingestion Rate / Depth / Size Caps (OPS-001-CAPS)
 - **Status**: ✅ Implemented (2026-07-17, #1632)

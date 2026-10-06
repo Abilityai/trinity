@@ -45,7 +45,11 @@ from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Set, 
 
 from database import db
 from services import operator_resume_service
-from services.operator_queue_choices import validate_response_choice
+from services.operator_queue_choices import (
+    SOMETHING_ELSE,
+    NotOffMenuError,
+    validate_response_choice,
+)
 from services.platform_audit_service import AuditEventType, platform_audit_service
 from utils.helpers import parse_iso_timestamp, to_utc_iso, utc_now_iso
 
@@ -197,12 +201,17 @@ def answer(
 ) -> Ending:
     """A person answered `item` (the row the caller read and checked).
 
-    Raises `ResponseNotOfferedError` (#2376) before anything is written, then
+    Raises `ResponseNotOfferedError` (#2376), or a `ReservedAnswerError` for the
+    reserved `SOMETHING_ELSE` decision (#3242), before anything is written, then
     `AskNotFound` / `AskConflict` when the compare-and-set did not land. The
     options are frozen at ingest, so validating against the caller's read is
     sound; the status is not, which is what the compare-and-set is for.
     """
-    validate_response_choice(item, response)
+    # #3242: a platform-minted approval (a skill gate) counts only its own
+    # options and no agent reads the instruction — refused, named.
+    if response == SOMETHING_ELSE and decided_by_options(item):
+        raise NotOffMenuError()
+    validate_response_choice(item, response, response_text=response_text)
     if not may_end(item, actor):
         raise AskNotAddressee(item["id"])
     updated = db.respond_to_operator_queue_item(
@@ -222,6 +231,14 @@ def answer(
     trigger = _broadcast_payload({"type": "operator_queue_responded",
                                   "data": {"id": updated["id"], "agent_name": updated["agent_name"]}})
     return _ended(EndingEvent(ANSWERED, (updated,), actor.email), audit, trigger)
+
+
+def decided_by_options(item: Dict[str, Any]) -> bool:
+    """An approval the platform minted (a skill gate, #751): decided only by one
+    of its options, so the reserved `SOMETHING_ELSE` never applies (#3242). The
+    Workspace projection exposes exactly this boolean, nothing else about it."""
+    from services.operator_queue_service import is_platform_minted
+    return (item or {}).get("type") == "approval" and is_platform_minted(item)
 
 
 def cancel(item_id: str, *, actor: Actor, reason: Optional[str] = None) -> Ending:
@@ -599,6 +616,11 @@ def _validated_ask(ask: Any, oqs, *, raised_by: str = "agent") -> Dict[str, Any]
         if (not isinstance(options, list)
                 or any(not isinstance(o, str) or not o.strip() for o in options)):
             raise AskRejected(422, "invalid_options", "options must be a list of non-empty strings.")
+        if SOMETHING_ELSE in options:
+            # #3242: the platform's reserved decision, offered on every approval.
+            raise AskRejected(422, "invalid_options",
+                              f"{SOMETHING_ELSE!r} is reserved by the platform and offered on "
+                              "every approval; do not list it as an option.")
         if oqs._json_bytes(options) > oqs.OPERATOR_QUEUE_OPTIONS_MAX_BYTES:
             raise _too_large("options", oqs.OPERATOR_QUEUE_OPTIONS_MAX_BYTES, "bytes")
     if kind == "approval" and not options:

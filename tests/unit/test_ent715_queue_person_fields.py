@@ -199,7 +199,9 @@ class TestTheMachineView:
         uid = _seed(real_db, channel="file")
         _as(**principal)
         row = _read(_client(), route, uid)
-        assert set(row) == MACHINE_ROW_KEYS | WITHHELD
+        # #3242: plus the sink's own "decided by its options" predicate — a bare
+        # boolean derived for the person's answer controls, never a column.
+        assert set(row) == MACHINE_ROW_KEYS | WITHHELD | {"decided_by_options"}
         assert (row["responded_by_email"], row["responded_by_id"], row["addressed_to_email"],
                 row["disposed_by_email"], row["resolved_to"]) == (
             OP_EMAIL, "7", FOR_EMAIL, OP_EMAIL, [RESOLVED_EMAIL])

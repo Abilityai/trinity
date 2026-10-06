@@ -20,7 +20,7 @@ The fleet list and fleet health are admin-only. If you open `/m` with a session 
 
 A queue card shows the agent, the priority, the type — **Needs approval**, **Question** or **Heads up** — the title and the question. The controls depend on the type, and they match the desktop page:
 
-- **Needs approval** — tap an option. The card restates what is about to happen (*Sending **Deny** to my-agent — it reads this as your decision on its next run.*), offers an optional note (*Add a note (optional)...*), and only then **Send: Deny** sends it. **Cancel** clears the selection. Nothing is sent on a single tap, and pressing Enter in the note does not send. The tapped option is the decision the agent reads; the note travels alongside it.
+- **Needs approval** — tap an option. The card restates what is about to happen (*Sending **Deny** to my-agent — it reads this as your decision on its next run.*), offers an optional note (*Add a note (optional)...*), and only then **Send: Deny** sends it. **Cancel** clears the selection. Nothing is sent on a single tap, and pressing Enter in the note does not send. The tapped option is the decision the agent reads; the note travels alongside it. When none of the options is right, tap **Something else**: the card says *Sending your instruction to my-agent — it will carry out none of the options and re-plan from your text.*, the field asks *What should it do instead?*, and **Send instruction** stays disabled until you type something.
 - **Question** — type a response and tap **Send**.
 - **Heads up** (and any platform heads-up with no decision) — tap **Got it**.
 

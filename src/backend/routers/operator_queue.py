@@ -31,7 +31,7 @@ from dependencies import (
 )
 from db_models import User
 from services.platform_audit_service import platform_audit_service, AuditEventType
-from services.operator_queue_choices import ResponseNotOfferedError
+from services.operator_queue_choices import ReservedAnswerError, ResponseNotOfferedError
 from services import ask_service, operator_queue_service
 
 
@@ -100,7 +100,11 @@ _MACHINE_ROW_FIELDS = (
 
 def _for_principal(items: List[Dict[str, Any]], current_user: User) -> List[Dict[str, Any]]:
     if is_person_principal(current_user):
-        return items
+        # #3242: whether the reserved "(something else)" answer applies — the
+        # sink's own predicate, so no operator surface offers a chip that 422s.
+        # A bare boolean; the machine view never needs it (it cannot answer).
+        return [{**item, "decided_by_options": ask_service.decided_by_options(item)}
+                for item in items]
     # #715: the platform's heads-ups ABOUT a person (a client's complaint, the
     # client addresses behind a shared inbox) are the operator's, not a machine's.
     return [
@@ -354,6 +358,10 @@ async def respond_to_queue_item(
                 "offered_options": e.options,
             },
         )
+    except ReservedAnswerError as e:
+        # #3242: the reserved "(something else)" decision — named so the caller
+        # can act: `instruction_required`, `reserved_value` or `not_off_menu`.
+        raise HTTPException(status_code=422, detail={"code": e.code, "message": str(e)})
     except ask_service.AskNotFound:
         raise HTTPException(status_code=404, detail="Queue item not found")
     except ask_service.AskNotAddressee:
