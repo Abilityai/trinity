@@ -427,7 +427,7 @@ export function createChatTools(
       // the parameter descriptions below, which are not cut.
       // delegation-contract.test.ts pins the published length.
       description:
-        "Delegate a task to another agent (the primary way to use sub-agents) and get back its reply or a receipt." +
+        "Delegate a task to another agent and get back its reply or a receipt." +
         "\n\n**Modes:** `parallel=false` (default) continues the agent's own chat session, one queue for every " +
         "caller. `parallel=true` runs a stateless task; several can run at once. `async=true` (with " +
         "`parallel=true`) answers with a receipt at once.\n\n" +
