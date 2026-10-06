@@ -1145,6 +1145,19 @@ _REFUSAL_POPS = ("value", "history", "color", "bound_series", "last_point_at",
                  "threshold_verdict", "direction")
 
 
+def _kind_of(value: Any) -> str:
+    """A YAML value's kind in an author's words, never the value itself."""
+    if isinstance(value, bool):
+        return "true/false"
+    if isinstance(value, (int, float)):
+        return "a number"
+    if isinstance(value, (list, tuple, set)):
+        return "a list"
+    if isinstance(value, dict):
+        return "a mapping"
+    return "a value of another type"
+
+
 def _refuse_widget(widget: Dict[str, Any], code: str, message: str,
                    detail: Optional[Dict[str, Any]] = None) -> None:
     widget["binding_error"] = message
@@ -1175,12 +1188,13 @@ def bind_dashboard_widgets(
     widgets and leaves every unbound widget untouched. A dashboard is never
     5xx'd because one widget named a metric.
 
-    Six refusals, each with a machine `binding_error_code` beside the
+    Seven refusals, each with a machine `binding_error_code` beside the
     sentence (the route's `{reason, message}` pair, spelled for a widget):
     `metric_store_unavailable`, `metric_undeclared`, and `metric_retired` —
     the last is TD-10's rule applied to a reader who cannot pass
     `include_retired`, so a retired metric never reads as current here either
-    — and the three `dims:` refusals (ent#730): `metric_dimension_invalid`,
+    — `metric_name_invalid` (a `metric:` that is not text, ent#730), and the
+    three `dims:` refusals (ent#730): `metric_dimension_invalid`,
     `metric_dimension_undeclared` and `metric_series_not_found`.
 
     A widget carrying `dims: {key: value}` names ONE series of a dimensioned
@@ -1217,6 +1231,16 @@ def bind_dashboard_widgets(
 
     for widget in widgets:
         name = widget.get("metric")
+        if not isinstance(name, str):
+            # YAML `metric: [ad_spend]` or `{a: b}` is truthy, so it is bound;
+            # `by_name.get(<list>)` then raised out of this loop, which runs
+            # outside the store `try`, and took the WHOLE dashboard read down
+            # (ent#730). Refuse this widget by name; the rest render.
+            _refuse_widget(
+                widget, "metric_name_invalid",
+                "metric must be the name of a declared metric, as text, not "
+                f"{_kind_of(name)}")
+            continue
         entry = by_name.get(name)
         if entry is None:
             widget["binding_error"] = (

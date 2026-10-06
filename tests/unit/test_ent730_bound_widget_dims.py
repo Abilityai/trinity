@@ -1115,3 +1115,22 @@ def test_an_unselected_zero_point_tile_drops_the_authors_trend(monkeypatch):
     (widget,) = _bind(_w(trend="up", trend_value="+12%"))
     assert widget["bound"] is True
     assert "trend" not in widget and "trend_value" not in widget
+
+
+@pytest.mark.parametrize("bad,kind", [
+    (["ad_spend"], "a list"),
+    ({"a": "b"}, "a mapping"),
+    (5, "a number"),
+    (True, "true/false"),
+])
+def test_a_non_text_metric_refuses_that_widget_only(store, bad, kind):
+    bad_widget = {"type": "metric", "label": "Bad", "metric": bad, "value": 0}
+    good, refused, unbound = _bind(
+        _w({"channel": "google"}), bad_widget,
+        {"type": "metric", "label": "Plain", "value": 7})
+    assert good["value"] == 410.0
+    assert refused["bound"] is False
+    assert refused["binding_error_code"] == "metric_name_invalid"
+    assert kind in refused["binding_error"]
+    assert "value" not in refused
+    assert unbound == {"type": "metric", "label": "Plain", "value": 7}
