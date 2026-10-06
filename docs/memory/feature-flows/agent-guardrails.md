@@ -228,7 +228,7 @@ Loads config → compiles `bash_deny` (baseline regex) → first match wins → 
 
 ### File deny — `hooks/file-guardrail.py` (77 lines)
 
-`_normalise(path)` → absolute (expands `~`, prefixes `/home/developer` for relative). `_matches_glob` runs `fnmatch` against **both** the full path and the basename, so `.env` patterns catch nested copies. Checks `path_deny` (baseline globs) then `extra_path_deny` (literals). `deny` with `tool`, `path`, `pattern`.
+`_normalise(path)` → absolute (expands `~`, prefixes `/home/developer` for relative, collapses any run of leading slashes to one — `normpath` keeps exactly two, which made `//home/developer/.ssh/x` match no absolute pattern, trinity-enterprise#792; `read-only-guard.py` normalises the same way). `_matches_glob` runs `fnmatch` against **both** the full path and the basename, so `.env` patterns catch nested copies. Checks `path_deny` (baseline globs) then `extra_path_deny` (literals). `deny` with `tool`, `path`, `pattern`.
 
 ### Credential scanner — `hooks/output-scanner.py` (58 lines, PostToolUse)
 
