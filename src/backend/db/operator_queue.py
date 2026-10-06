@@ -1937,7 +1937,12 @@ class OperatorQueueOperations:
         NULL, which would DROP the row).
 
         Equal to Python's `.strip().lower().startswith(p)` for these all-ASCII
-        prefixes on every dialect: `ltrim` takes Python's whitespace set;
+        prefixes on SQLite and on a UTF-8 PostgreSQL database with a
+        non-Turkic collation (the supported deployment). Under a Turkic
+        collation (`tr`/`az`) `lower('I')` is `ı`, so a legacy upper-case
+        `PORTAL-INBOX-…` row passes this exclusion; the Python belt then drops
+        it and the response carries `total: null` with a warning — never
+        wider, never narrower. `ltrim` takes Python's whitespace set;
         U+212A KELVIN SIGN is the one non-ASCII code point whose Python
         `.lower()` is ASCII (`k`), and SQLite's `lower` is ASCII-only, so it is
         rewritten first; U+0130 lowers to `i` + U+0307 in Python but to a bare
