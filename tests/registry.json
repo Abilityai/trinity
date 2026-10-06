@@ -1,6 +1,39 @@
 {
   "test_files": [
     {
+      "file": "unit/test_ent792_file_guardrail_hook.py",
+      "feature": "trinity-enterprise#792",
+      "added": "2026-10-06",
+      "categories": [
+        "agent",
+        "security",
+        "guardrails"
+      ],
+      "description": "The in-agent PreToolUse file guardrail reads any run of leading slashes as one: runs the SHIPPED docker/base-image/hooks/file-guardrail.py main() through run_hook against the shipped guardrails-baseline.json (lib loaded by path, sys.path and sys.modules restored). //- and ///-prefixed .ssh, .aws, .claude/settings*.json, /opt/trinity and /etc/claude-code paths are denied (exit 2) like the one-slash form; ordinary // paths stay allowed; the baseline is asserted to carry the absolute patterns so the rows are not vacuous. Pairs with the // rows in test_read_only_guard.py. Reverting the hook fix turns 7 red."
+    },
+    {
+      "file": "unit/test_files_protected_paths.py",
+      "feature": "Issue #590 / AISEC-C2, trinity-enterprise#792",
+      "added": "2026-10-06",
+      "categories": [
+        "backend",
+        "security",
+        "files"
+      ],
+      "description": "The backend file-route deny list, run against the SHIPPED services.agent_service.files (it used to test an inline copy, which is how ent#792 went unseen). AISEC-C2 reproduction, protected paths, traversal, allowed paths, edge cases; any number of leading slashes is refused (normpath keeps exactly two); DELETE refuses a protected path and any directory that holds one (.ssh, .claude, the home dir, the /proc/self/root and /proc/self/cwd doors), with the derived anchor tuple pinned and the derivation rule tested on hypothetical glob shapes; three Hypothesis properties (the normalised form equals an independent segment-stack resolution, extra leading slashes never change a verdict, DELETE refused iff writing is or the path holds an anchor); through the route logic and through the real FastAPI router (mkdir takes its path in the JSON body): // paths refused on PUT, mkdir and DELETE with the exact refusal, ordinary deletes reach the container lookup, and the agent is sent the normalised path that was checked. Five mutations each red."
+    },
+    {
+      "file": "unit/test_ent787_guardrail_exec_form.py",
+      "feature": "abilityai/trinity-enterprise#787",
+      "added": "2026-10-06",
+      "categories": [
+        "agent",
+        "security",
+        "unit"
+      ],
+      "description": "trinity-enterprise#787: the GUARD-002 hooks register in exec form under env -i + -I -S with a policy-pinned empty CLAUDE_CODE_SHELL_PREFIX (exact shape, key set of a known-loading entry, a port of CLI 2.1.281's hook spawn branch ratcheted to the image's CLI pin); each hook executed under its registered flags/env keeps its deny/allow tables; a hostile PYTHONPATH and a user-site usercustomize flip a deny under the old invocation (precondition) and not under the registered flags; read-only config is root-owned (guard and Codex never read the home file; the backend's root-exec argv writes the config as data, injection payloads included); startup.sh's legacy cleanup, executed under bash, removes both shipped claude-settings.json versions and keeps anything else. Mutation-proven."
+    },
+    {
       "file": "unit/test_3243_atomic_asks.py",
       "feature": "#3243",
       "added": "2026-10-05",
@@ -3971,16 +4004,6 @@
         "migrations"
       ],
       "description": "The container's pull cycle (ent#703, invariant G3) on real repos with a human clone pushing underneath: behind+clean fast-forwards; a local commit is rebased on top; uncommitted edits survive a pull (stashed and re-applied); incoming changes colliding with uncommitted edits are UNDONE — same HEAD, same edits, empty stash, failure recorded (the autostash trap; red against a naive --autostash mutant); a rebase conflict is aborted and recorded; never while an execution runs, including one starting mid-cycle, and an unknown registry counts as busy; a busy repo is skipped without a state write; a pull never touches the push's fields. The loop gate reads the flag live on /git/pull-sync with the env fallback; the interval defaults to the push interval. Both migration tracks: columns + backfill only where auto-sync is on."
-    },
-    {
-      "file": "unit/test_ent610_asks_unavailable.py",
-      "feature": "trinity-enterprise#610",
-      "added": "2026-09-28",
-      "categories": [
-        "backend",
-        "workspace"
-      ],
-      "description": "Workspace asks read fails loud (ent#610 PR A0): a fault in any of the three queue reads (agent set, count, page — #3059) and an unreadable roster each raise AsksUnavailable and the route answers 503 asks_unavailable with Retry-After: 20 (never []); a genuinely off-roster agent is still dropped with a 200; answer_ask stays a uniform 404 on a roster outage (Invariant #8); the suggestions build still degrades to no ask ids through its own attempt() (a guard for the new raise path; it also passes pre-fix). The app is a module-scoped fixture. Mutation: revert the raise to return an empty page (9 red across this file and test_ent428)."
     },
     {
       "file": "unit/test_ent527_readiness_on_lists.py",

@@ -754,9 +754,12 @@
   file get past it. A `sudo` rewrite that keeps root:root `0444` reads `ok` on
   `/health`.
 - **Interaction checked**: read-only mode (#887) no longer registers a hook of its
-  own — it writes `~/.trinity/read-only-config.json`, which the baked
-  `read-only-guard.py` reads — so there is exactly one live registration and the
-  managed file cannot clobber a runtime-written one.
+  own — it writes root-owned `/opt/trinity/read-only-config.json` through a root
+  `docker exec` (trinity-enterprise#787), which the baked `read-only-guard.py`
+  reads — so there is exactly one live registration and the managed file cannot
+  clobber a runtime-written one. The agent-owned `~/.trinity/read-only-config.json`
+  is also written; it decides only while the root file is missing, and it is the
+  only file a pre-trinity-enterprise#787 image reads.
   `read_only._remove_legacy_settings_hook` still cleans up pre-#887 leftovers.
 - **Both paths stay in the three write-deny lists**
   (`_FILE_WRITE_DENY_PATTERNS` / `guardrails-baseline.json::path_deny` /
@@ -766,15 +769,28 @@
 - **Legacy in-tree copy**: `~/.claude/settings.json` sits on the **durable home
   volume**, so rebuilding the image does not remove it from an existing agent —
   leaving a second registration (precedence-dependent) and a live #2036 leak
-  candidate. `startup.sh` deletes it **only on an exact `cmp -s` match** against the
-  managed copy; an agent-authored or operator-edited settings file differs and is
-  left alone. The #2036 ignore rule therefore stays load-bearing, for the legacy and
+  candidate. `startup.sh` deletes it **only when its SHA-256 is one of the two
+  versions the image shipped there** (`LEGACY_SETTINGS_SHA256`), so the gate does
+  not move when the managed registration changes (trinity-enterprise#787); an
+  agent-authored or operator-edited settings file differs and is left alone. The #2036 ignore rule therefore stays load-bearing, for the legacy and
   agent-authored copies rather than for a platform-baked one — premise restated in
   `test_2036_claude_settings_leak.py`, whose own docstring asked for exactly that
   re-argument if the hooks ever moved out of the synced tree.
+- **Exec-form registration (trinity-enterprise#787)**: the four GUARD-002 hooks
+  register as `"command": "/usr/bin/env"` with `"args": ["-i",
+  "HOME=/home/developer", "/usr/local/bin/python3", "-I", "-S",
+  "/opt/trinity/hooks/<hook>.py"]` and `"timeout": 30`: no shell, no
+  `CLAUDE_CODE_SHELL_PREFIX` wrap, no inherited `PYTHON*`/`LD_*` variables, no user
+  site. The managed file's policy `env` pins `CLAUDE_CODE_SHELL_PREFIX` to `""`, and
+  `execution_env.PROTECTED_KEYS` refuses it from `.env`. The image build runs
+  `/opt/trinity/hooks/guard002-smoke.py`, which executes each hook exactly as the
+  managed file registers it (`[command] + args`) against known inputs and fails the
+  build otherwise. Not a boundary against an agent using its passwordless `sudo`.
 - **Tests**: `tests/unit/test_ent345_guardrail_registration.py` (Dockerfile +
   startup assertions; CI does not build the base image, so the shipped artifact is
-  what is pinned).
+  what is pinned) and `tests/unit/test_ent787_guardrail_exec_form.py` (registration
+  shape, each hook under the registered invocation, root-owned read-only config,
+  legacy digest cleanup).
 
 ### 28.3 CLI Budget & Scope Controls (GUARD-003)
 - **Status**: 🚧 Partially Implemented — `--max-turns` + `--disallowedTools` shipped in #140; chat-mode wall-clock timeout tracked in #313

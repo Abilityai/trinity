@@ -298,6 +298,7 @@ onUnmounted(() => {
         :key="tab.id"
         type="button"
         :title="tab.signalTitle || (fixedWidth ? tab.label : undefined)"
+        :aria-keyshortcuts="tab.ariaKeyshortcuts || undefined"
         :role="tablistLabel ? 'tab' : undefined"
         :aria-selected="tablistLabel ? String(modelValue === tab.id) : undefined"
         :tabindex="tablistLabel ? (tab.id === rovingId ? 0 : -1) : undefined"
@@ -392,7 +393,8 @@ onUnmounted(() => {
         data-menu-item
         type="button"
         :aria-label="tab.badgeLabel || undefined"
-        :title="fixedWidth ? tab.label : undefined"
+        :title="tab.signalTitle || (fixedWidth ? tab.label : undefined)"
+        :aria-keyshortcuts="tab.ariaKeyshortcuts || undefined"
         @click="select(tab.id)"
         :class="[
           'w-full px-4 py-2 text-left text-sm transition-colors flex items-center justify-between gap-2',
