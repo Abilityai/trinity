@@ -60,6 +60,7 @@ Trinity runs agents on three [runtimes](../agents/agent-runtimes.md). Everything
 |---|---|---|---|
 | Guardrail hooks (Bash deny-list, credential-file protection, leak scan) | Yes | No | No |
 | Read-only mode | Yes, through a hook | Yes, through Codex's own read-only sandbox | No |
+| Credential redaction of output | Yes, inside the container | Yes, inside the container | No; only the platform's pattern-based scrub when results are stored |
 | Turn limit | Yes | No; the execution timeout bounds the run | No; the execution timeout bounds the run |
 | Per-agent disallowed tools | Yes | No | No |
 
