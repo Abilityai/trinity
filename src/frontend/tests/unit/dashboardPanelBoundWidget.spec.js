@@ -206,3 +206,96 @@ describe('the empty state knows the tiles are beside it (ent#479)', () => {
       .toContain('do not need the agent running')
   })
 })
+
+// ---------------------------------------------------------------------------
+// ent#730: a bound tile says which series its number is
+// ---------------------------------------------------------------------------
+
+function selected(channel, value, extra = {}) {
+  return {
+    type: 'metric', label: `Spend ${channel}`, metric: 'ad_spend', bound: true,
+    value, stale: false, freshness: 'fresh', last_point_at: '2026-09-22T09:00:00Z',
+    bound_series: { basis: 'selected', aggregation: 'sum', series_count: 3,
+      dims: { channel }, dimensions: ['channel'] },
+    ...extra,
+  }
+}
+
+function notFound(extra = {}) {
+  return {
+    type: 'metric', label: 'Spend tiktok', metric: 'ad_spend', bound: false,
+    binding_error: "metric 'ad_spend': no recent data for channel=tiktok",
+    binding_error_code: 'metric_series_not_found',
+    binding_detail: { selector: { channel: 'tiktok' }, recent_series: [{ channel: 'meta' }],
+      more: 0, window_points: 200, series_cap: null, near: [] },
+    ...extra,
+  }
+}
+
+describe('a bound tile captions which series it shows (ent#730)', () => {
+  it('gives three per-channel tiles three different captions', async () => {
+    const wrapper = await mountPanel(dashboard([
+      selected('meta', 623.88), selected('google', 410), selected('linkedin', 95.5),
+    ]))
+    const captions = wrapper.findAll('[data-testid="bound-series"]').map((c) => c.text())
+    expect(captions).toEqual(['channel=meta', 'channel=google', 'channel=linkedin'])
+  })
+
+  it('captions a fold, and does it on the status and progress arms too', async () => {
+    const fold = { basis: 'folded', aggregation: 'sum', series_count: 3, dims: null,
+      dimensions: ['channel', 'geo'], stale_count: 0 }
+    const wrapper = await mountPanel(dashboard([
+      { type: 'metric', label: 'Total', metric: 'ad_spend', bound: true, value: 1129.38,
+        stale: false, freshness: 'fresh', last_point_at: '2026-09-22T09:00:00Z', bound_series: fold },
+      { type: 'status', label: 'Pipeline', metric: 'pipeline', bound: true, value: 'ok', color: 'green',
+        stale: false, freshness: 'fresh', last_point_at: '2026-09-22T09:00:00Z',
+        bound_series: { basis: 'selected', aggregation: 'last', series_count: 2,
+          dims: { region: 'eu' }, dimensions: ['region'] } },
+      { type: 'progress', label: 'Coverage', metric: 'coverage', bound: true, value: 81,
+        stale: false, freshness: 'fresh', last_point_at: '2026-09-22T09:00:00Z',
+        bound_series: { basis: 'selected', aggregation: 'last', series_count: 2,
+          dims: { region: 'us' }, dimensions: ['region'] } },
+    ]))
+    const captions = wrapper.findAll('[data-testid="bound-series"]').map((c) => c.text())
+    expect(captions).toEqual(['sum of 3 series', 'region=eu', 'region=us'])
+  })
+
+  it('renders a not-found refusal as a calm footer row, not the warning paragraph', async () => {
+    const wrapper = await mountPanel(dashboard([notFound()]))
+    expect(wrapper.find('[data-testid="bound-chip"]').text()).toBe('ad_spend')
+    expect(wrapper.find('[data-testid="bound-series"]').text()).toBe('channel=tiktok')
+    expect(wrapper.find('[data-testid="bound-not-found"]').text()).toBe('no recent data')
+    expect(wrapper.find('[data-testid="bound-error-hint"]').text()).toContain('Recent channel: meta')
+    expect(wrapper.find('[data-testid="bound-error"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="bound-no-points"]').exists()).toBe(false)
+  })
+
+  it('tells a selected tile on a metric with no points that there are none yet', async () => {
+    const wrapper = await mountPanel(dashboard([notFound({ binding_detail: {
+      selector: { channel: 'google' }, recent_series: [], more: 0, window_points: 200,
+      series_cap: null, near: [] } })]))
+    expect(wrapper.find('[data-testid="bound-series"]').text()).toBe('channel=google')
+    expect(wrapper.find('[data-testid="bound-error-hint"]').text()).toBe('This metric has no points yet.')
+    expect(wrapper.find('[data-testid="bound-no-points"]').exists()).toBe(false)
+  })
+
+  it('links the docs on every dims refusal, including those with no facts', async () => {
+    const wrapper = await mountPanel(dashboard([
+      notFound(),
+      { type: 'metric', label: 'Bad', metric: 'ad_spend', bound: false,
+        binding_error: "metric 'ad_spend': dims must be a mapping of dimension: value",
+        binding_error_code: 'metric_dimension_invalid' },
+      { type: 'metric', label: 'Region', metric: 'ad_spend', bound: false,
+        binding_error: "metric 'ad_spend': dimension 'region' is not declared for this metric; declared: channel",
+        binding_error_code: 'metric_dimension_undeclared' },
+      { type: 'metric', label: 'Gone', metric: 'nope', bound: false,
+        binding_error: "metric 'nope' is not declared in template.yaml",
+        binding_error_code: 'metric_undeclared' },
+    ]))
+    expect(wrapper.findAll('[data-testid="bound-docs-link"]')).toHaveLength(3)
+    const errors = wrapper.findAll('[data-testid="bound-error"]')
+    expect(errors).toHaveLength(3)
+    expect(errors[1].text()).toContain("dimension 'region' is not declared")
+    expect(errors[1].attributes('class')).toContain('text-status-warning-700')
+  })
+})

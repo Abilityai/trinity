@@ -215,15 +215,136 @@ export function sparklinePoints(metric = {}) {
 export function chartBasisNote(metric = {}) {
   const chart = metric.chart
   if (!chart || chart.basis !== 'series' || !(chart.series_count > 1)) return null
-  const dims = Object.entries(chart.dims || {})
-    .map(([k, v]) => `${k}=${v}`)
-    .join(',')
+  const dims = formatDims(chart.dims)
   return {
     label: dims ? `chart: ${dims}` : 'chart: 1 series',
     title: `A '${chart.aggregation || 'last'}' metric has no cross-series fold, so this `
       + `chart and its trend show the most recently updated of `
       + `${chart.series_count} dimension series, not all of them.`,
   }
+}
+
+/**
+ * One series' dimensions as `channel=meta, geo=us` (ent#730).
+ *
+ * Keys in canonical (sorted) order, the order the store's series identity
+ * uses (`metric_points_service.canonical_dims`). A value containing
+ * whitespace, `,` or `=` is JSON-quoted so the pair stays unambiguous and on
+ * one line. Mirrors the backend's `_dims_text`, which writes the same pairs
+ * into a `metric_series_not_found` sentence.
+ */
+export function formatDims(dims) {
+  if (!dims || typeof dims !== 'object') return ''
+  return Object.keys(dims)
+    .sort()
+    .map((key) => {
+      const value = String(dims[key])
+      return `${key}=${/[\s,=]/.test(value) ? JSON.stringify(value) : value}`
+    })
+    .join(', ')
+}
+
+/**
+ * The published docs section a `dims:` refusal links to. The published site,
+ * not a `github.com/.../blob/main/...` URL (the `HARDENING_DOCS_URL`
+ * precedent): `docs/user-docs/advanced/dynamic-dashboards.md` is published as
+ * `guides/dynamic-dashboards`.
+ */
+export const DIMS_DOCS_URL = 'https://docs.ability.ai/guides/dynamic-dashboards#one-series-per-tile-dims'
+
+/** The `binding_error_code`s a `dims:` selector can produce. */
+export const DIMS_REFUSAL_CODES = new Set([
+  'metric_series_not_found',
+  'metric_dimension_undeclared',
+  'metric_dimension_invalid',
+])
+
+const FOLD_WORDS = { sum: 'sum', avg: 'avg' }
+const FOLD_TITLE_WORDS = { sum: 'sum', avg: 'average' }
+
+/**
+ * What a bound widget's number IS, from the backend's `bound_series` facts
+ * (ent#730) — `{text, dims, tone, title}` or `null` when there is nothing to
+ * qualify (one series, no selector).
+ *
+ * `text` is prose (sans) and `dims` is the machine `k=v` part (mono); the
+ * component renders them side by side. The backend sends facts and this
+ * writes the copy, so the wording can change without an API change.
+ */
+export function boundSeriesNote(widget = {}) {
+  const bs = widget.bound_series
+  if (!widget.metric || widget.bound !== true || !bs || typeof bs !== 'object') return null
+  const count = bs.series_count
+  const dims = formatDims(bs.dims)
+  if (bs.basis === 'selected') {
+    return {
+      text: '',
+      dims,
+      tone: 'tertiary',
+      title: `Only the ${dims} series of ${widget.metric}, chosen by dims in dashboard.yaml.`,
+    }
+  }
+  if (!(count > 1)) return null
+  const dimensions = Array.isArray(bs.dimensions) ? bs.dimensions : []
+  const fold = bs.basis === 'folded' ? FOLD_WORDS[bs.aggregation] : undefined
+  if (fold) {
+    const noun = dimensions.length === 1 ? `${dimensions[0]} values` : 'series'
+    const stale = bs.stale_count > 0 ? ` · ${bs.stale_count} stale` : ''
+    const each = dimensions.length === 1 ? `${dimensions[0]}s` : 'series'
+    return {
+      text: `${fold} of ${count} ${noun}${stale}`,
+      dims: '',
+      tone: 'tertiary',
+      title: `The ${FOLD_TITLE_WORDS[bs.aggregation]} of the latest value of each of ${count} ${each}. `
+        + 'Add dims to show one.',
+    }
+  }
+  return {
+    text: dims ? `newest of ${count}: ` : `newest of ${count} series`,
+    dims,
+    tone: 'secondary',
+    title: `This tile shows the most recently updated of its ${count} series, not all of them. `
+      + 'Add dims to pin one.',
+  }
+}
+
+/**
+ * The second line of a `metric_series_not_found` refusal, from the backend's
+ * `binding_detail` facts — or `null` without them. Deterministic hints only:
+ * a partial selector's real series, a casing mismatch, "no points yet", and
+ * otherwise the recent values and the read window. No fuzzy matching.
+ */
+export function refusalHint(widget = {}) {
+  const detail = widget.binding_detail
+  if (!detail || typeof detail !== 'object') return null
+  const selector = detail.selector || {}
+  const recent = Array.isArray(detail.recent_series) ? detail.recent_series : []
+  const near = Array.isArray(detail.near) ? detail.near : []
+  if (near.length) {
+    const missing = Object.keys(near[0]).filter((k) => !(k in selector)).sort()
+    return `Exact match also needs ${missing.join(', ')}: ${formatDims(near[0])}`
+  }
+  const wanted = formatDims(selector).toLowerCase()
+  const cased = recent.find((dims) => formatDims(dims).toLowerCase() === wanted)
+  if (cased && formatDims(cased) !== formatDims(selector)) {
+    return `Did you mean ${formatDims(cased)}?`
+  }
+  if (!recent.length) return 'This metric has no points yet.'
+  const keys = Object.keys(selector)
+  const single = keys.length === 1
+    && recent.every((dims) => dims && Object.keys(dims).length === 1 && keys[0] in dims)
+  const noun = single ? keys[0] : 'series'
+  // One declared key: list the values alone ("meta, google"), not "channel=meta".
+  const shown = recent.slice(0, 2)
+    .map((dims) => (single ? formatDims(dims).slice(keys[0].length + 1) : formatDims(dims)))
+  const rest = recent.length - shown.length + (detail.more || 0)
+  const list = `${shown.join(single ? ', ' : '; ')}${rest > 0 ? `, +${rest}` : ''}`
+  const lead = `Check the selector or confirm this ${noun} reports. Recent ${noun}: ${list}`
+  if (detail.series_cap) {
+    return `${lead}. Only the ${detail.series_cap} newest series are read, so this one may be outside them.`
+  }
+  return `${lead} (among the ${detail.window_points} newest points; a ${noun} that reports rarely `
+    + 'can fall outside them).'
 }
 
 /** A sparkline's y-max: the series peak, never 0 (uPlot draws nothing at 0). */

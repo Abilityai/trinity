@@ -4,8 +4,36 @@
          removes `value` for an undeclared metric (a wrong number is worse than
          no number), so without this the widget would render a bare em dash and
          the operator would have no idea the widget names a metric at all. -->
+    <!-- ent#730: a selector that matched no recent series is often not an
+         author error (the channel has not reported yet, or reports rarely),
+         so it is a calm footer row, not warning ink: chip, the selector, "no
+         recent data", then a hint written from the backend's facts. -->
+    <template v-if="notFound">
+      <div class="flex flex-wrap items-center gap-2 text-xs">
+        <span
+          class="inline-flex items-center rounded-full bg-gray-100 px-2 py-0.5 font-mono text-gray-600 dark:bg-gray-700 dark:text-gray-300"
+          :title="`Bound to the declared metric '${widget.metric}' — the value comes from the registry, not from dashboard.yaml.`"
+          data-testid="bound-chip"
+        >{{ widget.metric }}</span>
+        <span
+          v-if="selectorText"
+          class="min-w-0 break-words font-mono text-gray-500 dark:text-gray-400"
+          title="The series named by dims in dashboard.yaml."
+          data-testid="bound-series"
+        >{{ selectorText }}</span>
+        <span
+          class="text-gray-500 dark:text-gray-400"
+          data-testid="bound-not-found"
+        >no recent data</span>
+      </div>
+      <p
+        v-if="hint"
+        class="text-xs text-gray-500 dark:text-gray-400 break-words"
+        data-testid="bound-error-hint"
+      >{{ hint }}</p>
+    </template>
     <p
-      v-if="widget.binding_error"
+      v-else-if="widget.binding_error"
       class="text-xs text-status-warning-700 dark:text-status-warning-300"
       data-testid="bound-error"
     >
@@ -35,7 +63,25 @@
         class="text-gray-500 dark:text-gray-400"
         data-testid="bound-no-points"
       >declared, no points yet</span>
+      <!-- ent#730: which series the number is. Its own line (`w-full`), so a
+           long label wraps under chip · time · freshness instead of pushing
+           the freshness chip onto a later line. Mono on the `k=v` part only. -->
+      <span
+        v-if="seriesNote"
+        class="w-full min-w-0 break-words"
+        :class="seriesNote.tone === 'secondary' ? 'text-gray-600 dark:text-gray-300' : 'text-gray-500 dark:text-gray-400'"
+        :title="seriesNote.title"
+        data-testid="bound-series"
+      >{{ seriesNote.text }}<span v-if="seriesNote.dims" class="font-mono">{{ seriesNote.dims }}</span></span>
     </div>
+    <a
+      v-if="dimsRefusal"
+      :href="DIMS_DOCS_URL"
+      target="_blank"
+      rel="noopener noreferrer"
+      class="inline-block text-xs text-action-primary-600 dark:text-action-primary-400 hover:underline"
+      data-testid="bound-docs-link"
+    >How dims: selects a series</a>
   </div>
 </template>
 
@@ -53,6 +99,11 @@
  * progress arms all take the binding, and `DashboardPanel.vue` is already a
  * 735-line #1031 candidate.
  *
+ * ent#730: it also captions WHICH series a bound number is (from the
+ * backend's `bound_series` facts, copy in `utils/metricFormat.js`), renders a
+ * `metric_series_not_found` refusal as a neutral footer row with a hint built
+ * from `binding_detail` facts, and links the docs on every `dims:` refusal.
+ *
  * `stale` is the backend's verdict (the ONE rule in
  * `services/metric_read_service.freshness`), not a comparison done here. Note
  * this is the PER-METRIC flag on the widget, not the panel's top-level
@@ -61,7 +112,14 @@
  */
 import { computed } from 'vue'
 import { formatRelativeTime, formatLocalDateTime } from '../utils/timestamps'
-import { freshnessChip } from '../utils/metricFormat'
+import {
+  DIMS_DOCS_URL,
+  DIMS_REFUSAL_CODES,
+  boundSeriesNote,
+  formatDims,
+  freshnessChip,
+  refusalHint,
+} from '../utils/metricFormat'
 
 const props = defineProps({
   widget: { type: Object, required: true },
@@ -70,4 +128,9 @@ const props = defineProps({
 const chip = computed(() => freshnessChip(props.widget))
 const relative = computed(() => formatRelativeTime(props.widget.last_point_at))
 const absolute = computed(() => formatLocalDateTime(props.widget.last_point_at))
+const seriesNote = computed(() => boundSeriesNote(props.widget))
+const notFound = computed(() => props.widget.binding_error_code === 'metric_series_not_found')
+const selectorText = computed(() => formatDims(props.widget.binding_detail?.selector))
+const hint = computed(() => refusalHint(props.widget))
+const dimsRefusal = computed(() => DIMS_REFUSAL_CODES.has(props.widget.binding_error_code))
 </script>

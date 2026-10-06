@@ -10,8 +10,12 @@
  */
 import { describe, expect, it } from 'vitest'
 import {
+  DIMS_DOCS_URL,
+  boundSeriesNote,
   chartBasisNote,
   formatBytes,
+  formatDims,
+  refusalHint,
   formatDuration,
   formatMetricValue,
   freshnessChip,
@@ -228,5 +232,143 @@ describe('the colour maps are token-only', () => {
 
   it('falls back to gray for an unknown colour rather than rendering unstyled', () => {
     expect(statusBadgeClasses('chartreuse')).toBe(statusBadgeClasses('gray'))
+  })
+})
+
+// ---------------------------------------------------------------------------
+// ent#730: which series a bound widget's number is, and why a selector refused
+// ---------------------------------------------------------------------------
+
+function bound(boundSeries, extra = {}) {
+  return { type: 'metric', metric: 'ad_spend', bound: true, bound_series: boundSeries, ...extra }
+}
+
+describe('formatDims spells a series the one way both surfaces read it', () => {
+  it('joins k=v pairs in canonical (sorted) key order', () => {
+    expect(formatDims({ geo: 'us', channel: 'meta' })).toBe('channel=meta, geo=us')
+    expect(formatDims({ channel: 'meta' })).toBe('channel=meta')
+    expect(formatDims(null)).toBe('')
+    expect(formatDims({})).toBe('')
+  })
+
+  it('JSON-quotes a value that would make the pair ambiguous or wrap', () => {
+    expect(formatDims({ channel: 'paid social' })).toBe('channel="paid social"')
+    expect(formatDims({ channel: 'a,b' })).toBe('channel="a,b"')
+    expect(formatDims({ channel: 'a=b' })).toBe('channel="a=b"')
+    expect(formatDims({ channel: 'a\nb' })).toBe('channel="a\\nb"')
+  })
+
+  it('is what chartBasisNote uses for its label', () => {
+    const note = chartBasisNote({
+      chart: { basis: 'series', aggregation: 'last', series_count: 3, dims: { region: 'eu', geo: 'us' } },
+    })
+    expect(note.label).toBe('chart: geo=us, region=eu')
+  })
+})
+
+describe('boundSeriesNote says what a bound number is', () => {
+  it('names the selected series at any series count', () => {
+    for (const n of [1, 3]) {
+      const note = boundSeriesNote(bound({ basis: 'selected', aggregation: 'sum', series_count: n,
+        dims: { channel: 'meta' }, dimensions: ['channel'] }))
+      expect(note.text).toBe('')
+      expect(note.dims).toBe('channel=meta')
+      expect(note.title).toContain('channel=meta')
+      expect(note.title).toContain('ad_spend')
+    }
+  })
+
+  it('says a fold is a fold, naming the one declared dimension', () => {
+    const fold = (aggregation, dimensions, stale_count) => boundSeriesNote(bound({
+      basis: 'folded', aggregation, series_count: 3, dims: null, dimensions, stale_count }))
+    expect(fold('sum', ['channel'], 0).text).toBe('sum of 3 channel values')
+    expect(fold('avg', ['channel'], 0).text).toBe('avg of 3 channel values')
+    expect(fold('sum', ['channel', 'geo'], 0).text).toBe('sum of 3 series')
+    expect(fold('sum', ['channel'], 1).text).toBe('sum of 3 channel values · 1 stale')
+    expect(fold('sum', ['channel'], null).text).toBe('sum of 3 channel values')
+    expect(fold('sum', ['channel'], 0).dims).toBe('')
+  })
+
+  it('says a last tile over several series shows the newest, in secondary ink', () => {
+    const note = boundSeriesNote(bound({ basis: 'series', aggregation: 'last', series_count: 3,
+      dims: { channel: 'meta' }, dimensions: ['channel'] }))
+    expect(note.text).toBe('newest of 3: ')
+    expect(note.dims).toBe('channel=meta')
+    expect(note.tone).toBe('secondary')
+  })
+
+  it('falls to the newest-of copy for an aggregation it does not know', () => {
+    const note = boundSeriesNote(bound({ basis: 'folded', aggregation: 'median', series_count: 3,
+      dims: null, dimensions: ['channel'] }))
+    expect(note.text).toBe('newest of 3 series')
+  })
+
+  it('says nothing when there is nothing to qualify', () => {
+    expect(boundSeriesNote(bound({ basis: 'series', aggregation: 'last', series_count: 1,
+      dims: null, dimensions: [] }))).toBeNull()
+    expect(boundSeriesNote(bound(undefined))).toBeNull()
+    expect(boundSeriesNote({ ...bound({ basis: 'selected', series_count: 3, dims: { channel: 'meta' } }),
+      bound: false })).toBeNull()
+    expect(boundSeriesNote({ type: 'metric', value: 3 })).toBeNull()
+  })
+
+  it('never puts a backtick in a title', () => {
+    const notes = [
+      bound({ basis: 'selected', aggregation: 'sum', series_count: 3, dims: { channel: 'meta' }, dimensions: ['channel'] }),
+      bound({ basis: 'folded', aggregation: 'sum', series_count: 3, dims: null, dimensions: ['channel'] }),
+      bound({ basis: 'series', aggregation: 'last', series_count: 3, dims: { channel: 'meta' }, dimensions: ['channel'] }),
+    ].map(boundSeriesNote)
+    for (const note of notes) expect(note.title).not.toContain('`')
+  })
+})
+
+describe('refusalHint writes the second line of a not-found refusal from facts', () => {
+  function refused(detail) {
+    return { type: 'metric', metric: 'ad_spend', bound: false,
+      binding_error_code: 'metric_series_not_found', binding_detail: {
+        selector: { channel: 'tiktok' }, recent_series: [], more: 0, window_points: 200,
+        series_cap: null, near: [], ...detail } }
+  }
+
+  it('names the dimension a partial selector is missing', () => {
+    expect(refusalHint(refused({ selector: { channel: 'google' },
+      recent_series: [{ channel: 'google', geo: 'us' }], near: [{ channel: 'google', geo: 'us' }] })))
+      .toBe('Exact match also needs geo: channel=google, geo=us')
+  })
+
+  it('suggests a casing fix, and only a casing fix', () => {
+    expect(refusalHint(refused({ selector: { channel: 'Google' },
+      recent_series: [{ channel: 'meta' }, { channel: 'google' }] })))
+      .toBe('Did you mean channel=google?')
+    expect(refusalHint(refused({ selector: { channel: 'gogle' },
+      recent_series: [{ channel: 'meta' }, { channel: 'google' }] })))
+      .not.toContain('Did you mean')
+  })
+
+  it('says a metric with no points has none yet', () => {
+    expect(refusalHint(refused({ recent_series: [] }))).toBe('This metric has no points yet.')
+  })
+
+  it('lists recent values and the window otherwise', () => {
+    expect(refusalHint(refused({ recent_series: [{ channel: 'meta' }, { channel: 'google' },
+      { channel: 'linkedin' }], more: 0 })))
+      .toBe('Check the selector or confirm this channel reports. Recent channel: meta, google, +1 '
+        + '(among the 200 newest points; a channel that reports rarely can fall outside them).')
+  })
+
+  it('says the series may be outside the 50 read when the cap applies', () => {
+    const hint = refusalHint(refused({ recent_series: [{ channel: 'c1' }, { channel: 'c2' }],
+      more: 53, series_cap: 50 }))
+    expect(hint).toContain('Only the 50 newest series are read')
+    expect(hint).toContain('+53')
+  })
+
+  it('says nothing without facts', () => {
+    expect(refusalHint({ type: 'metric', metric: 'ad_spend', binding_error_code: 'metric_dimension_invalid' }))
+      .toBeNull()
+  })
+
+  it('points at the published binding docs', () => {
+    expect(DIMS_DOCS_URL).toMatch(/^https:\/\/docs\.ability\.ai\//)
   })
 })
