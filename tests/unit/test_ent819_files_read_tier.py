@@ -801,3 +801,76 @@ def test_each_refusal_is_counted_in_the_log(agent, caplog):
     assert files._UNVERIFIED_IMAGE_REFUSALS == before + 2
     lines = [r.getMessage() for r in caplog.records if "restart" in r.getMessage()]
     assert len(lines) == 2 and f"refusals={before + 2}" in lines[-1]
+
+
+# ---- the real routes: the forwarded path, the audit and the image check ----------
+
+
+def _route_client(user):
+    """The shipped router over the shipped logic; only the signed-in user is
+    supplied. Server errors come back as responses, so a 500 is asserted, not raised."""
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from routers import agent_files
+
+    app = FastAPI()
+    app.include_router(agent_files.router)
+    app.dependency_overrides[agent_files.get_current_user] = lambda: user
+    return TestClient(app, raise_server_exceptions=False)
+
+
+@pytest.mark.parametrize("route", ["download", "preview"])
+@pytest.mark.parametrize("path", ["//home/developer/notes.md", "docs/../notes.md"],
+                         ids=["double-slash", "dot-dot"])
+def test_the_real_routes_send_the_agent_the_path_that_was_checked(agent, route, path):
+    """The agent is asked for the normalized path the checks approved, never the
+    raw spelling the caller typed."""
+    r = _route_client(shared_user()).get(f"/api/agents/{AGENT}/files/{route}", params={"path": path})
+    assert r.status_code == 200, r.text
+    assert r.content == b"FILE-BODY"
+    assert agent.sent.await_count == 1
+    assert agent.sent.await_args.args[2] == f"/api/files/{route}"
+    assert agent.sent.await_args.kwargs["params"] == {"path": "/home/developer/notes.md"}
+
+
+@pytest.mark.parametrize("route", ["download", "preview"])
+def test_the_real_routes_refuse_a_shared_user_when_the_audit_store_fails(agent, audit, route):
+    """Auditing is best-effort: with the audit store down, a refused read is
+    still the structured 403, not a 500."""
+    audit.side_effect = RuntimeError("audit store down")
+    r = _route_client(shared_user()).get(f"/api/agents/{AGENT}/files/{route}", params={"path": ".env"})
+    assert r.status_code == 403, r.text
+    assert r.json()["detail"] == {
+        "code": "owner_tier_path",
+        "message": OWNER_TIER_MESSAGE,
+        "path": "/home/developer/.env",
+    }
+    assert audit.await_count == 1
+    assert agent.sent.await_count == 0
+
+
+@pytest.mark.parametrize("route", ["download", "preview"])
+def test_the_real_routes_serve_an_admin_when_the_audit_store_fails(agent, audit, route):
+    """Auditing is best-effort: with the audit store down, an admin who is not
+    the owner still reads the credential file."""
+    audit.side_effect = RuntimeError("audit store down")
+    r = _route_client(admin_jwt()).get(f"/api/agents/{AGENT}/files/{route}", params={"path": ".env"})
+    assert r.status_code == 200, r.text
+    assert r.content == b"FILE-BODY"
+    assert audit.await_count == 1
+    assert agent.sent.await_args.kwargs["params"] == {"path": "/home/developer/.env"}
+
+
+@pytest.mark.parametrize("route", ["download", "preview"])
+def test_the_real_routes_refuse_the_owners_agent_key_on_an_unverified_image(agent, route):
+    """Only a person who is the owner or an admin skips the image check. The
+    owner's agent-scoped key is below the owner tier, so on an image that is not
+    verified it gets the restart answer and the agent is never called."""
+    _old_image(agent)
+    key = _user(OWNER, mcp_scope="agent", agent_name=AGENT)
+    r = _route_client(key).get(f"/api/agents/{AGENT}/files/{route}", params={"path": "notes.md"})
+    assert r.status_code == 403, r.text
+    assert r.json()["detail"] == {"code": "agent_restart_required", "message": RESTART_MESSAGE,
+                                  "path": "/home/developer/notes.md"}
+    assert agent.probe.await_count == 1
+    assert agent.sent.await_count == 0
