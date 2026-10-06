@@ -13,6 +13,8 @@
  *      `{detail: <message>, code, path}`; a string detail stays a string;
  *   2. the Credentials panel (MOUNTED) opens the editor only after a read or a
  *      404, and shows the server's message next to the file list otherwise;
+ *      Quick Inject, which reads the current file before merging, shows the
+ *      server's message for a coded 403 and writes nothing;
  *   3. the Files panel's Download shows the server's message.
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest'
@@ -140,6 +142,34 @@ describe('Credentials panel: the editor opens only on content or a 404', () => {
     await flushPromises()
     expect(editor(w).element.value).toBe('KEY=value\n')
     expect(w.find('[data-testid="inline-error"]').exists()).toBe(false)
+  })
+})
+
+describe('Credentials panel: Quick Inject reads the current file first', () => {
+  async function quickInject (read) {
+    const w = await mountCredentials({ read })
+    const store = useAgentsStore()
+    store.injectCredentials = vi.fn().mockResolvedValue({})
+    await w.find('textarea[rows="5"]').setValue('NEW_KEY=new-value')
+    await button(w, 'Inject').trigger('click')
+    await flushPromises()
+    return { w, store }
+  }
+
+  it('a coded 403 shows the server message and writes nothing', async () => {
+    const { w, store } = await quickInject(vi.fn(refused))
+    expect(store.injectCredentials).not.toHaveBeenCalled()
+    expect(w.text()).toContain(MESSAGE)
+    expect(w.text()).not.toContain("Couldn't read this agent's current credentials")
+  })
+
+  it('an uncoded failure keeps the generic message and writes nothing', async () => {
+    const down = () => Promise.reject(Object.assign(new Error('Request failed with status code 403'), {
+      response: { status: 403, data: { detail: 'Forbidden' } },
+    }))
+    const { w, store } = await quickInject(vi.fn(down))
+    expect(store.injectCredentials).not.toHaveBeenCalled()
+    expect(w.text()).toContain("Couldn't read this agent's current credentials")
   })
 })
 
