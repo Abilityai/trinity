@@ -1,6 +1,6 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Description: >-
-  Trinity (sovereign AI agent platform) on one EC2 instance: the Trinity AMI,
+  Trinity (the operating system for the AI-native company) on one EC2 instance: the Trinity AMI,
   a security group for HTTPS, and an Elastic IP. Open the TrinityUrl output
   and enter the InstanceId output when /setup asks for it. (#3004)
 

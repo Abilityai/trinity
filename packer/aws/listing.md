@@ -7,7 +7,7 @@ Website), versioned with the image. Logo: `../digitalocean/logo.png`.
 
 ## Product title
 
-Trinity — sovereign infrastructure for autonomous AI agents
+Trinity — the operating system for the AI-native company
 
 ## Short description
 
