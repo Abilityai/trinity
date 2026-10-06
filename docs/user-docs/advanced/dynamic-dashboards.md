@@ -164,7 +164,7 @@ The three tiles show three different numbers (587.25, 410, and 95.5), each with 
 
 Rules for a selector:
 
-- **Exact match.** Name every dimension of one series. On a metric with `dimensions: [channel, geo]`, `dims: {channel: google}` is refused, and the hint shows the series it would have to name in full (`channel=google, geo=us`). Key order does not matter.
+- **Exact match.** Name every dimension the series was recorded with, no more and no fewer. A point may carry any subset of the metric's declared `dimensions`, so what counts is the `dims` on the recorded points. On a metric with `dimensions: [channel, geo]`, if the points carry `{channel: google, geo: us}`, then `dims: {channel: google}` is refused, and the hint shows the full series (`channel=google, geo=us`). If the points carry only `{channel: google}`, that same selector matches. Key order does not matter.
 - **Values are text.** Quote anything YAML would read as a number or a boolean: `dims: {year: "2024"}`, `dims: {enabled: "yes"}`.
 - **`dims: {}` means no selector.** The tile shows the folded number. A series recorded with no `dims` at all cannot be selected on its own.
 - **Thresholds and cadence are declared per metric** and apply to every selected series.
@@ -181,7 +181,7 @@ A tile whose selector cannot match shows a reason instead of a number, never the
 
 The agent's compatibility report also flags a `dims:` selector that can never match, and a `metric:` that is not a name (check **X-009**), so an agent can catch the mistake without opening the dashboard.
 
-**Visible change for existing dashboards:** with no change on your side, a bound tile over several series gains a caption saying what its number is, a breached bound `metric` tile gains a verdict badge, and bound trend arrows follow the metric's `direction`. To remove the caption, add `dims:` or keep one series.
+**Visible change for existing dashboards:** with no change on your side, a bound tile over several series gains a caption saying what its number is, a breached bound `metric` tile gains a verdict badge, and bound trend arrows follow the metric's `direction`. A bound tile over a single series gets no caption. Adding `dims:` replaces the fold caption with one naming the selected series (for example `channel=meta`).
 
 ### Retention and limits
 

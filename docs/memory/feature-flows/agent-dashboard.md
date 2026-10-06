@@ -336,7 +336,7 @@ widgets:
   - type: metric
     label: "Spend: Google"
     metric: ad_spend
-    dims: {channel: google}  # every declared dimension of one series, exact match
+    dims: {channel: google}  # every dimension the series was recorded with, exact match
 ```
 
 `value`, `last_point_at`, `stale`, `freshness`, `color` and `history` then come
