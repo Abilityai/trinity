@@ -1,6 +1,54 @@
 {
   "test_files": [
     {
+      "file": "unit/test_ent819_files_read_tier.py",
+      "feature": "trinity-enterprise#819",
+      "added": "2026-10-06",
+      "categories": [
+        "backend",
+        "files",
+        "auth",
+        "audit",
+        "unit"
+      ],
+      "description": "Owner tier on file download and preview, run against the SHIPPED services.agent_service.files: every owner-tier pattern (credential paths, their /proc and /dev spellings, Trinity credential copies, the secret file classes, runtime config) is refused below the owner tier with the teammate message; a PERSON gate runs first (agent, system, connector and ops keys get person_required) while agent keys still read accessor-tier files; the agent is sent the normalised path that was checked; NUL is refused before any agent call and an empty path is owner-tier. Refused reads and non-owner allowed reads write one AUTHORIZATION row with per-principal attribution, and an audit failure never changes the answer. The agent server's link refusal maps to an audited structured 403; platform readers (agent_client.read_file, the Work card pipeline reader, the objective join) log a warning naming a linked file. The older-image probe: below-owner and non-person reads refused on an unverified image, cached per container and image only for grep's own quiet answer, the probe target pinned to the shipped agent server."
+    },
+    {
+      "file": "unit/test_ent819_agent_server_read_boundary.py",
+      "feature": "trinity-enterprise#819",
+      "added": "2026-10-06",
+      "categories": [
+        "agent",
+        "files",
+        "unit"
+      ],
+      "description": "The SHIPPED agent server files router (loaded by path, home monkeypatched to a temp dir) opens download and preview paths one component at a time without following any link and serves that descriptor: a link anywhere in the path (file, linked directory, dangling, self-loop) is 403 resolved_path_mismatch; leading slashes collapse before the fence; /proc and sibling-prefix paths are fenced; missing is 404, a directory or FIFO is 400; a file swapped for a link after the open is not read through, and reads stop at the size that was opened."
+    },
+    {
+      "file": "unit/test_ent819_no_platform_links_in_home.py",
+      "feature": "trinity-enterprise#819",
+      "added": "2026-10-06",
+      "categories": [
+        "backend",
+        "agent",
+        "files",
+        "guard"
+      ],
+      "description": "Premise pin for the no-link read rule: a comment-stripped scan of docker/base-image and src/backend finds no link creation (os.symlink, symlink_to, hardlink_to, os.link, ln -s) outside a reasoned allowlist; files that do not tokenize are scanned as raw text; the scan's teeth are shown by planting a line in a temp copy."
+    },
+    {
+      "file": "unit/test_ent823_agent_server_protected_paths.py",
+      "feature": "trinity-enterprise#823",
+      "added": "2026-10-06",
+      "categories": [
+        "agent",
+        "files",
+        "guardrails",
+        "unit"
+      ],
+      "description": "The SHIPPED agent server keeps the runtime config files out of its file routes: ~/.claude.json and ~/.claude/.credentials.json are on both name lists; PUT, mkdir and DELETE never reach ~/.claude.json, ~/.claude/.credentials.json, ~/.gemini/settings.json or ~/.tmp/codex, matched on the resolved target (a link elsewhere in the home included; DELETE also refuses a directory above one); ordinary .claude and .tmp files stay writable; the two Claude Code entries are present in the backend constant, the hook baseline and both agent-server lists."
+    },
+    {
       "file": "unit/test_3246_platform_alert_surfaces.py",
       "feature": "#3246",
       "added": "2026-10-05",
@@ -3888,25 +3936,27 @@
     },
     {
       "file": "unit/test_ent792_file_guardrail_hook.py",
-      "feature": "trinity-enterprise#792",
+      "feature": "trinity-enterprise#792, trinity-enterprise#823",
       "added": "2026-10-06",
       "categories": [
         "agent",
         "security",
         "guardrails"
       ],
-      "description": "The in-agent PreToolUse file guardrail reads any run of leading slashes as one: runs the SHIPPED docker/base-image/hooks/file-guardrail.py main() through run_hook against the shipped guardrails-baseline.json (lib loaded by path, sys.path and sys.modules restored). //- and ///-prefixed .ssh, .aws, .claude/settings*.json, /opt/trinity and /etc/claude-code paths are denied (exit 2) like the one-slash form; ordinary // paths stay allowed; the baseline is asserted to carry the absolute patterns so the rows are not vacuous. Pairs with the // rows in test_read_only_guard.py. Reverting the hook fix turns 7 red."
+      "description": "The in-agent PreToolUse file guardrail reads any run of leading slashes as one: runs the SHIPPED docker/base-image/hooks/file-guardrail.py main() through run_hook against the shipped guardrails-baseline.json (lib loaded by path, sys.path and sys.modules restored). //- and ///-prefixed .ssh, .aws, .claude/settings*.json, /opt/trinity and /etc/claude-code paths are denied (exit 2) like the one-slash form; ordinary // paths stay allowed; the baseline is asserted to carry the absolute patterns so the rows are not vacuous. Pairs with the // rows in test_read_only_guard.py. Reverting the hook fix turns 7 red. trinity-enterprise#823: a Write to ~/.claude.json, ~/.claude/.credentials.json, ~/.gemini/settings.json or ~/.tmp/codex/* exits 2 under the shipped baseline, and every file-guardrail row of guard002-smoke.py (run at image build) is executed against the shipped hook.",
+      "updated": "2026-10-06"
     },
     {
       "file": "unit/test_files_protected_paths.py",
-      "feature": "Issue #590 / AISEC-C2, trinity-enterprise#792",
+      "feature": "Issue #590 / AISEC-C2, trinity-enterprise#792, trinity-enterprise#819, trinity-enterprise#823",
       "added": "2026-10-06",
       "categories": [
         "backend",
         "security",
         "files"
       ],
-      "description": "The backend file-route deny list, run against the SHIPPED services.agent_service.files (it used to test an inline copy, which is how ent#792 went unseen). AISEC-C2 reproduction, protected paths, traversal, allowed paths, edge cases; any number of leading slashes is refused (normpath keeps exactly two); DELETE refuses a protected path and any directory that holds one (.ssh, .claude, the home dir, the /proc/self/root and /proc/self/cwd doors), with the derived anchor tuple pinned and the derivation rule tested on hypothetical glob shapes; three Hypothesis properties (the normalised form equals an independent segment-stack resolution, extra leading slashes never change a verdict, DELETE refused iff writing is or the path holds an anchor); through the route logic and through the real FastAPI router (mkdir takes its path in the JSON body): // paths refused on PUT, mkdir and DELETE with the exact refusal, ordinary deletes reach the container lookup, and the agent is sent the normalised path that was checked. Five mutations each red."
+      "description": "The backend file-route deny list, run against the SHIPPED services.agent_service.files (it used to test an inline copy, which is how ent#792 went unseen). AISEC-C2 reproduction, protected paths, traversal, allowed paths, edge cases; any number of leading slashes is refused (normpath keeps exactly two); DELETE refuses a protected path and any directory that holds one (.ssh, .claude, the home dir, the /proc/self/root and /proc/self/cwd doors), with the derived anchor tuple pinned and the derivation rule tested on hypothetical glob shapes; three Hypothesis properties (the normalised form equals an independent segment-stack resolution, extra leading slashes never change a verdict, DELETE refused iff writing is or the path holds an anchor); through the route logic and through the real FastAPI router (mkdir takes its path in the JSON body): // paths refused on PUT, mkdir and DELETE with the exact refusal, ordinary deletes reach the container lookup, and the agent is sent the normalised path that was checked. Five mutations each red. trinity-enterprise#819/#823: .git/config, the runtime config files (~/.claude.json, ~/.claude/.credentials.json, ~/.gemini/settings.json, ~/.tmp/codex/*) and the /dev spellings join the write list with their delete anchors (deleting .tmp is refused); every owner-tier read pattern is also write-denied except the reviewed secret file classes (the set is pinned, plus a Hypothesis property over the path generator).",
+      "updated": "2026-10-06"
     },
     {
       "file": "unit/test_ent689_readiness_gate.py",
