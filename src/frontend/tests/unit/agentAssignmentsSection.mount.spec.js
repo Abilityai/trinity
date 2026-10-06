@@ -19,8 +19,8 @@ import { useEnterpriseStore } from '@/stores/enterprise'
 import { replacePrimarySteps, seatLine, driftNote, writeError } from '@/utils/assignments'
 
 const AGENT = 'scout'
-const ANN = { id: 'a1', user_id: 1, display_name: 'Ann Lee', role_id: 'cfo', kind: 'primary', drift_state: 'unknown', proactive_consent: true }
-const BOB = { id: 'a2', user_id: 2, display_name: 'Bob Ray', role_id: 'cfo', kind: 'approver', drift_state: 'changed', proactive_consent: false }
+const ANN = { id: 'a1', user_id: 1, display_name: 'Ann Lee', role_id: 'cfo', kind: 'primary', drift_state: 'unknown', proactive_consent: true, proactive_consent_state: 'consented' }
+const BOB = { id: 'a2', user_id: 2, display_name: 'Bob Ray', role_id: 'cfo', kind: 'approver', drift_state: 'changed', proactive_consent: false, proactive_consent_state: 'not_asked' }
 const USERS = [
   { id: 1, username: 'ann', name: 'Ann Lee' },
   { id: 2, username: 'bob', name: 'Bob Ray' },
@@ -29,9 +29,11 @@ const USERS = [
 ]
 
 let roster
+let canonRoles
 function serve() {
   api.get.mockImplementation(async (url) => {
     if (url === '/api/users') return { data: USERS }
+    if (url === `/api/agents/${AGENT}/canon/roles`) return { data: canonRoles }
     return { data: roster }
   })
 }
@@ -54,6 +56,7 @@ beforeEach(() => {
   setActivePinia(createPinia())
   for (const fn of Object.values(api)) fn.mockReset()
   roster = { agent_name: AGENT, assignments: [ANN, BOB], mine: null, primary: 'Ann Lee' }
+  canonRoles = { agent_name: AGENT, roles: [], unavailable: null, reason: 'no_canon', message: 'this agent declares no canon' }
   serve()
   api.post.mockResolvedValue({ data: {} })
   api.patch.mockResolvedValue({ data: {} })
@@ -84,9 +87,9 @@ describe('what an admin sees', () => {
   it('shows consent and a changed role file as a warning on its row', async () => {
     const w = render()
     await flushPromises()
-    expect(q(w, 'assignment-primary').find('[data-testid="assignment-consent"]').text()).toBe('Proactive briefs on')
+    expect(q(w, 'assignment-primary').find('[data-testid="assignment-consent"]').text()).toBe('Proactive briefs: consented')
     const bob = w.find('[data-testid="assignment-row"]')
-    expect(bob.find('[data-testid="assignment-consent"]').text()).toBe('Proactive briefs off')
+    expect(bob.find('[data-testid="assignment-consent"]').text()).toBe('Proactive briefs: not asked')
     expect(bob.find('[data-testid="assignment-drift"]').text()).toContain('role file changed')
   })
 
@@ -325,5 +328,68 @@ describe('seats (trinity-enterprise#811)', () => {
   it('replaces the primary without naming a seat when none is given', () => {
     const { steps } = replacePrimarySteps([], { newUserId: 3, oldBecomes: 'viewer', roleId: '  ' })
     expect(steps).toEqual([{ op: 'create', body: { user_id: 3, kind: 'primary' } }])
+  })
+})
+
+
+describe('canon seats, drift and consent (trinity-enterprise#817)', () => {
+  const CANON = {
+    agent_name: AGENT, canon_root: 'canon', unavailable: null, reason: null, message: null,
+    roles: [
+      { id: 'cfo', title: 'Chief Financial Officer', updated: '2026-09-30', path: 'canon/roles/cfo.yaml', error: null },
+      { id: 'head-of-sales', title: 'Head of Sales', updated: null, path: 'canon/roles/head-of-sales.yaml', error: null },
+    ],
+  }
+
+  it("names the seat by its canon title, with the file's updated stamp", async () => {
+    canonRoles = CANON
+    const w = render()
+    await flushPromises()
+    expect(q(w, 'assignments-seat').text().replace(/\s+/g, ' '))
+      .toBe('Serves the seat of its primary: Chief Financial Officer (cfo) (Ann Lee) · updated 2026-09-30')
+    expect(q(w, 'assignment-primary').find('[data-testid="assignment-seat"]').text()).toBe('Chief Financial Officer (cfo)')
+  })
+
+  it('offers the canon seats on every seat field, and a typed id still works', async () => {
+    canonRoles = CANON
+    const w = render()
+    await flushPromises()
+    const list = w.find(`datalist#canon-roles-${AGENT}`)
+    expect(list.findAll('option').map((o) => o.attributes('value'))).toEqual(['cfo', 'head-of-sales'])
+    expect(q(w, 'add-role').attributes('list')).toBe(`canon-roles-${AGENT}`)
+    await q(w, 'add-user').setValue('3')
+    await q(w, 'add-role').setValue('not-in-canon')
+    await q(w, 'assignment-add-form').trigger('submit')
+    await flushPromises()
+    expect(api.post.mock.calls[0][1].role_id).toBe('not-in-canon')
+  })
+
+  it('tells an admin why there are no seats to suggest', async () => {
+    const w = render()
+    await flushPromises()
+    expect(q(w, 'assignments-canon-note').text()).toContain('this agent declares no canon')
+  })
+
+  it('reads consent in three states', async () => {
+    roster = { ...roster, assignments: [
+      ANN, { ...BOB, proactive_consent_state: 'declined' },
+    ] }
+    const w = render()
+    await flushPromises()
+    expect(w.find('[data-testid="assignment-row"] [data-testid="assignment-consent"]').text()).toBe('Proactive briefs: declined')
+  })
+
+  it('warns on a missing role file, names why drift is unknown, and says nothing without a seat', async () => {
+    roster = { ...roster, assignments: [
+      { ...ANN, drift_state: 'missing', drift_reason: 'role_file_not_found' },
+      { ...BOB, drift_state: 'unknown', drift_reason: 'not_recorded' },
+      { ...BOB, id: 'a3', user_id: 3, display_name: 'Cat Moe', role_id: null, kind: 'viewer', drift_state: 'no_role' },
+    ] }
+    const w = render()
+    await flushPromises()
+    expect(q(w, 'assignment-primary').find('[data-testid="assignment-drift"]').text()).toBe('No role file for this seat in the canon')
+    const [bob, cat] = w.findAll('[data-testid="assignment-row"]')
+    expect(bob.find('[data-testid="assignment-drift"]').text()).toContain('set the seat again to start tracking')
+    expect(cat.find('[data-testid="assignment-drift"]').exists()).toBe(false)
   })
 })

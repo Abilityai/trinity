@@ -1,6 +1,29 @@
 {
   "test_files": [
     {
+      "file": "unit/test_ent817_proactive_consent.py",
+      "feature": "trinity-enterprise#817",
+      "added": "2026-10-06",
+      "categories": [
+        "backend",
+        "sharing",
+        "consent",
+        "migrations"
+      ],
+      "description": "Proactive consent in three states on real SQLite: a new share is NULL (not asked), the toggle writes declined/consented and both read paths say which, only consented may be messaged, and the data migration moves legacy 0s to NULL idempotently on both tracks."
+    },
+    {
+      "file": "unit/test_ent817_canon_roles.py",
+      "feature": "trinity-enterprise#817",
+      "added": "2026-10-06",
+      "categories": [
+        "backend",
+        "canon",
+        "api"
+      ],
+      "description": "canon_roles_service lists <canon>/roles/*.yaml with id, title and updated through the agent door; names every empty answer (no canon, traversing path, no roles dir, empty, stopped, unreachable, timeout), names an unparsable file, caps and says so; the route self-gates agent keys and draws on the objectives budget."
+    },
+    {
       "file": "unit/test_ent812_objective_join_seat.py",
       "feature": "trinity-enterprise#812",
       "added": "2026-10-06",

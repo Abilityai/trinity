@@ -98,12 +98,38 @@ export function withRole(body, roleId) {
 }
 
 /**
- * Proactive-brief consent as the row can state it. The backend returns one
- * boolean today, so "not asked" and "declined" are one state; the label says
- * only what is known.
+ * Proactive-brief consent in three states (ent#817): consented, declined, or
+ * never asked. Falls back to the boolean for a backend that predates the state.
  */
 export function consentLabel(row) {
-  return row?.proactive_consent ? 'Proactive briefs on' : 'Proactive briefs off'
+  const state = row?.proactive_consent_state || (row?.proactive_consent ? 'consented' : null)
+  if (state === 'consented') return 'Proactive briefs: consented'
+  if (state === 'declined') return 'Proactive briefs: declined'
+  return 'Proactive briefs: not asked'
+}
+
+const DRIFT_REASONS = {
+  not_recorded: 'set before the check existed — set the seat again to start tracking it',
+  no_updated_stamp: 'the role file has no `updated` stamp to compare',
+  no_canon: 'this agent declares no canon',
+  no_roles_dir: "the canon has no roles/ directory",
+  agent_stopped: 'the agent is stopped',
+  agent_missing: 'the agent has no container',
+  agent_unreachable: 'the agent is not answering',
+  rate_limited: 'too many reads just now — reload shortly',
+  role_file_invalid: "the role file doesn't parse",
+  role_file_unreadable: "the role file couldn't be read",
+  canon_read_unavailable: 'this install cannot read canon files',
+}
+
+/** The title the canon gives a seat id, or null. */
+export function seatTitle(canon, roleId) {
+  return (canon?.roles || []).find((r) => r.id === roleId)?.title || null
+}
+
+/** The canon's `updated` stamp for a seat id, or null. */
+export function seatUpdated(canon, roleId) {
+  return (canon?.roles || []).find((r) => r.id === roleId)?.updated || null
 }
 
 /**
@@ -115,11 +141,16 @@ export function consentLabel(row) {
  */
 export function driftNote(row) {
   const state = row?.drift_state || 'unknown'
+  if (state === 'no_role') return null
   if (state === 'changed') {
     return { tone: 'warning', text: 'The role file changed since this was assigned — review it' }
   }
+  if (state === 'missing') {
+    return { tone: 'warning', text: 'No role file for this seat in the canon' }
+  }
   if (state === 'current') return { tone: 'ok', text: 'Role file unchanged' }
-  return { tone: 'muted', text: 'Role file not checked yet' }
+  const why = DRIFT_REASONS[row?.drift_reason]
+  return { tone: 'muted', text: why ? `Role file unknown: ${why}` : 'Role file not checked yet' }
 }
 
 /** The backend's own words for a failed write, never a generic line first. */

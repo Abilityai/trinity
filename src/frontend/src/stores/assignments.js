@@ -22,6 +22,9 @@ export const useAssignmentsStore = defineStore('assignments', () => {
   const users = ref([])
   const usersLoaded = ref(false)
   const usersError = ref(null)
+  // ent#817: the seats each agent's canon defines — agentName -> the
+  // CanonRolesRead answer. Fail-soft: a failed read is a named reason.
+  const canonRoles = ref({})
 
   function entry(agent) {
     if (!byAgent.value[agent]) {
@@ -83,6 +86,19 @@ export const useAssignmentsStore = defineStore('assignments', () => {
     await load(agent)
   }
 
+  /** ent#817: the seats the agent's canon defines (id, title, updated). Never throws. */
+  async function loadCanonRoles(agent) {
+    try {
+      const { data } = await api.get(`/api/agents/${encodeURIComponent(agent)}/canon/roles`)
+      canonRoles.value = { ...canonRoles.value, [agent]: data }
+    } catch (err) {
+      canonRoles.value = {
+        ...canonRoles.value,
+        [agent]: { roles: [], unavailable: null, reason: 'unreadable', message: writeError(err, "Couldn't read this agent's role files.") },
+      }
+    }
+  }
+
   /** ent#811: set a row's seat, or clear it with `null` (an explicit null clears). */
   async function setRole(agent, id, roleId) {
     await run(agent, { op: 'update', id, body: { role_id: roleId || null } })
@@ -127,7 +143,7 @@ export const useAssignmentsStore = defineStore('assignments', () => {
   }
 
   return {
-    byAgent, users, usersLoaded, usersError,
+    byAgent, users, usersLoaded, usersError, canonRoles, loadCanonRoles,
     entry, peek, load, loadUsers, add, setKind, remove, replacePrimary,
     setRole, setSeatHolder, clearSeatHolder,
   }

@@ -5101,6 +5101,30 @@ class ObjectiveRead(BaseModel):
     metrics_truncated: bool = False
 
 
+class CanonRoleRead(BaseModel):
+    """One seat the agent's canon defines — `<canon>/roles/<id>.yaml`
+    (trinity-enterprise#817). `error` names why the file could not be read."""
+
+    id: str
+    title: Optional[str] = None
+    updated: Optional[str] = None
+    path: Optional[str] = None
+    error: Optional[str] = None
+
+
+class CanonRolesRead(BaseModel):
+    """The seats an agent's canon defines (trinity-enterprise#817). An empty
+    list always carries `unavailable` or `reason` and a `message`, never a blank."""
+
+    agent_name: str
+    canon_root: Optional[str] = None
+    roles: List[CanonRoleRead] = []
+    unavailable: Optional[str] = None
+    reason: Optional[str] = None
+    message: Optional[str] = None
+    truncated: bool = False
+
+
 class ObjectiveRoleRead(BaseModel):
     """The seat the agent owns objectives through (trinity-enterprise#812) —
     from Trinity's record, not from `x-role`. `null` when it has none; it can

@@ -5,14 +5,22 @@
   <section v-if="entitled" class="space-y-3" data-testid="agent-assignments">
     <div>
       <h4 class="text-sm font-semibold text-gray-900 dark:text-gray-100">People this agent serves</h4>
+      <!-- ent#817: the seats this agent's canon defines, offered on every seat
+           field. A typed id is still accepted. -->
+      <datalist :id="roleListId">
+        <option v-for="r in canonList" :key="r.id" :value="r.id">{{ r.title || r.id }}</option>
+      </datalist>
       <p class="mt-0.5 text-xs text-gray-600 dark:text-gray-300" data-testid="assignments-seat">
         <template v-if="seat.form === 'holds'">
-          Holds the seat: <span class="font-mono">{{ seat.roleId }}</span>
+          Holds the seat: <span :class="seatTitleClass">{{ seatName(seat.roleId) }}</span>
         </template>
         <template v-else-if="seat.form === 'serves'">
-          Serves the seat of its primary: <span class="font-mono">{{ seat.roleId }}</span> ({{ seat.person }})
+          Serves the seat of its primary: <span :class="seatTitleClass">{{ seatName(seat.roleId) }}</span> ({{ seat.person }})
         </template>
         <template v-else>No seat yet</template>
+        <span v-if="seat.form !== 'none' && seatUpdated(canon, seat.roleId)" data-testid="assignments-seat-updated">
+          · updated {{ seatUpdated(canon, seat.roleId) }}
+        </span>
       </p>
     </div>
 
@@ -55,7 +63,7 @@
             </span>
           </template>
           <form v-else class="flex flex-wrap items-end gap-2" data-testid="holder-form" @submit.prevent="saveHolder">
-            <BaseInput v-model="holderForm" label="Seat this agent holds (role id)" data-testid="holder-role" />
+            <BaseInput v-model="holderForm" label="Seat this agent holds (role id)" :list="roleListId" data-testid="holder-role" />
             <BaseButton type="submit" size="sm" :disabled="!holderForm.trim()" :loading="savingHolder"
                         loading-label="Saving…" data-testid="holder-save">Save</BaseButton>
             <BaseButton variant="ghost" size="sm" :disabled="savingHolder" @click="editingHolder = false">Cancel</BaseButton>
@@ -93,7 +101,8 @@
                   <BaseBadge v-if="row.kind === 'primary' || !isAdmin" :variant="row.kind === 'primary' ? 'primary' : 'neutral'">
                     {{ kindLabel(row.kind) }}
                   </BaseBadge>
-                  <span v-if="row.role_id" class="font-mono text-xs text-gray-600 dark:text-gray-300">{{ row.role_id }}</span>
+                  <span v-if="row.role_id" class="text-xs text-gray-600 dark:text-gray-300" :title="row.role_id"
+                        data-testid="assignment-seat">{{ seatName(row.role_id) }}</span>
                   <BaseButton
                     v-if="isAdmin && roleEdit.id !== row.id"
                     variant="ghost"
@@ -104,7 +113,7 @@
                 </div>
                 <div class="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs">
                   <span class="text-gray-600 dark:text-gray-300" data-testid="assignment-consent">{{ consentLabel(row) }}</span>
-                  <span :class="driftClass(row)" data-testid="assignment-drift">{{ driftNote(row).text }}</span>
+                  <span v-if="driftNote(row)" :class="driftClass(row)" data-testid="assignment-drift">{{ driftNote(row).text }}</span>
                 </div>
               </div>
 
@@ -142,7 +151,7 @@
               data-testid="assignment-role-form"
               @submit.prevent="saveRole(row)"
             >
-              <BaseInput v-model="roleEdit.value" :label="`Seat ${row.display_name} holds (role id)`" data-testid="assignment-role-input" />
+              <BaseInput v-model="roleEdit.value" :label="`Seat ${row.display_name} holds (role id)`" :list="roleListId" data-testid="assignment-role-input" />
               <BaseButton type="submit" size="sm" :disabled="!roleEdit.value.trim()"
                           :loading="busyId === row.id && busyVerb === 'role'" loading-label="Saving…"
                           data-testid="assignment-role-save">Save</BaseButton>
@@ -176,7 +185,7 @@
               <option v-for="k in STAKEHOLDER_KINDS" :key="k" :value="k">{{ kindLabel(k) }}</option>
               <option value="remove">Removed from this agent</option>
             </BaseSelect>
-            <BaseInput v-model="replaceForm.roleId" label="Seat (role id, optional)" help="The canon role id the new primary holds." data-testid="replace-role" />
+            <BaseInput v-model="replaceForm.roleId" label="Seat (role id, optional)" help="The canon role id the new primary holds." :list="roleListId" data-testid="replace-role" />
           </div>
           <InlineError v-if="replaceError" :message="replaceError" @dismiss="replaceError = ''" />
           <div class="flex gap-2">
@@ -200,11 +209,14 @@
           <BaseSelect v-model="addForm.kind" label="Kind" data-testid="add-kind">
             <option v-for="k in addKinds" :key="k" :value="k">{{ kindLabel(k) }}</option>
           </BaseSelect>
-          <BaseInput v-model="addForm.roleId" label="Seat (role id, optional)" data-testid="add-role" />
+          <BaseInput v-model="addForm.roleId" label="Seat (role id, optional)" :list="roleListId" data-testid="add-role" />
           <BaseButton type="submit" :disabled="!addForm.userId"
                       :loading="savingAdd" loading-label="Adding…" data-testid="add-submit">Add</BaseButton>
         </form>
         <InlineError v-if="isAdmin && (addError || assignments.usersError)" :message="addError || assignments.usersError" @dismiss="addError = ''" />
+        <p v-if="isAdmin && canonNote" class="text-xs text-gray-600 dark:text-gray-300" data-testid="assignments-canon-note">
+          No seats to suggest: {{ canonNote }}. A typed role id still works.
+        </p>
 
         <p v-if="!isAdmin" class="text-xs text-gray-600 dark:text-gray-300" data-testid="assignments-readonly-note">
           Only an instance admin can change who this agent serves.
@@ -228,7 +240,7 @@ import { useEnterpriseStore } from '../stores/enterprise'
 import { viewState } from '../utils/loadingState'
 import {
   KIND_LABELS, STAKEHOLDER_KINDS, primaryOf, stakeholdersOf, seatLine,
-  consentLabel, driftNote, writeError, withRole,
+  consentLabel, driftNote, writeError, withRole, seatTitle, seatUpdated,
 } from '../utils/assignments'
 
 const FEATURE_ID = 'assignments'
@@ -257,6 +269,17 @@ const view = computed(() => viewState({
   error: current.value.error,
   count: 1,
 }))
+
+// ent#817: the canon's seats — titles for the header and rows, and suggestions.
+const canon = computed(() => assignments.canonRoles[props.agentName] || null)
+const canonList = computed(() => (canon.value?.roles || []).filter((r) => !r.error))
+const roleListId = computed(() => `canon-roles-${props.agentName}`)
+const canonNote = computed(() => (canon.value && !canonList.value.length ? canon.value.message : ''))
+const seatTitleClass = computed(() => 'font-medium text-gray-900 dark:text-gray-100')
+function seatName(roleId) {
+  const title = seatTitle(canon.value, roleId)
+  return title ? `${title} (${roleId})` : roleId
+}
 
 const addKinds = computed(() => (primary.value ? STAKEHOLDER_KINDS : ['primary', ...STAKEHOLDER_KINDS]))
 
@@ -436,6 +459,8 @@ function reload() { return assignments.load(props.agentName) }
 async function start() {
   await enterprise.loadFeatureFlags()
   if (!entitled.value) return
+  // The canon read is a container read; it never blocks the roster.
+  assignments.loadCanonRoles(props.agentName)
   await reload()
   if (isAdmin.value && !assignments.usersLoaded) await assignments.loadUsers()
 }

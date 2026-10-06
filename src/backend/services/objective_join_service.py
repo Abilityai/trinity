@@ -787,8 +787,9 @@ async def _read_yaml(client, path: str, *,
 
 
 async def _list_objective_files(
-        client, root: str) -> Tuple[List[str], List[str], str]:
-    """(file names, refused names, source code) for `<root>/objectives`.
+        client, root: str, subdir: str = "objectives") -> Tuple[List[str], List[str], str]:
+    """(file names, refused names, source code) for `<root>/<subdir>` —
+    `objectives` here, `roles` for `canon_roles_service` (trinity-enterprise#817).
 
     The agent-server listing is RECURSIVE with no depth cap, so only top-level
     `type: file` entries are taken; nested folders are ignored. A 404 is
@@ -802,7 +803,7 @@ async def _list_objective_files(
     fetch".
     """
     response = await _agent_get(
-        client, f"/api/files?path=/home/developer/{root}/objectives")
+        client, f"/api/files?path=/home/developer/{root}/{subdir}")
     if response is None:
         return [], [], "unreadable"
     status = getattr(response, "status_code", 0)
