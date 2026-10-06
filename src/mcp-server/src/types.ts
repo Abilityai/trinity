@@ -1,5 +1,13 @@
 // Types for Trinity API responses
 
+/**
+ * #3242: the ONE platform-reserved approval answer — "none of the offered
+ * options; the instruction is in `response_text`". Mirrors `SOMETHING_ELSE` in
+ * `src/backend/services/operator_queue_choices.py` and
+ * `src/frontend/src/utils/operatorQueue.js` (parity-tested).
+ */
+export const SOMETHING_ELSE = "(something else)";
+
 /** #2991: `POST /api/agents/{name}/start` — skill delivery rides the response. */
 export interface StartAgentResult {
   message: string;

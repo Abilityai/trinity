@@ -31,7 +31,7 @@ from .commands.tags import tags
               help="Profile to use (overrides TRINITY_PROFILE env var)")
 @click.pass_context
 def cli(ctx, profile_name):
-    """Trinity — Autonomous Agent Orchestration Platform CLI.
+    """Command-line interface for Trinity, the operating system for the AI-native company.
 
     Get started:
 

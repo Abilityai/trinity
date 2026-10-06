@@ -45,6 +45,8 @@ import hashlib
 import logging
 from typing import Any, Awaitable, Callable, Dict, Optional, Set
 
+from services.operator_queue_choices import SOMETHING_ELSE
+
 logger = logging.getLogger(__name__)
 
 # The dispatched turn is one execution, framed so the agent can tell the answer
@@ -111,6 +113,16 @@ def _framed_message(
         f"Queue item: {item.get('id')}",
         f"Question: {item.get('question') or item.get('title') or '(none recorded)'}",
         "",
+    ]
+    if answer == SOMETHING_ELSE:
+        # #3242: said ABOVE the data fence — the platform's words, not the person's.
+        lines += [
+            f"The answer is the reserved value `{SOMETHING_ELSE}`: none of your offered "
+            "options is approved — carry out none of them. The notes carry the "
+            "person's instruction; re-plan from it or ask again.",
+            "",
+        ]
+    lines += [
         "---",
         label,
         f"answer: {answer}" if answer else "answer: (none)",

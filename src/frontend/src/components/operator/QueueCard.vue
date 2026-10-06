@@ -146,35 +146,49 @@
         <div v-if="responseKind === 'approval'" class="space-y-3">
           <div class="flex flex-wrap gap-2">
             <button
-              v-for="(option, idx) in item.options"
+              v-for="(option, idx) in chips"
               :key="option"
               @click.stop="selectedOption = option"
               class="px-4 py-2 rounded-lg text-sm font-medium border-2 transition-all"
-              :class="selectedOption === option
-                ? optionClass(idx)
-                : 'border-gray-200 dark:border-gray-600 text-gray-600 dark:text-gray-400 hover:border-gray-300 dark:hover:border-gray-500'"
+              :class="selectedOption === option ? optionClass(idx) : CHIP_IDLE_CLASS"
             >
               <AskMarkdown :text="option" inline />
+            </button>
+            <!-- #3242: the platform's off-menu answer — outside the v-for so it
+                 never takes a positional colour; hidden where the sink refuses it. -->
+            <button
+              v-if="offersSomethingElse"
+              data-testid="something-else-chip"
+              @click.stop="selectedOption = SOMETHING_ELSE"
+              class="px-4 py-2 rounded-lg text-sm font-medium border-2 border-dashed transition-all"
+              :class="somethingElseArmed ? optionClass(-1) : CHIP_IDLE_CLASS"
+              :aria-pressed="somethingElseArmed"
+            >
+              {{ SOMETHING_ELSE_LABEL }}
             </button>
           </div>
           <div class="flex gap-2">
             <input
               v-model="responseText"
               type="text"
+              maxlength="4000"
+              data-testid="approval-note"
               class="flex-1 text-sm rounded-lg border-gray-200 dark:border-gray-600 dark:bg-gray-700 dark:text-white placeholder-gray-400 dark:placeholder-gray-500 focus:ring-blue-500 focus:border-blue-500"
-              placeholder="Add a note (optional)..."
+              :placeholder="somethingElseArmed ? 'Instruction — none of the options will be carried out' : 'Add a note (optional)...'"
+              :aria-label="somethingElseArmed ? 'Instruction' : 'Note'"
               @click.stop
               @keydown.enter.stop="selectedOption && submitApproval()"
             />
             <button
+              data-testid="approval-send"
               @click.stop="submitApproval"
-              :disabled="!selectedOption"
+              :disabled="!sendBody"
               class="px-5 py-2 rounded-lg text-sm font-medium text-white transition-colors"
-              :class="selectedOption
+              :class="sendBody
                 ? 'bg-blue-600 hover:bg-blue-700 dark:bg-blue-500 dark:hover:bg-blue-600'
                 : 'bg-gray-200 dark:bg-gray-700 text-gray-500 dark:text-gray-400 cursor-not-allowed'"
             >
-              Send
+              {{ somethingElseArmed ? 'Send instruction' : 'Send' }}
             </button>
           </div>
         </div>
@@ -222,7 +236,10 @@ import AskMarkdown from './AskMarkdown.vue'
 import { useOperatorQueueStore } from '../../stores/operatorQueue'
 import { useAgentsStore } from '../../stores/agents'
 import { agentNameTooltip } from '../../utils/agentName'
-import { queueTypeLabel, queueResponseKind, queueSyncBadge, queueReaskBadges, queueSeenLine } from '../../utils/operatorQueue'
+import {
+  queueTypeLabel, queueResponseKind, queueSyncBadge, queueReaskBadges, queueSeenLine,
+  SOMETHING_ELSE, SOMETHING_ELSE_LABEL, offeredChips, decidedByOptions, buildQueueResponse,
+} from '../../utils/operatorQueue'
 import AgentAvatar from '../AgentAvatar.vue'
 import BaseBadge from '../base/BaseBadge.vue'
 import InlineError from '../InlineError.vue'
@@ -268,9 +285,22 @@ watch(isExpanded, (val) => {
   }
 })
 
+// #3242: the agent's chips, then the platform's "Something else". An explicit
+// pick wins; with none, typing alone arms "Something else" (T3) — but Enter
+// sends only after an explicit pick, so a note never silently becomes an
+// instruction.
+const CHIP_IDLE_CLASS = 'border-gray-200 dark:border-gray-600 text-gray-600 dark:text-gray-400 hover:border-gray-300 dark:hover:border-gray-500'
+const chips = computed(() => offeredChips(props.item))
+const offersSomethingElse = computed(() => !decidedByOptions(props.item))
+const decision = computed(() => selectedOption.value
+  ?? (offersSomethingElse.value && responseText.value.trim() ? SOMETHING_ELSE : null))
+const somethingElseArmed = computed(() => decision.value === SOMETHING_ELSE)
+const sendBody = computed(() => buildQueueResponse({ kind: 'approval', option: decision.value, note: responseText.value }))
+
 function submitApproval() {
-  if (!selectedOption.value) return
-  store.respondToItem(props.item.id, selectedOption.value, responseText.value)
+  const body = sendBody.value
+  if (!body) return
+  store.respondToItem(props.item.id, body.response, body.response_text ?? '')
 }
 
 function submitAnswer() {

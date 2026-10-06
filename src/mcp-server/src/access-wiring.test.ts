@@ -507,4 +507,46 @@ describe("trinity-enterprise#611 ask_operator raises as the key's agent (real tr
         `${field} is published as an object that accepts no keys: ${JSON.stringify(props[field])}`);
     }
   });
+
+  it("#3243 the ask tools' published descriptions fit Claude Code's 2,048-character cap", async () => {
+    // Claude Code shows a model only the first 2,048 characters of a tool
+    // description (#3234); parameter descriptions are not cut. So the field-level
+    // detail that left the ask_operator description must be PUBLISHED on its field.
+    const client = new Client({ name: "budget-3243", version: "1.0.0" });
+    await client.connect(new StreamableHTTPClientTransport(mcpUrl, {
+      requestInit: { headers: { Authorization: "Bearer trinity_mcp_611_user" } },
+    }));
+    const { tools } = await client.listTools();
+    await client.close();
+    for (const name of ["ask_operator", "get_my_ask", "respond_to_operator_queue"]) {
+      const tool = tools.find((t) => t.name === name);
+      assert.ok(tool, `${name} is not published`);
+      const length = (tool.description ?? "").length;
+      assert.ok(length <= 2048, `${name} description is ${length} characters — over Claude Code's 2,048 cap`);
+    }
+    const props = (tools.find((t) => t.name === "ask_operator")?.inputSchema as any)?.properties ?? {};
+    const pinned: Record<string, string[]> = {
+      request_id: ["replayed", "differs", "use a NEW request_id", "to_role", "resolved", "ask_status", "wakes_on_ending"],
+      title: ["title_too_long: shorten the title and move the detail into question"],
+      question: ["field_too_large"],
+      options: [
+        "'Send now', not 'approve — the receptionist sends it with a disclosure and CCs you'",
+        "options_required",
+        "too_many_options — split it into separate asks or drop variants",
+        "option_too_long — name the choice and move the rest to question or proposal",
+        "invalid_options",
+      ],
+      context: ["field_too_large"],
+      proposal: ["field_too_large"],
+      to: ["role_unassigned"],
+      expires_at: ["denied by timeout"],
+      supersedes_expired: ["reask_requires_link"],
+    };
+    for (const [field, phrases] of Object.entries(pinned)) {
+      const text = String(props[field]?.description ?? "");
+      for (const phrase of phrases) {
+        assert.ok(text.includes(phrase), `ask_operator.${field} description lost: ${phrase}`);
+      }
+    }
+  });
 });

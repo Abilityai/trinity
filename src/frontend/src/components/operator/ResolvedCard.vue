@@ -57,7 +57,7 @@
             <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
             </svg>
-            <AskMarkdown :text="item.response" inline data-testid="resolved-response" />
+            <AskMarkdown :text="decisionLabel(item.response)" inline data-testid="resolved-response" />
           </span>
           <!-- The answer's note, or the operator's reason for cancelling. -->
           <span v-if="note" class="text-xs text-gray-500 dark:text-gray-400">
@@ -84,7 +84,7 @@ import { computed } from 'vue'
 import { useOperatorQueueStore } from '../../stores/operatorQueue'
 import { useAgentsStore } from '../../stores/agents'
 import { agentNameTooltip } from '../../utils/agentName'
-import { queueSyncBadge, queueEnding, queueEndingText, queueReaskBadges } from '../../utils/operatorQueue'
+import { queueSyncBadge, queueEnding, queueEndingText, queueReaskBadges, decisionLabel } from '../../utils/operatorQueue'
 import { formatLocalDateTime } from '../../utils/timestamps'
 import AgentAvatar from '../AgentAvatar.vue'
 import BaseBadge from '../base/BaseBadge.vue'

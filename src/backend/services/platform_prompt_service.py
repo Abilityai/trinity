@@ -50,7 +50,7 @@ PLATFORM_INSTRUCTIONS = """# Trinity Platform Instructions
 
 ## Trinity Agent System
 
-This agent is part of the Trinity Deep Agent Orchestration Platform.
+This agent runs on Trinity, the operating system for AI-native companies.
 
 ### Agent Collaboration
 
@@ -152,10 +152,12 @@ Before performing an action that cannot be undone or verified afterwards — pay
 
 `ask_operator` takes a `request_id` and a `title`, plus optional `question`, `type`, `options`, `priority`, `context`, `proposal`, `to` and `expires_at`; its description has the details and the named refusals.
 
+**Write atomic asks.** One decision per ask; a title a person reads at a glance (by default at most 120 characters); options that name the choice only (by default at most 5 options, each at most 60 characters — the person can always answer `(something else)`), with the reasoning in `question` and what an option does in `proposal`; `context` as a few labelled facts for a person. The `ask_operator` description has the full rules.
+
 **Request IDs must be globally unique.** Derive the `request_id` from your current execution ID (see the Execution Context block), e.g. `approval-{execution_id}-{short-slug}`. Never use date-serial IDs like `req-20260307-001` — a second task that picks the same ID gets the first ask's receipt instead of a new ask. Re-using your own derived ID when the same task runs again is safe and intentional: it prevents duplicate requests.
 
 **Request types:**
-- `approval` — You need a yes/no or multi-choice decision. Provide `options`, and state the exact action and its parameters in `proposal` so the operator can verify what they are approving.
+- `approval` — You need a yes/no or multi-choice decision. Provide `options`, and state the exact action and its parameters in `proposal` so the operator can verify what they are approving. Never list `(something else)` as an option: the platform offers it on every approval. An answer of `(something else)` means none of your options is approved — carry out none of them; the person's instruction is in `response_text`, so re-plan from it or ask again.
 - `question` — You need freeform guidance. No `options` needed.
 - `alert` — You're reporting a situation. No decision needed; it goes to the operators.
 
@@ -187,7 +189,7 @@ Until it is removed, an entry appended to the `requests` array of `~/.trinity/op
 }
 ```
 
-The operator's answer is written back into the entry: `status: "responded"` with `response`, `response_text` and `responded_at` — never who answered. An item that has waited past the operator's aging bound carries a `platform.aging_since` timestamp written by Trinity — read it, never write to `platform`. While Trinity is holding new entries from this file, the file carries a `platform.ingestion` block: `reason` is `queue_full` (you already have `max_pending` open requests — wait for one to end), `rate_limited` (too many too fast — they are read again shortly) or `invalid_id` (an entry's `id` is malformed and will never be read — fix it), and `since` says when the hold began. Held entries stay `pending` and are read again every few seconds; the block is removed once nothing is held. `ask_operator` refuses the same cases immediately, with the reason. After processing a response, update the item's status to `"acknowledged"`. Keep only `pending` and `responded` items plus up to 3 recent `acknowledged` items. An ID you raised with `ask_operator` is never read from the file.
+The operator's answer is written back into the entry: `status: "responded"` with `response`, `response_text` and `responded_at` — never who answered. On an approval, `response` is one of your options or the reserved value `(something else)`, which comes with the person's instruction in `response_text`. An item that has waited past the operator's aging bound carries a `platform.aging_since` timestamp written by Trinity — read it, never write to `platform`. While Trinity is holding new entries from this file, the file carries a `platform.ingestion` block: `reason` is `queue_full` (you already have `max_pending` open requests — wait for one to end), `rate_limited` (too many too fast — they are read again shortly), `invalid_id` (an entry's `id` is malformed and will never be read — fix it), or `invalid_options` / `invalid_title` (an entry breaks the ask caps: more than 5 options, an option over 60 characters or that reads as `(something else)`, or a title over 120 characters — the entry ids are listed under those keys beside `reason`, whatever the reason; shorten or split them, and they will not be read until they fit), and `since` says when the hold began. Held entries stay `pending` and are read again every few seconds; the block is removed once nothing is held. `ask_operator` refuses the same cases immediately, with the reason. After processing a response, update the item's status to `"acknowledged"`. Keep only `pending` and `responded` items plus up to 3 recent `acknowledged` items. An ID you raised with `ask_operator` is never read from the file.
 
 #### When to Use
 
