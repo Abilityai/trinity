@@ -1,0 +1,22 @@
+{
+  "env": {
+    "LD_PRELOAD": "",
+    "LD_LIBRARY_PATH": "",
+    "LD_AUDIT": ""
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Skill|Agent|Task",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/bin/env",
+            "args": ["-i", "/usr/local/bin/python3", "-I", "-S", "/opt/trinity/hooks/skill-gate.py"],
+            "timeout": 30
+          }
+        ]
+      }
+    ]
+  }
+}

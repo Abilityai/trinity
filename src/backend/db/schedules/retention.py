@@ -334,11 +334,13 @@ class ScheduleRetentionMixin:
         ``backlog_service.enqueue`` json.dumps the full drain-replay request —
         including ``user_message``/``user_email``/``system_prompt`` — into
         ``backlog_metadata`` so a queued task can be reconstructed at drain.
-        Nothing reads that blob once a row leaves ``status='queued'``: the drain
-        claims only queued rows, the #1083/#1081 result callbacks read the POST
-        payload (not the row's metadata), and canary E-04/G-04 are queued-scoped.
-        On a terminal row it is therefore stale PII sitting in the DB indefinitely
-        (bounded only by the 90-day ``prune_execution_rows``). Scrub it.
+        Its last readers act at the terminal write itself: the pull sink reads
+        the delivery settings from the row it fetched before the CAS, and the
+        activity-close owner reads the collaboration / self-task activity ids
+        when the terminal is written (#2329). The drain claims only queued rows
+        and canary E-04/G-04 are queued-scoped. Once a row is authoritative-
+        terminal the blob is stale PII sitting in the DB indefinitely (bounded
+        only by the 90-day ``prune_execution_rows``). Scrub it.
 
         Unlike the #772 sweeps this is **not age-gated** — it is a security
         invariant, not a retention window — but it mirrors their chunked

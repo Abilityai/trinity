@@ -146,7 +146,8 @@ class ClaudeCodeRuntime(AgentRuntime):
         continue_session: bool = False,
         stream: bool = False,
         system_prompt: Optional[str] = None,
-        execution_id: Optional[str] = None
+        execution_id: Optional[str] = None,
+        isolated_session: bool = False,
     ) -> Tuple[str, List[ExecutionLogEntry], ExecutionMetadata, List[Dict]]:
         """Execute Claude Code with the given prompt.
 
@@ -156,7 +157,8 @@ class ClaudeCodeRuntime(AgentRuntime):
         """
         # Note: continue_session is handled internally: execute_claude_code
         # resumes the chat's own session id (agent_state.chat_session_id, #2958).
-        return await execute_claude_code(prompt, stream, model, system_prompt=system_prompt, execution_id=execution_id)
+        return await execute_claude_code(prompt, stream, model, system_prompt=system_prompt,
+                                         execution_id=execution_id, isolated_session=isolated_session)
 
     async def execute_headless(
         self,
@@ -193,6 +195,7 @@ async def _execute_claude_code_once(
     execution_id: str,
     resume_session_id: Optional[str],
     attempt_state: Optional[Dict] = None,
+    cli_model: Optional[str] = None,
 ) -> tuple[str, List[ExecutionLogEntry], ExecutionMetadata, List[Dict]]:
     """
     Run ONE chat subprocess. ``execute_claude_code`` owns the session choice.
@@ -211,6 +214,8 @@ async def _execute_claude_code_once(
         resume_session_id: the chat's own session id, or None for a cold start
         attempt_state: filled with this attempt's ``execution_log`` so the
             caller can tell whether a failed attempt ran a tool
+        cli_model: the model for THIS turn when it must not come from the
+            shared ``agent_state.current_model`` (an isolated turn, #752)
 
     Returns: (response_text, execution_log, metadata, raw_messages)
         - execution_log: Simplified ExecutionLogEntry objects for activity tracking
@@ -250,9 +255,10 @@ async def _execute_claude_code_once(
             cmd.extend(["--mcp-config", str(mcp_config_path)])
 
         # Add model selection if set
-        if agent_state.current_model:
-            cmd.extend(["--model", agent_state.current_model])
-            logger.info(f"Using model: {agent_state.current_model}")
+        turn_model = cli_model or agent_state.current_model
+        if turn_model:
+            cmd.extend(["--model", turn_model])
+            logger.info(f"Using model: {turn_model}")
 
         # #2958: resume the chat's OWN session by id. Never `--continue`, which
         # takes the newest JSONL in the shared project dir whoever wrote it —
@@ -286,7 +292,7 @@ async def _execute_claude_code_once(
         # (salvage / partial-metadata paths), this catalog value is the real
         # denominator — NOT the flat 200K Pydantic default (get_context_window
         # is never called for Claude, so this seed is the only fallback hook).
-        metadata.context_window = resolve_context_window(model or agent_state.current_model)
+        metadata.context_window = resolve_context_window(cli_model or model or agent_state.current_model)
         tool_start_times: Dict[str, datetime] = {}
         response_parts: List[str] = []
         # #678: capture turn-start timestamp so JSONL recovery can scope
@@ -704,7 +710,7 @@ def _cold_retry_reason(
     return "resume_jsonl_missing"
 
 
-async def execute_claude_code(prompt: str, stream: bool = False, model: Optional[str] = None, system_prompt: Optional[str] = None, execution_id: Optional[str] = None) -> tuple[str, List[ExecutionLogEntry], ExecutionMetadata, List[Dict]]:
+async def execute_claude_code(prompt: str, stream: bool = False, model: Optional[str] = None, system_prompt: Optional[str] = None, execution_id: Optional[str] = None, isolated_session: bool = False) -> tuple[str, List[ExecutionLogEntry], ExecutionMetadata, List[Dict]]:
     """
     Execute one chat turn, resuming only the chat's OWN session (#2958).
 
@@ -713,12 +719,26 @@ async def execute_claude_code(prompt: str, stream: bool = False, model: Optional
     A resume whose JSONL is gone (reaped, deleted) gets ONE cold retry. A reset
     (``DELETE /api/chat/history``) during the turn discards the capture.
 
+    ``isolated_session`` (trinity-enterprise#752): a self-approved turn of a
+    gated skill runs in a fresh session that is NOT kept as the chat's own —
+    the next caller resumes the shared session as it was, without the skill.
+
     Returns: (response_text, execution_log, metadata, raw_messages)
     """
     if not agent_state.claude_code_available:
         raise HTTPException(
             status_code=503,
             detail="Claude Code is not available in this container"
+        )
+
+    if isolated_session:
+        # No --resume, no capture, no shared-model or session-counter change,
+        # and no cold retry (there is no resume to fall back from). The turn's
+        # model is its own: the request's, else the chat's current one.
+        turn_model = model or agent_state.current_model or "claude-sonnet-4-6"
+        return await _execute_claude_code_once(
+            prompt, stream, model, system_prompt, execution_id or str(uuid.uuid4()), None, {},
+            cli_model=turn_model,
         )
 
     # Safety-net fallback: backend always resolves model before calling the agent

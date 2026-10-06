@@ -1164,7 +1164,23 @@ def c_d002(snap):
     return _with_dashboard(snap, f)
 
 
+# #3186: fields a widget BOUND to a metric (`metric: <name>`) does not need —
+# the backend fills them from the recorded points on every read (ent#479). The
+# agent server's `validate_widget` exempts exactly these, keyed on the same
+# truthy `metric` predicate; the two rules must agree, or an agent the
+# dashboard renders is reported HARD-incompatible.
+_BOUND_FILLED = {"metric": {"value"}, "status": {"value", "color"}, "progress": {"value"}}
+
+
 def c_d003(snap):
+    """HARD: each widget carries the fields it renders from.
+
+    A widget bound to a metric is exempt from the fields the binding fills
+    (`_BOUND_FILLED`) — whether or not the name is declared: an undeclared
+    binding renders "not declared" and the backend DROPS any written `value`,
+    so demanding one would demand a number nobody sees. `label` stays required:
+    it is the widget's own copy, not a measurement.
+    """
     req = {
         "text": ["content"], "markdown": ["content"], "list": ["items"],
         "link": ["url"], "metric": ["label", "value"],
@@ -1176,8 +1192,9 @@ def c_d003(snap):
             t = w.get("type")
             if not isinstance(t, str):      # a non-string type is D-002's finding; `req.get({..})` raised at HEAD
                 continue
+            filled = _BOUND_FILLED.get(t, set()) if w.get("metric") else set()
             for field in req.get(t, []):
-                if field not in w:
+                if field not in w and field not in filled:
                     bad.append({"type": t, "missing": field})
         if bad:
             pairs = sorted({(b["type"], b["missing"]) for b in bad})

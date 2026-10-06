@@ -37,6 +37,7 @@ import type {
   ExecutionSearchParams,
   ExecutionSearchResult,
 } from "./types.js";
+import { readNotResend } from "./delegation_contract.js";
 
 /**
  * Debug logging utility - only logs in development mode
@@ -1116,14 +1117,9 @@ export class TrinityClient {
           windowMs: timeoutMs + 10_000,
         });
         if (receipt) {
-          return {
-            status: "queued_timeout",
-            agent: name,
-            execution_id: receipt.id,
-            message:
-              `MCP-server timeout (${timeoutMs}ms) on chat_with_agent — task is still running on '${name}'. ` +
-              `Poll get_execution_result(execution_id="${receipt.id}") instead of retrying; retry will duplicate-queue and Trinity's concurrent-duplicate guard will kill mid-execution (#914).`,
-          };
+          // ent#568: the same builder as `task()`, so both routes answer with
+          // one receipt in the delegation contract's words.
+          return this.queuedTimeoutReceipt(name, receipt.id, timeoutMs);
         }
         // No match found — rethrow with a hint so the caller knows to
         // check the dashboard before retrying.
@@ -1487,9 +1483,8 @@ export class TrinityClient {
       agent: name,
       execution_id: executionId,
       message:
-        `This exact call was already dispatched to '${name}' and has not been replayed as complete. ` +
-        `Poll get_execution_result(execution_id="${executionId}") for its outcome; re-sending a reworded ` +
-        `variant would dispatch a SECOND execution (#2661).`,
+        `This exact call was already dispatched to '${name}' and has no result to replay yet. ` +
+        `${readNotResend(name, executionId)} A reworded re-send would dispatch a SECOND execution (#2661).`,
     };
   }
 
@@ -1504,9 +1499,8 @@ export class TrinityClient {
       agent: name,
       execution_id: executionId,
       message:
-        `MCP-server timeout (${timeoutMs}ms) on chat_with_agent — task is still running on '${name}'. ` +
-        `Poll get_execution_result(execution_id="${executionId}") instead of retrying; retry will ` +
-        `duplicate-queue and Trinity's concurrent-duplicate guard will kill mid-execution (#914).`,
+        `MCP-server timeout (${timeoutMs}ms) on chat_with_agent — the task is still running on '${name}'. ` +
+        `${readNotResend(name, executionId)} A timeout is not a failure (#914).`,
     };
   }
 

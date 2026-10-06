@@ -370,6 +370,7 @@
           @update:preview="(k) => { inboxPreview = k }"
           @refresh="refreshThreads"
           @open-chat="(url) => router.push(url)"
+          @open-thread="openNewThread"
           @reply="replyInChat"
         >
           <template #header-end>
@@ -438,7 +439,7 @@
           @open-menu="mobileNav = true"
           @escalate-to-room="onEscalateToRoom"
           @toggle-star="toggleStar"
-          @open-thread="openThread"
+          @open-thread="openNewThread"
           @work-state="onWorkState"
           @open-work="openRailOn('work')"
           @open-project="openProjects"
@@ -2032,6 +2033,14 @@ function openThread(t) {
   pendingSession.value = sid; prefill.value = ''; convGen.value++
   search.value = ''
   router.push(`/workspace/c/${sid}`)
+}
+// trinity-enterprise#747: open a chat that may have just been created (Discuss)
+// — adopted through `openThread`, so the #3140 guard does not read an id the
+// list has not caught up with as "not yours", then the list is refreshed so the
+// sidebar shows it.
+function openNewThread(t) {
+  openThread(t)
+  refreshThreads()
 }
 function onSessionAdopted(id) {
   pendingSession.value = id

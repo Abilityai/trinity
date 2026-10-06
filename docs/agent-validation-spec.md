@@ -460,6 +460,7 @@ Common mistakes that break rendering:
 - `metric` widget: must have `label` and `value`
 - `status` widget: must have `label`, `value`, and `color`
 - `progress` widget: must have `label` and `value`
+- A widget bound to a declared metric (`metric: <name>`) gets its `value` — and a `status` widget its `color` — from the recorded points, so a bound `metric`, `status` or `progress` widget needs only its `label` (#3186). The exemption holds for any non-empty binding: a binding to an undeclared name renders "not declared" and drops a written `value` anyway.
 
 **D-004** — Progress values in range  
 Severity: SOFT | Type: STATIC  

@@ -2,7 +2,7 @@
  * Execution Query Tools (MCP-007)
  *
  * MCP tools for querying execution history, results, and agent activity.
- * Enables async polling pattern: chat_with_agent(async=true) -> get_execution_result(id)
+ * Enables async polling pattern: chat_with_agent(parallel=true, async=true) -> get_execution_result(agent_name, execution_id)
  */
 
 import { z } from "zod";

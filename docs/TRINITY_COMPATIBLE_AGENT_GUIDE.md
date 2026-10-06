@@ -1066,11 +1066,11 @@ Permission checks before any agent-to-agent communication:
 
 ### 60-Second MCP Call Timeout
 
-> **Design Limitation**: Claude Code enforces a hardcoded 60-second timeout on all MCP HTTP tool calls. Any `chat_with_agent` call that takes longer than 60 seconds will fail regardless of the `timeout_seconds` parameter.
+> **Design Limitation**: an MCP client gives up on a tool call at its own ceiling (30–60 seconds is typical). Trinity's MCP server stops waiting first — at `MCP_CHAT_TIMEOUT_MS`, 25 seconds by default — and answers a synchronous `chat_with_agent` with a receipt (`status: "queued_timeout"` plus the `execution_id`) while the work keeps running. `timeout_seconds` does not extend that wait.
 
 When designing agents that collaborate with other agents, ensure that:
-- Synchronous MCP calls complete within 60 seconds
-- Complex tasks use the async pattern (`parallel=true, async=true`) and poll for results
+- A receipt is treated as "running", never as a failure: the outcome is read with `get_execution_result`, and the call is never re-sent. Every agent is taught this as the delegation contract in its platform prompt (§Agent Collaboration); the `chat_with_agent` tool description carries the same text
+- Complex tasks use the async pattern (`parallel=true, async=true`) from the start
 - Large data exchanges use shared folders instead of MCP return values
 
 See the [Multi-Agent System Guide](MULTI_AGENT_SYSTEM_GUIDE.md#design-limitation-60-second-mcp-call-timeout) for workaround patterns.
@@ -2092,7 +2092,7 @@ All human/operator communication on Trinity is **asynchronous**, mediated by the
 
 1. **Park** the request (approval / question / alert) with `ask_operator`, or, as the fallback, by appending an entry to the queue file.
 2. **End the turn.** A turn must never wait, poll, or sleep for a human response — a human may answer in minutes or days, and a blocked turn burns its entire timeout budget while pinning platform capacity. Never assume a synchronous human answer is available mid-turn.
-3. **Process the outcome in a later turn.** `get_my_ask` returns how an ask ended (answered, cancelled or expired, with the answer when there is one), and the Execution Context block of the system prompt lists the agent's asks that ended in the last 24 hours. For a queue-file entry, check the file for `status: "responded"` items, act on them, then mark them `"acknowledged"`.
+3. **Process the outcome in a later turn.** `get_my_ask` returns how an ask ended (answered, cancelled or expired, with the answer when there is one), and the Execution Context block of the system prompt lists the agent's asks that ended in the last 24 hours. For a queue-file entry, check the file for `status: "responded"` items, act on them, then mark them `"acknowledged"`. On an approval the answer is one of the agent's own options or the platform-reserved value `(something else)` (#3242): none of the options is approved — carry out none of them — and the person's instruction is in `response_text`. Never list `(something else)` as an option yourself; `ask_operator` refuses it. Write atomic asks (#3243): one decision per ask, a one-glance title (at most 120 characters), and at most 5 short options that name the choice only — the full rules are in the `ask_operator` tool description, and a queue-file entry over the caps is held as `invalid_options` / `invalid_title`.
 
 **Ask before irreversible actions.** Before an action the platform cannot undo or verify — payments, emails/messages through the agent's own credentials, public posts, destructive deletions — park an `approval` and end the turn when uncertain. Put the exact action in the ask's `proposal`. This matters most under re-delivery: pull-mode coordination (#1081) re-runs a turn whose worker died, so a task you receive may have partially run before. Check your own records and your earlier asks before repeating an irreversible effect; do the reversible parts first and gate only the irreversible step.
 

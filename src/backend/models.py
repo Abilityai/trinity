@@ -7,7 +7,7 @@ import re
 import unicodedata
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, SecretStr, field_validator, model_validator
-from typing import Any, Dict, List, Literal, Optional, Union
+from typing import Annotated, Any, Dict, List, Literal, Optional, Union
 from datetime import datetime
 from enum import Enum
 
@@ -3718,7 +3718,9 @@ class DismissAllRequest(BaseModel):
 class OperatorResponse(BaseModel):
     """Body for responding to a queue item."""
     response: str
-    response_text: Optional[str] = None
+    # #3242: carries the instruction with the reserved "(something else)"
+    # decision; bounded like the Workspace answer and the resume frame.
+    response_text: Optional[str] = Field(default=None, max_length=4000)
     # #2915: a response to an item the agent changed or closed on its side is
     # refused with 409 `item_diverged` unless the human has SEEN the divergence
     # and answers anyway. The UI sets this on the second click, after showing it.
@@ -3767,6 +3769,35 @@ class OperatorAskCreate(BaseModel):
     expires_at: Optional[str] = None
     to: Optional[str] = None
     supersedes_expired: Optional[str] = None
+
+
+class SkillGateCheckRequest(BaseModel):
+    """What the in-container skill-gate hook asks (trinity-enterprise#752):
+    `POST /api/skill-gate/check`, with the agent's own key.
+
+    No field names an agent — the platform takes it from the key. `names` is
+    every name the invoked skill (or a subagent's preloads) answers to;
+    `resolved` is False when the hook could not tell which skill a call loads.
+    The bounds are the hook's own: a body outside them is a 422, which the
+    hook reads as "no answer".
+    """
+    model_config = ConfigDict(extra="forbid")
+
+    via: Literal["skill_tool", "subagent_preload"]
+    invoked: Optional[str] = Field(default=None, max_length=256)
+    names: List[Annotated[str, Field(max_length=256)]] = Field(default_factory=list, max_length=64)
+    resolved: bool = True
+    subagent: Optional[str] = Field(default=None, max_length=256)
+    execution_id: Optional[str] = Field(default=None, max_length=128)
+    marker: Optional[bool] = None
+
+
+class SkillGateCheckResponse(BaseModel):
+    """The verdict. `allowed` is the only field the hook acts on; `message`
+    is what the model reads when it is refused."""
+    allowed: bool
+    gated: bool
+    message: Optional[str] = None
 
 
 class BulkCancelRequest(BaseModel):

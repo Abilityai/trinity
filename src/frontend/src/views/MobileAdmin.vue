@@ -276,7 +276,7 @@
                 <template v-if="queueResponseKind(item) === 'approval'">
                   <div class="ops-options" role="group" aria-label="Options">
                     <button
-                      v-for="(opt, idx) in optionsOf(item)"
+                      v-for="(opt, idx) in offeredChips(item)"
                       :key="idx + ':' + opt"
                       type="button"
                       class="ops-option-btn"
@@ -285,16 +285,30 @@
                       :disabled="respondingItems[item.id]"
                       @click="selectOption(item.id, opt)"
                     ><AskMarkdown :text="opt" inline /></button>
+                    <!-- #3242: the platform's off-menu answer; hidden where the sink refuses it. -->
+                    <button
+                      v-if="!decidedByOptions(item)"
+                      type="button"
+                      class="ops-option-btn"
+                      data-testid="queue-something-else"
+                      :aria-pressed="selectedOptions[item.id] === SOMETHING_ELSE ? 'true' : 'false'"
+                      :disabled="respondingItems[item.id]"
+                      @click="selectOption(item.id, SOMETHING_ELSE)"
+                    >{{ SOMETHING_ELSE_LABEL }}</button>
                   </div>
                   <div v-if="selectedOptions[item.id]" class="ops-approval-form" data-testid="queue-approval-form">
-                    <p class="ops-card-body" role="status" data-testid="queue-consequence">
+                    <p v-if="selectedOptions[item.id] === SOMETHING_ELSE" class="ops-card-body" role="status" data-testid="queue-consequence">
+                      Sending your instruction to {{ item.agent_name }} — it will carry out none of the options and re-plan from your text.
+                    </p>
+                    <p v-else class="ops-card-body" role="status" data-testid="queue-consequence">
                       Sending <strong><AskMarkdown :text="selectedOptions[item.id]" inline /></strong> to {{ item.agent_name }} — it reads this as your decision on its next run.
                     </p>
                     <input
                       v-model="responseTexts[item.id]"
                       type="text"
                       enterkeyhint="done"
-                      placeholder="Add a note (optional)..."
+                      maxlength="4000"
+                      :placeholder="selectedOptions[item.id] === SOMETHING_ELSE ? 'What should it do instead?' : 'Add a note (optional)...'"
                       class="ops-response-input"
                       data-testid="queue-note"
                       :disabled="respondingItems[item.id]"
@@ -312,9 +326,9 @@
                         type="button"
                         class="ops-respond-btn ops-send-btn"
                         data-testid="queue-send"
-                        :disabled="respondingItems[item.id]"
+                        :disabled="respondingItems[item.id] || !approvalBody(item)"
                         @click="submitApproval(item)"
-                      >Send: {{ selectedOptions[item.id] }}</button>
+                      >{{ selectedOptions[item.id] === SOMETHING_ELSE ? 'Send instruction' : `Send: ${selectedOptions[item.id]}` }}</button>
                     </div>
                   </div>
                 </template>
@@ -652,7 +666,8 @@ import AskMarkdown from '../components/operator/AskMarkdown.vue'
 import { apiErrorMessage } from '../utils/apiError'
 import { viewState, staleBannerMessage, listFrom } from '../utils/loadingState'
 import {
-  optionsOf, queueResponseKind, buildQueueResponse, queueTypeLabel,
+  queueResponseKind, buildQueueResponse, queueTypeLabel,
+  SOMETHING_ELSE, SOMETHING_ELSE_LABEL, offeredChips, decidedByOptions,
   QUEUE_RESPONSE_NOT_RECORDED, respondRefusedAsNotPending, queueSyncBadge,
   QUEUE_RESPONSE_DIVERGED, respondRefusedAsDiverged,
   QUEUE_RESPONSE_NOT_ADDRESSEE, respondRefusedAsNotAddressee } from '../utils/operatorQueue'
@@ -1330,10 +1345,15 @@ async function sendQueueResponse(item, body) {
   return true
 }
 
-function submitApproval(item) {
-  return sendQueueResponse(item, buildQueueResponse({
+// #3242: null until sendable — "Something else" needs the instruction typed.
+function approvalBody(item) {
+  return buildQueueResponse({
     kind: 'approval', option: selectedOptions[item.id], note: responseTexts[item.id],
-  }))
+  })
+}
+
+function submitApproval(item) {
+  return sendQueueResponse(item, approvalBody(item))
 }
 
 function submitAnswer(item) {
