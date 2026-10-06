@@ -292,6 +292,44 @@ def _is_owners_interactive_session(current_user, agent_name: str) -> bool:
     return bool(owner) and owner.get("owner_username") == current_user.username
 
 
+# trinity-enterprise#819: the agent server refuses a download/preview whose path
+# is a link or passes through one, for every caller. Keep in sync with
+# docker/base-image/agent_server/routers/files.py::_LINK_REFUSAL.
+_LINK_REFUSAL_CODE = "resolved_path_mismatch"
+_LINK_REFUSAL_MESSAGE = (
+    "This path is a link. Links are not opened by the file routes; open the file it points to."
+)
+
+
+def _is_link_refusal(response) -> bool:
+    """True for the agent server's structured link refusal; any other answer
+    (a string detail, a non-JSON body) is not one."""
+    if response.status_code != 403:
+        return False
+    try:
+        detail = response.json().get("detail")
+    except Exception:  # noqa: BLE001 - a non-JSON body is not the refusal
+        return False
+    return isinstance(detail, dict) and detail.get("code") == _LINK_REFUSAL_CODE
+
+
+async def _raise_if_link_refusal(response, request, current_user, agent_name, path) -> None:
+    """Turn the agent's link refusal into an audited, structured 403."""
+    if not _is_link_refusal(response):
+        return
+    logger.warning(
+        "File read refused, path is a link: agent=%s path=%r user=%s",
+        agent_name, _normalize_user_path(path), current_user.username,
+    )
+    await _audit_read("file_read_refused", request, current_user, agent_name, path, 403,
+                      _LINK_REFUSAL_CODE)
+    raise HTTPException(status_code=403, detail={
+        "code": _LINK_REFUSAL_CODE,
+        "message": _LINK_REFUSAL_MESSAGE,
+        "path": _normalize_user_path(path),
+    })
+
+
 async def _enforce_owner_tier_read(path, current_user, request, agent_name) -> None:
     """Refuse an owner-tier read unless the caller is a person who passes the
     owner tier (the agent's owner, or an admin). The PERSON gate runs first, so
@@ -454,6 +492,7 @@ async def download_agent_file_logic(
         if response.status_code == 200:
             return PlainTextResponse(content=response.text)
         else:
+            await _raise_if_link_refusal(response, request, current_user, agent_name, path)
             raise HTTPException(
                 status_code=response.status_code,
                 detail=f"Failed to download file: {response.text}"
@@ -579,6 +618,7 @@ async def preview_agent_file_logic(
             timeout=30.0
         )
         if response.status_code != 200:
+            await _raise_if_link_refusal(response, request, current_user, agent_name, path)
             raise HTTPException(
                 status_code=response.status_code,
                 detail=response.json().get("detail", f"Failed to preview: {response.text}")

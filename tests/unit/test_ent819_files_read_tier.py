@@ -466,3 +466,65 @@ def test_an_audit_failure_never_changes_the_answer(agent, audit):
         _call("download_agent_file_logic", ".env", shared_user())
     assert exc.value.status_code == 403
     assert _body(_call("download_agent_file_logic", ".env", admin_jwt())) == b"FILE-BODY"
+
+
+# ---- the agent's link refusal ---------------------------------------------------
+
+LINK_MESSAGE = "This path is a link. Links are not opened by the file routes; open the file it points to."
+
+
+def _link_refusal():
+    return _response(status=403, text='{"detail": {"code": "resolved_path_mismatch"}}',
+                     json_body={"detail": {"code": "resolved_path_mismatch", "message": LINK_MESSAGE}})
+
+
+@pytest.mark.parametrize("fn", LOGIC)
+@pytest.mark.parametrize("user", [shared_user, owner_jwt], ids=["shared", "owner"])
+def test_a_link_refusal_from_the_agent_is_audited_and_structured(agent, audit, fn, user):
+    agent.sent.return_value = _link_refusal()
+    with pytest.raises(HTTPException) as exc:
+        _call(fn, "//home/developer/notes-link", user())
+    assert exc.value.status_code == 403
+    assert exc.value.detail == {"code": "resolved_path_mismatch", "message": LINK_MESSAGE,
+                                "path": "/home/developer/notes-link"}
+    rows = _rows(audit, "file_read_refused")
+    assert len(rows) == 1
+    assert rows[0]["details"]["rule"] == "resolved_path_mismatch"
+    assert rows[0]["details"]["status"] == 403
+    assert rows[0]["details"]["path"] == "/home/developer/notes-link"
+
+
+@pytest.mark.parametrize("fn", LOGIC)
+def test_another_agent_403_passes_through_without_a_row(agent, audit, fn):
+    agent.sent.return_value = _response(status=403, text='{"detail": "Access denied"}',
+                                        json_body={"detail": "Access denied"})
+    with pytest.raises(HTTPException) as exc:
+        _call(fn, "notes.md", shared_user())
+    assert exc.value.status_code == 403
+    assert not isinstance(exc.value.detail, dict)
+    assert audit.await_count == 0
+
+
+def test_a_non_json_403_passes_through(agent, audit):
+    # (preview's existing error path reads the body as JSON; unchanged here)
+    agent.sent.return_value = _response(status=403, text="forbidden")
+    with pytest.raises(HTTPException) as exc:
+        _call("download_agent_file_logic", "notes.md", shared_user())
+    assert exc.value.status_code == 403
+    assert exc.value.detail == "Failed to download file: forbidden"
+    assert audit.await_count == 0
+
+
+def test_a_platform_read_of_a_link_logs_a_warning_naming_the_file(caplog):
+    """`agent_client.read_file` feeds the platform's own reads (CLAUDE.md,
+    template.yaml, ...). It still fails soft, and now says why."""
+    import httpx
+    from services.agent_client import AgentClient
+
+    fake = SimpleNamespace(agent_name="shared-agent", get=AsyncMock(return_value=httpx.Response(
+        403, json={"detail": {"code": "resolved_path_mismatch", "message": LINK_MESSAGE}})))
+    with caplog.at_level("WARNING"):
+        result = asyncio.run(AgentClient.read_file(fake, "CLAUDE.md"))
+    assert result["success"] is False and result["status_code"] == 403
+    warned = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+    assert any("CLAUDE.md" in m and "link" in m and "shared-agent" in m for m in warned), warned
