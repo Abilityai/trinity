@@ -356,6 +356,52 @@ class QueueListError(Exception):
         self.message = message
 
 
+# `agent_names` (trinity-enterprise#815): the MCP passes its own permit set,
+# one query parameter per name. Bounded so a request line stays well inside
+# every HTTP server's limit; the MCP refuses a larger set before sending.
+AGENT_NAMES_MAX = 500
+
+
+def narrow_to_agent_key(current_user, accessible):
+    """The agents an AGENT-scoped key's queue read covers: `{self} ∪ permitted`
+    intersected with its owner's accessible set (or the bare set when the owner
+    is an admin, `accessible is None`). Every other principal — a person's JWT
+    or user key, a system key, the event loopback — gets `accessible` back
+    unchanged (trinity-enterprise#815).
+
+    Narrowing for COMPLETENESS, not an authorization point: an agent key
+    resolves to its owner, so its broad read used to rank the owner's whole
+    fleet, cut it at `limit`, and leave the MCP to drop the rows the agent may
+    not see — its own rows could sit below the cut. The MCP's `checkAgentAccess`
+    stays the gate; enforcement on the raw routes is ent#629.
+
+    Keyed on `mcp_scope` / `agent_name` directly, never `acting_agent_name()`,
+    which maps a system key to `trinity-system` and would narrow the system
+    agent. Pure DB (`agent_permissions`, the ent#727 precedent): no Docker read,
+    so a Docker fault cannot shrink the set.
+    """
+    if getattr(current_user, "mcp_scope", None) != "agent":
+        return accessible
+    agent = getattr(current_user, "agent_name", None)
+    if not agent:
+        raise QueueListError(403, "agent key carries no agent identity")
+    allowed = {agent} | set(db.get_permitted_agents(agent))
+    return allowed if accessible is None else allowed & set(accessible)
+
+
+def _effective_agents(narrowed, agent_names):
+    """`agent_names` only ever narrows: intersected with what the caller may
+    see, or taken as given when the caller sees every agent."""
+    if agent_names is None:
+        return narrowed
+    if len(agent_names) > AGENT_NAMES_MAX:
+        raise QueueListError(422, f"agent_names: at most {AGENT_NAMES_MAX} names")
+    if any(not name or not name.strip() for name in agent_names):
+        raise QueueListError(422, "agent_names: a blank name is not allowed")
+    wanted = set(agent_names)
+    return wanted if narrowed is None else narrowed & wanted
+
+
 _BELT_DROP_WARNING = (
     "{n} item(s) on this page were withheld after the read (a stored request_id "
     "the database filter could not match); total not verified"
@@ -371,6 +417,7 @@ def list_for_principal(
     filters: dict,
     limit: int,
     offset: int = 0,
+    agent_names=None,
 ) -> dict:
     """One page of `GET /api/operator-queue` for this caller, with the fields
     that make it honest (trinity-enterprise#815).
@@ -382,20 +429,25 @@ def list_for_principal(
     - `next_offset` is `offset + limit` while `has_more`, else None;
     - `total` is a `COUNT` over the same filters — a snapshot.
 
+    The agent set is `narrow_to_agent_key` (an agent key: `{self} ∪ permitted`)
+    further narrowed by `agent_names`; it applies to the page, `total` and the
+    flags alike.
+
     `project` is the router's per-principal projection (`_for_principal`). It
     stays a BELT: if it drops a row the SQL page returned (only a legacy
     `request_id` led by non-ASCII whitespace can get past the SQL exclusion),
     `total` becomes None and `warnings` says so. The paging fields are
     unaffected — they describe the SQL page.
     """
+    agents = _effective_agents(narrow_to_agent_key(current_user, accessible), agent_names)
     exclude = ABOUT_A_PERSON_ID_PREFIXES if exclude_about_a_person else None
-    where = dict(filters, accessible_agent_names=accessible,
+    where = dict(filters, accessible_agent_names=agents,
                  exclude_request_id_prefixes=exclude)
     rows = db.list_operator_queue_items(**where, limit=limit + 1, offset=offset)
     has_more = len(rows) > limit
     page = rows[:limit]
     total = db.count_operator_queue_items(**where)
-    flags = db.count_operator_queue_flags(accessible_agent_names=accessible)
+    flags = db.count_operator_queue_flags(accessible_agent_names=agents)
 
     items = project(page)
     warnings = []

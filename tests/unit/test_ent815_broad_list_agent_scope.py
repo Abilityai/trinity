@@ -349,3 +349,259 @@ def test_b14_a_belt_drop_nulls_total_and_warns(qdb, names):
     assert body["warnings"], body
     assert body["has_more"] is True
     assert body["next_offset"] == 10
+
+
+# ---------------------------------------------------------------------------
+# Commit 2 — an agent key's broad read is narrowed to {self} ∪ permitted in
+# SQL; `agent_names` narrows further; `permissions?strict=true`.
+# ---------------------------------------------------------------------------
+
+
+def _fleet(db, names, *, strangers=30, mine=3, peers=3, stranger_priority="high"):
+    me, peer, stranger = names("me"), names("peer"), names("stranger")
+    db.add_agent_permission(me, peer, "op-815")
+    own = [_seed(db, me) for _ in range(mine)]
+    theirs = [_seed(db, peer) for _ in range(peers)]
+    alien = [_seed(db, stranger, priority=stranger_priority) for _ in range(strangers)]
+    return me, peer, stranger, own, theirs, alien
+
+
+OWNERS = [
+    pytest.param(None, id="admin-owner"),
+    pytest.param("user", id="non-admin-owner"),
+]
+
+
+def _owner(monkeypatch, db, role, visible):
+    """An agent key resolves to its OWNER. An admin owner's accessible set is
+    None (no filter); a non-admin's is the agents it owns or was shared."""
+    if role is None:
+        return {}
+    monkeypatch.setattr(db, "get_accessible_agent_names",
+                        lambda email, is_admin=False: sorted(visible))
+    return {"role": role}
+
+
+@pytest.mark.parametrize("owner_role", OWNERS)
+def test_b1_peer_and_own_rows_below_a_saturated_window_are_returned(
+        qdb, names, monkeypatch, owner_role):
+    """B1 (AC1, AC2, AC5 — the issue's window test): 30 high-priority rows on
+    a stranger the agent may not see sort above its own and its permitted
+    peer's medium rows. limit=10 used to return 10 stranger rows, which the MCP
+    then dropped: count 0. Now the page is self's and the peer's rows only."""
+    me, peer, stranger, own, theirs, alien = _fleet(qdb, names)
+    extra = _owner(monkeypatch, qdb, owner_role, {me, peer, stranger})
+    _as(mcp_scope="agent", agent_name=me, **extra)
+    body = _get(limit=10)
+    got = {i["id"] for i in body["items"]}
+    assert got == set(own) | set(theirs)
+    assert {i["agent_name"] for i in body["items"]} == {me, peer}
+    assert body["total"] == 6
+    assert body["has_more"] is False
+
+
+def test_b2_offset_mode_paging_fields(qdb, names):
+    """B2 (AC3): `total` is the visible count; `has_more` true on a cut page and
+    false on the last; `next_offset` = offset + limit or null; `next_cursor`
+    null in offset mode."""
+    me, peer, stranger, own, theirs, alien = _fleet(qdb, names, mine=5, peers=4, strangers=8)
+    _as(mcp_scope="agent", agent_name=me)
+    first = _get(limit=4)
+    assert (first["total"], first["count"], first["has_more"],
+            first["next_offset"], first["next_cursor"]) == (9, 4, True, 4, None)
+    last = _get(limit=4, offset=8)
+    assert (last["total"], last["count"], last["has_more"],
+            last["next_offset"], last["next_cursor"]) == (9, 1, False, None, None)
+
+
+def test_b3b_offset_walk_under_an_agent_key_interleaved_with_strangers(qdb, names):
+    """B3b (AC4): the offset walk under an agent key, with stranger rows
+    interleaved at every priority and one shared timestamp — every visible row
+    exactly once, no stranger row, every page but the last full."""
+    same = "2026-10-01T10:00:00.000000Z"
+    me, peer, stranger = names("me"), names("peer"), names("stranger")
+    qdb.add_agent_permission(me, peer, "op-815")
+    prios = ("critical", "high", "medium", "low")
+    visible = set()
+    for i in range(23):
+        agent = me if i % 2 else peer
+        visible.add(_seed(qdb, agent, priority=prios[i % 4], created_at=same))
+        _seed(qdb, stranger, priority=prios[(i + 1) % 4], created_at=same)
+    _as(mcp_scope="agent", agent_name=me)
+    ids, pages = _offset_walk(7)
+    assert len(ids) == len(set(ids))
+    assert set(ids) == visible
+    for page in pages[:-1]:
+        assert page["count"] == 7
+
+
+@pytest.mark.parametrize("principal", PERSON_PRINCIPALS)
+def test_b4_persons_see_every_row_and_total_counts_them(qdb, names, principal):
+    """B4 (guard): a JWT person and a person's own user key are not narrowed and
+    still receive the about-a-person rows; `total` counts them."""
+    me, peer, stranger, own, theirs, alien = _fleet(qdb, names, strangers=4)
+    gate = [_seed(qdb, me, priority="critical", rid=f"gate-{i}") for i in range(2)]
+    _as(**principal)
+    body = _get(limit=50)
+    assert {i["id"] for i in body["items"]} == set(own + theirs + alien + gate)
+    assert body["total"] == len(own + theirs + alien + gate)
+
+
+def test_b6_an_agent_key_naming_a_stranger_gets_an_empty_page(qdb, names):
+    """B6 (no widening, self-uniform): an explicit `agent_name` outside
+    {self} ∪ permitted is an empty page with total 0 — the same answer whether
+    that agent exists or not."""
+    me, peer, stranger, own, theirs, alien = _fleet(qdb, names, strangers=3)
+    _as(mcp_scope="agent", agent_name=me)
+    real = _get(agent_name=stranger, limit=10)
+    ghost = _get(agent_name=names("ghost"), limit=10)
+    for body in (real, ghost):
+        assert (body["items"], body["count"], body["total"], body["has_more"]) == ([], 0, 0, False)
+
+
+def test_b9_an_agent_scope_without_an_agent_identity_is_refused(qdb):
+    """B9: an agent-scoped principal that carries no agent name cannot be
+    narrowed, so it is refused with a reason — never a quiet empty page."""
+    _as(mcp_scope="agent")
+    res = _client().get("/api/operator-queue", params={"limit": 10})
+    assert res.status_code == 403, res.text
+    assert "agent identity" in res.json()["detail"]
+
+
+def test_b10_flags_count_only_the_agents_the_key_may_see(qdb, names):
+    """B10: `undelivered_count` / `closed_by_filer_count` under an agent key
+    count only {self} ∪ permitted."""
+    from sqlalchemy import update
+    from db.engine import get_engine
+    from db.tables import operator_queue
+    me, peer, stranger, own, theirs, alien = _fleet(qdb, names, strangers=2)
+    with get_engine().begin() as conn:
+        for uid in (own[0], alien[0]):
+            conn.execute(update(operator_queue).where(operator_queue.c.id == uid)
+                         .values(delivery_state="undelivered"))
+        for uid in (theirs[0], alien[1]):
+            conn.execute(update(operator_queue).where(operator_queue.c.id == uid)
+                         .values(sync_state="closed_by_filer"))
+    _as(mcp_scope="agent", agent_name=me)
+    body = _get(limit=10)
+    assert (body["undelivered_count"], body["closed_by_filer_count"]) == (1, 1)
+
+
+def test_b12_agent_names_only_ever_narrows(qdb, names):
+    """B12 (D1): `agent_names` intersects with what the caller may see; it never
+    widens. Bounded (≤500, no blank) and applied to the page, total and flags."""
+    from sqlalchemy import update
+    from db.engine import get_engine
+    from db.tables import operator_queue
+    me, peer, stranger, own, theirs, alien = _fleet(qdb, names, strangers=4)
+    with get_engine().begin() as conn:
+        conn.execute(update(operator_queue).where(operator_queue.c.id == theirs[0])
+                     .values(delivery_state="undelivered"))
+
+    _as()
+    person = _get(limit=50, agent_names=[stranger])
+    assert {i["id"] for i in person["items"]} == set(alien)
+    assert person["total"] == len(alien)
+    assert person["undelivered_count"] == 0
+
+    _as(mcp_scope="agent", agent_name=me)
+    agent = _get(limit=50, agent_names=[me, stranger])
+    assert {i["id"] for i in agent["items"]} == set(own)
+    assert agent["total"] == len(own)
+
+    both = _get(limit=50, agent_names=[me], agent_name=peer)
+    assert (both["items"], both["total"]) == ([], 0)
+    peer_only = _get(limit=50, agent_names=[peer, me], agent_name=peer)
+    assert {i["id"] for i in peer_only["items"]} == set(theirs)
+    assert peer_only["undelivered_count"] == 1
+
+    too_many = _client().get("/api/operator-queue",
+                             params={"agent_names": [f"a{i}" for i in range(501)]})
+    assert too_many.status_code == 422 and "agent_names" in too_many.text
+    blank = _client().get("/api/operator-queue", params={"agent_names": [me, " "]})
+    assert blank.status_code == 422 and "agent_names" in blank.text
+
+
+# --- B15: GET /api/agents/{name}/permissions?strict=true ---------------------
+
+_PERM_APP = {}
+
+
+def _perm_client(monkeypatch, db, *, states, me, peer, stranger):
+    """The real agent_files router; Docker and the DB access rules stubbed on
+    the globals the permissions logic actually reads (module-identity safe)."""
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    import routers.agent_files as route_mod
+    from models import User
+
+    g = route_mod.get_agent_permissions_logic.__globals__
+    helpers_g = g["get_accessible_agents"].__globals__
+    perm_db = g["db"]
+
+    def _states():
+        if isinstance(states, Exception):
+            raise states
+        return states
+
+    def _boom(*a, **k):
+        raise AssertionError("strict mode must not call a fail-silent Docker helper")
+
+    monkeypatch.setitem(g, "agent_container_states", _states)
+    monkeypatch.setitem(g, "get_agent_container", _boom)
+    monkeypatch.setitem(helpers_g, "list_all_agents_fast", _boom)
+    monkeypatch.setattr(perm_db, "can_user_access_agent", lambda u, a: True)
+    monkeypatch.setattr(perm_db, "get_user_by_username",
+                        lambda u: {"role": "user", "email": "op-815@example.com"})
+    monkeypatch.setattr(perm_db, "get_all_agent_metadata", lambda email: {
+        n: {"owner_username": "op-815", "is_shared_with_user": False}
+        for n in (me, peer, stranger)})
+
+    app = FastAPI()
+    app.include_router(route_mod.router)
+    human = User(id=7, username="op-815", email="op-815@example.com", role="user")
+    for route in app.routes:
+        for dep in getattr(getattr(route, "dependant", None), "dependencies", []) or []:
+            if getattr(dep.call, "__name__", "") == "get_current_user":
+                app.dependency_overrides[dep.call] = lambda: human
+    return TestClient(app), g, helpers_g
+
+
+def test_b15_strict_permissions_never_answer_a_docker_fault_with_no_peers(
+        qdb, names, monkeypatch):
+    """B15 (D1): without `strict`, a Docker fault inside `list_all_agents_fast`
+    reads as "200, no peers" — and the MCP would call a self-only view
+    complete. `strict=true` takes ONE tri-state snapshot: unreadable → 503;
+    readable → the permitted peers that have a container, with the
+    fail-silent helpers never called."""
+    me, peer, stranger = names("me"), names("peer"), names("stranger")
+    qdb.add_agent_permission(me, peer, "op-815")
+    snapshot = {me: "running", peer: "stopped", stranger: "running"}
+
+    client, g, helpers_g = _perm_client(monkeypatch, qdb, states=None,
+                                        me=me, peer=peer, stranger=stranger)
+    res = client.get(f"/api/agents/{me}/permissions", params={"strict": "true"})
+    assert res.status_code == 503, res.text
+
+    client, g, helpers_g = _perm_client(monkeypatch, qdb, states=snapshot,
+                                        me=me, peer=peer, stranger=stranger)
+    res = client.get(f"/api/agents/{me}/permissions", params={"strict": "true"})
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert [a["name"] for a in body["permitted_agents"]] == [peer]
+    assert body["permitted_agents"][0]["status"] == "stopped"
+    assert {a["name"] for a in body["available_agents"]} == {peer, stranger}
+
+    missing = client.get(f"/api/agents/{names('ghost')}/permissions",
+                         params={"strict": "true"})
+    assert missing.status_code == 404
+
+    # Without the flag: today's lenient behaviour, byte for byte — a container
+    # lookup, then the fleet list; a fleet-list fault is "200 with no peers".
+    monkeypatch.setitem(g, "get_agent_container", lambda name: object())
+    monkeypatch.setitem(helpers_g, "list_all_agents_fast", lambda: [])
+    monkeypatch.setitem(g, "agent_container_states",
+                        lambda: (_ for _ in ()).throw(AssertionError("lenient read took a snapshot")))
+    lenient = client.get(f"/api/agents/{me}/permissions")
+    assert lenient.status_code == 200
+    assert lenient.json()["permitted_agents"] == []

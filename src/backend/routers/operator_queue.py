@@ -150,13 +150,22 @@ async def list_queue_items(
     since: Optional[str] = Query(None, description="Items created after this ISO timestamp"),
     limit: int = Query(100, ge=1, le=500),
     offset: int = Query(0, ge=0),
+    agent_names: Optional[List[str]] = Query(
+        None,
+        description=(
+            "Narrow to these agents (repeat the parameter per name, at most 500). "
+            "Only ever narrows what the caller may see (trinity-enterprise#815)."
+        ),
+    ),
     current_user: User = Depends(get_current_user),
 ):
     """List operator queue items with optional filters.
 
     trinity-enterprise#815: complete within `limit` — every visibility filter
     runs in SQL before the cut — and says so: `total`, `has_more`,
-    `next_offset` (see `operator_queue_service.list_for_principal`).
+    `next_offset` (see `operator_queue_service.list_for_principal`). An
+    agent-scoped key is narrowed to `{self} ∪ permitted` before the cut;
+    `agent_names` narrows any caller further.
     """
     try:
         return operator_queue_service.list_for_principal(
@@ -174,6 +183,7 @@ async def list_queue_items(
                          agent_name=agent_name, since=since),
             limit=limit,
             offset=offset,
+            agent_names=agent_names,
         )
     except operator_queue_service.QueueListError as e:
         raise HTTPException(status_code=e.status_code, detail=e.message)
