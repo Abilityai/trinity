@@ -375,6 +375,7 @@ surface).
 | Pull sink (`apply_task_result`) | ✅ | #3114 — `pull_coordination_service` spawns the report |
 | Backend-shutdown terminal / cleanup stale-execution and stale-slot sweeps | ❌ | write `failed` with no report, so a hung or orphaned child fails silently (follow-up) |
 | Operator-terminate cancel (Path B) | ❌ v1 | writes CANCELLED before `apply_result` |
+| Approved run of a delegated `/task` that needed a skill-gate approval | ❌ | the gate (`skill_gate_service.enforce` in `dispatch_parallel_task`) fires before `create_task_execution_and_activities`, so nothing is inherited, and `skill_gate_service._dispatch_approved` re-creates the run from the frozen dispatch, which carries no `source_channel*` (follow-up) |
 
 Other recorded limits: a restart mid-inline-turn loses the inline reply and
 reports nothing (F7); a late token-gated FAILED→SUCCESS resurrection replays
