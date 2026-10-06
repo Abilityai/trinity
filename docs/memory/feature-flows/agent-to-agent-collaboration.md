@@ -251,7 +251,7 @@ When `MCP_AGENT_CHAT_PULL_ENABLED` is ON, a **sequential** (`parallel=false`) ag
     authContext?.scope === "agent" &&
     !isSelfTask;
   ```
-- **Pull branch** — chat.ts:391-402: calls `apiClient.task(agent_name, message, { async_mode: true }, sourceAgent, mcpKeyInfo, idempotencyKey)` and returns the receipt JSON. Only `async_mode` is forwarded; `model`/`allowed_tools`/`system_prompt` are parallel-only and were never applied in sequential mode, so omitting them preserves sequential semantics (agent defaults).
+- **Pull branch** — chat.ts:391-402: calls `apiClient.task(agent_name, message, { async_mode: true }, sourceAgent, mcpKeyInfo, idempotencyKey)` and returns the receipt JSON (a replayed one carries `idempotent_replay: true`, #3245). If that run ends `failed` or `cancelled`, an identical re-send dispatches a new run under the same key (#3245) — for a `lease_expired` failure only after its hold window (agent timeout + 5 min after the failure); until then the original receipt comes back. Only `async_mode` is forwarded; `model`/`allowed_tools`/`system_prompt` are parallel-only and were never applied in sequential mode, so omitting them preserves sequential semantics (agent defaults).
 
 ### D8 — Route is part of the idempotency identity
 
@@ -706,7 +706,7 @@ An MCP client gives up on a tool call at its own ceiling (30–60 seconds is typ
 **Impact**: The `timeout_seconds` parameter controls the backend execution timeout (how long Trinity waits for the target agent), not how long the call waits. A long synchronous call no longer just fails — when the server can match it to its execution it answers with a receipt (otherwise the error names `list_recent_executions`) — but the caller has to know a receipt means "running". Every agent is taught that as the delegation contract (ent#568) in its platform prompt's §Agent Collaboration, and the `chat_with_agent` description carries the same text.
 
 **Workarounds**:
-1. Treat a receipt as running: read it with `get_execution_result`, never re-send
+1. Treat a receipt as running: read it with `get_execution_result`, never re-send — unless the outcome is a confirmed `failed` or `cancelled`, which a word-for-word re-send retries (#3245)
 2. Use `async=true` with `parallel=true` for long-running tasks (returns `execution_id` immediately)
 3. Use shared folders for result exchange instead of synchronous return values
 

@@ -33,7 +33,7 @@ Enforcement lives at the **router** layer, not solely in `TaskExecutionService`,
 - **DB layer**: `db/idempotency.py` — `IdempotencyOperations` (no HTTP, no key-derivation logic).
 - **Service layer**: `services/idempotency_service.py` — key derivation + `begin`/`complete`/`fail` orchestration over the DB layer.
 - **Router layer**: each boundary calls `begin()` → dispatch → `complete()` or `fail()`.
-- **Facade**: `database.py` exposes `idempotency_claim` / `idempotency_attach_execution` / `idempotency_complete` / `idempotency_release` / `idempotency_purge_expired` (`database.py:2064-2080`), backed by `IdempotencyOperations` constructed in `__init__` (`database.py:297`).
+- **Facade**: `database.py` exposes `idempotency_claim` / `idempotency_attach_execution` / `idempotency_complete` / `idempotency_release` / `idempotency_purge_expired` (`database.py:2064-2080`), backed by `IdempotencyOperations` constructed in `__init__` (`database.py:297`). #3245 adds `idempotency_discard_completed_if_execution` (the compare-and-delete below) and `get_execution_failure_stamp` (a `(status, error, completed_at)` read on `schedule_executions`, used by the replay-liveness check).
 
 ### DB layer — `db/idempotency.py`
 The table's `PRIMARY KEY (scope, idempotency_key)` **is** the atomic claim. Atomicity relies on SQLite database-level write locking, which holds across processes (multiple uvicorn workers + the standalone scheduler share one DB file).
@@ -42,6 +42,7 @@ The table's `PRIMARY KEY (scope, idempotency_key)` **is** the atomic claim. Atom
 - `attach_execution(scope, key, execution_id)` — `db/idempotency.py:87`. Best-effort `UPDATE` recording the dispatched `execution_id` on an in-flight claim, so an in-flight 409 can hand back a pollable id.
 - `complete(scope, key, execution_id, snapshot)` — `db/idempotency.py:96`. Sets `status='completed'`, `COALESCE`s the execution_id, JSON-encodes and stores `response_snapshot` for replay.
 - `release(scope, key)` — `db/idempotency.py:126`. Deletes the row **only when still `in_flight`** so a failed first attempt can retry; never removes a `completed` row (which must stay to keep replaying the original result).
+- `discard_completed_if_execution(scope, key, execution_id) -> bool` (#3245). Deletes a `completed` row **only while it still names `execution_id`**; returns whether a row went. `execution_id` is required. Unlike #2040's `discard_completed` (any completed row for the key), a slow retry cannot erase the record a faster retry re-completed with its new run.
 - `purge_expired(ttl_hours=24)` — `db/idempotency.py:139`. Deletes rows past the TTL; returns the row count.
 
 Time math uses `iso_cutoff(hours)` and `utc_now_iso()` from `utils/helpers.py` (Invariant #16 — ISO-Z TEXT columns).
@@ -56,9 +57,13 @@ Time math uses `iso_cutoff(hours)` and `utc_now_iso()` from `utils/helpers.py` (
   - `attach_execution(decision, execution_id)` — `idempotency_service.py:112`. No-op on replay / disabled / missing id.
   - `complete(decision, execution_id, snapshot)` — `idempotency_service.py:122`. Finalizes a fresh claim; no-op on replay / disabled.
   - `fail(decision)` — `idempotency_service.py:132`. Releases a fresh in-flight claim so a failed first attempt can retry; no-op on replay / disabled.
+- **Replay liveness (#3245)**:
+  - `execution_liveness(execution_id, agent_name, *, now=None) -> Liveness(verdict, hold_until)`. Never raises. `live` (`queued`/`running`/`pending_retry`), `succeeded`, `ended` (`failed`/`cancelled`/`skipped`), `gone` (no row), `maybe_alive`, `indeterminate` (no id or `manual`, read error, another agent's row, unknown status). Reads `get_execution_gate_state` and, only on `failed`, `get_execution_failure_stamp`. A `failed` row whose `error` starts `lease_expired:` (the slot reaper's mark) is `maybe_alive` until `lease_expired_horizon(completed_at, agent)` = `completed_at` + the agent's current timeout + `SLOT_TTL_BUFFER` (300 s), then `ended`; the tag is checked before the stamp or the timeout, and a missing/unparseable stamp or an unreadable timeout is `indeterminate`. `_now()` is the clock hook.
+  - `discard_replay_of(scope, key, execution_id) -> True | False | None` wraps the compare-and-delete; `None` = the delete raised (logged, swallowed).
 
 ### Router flow (representative — `/chat`, `routers/chat.py`)
 1. `begin(make_agent_scope(name), idempotency_key)` at `chat.py:148` (inside `_admit_chat_request`) — gated before consuming a capacity slot.
+1a. **Stale-receipt reclaim (#3245)**: `dispatch_admission_service._reclaim_ended_receipt(idem, name=...)` runs right after `begin` in `admit_chat_request` (`/chat`) and `begin_task_idempotency` (`/task`). Only a `completed` replay whose snapshot is a dispatch receipt (`async_mode: true`, status `accepted`/`queued`/`queued_timeout`) is checked; `sched:` keys are skipped; the skill gate has already answered a gated request. On `ended`/`gone` it compare-and-deletes the row and calls `begin` once more (no loop): `new` dispatches a fresh run, a concurrent winner's `in_flight` → 409, its `completed` receipt → replay of the winner's run. A delete error replays the original. Logs `[#3245] receipt_reclaim … cas=deleted|no_match|error outcome=new|in_flight|completed|no_dedup|replay_original` and, for a held `lease_expired` failure, `[#3245] receipt_hold … until=<iso>` (never the raw key).
 2. **Replay path** (`idem.replay`, `chat.py:151`): writes a `EXECUTION / idempotent_replay` platform-audit event; if `idem.in_flight`, raises `409 {error: "request_in_progress", execution_id}` (`chat.py:169`); otherwise returns `idem.snapshot` (or a minimal `{execution.task_execution_id}`) with header `X-Idempotent-Replay: true` (`chat.py:181`).
 3. **Fresh path**: dispatch through `CapacityManager`. `attach_execution(idem, task_execution_id)` at `chat.py:361` (inside `_prepare_chat_execution`). On a final response, `complete(idem, task_execution_id, response_data)` at `chat.py:755` (inside `_run_chat_and_finalize`). On an upfront rejection where **nothing was dispatched** — capacity-full (`chat.py:264`) **or** dispatch-breaker-open (`chat.py:216`, #526, added by #1051) — `fail(idem)` releases the claim so the caller can retry with the same key once capacity frees or the breaker recovers.
 
@@ -80,6 +85,7 @@ Idempotency covers the whole batch — a duplicate replays the original `FanOutR
 - `src/mcp-server/src/tools/chat.ts:20` — `deriveMcpIdempotencyKey(parts)` returns `mcp:{sha256(parts.join(" "))}`.
 - `chat_with_agent` derives the key over `[caller, agent, "chat"|"task", model, "sync"|"async", message]` (`chat.ts:301`) and passes it into `apiClient.task(...)` / `apiClient.chat(...)`.
 - `fan_out` derives the key over `[caller, agent, "fan_out", model, JSON.stringify(tasks)]` (`chat.ts:518`) and passes it into `apiClient.fanOut(...)`.
+- **Replay marker (#3245)**: `client.ts` `markIdempotentReplay` copies `X-Idempotent-Replay: true` into the body as `idempotent_replay: true` on `task()` / `chat()` 200 replays, and the 409 in-flight receipt (`inFlightReplayReceipt`) carries it too. The client's own timeout-recovery receipts carry no field — absence is not proof of a fresh dispatch. `runAgentChat`'s receipt re-wording keeps the field.
 - `src/mcp-server/src/client.ts` forwards the key as the `Idempotency-Key` header on the `chat` / `task` / `fanOut` methods (`client.ts:485,498-501`, `client.ts:647,656-658`, `client.ts:762,787-789`). A transport-level retry of a byte-identical MCP call within 24h dedupes.
 
 ## Database
@@ -115,6 +121,10 @@ CREATE TABLE idempotency_keys (
 | First-seen key | Claim taken `in_flight`; request dispatches |
 | Duplicate, prior claim still running | `409` (`request_in_progress` for chat/task, `detail` string for webhook), with original `execution_id` where known |
 | Duplicate, prior claim completed | `200`/`202` replay of stored `response_snapshot` + `X-Idempotent-Replay: true` |
+| Duplicate on `/chat` or `/task`, stored receipt's run ended `failed`/`cancelled`/`skipped` or its row is gone (#3245) | Row compare-and-deleted, key re-claimed: a **new** run, no replay header |
+| Same, but the `failed` error starts `lease_expired:` and the hold window (`completed_at` + timeout + 300 s) is still open | Replay of the original receipt (logged `receipt_hold`); fresh once the window ends |
+| Same, but the key is `sched:…` | Replay (the scheduler's own key is never reclaimed) |
+| Same, but the request names a gated skill with a gate record | The gate's answer (pending / `409 request_<state>`) — the receipt is not checked |
 | Upfront at-capacity rejection (chat/task) | Claim released (`fail`) so caller can retry once capacity frees |
 | Dispatch error (webhook → scheduler) | Claim released (`fail`) so a legitimate re-delivery can retry |
 | Dedup-layer DB error | **Fail-open** — `begin` logs a warning and returns a no-dedup decision; the real execution always proceeds |
@@ -137,6 +147,10 @@ CREATE TABLE idempotency_keys (
    **Expected**: normal dispatch; **no** `idempotency_keys` row created.
 6. **TTL purge**: age a row past 24h (or wait), run a cleanup cycle.
    **Verify**: cleanup report shows `idempotency_keys_purged > 0`; row gone.
+7. **Retry after a failed async run (#3245)**: `POST /api/agents/{name}/task` with `{"message": "...", "async_mode": true}` and `Idempotency-Key: t7` to a stopped agent (or terminate the run) so the execution ends `failed`/`cancelled`; re-send the identical request.
+   **Expected**: a 202 receipt with a **new** `execution_id` and no `X-Idempotent-Replay` header. A third identical send while that new run is still running replays it (`X-Idempotent-Replay: true`, same new id).
+
+Unit coverage: `tests/unit/test_3245_async_replay_after_failure.py` (verdict matrix, `lease_expired` time axis, both seams incl. the pulled `/chat` receipt, AC2 over the real `/task` endpoint, the race, the log lines, structural pins); `src/mcp-server/src/task-receipt.test.ts` (the `idempotent_replay` marker).
 
 ## Related Flows
 - [Webhook Triggers](webhook-triggers.md) — the boundary that auto-derives `(token, body_hash)`.
@@ -150,3 +164,4 @@ CREATE TABLE idempotency_keys (
 | Date | ID | Change |
 |------|-----|--------|
 | 2026-06-02 | RELIABILITY-006 (#525), PR #1019 (commit 1bb8f271) | Initial implementation — `idempotency_keys` table + migration, `db/idempotency.py`, `services/idempotency_service.py`, wiring at `/chat`, `/task`, `/api/internal/execute-task`, `/api/webhooks/{token}`, `/api/agents/{name}/fan-out`, the scheduler, and MCP `chat_with_agent`/`fan_out`; 24h purge in the cleanup service. Established Architectural Invariant #18. |
+| 2026-10-06 | #3245 | A dispatch receipt replays only while its run can still succeed: `execution_liveness` + `discard_replay_of` (service), `discard_completed_if_execution` + `get_execution_failure_stamp` (DB), `_reclaim_ended_receipt` at the `/chat` and `/task` admission seams, a `lease_expired` hold window, and the MCP `idempotent_replay` marker. |
