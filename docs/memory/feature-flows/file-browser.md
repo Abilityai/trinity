@@ -7,6 +7,7 @@
 ## Revision History
 | Date | Changes |
 |------|---------|
+| 2026-10-06 | **Credential files are owner-tier to read; reads never follow a link; runtime config files are write-protected** (trinity-enterprise#819, #823): download and preview refuse an owner-tier path (credential files, their `/proc` / `/dev` spellings, `.trinity/git-credential`, `.trinity/backup/*`, the secret file classes, the runtime config files) unless the caller is a person who passes the owner tier; refused and non-owner allowed reads are audited. The agent server opens download/preview paths without following any link and serves that descriptor; a link is refused with `resolved_path_mismatch` for every caller. Agents not yet on that image refuse below-owner reads until restarted. `~/.claude.json`, `~/.claude/.credentials.json`, `~/.gemini/settings.json` and `~/.tmp/codex/*` join every write list; deleting `.tmp` is refused. The Credentials panel shows a refusal instead of opening an empty editor. |
 | 2026-10-06 | **Backend deny list covers DELETE; paths normalised before every check** (trinity-enterprise#792): `_normalize_user_path` collapses any run of leading slashes (`posixpath.normpath` keeps exactly two). `DELETE /files` refuses deny-listed paths and any directory that holds one (`_is_user_deletable_path`). PUT, mkdir and DELETE send the agent the normalised path that was checked. |
 | 2026-03-03 | **Per-agent Files tab restored** (Issue #51): FilesPanel.vue rewritten with full file manager (tree + preview). Uses `file-manager/FileTreeNode.vue` and `file-manager/FilePreview.vue`. Standalone `/files` route removed. |
 | 2026-02-18 | Files tab removed from AgentDetail.vue. Users directed to standalone File Manager. |
@@ -306,13 +307,18 @@ The file browser feature uses a **thin router + service layer** architecture:
 - `agent_name` (path) - Agent identifier
 - `path` (query, required) - File path relative to workspace
 
-**Business Logic** (in `download_agent_file_logic()`):
+**Business Logic** (in `download_agent_file_logic()`; preview is the same):
 1. Check user authentication
-2. Verify user has access to agent
-3. Get agent container
-4. Verify container exists and is running
-5. Proxy request to agent's internal API at `http://agent-{name}:8000/api/files/download`
-6. Return file content as PlainTextResponse
+2. Verify user has access to agent (accessor tier)
+3. Refuse a path containing a NUL byte: 400 `{"code": "invalid_path"}`, no agent call
+4. **Owner-tier paths** (`_enforce_owner_tier_read`, trinity-enterprise#819): if the path matches `_OWNER_TIER_READ_PATTERNS`, the caller must be a person (`assert_person`: a signed-in session or the person's own user-scoped key) and pass the owner tier (`assert_agent_owner`: the owner, or an admin). Refused → 403 `owner_tier_path` (or `person_required` for a key) and a `file_read_refused` audit row; allowed for anyone but the owner's own signed-in session → a `file_read_allowed` row
+5. Get agent container; verify it exists and is running
+6. **Older images** (`_refuse_below_owner_on_unverified_image`): below the owner tier, the container is probed once per container and image for the no-link read (`grep` of the agent server's `files.py` for `_open_for_read`); an unverified agent answers 403 `agent_restart_required`, logged with a running count. The owner and admins never trigger the probe
+7. Proxy to the agent's internal API with the **normalised** path that was checked
+8. **Links are not followed**: an agent answer of 403 `resolved_path_mismatch` becomes a structured 403 and a `file_read_refused` row (`rule: resolved_path_mismatch`), for every caller, the owner included
+9. Return file content as PlainTextResponse
+
+**Owner-tier set** (`services/agent_service/files.py`): `_CREDENTIAL_PATH_PATTERNS` (`.env`, `.env.*`, `.mcp.json`, `.mcp.json.template`, `.credentials.enc`, `.ssh/*`, `.aws/*`, `.gcp/*`, `.claude/settings.json`, `.claude/settings.local.json`, `.git/config`, and the runtime config files `.claude.json`, `.claude/.credentials.json`, `.gemini/settings.json`, `.tmp/codex/*`), `_PATH_ALIAS_PATTERNS` (`/proc/*`, `/dev/*`), `_TRINITY_CREDENTIAL_COPY_PATTERNS` (`.trinity/git-credential`, `.trinity/backup/*`) and `_SECRET_FILE_CLASS_PATTERNS` (`.kube/config`, `.config/gcloud/*`, `*.key`, `*.pem`, `*.p12`, `*.pfx`). Every pattern but the secret classes is also write-denied. `.trinity/pipelines` and `.trinity/pipeline-state` stay at the accessor tier, so the MCP pipeline tools work for anyone with access.
 
 **Response**: Plain text content of the file
 
@@ -476,6 +482,8 @@ def build_tree(directory: Path, base_path: Path, include_hidden: bool) -> dict:
 
 #### GET /api/files/download (Line 112-153)
 
+**Links are not followed** (trinity-enterprise#819): `_open_for_read` walks the path one component at a time from `_HOME` with `O_NOFOLLOW` (each step relative to the directory opened before it) and the handler reads that descriptor, so the checked file is the file served. A component that is a link → 403 `{"code": "resolved_path_mismatch", "message": "This path is a link. Links are not opened by the file routes; open the file it points to."}`; a missing file → 404; a directory, FIFO, or a file used as a directory → 400; a path outside the home (resolved containment, not a string prefix) → 403. Preview streams the same descriptor with `Content-Length` and an inline `Content-Disposition`.
+
 **Purpose**: Download file content as plain text
 
 **Parameters**:
@@ -515,8 +523,12 @@ PROTECTED_PATHS = [
     ".env",
     ".mcp.json",
     ".mcp.json.template",
+    ".claude.json",        # trinity-enterprise#823
+    ".credentials.json",   # trinity-enterprise#823
 ]
 ```
+
+**Runtime config** (`_RUNTIME_CONFIG_PATHS`, trinity-enterprise#823): PUT, mkdir and DELETE refuse a **resolved** target at or under `.claude.json`, `.claude/.credentials.json`, `.gemini/settings.json` or `.tmp/codex`, whatever `platform` says; DELETE also refuses a directory above one (`.claude`, `.gemini`, `.tmp`). Matched on the resolved path, so a link elsewhere in the home that points at one is refused too.
 
 **Business Logic**:
 1. Validate path is within workspace
@@ -557,6 +569,8 @@ EDIT_PROTECTED_PATHS = [
     ".mcp.json",          # added #590 — raw injection = RCE-by-config
     ".mcp.json.template", # ditto (envsubst doesn't sanitize attacker JSON)
     ".credentials.enc",   # added #590 — overwrite swaps encrypted backup
+    ".claude.json",       # trinity-enterprise#823
+    ".credentials.json",  # trinity-enterprise#823
 ]
 ```
 **Defense in depth**: the backend `update_agent_file_logic` / `create_agent_folder_logic` / `delete_agent_file_logic` in `src/backend/services/agent_service/files.py` run the same deny check (broader: also blocks `.ssh/*`, `.aws/*`, `/opt/trinity/*`, etc.; DELETE also refuses directories holding a protected path) BEFORE proxying to the agent-server, so a future router/proxy gap can't bypass the agent-server's check. They forward the normalised path they checked.
@@ -640,8 +654,8 @@ Show success notification
 
 ## Side Effects
 
-### No Audit Logging
-File browser operations are not currently logged to the audit system (removed during service layer refactoring).
+### Owner-tier reads are audited
+Download and preview write one platform audit row (`file_read_refused` / `file_read_allowed`, `AuditEventType.AUTHORIZATION`, the routed endpoint, the normalised path and the rule) for every refused owner-tier read, every allowed owner-tier read by anyone other than the owner's own signed-in session, and every link refusal (trinity-enterprise#819). A person is filed as `actor_user`; an agent key as its agent; other keys by scope and key. Best-effort: an audit failure never changes the answer. Other file operations are not audited.
 
 ### No Database Operations
 The file browser (list, download, preview) is read-only and does not modify database tables.
@@ -663,9 +677,16 @@ This feature does not emit real-time events.
 | Protected path (edit, backend deny list) | 403 | "Cannot edit protected path: {path}" | Backend |
 | Protected path (mkdir, backend deny list) | 403 | "Cannot create folder in protected path: {path}" | Backend |
 | Protected path (delete, backend deny list incl. holding directories) | 403 | "Cannot delete protected path: {path}" | Backend |
+| Owner-tier read below the owner tier | 403 | `{"code": "owner_tier_path", "message": "Credential files can be opened only by the agent's owner or an admin. You can still chat with this agent, and it keeps using its credentials. To view or change them, ask the agent's owner or an admin.", "path": ...}` | Backend |
+| Owner-tier read with a non-person key | 403 | `{"code": "person_required", ...}` | Backend |
+| NUL byte in the path | 400 | `{"code": "invalid_path", "message": "Invalid path"}` | Backend |
+| Below-owner read on an agent not yet on the current image | 403 | `{"code": "agent_restart_required", ...}` | Backend |
+| Path is, or passes through, a link (download/preview) | 403 | `{"code": "resolved_path_mismatch", "message": "This path is a link. ...", "path": ...}` | Agent Server → Backend |
 | Path outside workspace | 403 | "Access denied: only /home/developer accessible" | Agent Server |
 | Protected path (delete) | 403 | "Cannot delete protected path: {name}" | Agent Server |
 | Protected path (edit) | 403 | "Cannot edit protected path: {name}" | Agent Server |
+
+The UI shows the `message` of a structured refusal: the store parses the text/blob error body back into `{detail, code, path}` (`normalizeFileErrorBody`); the Files tab shows it in the preview pane and on Download, and the Credentials panel shows it in an `InlineError` beside the file list and does not open the editor (only content or a 404 opens it).
 | Cannot delete home | 403 | "Cannot delete home directory" | Agent Server |
 | File not found | 404 | "File not found: {path}" | Agent Server |
 | Path is directory | 400 | "Not a file: {path}" | Agent Server |
@@ -700,12 +721,12 @@ This feature does not emit real-time events.
 
 ### Protected Path Handling
 **Delete-Protected** (cannot be deleted):
-- Agent server, by name: `CLAUDE.md`, `.trinity`, `.git`, `.gitignore`, `.env`, `.mcp.json`, `.mcp.json.template`
-- Backend (trinity-enterprise#792): everything on the write deny list, plus directories holding a protected path (`.ssh`, `.aws`, `.gcp`, `.claude`, the home dir). See DELETE above.
+- Agent server, by name: `CLAUDE.md`, `.trinity`, `.git`, `.gitignore`, `.env`, `.mcp.json`, `.mcp.json.template`, `.claude.json`, `.credentials.json`; by resolved path, the runtime config paths and every directory above them (`.claude`, `.gemini`, `.tmp`)
+- Backend (trinity-enterprise#792): everything on the write deny list, plus directories holding a protected path (`.ssh`, `.aws`, `.gcp`, `.claude`, `.gemini`, `.tmp`, the home dir). See DELETE above.
 
 **Edit-Protected** (cannot be modified):
-- Agent server: `.trinity`, `.git`, `.gitignore`, `.env`, `.mcp.json`, `.mcp.json.template`, `.credentials.enc`
-- Backend deny list: the above plus `.env.*`, `.ssh/*`, `.aws/*`, `.gcp/*`, `.claude/settings*.json`, `/opt/trinity/*`, `/etc/*`, `/proc/*`, `/sys/*`
+- Agent server: `.trinity`, `.git`, `.gitignore`, `.env`, `.mcp.json`, `.mcp.json.template`, `.credentials.enc`, `.claude.json`, `.credentials.json`; by resolved path, `.gemini/settings.json` and `.tmp/codex/` too
+- Backend deny list: the above plus `.env.*`, `.ssh/*`, `.aws/*`, `.gcp/*`, `.claude/settings*.json`, `.claude/.credentials.json`, `.gemini/settings.json`, `.tmp/codex/*`, `.git/config`, `/opt/trinity/*`, `/etc/*`, `/proc/*`, `/dev/*`, `/sys/*`
 - Note: `CLAUDE.md` IS editable (owners manage agent instructions); `.mcp.json` is not (#590)
 
 ### Rate Limiting

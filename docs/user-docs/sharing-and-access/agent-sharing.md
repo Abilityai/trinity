@@ -27,8 +27,15 @@ The per-recipient DM toggle above is complemented on the channel side by the per
 | Level | Permissions |
 |-------|-------------|
 | **Owner** | Full control -- create, delete, configure, share, manage credentials and schedules. |
-| **Shared operator** | Interact only -- chat, run tasks, view files and logs. Cannot modify config, credentials, or permissions. |
+| **Shared operator** | Interact only -- chat, run tasks, view files (except credential files) and logs. Cannot modify config, credentials, or permissions. |
 | **Admin** | Full access to all agents regardless of ownership. |
+
+### What someone you share an agent with can do
+
+- Chat with the agent and run its tasks. The agent keeps using its credentials while it works for them.
+- Open, preview and download the agent's files, **except credential files**.
+- They cannot open or download credential files: `.env`, `.mcp.json`, SSH and cloud credentials, key and certificate files (`*.key`, `*.pem`, `*.p12`, `*.pfx`) and the agent runtimes' login files. Trying shows a message saying so. (`.env`, `.mcp.json` and the runtime login files cannot be changed through the Files tab by anyone.)
+- To see or change a credential, they ask the agent's owner or an admin. Managing credentials (set, inject, import, export) is owner-only.
 
 Enforcement notes:
 

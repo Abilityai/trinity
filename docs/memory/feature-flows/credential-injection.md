@@ -417,6 +417,8 @@ async def decrypt_and_inject(request: InternalDecryptInjectRequest):
 
 ## Frontend UI
 
+**Reading the files (trinity-enterprise#819).** View and Edit read `.env` / `.mcp.json` through `GET /api/agents/{name}/files/download`, which is owner-tier for credential paths: the owner and admins read them; anyone else gets 403 `owner_tier_path`. The panel reads first and opens the editor only on content or a 404 (a file not created yet); any other failure keeps the editor closed and shows the server's message in an `InlineError` beside the file list. The checklist and Quick Inject merge base (`readExistingEnv`) surfaces a coded 403's message instead of "try again once the agent is reachable". See [file-browser.md](file-browser.md).
+
 ### CredentialsPanel.vue Structure
 
 ```

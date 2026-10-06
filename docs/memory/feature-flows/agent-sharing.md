@@ -386,6 +386,8 @@ def delete_agent_ownership(self, agent_name: str) -> bool:
 
 > **Note (2026-01-30)**: Git Pull was changed from Owner-only to Authorized (owner/shared/admin). See [github-sync.md](github-sync.md) for details.
 
+> **Credential files (2026-10-06, trinity-enterprise#819)**: a share grants the accessor tier. Reading credential files (`.env`, `.mcp.json`, keys and similar) through the Files routes is owner-tier, so a shared user gets a 403 that says to ask the agent's owner or an admin. A shared user still chats with the agent, which keeps using its credentials; managing credentials was already owner-only. See [file-browser.md](file-browser.md).
+
 ---
 
 ## Side Effects
