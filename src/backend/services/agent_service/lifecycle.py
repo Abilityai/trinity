@@ -24,7 +24,8 @@ from services.docker_service import (
 )
 from services.docker_utils import (
     container_stop, container_remove, container_start, container_reload,
-    volume_get, volume_create, containers_run, image_get, container_stop
+    volume_get, volume_create, containers_run, image_get, container_stop,
+    agent_volume_labels
 )
 from services.agent_service.helpers import validate_base_image
 from services.agent_runtime_state import clear_agent_breakers
@@ -649,6 +650,22 @@ async def start_agent_internal(agent_name: str) -> dict:
     except Exception as e:
         logger.warning(
             "[ent#477] failed to spawn the metric registry refresh for %s on "
+            "start: %s",
+            agent_name,
+            e,
+        )
+
+    # trinity-enterprise#752: the skill-gate marker tells the in-container hook
+    # to refuse skills while the platform cannot be reached — only on an agent
+    # that has gates. It lives on the writable layer, so a fresh container has
+    # none. Fire-and-forget like the spawns above, and for gated agents only:
+    # the common agent with no gates costs no exec.
+    try:
+        from services import skill_gate_service
+        skill_gate_service.spawn_gate_marker_sync(agent_name)
+    except Exception as e:
+        logger.warning(
+            "[ent#752] failed to spawn the skill-gate marker sync for %s on "
             "start: %s",
             agent_name,
             e,
@@ -1290,6 +1307,19 @@ async def recreate_container_with_updated_config(
         # helper — that one also serves agent creation, where "the original was
         # stopped" is meaningless and stopping the result would be wrong.
         await _restore_stopped_state(agent_name, new_container, preserve_run_state, was_running)
+        # trinity-enterprise#752: the replacement has no skill-gate marker (it
+        # lived on the old writable layer). Re-sync it for a gated agent; a
+        # container left stopped just fails the exec, and its next start syncs.
+        try:
+            from services import skill_gate_service
+            skill_gate_service.spawn_gate_marker_sync(agent_name)
+        except Exception as e:
+            logger.warning(
+                "[ent#752] failed to spawn the skill-gate marker sync for %s on "
+                "recreate: %s",
+                agent_name,
+                e,
+            )
         return new_container
     except docker.errors.APIError as e:
         # #1809: 409 name-conflict — a concurrent start won the recreate race
@@ -1379,10 +1409,7 @@ async def _provision_folders_and_run_agent_container(
             except docker.errors.NotFound:
                 await volume_create(
                     name=shared_volume_name,
-                    labels={
-                        'trinity.platform': 'agent-shared',
-                        'trinity.agent-name': agent_name
-                    }
+                    labels=agent_volume_labels(agent_name, 'agent-shared'),
                 )
                 volume_created = True
 
@@ -1421,10 +1448,7 @@ async def _provision_folders_and_run_agent_container(
         except docker.errors.NotFound:
             await volume_create(
                 name=public_volume_name,
-                labels={
-                    'trinity.platform': 'agent-public',
-                    'trinity.agent-name': agent_name,
-                },
+                labels=agent_volume_labels(agent_name, 'agent-public'),
             )
             public_volume_created = True
 

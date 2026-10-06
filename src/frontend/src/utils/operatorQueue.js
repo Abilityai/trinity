@@ -43,6 +43,52 @@ export function optionsOf(item) {
 }
 
 /**
+ * #3242: the ONE platform-reserved approval answer — "none of the offered
+ * options; the instruction is in `response_text`". Mirrors `SOMETHING_ELSE` in
+ * `src/backend/services/operator_queue_choices.py` and
+ * `src/mcp-server/src/types.ts` (parity-tested). Never shown raw to a person:
+ * see `decisionLabel`.
+ */
+export const SOMETHING_ELSE = '(something else)'
+export const SOMETHING_ELSE_LABEL = 'Something else'
+
+/** The ingestion clamp's placeholder (#1632) — a record, never a choice. */
+export const OPTIONS_DROPPED_MARKER = '(options omitted: exceeded size cap)'
+
+/**
+ * The agent's own options as pickable chips: `optionsOf` minus the reserved
+ * literal (rendered once, by the surface, as its own chip) and the size-cap
+ * marker. `optionsOf` and `queueResponseKind` stay unfiltered — they must agree
+ * with the sink about whether an approval offered anything.
+ *
+ * @param {{options?: unknown}|undefined} item
+ * @returns {string[]}
+ */
+export function offeredChips(item) {
+  return optionsOf(item).filter((o) => o !== SOMETHING_ELSE && o !== OPTIONS_DROPPED_MARKER)
+}
+
+/** A recorded decision as a person reads it: the reserved value is "Something else". */
+export function decisionLabel(response) {
+  return response === SOMETHING_ELSE ? SOMETHING_ELSE_LABEL : response
+}
+
+/**
+ * Is this approval decided only by its options (a platform-minted approval)?
+ * The sink refuses the reserved answer there (`not_off_menu`), so no surface
+ * offers the chip. Every projection — the Workspace's and the operator queue's
+ * list and item — carries the sink's own predicate as `decided_by_options`, and
+ * that boolean wins. The `gate-` prefix is only the fallback for an item that
+ * lacks the field (a payload from before #3242).
+ */
+export function decidedByOptions(item) {
+  if (!item || typeof item !== 'object') return false
+  if (typeof item.decided_by_options === 'boolean') return item.decided_by_options
+  const id = String(item.request_id || item.id || '').trim().toLowerCase()
+  return id.startsWith('gate-')
+}
+
+/**
  * Which controls an item gets — by TYPE, and total:
  *
  *   approval with usable options → 'approval'    (option buttons → note → Send)
@@ -107,6 +153,9 @@ export function buildQueueResponse({ kind, option, note = '', answer = '' } = {}
     case 'approval': {
       const opt = typeof option === 'string' ? option : option == null ? '' : String(option)
       if (!opt.length) return null
+      // #3242: the reserved answer needs the instruction — the agent cannot act
+      // on "none of these" alone.
+      if (opt === SOMETHING_ELSE && !(typeof note === 'string' && note.trim())) return null
       return queueResponseBody(opt, note)
     }
     case 'question': {
@@ -327,7 +376,9 @@ export const QUEUE_RESPONSE_NOT_ADDRESSEE =
  * item is still pending.
  *
  * `{ kind, label, who, when }`:
- *   - `kind` — `answered | cancelled | expired`: the ledger's `disposition`,
+ *   - `kind` — `answered | dismissed | cancelled | expired`: the ledger's
+ *     `disposition` (`dismissed`, trinity-enterprise#748: the person it was
+ *     addressed to chose not to answer; its status is `cancelled`),
  *     else the terminal status (a row that ended before the ledger). The
  *     Workspace projection's own `status` (`answered`) reads the same way.
  *   - `who` — the person, for the Operating Room (`disposed_by_email`, or a
@@ -340,16 +391,17 @@ export const QUEUE_RESPONSE_NOT_ADDRESSEE =
  */
 export const ENDING_LABELS = Object.freeze({
   answered: 'Answered',
+  dismissed: 'Dismissed',
   cancelled: 'Cancelled',
   expired: 'Expired',
 })
 
 function endingKind(item) {
   const d = item.disposition
-  if (d === 'answered' || d === 'cancelled' || d === 'expired') return d
+  if (d === 'answered' || d === 'dismissed' || d === 'cancelled' || d === 'expired') return d
   const s = item.status
   if (s === 'responded' || s === 'acknowledged' || s === 'answered') return 'answered'
-  if (s === 'cancelled' || s === 'expired') return s
+  if (s === 'dismissed' || s === 'cancelled' || s === 'expired') return s
   return null
 }
 

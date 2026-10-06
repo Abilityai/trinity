@@ -99,7 +99,12 @@ dialog never advertises a key that does nothing.
 ctrl on every platform (the shipped ⌘J semantics), and a chord matches by
 `key` **or** by physical `code`. The `code` arm is what makes the map work on a
 non-Latin layout — and on a US Mac it is the *only* arm for `⌥.`, which types
-`≥`. Shift is accepted on a `key` match only, so DE's `Shift+7` → `/` and
+`≥`. It answers **only when the printed key is not a single printable ASCII
+character** (merge-train 2026-10-06): on a Latin non-QWERTY layout the position
+and the character disagree on purpose — Dvorak's ⌘V arrives as `key: 'v'` on
+`Period`, ⌘Z as `key: 'z'` on `Slash` — and letting the position out-vote a
+key that names itself made the rail toggle eat paste and the key list eat
+undo. Shift is accepted on a `key` match only, so DE's `Shift+7` → `/` and
 FR's shifted `.` reach ⌘/ while macOS's `⌘?` stays the browser's Help search.
 `chordLabel` / `ariaKeyshortcuts` take the platform and render `⌥↓` vs
 `Alt+↓` and `Alt+ArrowDown`. `keymapCollisions(map)` does NOT take a platform
@@ -120,7 +125,14 @@ protocol entry the map declares, not a second dispatcher), armed above `bootstra
    null and we return **without** `preventDefault`;
 2. signed in (the OTP form answers no keys);
 3. ⌘J keeps its place at the top and its own "leave the call?" ask — the one
-   key a live voice call answers rather than swallows;
+   key a live voice call answers rather than swallows. The ask parks the SAME
+   event and, on confirm, re-enters the ladder after a `nextTick` as the
+   **resumed** pass (`onGlobalKeydown(e, { resumed: true })`): step 3 has
+   already `preventDefault`ed that event, so rung 6 is told the mark is the
+   shell's own and not a nearer owner's (merge-train 2026-10-06 — read as a
+   claim, ⌘J was dead exactly when the person had said "end the call and
+   leave"), and the tick is what lets the confirm dialog leave the DOM before
+   the modal probe runs;
 4. an action with no dispatch entry (a protocol key, a reserved chord) is left
    to the browser rather than silently eaten;
 5. a focused `<select>` keeps Alt+↓ (its native menu on Firefox/Windows) — the

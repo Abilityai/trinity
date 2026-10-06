@@ -685,10 +685,13 @@ def _is_approved_gate_run(execution_id: str) -> bool:
     trigger (`public`, a channel) but runs long after that turn answered, so
     nothing replied inline — its result is reported like any background
     completion. An unreadable record reads as "inline": the failure direction is
-    a missing report, never a second post."""
+    a missing report, never a second post. A `self_approved` record
+    (trinity-enterprise#752) names a run that answered INLINE — it is not an
+    approved background run, and reporting it would post the reply twice."""
     try:
         from database import db
-        return db.get_gate_request_by_dispatched_execution(execution_id) is not None
+        record = db.get_gate_request_by_dispatched_execution(execution_id)
+        return bool(record) and record.get("state") in ("dispatching", "dispatched")
     except Exception:  # noqa: BLE001
         logger.warning("[ent#751] gate-record read failed for %s; not reporting", execution_id)
         return False

@@ -503,9 +503,9 @@ describe('#2375 — the panel goes through the shared module (source-asserted)',
   )
 
   it('imports the one home of the payload, the controls rule and the labels', () => {
-    expect(sfc).toMatch(
-      /import \{ optionsOf, queueResponseKind, buildQueueResponse, queueTypeLabel \} from '@\/utils\/operatorQueue'/,
-    )
+    // Pin the module, not the exact specifier list: the list changes with the
+    // panel (#3242 dropped the unused `optionsOf`), the one home does not.
+    expect(sfc).toMatch(/import \{[^}]*\bbuildQueueResponse\b[^}]*\} from '@\/utils\/operatorQueue'/)
   })
 
   it('never one-taps an option straight into an answer', () => {
@@ -518,7 +518,10 @@ describe('#2375 — the panel goes through the shared module (source-asserted)',
     const pickBody = sfc.match(/function pick\(ask, opt\) \{([\s\S]*?)\n\}/)?.[1] || ''
     expect(pickBody).toMatch(/picks\[ask\.id\] = /)
     expect(pickBody).not.toMatch(/submit|answerAsk/)
-    expect(sfc).toMatch(/:disabled="busyId === ask\.id \|\| !picks\[ask\.id\]"/)
+    // What arms Send is proven by behaviour, not by its source text (#3242
+    // reversed it: "Something else" plus a typed instruction is sendable without
+    // a pick) — see portalAskSomethingElse.mount.spec.js and
+    // portalAskAnswerFlow.mount.spec.js, which execute the predicate.
   })
 
   it('builds every submission through buildQueueResponse', () => {

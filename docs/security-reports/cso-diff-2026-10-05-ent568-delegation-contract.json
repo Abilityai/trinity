@@ -1,0 +1,85 @@
+{
+  "version": "1.2.3",
+  "date": "2026-10-05",
+  "mode": "daily",
+  "scope": "diff",
+  "branch": "feature/568-delegation-contract",
+  "issue": "abilityai/trinity-enterprise#568",
+  "base": "09f9d0868",
+  "commits": "uncommitted worktree diff + untracked files",
+  "audited": "25 files: prompt text (platform_prompt_service.py), MCP descriptions + receipt message strings (client.ts, tools/chat.ts, tools/dynamic-agents.ts, tools/messages.ts, new delegation_contract.ts), one CI line (mcp-server-test.yml), tests, docs",
+  "counts_as_full_run": false,
+  "phases_run": [
+    0,
+    1,
+    2,
+    4,
+    7,
+    8,
+    9,
+    10,
+    11,
+    12,
+    13,
+    14
+  ],
+  "phases_not_applicable": {
+    "3": "no dependency, lockfile, Dockerfile or requirements change in the diff",
+    "5": "no Dockerfile, compose, network or Redis change in the diff",
+    "6": "no webhook, internal route or integration change in the diff"
+  },
+  "stack_cve_quicklist": "not re-evaluated: no pin, lockfile, Dockerfile or compose file is in the diff; the diff adds no request.url.path read",
+  "attack_surface": {
+    "endpoints": "none new",
+    "mcp_tools": "none new; no new parameters; visibility unchanged (OPERATOR_SCOPES untouched). Text changes only: chat_with_agent / chat_with_<agent> / fan_out / send_message descriptions, three parameter descriptions, and the `message` of MCP-authored receipts",
+    "agent_context_ingress": "none new. The delegation contract is platform-authored text spliced into PLATFORM_INSTRUCTIONS; receipt messages embed the caller's own agent_name and a backend execution_id, echoed to the same caller",
+    "globally_advertised_text": "dynamic chat_with_<agent> descriptions append a platform constant to the backend's name-only line (#846) — no per-agent metadata added; a blank line falls back to the agent name, which the tool name already carries",
+    "ci": "mcp-server-test.yml: one extra `await import(...)` in an existing run step; no `${{ }}` interpolation, no trigger, permission or action change"
+  },
+  "checks": [
+    "Phase 2: secret-prefix scan over every changed and untracked file (sk-, ghp_, github_pat_, xox*, AKIA, re_) — none; `trinity_mcp_test_agent_key` in the new TS test is a fixture placeholder, the same literal src/mcp-server/src/access-wiring.test.ts already carries",
+    "Phase 2: enterprise-docs guard pattern replayed over docs/ + seam files with Python re (BSD grep lacks -P) — 0 hits",
+    "Phase 4: workflow change reviewed by hand against the zizmor set — no template injection, no new trigger, top-level `permissions: contents: read` unchanged",
+    "Phase 7 ASI01/ASI07: no third-party text enters a prompt through this diff; the contract is platform-authored and states capability facts (bare tool names, runtime-neutral)",
+    "Phase 7 LLM02: no per-agent metadata added to a globally advertised description",
+    "Phase 8: invisible / bidi / tag-block Unicode scan and injection-string scan over every changed and untracked file — none",
+    "Phase 9 A01/A05/A10: no route, query, subprocess or guard added; asyncReceipt only rewrites `message` on accepted/queued receipts that carry a string execution_id"
+  ],
+  "findings": [],
+  "hypotheses": [],
+  "considered_and_dismissed": [
+    {
+      "candidate": "A target agent could put receipt-shaped JSON inside its reply so the caller waits on a fake execution_id",
+      "why_dismissed": "A receipt is the tool's own answer, not text inside a reply; a target can already lie in its reply, and get_execution_result is gated to self ∪ permitted. No boundary is crossed that was not crossable before."
+    },
+    {
+      "candidate": "The contract's 'not found → re-send it word for word' step could duplicate work if idempotency begin() fails open",
+      "why_dismissed": "Needs two simultaneous failures (the ledger check missing a live row AND the idempotency store failing open); the worst case is one extra execution of the same work, not amplification. Documented in requirements §37.2 as the reason the MCP server itself does not probe this way; accepted as residual for an agent-level instruction."
+    },
+    {
+      "candidate": "'the outcome will be sent to you' is false for a system-scoped requester of a gated skill",
+      "why_dismissed": "Pre-existing in ent#751's shipped MCP message, not introduced here; honesty defect, not a security boundary. Filed as abilityai/trinity#3233."
+    }
+  ],
+  "coverage_gaps": [
+    "not a full run: Docker image checks, quicklist re-resolution and Phase 3 scanners not run (no pins, images or dependencies in the diff; the local stack was not rebuilt by instruction)",
+    "zizmor not run on the changed workflow; reviewed by hand"
+  ],
+  "supply_chain_summary": {
+    "scanner": "none (no dependency change in the diff)",
+    "new_install_scripts": 0
+  },
+  "filter_stats": {
+    "candidates": 3,
+    "dropped": 3,
+    "reported": 0
+  },
+  "totals": {
+    "critical": 0,
+    "high": 0,
+    "medium": 0,
+    "low": 0
+  },
+  "trend": "diff run — n/a",
+  "remediation": []
+}

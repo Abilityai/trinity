@@ -118,6 +118,22 @@ describe('matchesChord', () => {
     expect(matchesChord({ code: 'KeyJ', metaKey: true }, chordOf('new-chat'))).toBe(true)
   })
 
+  it('leaves the physical arm alone when the printed key is a plain ASCII character (merge-train 2026-10-06)', () => {
+    // Dvorak is a LATIN layout: ⌘V arrives as `key: 'v'` on the `Period`
+    // position, ⌘Z as `key: 'z'` on `Slash`. The `code` arm exists for a key
+    // the printed character cannot name (`≥`, Cyrillic) — a printable ASCII
+    // `key` names itself, and the position must not out-vote it, or the rail
+    // toggle eats paste and the key list eats undo on every Dvorak Mac.
+    expect(matchesChord(ev({ key: 'v', code: 'Period', metaKey: true }), railToggle)).toBe(false)
+    expect(matchesChord(ev({ key: 'z', code: 'Slash', metaKey: true }), keyList)).toBe(false)
+    expect(matchesChord(ev({ key: 'c', code: 'KeyJ', metaKey: true }), chordOf('new-chat'))).toBe(false)
+    // The printed key still wins on its own arm, on the same layout.
+    expect(matchesChord(ev({ key: '.', code: 'KeyE', metaKey: true }), railToggle)).toBe(true)
+    // And the arm the finding was about is untouched: a non-ASCII `key`.
+    expect(matchesChord(ev({ key: '≥', code: 'Period', altKey: true }), railTab)).toBe(true)
+    expect(matchesChord(ev({ key: 'о', code: 'KeyJ', metaKey: true }), chordOf('new-chat'))).toBe(true)
+  })
+
   it('accepts Shift on the printed key but never on the physical one (Decision 29)', () => {
     // DE: `/` is Shift+7. FR: `.` is a shifted key. Both must work.
     expect(matchesChord(ev({ key: '/', code: 'Digit7', metaKey: true, shiftKey: true }), search)).toBe(true)
@@ -228,6 +244,18 @@ describe('keymapSuppressed', () => {
   it('yields to a nearer owner that already claimed the event', () => {
     expect(sup({ action: 'agent-next', defaultPrevented: true })).toBe(true)
     expect(sup({ action: 'new-chat', defaultPrevented: true })).toBe(true)
+  })
+
+  it('a resumed ⌘J is not "claimed by a nearer owner" — the shell claimed it itself (merge-train 2026-10-06)', () => {
+    // ⌘J during a call `preventDefault`s and parks the SAME event behind the
+    // leave-call ask; on the resumed pass `e.defaultPrevented` is true because
+    // of that, not because anyone nearer spoke. `resumed` says so.
+    expect(sup({ action: 'new-chat', defaultPrevented: true, resumed: true })).toBe(false)
+    // It waives only that rung: a modal still stops it, and so does a drawer.
+    expect(sup({ action: 'new-chat', defaultPrevented: true, resumed: true, modalOpen: true })).toBe(true)
+    expect(sup({ action: 'new-chat', defaultPrevented: true, resumed: true, drawerOpen: true })).toBe(true)
+    // And it is not a general bypass for a key another owner really claimed.
+    expect(sup({ action: 'agent-next', defaultPrevented: true, resumed: false })).toBe(true)
   })
 
   it('stops every shell key under something modal — ⌘J included', () => {

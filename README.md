@@ -1,6 +1,6 @@
 <p align="center">
   <a href="https://www.ability.ai/trinity">
-    <img src="docs/assets/trinity-hero.webp" alt="Trinity — The Sovereign AI Agents Platform" width="720" />
+    <img src="docs/assets/trinity-hero.webp" alt="Trinity — the operating system for the AI-native company" width="720" />
   </a>
 </p>
 
@@ -53,9 +53,9 @@
 
 ---
 
-## The Sovereign AI Agents Platform
+## The operating system for the AI-native company
 
-Trinity is a sovereign AI agents platform — build and run proprietary systems, from fully (or semi-) autonomous businesses to self-improving cognitive systems, all governed, auditable, and on infrastructure you control.
+**Trinity: the operating system for the AI-native company — open source, self-hosted, that you own.** Compounding intelligence your company owns. Every agent is governed and auditable, and runs on infrastructure you control.
 
 > **Claude Code writes the agent. Trinity runs it in production.**
 
@@ -72,7 +72,7 @@ Each agent runs in its own isolated Docker container with real-time observabilit
 
 **The problem:** Everyone wants autonomous AI agents. But your options are terrible — SaaS platforms where data leaves your security perimeter, custom builds that take 6-12 months, or frameworks that don't handle governance and audit trails.
 
-**The solution:** Trinity is autonomous agent orchestration infrastructure. Each agent runs in its own isolated Docker container. You get real-time observability, fleet-wide health monitoring, cron-based scheduling, agent-to-agent delegation, and cost tracking — all on your own hardware.
+**The solution:** Trinity is the operating system for the AI-native company. Each agent runs in its own isolated Docker container. You get real-time observability, fleet-wide health monitoring, cron-based scheduling, agent-to-agent delegation, and cost tracking — all on your own hardware.
 
 | Option | Problem | Trinity |
 |--------|---------|---------|
@@ -820,7 +820,7 @@ git push origin cli-v1.0.0
 
 This project is licensed under the [Apache License 2.0](LICENSE) — free for any use, commercial included, with an explicit patent grant. Run it on your own infrastructure or any cloud you control.
 
-Optional **enterprise modules** (SSO, user management, SIEM export, and more) are available under a separate commercial license. Contact [hello@ability.ai](mailto:hello@ability.ai) for enterprise licensing.
+Optional **enterprise modules** (user management, SIEM export, and more) are available under a separate commercial license. Contact [hello@ability.ai](mailto:hello@ability.ai) for enterprise licensing.
 
 ## Contributing
 
@@ -839,5 +839,5 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
 ---
 
 <div align="center">
-  <sub>Built by <a href="https://ability.ai">Ability.ai</a> — Sovereign AI infrastructure for the autonomous enterprise</sub>
+  <sub>Built by <a href="https://ability.ai">Ability.ai</a> — the lab for AI-native companies</sub>
 </div>

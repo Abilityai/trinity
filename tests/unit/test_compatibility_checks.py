@@ -414,6 +414,46 @@ class TestStaticChecks:
         assert status == "pass"
         assert "check_error" not in (detail or {})
 
+    # -- #3186: a widget bound to a metric gets its value (and a status widget its
+    #    colour) from the recorded points, so D-003 must not demand them --------
+
+    @pytest.mark.parametrize("widget", [
+        "  - type: metric\n    label: Revenue\n    metric: revenue\n",
+        "  - type: status\n    label: Health\n    metric: health\n",
+        "  - type: progress\n    label: Quota\n    metric: quota\n",
+    ])
+    def test_d003_a_bound_widget_needs_no_value_or_color(self, widget):
+        snap = self._dash(good_snapshot(), "widgets:\n" + widget)
+        assert _run_one("D-003", snap)[0] == "pass"
+
+    @pytest.mark.parametrize("widget,missing", [
+        ("  - type: metric\n    label: Revenue\n", "'metric' needs value"),
+        ("  - type: status\n    label: Health\n    value: ok\n", "'status' needs color"),
+        ("  - type: status\n    label: Health\n    color: green\n", "'status' needs value"),
+        ("  - type: progress\n    label: Quota\n", "'progress' needs value"),
+    ])
+    def test_d003_an_unbound_widget_still_needs_them(self, widget, missing):
+        status, msg, _detail = _run_one("D-003", self._dash(good_snapshot(), "widgets:\n" + widget))
+        assert status == "fail" and missing in msg
+
+    @pytest.mark.parametrize("binding", ["metric: ''", "metric: null", "metric: 0"])
+    def test_d003_an_empty_binding_is_not_a_binding(self, binding):
+        snap = self._dash(good_snapshot(), f"widgets:\n  - type: metric\n    label: R\n    {binding}\n")
+        assert _run_one("D-003", snap)[0] == "fail"
+
+    def test_d003_a_bound_widget_still_needs_its_label(self):
+        snap = self._dash(good_snapshot(), "widgets:\n  - type: metric\n    metric: revenue\n")
+        status, msg, _detail = _run_one("D-003", snap)
+        assert status == "fail" and "'metric' needs label" in msg
+
+    def test_d003_a_binding_to_an_undeclared_name_is_not_a_required_field_failure(self):
+        """Decided in #3186: the renderer drops `value` for an undeclared
+        binding and shows "not declared" instead, so demanding a number here
+        would demand one nobody sees. The undeclared name is the finding, and
+        it is not D-003's."""
+        snap = self._dash(good_snapshot(), "widgets:\n  - type: metric\n    label: R\n    metric: nope\n")
+        assert _run_one("D-003", snap)[0] == "pass"
+
     def test_d004_detail_is_json_safe_for_date_labels(self):
         # the hardened loader hands back a `datetime.date` for `label: 2026-01-01`;
         # at HEAD that reached `detail` raw and `json.dumps(checks)` in upsert_result raised

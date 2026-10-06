@@ -1,10 +1,7 @@
 name: trinity
 display_name: Trinity Platform
 description: |
-  Deep Agent Orchestration Platform — sovereign infrastructure for deploying,
-  orchestrating, and governing autonomous AI systems that plan, reason, and
-  execute independently. Implements hierarchical delegation, persistent memory,
-  extreme context engineering, and autonomous operations.
+  Trinity is the operating system for the AI-native company — open source, self-hosted, that you own. This agent develops it: it implements, reviews and ships changes to the abilityai/trinity repository.
 avatar_prompt: A commanding orchestrator figure in a sleek dark coat standing before a holographic constellation of connected nodes, each glowing with autonomous energy — calm authority, strategic vision, deep blue and silver palette, cinematic lighting
 resources:
   cpu: "2"

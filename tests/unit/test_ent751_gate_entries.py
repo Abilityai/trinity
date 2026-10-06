@@ -228,11 +228,23 @@ def test_chat_from_an_agent_raises_before_the_key_and_the_slot(world):
     assert _count("idempotency_keys") == 0
 
 
-def test_chat_by_the_approver_signed_in_is_admitted_and_audited(world):
+def test_chat_by_the_approver_signed_in_is_admitted_and_audited(world, monkeypatch):
+    """Admission decides; the row's setup audits it on the execution the agent
+    receives (trinity-enterprise#752 moved it off the capacity slot's id, which
+    no agent ever sees)."""
+    monkeypatch.setattr(_CE.activity_service, "track_activity", AsyncMock(return_value="act-751"))
     admission = _chat(_human(world))
     world.capacity.acquire.assert_called_once()
     assert admission.execution_id
-    assert [a for a in world.audits if a.get("event_action") == "skill_gate_self_approved"]
+    assert admission.gate.self_approved_by == OWNER_EMAIL
+    ctx = asyncio.run(_CE.prepare_chat_execution(
+        name=FIN, request=ChatMessageRequest(message="/pay-invoice 100 EUR"),
+        current_user=_human(world), x_source_agent=None, x_via_mcp="true", idem=admission.idem,
+        chat_execution_id=admission.execution_id, capacity_result=SimpleNamespace(state="admitted"),
+        queue_result="running", gate=admission.gate))
+    rows = [a for a in world.audits if a.get("event_action") == "skill_gate_self_approved"]
+    assert len(rows) == 1
+    assert rows[0]["details"]["execution_id"] == ctx.task_execution_id
 
 
 def test_chat_refusals_propagate_named(world):

@@ -1844,7 +1844,10 @@ bounding the table. OSS-core (Workspace rule above). Flow:
   exception to "the ladder runs before any `preventDefault`": during an
   active voice call it claims the event and routes to the leave-call guard
   above the suppression rung, which is the pre-existing ent#534/551 ask kept
-  deliberately (ruling T8) rather than an oversight.
+  deliberately (ruling T8) rather than an oversight. On confirm the parked
+  event re-enters as the `resumed` pass after a tick, and the suppression
+  rung waives its `defaultPrevented` bail for that pass only — the mark is
+  the shell's own (merge-train 2026-10-06).
 - **AC-4 — every key works from the message field**: the conventional
   "ignore an editable target" guard is deliberately **inverted**; the composer
   is a textarea and the keys must work while typing. A nearer owner still wins
@@ -1861,7 +1864,10 @@ bounding the table. OSS-core (Workspace rule above). Flow:
   message field and a held `Ctrl+J` cannot open the browser's Downloads; the
   repeat of a press it did not claim stays the browser's.
 - **AC-6 — non-US layouts**: a chord matches by `key` **or** by physical
-  `code`, so the US position works on a non-Latin layout; `Shift` is accepted
+  `code`, so the US position works on a non-Latin layout — the `code` arm
+  answers only when the printed key is not a single printable ASCII character,
+  so a Latin non-QWERTY layout (Dvorak: ⌘V on `Period`, ⌘Z on `Slash`) keeps
+  paste and undo (merge-train 2026-10-06); `Shift` is accepted
   on a `key` match only, so DE's `Shift+7` → `/` and FR's shifted `.` reach
   `⌘/` while macOS's `⌘?` stays the browser's Help search. Matching is
   platform-free (`primary` = meta XOR ctrl everywhere); only labels take a
@@ -2036,6 +2042,7 @@ bounding the table. OSS-core (Workspace rule above). Flow:
 - **Status**: ✅ Implemented (2025-11-29)
 - **Description**: Agents communicate via Trinity MCP with agent-scoped API keys
 - **Flow**: `docs/memory/feature-flows/agent-to-agent-collaboration.md`
+- **Delegation contract**: what a dispatch receipt means, and never re-sending on a timeout, is taught to every agent and every MCP client — [scheduling.md §37.5](scheduling.md#375-the-delegation-contract-taught-where-callers-read-abilityaitrinity-enterprise568) (abilityai/trinity-enterprise#568)
 
 #### 9.1.1 Chain-depth guard (#2806)
 - **Status**: ✅ Implemented (2026-09-22)
@@ -3793,6 +3800,17 @@ to localStorage in the clear.
   users, Info for everyone — carries one "N ask(s) waiting on you · Open in Inbox" line to
   Action `?from=<agent>`, and each agent row's "needs you" mark counts from the same feed as the
   pinned Inbox row.
+- **Discuss and Dismiss (trinity-enterprise#747, #748)**: every waiting question or approval
+  offers **Discuss** and **Dismiss** wherever it renders (Inbox pane, chat tile, a project's
+  Needs you); an alert offers neither ("Got it" ends it). Discuss opens ONE chat per ask with the
+  asking agent, titled after the ask, whose every turn carries the ask (id, kind, live status,
+  options); later clicks continue it ("Continue discussion"), the ask stays the same pending row
+  drawn as that chat's tile, and it is decided on that row — its card, or for a question the
+  composer's **Send as answer** (the text becomes `response`). Dismiss is one click, undoable for
+  5 s with nothing sent meanwhile; it ends the ask as `dismissed` (status `cancelled`) through the
+  ending sink, wakes the opted-in filer, and the agent's readback shows `dismissed` with an empty
+  `response`. Only the addressee may do either (person gate, uniform 404); a dismiss losing a race
+  is a no-op. Flow: `feature-flows/operating-room.md` → Discuss and Dismiss.
 - **Action by agent (§3g C2, PR A2)**: whenever anything is waiting — from one agent on, so a
   second agent's ask does not push the list down — Action shows a second strip ("All agents",
   then each agent with its count), and choosing one narrows the tab to that agent's asks
