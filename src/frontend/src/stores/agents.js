@@ -14,6 +14,30 @@ import api from '../api'
 // clobbers this full-fleet list) plus the utils/websocket.js handlers that
 // merge agent_created / agent_label_changed rows in. The sort comparator
 // itself lives in utils/agentSort.js (pure function — no store access).
+// trinity-enterprise#819: the file routes answer a refusal with a structured
+// `detail` ({code, message, path}). The download and preview calls read the
+// body as text and as a blob, so turn it back into `{detail: <message>, code,
+// path}` — every consumer renders `err.response.data.detail` as a string. A
+// string detail stays a string; an unparseable body is left alone.
+export async function normalizeFileErrorBody (err) {
+  const res = err?.response
+  if (!res || res.data == null) return err
+  let body = res.data
+  try {
+    if (typeof Blob !== 'undefined' && body instanceof Blob) body = await body.text()
+    if (typeof body === 'string') body = JSON.parse(body)
+  } catch {
+    return err
+  }
+  const detail = body?.detail
+  if (detail && typeof detail === 'object') {
+    res.data = { detail: detail.message, code: detail.code, path: detail.path }
+  } else if (typeof detail === 'string') {
+    res.data = { detail }
+  }
+  return err
+}
+
 export const useAgentsStore = defineStore('agents', {
   state: () => ({
     agents: [],
@@ -767,12 +791,16 @@ export const useAgentsStore = defineStore('agents', {
 
     async downloadAgentFile(name, filePath) {
       const authStore = useAuthStore()
-      const response = await axios.get(`/api/agents/${name}/files/download`, {
-        params: { path: filePath },
-        headers: authStore.authHeader,
-        responseType: 'text'
-      })
-      return response.data
+      try {
+        const response = await axios.get(`/api/agents/${name}/files/download`, {
+          params: { path: filePath },
+          headers: authStore.authHeader,
+          responseType: 'text'
+        })
+        return response.data
+      } catch (err) {
+        throw await normalizeFileErrorBody(err)
+      }
     },
 
     async deleteAgentFile(name, filePath) {
@@ -807,11 +835,16 @@ export const useAgentsStore = defineStore('agents', {
 
     async getFilePreviewBlob(name, filePath) {
       const authStore = useAuthStore()
-      const response = await axios.get(`/api/agents/${name}/files/preview`, {
-        params: { path: filePath },
-        headers: authStore.authHeader,
-        responseType: 'blob'
-      })
+      let response
+      try {
+        response = await axios.get(`/api/agents/${name}/files/preview`, {
+          params: { path: filePath },
+          headers: authStore.authHeader,
+          responseType: 'blob'
+        })
+      } catch (err) {
+        throw await normalizeFileErrorBody(err)
+      }
       // Return blob URL for media elements
       return {
         url: URL.createObjectURL(response.data),
