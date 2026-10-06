@@ -192,6 +192,17 @@ def test_pilot_admission_skips_acquire(monkeypatch):
     audit.log.assert_awaited_once()
 
 
+def test_pilot_admission_audits_a_self_approved_gate(monkeypatch):
+    """ent#751: the pilot branch returns before the push branch's audit."""
+    import services.dispatch_admission_service as da
+
+    audited = AsyncMock()
+    monkeypatch.setattr(da.skill_gate_service, "audit_self_approved", audited)
+    admission, _, _, _ = _admit(monkeypatch, pilot=True)
+    audited.assert_awaited_once()
+    assert audited.await_args.kwargs["execution_id"] == admission.execution_id
+
+
 def test_non_pilot_admission_acquires_in_memory(monkeypatch):
     admission, cap, _, _ = _admit(monkeypatch, pilot=False)
     cap.acquire.assert_awaited_once()
@@ -223,6 +234,14 @@ def test_pilot_turn_dispatches_through_the_queue(turn_env):
     assert kw["conversation_key"] == f"session:chat:{env.session.id}"
     assert kw["triggered_by"] == "agent"
     assert kw["chain_depth"] == 2
+    # ent#751: admission gated with the authenticated requester; the backstop
+    # must not gate again with one rebuilt from the row.
+    assert kw["gate_checked"] is True
+    assert kw["request_text"] == "hello"
+    # The trigger is autonomous, so the claim wait is opted into explicitly,
+    # and the sink closes the collaboration activity from the payload.
+    assert kw["caller_waiting"] is True
+    assert kw["collaboration_activity_id"] == "act-collab"
     env.push.assert_not_awaited()
     env.marked.assert_not_called()
     # The pull sink wrote the terminal; the turn writes none.
@@ -358,6 +377,56 @@ def test_timeout_with_row_running_returns_receipt_and_504(turn_env):
     assert receipt["status"] == "queued_timeout"
 
 
+def test_lock_wait_is_one_turn(turn_env, monkeypatch):
+    """A second turn of one session waits for the first, as a room wake does,
+    instead of failing after 30s."""
+    env = turn_env
+    seen = {}
+    real = env.sts.ResumeLock
+
+    def _lock(*a, **kw):
+        seen.update(kw)
+        return real(*a, **kw)
+
+    monkeypatch.setattr(env.sts, "ResumeLock", _lock)
+    env.run()
+    assert seen["wait_seconds"] == 60  # resolve_lock_ttl, stubbed
+
+
+def test_lock_busy_on_a_terminal_row_emits_nothing(turn_env, monkeypatch):
+    from services.chat_signals import ChatDispatchError
+
+    env = turn_env
+
+    async def _busy(**kw):
+        raise env.sts.ResumeLockBusy("session_lock:cold:x")
+
+    monkeypatch.setattr(env.sts, "run_resumable_turn", _busy)
+    monkeypatch.setattr(env.db, "update_execution_status", lambda **kw: False)
+    events = MagicMock()
+    monkeypatch.setattr(env.ce, "event_dispatch_service", events)
+    with pytest.raises(ChatDispatchError):
+        env.run()
+    events.spawn_task_terminal_event.assert_not_called()
+    env.activity.close_execution_activity.assert_not_awaited()
+
+
+def test_backlog_full_is_429_capacity(turn_env):
+    from services.chat_signals import ChatDispatchError
+    from services.execution_envelope import TaskExecutionErrorCode
+
+    env = turn_env
+    env.dispatch.return_value = _result(
+        "failed", eid=env.row.id,
+        error="Agent backlog full (max_backlog_depth reached); queued task rejected",
+        error_code=TaskExecutionErrorCode.CAPACITY,
+    )
+    with pytest.raises(ChatDispatchError) as exc:
+        env.run()
+    assert exc.value.status_code == 429
+    assert exc.value.headers["X-Trinity-Error-Code"] == "capacity"
+
+
 def test_lock_busy_fails_the_row_and_answers_429(turn_env, monkeypatch):
     from services.chat_signals import ChatDispatchError
 
@@ -367,9 +436,14 @@ def test_lock_busy_fails_the_row_and_answers_429(turn_env, monkeypatch):
         raise env.sts.ResumeLockBusy("session_lock:cold:x")
 
     monkeypatch.setattr(env.sts, "run_resumable_turn", _busy)
+    events = MagicMock()
+    monkeypatch.setattr(env.ce, "event_dispatch_service", events)
     with pytest.raises(ChatDispatchError) as exc:
         env.run()
     assert exc.value.status_code == 429
+    assert exc.value.headers["X-Trinity-Error-Code"] == "capacity"
+    events.spawn_task_terminal_event.assert_called_once()
+    assert events.spawn_task_terminal_event.call_args.args == (AGENT, env.row.id)
     assert _scalar("SELECT status FROM schedule_executions WHERE id = :i", i=env.row.id) == "failed"
     env.idem.fail.assert_called_once_with("IDEM")
     chat_close = env.activity.close_execution_activity.await_args

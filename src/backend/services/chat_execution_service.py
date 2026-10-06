@@ -75,6 +75,7 @@ from services.upload_service import (
     WEB_MAX_TOTAL_IMAGE_SIZE,
 )
 from services.sync_waiter import signal_sync_waiter, wait_for_sync_terminal
+from services import event_dispatch_service
 from services.event_dispatch_service import (
     RESERVED_EVENT_TRIGGER,
     RESERVED_EVENT_TRIGGER_HEADER_VALUE,
@@ -989,8 +990,9 @@ async def run_pulled_chat_turn(
     The turn goes onto the durable queue through the resumable-turn engine the
     Session tab uses, so each chat session (one per agent and user) resumes its
     own Claude conversation from ``chat_sessions.cached_claude_session_id``. A
-    second turn of the same session waits on the resume lock (30s, then 429);
-    other users' turns run in parallel.
+    second turn of the same session waits on the resume lock for up to one
+    turn's lock TTL, as a room wake does, then gets 429; other users' turns
+    run in parallel.
 
     The worker's result reaches the row through the pull sink, which writes the
     terminal, closes the chat-start activity and runs SUB-003. This function
@@ -1008,10 +1010,14 @@ async def run_pulled_chat_turn(
                 agent_name=name,
                 session_key=f"chat:{session.id}",
                 message=request.message,
-                # ent#751: /chat runs no admission-seam gate, so the executor's
-                # backstop gates on the caller's own words.
+                # ent#751: `admit_chat_request` already ran the skill gate with
+                # the authenticated requester. The backstop rebuilds the
+                # requester from the row and never self-approves, so a second
+                # gate would turn an approver's own request into a pending ask.
                 request_text=request.message,
+                gate_checked=True,
                 cached_uuid=cached_uuid,
+                lock_wait=session_turn_service.resolve_lock_ttl(name),
                 triggered_by=triggered_by,
                 on_resume_failure=lambda: db.set_chat_session_claude_id(session.id, None),
                 execution_id=task_execution_id,
@@ -1023,26 +1029,37 @@ async def run_pulled_chat_turn(
                 model=request.model,
                 subscription_id=_chat_subscription_id,
                 chain_depth=chain_depth,
+                collaboration_activity_id=collaboration_activity_id,
             )
         except session_turn_service.ResumeLockBusy as busy:
             error = "Another turn on this chat session is in progress"
-            if task_execution_id:
-                db.update_execution_status(
-                    execution_id=task_execution_id,
-                    status=TaskExecutionStatus.FAILED,
-                    result=ExecutionResult(error=error),
-                )
-            # #1804: this terminal writer closes its own dispatch activity.
-            await activity_service.close_execution_activity(
-                task_execution_id, TaskExecutionStatus.FAILED, error=error,
-                activity_id=chat_activity_id,
+            # #1804: only the CAS winner closes the activity and emits the
+            # terminal event.
+            won = bool(task_execution_id) and db.update_execution_status(
+                execution_id=task_execution_id,
+                status=TaskExecutionStatus.FAILED,
+                result=ExecutionResult(error=error),
             )
+            if won or not task_execution_id:
+                await activity_service.close_execution_activity(
+                    task_execution_id, TaskExecutionStatus.FAILED, error=error,
+                    activity_id=chat_activity_id,
+                )
+            if won:
+                event_dispatch_service.spawn_task_terminal_event(
+                    name, task_execution_id,
+                    terminal_status=TaskExecutionStatus.FAILED,
+                    summary_or_error=error,
+                )
             if collaboration_activity_id:
                 await activity_service.complete_activity(
                     activity_id=collaboration_activity_id,
                     status=ActivityState.FAILED, error=error,
                 )
-            raise ChatDispatchError(429, busy.detail)
+            raise ChatDispatchError(
+                429, busy.detail,
+                headers=_error_code_headers(TaskExecutionErrorCode.CAPACITY),
+            )
 
         result = turn.result
         execution_id = result.execution_id or task_execution_id
@@ -1980,7 +1997,9 @@ def _map_task_failure(name, result, *, idem):
         # from the row's `[code]` prefix (#3114); a row with no prefix has none,
         # and the at-capacity branch below fills `capacity` (#2919).
         code_headers = _error_code_headers(getattr(result, "error_code", None))
-        if "at capacity" in (result.error or ""):
+        if "at capacity" in (result.error or "") or getattr(
+            getattr(result, "error_code", None), "value", None
+        ) == TaskExecutionErrorCode.CAPACITY.value:
             # #2919: the capacity rejection carries no code, so `capacity`
             # fills the ABSENT one. A code the result already carries is the
             # producer's structured verdict on a turn that ran (e.g. #2638

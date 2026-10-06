@@ -174,6 +174,14 @@ INTERACTIVE_TRIGGERS = frozenset(
 PULL_REACHABLE_NON_AUTONOMOUS = INTERACTIVE_TRIGGERS | {"validation"}
 
 
+# ``conversation_key`` prefix of every turn ``session_turn_service.run_resumable_turn``
+# queues. That engine always has a caller blocked on the reply (Session tab,
+# Workspace, ``POST /chat``), whatever the trigger: an agent-to-agent ``/chat``
+# carries trigger ``agent``, which is autonomous. The claim orders these rows
+# with ``INTERACTIVE_TRIGGERS`` (#3127).
+WAITING_CONVERSATION_PREFIX = "session:"
+
+
 def pull_owns_dispatch(agent_name: str, triggered_by: Optional[str]) -> bool:
     """True when this ``(agent, trigger)`` pair must reach the agent ONLY by the
     agent claiming it from the durable queue — the backend neither pushes it nor

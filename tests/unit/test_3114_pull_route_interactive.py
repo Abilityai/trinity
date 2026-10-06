@@ -529,6 +529,83 @@ async def test_a2a_takes_the_claim_phase(seed_agent, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_agent_chat_turn_takes_the_claim_phase(seed_agent, monkeypatch):
+    """#3127: an agent-to-agent ``/chat`` turn (trigger ``agent``, autonomous)
+    has a caller blocked on it. ``run_resumable_turn`` opts into the claim
+    phase, so an unclaimed turn answers FAILED/CAPACITY within one agent
+    timeout instead of running later for nobody."""
+    seed_agent(timeout=1)
+    _row("e1", trigger="agent")
+    import importlib
+
+    from services.execution_envelope import TaskExecutionResult
+
+    sts = importlib.import_module("services.session_turn_service")
+    tes = importlib.import_module("services.task_execution_service")
+    seen = {}
+
+    async def _execute(**kw):
+        seen.update(kw)
+        return TaskExecutionResult(execution_id="e1", status="queued", response="")
+
+    monkeypatch.setattr(tes, "get_task_execution_service",
+                        lambda: SimpleNamespace(execute_task=_execute))
+    monkeypatch.setattr(tes, "QUEUE_CLAIM_POLL_INTERVAL", 0.05)
+    monkeypatch.setattr(sts, "ResumeLock", _NoLock)
+    waited = AsyncMock(side_effect=AssertionError("must not reach the terminal wait"))
+    monkeypatch.setattr("services.sync_waiter.wait_for_sync_terminal", waited)
+    _terminal_hooks(monkeypatch, tes)
+
+    turn = await sts.run_resumable_turn(
+        agent_name=AGENT, session_key="chat:s1", message="hi", cached_uuid=None,
+        triggered_by="agent", collaboration_activity_id="act-collab",
+    )
+    assert turn.result.status == "failed"
+    assert turn.result.error_code.value == "capacity"
+    assert seen["conversation_key"] == "session:chat:s1"
+    assert seen["collaboration_activity_id"] == "act-collab"
+    assert "caller_waiting" not in seen  # consumed by the adapter
+
+
+def test_agent_chat_payload_carries_the_collaboration_activity(monkeypatch):
+    """#3127: the pull sink can only close what the queued row carries."""
+    from services import task_execution_service as tes
+
+    monkeypatch.setattr(tes, "pull_owns_dispatch", lambda a, t: True)
+    payload = tes.build_pull_queue_payload(
+        agent_name=AGENT, triggered_by="agent", execution_id="e1", message="m",
+        model=None, allowed_tools=None, system_prompt=None, timeout_seconds=60,
+        resume_session_id=None, subscription_id=None, source_user_id=1,
+        source_user_email=None, source_agent_name="caller", slot_already_held=False,
+        collaboration_activity_id="act-collab",
+    )
+    assert payload.collaboration_activity_id == "act-collab"
+
+
+@pytest.mark.parametrize("status", ["success", "failed"])
+def test_sink_closes_the_collaboration_activity(status):
+    """#3127: a turn whose caller gave up (504) still closes its collaboration
+    activity at the terminal, instead of waiting for the 120-min backstop."""
+    import services.pull_coordination_service as pcs
+
+    execution = MagicMock(status="running", agent_name=AGENT,
+                          backlog_metadata=json.dumps({"collaboration_activity_id": "act-collab"}))
+    mock_db = MagicMock()
+    mock_db.get_execution.return_value = execution
+    mock_db.update_execution_status.return_value = True
+    activity = MagicMock()
+    with patch.object(pcs, "db", mock_db), \
+         patch.object(pcs, "event_dispatch_service", MagicMock()), \
+         patch.object(pcs, "channel_completion_report", MagicMock()), \
+         patch.object(pcs, "subscription_auto_switch", MagicMock()), \
+         patch.object(pcs, "_spawn_breaker_verdict", MagicMock()), \
+         patch.object(pcs, "activity_service", activity):
+        assert pcs.apply_task_result("e1", "tok", status=status, content="x").kind == "applied"
+    ids = [c.kwargs.get("activity_id") for c in activity.spawn_close_execution_activity.call_args_list]
+    assert ids == [None, "act-collab"]
+
+
+@pytest.mark.asyncio
 async def test_terminal_wait_timeout_text_matches_callers(seed_agent, monkeypatch):
     """public_chat_service and mcp_auth_service map on the substring "timed out"."""
     seed_agent(timeout=1)

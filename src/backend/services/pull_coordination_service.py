@@ -240,13 +240,14 @@ def claim_next_task(agent_name: str, worker_id: str) -> Optional[Dict[str, Any]]
     """
     record_worker_poll(agent_name)
     cap = int(db.get_execution_timeout(agent_name))
-    from services.pull_pilot import INTERACTIVE_TRIGGERS
+    from services.pull_pilot import INTERACTIVE_TRIGGERS, WAITING_CONVERSATION_PREFIX
 
     row = db.claim_next_queued(
         agent_name,
         worker_id=worker_id,
         lease_seconds=cap + SLOT_TTL_BUFFER,
         interactive_triggers=INTERACTIVE_TRIGGERS,
+        waiting_conversation_prefix=WAITING_CONVERSATION_PREFIX,
     )
     if not row:
         return None
@@ -509,6 +510,16 @@ def _spawn_breaker_verdict(agent_name: str, row_status, is_auth: bool) -> None:
         logger.warning("[#2514] breaker verdict for %s not recorded: %s", agent_name, e)
 
 
+def _collaboration_activity_id(execution: Any) -> Optional[str]:
+    """The collaboration activity id the row's ``backlog_metadata`` carries, or
+    None. Best-effort: never raises before the sink's hooks."""
+    try:
+        meta = json.loads(execution.backlog_metadata or "{}")
+    except (TypeError, ValueError, AttributeError):
+        return None
+    return meta.get("collaboration_activity_id") if isinstance(meta, dict) else None
+
+
 def apply_task_result(
     execution_id: str,
     claim_token: str,
@@ -665,6 +676,16 @@ def apply_task_result(
             row_status,
             error=(None if row_status == TaskExecutionStatus.SUCCESS else (err_text or None)),
         )
+        # #3127: an agent-to-agent /chat turn's collaboration activity rides the
+        # payload, so it closes here even when its caller has given up (504).
+        collaboration_activity_id = _collaboration_activity_id(execution)
+        if collaboration_activity_id:
+            activity_service.spawn_close_execution_activity(
+                execution_id,
+                row_status,
+                error=(None if row_status == TaskExecutionStatus.SUCCESS else (err_text or None)),
+                activity_id=collaboration_activity_id,
+            )
         # #2643: SUB-003. This sink had every other terminal hook and not this
         # one, so a pull-owned turn that died on a quota or credential failure
         # recorded no `subscription_rate_limit_events` row (no skip-list entry,

@@ -466,6 +466,7 @@ chat_with_agent({
 - Calls `POST /api/agents/{name}/chat`
 - Uses execution queue (one at a time per agent)
 - Maintains conversation context by resuming the agent's own chat session by id (`--resume`, #2958; shared by every `/chat` caller of the agent, never a headless run's). A different effective model or a `DELETE /api/chat/history` starts a fresh session
+- On a pull pilot (#3127) the turn is queued and claimed by the agent's worker. Context is per `chat_sessions` row (one per agent and user; an agent key resolves to its owner, so all of one owner's agents share it), resumed from `chat_sessions.cached_claude_session_id`. A second turn of the same session waits on the resume lock for up to one turn's lock TTL, then 429 `capacity`. A full backlog answers 429 `capacity`. `DELETE /api/chat/history` clears the cached ids; the Chat tab writes the same rows, so its "New chat" also starts a fresh MCP conversation
 - A turn that crosses the context limit can pay a one-off auto-compaction: recorded as `compact_metadata` on the row, summarised in the response's `execution.compaction`, and returned by `get_execution_result` (#2958)
 - Agent-to-agent calls (with `X-Source-Agent` header) now create `schedule_executions` record (visible in Tasks tab)
 

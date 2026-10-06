@@ -704,6 +704,7 @@ DISPATCH_FIELDS: Dict[str, str] = {
     "fan_out_id": DROP,
     "loop_id": DROP,
     "parent_activity_id": DROP,
+    "collaboration_activity_id": DROP,
     "extra_activity_details": DROP,
     "schedule_context": DROP,
     "images": DROP,

@@ -205,6 +205,18 @@ async chat(name: string, message: string, sourceAgent?: string): Promise<ChatRes
 
 ---
 
+## Agent-to-agent `/chat` on a pull pilot (#3127)
+
+When the TARGET is in `PULL_MODE_PILOT_AGENTS`, the backend queues the `/chat` turn (trigger `agent`) through
+`run_resumable_turn`. The trigger is autonomous, but the caller is blocked on the reply, so:
+
+- `run_resumable_turn` calls `dispatch_and_await_terminal(caller_waiting=True)`: the turn waits for a claim for at most
+  one agent timeout and then answers FAILED/`CAPACITY` (429) instead of running later for nobody.
+- Its `conversation_key` starts with `pull_pilot.WAITING_CONVERSATION_PREFIX` (`session:`), and the pull claim orders
+  those rows with `INTERACTIVE_TRIGGERS`, ahead of batch work.
+- The collaboration activity id rides the queue payload (`backlog_metadata.collaboration_activity_id`), and the pull
+  sink closes it on its CAS-won terminal, so a turn whose caller got the 504 receipt still closes it.
+
 ## Pull-Pilot Routing (#946)
 
 **Phase 2 PoC for pull / work-stealing coordination** (Epic #1045, umbrella #1081 — see `docs/planning/TARGET_ARCHITECTURE.md`). A flag-gated routing fork on the EXISTING sequential agent→agent `chat_with_agent` path described above.

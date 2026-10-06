@@ -440,6 +440,7 @@ async def run_resumable_turn(
     lock_ttl: Optional[int] = None,
     cold_message: Optional[str] = None,
     on_resume_failure: Optional[Callable[[], None]] = None,
+    lock_wait: Optional[float] = None,
     **execute_kwargs,
 ) -> ResumableTurn:
     """Run one turn that reattaches to ``cached_uuid`` when there is one.
@@ -462,6 +463,12 @@ async def run_resumable_turn(
     cached UUID inside the same lock — a crash between the two leaves a stale
     id that simply re-fires this path on the next turn (self-healing).
 
+    ``lock_wait`` bounds the wait for the lock (default
+    ``LOCK_WAIT_TOTAL_SECONDS``). Every turn here has a caller blocked on the
+    reply, so the dispatch passes ``caller_waiting=True`` and its row is keyed
+    under ``WAITING_CONVERSATION_PREFIX``: on a pull pilot the claim orders it
+    with interactive turns whatever its trigger (#3127).
+
     Raises ``ResumeLockBusy`` (429) when another turn holds the lock. Never
     raises on an agent-side failure: that arrives as ``result.status``.
     """
@@ -479,12 +486,15 @@ async def run_resumable_turn(
     # turn is queued under this conversation's key and awaited; on push it is
     # plain `execute_task`.
     from services.task_execution_service import dispatch_and_await_terminal
+    from services.pull_pilot import WAITING_CONVERSATION_PREFIX
 
-    conversation_key = f"session:{session_key}"
+    conversation_key = f"{WAITING_CONVERSATION_PREFIX}{session_key}"
     fallback_fired = False
     fallback_reason: Optional[str] = None
 
-    async with ResumeLock(agent_name, resumed_with, session_key, ttl_seconds=ttl):
+    async with ResumeLock(
+        agent_name, resumed_with, session_key, ttl_seconds=ttl, wait_seconds=lock_wait
+    ):
         result = await dispatch_and_await_terminal(
             agent_name=agent_name,
             message=message,
@@ -492,6 +502,7 @@ async def run_resumable_turn(
             resume_session_id=resumed_with,
             persist_session=True,
             conversation_key=conversation_key,
+            caller_waiting=True,
             **execute_kwargs,
         )
 
@@ -534,6 +545,7 @@ async def run_resumable_turn(
                 resume_session_id=None,
                 persist_session=True,
                 conversation_key=conversation_key,
+                caller_waiting=True,
                 **retry_kwargs,
             )
             resumed_with = None

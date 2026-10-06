@@ -392,6 +392,9 @@ async def admit_chat_request(
             current_user=current_user, execution_id=chat_execution_id,
             queue_result=queue_result, source=source, message=request.message,
         )
+        await skill_gate_service.audit_self_approved(
+            name, gate, current_user=current_user,
+            endpoint=f"/api/agents/{name}/chat", execution_id=chat_execution_id)
         return ChatAdmission(
             idem=idem,
             execution_id=chat_execution_id,
