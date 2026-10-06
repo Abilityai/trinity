@@ -22,7 +22,7 @@ from client_portal.portal_auth import PortalPrincipal, get_portal_principal
 from dependencies import PERSON_REQUIRED_DETAIL
 
 from . import service
-from .models import WorkspaceAsk, WorkspaceAskAnswer, WorkspaceAskContext
+from .models import WorkspaceAsk, WorkspaceAskAnswer, WorkspaceAskContext, WorkspaceAskDiscussion
 from .service import AskError, AsksUnavailable
 
 # The 503 `asks_unavailable` Retry-After, in seconds (trinity-enterprise#610,
@@ -108,6 +108,53 @@ def answer_ask(
             body.response, body.response_text,
             acknowledge_divergence=body.acknowledge_divergence,
         )
+    except AskError as e:
+        _raise(e)
+
+
+@router.post("/{item_id}/dismiss", response_model=WorkspaceAsk)
+def dismiss_ask(
+    item_id: str,
+    principal: PortalPrincipal = Depends(get_portal_principal),
+):
+    """End an ask without answering it (trinity-enterprise#748).
+
+    Only the person it was addressed to: the same person gate and the same
+    uniform 404 as the answer route. An ask that already ended — or ends first
+    in a race — comes back as it stands with a 200: dismissing something that
+    no longer waits is a no-op, not an error. Rate-limited like the portal's
+    other mutating routes.
+    """
+    from services import rate_limiter
+
+    if not principal.is_person:
+        raise HTTPException(status_code=403, detail=dict(PERSON_REQUIRED_DETAIL))
+    rate_limiter.enforce(f"portal_ask_dismiss:{principal.email}", 60, 60)
+    try:
+        return service.dismiss_ask(item_id, principal.email, principal.is_platform)
+    except AskError as e:
+        _raise(e)
+
+
+@router.post("/{item_id}/discuss", response_model=WorkspaceAskDiscussion)
+def discuss_ask(
+    item_id: str,
+    principal: PortalPrincipal = Depends(get_portal_principal),
+):
+    """Open — or continue — the chat in which the addressee talks an ask through
+    with its agent before deciding (trinity-enterprise#747). One chat per ask;
+    the ask stays pending and is still answered on its own row.
+
+    Same person gate and uniform 404 as the answer route. Rate-limited: each
+    first call creates a chat.
+    """
+    from services import rate_limiter
+
+    if not principal.is_person:
+        raise HTTPException(status_code=403, detail=dict(PERSON_REQUIRED_DETAIL))
+    rate_limiter.enforce(f"portal_ask_discuss:{principal.email}", 30, 60)
+    try:
+        return service.discuss_ask(item_id, principal.email, principal.is_platform)
     except AskError as e:
         _raise(e)
 

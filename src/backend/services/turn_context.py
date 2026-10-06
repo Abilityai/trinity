@@ -5,9 +5,11 @@ open canvas, the file manifest). This registry lets another module add its own
 line without the composers knowing about it. A provider receives a
 :class:`TurnContext` and returns one line, or ``""`` / ``None`` for nothing.
 
-* OSS-only build → no provider registered → :func:`collect` returns ``""``.
-  Zero behavioural change.
-* Enterprise build → a registered provider answers from its own records.
+* A module with nothing to add for a turn returns nothing, so a chat no
+  provider recognises composes exactly as before.
+* OSS registers one provider: the discussed-ask line
+  (``client_portal.asks.service``, trinity-enterprise#747). An enterprise
+  build may register its own, answering from its own records.
 
 Two rules every provider relies on:
 

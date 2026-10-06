@@ -212,6 +212,8 @@ function askStatusLabel(it) {
   if (s === 'answered') return it.ask?.ended_by === 'you' ? 'Answered · you' : 'Answered'
   if (s === 'expired') return 'Expired'
   if (s === 'cancelled') return 'Cancelled'
+  // trinity-enterprise#748: the addressee's own "no answer".
+  if (s === 'dismissed') return it.ask?.ended_by === 'you' ? 'Dismissed · you' : 'Dismissed'
   if (s === 'unavailable') return 'No longer available'
   return s || ''
 }
