@@ -13,7 +13,7 @@ from fastapi.responses import PlainTextResponse, StreamingResponse
 
 from models import User
 from database import db
-from services.docker_service import get_agent_container
+from services.docker_service import execute_command_in_container, get_agent_container
 from services.docker_utils import container_reload
 from .helpers import agent_http_request
 
@@ -330,6 +330,78 @@ async def _raise_if_link_refusal(response, request, current_user, agent_name, pa
     })
 
 
+# trinity-enterprise#819: an agent still on an older base image follows links on
+# download and preview. Probed once per container and image (ent#708-style: grep
+# the agent server's source for the read function); until it is recreated on the
+# current image, reads below the owner tier are refused. Fails SAFE: a missing
+# target, an unreadable answer or an exec error all read as "not verified".
+_READ_POLICY_PROBE_PATH = "/app/agent_server/routers/files.py"
+_READ_POLICY_PROBE_TOKEN = "_open_for_read"
+_READ_POLICY_PROBE_TIMEOUT = 10
+_READ_POLICY_PROBE_CACHE: dict = {}
+_UNVERIFIED_IMAGE_REFUSALS = 0
+_RESTART_REQUIRED_MESSAGE = (
+    "This agent needs a restart to apply a security update. "
+    "Ask the agent's owner or an admin to stop and start it in Trinity."
+)
+
+
+async def _agent_reads_without_links(container, agent_name: str) -> bool:
+    """Does this container's agent server open reads without following links?
+    Cached per (container id, image id) only when the answer is conclusive."""
+    image = (getattr(container, "attrs", None) or {}).get("Image")
+    key = (getattr(container, "id", None), image)
+    cacheable = all(key)
+    if cacheable and key in _READ_POLICY_PROBE_CACHE:
+        return _READ_POLICY_PROBE_CACHE[key]
+    try:
+        result = await execute_command_in_container(
+            f"agent-{agent_name}",
+            ["grep", "-qsF", "--", _READ_POLICY_PROBE_TOKEN, _READ_POLICY_PROBE_PATH],
+            timeout=_READ_POLICY_PROBE_TIMEOUT,
+        )
+    except Exception as e:  # noqa: BLE001 - inconclusive: fail safe, re-probe next time
+        logger.warning("Read-policy probe failed: agent=%s error=%s", agent_name, e)
+        return False
+    code = result.get("exit_code")
+    if result.get("timed_out") or code not in (0, 1, 2):
+        logger.warning("Read-policy probe inconclusive: agent=%s exit=%s", agent_name, code)
+        return False
+    verdict = code == 0   # 1: token absent, 2: file absent; both a property of the image
+    if cacheable:
+        _READ_POLICY_PROBE_CACHE[key] = verdict
+    return verdict
+
+
+def _passes_owner_tier(current_user, agent_name: str) -> bool:
+    from dependencies import assert_agent_owner
+    try:
+        assert_agent_owner(current_user, agent_name)
+    except HTTPException:
+        return False
+    return True
+
+
+async def _refuse_below_owner_on_unverified_image(container, current_user, agent_name, path) -> None:
+    """Below the owner tier, read only from an agent whose image is verified."""
+    global _UNVERIFIED_IMAGE_REFUSALS
+    if _passes_owner_tier(current_user, agent_name):
+        return
+    if await _agent_reads_without_links(container, agent_name):
+        return
+    _UNVERIFIED_IMAGE_REFUSALS += 1
+    logger.warning(
+        "File read refused until the agent restarts on the current image: "
+        "agent=%s path=%r user=%s refusals=%d",
+        agent_name, _normalize_user_path(path), current_user.username, _UNVERIFIED_IMAGE_REFUSALS,
+    )
+    raise HTTPException(status_code=403, detail={
+        "code": "agent_restart_required",
+        "message": _RESTART_REQUIRED_MESSAGE,
+        "path": _normalize_user_path(path),
+    })
+
+
 async def _enforce_owner_tier_read(path, current_user, request, agent_name) -> None:
     """Refuse an owner-tier read unless the caller is a person who passes the
     owner tier (the agent's owner, or an admin). The PERSON gate runs first, so
@@ -477,6 +549,9 @@ async def download_agent_file_logic(
     if container.status != "running":
         raise HTTPException(status_code=400, detail="Agent must be running to download files")
 
+    # ent#819: below the owner tier, only an agent on the current image is read.
+    await _refuse_below_owner_on_unverified_image(container, current_user, agent_name, path)
+
     try:
         # Call agent's internal file download API with retry
         response = await agent_http_request(
@@ -604,6 +679,9 @@ async def preview_agent_file_logic(
     await container_reload(container)
     if container.status != "running":
         raise HTTPException(status_code=400, detail="Agent must be running to preview files")
+
+    # ent#819: below the owner tier, only an agent on the current image is read.
+    await _refuse_below_owner_on_unverified_image(container, current_user, agent_name, path)
 
     try:
         # Call agent's internal file preview API with retry

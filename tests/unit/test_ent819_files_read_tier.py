@@ -108,7 +108,11 @@ def agent(monkeypatch):
     monkeypatch.setattr(files, "container_reload", AsyncMock())
     sent = AsyncMock(return_value=_response())
     monkeypatch.setattr(files, "agent_http_request", sent)
-    return SimpleNamespace(sent=sent, container=container)
+    # The agent runs the current image: the read-policy probe finds its target.
+    probe = AsyncMock(return_value={"exit_code": 0, "output": "", "timed_out": False})
+    monkeypatch.setattr(files, "execute_command_in_container", probe, raising=False)
+    monkeypatch.setattr(files, "_READ_POLICY_PROBE_CACHE", {}, raising=False)
+    return SimpleNamespace(sent=sent, container=container, probe=probe)
 
 
 def _call(fn, path, user, request=None):
@@ -528,3 +532,89 @@ def test_a_platform_read_of_a_link_logs_a_warning_naming_the_file(caplog):
     assert result["success"] is False and result["status_code"] == 403
     warned = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
     assert any("CLAUDE.md" in m and "link" in m and "shared-agent" in m for m in warned), warned
+
+
+# ---- agents not yet on the current image -------------------------------------------
+
+RESTART_MESSAGE = (
+    "This agent needs a restart to apply a security update. "
+    "Ask the agent's owner or an admin to stop and start it in Trinity."
+)
+
+
+def _old_image(agent, code=1):
+    agent.probe.return_value = {"exit_code": code, "output": "", "timed_out": False}
+
+
+@pytest.mark.parametrize("fn", LOGIC)
+@pytest.mark.parametrize("code", [1, 2], ids=["token-absent", "file-absent"])
+def test_below_owner_reads_are_refused_on_an_unverified_image(agent, fn, code):
+    _old_image(agent, code)
+    with pytest.raises(HTTPException) as exc:
+        _call(fn, "notes.md", shared_user())
+    assert exc.value.status_code == 403
+    assert exc.value.detail == {"code": "agent_restart_required", "message": RESTART_MESSAGE,
+                                "path": "/home/developer/notes.md"}
+    assert agent.sent.await_count == 0
+
+
+def test_the_probe_greps_the_agent_servers_files_router(agent):
+    _call("download_agent_file_logic", "notes.md", shared_user())
+    call = agent.probe.await_args
+    assert call.args[0] == f"agent-{AGENT}" or call.kwargs.get("container_name") == f"agent-{AGENT}"
+    command = call.kwargs.get("command", call.args[1] if len(call.args) > 1 else None)
+    assert command == ["grep", "-qsF", "--", "_open_for_read", "/app/agent_server/routers/files.py"]
+
+
+@pytest.mark.parametrize("fn", LOGIC)
+@pytest.mark.parametrize("user", [owner_jwt, owner_user_key, admin_jwt],
+                         ids=["owner-jwt", "owner-user-key", "admin-jwt"])
+def test_the_owner_and_an_admin_are_unaffected_and_never_probe(agent, fn, user):
+    _old_image(agent)
+    assert _body(_call(fn, "notes.md", user())) == b"FILE-BODY"
+    assert agent.probe.await_count == 0
+
+
+def test_a_verified_image_serves_a_shared_user(agent):
+    assert _body(_call("download_agent_file_logic", "notes.md", shared_user())) == b"FILE-BODY"
+
+
+def test_the_verdict_is_cached_per_container_and_image(agent):
+    _call("download_agent_file_logic", "notes.md", shared_user())
+    _call("preview_agent_file_logic", "a.png", shared_user())
+    assert agent.probe.await_count == 1
+    agent.container.attrs = {"Image": "sha256:newer"}          # recreated on a new image
+    _call("download_agent_file_logic", "notes.md", shared_user())
+    assert agent.probe.await_count == 2
+    agent.container.id = "c-2"                                 # a new container
+    _call("download_agent_file_logic", "notes.md", shared_user())
+    assert agent.probe.await_count == 3
+
+
+@pytest.mark.parametrize("failure", [
+    {"exit_code": 124, "output": "", "timed_out": True},
+    {"exit_code": 126, "output": "", "timed_out": False},
+    RuntimeError("docker down"),
+], ids=["timeout", "exec-error", "raises"])
+def test_an_inconclusive_probe_fails_safe_and_is_not_cached(agent, failure):
+    if isinstance(failure, Exception):
+        agent.probe.side_effect = failure
+    else:
+        agent.probe.return_value = failure
+    for _ in range(2):
+        with pytest.raises(HTTPException) as exc:
+            _call("download_agent_file_logic", "notes.md", shared_user())
+        assert exc.value.detail["code"] == "agent_restart_required"
+    assert agent.probe.await_count == 2
+
+
+def test_each_refusal_is_counted_in_the_log(agent, caplog):
+    _old_image(agent)
+    before = files._UNVERIFIED_IMAGE_REFUSALS
+    with caplog.at_level("WARNING"):
+        for _ in range(2):
+            with pytest.raises(HTTPException):
+                _call("download_agent_file_logic", "notes.md", shared_user())
+    assert files._UNVERIFIED_IMAGE_REFUSALS == before + 2
+    lines = [r.getMessage() for r in caplog.records if "restart" in r.getMessage()]
+    assert len(lines) == 2 and f"refusals={before + 2}" in lines[-1]
