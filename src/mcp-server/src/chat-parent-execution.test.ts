@@ -766,3 +766,175 @@ describe("#3232 resolveReportBack (the rule, table-tested)", () => {
     }
   });
 });
+
+describe("#3232 resolveReportBack over the full input product (independent oracle)", () => {
+  // Plan §A.5 T15 promised every combination; the picked rows above stay as the
+  // readable spec. This block walks the whole product and checks each cell
+  // against an oracle written from the plan's §A.2 table and §A.3.1 rule text,
+  // not from the implementation's control flow: classify the inputs, decide the
+  // parent per route, then the fields, then the reason by precedence.
+  type Route = "task-async" | "task-sync" | "pull" | "chat";
+  type In = {
+    route: Route;
+    typed: string | undefined;
+    header: string | undefined;
+    isSelfTask: boolean;
+    injectResult: boolean;
+    enabled: boolean;
+  };
+  type Expect = {
+    arm: "default" | "typed" | "opt_out" | "none";
+    parent: string | undefined;
+    fields:
+      | { report_back: "requested" | "off"; report_back_reason?: string; report_back_note?: string }
+      | undefined;
+    log: Record<string, string>;
+  };
+
+  /** Fixture facts: these ids have the shape of a real execution id; PLACEHOLDER_ID does not. */
+  const WELL_FORMED_FIXTURES = new Set([TYPED, HEADER]);
+
+  function oracle(i: In): Expect {
+    // 1. Classify what was typed (trimmed) and what the platform header says.
+    const t = (i.typed ?? "").trim();
+    const typedKind =
+      t === "" ? "nothing" : t === "manual" ? "manual" : WELL_FORMED_FIXTURES.has(t) ? "id" : "malformed";
+    const headerKind = i.header === undefined ? "absent" : i.header === "manual" ? "manual" : "turn";
+
+    // §A.2 columns: typed `manual` is the opt-out; any other non-empty typed value
+    // is an opt-in; with nothing typed, only an async dispatch (parallel+async or
+    // pull-routed) from a real turn defaults on, unless a self-task already routes
+    // its result into its own chat (inject_result).
+    const asyncDispatch = i.route === "task-async" || i.route === "pull";
+    const ownChatDestination = i.isSelfTask && i.injectResult;
+    let arm: Expect["arm"];
+    if (typedKind === "manual") arm = "opt_out";
+    else if (typedKind !== "nothing") arm = "typed";
+    else if (asyncDispatch && headerKind === "turn" && !ownChatDestination) arm = "default";
+    else arm = "none";
+
+    // 2. Parent per route. Sequential /chat carries none; the kill switch sends
+    // none anywhere. A typed opt-in follows the header (Q3: a real turn wins; a
+    // `manual` header means no execution); only with no header does the typed id
+    // itself go, and only if it is well-formed.
+    let parent: string | undefined;
+    let source: "header" | "typed" | "none" = "none";
+    const routeCarriesParent = i.route !== "chat";
+    if (i.enabled && routeCarriesParent && arm === "default") {
+      parent = i.header;
+      source = "header";
+    } else if (i.enabled && routeCarriesParent && arm === "typed") {
+      if (headerKind === "turn") {
+        parent = i.header;
+        source = "header";
+      } else if (headerKind === "absent" && typedKind === "id") {
+        parent = t;
+        source = "typed";
+      }
+    }
+
+    // 3. Fields. Opt-out / none: nothing. Default: `requested` + the default note,
+    // and nothing at all with the switch off (byte-identical receipts). Typed:
+    // `requested` (no note) when a parent goes, else `off` + reason + its note.
+    let fields: Expect["fields"];
+    if (arm === "default" && i.enabled) {
+      fields = { report_back: "requested", report_back_note: chatMod.REPORT_BACK_DEFAULT_NOTE };
+    } else if (arm === "typed" && parent !== undefined) {
+      fields = { report_back: "requested" };
+    } else if (arm === "typed") {
+      // 4. Reason precedence: disabled > manual_session > invalid_execution_id > sequential_chat.
+      const candidates: Array<[boolean, string]> = [
+        [!i.enabled, "disabled"],
+        [headerKind === "manual", "manual_session"],
+        [headerKind === "absent" && typedKind === "malformed", "invalid_execution_id"],
+        [i.route === "chat", "sequential_chat"],
+      ];
+      const reason = candidates.find(([applies]) => applies)?.[1];
+      if (reason === undefined) throw new Error(`oracle: typed call with no parent and no reason: ${JSON.stringify(i)}`);
+      fields = {
+        report_back: "off",
+        report_back_reason: reason,
+        report_back_note: chatMod.REPORT_BACK_OFF_NOTES[reason as keyof typeof chatMod.REPORT_BACK_OFF_NOTES],
+      };
+    }
+
+    // 5. The log line: overridden = the agent typed a different id than the turn it is serving.
+    const overridden = arm === "typed" && source === "header" && t !== i.header;
+    const verdict = fields === undefined ? "n/a" : fields.report_back === "off" ? `off:${fields.report_back_reason}` : "requested";
+    return {
+      arm,
+      parent,
+      fields,
+      log: {
+        caller_turn: i.header ?? "none",
+        route: i.route,
+        arm,
+        parent: parent ?? "none",
+        source,
+        overridden: String(overridden),
+        report_back: verdict,
+      },
+    };
+  }
+
+  function parseLog(line: string): Record<string, string> | string {
+    const prefix = `[Report-Back #3232] ${CALLER} -> ${TARGET} `;
+    if (!line.startsWith(prefix)) return `bad prefix: ${line}`;
+    const out: Record<string, string> = {};
+    for (const tok of line.slice(prefix.length).split(" ")) {
+      const eq = tok.indexOf("=");
+      if (eq <= 0) return `bad token ${JSON.stringify(tok)}: ${line}`;
+      out[tok.slice(0, eq)] = tok.slice(eq + 1);
+    }
+    return out;
+  }
+
+  it("every route × typed × header × self/inject × enabled cell matches the oracle", () => {
+    const routes: Route[] = ["task-async", "task-sync", "pull", "chat"];
+    const typeds = [undefined, "", "   ", "manual", "  manual ", TYPED, `  ${TYPED} `, PLACEHOLDER_ID, HEADER];
+    const headers = [undefined, HEADER, "manual"];
+    const selfInject: Array<[boolean, boolean]> = [[false, false], [false, true], [true, false], [true, true]];
+    const enableds = [true, false];
+
+    const mismatches: string[] = [];
+    let cells = 0;
+    for (const route of routes)
+      for (const typed of typeds)
+        for (const header of headers)
+          for (const [isSelfTask, injectResult] of selfInject)
+            for (const enabled of enableds) {
+              cells++;
+              const i: In = { route, typed, header, isSelfTask, injectResult, enabled };
+              const label = JSON.stringify(i);
+              let want: Expect;
+              try {
+                want = oracle(i);
+              } catch (e) {
+                mismatches.push(String(e));
+                continue;
+              }
+              const got = chatMod.resolveReportBack({ ...i, caller: CALLER, target: TARGET });
+              const diffs: string[] = [];
+              if (got.arm !== want.arm) diffs.push(`arm ${got.arm} != ${want.arm}`);
+              if (got.parentExecutionId !== want.parent) diffs.push(`parent ${got.parentExecutionId} != ${want.parent}`);
+              for (const f of FIELDS) {
+                const g = got.fields?.[f];
+                const w = want.fields?.[f];
+                // Identity with the exported constants, not a copy of their text.
+                if (g !== w) diffs.push(`${f} ${JSON.stringify(g)} != ${JSON.stringify(w)}`);
+              }
+              if ((got.fields === undefined) !== (want.fields === undefined)) {
+                diffs.push(`fields ${got.fields === undefined ? "absent" : "present"} != ${want.fields === undefined ? "absent" : "present"}`);
+              }
+              const log = parseLog(got.logLine);
+              if (typeof log === "string") diffs.push(log);
+              else
+                for (const [k, v] of Object.entries(want.log)) {
+                  if (log[k] !== v) diffs.push(`log ${k}=${log[k]} != ${v}`);
+                }
+              if (diffs.length) mismatches.push(`${label}: ${diffs.join("; ")}`);
+            }
+    assert.equal(cells, 4 * 9 * 3 * 4 * 2, "the product was walked in full");
+    assert.deepEqual(mismatches, [], `${mismatches.length} of ${cells} cells disagree with the oracle`);
+  });
+});
