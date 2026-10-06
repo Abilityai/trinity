@@ -341,7 +341,7 @@ _READ_POLICY_PROBE_TIMEOUT = 10
 _READ_POLICY_PROBE_CACHE: dict = {}
 _UNVERIFIED_IMAGE_REFUSALS = 0
 _RESTART_REQUIRED_MESSAGE = (
-    "This agent needs a restart to apply a security update. "
+    "This agent needs a restart to apply an update. "
     "Ask the agent's owner or an admin to stop and start it in Trinity."
 )
 

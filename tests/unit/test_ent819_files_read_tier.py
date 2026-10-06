@@ -606,7 +606,7 @@ def test_a_pipeline_read_does_not_read_a_403_body_past_its_cap(monkeypatch, capl
 # ---- agents not yet on the current image -------------------------------------------
 
 RESTART_MESSAGE = (
-    "This agent needs a restart to apply a security update. "
+    "This agent needs a restart to apply an update. "
     "Ask the agent's owner or an admin to stop and start it in Trinity."
 )
 
