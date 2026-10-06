@@ -23,7 +23,7 @@ Enforcement lives at the **router** layer, not solely in `TaskExecutionService`,
 | `POST /api/webhooks/{token}` | `webhook:{token}` | header **or auto-derived** `(token, body_hash)` | `routers/webhooks.py:248` |
 | `POST /api/agents/{name}/fan-out` | `agent:{name}` | optional `Idempotency-Key` header | `routers/fan_out.py:134` |
 | Scheduler dispatch | `agent:{name}` | `sched:{execution_id}` (deterministic) | `src/scheduler/service.py:1042` |
-| MCP `chat_with_agent` / `fan_out` | `agent:{name}` | `mcp:{sha256(args)}` (deterministic) | `src/mcp-server/src/tools/chat.ts:301,518` |
+| MCP `chat_with_agent` / `fan_out` | `agent:{name}` | `mcp:{sha256(args)}` (deterministic) | `src/mcp-server/src/tools/chat.ts:284,746` |
 
 **Invariant #18 contract:** *Any new trigger type must accept an idempotency key before merge.* The dedup layer is fail-open, so the cost of wiring it is one `begin`/`complete`/`fail` triple.
 
@@ -33,7 +33,7 @@ Enforcement lives at the **router** layer, not solely in `TaskExecutionService`,
 - **DB layer**: `db/idempotency.py` — `IdempotencyOperations` (no HTTP, no key-derivation logic).
 - **Service layer**: `services/idempotency_service.py` — key derivation + `begin`/`complete`/`fail` orchestration over the DB layer.
 - **Router layer**: each boundary calls `begin()` → dispatch → `complete()` or `fail()`.
-- **Facade**: `database.py` exposes `idempotency_claim` / `idempotency_attach_execution` / `idempotency_complete` / `idempotency_release` / `idempotency_purge_expired` (`database.py:2064-2080`), backed by `IdempotencyOperations` constructed in `__init__` (`database.py:297`). #3245 adds `idempotency_discard_completed_if_execution` (the compare-and-delete below) and `get_execution_failure_stamp` (a `(status, error, completed_at)` read on `schedule_executions`, used by the replay-liveness check).
+- **Facade**: `database.py` exposes `idempotency_claim` / `idempotency_attach_execution` / `idempotency_complete` / `idempotency_release` / `idempotency_purge_expired` (`database.py:4231-4257`), backed by `IdempotencyOperations` constructed in `__init__` (`database.py:1045`). #3245 adds `idempotency_discard_completed_if_execution` (the compare-and-delete below) and `get_execution_failure_stamp` (a `(status, error, completed_at)` read on `schedule_executions`, used by the replay-liveness check).
 
 ### DB layer — `db/idempotency.py`
 The table's `PRIMARY KEY (scope, idempotency_key)` **is** the atomic claim. Atomicity relies on SQLite database-level write locking, which holds across processes (multiple uvicorn workers + the standalone scheduler share one DB file).
@@ -82,9 +82,9 @@ Idempotency covers the whole batch — a duplicate replays the original `FanOutR
 `src/scheduler/service.py:1042` sets `headers["Idempotency-Key"] = f"sched:{execution_id}"` when dispatching to the backend internal endpoint. The execution_id is created once per fire and reused across an HTTP-level resend of the same dispatch, so a transient backend 5xx + resend resolves to the same key and short-circuits the duplicate. Intentional #271 retries create a fresh execution_id → fresh key → not suppressed.
 
 ## MCP Layer (Invariant #13 — third surface in sync)
-- `src/mcp-server/src/tools/chat.ts:20` — `deriveMcpIdempotencyKey(parts)` returns `mcp:{sha256(parts.join(" "))}`.
-- `chat_with_agent` derives the key over `[caller, agent, "chat"|"task", model, "sync"|"async", message]` (`chat.ts:301`) and passes it into `apiClient.task(...)` / `apiClient.chat(...)`.
-- `fan_out` derives the key over `[caller, agent, "fan_out", model, JSON.stringify(tasks)]` (`chat.ts:518`) and passes it into `apiClient.fanOut(...)`.
+- `src/mcp-server/src/tools/chat.ts:23` — `deriveMcpIdempotencyKey(parts)` returns `mcp:{sha256(parts.join(" "))}`.
+- `chat_with_agent` derives the key over `[caller, agent, "chat"|"task", model, "sync"|"async", message]` (`chat.ts:284`) and passes it into `apiClient.task(...)` / `apiClient.chat(...)`.
+- `fan_out` derives the key over `[caller, agent, "fan_out", model, JSON.stringify(tasks)]` (`chat.ts:746`) and passes it into `apiClient.fanOut(...)`.
 - **Replay marker (#3245)**: `client.ts` `markIdempotentReplay` copies `X-Idempotent-Replay: true` into the body as `idempotent_replay: true` on `task()` / `chat()` 200 replays, and the 409 in-flight receipt (`inFlightReplayReceipt`) carries it too. The client's own timeout-recovery receipts carry no field — absence is not proof of a fresh dispatch. `runAgentChat`'s receipt re-wording keeps the field.
 - `src/mcp-server/src/client.ts` forwards the key as the `Idempotency-Key` header on the `chat` / `task` / `fanOut` methods (`client.ts:485,498-501`, `client.ts:647,656-658`, `client.ts:762,787-789`). A transport-level retry of a byte-identical MCP call within 24h dedupes.
 
