@@ -332,6 +332,7 @@ class AgentGitConfig(BaseModel):
     # #389 sync health observability
     auto_sync_enabled: bool = False
     freeze_schedules_if_sync_failing: bool = False
+    pull_sync_enabled: bool = False  # trinity-enterprise#703: the container's pull cycle
 
 
 class GitSyncResult(BaseModel):
@@ -1446,8 +1447,15 @@ class NeverminedConfigCreate(BaseModel):
     @field_validator('credits_per_request')
     @classmethod
     def validate_credits(cls, v: int) -> int:
-        if v < 1:
-            raise ValueError("credits_per_request must be >= 1")
+        # ent#679 T9: 0 is legal. A Nevermined *duration* plan charges by time,
+        # not per call, so Trinity sends no amount to the facilitator and the
+        # burn is whatever the plan defines; `credits_per_request` is display +
+        # `credits_amount` logging only. The old `>= 1` floor made such a plan
+        # impossible to configure honestly — the operator had to claim a
+        # per-call credit price that nothing would ever charge. A NEGATIVE
+        # amount is still a named 422: it is not a plan shape, it is a typo.
+        if v < 0:
+            raise ValueError("credits_per_request must be >= 0")
         return v
 
 
@@ -1473,6 +1481,14 @@ class NeverminedPaymentResult(BaseModel):
     remaining_balance: Optional[str] = None
     tx_hash: Optional[str] = None
     error: Optional[str] = None
+    #: Is this failure OURS rather than the token's (ent#679 E7)? A facilitator
+    #: timeout, an SDK error or a saturated concurrency gate means we could not
+    #: decide; a facilitator that answered "invalid" means the token is bad.
+    #: Only the second should tell a caller to go buy a new one. Defaulted so a
+    #: stored settle snapshot written before this field replays unchanged
+    #: (`NeverminedPaymentResult(**snapshot)`), and deliberately NOT part of
+    #: `_settle_snapshot` — it is about one attempt, not about the receipt.
+    retryable: bool = False
 
 
 class NeverminedPaymentLog(BaseModel):

@@ -18,6 +18,7 @@ from fastapi.responses import JSONResponse
 
 from models import (
     AutoSyncToggle,
+    PullSyncToggle,
     BindAgentRepoRequest,
     BindAgentRepoResponse,
     FreezeSchedulesToggle,
@@ -31,6 +32,7 @@ from database import db
 from dependencies import (
     get_current_user,
     reject_agent_principal,
+    require_person,
     AuthorizedAgentByName,
     OwnedAgentByName,
 )
@@ -121,7 +123,18 @@ async def get_git_status(
         status["db_config"] = {
             "last_sync_at": git_config.last_sync_at.isoformat() if git_config.last_sync_at else None,
             "last_commit_sha": git_config.last_commit_sha,
-            "sync_enabled": git_config.sync_enabled
+            "sync_enabled": git_config.sync_enabled,
+            # trinity-enterprise#704: the binding, so the Git panel can say
+            # whether this agent writes its own branch or is pull-only.
+            "source_mode": bool(git_config.source_mode),
+            # PR #3022 review: whether the agent saves its work to GitHub. Not
+            # `not source_mode`: a fork-to-own agent is source-mode on its own
+            # fork AND auto-pushes there. A source-mode row with auto-sync on is
+            # that population (creation turns auto-sync on for a source-mode
+            # agent only when it forked); a working branch pushes even while
+            # its auto-sync is paused (operator Push).
+            "pushes": (not git_config.source_mode) or bool(
+                getattr(git_config, "auto_sync_enabled", False)),
         }
 
     return status
@@ -1183,6 +1196,34 @@ async def set_auto_sync_config(
         raise HTTPException(status_code=404, detail="Git not configured")
     db.set_git_auto_sync_enabled(agent_name, body.enabled)
     return {"agent_name": agent_name, "auto_sync_enabled": body.enabled}
+
+
+@router.get("/{agent_name}/git/pull-sync")
+async def get_pull_sync_config(agent_name: AuthorizedAgentByName):
+    """trinity-enterprise#703: whether the agent's container pulls origin on its
+    own. The agent's pull loop reads this every cycle with its own key."""
+    config = db.get_git_config(agent_name)
+    if not config:
+        raise HTTPException(status_code=404, detail="Git not configured")
+    return {
+        "agent_name": agent_name,
+        "pull_sync_enabled": bool(getattr(config, "pull_sync_enabled", False)),
+    }
+
+
+@router.put("/{agent_name}/git/pull-sync")
+async def set_pull_sync_config(
+    agent_name: OwnedAgentByName,
+    body: PullSyncToggle,
+    current_user: User = Depends(require_person),
+):
+    """trinity-enterprise#703: turn the container's pull cycle on or off; live
+    on the agent's next pull cycle, no recreate."""
+    config = db.get_git_config(agent_name)
+    if not config:
+        raise HTTPException(status_code=404, detail="Git not configured")
+    db.set_git_pull_sync_enabled(agent_name, body.enabled)
+    return {"agent_name": agent_name, "pull_sync_enabled": body.enabled}
 
 
 @router.get("/{agent_name}/git/freeze-schedules-if-failing")

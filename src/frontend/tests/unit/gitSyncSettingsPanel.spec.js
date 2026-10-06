@@ -16,9 +16,14 @@ const getGitAutoSync = vi.fn()
 const setGitAutoSync = vi.fn()
 const getGitFreezeSchedules = vi.fn()
 const setGitFreezeSchedules = vi.fn()
+const getGitPullSync = vi.fn()
+const setGitPullSync = vi.fn()
 
 vi.mock('../../src/stores/agents', () => ({
-  useAgentsStore: () => ({ getGitAutoSync, setGitAutoSync, getGitFreezeSchedules, setGitFreezeSchedules }),
+  useAgentsStore: () => ({
+    getGitAutoSync, setGitAutoSync, getGitFreezeSchedules, setGitFreezeSchedules,
+    getGitPullSync, setGitPullSync,
+  }),
 }))
 
 // eslint-disable-next-line import/first
@@ -38,6 +43,7 @@ beforeEach(() => {
   vi.clearAllMocks()
   getGitAutoSync.mockResolvedValue({ agent_name: 'a1', auto_sync_enabled: true })
   getGitFreezeSchedules.mockResolvedValue({ agent_name: 'a1', freeze_schedules_if_sync_failing: false })
+  getGitPullSync.mockResolvedValue({ agent_name: 'a1', pull_sync_enabled: true })
 })
 
 describe('GitSyncSettingsPanel', () => {
@@ -57,6 +63,26 @@ describe('GitSyncSettingsPanel', () => {
     expect(setGitAutoSync).toHaveBeenCalledWith('a1', false)
     expect(toggle(wrapper, 'auto-sync-toggle').attributes('aria-checked')).toBe('false')
     expect(notify).toHaveBeenCalledWith(expect.stringMatching(/next cycle is skipped/), 'success')
+  })
+
+  it('the pull toggle opens on the persisted value and turning it off writes false', async () => {
+    // trinity-enterprise#703
+    setGitPullSync.mockResolvedValue({ agent_name: 'a1', pull_sync_enabled: false })
+    const wrapper = await mountPanel()
+    expect(toggle(wrapper, 'pull-sync-toggle').attributes('aria-checked')).toBe('true')
+    await toggle(wrapper, 'pull-sync-toggle').trigger('click')
+    await flushPromises()
+    expect(setGitPullSync).toHaveBeenCalledWith('a1', false)
+    expect(toggle(wrapper, 'pull-sync-toggle').attributes('aria-checked')).toBe('false')
+  })
+
+  it('a failed pull save keeps the prior value and says so beside the control', async () => {
+    setGitPullSync.mockRejectedValue(httpError(403, 'Only the owner can change this'))
+    const wrapper = await mountPanel()
+    await toggle(wrapper, 'pull-sync-toggle').trigger('click')
+    await flushPromises()
+    expect(toggle(wrapper, 'pull-sync-toggle').attributes('aria-checked')).toBe('true')
+    expect(wrapper.text()).toContain("Couldn't turn pulling off: Only the owner can change this")
   })
 
   it('turning the schedule pause on writes true', async () => {
@@ -80,6 +106,7 @@ describe('GitSyncSettingsPanel', () => {
   it('an agent with no GitHub binding gets the not-connected copy, not an error', async () => {
     getGitAutoSync.mockRejectedValue(httpError(404, 'Git not configured'))
     getGitFreezeSchedules.mockRejectedValue(httpError(404, 'Git not configured'))
+    getGitPullSync.mockRejectedValue(httpError(404, 'Git not configured'))
     const wrapper = await mountPanel()
     expect(wrapper.find('[data-testid="git-sync-unbound"]').exists()).toBe(true)
     expect(wrapper.find('[data-testid="load-failed"]').exists()).toBe(false)
@@ -94,6 +121,17 @@ describe('GitSyncSettingsPanel', () => {
     await wrapper.find('[data-testid="load-failed"] button').trigger('click')
     await flushPromises()
     expect(wrapper.find('[data-testid="git-sync-ready"]').exists()).toBe(true)
+  })
+
+  it('the pull copy names what a pull does not protect, never "never discards"', async () => {
+    // #3021 withdrew the "never discards its own changes" promise: an undo only
+    // spares registered executions (`_safe_to_reset`), so uploads / terminal
+    // writes made while a pull runs can be lost. A #3022 merge restored the
+    // false claim once; this pins the honest wording on the rendered panel.
+    const wrapper = await mountPanel()
+    const text = wrapper.find('[data-testid="git-sync-ready"]').text().replace(/\s+/g, ' ')
+    expect(text).toMatch(/Edits made outside agent turns \(uploads, terminal\) while a pull runs are not protected/)
+    expect(text).not.toMatch(/never (discards|loses)/i)
   })
 
   it('shows a skeleton, not the toggles, before the first load resolves', () => {

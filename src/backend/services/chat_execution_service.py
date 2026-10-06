@@ -83,6 +83,7 @@ from services.event_dispatch_service import (
 from services import idempotency_service
 from services import dispatch_admission_service
 from services import chat_persistence_service
+from services import skill_gate_service
 from services.runtime_secret_scrub import get_staged_values, scrub_obj, scrub_text
 from services.platform_prompt_service import (
     ExecutionContext,
@@ -1156,6 +1157,10 @@ async def run_async_task(
             slot_already_held=True,  # Router pre-acquired to preserve 429-upfront contract
             images=images or [],
             dispatch_gate_checked=dispatch_gate_checked,  # #526: True when router gated at acquire()
+            # ent#751: every caller of run_async_task (the /task async path and the
+            # backlog drain) is downstream of the /task admission seam's skill gate,
+            # and every enqueue into the backlog happens after a gate check.
+            gate_checked=True,
         )
 
         execution_time_ms = int((datetime.utcnow() - start_time).total_seconds() * 1000)
@@ -2013,6 +2018,7 @@ async def _dispatch_sync_immediate(
         slot_already_held=True,  # Issue #498: router pre-acquired
         images=image_data,
         dispatch_gate_checked=True,  # #526: router already gated at acquire()
+        gate_checked=True,  # ent#751: the /task admission seam ran the skill gate
     )
 
     if collaboration_activity_id:
@@ -2117,6 +2123,7 @@ async def dispatch_parallel_task(
     idempotency_key,
     x_event_trigger,
     x_internal_secret,
+    x_trinity_execution_id=None,
 ):
     """The /task dispatch orchestrator (Invariant #1). Owns derive → idempotency
     (via dispatch_admission_service) → file upload → create-row+activities →
@@ -2141,6 +2148,43 @@ async def dispatch_parallel_task(
         target=name,
         endpoint=f"/api/agents/{name}/task",
         x_via_mcp=x_via_mcp,
+    )
+
+    # trinity-enterprise#751: the skill gate, at the same point and for the same
+    # reason as the depth guard — nothing claimed, uploaded, written or acquired
+    # when a gated request raises its approval. Every `execute_task` this
+    # request reaches downstream (sync, async, backlog drain) passes
+    # `gate_checked=True`, so the gate must read what is DISPATCHED — `message`
+    # — and not only the caller-supplied `user_message`, which nothing checks
+    # against `message` (reading it alone let any caller hide a gated command in
+    # `message` behind a harmless `user_message`) — and the caller's
+    # `system_prompt`, which the executor receives appended to its own. A
+    # Chat-tab history that mentions a gated skill re-gates later turns: the
+    # safe direction.
+    gate = await skill_gate_service.enforce(
+        name,
+        request_text="\n".join(
+            t for t in (request.message, request.user_message, request.system_prompt) if t),
+        requester=skill_gate_service.requester_from_principal(
+            current_user, source_agent=x_source_agent,
+            # The platform-injected turn (#2392) first; the model-typed
+            # parent_execution_id only as a fallback. Either is kept only when
+            # it is one of the requesting agent's own executions.
+            execution_id=x_trinity_execution_id or getattr(request, "parent_execution_id", None)),
+        triggered_by=derivation.triggered_by,
+        occurrence_key=idempotency_key,
+        dispatch=skill_gate_service.frozen_dispatch(
+            triggered_by=derivation.triggered_by,
+            model=request.model,
+            timeout_seconds=request.timeout_seconds,
+            allowed_tools=request.allowed_tools,
+            source_user_id=current_user.id,
+            source_user_email=current_user.email or current_user.username,
+            source_agent_name=x_source_agent,
+            source_mcp_key_id=getattr(current_user, "mcp_key_id", None),
+            source_mcp_key_name=getattr(current_user, "mcp_key_name", None),
+            chain_depth=chain_depth,
+        ),
     )
 
     # RELIABILITY-006 (#525): idempotency begin/replay (shared with /chat, RD2).
@@ -2182,6 +2226,9 @@ async def dispatch_parallel_task(
         idem=idem,
         chain_depth=chain_depth,
     )
+    await skill_gate_service.audit_self_approved(
+        name, gate, current_user=current_user,
+        endpoint=f"/api/agents/{name}/task", execution_id=execution_id)
 
     if request.async_mode:
         return await _dispatch_async(

@@ -1298,7 +1298,10 @@ async def portal_chat(
                                               getattr(body, "open_canvas_id", None),
                                               is_platform=principal.is_platform),
                                           model=requested_model,
-                                          reply_context=reply_context)
+                                          reply_context=reply_context,
+                                          # trinity-enterprise#751: whether this
+                                          # route proved a person (self-approval).
+                                          gate_is_person=principal.is_person)
     except ClientPortalError as e:
         raise HTTPException(status_code=e.status_code, detail=e.detail)
     return PortalChatResponse(**result)
@@ -1981,6 +1984,7 @@ async def portal_chat_stream(
                 is_platform=principal.is_platform),
             model=requested_model,   # ent#403, same rule as the flag above
             reply_context=reply_context,
+            gate_is_person=principal.is_person,   # trinity-enterprise#751, same rule
         )
     except ClientPortalError as e:
         idempotency_service.fail(decision)

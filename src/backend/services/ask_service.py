@@ -20,13 +20,14 @@ So every ending goes through here, in one order:
    register their own (`register_ending_observer`). Nothing feature-specific
    branches in here.
 
-What does NOT live here: who may end an ask (the person gate is
-`dependencies.reject_non_person_principal`; the portal keeps its addressee
-check), and the refusals each route words its own way (status already
-terminal, divergence not acknowledged, an empty answer). The one check that
-DOES live here is the #2376 rule that an answer must be one of the options the
-agent offered: this is the only writer of an answer, so no entry point can
-reach the approval channel without it.
+What does NOT live here: the person gate (`dependencies.
+reject_non_person_principal`; the portal keeps its addressee check), and the
+refusals each route words its own way (status already terminal, divergence not
+acknowledged, an empty answer). Two checks DO live here, because this is the
+only writer of an ending and no entry point can reach the approval channel
+around it: the #2376 rule that an answer must be one of the options the agent
+offered, and `may_end` (trinity-enterprise#751) — a gated-skill approval is
+decided only by a person it was addressed to; an admin may cancel it.
 
 Synchronous on purpose. The portal answer route is a plain `def` that FastAPI
 runs on a worker thread; the operator routes are `async def` on the loop. The
@@ -81,6 +82,15 @@ class AskConflict(Exception):
         super().__init__(code)
         self.code = code
         self.item = item
+
+
+class AskNotAddressee(Exception):
+    """trinity-enterprise#751: a gated-skill approval may be decided only by a
+    person it was addressed to (an admin may cancel it, never approve it)."""
+
+    def __init__(self, item_id: str):
+        super().__init__("not_addressee")
+        self.item_id = item_id
 
 
 @dataclass(frozen=True)
@@ -143,6 +153,32 @@ def register_ending_observer(fn: Callable[[EndingEvent], None]) -> Callable[[End
     return fn
 
 
+def may_end(row: Mapping[str, Any], actor: "Actor", *, cancelling: bool = False) -> bool:
+    """Who may end an ask — the one rule every ending door shares
+    (trinity-enterprise#751; the operator routes, the Workspace answer and a
+    bulk sweep all reach it through this sink).
+
+    Only a GATED-SKILL APPROVAL is narrowed: its decision runs a business action,
+    so it belongs to the people the ask was addressed to (`resolved_to`). An
+    admin may CANCEL one — the escalation — but never approve it. Every other
+    ask keeps the rule it had: any person with access to the agent, checked by
+    the caller. Person-only endings stay the routes' check
+    (`dependencies.reject_non_person_principal`), since an agent key carries its
+    owner's email."""
+    if not (row.get("raised_by") == "gate" and row.get("type") == "approval"):
+        return True
+    email = (getattr(actor, "email", None) or "").strip().casefold()
+    resolved = row.get("resolved_to") or []
+    if isinstance(resolved, str):
+        try:
+            resolved = json.loads(resolved)
+        except ValueError:
+            resolved = []
+    if email and email in {str(p).strip().casefold() for p in resolved}:
+        return True
+    return cancelling and getattr(getattr(actor, "user", None), "role", None) == "admin"
+
+
 # ---------------------------------------------------------------------------
 # The four ways an ask ends
 # ---------------------------------------------------------------------------
@@ -164,6 +200,8 @@ def answer(
     sound; the status is not, which is what the compare-and-set is for.
     """
     validate_response_choice(item, response)
+    if not may_end(item, actor):
+        raise AskNotAddressee(item["id"])
     updated = db.respond_to_operator_queue_item(
         item_id=item["id"],
         response=response,
@@ -184,7 +222,11 @@ def answer(
 
 
 def cancel(item_id: str, *, actor: Actor, reason: Optional[str] = None) -> Ending:
-    """A person cancelled one ask. Raises `AskNotFound` / `AskConflict`."""
+    """A person cancelled one ask. Raises `AskNotFound` / `AskConflict` /
+    `AskNotAddressee` (a gate approval the actor may not end, #751)."""
+    current = db.get_operator_queue_item(item_id)
+    if current and not may_end(current, actor, cancelling=True):
+        raise AskNotAddressee(item_id)
     updated = db.cancel_operator_queue_item(item_id, disposed_by_email=actor.email, reason=reason)
     if not updated:
         raise AskNotFound(item_id)
@@ -210,8 +252,12 @@ def bulk_cancel(
     re-ended). One audit row and one trigger per sweep, however many rows.
     """
     ids = list(dict.fromkeys(ids))  # dedupe, keep order — an honest skipped count
+    # trinity-enterprise#751: a gate approval the actor may not end is skipped,
+    # like any other row this sweep may not touch.
+    permitted = [i for i in ids
+                 if may_end(db.get_operator_queue_item(i) or {}, actor, cancelling=True)]
     out = db.bulk_cancel_operator_queue_items(
-        ids, accessible_agent_names, disposed_by_email=actor.email, reason=reason,
+        permitted, accessible_agent_names, disposed_by_email=actor.email, reason=reason,
     )
     rows, batch_id = out["rows"], out["batch_id"]
     if not rows:
@@ -335,14 +381,20 @@ def raise_ask(
     3. the #1632 rate caps — the SAME buckets as the file poller, so the two
        channels share one budget. Before every check that reads the database,
        so a refusal below spends a token and cannot be repeated for free (the
-       re-ask scan reads up to `_REASK_SCAN` stored proposals). A gate raise
-       spends the agent's buckets too: an agent that floods its own queue blocks
-       its own gated calls, which fails closed;
+       re-ask scan reads up to `_REASK_SCAN` stored proposals). An AGENT's
+       raise only: a gate raise neither spends nor is refused by the agent's
+       buckets (trinity-enterprise#751) — shared, any requester could park the
+       agent's queue with gated requests and block its own asks, and an agent
+       flooding its own queue would block every gated request to it. The gate
+       (`services/skill_gate_service.py`) caps its own raises, per requester
+       and per executor, before it calls this;
     4. the deadline floor (C5), the re-ask link (`supersedes_expired` must name
        the agent's own expired ask) and its guard (C6), then the role (`to:`)
        resolved to a person;
     5. the create: replay, depth cap and insert in one per-agent serialized
-       step (`queue_full` → 429);
+       step (`queue_full` → 429). The depth cap counts the agent's own asks
+       and applies to them only — gate rows are neither counted nor capped
+       here (#751, same reason as step 3);
     6. one audit row (`raised`, ids and enums only) and one thin broadcast.
 
     The receipt names the ROLE an ask went to, never the resolved email, and
@@ -363,7 +415,7 @@ def raise_ask(
     if existing:
         return _replay(existing, norm, oqs, raised_by)
 
-    if not _rate_allowed(agent_name, oqs):
+    if raised_by == "agent" and not _rate_allowed(agent_name, oqs):
         raise AskRejected(429, "rate_limited",
                           "Too many asks in a short time; try again in a minute.")
 
@@ -406,13 +458,16 @@ def raise_ask(
     }
     out = db.create_native_operator_queue_item(
         agent_name, item,
-        max_pending=_max_pending(),
+        max_pending=_max_pending() if raised_by == "agent" else None,
         channel=channel,
         raised_by=raised_by,
         to_role=norm["to"],
         resolved_to=people or None,
         proposal=norm["proposal"],
         supersedes_expired=predecessor["id"] if predecessor else None,
+        # #3130: the cap counts the agent's own asks, never the platform's rows
+        # about it (its flood alarm above all).
+        exclude_request_id_prefixes=oqs._RESERVED_ID_PREFIXES,
     )
     if out["outcome"] == "queue_full":
         raise AskRejected(429, "queue_full",

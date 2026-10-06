@@ -116,6 +116,8 @@ class ScheduleExecutionsMixin:
         message: str,
         triggered_by: str = "manual",
         fields: Optional[TaskExecutionFields] = None,
+        *,
+        execution_id: Optional[str] = None,
     ) -> Optional[ScheduleExecution]:
         """Create a new execution record for a manual/API-triggered task (no schedule).
 
@@ -148,7 +150,10 @@ class ScheduleExecutionsMixin:
                 (read as 0) on every root.
         """
         f = asdict(fields or TaskExecutionFields())
-        execution_id = self._generate_id()
+        # trinity-enterprise#751: a caller may pass the id it already wrote
+        # elsewhere — the skill gate claims its approved run under an id before
+        # the row exists, so a crash in between is detectable, not lost.
+        execution_id = execution_id or self._generate_id()
         now = utc_now_iso()
 
         with get_engine().begin() as conn:

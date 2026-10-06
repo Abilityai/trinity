@@ -6,13 +6,105 @@ All SDK calls are sync internally, so they are wrapped in asyncio.to_thread().
 """
 
 import asyncio
+import contextlib
 import logging
+import os
+import weakref
 from typing import Optional
 
 from db_models import NeverminedConfig, NeverminedPaymentResult
 from services import idempotency_service
 
 logger = logging.getLogger(__name__)
+
+
+#: Fleet-wide ceiling on CONCURRENT facilitator calls (#679 E8). Every verify
+#: (15 s) and settle attempt (3 x 30 s) runs on the default `to_thread`
+#: executor, so a slow facilitator otherwise holds backend threads for the
+#: whole fleet — and a priced agent's public URL needs no credential to make us
+#: dial out. Per-IP rate limiting alone does not bound that, because the bound
+#: has to hold across IPs.
+NEVERMINED_MAX_INFLIGHT = int(os.getenv("NEVERMINED_MAX_INFLIGHT", "8"))
+
+#: How long a call waits for a slot before giving up. Bounded rather than
+#: unbounded because the caller is holding an HTTP request open: "busy, retry"
+#: is an honest answer, a queue that grows without limit is not.
+NEVERMINED_FACILITATOR_WAIT_SECONDS = float(
+    os.getenv("NEVERMINED_FACILITATOR_WAIT_SECONDS", "5.0")
+)
+
+#: One semaphore per event loop. Module-level `asyncio.Semaphore()` would bind
+#: the first loop that contends on it, which in a test suite is whichever test
+#: ran first; a WeakKeyDictionary keyed on the running loop keeps the bound
+#: real in production (one loop per worker) without that cross-loop trap.
+_FACILITATOR_GATES: "weakref.WeakKeyDictionary" = weakref.WeakKeyDictionary()
+
+
+class FacilitatorBusy(Exception):
+    """No facilitator slot became free within the wait budget."""
+
+
+def _facilitator_gate() -> asyncio.Semaphore:
+    loop = asyncio.get_running_loop()
+    gate = _FACILITATOR_GATES.get(loop)
+    if gate is None:
+        gate = asyncio.Semaphore(NEVERMINED_MAX_INFLIGHT)
+        _FACILITATOR_GATES[loop] = gate
+    return gate
+
+
+@contextlib.asynccontextmanager
+async def facilitator_slot():
+    """Hold one of the `NEVERMINED_MAX_INFLIGHT` slots, or raise `FacilitatorBusy`."""
+    gate = _facilitator_gate()
+    try:
+        await asyncio.wait_for(
+            gate.acquire(), timeout=NEVERMINED_FACILITATOR_WAIT_SECONDS
+        )
+    except asyncio.TimeoutError:
+        raise FacilitatorBusy("facilitator concurrency limit reached") from None
+    try:
+        yield
+    finally:
+        gate.release()
+
+
+def _resolve_endpoint(config: NeverminedConfig, base_url: str,
+                      endpoint: Optional[str]) -> str:
+    """The x402 `resource` URL a token is minted and verified against (#679 E2).
+
+    Default = the paid chat door, which is what every pre-#679 caller got. The
+    A2A gate passes its own door instead, because an x402 v3 token signs
+    `resourceUrl` and the facilitator compares origin+path: a token minted
+    against the paid URL cannot authorize a call to `/a2a/{name}`, and a
+    non-Trinity client follows `resource.url` out of the 402 verbatim.
+    """
+    return endpoint or f"{base_url}/api/paid/{config.agent_name}/chat"
+
+
+def _build_payment_required(config: NeverminedConfig, base_url: str,
+                            endpoint: Optional[str]):
+    """The SDK `X402PaymentRequired` for this agent's plan.
+
+    One home for the three call sites (402 body, verify, settle) that MUST agree:
+    the facilitator checks the token against this object, so a requirements
+    document built differently for verify than for the 402 is a rejection the
+    caller cannot act on.
+    """
+    network_map = {
+        "sandbox": "eip155:84532",        # Base Sepolia testnet
+        "staging_sandbox": "eip155:84532",
+        "live": "eip155:8453",            # Base mainnet
+        "staging_live": "eip155:8453",
+        "custom": "eip155:84532",
+    }
+    return build_payment_required(
+        plan_id=config.nvm_plan_id,
+        endpoint=_resolve_endpoint(config, base_url, endpoint),
+        agent_id=config.nvm_agent_id,
+        http_verb="POST",
+        network=network_map.get(config.nvm_environment, "eip155:84532"),
+    )
 
 
 class _SettleNotCompleted(Exception):
@@ -75,34 +167,18 @@ class NeverminedPaymentService:
             environment=nvm_environment,
         ))
 
-    def build_402_response(self, config: NeverminedConfig, base_url: str = "") -> dict:
+    def build_402_response(self, config: NeverminedConfig, base_url: str = "",
+                           endpoint: Optional[str] = None) -> dict:
         """Build the 402 Payment Required response body.
 
         Returns a dict suitable for JSON serialization in the 402 response.
+        `endpoint` defaults to the paid chat door (see `_resolve_endpoint`); a
+        caller serving the requirements from a different door passes its own.
         """
         if not NEVERMINED_AVAILABLE:
             raise RuntimeError("payments-py SDK is not installed")
 
-        endpoint = f"{base_url}/api/paid/{config.agent_name}/chat"
-
-        # Determine network from environment
-        network_map = {
-            "sandbox": "eip155:84532",       # Base Sepolia testnet
-            "staging_sandbox": "eip155:84532",
-            "live": "eip155:8453",            # Base mainnet
-            "staging_live": "eip155:8453",
-            "custom": "eip155:84532",
-        }
-        network = network_map.get(config.nvm_environment, "eip155:84532")
-
-        payment_required = build_payment_required(
-            plan_id=config.nvm_plan_id,
-            endpoint=endpoint,
-            agent_id=config.nvm_agent_id,
-            http_verb="POST",
-            network=network,
-        )
-
+        payment_required = _build_payment_required(config, base_url, endpoint)
         return payment_required.model_dump(by_alias=True)
 
     async def verify_payment(
@@ -112,44 +188,35 @@ class NeverminedPaymentService:
         config: NeverminedConfig,
         access_token: str,
         base_url: str = "",
+        endpoint: Optional[str] = None,
     ) -> NeverminedPaymentResult:
         """Verify a payment token before processing a request.
 
         Does NOT burn credits — only checks validity and balance.
-        Timeout: 15 seconds.
+        Timeout: 15 seconds, under the facilitator concurrency bound.
+
+        A failure carries `retryable` (#679 E7): a timeout, an SDK error or a
+        saturated facilitator gate is OUR side being unable to decide, not the
+        token being bad. The paid door answers 403 either way (unchanged); the
+        A2A gate tells a retryable caller to retry instead of telling a human to
+        go buy another token.
         """
         if not NEVERMINED_AVAILABLE:
             raise RuntimeError("payments-py SDK is not installed")
 
         try:
             payments = self._get_payments_client(nvm_api_key, nvm_environment)
+            payment_required = _build_payment_required(config, base_url, endpoint)
 
-            endpoint = f"{base_url}/api/paid/{config.agent_name}/chat"
-            network_map = {
-                "sandbox": "eip155:84532",
-                "staging_sandbox": "eip155:84532",
-                "live": "eip155:8453",
-                "staging_live": "eip155:8453",
-                "custom": "eip155:84532",
-            }
-            network = network_map.get(config.nvm_environment, "eip155:84532")
-
-            payment_required = build_payment_required(
-                plan_id=config.nvm_plan_id,
-                endpoint=endpoint,
-                agent_id=config.nvm_agent_id,
-                http_verb="POST",
-                network=network,
-            )
-
-            result = await asyncio.wait_for(
-                asyncio.to_thread(
-                    payments.facilitator.verify_permissions,
-                    payment_required,
-                    access_token,
-                ),
-                timeout=15.0,
-            )
+            async with facilitator_slot():
+                result = await asyncio.wait_for(
+                    asyncio.to_thread(
+                        payments.facilitator.verify_permissions,
+                        payment_required,
+                        access_token,
+                    ),
+                    timeout=15.0,
+                )
 
             return NeverminedPaymentResult(
                 success=result.is_valid,
@@ -157,17 +224,29 @@ class NeverminedPaymentService:
                 agent_request_id=result.agent_request_id,
                 error=result.invalid_reason if not result.is_valid else None,
             )
+        except FacilitatorBusy:
+            logger.warning(
+                f"Nevermined verify declined for agent {config.agent_name}: "
+                f"{NEVERMINED_MAX_INFLIGHT} facilitator calls already in flight"
+            )
+            return NeverminedPaymentResult(
+                success=False,
+                error="Payment verification is busy — retry shortly",
+                retryable=True,
+            )
         except asyncio.TimeoutError:
             logger.error(f"Nevermined verify timeout for agent {config.agent_name}")
             return NeverminedPaymentResult(
                 success=False,
                 error="Payment verification timed out",
+                retryable=True,
             )
         except Exception as e:
             logger.error(f"Nevermined verify error for agent {config.agent_name}: {e}")
             return NeverminedPaymentResult(
                 success=False,
                 error=str(e),
+                retryable=True,
             )
 
     async def settle_payment(
@@ -178,48 +257,35 @@ class NeverminedPaymentService:
         access_token: str,
         agent_request_id: Optional[str] = None,
         base_url: str = "",
+        endpoint: Optional[str] = None,
     ) -> NeverminedPaymentResult:
         """Settle a payment after successful task execution.
 
         Burns credits on-chain. Retries up to 3 times with exponential backoff.
-        Timeout per attempt: 30 seconds.
+        Timeout per attempt: 30 seconds, under the facilitator concurrency bound
+        (a saturated gate is one more retryable attempt failure, not a lost
+        settle — the caller's unsettled-success path re-drives it).
         """
         if not NEVERMINED_AVAILABLE:
             raise RuntimeError("payments-py SDK is not installed")
 
         payments = self._get_payments_client(nvm_api_key, nvm_environment)
-
-        endpoint = f"{base_url}/api/paid/{config.agent_name}/chat"
-        network_map = {
-            "sandbox": "eip155:84532",
-            "staging_sandbox": "eip155:84532",
-            "live": "eip155:8453",
-            "staging_live": "eip155:8453",
-            "custom": "eip155:84532",
-        }
-        network = network_map.get(config.nvm_environment, "eip155:84532")
-
-        payment_required = build_payment_required(
-            plan_id=config.nvm_plan_id,
-            endpoint=endpoint,
-            agent_id=config.nvm_agent_id,
-            http_verb="POST",
-            network=network,
-        )
+        payment_required = _build_payment_required(config, base_url, endpoint)
 
         last_error = None
         for attempt in range(3):
             try:
-                result = await asyncio.wait_for(
-                    asyncio.to_thread(
-                        payments.facilitator.settle_permissions,
-                        payment_required,
-                        access_token,
-                        None,  # max_amount
-                        agent_request_id,
-                    ),
-                    timeout=30.0,
-                )
+                async with facilitator_slot():
+                    result = await asyncio.wait_for(
+                        asyncio.to_thread(
+                            payments.facilitator.settle_permissions,
+                            payment_required,
+                            access_token,
+                            None,  # max_amount
+                            agent_request_id,
+                        ),
+                        timeout=30.0,
+                    )
 
                 if result.success:
                     return NeverminedPaymentResult(
@@ -236,6 +302,13 @@ class NeverminedPaymentService:
                         error=result.error_reason,
                     )
 
+            except FacilitatorBusy:
+                last_error = "facilitator concurrency limit reached"
+                logger.warning(
+                    f"Nevermined settle declined for agent {config.agent_name} "
+                    f"(attempt {attempt + 1}/3): {NEVERMINED_MAX_INFLIGHT} facilitator "
+                    "calls already in flight"
+                )
             except asyncio.TimeoutError:
                 last_error = "Settlement timed out"
                 logger.warning(
@@ -272,6 +345,7 @@ class NeverminedPaymentService:
         agent_request_id: Optional[str],
         execution_id: Optional[str],
         base_url: str = "",
+        endpoint: Optional[str] = None,
     ) -> NeverminedPaymentResult:
         """Settle at-most-once per local ``agent_request_id`` guard claim (#1084).
 
@@ -322,6 +396,7 @@ class NeverminedPaymentService:
                     access_token=access_token,
                     agent_request_id=agent_request_id,
                     base_url=base_url,
+                    endpoint=endpoint,
                 )
                 if not settle_result.success:
                     # Release the claim — only a SUCCESSFUL settle is replayable.

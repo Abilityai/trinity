@@ -30,7 +30,8 @@ from services.docker_service import (
     get_agent_status_from_container,
 )
 from services.docker_utils import (
-    volume_get, volume_create, containers_run, container_remove
+    volume_get, volume_create, containers_run, container_remove,
+    agent_volume_labels
 )
 from services.agent_runtime_state import clear_agent_breakers, clear_agent_runtime_state
 from services.template_service import (
@@ -1599,16 +1600,22 @@ async def _resolve_template(
                 f"{'source (pull-only)' if tr.git_mode_decision['source_mode'] else 'working branch'}"
                 f" — {tr.git_mode_decision['reason']}"
             )
+            # #2107 / trinity-enterprise#704: does this agent auto-push? The
+            # single predicate the container env is baked from — reported as
+            # `git_mode.pushes`, because `source_mode` alone cannot say it
+            # (fork-to-own is source-mode AND pushes to its own fork).
+            will_push = bool(git_service._git_auto_sync_baked(
+                config, tr.github_repo_for_agent,
+                tr.github_pat_for_agent, tr.fork_upstream_repo,
+            ))
+            tr.git_mode_decision["pushes"] = will_push
             # Validate PAT has access to the repository before creating container
             # This prevents silent clone failures in startup.sh (#218)
             await _validate_github_access(
                 config, tr.github_repo_for_agent, tr.github_pat_for_agent,
                 push_verified=bool(tr.git_mode_decision.get("push_verified")),
                 # #2107: the agents that will auto-push must be able to push.
-                will_push=git_service._git_auto_sync_baked(
-                    config, tr.github_repo_for_agent,
-                    tr.github_pat_for_agent, tr.fork_upstream_repo,
-                ),
+                will_push=will_push,
             )
             tr.git_instance_id, tr.git_working_branch = await _reserve_git_instance(
                 config, current_user, tr.github_repo_for_agent
@@ -1955,6 +1962,10 @@ def _apply_github_env(
             config, github_repo_for_agent, github_pat_for_agent, fork_upstream_repo
         ):
             env_vars['GIT_SYNC_AUTO'] = 'true'
+        # trinity-enterprise#703: the pull cycle's fallback env — the DB flag
+        # written below at creation is the one the loop reads live.
+        if not config.ephemeral:
+            env_vars['GIT_SYNC_PULL'] = 'true'
 
         # Source mode (default): Track source branch directly for pull-only sync
         # Legacy mode: Create a unique working branch for bidirectional sync
@@ -2043,10 +2054,7 @@ async def _workspace_volume_mount(config: AgentConfig, volumes: dict) -> None:
     except docker.errors.NotFound:
         await volume_create(
             name=agent_volume_name,
-            labels={
-                'trinity.platform': 'agent-workspace',
-                'trinity.agent-name': config.name
-            }
+            labels=agent_volume_labels(config.name, 'agent-workspace'),
         )
     volumes[agent_volume_name] = {'bind': '/home/developer', 'mode': 'rw'}  # Persistent workspace
 
@@ -2079,10 +2087,7 @@ async def _shared_folder_mounts(
             except docker.errors.NotFound:
                 await volume_create(
                     name=shared_volume_name,
-                    labels={
-                        'trinity.platform': 'agent-shared',
-                        'trinity.agent-name': config.name
-                    }
+                    labels=agent_volume_labels(config.name, 'agent-shared'),
                 )
                 volume_created = True
 
@@ -2126,10 +2131,7 @@ async def _public_volume_mount(config: AgentConfig, volumes: dict) -> None:
         except docker.errors.NotFound:
             await volume_create(
                 name=public_volume_name,
-                labels={
-                    'trinity.platform': 'agent-public',
-                    'trinity.agent-name': config.name,
-                },
+                labels=agent_volume_labels(config.name, 'agent-public'),
             )
             public_volume_created = True
 
@@ -2671,6 +2673,15 @@ async def _materialize_agent_files(
                 logger.error(
                     f"Failed to enable freeze-on-sync-failure for {config.name}: {e}"
                 )
+
+    # trinity-enterprise#703: the container pulls origin on its own — for every
+    # `github:` agent, source mode included (a pull-only agent is exactly the one
+    # that needs a pull). Ghosts are excluded: their workspace is throwaway.
+    if github_repo_for_agent and not config.ephemeral:
+        try:
+            db.set_git_pull_sync_enabled(config.name, True)
+        except Exception as e:
+            logger.error(f"Failed to enable the pull cycle for {config.name}: {e}")
 
     # #2069: the fleet-wide `.gitignore` merge never ran at creation, so the
     # 15-min in-container auto-sync loop (on from birth for the GIT_SYNC_AUTO

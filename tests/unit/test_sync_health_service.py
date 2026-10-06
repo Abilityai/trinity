@@ -169,6 +169,77 @@ class TestSyncStatePersistence:
         assert db.get_sync_state("alpha") is None
 
 
+class TestPullOutcomePersisted:
+    """trinity-enterprise#703: the pull cycle's outcome reaches the row, bounded."""
+
+    @pytest.mark.asyncio
+    async def test_pull_fields_are_persisted_and_the_push_counter_untouched(self, service, seed_agent):
+        seed_agent("alpha")
+        payload = _status_payload(status="success")
+        payload["sync_state"].update({
+            "last_pull_at": "2026-09-25T12:00:00+00:00",
+            "last_pull_status": "failed",
+            "behind_after_pull": 3,
+        })
+        with patch.object(service, "_fetch_git_status", AsyncMock(return_value=payload)):
+            await service._poll_cycle()
+        from database import db
+        row = db.get_sync_state("alpha")
+        assert (row["last_pull_at"], row["last_pull_status"], row["behind_after_pull"]) == (
+            "2026-09-25T12:00:00+00:00", "failed", 3)
+        assert row["consecutive_failures"] == 0  # a failed PULL is not a failed push
+
+    @pytest.mark.asyncio
+    async def test_pull_health_is_persisted_and_a_success_clears_the_error(self, service, seed_agent):
+        """PR #3021 review: the failure reason, the last success and the
+        streaks reach the row (ent#706/#707 read them), bounded."""
+        seed_agent("alpha")
+        payload = _status_payload(status="success")
+        payload["sync_state"].update({
+            "last_pull_at": "2026-09-25T12:15:00+00:00",
+            "last_pull_status": "failed",
+            "last_pull_error": "x" * 900,
+            "last_successful_pull_at": "2026-09-25T11:00:00+00:00",
+            "consecutive_pull_failures": 4,
+            "consecutive_pull_skips": 0,
+        })
+        with patch.object(service, "_fetch_git_status", AsyncMock(return_value=payload)):
+            await service._poll_cycle()
+        from database import db
+        row = db.get_sync_state("alpha")
+        assert row["last_pull_error"] == "x" * 500
+        assert row["last_successful_pull_at"] == "2026-09-25T11:00:00+00:00"
+        assert (row["consecutive_pull_failures"], row["consecutive_pull_skips"]) == (4, 0)
+
+        payload["sync_state"].update({
+            "last_pull_at": "2026-09-25T12:30:00+00:00", "last_pull_status": "success",
+            "last_pull_error": None, "last_successful_pull_at": "2026-09-25T12:30:00+00:00",
+            "consecutive_pull_failures": 0,
+        })
+        with patch.object(service, "_fetch_git_status", AsyncMock(return_value=payload)):
+            await service._poll_cycle()
+        row = db.get_sync_state("alpha")
+        assert row["last_pull_error"] is None
+        assert row["consecutive_pull_failures"] == 0
+        assert row["last_successful_pull_at"] == "2026-09-25T12:30:00+00:00"
+
+    @pytest.mark.asyncio
+    async def test_agent_written_garbage_is_dropped(self, service, seed_agent):
+        seed_agent("alpha")
+        payload = _status_payload(status="success")
+        payload["sync_state"].update({
+            "last_pull_status": "pwned; DROP TABLE",
+            "behind_after_pull": "lots",
+            "last_pull_at": {"not": "a string"},
+        })
+        with patch.object(service, "_fetch_git_status", AsyncMock(return_value=payload)):
+            await service._poll_cycle()
+        from database import db
+        row = db.get_sync_state("alpha")
+        assert (row["last_pull_at"], row["last_pull_status"], row["behind_after_pull"]) == (
+            None, None, None)
+
+
 class TestOperatorQueueEmission:
     """sync_failing entry emitted when consecutive_failures crosses 3."""
 

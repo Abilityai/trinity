@@ -633,6 +633,30 @@ next — turn-taking is mechanical: **you are woken iff you were @mentioned**.
   prompt-injection lever). Chain depth, a per-participant wake cap, and the ent#220
   cancellation shield bound the cascade; the ent#218 rule keeps an in-flight reply that
   was already billed from being discarded by a budget trip.
+- **A reply is never refused for its size, and a landed message never fails its post
+  (#3210).** `MAX_CONTENT_CHARS` (8,000) is an **inbound** rule — people, Workspace
+  clients, and agents calling the API. The engine's own post of a turn's reply is fitted
+  to `MAX_AGENT_REPLY_CHARS` (100,000) by `_fit_reply` instead: past the bound it keeps
+  head and tail around a marker, and there is no size at which it raises. It stays **one
+  row per turn** — `db.room_cost` joins messages to executions and
+  `count_budget_messages` counts rows, so a reply split across rows would charge the turn
+  once per part and spend the message budget doing it. `post_message` is split at the
+  append: everything a landed message sets in motion (budget close, roster re-check, wake
+  cap, the wakes) runs in `_after_landing` under one guard, and each wake is caught per
+  target, so a failure three agents down a mention chain costs that agent its turn and
+  nothing above it — not the upstream agents' cursor advances, not the human's HTTP
+  status or idempotency claim. A reply that genuinely did not land (and one that arrives
+  after the room closed) leaves a system line and a warning carrying the execution id;
+  handler lines go through the non-raising `_post_system_safe`. `CancelledError` still propagates
+  through all of it. The transcript a wake shows its agent is bounded by
+  `ROOM_TRANSCRIPT_BUDGET_CHARS` (240,000 — what a cold wake of 30 capped messages could
+  already receive): `_fit_transcript` keeps whole messages from the newest backwards,
+  always keeps the newest and the latest one that mentions the agent, and replaces each
+  omitted run with one line. The read cursor still advances over the **full** delta.
+  Two consequences to know: every agent woken after a long reply re-reads it, so long
+  replies raise a room's spend per message (the turn prompt suggests sharing a file plus a
+  summary for a long deliverable); and `GET /api/rooms/{id}` is unpaginated, so a room's
+  first load grows with its message sizes.
 - **Three tables** — `enterprise_rooms`, `enterprise_room_participants`,
   `enterprise_room_messages`. The `enterprise_` prefix is **retained history, not a
   licensing claim** (the ent#356 portal precedent): every entitled install already holds

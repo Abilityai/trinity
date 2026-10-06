@@ -1066,11 +1066,11 @@ Permission checks before any agent-to-agent communication:
 
 ### 60-Second MCP Call Timeout
 
-> **Design Limitation**: Claude Code enforces a hardcoded 60-second timeout on all MCP HTTP tool calls. Any `chat_with_agent` call that takes longer than 60 seconds will fail regardless of the `timeout_seconds` parameter.
+> **Design Limitation**: an MCP client gives up on a tool call at its own ceiling (30–60 seconds is typical). Trinity's MCP server stops waiting first — at `MCP_CHAT_TIMEOUT_MS`, 25 seconds by default — and answers a synchronous `chat_with_agent` with a receipt (`status: "queued_timeout"` plus the `execution_id`) while the work keeps running. `timeout_seconds` does not extend that wait.
 
 When designing agents that collaborate with other agents, ensure that:
-- Synchronous MCP calls complete within 60 seconds
-- Complex tasks use the async pattern (`parallel=true, async=true`) and poll for results
+- A receipt is treated as "running", never as a failure: the outcome is read with `get_execution_result`, and the call is never re-sent. Every agent is taught this as the delegation contract in its platform prompt (§Agent Collaboration); the `chat_with_agent` tool description carries the same text
+- Complex tasks use the async pattern (`parallel=true, async=true`) from the start
 - Large data exchanges use shared folders instead of MCP return values
 
 See the [Multi-Agent System Guide](MULTI_AGENT_SYSTEM_GUIDE.md#design-limitation-60-second-mcp-call-timeout) for workaround patterns.

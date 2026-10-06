@@ -121,6 +121,7 @@ from db.activities import ActivityOperations
 from db.reports import ReportOperations
 from db.canvas import CanvasOperations
 from db.canvas_shares import CanvasShareOperations
+from db.skill_gate_requests import SkillGateRequestOperations
 from db.user_preferences import UserPreferenceOperations
 from db.product_events import ProductEventOperations
 from db.evaluations import EvaluationOperations
@@ -1001,6 +1002,7 @@ class DatabaseManager:
         self._report_ops = ReportOperations()
         self._canvas_ops = CanvasOperations()
         self._canvas_share_ops = CanvasShareOperations()
+        self._skill_gate_request_ops = SkillGateRequestOperations()
         self._user_preference_ops = UserPreferenceOperations()
         self._product_event_ops = ProductEventOperations()
         self._evaluation_ops = EvaluationOperations()
@@ -1825,10 +1827,14 @@ class DatabaseManager:
         message: str,
         triggered_by: str = "manual",
         fields: Optional[TaskExecutionFields] = None,
+        *,
+        execution_id: Optional[str] = None,
     ):
         """Create an execution record for a manual/API-triggered task (no schedule).
-        Optional columns ride `fields` (#1482, `db/write_params.py`)."""
-        return self._schedule_ops.create_task_execution(agent_name, message, triggered_by, fields)
+        Optional columns ride `fields` (#1482, `db/write_params.py`).
+        `execution_id`: a caller-chosen id (trinity-enterprise#751)."""
+        return self._schedule_ops.create_task_execution(
+            agent_name, message, triggered_by, fields, execution_id=execution_id)
 
     def get_max_running_chain_depth(self, agent_name: str) -> int:
         """Deepest chain_depth among the agent's running rows, 0 if none (#2806)."""
@@ -2001,6 +2007,12 @@ class DatabaseManager:
 
     def get_git_auto_sync_enabled(self, agent_name: str):
         return self._schedule_ops.get_git_auto_sync_enabled(agent_name)
+
+    def set_git_pull_sync_enabled(self, agent_name: str, enabled: bool):
+        return self._schedule_ops.set_git_pull_sync_enabled(agent_name, enabled)
+
+    def get_git_pull_sync_enabled(self, agent_name: str):
+        return self._schedule_ops.get_git_pull_sync_enabled(agent_name)
 
     def get_all_git_auto_sync_enabled(self, agent_names=None):
         return self._schedule_ops.get_all_git_auto_sync_enabled(agent_names)
@@ -2259,6 +2271,54 @@ class DatabaseManager:
 
     def record_canvas_share_view(self, share_id: str) -> None:
         return self._canvas_share_ops.record_view(share_id)
+
+    # --- gated-skill requests (trinity-enterprise#751) ------------------------
+    # Signatures mirror db/skill_gate_requests.py exactly; a parity test in
+    # tests/unit/test_ent751_skill_gate_requests_db.py fails when they drift.
+
+    def create_gate_request(self, **fields):
+        return self._skill_gate_request_ops.create_gate_request(**fields)
+
+    def get_gate_request(self, request_id: str):
+        return self._skill_gate_request_ops.get_gate_request(request_id)
+
+    def get_gate_request_by_dispatched_execution(self, execution_id: str):
+        return self._skill_gate_request_ops.get_gate_request_by_dispatched_execution(execution_id)
+
+    def get_gate_requests_by_origin_executions(self, execution_ids):
+        return self._skill_gate_request_ops.get_gate_requests_by_origin_executions(execution_ids)
+
+    def attach_gate_ask(self, request_id: str, ask_item_id: str) -> bool:
+        return self._skill_gate_request_ops.attach_gate_ask(request_id, ask_item_id)
+
+    def count_pending_gate_requests(self, agent_name: str, requester_key=None) -> int:
+        return self._skill_gate_request_ops.count_pending_gate_requests(
+            agent_name, requester_key=requester_key)
+
+    def claim_gate_request_for_dispatch(self, request_id: str, execution_id: str) -> bool:
+        return self._skill_gate_request_ops.claim_gate_request_for_dispatch(request_id, execution_id)
+
+    def transition_gate_request(self, request_id: str, to_state: str, *, detail=None) -> bool:
+        return self._skill_gate_request_ops.transition_gate_request(
+            request_id, to_state, detail=detail)
+
+    def mark_gate_request_notified(self, request_id: str) -> bool:
+        return self._skill_gate_request_ops.mark_gate_request_notified(request_id)
+
+    def list_pending_gate_requests(self, agent_name: str):
+        return self._skill_gate_request_ops.list_pending_gate_requests(agent_name)
+
+    def list_gate_requests_with_ended_asks(self, limit: int = 200):
+        return self._skill_gate_request_ops.list_gate_requests_with_ended_asks(limit)
+
+    def list_gate_requests_lost_in_dispatch(self, claimed_before: str, limit: int = 200):
+        return self._skill_gate_request_ops.list_gate_requests_lost_in_dispatch(claimed_before, limit)
+
+    def list_gate_requests_dispatched_unrecorded(self, claimed_before: str, limit: int = 200):
+        return self._skill_gate_request_ops.list_gate_requests_dispatched_unrecorded(claimed_before, limit)
+
+    def list_gate_requests_without_live_ask(self, created_before: str, limit: int = 200):
+        return self._skill_gate_request_ops.list_gate_requests_without_live_ask(created_before, limit)
 
     def last_completed_execution_at(self, agent_name: str):
         return self._canvas_ops.last_completed_execution_at(agent_name)
@@ -3680,6 +3740,11 @@ class DatabaseManager:
     def get_nevermined_payment_log(self, agent_name, limit=50):
         return self._nevermined_ops.get_payment_log(agent_name, limit)
 
+    def nevermined_payer_owns_execution(self, agent_name, execution_id, subscriber_address):
+        return self._nevermined_ops.payer_owns_execution(
+            agent_name, execution_id, subscriber_address
+        )
+
     def get_nevermined_settlement_failures(self, limit=50):
         return self._nevermined_ops.get_settlement_failures(limit)
 
@@ -3705,13 +3770,15 @@ class DatabaseManager:
 
     def create_native_operator_queue_item(self, agent_name, item, *, max_pending, channel,
                                           raised_by, to_role, resolved_to, proposal,
-                                          supersedes_expired):
+                                          supersedes_expired, exclude_request_id_prefixes=None):
         # trinity-enterprise#611: an agent-raised ask — replay, depth cap and insert
-        # in one per-agent serialized step.
+        # in one per-agent serialized step. #3130: the prefixes leave platform
+        # rows out of the depth cap.
         return self._operator_queue_ops.create_native_item(
             agent_name, item, max_pending=max_pending, channel=channel,
             raised_by=raised_by, to_role=to_role, resolved_to=resolved_to,
             proposal=proposal, supersedes_expired=supersedes_expired,
+            exclude_request_id_prefixes=exclude_request_id_prefixes,
         )
 
     def prune_operator_queue_terminal_items(self, retention_days, responded_retention_days, limit=5000):
@@ -3831,14 +3898,17 @@ class DatabaseManager:
         # #1631: agent-scoped — item_id is the agent's request_id, not the uuid.
         return self._operator_queue_ops.item_exists(agent_name, item_id)
 
-    def count_operator_queue_pending_for_agent(self, agent_name, item_type=None):
+    def count_operator_queue_pending_for_agent(self, agent_name, item_type=None,
+                                               exclude_request_id_prefixes=None):
         # #1632: DB-measured per-agent pending depth — the primary ingestion cap.
         # #1677: optional item_type = the per-(agent, type) platform-alert
         # budget read. The pass-through is load-bearing — a missed delegation
         # plus the helper's swallow voids the budget while monkeypatched tests
-        # stay green (pinned by test_1677's real-facade test).
+        # stay green (pinned by test_1677's real-facade test). #3130: the
+        # prefixes leave platform rows out of the agent's own cap.
         return self._operator_queue_ops.count_pending_for_agent(
-            agent_name, item_type=item_type
+            agent_name, item_type=item_type,
+            exclude_request_id_prefixes=exclude_request_id_prefixes,
         )
 
     # =========================================================================

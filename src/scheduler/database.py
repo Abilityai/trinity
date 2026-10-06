@@ -633,6 +633,7 @@ class SchedulerDatabase:
         execution_log: str = None,
         claude_session_id: str = None,  # Claude Code session ID for --resume (EXEC-023)
         expected_status: str = None,
+        require_unclaimed: bool = False,
     ) -> bool:
         """Update execution status when completed.
 
@@ -647,6 +648,9 @@ class SchedulerDatabase:
                 argue it is safe today (it is — the abandon gates all run
                 before dispatch, so no competing writer exists), the caller
                 passes the precondition and it is safe by construction.
+            require_unclaimed: also require ``claim_token IS NULL`` (#2514). A
+                claimed row belongs to the pull worker that holds the token;
+                writing a terminal under it makes the worker's result CAS lose.
         """
         with self.get_connection() as conn:
             cursor = conn.cursor()
@@ -682,7 +686,8 @@ class SchedulerDatabase:
                     context_used = ?, context_max = ?, cost = ?, tool_calls = ?, execution_log = ?,
                     claude_session_id = ?
                 WHERE id = ?
-            """ + (" AND status = ?" if expected_status else ""), (
+            """ + (" AND status = ?" if expected_status else "")
+              + (" AND claim_token IS NULL" if require_unclaimed else ""), (
                 status,
                 to_utc_iso(completed_at),
                 duration_ms,

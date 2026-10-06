@@ -51,6 +51,8 @@ from services.dispatch_breaker import DispatchBreaker
 from services.execution_integrity import derive_turn_integrity
 from services import event_dispatch_service
 from services import channel_completion_report
+from services import skill_gate_service
+from services.skill_gate_errors import SkillApprovalRequired, SkillGateError
 from services.platform_audit_service import AuditEventType, platform_audit_service
 # #2048: stdlib-only leaf by construction, so this cannot cycle back through the
 # capacity stack at import time (its own reference to this module is lazy).
@@ -1383,6 +1385,31 @@ def _log_retry_budget(
         logger.info(line)
 
 
+# trinity-enterprise#751: the attribution a producer may leave off its call but
+# wrote on the row it pre-created. `/api/internal/execute-task` sends neither the
+# schedule id nor the person who pressed Run now — both live on the row.
+_ROW_ATTRIBUTION = ("source_user_id", "source_user_email", "source_agent_name",
+                    "source_mcp_key_id", "source_mcp_key_name", "schedule_id")
+
+
+def _with_row_attribution(fields: dict, execution_id: Optional[str]) -> dict:
+    """`fields` with each missing attribution filled from the pre-created row
+    (platform-written). Read only when a gate applies; an unreadable row leaves
+    `fields` as the caller passed them."""
+    merged = dict(fields, schedule_id=None)
+    if not execution_id:
+        return merged
+    try:
+        row = db.get_execution(execution_id)
+    except Exception:  # noqa: BLE001 — attribution only; the gate still runs
+        logger.warning("[SkillGate] could not read row %s for attribution", execution_id)
+        return merged
+    for key in _ROW_ATTRIBUTION:
+        if merged.get(key) is None:
+            merged[key] = getattr(row, key, None) if row is not None else None
+    return merged
+
+
 class TaskExecutionService:
     """
     Stateless service encapsulating the full task-execution lifecycle.
@@ -1436,6 +1463,18 @@ class TaskExecutionService:
         # #2973: inter-agent chain depth (#2806) the caller already admitted;
         # stamped on the row created here. Ignored when `execution_id` is given.
         chain_depth: Optional[int] = None,
+        # trinity-enterprise#751: the requester's OWN words, when `message` is a
+        # composed prompt (history, sender context, a template). The skill gate
+        # scans this, never the composition. None ⇒ `message` is the requester's.
+        request_text: Optional[str] = None,
+        # trinity-enterprise#751: True only when an admission seam already ran the
+        # skill gate for this request (`/chat`, `/task` and what they reach).
+        gate_checked: bool = False,
+        # trinity-enterprise#751: the person the producer's entry AUTHENTICATED
+        # (the Workspace's `PortalPrincipal`). The only way the backstop lets an
+        # approver run their own gated request; None ⇒ the requester is derived
+        # from the row's fields and never self-approves.
+        gate_requester: Optional["skill_gate_service.Requester"] = None,
     ) -> TaskExecutionResult:
         """
         Execute a task on an agent container with full lifecycle management.
@@ -1569,6 +1608,40 @@ class TaskExecutionService:
         # This fixes issue #90 where exceptions during slot acquisition left executions
         # stuck in 'running' status with NULL session_id and duration_ms.
         try:
+            # ---- 1b. Skill gate backstop (trinity-enterprise#751) -----------
+            # Every producer that reaches the agent through here and was not
+            # checked at an admission seam. Before admission, so a gated request
+            # holds no slot, opens no activity and is never enqueued; the row is
+            # closed SKIPPED and the gate's exception propagates (the `finally`
+            # releases a slot the caller pre-acquired).
+            if not gate_checked:
+                await self._skill_gate_backstop(
+                    agent_name=agent_name,
+                    message=message,
+                    request_text=request_text,
+                    triggered_by=triggered_by,
+                    execution_id=execution_id,
+                    gate_requester=gate_requester,
+                    schedule_context=schedule_context,
+                    loop_id=loop_id,
+                    fields=dict(
+                        source_user_id=source_user_id,
+                        source_user_email=source_user_email,
+                        source_agent_name=source_agent_name,
+                        source_mcp_key_id=source_mcp_key_id,
+                        source_mcp_key_name=source_mcp_key_name,
+                        model=model,
+                        timeout_seconds=timeout_seconds,
+                        allowed_tools=allowed_tools,
+                        subscription_id=subscription_id,
+                        chain_depth=chain_depth,
+                        source_channel=source_channel,
+                        source_channel_chat_id=source_channel_chat_id,
+                        source_channel_thread=source_channel_thread,
+                        source_channel_client=source_channel_client,
+                    ),
+                )
+
             # ---- 2. Acquire capacity slot ------------------------------------
             slot_acquired, admission_denied = await self._admission_gate(
                 agent_name=agent_name,
@@ -1732,6 +1805,12 @@ class TaskExecutionService:
                 state=state,
             ), state)
 
+        except SkillGateError:
+            # trinity-enterprise#751: not an execution failure — the backstop
+            # already closed the row SKIPPED. Propagate so the caller (or the
+            # app handler) answers pending / refused instead of FAILED.
+            raise
+
         except Exception as e:
             error_msg = str(e)
             logger.error(f"[TaskExecService] Unexpected error executing task on {agent_name}: {error_msg}")
@@ -1800,6 +1879,72 @@ class TaskExecutionService:
                     agent_name,
                     execution_id or f"temp-{datetime.utcnow().timestamp()}",
                 )
+
+    # -----------------------------------------------------------------------
+    # Skill gate backstop (trinity-enterprise#751)
+    # -----------------------------------------------------------------------
+
+    async def _skill_gate_backstop(self, *, agent_name, message, request_text, triggered_by,
+                                   execution_id, fields, gate_requester=None,
+                                   schedule_context=None, loop_id=None) -> None:
+        """Run the skill gate for a producer that calls `execute_task` directly.
+
+        Skipped for the approved run itself — a row the gate's own record names
+        as its dispatched execution, on this agent. Otherwise a gated request
+        closes its row SKIPPED (no activity exists yet: this runs before
+        admission, the #1804 allowlisted admission-path shape) and re-raises,
+        so the caller answers pending / refused instead of dispatching.
+        """
+        try:
+            # The gate map first: while nothing is gated (the common case, and
+            # every install until gates are set) this is the only read.
+            gates = skill_gate_service.read_gates(agent_name)
+            if not gates:
+                return
+            if execution_id:
+                approved = db.get_gate_request_by_dispatched_execution(execution_id)
+                if (approved and approved.get("agent_name") == agent_name
+                        and approved.get("state") in ("dispatching", "dispatched")):
+                    return
+            fields = _with_row_attribution(fields, execution_id)
+            requester = gate_requester or skill_gate_service.requester_for_dispatch(
+                triggered_by=triggered_by,
+                source_user_email=fields["source_user_email"],
+                source_agent_name=fields["source_agent_name"],
+                source_mcp_key_id=fields["source_mcp_key_id"],
+                source_channel=fields["source_channel"],
+                source_channel_chat_id=fields["source_channel_chat_id"],
+                schedule_id=(schedule_context or {}).get("schedule_id") or fields.get("schedule_id"),
+                schedule_name=(schedule_context or {}).get("name"),
+                loop_id=loop_id,
+            )
+            frozen = skill_gate_service.frozen_dispatch(
+                triggered_by=triggered_by,
+                **{k: v for k, v in fields.items() if k != "schedule_id"})
+            decision = await skill_gate_service.enforce(
+                agent_name,
+                request_text=message if request_text is None else request_text,
+                requester=requester,
+                triggered_by=triggered_by,
+                occurrence_key=execution_id,
+                origin_execution_id=execution_id,
+                dispatch=frozen,
+                gates=gates,
+            )
+            # Only reachable with a producer-supplied, proven `gate_requester`.
+            await skill_gate_service.audit_self_approved(
+                agent_name, decision, current_user=None,
+                endpoint=f"execute_task:{triggered_by}", execution_id=execution_id)
+        except SkillGateError as exc:
+            if execution_id:
+                if isinstance(exc, SkillApprovalRequired):
+                    error = f"Awaiting approval ({exc.request_id}): {exc.message}"
+                else:
+                    error = f"Refused by the skill gate ({exc.code}): {exc}"
+                await _write_terminal_and_gate(
+                    execution_id, None, status=TaskExecutionStatus.SKIPPED,
+                    error=error, agent_name=agent_name)
+            raise
 
     # -----------------------------------------------------------------------
     # Terminal applier (#1083) — the single point that finalizes an execution

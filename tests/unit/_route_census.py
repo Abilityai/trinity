@@ -556,6 +556,10 @@ AGENT_CALLABLE: Dict[str, Tuple[str, str]] = {
     # only the agent's own key (or trinity-system as itself) and refuses every person.
     "routers/operator_queue.py::raise_my_ask": (
         "POST /api/agents/{name}/operator-queue", "MCP ask_operator; the agent raises its own ask, self-only (get_self_acting_agent)"),
+    # ent#703: the agent's pull loop reads its own switch every cycle with its own key.
+    # The write (PUT .../git/pull-sync) is a setting, so it is person-only.
+    "routers/git.py::get_pull_sync_config": (
+        "GET /api/agents/{agent_name}/git/pull-sync", "ent#703 the agent's pull loop reads its own switch live each cycle"),
 }
 
 # Authenticates itself, or unauthenticated by design. key -> ("METHOD /full/path", reason)
@@ -607,6 +611,7 @@ OWN_AUTH: Dict[str, Tuple[str, str]] = {
     "routers/public.py::request_verification_code": ("POST /api/public/verify/request", "public-link surface; the link token in the path is the credential (email verification)"),
     "routers/public.py::tls_allowed": ("GET /api/public/tls-allowed", "unauthenticated by design (reverse-proxy on-demand TLS probe)"),
     "routers/a2a.py::a2a_well_known_card": ("GET /a2a/{agent_name}/.well-known/agent-card.json", "unauthenticated by design (A2A discovery card)"),
+    "routers/a2a.py::a2a_jsonrpc": ("POST /a2a/{agent_name}", "ent#679: a Trinity MCP key OR an x402 payment token; decided in-handler (get_user_or_anonymous → 401 unless exposed AND priced)"),
     "routers/mcp_keys.py::validate_mcp_api_key_http_endpoint": ("POST /api/mcp/validate", "validates the presented MCP key itself (MCP server auth)"),
     "main.py::health_check": ("GET /health", "unauthenticated by design (health probe)"),
     "routers/slack.py::handle_slack_event": ("POST /api/public/slack/events", "Slack request signature"),
@@ -638,7 +643,7 @@ WEBSOCKET_ROUTES = frozenset({
 
 # The exact size of the frozen baseline. Lower it in the same change that
 # removes an entry; it never goes up.
-FROZEN_BASELINE_COUNT = 360
+FROZEN_BASELINE_COUNT = 359
 
 
 def load_baseline(path: Path = BASELINE_PATH) -> Dict[str, str]:

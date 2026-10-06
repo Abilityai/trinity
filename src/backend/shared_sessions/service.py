@@ -21,6 +21,7 @@ from typing import Optional
 
 from config import ROOM_SOURCE_CHANNEL
 from services.platform_prompt_service import build_user_facing_room_prompt
+from services.skill_gate_errors import SkillGateError
 from utils.helpers import utc_now_iso
 
 from . import db
@@ -112,7 +113,29 @@ ROOM_WAKE_LIMIT_WINDOW_SECONDS = 300
 # How deep an agent->agent mention chain may go from one human message.
 ROOM_MAX_CHAIN_DEPTH = 8
 
+# The INBOUND cap: what a person, a workspace client or an agent calling the API
+# may post as one message (it mirrors `RoomMessageCreate.max_length`).
 MAX_CONTENT_CHARS = 8000
+# #3210: the engine's own post of a turn's reply is NOT inbound, and was held to
+# the cap above anyway — so a 9,000-character research brief, the ordinary output
+# of a room turn, was billed and then discarded without a line. A reply has its
+# own bound: high enough to sit near what one turn can produce, so reaching it is
+# a backstop and not a limit an agent steers by. Past it the reply is trimmed
+# (`_fit_reply`), never refused. Still ONE message per turn: `db.room_cost` joins
+# messages to executions and `count_budget_messages` counts rows, so a reply
+# split across rows would charge the turn once per part and spend the room's
+# message budget doing it.
+MAX_AGENT_REPLY_CHARS = 100_000
+# What a trimmed reply keeps of its END. A long brief closes with its conclusion
+# and, often, the "@next please review" that moves the room on.
+AGENT_REPLY_TAIL_CHARS = 10_000
+# #3210: the transcript one wake hands its agent. Raising the reply bound raises
+# what the NEXT agent is shown, and an unbounded transcript only moves the
+# failure one hop along: the turn overflows its context, and a cold wake repeats
+# it on every retry. 240,000 is what a cold wake could already receive
+# (ROOM_COLD_CONTEXT_MESSAGES x MAX_CONTENT_CHARS), so a room of ordinary
+# messages is shown exactly what it was.
+ROOM_TRANSCRIPT_BUDGET_CHARS = 240_000
 ROOM_TURN_TIMEOUT_SECONDS = 300
 # #3114: how long a room turn waits for a pull pilot's worker to claim it. A
 # room post is held while it waits, so this is far below the agent timeout a
@@ -709,6 +732,21 @@ def _post_system(room_id: str, content: str) -> int:
     return seq
 
 
+def _post_system_safe(room_id: str, content: str) -> None:
+    """`_post_system` for an error handler: it must not raise (#3210).
+
+    A system line is an insert into the same table as the message whose failure
+    is being reported. When that failure is the database, the line fails too —
+    and a handler that raises while explaining an error replaces it with a worse
+    one. The log already has the cause; this only adds what the room can see.
+    """
+    try:
+        _post_system(room_id, content)
+    except Exception:  # noqa: BLE001
+        logger.warning("room %s: could not write the system line %r", room_id,
+                       content, exc_info=True)
+
+
 def _broadcast(event: str, payload: dict) -> None:
     """Thin WS payload — ids only; the client refetches over the access-controlled
     REST. ``/ws`` is unfiltered, and a room transcript is not public (#918)."""
@@ -808,6 +846,129 @@ def _format_delta(messages: list[dict]) -> str:
     return "\n".join(lines)
 
 
+_REPLY_OMITTED = "\n\n[… {n:,} characters omitted from the middle of this reply …]\n\n"
+_FENCE = "```"
+# How far a cut may move to land on whitespace instead of inside a word.
+_CUT_SLACK_CHARS = 200
+_PARTIAL_MENTION_RE = re.compile(r"@[A-Za-z0-9_-]*$")
+
+
+def _fit_reply(text: str) -> str:
+    """An agent reply that fits ``MAX_AGENT_REPLY_CHARS``, marker included (#3210).
+
+    Pure. A reply at or under the bound is returned as it came. A longer one
+    keeps its head and its tail around a marker that says how much is gone — the
+    turn's response stays on the execution the message links to.
+
+    Three details, each one a way a "simple truncation" goes wrong:
+
+    * The marker COUNTS. Trimming to the bound and then appending a marker
+      yields a string over the bound, which is one re-added length check away
+      from the dropped reply this exists to prevent.
+    * A cut never lands inside an ``@mention``. ``@sales-eu`` cut to ``@sales``
+      names a different participant, and mentions are what wake agents.
+    * A cut never leaves a code fence open. An open fence renders the marker,
+      and everything after it, as code.
+    """
+    limit = MAX_AGENT_REPLY_CHARS
+    if len(text) <= limit:
+        return text
+
+    # Reserved for the marker at its longest (the omitted count cannot exceed
+    # the reply's own length) and for a fence closed and reopened around it.
+    reserved = len(_REPLY_OMITTED.format(n=len(text))) + 2 * (len(_FENCE) + 1)
+    room = max(0, limit - reserved)
+    tail_len = min(AGENT_REPLY_TAIL_CHARS, room // 2)
+    head = text[:room - tail_len]
+    tail = text[len(text) - tail_len:] if tail_len else ""
+
+    # Move each cut to whitespace when some is near, so neither side ends or
+    # starts mid-word.
+    slack = head[-_CUT_SLACK_CHARS:]
+    for i in range(len(slack) - 1, -1, -1):
+        if slack[i].isspace():
+            head = head[:len(head) - len(slack) + i]
+            break
+    else:
+        # No whitespace to retreat to: at least never keep half a mention.
+        partial = _PARTIAL_MENTION_RE.search(head)
+        if partial:
+            head = head[:partial.start()]
+    # ...unless the tail already starts on a token: advancing then would drop a
+    # whole word, and the first word of a closing line is often the @mention.
+    if tail and not text[len(text) - len(tail) - 1].isspace():
+        for i, ch in enumerate(tail[:_CUT_SLACK_CHARS]):
+            if ch.isspace():
+                tail = tail[i:]
+                break
+
+    omitted = len(text) - len(head) - len(tail)
+    closer = "\n" + _FENCE if head.count(_FENCE) % 2 else ""
+    # The tail starts inside a code block iff an odd number of fences precede it.
+    opener = _FENCE + "\n" if text[:len(text) - len(tail)].count(_FENCE) % 2 else ""
+    return head + closer + _REPLY_OMITTED.format(n=omitted) + opener + tail
+
+
+def _omitted_row(count: int) -> dict:
+    return {"seq": None, "sender_kind": "system", "sender_identity": None,
+            "kind": "system", "mentions": [],
+            "content": f"[{count} earlier message{'s' if count != 1 else ''} "
+                       "omitted for length]"}
+
+
+# Room for the lines `_fit_transcript` itself adds: at most two omitted runs.
+_OMITTED_ROWS_RESERVE = 2 * 80
+
+
+def _fit_transcript(messages: list[dict], agent_name: str) -> list[dict]:
+    """The delta one wake shows its agent, within ``ROOM_TRANSCRIPT_BUDGET_CHARS`` (#3210).
+
+    Pure. Under budget, the list is returned as it came. Over it, messages are
+    kept WHOLE from the newest backwards until one does not fit, and everything
+    older is replaced by a single line saying how many were left out.
+
+    Whole-or-omitted, not excerpts: an excerpt per message is not a bound (a warm
+    delta is up to 500 rows), and an agent reasoning from the first paragraph of
+    a brief sounds exactly as sure as one that read all of it.
+
+    Two messages are kept whatever the arithmetic says: the newest, and the
+    latest one that mentions this agent. In "@a @b question" the newest thing B
+    sees is A's reply; the ask that woke it sits further back, and a turn handed
+    a transcript without its own ask answers nothing.
+    """
+    budget = ROOM_TRANSCRIPT_BUDGET_CHARS
+    costs = [len(_format_delta([m])) + 1 for m in messages]
+    if sum(costs) <= budget:
+        return messages
+
+    last = len(messages) - 1
+    keep = {last}
+    for i in range(last, -1, -1):
+        if agent_name in (messages[i].get("mentions") or []):
+            keep.add(i)
+            break
+
+    spent = sum(costs[i] for i in keep) + _OMITTED_ROWS_RESERVE
+    for i in range(last - 1, -1, -1):
+        if i in keep:
+            continue
+        if spent + costs[i] > budget:
+            break
+        spent += costs[i]
+        keep.add(i)
+
+    fitted, run = [], 0
+    for i, m in enumerate(messages):
+        if i in keep:
+            if run:
+                fitted.append(_omitted_row(run))
+                run = 0
+            fitted.append(m)
+        else:
+            run += 1
+    return fitted
+
+
 def _build_turn_prompt(room: dict, agent_name: str, delta: list[dict], cold: bool,
                        user_facing: bool = False) -> str:
     # The old header claimed "Other agents and people are in this room"
@@ -826,7 +987,11 @@ def _build_turn_prompt(room: dict, agent_name: str, delta: list[dict], cold: boo
         + who
         + " You were @mentioned, so it is "
         "your turn to reply. Reply with your message only — it will be posted to "
-        "the room as you. To bring in another participant, @mention them by name.\n\n"
+        "the room as you. To bring in another participant, @mention them by name. "
+        # #3210: a hint, not a limit — a long reply still lands whole. It is here
+        # because every agent woken afterwards re-reads what was posted.
+        "For a long deliverable, consider sharing it as a file and posting a "
+        "summary here; post it in full when the room needs the full text.\n\n"
     )
     if cold:
         header += ("[You are joining the conversation now — here is the recent "
@@ -895,7 +1060,13 @@ async def post_message(current_user, room_id: str, content: str,
     content = (content or "").strip()
     if not content:
         raise RoomError(422, "empty_message", "Message content is required")
-    if len(content) > MAX_CONTENT_CHARS:
+    # #3210: the cap is an INBOUND rule. The engine's post of a turn's reply is
+    # fitted to its own bound instead — there is deliberately no size at which
+    # an agent reply raises, because that raise is a billed reply thrown away.
+    is_agent_reply = _sender_override is not None
+    if is_agent_reply:
+        content = _fit_reply(content)
+    elif len(content) > MAX_CONTENT_CHARS:
         raise RoomError(413, "message_too_large",
                         f"Message exceeds {MAX_CONTENT_CHARS} characters")
 
@@ -909,9 +1080,16 @@ async def post_message(current_user, room_id: str, content: str,
     # for a message that already landed, and discard a reply we already paid for
     # (ent#218). We only skip an agent reply if the room already closed (a prior
     # reply tripped the budget, or a close raced in).
-    is_agent_reply = _sender_override is not None
     if is_agent_reply:
         if room["status"] != "open":
+            # #3210: skipped, but never silently — the turn ran and was billed,
+            # and "the room closed first" is the only account of where its
+            # reply went.
+            logger.warning("room %s: reply of %s (execution %s) arrived after the "
+                           "room closed and was not posted",
+                           room_id, _sender_override[1], _execution_id)
+            _post_system_safe(room_id, f"{_sender_override[1]}'s reply arrived "
+                                       "after the room closed and was not posted.")
             return {"room_id": room_id, "seq": None, "mentions": [], "woke": []}
     else:
         _enforce_budgets(room)
@@ -936,6 +1114,38 @@ async def post_message(current_user, room_id: str, content: str,
                             content, mentions, "message", _execution_id, utc_now_iso())
     _broadcast("room_message", {"room_id": room_id, "seq": seq})
 
+    # #3210: the message has LANDED, and from here on nothing may fail the post.
+    #
+    # Everything below the append is consequence — a budget close, the wakes the
+    # message triggers — and it used to share the post's fate: an exception in a
+    # wake three agents down the chain climbed back through every poster above
+    # it. Each agent on the way lost its cursor advance for a reply that was
+    # already in the room, and the human at the top got an error status (and a
+    # failed idempotency claim, i.e. an invitation to post twice) for a message
+    # everyone could read. Cancellation still propagates: it is not an
+    # `Exception`, and swallowing it is how a process refuses to die.
+    try:
+        woke = await _after_landing(current_user, room_id, room, sender_kind,
+                                    sender_identity, mentions, is_agent_reply,
+                                    _chain_depth)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("room %s: message %s landed, but what follows it failed",
+                       room_id, seq, exc_info=True)
+        _post_system_safe(room_id, "This message was posted, but its mentions "
+                                   f"could not be processed ({type(e).__name__}).")
+        woke = []
+    return {"room_id": room_id, "seq": seq, "mentions": mentions, "woke": woke}
+
+
+async def _after_landing(current_user, room_id: str, room: dict, sender_kind: str,
+                         sender_identity: str, mentions: list[str],
+                         is_agent_reply: bool, _chain_depth: int) -> list[str]:
+    """What a landed message sets in motion; returns the agents it woke.
+
+    Split from `post_message` at the append so the caller can hold one line
+    around all of it (#3210): the message is durable before this runs, and no
+    failure in here is a failure to post.
+    """
     # Landing an agent's overshoot reply may exhaust the budget: close the room
     # now (with the visible system line) and stop the cascade — no raise, so the
     # human's original post still returns normally (ent#218).
@@ -943,7 +1153,7 @@ async def post_message(current_user, room_id: str, content: str,
         reason = _budget_exceeded_reason(room)
         if reason:
             _close_with(room_id, reason)
-            return {"room_id": room_id, "seq": seq, "mentions": mentions, "woke": []}
+            return []
 
     # An agent never re-wakes itself: that is the cycle-break at the root.
     targets = [m for m in mentions if m != sender_identity]
@@ -1011,13 +1221,24 @@ async def post_message(current_user, room_id: str, content: str,
             # starting NEW ones, and leave a line so the room explains itself.
             remaining = targets[targets.index(agent_name) + 1:]
             if remaining:
-                _post_system(room_id,
-                             "The sender disconnected; "
-                             f"{', '.join(remaining)} were not woken.")
+                # Non-raising (#3210): a line that fails here would REPLACE the
+                # cancellation with an ordinary error, and the guard around
+                # this function would then swallow it.
+                _post_system_safe(room_id,
+                                  "The sender disconnected; "
+                                  f"{', '.join(remaining)} were not woken.")
             raise
+        except Exception as e:  # noqa: BLE001 — #3210: a wake's failure stops at that wake
+            # `_wake_agent` reports its own turn failures in the room, so this
+            # is what it did not foresee. It costs this target its turn and
+            # nothing else: the next target still runs, and the poster above
+            # still returns.
+            logger.warning("room %s: wake of %s raised", room_id, agent_name,
+                           exc_info=True)
+            _post_system_safe(room_id,
+                              f"{agent_name} could not be woken ({type(e).__name__}).")
 
-    return {"room_id": room_id, "seq": seq, "mentions": mentions,
-            "woke": [t for t in targets]}
+    return [t for t in targets]
 
 
 # --- who is mid-turn, readable after a reload -------------------------------
@@ -1181,6 +1402,16 @@ async def _wake_agent_locked(current_user, room_id: str, agent_name: str,
         return
 
     top_seq = max(m["seq"] for m in delta)
+    # #3210: what the agent is SHOWN is bounded; what it is marked as having
+    # read is not — the cursor still moves past every message in the delta,
+    # omitted ones included, or each later wake would be handed the same
+    # overflow again. (`top_seq` is read above, from the rows the table
+    # returned: the line standing in for an omitted run has no seq.)
+    shown = _fit_transcript(delta, agent_name)
+    if shown is not delta:
+        logger.info("room %s: transcript for %s is over budget — showing %d of %d "
+                    "messages", room_id, agent_name,
+                    sum(1 for m in shown if m.get("seq") is not None), len(delta))
     # The WS broadcast reaches clients that are CONNECTED right now. A client
     # that reloads mid-turn missed it and has nothing to re-derive the state
     # from — the room looked idle while two agents were thinking. So the state
@@ -1217,7 +1448,7 @@ async def _wake_agent_locked(current_user, room_id: str, agent_name: str,
     # means anything — and `images` is what makes "what is in this picture"
     # answerable at all, since an agent must never read an image as text (#728).
     client_email = getattr(current_user, "email", None)
-    manifest_prefix, images = await _room_inbox_context(agent_name, client_email, delta)
+    manifest_prefix, images = await _room_inbox_context(agent_name, client_email, shown)
 
     # ent#661 — lines other modules add to the turn ("" in an OSS build). The
     # audience is the room's own membership verdict above, never a claim.
@@ -1231,7 +1462,12 @@ async def _wake_agent_locked(current_user, room_id: str, agent_name: str,
         # awaited here.
         result = await dispatch_and_await_terminal(
             agent_name=agent_name,
-            message=turn_prefix + manifest_prefix + _build_turn_prompt(room, agent_name, delta, cold, user_facing),
+            message=turn_prefix + manifest_prefix + _build_turn_prompt(room, agent_name, shown, cold, user_facing),
+            # trinity-enterprise#751: the skill gate reads what the participants
+            # wrote that this agent is SHOWN (the #3210 budget-fitted delta),
+            # never the transcript scaffolding.
+            request_text="\n".join(m.get("content") or "" for m in shown
+                                    if m.get("sender_kind") != "system"),
             triggered_by="room",
             conversation_key=f"room:{room_id}",
             system_prompt=room_prompt,
@@ -1263,8 +1499,12 @@ async def _wake_agent_locked(current_user, room_id: str, agent_name: str,
         # say so and re-raise: swallowing cancellation is how a process refuses
         # to die.
         logger.warning("room %s: turn for %s was cancelled", room_id, agent_name)
-        _post_system(room_id, f"{agent_name}'s turn was interrupted.")
+        _post_system_safe(room_id, f"{agent_name}'s turn was interrupted.")
         raise
+    except SkillGateError as e:
+        # trinity-enterprise#751: nothing ran; say why in the room.
+        _post_system(room_id, getattr(e, "message", None) or str(e))
+        return
     except Exception as e:  # noqa: BLE001 — a failed turn is VISIBLE, never silent
         logger.warning("room %s: turn for %s raised: %s", room_id, agent_name, e)
         _post_system(room_id, f"{agent_name} could not respond ({type(e).__name__}).")
@@ -1353,15 +1593,35 @@ async def _wake_agent_locked(current_user, room_id: str, agent_name: str,
     #
     # Both orders have a failure mode; this one costs a repeated read, the other
     # costs money and a lost answer.
-    await post_message(
-        current_user, room_id, reply,
-        _chain_depth=chain_depth,
-        _sender_override=("agent", agent_name),
-        _execution_id=getattr(result, "execution_id", None),
-    )
+    #
+    # #3210: and the post itself is no longer the one unguarded step. It sat
+    # outside every handler in this function, so when it raised — an oversized
+    # reply did, every time — the turn that "a failed turn is VISIBLE, never
+    # silent" was written for ended with no line and no log. `post_message` no
+    # longer raises for anything after its append, so what arrives here is a
+    # reply that did NOT land, and the line says exactly that.
+    execution_id = getattr(result, "execution_id", None)
+    try:
+        await post_message(
+            current_user, room_id, reply,
+            _chain_depth=chain_depth,
+            _sender_override=("agent", agent_name),
+            _execution_id=execution_id,
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.warning("room %s: reply of %s (execution %s) could not be posted",
+                       room_id, agent_name, execution_id, exc_info=True)
+        _post_system_safe(room_id,
+                          f"{agent_name}'s reply could not be posted ({type(e).__name__}).")
+        return
 
     # Cursor advances only on SUCCESS — a failed turn re-delivers its delta.
-    db.advance_read_cursor(room_id, agent_name, top_seq, getattr(result, "session_id", None))
+    try:
+        db.advance_read_cursor(room_id, agent_name, top_seq, getattr(result, "session_id", None))
+    except Exception:  # noqa: BLE001 — #3210: the reply is in the room; this is not its failure
+        logger.warning("room %s: could not advance the read cursor of %s — its "
+                       "next wake re-reads this delta", room_id, agent_name,
+                       exc_info=True)
 
 
 def sweep_expired_rooms() -> int:

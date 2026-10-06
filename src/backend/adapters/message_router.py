@@ -31,6 +31,7 @@ from services.platform_prompt_service import (
 )
 from services.settings_service import settings_service
 from services.task_execution_service import get_task_execution_service
+from services.skill_gate_errors import SkillGateError
 from services.telegram_group_context import (  # ent#600
     MAX_AGE_HOURS,
     MAX_MESSAGES,
@@ -863,6 +864,10 @@ class ChannelMessageRouter:
                 service=get_task_execution_service(),
                 agent_name=agent_name,
                 message=context_prompt,
+                # trinity-enterprise#751: the skill gate reads what THIS sender
+                # wrote, never the sender context + history `context_prompt` wraps
+                # it in — one past mention would gate every later turn.
+                request_text=getattr(message, "text", None),
                 triggered_by=channel,
                 conversation_key=f"channel:{session_id}" if session_id else None,
                 source_user_email=source_email,
@@ -920,6 +925,21 @@ class ChannelMessageRouter:
             response_text = result.response or ""
             logger.debug(f"[ROUTER:{channel}] Step 9 - agent responded ({len(response_text)} chars, cost=${result.cost or 0:.4f})")
             return result
+
+        except SkillGateError as e:
+            # trinity-enterprise#751: the message names a gated skill — nothing
+            # ran. Say so in the conversation (with the request id when an
+            # approval was raised) instead of an error or an empty reply.
+            logger.info(f"[ROUTER:{channel}] Step 9 - held by the skill gate: {e.code}")
+            await self._resolve_indicator(adapter, message, success=False)
+            await adapter.send_response(
+                message.channel_id,
+                ChannelResponse(text=getattr(e, "message", None) or str(e),
+                                metadata={"bot_token": bot_token, "agent_name": agent_name}),
+                thread_id=message.thread_id,
+            )
+            await self._cleanup_uploads(container, upload_dir)
+            return None
 
         except Exception as e:
             logger.error(f"[ROUTER:{channel}] Step 9 - execution error: {e}", exc_info=True)

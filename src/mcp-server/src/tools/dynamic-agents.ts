@@ -20,6 +20,7 @@
 import { z } from "zod";
 import { TrinityClient } from "../client.js";
 import { runAgentChat } from "./chat.js";
+import { DELEGATION_CONTRACT } from "../delegation_contract.js";
 import type { ToolAccessPolicy } from "../access.js";
 
 /** One exposed agent as returned by GET /api/internal/mcp-exposed-agents. */
@@ -42,9 +43,14 @@ export function makeDedicatedChatTool(
   toolName: string,
   description: string
 ) {
+  // ent#568: the tool answers with chat_with_agent's receipts, so it carries
+  // the same delegation contract, verbatim, after the backend's name-only line
+  // (#846). A blank line falls back to the default rather than leading with
+  // an empty paragraph that never names the agent.
+  const ownerLine = description.trim() || `Chat directly with the "${agentName}" agent.`;
   return {
     name: toolName,
-    description,
+    description: `${ownerLine}\n\n${DELEGATION_CONTRACT}`,
     parameters: z.object({
       message: z
         .string()

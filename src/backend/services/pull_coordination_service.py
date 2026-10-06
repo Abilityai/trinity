@@ -485,6 +485,31 @@ def _switch_failure_kind(
     return _SWITCH_FAILURE_KINDS.get((error_code or "").strip().lower())
 
 
+def _spawn_breaker_verdict(agent_name: str, row_status, is_auth: bool) -> None:
+    """Record a pulled terminal's dispatch-breaker outcome in the background.
+
+    SUCCESS records a success, an auth failure records ``auth``, anything else
+    records nothing (a failure's ``None`` would read as a success). Fail-open.
+    """
+    if row_status == TaskExecutionStatus.SUCCESS:
+        code = None
+    elif is_auth:
+        code = "auth"
+    else:
+        return
+    try:
+        # Lazy: task_execution_service imports half the service layer.
+        from services import task_execution_service as tes
+
+        tes._spawn_bg(
+            tes._record_dispatch_terminal(
+                agent_name, tes.dispatch_breaker_active(agent_name), code
+            )
+        )
+    except Exception as e:
+        logger.warning("[#2514] breaker verdict for %s not recorded: %s", agent_name, e)
+
+
 # Strong refs to in-flight delivery tasks: a bare create_task can be collected
 # mid-flight (same reason as activity_service._inflight_close_tasks).
 _inflight_delivery_tasks: "set[asyncio.Task[Any]]" = set()
@@ -767,6 +792,10 @@ def apply_task_result(
                 error_message=err_text or f"[{error_code}] pull terminal",
                 failure_kind=switch_kind,
             )
+        # #2514: the dispatch-breaker verdict (#526 D10), as the push terminals
+        # record it. Without it a pilot's breaker never trips on a pulled auth
+        # failure and never closes on the half-open probe it pulled.
+        _spawn_breaker_verdict(execution.agent_name, row_status, is_auth)
         # #2329: apply the caller's post-turn delivery settings (chat-session
         # save, collaboration / self-task finalisation) exactly as the push
         # drain does, then wake a sync waiter in this process. Its DB poll

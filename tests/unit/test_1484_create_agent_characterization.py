@@ -1598,3 +1598,63 @@ async def test_ent705_a_fork_is_reported_as_a_fork_after_fork_to_own_ran(crud_en
 
     assert decision["reason"] == "fork-to-own: the agent owns its fork"
     ctx["git_service"].probe_push_access.assert_not_awaited()
+
+
+# ===========================================================================
+# trinity-enterprise#703 — the container pulls origin on its own
+# ===========================================================================
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kw", [{}, {"kind": "deployment"}], ids=["agent", "deployment"])
+async def test_ent703_a_github_create_turns_the_pull_cycle_on(crud_env, monkeypatch, kw):
+    """Source mode included: a pull-only agent is exactly the one that needs a pull."""
+    crud, ctx = crud_env
+    await _create_default(crud, ctx, monkeypatch, "gc-pull", **kw)
+
+    assert _agent_run_kwargs(ctx)["environment"]["GIT_SYNC_PULL"] == "true"
+    ctx["db"].set_git_pull_sync_enabled.assert_called_once_with("gc-pull", True)
+
+
+# ===========================================================================
+# trinity-enterprise#704 — git_mode says whether the agent PUSHES
+# ===========================================================================
+# PR #3022 review: the UI read "pull-only" from `source_mode`, but fork-to-own
+# is source-mode AND auto-pushes to its own fork. `pushes` is the
+# `_git_auto_sync_baked` predicate the container env is baked from.
+
+
+@pytest.mark.asyncio
+async def test_ent704_git_mode_pushes_for_an_agent_on_its_own_repo(crud_env, monkeypatch):
+    crud, ctx = crud_env
+    _own_token(monkeypatch, crud)
+    result = await _create_own_repo(crud, ctx, monkeypatch, "gm-own")
+    assert result.git_mode["pushes"] is True
+
+
+@pytest.mark.asyncio
+async def test_ent704_git_mode_does_not_push_when_pull_only(crud_env, monkeypatch):
+    crud, ctx = crud_env
+    result = await _create_default(crud, ctx, monkeypatch, "gm-pull")
+    assert result.git_mode["source_mode"] is True
+    assert result.git_mode["pushes"] is False
+
+
+@pytest.mark.asyncio
+async def test_ent704_git_mode_pushes_for_fork_to_own(crud_env, monkeypatch):
+    crud, ctx = crud_env
+    _script_github_template(ctx, fork_to_own_meta="required")
+    _patch_repo_validation(monkeypatch, crud)
+    from services.agent_service.fork_to_own import ForkToOwnResult
+    monkeypatch.setattr(
+        crud, "fork_template_to_own_repo",
+        AsyncMock(return_value=ForkToOwnResult("alice/brain", "main", False)))
+    cfg = _github_config(
+        "gm-fork",
+        fork_to_own={"destination_repo": "alice/brain",
+                     "github_pat": "ghp_userpat", "private": True})
+    result = await crud.create_agent_internal(cfg, _user(), None)
+
+    assert _agent_run_kwargs(ctx)["environment"]["GIT_SYNC_AUTO"] == "true"
+    assert result.git_mode["source_mode"] is True
+    assert result.git_mode["pushes"] is True
+    assert result.git_mode["reason"] == "fork-to-own: the agent owns its fork"

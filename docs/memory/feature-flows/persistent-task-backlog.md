@@ -35,7 +35,7 @@ behind when a release callback couldn't fire (e.g. process crash).
 
 Before BACKLOG-001 (#260), `async_mode=true` requests at capacity were dropped
 on the floor with a 429 response. Bursty MCP fan-out scenarios (agents
-orchestrating other agents via `chat_with_agent(async=true)`) routinely hit
+orchestrating other agents via `chat_with_agent(parallel=true, async=true)`) routinely hit
 the 3-slot default cap and lost work. Clients had to implement their own
 retry-with-backoff logic, and there was no first-class backpressure signal.
 
@@ -576,7 +576,7 @@ All nine acceptance criteria from issue #260 are met:
 
 ## What Doesn't Change
 
-- MCP tool signatures — `chat_with_agent(async=true)` automatically gains
+- MCP tool signatures — `chat_with_agent(parallel=true, async=true)` automatically gains
   backlog behaviour.
 - Frontend routing — the Tasks tab and execution detail views render
   queued rows via the existing list endpoints; only the status badge

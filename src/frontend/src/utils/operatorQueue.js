@@ -126,6 +126,8 @@ export const QUEUE_TYPE_LABELS = Object.freeze({
   approval: 'Needs approval',
   question: 'Question',
   alert: 'Heads up',
+  // #3130: the flood alarm became a budgeted platform type; it is still an alert.
+  queue_flood: 'Heads up',
 })
 
 /**
@@ -303,6 +305,21 @@ export function respondRefusedAsDiverged(err) {
 
 export const QUEUE_RESPONSE_DIVERGED =
   'The agent changed this item after you opened it. Review it and send again to answer anyway.'
+
+/**
+ * trinity-enterprise#751 — a gated-skill approval is decided only by the person
+ * it was addressed to; anyone else's answer is refused (403 `not_addressee`) and
+ * nothing is recorded. Refused by WHO answered, not by the item's state, so it is
+ * neither a "not recorded, refetch" nor a divergence.
+ */
+export function respondRefusedAsNotAddressee(err) {
+  if (err?.response?.status !== 403) return false
+  const detail = err?.response?.data?.detail
+  return Boolean(detail && typeof detail === 'object' && detail.code === 'not_addressee')
+}
+
+export const QUEUE_RESPONSE_NOT_ADDRESSEE =
+  'This approval was addressed to someone else; only they can decide it.'
 
 /**
  * trinity-enterprise#611 — how an item ENDED, as ONE rule every surface renders

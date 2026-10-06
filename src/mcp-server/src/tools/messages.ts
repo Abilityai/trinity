@@ -9,6 +9,7 @@ import { z } from "zod";
 import { TrinityClient } from "../client.js";
 import type { McpAuthContext } from "../types.js";
 import { resolveExecutionId } from "./execution_id.js";
+import { DELEGATION_RULE } from "../delegation_contract.js";
 
 /**
  * Create message tools with the given client
@@ -70,7 +71,11 @@ export function createMessageTools(
         "The recipient must have opted in to receive proactive messages from this agent " +
         "(allow_proactive flag must be set in their sharing record). " +
         "Messages are delivered via Telegram, Slack, or web based on the channel parameter. " +
-        "Rate limited to 10 messages per recipient per hour.",
+        "Rate limited to 10 messages per recipient per hour. " +
+        DELEGATION_RULE +
+        " A send that errored without a named refusal may still have reached the person: never send it " +
+        "again under a new `dedup_label` or from a later turn (the delegation contract in " +
+        "`chat_with_agent`'s description).",
       parameters: z.object({
         to: z.enum(["primary", "approver", "viewer"]).optional()
           .describe("The role to message. The platform resolves the person. Use this, not recipient_email."),

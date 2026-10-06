@@ -66,7 +66,12 @@ def _denied():
 def _fake_db(pending=0, exists=False, create_side_effect=None):
     db = MagicMock()
     db.operator_queue_item_exists.return_value = exists
-    db.count_operator_queue_pending_for_agent.return_value = pending
+    # Keyed on the read's kwargs (#3130): the flood alert is now created through
+    # the #1677 budget, whose `item_type="queue_flood"` read must not see the
+    # agent's depth — a flat return_value would refuse every flood alert.
+    db.count_operator_queue_pending_for_agent.side_effect = (
+        lambda agent, item_type=None, exclude_request_id_prefixes=None:
+        0 if item_type else pending)
     if create_side_effect is not None:
         db.create_operator_queue_item.side_effect = create_side_effect
     db.mark_operator_queue_acknowledged.return_value = False
@@ -437,7 +442,7 @@ class TestExemptionAndFloodAlert:
         assert db.create_operator_queue_item.call_count == 1
         item = db.create_operator_queue_item.call_args.args[1]
         assert item["id"].startswith("queue-flood-a-")   # un-guessable id (C2)
-        assert item["type"] == "alert"
+        assert item["type"] == "queue_flood"            # budgeted (#3130)
         assert item["priority"] == "high"
         assert "7 request(s)" in item["question"]        # not clamped
         rate.assert_not_called()                          # exempt from the rate cap

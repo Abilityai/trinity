@@ -30,6 +30,7 @@ from models import (
 )
 from services.activity_service import activity_service
 from services.task_execution_service import get_task_execution_service
+from services.skill_gate_errors import SkillGateError
 from services.platform_audit_service import platform_audit_service, AuditEventType
 from services import (
     heartbeat_service, idempotency_service, schedule_seat_memory, schedule_workspace_delivery,
@@ -716,6 +717,12 @@ async def _execute_task_internal_background(
             except Exception as db_err:
                 logger.error(f"Failed to update execution status on cancel: {db_err}")
         raise
+
+    except SkillGateError as e:
+        # trinity-enterprise#751: the run names a gated skill. Not a failure —
+        # the backstop already closed the row SKIPPED (the scheduler does not
+        # retry SKIPPED) and raised the approval or refused by name.
+        logger.info(f"Scheduled task on {request.agent_name} not run by the skill gate: {e.code}")
 
     except Exception as e:
         # If an exception escapes TaskExecutionService, ensure execution is marked failed

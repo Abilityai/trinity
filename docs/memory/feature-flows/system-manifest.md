@@ -41,6 +41,7 @@ system_view:
 agents:
   orchestrator:
     template: github:YourOrg/orchestrator-agent
+    kind: agent       # trinity-enterprise#704: agent (default) | deployment — see github-sync.md
     resources:
       cpu: "2"
       memory: "4g"
@@ -631,6 +632,20 @@ def export_manifest(system_name: str, agents: List[Dict]) -> str:
         YAML string representing the system configuration
     """
 ```
+
+**`kind` round-trip (trinity-enterprise#704, PR #3022 review)**: `kind` is not
+persisted, so export reads it back from the git binding. A pull-only git member
+(`source_mode` on, auto-sync off) exports `kind: deployment`, so a redeploy never
+hands it the agent default's working branch and auto-push. A member that pushes
+(a working branch, or fork-to-own: source mode on its own fork with auto-sync on)
+or has no git binding exports no `kind`. An agent that asked for `agent` but fell
+back to pull-only exports as a deployment too — the conservative direction.
+**Known limit:** export infers fork-to-own from "source mode + auto-sync on". An
+owner who turns auto-sync on for a deployment in Settings → Git sync makes it
+read as a pushing agent, so it exports with no `kind` (and its badge says it
+saves to its default branch, while the heartbeat refuses to push there).
+Rejecting that toggle for non-fork source-mode agents needs a persisted fork
+marker, which `agent_git_config` does not have yet.
 
 **Permission Detection Logic**:
 - Check first agent's permissions

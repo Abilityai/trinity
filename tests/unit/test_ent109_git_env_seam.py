@@ -366,6 +366,19 @@ class TestGitSyncAuto:
         assert env["GIT_SYNC_AUTO"] == "true"
         db.set_git_auto_sync_enabled.assert_not_called()
 
+    @pytest.mark.parametrize("flag, expected", [(True, "true"), (False, None)])
+    def test_the_pull_env_follows_the_db_flag_alone(self, lc_env, flag, expected):
+        """trinity-enterprise#703: GIT_SYNC_PULL is derived like GIT_SYNC_AUTO —
+        the DB flag alone, never written back."""
+        lc, db, _rg = lc_env
+        db.get_git_config.return_value = _row(source_mode=True, pull_sync_enabled=flag)
+
+        env = _carried(GIT_SYNC_PULL="true")
+        lc._apply_git_env_from_db("a1", env, pat_gate="per_agent_only")
+
+        assert env.get("GIT_SYNC_PULL") == expected
+        db.set_git_pull_sync_enabled.assert_not_called()
+
     def test_neither_source_clears_a_stale_flag(self, lc_env):
         lc, db, _rg = lc_env
         db.get_git_config.return_value = _row(auto_sync_enabled=False)
@@ -550,7 +563,8 @@ class TestSetOrClear:
         """`_GIT_ENV_KEYS` drives the clear sweep; a var the helper writes but
         forgets to list would never be cleared."""
         lc, db, rg = lc_env
-        db.get_git_config.return_value = _row(auto_sync_enabled=True)
+        # every owned var written: auto-sync and (trinity-enterprise#703) pull on
+        db.get_git_config.return_value = _row(auto_sync_enabled=True, pull_sync_enabled=True)
         db.get_agent_github_pat.return_value = "ghp_PER_AGENT"
         rg.get_github_pat_for_agent.return_value = "ghp_PER_AGENT"
         monkeypatch.setenv("TRINITY_GIT_BASE_URL", "http://gitea:3000")
