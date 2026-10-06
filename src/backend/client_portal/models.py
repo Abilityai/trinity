@@ -321,6 +321,29 @@ class PortalExchangeResponse(BaseModel):
     expires_in: int
 
 
+class PortalTurnAttachment(BaseModel):
+    """One file the client attached to a chat turn (#3265).
+
+    A NAME, never content: the upload already landed through
+    `POST /agents/{agent_name}/documents`. The server keeps a successful entry
+    only when that filename is in the caller's own uploads to this agent, and
+    takes its size and type from there. `failed` marks an upload that did not
+    land, so the message says so instead of dropping it.
+    """
+    filename: str = Field(min_length=1, max_length=255)
+    failed: bool = False
+    error: Optional[str] = Field(None, max_length=300)
+
+
+class PortalMessageAttachment(BaseModel):
+    """What a user turn carried, as stored on its row (#3265)."""
+    filename: str
+    size_bytes: Optional[int] = None
+    mime_type: Optional[str] = None
+    failed: bool = False
+    error: Optional[str] = None
+
+
 class PortalChatRequest(BaseModel):
     """A client's chat turn to a rostered agent. ``session_id`` targets a specific
     thread; when omitted the turn lands in the client's most-recent session (or a
@@ -346,6 +369,11 @@ class PortalChatRequest(BaseModel):
     # so a client cannot put words in the agent's mouth. Optional; every
     # existing caller is unaffected.
     reply_to_message_id: Optional[str] = Field(None, max_length=64)
+    # #3265 — the files attached to this turn, by upload filename. Optional;
+    # every existing caller is unaffected. Bounded like an upload batch
+    # (`MAX_BATCH_FILES`), and resolved against the caller's own uploads before
+    # anything is stored (`service.resolve_turn_attachments`).
+    attachments: Optional[list[PortalTurnAttachment]] = Field(None, max_length=20)
     # ent#403 — the model this turn should run on. THREE states, preserving the
     # #894 shape rather than collapsing it to two: a curated id = an explicit
     # choice; `None`/`""`/whitespace = INHERIT (the agent's `public_channel_model`,
@@ -944,6 +972,9 @@ class PortalHistoryMessage(BaseModel):
     # rows into a single collapsed block keyed on this id.
     source: Optional[str] = None
     voice_call_id: Optional[str] = None
+    # #3265: the files a user turn carried, so a reload shows them on the
+    # message. None for every other row.
+    attachments: Optional[list[PortalMessageAttachment]] = None
 
 
 class PortalTurnOutcome(BaseModel):

@@ -269,7 +269,10 @@ export function usePortalFileDrop(upload, { disabled = () => false } = {}) {
       for (const { file, entry, rejection } of mine) {
         if (rejection) continue
         try {
-          await upload(file)
+          const res = await upload(file)
+          // #3265: the name the server stored the file under (it sanitises),
+          // which is what a sent message names it by.
+          entry.serverName = (res && typeof res.filename === 'string' && res.filename) || file.name
           entry.done = true
         } catch (err) {
           entry.error = uploadFailureReason(err)

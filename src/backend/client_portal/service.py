@@ -2837,7 +2837,10 @@ async def portal_chat(agent_name: str, message: str, email: str,
                       # person (`PortalPrincipal.is_person`), so an approver may run
                       # their own gated request. False for any caller that did not
                       # (voice relays a model's paraphrase of the speech).
-                      gate_is_person: bool = False) -> dict:
+                      gate_is_person: bool = False,
+                      # #3265 — the turn's attachments, already resolved by
+                      # `resolve_turn_attachments` (JSON). Stored on the user row.
+                      attachments: str | None = None) -> dict:
     """Run one client chat turn against a rostered agent as a standard platform
     execution (``triggered_by="public"`` — the external-caller path, observable +
     cost-tracked). Scoped to the caller's roster; raises ``ClientPortalError`` on
@@ -3022,7 +3025,8 @@ async def portal_chat(agent_name: str, message: str, email: str,
     # the thread's title before this writes the derived one, and the history
     # context below must not contain the very message it is context FOR. Both
     # reads happen first, deliberately.
-    _persist_user_turn(agent_name, email, session_id, client_message, voice_call_id=voice_call_id)
+    _persist_user_turn(agent_name, email, session_id, client_message, voice_call_id=voice_call_id,
+                       attachments=attachments)
 
     # ent#186 / #2579: title the thread NOW, concurrently with the turn.
     #
@@ -3432,8 +3436,55 @@ def _voice_attribution(voice_call_id: str | None) -> dict:
     return {"voice_call_id": voice_call_id} if voice_call_id else {}
 
 
+# #3265 — what a user turn carried. The upload itself already happened (the
+# composer uploads on attach); the turn only NAMES the files. A successful entry
+# is kept only when that filename is in the caller's own uploads to this agent,
+# with size and type read from there, so a request cannot put a file on its
+# message that it never sent. A failed one keeps its name and reason — the
+# person is told on the message, never by silence.
+_FAILED_UPLOAD = "This file did not upload."
+_NOT_IN_UPLOADS = "This file is not in your uploads to this agent."
+
+
+async def resolve_turn_attachments(agent_name: str, email: str, requested) -> str | None:
+    """The JSON stored on the user row, or None when nothing was attached."""
+    if not requested:
+        return None
+    inbox = {it["filename"]: it for it in await _read_inbox(agent_name, email)}
+    out, seen = [], set()
+    for a in requested:
+        name = (getattr(a, "filename", "") or "").strip()
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        if getattr(a, "failed", False):
+            out.append({"filename": name, "failed": True,
+                        "error": (getattr(a, "error", None) or _FAILED_UPLOAD)[:300]})
+        elif name in inbox:
+            it = inbox[name]
+            out.append({"filename": name, "size_bytes": it.get("size_bytes"),
+                        "mime_type": it.get("mime_type")})
+        else:
+            out.append({"filename": name, "failed": True, "error": _NOT_IN_UPLOADS})
+    return json.dumps(out) if out else None
+
+
+def decode_turn_attachments(raw) -> list | None:
+    """The stored column as a list; None for no attachments or an unreadable value."""
+    if not raw:
+        return None
+    try:
+        items = json.loads(raw)
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(items, list):
+        return None
+    return [i for i in items if isinstance(i, dict) and i.get("filename")] or None
+
+
 def _persist_user_turn(agent_name: str, email: str, session_id: str, content: str,
-                       voice_call_id: str | None = None) -> None:
+                       voice_call_id: str | None = None,
+                       attachments: str | None = None) -> None:
     """Write the client's own message, before the turn runs. Best-effort.
 
     Idempotent against a RETRY. The message is written before the turn so a
@@ -3461,7 +3512,11 @@ def _persist_user_turn(agent_name: str, email: str, session_id: str, content: st
     try:
         now = utc_now_iso()
         db.add_portal_message(uuid.uuid4().hex, agent_name, email, "user", content,
-                              None, now, session_id=session_id, **_voice_attribution(voice_call_id))
+                              None, now, session_id=session_id,
+                              **_voice_attribution(voice_call_id),
+                              # #3265: only when the turn carried files, so the
+                              # ordinary write is byte-identical to before.
+                              **({"attachments": attachments} if attachments else {}))
         db.touch_portal_session(session_id, now, added=1,
                                 title_if_empty=_derive_title(content))
     except Exception as e:  # noqa: BLE001 — never block a turn on bookkeeping
@@ -3891,7 +3946,9 @@ async def start_portal_turn(agent_name: str, message: str, email: str,
                             # ent#610 — see `portal_chat`.
                             reply_context: str = "",
                             # trinity-enterprise#751 — see `portal_chat`.
-                            gate_is_person: bool = False) -> dict:
+                            gate_is_person: bool = False,
+                            # #3265 — see `portal_chat`.
+                            attachments: str | None = None) -> dict:
     """Begin a turn and return as soon as it is dispatchable.
 
     Returns ``{execution_id, session_id}``. The caller subscribes to the
@@ -3991,6 +4048,7 @@ async def start_portal_turn(agent_name: str, message: str, email: str,
         try:
             await portal_chat(agent_name, message, email, session_id=session_id,
                               include_owned=include_owned, execution_id=execution_id,
+                              attachments=attachments,   # #3265
                               turn_timeout_seconds=turn_timeout,
                               # #2196: already resolved above — one Docker read per turn.
                               availability=availability,
@@ -4461,6 +4519,9 @@ def get_history(agent_name: str, email: str, session_id: str | None = None,
     # the thumb they already gave. One query for the thread rather than one per
     # message, and scoped to this evaluator — nobody sees anyone else's rating.
     _attach_own_ratings(messages, email, is_platform=include_owned)
+    # #3265: the stored JSON becomes the list the bubble renders.
+    for m in messages:
+        m["attachments"] = decode_turn_attachments(m.get("attachments"))
     # ent#286: a client that reloaded mid-turn has lost the execution id it was
     # streaming. It arrives here, on the fetch the client already makes on
     # mount, so reattaching costs no extra round trip.

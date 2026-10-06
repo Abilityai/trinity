@@ -1,6 +1,17 @@
 {
   "test_files": [
     {
+      "file": "unit/test_3265_portal_message_attachments.py",
+      "feature": "#3265",
+      "added": "2026-10-06",
+      "categories": [
+        "backend",
+        "api",
+        "workspace"
+      ],
+      "description": "A sent Workspace message keeps its attachments: resolve_turn_attachments keeps only names in the caller's own uploads (size/type from the server), records failed uploads with their reason, rejects unknown names, dedups; the user row stores the JSON on real SQLite and the history route returns it as a list; the streaming route resolves and forwards the request's attachments; the request is bounded at 20."
+    },
+    {
       "file": "unit/test_3246_platform_alert_surfaces.py",
       "feature": "#3246",
       "added": "2026-10-05",
