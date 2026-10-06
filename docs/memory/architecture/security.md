@@ -121,6 +121,8 @@ The same reasoning governs the backend side. `scope` is a free-text column with 
 
 CRED-002 file-injection model (Invariant #12): `.env` (KEY=VALUE source of truth) + `.mcp.json` edited directly; encrypted backup `.credentials.enc` (AES-256-GCM, safe for git); auto-import on startup if `.credentials.enc` exists without `.env`. Flow: Quick Inject writes `.env` → Export encrypts to `.credentials.enc` → agent start decrypts and writes files. OAuth providers for agent credentials: Google, Slack, GitHub (PAT), Notion. Common MCP servers inside agents: google-workspace, slack, notion, github, n8n-mcp.
 
+**File routes (trinity-enterprise#819/#823).** Accessor tier for list and write; owner tier (PERSON gate, then owner-or-admin) for reading credential paths (`services/agent_service/files.py::_enforce_owner_tier_read`, audited). The agent server opens reads without following any link and serves that descriptor (`agent_server/routers/files.py::_open_for_read`); PUT / mkdir / DELETE never reach the runtime config paths, matched on the resolved target (`_RUNTIME_CONFIG_PATHS`). Agents not yet on that image are probed once per container and image, and refuse below-owner reads until recreated. Write side: hook `path_deny` and the agent-server name lists. Detail: `feature-flows/file-browser.md`.
+
 ---
 
 ## Container Security
