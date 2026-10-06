@@ -213,3 +213,21 @@ def test_spawn_ignores_a_host_loop_that_was_closed(ors):
         loop.close()
     with pytest.raises(RuntimeError, match="could not be scheduled"):
         ors.spawn_on_loop(lambda: asyncio.sleep(0))
+
+
+def test_spawn_ignores_a_host_loop_that_is_open_but_not_running(ors):
+    """A captured loop that is open but not running — a test's private loop
+    between `run_until_complete` calls, or one whose `run_forever` returned —
+    would accept `call_soon_threadsafe` and queue the task forever. It is not a
+    target either: the spawn fails loudly and nothing is parked on that loop."""
+    loop = asyncio.new_event_loop()
+    try:
+        loop.run_until_complete(asyncio.sleep(0))
+        ors.remember_host_loop(loop)
+        assert not loop.is_closed() and not loop.is_running()
+        with pytest.raises(RuntimeError, match="could not be scheduled"):
+            ors.spawn_on_loop(lambda: asyncio.sleep(0))
+        assert not loop._ready, "a callback was parked on a loop that will never run it"
+    finally:
+        ors.remember_host_loop(None)
+        loop.close()
