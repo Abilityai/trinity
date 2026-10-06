@@ -49,7 +49,9 @@ def queued_activity_ids(backlog_metadata: Optional[str]) -> List[str]:
     #2329: these are opened by the producer, not by the dispatch, so the
     related-execution lookup never finds them. The push drain closes them in
     ``run_async_task``; every other terminal writer (pull sink, lease-reaper
-    park, expire, watchdog) reaches them only through this, by exact id.
+    park, watchdog) reaches them only through this, by exact id. Backlog
+    expiry (``expire_stale_queued``) calls no closer; the 120-minute sweep
+    covers it.
     """
     try:
         meta = json.loads(backlog_metadata or "{}")

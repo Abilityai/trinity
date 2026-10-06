@@ -12,7 +12,7 @@ Also pinned here:
     so delivery (which is not idempotent) runs once;
   * the collaboration / self-task activity a queued row carries is closed by
     the single activity-close owner, so a terminal written outside the sink
-    (lease-reaper park, expire, watchdog) does not leave it `started`.
+    (lease-reaper park, watchdog) does not leave it `started`.
 """
 from __future__ import annotations
 
@@ -347,7 +347,7 @@ class TestQueuedActivityClose:
     async def test_terminal_outside_the_sink_closes_collaboration_activity(
         self, seed_agent, enqueue
     ):
-        """Lease-reaper park, expire_stale, watchdog: none run the sink, all
+        """Lease-reaper park, watchdog: neither runs the sink, both
         call the single close owner."""
         from database import db
         from db.write_params import ExecutionResult

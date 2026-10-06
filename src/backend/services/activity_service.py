@@ -280,7 +280,8 @@ class ActivityService:
     async def _close_queued_activities(self, execution_id, activity_state, error) -> None:
         """#2329: close the collaboration / self-task activity a queued row
         names, so a terminal written outside ``run_async_task`` (pull sink,
-        lease-reaper park, expire, watchdog) does not leave it ``started``.
+        lease-reaper park, watchdog) does not leave it ``started``. Backlog
+        expiry calls no closer; the 120-minute sweep covers it.
         Details carry the keys the push closers write, because whichever
         closer wins the CAS is the one whose details persist."""
         execution = db.get_execution(execution_id)
