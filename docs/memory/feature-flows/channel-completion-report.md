@@ -105,11 +105,12 @@ reported back.
   computed as before; a typed `manual` opt-out never clears it.
 - **Not in the idempotency key.** The parent does not change the
   `Idempotency-Key` (Invariant #18), so the same text from a later turn within
-  24 h replays the first run, which reports to the first turn's thread.
+  24 h replays the first run, which reports to the first turn's thread (#3296).
 - **Sequential `/chat` cannot carry one.** `ChatMessageRequest` has no parent
   field, the `/chat` row is created without `source_channel*`, and the `/chat`
   terminals never spawn a report. Long work belongs on
   `parallel=true, async=true`, which the delegation contract already teaches.
+  Follow-up: #3295.
 
 Copy-paste example, from an agent serving a Slack thread — no argument needed:
 
