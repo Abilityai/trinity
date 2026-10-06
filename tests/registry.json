@@ -1,6 +1,39 @@
 {
   "test_files": [
     {
+      "file": "unit/test_ent792_file_guardrail_hook.py",
+      "feature": "trinity-enterprise#792",
+      "added": "2026-10-06",
+      "categories": [
+        "agent",
+        "security",
+        "guardrails"
+      ],
+      "description": "The in-agent PreToolUse file guardrail reads any run of leading slashes as one: runs the SHIPPED docker/base-image/hooks/file-guardrail.py main() through run_hook against the shipped guardrails-baseline.json (lib loaded by path, sys.path and sys.modules restored). //- and ///-prefixed .ssh, .aws, .claude/settings*.json, /opt/trinity and /etc/claude-code paths are denied (exit 2) like the one-slash form; ordinary // paths stay allowed; the baseline is asserted to carry the absolute patterns so the rows are not vacuous. Pairs with the // rows in test_read_only_guard.py. Reverting the hook fix turns 7 red."
+    },
+    {
+      "file": "unit/test_files_protected_paths.py",
+      "feature": "Issue #590 / AISEC-C2, trinity-enterprise#792",
+      "added": "2026-10-06",
+      "categories": [
+        "backend",
+        "security",
+        "files"
+      ],
+      "description": "The backend file-route deny list, run against the SHIPPED services.agent_service.files (it used to test an inline copy, which is how ent#792 went unseen). AISEC-C2 reproduction, protected paths, traversal, allowed paths, edge cases; any number of leading slashes is refused (normpath keeps exactly two); DELETE refuses a protected path and any directory that holds one (.ssh, .claude, the home dir, the /proc/self/root and /proc/self/cwd doors), with the derived anchor tuple pinned and the derivation rule tested on hypothetical glob shapes; three Hypothesis properties (the normalised form equals an independent segment-stack resolution, extra leading slashes never change a verdict, DELETE refused iff writing is or the path holds an anchor); through the route logic and through the real FastAPI router (mkdir takes its path in the JSON body): // paths refused on PUT, mkdir and DELETE with the exact refusal, ordinary deletes reach the container lookup, and the agent is sent the normalised path that was checked. Five mutations each red."
+    },
+    {
+      "file": "unit/test_ent787_guardrail_exec_form.py",
+      "feature": "abilityai/trinity-enterprise#787",
+      "added": "2026-10-06",
+      "categories": [
+        "agent",
+        "security",
+        "unit"
+      ],
+      "description": "trinity-enterprise#787: the GUARD-002 hooks register in exec form under env -i + -I -S with a policy-pinned empty CLAUDE_CODE_SHELL_PREFIX (exact shape, key set of a known-loading entry, a port of CLI 2.1.281's hook spawn branch ratcheted to the image's CLI pin); each hook executed under its registered flags/env keeps its deny/allow tables; a hostile PYTHONPATH and a user-site usercustomize flip a deny under the old invocation (precondition) and not under the registered flags; read-only config is root-owned (guard and Codex never read the home file; the backend's root-exec argv writes the config as data, injection payloads included); startup.sh's legacy cleanup, executed under bash, removes both shipped claude-settings.json versions and keeps anything else. Mutation-proven."
+    },
+    {
       "file": "unit/test_3243_atomic_asks.py",
       "feature": "#3243",
       "added": "2026-10-05",
@@ -868,7 +901,7 @@
         "files",
         "credentials"
       ],
-      "description": "Integration tests for the .mcp.json RCE-by-config bypass closure: AISEC-C2 exact reproduction (PUT /files?path=.mcp.json + credentials/inject vectors), full path_deny coverage (15 protected paths), path traversal variants (8), credentials inject allowlist (rejected paths + .env/.credentials.enc regression), defense-in-depth verification (block at backend layer for stopped agents), file-state proof (content unchanged after blocked write). Pairs with tests/unit/test_files_protected_paths.py. trinity-enterprise#792: two-leading-slash paths in the traversal set; DELETE of protected paths and the directories holding them (.ssh, .claude, a // path, /proc/self/cwd) and a // mkdir refused at the backend against a stopped agent."
+      "description": "Integration tests for the .mcp.json RCE-by-config bypass closure: AISEC-C2 exact reproduction (PUT /files?path=.mcp.json + credentials/inject vectors), full path_deny coverage (15 protected paths), path traversal variants (8), credentials inject allowlist (rejected paths + .env/.credentials.enc regression), defense-in-depth verification (block at backend layer for stopped agents), file-state proof (content unchanged after blocked write). Pairs with tests/unit/test_files_protected_paths.py (32 unit tests)."
     },
     {
       "file": "test_mcp_validator_endpoint.py",
@@ -3783,29 +3816,7 @@
         "security",
         "skills"
       ],
-      "description": "Only designated agents may change an agent's skills — their own included (ent#596). The scope ALLOWLIST as a ten-row matrix (JWT / user / system pass unchanged; agent passes only with a live grant; connector, ops, portal_delegate and a scope invented tomorrow are refused; a principal with no mcp_scope fails closed); the composed dependency checks the capability BEFORE the owner fence, so a non-holder gets one uniform named 403 for an existing, nonexistent or foreign target and a holder gains no reach beyond its owner; the route table read off FastAPI's real dependant graph (every skill-changing route takes the fence; the grant routes exist and are not shadowed); a refused agent key changes nothing on any of the four routes through a real FastAPI app; the file-route side door (.claude/skills/** via PUT/DELETE/mkdir, including a delete of an ancestor, and the same writes spelled with two leading slashes, ent#792) and that people and holders still edit skills there; grants over a real SQLite file (live-only via the agent_ownership join, idempotent who/when, soft-delete and recovery, orphan rows fail closed, unknown capability refused at the sink, no call permission written); the grant service (404 / system / ephemeral refusals, revoke needs no validation); the grant route refuses an admin's own MCP key and audits only real changes; attribution (the acting agent recorded, the system agent named, a bulk replace does not re-stamp kept names); both migration tracks executed; the CASCADE AgentRef. Eight mutations each red."
-    },
-    {
-      "file": "unit/test_ent792_file_guardrail_hook.py",
-      "feature": "trinity-enterprise#792",
-      "added": "2026-10-06",
-      "categories": [
-        "agent",
-        "security",
-        "guardrails"
-      ],
-      "description": "The in-agent PreToolUse file guardrail reads any run of leading slashes as one: runs the SHIPPED docker/base-image/hooks/file-guardrail.py main() through run_hook against the shipped guardrails-baseline.json (lib loaded by path, sys.path and sys.modules restored). //- and ///-prefixed .ssh, .aws, .claude/settings*.json, /opt/trinity and /etc/claude-code paths are denied (exit 2) like the one-slash form; ordinary // paths stay allowed; the baseline is asserted to carry the absolute patterns so the rows are not vacuous. Pairs with the // rows in test_read_only_guard.py. Reverting the hook fix turns 7 red."
-    },
-    {
-      "file": "unit/test_files_protected_paths.py",
-      "feature": "Issue #590 / AISEC-C2, trinity-enterprise#792",
-      "added": "2026-10-06",
-      "categories": [
-        "backend",
-        "security",
-        "files"
-      ],
-      "description": "The backend file-route deny list, run against the SHIPPED services.agent_service.files (it used to test an inline copy, which is how ent#792 went unseen). AISEC-C2 reproduction, protected paths, traversal, allowed paths, edge cases; any number of leading slashes is refused (normpath keeps exactly two); DELETE refuses a protected path and any directory that holds one (.ssh, .claude, the home dir, the /proc/self/root and /proc/self/cwd doors), with the derived anchor tuple pinned and the derivation rule tested on hypothetical glob shapes; three Hypothesis properties (the normalised form equals an independent segment-stack resolution, extra leading slashes never change a verdict, DELETE refused iff writing is or the path holds an anchor); through the route logic and through the real FastAPI router (mkdir takes its path in the JSON body): // paths refused on PUT, mkdir and DELETE with the exact refusal, ordinary deletes reach the container lookup, and the agent is sent the normalised path that was checked. Five mutations each red."
+      "description": "Only designated agents may change an agent's skills — their own included (ent#596). The scope ALLOWLIST as a ten-row matrix (JWT / user / system pass unchanged; agent passes only with a live grant; connector, ops, portal_delegate and a scope invented tomorrow are refused; a principal with no mcp_scope fails closed); the composed dependency checks the capability BEFORE the owner fence, so a non-holder gets one uniform named 403 for an existing, nonexistent or foreign target and a holder gains no reach beyond its owner; the route table read off FastAPI's real dependant graph (every skill-changing route takes the fence; the grant routes exist and are not shadowed); a refused agent key changes nothing on any of the four routes through a real FastAPI app; the file-route side door (.claude/skills/** via PUT/DELETE/mkdir, including a delete of an ancestor) and that people and holders still edit skills there; grants over a real SQLite file (live-only via the agent_ownership join, idempotent who/when, soft-delete and recovery, orphan rows fail closed, unknown capability refused at the sink, no call permission written); the grant service (404 / system / ephemeral refusals, revoke needs no validation); the grant route refuses an admin's own MCP key and audits only real changes; attribution (the acting agent recorded, the system agent named, a bulk replace does not re-stamp kept names); both migration tracks executed; the CASCADE AgentRef. Eight mutations each red."
     },
     {
       "file": "unit/test_ent689_readiness_gate.py",
@@ -3993,16 +4004,6 @@
         "migrations"
       ],
       "description": "The container's pull cycle (ent#703, invariant G3) on real repos with a human clone pushing underneath: behind+clean fast-forwards; a local commit is rebased on top; uncommitted edits survive a pull (stashed and re-applied); incoming changes colliding with uncommitted edits are UNDONE — same HEAD, same edits, empty stash, failure recorded (the autostash trap; red against a naive --autostash mutant); a rebase conflict is aborted and recorded; never while an execution runs, including one starting mid-cycle, and an unknown registry counts as busy; a busy repo is skipped without a state write; a pull never touches the push's fields. The loop gate reads the flag live on /git/pull-sync with the env fallback; the interval defaults to the push interval. Both migration tracks: columns + backfill only where auto-sync is on."
-    },
-    {
-      "file": "unit/test_ent610_asks_unavailable.py",
-      "feature": "trinity-enterprise#610",
-      "added": "2026-09-28",
-      "categories": [
-        "backend",
-        "workspace"
-      ],
-      "description": "Workspace asks read fails loud (ent#610 PR A0): a fault in any of the three queue reads (agent set, count, page — #3059) and an unreadable roster each raise AsksUnavailable and the route answers 503 asks_unavailable with Retry-After: 20 (never []); a genuinely off-roster agent is still dropped with a 200; answer_ask stays a uniform 404 on a roster outage (Invariant #8); the suggestions build still degrades to no ask ids through its own attempt() (a guard for the new raise path; it also passes pre-fix). The app is a module-scoped fixture. Mutation: revert the raise to return an empty page (9 red across this file and test_ent428)."
     },
     {
       "file": "unit/test_ent527_readiness_on_lists.py",
@@ -4494,15 +4495,16 @@
       "description": "A settled A2A Task must not report `metadata: null` (#3215, operator scope-add). The x402 payment status and receipt live at `status.message.metadata` — the spec location the provider SDK's own `X402A2AUtils` reads — and are now mirrored onto the Task's top-level `metadata` from the same assignment, so a strictly typed a2a-sdk `Task` carries the receipt instead of null on a turn that was charged. Asserted through `Task.model_validate` and through the SDK reader, over the real producer (`task_from_paid_payload`) on the settled, unsettled and failed outcomes, and the two locations are proven to be the SAME dict object so they cannot drift. Also pins that a free turn emits no `metadata` key at all, keeping unpaid Task bytes and the idempotency snapshots over them unchanged. Mutation-proven: removing the mirror goes red in 6. No Docker, no network."
     },
     {
-      "file": "unit/test_ent787_guardrail_exec_form.py",
-      "feature": "abilityai/trinity-enterprise#787",
+      "file": "unit/test_ent665_send_idempotency_key.py",
+      "feature": "abilityai/trinity-enterprise#665",
       "added": "2026-10-06",
       "categories": [
-        "agent",
-        "security",
-        "unit"
+        "backend",
+        "unit",
+        "reliability",
+        "mcp"
       ],
-      "description": "trinity-enterprise#787: the GUARD-002 hooks register in exec form under env -i + -I -S with a policy-pinned empty CLAUDE_CODE_SHELL_PREFIX (exact shape, key set of a known-loading entry, a port of CLI 2.1.281's hook spawn branch ratcheted to the image's CLI pin); each hook executed under its registered flags/env keeps its deny/allow tables; a hostile PYTHONPATH and a user-site usercustomize flip a deny under the old invocation (precondition) and not under the registered flags; read-only config is root-owned (guard and Codex never read the home file; the backend's root-exec argv writes the config as data, injection payloads included); startup.sh's legacy cleanup, executed under bash, removes both shipped claude-settings.json versions and keeps anything else. Mutation-proven."
+      "description": "Caller-declared cross-execution idempotency key on send_message / call_user / send_group_message (ent#665). Real schema via db_harness. Pins: intent claim TTL expires only completed rows and the checking call's TTL decides; a live in_flight row survives a short TTL and a stale one is reclaimed after the 300s lease; default claim path unchanged; two executions deliver once with first_sent_at/first_execution_id; in-flight is a retryable 409 (IntentInProgressError), never suppressed; held-inside-critical-section race yields one sender; key has no text input (#1422); two keys in one execution are two sends; consent refusal beats suppression; suppressed costs no rate limit; audit + system-role conversation note; request validation (StrictInt TTL, key charset, ttl needs key); messages route keyless response byte-identical; voip suppressed call is not dialed and audits voip_call_suppressed; Telegram + Slack group routes suppress. MCP half: src/mcp-server/src/tools/intent_key.test.ts. No Docker, no live backend."
     }
   ]
 }

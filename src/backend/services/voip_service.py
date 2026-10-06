@@ -136,6 +136,8 @@ class VoipService:
         process_transcript: bool = True,
         execution_id: Optional[str] = None,
         dedup_label: str = "",
+        idempotency_key: Optional[str] = None,
+        idempotency_ttl: Optional[int] = None,
     ) -> dict:
         """Gate, stage, and dial. Returns {call_id, status, to_number}.
 
@@ -152,6 +154,11 @@ class VoipService:
         The router's boundary Idempotency-Key gate stays the OUTER layer.
         Without a usable ``execution_id``: refused on a pull-mode agent, else
         placed and logged as degraded (#2392).
+
+        ``idempotency_key`` (ent#665): at most one call per (agent, number, key)
+        within ``idempotency_ttl`` across executions. The key is spent once Twilio
+        accepts the dial, answered or not. A suppressed call returns
+        ``{call_id: None, status: "suppressed", sent: False, ...}``.
         """
         if not self.is_available():
             raise HTTPException(status_code=404, detail="VoIP is not enabled")
@@ -170,25 +177,41 @@ class VoipService:
                 detail="public_chat_url is not configured; cannot build the Media Streams URL",
             )
 
+        identity = {"to": dest, "account": binding.get("account_sid")}
+        if idempotency_key:
+            identity["intent"] = idempotency_key  # ent#665: one per-turn effect per key
         async with idempotency_service.effect_guard(
             "voip_call",
-            {"to": dest, "account": binding.get("account_sid")},
+            identity,
             execution_id=execution_id,
             agent_name=agent_name,
             dedup_label=dedup_label,
         ) as guard:
             if guard.replay:
                 return guard.snapshot or {"call_id": None, "status": "ringing", "to_number": dest}
-            result = await self._place_call_inner(
+            async with idempotency_service.intent_guard(
+                "voip_call",
                 agent_name=agent_name,
-                dest=dest,
-                binding=binding,
-                initiator_user_id=initiator_user_id,
-                initiator_email=initiator_email,
-                public_url=public_url,
-                context=context,
-                process_transcript=process_transcript,
-            )
+                target=dest,
+                idempotency_key=idempotency_key,
+                ttl_seconds=idempotency_ttl,
+                execution_id=execution_id,
+            ) as intent:
+                if intent.suppressed:
+                    result = {"call_id": None, "status": "suppressed", "to_number": dest,
+                              **intent.result_fields()}
+                else:
+                    result = await self._place_call_inner(
+                        agent_name=agent_name,
+                        dest=dest,
+                        binding=binding,
+                        initiator_user_id=initiator_user_id,
+                        initiator_email=initiator_email,
+                        public_url=public_url,
+                        context=context,
+                        process_transcript=process_transcript,
+                    )
+                    result = {**result, **intent.result_fields()}
             guard.snapshot = result
             return result
 

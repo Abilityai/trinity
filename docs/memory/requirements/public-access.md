@@ -536,6 +536,14 @@
   client header never forks execution; an underivable key (missing token/body) disables dedup (fail-open,
   never a constant collision).
 
+### Cross-Execution Idempotency Key on Human-Facing Sends (trinity-enterprise#665)
+- **Status**: ✅ Implemented
+- **Description**: `send_message`, `call_user` and `send_group_message` accept an optional caller-declared `idempotency_key` + `idempotency_ttl` (60–86400 s, default 86400). Two sends with the same `(agent, target, key)` inside the TTL, from any executions, deliver once; the store decides races (one winner; a concurrent claimer gets a retryable 409).
+- **Result**: keyed sends return `sent`; a suppressed send returns `success:true, sent:false, suppressed_by:"idempotency_key", first_sent_at, first_execution_id`. Keyless requests and responses are unchanged.
+- **Never content-derived** (the #1422 failure): the key is the caller's string; the message text is not part of it.
+- **Visibility**: audit event (`suppressed` / `group_message_suppressed` / `voip_call_suppressed`) plus a `Trinity`-labelled `system` row in the first send's conversation session (DM + group; calls audit only).
+- **Order**: consent → key → rate limit → deliver. Composes with the per-turn `effect_guard` (#1084); flow: `feature-flows/effect-idempotency.md`.
+
 ### Configurable Proactive Message Rate Limits (#1609)
 - **Status**: ✅ Implemented (2026-07-14)
 - **GitHub Issue**: #1609
