@@ -534,6 +534,75 @@ def test_a_platform_read_of_a_link_logs_a_warning_naming_the_file(caplog):
     assert any("CLAUDE.md" in m and "link" in m and "shared-agent" in m for m in warned), warned
 
 
+def _pipeline_agent(monkeypatch, downloads):
+    """The Work card's pipeline reader over a real httpx client: one listed
+    state file, and `downloads` mapping a path to its (status, body)."""
+    import json
+
+    import httpx
+
+    import services.agent_auth as auth
+    from client_portal.work import pipeline_state as ps
+
+    tree = [{"type": "directory", "name": "digest", "children": [
+        {"type": "file", "name": "i1.json", "size": 200, "modified": "2026-09-06T10:05:00Z"}]}]
+
+    def handler(request):
+        if request.url.path == "/api/files":
+            return httpx.Response(200, json={"tree": tree})
+        status, body = downloads.get(request.url.params["path"], (404, b""))
+        if isinstance(body, dict):
+            body = json.dumps(body).encode()
+        return httpx.Response(status, content=body)
+
+    monkeypatch.setattr(auth, "agent_httpx_client", lambda name, **kw: httpx.AsyncClient(
+        transport=httpx.MockTransport(handler)))
+    ps.clear_cache()
+    return ps
+
+
+@pytest.mark.parametrize("linked", ["state", "definition"])
+def test_a_pipeline_read_of_a_link_logs_a_warning_naming_the_file(monkeypatch, caplog, linked):
+    """The Work card reads pipeline files with its own httpx client, not
+    `agent_client.read_file`. A linked file still fails soft there, and is named."""
+    from client_portal.work import pipeline_state as ps
+
+    state_path = f"{ps.STATE_DIR}/digest/i1.json"
+    def_path = f"{ps.PIPELINES_DIR}/digest.yaml"
+    refusal = (403, {"detail": {"code": "resolved_path_mismatch", "message": LINK_MESSAGE}})
+    state = (200, {"current_stage": "draft", "updated_at": "2026-09-06T10:05:00Z"})
+    definition = (200, b"stages:\n  - id: draft\n")
+    linked_path = state_path if linked == "state" else def_path
+    downloads = {state_path: refusal if linked == "state" else state,
+                 def_path: refusal if linked == "definition" else definition}
+    ps = _pipeline_agent(monkeypatch, downloads)
+    try:
+        with caplog.at_level("WARNING"):
+            steps = asyncio.run(ps.read_pipeline_steps(AGENT))
+    finally:
+        ps.clear_cache()
+    assert steps.state == ("none" if linked == "state" else "reported")
+    warned = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+    assert any(linked_path in m and "link" in m and AGENT in m for m in warned), warned
+
+
+def test_a_pipeline_read_does_not_read_a_403_body_past_its_cap(monkeypatch, caplog):
+    """The reader's byte budget covers a refusal body too: an oversized 403 is
+    dropped unread past the cap, and names nothing."""
+    from client_portal.work import pipeline_state as ps
+
+    state_path = f"{ps.STATE_DIR}/digest/i1.json"
+    huge = b'{"detail": {"code": "resolved_path_mismatch"}, "pad": "' + b"x" * (ps.MAX_FILE_BYTES + 5) + b'"}'
+    ps = _pipeline_agent(monkeypatch, {state_path: (403, huge)})
+    try:
+        with caplog.at_level("WARNING"):
+            steps = asyncio.run(ps.read_pipeline_steps(AGENT))
+    finally:
+        ps.clear_cache()
+    assert steps.state == "none"
+    assert not [r for r in caplog.records if r.levelname == "WARNING"]
+
+
 # ---- agents not yet on the current image -------------------------------------------
 
 RESTART_MESSAGE = (
