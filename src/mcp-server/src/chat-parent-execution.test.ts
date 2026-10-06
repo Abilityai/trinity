@@ -10,7 +10,8 @@
  * the real `TrinityClient` body, recorded by a fake backend. A fake `task()`
  * could not see a `client.ts` body regression.
  *
- * The rule (Andrii's decisions, `.plan/issue-3232.md` §A.2):
+ * The rule (the route table in docs/memory/feature-flows/channel-completion-report.md,
+ * "How an MCP delegation carries the parent"):
  *   - async dispatches (parallel+async, #946 pull-routed) send the platform
  *     header turn by DEFAULT; a typed `manual` opts out; a self-task with
  *     `inject_result` is excluded;
@@ -770,9 +771,9 @@ describe("#3232 resolveReportBack (the rule, table-tested)", () => {
 });
 
 describe("#3232 resolveReportBack over the full input product (independent oracle)", () => {
-  // Plan §A.5 T15 promised every combination; the picked rows above stay as the
-  // readable spec. This block walks the whole product and checks each cell
-  // against an oracle written from the plan's §A.2 table and §A.3.1 rule text,
+  // The picked rows above stay as the readable spec; this block walks every
+  // combination and checks each cell against an oracle written from the route
+  // table in channel-completion-report.md and the resolveReportBack doc comment,
   // not from the implementation's control flow: classify the inputs, decide the
   // parent per route, then the fields, then the reason by precedence.
   type Route = "task-async" | "task-sync" | "pull" | "chat";
@@ -803,7 +804,7 @@ describe("#3232 resolveReportBack over the full input product (independent oracl
       t === "" ? "nothing" : t === "manual" ? "manual" : WELL_FORMED_FIXTURES.has(t) ? "id" : "malformed";
     const headerKind = i.header === undefined ? "absent" : i.header === "manual" ? "manual" : "turn";
 
-    // §A.2 columns: typed `manual` is the opt-out; any other non-empty typed value
+    // Route-table columns: typed `manual` is the opt-out; any other non-empty typed value
     // is an opt-in; with nothing typed, only an async dispatch (parallel+async or
     // pull-routed) from a real turn defaults on, unless a self-task already routes
     // its result into its own chat (inject_result).
