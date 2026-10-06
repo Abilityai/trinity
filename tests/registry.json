@@ -79,6 +79,17 @@
       "description": "#3246 C1: the platform-alert leaf (services/platform_alerts.py) — loads by path in a bare interpreter (stdlib-only, so both migration tracks can import it); kind registry with lifetime classes (14 d default + env knob, 30 d net, none for the four a person must act on) and the 7-day snooze knob; key belt (id-shaped kept, else sha256[:16]); every legacy id shape mapped to its subject or to 'known kind, no subject', unknown/external prefixes never derived; plan_sweep keeps the newest pending row per (agent, subject), ends the rest, stamps survivors, gives subject-less known kinds a lifetime stamp, stamps person-ended rows inside the snooze window, and is idempotent on its own output. Mutation-checked (survivor rule, sid greediness, snooze window, prefix order). No DB, no Docker."
     },
     {
+      "file": "unit/test_3246_platform_alerts_thread_origin.py",
+      "feature": "#3246",
+      "added": "2026-10-06",
+      "categories": [
+        "backend",
+        "operator-queue",
+        "unit"
+      ],
+      "description": "#3246 merge-train fix: the platform ending seam works from every thread origin — `platform_alerts.clear` / `observe` driven through `asyncio.to_thread` (the loop's default executor, which anyio does not own — the headroom sweep and the skills reconcile) still land the `platform_cleared` audit row and the `operator_queue_cancelled` / sync trigger with no 'could not schedule' warning; `spawn_on_loop` from the default executor and from a plain `threading.Thread` once the host loop is known; `main.py::lifespan` captures the host loop before any boot phase; with no running loop, no anyio portal and no live host loop it still raises loudly (never a silent no-op), and a captured loop that was closed is not a target. No Docker."
+    },
+    {
       "file": "unit/test_3243_atomic_asks.py",
       "feature": "#3243",
       "added": "2026-10-05",
