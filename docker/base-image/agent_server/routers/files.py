@@ -22,6 +22,10 @@ class FileUpdateRequest(BaseModel):
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
+# The agent's home: the only tree these routes serve. A module constant so the
+# handlers can be driven over a temporary home in tests.
+_HOME = Path("/home/developer")
+
 
 def _iso_z_from_mtime(mtime: float) -> str:
     """Format an mtime (epoch seconds) as canonical ISO-Z UTC.
@@ -176,6 +180,8 @@ PROTECTED_PATHS = [
     ".env",
     ".mcp.json",
     ".mcp.json.template",
+    ".claude.json",
+    ".credentials.json",
 ]
 
 # Paths that cannot be edited via the file-write endpoint.
@@ -209,7 +215,35 @@ EDIT_PROTECTED_PATHS = [
     ".mcp.json",
     ".mcp.json.template",
     ".credentials.enc",
+    ".claude.json",
+    ".credentials.json",
 ]
+
+# trinity-enterprise#823: runtime config these routes never write, matched on
+# the RESOLVED path (relative to `_HOME`), so a link elsewhere in the home that
+# points here is refused too. Some names are too generic for the by-name lists
+# above (settings.json, auth.json, config.toml). `.tmp/codex` is Codex's
+# CODEX_HOME (its login and MCP config), so everything under it is covered.
+# No platform writer of these goes through these routes.
+_RUNTIME_CONFIG_PATHS = (
+    ".claude.json",
+    ".claude/.credentials.json",
+    ".gemini/settings.json",
+    ".tmp/codex",
+)
+
+
+def _touches_runtime_config(resolved: Path, *, include_ancestors: bool) -> bool:
+    """True when `resolved` is a runtime config path or lies under one; with
+    `include_ancestors` (DELETE), also when it is a directory above one."""
+    home = _HOME.resolve()
+    for rel in _RUNTIME_CONFIG_PATHS:
+        target = home / rel
+        if resolved == target or resolved.is_relative_to(target):
+            return True
+        if include_ancestors and target.is_relative_to(resolved):
+            return True
+    return False
 
 
 def _is_protected_path(path: Path) -> bool:
@@ -310,7 +344,7 @@ async def delete_file(path: str):
     Cannot delete protected paths (CLAUDE.md, .trinity, .git, etc.)
     """
     # Security: Only allow workspace access
-    allowed_base = Path("/home/developer")
+    allowed_base = _HOME
 
     # Handle both absolute and relative paths
     if path.startswith('/'):
@@ -326,8 +360,8 @@ async def delete_file(path: str):
     if requested_path == allowed_base:
         raise HTTPException(status_code=403, detail="Cannot delete home directory")
 
-    # Check if it's a protected path
-    if _is_protected_path(requested_path):
+    # Check if it's a protected path, or a directory holding runtime config
+    if _is_protected_path(requested_path) or _touches_runtime_config(requested_path, include_ancestors=True):
         raise HTTPException(
             status_code=403,
             detail=f"Cannot delete protected path: {requested_path.name}"
@@ -484,7 +518,7 @@ async def update_file(
     # is_relative_to() — the CWE-022 barrier create_folder already uses — rather
     # than a string prefix, which a sibling name such as /home/developer2 would
     # satisfy (#2915).
-    allowed_base = Path("/home/developer").resolve()
+    allowed_base = _HOME.resolve()
 
     # Handle both absolute and relative paths
     if path.startswith('/'):
@@ -506,6 +540,13 @@ async def update_file(
                 status_code=403,
                 detail=f"Cannot edit protected path: {requested_path.name}"
             )
+
+    # ent#823: runtime config is never written here, platform or not.
+    if _touches_runtime_config(requested_path, include_ancestors=False):
+        raise HTTPException(
+            status_code=403,
+            detail=f"Cannot edit protected path: {requested_path.name}"
+        )
 
     # If path exists and is a directory, reject
     if requested_path.exists() and not requested_path.is_file():
@@ -561,7 +602,7 @@ async def create_folder(path: str):
     """
     # Security: Only allow workspace access. allowed_base is resolved so the
     # containment check below compares resolved-path to resolved-path.
-    allowed_base = Path("/home/developer").resolve()
+    allowed_base = _HOME.resolve()
 
     if path.startswith('/'):
         requested_path = Path(path).resolve()
@@ -584,7 +625,9 @@ async def create_folder(path: str):
     # Reject creation inside an edit-protected path (.trinity, .git, etc.).
     # _is_edit_protected_path walks parents, so a nested target under a
     # protected dir is rejected too.
-    if _is_edit_protected_path(requested_path):
+    if _is_edit_protected_path(requested_path) or _touches_runtime_config(
+        requested_path, include_ancestors=False
+    ):
         raise HTTPException(
             status_code=403,
             detail=f"Cannot create folder in protected path: {requested_path.name}"
