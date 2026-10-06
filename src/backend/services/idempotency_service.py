@@ -636,7 +636,6 @@ async def intent_guard(
             "intent_guard.degraded effect_type=%s agent=%s — claim failed, sending "
             "without the idempotency key: %s", effect_type, agent_name, e,
         )
-        state.keyed = False
         yield state
         return
 

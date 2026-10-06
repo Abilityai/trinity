@@ -205,6 +205,10 @@ async def place_voip_call(
         # the outer claim; refused, not retryable.
         idempotency_service.fail(idem)
         raise HTTPException(status_code=422, detail={"reason": "effect_unguarded", "message": str(e)})
+    except idempotency_service.IntentInProgressError as e:
+        # ent#665: another run is placing this call under the same idempotency key.
+        idempotency_service.fail(idem)
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
     except idempotency_service.EffectInProgressError:
         # Concurrent duplicate dial for the same (execution, number) is mid-flight
         # (#1084). Release the outer trigger claim and surface a retryable 409.

@@ -194,6 +194,7 @@ caller-declared `idempotency_key` + `idempotency_ttl` (60–86400 s, default 864
   expires only a COMPLETED row by `created_at` (the checking call's TTL decides), and
   reclaims an `in_flight` row only after a 300 s lease on `updated_at`. Callers that
   pass neither keep the 24 h rule. TTL ceiling = the cleanup sweep's 24 h purge.
+- **Store unavailable**: fail-open — the send proceeds, logged `intent_guard.degraded`; the result still reports `sent: true`.
 - **Outcomes**: completed claim → suppressed (`sent:false, suppressed_by:"idempotency_key",
   first_sent_at, first_execution_id`); in-flight claim → `IntentInProgressError`
   (subclass of `EffectInProgressError`, 409, retryable — never "suppressed", which would
@@ -219,7 +220,7 @@ caller-declared `idempotency_key` + `idempotency_ttl` (60–86400 s, default 864
 | `in_flight` replay | duplicate worker mid-flight | raise `EffectInProgressError` → 409 | clear retryable error |
 | intent key `in_flight` | another run mid-send on the same key | `IntentInProgressError` → 409; stale after 300 s lease | retryable error naming the key |
 | intent key, ambiguous send | timeout / cancel after the provider may have delivered | claim released → next run sends again (at-least-once on ambiguity) | possible duplicate — documented |
-| intent key, send stalls > 300 s | lease reclaimed while the first send is alive | second send goes out; first `complete()` overwrites the row (no owner token) | possible duplicate — documented ceiling |
+| intent key, send stalls > 300 s | lease reclaimed while the first send is alive | second send goes out; the first sender's late `complete()` overwrites, or late `release()` deletes, the reclaimer's row (no owner token) | possible duplicate — documented ceiling |
 | chunked message crash | crash after chunk 3/5 | whole message re-sent on retry | duplicate chunks (at-least-once, documented) |
 | Nevermined settle | settle on terminal turn | terminal-turn guard preserved (no settle on failed execution) | no double-charge |
 | no usable execution_id, pull-mode agent | old image / raw API call / foreign or unknown id | `EffectUnguardedError` → 422 `effect_unguarded` + operator alarm; nothing sent | agent sees a non-retryable refusal; operator sees the alarm |

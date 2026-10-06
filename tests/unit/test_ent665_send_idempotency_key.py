@@ -235,6 +235,20 @@ class TestIntentGuard:
         assert sends == ["a", "b", "c", "d"]
 
     @pytest.mark.asyncio
+    async def test_store_outage_sends_and_still_reports_sent(self, idem, monkeypatch):
+        """Fail-open: the send goes out, and a keyed caller still gets `sent: true`."""
+        from database import db
+
+        def _down(*a, **k):
+            raise RuntimeError("db down")
+
+        monkeypatch.setattr(db, "idempotency_claim", _down)
+        sends: list = []
+        g = await _guarded_send(idem, execution_id="a", sends=sends)
+        assert sends == ["a"]
+        assert g.result_fields() == {"sent": True}
+
+    @pytest.mark.asyncio
     async def test_failed_send_releases_the_key(self, idem):
         sends: list = []
         with pytest.raises(RuntimeError):
@@ -518,6 +532,27 @@ class TestVoip:
         await voip.place_voip_call(VoipCallRequest(to_number="+14155550100", idempotency_key=KEY),
                                    AGENT, current_user=user, idempotency_key=None)
         assert [e["event_action"] for e in audit] == ["voip_call_suppressed"]
+
+
+class TestVoipRoute409:
+    @pytest.mark.asyncio
+    async def test_in_flight_key_is_a_409_naming_the_key(self, monkeypatch):
+        from fastapi import HTTPException
+        from models import VoipCallRequest
+        from routers import voip
+        from services import idempotency_service
+
+        monkeypatch.setattr(voip, "_require_enabled", lambda: None)
+
+        async def _place(**kw):
+            raise idempotency_service.IntentInProgressError(f"busy under key '{KEY}'")
+
+        monkeypatch.setattr(voip.voip_service, "place_outbound_call", _place)
+        user = types.SimpleNamespace(id=1, email="o@example.com", username="o")
+        with pytest.raises(HTTPException) as e:
+            await voip.place_voip_call(VoipCallRequest(to_number="+14155550100", idempotency_key=KEY),
+                                       AGENT, current_user=user, idempotency_key=None)
+        assert e.value.status_code == 409 and KEY in e.value.detail
 
 
 class TestGroupMessages:

@@ -79,8 +79,9 @@ class IdempotencyOperations:
                 )))
                 if in_flight_lease_seconds is not None:
                     # ponytail: no owner token, so a send stalled past the lease can
-                    # be re-sent by the reclaimer and its late complete() overwrites
-                    # the new row. Add a claim token if sends ever run that long.
+                    # be re-sent by the reclaimer, and its late complete() overwrites
+                    # (or its late release() deletes) the reclaimer's row. Add a
+                    # claim token if sends ever run that long.
                     conn.execute(delete(idempotency_keys).where(and_(
                         this_key,
                         idempotency_keys.c.status == STATE_IN_FLIGHT,
