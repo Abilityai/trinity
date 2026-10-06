@@ -7,7 +7,7 @@ SOURCE (the one selected series, or today's fold) and fills the widget once,
 so value, freshness, colour and sparkline come from the same place on both
 paths, and a selector that cannot match is a named refusal, never the fold.
 
-The fixture is three `channel` series with distinct values: meta 623.88
+The fixture is three `channel` series with distinct values: meta 587.25
 (newest), google 410.0, linkedin 95.5 (3 h old on a 1 h cadence, so stale).
 Assertions pin google and linkedin, never meta, because meta is exactly what
 the bug returned under `last`.
@@ -112,7 +112,7 @@ def _point(value, seconds_ago, dims=None, metric="ad_spend"):
 
 def _three_channels(metric="ad_spend"):
     return [
-        _point(623.88, 60, {"channel": "meta"}, metric),
+        _point(587.25, 60, {"channel": "meta"}, metric),
         _point(410.0, 120, {"channel": "google"}, metric),
         _point(95.5, 3 * HOUR, {"channel": "linkedin"}, metric),
     ]
@@ -199,7 +199,7 @@ def test_T1_each_dims_tile_shows_its_own_series(store):
 def test_T2_a_sum_metric_still_shows_the_one_series(monkeypatch):
     monkeypatch.setattr(database_mod, "db", _Db([_definition(aggregation="sum")]))
     (google,) = _bind(_w({"channel": "google"}))
-    assert google["value"] == 410.0  # not the 1129.38 total
+    assert google["value"] == 410.0  # not the 1092.75 total
 
 
 def test_T3_matching_is_canonical_so_key_order_does_not_matter(monkeypatch):
@@ -209,7 +209,7 @@ def test_T3_matching_is_canonical_so_key_order_does_not_matter(monkeypatch):
         _Db(
             [_definition(dimensions=["channel", "geo"])],
             [
-                _point(623.88, 60, {"channel": "meta", "geo": "us"}),
+                _point(587.25, 60, {"channel": "meta", "geo": "us"}),
                 _point(410.0, 120, {"channel": "google", "geo": "us"}),
             ],
         ),
@@ -259,7 +259,7 @@ def test_T6_a_partial_selector_is_refused_not_folded(monkeypatch):
         _Db(
             [_definition(dimensions=["channel", "geo"])],
             [
-                _point(623.88, 60, {"channel": "meta", "geo": "us"}),
+                _point(587.25, 60, {"channel": "meta", "geo": "us"}),
                 _point(410.0, 120, {"channel": "google", "geo": "us"}),
             ],
         ),
@@ -348,7 +348,7 @@ def test_T8_same_series_does_not_mean_equal_endpoints(monkeypatch):
 def test_T9_a_folded_sum_tile_says_it_is_a_fold(monkeypatch):
     monkeypatch.setattr(database_mod, "db", _Db([_definition(aggregation="sum")]))
     (widget,) = _bind(_w())
-    assert widget["value"] == pytest.approx(1129.38)
+    assert widget["value"] == pytest.approx(1092.75)
     assert widget["bound_series"] == {
         "basis": "folded",
         "aggregation": "sum",
@@ -361,7 +361,7 @@ def test_T9_a_folded_sum_tile_says_it_is_a_fold(monkeypatch):
 
 def test_T9_a_last_tile_over_several_series_names_the_newest(store):
     (widget,) = _bind(_w())
-    assert widget["value"] == 623.88
+    assert widget["value"] == 587.25
     assert widget["bound_series"] == {
         "basis": "series",
         "aggregation": "last",
@@ -588,7 +588,7 @@ def test_T13_any_dims_value_binds_or_refuses_by_name_never_raises(dims, zero_poi
         assert "binding_error_code" not in widget
         if "value" in widget:
             if no_selector:
-                assert widget["value"] == 623.88  # the fold under `last`
+                assert widget["value"] == 587.25  # the fold under `last`
             else:
                 assert widget["value"] in stored
                 assert widget["bound_series"]["basis"] == "selected"
@@ -705,7 +705,7 @@ def test_T14_more_than_ten_keys_is_invalid_with_no_hint(monkeypatch):
 def test_T14_an_empty_selector_is_no_selector(store, dims):
     (widget,) = _bind({**_w(), "dims": dims})
     assert widget["bound"] is True
-    assert widget["value"] == 623.88
+    assert widget["value"] == 587.25
     assert widget["bound_series"]["basis"] == "series"
 
 
@@ -928,7 +928,7 @@ def test_the_user_doc_recipe_shows_three_different_numbers(monkeypatch):
     bound = copy.deepcopy(config)
     mrs.bind_dashboard_widgets(bound, AGENT, now=NOW)
     values = [w["value"] for w in bound["sections"][0]["widgets"]]
-    assert values == [623.88, 410.0, 95.5]
+    assert values == [587.25, 410.0, 95.5]
     assert [w["bound_series"]["dims"] for w in bound["sections"][0]["widgets"]] == [
         {"channel": "meta"},
         {"channel": "google"},
@@ -960,7 +960,7 @@ def test_T20_each_channel_is_judged_on_its_own_value(monkeypatch):
 def test_T20_an_unselected_fold_tile_is_judged_on_the_fold(monkeypatch):
     monkeypatch.setattr(database_mod, "db", _verdict_db(aggregation="sum"))
     (widget,) = _bind(_w())
-    assert widget["value"] == pytest.approx(1129.38)
+    assert widget["value"] == pytest.approx(1092.75)
     assert widget["threshold_verdict"] == {"level": "critical",
                                            "threshold": 500}
 

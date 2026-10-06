@@ -130,7 +130,7 @@ A metric with `dimensions` holds one series per dimension value, for example one
 
    ```json
    {"points": [
-     {"metric": "ad_spend", "value": 623.88, "dims": {"channel": "meta"}},
+     {"metric": "ad_spend", "value": 587.25, "dims": {"channel": "meta"}},
      {"metric": "ad_spend", "value": 410.0,  "dims": {"channel": "google"}},
      {"metric": "ad_spend", "value": 95.5,   "dims": {"channel": "linkedin"}}
    ]}
@@ -160,7 +160,7 @@ A metric with `dimensions` holds one series per dimension value, for example one
            value: 0
    ```
 
-The three tiles show three different numbers (623.88, 410, and 95.5), each with its own point time, stale mark, sparkline, and verdict badge, and each captioned with its series (`channel=meta`).
+The three tiles show three different numbers (587.25, 410, and 95.5), each with its own point time, stale mark, sparkline, and verdict badge, and each captioned with its series (`channel=meta`).
 
 Rules for a selector:
 

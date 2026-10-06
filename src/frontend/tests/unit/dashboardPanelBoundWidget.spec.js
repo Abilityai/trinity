@@ -237,7 +237,7 @@ function notFound(extra = {}) {
 describe('a bound tile captions which series it shows (ent#730)', () => {
   it('gives three per-channel tiles three different captions', async () => {
     const wrapper = await mountPanel(dashboard([
-      selected('meta', 623.88), selected('google', 410), selected('linkedin', 95.5),
+      selected('meta', 587.25), selected('google', 410), selected('linkedin', 95.5),
     ]))
     const captions = wrapper.findAll('[data-testid="bound-series"]').map((c) => c.text())
     expect(captions).toEqual(['channel=meta', 'channel=google', 'channel=linkedin'])
@@ -247,7 +247,7 @@ describe('a bound tile captions which series it shows (ent#730)', () => {
     const fold = { basis: 'folded', aggregation: 'sum', series_count: 3, dims: null,
       dimensions: ['channel', 'geo'], stale_count: 0 }
     const wrapper = await mountPanel(dashboard([
-      { type: 'metric', label: 'Total', metric: 'ad_spend', bound: true, value: 1129.38,
+      { type: 'metric', label: 'Total', metric: 'ad_spend', bound: true, value: 1092.75,
         stale: false, freshness: 'fresh', last_point_at: '2026-09-22T09:00:00Z', bound_series: fold },
       { type: 'status', label: 'Pipeline', metric: 'pipeline', bound: true, value: 'ok', color: 'green',
         stale: false, freshness: 'fresh', last_point_at: '2026-09-22T09:00:00Z',
@@ -307,7 +307,7 @@ describe('a bound tile captions which series it shows (ent#730)', () => {
 // ---------------------------------------------------------------------------
 
 function judged(level, threshold, extra = {}) {
-  return selected('meta', 623.88, { direction: 'down_good',
+  return selected('meta', 587.25, { direction: 'down_good',
     threshold_verdict: { level, threshold }, ...extra })
 }
 
@@ -364,7 +364,7 @@ describe('a bound metric tile shows its threshold verdict (ent#730)', () => {
 
 describe('a bound tile colours its trend by the declared direction (ent#730)', () => {
   function trending(direction, trend = 'up', extra = {}) {
-    return selected('meta', 623.88, { direction,
+    return selected('meta', 587.25, { direction,
       history: { values: [{ t: 'a', v: 1 }, { t: 'b', v: 2 }], trend, trend_percent: 12 }, ...extra })
   }
 
