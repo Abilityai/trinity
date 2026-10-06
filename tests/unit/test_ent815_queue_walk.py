@@ -660,6 +660,33 @@ def test_k_platform_alert_priority_change_mid_walk(qdb):
     assert ids.count(raised) == 1
 
 
+@pytest.mark.parametrize("raised_at", ["critical", "high"])
+def test_k_platform_alert_raised_mid_walk_ranks_last(qdb, raised_at):
+    """Option B, the other arm: an alert raised AFTER `cursor=start` is not in
+    the snapshot, so it ranks 4 — after every real priority, a fixed key. Were
+    it ordered by its live priority instead, `critical` would land behind the
+    cursor (missed) and `high` would be returned and then, lowered to `low` by
+    `_touch`, land ahead of the cursor again (returned twice)."""
+    a = "kc-agent"
+    for i in range(10):
+        _seed(qdb, a, priority=PRIOS[i % 4], created_at=_ago(100 + i))
+    _as()
+    state = {"id": None, "lowered": False}
+
+    def between(n, body):
+        if n == 0:
+            assert {i["priority"] for i in body["items"]} == {"critical"}
+            state["id"] = _alert(qdb, a, "disk:new", raised_at)
+        elif state["id"] in {i["id"] for i in body["items"]} and not state["lowered"]:
+            assert _alert(qdb, a, "disk:new", "low") == state["id"]
+            state["lowered"] = True
+
+    ids, _ = _walk(3, between=between)
+    assert state["id"] is not None
+    assert ids.count(state["id"]) == 1, ids
+    assert len(ids) == 11
+
+
 # ---------------------------------------------------------------------------
 # K4 — the property: random interleavings of every write between pages.
 # ---------------------------------------------------------------------------
