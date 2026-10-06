@@ -188,7 +188,8 @@ def test_baked_settings_registers_absolute_container_paths():
 
     settings = json.loads(baked.read_text())
     commands = [
-        hook["command"]
+        # Exec form (trinity-enterprise#787) carries the script path in `args`.
+        " ".join([hook["command"], *hook.get("args", [])])
         for event_hooks in settings.get("hooks", {}).values()
         for matcher in event_hooks
         for hook in matcher.get("hooks", [])
