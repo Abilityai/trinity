@@ -5,7 +5,7 @@ import secrets
 from datetime import datetime, timedelta, timezone
 from typing import AbstractSet, Optional, List, Dict
 
-from sqlalchemy import select, update, and_, func, case, exists
+from sqlalchemy import select, update, and_, or_, func, case, exists
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import aliased
 
@@ -83,6 +83,7 @@ class ScheduleQueueMixin:
         worker_id: Optional[str] = None,
         lease_seconds: Optional[int] = None,
         interactive_triggers: Optional[AbstractSet[str]] = None,
+        waiting_conversation_prefix: Optional[str] = None,
     ) -> Optional[Dict]:
         """Atomically claim the next QUEUED execution for an agent.
 
@@ -112,6 +113,9 @@ class ScheduleQueueMixin:
                 anti-starvation rule: steady chat that keeps every worker busy
                 is answered by raising the agent's worker count. None ⇒ plain
                 oldest-first, exactly as before.
+            waiting_conversation_prefix: Pull claim only (#3127). Rows whose
+                ``conversation_key`` starts with it join the interactive group
+                whatever their trigger.
 
         Pull claims (``worker_id`` set) also skip any row whose
         ``conversation_key`` already has a ``running`` row for this agent
@@ -154,10 +158,15 @@ class ScheduleQueueMixin:
                 )
             )
         order_by = [se.c.queued_at.asc()]
+        interactive = []
         if interactive_triggers:
-            order_by.insert(
-                0, case((se.c.triggered_by.in_(sorted(interactive_triggers)), 0), else_=1)
+            interactive.append(se.c.triggered_by.in_(sorted(interactive_triggers)))
+        if waiting_conversation_prefix:
+            interactive.append(
+                se.c.conversation_key.startswith(waiting_conversation_prefix, autoescape=True)
             )
+        if interactive:
+            order_by.insert(0, case((or_(*interactive), 0), else_=1))
         oldest_queued_select = (
             select(se.c.id).where(and_(*conditions)).order_by(*order_by).limit(1)
         )

@@ -11,6 +11,7 @@
 - **Description**: Full-featured file manager in AgentDetail Files tab with two-panel layout (tree + preview)
 - **Key Features**: Tree view with search, image/video/audio/PDF/text preview, inline text editing, create folder (into selected directory or workspace root; nested via `/`), delete with protected path warnings, show hidden files toggle
 - **Components**: Reuses `file-manager/FileTreeNode.vue` and `file-manager/FilePreview.vue`
+- **Backend deny list on writes AND deletes** (#590, trinity-enterprise#792): `PUT /files`, `POST /files/mkdir` and `DELETE /files` refuse credential / runtime-config / Trinity-managed paths (403) before proxying. DELETE also refuses any directory that holds one (`.ssh`, `.claude`, the home dir), since deleting it removes them; deleting a directory that merely contains a basename-protected file (`.env`) is not refused. Paths are normalised before matching (any run of leading slashes reads as one) and the agent is sent the normalised path that was checked.
 - **Flow**: `docs/memory/feature-flows/file-browser.md`
 
 ### 13.2 File Manager Page (Standalone - Deprecated)

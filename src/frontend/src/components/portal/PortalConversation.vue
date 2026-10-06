@@ -896,7 +896,9 @@ import PortalAvatar from './PortalAvatar.vue'
 import PortalStarButton from './PortalStarButton.vue'
 import PortalEditableTitle from './PortalEditableTitle.vue'
 import PortalChatTabs from './PortalChatTabs.vue'
-import { newChatHotkeyLabel, MAIN_TAB_LABEL, composerAvailabilityNotice, assistantRow, replyFromHistory, replyBaseline, readReplyBaseline } from './portalUtils'
+import { newChatHotkeyLabel, MAIN_TAB_LABEL, composerAvailabilityNotice, assistantRow, replyFromHistory, replyBaseline, readReplyBaseline, agentChatTabs, NEW_CHAT_TAB_ID } from './portalUtils'
+// ent#621: the same wrap the typeahead's roving selection uses — one modulo.
+import { cycleIndex } from './portalKeymap'
 // ent#738: the chip's one-line excerpt — the same one the Inbox's arrow hands over.
 // Aliased: `submitUserText` already takes a `replyExcerpt` (the excerpt itself).
 import { replyExcerpt as excerptForReply } from './portalInbox'
@@ -3070,7 +3072,37 @@ function wrapUp(project) {
   void send()
 }
 
-defineExpose({ focusComposer, startVoiceCall, endVoiceCall })
+// ent#621 — ⌥⇧↑ / ⌥⇧↓ walk this agent's chat tabs. The walk lives HERE because
+// the strip's inputs do: `threads`, the active id, whether the provisional "New
+// chat" tab is listed, and the drafts key set are all this component's, and a
+// shell that rebuilt them would be a second opinion about which tabs exist.
+// What it emits is what a tab CLICK emits — `open-thread` for a real chat,
+// `new-chat` for the provisional one — so a key and a click land identically,
+// and the shell keeps its one door per action. Fewer than two tabs is a silent
+// no-op, per the AC.
+function cycleChat(delta) {
+  const tabs = agentChatTabs(props.threads, props.agent?.name, {
+    activeId: currentSessionId.value,
+    draft: props.newChat || bornHere.value,
+    draftKeys: drafts.keys,
+  })
+  if (tabs.length < 2) return
+  // The strip's EFFECTIVE selection, the same expression `PortalChatTabs` binds:
+  // while the open chat is unsaved, `currentSessionId` is null and the
+  // provisional tab's id is not, so comparing against the id alone would start
+  // the walk from nowhere.
+  const current = currentSessionId.value
+    || ((props.newChat || bornHere.value) ? NEW_CHAT_TAB_ID : null)
+  const next = tabs[cycleIndex(tabs.findIndex((t) => t.id === current), delta, tabs.length)]
+  if (!next) return
+  if (next.thread) emit('open-thread', next.thread)
+  else if (next.provisional) emit('new-chat')
+}
+
+// `cycleChat` is exposed as an IDENTIFIER, not an inline body: two source pins
+// match `defineExpose({[^}]*})`, and a `}` inside the braces would break them
+// while the wiring itself stayed fine (#2918's class, in reverse).
+defineExpose({ focusComposer, startVoiceCall, endVoiceCall, cycleChat })
 
 // ent#474 — the rail's Work signal for a 1:1, DERIVED from the in-flight flag
 // on every change and never latched: it clears in the same `finally` that ends

@@ -177,6 +177,40 @@ any of its own executions. The guard stops omission, not a hostile agent.
 
 > **Reframed (v2, 2026-07-01).** `TARGET_ARCHITECTURE.md` reframes the pull-mode side-effect rollout from a **per-agent** gate to **per-effect**: read/analysis-only + reversible + capability-confined-irreversible effects default on; only irreversible-**un-confineable** effects wait, via the **async operator queue** (#1402). `effect_guard` (this doc) is the reversible/backend-sink slice; general recovery is **retry-with-prior-trace** (#1401). The (a)/(b) trusted-injection requirement above still applies to the *confined-irreversible* tool-side gate.
 
+## Cross-execution intent keys (trinity-enterprise#665)
+
+`effect_guard` dedupes within ONE execution. A recurring agent's runs are separate
+executions, so it could not say "I already told this person X; do not say it again
+for N seconds". `send_message`, `call_user` and `send_group_message` take an optional
+caller-declared `idempotency_key` + `idempotency_ttl` (60–86400 s, default 86400).
+
+- **Guard**: `idempotency_service.intent_guard(effect_type, agent_name, target,
+  idempotency_key, ttl_seconds, execution_id)`. Scope `intent:{agent}`; key
+  `{effect_type}:sha256(effect_type, target, idempotency_key)`. Target = resolved
+  recipient email / E.164 number / `telegram:{chat_id}` / `slack:{team}:{channel}`.
+  The channel is not part of a DM key: the same news on Telegram then Slack is one
+  interruption. **No text argument** — content-derived suppression is the #1422 failure.
+- **Store**: the same `idempotency_keys` table. `claim(ttl_seconds=, in_flight_lease_seconds=)`
+  expires only a COMPLETED row by `created_at` (the checking call's TTL decides), and
+  reclaims an `in_flight` row only after a 300 s lease on `updated_at`. Callers that
+  pass neither keep the 24 h rule. TTL ceiling = the cleanup sweep's 24 h purge.
+- **Store unavailable**: fail-open — the send proceeds, logged `intent_guard.degraded`; the result still reports `sent: true`.
+- **Outcomes**: completed claim → suppressed (`sent:false, suppressed_by:"idempotency_key",
+  first_sent_at, first_execution_id`); in-flight claim → `IntentInProgressError`
+  (subclass of `EffectInProgressError`, 409, retryable — never "suppressed", which would
+  lie if that send dies); failed send → claim released. Keyless → nothing claimed, the
+  response is byte-identical (`response_model_exclude_unset` on the messages route).
+- **Composition** (`send_message`, `call_user`): `effect_guard` (outer, per execution) → `intent_guard` (inner) → send. The group routes have no `effect_guard`; they run `intent_guard` alone and map an in-flight claim to 409 themselves.
+  The intent key joins `effect_guard`'s identifying args, so one turn's suppressed send
+  under key A never replays for key B. A re-delivery of the suppressing run replays
+  `sent:false`.
+- **Order inside a sink**: consent → intent key → rate limit → deliver. A revoked
+  recipient gets 403; a suppressed send costs no rate-limit budget.
+- **Visibility**: audit `suppressed` (DM), `group_message_suppressed`,
+  `voip_call_suppressed`; and a `system`-role row labelled `Trinity` in the first send's
+  conversation session (`channel_history.persist_suppressed_note`, `sender_email=None` so
+  it stays out of MEM-001). Calls have no conversation session → audit only.
+
 ## Failure Modes
 
 | Codepath | Realistic failure | Handling | User-visible |
@@ -184,6 +218,9 @@ any of its own executions. The guard stops omission, not a hostile agent.
 | `effect_guard` claim | Redis/DB hiccup on claim | fail-open (`begin` returns disabled) → send proceeds | no |
 | pre-call crash | crash after claim, before provider call | `in_flight` blocks re-send for the TTL window (at-most-once-with-possible-loss) | **silent loss — documented tradeoff, not a silent bug** |
 | `in_flight` replay | duplicate worker mid-flight | raise `EffectInProgressError` → 409 | clear retryable error |
+| intent key `in_flight` | another run mid-send on the same key | `IntentInProgressError` → 409; stale after 300 s lease | retryable error naming the key |
+| intent key, ambiguous send | timeout / cancel after the provider may have delivered | claim released → next run sends again (at-least-once on ambiguity) | possible duplicate — documented |
+| intent key, send stalls > 300 s | lease reclaimed while the first send is alive | second send goes out; the first sender's late `complete()` overwrites, or late `release()` deletes, the reclaimer's row (no owner token) | possible duplicate — documented ceiling |
 | chunked message crash | crash after chunk 3/5 | whole message re-sent on retry | duplicate chunks (at-least-once, documented) |
 | Nevermined settle | settle on terminal turn | terminal-turn guard preserved (no settle on failed execution) | no double-charge |
 | no usable execution_id, pull-mode agent | old image / raw API call / foreign or unknown id | `EffectUnguardedError` → 422 `effect_unguarded` + operator alarm; nothing sent | agent sees a non-retryable refusal; operator sees the alarm |

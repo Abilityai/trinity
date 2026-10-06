@@ -219,20 +219,19 @@ class TestPullOwnsDispatch:
         assert pull_owns_dispatch("alice", "schedule") is False
         assert pull_owns_dispatch("alice", "agent") is True
 
-    @pytest.mark.parametrize("trigger", ["manual", "user", "voip", "voice"])
+    @pytest.mark.parametrize("trigger", ["manual", "user", "voip", "voice", "chat"])
     def test_pilot_owns_interactive_triggers(self, pilot, trigger):
-        """#3114: interactive turns reach a pilot through the durable queue."""
+        """#3114, #3127: interactive turns reach a pilot through the durable
+        queue, ``/chat`` included."""
         from services.agent_service.pull_mode import pull_owns_dispatch
 
         assert pull_owns_dispatch("alice", trigger) is True
 
-    @pytest.mark.parametrize("trigger", ["chat", None])
-    def test_pilot_does_not_own_chat_or_unknown(self, pilot, trigger):
-        """The UI ``/chat`` path still pushes (#3114); an unclassified trigger
-        falls back to push."""
+    def test_pilot_does_not_own_unknown(self, pilot):
+        """An unclassified trigger falls back to push."""
         from services.agent_service.pull_mode import pull_owns_dispatch
 
-        assert pull_owns_dispatch("alice", trigger) is False
+        assert pull_owns_dispatch("alice", None) is False
 
     def test_empty_allowlist_is_inert(self, monkeypatch):
         monkeypatch.setenv("PULL_MODE_PILOT_AGENTS", "")
@@ -301,10 +300,10 @@ class TestProducerGate:
         slot_service.acquire_slot.assert_not_awaited()
         backlog_service.enqueue.assert_awaited_once()
 
-    def test_pilot_chat_trigger_still_pushes(
+    def test_pilot_chat_trigger_is_queued(
         self, capacity, slot_service, backlog_service, pilot
     ):
-        """The remaining carve-out: trigger ``chat`` is admitted (#3114)."""
+        """Trigger ``chat`` reaches the durable queue too (#3127)."""
         result = asyncio.run(
             capacity.acquire(
                 agent_name="alice",
@@ -314,9 +313,9 @@ class TestProducerGate:
                 overflow_payload=_payload("chat"),
             )
         )
-        assert result.state == "admitted"
-        slot_service.acquire_slot.assert_awaited_once()
-        backlog_service.enqueue.assert_not_awaited()
+        assert result.state == "queued_persistent"
+        slot_service.acquire_slot.assert_not_awaited()
+        backlog_service.enqueue.assert_awaited_once()
 
     def test_non_pilot_autonomous_work_unchanged(
         self, capacity, slot_service, backlog_service, pilot

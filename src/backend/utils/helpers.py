@@ -43,7 +43,7 @@ def utc_now_iso() -> str:
     return datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.%fZ')
 
 
-def iso_cutoff(hours: int = 0, *, minutes: int = 0) -> str:
+def iso_cutoff(hours: int = 0, *, minutes: int = 0, seconds: int = 0) -> str:
     """
     Compute a past-cutoff ISO timestamp in the same format as utc_now_iso().
 
@@ -68,12 +68,13 @@ def iso_cutoff(hours: int = 0, *, minutes: int = 0) -> str:
         minutes: Additional minutes in the past (positive, keyword-only).
             Combine with `hours` for arbitrary windows, or use alone for
             sub-hour windows.
+        seconds: Additional seconds in the past (positive, keyword-only).
 
     Returns:
         ISO timestamp matching the format of utc_now_iso().
     """
     return (
-        datetime.now(timezone.utc) - timedelta(hours=hours, minutes=minutes)
+        datetime.now(timezone.utc) - timedelta(hours=hours, minutes=minutes, seconds=seconds)
     ).strftime('%Y-%m-%dT%H:%M:%S.%fZ')
 
 
