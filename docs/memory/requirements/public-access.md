@@ -858,6 +858,13 @@ of the epic #24 voice-replies feature.
 - **FR-8 — Migration of existing agents**: an already-`tts_voice_replies_enabled`
   agent keeps all three channel flags ON but no longer auto-speaks every reply
   (behavior change: always-voice → agent-chosen).
+- **FR-9 — A delegated child never speaks (#3232)**: the route answers
+  `{delivered: false, reason: "delegated_turn"}` for an execution whose
+  `source_channel_agent` is set — a child that inherited its parent's channel
+  context only so its consent-gated completion report (§15.1h) can find the way
+  back. Checked before any channel branch; this route has no proactive-consent
+  check of its own, and #3232's async report-back default makes such children
+  common.
 - **API**: `send_voice_reply` MCP tool → `POST /api/agents/{name}/voice-reply`
   (`AuthorizedAgentByName` + agent-scoped self-check; user-facing channel triggers
   only); `GET/PUT /api/agents/{name}/voice-replies` extended with per-channel
