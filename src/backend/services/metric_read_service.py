@@ -1210,6 +1210,9 @@ def bind_dashboard_widgets(
             widget["binding_error"] = "metric store unavailable"
             widget["binding_error_code"] = "metric_store_unavailable"
             widget["bound"] = False
+            # The docs recommend a `value: 0` placeholder for older base
+            # images; during an outage it would read as a real 0 (ent#730).
+            widget.pop("value", None)
         return config
 
     for widget in widgets:

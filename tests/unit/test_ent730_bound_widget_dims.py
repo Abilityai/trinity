@@ -1059,3 +1059,35 @@ def test_T22_a_zero_point_bind_still_carries_it_and_a_refusal_drops_it(
                                          direction="down_good"))
     assert unselected["direction"] == "down_good"
     assert "direction" not in refused
+
+
+# ---------------------------------------------------------------------------
+# D2: a store outage no longer leaves an author's placeholder on screen (T19)
+# ---------------------------------------------------------------------------
+
+class _DownDb(_Db):
+    def list_metric_definitions(self, name, include_retired=False):
+        raise RuntimeError("store down")
+
+
+def test_T19_an_outage_drops_the_authors_placeholder_value(monkeypatch):
+    """The user doc recommends `value: 0` for older base images; during an
+    outage that placeholder read as a real 0 under the refusal."""
+    monkeypatch.setattr(database_mod, "db", _DownDb())
+    (widget,) = _bind(_w({"channel": "google"}, value=0))
+    assert widget["binding_error_code"] == "metric_store_unavailable"
+    assert widget["bound"] is False
+    assert "value" not in widget
+
+
+def test_T19_the_cached_dashboard_path_drops_it_too(monkeypatch):
+    """The cached fallback deep-copies the stored config and re-binds it
+    through the same function."""
+    monkeypatch.setattr(database_mod, "db", _DownDb())
+    cached = {"sections": [{"widgets": [_w(value=0)]}]}
+    config = copy.deepcopy(cached)
+    mrs.bind_dashboard_widgets(config, AGENT, now=NOW)
+    (widget,) = config["sections"][0]["widgets"]
+    assert widget["binding_error_code"] == "metric_store_unavailable"
+    assert "value" not in widget
+    assert cached["sections"][0]["widgets"][0]["value"] == 0
