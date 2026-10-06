@@ -27,7 +27,15 @@ logger = logging.getLogger(__name__)
 # agent-server still re-validates server-side. KEEP IN SYNC with both:
 #   - docker/base-image/hooks/guardrails-baseline.json::path_deny
 #   - docker/base-image/agent_server/routers/files.py::EDIT_PROTECTED_PATHS
-_FILE_WRITE_DENY_PATTERNS = (
+#
+# Credential paths (trinity-enterprise#819): never writable through these
+# routes, and owner-tier to read. To add a path: (1) here; (2)
+# hooks/guardrails-baseline.json::path_deny plus a guard002-smoke row; (3)
+# agent_server PROTECTED_PATHS / EDIT_PROTECTED_PATHS by file or parent name,
+# unless the name is too generic for a by-name match (say why here); (4) tests:
+# test_files_protected_paths (+ _EXPECTED_ANCHORS), the hook test, the
+# agent-server list test.
+_CREDENTIAL_PATH_PATTERNS = (
     ".env",
     ".env.*",
     ".mcp.json",
@@ -38,14 +46,46 @@ _FILE_WRITE_DENY_PATTERNS = (
     ".gcp/*",
     ".claude/settings.json",
     ".claude/settings.local.json",
+    ".git/config",
+)
+# Other spellings of a home-dir path: the agent server follows
+# /proc/self/{cwd,root}/... and /dev/fd/N back into the home dir.
+_PATH_ALIAS_PATTERNS = (
+    "/proc/*",
+    "/dev/*",
+)
+_FILE_WRITE_DENY_PATTERNS = _CREDENTIAL_PATH_PATTERNS + (
     ".trinity/*",
     ".git/*",
     ".gitignore",
     "/opt/trinity/*",
     "/etc/claude-code/*",
     "/etc/*",
-    "/proc/*",
     "/sys/*",
+) + _PATH_ALIAS_PATTERNS
+# Trinity-managed copies that may hold credentials; write-denied already by `.trinity/*`.
+_TRINITY_CREDENTIAL_COPY_PATTERNS = (
+    ".trinity/git-credential",
+    ".trinity/backup/*",
+)
+# Secret file classes: owner-tier to read, deliberately NOT write-denied here
+# (the per-verb tier follows separately).
+_SECRET_FILE_CLASS_PATTERNS = (
+    ".kube/config",
+    ".config/gcloud/*",
+    "*.key",
+    "*.pem",
+    "*.p12",
+    "*.pfx",
+)
+# The only owner-tier read patterns that are not also write-denied (pinned by
+# test_files_protected_paths).
+_OWNER_TIER_READ_ONLY_PATTERNS = _SECRET_FILE_CLASS_PATTERNS
+_OWNER_TIER_READ_PATTERNS = (
+    _CREDENTIAL_PATH_PATTERNS
+    + _PATH_ALIAS_PATTERNS
+    + _TRINITY_CREDENTIAL_COPY_PATTERNS
+    + _OWNER_TIER_READ_ONLY_PATTERNS
 )
 
 
@@ -68,13 +108,14 @@ def _normalize_user_path(raw: str) -> str:
     return posixpath.normpath(posixpath.join("/home/developer", raw))
 
 
-def _is_user_writable_path(path: str) -> bool:
-    """Reject writes to credential / runtime-config / Trinity-managed paths.
+def _matches_any(path: str, patterns) -> bool:
+    """True when the normalised `path` matches any of `patterns`.
 
     Match strategy (mirrors docker/base-image/hooks/file-guardrail.py):
     - basename match against any pattern (handles `.env`, `.mcp.json` etc.)
     - full-path glob match (handles `.ssh/*`, `/opt/trinity/*` etc.)
     - relative-form glob match against /home/developer-relative path
+    fnmatch's `*` crosses `/`, so `.trinity/backup/*` covers any depth.
     """
     normalized = _normalize_user_path(path)
     if not normalized:
@@ -83,14 +124,25 @@ def _is_user_writable_path(path: str) -> bool:
     rel_to_home = ""
     if normalized.startswith("/home/developer/"):
         rel_to_home = normalized[len("/home/developer/"):]
-    for pattern in _FILE_WRITE_DENY_PATTERNS:
+    for pattern in patterns:
         if fnmatch.fnmatch(basename, pattern):
-            return False
+            return True
         if fnmatch.fnmatch(normalized, pattern):
-            return False
+            return True
         if rel_to_home and fnmatch.fnmatch(rel_to_home, pattern):
-            return False
-    return True
+            return True
+    return False
+
+
+def _is_user_writable_path(path: str) -> bool:
+    """Reject writes to credential / runtime-config / Trinity-managed paths."""
+    return bool(_normalize_user_path(path)) and not _matches_any(path, _FILE_WRITE_DENY_PATTERNS)
+
+
+def _is_owner_tier_read_path(path: str) -> bool:
+    """True when reading `path` takes the owner tier (trinity-enterprise#819).
+    An empty path is owner-tier: it fails closed."""
+    return not _normalize_user_path(path) or _matches_any(path, _OWNER_TIER_READ_PATTERNS)
 
 
 def _deny_anchor(pattern: str) -> str:
@@ -126,6 +178,51 @@ def _is_user_deletable_path(path: str) -> bool:
     normalized = _normalize_user_path(path)
     head = normalized.rstrip("/")
     return not any(a == normalized or a.startswith(head + "/") for a in _DENY_ANCHORS)
+
+
+# trinity-enterprise#819: reading a credential path takes the owner tier. The
+# message says what a teammate on a shared agent can still do and whom to ask.
+_OWNER_TIER_MESSAGE = (
+    "Credential files can be opened only by the agent's owner or an admin. "
+    "You can still chat with this agent, and it keeps using its credentials. "
+    "To view or change them, ask the agent's owner or an admin."
+)
+_INVALID_PATH_DETAIL = {"code": "invalid_path", "message": "Invalid path"}
+
+
+def _owner_tier_detail(path: str) -> dict:
+    return {
+        "code": "owner_tier_path",
+        "message": _OWNER_TIER_MESSAGE,
+        "path": _normalize_user_path(path),
+    }
+
+
+def _refuse_invalid_path(path: str) -> None:
+    """A NUL byte names no file; refused for every caller before the agent is called."""
+    if "\x00" in path:
+        raise HTTPException(status_code=400, detail=dict(_INVALID_PATH_DETAIL))
+
+
+async def _enforce_owner_tier_read(path, current_user, request, agent_name) -> None:
+    """Refuse an owner-tier read unless the caller is a person who passes the
+    owner tier (the agent's owner, or an admin). The PERSON gate runs first, so
+    an agent, system, connector or ops key gets `person_required`."""
+    if not _is_owner_tier_read_path(path):
+        return
+    from dependencies import assert_agent_owner, assert_person
+    try:
+        assert_person(current_user)
+        try:
+            assert_agent_owner(current_user, agent_name)
+        except HTTPException as e:
+            raise HTTPException(status_code=e.status_code, detail=_owner_tier_detail(path)) from e
+    except HTTPException:
+        logger.warning(
+            "Owner-tier read refused: agent=%s path=%r user=%s",
+            agent_name, _normalize_user_path(path), current_user.username,
+        )
+        raise
 
 
 # trinity-enterprise#596: the skills directory is where a library skill lands
@@ -236,6 +333,10 @@ async def download_agent_file_logic(
     if not db.can_user_access_agent(current_user.username, agent_name):
         raise HTTPException(status_code=403, detail="You don't have permission to access this agent")
 
+    # ent#819: a NUL byte names no file; credential paths take the owner tier.
+    _refuse_invalid_path(path)
+    await _enforce_owner_tier_read(path, current_user, request, agent_name)
+
     container = get_agent_container(agent_name)
     if not container:
         raise HTTPException(status_code=404, detail="Agent not found")
@@ -250,7 +351,8 @@ async def download_agent_file_logic(
             agent_name,
             "GET",
             "/api/files/download",
-            params={"path": path},
+            # ent#819: send the path the checks above approved, not the raw input
+            params={"path": _normalize_user_path(path)},
             max_retries=3,
             retry_delay=1.0,
             timeout=60.0
@@ -358,6 +460,10 @@ async def preview_agent_file_logic(
     if not db.can_user_access_agent(current_user.username, agent_name):
         raise HTTPException(status_code=403, detail="You don't have permission to access this agent")
 
+    # ent#819: a NUL byte names no file; credential paths take the owner tier.
+    _refuse_invalid_path(path)
+    await _enforce_owner_tier_read(path, current_user, request, agent_name)
+
     container = get_agent_container(agent_name)
     if not container:
         raise HTTPException(status_code=404, detail="Agent not found")
@@ -372,7 +478,8 @@ async def preview_agent_file_logic(
             agent_name,
             "GET",
             "/api/files/preview",
-            params={"path": path},
+            # ent#819: send the path the checks above approved, not the raw input
+            params={"path": _normalize_user_path(path)},
             max_retries=3,
             retry_delay=1.0,
             timeout=30.0

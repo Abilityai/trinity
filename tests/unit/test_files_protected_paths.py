@@ -232,13 +232,15 @@ _EXPECTED_ANCHORS = (
     "/home/developer/.gcp",
     "/home/developer/.claude/settings.json",
     "/home/developer/.claude/settings.local.json",
+    "/home/developer/.git/config",          # ent#819
     "/home/developer/.trinity",
     "/home/developer/.git",
     "/opt/trinity",
     "/etc/claude-code",
     "/etc",
-    "/proc",
     "/sys",
+    "/proc",
+    "/dev",                                 # ent#819: /dev/fd/N reaches an open file
 )
 
 
@@ -481,3 +483,42 @@ def test_the_agent_receives_the_path_that_was_checked(monkeypatch, fn, path, for
 
     assert _call(fn, path) == {"success": True}
     assert sent.await_args.kwargs["params"] == {"path": forwarded}
+
+
+# ---- ent#819: the owner-tier read set and the write list -----------------------
+
+# The only owner-tier read patterns that are NOT write-denied. Pinned as a
+# literal: a new read-only entry is a reviewed decision, not a side effect.
+_EXPECTED_READ_ONLY = (".kube/config", ".config/gcloud/*", "*.key", "*.pem", "*.p12", "*.pfx")
+
+
+def test_the_read_only_owner_tier_patterns_are_the_reviewed_set():
+    assert files._OWNER_TIER_READ_ONLY_PATTERNS == _EXPECTED_READ_ONLY
+
+
+@pytest.mark.parametrize("pattern", [
+    p for p in files._OWNER_TIER_READ_PATTERNS if p not in _EXPECTED_READ_ONLY
+])
+def test_every_other_owner_tier_read_pattern_is_write_denied(pattern):
+    instance = pattern.replace("*", "x")
+    assert files._is_owner_tier_read_path(instance) is True
+    assert _is_user_writable_path(instance) is False
+
+
+@_PROPERTY
+@given(_PATHS)
+@example("/home/developer/.git/config")
+@example("/dev/fd/7")
+def test_an_owner_tier_path_outside_the_read_only_set_is_never_writable(path):
+    if files._matches_any(path, files._OWNER_TIER_READ_PATTERNS) and not files._matches_any(
+        path, _EXPECTED_READ_ONLY
+    ):
+        assert _is_user_writable_path(path) is False
+
+
+@pytest.mark.parametrize("path", [
+    ".trinity/pipelines/x.yaml", ".trinity/pipeline-state/p/i.json",
+    "CLAUDE.md", "template.yaml", ".git/HEAD", "certs/ca.crt",
+])
+def test_the_platforms_shared_reads_are_not_owner_tier(path):
+    assert files._is_owner_tier_read_path(path) is False
