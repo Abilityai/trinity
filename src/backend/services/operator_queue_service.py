@@ -23,12 +23,16 @@ import re
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
-from typing import Optional, Tuple
+from typing import Optional, Sequence, Tuple
 
 from database import db
 from redis_breaker_util import get_breaker_redis
 from services import ask_service, rate_limiter
-from services.operator_queue_choices import OPTIONS_DROPPED_MARKER
+from services.operator_queue_choices import (
+    OPTIONS_DROPPED_MARKER,
+    options_cap_violation,
+    title_cap_violation,
+)
 from services.agent_client import AgentClient
 from utils.helpers import iso_cutoff, parse_iso_timestamp, to_utc_iso, utc_now_iso
 
@@ -84,6 +88,16 @@ OPERATOR_QUEUE_TITLE_MAX = int(os.getenv("OPERATOR_QUEUE_TITLE_MAX", "300"))
 OPERATOR_QUEUE_QUESTION_MAX = int(os.getenv("OPERATOR_QUEUE_QUESTION_MAX", "4000"))
 OPERATOR_QUEUE_CONTEXT_MAX_BYTES = int(os.getenv("OPERATOR_QUEUE_CONTEXT_MAX_BYTES", "8192"))
 OPERATOR_QUEUE_OPTIONS_MAX_BYTES = int(os.getenv("OPERATOR_QUEUE_OPTIONS_MAX_BYTES", "4096"))
+# #3243: the authoring caps on an agent's ask, refused (never truncated) on the
+# native path and held on the queue-file path. Floored at load so a mis-set env
+# cannot refuse every skill-gate approval (two short options) or every title.
+def _floored_env_cap(name: str, default: int, floor: int) -> int:
+    return max(floor, int(os.getenv(name, str(default))))
+
+
+OPERATOR_QUEUE_MAX_OPTIONS = _floored_env_cap("OPERATOR_QUEUE_MAX_OPTIONS", 5, 2)
+OPERATOR_QUEUE_OPTION_MAX_CHARS = _floored_env_cap("OPERATOR_QUEUE_OPTION_MAX_CHARS", 60, 16)
+OPERATOR_QUEUE_ASK_TITLE_MAX_CHARS = _floored_env_cap("OPERATOR_QUEUE_ASK_TITLE_MAX_CHARS", 120, 40)
 # trinity-enterprise#611: the frozen action an agent-raised ask carries (the
 # values a decision would submit). Refused above this on the native path.
 OPERATOR_QUEUE_PROPOSAL_MAX_BYTES = int(os.getenv("OPERATOR_QUEUE_PROPOSAL_MAX_BYTES", "8192"))
@@ -785,7 +799,15 @@ def _well_formed_queue(data) -> bool:
 HOLD_QUEUE_FULL = "queue_full"
 HOLD_RATE_LIMITED = "rate_limited"
 HOLD_INVALID_ID = "invalid_id"
-_HOLD_RANK = {HOLD_INVALID_ID: 1, HOLD_RATE_LIMITED: 2, HOLD_QUEUE_FULL: 3}
+# #3243: an entry over the authoring caps (options / an agent's title). Ranked
+# lowest — the offending ids ride in their own list on the marker, so a
+# self-clearing `queue_full`/`rate_limited` reason can never hide them.
+HOLD_INVALID_OPTIONS = "invalid_options"
+HOLD_INVALID_TITLE = "invalid_title"
+_HOLD_RANK = {HOLD_INVALID_OPTIONS: 0, HOLD_INVALID_TITLE: 0,
+              HOLD_INVALID_ID: 1, HOLD_RATE_LIMITED: 2, HOLD_QUEUE_FULL: 3}
+# How many offending ids the marker names per list (ids already `_ID_RE`-valid).
+_MARKER_MAX_IDS = 10
 _INGESTION_KEY = "ingestion"
 # "Leave the marker as it is" — distinct from None, which means "remove it".
 _MARKER_UNCHANGED = object()
@@ -795,12 +817,24 @@ def _stronger_hold(current: Optional[str], new: str) -> str:
     return new if current is None or _HOLD_RANK[new] > _HOLD_RANK[current] else current
 
 
-def _ingestion_marker(reason: Optional[str]) -> Optional[dict]:
+def _ingestion_marker(reason: Optional[str], invalid_options: Sequence[str] = (),
+                      invalid_title: Sequence[str] = ()) -> Optional[dict]:
     """The marker a held file should carry, or None when nothing is held. `since`
-    is stamped when it is written (`_apply_ingestion_marker`)."""
+    is stamped when it is written (`_apply_ingestion_marker`). #3243: the ids of
+    entries held over the authoring caps, with the limits in force, ride beside
+    `reason` — only the agent can fix them, so they are named whatever reason
+    wins."""
     if reason is None:
         return None
-    return {"reason": reason, "max_pending": OPERATOR_QUEUE_MAX_PENDING_PER_AGENT}
+    marker = {"reason": reason, "max_pending": OPERATOR_QUEUE_MAX_PENDING_PER_AGENT}
+    if invalid_options:
+        marker[HOLD_INVALID_OPTIONS] = list(invalid_options)[:_MARKER_MAX_IDS]
+        marker["max_options"] = OPERATOR_QUEUE_MAX_OPTIONS
+        marker["max_option_chars"] = OPERATOR_QUEUE_OPTION_MAX_CHARS
+    if invalid_title:
+        marker[HOLD_INVALID_TITLE] = list(invalid_title)[:_MARKER_MAX_IDS]
+        marker["max_title_chars"] = OPERATOR_QUEUE_ASK_TITLE_MAX_CHARS
+    return marker
 
 
 def _current_marker(queue_data) -> Optional[dict]:
@@ -817,7 +851,10 @@ def _marker_differs(queue_data, wanted: Optional[dict]) -> bool:
     current = _current_marker(queue_data)
     if wanted is None:
         return current is not None
-    return current is None or any(current.get(k) != v for k, v in wanted.items())
+    # #3243: the key set too — a fixed entry drops its id list while the
+    # reason (say `queue_full`) continues, and the stale list must go.
+    return (current is None or set(current) - {"since"} != set(wanted)
+            or any(current.get(k) != v for k, v in wanted.items()))
 
 
 def _apply_ingestion_marker(queue_data: dict, wanted: Optional[dict], now: str) -> bool:
@@ -1188,6 +1225,9 @@ class OperatorQueueSyncService:
         # the agents already told the file channel is deprecated. Logged once
         # per process each, bounded like the sets above.
         self._skipped_native: set[tuple[str, str]] = set()
+        # #3243: (agent, req_id) already logged for an entry held over the
+        # authoring caps — once per process, bounded like the sets above.
+        self._cap_held_logged: set[tuple[str, str]] = set()
         self._file_channel_noticed: set[str] = set()
         # #1632: unique per worker process so the cross-worker leader lock only
         # ever refreshes/releases ITS OWN lease (mirror monitoring #1464).
@@ -1624,6 +1664,10 @@ class OperatorQueueSyncService:
         # #3130: why entries were held this cycle — reported to the agent in its
         # file (`platform.ingestion`). The most actionable reason wins.
         hold_reason = None
+        # #3243: entries held over the authoring caps. NOT counted in `held`:
+        # the flood alert reads "runaway or compromised agent", and a too-long
+        # label is an authoring slip that holds until the agent edits it.
+        cap_held: dict[str, list] = {HOLD_INVALID_OPTIONS: [], HOLD_INVALID_TITLE: []}
 
         for req in requests[:OPERATOR_QUEUE_MAX_SCAN_PER_CYCLE]:
             if not isinstance(req, dict):
@@ -1792,6 +1836,31 @@ class OperatorQueueSyncService:
                 hold_reason = _stronger_hold(hold_reason, HOLD_INVALID_ID)
                 continue
 
+            # #3243: the authoring caps, the same predicate as the native raise.
+            # A NEW entry only (an ingested row was matched above, so an ask
+            # already in the queue is never re-judged), and before the depth and
+            # rate caps so a held entry spends no token.
+            cap_hold = None
+            if options_cap_violation(req.get("options"),
+                                     max_options=OPERATOR_QUEUE_MAX_OPTIONS,
+                                     max_chars=OPERATOR_QUEUE_OPTION_MAX_CHARS):
+                cap_hold = HOLD_INVALID_OPTIONS
+            elif title_cap_violation(req.get("title"),
+                                     max_chars=OPERATOR_QUEUE_ASK_TITLE_MAX_CHARS):
+                cap_hold = HOLD_INVALID_TITLE
+            if cap_hold:
+                cap_held[cap_hold].append(req_id)
+                hold_reason = _stronger_hold(hold_reason, cap_hold)
+                key = (agent_name, req_id)
+                if key not in self._cap_held_logged:
+                    if len(self._cap_held_logged) >= _MAX_QUARANTINE_ENTRIES:
+                        self._cap_held_logged.clear()  # safety valve
+                    self._cap_held_logged.add(key)
+                    logger.warning(
+                        f"Holding operator-queue request '{req_id}' from '{agent_name}': "
+                        f"{cap_hold} (#3243)")
+                continue
+
             # #1632 C3: DEPTH cap (hard, primary). At the cap STOP ingesting —
             # `admitted` only grows, so every later item is over too → break.
             if pending_count + admitted >= OPERATOR_QUEUE_MAX_PENDING_PER_AGENT:
@@ -1946,7 +2015,8 @@ class OperatorQueueSyncService:
         # #3130: tell a held file so — but only when the marker it carries is not
         # already the one wanted, and never again against a file a write was
         # already refused on.
-        ingestion = _ingestion_marker(hold_reason)
+        ingestion = _ingestion_marker(hold_reason, cap_held[HOLD_INVALID_OPTIONS],
+                                      cap_held[HOLD_INVALID_TITLE])
         marker_due = (
             file_exists
             and _marker_differs(queue_data, ingestion)

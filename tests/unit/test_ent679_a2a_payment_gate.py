@@ -404,11 +404,18 @@ def client(monkeypatch):
     monkeypatch.setattr(a2a, "idempotency_service", idem)
 
     class _PaymentService:
-        def build_402_response(self, config, base_url="", endpoint=None):
+        def build_402_response(self, config, base_url="", endpoint=None,
+                               plan_scheme=None):
+            # #3215: the router resolves the plan's scheme before calling.
             state["endpoints"].append(("build", endpoint))
+            state.setdefault("build_schemes", []).append(plan_scheme)
             if state.get("build_402_raises"):
                 raise RuntimeError("bad plan config")
             return state["built_402"]
+
+        async def resolve_plan_scheme(self, **kw):
+            state.setdefault("plan_lookups", []).append(kw.get("nvm_environment"))
+            return state.get("plan_scheme")
 
         async def verify_payment(self, **kw):
             state["endpoints"].append(("verify", kw.get("endpoint")))
@@ -938,6 +945,9 @@ class TestPayerBoundTaskRpc:
         class _Boom:
             def build_402_response(self, *a_, **k_):
                 return {}
+
+            async def resolve_plan_scheme(self, **kw):
+                return None
 
             async def verify_payment(self, **kw):
                 raise RuntimeError("facilitator exploded")

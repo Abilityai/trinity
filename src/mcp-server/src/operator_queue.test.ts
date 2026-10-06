@@ -17,6 +17,7 @@ import {
   createOperatorQueueTools,
 } from "./tools/operator_queue.js";
 import { ApiError, type TrinityClient } from "./client.js";
+import { SOMETHING_ELSE } from "./types.js";
 import type { OperatorAskCreate } from "./types.js";
 
 type Item = { id: string; agent_name: string };
@@ -161,6 +162,73 @@ describe("#1104 respond_to_operator_queue", () => {
 
     assert.match(out.error, /400/);
     assert.match(out.error, /Cannot respond/);
+  });
+});
+
+describe("#3242 the reserved (something else) answer", () => {
+  it("is the one literal the backend reserves", () => {
+    assert.equal(SOMETHING_ELSE, "(something else)");
+  });
+
+  it("forwards the literal and the instruction unchanged — the backend decides", async () => {
+    const calls: Array<{ id: string; body: unknown }> = [];
+    const tool = makeRespondTool({
+      getOperatorQueueItem: async () => ({ agent_name: "self" }) as any,
+      getPermittedAgents: async () => [],
+      respondToOperatorQueueItem: async (id: string, body: any) => {
+        calls.push({ id, body });
+        return { status: "responded" } as any;
+      },
+    });
+    await tool.execute(
+      { item_id: "q", response: SOMETHING_ELSE, response_text: "Use the blue bucket" },
+      agentCtx("self"),
+    );
+    assert.deepEqual(calls, [
+      { id: "q", body: { response: SOMETHING_ELSE, response_text: "Use the blue bucket" } },
+    ]);
+  });
+
+  it("a named 422 surfaces its code beside the kept `error`", async () => {
+    const tool = makeRespondTool({
+      getOperatorQueueItem: async () => ({ agent_name: "self" }) as any,
+      getPermittedAgents: async () => [],
+      respondToOperatorQueueItem: async () => {
+        throw new ApiError(422, JSON.stringify({ detail: {
+          code: "instruction_required", message: "needs response_text" } }));
+      },
+    });
+    const out = JSON.parse(
+      await tool.execute({ item_id: "q", response: SOMETHING_ELSE }, agentCtx("self")),
+    );
+    assert.equal(typeof out.error, "string");
+    assert.equal(out.status, 422);
+    assert.equal(out.code, "instruction_required");
+    assert.equal(out.message, "needs response_text");
+    assert.equal(out.success, undefined);
+  });
+
+  it("the offered options ride along on a not-offered refusal", async () => {
+    const tool = makeRespondTool({
+      getOperatorQueueItem: async () => ({ agent_name: "self" }) as any,
+      getPermittedAgents: async () => [],
+      respondToOperatorQueueItem: async () => {
+        throw new ApiError(422, JSON.stringify({ detail: {
+          code: "response_not_an_offered_option", message: "no",
+          offered_options: ["Approve", "Deny"] } }));
+      },
+    });
+    const out = JSON.parse(
+      await tool.execute({ item_id: "q", response: "approved" }, agentCtx("self")),
+    );
+    assert.deepEqual(out.offered_options, ["Approve", "Deny"]);
+  });
+
+  it("every agent-facing description names the literal", () => {
+    const tools = createOperatorQueueTools({} as unknown as TrinityClient, false);
+    for (const t of [tools.respondToOperatorQueue, tools.getMyAsk, tools.askOperator]) {
+      assert.match(t.description, /\(something else\)/, t.name);
+    }
   });
 });
 
@@ -381,5 +449,59 @@ describe("ent#661 ask_operator forwards the turn id", () => {
     await makeAskOperator(fake).execute(ASK as any, { session: { ...ctx.session, executionId: "exec-9" } } as any);
     await makeAskOperator(fake).execute({ ...ASK, request_id: "deploy-2" } as any, agentCtx("self"));
     assert.deepEqual(turns, ["exec-9", undefined]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// #3243 — atomic asks: the authoring rules ride in the tool's own contract,
+// and a cap refusal reaches the agent with its code and limit.
+// ---------------------------------------------------------------------------
+
+describe("#3243 atomic asks", () => {
+  const tools = createOperatorQueueTools({} as unknown as TrinityClient, false);
+
+  it("the ask_operator description carries the five rules and every cap code", () => {
+    const d = tools.askOperator.description;
+    for (const phrase of [
+      "One decision per ask",
+      "by default at most 120 (title_too_long)",
+      "Options name the choice only",
+      "by default at most 5 options, each at most 60 characters",
+      "a refusal names the limit in force",
+      "Context is for people",
+      "too_many_options",
+      "option_too_long",
+      "invalid_options",
+      "lookalike",
+      "Fire and park",
+    ]) {
+      assert.ok(d.includes(phrase), phrase);
+    }
+  });
+
+  it("the ask_operator description leaves headroom under Claude Code's 2,048 cap", () => {
+    // #3234: the client cuts the tail past 2,048. Kept at or under 1,800 so the
+    // next rule fits; field detail belongs in the parameter descriptions.
+    const d = tools.askOperator.description;
+    assert.ok(d.length <= 1800, `ask_operator description is ${d.length} characters`);
+    for (const t of [tools.getMyAsk, tools.respondToOperatorQueue]) {
+      assert.ok(t.description.length <= 2048, `${t.name} description is ${t.description.length} characters`);
+    }
+  });
+
+  it("a cap refusal comes back with its code and limit, never as a throw", async () => {
+    const fake = {
+      raiseAsk: async () => {
+        throw new ApiError(422, JSON.stringify({ detail: {
+          code: "option_too_long", message: "An option is too long.", limit: 60, index: 0, length: 77,
+        } }));
+      },
+    } as Partial<TrinityClient>;
+    const out = JSON.parse(await createOperatorQueueTools(fake as unknown as TrinityClient, false)
+      .askOperator.execute({ request_id: "r", title: "t", type: "approval", options: ["x"] } as any,
+        agentCtx("self")));
+    assert.equal(out.success, false);
+    assert.equal(out.code, "option_too_long");
+    assert.equal(out.limit, 60);
   });
 });

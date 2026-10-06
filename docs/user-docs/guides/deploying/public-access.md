@@ -45,7 +45,7 @@ In the Cloudflare dashboard, add a public hostname for your tunnel under the **P
 
 **Simplest: one catch-all rule** — route the whole hostname to the frontend, `http://trinity-frontend:8080`. The production frontend's nginx already proxies `/api/`, `/a2a/`, `/mcp`, `/ws` and `/health` to the right upstream, so a single rule serves the web UI, every webhook, and MCP. (The frontend container listens on **8080** inside the network; `FRONTEND_PORT` only changes the host-side mapping.)
 
-**Narrower: path-split rules** — if you want to publish only the webhook surface rather than the whole UI:
+**Narrower: path-split rules** — if you want to publish only the webhook surface rather than the whole UI. **Anchor the A2A rules.** An unanchored `/a2a/*` also matches `/api/agents/{name}/a2a/call` — Trinity's *outbound* A2A caller, an authenticated internal endpoint that has no business on a public hostname — so use the two anchored rules below rather than a prefix.
 
 | Path prefix | Routes to | Purpose |
 |---|---|---|
@@ -53,6 +53,8 @@ In the Cloudflare dashboard, add a public hostname for your tunnel under the **P
 | `/api/telegram/webhook/*` | `http://trinity-backend:8000` | Telegram bot webhooks |
 | `/api/whatsapp/*` | `http://trinity-backend:8000` | WhatsApp/Twilio webhooks |
 | `/api/paid/*` | `http://trinity-backend:8000` | Nevermined paid chat |
+| `^/a2a/[^/]+$` | `http://trinity-backend:8000` | A2A inbound JSON-RPC door (paid or authenticated) |
+| `^/a2a/[^/]+/\.well-known/agent-card\.json$` | `http://trinity-backend:8000` | A2A discovery card |
 | `/api/webhooks/*` | `http://trinity-backend:8000` | Schedule webhook triggers |
 | `/api/voip/*` | `http://trinity-backend:8000` | VoIP media streams (WebSocket) |
 | `/mcp` | `http://trinity-frontend:8080` | MCP server, proxied by the frontend |
