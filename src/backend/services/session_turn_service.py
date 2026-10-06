@@ -440,7 +440,6 @@ async def run_resumable_turn(
     lock_ttl: Optional[int] = None,
     cold_message: Optional[str] = None,
     on_resume_failure: Optional[Callable[[], None]] = None,
-    lock_wait: Optional[float] = None,
     **execute_kwargs,
 ) -> ResumableTurn:
     """Run one turn that reattaches to ``cached_uuid`` when there is one.
@@ -463,8 +462,7 @@ async def run_resumable_turn(
     cached UUID inside the same lock — a crash between the two leaves a stale
     id that simply re-fires this path on the next turn (self-healing).
 
-    ``lock_wait`` bounds the wait for the lock (default
-    ``LOCK_WAIT_TOTAL_SECONDS``). Every turn here has a caller blocked on the
+    Every turn here has a caller blocked on the
     reply, so the dispatch passes ``caller_waiting=True`` and its row is keyed
     under ``WAITING_CONVERSATION_PREFIX``: on a pull pilot the claim orders it
     with interactive turns whatever its trigger (#3127).
@@ -492,9 +490,7 @@ async def run_resumable_turn(
     fallback_fired = False
     fallback_reason: Optional[str] = None
 
-    async with ResumeLock(
-        agent_name, resumed_with, session_key, ttl_seconds=ttl, wait_seconds=lock_wait
-    ):
+    async with ResumeLock(agent_name, resumed_with, session_key, ttl_seconds=ttl):
         result = await dispatch_and_await_terminal(
             agent_name=agent_name,
             message=message,

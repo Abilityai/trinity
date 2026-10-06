@@ -448,7 +448,8 @@ export function createChatTools(
             "caller of this agent, never a scheduled or other headless run's — through its execution queue. " +
             "A turn that crosses the context limit can pay a one-off auto-compaction: it is recorded as " +
             "`compact_metadata`, readable via `get_execution_result`, and is not a sign the agent is degraded. " +
-            "The session restarts after a model change or a `/api/chat/history` reset."
+            "The session restarts after a model change or a `/api/chat/history` reset. " +
+            "On a pull-pilot agent each calling user has their own session instead."
           ),
         model: z
           .string()

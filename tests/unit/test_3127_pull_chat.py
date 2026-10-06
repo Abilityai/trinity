@@ -388,9 +388,13 @@ def test_isolated_turn_starts_cold_and_is_not_cached(turn_env):
     assert env.db.get_chat_session_claude_id(env.session.id) == UUID2
 
 
-def test_lock_wait_is_one_turn(turn_env, monkeypatch):
-    """A second turn of one session waits for the first, as a room wake does,
-    instead of failing after 30s."""
+def test_lock_wait_stays_under_the_no_session_sweep(turn_env, monkeypatch):
+    """A second turn of one session waits on the lock while its admission row
+    is `running` with no Claude session. A wait past the #106 sweep fails that
+    row, and the enqueue CAS then refuses it, so the caller gets a 429 for a
+    turn that never ran."""
+    from services.cleanup_service import NO_SESSION_TIMEOUT_SECONDS
+
     env = turn_env
     seen = {}
     real = env.sts.ResumeLock
@@ -401,7 +405,8 @@ def test_lock_wait_is_one_turn(turn_env, monkeypatch):
 
     monkeypatch.setattr(env.sts, "ResumeLock", _lock)
     env.run()
-    assert seen["wait_seconds"] == 60  # resolve_lock_ttl, stubbed
+    assert seen.get("wait_seconds") is None
+    assert env.sts.LOCK_WAIT_TOTAL_SECONDS < NO_SESSION_TIMEOUT_SECONDS
 
 
 def test_lock_busy_on_a_terminal_row_emits_nothing(turn_env, monkeypatch):

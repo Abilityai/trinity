@@ -1015,9 +1015,10 @@ async def run_pulled_chat_turn(
     The turn goes onto the durable queue through the resumable-turn engine the
     Session tab uses, so each chat session (one per agent and user) resumes its
     own Claude conversation from ``chat_sessions.cached_claude_session_id``. A
-    second turn of the same session waits on the resume lock for up to one
-    turn's lock TTL, as a room wake does, then gets 429; other users' turns
-    run in parallel.
+    second turn of the same session waits on the resume lock for the default
+    ``LOCK_WAIT_TOTAL_SECONDS``, then gets 429; other users' turns run in
+    parallel. The wait must stay under the #106 no-session sweep: the waiting
+    turn's admission row is ``running`` with no Claude session meanwhile.
 
     The worker's result reaches the row through the pull sink, which writes the
     terminal, closes the chat-start activity and runs SUB-003. This function
@@ -1046,7 +1047,6 @@ async def run_pulled_chat_turn(
                 request_text=request.message,
                 gate_checked=True,
                 cached_uuid=cached_uuid,
-                lock_wait=session_turn_service.resolve_lock_ttl(name),
                 triggered_by=triggered_by,
                 on_resume_failure=lambda: db.set_chat_session_claude_id(session.id, None),
                 execution_id=task_execution_id,
