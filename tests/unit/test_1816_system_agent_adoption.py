@@ -112,9 +112,30 @@ def _human_caller():
 
 
 def _run(coro):
+    """Run on a private loop AND cancel what the run spawned onto it.
+
+    `ensure_deployed` ends/observes platform alerts (#3246), whose audit and
+    broadcast hop onto the loop through `operator_resume_service.spawn_on_loop`
+    and sit in its module-level `_inflight` set. Closing the loop with those
+    tasks still pending leaves them there, bound to a dead loop, and the next
+    test that gathers `_inflight` on ITS loop fails with "The future belongs to
+    a different loop" (`test_ent329_operator_resume::test_spawn_keeps_a_strong_reference`).
+    Cancelled, not awaited: a follow-up may wait on a transport this island
+    never provides (the event-bus broadcast), so awaiting it would hang.
+    """
     loop = asyncio.new_event_loop()
     try:
-        return loop.run_until_complete(coro)
+        result = loop.run_until_complete(coro)
+        pending = [t for t in asyncio.all_tasks(loop) if not t.done()]
+        for task in pending:
+            task.cancel()
+        if pending:
+            loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+        # A task that finished in the run's LAST iteration has its done
+        # callbacks (the `_inflight.discard`) still queued when `stop()` lands;
+        # one more tick runs them, so nothing finished-but-registered survives.
+        loop.run_until_complete(asyncio.sleep(0))
+        return result
     finally:
         loop.close()
 
