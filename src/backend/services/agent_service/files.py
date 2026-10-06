@@ -334,7 +334,8 @@ async def _raise_if_link_refusal(response, request, current_user, agent_name, pa
 # download and preview. Probed once per container and image (ent#708-style: grep
 # the agent server's source for the read function); until it is recreated on the
 # current image, reads below the owner tier are refused. Fails SAFE: a missing
-# target, an unreadable answer or an exec error all read as "not verified".
+# target, an unreadable answer or an exec error all read as "not verified"; only
+# grep's own quiet answer (exit 0, or 1/2 with no output) is cached.
 _READ_POLICY_PROBE_PATH = "/app/agent_server/routers/files.py"
 _READ_POLICY_PROBE_TOKEN = "_open_for_read"
 _READ_POLICY_PROBE_TIMEOUT = 10
@@ -348,7 +349,11 @@ _RESTART_REQUIRED_MESSAGE = (
 
 async def _agent_reads_without_links(container, agent_name: str) -> bool:
     """Does this container's agent server open reads without following links?
-    Cached per (container id, image id) only when the answer is conclusive."""
+    Cached per (container id, image id) only when the answer is conclusive:
+    exit 0 (verified), or exit 1/2 with empty output (token or file absent;
+    `grep -qs` prints nothing). The exec helper reports a Docker fault as
+    exit 1 with text in `output`, so any output, a timeout or another code is
+    "not verified", logged and not cached."""
     image = (getattr(container, "attrs", None) or {}).get("Image")
     key = (getattr(container, "id", None), image)
     cacheable = all(key)
@@ -364,7 +369,8 @@ async def _agent_reads_without_links(container, agent_name: str) -> bool:
         logger.warning("Read-policy probe failed: agent=%s error=%s", agent_name, e)
         return False
     code = result.get("exit_code")
-    if result.get("timed_out") or code not in (0, 1, 2):
+    quiet = (result.get("output") or "").strip() == ""
+    if result.get("timed_out") or code not in (0, 1, 2) or (code != 0 and not quiet):
         logger.warning("Read-policy probe inconclusive: agent=%s exit=%s", agent_name, code)
         return False
     verdict = code == 0   # 1: token absent, 2: file absent; both a property of the image

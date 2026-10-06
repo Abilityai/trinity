@@ -690,8 +690,10 @@ def test_the_verdict_is_cached_per_container_and_image(agent):
 @pytest.mark.parametrize("failure", [
     {"exit_code": 124, "output": "", "timed_out": True},
     {"exit_code": 126, "output": "", "timed_out": False},
+    {"exit_code": 1, "output": "Error executing command: boom", "timed_out": False},
+    {"exit_code": 2, "output": "Container agent-x not found", "timed_out": False},
     RuntimeError("docker down"),
-], ids=["timeout", "exec-error", "raises"])
+], ids=["timeout", "exec-error", "docker-error-text", "exit-2-with-text", "raises"])
 def test_an_inconclusive_probe_fails_safe_and_is_not_cached(agent, failure):
     if isinstance(failure, Exception):
         agent.probe.side_effect = failure
@@ -702,6 +704,33 @@ def test_an_inconclusive_probe_fails_safe_and_is_not_cached(agent, failure):
             _call("download_agent_file_logic", "notes.md", shared_user())
         assert exc.value.detail["code"] == "agent_restart_required"
     assert agent.probe.await_count == 2
+
+
+def test_a_quiet_absent_token_is_cached_as_not_verified(agent):
+    """grep -qs prints nothing: exit 1 with no output is the image's answer."""
+    _old_image(agent, 1)
+    for _ in range(2):
+        with pytest.raises(HTTPException):
+            _call("download_agent_file_logic", "notes.md", shared_user())
+    assert agent.probe.await_count == 1
+    assert files._READ_POLICY_PROBE_CACHE == {("c-1", "sha256:img"): False}
+
+
+def test_the_real_exec_helper_without_docker_is_not_cached(agent, monkeypatch):
+    """The shipped exec helper reports a Docker fault as exit 1 with text in
+    `output`; that is not the image's answer, so nothing is cached."""
+    from services import docker_service
+
+    real = docker_service.execute_command_in_container
+    assert real.__globals__ is vars(docker_service)
+    monkeypatch.setattr(docker_service, "docker_client", None)
+    monkeypatch.setattr(files, "execute_command_in_container", real)
+    assert asyncio.run(files._agent_reads_without_links(agent.container, AGENT)) is False
+    assert files._READ_POLICY_PROBE_CACHE == {}
+    with pytest.raises(HTTPException) as exc:
+        _call("download_agent_file_logic", "notes.md", shared_user())
+    assert exc.value.detail["code"] == "agent_restart_required"
+    assert files._READ_POLICY_PROBE_CACHE == {}
 
 
 def test_each_refusal_is_counted_in_the_log(agent, caplog):
