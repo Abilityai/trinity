@@ -195,8 +195,8 @@ class TestFileTypeRouting:
         assert not is_unsupported_mime("image/gif")
         assert not is_unsupported_mime("image/webp")
 
-    def test_pdf_unsupported(self):
-        assert is_unsupported_mime("application/pdf")
+    def test_pdf_supported(self):
+        assert not is_unsupported_mime("application/pdf")
 
     def test_zip_supported(self):
         assert not is_unsupported_mime("application/zip")

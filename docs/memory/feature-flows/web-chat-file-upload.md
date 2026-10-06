@@ -150,7 +150,7 @@ files: Optional[List[WebFileUpload]] = None  # (#364)
 ```
 for each file (up to max_files):
   1. sanitize_filename() — NFKC, path traversal, dedup
-  2. Reject unsupported MIME categories (PDF, tar/gzip/rar, video/, audio/) — ZIP is accepted (#2152)
+  2. Reject unsupported MIME categories (tar/gzip/rar, video/, audio/) — ZIP is accepted (#2152)
   3. Actual size check against declared limit (TOCTOU defense)
   4. Magic-byte MIME validation via python-magic (graceful fallback):
      - Declared `application/zip` whose bytes start with a ZIP signature (`PK\x03\x04` /
@@ -159,9 +159,11 @@ for each file (up to max_files):
        libmagic 5.46 on Debian trixie returns `application/octet-stream` for a ZIP buffer)
      - Image MIME mislabel (JPEG vs PNG) → accept with detected MIME
      - text/plain vs text/csv → accept
+     - Generic `application/octet-stream` detected as `application/pdf` → accept as PDF; all other binary mismatches still reject
+     - If MIME detection is unavailable or fails, a PDF declaration requires a standard first-line `%PDF-N.N` header; a generic MIME with that header is identified as PDF. This is file-type detection, not document validation or malware scanning.
      - Other mismatch → reject with "file type mismatch"
   5a. If image → base64-encode → append to image_data list (vision blocks)
-  5b. If non-image → container mkdir -p + put_archive to /home/developer/uploads/{session_id}/
+  5b. If non-image (including PDF) → container mkdir -p + put_archive to /home/developer/uploads/{session_id}/; the receiving agent owns PDF parsing, extraction and OCR
   6. Emit platform_audit_service.log(event_type=EXECUTION, event_action="file_upload")
 ```
 
@@ -212,7 +214,7 @@ Images are passed through to Claude Code via `--input-format stream-json` as con
 | All non-image writes fail | 502 | `"File upload failed: could not write to agent workspace."` |
 | Single file rejected (size) | — | Description appended to prompt: `"{name} — rejected (exceeds X limit)"` |
 | Single file rejected (MIME mismatch) | — | Description: `"{name} — rejected (file type mismatch)"` |
-| Unsupported format (PDF, tar/gzip/rar, video, audio) | — | Description: `"{name} — unsupported format ({mime}). Text, CSV, JSON, ZIP, and image files are supported."` (ZIP allowed since 2026-08) |
+| Unsupported format (tar/gzip/rar, video, audio) | — | Description: `"{name} — unsupported format ({mime}). Text, CSV, JSON, PDF, ZIP, and image files are supported."` (ZIP allowed since 2026-08) |
 | File count exceeds max | — | Description: `"({n} more file(s) skipped — max {max} per message)"` |
 | Total image size exceeded | — | Description: `"{name} — skipped (total image size limit reached)"` |
 | Client-side oversized file | — | `alert()` shown in browser, file not added to `pendingFiles` |
@@ -242,7 +244,7 @@ routers/chat.py:execute_parallel_task           routers/public.py:public_chat
 upload_service.process_file_uploads():
   for each file (max 3):
     sanitize_filename() — unicode NFKC, path traversal, dedup
-    reject unsupported MIME (PDF, tar/gzip/rar, video, audio)
+    reject unsupported MIME (tar/gzip/rar, video, audio)
     size check vs WEB_MAX_FILE_SIZE / WEB_MAX_IMAGE_SIZE
     magic-byte MIME validation (python-magic; fallback graceful; declared ZIP with ZIP signature bypasses libmagic, #3046)
     if image:
@@ -293,7 +295,7 @@ execute_task → claude code --input-format stream-json
    Expected: `alert()` shown; file not added to pending list
 
 5. **Attempt to attach a PDF**
-   Expected: file sent to backend; rejected by `process_file_uploads` with unsupported format description injected into prompt
+   Expected: unchanged PDF bytes saved to the existing per-session uploads directory with uploader attribution; no vision block or platform-side extraction. Repeat with `application/octet-stream`. Non-PDF content declared as PDF and unrelated detected MIME mismatches reject before any workspace write.
 
 6. **Exceed 3-file limit**
    Expected: only first 3 files processed; overflow count injected into prompt

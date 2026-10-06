@@ -44,7 +44,7 @@ WEB_MAX_TOTAL_IMAGE_SIZE = 10 * 1024 * 1024      # 10 MB total images
 WEB_MAX_FILES = 3
 
 UNSUPPORTED_MIMES = {
-    "application/pdf", "application/x-tar",
+    "application/x-tar",
     "application/gzip", "application/x-rar-compressed",
     "video/", "audio/",
 }
@@ -181,7 +181,7 @@ async def process_file_uploads(
             used_names.add(safe_name)
             descriptions.append(
                 f"{safe_name} — unsupported format ({mimetype}). "
-                f"Text, CSV, JSON, ZIP, and image files are supported."
+                f"Text, CSV, JSON, PDF, ZIP, and image files are supported."
             )
             continue
 
@@ -200,6 +200,7 @@ async def process_file_uploads(
 
         # Magic-byte MIME validation
         actual_mime = mimetype
+        detected_mime = None
         if mimetype == "application/zip" and is_zip_container(data):
             # libmagic 5.46 (Debian trixie) detects ZIPs as application/octet-stream
             # from a buffer, so trust the container signature for a declared ZIP (#3046).
@@ -211,7 +212,11 @@ async def process_file_uploads(
                 detected_is_image = detected_mime.startswith("image/")
 
                 if detected_mime != mimetype:
-                    if declared_is_image and detected_is_image:
+                    if mimetype == "application/octet-stream" and detected_mime == "application/pdf":
+                        # Channels may deliver PDF documents with a generic MIME.
+                        # Do not extend this exception to other detected formats.
+                        actual_mime = detected_mime
+                    elif declared_is_image and detected_is_image:
                         # JPEG vs PNG mislabel — both images, accept with detected MIME
                         logger.debug(
                             f"[UPLOAD] Image MIME mismatch {safe_name}: "
@@ -231,6 +236,16 @@ async def process_file_uploads(
                         continue
             except Exception as e:
                 logger.warning(f"[UPLOAD] MIME detection failed for {safe_name}: {e}")
+
+        if detected_mime is None and mimetype in {"application/pdf", "application/octet-stream"}:
+            # Without libmagic, require the standard PDF header before trusting
+            # a PDF declaration or upgrading a generic MIME. This identifies the
+            # container only; parsing/extraction remains the receiving agent's job.
+            if re.match(rb"%PDF-[0-9]\.[0-9](?:\r\n?|\n)", data):
+                actual_mime = "application/pdf"
+            elif mimetype == "application/pdf":
+                descriptions.append(f"{safe_name} — rejected (file type mismatch)")
+                continue
 
         size_str = format_file_size(actual_size)
 

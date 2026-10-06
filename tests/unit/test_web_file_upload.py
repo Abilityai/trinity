@@ -11,7 +11,9 @@ from __future__ import annotations
 import asyncio
 import base64
 import importlib
+import io
 import sys
+import tarfile
 import types
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -164,13 +166,138 @@ class TestProcessFileUploads:
     @pytest.mark.asyncio
     async def test_unsupported_mime_rejected(self):
         container = MagicMock()
-        raw = self._make_raw(mimetype="application/pdf", data=b"%PDF")
+        raw = self._make_raw(mimetype="application/x-tar", data=b"archive")
         descs, _, failed, imgs = await _svc.process_file_uploads(
             raw_files=[raw], agent_name="a", container=container,
             session_id="s1", uploader="u"
         )
         assert any("unsupported format" in d for d in descs)
         assert imgs == []
+
+    @staticmethod
+    def _pdf_bytes():
+        """A complete synthetic one-page PDF, with correct cross-reference offsets."""
+        data = bytearray(b"%PDF-1.7\n%\xe2\xe3\xcf\xd3\n")
+        objects = [
+            b"<< /Type /Catalog /Pages 2 0 R >>",
+            b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] /Resources << >> >>",
+        ]
+        offsets = []
+        for number, obj in enumerate(objects, 1):
+            offsets.append(len(data))
+            data.extend(f"{number} 0 obj\n".encode() + obj + b"\nendobj\n")
+        xref = len(data)
+        data.extend(b"xref\n0 4\n0000000000 65535 f \n")
+        for offset in offsets:
+            data.extend(f"{offset:010d} 00000 n \n".encode())
+        data.extend(f"trailer\n<< /Size 4 /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n".encode())
+        return bytes(data)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("mimetype", ["application/pdf", "application/octet-stream"])
+    async def test_real_pdf_delivered_unchanged_with_unmocked_magic(self, mimetype):
+        """Declared and generic PDFs use workspace delivery, never image blocks."""
+        data = self._pdf_bytes()
+        raw = self._make_raw(name="../../report.pdf", mimetype=mimetype, data=data)
+        with (
+            patch.object(_svc, "container_exec_run", new=AsyncMock(return_value=(0, b""))),
+            patch.object(_svc, "container_put_archive", new=AsyncMock(return_value=True)) as put,
+            patch.object(_svc.platform_audit_service, "log", new=AsyncMock()) as audit,
+        ):
+            descriptions, directory, failed, images = await _svc.process_file_uploads(
+                [raw], "test-agent", MagicMock(), "session-1", "user@example.com"
+            )
+        assert not failed and images == []
+        assert directory == "/home/developer/uploads/session-1"
+        put.assert_awaited_once()
+        assert put.await_args.args[1] == directory
+        with tarfile.open(fileobj=io.BytesIO(put.await_args.args[2])) as archive:
+            assert archive.getnames() == ["report.pdf"]
+            assert archive.extractfile("report.pdf").read() == data
+        assert "[File uploaded by user@example.com]" in descriptions[0]
+        assert "saved to /home/developer/uploads/session-1/report.pdf" in descriptions[0]
+        assert audit.await_args.kwargs["details"]["mime_type"] == "application/pdf"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("mimetype", ["application/pdf", "application/octet-stream"])
+    @pytest.mark.parametrize("detector", ["missing", "error"])
+    async def test_pdf_header_fallback_when_magic_unavailable(self, mimetype, detector):
+        fake_magic = MagicMock()
+        fake_magic.from_buffer.side_effect = RuntimeError("detector unavailable")
+        raw = self._make_raw(name="report.pdf", mimetype=mimetype, data=self._pdf_bytes())
+        with (
+            patch.object(_svc, "_MAGIC_AVAILABLE", detector == "error"),
+            patch.object(_svc, "magic", fake_magic, create=True),
+            patch.object(_svc.platform_audit_service, "log", new=AsyncMock()) as audit,
+        ):
+            descriptions, directory, failed, images = await self._upload(raw)
+        assert directory is not None and not failed and images == []
+        assert "saved to" in descriptions[0]
+        assert audit.await_args.kwargs["details"]["mime_type"] == "application/pdf"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("data", [b"MZ\x90\x00", b"plain text", b"%PDF", b""])
+    @pytest.mark.parametrize("detector", ["missing", "error"])
+    async def test_declared_pdf_requires_signature_when_magic_unavailable(self, data, detector):
+        fake_magic = MagicMock()
+        fake_magic.from_buffer.side_effect = RuntimeError("detector unavailable")
+        with (
+            patch.object(_svc, "_MAGIC_AVAILABLE", detector == "error"),
+            patch.object(_svc, "magic", fake_magic, create=True),
+            patch.object(_svc, "container_exec_run", new=AsyncMock()) as execute,
+            patch.object(_svc, "container_put_archive", new=AsyncMock()) as put,
+        ):
+            descriptions, directory, failed, images = await _svc.process_file_uploads(
+                [self._make_raw(name="report.pdf", mimetype="application/pdf", data=data)],
+                "test-agent", MagicMock(), "s", "user@example.com",
+            )
+        assert "rejected (file type mismatch)" in descriptions[0]
+        assert directory is None and not failed and images == []
+        execute.assert_not_awaited()
+        put.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("declared,detected,data", [
+        ("application/pdf", "application/x-dosexec", b"MZ\x90\x00"),
+        ("application/octet-stream", "application/x-dosexec", b"MZ\x90\x00"),
+        ("text/plain", "application/pdf", b"%PDF-1.7\n"),
+        ("application/pdf", "text/plain", b"%PDF-1.7\n"),
+    ])
+    async def test_pdf_support_preserves_other_mime_mismatch_rejections(self, declared, detected, data):
+        fake_magic = MagicMock()
+        fake_magic.from_buffer.return_value = detected
+        with (
+            patch.object(_svc, "_MAGIC_AVAILABLE", True),
+            patch.object(_svc, "magic", fake_magic, create=True),
+            patch.object(_svc, "container_exec_run", new=AsyncMock()) as execute,
+            patch.object(_svc, "container_put_archive", new=AsyncMock()) as put,
+        ):
+            descriptions, directory, failed, images = await _svc.process_file_uploads(
+                [self._make_raw(name="report.pdf", mimetype=declared, data=data)],
+                "test-agent", MagicMock(), "s", "user@example.com",
+            )
+        assert "rejected (file type mismatch)" in descriptions[0]
+        assert directory is None and not failed and images == []
+        execute.assert_not_awaited()
+        put.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("mimetype", ["application/pdf", "application/octet-stream"])
+    async def test_pdf_actual_size_limit_precedes_workspace_writes(self, mimetype):
+        raw = self._make_raw(name="report.pdf", mimetype=mimetype, data=self._pdf_bytes())
+        raw["size"] = 1
+        with (
+            patch.object(_svc, "container_exec_run", new=AsyncMock()) as execute,
+            patch.object(_svc, "container_put_archive", new=AsyncMock()) as put,
+        ):
+            descriptions, directory, failed, images = await _svc.process_file_uploads(
+                [raw], "test-agent", MagicMock(), "s", "user@example.com", max_file_size=1
+            )
+        assert "rejected (exceeds" in descriptions[0]
+        assert directory is None and not failed and images == []
+        execute.assert_not_awaited()
+        put.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_oversized_file_rejected(self):
