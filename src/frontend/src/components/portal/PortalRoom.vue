@@ -405,7 +405,7 @@ import { workSignalFromRoom } from './portalRail'
 import { usePortalFileDrop, attachmentState } from '@/composables/usePortalFileDrop'
 import { useComposerDraft } from '@/composables/useComposerDraft'
 import { usePortalDraftsStore } from '@/stores/portalDrafts'
-import { draftKeyFor, shouldFocusOnRestore } from './portalDrafts'
+import { draftKeyFor, shouldAutoFocusComposer } from './portalDrafts'
 import { shouldCancelOnEscape, cancelOutcome } from '@/utils/turnCancel'
 import { useStickToBottom } from '@/composables/useStickToBottom'
 import {
@@ -969,7 +969,7 @@ onMounted(async () => {
   // end, on a fine pointer only (a phone would get the keyboard over the room).
   if (isClosed.value) drafts.clear(draftKey.value)
   else if (draftRestored && !props.prefill
-      && shouldFocusOnRestore(typeof window !== 'undefined' ? window.matchMedia?.bind(window) : null)) {
+      && shouldAutoFocusComposer(typeof window !== 'undefined' ? window.matchMedia?.bind(window) : null)) {
     nextTick(() => {
       const el = textarea.value
       if (!el || el.disabled) return
