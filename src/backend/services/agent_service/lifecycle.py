@@ -24,7 +24,8 @@ from services.docker_service import (
 )
 from services.docker_utils import (
     container_stop, container_remove, container_start, container_reload,
-    volume_get, volume_create, containers_run, image_get, container_stop
+    volume_get, volume_create, containers_run, image_get, container_stop,
+    agent_volume_labels
 )
 from services.agent_service.helpers import validate_base_image
 from services.agent_runtime_state import clear_agent_breakers
@@ -1408,10 +1409,7 @@ async def _provision_folders_and_run_agent_container(
             except docker.errors.NotFound:
                 await volume_create(
                     name=shared_volume_name,
-                    labels={
-                        'trinity.platform': 'agent-shared',
-                        'trinity.agent-name': agent_name
-                    }
+                    labels=agent_volume_labels(agent_name, 'agent-shared'),
                 )
                 volume_created = True
 
@@ -1450,10 +1448,7 @@ async def _provision_folders_and_run_agent_container(
         except docker.errors.NotFound:
             await volume_create(
                 name=public_volume_name,
-                labels={
-                    'trinity.platform': 'agent-public',
-                    'trinity.agent-name': agent_name,
-                },
+                labels=agent_volume_labels(agent_name, 'agent-public'),
             )
             public_volume_created = True
 

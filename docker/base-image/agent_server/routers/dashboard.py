@@ -45,7 +45,9 @@ def validate_widget(widget: Dict[str, Any], index: int) -> Optional[str]:
     # An agent on an older base image still has the strict rule, so the guide
     # tells authors to keep a placeholder `value:` until their image carries
     # this change — the backend overwrites it when the binding resolves, so
-    # the placeholder is never what an operator sees.
+    # the placeholder is never what an operator sees. Compatibility check D-003
+    # (`services/compatibility/static_checks.py::_BOUND_FILLED`) applies the same
+    # exemption — keep the two in step (#3186).
     bound = bool(widget.get('metric'))
 
     # Type-specific validation

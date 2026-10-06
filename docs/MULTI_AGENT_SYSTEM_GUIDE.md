@@ -756,7 +756,7 @@ Agent B reads from: /home/developer/shared-in/agent-a/data.json
 ### Strategy 2: MCP Chat (For Real-Time Requests)
 
 **Best For:**
-- Urgent requests that complete within 60 seconds
+- Urgent requests that complete within the synchronous bound (`MCP_CHAT_TIMEOUT_MS`, 25 seconds by default)
 - Interactive coordination
 - One-off questions
 - Triggering immediate action
@@ -815,20 +815,20 @@ mcp__trinity__chat_with_agent(
 
 ### Design Limitation: 60-Second MCP Call Timeout
 
-> **Important**: Claude Code enforces a **hardcoded 60-second timeout** on all MCP HTTP tool calls. This is an upstream limitation in Claude Code's MCP transport layer — Trinity's `timeout_seconds` parameter controls the backend execution time but cannot override the client-side connection timeout.
+> **Important**: an MCP client gives up on a tool call at its own ceiling (30–60 seconds is typical) — an upstream limit of the client's MCP transport. Trinity's MCP server stops waiting first, at `MCP_CHAT_TIMEOUT_MS` (25 seconds by default), and answers a synchronous `chat_with_agent` or `fan_out` with a **receipt** instead of an error: `status: "queued_timeout"` plus the `execution_id` (`fan_out_timeout` plus a `fan_out_id` for a batch). `timeout_seconds` controls the backend execution time, not that wait.
 
 **What this means for agent design:**
-- Any `chat_with_agent` call that takes longer than 60 seconds will fail, regardless of `timeout_seconds`
-- The target agent may continue processing, but the calling agent receives no response
-- This affects all synchronous agent-to-agent MCP calls
+- A long synchronous call no longer just fails: when the server can match it to its execution, it answers with a receipt and the target keeps running it; when it cannot, the error says so and names `list_recent_executions`
+- The caller reads the outcome with `get_execution_result(agent_name, execution_id)` and never re-sends — a reworded re-send runs the work twice. Every agent is taught this as the delegation contract in its platform prompt (§Agent Collaboration); the `chat_with_agent` description carries the same text
+- The calling turn still decides what to do while it waits: read later, arm `set_reminder`, or — for a `parallel=true` run — subscribe to the target's `agent.task.completed` / `agent.task.failed`
 
 **Design patterns that work within this constraint:**
 
-#### Pattern 1: Keep Tasks Small (< 60s)
-Break complex work into sub-tasks that each complete within 60 seconds:
+#### Pattern 1: Keep Tasks Small (< 25s)
+When you need the reply in the same call, break complex work into sub-tasks that each complete within the synchronous bound (`MCP_CHAT_TIMEOUT_MS`, 25 seconds by default):
 ```python
 # Instead of one large task:
-#   chat_with_agent("analyst", "Analyze entire codebase")  # Will timeout!
+#   chat_with_agent("analyst", "Analyze entire codebase")  # Comes back as a queued_timeout receipt
 
 # Break into focused tasks:
 chat_with_agent("analyst", "List the 5 most critical files in src/backend/")
@@ -847,7 +847,8 @@ result = mcp__trinity__chat_with_agent(
 )
 # result = { "execution_id": "abc123", "status": "accepted" }
 
-# Check results later via shared folder or API
+# Read the outcome later — never re-send to "check":
+#   get_execution_result(agent_name="analyst", execution_id="abc123")
 ```
 
 #### Pattern 3: Shared Folder Handoff

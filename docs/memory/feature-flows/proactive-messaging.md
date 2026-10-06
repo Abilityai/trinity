@@ -26,7 +26,7 @@ Enables agents to send proactive messages to specific users by verified email ac
 - **Redis-based rate limiting**: 10 messages per recipient per hour (survives restarts)
 - **Mandatory audit logging**: All proactive sends logged via platform_audit_service
 - **Multi-channel delivery**: Auto-selection tries telegram → slack → web. WhatsApp is an explicit-only channel (`channel="whatsapp"`) and not part of `auto` — Twilio's 24-hour session window makes it unreliable for inactive recipients.
-- **MCP tool access**: Agents use `send_message` MCP tool for outreach
+- **MCP tool access**: Agents use `send_message` MCP tool for outreach. Its description repeats the delegation contract's rule sentence (ent#568): a send that errored without a named refusal may still have reached the person, so it is never re-sent under a new `dedup_label` or from a later turn (the per-turn effect dedupe, #1084, covers only a same-turn repeat)
 - **History-aware (#1600)**: a delivered message is appended to the recipient's channel session, so the agent's next turn knows what it sent
 
 ## Architecture

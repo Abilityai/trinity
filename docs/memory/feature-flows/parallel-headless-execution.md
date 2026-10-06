@@ -1085,15 +1085,15 @@ async task(name: string, message: string, options?: {
 
 Note: Previously this ceiling was `(timeout_seconds || 600) + 10`, which capped inter-agent task duration at ~10 minutes and ignored per-agent `execution_timeout_seconds` whenever the caller omitted the parameter. Issue #418 lifted the ceiling to cover the platform max (7200s / 2h) with a 60s buffer.
 
-**MCP Tool** (`src/mcp-server/src/tools/chat.ts:187-195`):
+**MCP Tool** (`src/mcp-server/src/tools/chat.ts`, `chat_with_agent` → `async`):
 ```typescript
 async: z
   .boolean()
   .optional()
   .default(false)
   .describe(
-    "If true, return immediately with execution_id (fire-and-forget). " +
-    "Only applies when parallel=true. Poll the execution endpoint for results."
+    "If true, return immediately with a receipt carrying the execution_id (fire-and-forget). " +
+    "Only applies when parallel=true. Read the outcome with get_execution_result."
   ),
 ```
 
