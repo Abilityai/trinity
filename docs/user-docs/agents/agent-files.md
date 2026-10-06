@@ -77,7 +77,7 @@ The signed URL is the only credential a download needs: it is not tied to a chat
 
 ## Reading credential files
 
-Credential files open, preview and download only for the agent's **owner** or an **admin**, signed in or using their own user-scoped MCP key. This covers `.env` and `.env.*`, `.mcp.json`, `.credentials.enc`, `~/.ssh`, `~/.aws`, `~/.gcp`, the Claude Code settings and login files, the Gemini and Codex runtime config, `.git/config`, key and certificate files (`*.key`, `*.pem`, `*.p12`, `*.pfx`), `~/.kube/config` and `~/.config/gcloud`. Anyone else the agent is shared with sees: "Credential files can be opened only by the agent's owner or an admin. You can still chat with this agent, and it keeps using its credentials. To view or change them, ask the agent's owner or an admin." Agent, system and connector keys cannot read these files. Every refused read, and every read by anyone other than the owner signed in, is recorded in the audit log.
+Credential files open, preview and download only for the agent's **owner** or an **admin**, signed in or using their own user-scoped MCP key. This covers `.env` and `.env.*`, `.mcp.json` and `.mcp.json.template`, `.credentials.enc`, `~/.ssh`, `~/.aws`, `~/.gcp`, the Claude Code settings and login files, the Gemini and Codex runtime config, `.git/config`, key and certificate files (`*.key`, `*.pem`, `*.p12`, `*.pfx`), `~/.kube/config`, `~/.config/gcloud`, and Trinity's own copies at `.trinity/git-credential` and `.trinity/backup/`. Anyone else the agent is shared with sees: "Credential files can be opened only by the agent's owner or an admin. You can still chat with this agent, and it keeps using its credentials. To view or change them, ask the agent's owner or an admin." Agent, system and connector keys cannot read these files. Every refused read, and every read by anyone other than the owner signed in, is recorded in the audit log.
 
 All other files, including `.trinity/pipelines/` and `.trinity/pipeline-state/`, stay readable by anyone the agent is shared with.
 
@@ -85,7 +85,7 @@ All other files, including `.trinity/pipelines/` and `.trinity/pipeline-state/`,
 
 Files that are links, or that sit inside a linked folder, are not opened, previewed or downloaded through the Files tab, by anyone; the message says the path is a link. Open the file it points to instead. Ship real files, not links, at the paths Trinity reads itself (`CLAUDE.md`, `template.yaml`, dashboard images): a linked `CLAUDE.md`, for example, stops receiving the refreshed Platform Skills section.
 
-If someone you share an agent with is told the agent "needs a restart", stop and start the agent from Trinity: that recreates it on the current image.
+If an agent still runs an older image, opening, previewing or downloading its files is refused for anyone other than its owner or an admin (agent keys included), with: "This agent needs a restart to apply an update. Ask the agent's owner or an admin to stop and start it in Trinity." Stop and start the agent from Trinity: that recreates it on the current image.
 
 ## Protected runtime files
 
