@@ -497,6 +497,50 @@ def test_k8_an_oversized_key_fails_loud(qdb):
     assert any(big[:32] in w for w in body.get("warnings", [])), body.get("warnings")
 
 
+# Keys within the per-field 1,024-character limit whose JSON escaping still
+# overflows the 4,096-byte token: a non-ASCII character is six bytes (`\u00e9`),
+# a quote or a backslash two.
+_ESCAPE_HEAVY = [
+    pytest.param(chr(0xE9) * 700, None, id="700-e-acute"),
+    pytest.param("\\" * 1024, '"' * 1024, id="quotes-and-backslashes"),
+]
+
+
+@pytest.mark.parametrize("big,created_at", _ESCAPE_HEAVY)
+def test_k8b_an_escape_heavy_key_fails_loud_instead_of_issuing_a_dead_cursor(
+        qdb, big, created_at):
+    """K8b (T2): a boundary key that passes the per-field check but whose
+    escaped JSON is over `CURSOR_MAX_BYTES` used to be issued — and the next
+    request was a 422 "not a token this server issued". Now the page fails
+    loud exactly as K8 does: `has_more` true, `next_cursor` null, a warning."""
+    a = "k8b-agent"
+    for i in range(2):
+        _seed(qdb, a, priority="critical", created_at=_ago(100 + i))
+    _insert_raw(id=big, agent_name=a, request_id="legacy-1", status="pending",
+                priority="high", type="question", created_at=created_at or _ago(50))
+    for i in range(3):
+        _seed(qdb, a, priority="medium", created_at=_ago(200 + i))
+    _as()
+    body = _get(limit=3, cursor="start")
+    assert body["items"][-1]["id"] == big
+    assert body["has_more"] is True
+    assert body["next_cursor"] is None, "issued a cursor its own decoder refuses"
+    assert any(big[:32] in w for w in body.get("warnings", [])), body.get("warnings")
+
+
+@pytest.mark.parametrize("big,created_at", _ESCAPE_HEAVY)
+def test_k8c_every_issued_cursor_fits_its_decoder(big, created_at):
+    """K8c (T2, the codec): `encode_cursor` returns None for a key whose token
+    would exceed the decoder's byte cap, and a token it does issue at the
+    per-field limit (1,024 ASCII characters) is one `decode_cursor` accepts."""
+    from services.operator_queue_service import decode_cursor, encode_cursor
+    walk, fp = "a" * 32, "f" * 16
+    assert encode_cursor(T0, (0, 1, created_at or T0, big), fp, walk) is None
+    ok = encode_cursor(T0, (0, 1, T0, "L" * 1024), fp, walk)
+    assert ok is not None
+    assert decode_cursor(ok)["after"] == (0, 1, T0, "L" * 1024)
+
+
 def test_k9_offset_mode_order_is_unchanged(qdb):
     """K9 (D2 is additive): with no `cursor` the page order is exactly
     `list_items`' order — a row answered 60 s ago is in the ended section —

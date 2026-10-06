@@ -447,13 +447,22 @@ def _key_text_ok(value) -> bool:
 def encode_cursor(watermark: str, key, fingerprint: str, walk_id: str) -> Optional[str]:
     """The `next_cursor` for a page whose last row has `key`, or None when that
     key cannot be carried (a legacy agent-authored id or `created_at` longer
-    than the decoder allows, or holding a control character) — the caller then
-    says so instead of truncating a key or quietly ending the walk."""
+    than the decoder allows, holding a control character, or whose escaped
+    JSON would exceed `CURSOR_MAX_BYTES`) — the caller then says so instead of
+    truncating a key or quietly ending the walk.
+
+    The byte check is on the encoded JSON, not only per-field characters:
+    `json.dumps` escapes a non-ASCII character to six bytes and `"` / a backslash to
+    two, so a 700-character legacy id could pass the per-field check and still
+    produce a token `decode_cursor` refuses (ent#815 fix 2). Within the cap the
+    token is also within the decoder's base64 length bound."""
     sec, prk, st, item_id = key
     if not (_key_text_ok(st) and _key_text_ok(item_id)):
         return None
     raw = json.dumps({"v": 1, "w": watermark, "k": [sec, prk, st, item_id],
                       "f": fingerprint, "s": walk_id}, separators=(",", ":"))
+    if len(raw.encode("utf-8")) > CURSOR_MAX_BYTES:
+        return None
     return base64.urlsafe_b64encode(raw.encode("utf-8")).rstrip(b"=").decode("ascii")
 
 
