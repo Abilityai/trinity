@@ -1027,6 +1027,22 @@ cannot clobber the fresh listing. Per agent and not one shared token, because a 
 runs three of these concurrently for three different agents and a shared counter lets each
 invalidate the last.
 
+**A sent message keeps what it carried (#3265).** The 1:1 send waits for in-flight uploads
+(`settled()`, as the room escalation does), snapshots the settled chips onto the message
+(`components/portal/portalMessageAttachments.js::sentAttachments`, named by the upload
+route's stored `filename`) and clears the composer, then sends the names as
+`PortalChatRequest.attachments` on both `/chat` and `/chat/stream`.
+`client_portal/service.py::resolve_turn_attachments` reads the sender's own inbox once and
+keeps a successful entry only when that filename is there, with size and type from the
+listing — a request cannot put a file it never sent on its message. A failed upload is
+stored with its reason. The JSON lands on the user row (`enterprise_portal_messages.
+attachments`, both migration tracks) and `get_history` returns it on `PortalHistoryMessage`,
+so a reload shows it. `PortalMessageAttachments.vue` renders a fixed-size thumbnail per
+image, a chip per other file and a failed chip; thumbnails read through the
+rate-limited upload route (20/min, 100/h), so each is fetched once per tab, only when the
+message scrolls into view, and falls back to a chip when refused. Room messages
+(`enterprise_room_messages`) do not carry attachments yet.
+
 **The Files tab's own verbs (#2582 + ent#548).** Rows render from ONE flat projection
 (`components/portal/portalFiles.js::flattenFiles`) that owns both the render order and the
 preview index — two orderings would drift and the modal would silently open the wrong

@@ -4369,6 +4369,26 @@ def _migrate_portal_messages_voice_source(cursor, conn):
     conn.commit()
 
 
+def _migrate_portal_messages_attachments(cursor, conn):
+    """#3265 — a sent Workspace message shows what was attached to it.
+
+    One nullable column on `enterprise_portal_messages`: `attachments`, a JSON
+    list on a user turn — `{filename, size_bytes, mime_type}` for an upload the
+    server found in the sender's inbox, `{filename, failed, error}` for one that
+    did not land. Without it the chips cleared at send and nothing on the row
+    said a file went with the message, so a reload could not show it either.
+
+    Additive, no backfill: no existing row recorded what it carried.
+    Mirrored by the Alembic revision 0090_portal_messages_attachments.
+    """
+    _safe_add_column(
+        cursor,
+        "enterprise_portal_messages",
+        "attachments",
+        "ALTER TABLE enterprise_portal_messages ADD COLUMN attachments TEXT",
+    )
+    conn.commit()
+
 def _migrate_portal_session_main_chat(cursor, conn):
     """ent#523 — the pinned Main chat, and the tombstone Reset leaves behind.
 
@@ -5337,4 +5357,5 @@ MIGRATIONS = [
     ("pull_sync", _migrate_pull_sync),
     ("skill_gate_requests_table", _migrate_skill_gate_requests_table),
     ("supersede_queue_flood_backlog", _migrate_supersede_queue_flood_backlog),
+    ("portal_messages_attachments", _migrate_portal_messages_attachments),
 ]

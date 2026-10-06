@@ -667,7 +667,11 @@ TABLES = {
             -- matter how many rows the history window returns or what typed
             -- rows landed between them.
             source TEXT,
-            voice_call_id TEXT
+            voice_call_id TEXT,
+            -- #3265: what a user turn carried, as a JSON list of
+            -- {filename, size_bytes, mime_type} (or {filename, failed, error}
+            -- for an upload that did not land). NULL for every other row.
+            attachments TEXT
         )
     """,
 
