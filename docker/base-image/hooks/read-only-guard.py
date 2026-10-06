@@ -49,7 +49,10 @@ def _normalise(path: str) -> str:
     expanded = os.path.expanduser(path)
     if not os.path.isabs(expanded):
         expanded = os.path.join("/home/developer", expanded)
-    return os.path.normpath(expanded)
+    # normpath keeps exactly two leading slashes (POSIX leaves `//` implementation-
+    # defined); the filesystem reads them as one, so `//home/developer/...` must
+    # match the same patterns (trinity-enterprise#792).
+    return os.path.normpath("/" + expanded.lstrip("/"))
 
 
 def _matches_any(path: str, patterns: list) -> str:

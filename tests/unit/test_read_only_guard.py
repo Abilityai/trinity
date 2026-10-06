@@ -119,6 +119,19 @@ class TestGuardBlockedPaths:
         )
         assert result.returncode == 2
 
+    @pytest.mark.parametrize("path", [
+        "//home/developer/.claude/agents/x.md",
+        "///home/developer/.claude/agents/x.md",
+        "//home/developer/.claude",
+    ])
+    def test_leading_slashes_do_not_skip_a_directory_pattern(self, tmp_path, path):
+        """trinity-enterprise#792: normpath keeps exactly two leading slashes, so
+        `//home/developer/.claude/...` used to match neither the relative nor the
+        directory form of `.claude/*` while the write lands in `.claude/`."""
+        result = _run_guard({"file_path": path}, config=_DEFAULT_CONFIG, tmp_path=tmp_path)
+        assert result.returncode == 2
+        assert "read-only mode" in result.stderr
+
     def test_relative_path_blocked(self, tmp_path):
         """Relative file_path is resolved before pattern matching."""
         result = _run_guard(

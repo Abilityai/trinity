@@ -868,7 +868,7 @@
         "files",
         "credentials"
       ],
-      "description": "Integration tests for the .mcp.json RCE-by-config bypass closure: AISEC-C2 exact reproduction (PUT /files?path=.mcp.json + credentials/inject vectors), full path_deny coverage (15 protected paths), path traversal variants (8), credentials inject allowlist (rejected paths + .env/.credentials.enc regression), defense-in-depth verification (block at backend layer for stopped agents), file-state proof (content unchanged after blocked write). Pairs with tests/unit/test_files_protected_paths.py (32 unit tests)."
+      "description": "Integration tests for the .mcp.json RCE-by-config bypass closure: AISEC-C2 exact reproduction (PUT /files?path=.mcp.json + credentials/inject vectors), full path_deny coverage (15 protected paths), path traversal variants (8), credentials inject allowlist (rejected paths + .env/.credentials.enc regression), defense-in-depth verification (block at backend layer for stopped agents), file-state proof (content unchanged after blocked write). Pairs with tests/unit/test_files_protected_paths.py. trinity-enterprise#792: two-leading-slash paths in the traversal set; DELETE of protected paths and the directories holding them (.ssh, .claude, a // path, /proc/self/cwd) and a // mkdir refused at the backend against a stopped agent."
     },
     {
       "file": "test_mcp_validator_endpoint.py",
@@ -3783,7 +3783,29 @@
         "security",
         "skills"
       ],
-      "description": "Only designated agents may change an agent's skills — their own included (ent#596). The scope ALLOWLIST as a ten-row matrix (JWT / user / system pass unchanged; agent passes only with a live grant; connector, ops, portal_delegate and a scope invented tomorrow are refused; a principal with no mcp_scope fails closed); the composed dependency checks the capability BEFORE the owner fence, so a non-holder gets one uniform named 403 for an existing, nonexistent or foreign target and a holder gains no reach beyond its owner; the route table read off FastAPI's real dependant graph (every skill-changing route takes the fence; the grant routes exist and are not shadowed); a refused agent key changes nothing on any of the four routes through a real FastAPI app; the file-route side door (.claude/skills/** via PUT/DELETE/mkdir, including a delete of an ancestor) and that people and holders still edit skills there; grants over a real SQLite file (live-only via the agent_ownership join, idempotent who/when, soft-delete and recovery, orphan rows fail closed, unknown capability refused at the sink, no call permission written); the grant service (404 / system / ephemeral refusals, revoke needs no validation); the grant route refuses an admin's own MCP key and audits only real changes; attribution (the acting agent recorded, the system agent named, a bulk replace does not re-stamp kept names); both migration tracks executed; the CASCADE AgentRef. Eight mutations each red."
+      "description": "Only designated agents may change an agent's skills — their own included (ent#596). The scope ALLOWLIST as a ten-row matrix (JWT / user / system pass unchanged; agent passes only with a live grant; connector, ops, portal_delegate and a scope invented tomorrow are refused; a principal with no mcp_scope fails closed); the composed dependency checks the capability BEFORE the owner fence, so a non-holder gets one uniform named 403 for an existing, nonexistent or foreign target and a holder gains no reach beyond its owner; the route table read off FastAPI's real dependant graph (every skill-changing route takes the fence; the grant routes exist and are not shadowed); a refused agent key changes nothing on any of the four routes through a real FastAPI app; the file-route side door (.claude/skills/** via PUT/DELETE/mkdir, including a delete of an ancestor, and the same writes spelled with two leading slashes, ent#792) and that people and holders still edit skills there; grants over a real SQLite file (live-only via the agent_ownership join, idempotent who/when, soft-delete and recovery, orphan rows fail closed, unknown capability refused at the sink, no call permission written); the grant service (404 / system / ephemeral refusals, revoke needs no validation); the grant route refuses an admin's own MCP key and audits only real changes; attribution (the acting agent recorded, the system agent named, a bulk replace does not re-stamp kept names); both migration tracks executed; the CASCADE AgentRef. Eight mutations each red."
+    },
+    {
+      "file": "unit/test_ent792_file_guardrail_hook.py",
+      "feature": "trinity-enterprise#792",
+      "added": "2026-10-06",
+      "categories": [
+        "agent",
+        "security",
+        "guardrails"
+      ],
+      "description": "The in-agent PreToolUse file guardrail reads any run of leading slashes as one: runs the SHIPPED docker/base-image/hooks/file-guardrail.py main() through run_hook against the shipped guardrails-baseline.json (lib loaded by path, sys.path and sys.modules restored). //- and ///-prefixed .ssh, .aws, .claude/settings*.json, /opt/trinity and /etc/claude-code paths are denied (exit 2) like the one-slash form; ordinary // paths stay allowed; the baseline is asserted to carry the absolute patterns so the rows are not vacuous. Pairs with the // rows in test_read_only_guard.py. Reverting the hook fix turns 7 red."
+    },
+    {
+      "file": "unit/test_files_protected_paths.py",
+      "feature": "Issue #590 / AISEC-C2, trinity-enterprise#792",
+      "added": "2026-10-06",
+      "categories": [
+        "backend",
+        "security",
+        "files"
+      ],
+      "description": "The backend file-route deny list, run against the SHIPPED services.agent_service.files (it used to test an inline copy, which is how ent#792 went unseen). AISEC-C2 reproduction, protected paths, traversal, allowed paths, edge cases; any number of leading slashes is refused (normpath keeps exactly two); DELETE refuses a protected path and any directory that holds one (.ssh, .claude, the home dir, the /proc/self/root and /proc/self/cwd doors), with the derived anchor tuple pinned and the derivation rule tested on hypothetical glob shapes; three Hypothesis properties (the normalised form equals an independent segment-stack resolution, extra leading slashes never change a verdict, DELETE refused iff writing is or the path holds an anchor); through the route logic and through the real FastAPI router (mkdir takes its path in the JSON body): // paths refused on PUT, mkdir and DELETE with the exact refusal, ordinary deletes reach the container lookup, and the agent is sent the normalised path that was checked. Five mutations each red."
     },
     {
       "file": "unit/test_ent689_readiness_gate.py",
