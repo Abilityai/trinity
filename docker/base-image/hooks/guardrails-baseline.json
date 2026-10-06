@@ -59,6 +59,10 @@
     "/home/developer/.gcp/*",
     "/home/developer/.claude/settings.json",
     "/home/developer/.claude/settings.local.json",
+    ".claude.json",
+    "/home/developer/.claude/.credentials.json",
+    "/home/developer/.gemini/settings.json",
+    "/home/developer/.tmp/codex/*",
     "/home/developer/.trinity/read-only-config.json",
     "/opt/trinity/*",
     "/etc/claude-code/*"

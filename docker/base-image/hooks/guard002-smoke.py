@@ -28,6 +28,7 @@ CASES = {
     ],
     "file-guardrail.py": [
         ({"tool_name": "Write", "tool_input": {"file_path": "~/.ssh/id_rsa"}}, 2),
+        ({"tool_name": "Write", "tool_input": {"file_path": "~/.claude.json"}}, 2),
         ({"tool_name": "Write", "tool_input": {"file_path": "/home/developer/notes.md"}}, 0),
     ],
     "read-only-guard.py": [

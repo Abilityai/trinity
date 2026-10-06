@@ -74,3 +74,42 @@ def test_a_protected_path_is_denied_whatever_the_leading_slashes(hook, monkeypat
 @pytest.mark.parametrize("path", ["//home/developer/notes.md", "//home/developer/.claude/agents/x.md"])
 def test_an_ordinary_path_with_two_slashes_is_still_allowed(hook, monkeypatch, path):
     assert _exit_code(hook, monkeypatch, path) == 0
+
+
+# ---- trinity-enterprise#823: the runtime config files ----------------------------
+
+@pytest.mark.parametrize("path", [
+    "~/.claude.json",
+    "/home/developer/.claude.json",
+    "//home/developer/.claude/.credentials.json",
+    "/home/developer/.claude/.credentials.json",
+    "/home/developer/.gemini/settings.json",
+    "/home/developer/.tmp/codex/auth.json",
+    "/home/developer/.tmp/codex/config.toml",
+])
+def test_the_runtime_config_files_are_denied(hook, monkeypatch, path):
+    assert _exit_code(hook, monkeypatch, path) == 2
+
+
+@pytest.mark.parametrize("path", [
+    "~/.claude/agents/x.md", "/home/developer/.tmp/scratch.txt", "/home/developer/notes/settings.json",
+])
+def test_their_neighbours_stay_allowed(hook, monkeypatch, path):
+    assert _exit_code(hook, monkeypatch, path) == 0
+
+
+def test_the_image_build_smoke_carries_a_claude_json_row_and_it_decides(hook, monkeypatch):
+    """The image build runs guard002-smoke.py's CASES against the installed
+    hook; here every file-guardrail row runs against the shipped hook and
+    baseline, so the build-time row is known to hold."""
+    spec = importlib.util.spec_from_file_location("_guard002_smoke_823", HOOKS / "guard002-smoke.py")
+    smoke = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(smoke)
+    rows = smoke.CASES["file-guardrail.py"]
+    monkeypatch.setenv("HOME", "/home/developer")   # `~` as the agent user reads it
+    assert ({"tool_name": "Write", "tool_input": {"file_path": "~/.claude.json"}}, 2) in rows
+    for payload, want in rows:
+        monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(payload)))
+        with pytest.raises(SystemExit) as exc:
+            hook.run_hook(hook.main)
+        assert exc.value.code == want, payload
