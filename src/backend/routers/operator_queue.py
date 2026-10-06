@@ -157,6 +157,14 @@ async def list_queue_items(
             "Only ever narrows what the caller may see (trinity-enterprise#815)."
         ),
     ),
+    cursor: Optional[str] = Query(
+        None,
+        description=(
+            "Keyset walk: 'start' to begin, then each page's next_cursor. Within one "
+            "walk no item is returned twice or skipped while the queue changes "
+            "(trinity-enterprise#815). Omit for offset paging."
+        ),
+    ),
     current_user: User = Depends(get_current_user),
 ):
     """List operator queue items with optional filters.
@@ -184,6 +192,7 @@ async def list_queue_items(
             limit=limit,
             offset=offset,
             agent_names=agent_names,
+            cursor=cursor,
         )
     except operator_queue_service.QueueListError as e:
         raise HTTPException(status_code=e.status_code, detail=e.message)

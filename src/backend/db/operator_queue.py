@@ -14,9 +14,10 @@ unchanged.
 
 import hashlib
 import json
+import logging
 import uuid
 from typing import Optional, List, Dict, Set, Tuple
-from datetime import datetime
+from datetime import datetime, timezone
 
 from sqlalchemy import select, update, func, and_, or_, case, delete
 from sqlalchemy.exc import IntegrityError
@@ -24,6 +25,31 @@ from sqlalchemy.exc import IntegrityError
 from .engine import get_engine, make_insert
 from .tables import operator_queue
 from utils.helpers import utc_now_iso, iso_cutoff, parse_iso_timestamp, to_utc_iso
+
+logger = logging.getLogger(__name__)
+
+# trinity-enterprise#815: a cursor walk orders rows "as of" a watermark this many
+# seconds before it began (`W`). Every pending → ended writer stamps `now` before
+# it commits; a write whose stamp is at or before `W` but which commits after a
+# page was read would move its row between sections and be returned twice. The
+# margin absorbs any write that commits within it of its own stamp — the walk's
+# one BOUND. SQLite's busy timeout (30 s) keeps it in practice; PostgreSQL has no
+# statement or lock timeout configured, so a breach is logged at error
+# (`_note_commit_lag`), never silent. ONE home: the watermark and the lag check
+# read the same constant.
+WALK_WATERMARK_MARGIN_S = 300
+
+
+def _note_commit_lag(stamp: str) -> None:
+    """After a pending → ended write commits: if it landed more than the walk
+    margin after the timestamp it stamped, say so at error (ent#815). Called by
+    the five writers that end an ask, once their transaction is committed."""
+    lag = (datetime.now(timezone.utc) - parse_iso_timestamp(stamp)).total_seconds()
+    if lag > WALK_WATERMARK_MARGIN_S:
+        logger.error(
+            "operator-queue end committed %ds after its timestamp; cursor walks "
+            "open across it may repeat this row (ent#815)", int(lag),
+        )
 
 
 # #1632: generous hard "belt" caps enforced at the DB sink itself. The agent
@@ -685,6 +711,7 @@ class OperatorQueueOperations:
                     operator_queue.c.batch_id == batch_id,
                 ))
             ).mappings().all()
+        _note_commit_lag(now)
         return {"batch_id": batch_id, "rows": [self._row_to_item(r) for r in rows]}
 
     def get_item(self, item_id: str) -> Optional[Dict]:
@@ -1006,6 +1033,127 @@ class OperatorQueueOperations:
 
         return [self._row_to_item(row) for row in rows]
 
+    # ------------------------------------------------------------------
+    # trinity-enterprise#815 — the keyset (cursor) walk
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _walk_sort_keys(watermark: str, snapshot: Optional[Dict[str, int]] = None):
+        """The walk's sort key `(sec, prk, st)`, ordered `sec ASC, prk ASC,
+        st DESC, id ASC` — today's order, taken "as of" `watermark`.
+
+        A row is in the pending section (`sec = 0`) if it is pending NOW or
+        ended after `watermark` (every pending → ended writer stamps
+        `disposed_at` in the same UPDATE, and nothing returns a row to pending),
+        so a row answered mid-walk keeps the key it had when the walk began.
+        Nothing else moves a key, except a pending platform alert's priority
+        (#3246 `_touch`): `snapshot` maps those rows' ids to the priority rank
+        recorded when the walk began, and an alert not in it (raised during the
+        walk) ranks 4 — a fixed value, so its key cannot move either.
+
+        `coalesce(…, '')` keeps a NULL out of every comparison (a NULL key would
+        fail them all and be skipped); `db/tables.py` declares these columns
+        nullable even though the DDL does not.
+        """
+        oq = operator_queue.c
+        as_pending = or_(oq.status == "pending", oq.disposed_at > watermark)
+        sec = case((as_pending, 0), else_=1)
+        rank = case(
+            (oq.priority == "critical", 0),
+            (oq.priority == "high", 1),
+            (oq.priority == "medium", 2),
+            (oq.priority == "low", 3),
+            else_=4,
+        )
+        if snapshot is not None:
+            by_rank: Dict[int, List[str]] = {}
+            for item_id, r in snapshot.items():
+                by_rank.setdefault(int(r), []).append(item_id)
+            whens = [(oq.id.in_(sorted(ids)), r) for r, ids in sorted(by_rank.items())]
+            whens.append((oq.subject.isnot(None), 4))
+            rank = case(*whens, else_=rank)
+        prk = case((as_pending, rank), else_=0)
+        st = case(
+            (as_pending, func.coalesce(oq.created_at, "")),
+            else_=func.coalesce(oq.disposed_at, oq.responded_at, oq.created_at, ""),
+        )
+        return sec, prk, st
+
+    def _walk_query(
+        self,
+        *,
+        watermark: str,
+        snapshot: Optional[Dict[str, int]],
+        after: Optional[Tuple[int, int, str, str]],
+        limit: int,
+        **filters,
+    ):
+        """`(statement, (sec, prk, st))` for one walk page — None when the
+        filters match nothing. The after-cursor predicate, the ORDER BY and the
+        read-back key columns use the SAME expression objects, so the three
+        compare text under one collation and cannot disagree on either dialect.
+        The predicate is an OR-expansion (portable; handles the mixed
+        directions)."""
+        conds = self._list_conditions(**filters)
+        if conds is None:
+            return None, None
+        sec, prk, st = self._walk_sort_keys(watermark, snapshot)
+        where = list(conds)
+        if after is not None:
+            s, p, t, i = after
+            where.append(or_(
+                sec > s,
+                and_(sec == s, prk > p),
+                and_(sec == s, prk == p, st < t),
+                and_(sec == s, prk == p, st == t, operator_queue.c.id > i),
+            ))
+        stmt = select(*self._SELECT_COLS, sec.label("_k_sec"), prk.label("_k_prk"),
+                      st.label("_k_st"))
+        if where:
+            stmt = stmt.where(and_(*where))
+        stmt = stmt.order_by(sec, prk, st.desc(), operator_queue.c.id).limit(limit)
+        return stmt, (sec, prk, st)
+
+    def list_items_walk(
+        self,
+        *,
+        watermark: str,
+        snapshot: Optional[Dict[str, int]] = None,
+        after: Optional[Tuple[int, int, str, str]] = None,
+        limit: int = 100,
+        **filters,
+    ) -> List[Tuple[Dict, Tuple[int, int, str, str]]]:
+        """One page of a cursor walk (trinity-enterprise#815): `(item, key)`
+        pairs in walk order, after `after`. The key is read back from SQL —
+        Python never re-derives it — so a cursor built from the last row is
+        exactly where the next page starts. Same `_list_conditions` as
+        `list_items`/`count_items`, so the page and `total` share one WHERE.
+        `list_items` (and its callers' order) is untouched."""
+        stmt, _ = self._walk_query(watermark=watermark, snapshot=snapshot,
+                                   after=after, limit=limit, **filters)
+        if stmt is None:
+            return []
+        with get_engine().connect() as conn:
+            rows = conn.execute(stmt).mappings().all()
+        return [
+            (self._row_to_item(r), (int(r["_k_sec"]), int(r["_k_prk"]), r["_k_st"], r["id"]))
+            for r in rows
+        ]
+
+    def walk_alert_priorities(self, *, watermark: str, **filters) -> Dict[str, int]:
+        """`{id: priority rank}` of the platform alerts (`subject` set, #3246)
+        the walk orders as pending — the snapshot a walk takes when it begins
+        (trinity-enterprise#815), over the same filters as its pages."""
+        conds = self._list_conditions(**filters)
+        if conds is None:
+            return {}
+        _, prk, _ = self._walk_sort_keys(watermark)
+        oq = operator_queue.c
+        as_pending = or_(oq.status == "pending", oq.disposed_at > watermark)
+        stmt = select(oq.id, prk).where(and_(*conds, oq.subject.isnot(None), as_pending))
+        with get_engine().connect() as conn:
+            return {r[0]: int(r[1]) for r in conn.execute(stmt).all()}
+
     def respond_to_item(
         self,
         item_id: str,
@@ -1088,6 +1236,7 @@ class OperatorQueueOperations:
                 item["_status_conflict"] = True
                 return item
 
+        _note_commit_lag(now)
         return self.get_item(item_id)
 
     def cancel_item(
@@ -1143,6 +1292,7 @@ class OperatorQueueOperations:
                 item["_status_conflict"] = True
                 return item
 
+        _note_commit_lag(now)
         return self.get_item(item_id)
 
     def set_discussion_link(self, item_id: str, key: str, chat_id: str) -> Optional[Dict]:
@@ -1244,6 +1394,7 @@ class OperatorQueueOperations:
                     )
                 )
             ).mappings().all()
+        _note_commit_lag(now)
         return {"batch_id": batch_id, "rows": [self._row_to_item(r) for r in rows]}
 
     def clear_resolved_items(
@@ -1459,6 +1610,7 @@ class OperatorQueueOperations:
             rows = conn.execute(
                 select(*self._SELECT_COLS).where(operator_queue.c.id.in_(won))
             ).mappings().all()
+        _note_commit_lag(now)
         return [self._row_to_item(r) for r in rows]
 
     def get_stats(self, accessible_agent_names: Optional[Set[str]] = None) -> Dict:
