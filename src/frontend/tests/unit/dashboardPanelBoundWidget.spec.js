@@ -21,6 +21,7 @@ import DashboardPanel from '../../src/components/DashboardPanel.vue'
 import BaseBadge from '../../src/components/base/BaseBadge.vue'
 import BoundMetricMark from '../../src/components/BoundMetricMark.vue'
 import { useAgentsStore } from '../../src/stores/agents'
+import { VERDICT_WORDS } from '../../src/utils/metricFormat'
 
 // uPlot reads `matchMedia` at module load; see declaredMetricsTiles.spec.js.
 vi.mock('../../src/components/SparklineChart.vue', () => ({
@@ -315,7 +316,7 @@ describe('a bound metric tile shows its threshold verdict (ent#730)', () => {
   it('renders Critical as a danger badge naming the threshold', async () => {
     const wrapper = await mountPanel(dashboard([judged('critical', 500)]))
     const badge = wrapper.find('[data-testid="bound-verdict"]')
-    expect(badge.text()).toBe('Critical')
+    expect(badge.find('[data-testid="bound-verdict-label"]').text()).toBe('Critical')
     expect(wrapper.findComponent(BaseBadge).props('variant')).toBe('danger')
     expect(badge.classes()).not.toContain('invisible')
     expect(badge.attributes('title')).toContain('500')
@@ -323,7 +324,7 @@ describe('a bound metric tile shows its threshold verdict (ent#730)', () => {
 
   it('renders Warning as a warning badge', async () => {
     const wrapper = await mountPanel(dashboard([judged('warning', 400)]))
-    expect(wrapper.find('[data-testid="bound-verdict"]').text()).toBe('Warning')
+    expect(wrapper.find('[data-testid="bound-verdict-label"]').text()).toBe('Warning')
     expect(wrapper.findComponent(BaseBadge).props('variant')).toBe('warning')
   })
 
@@ -344,8 +345,48 @@ describe('a bound metric tile shows its threshold verdict (ent#730)', () => {
     const after = wrapper.findAll('[data-testid="bound-verdict"]')
     expect(after).toHaveLength(1)
     expect(after[0].element).toBe(before)
-    expect(after[0].text()).toBe('Critical')
+    expect(after[0].find('[data-testid="bound-verdict-label"]').text()).toBe('Critical')
     expect(after[0].classes()).not.toContain('invisible')
+  })
+
+  // The badge must be as wide as the WIDER verdict word in whatever font
+  // renders it, so a poll crossing a threshold never resizes it. A fixed
+  // min-width only moves the boundary: "Warning" measured 77.34px against a
+  // 76px floor in macOS system-ui. Both words share one grid cell and only the
+  // current one is visible, so the cell is sized by the wider word.
+  it.each([
+    ['critical', 500, 'Critical'],
+    ['warning', 400, 'Warning'],
+    ['ok', null, 'Critical'],
+  ])('stacks every verdict word in one cell on %s, showing only the current one', async (level, threshold, current) => {
+    const wrapper = mount(BoundMetricMark, { props: { widget: judged(level, threshold) } })
+    const badge = wrapper.find('[data-testid="bound-verdict"]')
+    const cell = badge.find('.inline-grid')
+    expect(cell.exists()).toBe(true)
+    const words = cell.findAll(':scope > span')
+    expect(words.map((w) => w.text())).toEqual(VERDICT_WORDS)
+    for (const word of words) {
+      expect(word.classes()).toEqual(expect.arrayContaining(['col-start-1', 'row-start-1']))
+    }
+    const shown = words.filter((w) => !w.classes().includes('invisible'))
+    expect(shown.map((w) => w.text())).toEqual([current])
+    expect(shown[0].attributes('aria-hidden')).toBeUndefined()
+    expect(shown[0].attributes('data-testid')).toBe('bound-verdict-label')
+    for (const hidden of words.filter((w) => w.classes().includes('invisible'))) {
+      expect(hidden.attributes('aria-hidden')).toBe('true')
+      expect(hidden.attributes('data-testid')).toBeUndefined()
+    }
+    expect(badge.findAll('[data-testid="bound-verdict-label"]')).toHaveLength(1)
+  })
+
+  it('keeps both words in the same cell across a poll, swapping which one shows', async () => {
+    const wrapper = mount(BoundMetricMark, { props: { widget: judged('warning', 400) } })
+    const before = wrapper.find('[data-testid="bound-verdict"]').element
+    await wrapper.setProps({ widget: judged('critical', 500) })
+    const badge = wrapper.find('[data-testid="bound-verdict"]')
+    expect(badge.element).toBe(before)
+    expect(badge.findAll('.inline-grid > span').map((w) => w.text())).toEqual(VERDICT_WORDS)
+    expect(badge.find('[data-testid="bound-verdict-label"]').text()).toBe('Critical')
   })
 
   it('never renders on status or progress tiles, an unbound tile, or an unknown level', async () => {

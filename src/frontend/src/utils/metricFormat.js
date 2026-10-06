@@ -352,11 +352,25 @@ export function refusalHint(widget = {}) {
 const VERDICTS = {
   critical: { variant: 'danger', label: 'Critical', reserved: false },
   warning: { variant: 'warning', label: 'Warning', reserved: false },
-  // `ok` keeps the slot: an invisible placeholder of the widest label, so a
-  // background poll that crosses a threshold swaps the badge in place instead
-  // of adding one and shifting the layout.
+  // `ok` keeps the slot: the badge renders invisible rather than not at all,
+  // so a background poll that crosses a threshold swaps it in place instead
+  // of adding one and shifting the layout. Its label is arbitrary — the
+  // badge's width does not depend on which word is current (VERDICT_WORDS).
   ok: { variant: 'danger', label: 'Critical', reserved: true },
 }
+
+/**
+ * Every word a verdict badge can show, each spelled once (from `VERDICTS`).
+ *
+ * `BoundMetricMark` stacks ALL of them in one grid cell and hides all but the
+ * current one, so the badge is as wide as the wider word in whatever font
+ * renders it — critical, warning and the reserved `ok` slot are one width, and
+ * crossing a threshold never resizes the badge. A fixed min-width cannot do
+ * that: the app uses the system font stack, so a floor sized in one font is
+ * too narrow in another ("Warning" measured 77.34px against a 76px floor in
+ * macOS system-ui).
+ */
+export const VERDICT_WORDS = Object.freeze([...new Set(Object.values(VERDICTS).map((v) => v.label))])
 
 /**
  * The threshold verdict badge on a bound `metric` tile (ent#730), from the

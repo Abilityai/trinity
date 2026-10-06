@@ -17,6 +17,7 @@ import {
   formatDims,
   refusalHint,
   verdictBadge,
+  VERDICT_WORDS,
   formatDuration,
   formatMetricValue,
   freshnessChip,
@@ -401,10 +402,18 @@ describe('verdictBadge: the threshold verdict on a bound metric tile (ent#730)',
       .toMatchObject({ variant: 'danger', label: 'Critical', reserved: false })
     expect(verdictBadge(tile({ level: 'warning', threshold: 400 })))
       .toMatchObject({ variant: 'warning', label: 'Warning', reserved: false })
-    // `ok` keeps the slot: an invisible placeholder of the widest label, so a
-    // poll that crosses a threshold swaps the badge in place.
+    // `ok` keeps the slot: an invisible badge whose cell already stacks every
+    // verdict word, so a poll that crosses a threshold swaps it in place.
     expect(verdictBadge(tile({ level: 'ok', threshold: null })))
       .toMatchObject({ variant: 'danger', label: 'Critical', reserved: true })
+  })
+
+  it('spells each verdict word once, and every level shows one of them', () => {
+    expect(VERDICT_WORDS).toEqual(['Critical', 'Warning'])
+    for (const level of ['critical', 'warning', 'ok']) {
+      const badge = verdictBadge(tile({ level, threshold: 1 }))
+      expect(VERDICT_WORDS).toContain(badge.label)
+    }
   })
 
   it('titles the threshold in the declared direction, never on ok', () => {

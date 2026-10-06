@@ -65,17 +65,26 @@
       >declared, no points yet</span>
       <!-- ent#730: the threshold verdict (bound `metric` tiles only). On a
            judgeable tile its footprint is always present — `ok` is an
-           invisible placeholder — so crossing a threshold swaps it in place. -->
+           invisible placeholder — so crossing a threshold swaps it in place.
+           Every verdict word sits in the SAME grid cell and only the current
+           one is visible, so the badge is as wide as the wider word in
+           whatever font renders it: no state change resizes it. -->
       <BaseBadge
         v-if="verdict"
         :variant="verdict.variant"
         dot
-        class="min-w-[4.75rem] justify-center"
         :class="verdict.reserved ? 'invisible' : ''"
         :aria-hidden="verdict.reserved ? 'true' : undefined"
         :title="verdict.title"
         data-testid="bound-verdict"
-      >{{ verdict.label }}</BaseBadge>
+      ><span class="inline-grid justify-items-center"><span
+        v-for="word in VERDICT_WORDS"
+        :key="word"
+        class="col-start-1 row-start-1"
+        :class="word === verdict.label ? '' : 'invisible'"
+        :aria-hidden="word === verdict.label ? undefined : 'true'"
+        :data-testid="word === verdict.label ? 'bound-verdict-label' : undefined"
+      >{{ word }}</span></span></BaseBadge>
       <!-- ent#730: which series the number is. Its own line (`w-full`), so a
            long label wraps under chip · time · freshness instead of pushing
            the freshness chip onto a later line. Mono on the `k=v` part only. -->
@@ -129,6 +138,7 @@ import { formatRelativeTime, formatLocalDateTime } from '../utils/timestamps'
 import {
   DIMS_DOCS_URL,
   DIMS_REFUSAL_CODES,
+  VERDICT_WORDS,
   boundSeriesNote,
   formatDims,
   freshnessChip,
