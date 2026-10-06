@@ -1427,6 +1427,25 @@ def c_x007(snap):
     return _with_template(snap, f)
 
 
+def _as_wire(value):
+    """`value` as the bound tile receives it from the agent server (ent#730).
+
+    The agent server's `GET /api/dashboard` returns the parsed YAML as a plain
+    dict, which FastAPI renders with `jsonable_encoder` and then `json.dumps`.
+    The real encoder turns a YAML `date`/`datetime` into its ISO text (keys
+    included), and the JSON round trip makes every mapping key text, exactly
+    as the backend's `response.json()` sees them. NaN is kept as a number (the
+    real response refuses it outright; a "must be text" finding is the more
+    useful report). Raises on anything the encoder cannot render, which the
+    caller's fail-closed `try` turns into a failed check.
+    """
+    import json
+
+    from fastapi.encoders import jsonable_encoder
+
+    return json.loads(json.dumps(jsonable_encoder(value)))
+
+
 def c_x009(snap):
     """SOFT, STATIC: `dashboard.yaml` bindings that can never resolve (ent#730).
 
@@ -1448,6 +1467,14 @@ def c_x009(snap):
     bound predicate is the same truthy `metric` it, the agent server and
     `is_bound` use.
 
+    It judges each widget's `metric:` and `dims:` AS THE TILE RECEIVES THEM,
+    not as raw YAML. The agent server returns the parsed `dashboard.yaml`
+    through FastAPI's JSON response, so an unquoted `dims: {day: 2024-01-01}`
+    (a YAML date) reaches the binding as the text `"2024-01-01"` and binds,
+    and an unquoted `metric: 2024-01-01` is text the tile calls undeclared.
+    A number stays a number on the wire, so `dims: {channel: 2024}` is still
+    flagged. `_as_wire` applies the same conversion.
+
     Function-local imports, per the D-009 / T-018 convention, and fail CLOSED
     on a raise for D-009's reason verbatim (a raise inside `run_static` would
     be persisted as a clean bill of health).
@@ -1463,7 +1490,7 @@ def c_x009(snap):
         findings: List[Dict[str, str]] = []
         selecting = []
         for w in widgets or []:
-            metric = w.get("metric")
+            metric = _as_wire(w.get("metric"))
             name_problem = metric_read_service.invalid_metric_name(metric)
             if name_problem is not None:
                 findings.append({"metric": "(not text)",
@@ -1471,7 +1498,7 @@ def c_x009(snap):
                                  "code": "metric_name_invalid",
                                  "problem": _clip(name_problem, 240)})
                 continue
-            raw = w.get("dims")
+            raw = _as_wire(w.get("dims"))
             if raw is None or (isinstance(raw, dict) and not raw):
                 continue
             if not metric:
@@ -1482,7 +1509,7 @@ def c_x009(snap):
                                             "metric, so without metric: it "
                                             "does nothing"})
                 continue
-            selecting.append(w)
+            selecting.append((w, metric, raw))
 
         if selecting:
             data, terr = _template(snap)
@@ -1496,12 +1523,11 @@ def c_x009(snap):
                 for entry in template_metrics.normalize_declared_metrics(
                         (data or {}).get("metrics")):
                     declared[entry["name"]] = list(entry.get("dimensions") or [])
-            for w in selecting:
-                name = w.get("metric")
+            for w, name, raw in selecting:
                 if name not in declared:
                     continue
                 _clean, problem = metric_read_service.parse_dims_selector(
-                    w.get("dims"), declared[name])
+                    raw, declared[name])
                 if problem is None:
                     continue
                 findings.append({"metric": _echo_key(name),

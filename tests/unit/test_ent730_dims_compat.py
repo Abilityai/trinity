@@ -259,3 +259,57 @@ def test_C10_the_user_docs_recipe_passes_x009_and_d003():
     results = run_static(_snap(module.RECIPE_DASHBOARD_YAML), ["X-009", "D-003"])
     assert results["X-009"][0] == "pass"
     assert results["D-003"][0] == "pass"
+
+
+# ---------------------------------------------------------------------------
+# C11: X-009 judges the widget as the tile receives it. The agent server
+# returns the parsed `dashboard.yaml` through FastAPI's JSON encoding, so an
+# unquoted YAML date arrives at the binding as TEXT, while a number stays a
+# number.
+# ---------------------------------------------------------------------------
+
+DAY_TEMPLATE = TEMPLATE + """\
+  - name: daily_spend
+    type: gauge
+    label: "Daily spend"
+    dimensions: [day]
+"""
+
+
+def test_C11_an_unquoted_date_value_in_dims_passes_because_it_arrives_as_text():
+    status, message, detail = _x009(_snap(_dashboard(
+        '{type: metric, label: D, metric: daily_spend, dims: {day: 2024-01-01}}'),
+        template=DAY_TEMPLATE))
+    assert status == "pass", (message, detail)
+
+
+def test_C11_an_unquoted_date_metric_is_not_a_non_text_metric():
+    """The tile gets the text `2024-01-01` and says `metric_undeclared`,
+    which by design no check flags."""
+    status, message, detail = _x009(_snap(_dashboard(
+        '{type: metric, label: D, metric: 2024-01-01}'), template=DAY_TEMPLATE))
+    assert status == "pass", (message, detail)
+
+
+@pytest.mark.parametrize("yaml_value,wire_value", [
+    ("2024-01-01", "2024-01-01"),
+    ("2024-01-01T10:00:00", "2024-01-01T10:00:00"),
+])
+def test_C11_the_date_verdict_equals_the_binding_verdict_on_the_wire_form(
+        yaml_value, wire_value):
+    result = _x009(_snap(_dashboard(
+        f'{{type: metric, label: D, metric: daily_spend, '
+        f'dims: {{day: {yaml_value}}}}}'), template=DAY_TEMPLATE))
+    _clean, problem = mrs.parse_dims_selector({"day": wire_value}, ["day"])
+    if problem is None:
+        assert result[0] == "pass", result
+    else:
+        (finding,) = _findings(result)
+        assert (finding["code"], finding["problem"]) == problem
+
+
+def test_C11_an_unquoted_year_is_still_flagged_because_json_keeps_ints():
+    (finding,) = _findings(_x009(_snap(_dashboard(
+        '{type: metric, label: Y, metric: daily_spend, dims: {day: 2024}}'),
+        template=DAY_TEMPLATE)))
+    assert finding["code"] == "metric_dimension_invalid"
