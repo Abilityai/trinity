@@ -6,7 +6,10 @@
     <div>
       <h4 class="text-sm font-semibold text-gray-900 dark:text-gray-100">People this agent serves</h4>
       <p class="mt-0.5 text-xs text-gray-600 dark:text-gray-300" data-testid="assignments-seat">
-        <template v-if="seat.form === 'serves'">
+        <template v-if="seat.form === 'holds'">
+          Holds the seat: <span class="font-mono">{{ seat.roleId }}</span>
+        </template>
+        <template v-else-if="seat.form === 'serves'">
           Serves the seat of its primary: <span class="font-mono">{{ seat.roleId }}</span> ({{ seat.person }})
         </template>
         <template v-else>No seat yet</template>
@@ -38,6 +41,28 @@
       </div>
 
       <template v-else>
+        <!-- ent#811 (R50a): the agent itself holding a seat — the autonomous
+             player. A companion serves its primary's seat instead. -->
+        <div v-if="isAdmin" class="flex flex-wrap items-center gap-2" data-testid="assignments-holder">
+          <template v-if="!editingHolder">
+            <BaseButton variant="secondary" size="sm" data-testid="holder-edit" @click="startHolder">
+              {{ roster.held_seat ? 'Change the seat it holds' : 'This agent holds a seat' }}
+            </BaseButton>
+            <BaseButton v-if="roster.held_seat" variant="ghost" size="sm" :loading="savingHolder"
+                        loading-label="Clearing…" data-testid="holder-clear" @click="clearHolder">Clear the seat</BaseButton>
+            <span v-else class="text-xs text-gray-600 dark:text-gray-300">
+              For an agent that works a seat itself, such as an orchestrator. A companion serves its primary's seat.
+            </span>
+          </template>
+          <form v-else class="flex flex-wrap items-end gap-2" data-testid="holder-form" @submit.prevent="saveHolder">
+            <BaseInput v-model="holderForm" label="Seat this agent holds (role id)" data-testid="holder-role" />
+            <BaseButton type="submit" size="sm" :disabled="!holderForm.trim()" :loading="savingHolder"
+                        loading-label="Saving…" data-testid="holder-save">Save</BaseButton>
+            <BaseButton variant="ghost" size="sm" :disabled="savingHolder" @click="editingHolder = false">Cancel</BaseButton>
+          </form>
+        </div>
+        <InlineError v-if="isAdmin && holderError" :message="holderError" data-testid="holder-error" @dismiss="holderError = ''" />
+
         <p
           v-if="!primary"
           class="rounded-md px-3 py-2 text-sm bg-status-warning-50 dark:bg-status-warning-900/30 text-status-warning-800 dark:text-status-warning-300"
@@ -69,6 +94,13 @@
                     {{ kindLabel(row.kind) }}
                   </BaseBadge>
                   <span v-if="row.role_id" class="font-mono text-xs text-gray-600 dark:text-gray-300">{{ row.role_id }}</span>
+                  <BaseButton
+                    v-if="isAdmin && roleEdit.id !== row.id"
+                    variant="ghost"
+                    size="sm"
+                    data-testid="assignment-edit-role"
+                    @click="startRoleEdit(row)"
+                  >{{ row.role_id ? 'Change seat' : 'Add seat' }}</BaseButton>
                 </div>
                 <div class="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs">
                   <span class="text-gray-600 dark:text-gray-300" data-testid="assignment-consent">{{ consentLabel(row) }}</span>
@@ -103,6 +135,21 @@
                 @click="startReplace"
               >Replace primary</BaseButton>
             </div>
+            <!-- ent#811: the seat this person holds — optional, and clearable. -->
+            <form
+              v-if="roleEdit.id === row.id"
+              class="mt-2 flex flex-wrap items-end gap-2"
+              data-testid="assignment-role-form"
+              @submit.prevent="saveRole(row)"
+            >
+              <BaseInput v-model="roleEdit.value" :label="`Seat ${row.display_name} holds (role id)`" data-testid="assignment-role-input" />
+              <BaseButton type="submit" size="sm" :disabled="!roleEdit.value.trim()"
+                          :loading="busyId === row.id && busyVerb === 'role'" loading-label="Saving…"
+                          data-testid="assignment-role-save">Save</BaseButton>
+              <BaseButton v-if="row.role_id" variant="ghost" size="sm" :disabled="busyId === row.id"
+                          data-testid="assignment-role-clear" @click="clearRole(row)">Clear seat</BaseButton>
+              <BaseButton variant="ghost" size="sm" :disabled="busyId === row.id" @click="roleEdit = { id: null, value: '' }">Cancel</BaseButton>
+            </form>
             <InlineError
               v-if="rowError.id === row.id && rowError.message"
               class="mt-2"
@@ -129,11 +176,11 @@
               <option v-for="k in STAKEHOLDER_KINDS" :key="k" :value="k">{{ kindLabel(k) }}</option>
               <option value="remove">Removed from this agent</option>
             </BaseSelect>
-            <BaseInput v-model="replaceForm.roleId" label="Seat (role id)" help="The canon role id the new primary holds." data-testid="replace-role" />
+            <BaseInput v-model="replaceForm.roleId" label="Seat (role id, optional)" help="The canon role id the new primary holds." data-testid="replace-role" />
           </div>
           <InlineError v-if="replaceError" :message="replaceError" @dismiss="replaceError = ''" />
           <div class="flex gap-2">
-            <BaseButton type="submit" size="sm" :disabled="!replaceForm.userId || !replaceForm.roleId.trim()"
+            <BaseButton type="submit" size="sm" :disabled="!replaceForm.userId"
                         :loading="savingReplace" loading-label="Replacing…" data-testid="replace-confirm">Replace primary</BaseButton>
             <BaseButton variant="ghost" size="sm" :disabled="savingReplace" @click="replacing = false">Cancel</BaseButton>
           </div>
@@ -153,8 +200,8 @@
           <BaseSelect v-model="addForm.kind" label="Kind" data-testid="add-kind">
             <option v-for="k in addKinds" :key="k" :value="k">{{ kindLabel(k) }}</option>
           </BaseSelect>
-          <BaseInput v-model="addForm.roleId" label="Seat (role id)" data-testid="add-role" />
-          <BaseButton type="submit" :disabled="!addForm.userId || !addForm.roleId.trim()"
+          <BaseInput v-model="addForm.roleId" label="Seat (role id, optional)" data-testid="add-role" />
+          <BaseButton type="submit" :disabled="!addForm.userId"
                       :loading="savingAdd" loading-label="Adding…" data-testid="add-submit">Add</BaseButton>
         </form>
         <InlineError v-if="isAdmin && (addError || assignments.usersError)" :message="addError || assignments.usersError" @dismiss="addError = ''" />
@@ -181,7 +228,7 @@ import { useEnterpriseStore } from '../stores/enterprise'
 import { viewState } from '../utils/loadingState'
 import {
   KIND_LABELS, STAKEHOLDER_KINDS, primaryOf, stakeholdersOf, seatLine,
-  consentLabel, driftNote, writeError,
+  consentLabel, driftNote, writeError, withRole,
 } from '../utils/assignments'
 
 const FEATURE_ID = 'assignments'
@@ -230,7 +277,12 @@ const addForm = ref({ userId: '', kind: 'approver', roleId: '' })
 const savingAdd = ref(false)
 const addError = ref('')
 
-watch(addKinds, (kinds) => { if (!kinds.includes(addForm.value.kind)) addForm.value.kind = kinds[0] }, { immediate: true })
+// With no primary yet, the next person added is most likely the one the agent
+// coaches — the empty state says so — so the form starts there.
+watch(addKinds, (kinds) => {
+  if (kinds[0] === 'primary') addForm.value.kind = 'primary'
+  else if (!kinds.includes(addForm.value.kind)) addForm.value.kind = kinds[0]
+}, { immediate: true })
 // Start the role from the agent's seat; the admin can type any other id.
 watch(seat, (s) => { if (!addForm.value.roleId && s.form === 'serves') addForm.value.roleId = s.roleId }, { immediate: true })
 
@@ -238,11 +290,10 @@ async function addPerson() {
   addError.value = ''
   savingAdd.value = true
   try {
-    await assignments.add(props.agentName, {
+    await assignments.add(props.agentName, withRole({
       user_id: Number(addForm.value.userId),
-      role_id: addForm.value.roleId.trim(),
       kind: addForm.value.kind,
-    })
+    }, addForm.value.roleId))
     addForm.value = { ...addForm.value, userId: '' }
   } catch (err) {
     addError.value = writeError(err, "Couldn't add that person.")
@@ -282,6 +333,69 @@ async function removeRow(row) {
   } finally {
     busyId.value = null
     busyVerb.value = ''
+  }
+}
+
+// ---- a row's seat (ent#811) ---------------------------------------------------
+const roleEdit = ref({ id: null, value: '' })
+
+function startRoleEdit(row) {
+  rowError.value = { id: null, message: '' }
+  roleEdit.value = { id: row.id, value: row.role_id || seat.value.roleId || '' }
+}
+
+async function writeRole(row, roleId) {
+  busyId.value = row.id
+  busyVerb.value = 'role'
+  rowError.value = { id: null, message: '' }
+  try {
+    await assignments.setRole(props.agentName, row.id, roleId)
+    roleEdit.value = { id: null, value: '' }
+  } catch (err) {
+    rowError.value = { id: row.id, message: writeError(err, "Couldn't change the seat.") }
+  } finally {
+    busyId.value = null
+    busyVerb.value = ''
+  }
+}
+
+function saveRole(row) { return writeRole(row, roleEdit.value.value.trim()) }
+function clearRole(row) { return writeRole(row, null) }
+
+// ---- the seat the agent itself holds (ent#811, R50a) -------------------------
+const editingHolder = ref(false)
+const holderForm = ref('')
+const savingHolder = ref(false)
+const holderError = ref('')
+
+function startHolder() {
+  holderError.value = ''
+  holderForm.value = roster.value.held_seat || ''
+  editingHolder.value = true
+}
+
+async function saveHolder() {
+  holderError.value = ''
+  savingHolder.value = true
+  try {
+    await assignments.setSeatHolder(props.agentName, holderForm.value.trim())
+    editingHolder.value = false
+  } catch (err) {
+    holderError.value = writeError(err, "Couldn't record the seat this agent holds.")
+  } finally {
+    savingHolder.value = false
+  }
+}
+
+async function clearHolder() {
+  holderError.value = ''
+  savingHolder.value = true
+  try {
+    await assignments.clearSeatHolder(props.agentName)
+  } catch (err) {
+    holderError.value = writeError(err, "Couldn't clear the seat this agent holds.")
+  } finally {
+    savingHolder.value = false
   }
 }
 

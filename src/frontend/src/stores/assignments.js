@@ -83,6 +83,23 @@ export const useAssignmentsStore = defineStore('assignments', () => {
     await load(agent)
   }
 
+  /** ent#811: set a row's seat, or clear it with `null` (an explicit null clears). */
+  async function setRole(agent, id, roleId) {
+    await run(agent, { op: 'update', id, body: { role_id: roleId || null } })
+    await load(agent)
+  }
+
+  /** ent#811 (R50a): record the agent itself as the holder of a seat. */
+  async function setSeatHolder(agent, roleId) {
+    await api.put(`${base(agent)}/seat`, { role_id: roleId })
+    await load(agent)
+  }
+
+  async function clearSeatHolder(agent) {
+    await api.delete(`${base(agent)}/seat`)
+    await load(agent)
+  }
+
   /**
    * Replace the primary as one flow (see `replacePrimarySteps`). If the new
    * primary cannot be written, step one is undone so the agent keeps the
@@ -112,5 +129,6 @@ export const useAssignmentsStore = defineStore('assignments', () => {
   return {
     byAgent, users, usersLoaded, usersError,
     entry, peek, load, loadUsers, add, setKind, remove, replacePrimary,
+    setRole, setSeatHolder, clearSeatHolder,
   }
 })

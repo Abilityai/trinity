@@ -243,3 +243,87 @@ describe('helpers', () => {
     expect(writeError({ response: { data: { detail: [{ msg: 'field required' }] } } }, 'x')).toBe('field required')
   })
 })
+
+describe('seats (trinity-enterprise#811)', () => {
+  const SEAT = `/api/enterprise/assignments/agents/${AGENT}/seat`
+
+  it('names the seat the agent holds itself, and holds wins over serves', async () => {
+    roster = { ...roster, held_seat: 'brain' }
+    const w = render()
+    await flushPromises()
+    expect(q(w, 'assignments-seat').text()).toBe('Holds the seat: brain')
+  })
+
+  it('records the agent as the holder of a seat', async () => {
+    api.put = vi.fn(async () => ({ data: {} }))
+    const w = render()
+    await flushPromises()
+    await q(w, 'holder-edit').trigger('click')
+    await q(w, 'holder-role').setValue('orchestrator')
+    await q(w, 'holder-form').trigger('submit')
+    await flushPromises()
+    expect(api.put).toHaveBeenCalledWith(SEAT, { role_id: 'orchestrator' })
+  })
+
+  it('names the agent that already holds the seat when refused', async () => {
+    api.put = vi.fn(async () => { throw conflict('The seat orchestrator is already held by the agent brain-bot.') })
+    const w = render()
+    await flushPromises()
+    await q(w, 'holder-edit').trigger('click')
+    await q(w, 'holder-role').setValue('orchestrator')
+    await q(w, 'holder-form').trigger('submit')
+    await flushPromises()
+    expect(q(w, 'holder-error').text()).toContain('already held by the agent brain-bot')
+  })
+
+  it('clears the seat the agent holds', async () => {
+    roster = { ...roster, held_seat: 'brain' }
+    const w = render()
+    await flushPromises()
+    await q(w, 'holder-clear').trigger('click')
+    await flushPromises()
+    expect(api.delete).toHaveBeenCalledWith(SEAT)
+  })
+
+  it('adds a person with kind only — the seat is optional', async () => {
+    roster = { agent_name: AGENT, assignments: [], mine: null, primary: null }
+    const w = render()
+    await flushPromises()
+    await q(w, 'add-user').setValue('3')
+    expect(q(w, 'add-submit').attributes('disabled')).toBeUndefined()
+    await q(w, 'assignment-add-form').trigger('submit')
+    await flushPromises()
+    const [, body] = api.post.mock.calls[0]
+    expect(body).toEqual({ user_id: 3, kind: 'primary' })
+  })
+
+  it("sets and clears a row's seat (an explicit null clears)", async () => {
+    const w = render()
+    await flushPromises()
+    const bob = () => w.find('[data-testid="assignment-row"]')
+    await bob().find('[data-testid="assignment-edit-role"]').trigger('click')
+    await bob().find('[data-testid="assignment-role-input"]').setValue('head-of-sales')
+    await bob().find('[data-testid="assignment-role-form"]').trigger('submit')
+    await flushPromises()
+    expect(api.patch).toHaveBeenLastCalledWith(`/api/enterprise/assignments/agents/${AGENT}/a2`, { role_id: 'head-of-sales' })
+
+    await bob().find('[data-testid="assignment-edit-role"]').trigger('click')
+    await bob().find('[data-testid="assignment-role-clear"]').trigger('click')
+    await flushPromises()
+    expect(api.patch).toHaveBeenLastCalledWith(`/api/enterprise/assignments/agents/${AGENT}/a2`, { role_id: null })
+  })
+
+  it('hides every seat control from a non-admin', async () => {
+    roster = { ...roster, held_seat: 'brain' }
+    const w = render({ admin: false })
+    await flushPromises()
+    expect(q(w, 'assignments-seat').text()).toBe('Holds the seat: brain')
+    expect(q(w, 'assignments-holder').exists()).toBe(false)
+    expect(q(w, 'assignment-edit-role').exists()).toBe(false)
+  })
+
+  it('replaces the primary without naming a seat when none is given', () => {
+    const { steps } = replacePrimarySteps([], { newUserId: 3, oldBecomes: 'viewer', roleId: '  ' })
+    expect(steps).toEqual([{ op: 'create', body: { user_id: 3, kind: 'primary' } }])
+  })
+})

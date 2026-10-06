@@ -35,13 +35,17 @@ export function stakeholdersOf(assignments) {
 }
 
 /**
- * The section header's seat line. This cut knows one form: the agent serves
- * the seat its primary holds (the role id on the primary's row). "Holds the
- * seat" needs seat-holder storage that does not exist yet (ent#810 follow-up).
+ * The section header's seat line, in the two forms ent#810 names: the agent
+ * HOLDS a seat itself (R50a, `held_seat` from the backend — an autonomous
+ * player), or it SERVES the seat its primary holds (the role on the primary's
+ * row — a companion). Holds wins when both apply (operator ruling 2026-10-06).
  *
- * @returns {{ form: 'serves', roleId: string, person: string } | { form: 'none' }}
+ * @returns {{ form: 'holds', roleId: string }
+ *         | { form: 'serves', roleId: string, person: string }
+ *         | { form: 'none' }}
  */
-export function seatLine({ assignments = null, primary = null } = {}) {
+export function seatLine({ assignments = null, primary = null, held_seat: heldSeat = null } = {}) {
+  if (heldSeat) return { form: 'holds', roleId: heldSeat }
   const row = primaryOf(assignments)
   if (row && row.role_id) return { form: 'serves', roleId: row.role_id, person: row.display_name }
   if (!assignments && primary) return { form: 'none', person: primary }
@@ -68,7 +72,8 @@ export function seatLine({ assignments = null, primary = null } = {}) {
  */
 export function replacePrimarySteps(assignments, { newUserId, oldBecomes, roleId }) {
   const old = primaryOf(assignments)
-  const create = { op: 'create', body: { user_id: newUserId, role_id: roleId, kind: 'primary' } }
+  // ent#811: the seat is optional — sent only when there is one.
+  const create = { op: 'create', body: withRole({ user_id: newUserId, kind: 'primary' }, roleId) }
   if (!old) return { steps: [create], rollback: [] }
   if (old.user_id === newUserId) return { steps: [], rollback: [] }
 
@@ -82,8 +87,14 @@ export function replacePrimarySteps(assignments, { newUserId, oldBecomes, roleId
   }
   return {
     steps: [{ op: 'delete', id: old.id }, create],
-    rollback: [{ op: 'create', body: { user_id: old.user_id, role_id: old.role_id, kind: 'primary' } }],
+    rollback: [{ op: 'create', body: withRole({ user_id: old.user_id, kind: 'primary' }, old.role_id) }],
   }
+}
+
+/** A create body with `role_id` only when there is a seat to name (ent#811). */
+export function withRole(body, roleId) {
+  const role = typeof roleId === 'string' ? roleId.trim() : roleId
+  return role ? { ...body, role_id: role } : { ...body }
 }
 
 /**
