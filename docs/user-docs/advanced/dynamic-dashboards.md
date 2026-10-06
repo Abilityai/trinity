@@ -102,7 +102,84 @@ A `metric`, `status`, or `progress` widget in `dashboard.yaml` can name a declar
   value: 0             # placeholder for agents on an older base image
 ```
 
-Trinity fills the widget's value, status color, and sparkline from the recorded points on every read, and marks it stale by the same rule as the tiles. A bound widget whose name is not declared, or whose metric was retired, shows the reason instead of a number. Agents on a base image built before this feature still require a `value:`, so keep a placeholder until the image is rebuilt; Trinity overwrites it whenever the binding resolves.
+Trinity fills the widget's value, status color, and sparkline from the recorded points on every read, and marks it stale by the same rule as the tiles. A bound widget whose name is not declared, or whose metric was retired, shows the reason instead of a number. Agents on a base image built before this feature still require a `value:`, so keep a placeholder until the image is rebuilt; Trinity overwrites it whenever the binding resolves, and drops it while the metric store is unavailable, so the placeholder is never shown as a real number.
+
+A bound `metric` tile whose metric declares `direction: up_good` or `down_good` and a `warning_threshold` or `critical_threshold` shows a **Critical** or **Warning** badge when its value crosses one (hover it for the threshold). A bound widget's trend arrow and sparkline follow the metric's `direction`: a rising `down_good` cost is red, and a metric with no `direction` declared shows a neutral grey arrow. Any `trend:` or `trend_value:` written in the file is replaced by the computed trend once the binding resolves.
+
+#### One series per tile: `dims:`
+
+A metric with `dimensions` holds one series per dimension value, for example one per ad channel. A bound widget without `dims:` shows the metric's folded number (the `sum` or `avg` of every series, or the newest series for `last`), and a caption says so: `sum of 3 channel values`, or `newest of 3: channel=meta`. To show one series, name it with `dims:`. This recipe takes about five minutes on a running agent.
+
+1. Declare the metric in `template.yaml`:
+
+   ```yaml
+   metrics:
+     - name: ad_spend
+       type: gauge
+       label: "Ad spend"
+       unit: "USD"
+       cadence: 1h
+       direction: down_good
+       aggregation: sum
+       critical_threshold: 500
+       dimensions: [channel]
+   ```
+
+2. Refresh the definitions (`POST /api/agents/{name}/metrics/definitions/refresh`, or restart the agent).
+3. Record one point per channel with `record_metrics`:
+
+   ```json
+   {"points": [
+     {"metric": "ad_spend", "value": 623.88, "dims": {"channel": "meta"}},
+     {"metric": "ad_spend", "value": 410.0,  "dims": {"channel": "google"}},
+     {"metric": "ad_spend", "value": 95.5,   "dims": {"channel": "linkedin"}}
+   ]}
+   ```
+
+4. Bind one tile per channel in `dashboard.yaml`:
+
+   ```yaml
+   title: "Spend"
+   sections:
+     - title: "Spend by channel"
+       widgets:
+         - type: metric
+           label: "Meta"
+           metric: ad_spend
+           dims: {channel: meta}
+           value: 0             # placeholder, only for an older base image
+         - type: metric
+           label: "Google"
+           metric: ad_spend
+           dims: {channel: google}
+           value: 0
+         - type: metric
+           label: "LinkedIn"
+           metric: ad_spend
+           dims: {channel: linkedin}
+           value: 0
+   ```
+
+The three tiles show three different numbers (623.88, 410, and 95.5), each with its own point time, stale mark, sparkline, and verdict badge, and each captioned with its series (`channel=meta`).
+
+Rules for a selector:
+
+- **Exact match.** Name every dimension of one series. On a metric with `dimensions: [channel, geo]`, `dims: {channel: google}` is refused, and the hint shows the series it would have to name in full (`channel=google, geo=us`). Key order does not matter.
+- **Values are text.** Quote anything YAML would read as a number or a boolean: `dims: {year: "2024"}`, `dims: {enabled: "yes"}`.
+- **`dims: {}` means no selector.** The tile shows the folded number. A series recorded with no `dims` at all cannot be selected on its own.
+- **Thresholds and cadence are declared per metric** and apply to every selected series.
+- **Adding a dimension later changes series identity.** If you add `geo` to `dimensions`, update the producers and the selectors together, then check each tile.
+- `dims:` needs a Trinity backend at or after this release. An older backend ignores it and shows the folded number.
+
+A tile whose selector cannot match shows a reason instead of a number, never the folded total:
+
+| What the tile says | Why |
+|---|---|
+| `dims must be a mapping of dimension: value`, or `dims value for 'channel' must be text`, with a hint | The selector is malformed. Fix it as the hint says. |
+| `dimension 'region' is not declared for this metric; declared: channel` | The key is not in the metric's `dimensions`. |
+| A grey footer: `channel=tiktok`, **no recent data**, and a hint | No recent series matches. The channel may not have reported yet, the value may be misspelled (the hint suggests a casing fix), or a rarely-reporting channel may sit outside the window Trinity reads: each metric's 200 newest points and 50 newest series. |
+
+**Visible change for existing dashboards:** with no change on your side, a bound tile over several series gains a caption saying what its number is, a breached bound `metric` tile gains a verdict badge, and bound trend arrows follow the metric's `direction`. To remove the caption, add `dims:` or keep one series.
 
 ### Retention and limits
 
