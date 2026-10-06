@@ -886,7 +886,15 @@ def _status_color(definition: Dict[str, Any], value: Any) -> Optional[str]:
     return None
 
 
-def _threshold_color(definition: Dict[str, Any], value: Any) -> Optional[str]:
+def _threshold_verdict(
+    definition: Dict[str, Any], value: Any
+) -> Optional[Dict[str, Any]]:
+    """`{"level": "critical" | "warning", "threshold": n}` when breached.
+
+    The ONE threshold rule (ent#730): `color` is a two-line mapping of this,
+    and a bound tile's typed `threshold_verdict` is this, so the colour and the
+    badge can never disagree about the same value.
+    """
     if not isinstance(value, (int, float)) or isinstance(value, bool):
         return None
     # The registry's vocabulary is `up_good` / `down_good` / `neutral`
@@ -904,10 +912,33 @@ def _threshold_color(definition: Dict[str, Any], value: Any) -> Optional[str]:
     breached = ((lambda v, t: v >= t) if direction == "down_good"
                 else (lambda v, t: v <= t))
     if critical is not None and breached(value, critical):
-        return "red"
+        return {"level": "critical", "threshold": critical}
     if warning is not None and breached(value, warning):
-        return "yellow"
+        return {"level": "warning", "threshold": warning}
     return None
+
+
+_VERDICT_COLOR = {"critical": "red", "warning": "yellow"}
+
+
+def _threshold_color(definition: Dict[str, Any], value: Any) -> Optional[str]:
+    verdict = _threshold_verdict(definition, value)
+    return _VERDICT_COLOR.get(verdict["level"]) if verdict else None
+
+
+def _judgeable(definition: Dict[str, Any]) -> bool:
+    """True when the declaration lets a numeric value be judged at all.
+
+    A property of the DECLARATION, not of the value, so it does not change
+    between polls: the panel reserves the verdict badge's footprint on every
+    judgeable tile, and crossing a threshold swaps it in place instead of
+    shifting the layout (design-system rule: a background refresh never moves
+    anything).
+    """
+    return (definition.get("type") != "status"
+            and definition.get("direction") in ("up_good", "down_good")
+            and (definition.get("critical_threshold") is not None
+                 or definition.get("warning_threshold") is not None))
 
 
 #: The write-path leaf's codes, spelled for a widget (ent#730). Two of the
@@ -1110,7 +1141,8 @@ def _select_series(
 #: describes a number may survive it (an author arrow beside a refused `-` is a
 #: success cue on a failed tile).
 _REFUSAL_POPS = ("value", "history", "color", "bound_series", "last_point_at",
-                 "stale", "freshness", "trend", "trend_value")
+                 "stale", "freshness", "trend", "trend_value",
+                 "threshold_verdict", "direction")
 
 
 def _refuse_widget(widget: Dict[str, Any], code: str, message: str,
@@ -1229,8 +1261,12 @@ def bind_dashboard_widgets(
             widget["bound_series"] = source["bound_series"]
         else:
             widget.pop("bound_series", None)
+        # The registry owns the direction (like `bound_series`): the panel
+        # colours a bound tile's trend by it, so an author value cannot win.
+        widget["direction"] = entry.get("direction") or "neutral"
         if not source["has_value"]:
             widget.pop("value", None)
+            widget.pop("threshold_verdict", None)
             continue
         # Overwrite: an author keeping a placeholder `value:` for an older
         # base image must not see the placeholder once the binding works.
@@ -1241,6 +1277,15 @@ def bind_dashboard_widgets(
                  else _threshold_color(entry, value))
         if color:
             widget["color"] = color
+        # Written whenever the metric is judgeable, `ok` included, so the
+        # field's presence never changes between polls (only its level does).
+        numeric = isinstance(value, (int, float)) and not isinstance(value, bool)
+        if _judgeable(entry) and numeric:
+            verdict = _threshold_verdict(entry, value)
+            widget["threshold_verdict"] = (
+                verdict if verdict else {"level": "ok", "threshold": None})
+        else:
+            widget.pop("threshold_verdict", None)
         buckets = source["buckets"]
         if buckets is not None:
             # The SAME shape `_enrich_widgets_with_history` writes

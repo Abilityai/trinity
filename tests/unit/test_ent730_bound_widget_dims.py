@@ -579,8 +579,10 @@ _selectors = (
 def test_T13_any_dims_value_binds_or_refuses_by_name_never_raises(dims, zero_points):
     fake = _Db(points=[] if zero_points else None)
     stored = {p["value_numeric"] for p in fake.points}
+    # Author-typed keys the registry owns: a refusal must not keep them.
+    authored = {"threshold_verdict": {"level": "critical"}, "direction": "up_good"}
     with patch.object(database_mod, "db", fake):
-        (widget,) = _bind(_w(dims))
+        (widget,) = _bind(_w(dims, **authored))
     no_selector = dims is None or dims == {}
     if widget["bound"] is True:
         assert "binding_error_code" not in widget
@@ -598,6 +600,9 @@ def test_T13_any_dims_value_binds_or_refuses_by_name_never_raises(dims, zero_poi
         assert widget["binding_error_code"] in NEW_CODES
         for key in FILLED_KEYS:
             assert key not in widget, key
+        # A refused tile carries no verdict and no direction either (D3).
+        assert "threshold_verdict" not in widget
+        assert "direction" not in widget
 
 
 # ---------------------------------------------------------------------------
@@ -929,3 +934,128 @@ def test_the_user_doc_recipe_shows_three_different_numbers(monkeypatch):
         {"channel": "google"},
         {"channel": "linkedin"},
     ]
+
+
+# ---------------------------------------------------------------------------
+# D3: the typed threshold verdict and the declared direction (T20 – T22)
+# ---------------------------------------------------------------------------
+
+def _verdict_db(**overrides):
+    definition = _definition(warning_threshold=400, critical_threshold=500)
+    definition.update(overrides)
+    return _Db([definition])
+
+
+def test_T20_each_channel_is_judged_on_its_own_value(monkeypatch):
+    monkeypatch.setattr(database_mod, "db", _verdict_db())
+    meta, google, linkedin = _bind(_w({"channel": "meta"}),
+                                   _w({"channel": "google"}),
+                                   _w({"channel": "linkedin"}))
+    assert meta["threshold_verdict"] == {"level": "critical", "threshold": 500}
+    assert google["threshold_verdict"] == {"level": "warning", "threshold": 400}
+    assert linkedin["threshold_verdict"] == {"level": "ok", "threshold": None}
+    assert (meta["color"], google["color"]) == ("red", "yellow")
+
+
+def test_T20_an_unselected_fold_tile_is_judged_on_the_fold(monkeypatch):
+    monkeypatch.setattr(database_mod, "db", _verdict_db(aggregation="sum"))
+    (widget,) = _bind(_w())
+    assert widget["value"] == pytest.approx(1129.38)
+    assert widget["threshold_verdict"] == {"level": "critical",
+                                           "threshold": 500}
+
+
+def test_T20_up_good_breaches_at_exactly_the_threshold(monkeypatch):
+    monkeypatch.setattr(database_mod, "db", _Db(
+        [_definition(direction="up_good", critical_threshold=410.0)]))
+    (widget,) = _bind(_w({"channel": "google"}))
+    assert widget["threshold_verdict"] == {"level": "critical",
+                                           "threshold": 410.0}
+
+
+@pytest.mark.parametrize("overrides,points", [
+    ({"direction": "neutral"}, None),
+    ({"warning_threshold": None, "critical_threshold": None}, None),
+    ({"type": "status", "direction": "down_good",
+      "values": [{"value": "ok", "color": "green"}]},
+     [_point("ok", 60, {"channel": "google"})]),
+    ({}, [_point("lots", 60, {"channel": "google"})]),
+    ({}, [_point(True, 60, {"channel": "google"})]),
+])
+def test_T20_no_verdict_where_the_metric_cannot_be_judged(
+        monkeypatch, overrides, points):
+    definition = _definition(warning_threshold=400, critical_threshold=500)
+    definition.update(overrides)
+    monkeypatch.setattr(database_mod, "db", _Db([definition], points))
+    (widget,) = _bind(_w({"channel": "google"},
+                         threshold_verdict={"level": "critical"}))
+    assert widget["bound"] is True
+    assert "threshold_verdict" not in widget
+
+
+def test_T20_an_unselected_zero_point_widget_has_no_verdict(monkeypatch):
+    monkeypatch.setattr(database_mod, "db", _Db([_definition()], []))
+    (widget,) = _bind(_w(threshold_verdict={"level": "critical"}))
+    assert widget["bound"] is True
+    assert "threshold_verdict" not in widget
+
+
+def test_T20_an_author_typed_verdict_never_survives(monkeypatch):
+    monkeypatch.setattr(database_mod, "db", _verdict_db())
+    below, refused = _bind(
+        _w({"channel": "linkedin"}, threshold_verdict={"level": "critical"}),
+        _w({"channel": "tiktok"}, threshold_verdict={"level": "critical"}))
+    assert below["threshold_verdict"] == {"level": "ok", "threshold": None}
+    assert "threshold_verdict" not in refused
+
+
+@pytest.mark.parametrize("direction,warn,crit,value,verdict,color", [
+    ("down_good", 400, 500, 500, ("critical", 500), "red"),
+    ("down_good", 400, 500, 499.99, ("warning", 400), "yellow"),
+    ("down_good", 400, 500, 400, ("warning", 400), "yellow"),
+    ("down_good", 400, 500, 399.99, None, None),
+    ("down_good", None, 500, 450, None, None),
+    ("up_good", 20, 10, 10, ("critical", 10), "red"),
+    ("up_good", 20, 10, 10.01, ("warning", 20), "yellow"),
+    ("up_good", 20, 10, 20, ("warning", 20), "yellow"),
+    ("up_good", 20, 10, 20.01, None, None),
+    ("up_good", None, 10, True, None, None),
+    ("down_good", 400, 500, False, None, None),
+    ("down_good", 400, 500, "600", None, None),
+    ("down_good", 400, 500, None, None, None),
+    ("neutral", 400, 500, 900, None, None),
+    (None, 400, 500, 900, None, None),
+])
+def test_T21_one_rule_behind_the_verdict_and_the_colour(
+        direction, warn, crit, value, verdict, color):
+    """Each row states its verdict AND its colour independently: comparing
+    one function with a mapping of the other would pass a bug they share."""
+    definition = {"direction": direction, "warning_threshold": warn,
+                  "critical_threshold": crit}
+    expected = (None if verdict is None
+                else {"level": verdict[0], "threshold": verdict[1]})
+    assert mrs._threshold_verdict(definition, value) == expected
+    assert mrs._threshold_color(definition, value) == color
+
+
+def test_T22_a_bind_carries_the_registrys_direction(monkeypatch):
+    monkeypatch.setattr(database_mod, "db", _Db())
+    selected, folded = _bind(_w({"channel": "google"}, direction="up_good"),
+                             _w(direction="up_good"))
+    assert selected["direction"] == "down_good"
+    assert folded["direction"] == "down_good"
+
+
+def test_T22_no_declared_direction_is_neutral(monkeypatch):
+    monkeypatch.setattr(database_mod, "db", _Db([_definition(direction=None)]))
+    (widget,) = _bind(_w({"channel": "google"}))
+    assert widget["direction"] == "neutral"
+
+
+def test_T22_a_zero_point_bind_still_carries_it_and_a_refusal_drops_it(
+        monkeypatch):
+    monkeypatch.setattr(database_mod, "db", _Db([_definition()], []))
+    unselected, refused = _bind(_w(), _w({"channel": "google"},
+                                         direction="down_good"))
+    assert unselected["direction"] == "down_good"
+    assert "direction" not in refused
