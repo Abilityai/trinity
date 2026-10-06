@@ -30,6 +30,10 @@
           <h3 class="text-base text-gray-900 dark:text-white leading-snug">
             <AskMarkdown :text="item.title" inline data-testid="queue-card-title" />
           </h3>
+          <!-- #3246: a platform alert is one row per condition, updated in place
+               by each reading — "seen N times · last seen …" so it does not read
+               as a fresh alert (utils/operatorQueue.js::queueSeenLine). -->
+          <p v-if="seenLine" class="mt-0.5 text-xs opacity-75" data-testid="queue-seen-line">{{ seenLine }}</p>
 
           <!-- Type + priority pills (subtle) -->
           <div class="flex items-center gap-2 mt-1.5">
@@ -233,7 +237,7 @@ import { useOperatorQueueStore } from '../../stores/operatorQueue'
 import { useAgentsStore } from '../../stores/agents'
 import { agentNameTooltip } from '../../utils/agentName'
 import {
-  queueTypeLabel, queueResponseKind, queueSyncBadge, queueReaskBadges,
+  queueTypeLabel, queueResponseKind, queueSyncBadge, queueReaskBadges, queueSeenLine,
   SOMETHING_ELSE, SOMETHING_ELSE_LABEL, offeredChips, decidedByOptions, buildQueueResponse,
 } from '../../utils/operatorQueue'
 import AgentAvatar from '../AgentAvatar.vue'
@@ -257,6 +261,7 @@ const agentsStore = useAgentsStore()
 const responseKind = computed(() => queueResponseKind(props.item))
 // #2915: sync/delivery/aging badge and the refused-response notice.
 const syncBadge = computed(() => queueSyncBadge(props.item))
+const seenLine = computed(() => queueSeenLine(props.item))   // #3246
 const reaskBadges = computed(() => queueReaskBadges(props.item, store.items))   // trinity-enterprise#611
 const diverged = computed(() => store.divergedItemId === props.item.id)
 const notAddressee = computed(() => store.notAddresseeItemId === props.item.id)

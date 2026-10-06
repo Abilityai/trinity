@@ -105,7 +105,10 @@ const isTerminalWithoutResponse = computed(() =>
 )
 const ending = computed(() => queueEnding(props.item))   // trinity-enterprise#611
 const endingText = computed(() => queueEndingText(ending.value))
-const note = computed(() => props.item.response_text || props.item.disposition_reason || '')
+// #3246: a platform ending's reason is a token the ending text already words
+// (`queueEndingText`), never printed raw as though an operator wrote it.
+const note = computed(() => props.item.response_text
+  || (ending.value && ending.value.who === 'the platform' ? '' : props.item.disposition_reason) || '')
 const endedAtAbsolute = computed(() => (ending.value?.when ? formatLocalDateTime(ending.value.when) : ''))
 // An answer's "who" rides beside its time; a cancel / expiry names it in its label.
 const endingMeta = computed(() => {

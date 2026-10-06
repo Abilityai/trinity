@@ -751,7 +751,7 @@ CREATE TABLE operator_queue (
     -- trinity-enterprise#611 (SQLite `operator_queue_ask_object` / Alembic `0076_operator_queue_ask_object`; nullable, no backfill):
     disposition TEXT,                   -- answered|cancelled|expired — written in the SAME CAS UPDATE that flips `status`; NULL = ended before the ledger
     disposed_at TEXT,
-    disposed_by TEXT,                   -- person|timeout (an enum of two: only a person or the clock ends an ask)
+    disposed_by TEXT,                   -- person|timeout|platform — only a person or the clock ends an ASK; `platform` ends only a platform alert (#3130 superseded flood alarms, #3246 condition_cleared)
     disposed_by_email TEXT,             -- NULL for timeout; withheld from machine keys on get/list
     disposition_reason TEXT,            -- the operator's optional cancel reason (≤ 500); never in an audit row, never to a Workspace client
     batch_id TEXT,                      -- one uuid per bulk-cancel sweep; its re-select is the sweep's CAS winners
@@ -761,6 +761,8 @@ CREATE TABLE operator_queue (
     resolved_to TEXT,                   -- PR B: JSON list of person refs; withheld from machine keys
     proposal TEXT,                      -- PR B: JSON, the frozen action
     supersedes_expired TEXT,            -- PR B: the agent's own expired predecessor (row uuid)
+    subject TEXT,                       -- #3246: a platform alert's condition key `<kind>:<key>`; at most one PENDING row per (agent_name, subject) — partial unique index uq_operator_queue_pending_subject
+    last_seen_at TEXT,                  -- #3246: the latest reading of that condition (the count rides in context.seen_count)
     FOREIGN KEY (responded_by_id) REFERENCES users(id)
 );
 CREATE INDEX idx_operator_queue_agent ON operator_queue(agent_name);

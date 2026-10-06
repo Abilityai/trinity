@@ -61,6 +61,7 @@ MACHINE_ROW_KEYS = frozenset({
     "disposition", "disposed_at", "disposed_by", "disposition_reason", "batch_id",
     "raised_by", "channel", "to_role", "proposal", "supersedes_expired",
     "aging", "aged_since",
+    "subject", "last_seen_at",
 })
 
 AGENT = "agent-715-reads"

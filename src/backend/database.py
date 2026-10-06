@@ -3901,6 +3901,24 @@ class DatabaseManager:
         # #1631: agent-scoped — item_id is the agent's request_id, not the uuid.
         return self._operator_queue_ops.mark_acknowledged(agent_name, item_id)
 
+    # #3246 — platform alerts: one pending row per (agent, subject)
+    def find_pending_operator_queue_by_subject(self, agent_name, subject):
+        return self._operator_queue_ops.find_pending_by_subject(agent_name, subject)
+
+    def find_person_ended_operator_queue_by_subject(self, agent_name, subject, since):
+        return self._operator_queue_ops.find_person_ended_by_subject(agent_name, subject, since)
+
+    def create_platform_operator_queue_item(self, agent_name, item, *, subject,
+                                            max_pending_for_type=None):
+        # Returns {"outcome": created|updated|refused_at_budget, "row", "changed"}.
+        return self._operator_queue_ops.create_platform_item(
+            agent_name, item, subject=subject, max_pending_for_type=max_pending_for_type,
+        )
+
+    def end_operator_queue_items_by_platform(self, ids, *, reason, batch_id=None):
+        # Returns {"batch_id", "rows"} — the rows THIS call ended (CAS-won).
+        return self._operator_queue_ops.end_items_by_platform(ids, reason=reason, batch_id=batch_id)
+
     def mark_operator_queue_expired(self):
         # trinity-enterprise#611: returns the rows this sweep ended (was a count).
         return self._operator_queue_ops.mark_expired()

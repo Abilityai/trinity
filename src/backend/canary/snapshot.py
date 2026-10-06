@@ -153,8 +153,13 @@ _DB_BACKUP_AGENT = "_db-backup"
 _LOG_ARCHIVE_AGENT = "_log-archive"
 # ent#434: the weekly-headroom alarm host.
 _SUB_HEADROOM_AGENT = "_sub-headroom"
+# #3246: the skills-library alarm host (mirrors
+# services.skill_service.RECONCILE_ALARM_AGENT_NAME) — its rows now arrive
+# through the platform-alert seam and would otherwise read as L-03 orphans.
+_SKILLS_SYNC_AGENT = "_skills-sync"
 _PLATFORM_ALARM_SENTINELS = (_RETENTION_GUARD_AGENT, _DB_BACKUP_AGENT,
-                            _LOG_ARCHIVE_AGENT, _SUB_HEADROOM_AGENT)
+                            _LOG_ARCHIVE_AGENT, _SUB_HEADROOM_AGENT,
+                            _SKILLS_SYNC_AGENT)
 _SENTINEL_SQL_LIST = ", ".join(f"'{name}'" for name in _PLATFORM_ALARM_SENTINELS)
 
 ORPHAN_SCAN_TABLES = [
