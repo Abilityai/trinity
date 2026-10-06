@@ -1,0 +1,122 @@
+{
+  "version": "1.2.3",
+  "date": "2026-10-06",
+  "mode": "diff (daily, 8/10 gate)",
+  "scope": "--diff",
+  "branch": "feature/ent787-guardrail-exec-form",
+  "issue": "abilityai/trinity-enterprise#787",
+  "base": "84b586b81",
+  "commits": [],
+  "audited": "working tree vs merge-base 84b586b81 + untracked files",
+  "counts_as_full_run": false,
+  "phases_run": [
+    0,
+    1,
+    2,
+    5,
+    7,
+    8,
+    9,
+    12,
+    13,
+    14
+  ],
+  "phases_not_applicable": {
+    "3": "no dependency changes",
+    "4": "no workflow changes",
+    "6": "no webhook/integration changes",
+    "10": "no new component",
+    "11": "no new data class"
+  },
+  "stack_cve_quicklist": [
+    {
+      "component": "Claude Code in the base image",
+      "pin": "2.1.281",
+      "verdict": "patched (unchanged by this diff)"
+    },
+    {
+      "component": "other rows",
+      "verdict": "not touched by this diff"
+    }
+  ],
+  "attack_surface": {
+    "new_endpoints": 0,
+    "new_root_exec": 1,
+    "changed_hook_registrations": 4,
+    "new_image_files": [
+      "/opt/trinity/hooks/guard002-smoke.py"
+    ]
+  },
+  "checks": [
+    {
+      "check": "secret prefixes in diff + untracked files",
+      "result": "none"
+    },
+    {
+      "check": "concealed Unicode in hooks + new tests",
+      "result": "none"
+    },
+    {
+      "check": "root exec argv (read_only.root_config_command): config JSON reaches the shell as data",
+      "result": "clean; constant script, JSON as positional $3 via printf '%s'; executed with quote/backtick/$()/printf-format payloads in tests"
+    },
+    {
+      "check": "GUARD-002 hooks reachable by agent-controlled env/shell prefix/user site",
+      "result": "closed; exec form + env -i + -I -S; verified in a built image with a hostile workspace (control: old invocation flips deny to allow)"
+    },
+    {
+      "check": "CLAUDE_CODE_SHELL_PREFIX via .env / settings env",
+      "result": "closed; PROTECTED_KEYS + policy env pin, verified in a built image (main + drop-in env blocks merge key-wise)"
+    },
+    {
+      "check": "read-only config writable by the agent without sudo",
+      "result": "closed while the root file exists; root:root 0444 in root-owned dir, agent rm refused in a built image"
+    },
+    {
+      "check": "Invariant #17 (image ends non-root)",
+      "result": "unchanged; smoke runs inside the existing root block, USER developer follows"
+    },
+    {
+      "check": "failure direction stated (A10)",
+      "result": "stated in read-only-guard.py / codex_runtime.py comments: root decides when present, home copy only while root missing; malformed root fails open + logs (pre-existing doctrine, CSO #1187)"
+    }
+  ],
+  "findings": [],
+  "hypotheses": [],
+  "considered_and_dismissed": [
+    {
+      "item": "Home-copy fallback while the root file is missing",
+      "why": "Accepted by the owner for this PR: covers the recreate window and pre-ent#787 backends with the same exposure as before; registered as debt (trinity-dev DEBT_INBOX debt:2026-10-06-read-only-legacy-home-dual-write)"
+    },
+    {
+      "item": "Agent with passwordless sudo rewrites managed settings / root config",
+      "why": "Stated limit (GUARD-002, requirements/security.md); not a boundary"
+    },
+    {
+      "item": "Hook timeout 30 s lets the tool run on timeout",
+      "why": "CLI behaviour, hooks complete well under 1 s; matches the skill-gate entry"
+    },
+    {
+      "item": "guard002-smoke.py shipped in the image deletes the root config if run as root",
+      "why": "needs sudo; root already controls the file"
+    }
+  ],
+  "coverage_gaps": [
+    "Real Claude Code PreToolUse Bash deny through a logged-in CLI not exercised here (needs model auth) \u2014 covered at /verify-local"
+  ],
+  "supply_chain_summary": {
+    "scanner": "n/a (no dependency changes)"
+  },
+  "filter_stats": {
+    "candidates": 4,
+    "reported": 0
+  },
+  "totals": {
+    "critical": 0,
+    "high": 0,
+    "medium": 0,
+    "low": 0
+  },
+  "trend": "n/a (diff run)",
+  "remediation": []
+}

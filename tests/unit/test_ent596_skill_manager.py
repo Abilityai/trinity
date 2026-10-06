@@ -340,6 +340,11 @@ def test_a_refused_agent_key_changes_nothing_on_any_of_the_four_routes(grants, a
     ("/home/developer", True, True),
     ("/", True, True),
     ("notes", True, False),
+    # ent#792: normpath keeps exactly two leading slashes; the agent server does not
+    ("//home/developer/.claude/skills/x/SKILL.md", False, True),
+    ("///home/developer/.claude/skills", False, True),
+    ("//home/developer/.claude", True, True),
+    ("//home/developer", True, True),
 ])
 def test_what_counts_as_touching_the_skills_dir(path, ancestors, expected):
     from services.agent_service.files import _touches_skills_dir
@@ -360,6 +365,11 @@ def files_mod(monkeypatch, grants, audit):
     ("update_agent_file_logic", (".claude/skills/x/SKILL.md", "---\nname: x\n---")),
     ("create_agent_folder_logic", (".claude/skills/x",)),
     ("delete_agent_file_logic", (".claude",)),
+    # ent#792: the same writes spelled with two leading slashes
+    ("update_agent_file_logic", ("//home/developer/.claude/skills/x/SKILL.md", "---\nname: x\n---")),
+    ("create_agent_folder_logic", ("//home/developer/.claude/skills/x",)),
+    ("delete_agent_file_logic", ("//home/developer/.claude",)),
+    ("delete_agent_file_logic", ("//home/developer/.claude/skills",)),
 ])
 def test_a_non_holder_cannot_reach_the_skills_dir_through_the_file_routes(files_mod, fn, args):
     call = getattr(files_mod, fn)
