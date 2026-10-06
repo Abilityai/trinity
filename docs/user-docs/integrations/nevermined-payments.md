@@ -43,6 +43,36 @@ Client -> POST /api/paid/{agent}/chat (payment-signature header)
 
 Call `GET /api/paid/{agent_name}/info` to retrieve payment requirements without authentication. Returns the Agent ID, Plan ID, checkout URL, and credits per request.
 
+### Crypto plans and card (fiat) plans
+
+Nevermined plans are paid either in crypto or by card, and the x402 requirements
+Trinity advertises must match the plan — the facilitator checks the buyer's token
+against them, so a card plan described as a crypto one is simply unpayable.
+Trinity reads the plan's own type from Nevermined and advertises it:
+
+| Plan | Scheme advertised | Network |
+|---|---|---|
+| Crypto | `nvm:erc4337` | `eip155:8453` (live) / `eip155:84532` (sandbox) |
+| Card / fiat | `nvm:card-delegation` | the plan's payment provider — `stripe`, `braintree` or `visa` |
+
+Nothing to configure: the plan type comes from Nevermined, is cached for five
+minutes, and `GET /api/paid/{agent}/info` shows the scheme a client will be asked
+for. If Nevermined is unreachable when the lookup is first needed, Trinity serves
+the last answer it had — or falls back to `nvm:erc4337` — and logs a warning
+naming the plan.
+
+### The URL in a 402 must be the URL you call
+
+The 402 carries a `resource.url` that your payment token is minted and verified
+against, so it has to be the origin a buyer actually reaches Trinity on. Trinity
+uses the public URL you configured (**Settings → Public Chat URL**, or the
+`PUBLIC_CHAT_URL` / `FRONTEND_URL` environment variables) when it matches the
+host of the incoming request, and otherwise the request's own host — upgraded to
+`https` when your proxy sends `X-Forwarded-Proto: https`. If a buyer reports a
+token rejected for the wrong resource URL, check that your TLS terminator
+forwards that header and that the configured public URL is the hostname clients
+really use.
+
 ## For Agents
 
 ### API Endpoints

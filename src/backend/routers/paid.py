@@ -28,12 +28,39 @@ router = APIRouter(prefix="/api/paid", tags=["paid"])
 logger = logging.getLogger(__name__)
 
 
+def _paid_base_url(request: Request) -> str:
+    """The externally reachable origin for this door's `resource.url` (#3215).
+
+    Shared with the A2A door and the agent card through
+    `utils.public_url.public_base_url`, so one request produces ONE origin
+    wherever Trinity hands a buyer a URL.
+    """
+    from config import FRONTEND_URL
+    from services.settings_service import settings_service
+    from utils.public_url import public_base_url
+
+    try:
+        configured = settings_service.get_public_chat_url()
+    except Exception:  # noqa: BLE001 — an unreadable setting falls back to env
+        from config import PUBLIC_CHAT_URL
+        configured = (PUBLIC_CHAT_URL or "").rstrip("/")
+    return public_base_url(request, configured=configured,
+                           frontend_url=FRONTEND_URL)
+
+
 @router.get("/{agent_name}/info")
-async def get_paid_agent_info(agent_name: str):
+async def get_paid_agent_info(agent_name: str, request: Request):
     """Get agent payment info and requirements.
 
     Returns 404 if agent doesn't exist or Nevermined is not enabled
     (prevents agent name enumeration).
+
+    This body is the agent card's `paymentInfoUrl` target: a payment-aware
+    client pays from it on its FIRST request, so it has to advertise the same
+    scheme and the same origin as the 402 it would otherwise have had to provoke
+    (#3215). That is why it now loads the config WITH the key — resolving the
+    plan's scheme needs a `Payments` instance, which cannot be constructed
+    without one. The key is used server-side only and never appears in the body.
     """
     if not NEVERMINED_AVAILABLE:
         return JSONResponse(
@@ -41,7 +68,8 @@ async def get_paid_agent_info(agent_name: str):
             content={"detail": "Nevermined payment integration is not available"},
         )
 
-    config = db.get_nevermined_config(agent_name)
+    config_data = db.get_nevermined_config_with_key(agent_name)
+    config = config_data["config"] if config_data else None
     if not config or not config.enabled:
         return JSONResponse(
             status_code=404,
@@ -49,9 +77,17 @@ async def get_paid_agent_info(agent_name: str):
         )
 
     payment_service = get_nevermined_payment_service()
+    base_url = _paid_base_url(request)
 
     try:
-        payment_required = payment_service.build_402_response(config)
+        plan_scheme = await payment_service.resolve_plan_scheme(
+            nvm_api_key=config_data["nvm_api_key"],
+            nvm_environment=config.nvm_environment,
+            config=config,
+        )
+        payment_required = payment_service.build_402_response(
+            config, base_url, plan_scheme=plan_scheme
+        )
     except Exception as e:
         logger.error(f"Failed to build payment info for {agent_name}: {e}")
         return JSONResponse(
@@ -112,8 +148,11 @@ async def paid_chat(
 
     payment_service = get_nevermined_payment_service()
 
-    # Determine base URL for payment_required construction
-    base_url = str(request.base_url).rstrip("/")
+    # Determine base URL for payment_required construction. The shared public
+    # origin (#3215), not `request.base_url`: behind the standard proxy topology
+    # the latter is http, and a token minted against an http `resource.url`
+    # cannot authorize the https call the buyer actually makes.
+    base_url = _paid_base_url(request)
 
     # Step 1: Check for payment-signature header
     access_token = request.headers.get("payment-signature")
@@ -121,7 +160,16 @@ async def paid_chat(
     if not access_token:
         # Return 402 Payment Required
         try:
-            payment_required = payment_service.build_402_response(config, base_url)
+            # The plan's own scheme (#3215). A fiat plan advertised as
+            # `nvm:erc4337` mints a token the facilitator will reject.
+            plan_scheme = await payment_service.resolve_plan_scheme(
+                nvm_api_key=nvm_api_key,
+                nvm_environment=config.nvm_environment,
+                config=config,
+            )
+            payment_required = payment_service.build_402_response(
+                config, base_url, plan_scheme=plan_scheme
+            )
         except Exception as e:
             logger.error(f"Failed to build 402 response for {agent_name}: {e}")
             return JSONResponse(
