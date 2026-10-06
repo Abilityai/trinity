@@ -201,7 +201,8 @@ async def download_file(path: str):
                 status_code=413, detail=f"File too large: {st.st_size} bytes (max {_MAX_READ_BYTES})"
             )
         try:
-            content = f.read().decode("utf-8", errors="replace")
+            # At most the size it had when opened: a file that grows is not read past it.
+            content = f.read(st.st_size).decode("utf-8", errors="replace")
         except Exception as e:
             logger.error(f"File download error: {e}")
             raise HTTPException(status_code=500, detail=f"Failed to read file: {str(e)}")
@@ -459,11 +460,14 @@ async def preview_file(path: str):
         mime_type = "application/octet-stream"
 
     def _chunks():
+        # At most the declared Content-Length: a file that grows is not read past it.
+        remaining = st.st_size
         try:
-            while True:
-                chunk = f.read(64 * 1024)
+            while remaining > 0:
+                chunk = f.read(min(64 * 1024, remaining))
                 if not chunk:
                     break
+                remaining -= len(chunk)
                 yield chunk
         finally:
             f.close()

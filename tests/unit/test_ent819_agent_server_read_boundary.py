@@ -170,6 +170,27 @@ def test_the_handlers_serve_what_they_opened(home, monkeypatch, route):
 
 
 @pytest.mark.parametrize("route", ["/api/files/download", "/api/files/preview"])
+def test_the_handlers_serve_the_size_they_opened(home, monkeypatch, route):
+    """A file that grows after it is opened is served at the size it had
+    when opened, so the body matches the declared length."""
+    mod, base, client = home
+    real = mod._open_for_read
+
+    def _open_then_grow(path, base_=None):
+        opened = real(path, base_)
+        with open(base / "notes.md", "ab") as grow:
+            grow.write(b"appended after the open\n" * 4096)
+        return opened
+
+    monkeypatch.setattr(mod, "_open_for_read", _open_then_grow)
+    r = client.get(route, params={"path": "notes.md"})
+    assert r.status_code == 200
+    assert r.content == b"hello notes\n"
+    if route.endswith("preview"):
+        assert r.headers["content-length"] == str(len(b"hello notes\n"))
+
+
+@pytest.mark.parametrize("route", ["/api/files/download", "/api/files/preview"])
 def test_the_handlers_keep_404_and_400(home, route):
     _, _, client = home
     assert client.get(route, params={"path": "absent.txt"}).status_code == 404
