@@ -19,7 +19,7 @@
 
 import { z } from "zod";
 import { TrinityClient } from "../client.js";
-import { runAgentChat } from "./chat.js";
+import { EXECUTION_ID_PARAM_DESCRIPTION, runAgentChat } from "./chat.js";
 import { DELEGATION_CONTRACT } from "../delegation_contract.js";
 import type { ToolAccessPolicy } from "../access.js";
 
@@ -110,11 +110,7 @@ export function makeDedicatedChatTool(
       execution_id: z
         .string()
         .optional()
-        .describe(
-          "Your CURRENT execution_id. Pass it when delegating long-running work so the " +
-          "delegated task inherits the channel/thread this request came from and its " +
-          "completion is reported back there (ent#224). Optional."
-        ),
+        .describe(EXECUTION_ID_PARAM_DESCRIPTION),
     }),
     execute: async (
       params: {

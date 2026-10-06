@@ -210,6 +210,27 @@ export interface ReportBackDecision {
   logLine: string;
 }
 
+/**
+ * #3232 (D5): the one `execution_id` parameter text, published by
+ * `chat_with_agent` and every dedicated `chat_with_<agent>` so the promise cannot
+ * drift between them. It lives in the PARAMETER description (not cut at Claude
+ * Code's 2,048-character tool-description cap; the tool descriptions and
+ * DELEGATION_CONTRACT stay byte-unchanged). It must state the default on its own:
+ * it is the only text a model sees when a default-armed call ends in an error.
+ */
+export const EXECUTION_ID_PARAM_DESCRIPTION =
+  "Report-back to the Slack, Telegram or Workspace conversation you are serving. It is on by default " +
+  "whenever this call answers with an async receipt (parallel=true, async=true, or a sequential call this " +
+  "platform routes as a task): when the delegated run ends, success or failure, it posts a note there, and " +
+  "runs it delegates onward may post their own. Pass \"manual\" to turn it off for this call. For a sync " +
+  "call, pass your own execution_id (from your Execution Context, not one from a receipt) to ask for it. " +
+  "The result's report_back field says whether it was requested; even requested is not a guarantee (the " +
+  "conversation may not allow such notes, or the send may fail). The note may arrive before or after your " +
+  "own reply: give your own answer, and if you follow up later, add what is new rather than repeat it. A " +
+  "sequential call that answers with the reply itself does not report back. A repeated identical request " +
+  "returns the earlier run, which reports wherever that run was asked to; do not re-send or reword it to " +
+  "change that. Optional.";
+
 /** On default-armed results: the call reports back although nothing was typed. */
 export const REPORT_BACK_DEFAULT_NOTE =
   "Report-back is on by default: when this run ends it posts its outcome into the Slack, Telegram or " +
@@ -687,11 +708,7 @@ export function createChatTools(
         execution_id: z
           .string()
           .optional()
-          .describe(
-            "Your CURRENT execution_id. Pass it when delegating long-running work so the " +
-            "delegated task inherits the channel/thread this request came from and its " +
-            "completion is reported back there (ent#224). Optional."
-          ),
+          .describe(EXECUTION_ID_PARAM_DESCRIPTION),
       }),
       execute: async (
         {
