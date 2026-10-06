@@ -313,3 +313,39 @@ def test_C11_an_unquoted_year_is_still_flagged_because_json_keeps_ints():
         '{type: metric, label: Y, metric: daily_spend, dims: {day: 2024}}'),
         template=DAY_TEMPLATE)))
     assert finding["code"] == "metric_dimension_invalid"
+
+
+# The JSON round trip, not `jsonable_encoder` alone, is what turns a non-text
+# mapping KEY into text: the encoder keeps a bool/null key as True/None, and
+# `json.dumps` writes it as `"true"`/`"null"`. PyYAML (YAML 1.1) reads an
+# unquoted `yes` as True and `~` as None, so the tile receives the text and
+# binds against a dimension declared under that quoted name.
+KEYWORD_TEMPLATE = TEMPLATE + """\
+  - name: flag_spend
+    type: gauge
+    label: "Flag spend"
+    dimensions: ["true"]
+  - name: void_spend
+    type: gauge
+    label: "Void spend"
+    dimensions: ["null"]
+"""
+
+
+@pytest.mark.parametrize("metric,yaml_key,wire_key", [
+    ("flag_spend", "yes", "true"),
+    ("void_spend", "~", "null"),
+])
+def test_C11_a_non_text_dims_key_passes_because_json_makes_it_text(
+        metric, yaml_key, wire_key):
+    widget = (f'{{type: metric, label: K, metric: {metric}, '
+              f'dims: {{{yaml_key}: google}}}}')
+    data, err = static_checks._parse_yaml(_dashboard(widget))
+    assert err is None, err
+    (parsed_key,) = data["sections"][0]["widgets"][0]["dims"]
+    assert not isinstance(parsed_key, str), parsed_key  # the YAML is non-text
+    _clean, problem = mrs.parse_dims_selector({wire_key: "google"}, [wire_key])
+    assert problem is None, problem  # the tile binds on the wire form
+    status, message, detail = _x009(_snap(_dashboard(widget),
+                                          template=KEYWORD_TEMPLATE))
+    assert status == "pass", (message, detail)
