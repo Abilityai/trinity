@@ -67,6 +67,7 @@ from models import SetAdminPasswordRequest
 from database import db
 from dependencies import hash_password
 from services.system_seed_service import ensure_first_run_seeded
+from services.system_agent_service import system_agent_service
 from services.operator_intake_service import submit_operator_intake
 from utils.password_validation import validate_password_strength, PASSWORD_REQUIREMENTS_MESSAGE
 from utils.admin_identity import admin_username, is_usable_password_hash
@@ -157,6 +158,16 @@ async def get_setup_status():
         "setup_available": True,
         "claim_required": _claim_required(),
     }
+
+
+async def _deploy_system_agent() -> None:
+    """Deploy the system agent after setup (#3237). Never raises: setup has
+    already succeeded, and the next backend start retries."""
+    try:
+        result = await system_agent_service.ensure_deployed()
+        logger.info("System agent after setup: %s - %s", result.get("action"), result.get("message"))
+    except Exception as e:  # noqa: BLE001
+        logger.error("System agent deploy after setup failed: %s", e)
 
 
 @router.post("/admin-password")
@@ -326,6 +337,13 @@ async def set_admin_password(
     # seeders are idempotent, first-run-only, and fresh-install-scoped, so this can
     # never double-provision or surprise an established fleet.
     background_tasks.add_task(ensure_first_run_seeded)
+
+    # #3237: the system agent needs the admin as its owner. Its only other
+    # deploy attempt runs at backend startup, which on a fresh install is before
+    # this endpoint, so without this it stayed missing until the next restart.
+    # Same background-task rule as the seed pass above; ensure_deployed is
+    # idempotent, so a later restart stays a no-op.
+    background_tasks.add_task(_deploy_system_agent)
 
     # Operator intake (trinity-enterprise#38): only on affirmative consent.
     # Scheduled as a background task so it runs AFTER the response is sent — it
