@@ -374,8 +374,12 @@ async def _agent_reads_without_links(container, agent_name: str) -> bool:
 
 
 def _passes_owner_tier(current_user, agent_name: str) -> bool:
-    from dependencies import assert_agent_owner
+    """The credential owner tier: a person who passes the owner gate (the
+    agent's owner, or an admin). An agent, system, connector or ops key is
+    below it, as in `_enforce_owner_tier_read`."""
+    from dependencies import assert_agent_owner, assert_person
     try:
+        assert_person(current_user)
         assert_agent_owner(current_user, agent_name)
     except HTTPException:
         return False
@@ -383,7 +387,9 @@ def _passes_owner_tier(current_user, agent_name: str) -> bool:
 
 
 async def _refuse_below_owner_on_unverified_image(container, current_user, agent_name, path) -> None:
-    """Below the owner tier, read only from an agent whose image is verified."""
+    """Below the owner tier, read only from an agent whose image is verified.
+    Only a person who is the owner or an admin skips the check; agent keys are
+    refused like any caller below the owner tier until the restart."""
     global _UNVERIFIED_IMAGE_REFUSALS
     if _passes_owner_tier(current_user, agent_name):
         return

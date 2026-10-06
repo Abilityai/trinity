@@ -644,6 +644,33 @@ def test_the_owner_and_an_admin_are_unaffected_and_never_probe(agent, fn, user):
     assert agent.probe.await_count == 0
 
 
+@pytest.mark.parametrize("fn", LOGIC)
+@pytest.mark.parametrize("key", [
+    lambda: _user(OWNER, mcp_scope="agent", agent_name=AGENT),
+    lambda: _user(OWNER, mcp_scope="agent", agent_name="sibling"),
+], ids=["own-agent-key", "sibling-agent-key"])
+def test_an_agent_key_of_the_owner_is_refused_on_an_unverified_image(agent, fn, key):
+    """Only a person who is the owner or an admin skips the image check; an
+    agent key is below the owner tier, as on the credential paths."""
+    _old_image(agent)
+    with pytest.raises(HTTPException) as exc:
+        _call(fn, "notes.md", key())
+    assert exc.value.status_code == 403
+    assert exc.value.detail == {"code": "agent_restart_required", "message": RESTART_MESSAGE,
+                                "path": "/home/developer/notes.md"}
+    assert agent.probe.await_count == 1
+    assert agent.sent.await_count == 0
+
+
+def test_an_agent_key_reads_a_pipeline_file_on_a_verified_image(agent):
+    key = _user(OWNER, mcp_scope="agent", agent_name="sibling")
+    assert (
+        _body(_call("download_agent_file_logic", ".trinity/pipelines/x.yaml", key))
+        == b"FILE-BODY"
+    )
+    assert agent.probe.await_count == 1
+
+
 def test_a_verified_image_serves_a_shared_user(agent):
     assert _body(_call("download_agent_file_logic", "notes.md", shared_user())) == b"FILE-BODY"
 
