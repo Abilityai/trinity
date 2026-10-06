@@ -62,8 +62,8 @@ _PIN_FILES = (
 # tag. Before moving the pin, check membership against the real upstream tag —
 # it must print the path:
 #
-#   git clone --bare https://github.com/abilityai/trinity-skills /tmp/ts
-#   git -C /tmp/ts ls-tree --name-only -r <tag> skills/update-dashboard/SKILL.md
+#   git clone --bare https://github.com/abilityai/trinity-skills /tmp/ts && \
+#     git -C /tmp/ts ls-tree --name-only -r <tag> skills/update-dashboard/SKILL.md
 #
 # And review what the new tag brings into a fleet (skills carry executables):
 #
