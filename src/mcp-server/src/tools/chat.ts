@@ -220,9 +220,10 @@ export interface ReportBackDecision {
  */
 export const EXECUTION_ID_PARAM_DESCRIPTION =
   "Report-back to the Slack, Telegram or Workspace conversation you are serving. It is on by default " +
-  "whenever this call answers with an async receipt (parallel=true, async=true, or a sequential call this " +
-  "platform routes as a task): when the delegated run ends, success or failure, it posts a note there, and " +
-  "runs it delegates onward may post their own. Pass \"manual\" to turn it off for this call. For a sync " +
+  "for async delegation (parallel=true, async=true, or a sequential call this platform routes as a task): " +
+  "when the delegated run ends, success or failure, it posts a note there, and runs it delegates onward may " +
+  "post their own. An error from this call does not mean nothing will post: the run may have started. " +
+  "Pass \"manual\" to turn it off for this call. For a sync " +
   "call, pass your own execution_id (from your Execution Context, not one from a receipt) to ask for it. " +
   "The result's report_back field says whether it was requested; even requested is not a guarantee (the " +
   "conversation may not allow such notes, or the send may fail). The note may arrive before or after your " +

@@ -491,9 +491,17 @@ describe("#3232 parent_execution_id leaves the MCP server (real transport)", () 
       "not a guarantee",
       "does not report back",
       "do not re-send",
+      // An async call that errors after the backend accepted the work still
+      // reports back: the default is tied to the dispatch, not to the receipt.
+      "does not mean nothing will post",
+      "the run may have started",
     ]) {
       assert.ok(shared.includes(phrase), `the description must say: ${phrase}`);
     }
+    assert.ok(
+      !shared.includes("answers with an async receipt"),
+      "the default must not be scoped to receiving a receipt (an errored call may still report back)"
+    );
   });
 
   it("T12: the same text from two turns shares one key but names two parents (Q4 characterization)", async () => {
