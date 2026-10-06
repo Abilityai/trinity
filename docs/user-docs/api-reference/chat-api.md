@@ -124,7 +124,7 @@ curl -s -X POST http://localhost:8000/api/agents/my-agent/task \
   -H "Authorization: Bearer <token>" -H "Idempotency-Key: report-2026-10-06" \
   -H "Content-Type: application/json" \
   -d '{"message": "Summarize the latest reports", "async_mode": true}'
-# -> 202 {"status": "accepted", "execution_id": "<first-id>", "async_mode": true, ...}
+# -> 200 {"status": "accepted", "execution_id": "<first-id>", "async_mode": true, ...}
 
 # 2. Check the outcome
 curl -s -H "Authorization: Bearer <token>" \
@@ -136,7 +136,7 @@ curl -s -X POST http://localhost:8000/api/agents/my-agent/task \
   -H "Authorization: Bearer <token>" -H "Idempotency-Key: report-2026-10-06" \
   -H "Content-Type: application/json" \
   -d '{"message": "Summarize the latest reports", "async_mode": true}'
-# -> 202 {"status": "accepted", "execution_id": "<second-id>", ...}
+# -> 200 {"status": "accepted", "execution_id": "<second-id>", ...}
 ```
 
 Checking the status tells you **whether** to retry; it cannot make a retry safe. Anything the failed run already did (a message sent, a file written) may happen again in the new run — effect de-duplication is per execution, and the new run has a new `execution_id`. Two identical retries that arrive together start one new run.
