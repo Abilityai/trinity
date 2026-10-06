@@ -7,7 +7,7 @@
 ## Revision History
 | Date | Changes |
 |------|---------|
-| 2026-10-06 | **Credential files are owner-tier to read; reads never follow a link; runtime config files are write-protected** (trinity-enterprise#819, #823): download and preview refuse an owner-tier path (credential files, their `/proc` / `/dev` spellings, `.trinity/git-credential`, `.trinity/backup/*`, the secret file classes, the runtime config files) unless the caller is a person who passes the owner tier; refused and non-owner allowed reads are audited. The agent server opens download/preview paths without following any link and serves that descriptor; a link is refused with `resolved_path_mismatch` for every caller. Agents not yet on that image refuse below-owner reads until restarted. `~/.claude.json`, `~/.claude/.credentials.json`, `~/.gemini/settings.json` and `~/.tmp/codex/*` join every write list; deleting `.tmp` is refused. The Credentials panel shows a refusal instead of opening an empty editor. |
+| 2026-10-06 | **Credential files are owner-tier to read; reads never follow a link; runtime config files are write-protected** (trinity-enterprise#819, #823): download and preview refuse an owner-tier path (credential files, their `/proc` / `/dev` spellings, `.trinity/git-credential`, `.trinity/backup/*`, the secret file classes, the runtime config files) unless the caller is a person who passes the owner tier; refused reads, and allowed reads other than the owner's own signed-in session, are audited. The agent server opens download/preview paths without following any link, serves that descriptor, and reads at most the size the file had when opened; a link is refused with `resolved_path_mismatch` for every caller. Agents not yet on that image refuse reads below the owner tier with `agent_restart_required` until stopped and started through Trinity. `~/.claude.json`, `~/.claude/.credentials.json`, `~/.gemini/settings.json` and `~/.tmp/codex/*` join every write list; deleting `.tmp` is refused. The Credentials panel shows a refusal instead of opening an empty editor. |
 | 2026-10-06 | **Backend deny list covers DELETE; paths normalised before every check** (trinity-enterprise#792): `_normalize_user_path` collapses any run of leading slashes (`posixpath.normpath` keeps exactly two). `DELETE /files` refuses deny-listed paths and any directory that holds one (`_is_user_deletable_path`). PUT, mkdir and DELETE send the agent the normalised path that was checked. |
 | 2026-03-03 | **Per-agent Files tab restored** (Issue #51): FilesPanel.vue rewritten with full file manager (tree + preview). Uses `file-manager/FileTreeNode.vue` and `file-manager/FilePreview.vue`. Standalone `/files` route removed. |
 | 2026-02-18 | Files tab removed from AgentDetail.vue. Users directed to standalone File Manager. |
@@ -91,13 +91,13 @@ const props = defineProps({
 - `showDeleteConfirm`, `downloading`, `deleting` - action state
 
 **Key Methods**:
-- `loadFiles()` (Line 387-402): Calls `agentsStore.listAgentFiles()`, populates `fileTree`
-- `onFileSelect(item)` (Line 404-424): Sets `selectedFile`, resets edit state, calls `loadPreview()` for files
-- `loadPreview(file)` (Line 426-437): Calls `agentsStore.getFilePreviewBlob()`, sets `previewData`
-- `downloadFile()` (Line 439-469): Fetches blob from preview URL, triggers browser download via `<a>` element
-- `deleteFile()` (Line 471-493): Calls `agentsStore.deleteAgentFile()`, clears selection, reloads tree
-- `startEdit()` (Line 496-508): Fetches text from preview blob URL, enters edit mode
-- `saveFile()` (Line 526-547): Calls `agentsStore.updateAgentFile()`, exits edit mode, reloads preview
+- `loadFiles()` (Line 462-477): Calls `agentsStore.listAgentFiles()`, populates `fileTree`
+- `onFileSelect(item)` (Line 479-499): Sets `selectedFile`, resets edit state, calls `loadPreview()` for files
+- `loadPreview(file)` (Line 501-512): Calls `agentsStore.getFilePreviewBlob()`, sets `previewData`; on failure sets `previewError` to the server's message
+- `downloadFile()` (Line 514-544): Fetches blob from preview URL, triggers browser download via `<a>` element; on failure notifies `Failed to download: <message>`
+- `deleteFile()` (Line 546-568): Calls `agentsStore.deleteAgentFile()`, clears selection, reloads tree
+- `startEdit()` (Line 599-611): Fetches text from preview blob URL, enters edit mode
+- `saveFile()` (Line 629-650): Calls `agentsStore.updateAgentFile()`, exits edit mode, reloads preview
 
 **Lifecycle & Watchers** (Lines 574-605):
 - `onMounted`: Loads files if agent is running
@@ -174,7 +174,7 @@ const props = defineProps({
 
 **File**: `src/frontend/src/stores/agents.js`
 
-#### listAgentFiles (Line 452-459)
+#### listAgentFiles (Line 783-790)
 ```javascript
 async listAgentFiles(name, path = '/home/developer', showHidden = false) {
   const authStore = useAuthStore()
@@ -186,20 +186,26 @@ async listAgentFiles(name, path = '/home/developer', showHidden = false) {
 }
 ```
 
-#### downloadAgentFile (Line 461-469)
+#### downloadAgentFile (Line 792-804)
 ```javascript
 async downloadAgentFile(name, filePath) {
   const authStore = useAuthStore()
-  const response = await axios.get(`/api/agents/${name}/files/download`, {
-    params: { path: filePath },
-    headers: authStore.authHeader,
-    responseType: 'text'
-  })
-  return response.data
+  try {
+    const response = await axios.get(`/api/agents/${name}/files/download`, {
+      params: { path: filePath },
+      headers: authStore.authHeader,
+      responseType: 'text'
+    })
+    return response.data
+  } catch (err) {
+    throw await normalizeFileErrorBody(err)
+  }
 }
 ```
 
-#### deleteAgentFile (Line 471-478)
+`getFilePreviewBlob` (Line 836-854) wraps its blob request the same way. `normalizeFileErrorBody` (Line 22-39) parses the text/blob error body and turns a structured `detail` into `{detail: <message>, code, path}`; a string detail stays a string.
+
+#### deleteAgentFile (Line 806-813)
 ```javascript
 async deleteAgentFile(name, filePath) {
   const authStore = useAuthStore()
@@ -211,7 +217,7 @@ async deleteAgentFile(name, filePath) {
 }
 ```
 
-#### updateAgentFile (Line 480-488)
+#### updateAgentFile (Line 815-824)
 ```javascript
 async updateAgentFile(name, filePath, content) {
   const authStore = useAuthStore()
@@ -235,15 +241,15 @@ The file browser feature uses a **thin router + service layer** architecture:
 
 | Layer | File | Purpose |
 |-------|------|---------|
-| Router | `src/backend/routers/agents.py:500-569` | Endpoint definitions |
-| Service | `src/backend/services/agent_service/files.py` (309 lines) | File listing, download, preview, delete, and update logic |
+| Router | `src/backend/routers/agent_files.py:197-276` | Endpoint definitions |
+| Service | `src/backend/services/agent_service/files.py` (894 lines) | File listing, download, preview, delete, and update logic |
 
 ### Endpoints
 
 #### GET /api/agents/{agent_name}/files
 
-**Router**: `src/backend/routers/agents.py:500-514`
-**Service**: `src/backend/services/agent_service/files.py:20-78`
+**Router**: `src/backend/routers/agent_files.py:197-211`
+**Service**: `src/backend/services/agent_service/files.py:478-536`
 
 **Purpose**: List all files in agent workspace as hierarchical tree structure
 
@@ -298,8 +304,8 @@ The file browser feature uses a **thin router + service layer** architecture:
 
 #### GET /api/agents/{agent_name}/files/download
 
-**Router**: `src/backend/routers/agents.py:517-525`
-**Service**: `src/backend/services/agent_service/files.py:81-131`
+**Router**: `src/backend/routers/agent_files.py:214-222`
+**Service**: `src/backend/services/agent_service/files.py:539-598`
 
 **Purpose**: Download file content from agent workspace
 
@@ -311,9 +317,9 @@ The file browser feature uses a **thin router + service layer** architecture:
 1. Check user authentication
 2. Verify user has access to agent (accessor tier)
 3. Refuse a path containing a NUL byte: 400 `{"code": "invalid_path"}`, no agent call
-4. **Owner-tier paths** (`_enforce_owner_tier_read`, trinity-enterprise#819): if the path matches `_OWNER_TIER_READ_PATTERNS`, the caller must be a person (`assert_person`: a signed-in session or the person's own user-scoped key) and pass the owner tier (`assert_agent_owner`: the owner, or an admin). Refused → 403 `owner_tier_path` (or `person_required` for a key) and a `file_read_refused` audit row; allowed for anyone but the owner's own signed-in session → a `file_read_allowed` row
+4. **Owner-tier paths** (`_enforce_owner_tier_read`, trinity-enterprise#819): if the path matches `_OWNER_TIER_READ_PATTERNS`, the caller must be a person (`assert_person`: a signed-in session or the person's own user-scoped key) and pass the owner tier (`assert_agent_owner`: the owner, or an admin). The PERSON gate runs first, so an agent, system, connector or ops key gets 403 `person_required`; a person below the owner tier gets 403 `owner_tier_path`. Either refusal is logged and writes a `file_read_refused` audit row; allowed for anyone but the owner's own signed-in session → a `file_read_allowed` row
 5. Get agent container; verify it exists and is running
-6. **Older images** (`_refuse_below_owner_on_unverified_image`): below the owner tier, the container is probed once per container and image for the no-link read (`grep` of the agent server's `files.py` for `_open_for_read`); an unverified agent answers 403 `agent_restart_required`, logged with a running count. Only a person who is the owner or an admin skips the check (`_passes_owner_tier`: `assert_person`, then `assert_agent_owner`, the gate the credential tier uses); agent keys are refused like any caller below the owner tier until the restart
+6. **Older images** (`_refuse_below_owner_on_unverified_image`): only a PERSON who passes the owner gate (the agent's owner or an admin; `_passes_owner_tier`: `assert_person`, then `assert_agent_owner`, the gate the credential tier uses) skips this check. Every other caller — a shared user, the agent's own key, another agent's key, a system, connector or ops key — is checked against the container: `_agent_reads_without_links` runs `grep -qsF -- _open_for_read /app/agent_server/routers/files.py` (10 s timeout). Exit 0 is verified; exit 1 or 2 with empty output is not verified; only those two answers are cached, per (container id, image id). An exec error, a timeout, any other exit code or any output reads as not verified, is logged and is not cached, so the next read probes again. On an unverified image the read is refused with 403 `agent_restart_required` until the agent is stopped and started through Trinity; each refusal is logged with a running count (`refusals=N`)
 7. Proxy to the agent's internal API with the **normalised** path that was checked
 8. **Links are not followed**: an agent answer of 403 `resolved_path_mismatch` becomes a structured 403 and a `file_read_refused` row (`rule: resolved_path_mismatch`), for every caller, the owner included
 9. Return file content as PlainTextResponse
@@ -324,8 +330,8 @@ The file browser feature uses a **thin router + service layer** architecture:
 
 #### GET /api/agents/{agent_name}/files/preview
 
-**Router**: `src/backend/routers/agents.py:528-536`
-**Service**: `src/backend/services/agent_service/files.py:187-246`
+**Router**: `src/backend/routers/agent_files.py:225-233`
+**Service**: `src/backend/services/agent_service/files.py:670-738`
 
 **Purpose**: Get file with proper MIME type for preview (images, video, audio, etc.)
 
@@ -337,8 +343,8 @@ The file browser feature uses a **thin router + service layer** architecture:
 
 #### DELETE /api/agents/{agent_name}/files
 
-**Router**: `src/backend/routers/agents.py:539-547`
-**Service**: `src/backend/services/agent_service/files.py:134-184`
+**Router**: `src/backend/routers/agent_files.py:236-244`
+**Service**: `src/backend/services/agent_service/files.py:601-667`
 
 **Purpose**: Delete a file or directory from agent workspace
 
@@ -348,7 +354,7 @@ The file browser feature uses a **thin router + service layer** architecture:
 
 **Protected Paths**: two layers.
 - **Backend** (`_is_user_deletable_path`, trinity-enterprise#792), checked after the access check and the `skills.manage` fence, before the container lookup. It refuses everything the write deny list refuses, plus any directory that holds a path-anchored protected path: `.ssh`, `.aws`, `.gcp`, `.trinity`, `.git`, **`.claude`** (holds `settings.json`), the home dir and `/`. Anchors are derived from `_FILE_WRITE_DENY_PATTERNS` (`_DENY_ANCHORS`). `/proc/*` is load-bearing, because `/proc/self/root/…` and `/proc/self/cwd/…` resolve into the home dir inside the agent container. Basename patterns (`.env`, `.credentials.enc`) are name-only on DELETE, so a directory that merely contains one is not refused. Refusal: 403 `Cannot delete protected path: {path}`, which the Files tab shows as `Failed to delete: …`.
-- **Agent server** (`PROTECTED_PATHS`, by name at any depth and on any parent): `CLAUDE.md`, `.trinity`, `.git`, `.gitignore`, `.env`, `.mcp.json`, `.mcp.json.template`.
+- **Agent server** (`PROTECTED_PATHS`, by name at any depth and on any parent): `CLAUDE.md`, `.trinity`, `.git`, `.gitignore`, `.env`, `.mcp.json`, `.mcp.json.template`, `.claude.json`, `.credentials.json`; and, on the resolved path (`_touches_runtime_config`), the runtime config paths and every directory above one (`.claude`, `.gemini`, `.tmp`).
 
 **Path normalisation** (all three write routes): `_normalize_user_path` resolves `.`/`..` lexically, anchors relative paths at `/home/developer`, and collapses any run of leading slashes to one. The agent is sent that normalised path, never the raw input, so the check and the action read one string. The agent echoes the string it received, so the `path` / `deleted` fields and the agent's own 404/409 messages (`File not found: …`, `Directory already exists: …`) carry the absolute normalised path, not the string the caller sent.
 
@@ -364,8 +370,8 @@ The file browser feature uses a **thin router + service layer** architecture:
 
 #### PUT /api/agents/{agent_name}/files
 
-**Router**: `src/backend/routers/agents.py:555-569`
-**Service**: `src/backend/services/agent_service/files.py:249-308`
+**Router**: `src/backend/routers/agent_files.py:247-261`
+**Service**: `src/backend/services/agent_service/files.py:741-817`
 
 **Purpose**: Update a file's content in agent workspace
 
@@ -374,7 +380,7 @@ The file browser feature uses a **thin router + service layer** architecture:
 - `path` (query, required) - File path to update
 - `body.content` (body, required) - New file content
 
-**Protected Paths** (#590, AISEC-C2): Cannot edit `.trinity`, `.git`, `.gitignore`, `.env`, `.mcp.json`, `.mcp.json.template`, `.credentials.enc` (agent server). The backend deny list (`_is_user_writable_path`, broader: `.ssh/*`, `.aws/*`, `.gcp/*`, `.claude/settings*.json`, `/opt/trinity/*`, `/proc/*`, …) runs first on the normalised path; a `//`-prefixed spelling is refused like the canonical one (trinity-enterprise#792).
+**Protected Paths** (#590, AISEC-C2): Cannot edit `.trinity`, `.git`, `.gitignore`, `.env`, `.mcp.json`, `.mcp.json.template`, `.credentials.enc`, `.claude.json`, `.credentials.json` (agent server), nor, on the resolved path, the runtime config paths (`.claude/.credentials.json`, `.gemini/settings.json`, anything under `.tmp/codex`; trinity-enterprise#823), `platform=true` or not. The backend deny list (`_is_user_writable_path`, broader: `.ssh/*`, `.aws/*`, `.gcp/*`, `.claude/settings*.json`, `/opt/trinity/*`, `/proc/*`, …) runs first on the normalised path; a `//`-prefixed spelling is refused like the canonical one (trinity-enterprise#792).
 **Note**: `CLAUDE.md` IS editable (owners manage agent instructions). `.mcp.json` is no longer editable here — raw content defines executable tool commands; use the platform regenerate-from-template flow.
 
 **Response**:
@@ -395,9 +401,9 @@ The file browser feature uses a **thin router + service layer** architecture:
 
 ### Agent Server Endpoints
 
-**File**: `docker/base-image/agent_server/routers/files.py` (370 lines)
+**File**: `docker/base-image/agent_server/routers/files.py` (692 lines)
 
-#### GET /api/files (Line 23-109)
+#### GET /api/files (Line 98-184)
 
 **Purpose**: Recursively list files in workspace directory as hierarchical tree
 
@@ -411,12 +417,12 @@ The file browser feature uses a **thin router + service layer** architecture:
 - Skips hidden files/directories unless `show_hidden=true`
 
 **Business Logic**:
-1. Resolve requested path and validate it's within workspace (Line 36-41)
-2. Check path exists (404 if not) (Line 43-44)
-3. Call recursive `build_tree(directory)` function (Line 46-94)
-4. Return structured tree response (Line 96-109)
+1. Resolve requested path and validate it's within workspace (Line 111-116)
+2. Check path exists (404 if not) (Line 118-119)
+3. Call recursive `build_tree(directory)` function (Line 121-169)
+4. Return structured tree response (Line 171-180)
 
-**build_tree() Function** (Line 46-94):
+**build_tree() Function** (Line 121-169):
 ```python
 def build_tree(directory: Path, base_path: Path, include_hidden: bool) -> dict:
     """Build a hierarchical tree structure from a directory."""
@@ -480,9 +486,9 @@ def build_tree(directory: Path, base_path: Path, include_hidden: bool) -> dict:
 }
 ```
 
-#### GET /api/files/download (Line 112-153)
+#### GET /api/files/download (Line 187-209)
 
-**Links are not followed** (trinity-enterprise#819): `_open_for_read` walks the path one component at a time from `_HOME` with `O_NOFOLLOW` (each step relative to the directory opened before it) and the handler reads that descriptor, so the checked file is the file served. A component that is a link → 403 `{"code": "resolved_path_mismatch", "message": "This path is a link. Links are not opened by the file routes; open the file it points to."}`; a missing file → 404; a directory, FIFO, or a file used as a directory → 400; a path outside the home (resolved containment, not a string prefix) → 403. Preview streams the same descriptor with `Content-Length` and an inline `Content-Disposition`.
+**Links are not followed** (trinity-enterprise#819): `_open_for_read` (Line 41-84) walks the path one component at a time from `_HOME` with `O_NOFOLLOW` (each step relative to the directory opened before it) and the handler reads that descriptor, so the checked file is the file served. A component that is a link → 403 `{"code": "resolved_path_mismatch", "message": "This path is a link. Links are not opened by the file routes; open the file it points to."}`; a missing file → 404; a directory, FIFO, or a file used as a directory → 400; a path outside the home (lexical containment after normalisation, not a string prefix) → 403. Preview streams the same descriptor with `Content-Length` and an inline `Content-Disposition`. Both read at most the size the file had when opened (`fstat` on the descriptor): download reads `st_size` bytes, preview stops at the declared `Content-Length`.
 
 **Purpose**: Download file content as plain text
 
@@ -496,24 +502,21 @@ def build_tree(directory: Path, base_path: Path, include_hidden: bool) -> dict:
 - Verifies path is a file (400 if directory)
 
 **Business Logic**:
-1. Handle both absolute and relative paths (Line 125-128)
-2. Resolve path and validate workspace access (Line 130-132)
-3. Check file exists (404 if not) (Line 134-135)
-4. Verify it's a file, not directory (400 if directory) (Line 137-138)
-5. Check file size <= 100MB (413 if too large) (Line 140-144)
-6. Read file as UTF-8 text (with error replacement for binary) (Line 146-149)
-7. Return as PlainTextResponse
+1. `_open_for_read(path)` (Line 197): anchors a relative path at `/home/developer`, checks containment, opens without following links, returns `(fd, fstat)` (refusals above)
+2. Check the opened file's size <= 100MB (413 if too large) (Line 199-202)
+3. Read at most `st_size` bytes from that descriptor as UTF-8 text (with error replacement for binary) (Line 203-208)
+4. Return as PlainTextResponse
 
 **Response**: Plain text content
 
-#### DELETE /api/files (Line 202-259)
+#### DELETE /api/files (Line 377-434)
 
 **Purpose**: Delete a file or directory from workspace
 
 **Parameters**:
 - `path` (query, required) - File path to delete
 
-**Protected Paths** (Line 157-165):
+**Protected Paths** (Line 213-223):
 ```python
 PROTECTED_PATHS = [
     "CLAUDE.md",
@@ -536,7 +539,7 @@ PROTECTED_PATHS = [
 3. Check path is not protected (403 if protected)
 4. Delete file or directory recursively
 
-#### GET /api/files/preview (Line 262-311)
+#### GET /api/files/preview (Line 437-484)
 
 **Purpose**: Get file with proper MIME type for preview
 
@@ -544,14 +547,14 @@ PROTECTED_PATHS = [
 - `path` (query, required) - File path to preview
 
 **Security**:
-- Same as download (workspace restriction, 100MB limit)
+- Same as download (workspace restriction, no links, 100MB limit)
 
 **Business Logic**:
-1. Validate path
+1. `_open_for_read(path)` — same refusals as download; 413 over 100MB
 2. Detect MIME type via `mimetypes.guess_type()`
-3. Return FileResponse with correct Content-Type
+3. Return a StreamingResponse of that descriptor (`Content-Length` = size at open, inline `Content-Disposition`), reading at most that many bytes
 
-#### PUT /api/files (Line 314-369)
+#### PUT /api/files (Line 522-619)
 
 **Purpose**: Update a file's content
 
@@ -631,17 +634,17 @@ Fetches blob from previewData.url (or calls agentsStore.getFilePreviewBlob)
   |
 GET /api/agents/{name}/files/preview?path=... (backend router, if not cached)
   |
-preview_agent_file_logic() - Authorization check
+preview_agent_file_logic() - access, owner-tier and older-image checks
   |
-agent_http_request() - proxy to agent
+agent_http_request() - proxy to agent (normalised path)
   |
 GET http://agent-{name}:8000/api/files/preview?path=... (agent-server)
   |
-Validate path within workspace
+_open_for_read() - open within workspace without following links
   |
 Check file size <= 100MB
   |
-Return FileResponse with correct Content-Type
+Stream the descriptor (at most the size at open) with correct Content-Type
   |
 Create Blob in browser (previewData.url)
   |
@@ -656,6 +659,9 @@ Show success notification
 
 ### Owner-tier reads are audited
 Download and preview write one platform audit row (`file_read_refused` / `file_read_allowed`, `AuditEventType.AUTHORIZATION`, the routed endpoint, the normalised path and the rule) for every refused owner-tier read, every allowed owner-tier read by anyone other than the owner's own signed-in session, and every link refusal (trinity-enterprise#819). A person is filed as `actor_user`; an agent key as its agent; other keys by scope and key. Best-effort: an audit failure never changes the answer. Other file operations are not audited.
+
+### Platform reads of a linked file are logged
+A platform reader that meets the agent's `resolved_path_mismatch` answer still fails soft, and logs a warning naming the file so the template can ship it as a real file (`agent_client.client._warn_if_link_refusal`). The readers: `AgentClient.read_file` (`CLAUDE.md` in `skill_service`, `template.yaml` in `role_readiness_gate`, the role card, the operator queue, `read_only`), the Work card pipeline reader (`client_portal/work/pipeline_state.py::_download_capped`, which reads the 403 body under its byte budget) and the objective join's `objective_join_service._read_yaml`.
 
 ### No Database Operations
 The file browser (list, download, preview) is read-only and does not modify database tables.
@@ -685,8 +691,6 @@ This feature does not emit real-time events.
 | Path outside workspace | 403 | "Access denied: only /home/developer accessible" | Agent Server |
 | Protected path (delete) | 403 | "Cannot delete protected path: {name}" | Agent Server |
 | Protected path (edit) | 403 | "Cannot edit protected path: {name}" | Agent Server |
-
-The UI shows the `message` of a structured refusal: the store parses the text/blob error body back into `{detail, code, path}` (`normalizeFileErrorBody`); the Files tab shows it in the preview pane and on Download, and the Credentials panel shows it in an `InlineError` beside the file list and does not open the editor (only content or a 404 opens it).
 | Cannot delete home | 403 | "Cannot delete home directory" | Agent Server |
 | File not found | 404 | "File not found: {path}" | Agent Server |
 | Path is directory | 400 | "Not a file: {path}" | Agent Server |
@@ -697,6 +701,8 @@ The UI shows the `message` of a structured refusal: the store parses the text/bl
 | Network timeout (delete) | 504 | "File deletion timed out" | Backend (30s) |
 | Network timeout (update) | 504 | "File update timed out" | Backend (60s) |
 | Network timeout (preview) | 504 | "File preview timed out" | Backend (30s) |
+
+The UI shows the `message` of a structured refusal: the store parses the text/blob error body back into `{detail, code, path}` (`normalizeFileErrorBody`); the Files tab shows it in the preview pane and on Download, and the Credentials panel shows it in an `InlineError` beside the file list and does not open the editor (Edit opens it on content or a 404, View on content only).
 
 ---
 
@@ -710,7 +716,7 @@ The UI shows the `message` of a structured refusal: the store parses the text/bl
 ### Path Traversal Prevention
 - All paths resolved via `Path.resolve()`
 - Prefix check: must start with `/home/developer`
-- No access to system files, .env, .git, or other agent workspace directories
+- No access to system files or other agent workspace directories; credential files (`.env`, `.git/config`, …) are owner-tier to read (see download above)
 
 ### File Access Restrictions
 - Hidden files (.env, .git) skipped by default (use `show_hidden=true` to include)
@@ -865,7 +871,7 @@ Working - Feature tested and operational as of 2026-03-03 (Issue #51)
 - **Agent Sharing** - Shared users can browse files too
 
 ### Downstream
-- None (no downstream dependencies; audit logging removed during earlier refactoring)
+- None (owner-tier reads write platform audit rows; see Side Effects)
 
 ### Similar Features
 - **Agent Logs & Telemetry** - Also provides read-only agent data view
