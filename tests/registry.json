@@ -4470,6 +4470,18 @@
         "payments"
       ],
       "description": "A settled A2A Task must not report `metadata: null` (#3215, operator scope-add). The x402 payment status and receipt live at `status.message.metadata` — the spec location the provider SDK's own `X402A2AUtils` reads — and are now mirrored onto the Task's top-level `metadata` from the same assignment, so a strictly typed a2a-sdk `Task` carries the receipt instead of null on a turn that was charged. Asserted through `Task.model_validate` and through the SDK reader, over the real producer (`task_from_paid_payload`) on the settled, unsettled and failed outcomes, and the two locations are proven to be the SAME dict object so they cannot drift. Also pins that a free turn emits no `metadata` key at all, keeping unpaid Task bytes and the idempotency snapshots over them unchanged. Mutation-proven: removing the mirror goes red in 6. No Docker, no network."
+    },
+    {
+      "file": "unit/test_ent665_send_idempotency_key.py",
+      "feature": "abilityai/trinity-enterprise#665",
+      "added": "2026-10-06",
+      "categories": [
+        "backend",
+        "unit",
+        "reliability",
+        "mcp"
+      ],
+      "description": "Caller-declared cross-execution idempotency key on send_message / call_user / send_group_message (ent#665). Real schema via db_harness. Pins: intent claim TTL expires only completed rows and the checking call's TTL decides; a live in_flight row survives a short TTL and a stale one is reclaimed after the 300s lease; default claim path unchanged; two executions deliver once with first_sent_at/first_execution_id; in-flight is a retryable 409 (IntentInProgressError), never suppressed; held-inside-critical-section race yields one sender; key has no text input (#1422); two keys in one execution are two sends; consent refusal beats suppression; suppressed costs no rate limit; audit + system-role conversation note; request validation (StrictInt TTL, key charset, ttl needs key); messages route keyless response byte-identical; voip suppressed call is not dialed and audits voip_call_suppressed; Telegram + Slack group routes suppress. MCP half: src/mcp-server/src/tools/intent_key.test.ts. No Docker, no live backend."
     }
   ]
 }

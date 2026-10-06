@@ -507,6 +507,177 @@ async def effect_guard(
 
 
 # ---------------------------------------------------------------------------
+# Caller-declared intent keys (ent#665)
+#
+# `effect_guard` dedupes WITHIN one execution. A recurring agent's runs are
+# separate executions, so it has no way to say "I already told this person X;
+# do not say it again for N seconds". The caller names the intent with a key;
+# the store decides. The key is ALWAYS the caller's string — never derived from
+# the message, which is the #1422 failure (silent suppression of a legitimate
+# send whose bytes happened to match). Scope is the agent; the key folds in the
+# effect type and the resolved target (recipient email, E.164 number, group).
+# The channel is deliberately NOT part of it: the same news on Telegram then
+# Slack is one interruption.
+# ---------------------------------------------------------------------------
+
+# Ceiling = the cleanup sweep's purge window (`idempotency_purge_expired(ttl_hours=24)`):
+# a row is hard-deleted after 24h, so a longer TTL would promise suppression the
+# store cannot keep.
+# ponytail: per-row expires_at column (+ both migrations) if a weekly window is ever needed.
+INTENT_TTL_MAX_SECONDS = 24 * 3600
+INTENT_TTL_MIN_SECONDS = 60
+# A claim whose sender died mid-send is reclaimable after this long.
+INTENT_IN_FLIGHT_LEASE_SECONDS = 300
+SUPPRESSED_BY_IDEMPOTENCY_KEY = "idempotency_key"
+
+
+class IntentInProgressError(EffectInProgressError):
+    """Another execution holds this intent key and has not finished sending.
+
+    Retryable (409). Never reported as "suppressed": if that send then fails,
+    nobody delivers the message while both callers believe it was sent.
+    """
+
+
+def make_intent_scope(agent_name: str) -> str:
+    return f"intent:{agent_name}"
+
+
+def derive_intent_key(effect_type: str, target: str, idempotency_key: str) -> str:
+    """`{effect_type}:sha256(effect_type \\x00 target \\x00 idempotency_key)`.
+
+    There is no text argument: message content cannot reach the key.
+    """
+    h = hashlib.sha256()
+    h.update(effect_type.encode("utf-8"))
+    h.update(b"\x00")
+    h.update((target or "").strip().lower().encode("utf-8"))
+    h.update(b"\x00")
+    h.update(idempotency_key.encode("utf-8"))
+    return f"{effect_type}:{h.hexdigest()}"
+
+
+class _IntentGuardState:
+    """Yielded by `intent_guard`. On a fresh claim the sink puts what a later
+    suppressed call needs (channel, session_identifier, ...) into `record`."""
+
+    __slots__ = ("suppressed", "first_sent_at", "first_execution_id", "first", "record", "keyed")
+
+    def __init__(self, keyed: bool) -> None:
+        self.keyed = keyed
+        self.suppressed = False
+        self.first_sent_at: Optional[str] = None
+        self.first_execution_id: Optional[str] = None
+        self.first: dict = {}
+        self.record: dict = {}
+
+    def result_fields(self) -> dict:
+        """The fields every sink adds to its result when a key was supplied."""
+        if not self.keyed:
+            return {}
+        if not self.suppressed:
+            return {"sent": True}
+        return {
+            "sent": False,
+            "suppressed_by": SUPPRESSED_BY_IDEMPOTENCY_KEY,
+            "first_sent_at": self.first_sent_at,
+            "first_execution_id": self.first_execution_id,
+        }
+
+
+@asynccontextmanager
+async def intent_guard(
+    effect_type: str,
+    *,
+    agent_name: str,
+    target: str,
+    idempotency_key: Optional[str],
+    ttl_seconds: Optional[int],
+    execution_id: Optional[str],
+) -> AsyncIterator[_IntentGuardState]:
+    """Cross-execution "at most once per TTL" for a human-facing send (ent#665).
+
+    Usage::
+
+        async with intent_guard("message", agent_name=a, target=email,
+                                idempotency_key=k, ttl_seconds=t,
+                                execution_id=eid) as g:
+            if g.suppressed:
+                return suppressed_result(g)      # nothing is sent
+            result = await actually_send(...)
+            g.record = {"channel": ..., "session_identifier": ...}
+            return result
+
+    - no key → a no-op state; nothing is claimed (keyless sends are unchanged).
+    - completed claim inside the TTL → `g.suppressed`, with `first_sent_at`,
+      `first_execution_id` and the first send's `record` in `g.first`.
+    - in-flight claim → `IntentInProgressError` (retryable 409).
+    - fresh claim → the body runs; a clean exit records the send, an exception
+      releases the claim so a refused or failed send does not spend the key.
+    - store error on claim → fail-open, the send proceeds unguarded (logged).
+
+    The TTL is the checking call's: "suppress if this was sent within MY window".
+    """
+    state = _IntentGuardState(keyed=bool(idempotency_key))
+    if not idempotency_key:
+        yield state
+        return
+
+    ttl = ttl_seconds or INTENT_TTL_MAX_SECONDS
+    scope = make_intent_scope(agent_name)
+    key = derive_intent_key(effect_type, target, idempotency_key)
+    try:
+        res = db.idempotency_claim(
+            scope, key, ttl_seconds=ttl,
+            in_flight_lease_seconds=INTENT_IN_FLIGHT_LEASE_SECONDS,
+        )
+    except Exception as e:  # fail-open, like begin()
+        logger.warning(
+            "intent_guard.degraded effect_type=%s agent=%s — claim failed, sending "
+            "without the idempotency key: %s", effect_type, agent_name, e,
+        )
+        state.keyed = False
+        yield state
+        return
+
+    claim_state = res.get("state")
+    if claim_state == STATE_IN_FLIGHT:
+        raise IntentInProgressError(
+            f"Another run of this agent is sending '{effect_type}' under idempotency key "
+            f"'{idempotency_key}' right now. Retry shortly; do not change the key."
+        )
+    if claim_state == STATE_COMPLETED:
+        snap = res.get("snapshot") or {}
+        state.suppressed = True
+        state.first_sent_at = snap.get("sent_at")
+        state.first_execution_id = res.get("execution_id")
+        state.first = snap
+        yield state
+        return
+
+    # Only an execution that is this agent's own is recorded as the first sender.
+    owned_execution_id = (
+        execution_id if resolve_and_validate_execution(execution_id, agent_name) else None
+    )
+    try:
+        yield state
+    except BaseException:
+        try:
+            db.idempotency_release(scope, key)
+        except Exception as e:
+            logger.warning("intent_guard release failed: %s", e)
+        raise
+    else:
+        from utils.helpers import utc_now_iso
+        try:
+            db.idempotency_complete(
+                scope, key, owned_execution_id, {**state.record, "sent_at": utc_now_iso()},
+            )
+        except Exception as e:
+            logger.warning("intent_guard complete failed: %s", e)
+
+
+# ---------------------------------------------------------------------------
 # Lifecycle
 # ---------------------------------------------------------------------------
 

@@ -197,6 +197,8 @@ async def place_voip_call(
             process_transcript=request.process_transcript,
             execution_id=request.execution_id,
             dedup_label=request.dedup_label,
+            idempotency_key=request.idempotency_key,
+            idempotency_ttl=request.idempotency_ttl,
         )
     except idempotency_service.EffectUnguardedError as e:
         # #2392: pull-mode agent, no usable execution id — nothing dialed, release
@@ -220,14 +222,22 @@ async def place_voip_call(
         raise HTTPException(status_code=500, detail="Failed to place call")
 
     idempotency_service.complete(idem, result.get("call_id"), result)
+    suppressed = result.get("sent") is False  # ent#665: nothing was dialed
     await platform_audit_service.log(
         event_type=AuditEventType.EXECUTION,
-        event_action="voip_call_placed",
+        event_action="voip_call_suppressed" if suppressed else "voip_call_placed",
         source="api",
         actor_user=current_user,
         target_type="agent",
         target_id=agent_name,
-        details={"to_number": result.get("to_number"), "call_id": result.get("call_id")},
+        details={
+            "to_number": result.get("to_number"),
+            "call_id": result.get("call_id"),
+            **({"suppressed_by": result.get("suppressed_by"),
+                "idempotency_key": request.idempotency_key,
+                "first_sent_at": result.get("first_sent_at"),
+                "first_execution_id": result.get("first_execution_id")} if suppressed else {}),
+        },
     )
     return result
 
