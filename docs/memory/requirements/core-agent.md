@@ -1843,7 +1843,10 @@ bounding the table. OSS-core (Workspace rule above). Flow:
   exception to "the ladder runs before any `preventDefault`": during an
   active voice call it claims the event and routes to the leave-call guard
   above the suppression rung, which is the pre-existing ent#534/551 ask kept
-  deliberately (ruling T8) rather than an oversight.
+  deliberately (ruling T8) rather than an oversight. On confirm the parked
+  event re-enters as the `resumed` pass after a tick, and the suppression
+  rung waives its `defaultPrevented` bail for that pass only — the mark is
+  the shell's own (merge-train 2026-10-06).
 - **AC-4 — every key works from the message field**: the conventional
   "ignore an editable target" guard is deliberately **inverted**; the composer
   is a textarea and the keys must work while typing. A nearer owner still wins
@@ -1860,7 +1863,10 @@ bounding the table. OSS-core (Workspace rule above). Flow:
   message field and a held `Ctrl+J` cannot open the browser's Downloads; the
   repeat of a press it did not claim stays the browser's.
 - **AC-6 — non-US layouts**: a chord matches by `key` **or** by physical
-  `code`, so the US position works on a non-Latin layout; `Shift` is accepted
+  `code`, so the US position works on a non-Latin layout — the `code` arm
+  answers only when the printed key is not a single printable ASCII character,
+  so a Latin non-QWERTY layout (Dvorak: ⌘V on `Period`, ⌘Z on `Slash`) keeps
+  paste and undo (merge-train 2026-10-06); `Shift` is accepted
   on a `key` match only, so DE's `Shift+7` → `/` and FR's shifted `.` reach
   `⌘/` while macOS's `⌘?` stays the browser's Help search. Matching is
   platform-free (`primary` = meta XOR ctrl everywhere); only labels take a

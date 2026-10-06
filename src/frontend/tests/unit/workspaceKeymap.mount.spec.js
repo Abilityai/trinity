@@ -415,6 +415,36 @@ describe('ent#621 — the suppression ladder', () => {
     expect(cycleChat).not.toHaveBeenCalled()
   })
 
+  it('⌘J during a call asks first, and the new chat opens once the person confirms (merge-train 2026-10-06)', async () => {
+    // The key `preventDefault`s and parks the SAME event behind the leave-call
+    // ask. On the resumed pass that event reads `defaultPrevented: true` — the
+    // shell's own doing, not a nearer owner's — and the suppression rung must
+    // not mistake it for one, or ⌘J is dead exactly when the person said yes.
+    const { w } = await boot('/workspace/c/s-main')
+    w.vm.voiceCall = { active: true, agentName: 'scout', voiceSessionId: 'v1' }
+    await w.vm.$nextTick()
+    const e = await press(w, { key: 'j', meta: true })
+    expect(e.defaultPrevented).toBe(true)        // claimed: the browser gets nothing
+    expect(w.vm.leaveCall.open).toBe(true)       // ...and the ask is up
+    expect(showing(w).newChat).not.toBe(true)    // nothing moved yet
+    await w.vm.onLeaveCallConfirm()
+    await flushPromises(); await w.vm.$nextTick(); await flushPromises()
+    expect(w.vm.voiceCall.active).toBe(false)
+    expect(showing(w).newChat).toBe(true)        // the parked ⌘J fired
+    expect(showing(w).agent).toBe('scout')
+  })
+
+  it('⌘J during a call does nothing when the person stays (merge-train 2026-10-06)', async () => {
+    const { w } = await boot('/workspace/c/s-main')
+    w.vm.voiceCall = { active: true, agentName: 'scout', voiceSessionId: 'v1' }
+    await w.vm.$nextTick()
+    await press(w, { key: 'j', meta: true })
+    w.vm.onLeaveCallCancel()
+    await flushPromises(); await w.vm.$nextTick()
+    expect(w.vm.voiceCall.active).toBe(true)
+    expect(showing(w).newChat).not.toBe(true)
+  })
+
   it('yields to a nearer owner that already claimed the event', async () => {
     // The protocol is `defaultPrevented`, not a registry: the typeahead's bare
     // arrows and the Esc ladder are handled closer to the target, and the shell

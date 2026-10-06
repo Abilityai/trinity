@@ -2533,8 +2533,17 @@ const KEY_DISPATCH = Object.freeze({
 // which is modal), and the repeat of a press the shell did NOT claim must stay
 // the browser's exactly as the press did (⌘. on a page with no rail). Any new
 // press ends the hold, so a stale claim can never eat a later key.
+//
+// (merge-train 2026-10-06) `resumed` is the second pass of a ⌘J the call parked
+// at step 3. That pass re-enters with the SAME event, which step 3 has already
+// `preventDefault`ed — so read as "a nearer owner claimed it", the resumed ⌘J
+// was dead exactly when the person had just said "end the call and leave".
+// The flag tells the suppression rung whose mark that is. It re-runs after a
+// `nextTick` on purpose: the confirm dialog that asked is `aria-modal`, and
+// `onLeaveCallConfirm` closes it on the same flush the continuation runs in,
+// so a same-tick re-probe of `hasModalOpen` would still find it and bail.
 let heldKey = null
-function onGlobalKeydown(e) {
+function onGlobalKeydown(e, { resumed = false } = {}) {
   if (e.repeat) {
     if (heldKey && workspaceChord(e) === heldKey) e.preventDefault()
     return
@@ -2547,7 +2556,7 @@ function onGlobalKeydown(e) {
     if (voiceCall.value.active) {        // ent#534/ent#551: the call owns the stage — ask first
       e.preventDefault()
       heldKey = action
-      guardLeaveCall(() => onGlobalKeydown(e))
+      guardLeaveCall(() => nextTick(() => onGlobalKeydown(e, { resumed: true })))
       return
     }
   }
@@ -2560,6 +2569,7 @@ function onGlobalKeydown(e) {
     drawerOpen: mobileNav.value,
     callActive: voiceCall.value.active,
     defaultPrevented: e.defaultPrevented,
+    resumed,
     railAvailable: railKeysAvailable(),
   })) return
   e.preventDefault()

@@ -489,7 +489,12 @@ describe('the shell: the canvas takes the right column, and navigation waits', (
     // words, and nothing else may run before the guard.
     expect(SHELL_CODE).toMatch(/function newChatWithAgent\(name\) \{\s*if \(guardLeaveCall\(\(\) => newChatWithAgent\(name\)\)\) return/)
     expect(SHELL_CODE).toMatch(/function openThread\(t\) \{\s*if \(guardLeaveCall\(\(\) => openThread\(t\)\)\) return/)
-    expect(SHELL_CODE).toMatch(/function onGlobalKeydown\(e\) \{[\s\S]{0,260}if \(voiceCall\.value\.active\) \{[\s\S]{0,120}guardLeaveCall\(\(\) => onGlobalKeydown\(e\)\)/)
+    // (merge-train 2026-10-06) the continuation re-enters as the RESUMED pass,
+    // after a tick — the same event, already `preventDefault`ed by the line
+    // above it, must not read as "a nearer owner claimed it" on the way back,
+    // and the confirm dialog must have left the DOM before the modal probe.
+    expect(SHELL_CODE).toMatch(/function onGlobalKeydown\(e, \{ resumed = false \} = \{\}\) \{[\s\S]{0,260}if \(voiceCall\.value\.active\) \{[\s\S]{0,120}guardLeaveCall\(\(\) => nextTick\(\(\) => onGlobalKeydown\(e, \{ resumed: true \}\)\)\)/)
+    expect(SHELL_CODE).toMatch(/keymapSuppressed\(\{[\s\S]{0,400}defaultPrevented: e\.defaultPrevented,\s*resumed,/)
   })
   it('clears the call state when the conversation remounts', () => {
     expect(SHELL_CODE).toMatch(/watch\(\[convKey, activeRoomIdFromRoute\], \(\) => \{\s*onVoiceCall\(null\)/)
@@ -827,8 +832,8 @@ describe('leaving the stage mid-call asks first', () => {
       expect(SHELL.slice(at, at + 420), fn).toContain('guardLeaveCall(')
     }
     // ⌘J too — a keyboard exit is still an exit.
-    const kd = SHELL.slice(SHELL.indexOf('function onGlobalKeydown(e)'))
-    expect(kd.slice(0, 600)).toContain('guardLeaveCall(() => onGlobalKeydown(e))')
+    const kd = SHELL.slice(SHELL.indexOf('function onGlobalKeydown(e, { resumed = false } = {})'))
+    expect(kd.slice(0, 600)).toContain('guardLeaveCall(() => nextTick(() => onGlobalKeydown(e, { resumed: true })))')
     // The guard holds the action and asks; confirm ends the call via the
     // conversation's own exposed action, then runs it.
     expect(SHELL).toContain("await conversationRef.value?.endVoiceCall?.()")

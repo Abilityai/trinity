@@ -239,9 +239,23 @@ export function matchesChord(e, c) {
     && (c.shiftOnKey || shiftOk)
   // Decision 29: shift is never accepted on the physical arm — macOS `⌘?`
   // (Help search) sits on `Shift`+`Slash` and must stay the browser's.
+  //
+  // (merge-train 2026-10-06) The physical arm answers only when the printed
+  // key CANNOT name the chord itself: a non-Latin layout (`о` on `KeyJ`), or a
+  // key the modifier re-maps (`⌥.` types `≥` on a US Mac). A printable ASCII
+  // `key` names itself, and on a Latin non-QWERTY layout the position and the
+  // character disagree on purpose — Dvorak's ⌘V arrives as `key: 'v'` on
+  // `Period`, ⌘Z as `key: 'z'` on `Slash` — so letting the position out-vote
+  // the character made the rail toggle eat paste and the key list eat undo.
   const byCode = !!c.code && typeof e.code === 'string' && e.code === c.code && shiftOk
+    && !printsAscii(e.key)
   return byKey || byCode
 }
+
+// One printable ASCII character (space through tilde): a `key` that names
+// itself, on any Latin layout.
+const printsAscii = (key) => typeof key === 'string' && key.length === 1
+  && key.charCodeAt(0) >= 0x20 && key.charCodeAt(0) <= 0x7e
 
 /**
  * The action this event asks for, or null.
@@ -330,19 +344,25 @@ export function keymapCollisions(map = WORKSPACE_KEYMAP) {
  *
  * Per-action exemptions are the CALLER's: it passes `hasModalOpen`'s `ignore`
  * so rail keys do not see the rail's own sheet and ⌘/ can close its own list,
- * and `railAvailable` for the two entries marked `needsRail`.
+ * `railAvailable` for the two entries marked `needsRail`, and `resumed` for the
+ * pass that re-runs a parked ⌘J after the leave-call confirm.
  */
 export function keymapSuppressed({
   action, modalOpen = false, drawerOpen = false, callActive = false, defaultPrevented = false,
-  railAvailable = true,
+  railAvailable = true, resumed = false,
 } = {}, map = WORKSPACE_KEYMAP) {
   const entry = findBinding(action, map)
   // Not ours to dispatch → suppressed, which fails closed for an action id
   // that only exists in a future map.
   if (!entry || entry.reserved || entry.owner !== OWNER_SHELL) return true
   // A nearer owner already claimed this event (the Esc protocol, the
-  // typeahead's bare arrows): yielding is the protocol.
-  if (defaultPrevented) return true
+  // typeahead's bare arrows): yielding is the protocol. `resumed` is the one
+  // exception — ⌘J during a call `preventDefault`s and parks the SAME event
+  // behind the leave-call ask, so on the resumed pass `defaultPrevented` is
+  // the shell's own mark, not a nearer owner's. (merge-train 2026-10-06: read
+  // as a claim, it made ⌘J dead exactly when the person had said "end the
+  // call and leave".) It waives this rung only; everything below still runs.
+  if (defaultPrevented && !resumed) return true
   if (modalOpen || drawerOpen) return true
   // A rail key on a page with no rail is suppressed rather than dispatched to a
   // no-op: the difference is `preventDefault`. An action the shell will not
