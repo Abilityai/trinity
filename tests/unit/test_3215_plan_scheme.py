@@ -464,9 +464,14 @@ class TestCancelledLeaderFailsFollowersLoudly:
         entry = nps._PLAN_SCHEME_CACHE[("sandbox", "plan-1")]
         entry.fetched_at -= nps.PLAN_SCHEME_TTL_SECONDS + 1
 
+        # A SLOW leader, so `cancel()` below reliably lands while its lookup
+        # is still in flight. Not `svc`'s client: that one has no delay, and a
+        # leader that finishes in microseconds races the cancel (it won on
+        # Linux CI and lost deterministically on macOS). The cache and the
+        # in-flight registry are module-global, so last-known-good is shared
+        # without sharing the client.
         started = asyncio.Event()
         svc2 = _service(plans=_Plans(CARD_PLAN, delay=0.2))
-        svc2._get_payments_client = svc._get_payments_client
 
         async def _leader():
             started.set()
