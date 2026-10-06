@@ -18,6 +18,8 @@ import { mount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import { nextTick } from 'vue'
 import DashboardPanel from '../../src/components/DashboardPanel.vue'
+import BaseBadge from '../../src/components/base/BaseBadge.vue'
+import BoundMetricMark from '../../src/components/BoundMetricMark.vue'
 import { useAgentsStore } from '../../src/stores/agents'
 
 // uPlot reads `matchMedia` at module load; see declaredMetricsTiles.spec.js.
@@ -297,5 +299,121 @@ describe('a bound tile captions which series it shows (ent#730)', () => {
     expect(errors).toHaveLength(3)
     expect(errors[1].text()).toContain("dimension 'region' is not declared")
     expect(errors[1].attributes('class')).toContain('text-status-warning-700')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// ent#730: the threshold verdict, and trend colours by declared direction
+// ---------------------------------------------------------------------------
+
+function judged(level, threshold, extra = {}) {
+  return selected('meta', 623.88, { direction: 'down_good',
+    threshold_verdict: { level, threshold }, ...extra })
+}
+
+describe('a bound metric tile shows its threshold verdict (ent#730)', () => {
+  it('renders Critical as a danger badge naming the threshold', async () => {
+    const wrapper = await mountPanel(dashboard([judged('critical', 500)]))
+    const badge = wrapper.find('[data-testid="bound-verdict"]')
+    expect(badge.text()).toBe('Critical')
+    expect(wrapper.findComponent(BaseBadge).props('variant')).toBe('danger')
+    expect(badge.classes()).not.toContain('invisible')
+    expect(badge.attributes('title')).toContain('500')
+  })
+
+  it('renders Warning as a warning badge', async () => {
+    const wrapper = await mountPanel(dashboard([judged('warning', 400)]))
+    expect(wrapper.find('[data-testid="bound-verdict"]').text()).toBe('Warning')
+    expect(wrapper.findComponent(BaseBadge).props('variant')).toBe('warning')
+  })
+
+  it('reserves the slot on ok, hidden from sight and from assistive tech', async () => {
+    const wrapper = await mountPanel(dashboard([judged('ok', null)]))
+    const badge = wrapper.find('[data-testid="bound-verdict"]')
+    expect(badge.exists()).toBe(true)
+    expect(badge.classes()).toContain('invisible')
+    expect(badge.attributes('aria-hidden')).toBe('true')
+  })
+
+  it('swaps the badge in place when a poll crosses the threshold', async () => {
+    // The footer itself, re-rendered with the next poll's widget: the same
+    // element must carry the new verdict (a swap, not an insert).
+    const wrapper = mount(BoundMetricMark, { props: { widget: judged('ok', null) } })
+    const before = wrapper.find('[data-testid="bound-verdict"]').element
+    await wrapper.setProps({ widget: judged('critical', 500) })
+    const after = wrapper.findAll('[data-testid="bound-verdict"]')
+    expect(after).toHaveLength(1)
+    expect(after[0].element).toBe(before)
+    expect(after[0].text()).toBe('Critical')
+    expect(after[0].classes()).not.toContain('invisible')
+  })
+
+  it('never renders on status or progress tiles, an unbound tile, or an unknown level', async () => {
+    const verdict = { level: 'critical', threshold: 500 }
+    const wrapper = await mountPanel(dashboard([
+      { ...judged('critical', 500), type: 'status', value: 'ok', color: 'red' },
+      { ...judged('critical', 500), type: 'progress', value: 80 },
+      { type: 'metric', label: 'Manual', metric: 'ad_spend', bound: false, value: 9,
+        binding_error: 'metric store unavailable', binding_error_code: 'metric_store_unavailable',
+        threshold_verdict: verdict },
+      judged('apocalyptic', 1),
+    ]))
+    expect(wrapper.find('[data-testid="bound-verdict"]').exists()).toBe(false)
+  })
+})
+
+describe('a bound tile colours its trend by the declared direction (ent#730)', () => {
+  function trending(direction, trend = 'up', extra = {}) {
+    return selected('meta', 623.88, { direction,
+      history: { values: [{ t: 'a', v: 1 }, { t: 'b', v: 2 }], trend, trend_percent: 12 }, ...extra })
+  }
+
+  async function colours(widget) {
+    const wrapper = await mountPanel(dashboard([widget]))
+    return {
+      arrow: wrapper.find('[data-testid="widget-trend"]').attributes('class'),
+      line: wrapper.find('.sparkline-stub').attributes('color'),
+    }
+  }
+
+  it('reads a rising down_good cost as bad', async () => {
+    const { arrow, line } = await colours(trending('down_good'))
+    expect(arrow).toContain('text-status-danger-600')
+    expect(line).toBe('#ef4444')
+  })
+
+  it('reads a rising up_good number as good', async () => {
+    const { arrow, line } = await colours(trending('up_good'))
+    expect(arrow).toContain('text-status-success-600')
+    expect(line).toBe('#10b981')
+  })
+
+  it('declines to judge a neutral metric', async () => {
+    const { arrow, line } = await colours(trending('neutral'))
+    expect(arrow).toContain('text-gray-500')
+    expect(arrow).not.toContain('status-')
+    expect(line).toBe('#3b82f6')
+  })
+
+  it('applies to the progress arm too', async () => {
+    const { arrow } = await colours(trending('down_good', 'up', { type: 'progress', value: 80 }))
+    expect(arrow).toContain('text-status-danger-600')
+  })
+
+  it('leaves an UNBOUND widget on the legacy colours', async () => {
+    const { arrow, line } = await colours({ type: 'metric', label: 'Manual', value: 3,
+      history: { values: [{ t: 'a', v: 1 }, { t: 'b', v: 2 }], trend: 'up' } })
+    expect(arrow).toContain('text-status-success-600')
+    expect(line).toBe('#10b981')
+  })
+
+  it('ignores an author-typed bound: true on a widget with no metric', async () => {
+    // The backend never touches a widget without `metric:`, so `bound` and
+    // `direction` there are whatever the author typed.
+    const { arrow, line } = await colours({ type: 'metric', label: 'Manual', value: 3,
+      bound: true, direction: 'down_good',
+      history: { values: [{ t: 'a', v: 1 }, { t: 'b', v: 2 }], trend: 'up' } })
+    expect(arrow).toContain('text-status-success-600')
+    expect(line).toBe('#10b981')
   })
 })

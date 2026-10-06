@@ -347,6 +347,45 @@ export function refusalHint(widget = {}) {
     + 'can fall outside them).'
 }
 
+const VERDICTS = {
+  critical: { variant: 'danger', label: 'Critical', reserved: false },
+  warning: { variant: 'warning', label: 'Warning', reserved: false },
+  // `ok` keeps the slot: an invisible placeholder of the widest label, so a
+  // background poll that crosses a threshold swaps the badge in place instead
+  // of adding one and shifting the layout.
+  ok: { variant: 'danger', label: 'Critical', reserved: true },
+}
+
+/**
+ * The threshold verdict badge on a bound `metric` tile (ent#730), from the
+ * backend's typed `threshold_verdict` — `{variant, label, title, reserved}` or
+ * `null`.
+ *
+ * `metric` tiles only: `status` and `progress` tiles already show the verdict
+ * through `color`, and a badge there would say it twice. A truthy `metric` and
+ * `bound === true` both, because the backend never touches an unbound widget,
+ * so an author could type `bound: true` on one. The label is the word alone:
+ * a number in it would change the badge's width between Warning and Critical,
+ * which defeats the reserved slot; the number is in `title`.
+ */
+export function verdictBadge(widget = {}) {
+  if (widget.type !== 'metric' || !widget.metric || widget.bound !== true) return null
+  const level = widget.threshold_verdict?.level
+  const base = Object.prototype.hasOwnProperty.call(VERDICTS, level) ? VERDICTS[level] : null
+  if (!base) return null
+  if (base.reserved) return { ...base }
+  const threshold = widget.threshold_verdict.threshold
+  const shown = typeof threshold === 'number'
+    ? threshold.toLocaleString('en-US', { maximumFractionDigits: 2 })
+    : String(threshold)
+  const lowerIsBetter = widget.direction === 'down_good'
+  return {
+    ...base,
+    title: `${widget.metric} is at or ${lowerIsBetter ? 'above' : 'below'} its ${level} threshold, `
+      + `${shown} (set in template.yaml). ${lowerIsBetter ? 'Lower' : 'Higher'} is better.`,
+  }
+}
+
 /** A sparkline's y-max: the series peak, never 0 (uPlot draws nothing at 0). */
 export function sparklineMax(points, stats) {
   const fromStats = typeof stats?.max === 'number' ? stats.max : null

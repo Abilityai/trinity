@@ -16,6 +16,7 @@ import {
   formatBytes,
   formatDims,
   refusalHint,
+  verdictBadge,
   formatDuration,
   formatMetricValue,
   freshnessChip,
@@ -370,5 +371,45 @@ describe('refusalHint writes the second line of a not-found refusal from facts',
 
   it('points at the published binding docs', () => {
     expect(DIMS_DOCS_URL).toMatch(/^https:\/\/docs\.ability\.ai\//)
+  })
+})
+
+describe('verdictBadge: the threshold verdict on a bound metric tile (ent#730)', () => {
+  function tile(verdict, extra = {}) {
+    return { type: 'metric', metric: 'ad_spend', bound: true, direction: 'down_good',
+      threshold_verdict: verdict, ...extra }
+  }
+
+  it('maps each level to a variant, a word, and a reserved flag', () => {
+    expect(verdictBadge(tile({ level: 'critical', threshold: 500 })))
+      .toMatchObject({ variant: 'danger', label: 'Critical', reserved: false })
+    expect(verdictBadge(tile({ level: 'warning', threshold: 400 })))
+      .toMatchObject({ variant: 'warning', label: 'Warning', reserved: false })
+    // `ok` keeps the slot: an invisible placeholder of the widest label, so a
+    // poll that crosses a threshold swaps the badge in place.
+    expect(verdictBadge(tile({ level: 'ok', threshold: null })))
+      .toMatchObject({ variant: 'danger', label: 'Critical', reserved: true })
+  })
+
+  it('titles the threshold in the declared direction, never on ok', () => {
+    const down = verdictBadge(tile({ level: 'critical', threshold: 1500.256 }))
+    expect(down.title).toContain('at or above')
+    expect(down.title).toContain('1,500.26')
+    expect(down.title).toContain('Lower is better')
+    const up = verdictBadge(tile({ level: 'warning', threshold: 10 }, { direction: 'up_good' }))
+    expect(up.title).toContain('at or below')
+    expect(up.title).toContain('Higher is better')
+    expect(verdictBadge(tile({ level: 'ok', threshold: null })).title).toBeUndefined()
+    for (const badge of [down, up]) expect(badge.title).not.toContain('`')
+  })
+
+  it('renders only on a bound metric tile with a known level', () => {
+    const critical = { level: 'critical', threshold: 500 }
+    expect(verdictBadge(tile(critical, { type: 'status' }))).toBeNull()
+    expect(verdictBadge(tile(critical, { type: 'progress' }))).toBeNull()
+    expect(verdictBadge(tile(critical, { metric: undefined }))).toBeNull()
+    expect(verdictBadge(tile(critical, { bound: false }))).toBeNull()
+    expect(verdictBadge(tile({ level: 'apocalyptic', threshold: 1 }))).toBeNull()
+    expect(verdictBadge(tile(undefined))).toBeNull()
   })
 })

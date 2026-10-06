@@ -63,6 +63,19 @@
         class="text-gray-500 dark:text-gray-400"
         data-testid="bound-no-points"
       >declared, no points yet</span>
+      <!-- ent#730: the threshold verdict (bound `metric` tiles only). On a
+           judgeable tile its footprint is always present — `ok` is an
+           invisible placeholder — so crossing a threshold swaps it in place. -->
+      <BaseBadge
+        v-if="verdict"
+        :variant="verdict.variant"
+        dot
+        class="min-w-[4.75rem] justify-center"
+        :class="verdict.reserved ? 'invisible' : ''"
+        :aria-hidden="verdict.reserved ? 'true' : undefined"
+        :title="verdict.title"
+        data-testid="bound-verdict"
+      >{{ verdict.label }}</BaseBadge>
       <!-- ent#730: which series the number is. Its own line (`w-full`), so a
            long label wraps under chip · time · freshness instead of pushing
            the freshness chip onto a later line. Mono on the `k=v` part only. -->
@@ -111,6 +124,7 @@
  * different facts that must never be rendered as one.
  */
 import { computed } from 'vue'
+import BaseBadge from './base/BaseBadge.vue'
 import { formatRelativeTime, formatLocalDateTime } from '../utils/timestamps'
 import {
   DIMS_DOCS_URL,
@@ -119,6 +133,7 @@ import {
   formatDims,
   freshnessChip,
   refusalHint,
+  verdictBadge,
 } from '../utils/metricFormat'
 
 const props = defineProps({
@@ -132,5 +147,6 @@ const seriesNote = computed(() => boundSeriesNote(props.widget))
 const notFound = computed(() => props.widget.binding_error_code === 'metric_series_not_found')
 const selectorText = computed(() => formatDims(props.widget.binding_detail?.selector))
 const hint = computed(() => refusalHint(props.widget))
+const verdict = computed(() => verdictBadge(props.widget))
 const dimsRefusal = computed(() => DIMS_REFUSAL_CODES.has(props.widget.binding_error_code))
 </script>
