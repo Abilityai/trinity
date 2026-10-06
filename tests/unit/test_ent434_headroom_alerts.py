@@ -251,43 +251,40 @@ class TestTierAndPriority:
 # =============================================================================
 
 class TestEpisodeIdentity:
+    """#3246 re-pin: the id is no longer the state machine — the subject is.
+    One subscription is one subject across readings, tiers and windows; the
+    window travels on the context."""
 
-    def test_same_window_same_id_so_a_re_emit_is_an_on_conflict_noop(self):
-        """Three cycles at 80/81/82 inside one window produce ONE id, so the
-        sink's ON CONFLICT DO NOTHING makes it one row. This is the whole
-        edge-trigger, with no durable memo."""
-        from services.subscription_headroom_alerts import alert_id, episode_key
-        resets = "2026-09-01T00:00:00Z"
-        ids = {alert_id("s1", episode_key(resets, now=NOW), "warn") for _ in range(3)}
-        assert len(ids) == 1
+    def test_every_reading_of_one_subscription_shares_one_subject(self):
+        from services import platform_alerts as pa
+        from services.subscription_headroom_alerts import subject_key
+        subjects = {pa.subject_for("subscription_headroom", subject_key("s1")) for _ in range(3)}
+        assert subjects == {"subscription_headroom:s1"}
 
-    def test_window_reset_mints_a_new_id_so_the_alert_re_arms(self):
-        from services.subscription_headroom_alerts import alert_id, episode_key
-        first = alert_id("s1", episode_key("2026-09-01T00:00:00Z", now=NOW), "warn")
-        after = alert_id("s1", episode_key("2026-09-08T00:00:00Z", now=NOW), "warn")
-        assert first != after
+    def test_the_subject_is_the_cleaned_sid_the_legacy_ids_carried(self):
+        """So a row the upgrade sweep re-subjected matches a new reading."""
+        from services import platform_alerts as pa
+        from services.subscription_headroom_alerts import subject_key
+        legacy = pa.derive_legacy_subject("sub-headroom-ab-c-2026-09-01-crit", {})
+        assert legacy.subject == pa.subject_for("subscription_headroom", subject_key("ab/c"))
 
-    def test_escalation_carries_its_own_id(self):
-        from services.subscription_headroom_alerts import alert_id, episode_key
-        ep = episode_key("2026-09-01T00:00:00Z", now=NOW)
-        assert alert_id("s1", ep, "warn") != alert_id("s1", ep, "crit")
+    def test_tier_is_the_material_key(self):
+        from services import platform_alerts as pa
+        assert pa.KINDS["subscription_headroom"].material_keys == ("tier",)
 
-    def test_a_moving_reset_degrades_to_one_id_per_day_not_one_per_probe(self):
+    def test_a_moving_reset_degrades_to_one_window_per_day_not_one_per_probe(self):
         """The belt against the measurement being wrong elsewhere. If some
         provider plan did behave as a rolling window, quantising to the day
-        bounds the blast radius at one alert per day instead of one per
-        probe."""
+        bounds the window label at one per day instead of one per probe."""
         from services.subscription_headroom_alerts import episode_key
         a = episode_key("2026-09-01T00:00:00Z", now=NOW)
         b = episode_key("2026-09-01T18:30:00Z", now=NOW)
         assert a == b
 
-    def test_id_carries_the_reserved_prefix(self):
-        from services.subscription_headroom_alerts import (
-            ALARM_ID_PREFIX, alert_id, fleet_alert_id,
-        )
-        assert alert_id("s1", "2026-09-01", "warn").startswith(ALARM_ID_PREFIX)
-        assert fleet_alert_id("2026-09-01").startswith(ALARM_ID_PREFIX)
+    def test_the_kind_carries_the_reserved_prefix(self):
+        from services import platform_alerts as pa
+        from services.subscription_headroom_alerts import ALARM_ID_PREFIX
+        assert pa.KINDS["subscription_headroom"].prefix == ALARM_ID_PREFIX
 
 
 # =============================================================================
@@ -486,27 +483,19 @@ class TestRegistryParity:
         from services.subscription_headroom_alerts import ALARM_AGENT_NAME
         assert sanitize_agent_name(ALARM_AGENT_NAME) != ALARM_AGENT_NAME
 
-    def test_emitter_is_on_the_1677_platform_only_allowlist(self):
-        """A new direct `create_operator_queue_item` call site reds that guard
-        until it is classified. This asserts the classification exists rather
-        than re-running the guard."""
-        src = (_REPO / "tests" / "unit"
-               / "test_1677_operator_alert_emitters.py").read_text()
-        assert "services/subscription_headroom_alerts.py" in src
-
-    def test_alerts_emit_never_sets_expires_at(self):
-        """`mark_operator_queue_expired` flips any pending row past
-        `expires_at` to expired fleet-wide every 5s."""
+    def test_emitter_reports_through_the_platform_alert_seam(self):
+        """#3246: no direct `create_operator_queue_item` left in the module —
+        every reading goes through `platform_alerts.observe`, so it is off the
+        #1677 allowlist and the seam sets the lifetime (`expires_at`)."""
         src = (_BACKEND / "services" / "subscription_headroom_alerts.py").read_text()
         tree = ast.parse(src)
-        found = False
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Dict):
-                for k, v in zip(node.keys, node.values):
-                    if isinstance(k, ast.Constant) and k.value == "expires_at":
-                        found = True
-                        assert isinstance(v, ast.Constant) and v.value is None
-        assert found, "the emitted item must set expires_at explicitly"
+        calls = {n.func.attr for n in ast.walk(tree)
+                 if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)}
+        assert "observe" in calls and "reconcile" in calls
+        assert "create_operator_queue_item" not in calls
+        guard = (_REPO / "tests" / "unit"
+                 / "test_1677_operator_alert_emitters.py").read_text()
+        assert "services/subscription_headroom_alerts.py" not in guard
 
 
 # =============================================================================

@@ -216,6 +216,7 @@ class SystemAgentService:
                 else:
                     result["message"] = "System agent already running"
                     logger.info("System agent already running on a current base image")
+                    self._clear_alert("base_image_stale")
                 return result
 
             # #1816 — STOPPED: the cold boundary. Delegate to the shared
@@ -262,6 +263,7 @@ class SystemAgentService:
                         "(pre-flight failed — see the preceding warning)"
                     )
                     logger.info("System agent started (adoption skipped by pre-flight)")
+                    self._clear_alert("system_agent_start_failed")
                     return result
                 except Exception as e:
                     result["action"] = "start_failed"
@@ -285,6 +287,9 @@ class SystemAgentService:
                     "System agent started (recreated=%s, reason=%s)",
                     result["recreated"], result["recreate_reason"],
                 )
+                self._clear_alert("system_agent_start_failed")
+                if start_result.get("recreate_reason") == "image_drift":
+                    self._clear_alert("base_image_stale")
                 return result
             except Exception as e:
                 result["action"] = "start_failed"
@@ -625,14 +630,15 @@ class SystemAgentService:
         SystemAgentService._last_base_image_alert_at = now
 
         ts = utc_now_iso()
-        item = {
-            "id": f"{BASE_IMAGE_STALE_ALERT_PREFIX}{SYSTEM_AGENT_NAME}-{ts}",
-            "agent_name": SYSTEM_AGENT_NAME,
-            "type": "alert",
-            "status": "pending",
-            "priority": "high",
-            "title": "System agent is running a stale base image",
-            "question": (
+        # #3246: through the platform alert seam — one pending row for the
+        # system agent's image, ended by `_clear_alert` once a boot finds the
+        # image current or a start adopts the rebuilt one.
+        from services import platform_alerts
+        outcome = platform_alerts.observe(
+            SYSTEM_AGENT_NAME, "base_image_stale", SYSTEM_AGENT_NAME,
+            priority="high",
+            title="System agent is running a stale base image",
+            question=(
                 f"{SYSTEM_AGENT_NAME} is still running the base image it was "
                 f"created from, and a newer trinity-agent-base has been built. "
                 f"It is never recreated while running. Restart it "
@@ -640,14 +646,19 @@ class SystemAgentService:
                 f"NOTE: adoption replaces the container, so anything installed "
                 f"outside /home/developer is lost."
             ),
-            "context": {"agent_name": SYSTEM_AGENT_NAME, "detected_at": ts},
-            "created_at": ts,
-        }
-        try:
-            db.create_operator_queue_item(SYSTEM_AGENT_NAME, item)
-            logger.warning("base-image staleness alarm emitted for %s", SYSTEM_AGENT_NAME)
-        except Exception:
-            logger.exception("failed to emit base-image staleness alarm")
+            context={"agent_name": SYSTEM_AGENT_NAME, "detected_at": ts},
+        )
+        logger.warning("base-image staleness alarm for %s: %s", SYSTEM_AGENT_NAME, outcome)
+
+    @staticmethod
+    def _clear_alert(kind: str) -> None:
+        """#3246: the condition behind a system-agent alert cleared — the
+        platform ends its pending row. Never raises."""
+        from services import platform_alerts
+        if kind == "base_image_stale":
+            platform_alerts.clear(SYSTEM_AGENT_NAME, "base_image_stale", SYSTEM_AGENT_NAME)
+        elif kind == "system_agent_start_failed":
+            platform_alerts.clear(SYSTEM_AGENT_NAME, "system_agent_start_failed", SYSTEM_AGENT_NAME)
 
     def _emit_start_failed_alert(self, reason: str) -> None:
         """#1816 R1: the platform may now have NO system agent, and nobody is
@@ -666,26 +677,21 @@ class SystemAgentService:
         `summary_or_error`)."""
         ts = utc_now_iso()
         reason = sanitize_text(reason)
-        bucket = int(time.time()) // START_FAILED_ALERT_BUCKET_SECONDS
-        item = {
-            "id": f"{BASE_IMAGE_STALE_ALERT_PREFIX}start-{SYSTEM_AGENT_NAME}-{bucket}",
-            "agent_name": SYSTEM_AGENT_NAME,
-            "type": "alert",
-            "status": "pending",
-            "priority": "critical",
-            "title": "System agent could not be started",
-            "question": (
+        # #3246: through the platform alert seam — one pending row per system
+        # agent (a newer failure updates it in place), ended by `_clear_alert`
+        # when a start succeeds.
+        from services import platform_alerts
+        outcome = platform_alerts.observe(
+            SYSTEM_AGENT_NAME, "system_agent_start_failed", SYSTEM_AGENT_NAME,
+            priority="critical",
+            title="System agent could not be started",
+            question=(
                 f"{SYSTEM_AGENT_NAME} failed to start: {reason}. The platform "
                 f"orchestrator may be unavailable."
             ),
-            "context": {"agent_name": SYSTEM_AGENT_NAME, "detected_at": ts},
-            "created_at": ts,
-        }
-        try:
-            db.create_operator_queue_item(SYSTEM_AGENT_NAME, item)
-            logger.warning("system-agent start-failure alarm emitted: %s", reason)
-        except Exception:
-            logger.exception("failed to emit system-agent start-failure alarm")
+            context={"agent_name": SYSTEM_AGENT_NAME, "detected_at": ts},
+        )
+        logger.warning("system-agent start-failure alarm (%s): %s", outcome, reason)
 
     def _set_system_scope(self, key_id: str):
         """Update MCP key to have system scope (bypasses permissions)."""

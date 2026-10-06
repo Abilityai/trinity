@@ -258,6 +258,8 @@
                 <!-- The API field is `type`; a read of a misnamed field here rendered a blank line for months (issue 2370). -->
                 <div class="ops-card-type" data-testid="queue-type">{{ queueTypeLabel(item.type) }}</div>
                 <p v-if="item.title && item.title !== item.question" class="ops-card-title" data-testid="queue-title"><AskMarkdown :text="item.title" inline /></p>
+                <!-- #3246: one row per condition — how often the platform saw it. -->
+                <p v-if="queueSeenLine(item)" class="ops-card-type" data-testid="queue-seen-line">{{ queueSeenLine(item) }}</p>
                 <!-- #3115: agent-written markdown, rendered — never shown raw. -->
                 <AskMarkdown class="ops-card-message" :text="item.message || item.question || item.description" :prose="false" data-testid="queue-message" />
                 <!-- trinity-enterprise#611: the exact action this approval would run,
@@ -672,7 +674,7 @@ import {
   QUEUE_RESPONSE_DIVERGED, respondRefusedAsDiverged,
   QUEUE_RESPONSE_NOT_ADDRESSEE, respondRefusedAsNotAddressee } from '../utils/operatorQueue'
 // trinity-enterprise#611: a second line so the #2370 import pin above stays byte-exact.
-import { queueEnding, queueEndingText, recentlyEnded } from '../utils/operatorQueue'
+import { queueEnding, queueEndingText, queueSeenLine, recentlyEnded } from '../utils/operatorQueue'
 import { formatLocalDateTime } from '../utils/timestamps'
 import LoadFailed from '../components/LoadFailed.vue'
 import InlineError from '../components/InlineError.vue'
