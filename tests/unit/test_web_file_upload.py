@@ -12,6 +12,7 @@ import asyncio
 import base64
 import importlib
 import io
+import runpy
 import sys
 import tarfile
 import types
@@ -135,6 +136,10 @@ class TestDecodeWebFile:
 
 class TestProcessFileUploads:
     """Tests the core upload processing logic with mocked container ops."""
+
+    @pytest.fixture(autouse=True)
+    def enable_pdf_uploads(self, monkeypatch):
+        monkeypatch.setattr(_svc, "ALLOW_PDF_UPLOADS", True, raising=False)
 
     def _make_raw(self, name="test.txt", mimetype="text/plain", data=b"hello", file_id="f1"):
         return {"name": name, "mimetype": mimetype, "size": len(data), "data": data, "id": file_id}
@@ -421,3 +426,117 @@ class TestProcessFileUploads:
                 )
         combined = " ".join(descs)
         assert "skipped" in combined or "more file" in combined
+
+
+class TestPdfUploadPolicy:
+    @pytest.mark.parametrize("value,expected", [
+        (None, False), ("false", False), ("", False), ("invalid", False),
+        ("1", False), ("true", True), ("TRUE", True),
+    ])
+    def test_config_requires_explicit_true(self, monkeypatch, value, expected):
+        if value is None:
+            monkeypatch.delenv("ALLOW_PDF_UPLOADS", raising=False)
+        else:
+            monkeypatch.setenv("ALLOW_PDF_UPLOADS", value)
+        config = runpy.run_path(str(_BACKEND / "config.py"))
+        assert config["ALLOW_PDF_UPLOADS"] is expected
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("declared", ["application/pdf", "application/octet-stream", "text/plain"])
+    @pytest.mark.parametrize("detector", ["available", "missing", "error", "generic"])
+    async def test_disabled_pdf_never_reaches_workspace(self, monkeypatch, declared, detector):
+        monkeypatch.setattr(_svc, "ALLOW_PDF_UPLOADS", False, raising=False)
+        monkeypatch.setattr(_svc, "_MAGIC_AVAILABLE", detector != "missing")
+        fake_magic = MagicMock()
+        fake_magic.from_buffer.return_value = "application/octet-stream" if detector == "generic" else "application/pdf"
+        if detector == "error":
+            fake_magic.from_buffer.side_effect = RuntimeError("detector unavailable")
+        monkeypatch.setattr(_svc, "magic", fake_magic, raising=False)
+        raw = {
+            "name": "report.pdf", "mimetype": declared,
+            "data": TestProcessFileUploads._pdf_bytes(), "id": "pdf-1",
+        }
+        with (
+            patch.object(_svc, "container_exec_run", new=AsyncMock()) as execute,
+            patch.object(_svc, "container_put_archive", new=AsyncMock()) as put,
+        ):
+            descriptions, directory, failed, images = await _svc.process_file_uploads(
+                [raw], "test-agent", MagicMock(), "s", "user@example.com"
+            )
+        assert "PDF uploads are disabled" in descriptions[0]
+        assert directory is None and not failed and images == []
+        execute.assert_not_awaited()
+        put.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_disabled_detected_pdf_without_first_line_header_rejected(self, monkeypatch):
+        monkeypatch.setattr(_svc, "ALLOW_PDF_UPLOADS", False, raising=False)
+        monkeypatch.setattr(_svc, "_MAGIC_AVAILABLE", True)
+        fake_magic = MagicMock()
+        fake_magic.from_buffer.return_value = "application/pdf"
+        monkeypatch.setattr(_svc, "magic", fake_magic, raising=False)
+        with (
+            patch.object(_svc, "container_exec_run", new=AsyncMock()) as execute,
+            patch.object(_svc, "container_put_archive", new=AsyncMock()) as put,
+        ):
+            descriptions, directory, failed, images = await _svc.process_file_uploads(
+                [{"name": "report.pdf", "mimetype": "application/octet-stream",
+                  "data": b"preamble\n" + TestProcessFileUploads._pdf_bytes()}],
+                "test-agent", MagicMock(), "s", "user@example.com",
+            )
+        assert "PDF uploads are disabled" in descriptions[0]
+        assert directory is None and not failed and images == []
+        execute.assert_not_awaited()
+        put.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("declared", ["application/octet-stream", "text/plain"])
+    @pytest.mark.parametrize("detector", ["missing", "error"])
+    @pytest.mark.parametrize("offset", [9, 1015])
+    async def test_disabled_preamble_pdf_rejected_without_detector(
+        self, monkeypatch, declared, detector, offset
+    ):
+        monkeypatch.setattr(_svc, "ALLOW_PDF_UPLOADS", False)
+        monkeypatch.setattr(_svc, "_MAGIC_AVAILABLE", detector == "error")
+        fake_magic = MagicMock()
+        fake_magic.from_buffer.side_effect = RuntimeError("detector unavailable")
+        monkeypatch.setattr(_svc, "magic", fake_magic, raising=False)
+        raw = {
+            "name": "report.pdf", "mimetype": declared,
+            "data": b" " * offset + TestProcessFileUploads._pdf_bytes(),
+        }
+        with (
+            patch.object(_svc, "container_exec_run", new=AsyncMock()) as execute,
+            patch.object(_svc, "container_put_archive", new=AsyncMock()) as put,
+        ):
+            descriptions, directory, failed, images = await _svc.process_file_uploads(
+                [raw], "test-agent", MagicMock(), "s", "user@example.com"
+            )
+        assert "PDF uploads are disabled" in descriptions[0]
+        assert directory is None and not failed and images == []
+        execute.assert_not_awaited()
+        put.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("enabled", [False, True])
+    async def test_non_pdf_text_upload_unchanged(self, monkeypatch, enabled):
+        monkeypatch.setattr(_svc, "ALLOW_PDF_UPLOADS", enabled, raising=False)
+        with (
+            patch.object(_svc, "container_exec_run", new=AsyncMock(return_value=(0, b""))),
+            patch.object(_svc, "container_put_archive", new=AsyncMock(return_value=True)) as put,
+        ):
+            descriptions, directory, failed, images = await _svc.process_file_uploads(
+                [{"name": "note.txt", "mimetype": "text/plain", "data": b"notes\n"}],
+                "test-agent", MagicMock(), "s", "user@example.com",
+            )
+        assert directory is not None and not failed and images == []
+        assert "saved to" in descriptions[0]
+        put.assert_awaited_once()
+
+    def test_both_compose_backends_expose_disabled_default(self):
+        import yaml
+        root = _BACKEND.parents[1]
+        for filename in ("docker-compose.yml", "docker-compose.prod.yml"):
+            compose = yaml.safe_load((root / filename).read_text())
+            assert "ALLOW_PDF_UPLOADS=${ALLOW_PDF_UPLOADS:-false}" in compose["services"]["backend"]["environment"]
+        assert "ALLOW_PDF_UPLOADS=false" in (root / ".env.example").read_text()

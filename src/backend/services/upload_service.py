@@ -15,6 +15,7 @@ import tarfile
 import unicodedata
 from typing import List, Optional, Tuple
 
+from config import ALLOW_PDF_UPLOADS
 from services.docker_utils import container_put_archive, container_exec_run
 from services.platform_audit_service import platform_audit_service, AuditEventType
 from utils.zip_signature import is_zip_container
@@ -171,6 +172,17 @@ async def process_file_uploads(
             continue
 
         is_image = mimetype.startswith("image/")
+        has_pdf_header = bool(re.match(rb"%PDF-[0-9]\.[0-9](?:\r\n?|\n)", data))
+        # PDF readers can tolerate a preamble. The disabled policy checks a
+        # bounded prefix even when libmagic is missing or cannot identify it.
+        if not ALLOW_PDF_UPLOADS and (
+            mimetype == "application/pdf"
+            or re.search(rb"%PDF-[0-9]\.[0-9](?:\r\n?|\n)", data[:1024])
+        ):
+            safe_name = sanitize_filename(name, file_id, used_names)
+            used_names.add(safe_name)
+            descriptions.append(f"{safe_name} — PDF uploads are disabled by the operator")
+            continue
 
         # Reject unsupported binary formats
         if any(
@@ -181,7 +193,7 @@ async def process_file_uploads(
             used_names.add(safe_name)
             descriptions.append(
                 f"{safe_name} — unsupported format ({mimetype}). "
-                f"Text, CSV, JSON, PDF, ZIP, and image files are supported."
+                f"Text, CSV, JSON, {'PDF, ' if ALLOW_PDF_UPLOADS else ''}ZIP, and image files are supported."
             )
             continue
 
@@ -241,11 +253,15 @@ async def process_file_uploads(
             # Without libmagic, require the standard PDF header before trusting
             # a PDF declaration or upgrading a generic MIME. This identifies the
             # container only; parsing/extraction remains the receiving agent's job.
-            if re.match(rb"%PDF-[0-9]\.[0-9](?:\r\n?|\n)", data):
+            if has_pdf_header:
                 actual_mime = "application/pdf"
             elif mimetype == "application/pdf":
                 descriptions.append(f"{safe_name} — rejected (file type mismatch)")
                 continue
+
+        if actual_mime == "application/pdf" and not ALLOW_PDF_UPLOADS:
+            descriptions.append(f"{safe_name} — PDF uploads are disabled by the operator")
+            continue
 
         size_str = format_file_size(actual_size)
 

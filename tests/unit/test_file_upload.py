@@ -464,7 +464,8 @@ class TestFileDeliveryFormat:
         container = MagicMock()
         router = ChannelMessageRouter()
 
-        with patch("adapters.message_router.container_exec_run", new=AsyncMock()), \
+        with patch("services.upload_service.ALLOW_PDF_UPLOADS", True, create=True), \
+             patch("adapters.message_router.container_exec_run", new=AsyncMock()), \
              patch("services.upload_service.container_put_archive", new=AsyncMock(return_value=True)), \
              patch("services.upload_service.platform_audit_service") as mock_audit:
             mock_audit.log = AsyncMock()

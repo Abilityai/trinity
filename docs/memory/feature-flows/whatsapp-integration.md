@@ -15,7 +15,7 @@ no platform-level Twilio account required.
 - Inbound DMs → `WhatsAppAdapter` → `ChannelMessageRouter` → `TaskExecutionService`
 - Outbound responses via Twilio REST (`POST /Messages.json`, HTTP Basic auth)
 - Media in via Twilio-hosted URLs — SSRF-gated, two-tier (#1932). Any type is
-  **fetched**; images reach vision blocks and text/CSV/JSON/PDF documents reach the workspace:
+  **fetched**; images reach vision blocks and text/CSV/JSON documents reach the workspace; PDFs require explicit `ALLOW_PDF_UPLOADS=true` (default false):
   `upload_service.UNSUPPORTED_MIMES` rejects `audio/`,
   `video/` and non-ZIP archives for **every** channel, so a voice note lands as
   `"<name> — unsupported format"`. That is the policy gate, not a download

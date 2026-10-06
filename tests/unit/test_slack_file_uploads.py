@@ -195,7 +195,8 @@ class TestFileTypeRouting:
         assert not is_unsupported_mime("image/gif")
         assert not is_unsupported_mime("image/webp")
 
-    def test_pdf_supported(self):
+    def test_pdf_is_not_unconditionally_unsupported(self):
+        # The shared upload processor applies the separate default-off PDF gate.
         assert not is_unsupported_mime("application/pdf")
 
     def test_zip_supported(self):
