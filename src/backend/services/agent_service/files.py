@@ -204,25 +204,106 @@ def _refuse_invalid_path(path: str) -> None:
         raise HTTPException(status_code=400, detail=dict(_INVALID_PATH_DETAIL))
 
 
+def _owner_tier_rule(path: str) -> str:
+    """Which part of the owner-tier set `path` falls in, for the audit row."""
+    if not _normalize_user_path(path):
+        return "empty"
+    for rule, patterns in (
+        ("alias", _PATH_ALIAS_PATTERNS),
+        ("trinity_copy", _TRINITY_CREDENTIAL_COPY_PATTERNS),
+        ("secret_class", _SECRET_FILE_CLASS_PATTERNS),
+    ):
+        if _matches_any(path, patterns):
+            return rule
+    return "credential"
+
+
+def _audit_actor(current_user) -> dict:
+    """Who the row is filed against. The audit resolver ranks `actor_user`
+    first and would record the OWNER for a key that resolves to them, so only a
+    person is filed as `actor_user`; an agent key is filed as its agent, and any
+    other key by its scope and key, the owner riding as `actor_email`."""
+    from dependencies import is_person_principal
+    if is_person_principal(current_user):
+        return {"actor_user": current_user}
+    keyed = {
+        "actor_email": getattr(current_user, "email", None),
+        "mcp_key_id": getattr(current_user, "mcp_key_id", None),
+        "mcp_key_name": getattr(current_user, "mcp_key_name", None),
+        "mcp_scope": getattr(current_user, "mcp_scope", None),
+    }
+    agent = getattr(current_user, "agent_name", None)
+    if agent:
+        keyed["actor_agent_name"] = agent
+    return keyed
+
+
+async def _audit_read(event_action, request, current_user, agent_name, path, status, rule) -> None:
+    """One AUTHORIZATION row per owner-tier read decision. Best-effort: an audit
+    failure never turns a refusal into a 500 nor blocks an allowed read."""
+    try:
+        from services.platform_audit_service import platform_audit_service, AuditEventType
+        await platform_audit_service.log(
+            event_type=AuditEventType.AUTHORIZATION,
+            event_action=event_action,
+            source="api",
+            **_audit_actor(current_user),
+            actor_ip=request.client.host if request.client else None,
+            target_type="agent",
+            target_id=agent_name,
+            # the routed path, never request.url.path (#3108)
+            endpoint=request.scope["path"],
+            request_id=getattr(request.state, "request_id", None),
+            details={
+                "path": _normalize_user_path(path)[:512],
+                "status": status,
+                "method": request.method,
+                "tier": "owner",
+                "rule": rule,
+            },
+        )
+    except Exception:  # noqa: BLE001
+        logger.warning("File read audit failed: action=%s agent=%s", event_action, agent_name)
+
+
+def _is_owners_interactive_session(current_user, agent_name: str) -> bool:
+    """The agent's owner in a signed-in session (not a key). Decided on the
+    owner row, never `can_user_share_agent` (true for every admin). A failed
+    lookup reads as "not the owner", so the read is audited."""
+    if getattr(current_user, "mcp_scope", "__missing__") is not None:
+        return False
+    try:
+        owner = db.get_agent_owner(agent_name)
+    except Exception:  # noqa: BLE001
+        return False
+    return bool(owner) and owner.get("owner_username") == current_user.username
+
+
 async def _enforce_owner_tier_read(path, current_user, request, agent_name) -> None:
     """Refuse an owner-tier read unless the caller is a person who passes the
     owner tier (the agent's owner, or an admin). The PERSON gate runs first, so
-    an agent, system, connector or ops key gets `person_required`."""
+    an agent, system, connector or ops key gets `person_required`. Refusals are
+    audited, and so are allowed reads by anyone but the owner's own session."""
     if not _is_owner_tier_read_path(path):
         return
     from dependencies import assert_agent_owner, assert_person
+    rule = _owner_tier_rule(path)
     try:
         assert_person(current_user)
         try:
             assert_agent_owner(current_user, agent_name)
         except HTTPException as e:
             raise HTTPException(status_code=e.status_code, detail=_owner_tier_detail(path)) from e
-    except HTTPException:
+    except HTTPException as refusal:
         logger.warning(
             "Owner-tier read refused: agent=%s path=%r user=%s",
             agent_name, _normalize_user_path(path), current_user.username,
         )
+        await _audit_read("file_read_refused", request, current_user, agent_name, path,
+                          refusal.status_code, rule)
         raise
+    if not _is_owners_interactive_session(current_user, agent_name):
+        await _audit_read("file_read_allowed", request, current_user, agent_name, path, 200, rule)
 
 
 # trinity-enterprise#596: the skills directory is where a library skill lands

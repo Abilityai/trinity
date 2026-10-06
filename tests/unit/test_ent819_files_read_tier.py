@@ -344,3 +344,120 @@ def test_the_real_routes_refuse_a_shared_user(agent, route):
         "path": "/home/developer/.env",
     }
     assert agent.sent.await_count == 0
+
+
+# ---- audit ----------------------------------------------------------------------
+
+
+@pytest.fixture
+def audit(monkeypatch):
+    from services.platform_audit_service import platform_audit_service
+
+    log = AsyncMock(return_value="evt-1")
+    monkeypatch.setattr(platform_audit_service, "log", log)
+    return log
+
+
+def _rows(log, action):
+    return [c.kwargs for c in log.await_args_list if c.kwargs.get("event_action") == action]
+
+
+@pytest.mark.parametrize("fn,endpoint", [
+    ("download_agent_file_logic", f"/api/agents/{AGENT}/files/download"),
+    ("preview_agent_file_logic", f"/api/agents/{AGENT}/files/preview"),
+])
+def test_a_refused_read_writes_one_row(agent, audit, fn, endpoint):
+    from services.platform_audit_service import AuditEventType
+
+    user = shared_user()
+    with pytest.raises(HTTPException):
+        _call(fn, "//home/developer/.env", user, _request(path=endpoint))
+    rows = _rows(audit, "file_read_refused")
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["event_type"] == AuditEventType.AUTHORIZATION
+    assert row["source"] == "api"
+    assert row["actor_user"] is user
+    assert row["target_type"] == "agent" and row["target_id"] == AGENT
+    assert row["endpoint"] == endpoint
+    assert row["request_id"] == "req-1"
+    assert row["details"] == {"path": "/home/developer/.env", "status": 403, "method": "GET",
+                              "tier": "owner", "rule": "credential"}
+
+
+@pytest.mark.parametrize("path,rule", [
+    (".env", "credential"), ("/proc/self/cwd/x", "alias"), ("/dev/fd/7", "alias"),
+    (".trinity/git-credential", "trinity_copy"), ("server.pem", "secret_class"), ("", "empty"),
+])
+def test_the_row_names_the_rule(agent, audit, path, rule):
+    with pytest.raises(HTTPException):
+        _call("download_agent_file_logic", path, shared_user())
+    assert _rows(audit, "file_read_refused")[0]["details"]["rule"] == rule
+
+
+def test_an_agent_key_is_filed_as_the_agent_not_its_owner(agent, audit):
+    key = _user(OWNER, mcp_scope="agent", agent_name="sibling")
+    key.mcp_key_id, key.mcp_key_name = "k-1", "sibling-key"
+    with pytest.raises(HTTPException):
+        _call("download_agent_file_logic", ".env", key)
+    row = _rows(audit, "file_read_refused")[0]
+    assert "actor_user" not in row
+    assert row["actor_agent_name"] == "sibling"
+    assert row["actor_email"] == f"{OWNER}@example.com"
+    assert (row["mcp_key_id"], row["mcp_key_name"], row["mcp_scope"]) == ("k-1", "sibling-key", "agent")
+    assert row["details"]["status"] == 403
+
+
+@pytest.mark.parametrize("scope,connector", [("system", None), ("ops", None), ("user", AGENT)],
+                         ids=["system", "ops", "connector"])
+def test_other_keys_are_filed_without_the_owner_as_actor(agent, audit, scope, connector):
+    key = _user(OWNER, mcp_scope=scope, connector_agent=connector)
+    with pytest.raises(HTTPException):
+        _call("download_agent_file_logic", ".env", key)
+    row = _rows(audit, "file_read_refused")[0]
+    assert "actor_user" not in row
+    assert row["mcp_scope"] == scope
+    assert row["actor_email"] == f"{OWNER}@example.com"
+
+
+@pytest.mark.parametrize("user,rows", [
+    (admin_jwt, 1),        # an admin who is not the owner
+    (owner_user_key, 1),   # the owner, through a key rather than a session
+    (owner_jwt, 0),        # the owner's own session
+], ids=["admin", "owner-key", "owner-jwt"])
+def test_allowed_owner_tier_reads_are_audited_except_the_owners_own_session(agent, audit, user, rows):
+    result = _call("download_agent_file_logic", ".env", user())
+    assert _body(result) == b"FILE-BODY"
+    allowed = _rows(audit, "file_read_allowed")
+    assert len(allowed) == rows
+    if rows:
+        assert allowed[0]["details"]["status"] == 200
+    assert _rows(audit, "file_read_refused") == []
+
+
+def test_an_admin_who_owns_the_agent_is_not_audited(agent, audit, monkeypatch):
+    monkeypatch.setattr(files.db, "get_agent_owner", lambda a: {"owner_username": ADMIN})
+    _call("download_agent_file_logic", ".env", admin_jwt())
+    assert _rows(audit, "file_read_allowed") == []
+
+
+def test_an_owner_lookup_failure_audits_the_read(agent, audit, monkeypatch):
+    def _boom(a):
+        raise RuntimeError("db down")
+    monkeypatch.setattr(files.db, "get_agent_owner", _boom)
+    _call("download_agent_file_logic", ".env", owner_jwt())
+    assert len(_rows(audit, "file_read_allowed")) == 1
+
+
+def test_an_ordinary_read_writes_no_row(agent, audit):
+    _call("download_agent_file_logic", "notes.md", shared_user())
+    _call("download_agent_file_logic", "notes.md", admin_jwt())
+    assert audit.await_count == 0
+
+
+def test_an_audit_failure_never_changes_the_answer(agent, audit):
+    audit.side_effect = RuntimeError("audit store down")
+    with pytest.raises(HTTPException) as exc:
+        _call("download_agent_file_logic", ".env", shared_user())
+    assert exc.value.status_code == 403
+    assert _body(_call("download_agent_file_logic", ".env", admin_jwt())) == b"FILE-BODY"
