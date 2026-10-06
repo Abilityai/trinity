@@ -1,6 +1,17 @@
 {
   "test_files": [
     {
+      "file": "unit/test_3237_system_agent_after_setup.py",
+      "feature": "#3237",
+      "added": "2026-10-06",
+      "categories": [
+        "backend",
+        "setup",
+        "system-agent"
+      ],
+      "description": "First-run /setup deploys the system agent: a successful setup schedules _deploy_system_agent_after_setup before ensure_first_run_seeded, the deploy runs with the admin row already present, never raises, is skipped without a Docker client, and a refused setup schedules nothing."
+    },
+    {
       "file": "unit/test_ent761_outbound_control_oss.py",
       "feature": "trinity-enterprise#761",
       "added": "2026-10-02",
