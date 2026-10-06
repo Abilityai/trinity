@@ -388,6 +388,11 @@ so a consumer telling one refusal from another never substring-matches English:
 | No recent series matches the selector (also on a metric with no points) | `metric_series_not_found` | A neutral footer row: chip, selector caption, "no recent data", and a hint built from `binding_detail` facts (a partial selector's real series, a casing mismatch, "no points yet", or the 200-point / 50-series window). **Never the fold** |
 | Declared, no points yet | — | "declared, no points yet" instead of a number |
 
+Compat **X-009** reports the `metric_name_invalid`, `metric_dimension_invalid`
+and `metric_dimension_undeclared` cases (and a `dims:` with no `metric:`) with
+the tile's own sentence, so an agent sees them in its compatibility report
+without opening the dashboard.
+
 A resolved binding **clears** a previous refusal (both keys are popped), so a
 retry after the store comes back cannot leave a widget bound and erroring at
 once.

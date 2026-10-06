@@ -1158,6 +1158,19 @@ def _kind_of(value: Any) -> str:
     return "a value of another type"
 
 
+def invalid_metric_name(value: Any) -> Optional[str]:
+    """The refusal sentence for a bound widget's `metric:` that is not text.
+
+    `None` when `value` is text or falsy (falsy is simply unbound). Public
+    because compat X-009 reports the same sentence the tile shows (ent#730).
+    Names the YAML kind, never the value.
+    """
+    if not value or isinstance(value, str):
+        return None
+    return ("metric must be the name of a declared metric, as text, not "
+            f"{_kind_of(value)}")
+
+
 def _refuse_widget(widget: Dict[str, Any], code: str, message: str,
                    detail: Optional[Dict[str, Any]] = None) -> None:
     widget["binding_error"] = message
@@ -1231,15 +1244,13 @@ def bind_dashboard_widgets(
 
     for widget in widgets:
         name = widget.get("metric")
-        if not isinstance(name, str):
+        name_problem = invalid_metric_name(name)
+        if name_problem is not None:
             # YAML `metric: [ad_spend]` or `{a: b}` is truthy, so it is bound;
             # `by_name.get(<list>)` then raised out of this loop, which runs
             # outside the store `try`, and took the WHOLE dashboard read down
             # (ent#730). Refuse this widget by name; the rest render.
-            _refuse_widget(
-                widget, "metric_name_invalid",
-                "metric must be the name of a declared metric, as text, not "
-                f"{_kind_of(name)}")
+            _refuse_widget(widget, "metric_name_invalid", name_problem)
             continue
         entry = by_name.get(name)
         if entry is None:

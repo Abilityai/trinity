@@ -492,7 +492,7 @@ locally before pushing — the first must report exactly **one** head.
 | Budget | `src/backend/services/objectives_read_budget.py` | The per-agent bucket on the objective fan-out — `enforce` for the operator route, `admit` for the Workspace role card (ent#676) |
 | Route | `src/backend/routers/agent_files.py` | `GET/POST .../metrics*`, `GET .../objectives` |
 | Health | `src/backend/routers/monitoring.py`, `db_models.AgentHealthDetail` | The informational block |
-| Compat | `src/backend/services/compatibility/static_checks.py` | D-009 (shape), D-010 (`metrics.json` superseded) |
+| Compat | `src/backend/services/compatibility/static_checks.py` | D-009 (shape), D-010 (`metrics.json` superseded), X-009 (`dashboard.yaml` `metric:`/`dims:` bindings that can never resolve, ent#730) |
 | MCP | `src/mcp-server/src/tools/metrics.ts` | `record_metrics`, `get_metrics`, `get_objectives` |
 | Frontend | `src/frontend/src/components/DeclaredMetricsTiles.vue` | The tiles |
 | Frontend | `src/frontend/src/components/BoundMetricMark.vue` | A bound widget's point time / stale mark / binding error / which series (ent#730 caption) / threshold verdict badge |

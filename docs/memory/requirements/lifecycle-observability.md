@@ -1616,6 +1616,13 @@ from the registry on every read: `value`, `color` (from the declared status
   `sparklineColor`, so a rising `down_good` cost reads red and a `neutral`
   metric reads grey, exactly like its declared-metric tile. Unbound widgets keep
   their colours.
+- **Compat X-009 (SOFT, static)** reports, with the tile's own code and
+  sentence, a `metric:` that is not text, a `dims:` with no `metric:`, and a
+  `dims:` selector that can never match the dimensions its metric declares in
+  `template.yaml` (validated by the shared `parse_dims_selector`). It never
+  consults points, so a valid selector with no data yet passes. The refusal
+  otherwise renders only in the browser; the compatibility report is how an
+  agent sees it.
 - A store outage degrades **per widget**; a dashboard is never 5xx'd because one
   widget named a metric.
 - The agent-server `validate_widget` no longer requires `value` (or `color` on a
