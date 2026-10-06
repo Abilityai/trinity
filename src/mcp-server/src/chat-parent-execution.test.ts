@@ -493,7 +493,9 @@ describe("#3232 parent_execution_id leaves the MCP server (real transport)", () 
       "do not re-send",
       // An async call that errors after the backend accepted the work still
       // reports back: the default is tied to the dispatch, not to the receipt.
-      "does not mean nothing will post",
+      // Scoped to async or opted-in calls: a sync call with no execution_id
+      // sends no parent, so its error really does mean nothing will post.
+      "An error from an async call, or from one you opted in, does not mean nothing will post",
       "the run may have started",
     ]) {
       assert.ok(shared.includes(phrase), `the description must say: ${phrase}`);

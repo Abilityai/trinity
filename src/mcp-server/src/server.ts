@@ -577,7 +577,7 @@ export async function createServer(config: ServerConfig = {}) {
     `Delegation report-back (#3232): ${
       reportBackEnabled
         ? "ON (async dispatches carry the caller's turn by default)"
-        : "OFF (MCP_REPORT_BACK_ENABLED=false — no parent is ever sent)"
+        : "OFF (MCP_REPORT_BACK_ENABLED is false/0/no/off — no parent is ever sent)"
     }`
   );
   // #848 — a keyless session tier is a posture change; make it unambiguous in
