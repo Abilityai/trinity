@@ -9,7 +9,8 @@ premise over the backend and the base image: a new `os.symlink`, `symlink_to`,
 read rule and listed below with a reason.
 
 Comments are stripped before matching (tokenize for Python, `#` for shell and
-Dockerfile), so a comment naming one of these is not a finding.
+Dockerfile), so a comment naming one of these is not a finding. A Python file
+that does not tokenize is scanned as raw text rather than skipped.
 """
 import io
 import re
@@ -64,9 +65,12 @@ def _scan(roots, excluded=()):
                 continue
             if path.suffix == ".py":
                 try:
-                    text, patterns = _strip_py_comments(path.read_text()), _PY_PATTERNS
+                    text = _strip_py_comments(path.read_text())
                 except (tokenize.TokenError, SyntaxError, UnicodeDecodeError):
-                    continue
+                    # Never skip: a file that does not tokenize is scanned raw,
+                    # comments included, so it can only add a finding.
+                    text = path.read_text(errors="replace")
+                patterns = _PY_PATTERNS
             elif path.suffix == ".sh" or path.name.startswith("Dockerfile"):
                 text, patterns = _strip_sh_comments(path.read_text(errors="replace")), _SH_PATTERNS
             else:
@@ -103,6 +107,15 @@ def test_every_allowance_names_a_reason():
 def test_the_scan_has_teeth(tmp_path, planted, name):
     (tmp_path / name).write_text(planted)
     assert _scan((tmp_path,)) == [str(tmp_path / name)]
+
+
+@pytest.mark.parametrize("planted", [
+    b"x = '''unterminated\nos.symlink('/home/developer/.env', 'x')\n",
+    b"\xff\xfe not utf-8\nimport os\nos.symlink('/home/developer/.env', 'x')\n",
+], ids=["does-not-tokenize", "not-utf-8"])
+def test_a_python_file_that_does_not_tokenize_is_still_scanned(tmp_path, planted):
+    (tmp_path / "broken.py").write_bytes(planted)
+    assert _scan((tmp_path,)) == [str(tmp_path / "broken.py")]
 
 
 @pytest.mark.parametrize("text,name", [
