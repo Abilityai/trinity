@@ -233,6 +233,9 @@ _EXPECTED_ANCHORS = (
     "/home/developer/.claude/settings.json",
     "/home/developer/.claude/settings.local.json",
     "/home/developer/.git/config",          # ent#819
+    "/home/developer/.claude/.credentials.json",   # ent#823
+    "/home/developer/.gemini/settings.json",       # ent#823
+    "/home/developer/.tmp/codex",                  # ent#823: deleting .tmp is refused
     "/home/developer/.trinity",
     "/home/developer/.git",
     "/opt/trinity",
@@ -522,3 +525,77 @@ def test_an_owner_tier_path_outside_the_read_only_set_is_never_writable(path):
 ])
 def test_the_platforms_shared_reads_are_not_owner_tier(path):
     assert files._is_owner_tier_read_path(path) is False
+
+
+# ---- ent#823: the runtime config files (Claude Code, Gemini, Codex) --------------
+
+_RUNTIME_CONFIG_SPELLINGS = [
+    ".claude.json", "/home/developer/.claude.json", "//home/developer/.claude.json",
+    ".claude/.credentials.json", "//home/developer/.claude/.credentials.json",
+    ".gemini/settings.json", "/home/developer/.gemini/settings.json",
+    ".tmp/codex/auth.json", ".tmp/codex/config.toml", "//home/developer/.tmp/codex/x",
+]
+
+
+@pytest.mark.parametrize("path", _RUNTIME_CONFIG_SPELLINGS)
+def test_runtime_config_files_are_not_writable_nor_deletable(path):
+    assert _is_user_writable_path(path) is False
+    assert files._is_user_deletable_path(path) is False
+
+
+@pytest.mark.parametrize("path", _RUNTIME_CONFIG_SPELLINGS)
+def test_runtime_config_files_are_owner_tier_to_read(path):
+    assert files._is_owner_tier_read_path(path) is True
+
+
+@pytest.mark.parametrize("path", [".tmp", ".tmp/", ".tmp/codex", "/home/developer/.tmp", ".gemini", ".claude"])
+def test_deleting_a_directory_that_holds_runtime_config_is_refused(path):
+    assert files._is_user_deletable_path(path) is False
+
+
+@pytest.mark.parametrize("path", [".tmp/other.txt", ".tmp/scratch/x", ".claude/agents/a.md", "notes/.claude.jsonx"])
+def test_neighbours_of_runtime_config_stay_writable(path):
+    assert _is_user_writable_path(path) is True
+    assert files._is_user_deletable_path(path) is True
+
+
+@pytest.mark.parametrize("fn", list(_REFUSAL))
+@pytest.mark.parametrize("path", [
+    ".claude.json", "/home/developer/.claude.json", ".claude/.credentials.json",
+    "//home/developer/.claude/.credentials.json", ".gemini/settings.json",
+    ".tmp/codex/auth.json", ".tmp/codex/config.toml",
+])
+def test_every_write_route_refuses_runtime_config(routes, fn, path):
+    with pytest.raises(HTTPException) as exc:
+        _call(fn, path)
+    assert exc.value.status_code == 403
+    assert exc.value.detail == _REFUSAL[fn].format(path)
+
+
+@pytest.mark.parametrize("method,url,request_kwargs,refusal", [
+    ("PUT", f"/api/agents/{AGENT}/files",
+     lambda p: {"params": {"path": p}, "json": {"content": "x"}}, "Cannot edit protected path: "),
+    ("POST", f"/api/agents/{AGENT}/files/mkdir",
+     lambda p: {"json": {"path": p}}, "Cannot create folder in protected path: "),
+    ("DELETE", f"/api/agents/{AGENT}/files",
+     lambda p: {"params": {"path": p}}, "Cannot delete protected path: "),
+])
+@pytest.mark.parametrize("path", [".claude.json", "//home/developer/.claude/.credentials.json"])
+def test_the_real_routes_refuse_the_claude_code_login_files(routes, method, url, request_kwargs, refusal, path):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from routers import agent_files
+
+    app = FastAPI()
+    app.include_router(agent_files.router)
+    app.dependency_overrides[agent_files.get_current_user] = _human
+    r = TestClient(app).request(method, url, **request_kwargs(path))
+    assert r.status_code == 403, (method, r.status_code, r.text)
+    assert r.json()["detail"] == refusal + path
+
+
+@pytest.mark.parametrize("path", [".tmp", ".tmp/codex"])
+def test_delete_of_tmp_is_refused_through_the_route_logic(routes, path):
+    with pytest.raises(HTTPException) as exc:
+        _call("delete_agent_file_logic", path)
+    assert exc.value.status_code == 403

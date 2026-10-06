@@ -140,6 +140,10 @@ PATTERN_INSTANCES = {
     ".claude/settings.json": ".claude/settings.json",
     ".claude/settings.local.json": ".claude/settings.local.json",
     ".git/config": ".git/config",
+    ".claude.json": ".claude.json",
+    ".claude/.credentials.json": ".claude/.credentials.json",
+    ".gemini/settings.json": ".gemini/settings.json",
+    ".tmp/codex/*": ".tmp/codex/auth.json",
     "/proc/*": "/proc/self/cwd/notes.md",
     "/dev/*": "/dev/fd/7",
     ".trinity/git-credential": ".trinity/git-credential",
@@ -388,6 +392,7 @@ def test_a_refused_read_writes_one_row(agent, audit, fn, endpoint):
 @pytest.mark.parametrize("path,rule", [
     (".env", "credential"), ("/proc/self/cwd/x", "alias"), ("/dev/fd/7", "alias"),
     (".trinity/git-credential", "trinity_copy"), ("server.pem", "secret_class"), ("", "empty"),
+    (".claude.json", "runtime"), (".tmp/codex/config.toml", "runtime"),
 ])
 def test_the_row_names_the_rule(agent, audit, path, rule):
     with pytest.raises(HTTPException):

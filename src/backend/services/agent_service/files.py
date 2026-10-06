@@ -35,6 +35,18 @@ logger = logging.getLogger(__name__)
 # unless the name is too generic for a by-name match (say why here); (4) tests:
 # test_files_protected_paths (+ _EXPECTED_ANCHORS), the hook test, the
 # agent-server list test.
+#
+# Runtime config files (trinity-enterprise#823): each runtime's login and MCP
+# config. Gemini's `settings.json` and Codex's `auth.json` / `config.toml` are
+# too generic for the agent-server by-name lists; the agent server matches all
+# four on the resolved path instead (`_RUNTIME_CONFIG_PATHS`). Codex keeps them
+# in CODEX_HOME = $TMPDIR/codex = ~/.tmp/codex, so deleting `.tmp` is refused.
+_RUNTIME_CONFIG_PATTERNS = (
+    ".claude.json",
+    ".claude/.credentials.json",
+    ".gemini/settings.json",
+    ".tmp/codex/*",
+)
 _CREDENTIAL_PATH_PATTERNS = (
     ".env",
     ".env.*",
@@ -47,7 +59,7 @@ _CREDENTIAL_PATH_PATTERNS = (
     ".claude/settings.json",
     ".claude/settings.local.json",
     ".git/config",
-)
+) + _RUNTIME_CONFIG_PATTERNS
 # Other spellings of a home-dir path: the agent server follows
 # /proc/self/{cwd,root}/... and /dev/fd/N back into the home dir.
 _PATH_ALIAS_PATTERNS = (
@@ -212,6 +224,7 @@ def _owner_tier_rule(path: str) -> str:
         ("alias", _PATH_ALIAS_PATTERNS),
         ("trinity_copy", _TRINITY_CREDENTIAL_COPY_PATTERNS),
         ("secret_class", _SECRET_FILE_CLASS_PATTERNS),
+        ("runtime", _RUNTIME_CONFIG_PATTERNS),
     ):
         if _matches_any(path, patterns):
             return rule
