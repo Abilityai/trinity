@@ -79,7 +79,7 @@ def test_every_registered_hook_command_exists_in_the_image():
     Pins the registration against the COPY list rather than trusting both."""
     settings = json.loads((_BASE / "hooks" / "managed-settings.json").read_text())
     commands = [
-        h["command"]
+        " ".join([h["command"], *h.get("args", [])])
         for phase in settings["hooks"].values()
         for entry in phase
         for h in entry["hooks"]
@@ -129,16 +129,16 @@ def test_startup_retires_the_legacy_in_tree_copy_only_on_an_exact_match():
     hook registration whose interaction with the managed one depends on precedence
     we do not control, plus a live #2036 leak candidate.
 
-    Removal is gated on `cmp -s` against the file we now ship: no parsing, no
-    heuristics, no "looks like ours". An agent-authored settings.json differs and is
-    left completely alone, which is the property that makes deleting a file in the
-    agent's own HOME defensible at all.
+    Removal is gated on the file's SHA-256 being one of the versions the image
+    shipped to that path (ent#787): no parsing, no heuristics, no "looks like
+    ours". An agent-authored settings.json differs and is left completely alone,
+    which is the property that makes deleting a file in the agent's own HOME
+    defensible at all. The gate is executed against both shipped versions in
+    `test_ent787_guardrail_exec_form.py`; this pins where it lives.
     """
     assert "LEGACY_SETTINGS=/home/developer/.claude/settings.json" in _STARTUP
-    assert 'cmp -s "$LEGACY_SETTINGS" "$GUARDRAIL_SETTINGS"' in _STARTUP
-    # Guarded by BOTH files existing, so a missing managed copy cannot make the
-    # comparison vacuous and delete the only registration present.
-    assert '[ -f "$LEGACY_SETTINGS" ] && [ -f "$GUARDRAIL_SETTINGS" ]' in _STARTUP
+    assert "LEGACY_SETTINGS_SHA256=" in _STARTUP
+    assert 'sha256sum "$LEGACY_SETTINGS"' in _STARTUP
 
 
 def test_both_paths_stay_in_the_write_deny_lists():
