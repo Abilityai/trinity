@@ -1585,7 +1585,7 @@ from the registry on every read: `value`, `color` (from the declared status
   (`MAX_SERIES_PER_METRIC`). A series that reports rarely beside a busy one can
   fall outside that window and is then refused `metric_series_not_found` even
   though it still reports; the refusal states the window as facts and the hint
-  says so. A selector-specific lookup is the fix (follow-up bug #TBD).
+  says so. A selector-specific lookup is the fix (follow-up bug #3293).
 - **Every successfully bound widget says what its number is** through
   `bound_series` (facts; the browser writes the caption):
 
@@ -1653,7 +1653,7 @@ serving the file would have left the agent half of a deleted backend read alive
 registry owns. `series_limit` and the bucket count as Settings rows — they are
 read bounds on one query, not operator policy. A `dims` selector on
 `GET /api/agents/{name}/metrics` and MCP `get_metrics`: ent#730 shipped the
-widget half only (follow-up issue #TBD).
+widget half only (follow-up ent#828).
 
 ### Acceptance
 
