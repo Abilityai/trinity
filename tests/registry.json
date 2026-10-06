@@ -1,6 +1,17 @@
 {
   "test_files": [
     {
+      "file": "unit/test_3262_admin_username_owner.py",
+      "feature": "#3262",
+      "added": "2026-10-06",
+      "categories": [
+        "backend",
+        "system-agent",
+        "setup"
+      ],
+      "description": "With ADMIN_USERNAME=root and only a root admin: the system agent's create path looks up and names the configured admin, a running system agent is registered to it, the Cornelius seed provisions under it, and the default system seed no longer defers waiting for an 'admin' user."
+    },
+    {
       "file": "unit/test_3237_system_agent_after_setup.py",
       "feature": "#3237",
       "added": "2026-10-06",

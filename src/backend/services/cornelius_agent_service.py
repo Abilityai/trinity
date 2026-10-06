@@ -51,6 +51,7 @@ import logging
 from typing import Optional
 
 from database import db
+from utils.admin_identity import admin_username
 from models import AgentConfig, User
 from services.docker_service import docker_client
 from redis_breaker_util import get_breaker_redis, SingleFlightLock
@@ -59,7 +60,6 @@ logger = logging.getLogger(__name__)
 
 CORNELIUS_AGENT_NAME = "cornelius"
 CORNELIUS_TEMPLATE = "github:Abilityai/cornelius"
-CORNELIUS_OWNER = "admin"  # seeded under the admin account, like the system agent
 
 # Durable "already seeded" marker (system_settings KV — no migration).
 _SEEDED_FLAG = "cornelius_seeded"
@@ -130,7 +130,7 @@ class CorneliusAgentService:
         # 3. Owner must exist. On a truly-fresh pre-setup boot the admin row is not
         #    created until first-time setup completes; skip WITHOUT setting the flag
         #    so the setup-completion trigger (or a later boot) retries.
-        admin_row = db.get_user_by_username(CORNELIUS_OWNER)
+        admin_row = db.get_user_by_username(admin_username())
         if not admin_row:
             return self._skip(
                 result, "deferred",

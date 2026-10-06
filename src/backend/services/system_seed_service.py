@@ -53,6 +53,7 @@ from pathlib import Path
 from typing import Optional
 
 from database import db
+from utils.admin_identity import admin_username
 from models import User
 from services.docker_service import docker_client
 from services.cornelius_agent_service import cornelius_agent_service
@@ -62,7 +63,6 @@ from utils.helpers import utc_now_iso
 
 logger = logging.getLogger(__name__)
 
-SEED_OWNER = "admin"  # seeded under the admin account, like Cornelius
 
 # Durable markers (system_settings KV — no migration).
 _SEEDED_FLAG = "default_system_seeded"
@@ -313,7 +313,7 @@ class SystemSeedService:
         #    not created until first-time setup completes; skip WITHOUT setting
         #    the flag so the setup-completion trigger (or a later boot) retries.
         try:
-            admin_row = db.get_user_by_username(SEED_OWNER)
+            admin_row = db.get_user_by_username(admin_username())
         except Exception as e:  # e.g. SQLite BUSY during boot — retry next pass
             return self._skip(result, "skipped_error", f"admin lookup failed: {e}")
         if not admin_row:
