@@ -469,7 +469,8 @@ async function confirmReplace() {
     const now = primary.value
       ? `${primary.value.display_name} is still the primary.`
       : 'This agent has no primary now — add one below.'
-    replaceError.value = `${writeError(err, "Couldn't replace the primary.")} ${now}`
+    const reason = writeError(err, "Couldn't replace the primary.").trim()
+    replaceError.value = `${/[.!?]$/.test(reason) ? reason : `${reason}.`} ${now}`
   } finally {
     savingReplace.value = false
   }
