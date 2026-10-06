@@ -126,6 +126,12 @@ context, and the guard's agent arm passes, so C inherits too. The thread gets
 B's note (often "handed to C") and later C's note. B can pass
 `execution_id="manual"` to stay quiet.
 
+**Inherited context is for this report only.** `POST /api/agents/{name}/voice-reply`
+(`routers/agents.py::send_voice_reply_endpoint`) has no proactive-consent check,
+so it refuses a delegated child — a row whose `source_channel_agent` is set —
+with `reason="delegated_turn"` before any channel branch (#3232). A direct
+channel turn still delivers.
+
 ### Debugging: no note arrived
 
 1. **MCP server log** — find the `[Report-Back #3232] <caller> -> <target> …`
