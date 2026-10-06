@@ -1,0 +1,101 @@
+{
+  "version": "1.2.3",
+  "date": "2026-10-06",
+  "mode": "daily",
+  "scope": "diff",
+  "branch": "feature/792-double-slash-path",
+  "issue": "abilityai/trinity-enterprise#792",
+  "base": "fa50b3888",
+  "commits": [],
+  "audited": "working tree vs base (pre-commit)",
+  "counts_as_full_run": false,
+  "phases_run": [
+    0,
+    1,
+    2,
+    7,
+    8,
+    9,
+    10,
+    11,
+    12,
+    13,
+    14
+  ],
+  "phases_not_applicable": {
+    "3": "no dependency change",
+    "4": "no workflow change",
+    "5": "no Docker/compose change",
+    "6": "no webhook/integration change"
+  },
+  "stack_cve_quicklist": [
+    {
+      "component": "all rows",
+      "verdict": "not touched by diff"
+    }
+  ],
+  "attack_surface": {
+    "new_endpoints": 0,
+    "auth_dependencies_changed": 0,
+    "narrowed_routes": [
+      "DELETE /api/agents/{name}/files",
+      "PUT /api/agents/{name}/files",
+      "POST /api/agents/{name}/files/mkdir"
+    ]
+  },
+  "checks": [
+    {
+      "check": "secret prefixes in added lines",
+      "result": "none"
+    },
+    {
+      "check": "invisible Unicode in changed files",
+      "result": "none"
+    },
+    {
+      "check": "variant analysis: lexical // in other path classifiers",
+      "result": "canvas_blocks fails closed; shared-files publisher refuses leading /; agent server checks after resolve(); MCP server has no classifier"
+    },
+    {
+      "check": "mutation battery",
+      "result": "5/5 red, restored byte-identical"
+    },
+    {
+      "check": "agent-container resolution probe",
+      "result": "// and /proc/self/{root,cwd} resolve into /home/developer; no other symlink in the image does"
+    },
+    {
+      "check": "A10 failure direction of the new guard",
+      "result": "fails closed; docstring now states it"
+    }
+  ],
+  "findings": [],
+  "hypotheses": [],
+  "considered_and_dismissed": [
+    {
+      "item": "forwarded path echoes absolute in agent responses",
+      "reason": "frontend does not read the echo; behaviour approved at the plan gate"
+    },
+    {
+      "item": "403 detail and log echo the raw path",
+      "reason": "same as PUT/mkdir; JsonFormatter encodes CR/LF; UI renders as text"
+    }
+  ],
+  "coverage_gaps": [],
+  "supply_chain_summary": {
+    "scanner": "n/a (no dependency change)"
+  },
+  "filter_stats": {
+    "candidates": 2,
+    "dismissed": 2,
+    "reported": 0
+  },
+  "totals": {
+    "critical": 0,
+    "high": 0,
+    "medium": 0,
+    "low": 0
+  },
+  "trend": "first diff report for this area; closes trinity-enterprise#792 at the shared normaliser and the forwarded string",
+  "remediation": []
+}
