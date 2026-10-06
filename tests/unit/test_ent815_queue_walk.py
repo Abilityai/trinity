@@ -417,6 +417,19 @@ def test_k6_cursor_validation_is_strict(qdb):
         return _token(d)
 
     k = good["k"]
+
+    def oversized():
+        """A token whose ONLY fault is size: the valid token's JSON padded with
+        insignificant whitespace to one byte over the cap, still inside the
+        base64 length precheck, so only the decoded-bytes check can refuse it."""
+        from services.operator_queue_service import CURSOR_MAX_BYTES
+        body = json.dumps(good, separators=(",", ":"))
+        raw = body[:-1] + " " * (CURSOR_MAX_BYTES + 1 - len(body)) + "}"
+        assert len(raw) == CURSOR_MAX_BYTES + 1 and json.loads(raw) == good
+        t = base64.urlsafe_b64encode(raw.encode()).rstrip(b"=").decode()
+        assert len(t) <= (CURSOR_MAX_BYTES * 4 + 2) // 3 + 4
+        return t
+
     cases = {
         "not base64url": "!!not*base64!!",
         "not an object": _token([1, 2]),
@@ -429,7 +442,7 @@ def test_k6_cursor_validation_is_strict(qdb):
         "a 1,025-char st": bad(k=[k[0], k[1], "x" * 1025, k[3]]),
         "a NUL in st": bad(k=[k[0], k[1], "\u0000", k[3]]),
         "a lone surrogate in id": bad(k=[k[0], k[1], k[2], "\ud800"]),
-        "over 4,096 bytes": bad(pad="y" * 4100),
+        "over 4,096 bytes": oversized(),
         "a bad walk id": bad(s="not-hex"),
     }
     for label, cursor in cases.items():
@@ -658,6 +671,61 @@ def test_k_platform_alert_priority_change_mid_walk(qdb):
     ids, _ = _walk(3, between=between)
     assert ids.count(lowered) == 1
     assert ids.count(raised) == 1
+
+
+class _RaisingRedis:
+    """A Redis client whose every walk call faults mid-call."""
+
+    def __init__(self, where):
+        self.where = where
+
+    def _boom(self, *a, **k):
+        raise ConnectionError(f"redis down ({self.where})")
+
+    def hgetall(self, *a, **k):
+        return self._boom()
+
+    def pipeline(self):
+        outer = self
+
+        class _Pipe:
+            def hset(self, *a, **k):
+                if outer.where == "hset":
+                    outer._boom()
+
+            def expire(self, *a, **k):
+                pass
+
+            def execute(self):
+                outer._boom()
+
+        return _Pipe()
+
+
+@pytest.mark.parametrize("fault", ["unreachable", "hset", "execute", "hgetall"])
+def test_k_a_walk_without_redis_is_a_503_and_offset_paging_still_works(
+        qdb, monkeypatch, fault):
+    """A walk needs its priority snapshot in Redis. With the accessor returning
+    None, or the client raising on `hset` / pipeline `execute` (the start) or on
+    `hgetall` (a continuation), the walk answers 503 naming the offset fallback
+    — never a 500, never a walk silently ordered without its snapshot — and
+    offset paging (no cursor) still answers 200."""
+    from routers import operator_queue as route
+    tok = _valid_token(qdb)
+    broken = None if fault == "unreachable" else _RaisingRedis(fault)
+    monkeypatch.setitem(route.operator_queue_service.list_for_principal.__globals__,
+                        "get_breaker_redis", lambda: broken)
+    params = {"limit": 2}
+    if fault != "hgetall":
+        res = _client().get("/api/operator-queue", params={**params, "cursor": "start"})
+        assert res.status_code == 503, res.text
+        assert "offset" in res.text
+    if fault in ("unreachable", "hgetall"):
+        res = _client().get("/api/operator-queue", params={**params, "cursor": tok})
+        assert res.status_code == 503, res.text
+        assert "offset" in res.text
+    body = _get(**params)
+    assert body["count"] == 2 and body["has_more"] is True
 
 
 @pytest.mark.parametrize("raised_at", ["critical", "high"])
