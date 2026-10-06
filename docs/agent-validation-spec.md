@@ -570,7 +570,7 @@ Prompt: "Given this agent's stated purpose and use cases, is the resource alloca
 Severity: SOFT | Type: STATIC  
 A bound widget may name one series of a dimensioned metric with `dims: {channel: meta}`. A selector that can never match is refused on the tile by name, but that refusal renders only in the browser, so this check puts it where an agent can read it (the compatibility report, MCP `get_agent_compatibility_report`). For each widget it reports, with the **same code and sentence the tile shows**:
 
-- a `metric:` that is not text (a YAML list or mapping): `metric_name_invalid`. The binding refuses that widget; before ent#730 it failed the whole dashboard read;
+- a `metric:` that is a truthy non-text value (a number, boolean, list or mapping): `metric_name_invalid`. The binding refuses that widget. Before ent#730 a list or mapping failed the whole dashboard read, and a scalar such as `metric: 5` or `metric: true` read `metric_undeclared`. A falsy value (`0`, `false`, `[]`, `{}`) leaves the widget unbound, as before;
 - `dims:` with no `metric:`: `dims_without_metric` (the selector does nothing);
 - a `dims:` selector on a metric declared in `template.yaml` that is not a mapping, has a non-text, empty, over-long or control-character value, names more than 10 keys (`metric_dimension_invalid`), or names a key the metric does not declare (`metric_dimension_undeclared`).
 

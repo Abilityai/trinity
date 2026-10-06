@@ -1545,9 +1545,12 @@ from the registry on every read: `value`, `color` (from the declared status
   drops `value`: `metric_store_unavailable` (drops `value` only, ent#730: the
   docs recommend a `value: 0` placeholder, which an outage would otherwise show
   as a real 0), `metric_undeclared` (drops `value`), `metric_retired` (drops
-  `value` and `history`), `metric_name_invalid` (a `metric:` that is not text,
-  e.g. a YAML list; ent#730, before which it crashed the whole dashboard read),
-  and the three `dims` refusals below.
+  `value` and `history`), `metric_name_invalid` (a `metric:` that is a truthy
+  non-text value: a number, boolean, list or mapping; ent#730. Before it, a
+  list or mapping crashed the whole dashboard read, and a scalar such as
+  `metric: 5` or `metric: true` read `metric_undeclared`. A falsy value — `0`,
+  `false`, `[]`, `{}` — leaves the widget unbound, as before), and the three
+  `dims` refusals below.
 - A bound widget's `history` is built from `chart`, the same fold its `value`
   comes from, so its sparkline and trend arrow describe the metric the number
   names.
