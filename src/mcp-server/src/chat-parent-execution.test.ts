@@ -631,6 +631,34 @@ describe("#3232 kill switch MCP_REPORT_BACK_ENABLED", () => {
       } finally {
         await enabled.stop();
       }
+      // The switch is an operator's off-word, not one exact spelling: any case,
+      // surrounding whitespace trimmed. Anything else (including empty) leaves it on.
+      const rows: Array<[string, boolean]> = [
+        ["False", false],
+        [" OFF ", false],
+        ["0", false],
+        ["no", false],
+        ["NO", false],
+        ["true", true],
+        ["", true],
+        ["1", true],
+        ["yes", true],
+      ];
+      const mismatches: string[] = [];
+      for (const [raw, on] of rows) {
+        process.env.MCP_REPORT_BACK_ENABLED = raw;
+        const h = await boot({ pull: false });
+        try {
+          const r = await h.call("chat_with_agent", { agent_name: TARGET, message: "t20", ...PA }, HEADER);
+          const got = parentOf(r);
+          if (on ? got !== HEADER : hasParent(r)) {
+            mismatches.push(`${JSON.stringify(raw)}: expected ${on ? "header sent" : "no parent"}, got parent=${JSON.stringify(got)}`);
+          }
+        } finally {
+          await h.stop();
+        }
+      }
+      assert.deepEqual(mismatches, [], "env value → switch state");
     } finally {
       if (saved === undefined) delete process.env.MCP_REPORT_BACK_ENABLED;
       else process.env.MCP_REPORT_BACK_ENABLED = saved;

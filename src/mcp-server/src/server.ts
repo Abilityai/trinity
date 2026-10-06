@@ -429,9 +429,12 @@ export async function createServer(config: ServerConfig = {}) {
     // ServerConfig.agentChatPullEnabled). Same env key the backend declares in
     // config.py (MCP_AGENT_CHAT_PULL_ENABLED) so a single-.env deploy can't drift.
     agentChatPullEnabled = process.env.MCP_AGENT_CHAT_PULL_ENABLED === "true",
-    // #3232 report-back kill switch — default ON; only the literal "false"
-    // turns it off (see ServerConfig.reportBackEnabled).
-    reportBackEnabled = process.env.MCP_REPORT_BACK_ENABLED !== "false",
+    // #3232 report-back kill switch — default ON; "false", "0", "no" or "off"
+    // (any case, whitespace trimmed) turns it off; anything else, unset or
+    // empty included, leaves it on (see ServerConfig.reportBackEnabled).
+    reportBackEnabled = !["false", "0", "no", "off"].includes(
+      (process.env.MCP_REPORT_BACK_ENABLED ?? "").trim().toLowerCase()
+    ),
     // #848 inline email auth — default OFF. When off, a request with no
     // Authorization header is rejected exactly as before and no session is
     // created. When on, it yields an anonymous sentinel session that may only
