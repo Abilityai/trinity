@@ -344,13 +344,13 @@ The file browser feature uses a **thin router + service layer** architecture:
 - **Backend** (`_is_user_deletable_path`, trinity-enterprise#792), checked after the access check and the `skills.manage` fence, before the container lookup. It refuses everything the write deny list refuses, plus any directory that holds a path-anchored protected path: `.ssh`, `.aws`, `.gcp`, `.trinity`, `.git`, **`.claude`** (holds `settings.json`), the home dir and `/`. Anchors are derived from `_FILE_WRITE_DENY_PATTERNS` (`_DENY_ANCHORS`). `/proc/*` is load-bearing, because `/proc/self/root/…` and `/proc/self/cwd/…` resolve into the home dir inside the agent container. Basename patterns (`.env`, `.credentials.enc`) are name-only on DELETE, so a directory that merely contains one is not refused. Refusal: 403 `Cannot delete protected path: {path}`, which the Files tab shows as `Failed to delete: …`.
 - **Agent server** (`PROTECTED_PATHS`, by name at any depth and on any parent): `CLAUDE.md`, `.trinity`, `.git`, `.gitignore`, `.env`, `.mcp.json`, `.mcp.json.template`.
 
-**Path normalisation** (all three write routes): `_normalize_user_path` resolves `.`/`..` lexically, anchors relative paths at `/home/developer`, and collapses any run of leading slashes to one. The agent is sent that normalised path, never the raw input, so the check and the action read one string.
+**Path normalisation** (all three write routes): `_normalize_user_path` resolves `.`/`..` lexically, anchors relative paths at `/home/developer`, and collapses any run of leading slashes to one. The agent is sent that normalised path, never the raw input, so the check and the action read one string. The agent echoes the string it received, so the `path` / `deleted` fields and the agent's own 404/409 messages (`File not found: …`, `Directory already exists: …`) carry the absolute normalised path, not the string the caller sent.
 
 **Response**:
 ```json
 {
   "success": true,
-  "deleted": "path/to/file",
+  "deleted": "/home/developer/path/to/file",
   "type": "file",
   "file_count": 1
 }
@@ -375,7 +375,7 @@ The file browser feature uses a **thin router + service layer** architecture:
 ```json
 {
   "success": true,
-  "path": "CLAUDE.md",
+  "path": "/home/developer/CLAUDE.md",
   "size": 1234,
   "modified": "2025-12-01T10:30:00.123456"
 }
@@ -705,7 +705,7 @@ This feature does not emit real-time events.
 
 **Edit-Protected** (cannot be modified):
 - Agent server: `.trinity`, `.git`, `.gitignore`, `.env`, `.mcp.json`, `.mcp.json.template`, `.credentials.enc`
-- Backend deny list: the above plus `.ssh/*`, `.aws/*`, `.gcp/*`, `.claude/settings*.json`, `/opt/trinity/*`, `/etc/*`, `/proc/*`, `/sys/*`
+- Backend deny list: the above plus `.env.*`, `.ssh/*`, `.aws/*`, `.gcp/*`, `.claude/settings*.json`, `/opt/trinity/*`, `/etc/*`, `/proc/*`, `/sys/*`
 - Note: `CLAUDE.md` IS editable (owners manage agent instructions); `.mcp.json` is not (#590)
 
 ### Rate Limiting

@@ -58,7 +58,7 @@
     },
     {
       "check": "mutation battery",
-      "result": "5/5 red, restored byte-identical"
+      "result": "6 backend + 2 hook mutations, each red"
     },
     {
       "check": "agent-container resolution probe",
@@ -67,9 +67,31 @@
     {
       "check": "A10 failure direction of the new guard",
       "result": "fails closed; docstring now states it"
+    },
+    {
+      "check": "variant analysis rerun without truncation",
+      "result": "agent-side hooks had the same normpath shape; fixed in this PR"
     }
   ],
-  "findings": [],
+  "findings": [
+    {
+      "id": "F1",
+      "severity": "medium",
+      "confidence": 9,
+      "status": "VERIFIED",
+      "evidence": "SUPPORTED",
+      "category": "path-normalisation-guardrail-hook",
+      "owasp_2025": "A01",
+      "asi": "ASI02",
+      "llm": null,
+      "file": "docker/base-image/hooks/file-guardrail.py:29, docker/base-image/hooks/read-only-guard.py:52",
+      "title": "In-agent file guardrail and read-only guard matched no absolute pattern for a //-prefixed path",
+      "found_by": "independent PR review (missed by the first /cso pass: variant grep truncated)",
+      "verification": "shipped image: // forms exit 0 vs 2 for the one-slash form; fixed hooks mounted into trinity-agent-base deny them",
+      "remediation": "fixed in this PR: _normalise collapses leading slashes in both hooks; tests load the shipped hook",
+      "unverified": "whether Claude Code canonicalises file_path before PreToolUse"
+    }
+  ],
   "hypotheses": [],
   "considered_and_dismissed": [
     {
@@ -86,16 +108,16 @@
     "scanner": "n/a (no dependency change)"
   },
   "filter_stats": {
-    "candidates": 2,
+    "candidates": 3,
     "dismissed": 2,
-    "reported": 0
+    "reported": 1
   },
   "totals": {
     "critical": 0,
     "high": 0,
-    "medium": 0,
+    "medium": 1,
     "low": 0
   },
-  "trend": "first diff report for this area; closes trinity-enterprise#792 at the shared normaliser and the forwarded string",
+  "trend": "first diff report for this area; closes trinity-enterprise#792 at the backend normaliser, the forwarded string, and the agent-side guardrail hooks",
   "remediation": []
 }

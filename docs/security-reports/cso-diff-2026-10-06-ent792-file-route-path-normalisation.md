@@ -7,10 +7,11 @@
 | File | Change |
 |---|---|
 | `src/backend/services/agent_service/files.py` | `_normalize_user_path` collapses any run of leading slashes; new `_deny_anchor` / `_DENY_ANCHORS` / `_is_user_deletable_path`; `DELETE /files` applies the deny list (and refuses a directory holding a protected path); PUT / mkdir / DELETE forward the normalised path to the agent |
-| `tests/unit/test_files_protected_paths.py`, `tests/unit/test_ent596_skill_manager.py`, `tests/test_files_guardrail_bypass.py`, `tests/registry.json` | tests |
+| `docker/base-image/hooks/file-guardrail.py`, `docker/base-image/hooks/read-only-guard.py` | the agent-side `_normalise` collapses leading slashes too (added after the PR review, see Phase 12) |
+| `tests/unit/test_files_protected_paths.py`, `tests/unit/test_ent596_skill_manager.py`, `tests/unit/test_ent792_file_guardrail_hook.py`, `tests/unit/test_read_only_guard.py`, `tests/test_files_guardrail_bypass.py`, `tests/registry.json` | tests |
 | `docs/memory/requirements/content-files.md`, `docs/memory/learnings/2026-10-06-*.md` | docs |
 
-No dependency, CI, Docker, compose, base-image, frontend, schema or MCP change.
+No dependency, CI, Docker, compose, frontend, schema or MCP change. The base-image change is two hook functions; no file is added, so the image's COPY set is unchanged.
 
 ## Phase 0 — model and quicklist
 
@@ -44,18 +45,24 @@ Tampering and elevation of privilege are reduced. An agent key without `skills.m
 
 ## Phase 11 — data classification touched
 
-RESTRICTED: `.ssh/*`, `.aws/*`, `.gcp/*`, `.credentials.enc`, `.env*`. CONFIDENTIAL with code-execution impact: `.claude/settings*.json` (hooks), `.claude/skills/**`. All are now refused on DELETE as well as write.
+RESTRICTED: `.ssh/*`, `.aws/*`, `.gcp/*`, `.credentials.enc`, `.env*`. CONFIDENTIAL with code-execution impact: `.claude/settings*.json` (hooks) and `.claude/skills/**`. The RESTRICTED set and `.claude/settings*.json` are now refused on DELETE as well as write. `.claude/skills/**` stays deletable by humans and by agents holding `skills.manage`; the ent#596 fence refuses everyone else.
 
 ## Phase 12 — findings
 
-**No findings at or above the 8/10 gate.** Variant analysis covered:
-- `canvas_blocks.py`, which fails closed on `//`;
-- `agent_shared_files_service.validate_publish_path`, which refuses a leading `/`;
-- the agent server, which checks containment after `resolve()`;
-- the MCP server, which has no path classifier.
+**Correction (PR review, same day): one finding the first pass missed, fixed in this PR.** The variant grep was cut at fifteen lines, and the agent-side copy of the policy fell below the cut. `docker/base-image/hooks/file-guardrail.py` and `read-only-guard.py` normalised `file_path` with the same `normpath` call. In the shipped image, `//home/developer/.ssh/authorized_keys` and `//home/developer/.claude/settings.json` exited 0 (allowed) where the one-slash form exited 2. Both `_normalise` functions now collapse leading slashes. `tests/unit/test_ent792_file_guardrail_hook.py` runs the shipped hook's `main()` against the shipped baseline; `test_read_only_guard.py` has `//` rows. Reverting either fix turns its rows red, and the fixed hooks, mounted into `trinity-agent-base`, deny the `//` forms in the real image. Whether Claude Code canonicalises `file_path` before PreToolUse was not checked; the fix does not depend on it.
+
+Variant analysis, rerun in full:
+- `canvas_blocks.py` fails closed on `//`;
+- `agent_shared_files_service.validate_publish_path` refuses a leading `/`;
+- the agent server checks containment after `resolve()`;
+- the MCP server has no path classifier;
+- the agent-side hooks are fixed above;
+- every other `normpath` call in the agent image joins a platform-built path (`pull_worker`, `result_callback`, `retained_results`).
+
+No other finding at or above the 8/10 gate.
 
 Active verification:
-- Mutation battery: five mutations, each red.
+- Mutation battery: six backend mutations and two hook mutations, each red.
 - In-container probe (`trinity-agent-base`, `--network none`): `//…` and `/proc/self/{root,cwd}/…` resolve into `/home/developer`; no other symlink in the image resolves there.
 
 Out-of-scope observations from the plan review were filed in the private tracker, not described here.

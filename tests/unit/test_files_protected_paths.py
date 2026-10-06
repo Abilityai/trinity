@@ -13,7 +13,7 @@ writes.
 ent#792: these tests used to run against an inline COPY of the deny logic, so
 they could not see a bug in the shipped module — and it had one. A path with
 exactly two leading slashes kept them through `posixpath.normpath`, so no
-path-anchored pattern (`.ssh/*`, `.claude/settings.json`) and neither capability
+path-anchored pattern (`.ssh/*`, `.claude/settings.json`) nor the `skills.manage`
 fence matched it, while the agent server's `Path.resolve()` collapsed `//` to `/`
 and wrote the real file. Everything below imports the shipped functions. The
 same issue extended the deny list to DELETE, where deleting a directory that
@@ -286,6 +286,8 @@ class TestDeletablePaths:
         "notes.md", "docs", "docs/old", "content/reports/q1.txt",
         ".claude/skills/x", ".claude/skills", ".claude/agents", ".claude/projects",
         ".sshX", ".claude/settings.jsonX", "x/.ssh", "/etcX",
+        # a string prefix of an anchor is not a directory above it
+        "/home/developer/.ss", "/et", "/home/dev", ".claude/settings",
         "CLAUDE.md",          # the agent server's own by-name block decides this one
     ])
     def test_allowed(self, path):
@@ -297,6 +299,7 @@ class TestDeletablePaths:
 _SEGMENTS = st.sampled_from([
     "", ".", "..", "home", "developer", ".ssh", ".claude", "settings.json",
     "skills", "etc", "opt", "trinity", "proc", "x",
+    "dev", ".ss", "settings", "et",            # string prefixes of real segments
 ])
 _PATHS = st.builds(
     lambda lead, segs: "/" * lead + "/".join(segs),
@@ -323,8 +326,10 @@ def _lexical(path: str) -> str:
 
 
 def _holds_an_anchor(normalized: str) -> bool:
-    head = normalized.rstrip("/")
-    return any(a == normalized or a.startswith(head + "/") for a in _EXPECTED_ANCHORS)
+    """True when `normalized` is an anchor or a directory above one, decided on
+    whole path segments, written apart from the shipped string comparison."""
+    mine = [p for p in normalized.split("/") if p]
+    return any([p for p in a.split("/") if p][:len(mine)] == mine for a in _EXPECTED_ANCHORS)
 
 
 @_PROPERTY
