@@ -16,7 +16,7 @@
 > **Pull pilots (#3127)**: on an agent in `PULL_MODE_PILOT_AGENTS`, `POST /chat` (UI, MCP and agent-to-agent)
 > runs through `chat_execution_service.run_pulled_chat_turn`. The turn is queued and claimed by the agent's worker;
 > the Claude conversation is resumed per `chat_sessions` row from `chat_sessions.cached_claude_session_id`
-> (alembic `0090_chat_session_claude_id`). `GET /chat/history` returns the caller's active session from the database,
+> (alembic `0091_chat_session_claude_id`). `GET /chat/history` returns the caller's active session from the database,
 > and `DELETE /chat/history` clears every cached id of the agent. The caller persists the assistant `chat_messages` row
 > after the terminal; a 504 receipt or a backend restart loses that write.
 

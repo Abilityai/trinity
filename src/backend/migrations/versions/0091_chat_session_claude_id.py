@@ -5,14 +5,14 @@ session's next pulled ``/chat`` turn resumes. Nullable, no backfill.
 
 Mirrors the SQLite ``chat_session_claude_id`` migration.
 
-Revision ID: 0090_chat_session_claude_id
-Revises: 0089_supersede_queue_flood_backlog
+Revision ID: 0091_chat_session_claude_id
+Revises: 0090_platform_alert_subjects
 """
 from alembic import op
 
 
-revision = "0090_chat_session_claude_id"
-down_revision = "0089_supersede_queue_flood_backlog"
+revision = "0091_chat_session_claude_id"
+down_revision = "0090_platform_alert_subjects"
 branch_labels = None
 depends_on = None
 
