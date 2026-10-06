@@ -206,7 +206,7 @@ rule is a plain function (the ent#392 precedent):
 | `agentLanding` | a **precedence** (ent#784, replacing ent#523's `landingThread`; operator ruling 2026-10-05): a validated `lastOpenSessionId` (live, unarchived, this agent's), then the chat holding an unsent **draft** (newest `updatedAt`; a `new:<agent>` winner = a new chat), then the agent's existing **empty** chat, then a new, empty chat |
 | `resolveAgentLanding` | the `?agent=` deep link, delegating to `agentLanding` so there is one answer |
 | `agentEmptyChat` | arm 4's "empty": unarchived, non-room, no `last_message_at` and `message_count` 0/absent; Main first, then newest `created_at` |
-| `orderRosterAgents` | most recent collaboration, then name; `primaryName` is ent#491's seam |
+| `orderRosterAgents` | most recent collaboration, then name; `primaryName` is ent#491's seam. Called **once, in the shell** since ent#621 (`orderedRoster`, handed to both sidebar instances) — the switch-agent keys must walk the order the eye reads, and the sidebar no longer sorts what it is given |
 | `agentPreview` | the newest chat's **title** — the sidebar list carries no message content (#2198), so a body preview would reinstate the N+1 |
 | `composerAvailabilityNotice` | what the composer says for a stopped/unavailable agent |
 
@@ -245,13 +245,19 @@ rule is a plain function (the ent#392 precedent):
   would add a second empty row and then land on one of the two. #2579's "the
   pinned tab has to be there" still holds for every agent whose chats are all
   used, which is what it was about.
-- **Two doors RESOLVE, the rest ASSERT.** Only `landOnAgent` (the sidebar/rail
-  row, back/forward, a typed URL) and `resolveAgentLanding` (`?agent=`) ask
-  `agentLanding` where to land. New chat, ⌘J, the agent picker and switch-agent
-  do not call it at all — they already mean "fresh". That split is also the
-  focus rule: a gesture may focus the composer on any pointer (#2579 AC 2), a
-  landing only on a fine one (ent#784), because a landing nobody asked for in
-  those words must not slide a keyboard up over a phone.
+- **The doors that RESOLVE, and the doors that ASSERT.** `landOnAgent` (the
+  sidebar/rail row, back/forward, a typed URL, and the switch-agent keys) and
+  `resolveAgentLanding` (`?agent=`) ask `agentLanding` where to land. New chat,
+  ⌘J and the agent picker do not call it at all — they already mean "fresh".
+  The switch-agent keys are on the resolving side on purpose: walking the
+  roster is navigation, not a request for a blank page, so each key press
+  passes the `lastOpenSessionId` the shell remembers for that agent and arm 2
+  returns the person to the chat they were last in (see
+  `workspace-chat-tabs-and-titles.md` → Key map). That split is also the focus
+  rule: a gesture may focus the composer on any pointer (#2579 AC 2), a landing
+  only on a fine one (ent#784) — except a key landing, which focuses the
+  composer unconditionally, because the hands are already on the keyboard and
+  nothing about a chord can slide a keyboard up over a phone.
 - **An unused Main is filtered from the sidebar only.** It exists for every pair
   the moment an agent is opened; the tab strip must still show it from the first
   visit, so this is a projection for one consumer (`sidebarThreads`), not a

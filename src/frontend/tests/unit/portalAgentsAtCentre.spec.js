@@ -26,6 +26,8 @@ import {
   agentRowTime,
   agentRowMeta,
   MAIN_TAB_LABEL,
+  visibleAgentRows,
+  searchAgents,
 } from '@/components/portal/portalUtils'
 import {
   isFileDrag,
@@ -239,8 +241,39 @@ describe('ent#523 — roster order and preview', () => {
   it('orders the roster BEFORE the collapse', () => {
     // Bounding first would sort a slice chosen by the old order — the same bug
     // one step later.
-    expect(SIDEBAR).toMatch(/const orderedRoster = computed\(\(\) => orderRosterAgents\(/)
-    expect(SIDEBAR).toMatch(/visibleAgentRows\(orderedRoster\.value/)
+    //
+    // ent#621 T6 re-pin: the sort MOVED UP to the shell. It was a computed in
+    // the sidebar, which meant two of them (the desktop column and the mobile
+    // drawer) and no way for the switch-agent keys to walk the order the eye
+    // reads. So the shell computes it once, hands it to both instances, and the
+    // sidebar bounds what it is given — the ordering still happens first, one
+    // component higher.
+    expect(PORTAL).toMatch(/const orderedRoster = computed\(\(\) => orderRosterAgents\(/)
+    expect(PORTAL).toMatch(/:roster="orderedRoster"/)
+    expect(SIDEBAR).not.toMatch(/orderRosterAgents/)
+    expect(SIDEBAR).toMatch(/visibleAgentRows\(props\.roster/)
+    // ent#621: and the active agent is passed to it. The behaviour of `keep` is
+    // proven below against the function itself; this is the structural half —
+    // which argument the sidebar actually hands it — and there is no second way
+    // to see it, because the sidebar's collapse is not reachable without a
+    // mount of its own.
+    expect(SIDEBAR).toMatch(/visibleAgentRows\(props\.roster,[\s\S]{0,240}?keep: props\.activeAgentName/)
+  })
+
+  it('ent#621 — the active agent is never collapsed out of the sidebar', () => {
+    // The #2424 rule gains one more member. A key walk that lands on an agent
+    // behind "N more" auto-expands the list; this is the belt for a list the
+    // person collapsed by hand, and it is why `keep` exists at all.
+    const roster = Array.from({ length: 12 }, (_, i) => ({ name: `a${String(i).padStart(2, '0')}` }))
+    const last = roster[roster.length - 1].name
+    expect(visibleAgentRows(roster).map((a) => a.name)).not.toContain(last)
+    expect(visibleAgentRows(roster, { keep: last }).map((a) => a.name)).toEqual([
+      'a00', 'a01', 'a02', 'a03', 'a04', last,
+    ])
+    // An agent already in the head is not duplicated.
+    expect(visibleAgentRows(roster, { keep: 'a00' })).toHaveLength(5)
+    // And search keeps it the same way (#2424's window, one more member).
+    expect(searchAgents(roster, 'a1', { keep: last }).visible.map((a) => a.name)).toContain(last)
   })
 
   it('does not list an unused Main as a recent chat', () => {

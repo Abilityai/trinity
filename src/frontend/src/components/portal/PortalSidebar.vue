@@ -86,11 +86,17 @@
           <span class="sr-only">Loading your agents…</span>
         </div>
 
+        <!-- ent#621: the row says it is the one you are in — by click as well as
+             by key. `aria-current` rather than `aria-selected`: these are
+             navigation destinations, not options in a listbox. -->
         <button
           v-for="a in shownAgents"
           :key="a.name"
-          class="w-full flex items-center gap-2.5 rounded-lg px-2 py-2 hover:bg-gray-50 dark:hover:bg-gray-800 transition"
-          :title="agentRowTitle(a)"
+          class="w-full flex items-center gap-2.5 rounded-lg px-2 py-2 transition hover:bg-gray-50 dark:hover:bg-gray-800"
+          :class="a.name === activeAgentName ? ROW_ACTIVE : ''"
+          :aria-current="a.name === activeAgentName ? 'true' : undefined"
+          :title="`${agentRowTitle(a)} · ${AGENT_KEY_HINT} switch agent`"
+          :aria-keyshortcuts="AGENT_KEY_SHORTCUTS"
           @click="onAgentClick(a.name)"
         >
           <PortalAvatar :name="a.name" :avatar-url="a.avatar_url" :size="26" />
@@ -315,9 +321,23 @@
         <div class="text-xs" :class="META_INK">{{ isPlatformSession ? 'Signed in to Trinity' : 'Signed in' }}</div>
         <div class="text-sm truncate" :title="clientEmail">{{ clientEmail }}</div>
       </div>
+      <!-- ent#621: the keys are only discoverable if something shows them, and
+           a key chord cannot show itself. Mouse and touch reach the same list
+           the `⌘/` chord opens (the ent#261 `<kbd>` precedent). -->
       <button
         type="button"
-        class="shrink-0 p-2 rounded-lg text-gray-400 hover:text-gray-700 dark:hover:text-gray-200 hover:bg-white dark:hover:bg-gray-900 transition"
+        :class="FOOTER_BTN"
+        :title="`Keyboard shortcuts (${KEY_LIST_HINT})`"
+        :aria-label="`Keyboard shortcuts (${KEY_LIST_HINT})`"
+        :aria-keyshortcuts="KEY_LIST_SHORTCUTS"
+        data-testid="portal-sidebar-keys"
+        @click="$emit('open-keys')"
+      >
+        <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 8a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2V8zm4 1v.01M11 9v.01M15 9v.01M7 13h10" /></svg>
+      </button>
+      <button
+        type="button"
+        :class="FOOTER_BTN"
         :title="signOutLabel"
         :aria-label="signOutLabel"
         @click="$emit('sign-out')"
@@ -330,7 +350,7 @@
 
 <script setup>
 import PortalSidebarProjectsLink from './projects/PortalSidebarProjectsLink.vue'
-import { computed, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 import PortalAvatar from './PortalAvatar.vue'
 import ChatRow from './PortalChatRow.vue'
 import PortalBrand from './PortalBrand.vue'
@@ -342,7 +362,7 @@ import { usePortalDraftsStore } from '@/stores/portalDrafts'
 import { agentsWithDrafts, threadKey } from './portalDrafts'
 import {
   groupThreadsByDate, partitionStarred, unreadByAgent, availabilityChip,
-  orderRosterAgents, agentRowMeta,
+  agentRowMeta,
   asksByAgent, agentRowTitle as buildAgentRowTitle,
   visibleAgentRows, AGENT_COLLAPSE_LIMIT,
   signOutLabelFor,
@@ -351,6 +371,10 @@ import {
   WORKSPACE_INBOX, askBadgeTitle,
 } from './portalUtils'
 import { inboxCounts } from './portalInbox'
+// ent#621: every key hint on this sidebar is DERIVED from the one map. A typed
+// glyph here would be a second declaration of the same chord, free to go stale
+// the day the map changes.
+import { keyHint, keyShortcutsFor, hostPlatform } from './portalKeymap'
 import { capCount } from '@/utils/tabTitle'
 
 // ent#610 §3g B7a: the sidebar's meta ink, ONE string for every meta text
@@ -358,12 +382,25 @@ import { capCount } from '@/utils/tabTitle'
 // had no dark half; gray-500 light is 4.83:1, gray-400 dark 6.99:1 on gray-900.
 const META_INK = 'text-gray-500 dark:text-gray-400'
 
+// ent#621: the agent row you are IN. The tinted ground is the semantic
+// `action-primary` token, not a raw neutral — the chat rows' white-on-ring
+// treatment reads as "a card lifted out of the list", which is the wrong
+// metaphor for a destination you are currently at, and spending three more raw
+// grays on it would push the file's ratchet the wrong way. Dark uses the
+// documented tinted-ground recipe (`token-500` at 16%, design-system §5).
+const ROW_ACTIVE = 'bg-action-primary-50 dark:bg-action-primary-500/16'
+
 const props = defineProps({
   roster: { type: Array, default: () => [] },
   threads: { type: Array, default: () => [] },     // merged, agent-tagged, star/unread-tagged
   clientEmail: { type: String, default: '' },
   currentSessionId: { type: String, default: null },
   currentRoomId: { type: String, default: null },
+  // ent#621 — which agent is on stage. The sidebar had no notion of one: the
+  // only "current" it knew was a chat id, so an agent row never showed that it
+  // was the one you were in, by click or by key. It drives `aria-current`, the
+  // active row class, the auto-expand below, and `visibleAgentRows`' `keep`.
+  activeAgentName: { type: String, default: null },
   isPlatformSession: { type: Boolean, default: false },
   // ent#661 — the roster's capability, and whether a Projects page is on screen.
   projectsAvailable: { type: Boolean, default: false },
@@ -379,10 +416,21 @@ const props = defineProps({
 })
 const emit = defineEmits([
   'new-chat', 'new-chat-with-agent', 'open-agent', 'open-thread', 'toggle-star', 'open-inbox',
-  'update:search', 'sign-out', 'open-projects',
+  'update:search', 'sign-out', 'open-projects', 'open-keys',
 ])
 
 const isSearching = computed(() => (props.search || '').trim().length >= 2)
+
+// The footer's icon buttons, ONE class string for both (the `ICON_BTN` shape
+// `PortalRail` uses): two identical inline copies is two places for a hover
+// state to drift, and the raw-colour ratchet counts every copy.
+const FOOTER_BTN = 'shrink-0 p-2 rounded-lg text-gray-400 hover:text-gray-700 dark:hover:text-gray-200 hover:bg-white dark:hover:bg-gray-900 transition'
+
+const KEY_PLATFORM = hostPlatform()
+const AGENT_KEY_HINT = keyHint(['agent-prev', 'agent-next'], KEY_PLATFORM)
+const AGENT_KEY_SHORTCUTS = keyShortcutsFor(['agent-prev', 'agent-next'], KEY_PLATFORM)
+const KEY_LIST_HINT = keyHint('key-list', KEY_PLATFORM)
+const KEY_LIST_SHORTCUTS = keyShortcutsFor('key-list', KEY_PLATFORM)
 
 // #2258: the accessible name of the footer button, per principal kind.
 const signOutLabel = computed(() => signOutLabelFor(props.isPlatformSession))
@@ -481,6 +529,9 @@ const agentResults = computed(() => searchAgents(props.roster, props.search, {
   askCounts: asksPerAgent.value,
   draftAgents: draftAgents.value,
   expanded: agentsExpanded.value,
+  // ent#621: the agent you are IN stays in its own result list, the way #2424
+  // keeps an asked agent in it.
+  keep: props.activeAgentName,
 }))
 
 // The section header, both empty lines and the hint read from ONE state value,
@@ -502,25 +553,35 @@ const emptyLines = computed(() => searchEmptyLines(searchState.value, props.sear
 // ONE loop in the template feeds from this, so the row markup, its badges, its
 // availability chip and its open path are inherited by search rather than
 // copied into it — the only way the two modes cannot drift.
-// ent#523 AC 6 — the agents you worked with most recently first, then by name.
 //
-// ent#491 now fills the recency half: rooms count (crediting every agent in
-// them), and the fourth argument is the session-stable snapshot that keeps an
-// incoming reply from re-sorting the list under the cursor. `primaryName` stays
-// null — ent#500 does not exist, so there is nothing to name a primary with, and
-// guessing one would be worse than the seam. Applied BEFORE the
-// collapse so the rows that survive `visibleAgentRows`' limit are the ones the
-// person actually uses — ordering after it would sort a slice chosen by the old
-// order, which is the same bug one step later. Search results are ordered by
-// relevance and are deliberately left alone.
-const orderedRoster = computed(() => orderRosterAgents(
-  props.roster, props.threads, null, asksStore.agentRecency))
-
+// ent#523 AC 6 (most recent first, then by name) and ent#491's session-stable
+// recency are still the order; ent#621 T6 moved the SORT up to `Portal.vue`, so
+// `props.roster` arrives already ordered. Two reasons it had to move: this
+// component is mounted twice (the desktop column and the mobile drawer), and the
+// switch-agent keys have to walk exactly the order the eye reads — which they
+// cannot ask a child for. Ordering still happens BEFORE the collapse, which is
+// the point of #2424; search results are ordered by relevance and are
+// deliberately left alone.
 const shownAgents = computed(() => (isSearching.value
   ? agentResults.value.visible
-  : visibleAgentRows(orderedRoster.value, {
+  : visibleAgentRows(props.roster, {
       expanded: agentsExpanded.value, askCounts: asksPerAgent.value, draftAgents: draftAgents.value,
+      // ent#621: and never the agent you are looking at.
+      keep: props.activeAgentName,
     })))
+
+// ent#621 Decision 27/37 — a key walk that lands on an agent behind "N more"
+// must SHOW it. `keep` alone would append one row to an otherwise unchanged
+// list, so the walk would rename a single row at the bottom while the rest of
+// the order stayed hidden: not "the order the sidebar shows". Expanding is the
+// honest answer, and it happens once here for both instances. Collapsing again
+// is left to the person — a list that re-collapsed itself on the next move
+// would fight the walk.
+watch(() => props.activeAgentName, (name) => {
+  if (!name || agentsExpanded.value) return
+  const i = (props.roster || []).findIndex((a) => a && a.name === name)
+  if (i >= AGENT_COLLAPSE_LIMIT) agentsExpanded.value = true
+})
 
 // #2641: computed over `shownAgents` — the rows actually RENDERED — not over
 // the whole roster. A stopped agent hidden by search or by the collapse limit
