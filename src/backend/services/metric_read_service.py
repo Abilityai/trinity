@@ -1251,10 +1251,14 @@ def bind_dashboard_widgets(
         widget.pop("binding_error_code", None)
         widget.pop("binding_detail", None)
         if source["clear_author_overrides"]:
-            # A selected series owns its colour and its trend: an author value
-            # typed for the old fold must not contradict it (AC8).
-            for key in ("color", "trend", "trend_value"):
-                widget.pop(key, None)
+            # A selected series owns its colour: an author value typed for the
+            # old fold must not contradict it (AC8).
+            widget.pop("color", None)
+        # Every successful bind owns the trend: the panel prefers an author
+        # `trend:` over `history.trend`, so an author arrow would contradict
+        # the computed sparkline beside it (ent#730, fold path included).
+        widget.pop("trend", None)
+        widget.pop("trend_value", None)
         widget["last_point_at"] = source["last_point_at"]
         widget["stale"] = source["stale"]
         widget["freshness"] = source["freshness"]

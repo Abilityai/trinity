@@ -1091,3 +1091,27 @@ def test_T19_the_cached_dashboard_path_drops_it_too(monkeypatch):
     assert widget["binding_error_code"] == "metric_store_unavailable"
     assert "value" not in widget
     assert cached["sections"][0]["widgets"][0]["value"] == 0
+
+
+# ---------------------------------------------------------------------------
+# Round 2: a successful bind owns the trend; a non-text `metric:` refuses
+# one widget instead of failing the whole dashboard read.
+# ---------------------------------------------------------------------------
+
+def test_an_unselected_bound_tile_drops_the_authors_trend(monkeypatch):
+    """An author `trend: down` beside a rising `down_good` sparkline would
+    draw a green arrow over a red line: the panel prefers `widget.trend`."""
+    monkeypatch.setattr(database_mod, "db",
+                        _Db([_definition(aggregation="sum")]))
+    (widget,) = _bind(_w(trend="down", trend_value="-3%", color="green"))
+    assert widget["bound"] is True
+    assert "trend" not in widget and "trend_value" not in widget
+    assert "history" in widget
+    assert widget["color"] == "red"  # the fold breaches; author colour loses
+
+
+def test_an_unselected_zero_point_tile_drops_the_authors_trend(monkeypatch):
+    monkeypatch.setattr(database_mod, "db", _Db([_definition()], []))
+    (widget,) = _bind(_w(trend="up", trend_value="+12%"))
+    assert widget["bound"] is True
+    assert "trend" not in widget and "trend_value" not in widget
