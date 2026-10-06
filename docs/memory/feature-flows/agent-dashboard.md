@@ -391,7 +391,9 @@ so a consumer telling one refusal from another never substring-matches English:
 Compat **X-009** reports the `metric_name_invalid`, `metric_dimension_invalid`
 and `metric_dimension_undeclared` cases (and a `dims:` with no `metric:`) with
 the tile's own sentence, so an agent sees them in its compatibility report
-without opening the dashboard.
+without opening the dashboard. It judges each widget as the tile receives it
+(the agent server returns the parsed YAML as JSON), so an unquoted YAML date
+in `dims:` arrives as ISO text and binds, while a number is still flagged.
 
 A resolved binding **clears** a previous refusal (both keys are popped), so a
 retry after the store comes back cannot leave a widget bound and erroring at
