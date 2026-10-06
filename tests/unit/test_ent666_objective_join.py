@@ -593,7 +593,9 @@ async def test_the_whole_read_end_to_end(store, running):
     result = await svc.read_objective_join(AGENT, now=NOW, client=client)
 
     assert result["unavailable"] is None
-    assert result["role"] == {"id": ROLE, "path": "canon/roles/revenue-lead.yaml"}
+    # trinity-enterprise#812: the seat comes from Trinity's record.
+    assert result["role"] == {"id": ROLE, "path": "canon/roles/revenue-lead.yaml",
+                              "case": "serves", "seats": [ROLE]}
     assert result["canon_root"] == "canon"
     assert result["stale_rule"] == "2x cadence"
     assert result["source"]["template"] == "read"
@@ -770,17 +772,29 @@ async def test_a_traversing_clone_path_reads_no_file_with_it(store, running):
 @pytest.mark.asyncio
 async def test_an_invalid_role_id_is_a_finding_and_still_reads_supported_work(
         store, running):
+    """trinity-enterprise#812: the seat comes from Trinity's record, so an
+    invalid id there owns nothing — named `no_seat` — and `x-role` is not read."""
+    from services import assignment_provider as ap
+
+    class _Bad:
+        def assignment_for(self, agent_name, triggered_by):
+            return None
+
+        def seat_for(self, agent_name):
+            return {"case": "serves", "role_id": "not a valid id", "seats": ["not a valid id"]}
+
+    ap.register_provider(_Bad())
     supported = OBJECTIVE_YAML.replace(
         "owner: role:revenue-lead",
         f"owner: role:someone-else\nsupporting_agents: [{AGENT}]")
     client = _FakeClient(files={
-        "template.yaml": "x-role:\n  role: 'not a valid id'\n"
+        "template.yaml": "x-role:\n  role: revenue-lead\n"
                          "x-canon:\n  clone_path: canon\n",
         "canon/objectives/q4-close-rate.yaml": supported,
     })
     result = await svc.read_objective_join(AGENT, now=NOW, client=client)
 
-    assert "role_id_invalid" in [f["code"] for f in result["findings"]]
+    assert "no_seat" in [f["code"] for f in result["findings"]]
     assert result["objectives"][0]["supporting"] is True
     assert result["objectives"][0]["owned"] is False
 
@@ -1039,3 +1053,23 @@ def test_there_is_exactly_one_stale_rule_and_this_module_imports_it():
     passed = {kw.arg for kw in joins[0].keywords}
     assert {"template", "client"} <= passed, (
         "the join is handed the template and client the card already holds")
+
+
+@pytest.fixture(autouse=True)
+def _seat_on_record():
+    """trinity-enterprise#812: the join reads the seat from Trinity's record,
+    not from `x-role`. Record the seat these tests' templates used to declare,
+    as a companion whose primary holds it; the `x-role` left in a template is
+    now simply not read."""
+    from services import assignment_provider as ap
+
+    class _Seats:
+        def assignment_for(self, agent_name, triggered_by):
+            return None
+
+        def seat_for(self, agent_name):
+            return {"case": "serves", "role_id": "revenue-lead", "seats": ["revenue-lead"]}
+
+    ap.register_provider(_Seats())
+    yield
+    ap.clear_provider()

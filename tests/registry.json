@@ -1,6 +1,27 @@
 {
   "test_files": [
     {
+      "file": "unit/test_ent812_objective_join_seat.py",
+      "feature": "trinity-enterprise#812",
+      "added": "2026-10-06",
+      "categories": [
+        "backend",
+        "objectives",
+        "assignments"
+      ],
+      "description": "The objective join owns objectives through the seat on record (assignment_provider.resolve_seat), not x-role: a held seat owns only itself, a companion owns the union of its people's seats (primary first), x-canon alone enables the join, no seat owns nothing with a no_seat finding while supporting work still shows."
+    },
+    {
+      "file": "unit/test_ent811_resolve_seat.py",
+      "feature": "trinity-enterprise#811",
+      "added": "2026-10-06",
+      "categories": [
+        "backend",
+        "assignments"
+      ],
+      "description": "assignment_provider.resolve_seat answers holds/serves/none with no triggering user; every degraded case (no agent, no provider, no seat_for, a raise, no answer, a malformed shape) reads as no seat with a named reason, never a raise."
+    },
+    {
       "file": "unit/test_3243_atomic_asks.py",
       "feature": "#3243",
       "added": "2026-10-05",

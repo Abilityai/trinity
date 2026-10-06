@@ -387,3 +387,22 @@ def test_the_migration_graph_still_has_exactly_one_head():
     out = subprocess.run(["python3", str(REPO / "scripts/ci/check_alembic_heads.py"),
                           str(REPO / "src/backend/migrations/versions")], capture_output=True, text=True)
     assert out.returncode == 0, out.stdout + out.stderr
+
+
+@pytest.fixture(autouse=True)
+def _seat_on_record():
+    """trinity-enterprise#812: the join reads the seat from Trinity's record,
+    not from `x-role`; record the seat this suite's template declares, as a
+    companion's."""
+    from services import assignment_provider as ap
+
+    class _Seats:
+        def assignment_for(self, agent_name, triggered_by):
+            return None
+
+        def seat_for(self, agent_name):
+            return {"case": "serves", "role_id": "sales-lead", "seats": ["sales-lead"]}
+
+    ap.register_provider(_Seats())
+    yield
+    ap.clear_provider()

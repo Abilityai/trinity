@@ -174,6 +174,8 @@ function roleErrorText(code) {
     role_file_unreadable: 'The role file could not be read from the agent. Try again in a moment.',
     role_file_invalid: 'The role file is not valid YAML (or not a role) — fix the file; nothing is edited here.',
     role_id_invalid: 'The role id in template.yaml is not a valid id.',
+    // trinity-enterprise#812: owned objectives come from the seat on record.
+    no_seat: 'This agent neither holds a seat nor serves someone who holds one, so it owns no objective yet.',
     canon_path_invalid: 'The canon path in template.yaml is not a valid path.',
   }[code] || 'The role could not be loaded.'
 }

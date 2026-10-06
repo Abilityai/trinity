@@ -5102,11 +5102,19 @@ class ObjectiveRead(BaseModel):
 
 
 class ObjectiveRoleRead(BaseModel):
-    """The role from `x-role`. `null` when the agent has none — it can still
-    support an objective by name."""
+    """The seat the agent owns objectives through (trinity-enterprise#812) —
+    from Trinity's record, not from `x-role`. `null` when it has none; it can
+    still support an objective by name.
+
+    `case`: `holds` (the agent holds the seat itself), `serves` (a companion —
+    its assigned people's seats, primary first) or `none`. `seats` is every
+    seat it owns through; `id`/`path` name the first.
+    """
 
     id: Optional[str] = None
     path: Optional[str] = None
+    case: Optional[str] = None
+    seats: List[str] = []
 
 
 class ObjectiveJoinSource(BaseModel):

@@ -89,7 +89,9 @@ def _body(**overrides):
         "generated_at": "2026-09-22T12:00:00.000000Z",
         "stale_rule": svc.STALE_RULE,
         "role": {"id": "revenue-lead",
-                 "path": "canon/roles/revenue-lead.yaml"},
+                 "path": "canon/roles/revenue-lead.yaml",
+                 # trinity-enterprise#812: where the seat came from.
+                 "case": "serves", "seats": ["revenue-lead"]},
         "canon_root": "canon",
         "unavailable": None,
         "source": {"template": "read", "objectives_dir": "read",
