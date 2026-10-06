@@ -802,6 +802,7 @@ class OperatorQueueOperations:
         hide_ended_before: Optional[str] = None,
         types: Optional[Tuple[str, ...]] = None,
         context_contains: Optional[Tuple[str, ...]] = None,
+        exclude_request_id_prefixes: Optional[Tuple[str, ...]] = None,
     ) -> Optional[list]:
         """The WHERE conditions `list_items`, `count_items` and
         `list_item_agent_names` share (#3059) — ONE definition, so a page, its
@@ -857,6 +858,7 @@ class OperatorQueueOperations:
             # `_` or `%` in the fragment matches only itself.
             escaped = fragment.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
             conds.append(operator_queue.c.context.like(f"%{escaped}%", escape="\\"))
+        conds.extend(self._request_id_not_prefixed_ci(exclude_request_id_prefixes))
         return conds
 
     def count_items(self, **filters) -> int:
@@ -898,8 +900,18 @@ class OperatorQueueOperations:
         hide_ended_before: Optional[str] = None,
         types: Optional[Tuple[str, ...]] = None,
         context_contains: Optional[Tuple[str, ...]] = None,
+        exclude_request_id_prefixes: Optional[Tuple[str, ...]] = None,
     ) -> List[Dict]:
         """List queue items with optional filters.
+
+        exclude_request_id_prefixes (trinity-enterprise#815): leave out rows
+        whose `request_id` starts with one of these prefixes — the platform's
+        heads-ups ABOUT a person, which a machine key never receives. A SQL
+        condition, not a filter on the result, for the `addressed_to_email`
+        reason below: dropped after the limit, they emptied a machine's page
+        while its own rows sat just below the cut. Case-insensitive and
+        leading-whitespace-tolerant, and a NULL `request_id` is kept — the
+        rule `operator_queue_service.is_about_a_person` applies in Python.
 
         types (#3059): narrow to a set of item types in SQL, so a caller that
         shows only some kinds pages and counts over exactly what it shows.
@@ -942,6 +954,7 @@ class OperatorQueueOperations:
             include_cleared=include_cleared, addressed_to_email=addressed_to_email,
             hide_ended_before=hide_ended_before, types=types,
             context_contains=context_contains,
+            exclude_request_id_prefixes=exclude_request_id_prefixes,
         )
         if conds is None:
             return []
@@ -1750,6 +1763,33 @@ class OperatorQueueOperations:
         channel column; a native (`mcp`) ask has no file entry to reconcile,
         flag or write back into."""
         return or_(operator_queue.c.channel.is_(None), operator_queue.c.channel == "file")
+
+    # The leading characters `str.strip()` removes that every SQL dialect can
+    # trim too: ASCII whitespace. A row led by other Unicode whitespace (U+00A0
+    # …) is the one case the SQL keeps and the Python belt drops — ingest
+    # refuses such ids (`_ID_RE`), so only a legacy row can carry one.
+    _ASCII_WHITESPACE = " \t\n\r\v\f"
+
+    @staticmethod
+    def _request_id_not_prefixed_ci(prefixes):
+        """`request_id` does not start with any of `prefixes`, compared the way
+        `operator_queue_service.is_about_a_person` compares in Python
+        (trinity-enterprise#815): case-insensitive, leading whitespace ignored,
+        and a NULL `request_id` kept (`coalesce`: a bare `substr(NULL) != p` is
+        NULL, which would DROP the row). `lower`, `ltrim(text, chars)`,
+        `coalesce` and `substr` exist on SQLite and PostgreSQL alike.
+
+        Deliberately not `_not_prefixed` below: that one is the sweeps' and the
+        own-budget predicate's (case-sensitive, NULL-dropping), and is left
+        exactly as it is."""
+        normalised = func.lower(func.ltrim(
+            func.coalesce(operator_queue.c.request_id, ""),
+            OperatorQueueOperations._ASCII_WHITESPACE,
+        ))
+        return [
+            func.substr(normalised, 1, len(p)) != p.lower()
+            for p in (prefixes or ())
+        ]
 
     @staticmethod
     def _not_prefixed(prefixes):

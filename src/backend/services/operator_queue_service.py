@@ -337,6 +337,91 @@ def is_about_a_person(item: dict) -> bool:
     return str(candidate).strip().lower().startswith(_ABOUT_A_PERSON_ID_PREFIXES)
 
 
+# trinity-enterprise#815: the same tuple, public, for the SQL twin of
+# `is_about_a_person` — the list routes pass it to `_list_conditions` so the
+# exclusion runs BEFORE the limit. One tuple, read by SQL and Python alike.
+ABOUT_A_PERSON_ID_PREFIXES = _ABOUT_A_PERSON_ID_PREFIXES
+
+
+# ============================================================================
+# trinity-enterprise#815 — a broad listing is complete before the limit
+# ============================================================================
+
+class QueueListError(Exception):
+    """A refusal `list_for_principal` names; the router maps it to HTTP."""
+
+    def __init__(self, status_code: int, message: str):
+        super().__init__(message)
+        self.status_code = status_code
+        self.message = message
+
+
+_BELT_DROP_WARNING = (
+    "{n} item(s) on this page were withheld after the read (a stored request_id "
+    "the database filter could not match); total not verified"
+)
+
+
+def list_for_principal(
+    current_user,
+    *,
+    accessible,
+    exclude_about_a_person: bool,
+    project,
+    filters: dict,
+    limit: int,
+    offset: int = 0,
+) -> dict:
+    """One page of `GET /api/operator-queue` for this caller, with the fields
+    that make it honest (trinity-enterprise#815).
+
+    Every visibility filter is a SQL condition on the one WHERE builder, so the
+    page, `total` and the flags are computed over the same rows:
+    - `has_more` is read off the page itself (`limit + 1` rows asked for), never
+      a separate count, so a row landing between the two cannot make it lie;
+    - `next_offset` is `offset + limit` while `has_more`, else None;
+    - `total` is a `COUNT` over the same filters — a snapshot.
+
+    `project` is the router's per-principal projection (`_for_principal`). It
+    stays a BELT: if it drops a row the SQL page returned (only a legacy
+    `request_id` led by non-ASCII whitespace can get past the SQL exclusion),
+    `total` becomes None and `warnings` says so. The paging fields are
+    unaffected — they describe the SQL page.
+    """
+    exclude = ABOUT_A_PERSON_ID_PREFIXES if exclude_about_a_person else None
+    where = dict(filters, accessible_agent_names=accessible,
+                 exclude_request_id_prefixes=exclude)
+    rows = db.list_operator_queue_items(**where, limit=limit + 1, offset=offset)
+    has_more = len(rows) > limit
+    page = rows[:limit]
+    total = db.count_operator_queue_items(**where)
+    flags = db.count_operator_queue_flags(accessible_agent_names=accessible)
+
+    items = project(page)
+    warnings = []
+    dropped = len(page) - len(items)
+    if dropped:
+        total = None
+        warnings.append(_BELT_DROP_WARNING.format(n=dropped))
+        logger.warning(
+            "[operator-queue] list: the projection withheld %d row(s) the SQL "
+            "exclusion kept (ent#815); total reported as null", dropped,
+        )
+    body = {
+        "items": items,
+        "count": len(items),
+        "total": total,
+        "has_more": has_more,
+        "next_offset": offset + limit if has_more else None,
+        "next_cursor": None,
+        "undelivered_count": flags["undelivered"],
+        "closed_by_filer_count": flags["closed_by_filer"],
+    }
+    if warnings:
+        body["warnings"] = warnings
+    return body
+
+
 def _truncate_with_marker(text: str, max_len: int) -> str:
     """Truncate so the RESULT (content + marker) is ≤ max_len chars."""
     if len(text) <= max_len:

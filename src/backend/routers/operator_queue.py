@@ -152,31 +152,31 @@ async def list_queue_items(
     offset: int = Query(0, ge=0),
     current_user: User = Depends(get_current_user),
 ):
-    """List operator queue items with optional filters."""
-    accessible = _accessible_set(current_user)
-    items = db.list_operator_queue_items(
-        status=status,
-        type=type,
-        priority=priority,
-        agent_name=agent_name,
-        since=since,
-        limit=limit,
-        offset=offset,
-        accessible_agent_names=accessible,
-    )
-    # #2915: aging is computed once, here, from the operator's bound — the
-    # frontend renders `aging`/`aged_since`, it never recomputes them. The two
-    # counts are the visible escalation (undelivered answers, items the agent
-    # closed on its side) the Operations header shows instead of minting queue
-    # items about queue items.
-    items = _for_principal(operator_queue_service.annotate_aging(items), current_user)
-    flags = db.count_operator_queue_flags(accessible_agent_names=accessible)
-    return {
-        "items": items,
-        "count": len(items),
-        "undelivered_count": flags["undelivered"],
-        "closed_by_filer_count": flags["closed_by_filer"],
-    }
+    """List operator queue items with optional filters.
+
+    trinity-enterprise#815: complete within `limit` — every visibility filter
+    runs in SQL before the cut — and says so: `total`, `has_more`,
+    `next_offset` (see `operator_queue_service.list_for_principal`).
+    """
+    try:
+        return operator_queue_service.list_for_principal(
+            current_user,
+            accessible=_accessible_set(current_user),
+            exclude_about_a_person=not is_person_principal(current_user),
+            # #2915: aging is computed once, here, from the operator's bound —
+            # the frontend renders `aging`/`aged_since`, it never recomputes
+            # them. The two flag counts are the visible escalation (undelivered
+            # answers, items the agent closed on its side) the Operations header
+            # shows instead of minting queue items about queue items.
+            project=lambda rows: _for_principal(
+                operator_queue_service.annotate_aging(rows), current_user),
+            filters=dict(status=status, type=type, priority=priority,
+                         agent_name=agent_name, since=since),
+            limit=limit,
+            offset=offset,
+        )
+    except operator_queue_service.QueueListError as e:
+        raise HTTPException(status_code=e.status_code, detail=e.message)
 
 
 @router.get("/stats")
@@ -454,6 +454,11 @@ async def get_agent_queue_items(
         agent_name=agent_name,
         status=status,
         limit=limit,
+        # trinity-enterprise#815: a machine's about-a-person exclusion runs in
+        # SQL, before the limit, so those rows can no longer empty the page.
+        exclude_request_id_prefixes=(
+            None if is_person_principal(current_user)
+            else operator_queue_service.ABOUT_A_PERSON_ID_PREFIXES),
     )
     items = _for_principal(operator_queue_service.annotate_aging(items), current_user)
     return {"agent_name": agent_name, "items": items, "count": len(items)}
