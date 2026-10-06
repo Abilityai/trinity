@@ -429,8 +429,9 @@ export async function createServer(config: ServerConfig = {}) {
     // ServerConfig.agentChatPullEnabled). Same env key the backend declares in
     // config.py (MCP_AGENT_CHAT_PULL_ENABLED) so a single-.env deploy can't drift.
     agentChatPullEnabled = process.env.MCP_AGENT_CHAT_PULL_ENABLED === "true",
-    // #3232 report-back — default ON (see ServerConfig.reportBackEnabled).
-    reportBackEnabled = true,
+    // #3232 report-back kill switch — default ON; only the literal "false"
+    // turns it off (see ServerConfig.reportBackEnabled).
+    reportBackEnabled = process.env.MCP_REPORT_BACK_ENABLED !== "false",
     // #848 inline email auth — default OFF. When off, a request with no
     // Authorization header is rejected exactly as before and no session is
     // created. When on, it yields an anonymous sentinel session that may only
@@ -568,6 +569,14 @@ export async function createServer(config: ServerConfig = {}) {
   // #946 pilot — surface the routing mode at startup so the soak's control vs
   // treatment window is unambiguous in the logs.
   console.log(`Agent→agent chat pull routing (#946): ${agentChatPullEnabled ? "ON (async /task)" : "OFF (sync /chat)"}`);
+  // #3232 — whether delegations can post back into the caller's conversation.
+  console.log(
+    `Delegation report-back (#3232): ${
+      reportBackEnabled
+        ? "ON (async dispatches carry the caller's turn by default)"
+        : "OFF (MCP_REPORT_BACK_ENABLED=false — no parent is ever sent)"
+    }`
+  );
   // #848 — a keyless session tier is a posture change; make it unambiguous in
   // the startup log which mode the server came up in.
   console.log(
