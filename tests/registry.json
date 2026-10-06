@@ -4492,6 +4492,17 @@
         "payments"
       ],
       "description": "A settled A2A Task must not report `metadata: null` (#3215, operator scope-add). The x402 payment status and receipt live at `status.message.metadata` — the spec location the provider SDK's own `X402A2AUtils` reads — and are now mirrored onto the Task's top-level `metadata` from the same assignment, so a strictly typed a2a-sdk `Task` carries the receipt instead of null on a turn that was charged. Asserted through `Task.model_validate` and through the SDK reader, over the real producer (`task_from_paid_payload`) on the settled, unsettled and failed outcomes, and the two locations are proven to be the SAME dict object so they cannot drift. Also pins that a free turn emits no `metadata` key at all, keeping unpaid Task bytes and the idempotency snapshots over them unchanged. Mutation-proven: removing the mirror goes red in 6. No Docker, no network."
+    },
+    {
+      "file": "unit/test_ent787_guardrail_exec_form.py",
+      "feature": "abilityai/trinity-enterprise#787",
+      "added": "2026-10-06",
+      "categories": [
+        "agent",
+        "security",
+        "unit"
+      ],
+      "description": "trinity-enterprise#787: the GUARD-002 hooks register in exec form under env -i + -I -S with a policy-pinned empty CLAUDE_CODE_SHELL_PREFIX (exact shape, key set of a known-loading entry, a port of CLI 2.1.281's hook spawn branch ratcheted to the image's CLI pin); each hook executed under its registered flags/env keeps its deny/allow tables; a hostile PYTHONPATH and a user-site usercustomize flip a deny under the old invocation (precondition) and not under the registered flags; read-only config is root-owned (guard and Codex never read the home file; the backend's root-exec argv writes the config as data, injection payloads included); startup.sh's legacy cleanup, executed under bash, removes both shipped claude-settings.json versions and keeps anything else. Mutation-proven."
     }
   ]
 }

@@ -241,6 +241,8 @@ COPY ./hooks/read-only-guard.py /opt/trinity/hooks/read-only-guard.py
 COPY ./hooks/skill-gate.py /opt/trinity/hooks/skill-gate.py
 COPY ./hooks/_skill_gate.py /opt/trinity/hooks/_skill_gate.py
 COPY ./hooks/write-runtime-config.py /opt/trinity/hooks/write-runtime-config.py
+# trinity-enterprise#787: build-time smoke for the GUARD-002 registration.
+COPY ./hooks/guard002-smoke.py /opt/trinity/hooks/guard002-smoke.py
 COPY ./hooks/guardrails-baseline.json /opt/trinity/guardrails-baseline.json
 RUN chmod 0555 /opt/trinity/hooks/*.py && \
     chmod 0444 /opt/trinity/guardrails-baseline.json && \
@@ -278,9 +280,15 @@ RUN chown -R root:root /etc/claude-code && \
 # trinity-enterprise#752 — the gated-skill hook registers in its OWN drop-in.
 # The CLI validates each `managed-settings.d` file on its own and voids only the
 # file an entry fails in, so a rejected skill-gate entry can never take the
-# GUARD-002 hooks in `managed-settings.json` with it (that file is unchanged, and
-# startup.sh's legacy cleanup still compares it byte for byte). Same ownership
-# rules as the main file: root:root 0444 in a root-owned 0755 directory.
+# GUARD-002 hooks in `managed-settings.json` with it. Same ownership rules as
+# the main file: root:root 0444 in a root-owned 0755 directory.
+#
+# trinity-enterprise#787 — the GUARD-002 hooks in `managed-settings.json` run
+# the same way: exec form (`command` + `args`, so no shell and no
+# `CLAUDE_CODE_SHELL_PREFIX`) under `/usr/bin/env -i HOME=/home/developer
+# /usr/local/bin/python3 -I -S` (no inherited PYTHON*/LD_* variables, no user
+# site), and the file's policy `env` pins `CLAUDE_CODE_SHELL_PREFIX` empty for
+# everything still in shell form.
 RUN mkdir -p /etc/claude-code/managed-settings.d
 COPY ./hooks/managed-settings.d/50-skill-gate.json /etc/claude-code/managed-settings.d/50-skill-gate.json
 RUN chown -R root:root /etc/claude-code/managed-settings.d && \
@@ -359,6 +367,11 @@ ENV PYTHONPATH="/app:${PYTHONPATH}"
 EXPOSE 22 8000
 
 USER root
+
+# trinity-enterprise#787: fail the build unless every GUARD-002 hook, run exactly
+# as the shipped managed file registers it, denies and allows what it should.
+# Runs before /logs is created for the agent user and removes what it writes.
+RUN /usr/local/bin/python3 -I -S /opt/trinity/hooks/guard002-smoke.py
 
 RUN mkdir -p /workspace /data /logs && \
     chown -R developer:developer /workspace /data /logs && \
