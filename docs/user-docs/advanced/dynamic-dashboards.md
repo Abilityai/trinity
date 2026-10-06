@@ -160,7 +160,7 @@ A metric with `dimensions` holds one series per dimension value, for example one
            value: 0
    ```
 
-The three tiles show three different numbers (587.25, 410, and 95.5), each with its own point time, stale mark, sparkline, and verdict badge, and each captioned with its series (`channel=meta`).
+The three tiles show three different numbers (587.25, 410, and 95.5), each with its own point time, stale mark, and sparkline, and each captioned with its series (`channel=meta`). Each tile is judged on its own number, so only Meta, at or above the 500 critical threshold, shows a **Critical** badge.
 
 Rules for a selector:
 

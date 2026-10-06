@@ -1549,9 +1549,9 @@ from the registry on every read: `value`, `color` (from the declared status
   non-text value: a number, boolean, list or mapping; ent#730. Before it, a
   list or mapping crashed the whole dashboard read, and a scalar such as
   `metric: 5` or `metric: true` read `metric_undeclared`. A falsy value — `0`,
-  `false`, `[]`, `{}` — leaves the widget unbound, as before), and the three
-  `dims` refusals below.
-- A bound widget's `history` is built from `chart`, the same fold its `value`
+  `false`, `[]`, `{}` — leaves the widget unbound, as before; it drops the same
+  keys as the `dims` refusals), and the three `dims` refusals below.
+- A bound widget's `history` (without `dims:`) is built from `chart`, the same fold its `value`
   comes from, so its sparkline and trend arrow describe the metric the number
   names.
 - **A bound widget may name one series with `dims: {key: value}`** next to
@@ -1576,7 +1576,7 @@ from the registry on every read: `value`, `color` (from the declared status
 
   | Code | When |
   |---|---|
-  | `metric_dimension_invalid` | `dims` is not a mapping, a value is not a non-empty string (YAML `2024` / `yes`), or there are more than 10 keys. A hint is added only for a non-text value, chosen by its type: quote it / one value per tile / the value is missing. |
+  | `metric_dimension_invalid` | `dims` is not a mapping, a value is not a non-empty string (YAML `2024` / `yes`), is over-long or holds a control character, or there are more than 10 keys. A hint is added only for a non-text value, chosen by its type: quote it / one value per tile / the value is missing. |
   | `metric_dimension_undeclared` | A key the metric does not declare. The sentence lists the declared keys, or says the metric declares none. |
   | `metric_series_not_found` | Valid and declared, but no recent series matches, including on a metric with no points at all. `binding_error` is "metric 'ad_spend': no recent data for channel=tiktok" (never "does not exist"); the rest travels as `binding_detail` facts (`selector`, `recent_series` ≤ 5, `more`, `window_points`, `series_cap`, `near` ≤ 5) and the browser writes the second line. |
 
@@ -1594,7 +1594,7 @@ from the registry on every read: `value`, `color` (from the declared status
   | `basis` | `"selected"` | `"series"` (a single series, the newest of several under `last`, or a non-numeric metric declaring `sum`/`avg`, whose fold is the newest value) | `"folded"` | no `bound_series` |
   | `aggregation` | normalised | `chart.aggregation` | `chart.aggregation` | |
   | `series_count` | `entry.series_count` | `entry.series_count` | `entry.series_count` | |
-  | `dims` | the matched series' dims | `chart.dims` (may be `null`) | `null` | |
+  | `dims` | the matched series' dims | `chart.dims` (may be `null`; the newest series' dims for a non-numeric `sum`/`avg`) | `null` | |
   | `dimensions` | declared keys | declared keys | declared keys | |
   | `stale_count` | absent | absent | stale series in `latest_by_series` when `series_count ≤ 50`, else `null` | |
 
@@ -1617,10 +1617,10 @@ from the registry on every read: `value`, `color` (from the declared status
 - **Bound tiles colour their trend by the declared direction.** The trend arrow
   and sparkline of a bound widget use the shared `metricFormat.trendClasses` /
   `sparklineColor`, so a rising `down_good` cost reads red and a `neutral`
-  metric reads grey, exactly like its declared-metric tile. Unbound widgets keep
+  metric reads a grey arrow over a blue sparkline, exactly like its declared-metric tile. Unbound widgets keep
   their colours.
 - **Compat X-009 (SOFT, static)** reports, with the tile's own code and
-  sentence, a `metric:` that is not text, a `dims:` with no `metric:`, and a
+  sentence, a truthy `metric:` that is not text, a `dims:` with no `metric:`, and a
   `dims:` selector that can never match the dimensions its metric declares in
   `template.yaml` (validated by the shared `parse_dims_selector`). It never
   consults points, so a valid selector with no data yet passes. The refusal
