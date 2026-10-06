@@ -48,6 +48,8 @@ from services import operator_resume_service
 from services.operator_queue_choices import (
     SOMETHING_ELSE,
     NotOffMenuError,
+    options_cap_violation,
+    title_cap_violation,
     validate_response_choice,
 )
 from services.platform_audit_service import AuditEventType, platform_audit_service
@@ -419,6 +421,11 @@ def raise_ask(
        `status: "replayed"`, plus `differs` (what this call changed). Before
        every time- or state-dependent check, so a retry minutes later gets its
        receipt back rather than a refusal it did not earn the first time;
+    2b. the authoring caps (#3243) — option count and length (gate raises
+       too), a lookalike of the reserved `SOMETHING_ELSE`, and an agent's
+       title length. After the replay, deliberately: an ask raised before the
+       caps existed still gets its receipt back on retry. Before the rate cap,
+       like every other 422, so a refusal spends no token;
     3. the #1632 rate caps — the SAME buckets as the file poller, so the two
        channels share one budget. Before every check that reads the database,
        so a refusal below spends a token and cannot be repeated for free (the
@@ -455,6 +462,7 @@ def raise_ask(
     existing = db.get_operator_queue_item_for_agent_by_request_id(agent_name, norm["request_id"])
     if existing:
         return _replay(existing, norm, oqs, raised_by)
+    _refuse_over_caps(norm, oqs, raised_by)
 
     if raised_by == "agent" and not _rate_allowed(agent_name, oqs):
         raise AskRejected(429, "rate_limited",
@@ -563,6 +571,38 @@ def _platform_turn(agent_name: str, execution_id: Optional[str]) -> Optional[str
         return None
 
 
+_CAP_MESSAGES = {
+    "too_many_options": (
+        "Too many options. Split independent decisions into separate asks, or drop "
+        "variants — the person can always answer (something else); for an open choice "
+        "among many, ask a question instead. Do not retry unchanged."),
+    "option_too_long": (
+        "An option is too long. Name the choice only; put the reasoning in question and "
+        "what the option does in proposal. Do not retry unchanged."),
+    "invalid_options": (
+        f"An option reads as {SOMETHING_ELSE!r}, which the platform offers on every "
+        "approval; do not list it or a lookalike as an option."),
+    "title_too_long": (
+        "The title is too long. Shorten it to one line a person reads at a glance and "
+        "move the detail into question. Do not retry unchanged."),
+}
+
+
+def _refuse_over_caps(norm: Dict[str, Any], oqs, raised_by: str) -> None:
+    """Step 2b of `raise_ask`: the #3243 authoring caps, one shared predicate
+    with the queue-file ingest. The title limit applies to an agent's raise
+    only — a gate's title is platform-authored."""
+    hit = options_cap_violation(norm.get("options"),
+                                max_options=oqs.OPERATOR_QUEUE_MAX_OPTIONS,
+                                max_chars=oqs.OPERATOR_QUEUE_OPTION_MAX_CHARS)
+    if hit is None and raised_by == "agent":
+        hit = title_cap_violation(norm.get("title"),
+                                  max_chars=oqs.OPERATOR_QUEUE_ASK_TITLE_MAX_CHARS)
+    if hit is not None:
+        code, extras = hit
+        raise AskRejected(422, code, _CAP_MESSAGES[code], **extras)
+
+
 def _too_large(field: str, limit: int, unit: str) -> AskRejected:
     return AskRejected(422, "field_too_large", f"{field} is over {limit} {unit}.",
                        field=field, limit=limit, unit=unit)
@@ -605,6 +645,13 @@ def _validated_ask(ask: Any, oqs, *, raised_by: str = "agent") -> Dict[str, Any]
     if not isinstance(title, str) or not title.strip():
         raise AskRejected(422, "invalid_title", "An ask needs a title.")
     if len(title) > oqs.OPERATOR_QUEUE_TITLE_MAX:
+        if raised_by == "agent":
+            # #3243: name the agent's limit on the FIRST refusal, so a title
+            # over the outer 300 belt is not refused twice by two codes.
+            raise AskRejected(
+                422, "title_too_long", _CAP_MESSAGES["title_too_long"],
+                limit=min(oqs.OPERATOR_QUEUE_TITLE_MAX, oqs.OPERATOR_QUEUE_ASK_TITLE_MAX_CHARS),
+                length=len(title))
         raise _too_large("title", oqs.OPERATOR_QUEUE_TITLE_MAX, "characters")
     question = ask.get("question")
     if question is not None and not isinstance(question, str):

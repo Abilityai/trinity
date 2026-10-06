@@ -57,6 +57,9 @@ SENTINELS = (
     "expires_at",
     # #3242: the platform-reserved off-menu approval answer.
     "(something else)",
+    # #3243: atomic asks — the rules point at the tool; the file hold reason.
+    "One decision per ask",
+    "invalid_options",
 )
 
 # The pre-#1402 wording that invited in-turn polling. Must not reappear.

@@ -1,6 +1,18 @@
 {
   "test_files": [
     {
+      "file": "unit/test_3243_atomic_asks.py",
+      "feature": "#3243",
+      "added": "2026-10-05",
+      "categories": [
+        "backend",
+        "operator-queue",
+        "mcp",
+        "prompt"
+      ],
+      "description": "Atomic asks (#3243): an agent-raised ask is refused over the option-count / option-length / agent-title caps with too_many_options / option_too_long / title_too_long naming the limit in force (a title over the 300 outer belt names the agent limit on the FIRST refusal; a gate title keeps field_too_large), an option reading as the (something else) chip is refused on both create paths after NFKC + zero-width stripping (fullwidth forms and parentheses, ZWSP/ZWJ/BOM insertions) while an option merely containing the words is admitted and cross-script confusables are pinned out of scope, over-cap queue-file entries are held and named on the marker, the env knobs are floored, and the tool description / platform prompt quote the literal DEFAULTS ('by default') so the guard stays green on a re-tuned install."
+    },
+    {
       "file": "unit/test_3237_system_agent_after_setup.py",
       "feature": "#3237",
       "added": "2026-10-06",

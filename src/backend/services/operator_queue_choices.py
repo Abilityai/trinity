@@ -18,7 +18,8 @@ singleton and imports `AgentClient` at module scope, and the Workspace asks path
 must not drag either in to answer a question about a list of strings.
 """
 
-from typing import Optional, Sequence
+import unicodedata
+from typing import Optional, Sequence, Tuple
 
 # The placeholder `operator_queue_service` substitutes when an agent's own
 # options blob blows the ingestion size cap (#1632). It is NOT an offered
@@ -36,6 +37,63 @@ OPTIONS_DROPPED_MARKER = "(options omitted: exceeded size cap)"
 # only option is this literal must stay closed to every other string.
 SOMETHING_ELSE = "(something else)"
 
+# Zero-width / invisible format characters an agent could slip into a lookalike
+# of the chip (#3243): ZWSP, ZWNJ, ZWJ, LRM, RLM, word joiner, BOM. `str.split()`
+# does not treat them as whitespace, so they are removed before the compare.
+_ZERO_WIDTH = dict.fromkeys(map(ord, "\u200b\u200c\u200d\u200e\u200f\u2060\ufeff"))
+
+
+def reads_as_something_else(option) -> bool:
+    """Whether an agent-authored option would read as the platform's chip
+    (#3243, from the #3242 security pass): "Something else" in any case, with or
+    without surrounding whitespace or parentheses. The exact literal included —
+    a lookalike next to the real chip lets an ask show two "something else"
+    choices that mean different things.
+
+    NFKC folds fullwidth letters and fullwidth parentheses onto ASCII, and the
+    zero-width characters are dropped first, so neither hides the chip.
+    Cross-script confusables (Cyrillic "е", Greek "ο", …) are deliberately out
+    of scope: closing them needs a confusables table, not a normal form."""
+    if not isinstance(option, str):
+        return False
+    folded = unicodedata.normalize("NFKC", option.translate(_ZERO_WIDTH))
+    core = folded.strip().strip("()").strip()
+    return " ".join(core.split()).casefold() == "something else"
+
+
+def options_cap_violation(
+    options, *, max_options: int, max_chars: int
+) -> Optional[Tuple[str, dict]]:
+    """The one authoring rule for an ask's options (#3243), shared by the
+    native raise and the queue-file ingest so the two cannot drift.
+
+    Returns `(code, extras)` for the first violation, or None. In order: more
+    than `max_options` choices (`SOMETHING_ELSE` itself is never counted — the
+    platform adds it), an option that reads as `SOMETHING_ELSE` without being
+    it, then an option longer than `max_chars` (Python `len`, code points).
+    Count before length: splitting an ask is the bigger fix. The extras are
+    integers only — option text is agent-authored and never echoed back.
+    A non-list, or a non-string element, is not this rule's question."""
+    if not isinstance(options, list):
+        return None
+    count = sum(1 for o in options if o != SOMETHING_ELSE)
+    if count > max_options:
+        return "too_many_options", {"limit": max_options, "count": count}
+    for index, option in enumerate(options):
+        if option != SOMETHING_ELSE and reads_as_something_else(option):
+            return "invalid_options", {"index": index}
+    for index, option in enumerate(options):
+        if isinstance(option, str) and len(option) > max_chars:
+            return "option_too_long", {"limit": max_chars, "index": index, "length": len(option)}
+    return None
+
+
+def title_cap_violation(title, *, max_chars: int) -> Optional[Tuple[str, dict]]:
+    """The hard title limit on an agent-raised ask (#3243): `title_too_long`
+    with the limit and the length, or None."""
+    if isinstance(title, str) and len(title) > max_chars:
+        return "title_too_long", {"limit": max_chars, "length": len(title)}
+    return None
 
 class ResponseNotOfferedError(ValueError):
     """An approval decision that is not one of the item's own options.
