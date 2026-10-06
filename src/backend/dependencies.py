@@ -1675,6 +1675,19 @@ def get_self_acting_agent(
     return get_authorized_agent(name, current_user)
 
 
+def get_self_agent(current_user: User = Depends(get_current_user)) -> str:
+    """The calling agent, derived from its KEY alone (trinity-enterprise#752).
+
+    For a route an agent calls about itself that names no agent: an
+    agent-scoped key is its own agent, the system key is `trinity-system`.
+    Nothing in the request can name another one — and nothing has to, which
+    matters because a renamed agent's container keeps its old `AGENT_NAME`
+    while its key follows the rename. Every other principal gets
+    `get_self_acting_agent`'s uniform 403, then the access check its 404.
+    """
+    return get_self_acting_agent(acting_agent_name(current_user) or "", current_user)
+
+
 def get_owned_agent(
     name: str = Path(..., description="Agent name from path"),
     current_user: User = Depends(get_current_user)

@@ -1901,6 +1901,9 @@ class DatabaseManager:
     def get_execution(self, execution_id: str):
         return self._schedule_ops.get_execution(execution_id)
 
+    def get_execution_gate_state(self, execution_id: str):
+        return self._schedule_ops.get_execution_gate_state(execution_id)
+
     def get_fan_out_executions(self, agent_name: str, fan_out_id: str, limit: int = 200):
         """Every execution row of one fan-out batch (#2670)."""
         return self._schedule_ops.get_fan_out_executions(agent_name, fan_out_id, limit)
@@ -2278,6 +2281,14 @@ class DatabaseManager:
 
     def create_gate_request(self, **fields):
         return self._skill_gate_request_ops.create_gate_request(**fields)
+
+    def record_self_approved_run(self, *, request_id: str, agent_name: str, skills,
+                                 request_text: str, requester_email: str, triggered_by,
+                                 dispatched_execution_id: str) -> bool:
+        return self._skill_gate_request_ops.record_self_approved_run(
+            request_id=request_id, agent_name=agent_name, skills=skills,
+            request_text=request_text, requester_email=requester_email,
+            triggered_by=triggered_by, dispatched_execution_id=dispatched_execution_id)
 
     def get_gate_request(self, request_id: str):
         return self._skill_gate_request_ops.get_gate_request(request_id)

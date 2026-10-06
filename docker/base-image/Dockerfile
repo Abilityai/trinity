@@ -237,6 +237,9 @@ COPY ./hooks/bash-guardrail.py /opt/trinity/hooks/bash-guardrail.py
 COPY ./hooks/file-guardrail.py /opt/trinity/hooks/file-guardrail.py
 COPY ./hooks/output-scanner.py /opt/trinity/hooks/output-scanner.py
 COPY ./hooks/read-only-guard.py /opt/trinity/hooks/read-only-guard.py
+# trinity-enterprise#752: the gated-skill hook (bootstrap + decision).
+COPY ./hooks/skill-gate.py /opt/trinity/hooks/skill-gate.py
+COPY ./hooks/_skill_gate.py /opt/trinity/hooks/_skill_gate.py
 COPY ./hooks/write-runtime-config.py /opt/trinity/hooks/write-runtime-config.py
 COPY ./hooks/guardrails-baseline.json /opt/trinity/guardrails-baseline.json
 RUN chmod 0555 /opt/trinity/hooks/*.py && \
@@ -271,6 +274,18 @@ COPY ./hooks/managed-settings.json /etc/claude-code/managed-settings.json
 RUN chown -R root:root /etc/claude-code && \
     chmod 0755 /etc/claude-code && \
     chmod 0444 /etc/claude-code/managed-settings.json
+
+# trinity-enterprise#752 — the gated-skill hook registers in its OWN drop-in.
+# The CLI validates each `managed-settings.d` file on its own and voids only the
+# file an entry fails in, so a rejected skill-gate entry can never take the
+# GUARD-002 hooks in `managed-settings.json` with it (that file is unchanged, and
+# startup.sh's legacy cleanup still compares it byte for byte). Same ownership
+# rules as the main file: root:root 0444 in a root-owned 0755 directory.
+RUN mkdir -p /etc/claude-code/managed-settings.d
+COPY ./hooks/managed-settings.d/50-skill-gate.json /etc/claude-code/managed-settings.d/50-skill-gate.json
+RUN chown -R root:root /etc/claude-code/managed-settings.d && \
+    chmod 0755 /etc/claude-code/managed-settings.d && \
+    chmod 0444 /etc/claude-code/managed-settings.d/50-skill-gate.json
 
 # `~/.claude` still belongs to the agent — Claude Code writes its own state there
 # (`.claude/projects/`, plugin cache). What is NO LONGER shipped is a
@@ -333,6 +348,10 @@ COPY --chown=developer:developer ./startup.sh /app/startup.sh
 RUN chmod +x /app/startup.sh /app/agent-server.py
 # #2971: fail the build if the pinned gemini-cli rejects any argv the runtime builds.
 RUN python3 /app/agent_server/services/gemini_cli_args.py --smoke
+# trinity-enterprise#752: fail the build unless the skill-gate hook imports and
+# decides under the exact interpreter and flags it is registered with — a hook
+# that cannot run lets every gated skill through.
+RUN /usr/local/bin/python3 -I -S /opt/trinity/hooks/skill-gate.py --self-test
 
 # Add /app to Python path so agent_server module can be imported
 ENV PYTHONPATH="/app:${PYTHONPATH}"
