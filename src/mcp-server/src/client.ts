@@ -39,6 +39,28 @@ import type {
 } from "./types.js";
 import { readNotResend } from "./delegation_contract.js";
 
+/** Caller-declared idempotency key on a group send (abilityai/trinity-enterprise#665). */
+type GroupIntentFields = {
+  idempotency_key?: string;
+  idempotency_ttl?: number;
+  execution_id?: string;
+};
+
+/** Present on a send result only when the request carried an idempotency_key. */
+type IntentResult = {
+  sent?: boolean;
+  suppressed_by?: string;
+  first_sent_at?: string | null;
+  first_execution_id?: string | null;
+};
+
+/** Drop undefined fields so a keyless request body is unchanged. */
+function definedOnly<T extends object>(o: T | undefined): Partial<T> {
+  return Object.fromEntries(
+    Object.entries(o ?? {}).filter(([, v]) => v !== undefined)
+  ) as Partial<T>;
+}
+
 /**
  * Debug logging utility - only logs in development mode
  * Set DEBUG_MCP_CLIENT=true or NODE_ENV=development to enable
@@ -2569,6 +2591,8 @@ export class TrinityClient {
       reply_to_thread?: boolean;
       execution_id?: string;
       dedup_label?: string;
+      idempotency_key?: string;
+      idempotency_ttl?: number;
     }
   ): Promise<{
     success: boolean;
@@ -2628,6 +2652,8 @@ export class TrinityClient {
       process_transcript?: boolean;
       execution_id?: string;
       dedup_label?: string;
+      idempotency_key?: string;
+      idempotency_ttl?: number;
     }
   ): Promise<{
     call_id: string;
@@ -3329,17 +3355,18 @@ export class TrinityClient {
   async sendTelegramGroupMessage(
     agentName: string,
     chatId: string,
-    message: string
+    message: string,
+    intent?: GroupIntentFields
   ): Promise<{
     ok: boolean;
     message_id?: number;
     chat_id: string;
     group_title?: string;
-  }> {
+  } & IntentResult> {
     return this.request(
       "POST",
       `/api/agents/${encodeURIComponent(agentName)}/telegram/groups/${encodeURIComponent(chatId)}/messages`,
-      { message }
+      { message, ...definedOnly(intent) }
     );
   }
 
@@ -3370,18 +3397,19 @@ export class TrinityClient {
     agentName: string,
     channelId: string,
     message: string,
-    threadTs?: string
+    threadTs?: string,
+    intent?: GroupIntentFields
   ): Promise<{
     sent: boolean;
     channel_type: string;
     channel_id: string;
     channel_name?: string | null;
     thread_ts?: string | null;
-  }> {
+  } & IntentResult> {
     return this.request(
       "POST",
       `/api/agents/${encodeURIComponent(agentName)}/slack/channels/${encodeURIComponent(channelId)}/messages`,
-      threadTs ? { message, thread_ts: threadTs } : { message }
+      { ...(threadTs ? { message, thread_ts: threadTs } : { message }), ...definedOnly(intent) }
     );
   }
 

@@ -404,6 +404,19 @@ class SubscriptionRecoveryService:
         }
         verdict = alerts.fleet_verdict(classifications)
 
+        # #3246: the evaluation pass is the one place that knows a subscription
+        # is back under its threshold, so it ends the rows it no longer backs.
+        # Only a MEASURED `HAS_HEADROOM` clears — an unassessable member keeps
+        # its row (no evidence is not recovery, the ent#100 rule) — and the
+        # fleet row survives until some member is measured with room.
+        live_keys = [
+            alerts.subject_key(sid) for sid, c in classifications.items()
+            if c != alerts.HAS_HEADROOM
+        ]
+        if not verdict["has_headroom_ids"]:
+            live_keys.append(alerts.FLEET_KEY)
+        await asyncio.to_thread(alerts.clear_recovered, live_keys)
+
         # The fleet alert names every saturated subscription, so emitting the
         # individual ones beside it would be N+1 operator items for one event.
         if verdict["saturated"]:
