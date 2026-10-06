@@ -407,13 +407,60 @@ def test_b16_total_is_exact_for_legacy_about_a_person_ids(qdb, names, principal)
     assert person["total"] == 1 + len(legacy)
 
 
+def _glibc_lower(value):
+    """PostgreSQL's `lower` on a UTF-8, non-Turkic database: glibc `towlower`,
+    a simple per-character mapping. U+0130 becomes a bare `i` (Python gives
+    `i` + U+0307); any other character takes its one-character Python
+    `.lower()`, and a character whose `.lower()` is longer stays as it is."""
+    if value is None:
+        return None
+    out = []
+    for ch in str(value):
+        if ch == "\u0130":
+            out.append("i")
+            continue
+        low = ch.lower()
+        out.append(low if len(low) == 1 else ch)
+    return "".join(out)
+
+
+@pytest.fixture()
+def sql_lower(request, qdb):
+    """`sqlite`: SQLite's built-in, ASCII-only `lower` (what CI runs).
+    `glibc`: every connection the route's engine opens gets `lower` replaced
+    by `_glibc_lower`, so the PostgreSQL behaviour the U+0130 rewrite exists
+    for runs here too. The listener is removed and the engine disposed
+    afterwards, so no other test inherits it under pytest-randomly."""
+    if request.param == "sqlite":
+        yield request.param
+        return
+    from sqlalchemy import event
+    from db.engine import get_engine
+
+    engine = get_engine()
+
+    def _install(dbapi_conn, _record):
+        dbapi_conn.create_function("lower", 1, _glibc_lower, deterministic=True)
+
+    event.listen(engine, "connect", _install)
+    engine.dispose()
+    try:
+        yield request.param
+    finally:
+        event.remove(engine, "connect", _install)
+        engine.dispose()
+
+
+@pytest.mark.parametrize("sql_lower", ["sqlite", "glibc"], indirect=True)
 @pytest.mark.parametrize("principal", MACHINE_KEYS)
-def test_b17_a_dotted_capital_i_is_not_an_about_a_person_match(qdb, names, principal):
+def test_b17_a_dotted_capital_i_is_not_an_about_a_person_match(
+        qdb, names, principal, sql_lower):
     """B17 (T1, the reverse direction): Python lowers U+0130 to `i` + U+0307,
     so `portal-\u0130nbox-collision-…` is NOT about a person and a machine
     receives it. PostgreSQL's glibc `lower` gives a bare `i`, which would match
-    — the SQL rewrites U+0130 to Python's two code points first, so every
-    dialect keeps the row (SQLite's ASCII `lower` already did)."""
+    — the SQL rewrites U+0130 to Python's two code points first, so the row is
+    kept on both. SQLite's own `lower` is ASCII-only and keeps it with or
+    without the rewrite, so the `glibc` case is the one that can go red."""
     me = names("me")
     kept = _seed(qdb, me, rid="portal-\u0130nbox-collision-x")
     if principal.get("mcp_scope") == "agent":
