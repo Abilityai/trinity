@@ -9,14 +9,14 @@ Additive, no backfill: no existing row recorded what it carried.
 
 Mirrors the SQLite ``portal_messages_attachments`` migration.
 
-Revision ID: 0090_portal_messages_attachments
-Revises: 0089_supersede_queue_flood_backlog
+Revision ID: 0092_portal_messages_attachments
+Revises: 0091_chat_session_claude_id
 """
 from alembic import op
 
 
-revision = "0090_portal_messages_attachments"
-down_revision = "0089_supersede_queue_flood_backlog"
+revision = "0092_portal_messages_attachments"
+down_revision = "0091_chat_session_claude_id"
 branch_labels = None
 depends_on = None
 

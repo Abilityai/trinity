@@ -4379,7 +4379,7 @@ def _migrate_portal_messages_attachments(cursor, conn):
     said a file went with the message, so a reload could not show it either.
 
     Additive, no backfill: no existing row recorded what it carried.
-    Mirrored by the Alembic revision 0090_portal_messages_attachments.
+    Mirrored by the Alembic revision 0092_portal_messages_attachments.
     """
     _safe_add_column(
         cursor,
