@@ -73,6 +73,21 @@ describe('gating', () => {
 })
 
 describe('what an admin sees', () => {
+  it('while loading, keeps the loaded shape and never claims "No seat yet"', async () => {
+    let release
+    api.get.mockImplementation((url) => (url === '/api/users'
+      ? Promise.resolve({ data: USERS })
+      : new Promise((ok) => { release = () => ok({ data: url.includes('/canon/roles') ? canonRoles : roster }) })))
+    const w = render()
+    await flushPromises()
+    expect(q(w, 'assignments-skeleton').attributes('aria-busy')).toBe('true')
+    expect(q(w, 'assignments-skeleton').findAll('.px-4.py-3')).toHaveLength(2)   // a primary + one more, like the loaded list
+    expect(q(w, 'assignments-seat').text()).toBe('')                             // unknown, not "No seat yet"
+    release()
+    await flushPromises()
+    expect(q(w, 'assignments-seat').text()).toBe('Serves the seat of its primary: cfo (Ann Lee)')
+  })
+
   it('shows the primary apart from the stakeholders, with the seat it serves', async () => {
     const w = render()
     await flushPromises()
@@ -117,6 +132,7 @@ describe('writes', () => {
     await q(w, 'assignment-add-form').trigger('submit')
     await flushPromises()
     expect(api.post).toHaveBeenCalledWith(`/api/enterprise/assignments/agents/${AGENT}`, { user_id: 3, role_id: 'cfo', kind: 'viewer' })
+    expect(q(w, 'add-role').element.value).toBe('')     // ent#814: the seat leaves with the person it was for
     expect(api.get.mock.calls.filter(([u]) => u.startsWith('/api/enterprise/assignments')).length).toBe(2)
   })
 
@@ -180,6 +196,8 @@ describe('replacing the primary', () => {
       [`/api/enterprise/assignments/agents/${AGENT}/a1`, { kind: 'primary' }],
     ])
     expect(q(w, 'assignment-replace-form').text()).toContain('User not found')
+    // From the re-read roster, not from hope: says where the agent stands now.
+    expect(q(w, 'assignment-replace-form').text()).toContain('Ann Lee is still the primary.')
   })
 })
 
@@ -231,6 +249,19 @@ describe('helpers', () => {
   it('deletes and can restore when the old primary is removed', () => {
     const { steps } = replacePrimarySteps(rows, { newUserId: 3, oldBecomes: 'remove', roleId: 'cfo' })
     expect(steps.map((s) => s.op)).toEqual(['delete', 'create'])
+  })
+
+  it('promotes the new primary’s existing row instead of listing them twice (ent#814)', () => {
+    // Bob is already an approver holding cfo; Ann steps down to viewer first.
+    const kept = replacePrimarySteps(rows, { newUserId: 2, oldBecomes: 'viewer', roleId: '' })
+    expect(kept.steps).toEqual([
+      { op: 'update', id: 'a1', body: { kind: 'viewer' } },
+      { op: 'update', id: 'a2', body: { kind: 'primary' } },       // his seat stays cfo
+    ])
+    expect(kept.rollback).toEqual([{ op: 'update', id: 'a1', body: { kind: 'primary' } }])
+    const reseated = replacePrimarySteps(rows, { newUserId: 2, oldBecomes: 'viewer', roleId: 'head-of-sales' })
+    expect(reseated.steps[1]).toEqual({ op: 'update', id: 'a2', body: { kind: 'primary', role_id: 'head-of-sales' } })
+    expect(reseated.steps.some((st) => st.op === 'create')).toBe(false)
   })
 
   it('does nothing when the new primary is the current one', () => {

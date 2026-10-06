@@ -58,8 +58,10 @@ export function seatLine({ assignments = null, primary = null, held_seat: heldSe
  * The old primary row leaves FIRST — re-kinded to `oldBecomes`, or deleted when
  * the old person is to be removed or already holds that kind (a second row of
  * one kind for one person is refused by the backend) — and only then is the
- * new primary row created. The new primary keeps any other kinds they hold;
- * it is a new row, not a re-kinding of an existing one.
+ * new primary is written. A new primary who is already on the agent has their
+ * existing row PROMOTED (re-kinded to primary, keeping their seat unless a new
+ * one is given) — a second row would list one person twice and give them two
+ * seats to choose between (ent#814: a run serves the person's own seat).
  *
  * `rollback` undoes step one, for the store to run if step two fails, so a
  * failed replacement leaves the agent with the primary it had.
@@ -73,7 +75,10 @@ export function seatLine({ assignments = null, primary = null, held_seat: heldSe
 export function replacePrimarySteps(assignments, { newUserId, oldBecomes, roleId }) {
   const old = primaryOf(assignments)
   // ent#811: the seat is optional — sent only when there is one.
-  const create = { op: 'create', body: withRole({ user_id: newUserId, kind: 'primary' }, roleId) }
+  const existing = (assignments || []).find((a) => a.user_id === newUserId && a.kind !== 'primary')
+  const create = existing
+    ? { op: 'update', id: existing.id, body: withRole({ kind: 'primary' }, roleId) }
+    : { op: 'create', body: withRole({ user_id: newUserId, kind: 'primary' }, roleId) }
   if (!old) return { steps: [create], rollback: [] }
   if (old.user_id === newUserId) return { steps: [], rollback: [] }
 

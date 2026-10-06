@@ -29,14 +29,19 @@
       <!-- Objectives with metric freshness — the portal projection of the ONE
            objective ↔ metric join (ent#676). An agent that simply has none
            renders nothing here, as before. -->
-      <template v-if="card.objectives.length || card.objectives_error">
+      <template v-if="card.objectives.length || card.objectives_error || noSeat">
         <h3 class="mt-3 mb-1 text-[11px] font-medium text-gray-400">Objectives</h3>
+        <!-- trinity-enterprise#812: owning nothing because nobody's seat is on
+             record is a named state, with what to do — never a silent blank. -->
+        <p v-if="noSeat" class="mb-1.5 text-[12.5px] text-status-warning-700 dark:text-status-warning-300" data-testid="portal-role-no-seat">
+          {{ roleErrorText('no_seat') }}
+        </p>
         <!-- Zero objectives for a NAMED reason: a read that did not happen is
              never shown as "this agent has none" (principle 15). -->
-        <p v-if="!card.objectives.length" class="text-[12.5px] text-status-warning-700 dark:text-status-warning-300" data-testid="portal-role-objectives-error">
+        <p v-if="!card.objectives.length && card.objectives_error" class="text-[12.5px] text-status-warning-700 dark:text-status-warning-300" data-testid="portal-role-objectives-error">
           {{ objectivesErrorText(card.objectives_error) }}
         </p>
-        <ul v-else class="space-y-1.5">
+        <ul v-if="card.objectives.length" class="space-y-1.5">
           <li v-for="o in card.objectives" :key="o.id"
               class="rounded-lg border border-gray-200 dark:border-gray-800 px-3 py-2 text-[12.5px]"
               data-testid="portal-role-objective">
@@ -167,6 +172,9 @@ function flip() {
   const next = readiness.value.status === 'ready' ? 'calibrating' : 'ready'
   return store.flipAgentReadiness(props.agentName, next)
 }
+
+// trinity-enterprise#812: the join's `no_seat` finding, carried on the card.
+const noSeat = computed(() => (card.value?.finding_codes || []).includes('no_seat'))
 
 function roleErrorText(code) {
   return {

@@ -233,6 +233,16 @@ describe('PortalAgentRole (mounted)', () => {
     expect(w.text()).not.toContain('Objectives')
   })
 
+  it('an agent with no seat on record says so, and still lists the work it supports (ent#812)', async () => {
+    const sentence = 'This agent neither holds a seat nor serves someone who holds one, so it owns no objective yet.'
+    const none = await mountWith(card({ objectives: [], objectives_error: null, finding_codes: ['no_seat'] }))
+    expect(none.get('[data-testid="portal-role-no-seat"]').text()).toBe(sentence)
+    expect(none.find('[data-testid="portal-role-objectives-error"]').exists()).toBe(false)   // not a failed read
+    const supporting = await mountWith(card({ finding_codes: ['no_seat'] }))
+    expect(supporting.get('[data-testid="portal-role-no-seat"]').text()).toBe(sentence)
+    expect(supporting.findAll('[data-testid="portal-role-objective"]')).toHaveLength(1)
+  })
+
   it('a list with objective files that failed to read says it may be incomplete', async () => {
     const w = await mountWith(card({ objectives_partial: true }))
     expect(w.findAll('[data-testid="portal-role-objective"]')).toHaveLength(1)   // what did load still shows

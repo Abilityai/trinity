@@ -11,7 +11,9 @@
         <option v-for="r in canonList" :key="r.id" :value="r.id">{{ r.title || r.id }}</option>
       </datalist>
       <p class="mt-0.5 text-xs text-gray-600 dark:text-gray-300" data-testid="assignments-seat">
-        <template v-if="seat.form === 'holds'">
+        <!-- Until the roster is in, the seat is unknown — not "no seat". -->
+        <span v-if="view.state === 'loading'" class="inline-block h-3 w-72 max-w-full rounded bg-gray-100 dark:bg-gray-750 align-middle animate-pulse motion-reduce:animate-none" aria-hidden="true"></span>
+        <template v-else-if="seat.form === 'holds'">
           Holds the seat: <span :class="seatTitleClass">{{ seatName(seat.roleId) }}</span>
         </template>
         <template v-else-if="seat.form === 'serves'">
@@ -24,10 +26,21 @@
       </p>
     </div>
 
-    <!-- first load: the section's own footprint, pulsing -->
-    <div v-if="view.state === 'loading'" class="space-y-2" aria-busy="true">
+    <!-- first load: the loaded section's own shape — the admin's seat bar, a
+         primary and one stakeholder, the add form — so arrival moves little. -->
+    <div v-if="view.state === 'loading'" class="space-y-3" aria-busy="true" data-testid="assignments-skeleton">
       <span class="sr-only">Loading who this agent serves…</span>
-      <div v-for="n in 3" :key="n" class="h-12 rounded-md bg-gray-100 dark:bg-gray-750 animate-pulse motion-reduce:animate-none"></div>
+      <div v-if="isAdmin" class="h-8 w-44 rounded-md bg-gray-100 dark:bg-gray-750 animate-pulse motion-reduce:animate-none"></div>
+      <div class="divide-y divide-gray-200 dark:divide-gray-750 rounded-lg border border-gray-200 dark:border-gray-750">
+        <div v-for="n in 2" :key="n" class="px-4 py-3 space-y-2">
+          <div class="h-4 w-1/3 rounded bg-gray-100 dark:bg-gray-750 animate-pulse motion-reduce:animate-none"></div>
+          <div class="h-3 w-1/2 rounded bg-gray-100 dark:bg-gray-750 animate-pulse motion-reduce:animate-none"></div>
+        </div>
+      </div>
+      <div v-if="isAdmin" class="space-y-1">
+        <div class="h-4 w-24 rounded bg-gray-100 dark:bg-gray-750 animate-pulse motion-reduce:animate-none"></div>
+        <div class="h-10 rounded-md bg-gray-100 dark:bg-gray-750 animate-pulse motion-reduce:animate-none"></div>
+      </div>
     </div>
 
     <LoadFailed
@@ -94,7 +107,7 @@
             class="px-4 py-3 bg-white dark:bg-gray-800"
             :data-testid="row.kind === 'primary' ? 'assignment-primary' : 'assignment-row'"
           >
-            <div class="flex items-start justify-between gap-3">
+            <div class="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between sm:gap-3">
               <div class="min-w-0 space-y-1">
                 <div class="flex flex-wrap items-center gap-2">
                   <span class="text-sm font-medium text-gray-900 dark:text-gray-100 truncate">{{ row.display_name }}</span>
@@ -117,9 +130,10 @@
                 </div>
               </div>
 
-              <div v-if="isAdmin && row.kind !== 'primary'" class="flex items-center gap-2 shrink-0">
+              <div v-if="isAdmin && row.kind !== 'primary'" class="flex items-center gap-2 shrink-0 self-start">
                 <BaseSelect
                   :model-value="row.kind"
+                  class="min-w-[9.5rem]"
                   :aria-label="`Kind for ${row.display_name}`"
                   :disabled="busyId === row.id"
                   data-testid="assignment-kind"
@@ -138,6 +152,7 @@
               </div>
               <BaseButton
                 v-else-if="isAdmin && row.kind === 'primary' && !replacing"
+                class="self-start shrink-0"
                 variant="secondary"
                 size="sm"
                 data-testid="assignment-replace"
@@ -317,7 +332,9 @@ async function addPerson() {
       user_id: Number(addForm.value.userId),
       kind: addForm.value.kind,
     }, addForm.value.roleId))
-    addForm.value = { ...addForm.value, userId: '' }
+    // The seat goes with the person: a seat left in the field would be given
+    // to whoever is added next (ent#814 — each person holds their own).
+    addForm.value = { ...addForm.value, userId: '', roleId: '' }
   } catch (err) {
     addError.value = writeError(err, "Couldn't add that person.")
   } finally {
@@ -447,7 +464,12 @@ async function confirmReplace() {
     })
     replacing.value = false
   } catch (err) {
-    replaceError.value = writeError(err, "Couldn't replace the primary. The agent keeps its current primary.")
+    // The store has rolled back and re-read the roster: say where that left
+    // the agent, from the fresh read, not from what we hoped happened.
+    const now = primary.value
+      ? `${primary.value.display_name} is still the primary.`
+      : 'This agent has no primary now — add one below.'
+    replaceError.value = `${writeError(err, "Couldn't replace the primary.")} ${now}`
   } finally {
     savingReplace.value = false
   }
