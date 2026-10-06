@@ -1,6 +1,27 @@
 {
   "test_files": [
     {
+      "file": "unit/test_ent730_bound_widget_dims.py",
+      "feature": "abilityai/trinity-enterprise#730",
+      "added": "2026-10-06",
+      "categories": [
+        "backend",
+        "unit"
+      ],
+      "description": "A bound dashboard.yaml widget names ONE series with `dims:`: each per-channel tile shows its own series' number, freshness, sparkline and colour (pick a source, fill once), matching by `canonical_dims` with exact match only; a selector that cannot match is one of three named refusals (`metric_dimension_invalid` with a type hint, `metric_dimension_undeclared`, `metric_series_not_found` with `binding_detail` facts) and never the fold; `bound_series` says what an unselected number is; selection equals the fold over that series alone (parity with `latest_by_metric`); the 200-point / 50-series window is pinned against a fake that honours the real store's SQL contract (and once against the real store); a Hypothesis property over arbitrary JSON `dims` never raises; the typed `threshold_verdict` and `direction` (one rule behind verdict and colour, each row stated independently); a store outage drops an author's placeholder `value`; a successful bind drops an author trend; a non-text `metric:` refuses one widget instead of failing the dashboard read; and the user doc's recipe YAML runs through the real agent-server validator and the bind."
+    },
+    {
+      "file": "unit/test_ent730_dims_compat.py",
+      "feature": "abilityai/trinity-enterprise#730",
+      "added": "2026-10-06",
+      "categories": [
+        "backend",
+        "compatibility",
+        "unit"
+      ],
+      "description": "Compat X-009 (SOFT, static): a `dims:` selector that can never match the dimensions its metric declares in template.yaml, a `dims:` with no `metric:`, and a `metric:` that is not text are reported with the tile's own code and sentence (parity with `parse_dims_selector` and the binding); valid selectors pass with no points anywhere; undeclared or malformed metrics and empty selectors are not its finding; no dashboard / no or invalid template skip; a raise fails closed with the type name only; nothing raw from the author (a declared `channel\\n`, a bidi or control character in a label) reaches the persisted detail; the user doc's recipe passes X-009 and D-003."
+    },
+    {
       "file": "unit/test_3246_platform_alert_surfaces.py",
       "feature": "#3246",
       "added": "2026-10-05",
