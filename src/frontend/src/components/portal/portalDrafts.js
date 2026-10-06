@@ -175,11 +175,82 @@ export function removeDraftsBucket(storage, identity) {
 export function agentsWithDrafts(threads, newChatDraftAgents) {
   const out = new Set()
   for (const t of Array.isArray(threads) ? threads : []) {
-    if (t && !t.is_room && t.hasDraft && t.agent_name) out.add(t.agent_name)
+    if (isDraftedThread(t)) out.add(t.agent_name)
   }
   const extra = newChatDraftAgents instanceof Set ? newChatDraftAgents : []
   for (const name of extra) if (name) out.add(name)
   return out
+}
+
+/**
+ * Does this thread row hold a draft that opening its agent should land on?
+ *
+ * The ONE predicate behind both halves of ent#784's promise, which is why it
+ * is a named export rather than a condition inside `agentsWithDrafts`: the
+ * agent row's draft mark (`agentsWithDrafts`, read by `PortalSidebar`) and the
+ * drafts-win landing arm (`portalUtils::agentLanding`) must light and land on
+ * the SAME rows, or the mark stops meaning "click here to continue".
+ *
+ * A ROOM is excluded for `agentsWithDrafts`' own reason (the room row is the
+ * draft's own door), and so is an ARCHIVED thread: nothing should invite the
+ * person to carry on writing in a chat that has been put away, and the mark
+ * must not promise a landing the rule refuses. Reset already MOVES the draft
+ * off the row it archives (`Portal.vue::onMainReset`), so this covers the
+ * archive paths that do not.
+ *
+ * `hasDraft` is the shell's `decorate()` stamp, read from the drafts store's
+ * key set — so the rows this answers for are exactly the rows with a stored
+ * draft, never a second opinion about where drafts live.
+ */
+export function isDraftedThread(t) {
+  return !!t && !t.is_room && !!t.hasDraft && !!t.agent_name && !t.archived_at
+}
+
+/**
+ * ent#784 arm 3 — which of this agent's drafted chats to open, or null.
+ *
+ * The candidates are `isDraftedThread` rows of this agent plus the agent's
+ * unsaved `new:<agent>` chat, and the winner is the one edited most recently
+ * (`updatedAt` from the store's map). A `new:` winner answers `sessionId:
+ * null` — a new chat, which is where that draft already lives, so landing
+ * there restores it with no move.
+ *
+ * Deterministic on a tie: `threads` arrives most-recent-first, the comparison
+ * is strictly-greater, and the unsaved chat is weighed last — so equal
+ * timestamps resolve to the newest listed thread, never to a coin flip. An
+ * entry with no usable `updatedAt` counts as 0 (the storage codec already
+ * dropped anything else), which is the oldest, not a win by accident.
+ *
+ * One row can be a candidate here without carrying the sidebar's agent-row
+ * mark: the shell hands the mark `sidebarThreads`, which omits an unused Main
+ * (`portalInbox::inSidebar`). That direction is harmless — the promise is
+ * "a mark means clicking the row lands you on those words", and every marked
+ * row IS a candidate. The reverse only means an unmarked draft is still found.
+ */
+export function draftedLandingFor({ agentName, threads = [], drafts = null } = {}) {
+  if (!agentName || typeof agentName !== 'string') return null
+  const map = drafts && typeof drafts === 'object' && !Array.isArray(drafts) ? drafts : null
+  if (!map) return null
+  const at = (key) => {
+    const n = Number(map[key]?.updatedAt)
+    return Number.isFinite(n) ? n : 0
+  }
+  const held = (key) => !!key && hasDraftText(map[key]?.text)
+  let best = null
+  for (const t of Array.isArray(threads) ? threads : []) {
+    if (!isDraftedThread(t) || t.agent_name !== agentName) continue
+    const sid = t.id || t.session_id
+    const key = threadKey(sid)
+    if (!held(key)) continue
+    const when = at(key)
+    if (!best || when > best.updatedAt) best = { sessionId: sid, updatedAt: when }
+  }
+  const fresh = newChatKey(agentName)
+  if (held(fresh)) {
+    const when = at(fresh)
+    if (!best || when > best.updatedAt) best = { sessionId: null, updatedAt: when }
+  }
+  return best ? { sessionId: best.sessionId } : null
 }
 
 /**
@@ -211,11 +282,16 @@ export function reconcileDraftOnKeyChange({ oldKey = null, newKey = null, compos
 }
 
 /**
- * Focus the restored composer on a fine pointer only. #2579's New chat focus
- * is an explicit gesture; arriving at a drafted chat is not, and on a phone a
- * focus pops the soft keyboard over the transcript.
+ * May the composer take focus by itself? On a fine pointer only — on a phone a
+ * programmatic focus pops the soft keyboard over the transcript.
+ *
+ * Two reasons share this one rule, which is why the name says "auto" rather
+ * than "on restore": arriving at a drafted chat (ent#657), and LANDING on an
+ * agent's new chat (ent#784). Neither is something the person asked for in
+ * those words. An explicit gesture — New chat, ⌘J, the agent picker — does not
+ * consult this at all and focuses on any pointer (#2579 AC 2).
  */
-export function shouldFocusOnRestore(matchMedia) {
+export function shouldAutoFocusComposer(matchMedia) {
   try {
     return typeof matchMedia === 'function' && !!matchMedia('(pointer: fine)')?.matches
   } catch {
