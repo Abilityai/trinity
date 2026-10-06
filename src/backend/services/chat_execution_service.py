@@ -148,6 +148,7 @@ async def prepare_chat_execution(
     capacity_result: object,
     queue_result: str,
     chain_depth: Optional[int] = None,
+    gate: Optional[object] = None,
 ) -> ChatExecutionContext:
     """Execution setup for chat_with_agent (#1026 slice 2).
 
@@ -156,6 +157,10 @@ async def prepare_chat_execution(
     gets/creates the chat session, tracks the chat-start activity, and logs the
     inbound user message. Returns a ChatExecutionContext carrying the ids/records
     the downstream execute+finalize body consumes.
+
+    `gate` is the admission's skill-gate decision (trinity-enterprise#752): a
+    self-approval is recorded here, on the row the agent receives, and the turn
+    is marked to run in its own session.
     """
     is_queued = capacity_result.state == "queued_in_memory"
 
@@ -199,6 +204,16 @@ async def prepare_chat_execution(
     logger.info(
         f"[Chat] Created task execution {task_execution_id} for {triggered_by} call on agent '{name}'"
     )
+
+    # trinity-enterprise#752: the self-approval is recorded on THIS row — the
+    # id `build_chat_payload` sends — never on the admission's capacity-slot
+    # id, which no agent ever sees. Such a turn also runs in its own session.
+    isolated_session = bool(gate is not None and not gate.ungated and gate.self_approved_by)
+    if gate is not None:
+        await skill_gate_service.record_self_approval(
+            name, gate, execution_id=task_execution_id, current_user=current_user,
+            endpoint=f"/api/agents/{name}/chat", request_text=request.message,
+            triggered_by=triggered_by)
 
     # Broadcast collaboration event if this is agent-to-agent communication
     collaboration_activity_id = None
@@ -273,6 +288,7 @@ async def prepare_chat_execution(
         chat_activity_id=chat_activity_id,
         session=session,
         is_queued=is_queued,
+        isolated_session=isolated_session,
     )
 
 
@@ -284,14 +300,19 @@ def build_chat_payload(
     current_user: User,
     x_source_agent: Optional[str],
     task_execution_id: object,
+    isolated_session: bool = False,
 ) -> dict:
     """Build the agent-server /api/chat payload: message + model + the
     runtime-aware platform/execution-context system prompt (MEM-001, #1187), and
     mark the execution dispatched (#686) so the no-session sweep doesn't falsely
-    fail a long turn."""
+    fail a long turn. `isolated_session` (trinity-enterprise#752) asks the agent
+    to run the turn fresh and not keep it as its chat session; an older agent
+    image ignores the field."""
     payload = {"message": request.message, "stream": False}
     if request.model:
         payload["model"] = request.model
+    if isolated_session:
+        payload["isolated_session"] = True
     # Resolve the agent runtime (best-effort, never raises) so the MCP-tool
     # naming in the platform prompt matches the harness (#1187 F-MCP). Lazy +
     # guarded so a re-import under a stubbed services.docker_service can't break
@@ -834,6 +855,7 @@ async def run_chat_turn(
     idem: object,
     capacity: object,
     chain_depth: Optional[int] = None,
+    isolated_session: bool = False,
 ):
     """Execute the chat against the agent and finalize (#1026 slice 3;
     **transitional** sync-chat applier, RD15).
@@ -863,6 +885,7 @@ async def run_chat_turn(
             queue_result=queue_result,
             idem=idem,
             chain_depth=chain_depth,
+            isolated_session=isolated_session,
         )
     idem_done = False
     try:
@@ -873,6 +896,7 @@ async def run_chat_turn(
             current_user=current_user,
             x_source_agent=x_source_agent,
             task_execution_id=task_execution_id,
+            isolated_session=isolated_session,
         )
         start_time = datetime.utcnow()
         response = await agent_post_with_retry(
@@ -984,6 +1008,7 @@ async def run_pulled_chat_turn(
     queue_result: str,
     idem: object,
     chain_depth: Optional[int] = None,
+    isolated_session: bool = False,
 ):
     """``POST /chat`` on a pull pilot (#3127).
 
@@ -999,12 +1024,16 @@ async def run_pulled_chat_turn(
     persists the assistant message, closes the collaboration activity, caches
     the Claude id, and stores the idempotency snapshot. No slot is held, so
     nothing is released.
+
+    ``isolated_session`` (trinity-enterprise#752, a self-approved gated skill):
+    the turn starts cold and its Claude id is not cached, so the session's next
+    turn never resumes a context with the skill loaded.
     """
     idem_done = False
     user_email = current_user.email or current_user.username
     try:
         start_time = datetime.utcnow()
-        cached_uuid = db.get_chat_session_claude_id(session.id)
+        cached_uuid = None if isolated_session else db.get_chat_session_claude_id(session.id)
         try:
             turn = await session_turn_service.run_resumable_turn(
                 agent_name=name,
@@ -1112,7 +1141,7 @@ async def run_pulled_chat_turn(
                 f"[Chat] Discarding malformed claude_session_id from pulled turn "
                 f"(execution_id={execution_id})"
             )
-        if real_uuid and real_uuid != cached_uuid:
+        if real_uuid and real_uuid != cached_uuid and not isolated_session:
             db.set_chat_session_claude_id(session.id, real_uuid)
 
         execution_time_ms = int((datetime.utcnow() - start_time).total_seconds() * 1000)
@@ -1434,34 +1463,17 @@ async def run_async_task(
 
         execution_time_ms = int((datetime.utcnow() - start_time).total_seconds() * 1000)
 
-        # Post-task side effects (each guarded + self-isolating; see helpers).
-        chat_session_id = (
-            await chat_persistence_service.persist_and_broadcast_chat_session(
-                agent_name=agent_name,
-                request=request,
-                result=result,
-                execution_id=execution_id,
-                user_id=user_id,
-                user_email=user_email,
-                subscription_id=subscription_id,
-                execution_time_ms=execution_time_ms,
-            )
-        )
-        await complete_collaboration_activity(
-            collaboration_activity_id,
-            result,
-            execution_id,
-            execution_time_ms,
-        )
-        await finalize_self_task(
-            is_self_task=is_self_task,
-            self_task_activity_id=self_task_activity_id,
+        chat_session_id = await run_post_turn_delivery(
             agent_name=agent_name,
             request=request,
             result=result,
             execution_id=execution_id,
+            collaboration_activity_id=collaboration_activity_id,
             user_id=user_id,
             user_email=user_email,
+            subscription_id=subscription_id,
+            is_self_task=is_self_task,
+            self_task_activity_id=self_task_activity_id,
             execution_time_ms=execution_time_ms,
         )
 
@@ -1473,6 +1485,60 @@ async def run_async_task(
         # Issue #498: signal any sync HTTP caller waiting on this execution.
         # No-op when no waiter is registered (the common async path).
         signal_sync_waiter(execution_id, result, chat_session_id)
+
+
+async def run_post_turn_delivery(
+    *,
+    agent_name,
+    request,
+    result,
+    execution_id,
+    collaboration_activity_id,
+    user_id,
+    user_email,
+    subscription_id,
+    is_self_task,
+    self_task_activity_id,
+    execution_time_ms,
+):
+    """Apply what the caller asked to happen with a finished turn's result:
+    chat-session persistence, collaboration-activity completion, self-task
+    finalisation. Each step is guarded and self-isolating (see the helpers).
+    Returns the chat_session_id the turn was saved to, or None.
+
+    #2329: the push path (`run_async_task`) and the pull sink
+    (`pull_coordination_service.apply_task_result`) both call this, so a pulled
+    turn honours the same delivery settings as a pushed one. Driven by the
+    request's settings only, never by the trigger.
+    """
+    chat_session_id = await chat_persistence_service.persist_and_broadcast_chat_session(
+        agent_name=agent_name,
+        request=request,
+        result=result,
+        execution_id=execution_id,
+        user_id=user_id,
+        user_email=user_email,
+        subscription_id=subscription_id,
+        execution_time_ms=execution_time_ms,
+    )
+    await complete_collaboration_activity(
+        collaboration_activity_id,
+        result,
+        execution_id,
+        execution_time_ms,
+    )
+    await finalize_self_task(
+        is_self_task=is_self_task,
+        self_task_activity_id=self_task_activity_id,
+        agent_name=agent_name,
+        request=request,
+        result=result,
+        execution_id=execution_id,
+        user_id=user_id,
+        user_email=user_email,
+        execution_time_ms=execution_time_ms,
+    )
+    return chat_session_id
 
 
 async def complete_collaboration_activity(
@@ -2203,7 +2269,9 @@ async def _dispatch_sync_backlog(*, name, execution_id, sync_effective_timeout, 
                 "claude_session_id": row.claude_session_id,
             },
         )
-        sync_chat_session_id = None
+        # #2329: the pull sink signals `result=None` with the session it saved
+        # the turn to; the DB-poll wake (another worker) carries none.
+        sync_chat_session_id = (wait_payload or {}).get("chat_session_id")
 
     _map_task_failure(name, result, idem=idem)
 
@@ -2393,10 +2461,11 @@ async def dispatch_parallel_task(
     # `system_prompt`, which the executor receives appended to its own. A
     # Chat-tab history that mentions a gated skill re-gates later turns: the
     # safe direction.
+    gate_text = "\n".join(
+        t for t in (request.message, request.user_message, request.system_prompt) if t)
     gate = await skill_gate_service.enforce(
         name,
-        request_text="\n".join(
-            t for t in (request.message, request.user_message, request.system_prompt) if t),
+        request_text=gate_text,
         requester=skill_gate_service.requester_from_principal(
             current_user, source_agent=x_source_agent,
             # The platform-injected turn (#2392) first; the model-typed
@@ -2458,9 +2527,12 @@ async def dispatch_parallel_task(
         idem=idem,
         chain_depth=chain_depth,
     )
-    await skill_gate_service.audit_self_approved(
-        name, gate, current_user=current_user,
-        endpoint=f"/api/agents/{name}/task", execution_id=execution_id)
+    # trinity-enterprise#752: clear the run the agent receives for the skills
+    # it was self-approved for (the in-container hook's clearance), + audit.
+    await skill_gate_service.record_self_approval(
+        name, gate, execution_id=execution_id, current_user=current_user,
+        endpoint=f"/api/agents/{name}/task", request_text=gate_text,
+        triggered_by=derivation.triggered_by)
 
     if request.async_mode:
         return await _dispatch_async(

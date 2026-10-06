@@ -453,6 +453,8 @@ Backend Startup
 └──────────────────────────────────┘
 ```
 
+**Second trigger — first-run `/setup` (#3237).** On a browser-claimed install (every one-click / marketplace path) no admin exists at boot, so the create branch above fails with `Admin user 'admin' not found`. `POST /api/setup/admin-password` therefore schedules `routers/setup.py::_deploy_system_agent_after_setup` as a background task once the admin row is written — before `ensure_first_run_seeded`, matching the boot order (the seeder hosts its failure alerts on `trinity-system`). It never raises (Starlette runs background tasks in sequence) and skips without a Docker client; `ensure_deployed` is idempotent, so the next boot is a no-op.
+
 ### 2. Fleet Health Check Flow
 
 ```
@@ -1050,6 +1052,7 @@ ls -1 ~/reports/fleet/ | tail -1
 
 | Date | Changes |
 |------|---------|
+| 2026-10-06 | **#3237**: `/setup` deploys the system agent after creating the admin — the boot-time attempt runs before the admin exists on browser-claimed installs and was never retried. |
 | 2026-07-28 | **#1816 base-image adoption**: `ensure_deployed` is read-only when the container is running (3-state `check_base_image_state` → `base_image_state`, WARNING + an edge-triggered `base-image-stale-` operator alarm on `stale` only) and delegates to `start_agent_internal` when stopped, so the cold boundary adopts a rebuilt base image through the shared lifecycle. Creation converges on the recreate path's contract (`TRINITY_AGENT_AUTH_TOKEN`, `trinity.full-capabilities`) — the convergence invariant. AC2 is a **structural** gate in `start_agent_internal` (`is_system AND was_already_running` ⇒ `recreate_deferred="system_agent_running"`), independent of predicate count. `/restart` delegates; `/status` gains `base_image_state`. |
 | 2026-02-11 | Fixed reinitialize flow diagram - cleanup command now shows actual paths (`/home/developer/.claude`, `.trinity`, `content`, `plans`) instead of obsolete workspace reference |
 | 2026-01-27 | **Emergency Stop Prefix Filter**: Added `system_prefix` query parameter to `POST /api/ops/emergency-stop` (`routers/ops.py:607-696`). Allows targeting specific agents/schedules by name prefix. Schedule pausing respects prefix (line 638-639), agent stopping respects prefix (line 658-659). Enables safe testing with nonexistent prefix. |

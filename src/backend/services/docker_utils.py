@@ -349,6 +349,30 @@ _AGENT_VOLUME_PLATFORMS = frozenset(
 # Label key present on every agent data volume — the cheap list filter for the
 # orphan sweep (catches all three platforms in one call).
 _AGENT_VOLUME_LABEL_KEY = "trinity.agent-name"
+# #3214: the stack that created the volume — this install's `installation_id`
+# (`instance_identity.get_instance_id`). Docker volumes are daemon-global, so a
+# second stack on the same daemon must be able to tell its own volumes from
+# another stack's; the orphan sweep reclaims only volumes carrying OUR value.
+# Labels are immutable after creation, so volumes created before this label
+# existed carry none — they are never auto-reclaimed by the sweep.
+AGENT_VOLUME_INSTANCE_LABEL = "trinity.instance"
+
+
+def _resolve_instance_id() -> Optional[str]:
+    from services.instance_identity import get_instance_id
+    return get_instance_id()
+
+
+def agent_volume_labels(volume_base: str, platform: str) -> Dict[str, str]:
+    """The labels every agent data volume is created with (#3214) — the ONE
+    builder, so no creation path can forget the instance label. An unresolvable
+    instance id yields an unlabelled volume (never a wrong label): such a
+    volume is simply never an orphan-sweep candidate."""
+    labels = {"trinity.platform": platform, "trinity.agent-name": volume_base}
+    instance_id = _resolve_instance_id()
+    if instance_id:
+        labels[AGENT_VOLUME_INSTANCE_LABEL] = instance_id
+    return labels
 # Mount destination of the agent's durable home volume (#1169) — the bind every
 # `agent-{base}-workspace` volume is attached at.
 AGENT_HOME_PATH = "/home/developer"
@@ -361,7 +385,7 @@ def _volume_labels(volume) -> Dict[str, str]:
         return {}
 
 
-def is_reclaimable_agent_volume(volume, volume_base: str) -> bool:
+def is_reclaimable_agent_volume(volume, volume_base: str, instance_id: Optional[str] = None) -> bool:
     """Fail-closed guard: True ONLY if ``volume`` is one of ``volume_base``'s
     agent data volumes (name AND label both match; #1581 double-guard).
 
@@ -379,6 +403,14 @@ def is_reclaimable_agent_volume(volume, volume_base: str) -> bool:
     `list_attached_volume_names` for in-use — and `volume_base` must therefore
     come from `db.get_volume_base_name(agent)`, never from f-stringing an
     agent's current name.
+
+    Stack scope (#3214): a volume labelled for ANOTHER instance is never
+    reclaimable, and a labelled volume is refused when ``instance_id`` (ours)
+    is unknown — two stacks on one daemon can both have an agent named
+    ``alpha``, so name + label alone cannot say whose data it is. An
+    UNLABELLED (pre-#3214) volume keeps the guard as it was: the retention
+    purge reaches it only from this stack's own ownership row, and the orphan
+    sweep never lists one.
     """
     if not volume_base:
         return False
@@ -390,10 +422,13 @@ def is_reclaimable_agent_volume(volume, volume_base: str) -> bool:
         return False
     if labels.get("trinity.platform") not in _AGENT_VOLUME_PLATFORMS:
         return False
+    owner = labels.get(AGENT_VOLUME_INSTANCE_LABEL)
+    if owner is not None and (not instance_id or owner != instance_id):
+        return False
     return True
 
 
-async def remove_agent_volumes(volume_base: str) -> int:
+async def remove_agent_volumes(volume_base: str, instance_id: Optional[str] = None) -> int:
     """Remove the data volumes (workspace/public/shared) under ``volume_base``
     — #1581.
 
@@ -407,9 +442,16 @@ async def remove_agent_volumes(volume_base: str) -> int:
     a renamed agent's volumes keep the pre-rename base, so callers holding an
     agent name must resolve it via ``db.get_volume_base_name(agent)`` — while
     the ownership row still exists.
+
+    ``instance_id`` is this stack's identity (#3214), resolved here when not
+    given; a volume labelled for another stack is refused by the guard.
+    Every removal is logged at WARNING as unrecoverable — it destroys the
+    agent's data, so no instance of it is routine (#1638).
     """
     if docker_client is None:
         return 0
+    if instance_id is None:
+        instance_id = _resolve_instance_id()
     removed = 0
     for suffix in _AGENT_VOLUME_SUFFIXES:
         vol_name = f"agent-{volume_base}-{suffix}"
@@ -420,16 +462,19 @@ async def remove_agent_volumes(volume_base: str) -> int:
         except Exception as e:
             logger.warning(f"[#1581] could not read volume {vol_name}: {e}")
             continue
-        if not is_reclaimable_agent_volume(volume, volume_base):
+        if not is_reclaimable_agent_volume(volume, volume_base, instance_id):
             logger.error(
                 f"[#1581] refusing to remove volume {vol_name}: guard "
-                f"(name+label) did not match base {volume_base}"
+                f"(name+label+instance) did not match base {volume_base}"
             )
             continue
         try:
             await volume_remove(volume, force=True)
             removed += 1
-            logger.info(f"[#1581] removed agent volume {vol_name}")
+            logger.warning(
+                f"[#1581] removed agent volume {vol_name} — its data is "
+                f"unrecoverable"
+            )
         except docker.errors.NotFound:
             continue
         except docker.errors.APIError as e:
@@ -527,21 +572,41 @@ def volume_base_from_workspace_volume(volume_name: str) -> Optional[str]:
     return base or None
 
 
-async def list_agent_data_volumes() -> List[Any]:
-    """All agent data volumes across the fleet (any agent), by label key.
+async def list_agent_data_volumes(instance_id: str) -> List[Any]:
+    """THIS stack's agent data volumes (any agent) — the #1581 orphan sweep's
+    candidates.
 
-    Used by the #1581 orphan sweep. Returns raw volume objects — callers read
+    Filtered at the daemon on the agent label key AND the instance label's
+    key+value (#3214): Docker volumes are daemon-global, and a volume another
+    stack created must never be a candidate here, whatever its ownership looks
+    like from this stack's database. Returns raw volume objects — callers read
     ``.name`` / ``.attrs`` (``Labels['trinity.agent-name']``, ``CreatedAt``).
+    """
+    if docker_client is None or not instance_id:
+        return []
+    return await _list_volumes(
+        [_AGENT_VOLUME_LABEL_KEY, f"{AGENT_VOLUME_INSTANCE_LABEL}={instance_id}"]
+    )
+
+
+async def list_all_agent_data_volumes() -> List[Any]:
+    """Every agent data volume on the daemon, by label key — ANY stack's.
+
+    Never a removal candidate list (#3214): the orphan sweep reads it only to
+    NAME legacy unlabelled volumes for a human. Reclaiming from it is the bug
+    #3214 fixed.
     """
     if docker_client is None:
         return []
+    return await _list_volumes([_AGENT_VOLUME_LABEL_KEY])
+
+
+async def _list_volumes(label_filters: List[str]) -> List[Any]:
     loop = asyncio.get_event_loop()
     try:
         return await loop.run_in_executor(
             _docker_executor,
-            lambda: docker_client.volumes.list(
-                filters={"label": _AGENT_VOLUME_LABEL_KEY}
-            ),
+            lambda: docker_client.volumes.list(filters={"label": label_filters}),
         )
     except Exception as e:
         logger.error(f"[#1581] listing agent data volumes failed: {e}")

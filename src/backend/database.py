@@ -1901,6 +1901,9 @@ class DatabaseManager:
     def get_execution(self, execution_id: str):
         return self._schedule_ops.get_execution(execution_id)
 
+    def get_execution_gate_state(self, execution_id: str):
+        return self._schedule_ops.get_execution_gate_state(execution_id)
+
     def get_fan_out_executions(self, agent_name: str, fan_out_id: str, limit: int = 200):
         """Every execution row of one fan-out batch (#2670)."""
         return self._schedule_ops.get_fan_out_executions(agent_name, fan_out_id, limit)
@@ -2288,6 +2291,14 @@ class DatabaseManager:
 
     def create_gate_request(self, **fields):
         return self._skill_gate_request_ops.create_gate_request(**fields)
+
+    def record_self_approved_run(self, *, request_id: str, agent_name: str, skills,
+                                 request_text: str, requester_email: str, triggered_by,
+                                 dispatched_execution_id: str) -> bool:
+        return self._skill_gate_request_ops.record_self_approved_run(
+            request_id=request_id, agent_name=agent_name, skills=skills,
+            request_text=request_text, requester_email=requester_email,
+            triggered_by=triggered_by, dispatched_execution_id=dispatched_execution_id)
 
     def get_gate_request(self, request_id: str):
         return self._skill_gate_request_ops.get_gate_request(request_id)
@@ -3833,12 +3844,18 @@ class DatabaseManager:
             divergence_acknowledged=divergence_acknowledged,
         )
 
-    def cancel_operator_queue_item(self, item_id, *, disposed_by_email, reason=None):
+    def cancel_operator_queue_item(self, item_id, *, disposed_by_email, reason=None,
+                                   disposition="cancelled"):
         # trinity-enterprise#611: CAS + endings ledger; a lost race carries
-        # `_status_conflict` (the mirror of respond).
+        # `_status_conflict` (the mirror of respond). ent#748: `dismissed`.
         return self._operator_queue_ops.cancel_item(
             item_id, disposed_by_email=disposed_by_email, reason=reason,
+            disposition=disposition,
         )
+
+    def set_operator_queue_discussion_link(self, item_id, key, chat_id):
+        # trinity-enterprise#747: link a pending ask to its discussion chat, once.
+        return self._operator_queue_ops.set_discussion_link(item_id, key, chat_id)
 
     def bulk_cancel_operator_queue_items(self, ids, accessible_agent_names=None, *,
                                          disposed_by_email, reason=None):

@@ -223,9 +223,9 @@ When the TARGET is in `PULL_MODE_PILOT_AGENTS`, the backend queues the `/chat` t
 
 ### What it does
 
-When `MCP_AGENT_CHAT_PULL_ENABLED` is ON, a **sequential** (`parallel=false`) agent→agent (`scope='agent'`, non-self) `chat_with_agent` call is routed by the MCP server through the durable async `/task` path (`apiClient.task(..., {async_mode: true})`) **instead of** the synchronous held `/chat` call. The caller gets an immediate `{status: "accepted" | "queued", execution_id, agent_name, ...}` receipt and **polls `get_execution_result(execution_id)`** for the result.
+When `MCP_AGENT_CHAT_PULL_ENABLED` is ON, a **sequential** (`parallel=false`) agent→agent (`scope='agent'`, non-self) `chat_with_agent` call is routed by the MCP server through the durable async `/task` path (`apiClient.task(..., {async_mode: true})`) **instead of** the synchronous held `/chat` call. The caller gets an immediate `{status: "accepted" | "queued", execution_id, agent_name, ...}` receipt and **polls `get_execution_result(agent_name, execution_id)`** for the result.
 
-- **Polling is the contract** — the backend emits no completion event for this path; the caller must poll.
+- **The receipt is the contract** — read the outcome with `get_execution_result`, or subscribe to the target's `agent.task.completed` / `agent.task.failed`: this path runs through the task service, which emits them (#1578). (The synchronous `/chat` path it replaces emits none.) The receipt's `message` is the MCP server's (ent#568), not the backend's REST "Poll GET …" line.
 - **Default OFF.** Rollback is a flag flip + MCP routing revert (no schema, no data migration).
 
 ### What stays UNCHANGED (deliberate exclusions)
@@ -701,12 +701,12 @@ See `scheduling.md` and `mcp-orchestration.md` for full details on schedule mana
 
 ## Design Limitation: 60-Second MCP Call Timeout
 
-Claude Code enforces a hardcoded 60-second timeout on all MCP HTTP tool calls. This means any synchronous `chat_with_agent` call that takes longer than 60 seconds will fail — the calling agent's MCP client drops the connection regardless of the `timeout_seconds` parameter passed to Trinity.
+An MCP client gives up on a tool call at its own ceiling (30–60 seconds is typical). Trinity's MCP server stops waiting first — at `MCP_CHAT_TIMEOUT_MS`, 25 seconds by default — and answers a synchronous `chat_with_agent` with a `queued_timeout` receipt carrying the `execution_id`, while the target keeps running (#914, #2661; details in [mcp-orchestration.md](mcp-orchestration.md) → "Gateway-Timeout Receipt").
 
-**Impact**: The `timeout_seconds` parameter controls the backend execution timeout (how long Trinity waits for the target agent), but Claude Code kills the HTTP connection after 60s on the client side.
+**Impact**: The `timeout_seconds` parameter controls the backend execution timeout (how long Trinity waits for the target agent), not how long the call waits. A long synchronous call no longer just fails — when the server can match it to its execution it answers with a receipt (otherwise the error names `list_recent_executions`) — but the caller has to know a receipt means "running". Every agent is taught that as the delegation contract (ent#568) in its platform prompt's §Agent Collaboration, and the `chat_with_agent` description carries the same text.
 
 **Workarounds**:
-1. Design tasks to complete within 60 seconds
+1. Treat a receipt as running: read it with `get_execution_result`, never re-send
 2. Use `async=true` with `parallel=true` for long-running tasks (returns `execution_id` immediately)
 3. Use shared folders for result exchange instead of synchronous return values
 
@@ -753,8 +753,8 @@ result = mcp__trinity__chat_with_agent(
 )
 # Returns: { "status": "accepted", "execution_id": "abc123", ... }
 
-# Poll later for results
-# GET /api/agents/analysis-agent/executions/abc123
+# Read later — never re-send to "check":
+# get_execution_result(agent_name="analysis-agent", execution_id="abc123")
 ```
 
 **When to use async mode**:

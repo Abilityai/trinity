@@ -22,6 +22,7 @@ authority (aligned with ``task_execution_service.apply_result``).
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import time
@@ -510,14 +511,92 @@ def _spawn_breaker_verdict(agent_name: str, row_status, is_auth: bool) -> None:
         logger.warning("[#2514] breaker verdict for %s not recorded: %s", agent_name, e)
 
 
-def _collaboration_activity_id(execution: Any) -> Optional[str]:
-    """The collaboration activity id the row's ``backlog_metadata`` carries, or
-    None. Best-effort: never raises before the sink's hooks."""
+# Strong refs to in-flight delivery tasks: a bare create_task can be collected
+# mid-flight (same reason as activity_service._inflight_close_tasks).
+_inflight_delivery_tasks: "set[asyncio.Task[Any]]" = set()
+
+
+def _delivery_metadata(execution: Any) -> Optional[Dict[str, Any]]:
+    """The queued row's metadata when it asks for post-turn delivery, else None.
+
+    Read from the row fetched BEFORE the terminal CAS. The #1449 scrub is a
+    retention job over authoritative terminals, so the blob is still present.
+    """
     try:
-        meta = json.loads(execution.backlog_metadata or "{}")
-    except (TypeError, ValueError, AttributeError):
+        meta = json.loads(getattr(execution, "backlog_metadata", None) or "{}")
+    except (TypeError, ValueError):
         return None
-    return meta.get("collaboration_activity_id") if isinstance(meta, dict) else None
+    if not isinstance(meta, dict):
+        return None
+    wants = (
+        meta.get("save_to_session")
+        or meta.get("collaboration_activity_id")
+        or (meta.get("is_self_task") and meta.get("self_task_activity_id"))
+    )
+    return meta if wants else None
+
+
+async def _deliver_and_signal(
+    execution: Any, meta: Dict[str, Any], applied_status: Any
+) -> None:
+    """Run the shared post-turn delivery for a pulled turn, then wake the sync
+    waiter with the chat session it was saved to. The waiter is signalled even
+    when delivery fails: the terminal is already committed."""
+    from services.backlog_service import request_from_metadata
+    from services.chat_execution_service import run_post_turn_delivery
+    from services.sync_waiter import signal_sync_waiter
+    from services.task_execution_service import result_from_execution_row
+
+    chat_session_id = None
+    try:
+        result = result_from_execution_row(execution.id)
+        # Deliver only the terminal this CAS wrote. A late SUCCESS correcting a
+        # FAILED row spawns its own delivery; the FAILED one must not re-read
+        # the corrected row and deliver it a second time.
+        if result is not None and result.status == applied_status:
+            # The terminal CAS wrote duration_ms from the claim-time started_at.
+            applied = db.get_execution(execution.id)
+            execution_time_ms = getattr(applied, "duration_ms", None)
+            chat_session_id = await run_post_turn_delivery(
+                agent_name=execution.agent_name,
+                request=request_from_metadata(meta),
+                result=result,
+                execution_id=execution.id,
+                collaboration_activity_id=meta.get("collaboration_activity_id"),
+                user_id=meta.get("user_id"),
+                user_email=meta.get("user_email"),
+                subscription_id=meta.get("subscription_id"),
+                is_self_task=meta.get("is_self_task") or False,
+                self_task_activity_id=meta.get("self_task_activity_id"),
+                execution_time_ms=execution_time_ms,
+            )
+    except Exception as e:  # noqa: BLE001 — never affect a committed terminal
+        logger.warning(
+            "[#2329] post-turn delivery failed for %s: %s", execution.id, type(e).__name__
+        )
+    finally:
+        signal_sync_waiter(execution.id, None, chat_session_id)
+
+
+def _spawn_post_turn_delivery(execution: Any, applied_status: Any) -> None:
+    """Sync entry from the CAS-won branch. Nothing to deliver, or no running
+    loop: wake the waiter now. Otherwise deliver first, then wake it."""
+    from services.sync_waiter import signal_sync_waiter
+
+    meta = _delivery_metadata(execution)
+    if meta is not None:
+        try:
+            task = asyncio.get_running_loop().create_task(
+                _deliver_and_signal(execution, meta, applied_status)
+            )
+        except RuntimeError as e:
+            logger.warning("[#2329] post-turn delivery skipped for %s (no loop): %s",
+                           execution.id, e)
+        else:
+            _inflight_delivery_tasks.add(task)
+            task.add_done_callback(_inflight_delivery_tasks.discard)
+            return
+    signal_sync_waiter(execution.id, None, None)
 
 
 def apply_task_result(
@@ -676,16 +755,6 @@ def apply_task_result(
             row_status,
             error=(None if row_status == TaskExecutionStatus.SUCCESS else (err_text or None)),
         )
-        # #3127: an agent-to-agent /chat turn's collaboration activity rides the
-        # payload, so it closes here even when its caller has given up (504).
-        collaboration_activity_id = _collaboration_activity_id(execution)
-        if collaboration_activity_id:
-            activity_service.spawn_close_execution_activity(
-                execution_id,
-                row_status,
-                error=(None if row_status == TaskExecutionStatus.SUCCESS else (err_text or None)),
-                activity_id=collaboration_activity_id,
-            )
         # #2643: SUB-003. This sink had every other terminal hook and not this
         # one, so a pull-owned turn that died on a quota or credential failure
         # recorded no `subscription_rate_limit_events` row (no skip-list entry,
@@ -728,11 +797,11 @@ def apply_task_result(
         # record it. Without it a pilot's breaker never trips on a pulled auth
         # failure and never closes on the half-open probe it pulled.
         _spawn_breaker_verdict(execution.agent_name, row_status, is_auth)
-        # #3114: wake a `dispatch_and_await_terminal` caller in this process
-        # now; its DB poll covers a caller held by another worker.
-        from services.sync_waiter import signal_sync_waiter
-
-        signal_sync_waiter(execution_id, None, None)
+        # #2329: apply the caller's post-turn delivery settings (chat-session
+        # save, collaboration / self-task finalisation) exactly as the push
+        # drain does, then wake a sync waiter in this process. Its DB poll
+        # covers a caller held by another worker (#3114).
+        _spawn_post_turn_delivery(execution, row_status)
         return ResultApplyOutcome("applied", row_status)
 
     # CAS lost — reclassify against the freshly-read row.

@@ -972,7 +972,9 @@ registers a dedicated `chat_with_<slug>` tool — functionally identical to `cha
 with the agent name pre-filled — so a curated, well-known agent surfaces as a named tool
 instead of requiring `list_agents` + `chat_with_agent`. Toggling adds/removes the tool at
 runtime with **no MCP-server restart**. The flag publishes a surface only; execution always
-runs the same access gate, so ownership/sharing is never bypassed.
+runs the same access gate, so ownership/sharing is never bypassed. Each dedicated tool's
+description also carries the delegation contract verbatim (abilityai/trinity-enterprise#568,
+[scheduling.md §37.5](scheduling.md#375-the-delegation-contract-taught-where-callers-read-abilityaitrinity-enterprise568)).
 
 - **FR-1 — Toggle**: `agent_ownership.mcp_exposed INTEGER DEFAULT 0`; owner-only `GET`/`PUT
   /api/agents/{name}/mcp-exposed`. PUT refuses the system agent (403). Getter/setter both guard

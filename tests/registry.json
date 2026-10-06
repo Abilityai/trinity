@@ -1,6 +1,17 @@
 {
   "test_files": [
     {
+      "file": "unit/test_3237_system_agent_after_setup.py",
+      "feature": "#3237",
+      "added": "2026-10-06",
+      "categories": [
+        "backend",
+        "setup",
+        "system-agent"
+      ],
+      "description": "First-run /setup deploys the system agent: a successful setup schedules _deploy_system_agent_after_setup before ensure_first_run_seeded, the deploy runs with the admin row already present, never raises, is skipped without a Docker client, and a refused setup schedules nothing."
+    },
+    {
       "file": "unit/test_ent761_outbound_control_oss.py",
       "feature": "trinity-enterprise#761",
       "added": "2026-10-02",
@@ -4216,6 +4227,104 @@
       "description": "trinity-enterprise#751: discovery guards — every function that posts to an agent is behind the gate (structural checks per site), every producer passes the requester's own words or is named unwrapped, and every execute_task keyword is classified in the frozen dispatch."
     },
     {
+      "file": "unit/test_ent752_skill_gate_hook.py",
+      "feature": "ent#752",
+      "added": "2026-10-05",
+      "categories": [
+        "agent",
+        "security",
+        "unit"
+      ],
+      "description": "trinity-enterprise#752: the in-container hook executed in its own process under -I -S (import-level seam, stub platform, fake /proc) — the verdict table, every no-verdict path against the marker, the 10 s deadline, one retry, identity from /proc never its own env, crash injection through the bootstrap (never exit 1), FIFO traps, the log without the key, the build self-test."
+    },
+    {
+      "file": "unit/test_ent752_name_resolution.py",
+      "feature": "ent#752",
+      "added": "2026-10-05",
+      "categories": [
+        "agent",
+        "security",
+        "unit"
+      ],
+      "description": "trinity-enterprise#752: which names a call loads — generous resolution is a superset of #751's _FINGERPRINT_SCRIPT (every key it resolves is sent whichever name the skill is invoked by), YAML-faithful front matter (BOM, quotes, comments, beyond 4 KiB), the skills: forms of a subagent definition, subagent lookup by front-matter name."
+    },
+    {
+      "file": "unit/test_ent752_check_endpoint.py",
+      "feature": "ent#752",
+      "added": "2026-10-05",
+      "categories": [
+        "backend",
+        "api",
+        "security",
+        "unit"
+      ],
+      "description": "trinity-enterprise#752: POST /api/skill-gate/check over the real route and DB — only the agent itself (from its key) may ask, every verdict (approved / self-approved / D3 per skill / no run / could not tell), identical answers and reads for unknown, foreign and finished runs, 503 on an unreadable map, named 422s, the throttled skill_gate_refused audit, the rate-limited marker heal, and the hook's own request replayed against the route."
+    },
+    {
+      "file": "unit/test_ent752_self_approval_clearance.py",
+      "feature": "ent#752",
+      "added": "2026-10-05",
+      "categories": [
+        "backend",
+        "security",
+        "unit"
+      ],
+      "description": "trinity-enterprise#752: a self-approval is recorded on the run the agent receives — /task, /chat (moved from admission to the row's setup) and the Workspace backstop; the self_approved record's lattice and idempotency; the completion report and the backstop never read it as an approved run; AST guard: audit_self_approved only inside record_self_approval."
+    },
+    {
+      "file": "unit/test_ent752_marker_sync.py",
+      "feature": "ent#752",
+      "added": "2026-10-05",
+      "categories": [
+        "backend",
+        "agent",
+        "unit"
+      ],
+      "description": "trinity-enterprise#752: the outage marker — written / removed by a constant root argv (executed against a temp path), never touched on an unreadable map or a failed exec, the gated-only fire-and-forget spawn, and both lifecycle tails (start, recreate) driven through their real bodies with Docker mocked."
+    },
+    {
+      "file": "unit/test_ent752_isolated_chat_session.py",
+      "feature": "ent#752",
+      "added": "2026-10-05",
+      "categories": [
+        "backend",
+        "agent",
+        "unit"
+      ],
+      "description": "trinity-enterprise#752: a self-approved /chat turn runs in its own session — the router carries the decision and the isolation, the payload carries isolated_session, the agent server passes it to the runtime and keeps the shared stats, and the real execute_claude_code (#2958 fake CLI) neither resumes nor captures nor moves the shared model."
+    },
+    {
+      "file": "unit/test_ent752_managed_registration.py",
+      "feature": "ent#752",
+      "added": "2026-10-05",
+      "categories": [
+        "agent",
+        "security",
+        "unit"
+      ],
+      "description": "trinity-enterprise#752: the managed-settings drop-in's exact shape, its matcher evaluated by a port of the CLI's own plain-name branch, exec form with env -i and -I -S, loader pins within PROTECTED_KEYS, managed-settings.json untouched, and the image wiring (COPY, root ownership, the --self-test smoke, USER developer)."
+    },
+    {
+      "file": "unit/test_ent752_cli_pin.py",
+      "feature": "ent#752",
+      "added": "2026-10-05",
+      "categories": [
+        "agent",
+        "unit"
+      ],
+      "description": "trinity-enterprise#752: the hook's CLI facts were verified against the Claude Code version the image pins (SKILL_GATE_CLI_VERIFIED == ARG CLAUDE_CODE_VERSION), with the re-audit list beside it."
+    },
+    {
+      "file": "unit/test_ent752_health_skill_gate.py",
+      "feature": "ent#752",
+      "added": "2026-10-05",
+      "categories": [
+        "agent",
+        "unit"
+      ],
+      "description": "trinity-enterprise#752: the agent /health skill_gate_hook enum — missing / not_root_owned / writable / ok over the drop-in, its directory and both scripts, unsupported_runtime off Claude Code."
+    },
+    {
       "file": "unit/test_3185_a2a_payment_outcome.py",
       "feature": "abilityai/trinity#3185",
       "added": "2026-10-03",
@@ -4304,6 +4413,18 @@
         "payments"
       ],
       "description": "The priced A2A agent card (ent#679 checkpoint C, AC2). A stranger could previously learn an agent's price only by calling and being refused; the card is A2A's discovery document, so a priced agent now declares `agentId` / `planId` / `credits` there and an x402 client meets the paywall on its first request. The hard line first: no config, a DISABLED config, or an enabled one missing its plan or agent id all return the card object BY IDENTITY, so every install that sells nothing is byte-identical and `generate_a2a_card` stays pure with no payment knowledge and no I/O. The declared vocabulary is Nevermined's own `urn:nevermined:payment` (the provider SDK's card helper's URI) and the official Google/Coinbase x402 extension URI is asserted ABSENT — declaring it would advertise an `X-A2A-Extensions` activation handshake Trinity does not run, leaving a generic client waiting for a negotiation that never comes. Both card surfaces are driven over a real TestClient (ent#180 FR-3: the public well-known card and the authenticated per-agent card must not disagree) and `paymentInfoUrl` is proven to be built from the requesting instance's own origin rather than a hardcoded host, omitted entirely when there is no base URL. T9: `credits_per_request = 0` is a Nevermined DURATION plan (charged by time, so Trinity sends no amount and the plan defines the burn) — the model accepts 0, a negative is still a named 422, the default is still 1, and 0 declares `paymentType: dynamic` rather than the contradictory `fixed`/0 that reads as free and that the SDK's own card validator rejects. Fail-open is asserted with its WARNING: an unreadable payment config still serves the card, because a card route has never 5xx'd and the gate reads the config independently and still answers 402. Mutation-proven (router wiring dropped / official URI declared / paymentType hardcoded / credits floor restored each go red). No Docker, no live backend, no facilitator."
+    },
+    {
+      "file": "unit/test_ent568_delegation_contract.py",
+      "feature": "abilityai/trinity-enterprise#568",
+      "added": "2026-10-05",
+      "categories": [
+        "backend",
+        "unit",
+        "reliability",
+        "mcp"
+      ],
+      "description": "The delegation contract (ent#568): what a dispatch receipt means and what to do instead of re-sending, taught as ONE text in the platform prompt (\u00a7Agent Collaboration, spliced from DELEGATION_CONTRACT) and, byte-identical, in src/mcp-server/src/delegation_contract.ts, which the chat_with_agent and chat_with_<agent> descriptions carry. Pins: the contract renders once inside \u00a7Agent Collaboration for every runtime with no unspliced __MARKER__ left; it is runtime-neutral (no mcp__trinity__, no heading); the TS array parses strictly as JSON (exactly one anchored declaration) and equals the Python constant, with guard-the-guard cases proving a comment inside the array raises and a one-character edit is seen; the rule sentence fan_out/send_message repeat is the contract's own; every backticked token is classified and proven real -- each tool exists in a non-test MCP module with each named argument in its zod schema, each status is emitted by a pinned DISPATCH-route file (so ask_operator's `replayed` cannot vouch for it), the events are TASK_COMPLETED_EVENT/TASK_FAILED_EVENT; the Codex orientation lists the tools; the contract stays under its 1,650-char budget and \u00a7Agent Collaboration stays shorter than \u00a7Operator Communication (AC4). The MCP half -- published tools/list descriptions under Claude Code's 2,048-char cap, receipt messages -- is src/mcp-server/src/delegation-contract.test.ts. Mutation-proven (splice dropped / Codex name dropped / TS copy drifted each go red). No Docker, no live backend."
     }
   ]
 }

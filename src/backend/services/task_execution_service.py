@@ -1941,9 +1941,14 @@ class TaskExecutionService:
                 gates=gates,
             )
             # Only reachable with a producer-supplied, proven `gate_requester`.
-            await skill_gate_service.audit_self_approved(
+            # trinity-enterprise#752: the row this call created or was given is
+            # the run the agent receives — cleared here for the in-container
+            # hook, before admission (so a Workspace cold retry reuses it).
+            await skill_gate_service.record_self_approval(
                 agent_name, decision, current_user=None,
-                endpoint=f"execute_task:{triggered_by}", execution_id=execution_id)
+                endpoint=f"execute_task:{triggered_by}", execution_id=execution_id,
+                request_text=message if request_text is None else request_text,
+                triggered_by=triggered_by)
         except SkillGateError as exc:
             if execution_id:
                 if isinstance(exc, SkillApprovalRequired):

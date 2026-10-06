@@ -582,27 +582,15 @@ def test_agent_chat_payload_carries_the_collaboration_activity(monkeypatch):
     assert payload.collaboration_activity_id == "act-collab"
 
 
-@pytest.mark.parametrize("status", ["success", "failed"])
-def test_sink_closes_the_collaboration_activity(status):
-    """#3127: a turn whose caller gave up (504) still closes its collaboration
-    activity at the terminal, instead of waiting for the 120-min backstop."""
+def test_sink_delivers_a_collaboration_only_row():
+    """#3127 + #2329: an agent-to-agent /chat row carries only the
+    collaboration activity id; the sink's post-turn delivery still picks it up,
+    so a turn whose caller gave up (504) closes the activity at the terminal."""
     import services.pull_coordination_service as pcs
 
-    execution = MagicMock(status="running", agent_name=AGENT,
-                          backlog_metadata=json.dumps({"collaboration_activity_id": "act-collab"}))
-    mock_db = MagicMock()
-    mock_db.get_execution.return_value = execution
-    mock_db.update_execution_status.return_value = True
-    activity = MagicMock()
-    with patch.object(pcs, "db", mock_db), \
-         patch.object(pcs, "event_dispatch_service", MagicMock()), \
-         patch.object(pcs, "channel_completion_report", MagicMock()), \
-         patch.object(pcs, "subscription_auto_switch", MagicMock()), \
-         patch.object(pcs, "_spawn_breaker_verdict", MagicMock()), \
-         patch.object(pcs, "activity_service", activity):
-        assert pcs.apply_task_result("e1", "tok", status=status, content="x").kind == "applied"
-    ids = [c.kwargs.get("activity_id") for c in activity.spawn_close_execution_activity.call_args_list]
-    assert ids == [None, "act-collab"]
+    meta = {"collaboration_activity_id": "act-collab"}
+    execution = SimpleNamespace(backlog_metadata=json.dumps(meta))
+    assert pcs._delivery_metadata(execution) == meta
 
 
 @pytest.mark.asyncio

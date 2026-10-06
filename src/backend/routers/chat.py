@@ -289,6 +289,8 @@ async def chat_with_agent(
         capacity_result=capacity_result,
         queue_result=queue_result,
         chain_depth=admission.chain_depth,
+        # trinity-enterprise#752: a self-approval is recorded on the row.
+        gate=admission.gate,
     )
     execution = ctx.execution
     task_execution_id = ctx.task_execution_id
@@ -324,6 +326,7 @@ async def chat_with_agent(
             idem=idem,
             capacity=capacity,
             chain_depth=admission.chain_depth,
+            isolated_session=ctx.isolated_session,
         )
     except ChatDispatchError as e:
         raise HTTPException(status_code=e.status_code, detail=e.detail, headers=e.headers)

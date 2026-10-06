@@ -118,7 +118,7 @@ def turn_env(tmp_db, monkeypatch):
     marked = MagicMock()
     monkeypatch.setattr(db, "mark_execution_dispatched", marked)
 
-    def run(eid=None, user=None):
+    def run(eid=None, user=None, isolated_session=False):
         from models import ChatMessageRequest
 
         return asyncio.run(ce.run_chat_turn(
@@ -139,6 +139,7 @@ def turn_env(tmp_db, monkeypatch):
             idem="IDEM",
             capacity=None,
             chain_depth=2,
+            isolated_session=isolated_session,
         ))
 
     return SimpleNamespace(
@@ -192,15 +193,15 @@ def test_pilot_admission_skips_acquire(monkeypatch):
     audit.log.assert_awaited_once()
 
 
-def test_pilot_admission_audits_a_self_approved_gate(monkeypatch):
-    """ent#751: the pilot branch returns before the push branch's audit."""
+def test_pilot_admission_carries_the_gate_decision(monkeypatch):
+    """ent#751/#752: the row's setup records a self-approval from
+    ``admission.gate``; the pilot branch must hand it on like the push branch."""
     import services.dispatch_admission_service as da
 
-    audited = AsyncMock()
-    monkeypatch.setattr(da.skill_gate_service, "audit_self_approved", audited)
+    decision = object()
+    monkeypatch.setattr(da.skill_gate_service, "enforce", AsyncMock(return_value=decision))
     admission, _, _, _ = _admit(monkeypatch, pilot=True)
-    audited.assert_awaited_once()
-    assert audited.await_args.kwargs["execution_id"] == admission.execution_id
+    assert admission.gate is decision
 
 
 def test_non_pilot_admission_acquires_in_memory(monkeypatch):
@@ -375,6 +376,16 @@ def test_timeout_with_row_running_returns_receipt_and_504(turn_env):
     (_, eid, receipt), _ = env.idem.complete.call_args
     assert eid == env.row.id
     assert receipt["status"] == "queued_timeout"
+
+
+def test_isolated_turn_starts_cold_and_is_not_cached(turn_env):
+    """ent#752: a self-approved gated-skill turn never resumes the session's
+    conversation, and the next turn never resumes it."""
+    env = turn_env
+    env.db.set_chat_session_claude_id(env.session.id, UUID2)
+    env.run(isolated_session=True)
+    assert env.dispatch.await_args.kwargs["resume_session_id"] is None
+    assert env.db.get_chat_session_claude_id(env.session.id) == UUID2
 
 
 def test_lock_wait_is_one_turn(turn_env, monkeypatch):

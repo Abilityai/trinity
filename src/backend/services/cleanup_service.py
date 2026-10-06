@@ -843,6 +843,9 @@ class CleanupService:
         # unowned. In-process only (a restart just restarts the count — the
         # safe direction).
         self._unattached_volume_strikes: Dict[str, int] = {}
+        # #3214: the legacy unlabelled orphan volumes last named in a WARNING,
+        # so the report repeats only when that set changes.
+        self._reported_unlabelled_volumes: frozenset = frozenset()
 
     def start(self):
         """Start the background cleanup loop."""
@@ -1821,15 +1824,44 @@ class CleanupService:
         Removal still goes through the name+label guard (`remove_agent_volumes`)
         as a last line of defence. Also carries a creation-grace window
         (creation writes the volume before the ownership row).
+
+        **Stack scope (#3214).** Docker volumes are daemon-global while (1) is
+        answered from THIS stack's database, so a second stack on the same
+        daemon used to read every other stack's unattached agent volumes as
+        its own orphans and force-remove them. Candidates are therefore listed
+        on the `trinity.instance=<this installation_id>` label (key AND value):
+        a volume another stack created is never a candidate. If this stack's
+        id cannot be resolved, the sweep does nothing.
+
+        **Legacy volumes — fail-closed.** Volumes created before the instance
+        label existed carry none, and Docker labels cannot be added later. The
+        sweep NEVER reclaims an unlabelled volume: on a shared daemon it cannot
+        say whose it is. Unlabelled ones that are also unowned and unattached
+        are named in one WARNING (repeated only when that set changes) for a
+        human to remove. This stack's own agents still lose their volumes at
+        the retention purge, which is driven by the ownership row, labelled or
+        not.
         """
         try:
             from services.docker_utils import (
+                AGENT_VOLUME_INSTANCE_LABEL,
                 list_agent_data_volumes,
                 list_attached_volume_names,
                 remove_agent_volumes,
             )
+            from services.instance_identity import get_instance_id
 
-            volumes = await list_agent_data_volumes()
+            instance_id = get_instance_id()
+            if not instance_id:
+                logger.warning(
+                    "[#1581] skipping orphan-volume sweep: this instance's id is "
+                    "unavailable (cannot tell its volumes from another stack's)"
+                )
+                return
+
+            await self._report_unlabelled_orphan_volumes(AGENT_VOLUME_INSTANCE_LABEL)
+
+            volumes = await list_agent_data_volumes(instance_id)
             if not volumes:
                 self._unattached_volume_strikes.clear()
                 return
@@ -1900,9 +1932,13 @@ class CleanupService:
             for stale in set(self._unattached_volume_strikes) - seen_volumes:
                 self._unattached_volume_strikes.pop(stale, None)
 
-            for volume_base in orphan_agents:
+            reclaimed_bases = []
+            for volume_base in sorted(orphan_agents):
                 try:
-                    reclaimed += await remove_agent_volumes(volume_base)
+                    n = await remove_agent_volumes(volume_base, instance_id)
+                    reclaimed += n
+                    if n:
+                        reclaimed_bases.append(volume_base)
                 except Exception as e:
                     logger.warning(
                         f"[#1581] orphan volume reclaim for {volume_base} failed: {e}"
@@ -1910,11 +1946,64 @@ class CleanupService:
 
             report.orphan_agent_volumes_reclaimed = reclaimed
             if reclaimed > 0:
-                logger.info(
-                    f"[#1581] reclaimed {reclaimed} orphaned agent volume(s)"
+                # Always WARNING (#3214, the #1638 rule the purge path already
+                # follows): this destroys agent data and is unrecoverable —
+                # there is no routine, unremarkable one. Each volume is also
+                # named on its own line by `remove_agent_volumes`.
+                logger.warning(
+                    f"[#1581] reclaimed {reclaimed} orphaned agent volume(s) of "
+                    f"this instance — unrecoverable: "
+                    + ", ".join(f"agent-{b}-*" for b in reclaimed_bases)
                 )
         except Exception as e:
             logger.error(f"[Cleanup] Error in orphan agent-volume sweep: {e}")
+
+    async def _report_unlabelled_orphan_volumes(self, instance_label: str) -> None:
+        """#3214: name the legacy (unlabelled) agent volumes that look orphaned
+        — no ownership row, not mounted — for a human. Never reclaims: without
+        an instance label nothing says which stack's data a volume holds.
+
+        One WARNING per change of that set, not one per 5-minute cycle. Never
+        raises.
+        """
+        try:
+            from services.docker_utils import (
+                list_all_agent_data_volumes,
+                list_attached_volume_names,
+            )
+
+            volumes = await list_all_agent_data_volumes()
+            attached = await list_attached_volume_names()
+            if attached is None:
+                return
+            names = []
+            for volume in volumes:
+                labels = (volume.attrs.get("Labels") or {}) if getattr(volume, "attrs", None) else {}
+                if labels.get(instance_label):
+                    continue
+                base = labels.get("trinity.agent-name")
+                name = getattr(volume, "name", None)
+                if not base or not name or name in attached:
+                    continue
+                if db.is_volume_base_reserved(base):
+                    continue
+                names.append(name)
+            current = frozenset(names)
+            if current == self._reported_unlabelled_volumes:
+                return
+            self._reported_unlabelled_volumes = current
+            if current:
+                shown = sorted(current)
+                logger.warning(
+                    f"[#3214] {len(shown)} unlabelled agent volume(s) with no owner "
+                    f"and no container — NOT reclaimed automatically (created "
+                    f"before stack-identity labels; on a shared Docker daemon they "
+                    f"may belong to another stack). Review and remove by hand: "
+                    + ", ".join(shown[:50])
+                    + (f" … (+{len(shown) - 50} more)" if len(shown) > 50 else "")
+                )
+        except Exception as e:
+            logger.debug(f"[#3214] unlabelled-volume report skipped: {e}")
 
     @staticmethod
     def _volume_age_seconds(created_raw: Optional[str], now) -> Optional[float]:
