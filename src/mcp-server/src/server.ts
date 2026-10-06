@@ -73,6 +73,12 @@ export interface ServerConfig {
    */
   agentChatPullEnabled?: boolean;
   /**
+   * #3232 report-back kill switch. When false, no chat_with_* call sends
+   * `parent_execution_id` — neither the async default nor a typed opt-in — so a
+   * delegated run never posts into the caller's conversation. Default ON.
+   */
+  reportBackEnabled?: boolean;
+  /**
    * #848 inline email auth. When true, a request arriving with NO Authorization
    * header opens an anonymous sentinel session that may call request_login /
    * verify_login (and the connector tools, which refuse to act until an email
@@ -423,6 +429,8 @@ export async function createServer(config: ServerConfig = {}) {
     // ServerConfig.agentChatPullEnabled). Same env key the backend declares in
     // config.py (MCP_AGENT_CHAT_PULL_ENABLED) so a single-.env deploy can't drift.
     agentChatPullEnabled = process.env.MCP_AGENT_CHAT_PULL_ENABLED === "true",
+    // #3232 report-back — default ON (see ServerConfig.reportBackEnabled).
+    reportBackEnabled = true,
     // #848 inline email auth — default OFF. When off, a request with no
     // Authorization header is rejected exactly as before and no session is
     // created. When on, it yields an anonymous sentinel session that may only
@@ -625,7 +633,7 @@ export async function createServer(config: ServerConfig = {}) {
   // Build tool groups once, then register + count (SEC-001 Phase 3).
   const toolGroups: Record<string, any>[] = [
     createAgentTools(client, requireApiKey),
-    createChatTools(client, requireApiKey, agentChatPullEnabled),
+    createChatTools(client, requireApiKey, agentChatPullEnabled, reportBackEnabled),
     createSystemTools(client, requireApiKey),
     createDocsTools(),
     createSkillsTools(client, requireApiKey),
@@ -716,6 +724,7 @@ export async function createServer(config: ServerConfig = {}) {
     client,
     requireApiKey,
     agentChatPullEnabled,
+    reportBackEnabled,
     trinityApiUrl,
     operatorOnly,
     builtinToolNames,
