@@ -635,6 +635,42 @@ def test_the_probe_greps_the_agent_servers_files_router(agent):
     assert command == ["grep", "-qsF", "--", "_open_for_read", "/app/agent_server/routers/files.py"]
 
 
+def _without_comments(source):
+    import io
+    import tokenize
+
+    lines = source.splitlines(keepends=True)
+    for tok in tokenize.generate_tokens(io.StringIO(source).readline):
+        if tok.type == tokenize.COMMENT:
+            (row, col), (_, end) = tok.start, tok.end
+            line = lines[row - 1]
+            lines[row - 1] = line[:col] + " " * (end - col) + line[end:]
+    return "".join(lines)
+
+
+def test_the_probe_target_is_the_shipped_agent_servers_read_function():
+    """The probe's path is where the base image copies the agent server's
+    files router, and that router defines the probed function at module level.
+    Renaming or moving either one must fail here, not on every agent."""
+    import ast
+    import re
+    from pathlib import Path
+
+    repo = Path(__file__).resolve().parents[2]
+    base = repo / "docker/base-image"
+    copies = re.findall(r"^COPY\s+(?:--\S+\s+)*\./agent_server\s+(/app/agent_server)\s*$",
+                        (base / "Dockerfile").read_text(), flags=re.MULTILINE)
+    assert copies == ["/app/agent_server"], copies
+    probe_path, token = files._READ_POLICY_PROBE_PATH, files._READ_POLICY_PROBE_TOKEN
+    assert probe_path.startswith("/app/agent_server/"), probe_path
+    target = base / "agent_server" / probe_path[len("/app/agent_server/"):]
+    assert target.is_file(), target
+    source = target.read_text()
+    assert re.search(rf"^def {re.escape(token)}\(", _without_comments(source), flags=re.MULTILINE), (
+        f"{target.relative_to(repo)} defines no module-level def {token}(")
+    assert token in {n.name for n in ast.parse(source).body if isinstance(n, ast.FunctionDef)}
+
+
 @pytest.mark.parametrize("fn", LOGIC)
 @pytest.mark.parametrize("user", [owner_jwt, owner_user_key, admin_jwt],
                          ids=["owner-jwt", "owner-user-key", "admin-jwt"])
