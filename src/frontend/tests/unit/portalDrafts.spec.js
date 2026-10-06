@@ -17,7 +17,7 @@ import {
   draftKeyFor, threadKey, roomKey, newChatKey, isNewChatKey, agentOfNewChatKey,
   hasDraftText, draftStorageKey, normalizeDraftsMap, boundDrafts,
   loadDrafts, persistDraft, removeDraftsBucket,
-  agentsWithDrafts, reconcileDraftOnKeyChange, shouldFocusOnRestore,
+  agentsWithDrafts, reconcileDraftOnKeyChange, shouldAutoFocusComposer,
 } from '../../src/components/portal/portalDrafts'
 import { usePortalDraftsStore } from '../../src/stores/portalDrafts'
 
@@ -195,12 +195,12 @@ describe('reconcileDraftOnKeyChange — the four in-instance transitions', () =>
   })
 })
 
-describe('shouldFocusOnRestore — a fine pointer only', () => {
+describe('shouldAutoFocusComposer — a fine pointer only', () => {
   it('true on a fine pointer, false on coarse, false with no matchMedia', () => {
-    expect(shouldFocusOnRestore((q) => ({ matches: q === '(pointer: fine)' }))).toBe(true)
-    expect(shouldFocusOnRestore(() => ({ matches: false }))).toBe(false)
-    expect(shouldFocusOnRestore(undefined)).toBe(false)
-    expect(shouldFocusOnRestore(() => { throw new Error('no') })).toBe(false)
+    expect(shouldAutoFocusComposer((q) => ({ matches: q === '(pointer: fine)' }))).toBe(true)
+    expect(shouldAutoFocusComposer(() => ({ matches: false }))).toBe(false)
+    expect(shouldAutoFocusComposer(undefined)).toBe(false)
+    expect(shouldAutoFocusComposer(() => { throw new Error('no') })).toBe(false)
   })
 })
 

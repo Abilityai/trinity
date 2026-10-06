@@ -516,9 +516,11 @@ export function railEmptyCopy(tab, participants) {
 // ---------------------------------------------------------------- shell placement
 
 /**
- * Whom the rail is scoped to. The agent page is a destination of its own with
- * no conversation beside it, so it has no rail (#474: the rail renders beside
- * `PortalConversation` and `PortalRoom`). A room's participants arrive with
+ * Whom the rail is scoped to. `agentPage` is a stage with no conversation
+ * beside it, so it has no rail (#474: the rail renders beside
+ * `PortalConversation` and `PortalRoom`) — since ent#784 that is an agent URL
+ * which has not LANDED yet, never one a new chat is resting on (the shell
+ * decides which, `Portal.vue::unlandedAgentPage`). A room's participants arrive with
  * the room's own fetch, so this can legitimately be empty for a beat — the
  * rail stays mounted on the ROUTE fact (`railVisibleFor`) and its tabs show
  * their empty states rather than the rail flickering in and out.
@@ -539,7 +541,9 @@ export function railParticipantsFor({
  * synchronous (the route) or verdicts (the stage state), never on data that is
  * still arriving — so a live update can never remount it.
  *
- *   agentPage     `/workspace/a/:name` — a page, not a conversation
+ *   agentPage     a stage with no conversation: `/workspace/a/:name` before it
+ *                 has landed, or the Projects pages. NOT a landed agent URL —
+ *                 that is a new chat, and has the rail every chat has (ent#784)
  *   stageState    `stageZone(...).state`: only a `ready` stage holds a
  *                 conversation; loading / failed / empty stages show no rail
  *   roomId        `/workspace/r/:id` — the rail follows the room only where
@@ -577,7 +581,8 @@ export function railVisibleFor({
  *
  * Deliberately narrower than `railVisibleFor`'s route set:
  *
- *   - an agent page never carries a rail, so reserving there would invent a gap;
+ *   - a Projects page never carries a rail, so reserving there would invent a
+ *     gap (an agent URL DOES reserve: since ent#784 it is a 1:1 route itself);
  *   - a ROOM route is excluded even though a ready room usually has a rail,
  *     because that depends on `roomsAvailable`, which arrives ON the roster
  *     payload (#2128) — reserving on a capability we have not been told about

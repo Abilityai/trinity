@@ -4,7 +4,7 @@
 
 ## What is Trinity?
 
-Trinity is an open-source autonomous agent orchestration platform — infrastructure for deploying, orchestrating, and governing fleets of AI agents on your own hardware. Each agent runs in an isolated Docker container with a pluggable runtime (Claude Code, OpenAI Codex, or Gemini CLI), persists memory across sessions, can delegate to other agents, and can run on schedules without human intervention. You interact with the platform through a web UI, a REST API, or MCP tools. See [Overview](../getting-started/overview.md).
+Trinity is the open-source operating system for the AI-native company — compounding intelligence your company owns. Concretely, it is infrastructure for deploying, orchestrating, and governing fleets of AI agents on your own hardware. Each agent runs in an isolated Docker container with a pluggable runtime (Claude Code, OpenAI Codex, or Gemini CLI), persists memory across sessions, can delegate to other agents, and can run on schedules without human intervention. You interact with the platform through a web UI, a REST API, or MCP tools. See [Overview](../getting-started/overview.md).
 
 ## What do I need to run Trinity on my own machine?
 

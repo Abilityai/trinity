@@ -901,7 +901,7 @@ import { useConversationAnchor } from '@/composables/useConversationAnchor'
 import { useRoute, useRouter } from 'vue-router'
 import { useComposerDraft } from '@/composables/useComposerDraft'
 import { usePortalDraftsStore } from '@/stores/portalDrafts'
-import { draftKeyFor, shouldFocusOnRestore } from './portalDrafts'
+import { draftKeyFor, shouldAutoFocusComposer } from './portalDrafts'
 import PortalTypeahead from './PortalTypeahead.vue'
 import PortalJumpToLatest from './PortalJumpToLatest.vue'
 import PortalAsks from './PortalAsks.vue'
@@ -991,6 +991,11 @@ const props = defineProps({
   // This is the second bit that makes them distinguishable, mirroring the
   // backend's `new_thread`.
   newChat: { type: Boolean, default: false },
+  // ent#784 — WHY this instance is showing a fresh composer, which decides
+  // whether it may focus itself. `always` = the person just made a gesture that
+  // asks for a composer. `fine-pointer` = they LANDED here (opening an agent, a
+  // deep link), so focus only where it cannot summon an on-screen keyboard.
+  focusOnMount: { type: String, default: 'always' },
   prefill: { type: String, default: '' },
   // ent#610 round 8: `{ sessionId, messageId, excerpt }` from the Inbox arrow.
   // Shown only on the chat it belongs to; the shell clears it on `reply-done`.
@@ -1069,6 +1074,13 @@ watch(() => props.threads, (list) => {
 })
 
 function focusComposer() { textarea.value?.focus() }
+// ent#784: the landing doors pass `fine-pointer`, so opening an agent on a
+// phone shows a fresh composer without the keyboard sliding up over it. A
+// gesture door passes `always` and is unaffected.
+function mayAutoFocus() {
+  if (props.focusOnMount !== 'fine-pointer') return true
+  return shouldAutoFocusComposer(typeof window !== 'undefined' ? window.matchMedia?.bind(window) : null)
+}
 
 const loadingHistory = ref(false)
 // #2163 — "a verdict exists for this thread's history" (mirrors `onMounted`'s
@@ -1659,7 +1671,7 @@ onMounted(async () => {
   // fine pointer only (a phone would get the soft keyboard over the thread).
   // After the prefill line on purpose: an explicit "Ask about it" replaces the
   // composer today, and the write-through then makes IT the draft.
-  if (draftRestored && !props.prefill && shouldFocusOnRestore(typeof window !== 'undefined' ? window.matchMedia?.bind(window) : null)) {
+  if (draftRestored && !props.prefill && shouldAutoFocusComposer(typeof window !== 'undefined' ? window.matchMedia?.bind(window) : null)) {
     nextTick(() => {
       const el = textarea.value
       if (!el || el.disabled) return
@@ -1679,7 +1691,7 @@ onMounted(async () => {
     // instance: pressing New chat bumps `convGen`, which remounts this
     // component, so any focus set before the press is thrown away. A disabled
     // textarea (a live voice call) makes it a no-op by construction.
-    if (props.newChat) nextTick(focusComposer)
+    if (props.newChat && mayAutoFocus()) nextTick(focusComposer)
   }
   autoGrowAfterUpdate()   // `props.prefill` was assigned above; wait for the patch
 })
