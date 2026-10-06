@@ -31,7 +31,7 @@ Each card carries a type pill — **Needs approval**, **Question**, or **Heads u
 
 | Type | What you do |
 |------|-------------|
-| Needs approval | Pick one of the options the agent offered, optionally add a note, and send. The decision is always one of the agent's own options — a free-text decision is refused. |
+| Needs approval | Pick one of the options the agent offered, optionally add a note, and send. When none of them is right, choose **Something else** (or just start typing) and write what the agent should do instead — the agent carries out none of its options and re-plans from your instruction. The text is required then, and the button reads **Send instruction**. Any other free-text decision is refused. Approvals raised by the platform itself (skill gates) are decided by their options only and show no **Something else**. |
 | Question | Type an answer and send. |
 | Heads up | Click **Got it** to acknowledge. |
 
@@ -99,7 +99,7 @@ Per-agent sync state (last sync at, last error, ahead/behind counts on `main` an
 | `/api/operator-queue/bulk-cancel` | POST | Cancel listed pending items (`{"ids": [...]}`); returns `{cancelled, skipped}` |
 | `/api/operator-queue/clear-resolved` | POST | Hide terminal items (acknowledged/cancelled/expired); returns `{cleared}` |
 | `/api/operator-queue/{id}` | GET | Get single item |
-| `/api/operator-queue/{id}/respond` | POST | Submit response — body `{"response": "<decision>", "response_text": "<optional note>"}`. For an approval, `response` must be one of the item's own `options` (exact match) or the call fails with 422 `response_not_an_offered_option` carrying `offered_options`; 409 if the item is no longer pending |
+| `/api/operator-queue/{id}/respond` | POST | Submit response — body `{"response": "<decision>", "response_text": "<optional note>"}`. For an approval, `response` must be one of the item's own `options` (exact match) or the reserved `"(something else)"` with the instruction in `response_text`; anything else fails with 422 `response_not_an_offered_option` carrying `offered_options`, and the reserved value fails with 422 `instruction_required` (blank `response_text`), `reserved_value` (not an approval) or `not_off_menu` (a platform-minted gate approval). `response_text` is at most 4000 characters; 409 if the item is no longer pending |
 | `/api/operator-queue/{id}/cancel` | POST | Cancel item |
 | `/api/operator-queue/agents/{name}` | GET | Items for a specific agent |
 | `/api/notifications/dismiss-all` | POST | Dismiss all pending + acknowledged notifications (optional `agent_name`) |

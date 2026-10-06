@@ -45,7 +45,7 @@ def _approval(options):
 def test_the_exact_2370_case_is_refused():
     """The case that shipped: `"approved"` against `["Approve", "Deny"]`."""
     with pytest.raises(ResponseNotOfferedError) as e:
-        validate_response_choice(_approval(["Approve", "Deny"]), "approved")
+        validate_response_choice(_approval(["Approve", "Deny"]), "approved", response_text=None)
     assert e.value.code == "response_not_an_offered_option"
     # The refusal must NAME the options — they are agent-authored, so an
     # operator cannot guess them from a bare "invalid".
@@ -54,8 +54,8 @@ def test_the_exact_2370_case_is_refused():
 
 
 def test_an_offered_option_is_accepted():
-    validate_response_choice(_approval(["Approve", "Deny"]), "Approve")
-    validate_response_choice(_approval(["Approve", "Deny"]), "Deny")
+    validate_response_choice(_approval(["Approve", "Deny"]), "Approve", response_text=None)
+    validate_response_choice(_approval(["Approve", "Deny"]), "Deny", response_text=None)
 
 
 def test_matching_is_exact_because_the_options_are_agent_authored():
@@ -64,7 +64,7 @@ def test_matching_is_exact_because_the_options_are_agent_authored():
     decision has to be one it can compare against its own list."""
     for near_miss in ("approve", "APPROVE", " Approve", "Approve "):
         with pytest.raises(ResponseNotOfferedError):
-            validate_response_choice(_approval(["Approve", "Deny"]), near_miss)
+            validate_response_choice(_approval(["Approve", "Deny"]), near_miss, response_text=None)
 
 
 # ---------------------------------------------------------------------------
@@ -81,7 +81,7 @@ def test_matching_is_exact_because_the_options_are_agent_authored():
     pytest.param({}, id="no-type"),
 ])
 def test_items_that_do_not_constrain_the_answer_are_unaffected(item):
-    validate_response_choice(item, "anything at all")
+    validate_response_choice(item, "anything at all", response_text=None)
     assert usable_options(item) is None
 
 
@@ -92,16 +92,16 @@ def test_the_size_cap_marker_is_not_an_offered_choice():
     constrained would make it unanswerable."""
     item = _approval([OPTIONS_DROPPED_MARKER])
     assert usable_options(item) is None
-    validate_response_choice(item, "Approve")          # answerable
-    validate_response_choice(item, OPTIONS_DROPPED_MARKER)
+    validate_response_choice(item, "Approve", response_text=None)          # answerable
+    validate_response_choice(item, OPTIONS_DROPPED_MARKER, response_text=None)
 
 
 def test_the_marker_alongside_real_options_leaves_the_real_ones_binding():
     item = _approval(["Approve", OPTIONS_DROPPED_MARKER])
     assert usable_options(item) == ["Approve"]
-    validate_response_choice(item, "Approve")
+    validate_response_choice(item, "Approve", response_text=None)
     with pytest.raises(ResponseNotOfferedError):
-        validate_response_choice(item, OPTIONS_DROPPED_MARKER)
+        validate_response_choice(item, OPTIONS_DROPPED_MARKER, response_text=None)
 
 
 @pytest.mark.parametrize("empty", [None, ""])
@@ -110,7 +110,7 @@ def test_a_text_only_answer_is_not_rejected(empty):
     and the asks path has its own `empty_answer` refusal for a truly empty one.
     Turning a text-only answer into a 422 would break a working path in the name
     of validating a field nobody filled in."""
-    validate_response_choice(_approval(["Approve", "Deny"]), empty)
+    validate_response_choice(_approval(["Approve", "Deny"]), empty, response_text=None)
 
 
 def test_acknowledged_items_never_reach_the_rule():
@@ -200,3 +200,15 @@ def test_both_entry_points_surface_a_named_422_listing_the_options():
     ask_src = inspect.getsource(asks.answer_ask)
     assert "offered_options" in ask_src
     assert "e.code" in ask_src, "the asks refusal must carry the shared code"
+
+
+def test_both_entry_points_name_the_reserved_answer_refusals():
+    """#3242: the reserved "(something else)" decision has three named refusals
+    (`instruction_required`, `reserved_value`, `not_off_menu`), all subclasses of
+    `ReservedAnswerError`. Pin on top of `test_3242_something_else.py`, which
+    drives both writers: a third writer must map them too, not 500."""
+    import inspect
+    from routers import operator_queue as r
+    from client_portal.asks import service as asks
+    for fn in (r.respond_to_queue_item, asks.answer_ask):
+        assert "except ReservedAnswerError" in inspect.getsource(fn), fn.__name__

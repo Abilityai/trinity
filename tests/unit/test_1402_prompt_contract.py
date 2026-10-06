@@ -55,6 +55,8 @@ SENTINELS = (
     "Request IDs must be globally unique",
     "approval-{execution_id}",
     "expires_at",
+    # #3242: the platform-reserved off-menu approval answer.
+    "(something else)",
 )
 
 # The pre-#1402 wording that invited in-turn polling. Must not reappear.
@@ -212,3 +214,5 @@ def test_agent_guide_documents_async_contract():
     assert "approval-{execution_id}" in text
     # Honor-system framing must be stated, not implied (#1402 review S1).
     assert "not a security boundary" in text
+    # #3242: the reserved off-menu approval answer, like the two prompt copies.
+    assert "(something else)" in text

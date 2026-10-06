@@ -56,6 +56,10 @@ class WorkspaceAsk(BaseModel):
     # nor a poller timestamp. `aging` is the operator's configured bound.
     sync: str = "unconfirmed"
     aging: bool = False
+    # #3242: an approval decided only by its options (platform-minted — a skill
+    # gate). The surface hides the "Something else" chip, which the sink would
+    # refuse (`not_off_menu`). Says nothing else about the gate.
+    decided_by_options: bool = False
     # ent#430 AC #5: whether answering this ask sets work in motion, so a
     # surface can say "answered" without implying the agent started working.
     # Populated only on the ANSWER response — a pending ask has not been

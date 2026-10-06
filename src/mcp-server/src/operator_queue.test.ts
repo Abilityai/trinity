@@ -17,6 +17,7 @@ import {
   createOperatorQueueTools,
 } from "./tools/operator_queue.js";
 import { ApiError, type TrinityClient } from "./client.js";
+import { SOMETHING_ELSE } from "./types.js";
 import type { OperatorAskCreate } from "./types.js";
 
 type Item = { id: string; agent_name: string };
@@ -161,6 +162,73 @@ describe("#1104 respond_to_operator_queue", () => {
 
     assert.match(out.error, /400/);
     assert.match(out.error, /Cannot respond/);
+  });
+});
+
+describe("#3242 the reserved (something else) answer", () => {
+  it("is the one literal the backend reserves", () => {
+    assert.equal(SOMETHING_ELSE, "(something else)");
+  });
+
+  it("forwards the literal and the instruction unchanged — the backend decides", async () => {
+    const calls: Array<{ id: string; body: unknown }> = [];
+    const tool = makeRespondTool({
+      getOperatorQueueItem: async () => ({ agent_name: "self" }) as any,
+      getPermittedAgents: async () => [],
+      respondToOperatorQueueItem: async (id: string, body: any) => {
+        calls.push({ id, body });
+        return { status: "responded" } as any;
+      },
+    });
+    await tool.execute(
+      { item_id: "q", response: SOMETHING_ELSE, response_text: "Use the blue bucket" },
+      agentCtx("self"),
+    );
+    assert.deepEqual(calls, [
+      { id: "q", body: { response: SOMETHING_ELSE, response_text: "Use the blue bucket" } },
+    ]);
+  });
+
+  it("a named 422 surfaces its code beside the kept `error`", async () => {
+    const tool = makeRespondTool({
+      getOperatorQueueItem: async () => ({ agent_name: "self" }) as any,
+      getPermittedAgents: async () => [],
+      respondToOperatorQueueItem: async () => {
+        throw new ApiError(422, JSON.stringify({ detail: {
+          code: "instruction_required", message: "needs response_text" } }));
+      },
+    });
+    const out = JSON.parse(
+      await tool.execute({ item_id: "q", response: SOMETHING_ELSE }, agentCtx("self")),
+    );
+    assert.equal(typeof out.error, "string");
+    assert.equal(out.status, 422);
+    assert.equal(out.code, "instruction_required");
+    assert.equal(out.message, "needs response_text");
+    assert.equal(out.success, undefined);
+  });
+
+  it("the offered options ride along on a not-offered refusal", async () => {
+    const tool = makeRespondTool({
+      getOperatorQueueItem: async () => ({ agent_name: "self" }) as any,
+      getPermittedAgents: async () => [],
+      respondToOperatorQueueItem: async () => {
+        throw new ApiError(422, JSON.stringify({ detail: {
+          code: "response_not_an_offered_option", message: "no",
+          offered_options: ["Approve", "Deny"] } }));
+      },
+    });
+    const out = JSON.parse(
+      await tool.execute({ item_id: "q", response: "approved" }, agentCtx("self")),
+    );
+    assert.deepEqual(out.offered_options, ["Approve", "Deny"]);
+  });
+
+  it("every agent-facing description names the literal", () => {
+    const tools = createOperatorQueueTools({} as unknown as TrinityClient, false);
+    for (const t of [tools.respondToOperatorQueue, tools.getMyAsk, tools.askOperator]) {
+      assert.match(t.description, /\(something else\)/, t.name);
+    }
   });
 });
 
