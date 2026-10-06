@@ -152,8 +152,12 @@ paywall the paid chat endpoint has always had, now on the A2A door.
 plan credits from Nevermined, and sends the payment in the A2A message's
 `metadata` under `x402.payment.payload`. The older `payment-signature` HTTP
 header still works as a fallback, and if a client sends both, the one in the
-message wins. The reply is a normal A2A Task whose metadata carries the payment
-status and a receipt.
+message wins. The reply is a normal A2A Task carrying the payment status and a
+receipt: the primary location is **`status.message.metadata`**, which is where
+the x402 A2A extension puts it and where payment-aware SDKs read it. The same
+object is also mirrored onto the Task's own top-level `metadata`, so a strictly
+typed client sees the receipt rather than `metadata: null`. A **free** turn's
+Task carries no `metadata` key at all.
 
 **The card tells a client the price before it calls.** An exposed, priced agent's
 `/.well-known/agent-card.json` carries a payment entry under

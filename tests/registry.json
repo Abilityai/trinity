@@ -4379,7 +4379,7 @@
         "payments",
         "security"
       ],
-      "description": "The payer\u2192task binding at the layer that implements it (ent#679 I6): `db/nevermined.py::payer_owns_execution` run against a throwaway SQLite carrying the real `nevermined_payment_log`, because every A2A gate test stubs `db.nevermined_payer_owns_execution` and the one new query on the money path \u2014 the one carrying T5's security property \u2014 never executed in CI. Pins that the payer matches their own settled (and settle_failed) task across the facilitator's unstable checksum casing, that another payer / another agent / an unknown execution are all False, that a SQL-shaped wallet is a bound parameter rather than SQL, and that a missing argument fails closed."
+      "description": "The payer→task binding at the layer that implements it (ent#679 I6): `db/nevermined.py::payer_owns_execution` run against a throwaway SQLite carrying the real `nevermined_payment_log`, because every A2A gate test stubs `db.nevermined_payer_owns_execution` and the one new query on the money path — the one carrying T5's security property — never executed in CI. Pins that the payer matches their own settled (and settle_failed) task across the facilitator's unstable checksum casing, that another payer / another agent / an unknown execution are all False, that a SQL-shaped wallet is a bound parameter rather than SQL, and that a missing argument fails closed."
     },
     {
       "file": "unit/test_ent679_paid_turn_service.py",
@@ -4436,7 +4436,40 @@
         "reliability",
         "mcp"
       ],
-      "description": "The delegation contract (ent#568): what a dispatch receipt means and what to do instead of re-sending, taught as ONE text in the platform prompt (\u00a7Agent Collaboration, spliced from DELEGATION_CONTRACT) and, byte-identical, in src/mcp-server/src/delegation_contract.ts, which the chat_with_agent and chat_with_<agent> descriptions carry. Pins: the contract renders once inside \u00a7Agent Collaboration for every runtime with no unspliced __MARKER__ left; it is runtime-neutral (no mcp__trinity__, no heading); the TS array parses strictly as JSON (exactly one anchored declaration) and equals the Python constant, with guard-the-guard cases proving a comment inside the array raises and a one-character edit is seen; the rule sentence fan_out/send_message repeat is the contract's own; every backticked token is classified and proven real -- each tool exists in a non-test MCP module with each named argument in its zod schema, each status is emitted by a pinned DISPATCH-route file (so ask_operator's `replayed` cannot vouch for it), the events are TASK_COMPLETED_EVENT/TASK_FAILED_EVENT; the Codex orientation lists the tools; the contract stays under its 1,650-char budget and \u00a7Agent Collaboration stays shorter than \u00a7Operator Communication (AC4). The MCP half -- published tools/list descriptions under Claude Code's 2,048-char cap, receipt messages -- is src/mcp-server/src/delegation-contract.test.ts. Mutation-proven (splice dropped / Codex name dropped / TS copy drifted each go red). No Docker, no live backend."
+      "description": "The delegation contract (ent#568): what a dispatch receipt means and what to do instead of re-sending, taught as ONE text in the platform prompt (§Agent Collaboration, spliced from DELEGATION_CONTRACT) and, byte-identical, in src/mcp-server/src/delegation_contract.ts, which the chat_with_agent and chat_with_<agent> descriptions carry. Pins: the contract renders once inside §Agent Collaboration for every runtime with no unspliced __MARKER__ left; it is runtime-neutral (no mcp__trinity__, no heading); the TS array parses strictly as JSON (exactly one anchored declaration) and equals the Python constant, with guard-the-guard cases proving a comment inside the array raises and a one-character edit is seen; the rule sentence fan_out/send_message repeat is the contract's own; every backticked token is classified and proven real -- each tool exists in a non-test MCP module with each named argument in its zod schema, each status is emitted by a pinned DISPATCH-route file (so ask_operator's `replayed` cannot vouch for it), the events are TASK_COMPLETED_EVENT/TASK_FAILED_EVENT; the Codex orientation lists the tools; the contract stays under its 1,650-char budget and §Agent Collaboration stays shorter than §Operator Communication (AC4). The MCP half -- published tools/list descriptions under Claude Code's 2,048-char cap, receipt messages -- is src/mcp-server/src/delegation-contract.test.ts. Mutation-proven (splice dropped / Codex name dropped / TS copy drifted each go red). No Docker, no live backend."
+    },
+    {
+      "file": "unit/test_3215_plan_scheme.py",
+      "feature": "abilityai/trinity#3215",
+      "added": "2026-10-04",
+      "categories": [
+        "backend",
+        "payments",
+        "security"
+      ],
+      "description": "Card (fiat) plans are payable (#3215). `_build_payment_required` passed no `scheme=` to the SDK helper, so every 402, verify and settle advertised the default `nvm:erc4337`; the facilitator is POSTed that requirements document verbatim, so `accepts[0].scheme` is the only channel the scheme travels through and every card token was rejected. Pins a card plan's 402 (scheme + the plan's fiat network), crypto bytes as frozen golden literals per environment (a payments-py bump must not move a live agent's network, #3216), 402 == verify == settle for one card token, Trinity's own plan parser against the SDK's `resolve_scheme`/`resolve_network` on thirteen payloads including malformed ones, 50 concurrent cold 402s costing exactly one `get_plan` and zero facilitator slots, `scheme_from_token` as an allow-list over a caller-supplied field (bad scheme / bad network / another agent's planId / non-str all fall through), and a settle re-driven after the cache expired with the lookup now failing still settling as card. Mutation-proven: dropping `scheme=` goes red in 5, swapping settle's token-derived scheme for a plan lookup in 2. No Docker, no network, no facilitator."
+    },
+    {
+      "file": "unit/test_3215_public_base_url.py",
+      "feature": "abilityai/trinity#3215",
+      "added": "2026-10-04",
+      "categories": [
+        "backend",
+        "payments",
+        "security"
+      ],
+      "description": "The 402's `resource.url` origin (#3215 AC5). A token is minted and verified against that URL and the facilitator compares origin+path, so one wrong scheme character mints a token for a URL the client never calls. Pins `utils/public_url.py` precedence (the configured public origin only when its host equals the request host, else the request host with an https upgrade and never a downgrade, read from the RAW `X-Forwarded-Proto` because the prod/hosted compose `command:` drops uvicorn's proxy-header trust so `request.url.scheme` is inert exactly where the bug was reported), one origin shared by the agent card and both payment doors for a single request, `GET /api/paid/{name}/info` advertising the plan's real scheme and an absolute URL with the nvm api key never serialised, the 402 door itself honouring the forwarded proto, and the nginx `$fwd_proto` map that stops that hop clobbering an upstream https with its own always-http `$scheme`. Mutation-proven: removing the header upgrade goes red in 9. No Docker, no network."
+    },
+    {
+      "file": "unit/test_3215_task_metadata.py",
+      "feature": "abilityai/trinity#3215",
+      "added": "2026-10-04",
+      "categories": [
+        "backend",
+        "a2a",
+        "payments"
+      ],
+      "description": "A settled A2A Task must not report `metadata: null` (#3215, operator scope-add). The x402 payment status and receipt live at `status.message.metadata` — the spec location the provider SDK's own `X402A2AUtils` reads — and are now mirrored onto the Task's top-level `metadata` from the same assignment, so a strictly typed a2a-sdk `Task` carries the receipt instead of null on a turn that was charged. Asserted through `Task.model_validate` and through the SDK reader, over the real producer (`task_from_paid_payload`) on the settled, unsettled and failed outcomes, and the two locations are proven to be the SAME dict object so they cannot drift. Also pins that a free turn emits no `metadata` key at all, keeping unpaid Task bytes and the idempotency snapshots over them unchanged. Mutation-proven: removing the mirror goes red in 6. No Docker, no network."
     }
   ]
 }

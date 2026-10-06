@@ -237,9 +237,13 @@
              agent — it resolves to the chat you were last in and renders the
              conversation, with the agent's numbers in the band above it and its
              context one click away in Agent details. The URL is kept (every
-             link to it still works); `landOnAgent` replaces it with the
-             thread's own URL as soon as the list is in hand. The skeleton below
-             covers that beat, so nothing renders here.
+             link to it still works). ent#784 then made the landing a
+             PRECEDENCE — a validated `lastOpenSessionId`, else the chat holding
+             an unsent draft (newest first), else the agent's existing empty
+             chat, else a new one — and only the two arms that name a THREAD
+             replace this URL with the thread's own (via `openThread`); a new
+             chat stays here, which is what makes it reloadable. The skeleton
+             below covers that beat, so nothing renders here.
 
              ent#360's reasoning is not reverted — an agent still has a home with
              its history, what it can do and a place to ask you something. It is
@@ -415,6 +419,7 @@
           :roster="store.agents"
           :session-id="pendingSession"
           :new-chat="startingNewChat"
+          :focus-on-mount="composerFocusMode"
           :prefill="prefill"
           :reply-target="replyTarget"
           :starred="isStarred('thread', activeSessionId || pendingSession)"
@@ -844,7 +849,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { useClientPortalStore, MULTI_AGENT_UNAVAILABLE, PLATFORM_LOGIN_ROUTE } from '@/stores/clientPortal'
 import { useAuthStore } from '@/stores/auth'
 import { usePortalDraftsStore } from '@/stores/portalDrafts'
-import { threadKey } from '@/components/portal/portalDrafts'
+import { threadKey, shouldAutoFocusComposer } from '@/components/portal/portalDrafts'
 import { safeStorage } from '@/utils/safeStorage'
 import PortalSidebar from '@/components/portal/PortalSidebar.vue'
 import PortalBrand from '@/components/portal/PortalBrand.vue'
@@ -902,8 +907,8 @@ import {
 import { stageZone } from '@/components/portal/portalBriefingState'
 import {
   isNewChatHotkey, resolveAgentLanding, shouldMarkTurnRead, shouldEscapeStage,
-  landingThread,
-  agentHasMain, titleSettling, shouldFetchTitleHealth, titleGenerationNotice,
+  agentLanding,
+  agentHasMain, agentEmptyChat, titleSettling, shouldFetchTitleHealth, titleGenerationNotice,
   TITLE_SETTLE_DELAYS_MS,
   // ent#557: the SAME sum the sidebar renders, so the tab and the rows cannot
   // disagree about the number.
@@ -1055,9 +1060,20 @@ const inboxAgentLabels = computed(() => agentLabels(store.agents))
 // ent#661: `/workspace/projects` and `/workspace/projects/:projectId`.
 const projectsRoute = computed(() => route.name === 'WorkspaceProjects' || route.name === 'WorkspaceProject')
 const activeProjectId = computed(() => route.params.projectId || null)
-// A stage page that never carries a rail: the agent page (ent#360) and the
-// Projects pages (ent#661). Both rail rules read it as their `agentPage`.
-const railFreePage = computed(() => activeAgentPageName.value || (projectsRoute.value ? 'projects' : null))
+// ent#784 (review): `/workspace/a/:name` used to be left within a tick, so the
+// rail rules could read it as "a page, not a conversation". It is now where a
+// landed new chat RESTS — the same conversation `/workspace` and
+// `/workspace/c/:id` show, one URL apart — so it is rail-free only until the
+// landing has put the named agent on stage. Reading it as a page for longer
+// gave a new chat no rail, and the first send (which moves the URL to the
+// thread's own) then slid one in beside a reply already streaming.
+const unlandedAgentPage = computed(() => (
+  activeAgentPageName.value && activeAgentName.value !== activeAgentPageName.value
+    ? activeAgentPageName.value
+    : null))
+// A stage page that carries no rail: an agent URL that has not landed yet, and
+// the Projects pages (ent#661). The rail rules read it as their `agentPage`.
+const railFreePage = computed(() => unlandedAgentPage.value || (projectsRoute.value ? 'projects' : null))
 const activeAgent = computed(() => {
   if (isInboxRoute.value) {
     return inboxSelectedAgent({ item: inboxSelection.value, threads: threads.value, asks: store.asks, agents: store.agents })
@@ -1217,7 +1233,7 @@ const roomParticipants = ref([])
 const workSignal = ref(emptySignal())
 
 const railParticipants = computed(() => railParticipantsFor({
-  agentPage: activeAgentPageName.value,
+  agentPage: unlandedAgentPage.value,
   roomId: activeRoomIdFromRoute.value,
   roomParticipants: roomParticipants.value,
   activeAgent: activeAgent.value?.name,
@@ -1258,9 +1274,13 @@ const railVisible = computed(() => railVisibleFor({
 const RAIL_MOTION = 'transition-[width] duration-300 ease-out overflow-hidden '
   + 'motion-reduce:transition-none motion-reduce:duration-0'
 
+// ent#784 (review): NOT `railFreePage` here. That is true for an agent URL
+// until it lands, which on a cold link is the whole of the loading stage — the
+// only stage this rule answers for — so reading it would never reserve the
+// column for a route that is now a 1:1 conversation like `/workspace/c/:id`.
 const railColumnReserved = computed(() => Boolean(
   railColumnReservedFor({
-    agentPage: railFreePage.value,
+    agentPage: projectsRoute.value ? 'projects' : null,
     stageState: stage.value.state,
     roomId: activeRoomIdFromRoute.value,
   }) && !voiceCanvasHasColumn.value
@@ -1402,6 +1422,17 @@ function openSuggestionSection(name) {
 function focusConversationComposer() {
   conversationRef.value?.focusComposer?.()
 }
+// ent#784 (review): the caret for a LANDING, under the landing's own rule. A
+// new chat focuses itself when it mounts (`focusOnMount`); a landing that
+// reuses a chat — the agent's empty one, a remembered one — mounts as a thread,
+// and a thread mount focuses nothing. So the shell hands the caret over for
+// those, reading the same `composerFocusMode` the mount reads: a landing on a
+// touch device still does not summon the keyboard.
+function focusLandedComposer() {
+  if (composerFocusMode.value === 'fine-pointer'
+    && !shouldAutoFocusComposer(typeof window !== 'undefined' ? window.matchMedia?.bind(window) : null)) return
+  nextTick(focusConversationComposer)
+}
 function onRoomParticipants(list) { roomParticipants.value = Array.isArray(list) ? list : [] }
 
 // A signal belongs to the chat that reported it. The conversation is keyed by
@@ -1471,6 +1502,13 @@ const pickerBusy = ref(false)
 // thread exists (`openThread`, and the send that gets a session id back), so it
 // can never make a SECOND turn open another thread.
 const startingNewChat = ref(false)
+// ent#784 / #2579 — WHY the composer is being focused, which decides whether it
+// may summon a soft keyboard. `always` is a gesture the person just made (New
+// chat, ⌘J, the agent picker, switch-agent): they asked for a composer, so the
+// keyboard is the answer, not an ambush. `fine-pointer` is a LANDING they did
+// not ask for in those words (opening an agent, an `?agent=` link), where a
+// keyboard sliding up over a phone is exactly the "unprompted" the issue names.
+const composerFocusMode = ref('always')
 
 function newChat() {
   if (guardLeaveCall(() => newChat())) return   // ent#551: ask, then leave
@@ -1729,18 +1767,35 @@ function openRoom(roomId) {
 // where a row carrying an unread badge opened the unread chat instead. The
 // count still shows on the row; the page's Overview lists the chats it belongs
 // to, so the conversation is one click further, not lost.
-// ent#523: clicking an agent opens the CONVERSATION you were last in, not a
-// report about the agent. The `/workspace/a/:name` URL is kept — every existing
-// link, and the sidebar row, still route through it — and `landOnAgent`
-// swaps it for the thread's own URL once the list is in hand. Landing here
-// rather than pushing the thread URL directly is deliberate: the thread list
-// may not have loaded yet on a cold deep link, and this way the URL is honest
-// at every instant instead of pointing at a chat we have not resolved.
+// ent#784: clicking an agent opens a NEW chat with it, not a report about the
+// agent and not the chat you were last in. The `/workspace/a/:name` URL is kept
+// — every existing link, and the sidebar row, still route through it — and it
+// now STAYS: a landed new chat is "new chat with X", which that URL says
+// exactly, so a reload, a bookmark or a copied link keeps the agent. The first
+// send replaces it with the thread's own `/workspace/c/:id` (`onSessionAdopted`),
+// which is the first moment there is a thread to name. Landing here rather than
+// pushing a thread URL directly is deliberate: the thread list may not have
+// loaded yet on a cold deep link, and this way the URL is honest at every
+// instant instead of pointing at a chat we have not resolved.
 function openAgentPage(name) {
   if (!name) return
   // ent#551 QA: the rail's agent row. It pushed a route with no guard, so the
   // conversation remounted and the call ended without a word.
   if (guardLeaveCall(() => openAgentPage(name))) return
+  // ent#784 (review): the row of the agent whose landed new chat is ALREADY on
+  // stage. The push below would be a no-op (same URL), so the route watcher
+  // would not re-fire and nothing would re-land — while the two writes above it
+  // would still spend `startingNewChat`. The composer then kept reading "New
+  // chat" and sent its first message without `new_thread`, which the server
+  // files in the agent's MAIN chat. There is nothing to open: the person is
+  // where the click leads, so it only hands the caret back to the field the
+  // click took it from.
+  if (activeAgentPageName.value === name && activeAgentName.value === name
+    && startingNewChat.value && !pendingSession.value) {
+    composerFocusMode.value = 'fine-pointer'
+    focusLandedComposer()
+    return
+  }
   unreachableAgent.value = null
   pendingSession.value = null
   startingNewChat.value = false
@@ -1748,49 +1803,65 @@ function openAgentPage(name) {
   router.push(`/workspace/a/${encodeURIComponent(name)}`)
 }
 
-// ent#523 — turn `/workspace/a/:name` into the chat to land in.
+// ent#784 — turn `/workspace/a/:name` into the chat to land in.
 // Named `landOnAgent` to stay clear of the pure `resolveAgentLanding` above,
 // which answers the same question for the `?agent=` deep link; both defer to
-// `landingThread` so there is ONE rule for which chat you land in.
+// `agentLanding` so there is ONE rule for which chat you land in.
 //
-// `landingThread` is the rule (most recently active, Main as the floor); it is
-// pure and lives in portalUtils so it is testable without a mount. With no
-// chats at all the agent's Main has not been minted yet, so the shell asks the
-// server for the list — which is what mints it — and lands on what comes back.
-// A failure leaves the caller on the agent URL with the stage's own error
-// states, rather than dropping them somewhere unrelated.
-async function landOnAgent(name) {
+// `agentLanding` is the rule, and since ent#784 its answer is a NEW chat unless
+// the caller hands it a session to return to (the ent#621 seam). So this is now
+// SYNCHRONOUS: there is nothing to fetch before it can answer, and the awaited
+// `ensureMainListed` that used to sit on this path is gone from it. The pinned
+// Main is still minted on the first visit — `watch(activeAgentName)` below owns
+// that promise (ent#523) — it simply no longer blocks the landing.
+//
+// No `escapeStage` / no push to bare `/workspace`: staying on this URL is what
+// makes the landed chat reloadable and linkable.
+function landOnAgent(name) {
   if (!name) return
-  activeAgentName.value = name
-  const target = landingThread(threads.value, name)
-  if (target) { openThread(target); return }
-  try {
-    // #2579: this branch used to destructure `{ sessions }` off the store's
-    // return value — which is an ARRAY (`data.sessions || []`). `sessions` was
-    // therefore always `undefined`, `landingThread` always missed, and the
-    // repair branch this comment describes never once ran: a first-time
-    // visitor always fell through to a fresh chat, and the Main the call had
-    // just minted server-side never reached the screen. It now goes through
-    // `ensureMainListed`, which does the same per-agent read AND folds the
-    // result into `threads` — one seam for "the list must show this agent's
-    // Main", shared with the watcher below.
-    await ensureMainListed(name)
-    // The watcher fires on the route param AND on the thread list arriving, so
-    // two landings can be in flight at once on a cold deep link: the first
-    // misses (no threads yet) and goes to the network, the second finds the
-    // list and navigates. Without this the first one's late resolution
-    // navigates too — moving the person off a chat they have since chosen. The
-    // route is the authority; if it no longer names this agent, this landing
-    // has been overtaken and has nothing to say. Re-checked HERE, after the
-    // await: the ensure spends two round trips where the old code spent one.
-    if (activeAgentPageName.value !== name) return
-    const landed = landingThread(threads.value, name)
-    if (landed) { openThread(landed); return }
-  } catch {
-    // Fall through: a fresh chat is a better answer than a dead stage.
+  // ent#551 class: `activeAgentName` feeds `convKey`, so writing it remounts
+  // the conversation and ends a live call without a word. The click doors ask
+  // first; back/forward and a typed `/workspace/a/:name` come through here, and
+  // did not. Ask before touching anything.
+  if (guardLeaveCall(() => landOnAgent(name))) return
+  // ent#784: landing is not a gesture, so the composer focuses only where that
+  // cannot summon an on-screen keyboard (see `focusOnMount` below). Set BEFORE
+  // the branch, not only on the new-chat path: a landing on a drafted chat is
+  // the same kind of arrival, and `openThread` does not touch this ref — so
+  // leaving a gesture's `always` standing would make the next landing focus on
+  // a touch device (the T3(b) rule, one door at a time).
+  composerFocusMode.value = 'fine-pointer'
+  const landing = agentLanding({
+    agentName: name,
+    threads: threads.value,
+    // The drafts arm's candidates. Passed in rather than read inside the rule,
+    // so `agentLanding` stays a pure function both doors can be tested through.
+    drafts: drafts.drafts,
+  })
+  if (!landing) return
+  if (landing.sessionId) {
+    const row = threads.value.find((t) => (t.id || t.session_id) === landing.sessionId)
+    // `openThread` remounts the conversation on the landed session, which is
+    // what restores the draft: the fresh instance's `useComposerDraft` reads
+    // `thread:<id>` at setup and `PortalConversation`'s mount then puts the
+    // caret at its end, on a fine pointer only — the same rule as above, shared
+    // through `shouldAutoFocusComposer` rather than re-decided here.
+    //
+    // (review) A landing on a chat with NO draft — the agent's empty one — is
+    // restored by nothing, so that mount leaves focus on the sidebar row the
+    // click came from. `focusLandedComposer` covers it under the same rule.
+    if (row) { openThread(row); focusLandedComposer(); return }
   }
-  if (activeAgentPageName.value !== name) return
-  newChatWithAgent(name)
+  // Idempotent: the watcher fires on the route param AND on the thread list
+  // arriving, and this landing no longer navigates away — so without this the
+  // second fire would bump `convGen` and remount an unsent chat, throwing away
+  // what the person had started typing.
+  if (activeAgentName.value === name && startingNewChat.value && !pendingSession.value) return
+  unreachableAgent.value = null
+  activeAgentName.value = name
+  activeRoomId.value = null
+  startingNewChat.value = true
+  pendingSession.value = null; prefill.value = ''; convGen.value++
 }
 
 // #2579 — make sure this agent's pinned Main is IN the list on screen.
@@ -1819,6 +1890,15 @@ const MAIN_ENSURE_ATTEMPTS = 2
 function ensureMainListed(name) {
   if (!name) return Promise.resolve()
   if (agentHasMain(threads.value, name)) return Promise.resolve()
+  // ent#784 arm 4, the write side of "at most one empty chat per agent at any
+  // time" (operator ruling 2026-10-05). This is a GET that INSERTS, so for an
+  // agent that already has an empty chat but no Main — legacy data, since
+  // nothing mints a non-Main empty row today — visiting it would add a SECOND
+  // empty chat and then land on one of them. The ruling outranks #2579's "the
+  // pinned tab has to be there": the empty chat that exists is the one arm 4
+  // reuses, and the person is never shown two. An agent whose chats are all
+  // used still gets its Main on this visit, which is the case #2579 was about.
+  if (agentEmptyChat(threads.value, name)) return Promise.resolve()
   const inflight = mainEnsured.get(name)
   if (inflight) return inflight
   const spent = mainAttempts.get(name) || 0
@@ -1868,6 +1948,10 @@ function newChatWithAgent(name) {
   if (guardLeaveCall(() => newChatWithAgent(name))) return   // ent#534/ent#551: ask, then leave
   unreachableAgent.value = null
   activeAgentName.value = name
+  // ent#784: every door into here is a gesture the person just made — the New
+  // chat button, ⌘J, the agent picker, switch-agent — so the composer focuses
+  // on any pointer. Only the landing doors hold back (#2579 AC 2 kept).
+  composerFocusMode.value = 'always'
   // ent#451: this function has always MEANT a fresh chat — it clears
   // `pendingSession` — but a null session id is also what an unresolved thread
   // looks like, so the conversation could not tell the two apart and loaded the
@@ -2328,10 +2412,8 @@ watch([() => route.params.sessionId, () => threads.value.length], () => {
 // Watched on BOTH the route param and the thread list, for the same reason the
 // `sessionId` watcher above watches both: on a cold deep link the agent name
 // arrives long before the threads do, so a param-only watcher would resolve
-// against an empty list and always mint a new chat. Re-entrancy is guarded by
-// the fact that `landOnAgent` navigates away from this route as soon as it
-// succeeds; while it has not, re-running is harmless and idempotent.
-watch([activeAgentPageName, () => threads.value.length], ([name]) => {
+// against an empty list and always mint a new chat.
+watch([activeAgentPageName, () => threads.value.length], ([name], [prevName]) => {
   if (!name || !store.isClientSignedIn) return
   // Wait for the roster verdict. Landing before it means `activeAgent` cannot
   // resolve the name yet, and the "you don't have access" branch would fire for
@@ -2344,6 +2426,24 @@ watch([activeAgentPageName, () => threads.value.length], ([name]) => {
     unreachableAgent.value = name
     return
   }
+  // ent#784: the landing no longer navigates away, so — unlike every earlier
+  // version of this watcher — it can re-fire with the route unchanged, once per
+  // thread-list refresh, for as long as the person stays on this URL. The
+  // landing rule reads nothing from the list, so a list-only re-fire cannot
+  // change the answer; re-running it would null a session the first send has
+  // since adopted (`onSessionAdopted` writes the state, then replaces the route
+  // asynchronously, and itself ends in a `refreshThreads`) and remount an empty
+  // composer over the thread whose reply is streaming.
+  //
+  // Keyed on "the route did not change on this fire", AND on having already
+  // landed this name — the two have to hold together:
+  //   * the name alone would swallow the cold deep link, whose only fire IS the
+  //     list arriving with the param already in place (the reason above);
+  //   * `pendingSession` must NOT be the key: back/forward from
+  //     `/workspace/c/:id` to `/workspace/a/:name` arrives with a session set
+  //     and has to land fresh. A thread URL carries no `agentName` param, so
+  //     that hop always changes `name` and is never mistaken for a re-fire.
+  if (name === prevName && activeAgentName.value === name) return
   landOnAgent(name)
 })
 
@@ -2377,6 +2477,9 @@ function resolveAgentQuery() {
     forceNew,
     agents: store.agents,
     threads: threads.value,
+    // ent#784: the same drafts map `landOnAgent` passes — ONE rule for every
+    // door, so a `?agent=` link and a sidebar click land on the same chat.
+    drafts: drafts.drafts,
   })
   if (!landing) {
     // The link named an agent this caller cannot reach (un-shared since the URL
@@ -2415,7 +2518,12 @@ function resolveAgentQuery() {
   // ambiguity ent#451 exists to remove — it also means "unresolved". AND-ed
   // with the landing so a `?new=1` that still resolved a thread (it cannot
   // today, but the two are independent functions) never claims a fresh start.
-  startingNewChat.value = forceNew && !landing.sessionId
+  // ent#784: `forceNew` no longer changes the answer — a landing IS a new chat
+  // unless the resolver handed back a session — so the intent follows the
+  // resolved landing rather than the query flag.
+  startingNewChat.value = !landing.sessionId
+  // A deep link is a landing, not a gesture (see `composerFocusMode`).
+  composerFocusMode.value = 'fine-pointer'
   // The bare path drops the query, so this replace is ALSO the strip on this
   // branch — recorded so the `finally` does not start a competing navigation.
   if (landing.sessionId) { landingReplaced = true; router.replace(`/workspace/c/${landing.sessionId}`) }
