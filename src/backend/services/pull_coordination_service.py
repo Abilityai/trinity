@@ -241,13 +241,14 @@ def claim_next_task(agent_name: str, worker_id: str) -> Optional[Dict[str, Any]]
     """
     record_worker_poll(agent_name)
     cap = int(db.get_execution_timeout(agent_name))
-    from services.pull_pilot import INTERACTIVE_TRIGGERS
+    from services.pull_pilot import INTERACTIVE_TRIGGERS, WAITING_CONVERSATION_PREFIX
 
     row = db.claim_next_queued(
         agent_name,
         worker_id=worker_id,
         lease_seconds=cap + SLOT_TTL_BUFFER,
         interactive_triggers=INTERACTIVE_TRIGGERS,
+        waiting_conversation_prefix=WAITING_CONVERSATION_PREFIX,
     )
     if not row:
         return None

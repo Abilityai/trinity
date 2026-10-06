@@ -1569,8 +1569,8 @@ class DatabaseManager:
     def update_execution_to_queued(self, execution_id: str, backlog_metadata: str, queued_at: str, conversation_key: str = None) -> bool:
         return self._schedule_ops.update_execution_to_queued(execution_id, backlog_metadata, queued_at, conversation_key)
 
-    def claim_next_queued(self, agent_name: str, worker_id: str = None, lease_seconds: int = None, interactive_triggers=None):
-        return self._schedule_ops.claim_next_queued(agent_name, worker_id, lease_seconds, interactive_triggers)
+    def claim_next_queued(self, agent_name: str, worker_id: str = None, lease_seconds: int = None, interactive_triggers=None, waiting_conversation_prefix: str = None):
+        return self._schedule_ops.claim_next_queued(agent_name, worker_id, lease_seconds, interactive_triggers, waiting_conversation_prefix)
 
     def release_claim_to_queued(self, execution_id: str) -> bool:
         return self._schedule_ops.release_claim_to_queued(execution_id)
@@ -2111,6 +2111,16 @@ class DatabaseManager:
 
     def create_new_chat_session(self, agent_name: str, user_id: int, user_email: str, subscription_id: str = None):
         return self._chat_ops.create_new_chat_session(agent_name, user_id, user_email, subscription_id=subscription_id)
+
+    # #3127: per-session Claude id for pulled /chat turns.
+    def get_chat_session_claude_id(self, session_id: str):
+        return self._chat_ops.get_chat_session_claude_id(session_id)
+
+    def set_chat_session_claude_id(self, session_id: str, claude_session_id):
+        return self._chat_ops.set_chat_session_claude_id(session_id, claude_session_id)
+
+    def clear_chat_session_claude_ids(self, agent_name: str):
+        return self._chat_ops.clear_chat_session_claude_ids(agent_name)
 
     def delete_chat_session(self, session_id: str):
         return self._chat_ops.delete_chat_session(session_id)

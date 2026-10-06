@@ -138,6 +138,25 @@ def test_claim_next_task_passes_the_interactive_set():
         db.claim_next_queued.return_value = None
         assert pcs.claim_next_task("alpha", "alpha#w0") is None
     assert db.claim_next_queued.call_args.kwargs["interactive_triggers"] is INTERACTIVE_TRIGGERS
+    assert db.claim_next_queued.call_args.kwargs["waiting_conversation_prefix"] == "session:"
+
+
+def test_waiting_conversation_is_claimed_with_interactive_turns(ops):
+    """#3127: an agent-to-agent /chat turn (trigger ``agent``, autonomous) has a
+    caller blocked on it. Its ``session:`` key puts it ahead of batch work."""
+    from services.pull_pilot import INTERACTIVE_TRIGGERS, WAITING_CONVERSATION_PREFIX
+
+    _q("alpha", "schedule", 0)
+    _q("alpha", "agent", 1)  # an async agent /task: no key, stays batch
+    chat = _q("alpha", "agent", 30, key="session:chat:s1")
+
+    row = ops.claim_next_queued(
+        "alpha", worker_id="alpha#w0", lease_seconds=900,
+        interactive_triggers=INTERACTIVE_TRIGGERS,
+        waiting_conversation_prefix=WAITING_CONVERSATION_PREFIX,
+    )
+    assert row["id"] == chat
+    assert _pull(ops) == "schedule-0-nokey"
 
 
 def test_interactive_and_autonomous_sets_overlap_only_where_documented():
