@@ -306,7 +306,9 @@ async def admit_chat_request(
     trinity-enterprise#751: then the skill gate, at the same point and for the
     same reason — ``SkillApprovalRequired`` / ``SkillGateRefused`` propagate to
     the app handler (202 pending / named refusal) with nothing claimed, acquired
-    or written. The same Idempotency-Key replays the same approval.
+    or written. The same Idempotency-Key replays the same approval. A
+    self-approval rides ``ChatAdmission.gate`` to ``prepare_chat_execution``,
+    which records it on the execution row (trinity-enterprise#752).
     """
     chain_depth = await enforce_inter_agent_depth(
         current_user=current_user,
@@ -398,9 +400,6 @@ async def admit_chat_request(
             current_user=current_user, execution_id=chat_execution_id,
             queue_result=queue_result, source=source, message=request.message,
         )
-        await skill_gate_service.audit_self_approved(
-            name, gate, current_user=current_user,
-            endpoint=f"/api/agents/{name}/chat", execution_id=chat_execution_id)
     except EphemeralBudgetExhausted:
         # trinity-enterprise#69: ghost budget spent — nothing admitted/enqueued.
         idempotency_service.fail(idem)
@@ -420,6 +419,9 @@ async def admit_chat_request(
         queue_result=queue_result,
         chat_timeout=chat_timeout,
         chain_depth=chain_depth,
+        # trinity-enterprise#752: a self-approval is recorded by the row's
+        # setup (`prepare_chat_execution`), on the id the agent receives.
+        gate=gate,
     )
 
 

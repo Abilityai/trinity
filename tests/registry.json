@@ -4227,6 +4227,104 @@
       "description": "trinity-enterprise#751: discovery guards — every function that posts to an agent is behind the gate (structural checks per site), every producer passes the requester's own words or is named unwrapped, and every execute_task keyword is classified in the frozen dispatch."
     },
     {
+      "file": "unit/test_ent752_skill_gate_hook.py",
+      "feature": "ent#752",
+      "added": "2026-10-05",
+      "categories": [
+        "agent",
+        "security",
+        "unit"
+      ],
+      "description": "trinity-enterprise#752: the in-container hook executed in its own process under -I -S (import-level seam, stub platform, fake /proc) — the verdict table, every no-verdict path against the marker, the 10 s deadline, one retry, identity from /proc never its own env, crash injection through the bootstrap (never exit 1), FIFO traps, the log without the key, the build self-test."
+    },
+    {
+      "file": "unit/test_ent752_name_resolution.py",
+      "feature": "ent#752",
+      "added": "2026-10-05",
+      "categories": [
+        "agent",
+        "security",
+        "unit"
+      ],
+      "description": "trinity-enterprise#752: which names a call loads — generous resolution is a superset of #751's _FINGERPRINT_SCRIPT (every key it resolves is sent whichever name the skill is invoked by), YAML-faithful front matter (BOM, quotes, comments, beyond 4 KiB), the skills: forms of a subagent definition, subagent lookup by front-matter name."
+    },
+    {
+      "file": "unit/test_ent752_check_endpoint.py",
+      "feature": "ent#752",
+      "added": "2026-10-05",
+      "categories": [
+        "backend",
+        "api",
+        "security",
+        "unit"
+      ],
+      "description": "trinity-enterprise#752: POST /api/skill-gate/check over the real route and DB — only the agent itself (from its key) may ask, every verdict (approved / self-approved / D3 per skill / no run / could not tell), identical answers and reads for unknown, foreign and finished runs, 503 on an unreadable map, named 422s, the throttled skill_gate_refused audit, the rate-limited marker heal, and the hook's own request replayed against the route."
+    },
+    {
+      "file": "unit/test_ent752_self_approval_clearance.py",
+      "feature": "ent#752",
+      "added": "2026-10-05",
+      "categories": [
+        "backend",
+        "security",
+        "unit"
+      ],
+      "description": "trinity-enterprise#752: a self-approval is recorded on the run the agent receives — /task, /chat (moved from admission to the row's setup) and the Workspace backstop; the self_approved record's lattice and idempotency; the completion report and the backstop never read it as an approved run; AST guard: audit_self_approved only inside record_self_approval."
+    },
+    {
+      "file": "unit/test_ent752_marker_sync.py",
+      "feature": "ent#752",
+      "added": "2026-10-05",
+      "categories": [
+        "backend",
+        "agent",
+        "unit"
+      ],
+      "description": "trinity-enterprise#752: the outage marker — written / removed by a constant root argv (executed against a temp path), never touched on an unreadable map or a failed exec, the gated-only fire-and-forget spawn, and both lifecycle tails (start, recreate) driven through their real bodies with Docker mocked."
+    },
+    {
+      "file": "unit/test_ent752_isolated_chat_session.py",
+      "feature": "ent#752",
+      "added": "2026-10-05",
+      "categories": [
+        "backend",
+        "agent",
+        "unit"
+      ],
+      "description": "trinity-enterprise#752: a self-approved /chat turn runs in its own session — the router carries the decision and the isolation, the payload carries isolated_session, the agent server passes it to the runtime and keeps the shared stats, and the real execute_claude_code (#2958 fake CLI) neither resumes nor captures nor moves the shared model."
+    },
+    {
+      "file": "unit/test_ent752_managed_registration.py",
+      "feature": "ent#752",
+      "added": "2026-10-05",
+      "categories": [
+        "agent",
+        "security",
+        "unit"
+      ],
+      "description": "trinity-enterprise#752: the managed-settings drop-in's exact shape, its matcher evaluated by a port of the CLI's own plain-name branch, exec form with env -i and -I -S, loader pins within PROTECTED_KEYS, managed-settings.json untouched, and the image wiring (COPY, root ownership, the --self-test smoke, USER developer)."
+    },
+    {
+      "file": "unit/test_ent752_cli_pin.py",
+      "feature": "ent#752",
+      "added": "2026-10-05",
+      "categories": [
+        "agent",
+        "unit"
+      ],
+      "description": "trinity-enterprise#752: the hook's CLI facts were verified against the Claude Code version the image pins (SKILL_GATE_CLI_VERIFIED == ARG CLAUDE_CODE_VERSION), with the re-audit list beside it."
+    },
+    {
+      "file": "unit/test_ent752_health_skill_gate.py",
+      "feature": "ent#752",
+      "added": "2026-10-05",
+      "categories": [
+        "agent",
+        "unit"
+      ],
+      "description": "trinity-enterprise#752: the agent /health skill_gate_hook enum — missing / not_root_owned / writable / ok over the drop-in, its directory and both scripts, unsupported_runtime off Claude Code."
+    },
+    {
       "file": "unit/test_3185_a2a_payment_outcome.py",
       "feature": "abilityai/trinity#3185",
       "added": "2026-10-03",
