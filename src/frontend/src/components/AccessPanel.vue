@@ -10,6 +10,10 @@
       </p>
     </div>
 
+    <!-- trinity-enterprise#810: who this agent serves. Above the operator list:
+         an assignment is a relationship on top of an operator's access. -->
+    <AgentAssignmentsSection :agent-name="agentName" />
+
     <!-- Add operator -->
     <form @submit.prevent="addOperator" class="flex items-center space-x-3">
       <input
@@ -129,6 +133,7 @@
 <script setup>
 import { ref, watch, onMounted } from 'vue'
 import { useAgentsStore } from '../stores/agents'
+import AgentAssignmentsSection from './AgentAssignmentsSection.vue'
 
 const props = defineProps({
   agentName: { type: String, required: true },
