@@ -1165,34 +1165,17 @@ async def run_async_task(
 
         execution_time_ms = int((datetime.utcnow() - start_time).total_seconds() * 1000)
 
-        # Post-task side effects (each guarded + self-isolating; see helpers).
-        chat_session_id = (
-            await chat_persistence_service.persist_and_broadcast_chat_session(
-                agent_name=agent_name,
-                request=request,
-                result=result,
-                execution_id=execution_id,
-                user_id=user_id,
-                user_email=user_email,
-                subscription_id=subscription_id,
-                execution_time_ms=execution_time_ms,
-            )
-        )
-        await complete_collaboration_activity(
-            collaboration_activity_id,
-            result,
-            execution_id,
-            execution_time_ms,
-        )
-        await finalize_self_task(
-            is_self_task=is_self_task,
-            self_task_activity_id=self_task_activity_id,
+        chat_session_id = await run_post_turn_delivery(
             agent_name=agent_name,
             request=request,
             result=result,
             execution_id=execution_id,
+            collaboration_activity_id=collaboration_activity_id,
             user_id=user_id,
             user_email=user_email,
+            subscription_id=subscription_id,
+            is_self_task=is_self_task,
+            self_task_activity_id=self_task_activity_id,
             execution_time_ms=execution_time_ms,
         )
 
@@ -1204,6 +1187,60 @@ async def run_async_task(
         # Issue #498: signal any sync HTTP caller waiting on this execution.
         # No-op when no waiter is registered (the common async path).
         signal_sync_waiter(execution_id, result, chat_session_id)
+
+
+async def run_post_turn_delivery(
+    *,
+    agent_name,
+    request,
+    result,
+    execution_id,
+    collaboration_activity_id,
+    user_id,
+    user_email,
+    subscription_id,
+    is_self_task,
+    self_task_activity_id,
+    execution_time_ms,
+):
+    """Apply what the caller asked to happen with a finished turn's result:
+    chat-session persistence, collaboration-activity completion, self-task
+    finalisation. Each step is guarded and self-isolating (see the helpers).
+    Returns the chat_session_id the turn was saved to, or None.
+
+    #2329: the push path (`run_async_task`) and the pull sink
+    (`pull_coordination_service.apply_task_result`) both call this, so a pulled
+    turn honours the same delivery settings as a pushed one. Driven by the
+    request's settings only, never by the trigger.
+    """
+    chat_session_id = await chat_persistence_service.persist_and_broadcast_chat_session(
+        agent_name=agent_name,
+        request=request,
+        result=result,
+        execution_id=execution_id,
+        user_id=user_id,
+        user_email=user_email,
+        subscription_id=subscription_id,
+        execution_time_ms=execution_time_ms,
+    )
+    await complete_collaboration_activity(
+        collaboration_activity_id,
+        result,
+        execution_id,
+        execution_time_ms,
+    )
+    await finalize_self_task(
+        is_self_task=is_self_task,
+        self_task_activity_id=self_task_activity_id,
+        agent_name=agent_name,
+        request=request,
+        result=result,
+        execution_id=execution_id,
+        user_id=user_id,
+        user_email=user_email,
+        execution_time_ms=execution_time_ms,
+    )
+    return chat_session_id
 
 
 async def complete_collaboration_activity(
@@ -1932,7 +1969,9 @@ async def _dispatch_sync_backlog(*, name, execution_id, sync_effective_timeout, 
                 "claude_session_id": row.claude_session_id,
             },
         )
-        sync_chat_session_id = None
+        # #2329: the pull sink signals `result=None` with the session it saved
+        # the turn to; the DB-poll wake (another worker) carries none.
+        sync_chat_session_id = (wait_payload or {}).get("chat_session_id")
 
     _map_task_failure(name, result, idem=idem)
 
