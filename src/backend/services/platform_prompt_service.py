@@ -725,6 +725,16 @@ class ExecutionContext:
     # from the DB; stateless, so a wake that was lost (a crash, a stopped agent)
     # still reaches the agent on its next turn.
     ended_asks: Optional[List[dict]] = None
+    # trinity-enterprise#814: the person a scheduled seat run is addressed to
+    # (ent#637 — the Workspace delivery address on the execution row). NEVER
+    # rendered: it only picks which seat `role_id` names. A chat turn uses
+    # `source_user_email` for the same purpose.
+    served_person_email: Optional[str] = None
+    # trinity-enterprise#814: the seat THIS run serves when it is not the
+    # primary's (a shared companion working for someone else, or an agent that
+    # holds a seat itself). Rendered as its own line; the `Primary human` line
+    # and its role stay the primary's.
+    served_role_id: Optional[str] = None
 
     @staticmethod
     def derive_mode(triggered_by: Optional[str]) -> str:
@@ -926,6 +936,9 @@ def build_execution_context(ctx: ExecutionContext) -> str:
         if assignment:
             lines.append(f"- **Primary human**: {assignment}")
 
+        served = _sanitize_field(ctx.served_role_id, max_len=MAX_ROLE_ID_LEN)
+        if served and served != _sanitize_field(ctx.role_id, max_len=MAX_ROLE_ID_LEN):
+            lines.append(f"- **Seat this run serves**: {served}")
         stakeholders = _render_stakeholders(ctx)
         if stakeholders:
             lines.append(f"- **Stakeholders**: {stakeholders}")
@@ -981,6 +994,30 @@ def _resolve_assignment(
     from services.assignment_provider import resolve_assignment
 
     return resolve_assignment(agent_name, triggered_by) or {}
+
+
+def _served_role(ctx: ExecutionContext) -> Optional[str]:
+    """The seat THIS run serves, when it is not the primary's (trinity-enterprise#814).
+
+    A shared companion serves several people; the provider's answer carries the
+    primary's seat. When the run is addressed to a person — the chat user, or
+    the Workspace a brief is delivered to — their own seat is the one served,
+    and the agent's own seat when it holds one. Asked only when the provider
+    already answered, so an audience it suppressed still renders nothing.
+    """
+    person = ctx.served_person_email or ctx.source_user_email
+    if not person:
+        return None
+    try:
+        from services.assignment_provider import resolve_served_seat
+
+        served = resolve_served_seat(ctx.agent_name, person)
+    except Exception as e:  # noqa: BLE001 — the line degrades, never the turn
+        logger.debug(f"_served_role({ctx.agent_name}) failed: {e}")
+        return None
+    if served.get("source") in ("holds", "person"):
+        return served.get("role_id")
+    return None
 
 
 def _resolve_ended_asks(agent_name: Optional[str]) -> List[dict]:
@@ -1067,6 +1104,9 @@ def compose_system_prompt(
                 if needs_assignment
                 else {}
             )
+            served_role = (
+                _served_role(ctx) if assignment and ctx.served_role_id is None else None
+            )
             ctx = replace(
                 ctx,
                 collaborators=(
@@ -1103,6 +1143,9 @@ def compose_system_prompt(
                     ctx.ended_asks
                     if ctx.ended_asks is not None
                     else _resolve_ended_asks(ctx.agent_name)
+                ),
+                served_role_id=(
+                    ctx.served_role_id if ctx.served_role_id is not None else served_role
                 ),
             )
         block = build_execution_context(ctx)

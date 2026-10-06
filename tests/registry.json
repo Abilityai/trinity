@@ -1,6 +1,18 @@
 {
   "test_files": [
     {
+      "file": "unit/test_ent814_served_seat.py",
+      "feature": "trinity-enterprise#814",
+      "added": "2026-10-06",
+      "categories": [
+        "backend",
+        "assignments",
+        "prompt",
+        "seat-decisions"
+      ],
+      "description": "A shared companion serves the seat of the person each run is for: resolve_served_seat answers the person's own seat, holds wins, the primary's as fallback for every degraded provider answer; the prompt keeps the Primary human line and adds 'Seat this run serves' only when different (chat user or a brief's Workspace address, never rendered); a seat decision is stamped with the served seat over the agent's claim."
+    },
+    {
       "file": "unit/test_ent817_proactive_consent.py",
       "feature": "trinity-enterprise#817",
       "added": "2026-10-06",

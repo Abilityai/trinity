@@ -92,6 +92,15 @@ class AssignmentProvider(Protocol):
     # :func:`resolve_seat`, which answers "no seat" for every degraded case.
     # def seat_for(self, agent_name: str) -> Optional[dict]: ...
 
+    # OPTIONAL (trinity-enterprise#814): the seat a run serves when it is
+    # addressed to ``person_email`` — a shared companion serves several people
+    # and each run serves the one it is for. Shaped as
+    # ``{"role_id": str|None, "source": "holds"|"person"|"primary"|"none"}``;
+    # a seat id, never a person. Read through ``getattr`` by
+    # :func:`resolve_served_seat`, which falls back to :func:`resolve_seat`
+    # (the primary's seat) for a provider that predates it.
+    # def served_seat_for(self, agent_name: str, person_email: str) -> Optional[dict]: ...
+
 
 _provider: Optional[AssignmentProvider] = None
 
@@ -300,3 +309,47 @@ def resolve_seat(agent_name: Optional[str]) -> Dict[str, Any]:
     if case == "none":
         role_id = None
     return {"case": case, "role_id": role_id, "seats": list(seats), "reason": "provider"}
+
+
+#: Where a served seat came from (trinity-enterprise#814).
+SERVED_SOURCES = ("holds", "person", "primary", "none")
+
+
+def resolve_served_seat(agent_name: Optional[str], person_email: Optional[str]) -> Dict[str, Any]:
+    """The seat a run addressed to ``person_email`` serves (trinity-enterprise#814).
+
+    Always ``{"role_id", "source"}``, never a raise. The person's own
+    assignment row decides; the agent's own seat (``holds``) wins over it, and
+    the primary's seat is the fallback — which is also the whole answer when
+    no person is known or the provider predates ``served_seat_for``.
+    """
+    def _fallback() -> Dict[str, Any]:
+        seat = resolve_seat(agent_name)
+        if seat["case"] == "holds":
+            return {"role_id": seat["role_id"], "source": "holds"}
+        if seat["case"] == "serves":
+            return {"role_id": seat["role_id"], "source": "primary"}
+        return {"role_id": None, "source": "none"}
+
+    email = (person_email or "").strip().lower()
+    provider = _provider
+    fn = getattr(provider, "served_seat_for", None) if provider is not None else None
+    if not agent_name or not email or fn is None:
+        return _fallback()
+    try:
+        answer = fn(agent_name, email)
+    except Exception:  # noqa: BLE001 — a provider bug must never break a turn
+        logger.warning("[assignment_provider] provider.served_seat_for failed for %s; "
+                       "falling back to the primary's seat", agent_name, exc_info=True)
+        return _fallback()
+    if answer is None:
+        return _fallback()
+    if (not isinstance(answer, Mapping)
+            or answer.get("source") not in SERVED_SOURCES
+            or (answer.get("role_id") is not None and not isinstance(answer.get("role_id"), str))
+            or (answer.get("source") != "none" and not answer.get("role_id"))):
+        logger.warning("[assignment_provider] provider.served_seat_for returned a malformed "
+                       "answer for %s; falling back to the primary's seat", agent_name)
+        return _fallback()
+    source = answer["source"]
+    return {"role_id": answer.get("role_id") if source != "none" else None, "source": source}

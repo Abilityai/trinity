@@ -306,8 +306,8 @@ watch(addKinds, (kinds) => {
   if (kinds[0] === 'primary') addForm.value.kind = 'primary'
   else if (!kinds.includes(addForm.value.kind)) addForm.value.kind = kinds[0]
 }, { immediate: true })
-// Start the role from the agent's seat; the admin can type any other id.
-watch(seat, (s) => { if (!addForm.value.roleId && s.form === 'serves') addForm.value.roleId = s.roleId }, { immediate: true })
+// No prefill (ent#814): each person holds their own seat, and a run for them
+// serves it — starting from the primary's would stamp everyone with that role.
 
 async function addPerson() {
   addError.value = ''

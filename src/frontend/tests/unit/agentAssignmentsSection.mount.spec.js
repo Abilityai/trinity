@@ -104,14 +104,15 @@ describe('what an admin sees', () => {
 })
 
 describe('writes', () => {
-  it('adds a person picked by name, with the seat filled in, and reloads', async () => {
+  it('adds a person picked by name, with their own seat, and reloads', async () => {
     const w = render()
     await flushPromises()
     const options = q(w, 'add-user').findAll('option').map((o) => o.text())
     expect(options).toContain('Cat Moe')
     expect(options).not.toContain('Dan Off')                      // suspended
-    expect(q(w, 'add-role').element.value).toBe('cfo')            // the agent's seat
+    expect(q(w, 'add-role').element.value).toBe('')               // ent#814: never the primary's seat by default
     await q(w, 'add-user').setValue('3')
+    await q(w, 'add-role').setValue('cfo')
     await q(w, 'add-kind').setValue('viewer')
     await q(w, 'assignment-add-form').trigger('submit')
     await flushPromises()
