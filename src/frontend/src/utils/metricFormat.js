@@ -320,8 +320,10 @@ export function refusalHint(widget = {}) {
   const selector = detail.selector || {}
   const recent = Array.isArray(detail.recent_series) ? detail.recent_series : []
   const near = Array.isArray(detail.near) ? detail.near : []
+  // Own keys only: `in` would find a dimension named `constructor` on Object.prototype.
+  const has = (obj, key) => Object.prototype.hasOwnProperty.call(obj, key)
   if (near.length) {
-    const missing = Object.keys(near[0]).filter((k) => !(k in selector)).sort()
+    const missing = Object.keys(near[0]).filter((k) => !has(selector, k)).sort()
     return `Exact match also needs ${missing.join(', ')}: ${formatDims(near[0])}`
   }
   const wanted = formatDims(selector).toLowerCase()
@@ -332,7 +334,7 @@ export function refusalHint(widget = {}) {
   if (!recent.length) return 'This metric has no points yet.'
   const keys = Object.keys(selector)
   const single = keys.length === 1
-    && recent.every((dims) => dims && Object.keys(dims).length === 1 && keys[0] in dims)
+    && recent.every((dims) => dims && Object.keys(dims).length === 1 && has(dims, keys[0]))
   const noun = single ? keys[0] : 'series'
   // One declared key: list the values alone ("meta, google"), not "channel=meta".
   const shown = recent.slice(0, 2)

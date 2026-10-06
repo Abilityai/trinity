@@ -337,6 +337,22 @@ describe('refusalHint writes the second line of a not-found refusal from facts',
       .toBe('Exact match also needs geo: channel=google, geo=us')
   })
 
+  it('names a missing dimension even when it is called like an Object property', () => {
+    // `constructor` is a valid dimension name; `in` would find it on Object.prototype.
+    expect(refusalHint(refused({ selector: { channel: 'meta' },
+      recent_series: [{ channel: 'meta', constructor: 'x' }],
+      near: [{ channel: 'meta', constructor: 'x' }] })))
+      .toBe('Exact match also needs constructor: channel=meta, constructor=x')
+  })
+
+  it('does not treat a selector key called like an Object property as present', () => {
+    expect(refusalHint(refused({ selector: { constructor: 'x' },
+      recent_series: [{ channel: 'meta' }, { channel: 'google' }] })))
+      .toBe('Check the selector or confirm this series reports. Recent series: channel=meta; '
+        + 'channel=google (among the 200 newest points; a series that reports rarely can fall '
+        + 'outside them).')
+  })
+
   it('suggests a casing fix, and only a casing fix', () => {
     expect(refusalHint(refused({ selector: { channel: 'Google' },
       recent_series: [{ channel: 'meta' }, { channel: 'google' }] })))
