@@ -62,9 +62,11 @@ spy over every existing resolver).
 | `apply_result` success branch | `services/task_execution_service.py` (~1965) | CAS-won only |
 | `apply_result` failure branch | `services/task_execution_service.py` (~2072) | **ent#265 D3** — previously emitted the #1578 event but never the report; the path agent-reported failure envelopes take (HTTP-error terminals, async #1083 callbacks). CANCELLED envelopes (#679) report too |
 | `_write_terminal_and_gate` | `services/task_execution_service.py` (~890) | timeout / budget / crash / inline circuit-open class |
+| `apply_task_result` (pull sink) | `services/pull_coordination_service.py` | CAS-won only (#3114) |
 | MCP `chat_with_agent` / `chat_with_<agent>` (#3232) | `src/mcp-server/src/tools/chat.ts::resolveReportBack` | not a terminal — where a delegated child's `parent_execution_id` comes from; async dispatches send the caller's turn by default. See [below](#how-an-mcp-delegation-carries-the-parent-3232) |
 
-All three call `spawn_completion_report(...)` — fire-and-forget with a
+Every terminal above calls `spawn_completion_report(...)` (the MCP row is not a
+terminal) — fire-and-forget with a
 strong-ref task set (the #1083 GC footgun), never-raise, CAS-won-gated by the
 caller.
 
@@ -381,12 +383,14 @@ surface).
 | Pull sink (`apply_task_result`) | ✅ | #3114 — `pull_coordination_service` spawns the report |
 | Backend-shutdown terminal / cleanup stale-execution and stale-slot sweeps | ❌ | write `failed` with no report, so a hung or orphaned child fails silently (follow-up) |
 | Operator-terminate cancel (Path B) | ❌ v1 | writes CANCELLED before `apply_result` |
+| `fan_out` children (MCP `fan_out`, `POST /api/agents/{name}/fan-out`) | ❌ | `FanOutRequest` has no parent field and `fan_out_service` creates its rows without `source_channel*`, so nothing is inherited (#3232, follow-up) |
 | Approved run of a delegated `/task` that needed a skill-gate approval | ❌ | the gate (`skill_gate_service.enforce` in `dispatch_parallel_task`) fires before `create_task_execution_and_activities`, so nothing is inherited, and `skill_gate_service._dispatch_approved` re-creates the run from the frozen dispatch, which carries no `source_channel*` (follow-up) |
 
 Other recorded limits: a restart mid-inline-turn loses the inline reply and
 reports nothing (F7); a late token-gated FAILED→SUCCESS resurrection replays
 the guard — the corrective ✅ is never sent (correct at-most-once, D4/L5);
-fan-out = ONE report per child execution (per-execution identity; no persisted
+fan-out children carry no inherited conversation today (row above); were they
+to, fan-out = ONE report per child execution (per-execution identity; no persisted
 parent key to dedup on — G3, pinned by test); pre-migration rows suppress on
 Telegram (NULL context, G7); forum topics not threaded (inbound never captures
 `message_thread_id`); no channel-history persistence of the report (the group

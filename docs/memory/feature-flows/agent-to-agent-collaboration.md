@@ -251,7 +251,7 @@ When `MCP_AGENT_CHAT_PULL_ENABLED` is ON, a **sequential** (`parallel=false`) ag
     authContext?.scope === "agent" &&
     !isSelfTask;
   ```
-- **Pull branch** — chat.ts:391-402: calls `apiClient.task(agent_name, message, { async_mode: true, parent_execution_id }, sourceAgent, mcpKeyInfo, idempotencyKey, callerTurn)` and returns the receipt JSON. Only `async_mode` and the parent are forwarded (#3232: the pull-routed call is an async receipt, so it carries the caller's turn by default — see [channel-completion-report.md](channel-completion-report.md#how-an-mcp-delegation-carries-the-parent-3232)); `model`/`allowed_tools`/`system_prompt` are parallel-only and were never applied in sequential mode, so omitting them preserves sequential semantics (agent defaults).
+- **Pull branch** — `chat.ts::runAgentChat`, the `if (usePullRouting)` branch: calls `apiClient.task(agent_name, message, { async_mode: true, parent_execution_id }, sourceAgent, mcpKeyInfo, idempotencyKey, callerTurn)` and returns the receipt JSON. Only `async_mode` and the parent are forwarded (#3232: the pull-routed call is an async receipt, so it carries the caller's turn by default — see [channel-completion-report.md](channel-completion-report.md#how-an-mcp-delegation-carries-the-parent-3232)); `model`/`allowed_tools`/`system_prompt` are parallel-only and were never applied in sequential mode, so omitting them preserves sequential semantics (agent defaults).
 
 ### D8 — Route is part of the idempotency identity
 
@@ -767,7 +767,7 @@ result = mcp__trinity__chat_with_agent(
 Slack, Telegram or Workspace conversation, an async delegation carries that
 turn as `parent_execution_id` by default, so the delegated run posts its
 outcome there when it ends (the receipt says `report_back: "requested"`).
-Pass `execution_id="manual"` to keep a call quiet; a sync call opts in by
+Pass `execution_id="manual"` to keep a call quiet; a `parallel=true` sync call opts in by
 passing your own `execution_id`. Rules and debugging:
 [channel-completion-report.md](channel-completion-report.md#how-an-mcp-delegation-carries-the-parent-3232).
 
