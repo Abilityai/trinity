@@ -20,7 +20,7 @@ import { describe, it, mock } from "node:test";
 import { strict as assert } from "node:assert";
 
 import { createOperatorQueueTools } from "./tools/operator_queue.js";
-import { ApiError, type TrinityClient } from "./client.js";
+import { ApiError, operatorQueueListTarget, type TrinityClient } from "./client.js";
 
 type Row = { id: string; agent_name: string };
 
@@ -252,5 +252,80 @@ describe("ent#815 list_operator_queue completeness", () => {
     const out = await run(f, { limit: 10 }, scopeCtx("system"));
     assert.equal(out.total, null);
     assert.deepEqual(out.warnings, ["1 item(s) on this page were withheld after the read"]);
+  });
+});
+
+describe("ent#815 list_operator_queue cursor walk (opt-in)", () => {
+  it("M12: cursor start / a token pass through; no cursor sends none and offset 0", async () => {
+    const f = fake({});
+    // Through the published schema, as the MCP framework calls the tool — so
+    // `offset`'s default of 0 applies exactly as it does for a real caller.
+    const parse = (p: Record<string, unknown>) => (tool(f).parameters as any).parse(p);
+    await run(f, parse({ cursor: "start", limit: 5 }), scopeCtx("user"));
+    await run(f, parse({ cursor: "tok-abc", limit: 5 }), scopeCtx("user"));
+    await run(f, parse({ limit: 5 }), scopeCtx("user"));
+    assert.equal(f.listParams[0].cursor, "start");
+    assert.equal(f.listParams[1].cursor, "tok-abc");
+    assert.equal(f.listParams[2].cursor, undefined);
+    assert.equal(f.listParams[2].offset, 0);
+    assert.match(operatorQueueListTarget(f.listParams[0]), /[?&]cursor=start(&|$)/);
+    assert.doesNotMatch(operatorQueueListTarget(f.listParams[2]), /cursor=/);
+  });
+
+  it("M13: a two-page walk carries next_cursor and re-reads and re-sends permits each page", async () => {
+    const permits = [["peer-a", "peer-b"], ["peer-a"]];
+    const calls: string[] = [];
+    const sent: any[] = [];
+    let page = 0;
+    const client: Partial<TrinityClient> = {
+      getPermittedAgents: (async (_n: string, o?: any) => {
+        calls.push(`permits:${o?.strict}`);
+        return permits[Math.min(calls.filter((c) => c.startsWith("permits")).length - 1, 1)];
+      }) as any,
+      listOperatorQueue: (async (p: any) => {
+        calls.push("list");
+        sent.push(p);
+        page += 1;
+        return {
+          items: [{ id: `i${page}`, agent_name: "self" }], count: 1, total: 2,
+          has_more: page === 1, next_offset: null, next_cursor: page === 1 ? "next-1" : null,
+        } as any;
+      }) as any,
+    };
+    const t = createOperatorQueueTools(client as unknown as TrinityClient, false).listOperatorQueue;
+    const first = JSON.parse(await t.execute({ cursor: "start", limit: 1 } as any, agentCtx("self")));
+    const second = JSON.parse(
+      await t.execute({ cursor: first.next_cursor, limit: 1 } as any, agentCtx("self")),
+    );
+    assert.equal(first.next_cursor, "next-1");
+    assert.equal(sent[1].cursor, "next-1");
+    assert.deepEqual(calls, ["permits:true", "list", "permits:true", "list"]);
+    assert.deepEqual([...sent[0].agent_names].sort(), ["peer-a", "peer-b", "self"]);
+    assert.deepEqual([...sent[1].agent_names].sort(), ["peer-a", "self"]);
+    assert.equal(second.has_more, false);
+    assert.equal(second.next_cursor, null);
+  });
+
+  it("M9: just over 8 KB once a 250-byte cursor is counted, under 500 names → refused", async () => {
+    // 468 short names: just under 8 KB on their own, just over with the cursor.
+    const permitted = Array.from({ length: 468 }, (_, i) => `${"abcde"[i % 5]}x${Math.floor(i / 5)}`);
+    const params = { limit: 100, cursor: "c".repeat(250) };
+    const withoutCursor = Buffer.byteLength(
+      operatorQueueListTarget({ limit: 100, offset: 0, agent_names: ["s", ...permitted] }), "utf8");
+    assert.ok(withoutCursor <= 8192 && withoutCursor > 8192 - 250, `fixture is ${withoutCursor} bytes`);
+    const f = fake({ permitted });
+    const out = await run(f, params, agentCtx("s"));
+    assert.equal(out.error, "permit_set_too_large");
+    assert.deepEqual(f.calls, ["permits"]);
+  });
+
+  it("M4: the description teaches the walk", () => {
+    const t = tool(fake({}));
+    assert.ok(t.description.includes("next_cursor"));
+    assert.ok(t.description.includes('cursor="start"'));
+    assert.ok(t.description.length <= 1800, `description is ${t.description.length} chars`);
+    const shape = (t.parameters as any).shape;
+    assert.ok(shape.cursor, "the tool takes a cursor");
+    assert.match(shape.offset.description, /legacy paging; prefer cursor/);
   });
 });

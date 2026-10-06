@@ -260,7 +260,9 @@ export function createOperatorQueueTools(
         "items, and aging/aged_since once it has waited past the operator's bound. " +
         "Complete within limit: every item you may see is ranked before the cut, so " +
         "has_more=false means you have them all and total counts them. To page, pass " +
-        "offset=next_offset until has_more is false. If has_more or total is null, " +
+        "cursor=\"start\", then cursor=next_cursor until has_more is false; within one " +
+        "walk no item is returned twice or skipped, even while the queue changes. If " +
+        "next_cursor is null while has_more is true, read the warning. If has_more or total is null, " +
         "completeness is not verified: do not conclude nothing is pending. To check " +
         "whether an ask is already open, pass status=pending.",
       parameters: z.object({
@@ -300,7 +302,12 @@ export function createOperatorQueueTools(
           .min(0)
           .optional()
           .default(0)
-          .describe("Pagination offset (default 0)."),
+          .describe("Pagination offset (default 0): legacy paging; prefer cursor."),
+        cursor: z
+          .string()
+          .min(1)
+          .optional()
+          .describe('"start" to begin a walk, then next_cursor.'),
       }),
       execute: async (
         params: {
@@ -311,6 +318,7 @@ export function createOperatorQueueTools(
           since?: string;
           limit?: number;
           offset?: number;
+          cursor?: string;
         },
         context?: { session?: McpAuthContext },
       ) => {
@@ -360,6 +368,9 @@ export function createOperatorQueueTools(
           limit: params.limit,
           offset: params.offset,
           agent_names: allowed ? [...allowed] : undefined,
+          // Opt-in (ent#815): with no cursor the read is today's offset mode.
+          // A walk re-reads the permits above on EVERY page and re-sends them.
+          cursor: params.cursor,
         };
         if (allowed) {
           const bytes = Buffer.byteLength(operatorQueueListTarget(listParams), "utf8");

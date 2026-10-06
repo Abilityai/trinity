@@ -129,6 +129,8 @@ export interface OperatorQueueListParams {
   offset?: number;
   /** Narrowing only: one `agent_names` query parameter per name. */
   agent_names?: string[];
+  /** Keyset walk: "start", then each page's `next_cursor`. */
+  cursor?: string;
 }
 
 /**
@@ -146,6 +148,7 @@ export function operatorQueueListTarget(params: OperatorQueueListParams = {}): s
   if (params.limit !== undefined) sp.set("limit", String(params.limit));
   if (params.offset !== undefined) sp.set("offset", String(params.offset));
   for (const name of params.agent_names ?? []) sp.append("agent_names", name);
+  if (params.cursor !== undefined) sp.set("cursor", params.cursor);
   const qs = sp.toString();
   return `/api/operator-queue${qs ? `?${qs}` : ""}`;
 }
