@@ -1,6 +1,32 @@
 {
   "test_files": [
     {
+      "file": "mcp-server/src/chat-parent-execution.test.ts",
+      "feature": "#3232",
+      "added": "2026-10-06",
+      "categories": [
+        "mcp-server",
+        "typescript",
+        "unit",
+        "channels",
+        "executions"
+      ],
+      "description": "#3232: parent_execution_id leaves the MCP server on every /task route. Real createServer + a real MCP client over streamable HTTP + the real reconciler for a dedicated chat_with_<agent> tool, against a fake backend that records the /task and /chat bodies, the forwarded X-Trinity-Execution-Id and the Idempotency-Key (node:test). Covers: the async default (parallel+async and #946 pull-routed send the platform header turn), sync opt-in, header wins over a typed id, malformed/`manual` typed ids never forwarded, typed `manual` opt-out keeps the forwarded turn header, self-task inject_result excluded, sequential /chat carries nothing, the parent never enters the Idempotency-Key (Invariant #18), report_back result fields on every result path and never on gate/depth/thrown results, the MCP_REPORT_BACK_ENABLED kill switch (false/0/no/off, any case) incl. the env read and the dedicated tool, the shared execution_id parameter text, and resolveReportBack over its full 864-combination input product against an independent oracle. Every 'nothing sent' assertion is paired with a forwarding sibling, so the file is red on dev."
+    },
+    {
+      "file": "unit/test_3232_voice_reply_delegated_child.py",
+      "feature": "#3232",
+      "added": "2026-10-06",
+      "categories": [
+        "backend",
+        "unit",
+        "voice",
+        "channels",
+        "security"
+      ],
+      "description": "#3232: POST /api/agents/{name}/voice-reply refuses a delegated child (a row with source_channel_agent set, i.e. it inherited its parent's conversation) with reason=delegated_turn before any channel branch, on Slack and Telegram; a direct channel turn still delivers; an agent tasking itself is still a delegated child (3 tests). Red on dev."
+    },
+    {
       "file": "unit/test_3246_platform_alert_surfaces.py",
       "feature": "#3246",
       "added": "2026-10-05",
