@@ -5,7 +5,7 @@
 
 ## Attack surface added
 - **No new endpoint or auth path.** `POST /api/agents/{name}/chat` keeps its admission order (auth, chain-depth guard, idempotency begin, breaker read) and on a pull pilot enqueues the turn instead of acquiring a slot. `GET`/`DELETE /chat/history` keep their dependencies (`get_authorized_agent` / `get_owned_agent`).
-- **New column `chat_sessions.cached_claude_session_id`** (SQLite migration + Alembic `0086`), written only by the pulled `/chat` path after a UUID check, read by the session reaper's keep set.
+- **New column `chat_sessions.cached_claude_session_id`** (SQLite migration + Alembic `0090`), written only by the pulled `/chat` path after a UUID check, read by the session reaper's keep set.
 
 ## Phases
 - **Secrets:** no key patterns in the diff. The pulled path scrubs staged secrets from the response before the `chat_messages` write (ent#279 parity).
