@@ -42,6 +42,7 @@ On an agent in the pull pilot, a turn can be delivered again after its lease exp
 |------|-------------|
 | `chat_with_agent(agent_name, message)` | Send a message to another agent and wait for the response. |
 | `chat_with_agent(agent_name, message, parallel=true, async=true)` | Send a message asynchronously. Returns an `execution_id`. |
+| `chat_with_agent(agent_name, message, parallel=true, async=true)` from a Slack, Telegram or Workspace turn | Same receipt, plus `report_back: "requested"`: when the delegated run ends, success or failure, it posts its outcome into that conversation. On by default for async delegation; pass `execution_id="manual"` to turn it off for one call. A sync call opts in by passing your own `execution_id`. |
 | `get_execution_result(agent_name, execution_id)` | Poll for the result of an async execution. |
 | `list_recent_executions(agent_name)` | List recent executions for an agent. |
 | `get_agent_activity_summary(agent_name)` | Activity summary over a configurable time window. |
