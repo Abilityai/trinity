@@ -805,6 +805,57 @@ class TestAC2EndToEnd:
         assert json.loads(third.body)["execution_id"] == "exec-second-b2"
 
 
+class TestTaskGateSeam:
+    """The `/task` twin of `TestChatSeam::test_gate_record_answers_before_the_receipt`:
+    `dispatch_parallel_task` runs `skill_gate_service.enforce` before
+    `begin_task_idempotency`, so a gated request gets the gate's answer and never
+    reaches the receipt reclaim. Driven through the real
+    `routers.chat.execute_parallel_task`, the idempotency layer real."""
+
+    @pytest.mark.parametrize("which", ["decided", "pending"])
+    def test_gate_record_answers_before_the_receipt(self, svc, monkeypatch, which):
+        import asyncio
+        import sys
+        from unittest.mock import AsyncMock, MagicMock
+        from routers.chat import execute_parallel_task
+        from models import ParallelTaskRequest
+        from services.skill_gate_errors import SkillApprovalRequired, SkillGateRefused
+        import services.chat_execution_service as ce
+
+        exc = (SkillGateRefused(409, "request_denied", "denied") if which == "decided"
+               else SkillApprovalRequired(request_id="req-task-9c4", agent_name=AGENT,
+                                          skills=["deploy"], approver_role="owner",
+                                          expires_at=None))
+        _insert_exec(svc.store, STALE, "failed", error="boom", completed_at=T0)
+        _store_receipt(svc, "k-task-gated", status="accepted")
+
+        router_mod = sys.modules[execute_parallel_task.__module__]
+        db = MagicMock()
+        db.get_execution_timeout.return_value = 3600
+        db.get_max_parallel_tasks.return_value = 3
+        monkeypatch.setattr(router_mod, "get_agent_container",
+                            lambda name: MagicMock(status="running"))
+        monkeypatch.setattr(router_mod, "db", db)
+        monkeypatch.setattr(ce, "db", db)
+        monkeypatch.setattr(ce, "idempotency_service", svc.isvc)
+        monkeypatch.setattr(svc.das, "platform_audit_service", MagicMock(log=AsyncMock()))
+        enforce = AsyncMock(side_effect=exc)
+        monkeypatch.setattr(ce.skill_gate_service, "enforce", enforce)
+
+        with pytest.raises(type(exc)):
+            asyncio.run(execute_parallel_task(
+                request=ParallelTaskRequest(message="deploy it", async_mode=True), name=AGENT,
+                current_user=MagicMock(id=1, email="u@e.com", username="u", role="user",
+                                       agent_name=None),
+                x_source_agent=None, x_via_mcp=None, idempotency_key="k-task-gated",
+                x_event_trigger=None, x_internal_secret=None,
+            ))
+        assert enforce.await_count == 1
+        assert _row(svc, "k-task-gated") == ("completed", STALE)
+        assert svc.db.get_execution_gate_state.calls == 0
+        db.create_task_execution.assert_not_called()
+
+
 # ---------------------------------------------------------------------------
 # Structural guards (supplementary pins over the behaviour above)
 # ---------------------------------------------------------------------------
