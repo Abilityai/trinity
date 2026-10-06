@@ -358,6 +358,11 @@ async def set_admin_password(data, request, background_tasks):
     # 6. Mark setup completed
     db.set_setting('setup_completed', 'true')
 
+    # 6b. Deploy the system agent (#3237) — its boot-time attempt ran before this
+    #     admin existed and failed. Background task, never raises, scheduled
+    #     before the first-run seed (ensure_first_run_seeded).
+    background_tasks.add_task(_deploy_system_agent_after_setup)
+
     # 7. Operator intake (trinity-enterprise#38): only on affirmative consent,
     #    scheduled as a BackgroundTask so it runs after the response
     if data.consent_updates:
