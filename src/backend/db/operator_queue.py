@@ -1916,28 +1916,44 @@ class OperatorQueueOperations:
         flag or write back into."""
         return or_(operator_queue.c.channel.is_(None), operator_queue.c.channel == "file")
 
-    # The leading characters `str.strip()` removes that every SQL dialect can
-    # trim too: ASCII whitespace. A row led by other Unicode whitespace (U+00A0
-    # …) is the one case the SQL keeps and the Python belt drops — ingest
-    # refuses such ids (`_ID_RE`), so only a legacy row can carry one.
-    _ASCII_WHITESPACE = " \t\n\r\v\f"
+    # Exactly the characters `str.strip()` removes (`str.isspace()`: ASCII
+    # whitespace, the ASCII separators U+001C-U+001F, NEL, NBSP and the Unicode
+    # spaces), so the SQL trims what `is_about_a_person` trims (ent#815 fix 1).
+    # `ltrim(text, chars)` is multi-byte aware on SQLite and PostgreSQL alike.
+    # Ingest refuses such ids (`_ID_RE`); only a legacy row can carry one.
+    _PY_WHITESPACE = (
+        "\t\n\x0b\x0c\r\x1c\x1d\x1e\x1f \x85\xa0\u1680"
+        "\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a"
+        "\u2028\u2029\u202f\u205f\u3000"
+    )
 
     @staticmethod
     def _request_id_not_prefixed_ci(prefixes):
         """`request_id` does not start with any of `prefixes`, compared the way
         `operator_queue_service.is_about_a_person` compares in Python
-        (trinity-enterprise#815): case-insensitive, leading whitespace ignored,
-        and a NULL `request_id` kept (`coalesce`: a bare `substr(NULL) != p` is
-        NULL, which would DROP the row). `lower`, `ltrim(text, chars)`,
-        `coalesce` and `substr` exist on SQLite and PostgreSQL alike.
+        (trinity-enterprise#815), so the two rules exclude exactly the same rows
+        and `total` is exact: case-insensitive, leading whitespace ignored, and
+        a NULL `request_id` kept (`coalesce`: a bare `substr(NULL) != p` is
+        NULL, which would DROP the row).
+
+        Equal to Python's `.strip().lower().startswith(p)` for these all-ASCII
+        prefixes on every dialect: `ltrim` takes Python's whitespace set;
+        U+212A KELVIN SIGN is the one non-ASCII code point whose Python
+        `.lower()` is ASCII (`k`), and SQLite's `lower` is ASCII-only, so it is
+        rewritten first; U+0130 lowers to `i` + U+0307 in Python but to a bare
+        `i` under PostgreSQL's glibc `lower`, so it is rewritten to Python's
+        form first. `lower`, `replace`, `ltrim(text, chars)`, `coalesce` and
+        `substr` exist on SQLite and PostgreSQL alike — no dialect branch.
 
         Deliberately not `_not_prefixed` below: that one is the sweeps' and the
         own-budget predicate's (case-sensitive, NULL-dropping), and is left
         exactly as it is."""
-        normalised = func.lower(func.ltrim(
-            func.coalesce(operator_queue.c.request_id, ""),
-            OperatorQueueOperations._ASCII_WHITESPACE,
-        ))
+        normalised = func.lower(func.replace(func.replace(
+            func.ltrim(
+                func.coalesce(operator_queue.c.request_id, ""),
+                OperatorQueueOperations._PY_WHITESPACE,
+            ),
+            "\u212a", "k"), "\u0130", "i\u0307"))
         return [
             func.substr(normalised, 1, len(p)) != p.lower()
             for p in (prefixes or ())

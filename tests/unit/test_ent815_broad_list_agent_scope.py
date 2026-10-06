@@ -298,7 +298,9 @@ def test_b8_agent_route_excludes_about_a_person_in_sql(qdb, names):
 @pytest.mark.parametrize("dialect", ["postgresql", "sqlite"])
 def test_b11_exclusion_compiles_on_both_dialects(dialect):
     """B11 (dialect parity; CI has no PostgreSQL pytest): the exclusion is the
-    portable `lower(ltrim(coalesce(...)))` shape on both dialects."""
+    portable `lower(replace(replace(ltrim(coalesce(...)))))` shape on both
+    dialects — the trim set and the two code-point rewrites are plain
+    functions, no dialect branch."""
     from sqlalchemy import and_
     from sqlalchemy.dialects import postgresql, sqlite
     from db.operator_queue import OperatorQueueOperations
@@ -308,7 +310,20 @@ def test_b11_exclusion_compiles_on_both_dialects(dialect):
     )
     d = postgresql.dialect() if dialect == "postgresql" else sqlite.dialect()
     sql = str(and_(*conds).compile(dialect=d))
-    assert sql.count("lower(ltrim(coalesce(operator_queue.request_id") == 2, sql
+    assert sql.count(
+        "lower(replace(replace(ltrim(coalesce(operator_queue.request_id") == 2, sql
+
+
+def test_b11b_the_trim_set_is_exactly_pythons_whitespace():
+    """B11b: the characters SQL trims are exactly the ones `str.strip()` removes
+    (`str.isspace()`), so a legacy row led by any of them is excluded in SQL,
+    not only by the Python belt — computed here, never copied from the code."""
+    from db.operator_queue import OperatorQueueOperations
+
+    expected = {c for c in map(chr, range(0x110000)) if c.isspace()}
+    trim = OperatorQueueOperations._PY_WHITESPACE
+    assert len(trim) == len(set(trim)), "a duplicated character"
+    assert set(trim) == expected
 
 
 def test_b13_has_more_comes_from_the_page_read_not_the_count(qdb, names, monkeypatch):
@@ -333,13 +348,19 @@ def test_b13_has_more_comes_from_the_page_read_not_the_count(qdb, names, monkeyp
     assert body["total"] == 8
 
 
-def test_b14_a_belt_drop_nulls_total_and_warns(qdb, names):
-    """B14 (`total` honest): a legacy request_id led by a non-ASCII space
-    (U+00A0) passes the SQL exclusion — portable SQL trims ASCII whitespace
-    only — and the Python belt drops it. The page then says so: `total` null
-    plus a warning, while the paging fields still come from the SQL page."""
+def test_b14_a_belt_drop_nulls_total_and_warns(qdb, names, monkeypatch):
+    """B14 (`total` honest): when the Python belt drops a row the SQL page kept,
+    the page says so — `total` null plus a warning, while the paging fields
+    still come from the SQL page. The SQL rule now equals the Python rule, so
+    the drop is forced through the real route: the tuple the SQL reads
+    (`ABOUT_A_PERSON_ID_PREFIXES`) omits `gate-`, the one the belt reads
+    (`_ABOUT_A_PERSON_ID_PREFIXES`) does not."""
+    from services import operator_queue_service as svc
+
+    monkeypatch.setattr(svc, "ABOUT_A_PERSON_ID_PREFIXES",
+                        ("workspace-problem-", "portal-inbox-collision-"))
     me = names("me")
-    _seed(qdb, me, priority="critical", rid=" gate-x")
+    _seed(qdb, me, priority="critical", rid="gate-x")
     for _ in range(12):
         _seed(qdb, me)
     _as(mcp_scope="system")
@@ -349,6 +370,59 @@ def test_b14_a_belt_drop_nulls_total_and_warns(qdb, names):
     assert body["warnings"], body
     assert body["has_more"] is True
     assert body["next_offset"] == 10
+
+
+# Legacy ids ingest refuses today (`_ID_RE`) but an older row can carry: led by
+# whitespace only `str.isspace()` knows (an ASCII separator, NBSP, ideographic
+# space), and the KELVIN SIGN, whose Python `.lower()` is ASCII `k`.
+_LEGACY_ABOUT_A_PERSON = ("\u00a0gate-x", "\x1cgate-y", "\u3000GATE-z",
+                          "wor\u212aspace-problem-w")
+
+
+@pytest.mark.parametrize("principal", MACHINE_KEYS)
+def test_b16_total_is_exact_for_legacy_about_a_person_ids(qdb, names, principal):
+    """B16 (T1): the SQL exclusion equals `is_about_a_person` exactly, so a
+    legacy about-a-person row that sorts OFF the page is not counted either.
+    Before, SQL trimmed ASCII whitespace only and lowered ASCII only: these rows
+    were counted in `total` and pushed `has_more` true, while the belt never
+    saw them (they were not on the page) — an overcount nothing flagged."""
+    me = names("me")
+    own = _seed(qdb, me, priority="high")
+    lead = sorted(c for c in map(chr, range(0x110000)) if c.isspace())
+    rids = list(_LEGACY_ABOUT_A_PERSON) + [f"{c}gate-{ord(c):x}" for c in lead]
+    legacy = [_seed(qdb, me, priority="low", rid=r) for r in rids]
+    if principal.get("mcp_scope") == "agent":
+        principal = {**principal, "agent_name": me}
+    _as(**principal)
+    body = _get(limit=1)
+    assert [i["id"] for i in body["items"]] == [own]
+    assert body["total"] == 1, body
+    assert body["has_more"] is False
+    assert body["next_offset"] is None
+    assert "warnings" not in body
+
+    _as()
+    person = _get(limit=100)
+    assert {i["id"] for i in person["items"]} == {own, *legacy}
+    assert person["total"] == 1 + len(legacy)
+
+
+@pytest.mark.parametrize("principal", MACHINE_KEYS)
+def test_b17_a_dotted_capital_i_is_not_an_about_a_person_match(qdb, names, principal):
+    """B17 (T1, the reverse direction): Python lowers U+0130 to `i` + U+0307,
+    so `portal-\u0130nbox-collision-…` is NOT about a person and a machine
+    receives it. PostgreSQL's glibc `lower` gives a bare `i`, which would match
+    — the SQL rewrites U+0130 to Python's two code points first, so every
+    dialect keeps the row (SQLite's ASCII `lower` already did)."""
+    me = names("me")
+    kept = _seed(qdb, me, rid="portal-\u0130nbox-collision-x")
+    if principal.get("mcp_scope") == "agent":
+        principal = {**principal, "agent_name": me}
+    _as(**principal)
+    body = _get(limit=10)
+    assert [i["id"] for i in body["items"]] == [kept]
+    assert body["total"] == 1
+    assert "warnings" not in body
 
 
 # ---------------------------------------------------------------------------
