@@ -534,6 +534,28 @@ def test_a_platform_read_of_a_link_logs_a_warning_naming_the_file(caplog):
     assert any("CLAUDE.md" in m and "link" in m and "shared-agent" in m for m in warned), warned
 
 
+@pytest.mark.parametrize("detail,named", [
+    ({"code": "resolved_path_mismatch", "message": "a link"}, True),
+    ("Access denied", False),
+], ids=["link", "string-detail"])
+def test_an_objective_read_of_a_link_logs_a_warning_naming_the_file(caplog, detail, named):
+    """The objective join reads template.yaml and objectives over the agent
+    door directly, not `agent_client.read_file`. A linked file still fails
+    soft there, and is named; any other 403 names nothing."""
+    import httpx
+
+    from services import objective_join_service as svc
+
+    path = "canon/objectives/q4.yaml"
+    fake = SimpleNamespace(agent_name="linked-agent", get=AsyncMock(
+        return_value=httpx.Response(403, json={"detail": detail})))
+    with caplog.at_level("WARNING"):
+        assert asyncio.run(svc._read_yaml(fake, path)) == (None, "unreadable")
+    warned = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+    hits = [m for m in warned if path in m and "link" in m and "linked-agent" in m]
+    assert bool(hits) is named, warned
+
+
 def _pipeline_agent(monkeypatch, downloads):
     """The Work card's pipeline reader over a real httpx client: one listed
     state file, and `downloads` mapping a path to its (status, body)."""
