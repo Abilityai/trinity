@@ -329,10 +329,12 @@ class TestStrandedTriggersStayPushed:
         assert kw["overflow_policy"] == "queue_persistent", trigger
         assert kw["overflow_payload"] is not None, trigger
 
-    def test_chat_trigger_is_untouched(self, pilot):
-        """The UI ``/chat`` trigger keeps the push path (#3114)."""
+    def test_chat_trigger_is_queued(self, pilot):
+        """``chat`` reaches the durable queue on a pilot too (#3127)."""
         _, m = _run(triggered_by="chat")
-        assert _acquire_kwargs(m["capacity"])["overflow_policy"] == "reject"
+        kw = _acquire_kwargs(m["capacity"])
+        assert kw["overflow_policy"] == "queue_persistent"
+        assert kw["overflow_payload"] is not None
 
 
 # ---------------------------------------------------------------------------

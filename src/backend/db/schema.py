@@ -403,6 +403,7 @@ TABLES = {
             total_context_max INTEGER DEFAULT 200000,
             status TEXT DEFAULT 'active',
             subscription_id TEXT,
+            cached_claude_session_id TEXT,
             FOREIGN KEY (user_id) REFERENCES users(id)
         )
     """,
