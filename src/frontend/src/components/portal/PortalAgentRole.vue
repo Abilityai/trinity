@@ -23,17 +23,18 @@
         </p>
         <p v-else-if="card.role.mission" class="mt-1 text-sm">{{ card.role.mission }}</p>
         <p v-if="card.role.path" class="mt-1 text-[11px] text-gray-400 font-mono break-all">{{ card.role.path }}</p>
-        <p v-if="card.seat" class="mt-1 text-[11px] text-gray-400">Seat · {{ card.seat }}</p>
+        <!-- ent#814: where this seat comes from, for you — never a person. -->
+        <p v-if="seatSourceText" class="mt-1 text-[11px] text-gray-400" data-testid="portal-role-seat-source">{{ seatSourceText }}</p>
       </div>
 
       <!-- Objectives with metric freshness — the portal projection of the ONE
            objective ↔ metric join (ent#676). An agent that simply has none
            renders nothing here, as before. -->
-      <template v-if="card.objectives.length || card.objectives_error || noSeat">
+      <template v-if="card.objectives.length || card.objectives_error || (noSeat && card.role.error !== 'no_seat')">
         <h3 class="mt-3 mb-1 text-[11px] font-medium text-gray-400">Objectives</h3>
         <!-- trinity-enterprise#812: owning nothing because nobody's seat is on
              record is a named state, with what to do — never a silent blank. -->
-        <p v-if="noSeat" class="mb-1.5 text-[12.5px] text-status-warning-700 dark:text-status-warning-300" data-testid="portal-role-no-seat">
+        <p v-if="noSeat && card.role.error !== 'no_seat'" class="mb-1.5 text-[12.5px] text-status-warning-700 dark:text-status-warning-300" data-testid="portal-role-no-seat">
           {{ roleErrorText('no_seat') }}
         </p>
         <!-- Zero objectives for a NAMED reason: a read that did not happen is
@@ -82,7 +83,7 @@
 
       <!-- Your relationship (ent#500 when it lands; stated, never blank). -->
       <p class="mt-3 text-[12.5px]" data-testid="portal-role-relationship">
-        <span class="text-gray-400">Your relationship · </span>{{ card.relationship || 'no assignment recorded' }}
+        <span class="text-gray-400">Your relationship · </span>{{ relationshipText }}
       </p>
 
       <!-- Readiness: the owner's stamp, never the template's word. -->
@@ -172,6 +173,24 @@ function flip() {
   const next = readiness.value.status === 'ready' ? 'calibrating' : 'ready'
   return store.flipAgentReadiness(props.agentName, next)
 }
+
+// ent#814: the seat on the card is the one this agent serves for YOU.
+const SEAT_SOURCE_TEXT = {
+  holds: 'The agent holds this seat itself',
+  person: 'Your seat on this agent',
+  primary: "Its primary's seat",
+}
+const seatSourceText = computed(() => SEAT_SOURCE_TEXT[card.value?.seat_source] || '')
+
+// ent#638 kinds — the viewer's assignment on this agent.
+const RELATIONSHIP_TEXT = {
+  primary: 'primary — it works for you',
+  approver: 'approver',
+  collaborator: 'collaborator',
+  viewer: 'viewer',
+}
+const relationshipText = computed(() =>
+  RELATIONSHIP_TEXT[card.value?.relationship] || 'no assignment recorded')
 
 // trinity-enterprise#812: the join's `no_seat` finding, carried on the card.
 const noSeat = computed(() => (card.value?.finding_codes || []).includes('no_seat'))

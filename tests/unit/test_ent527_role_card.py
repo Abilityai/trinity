@@ -176,14 +176,46 @@ def _full_client():
 
 # --- no role → no card ----------------------------------------------------------
 
-def test_an_agent_with_no_x_role_has_no_card(monkeypatch):
+def _seats(seat_for=None, served_seat_for=None, kinds_for=None):
+    """Register an assignment provider for one test (the autouse fixture's
+    teardown clears it)."""
+    from services import assignment_provider as ap
+
+    class _P:
+        def assignment_for(self, agent_name, triggered_by):
+            return None
+
+    p = _P()
+    if seat_for:
+        p.seat_for = seat_for
+    if served_seat_for:
+        p.served_seat_for = served_seat_for
+    if kinds_for:
+        p.kinds_for = kinds_for
+    ap.register_provider(p)
+
+
+def test_no_seat_no_canon_and_no_x_role_is_no_card(monkeypatch):
+    from services import assignment_provider as ap
+    ap.clear_provider()
     rc = _wire(monkeypatch, FakeClient({"template.yaml": "name: plain\n"}))
     assert _card(rc) == {"agent_name": AGENT, "role": None}
 
 
-def test_an_unreadable_template_is_also_no_card(monkeypatch):
+def test_an_unreadable_template_with_no_seat_is_also_no_card(monkeypatch):
+    from services import assignment_provider as ap
+    ap.clear_provider()
     rc = _wire(monkeypatch, FakeClient({}, broken={"template.yaml"}))
     assert _card(rc)["role"] is None
+
+
+def test_a_seat_on_record_shows_the_card_even_without_x_role(monkeypatch):
+    """ent#811: the seat is the record. A template that never declared
+    `x-role` still gets its card when the agent serves a seat."""
+    rc = _wire(monkeypatch, FakeClient({"template.yaml": "name: plain\n",
+                                        "canon/roles/sales-lead.yaml": ROLE}))
+    card = _card(rc)
+    assert card["role"]["id"] == "sales-lead" and card["role"]["title"] == "Sales Lead"
 
 
 # --- the role, and a role file that fails to load --------------------------------
@@ -198,7 +230,64 @@ def test_the_role_reads_from_the_canon_file_through_the_agent(monkeypatch):
     assert role["status"] == "active"
     assert role["path"] == "canon/roles/sales-lead.yaml"
     assert role["error"] is None
-    assert card["seat"] == "gary@example.com"
+    # ent#814: where the seat came from, never x-role's email.
+    assert card["seat_source"] == "primary"
+    assert "seat" not in card
+
+
+def test_the_template_x_role_is_not_read_the_seat_on_record_is(monkeypatch):
+    """The live check's defect: the card said `sales-lead` from the template
+    while the Access tab said Head of Sales."""
+    lying = TEMPLATE.replace("role: sales-lead", "role: sales-lead-old")
+    _seats(seat_for=lambda a: {"case": "serves", "role_id": "head-of-sales", "seats": ["head-of-sales"]})
+    rc = _wire(monkeypatch, FakeClient({"template.yaml": lying,
+                                        "canon/roles/head-of-sales.yaml": ROLE.replace(
+                                            "id: sales-lead", "id: head-of-sales").replace(
+                                            "title: Sales Lead", "title: Head of Sales")}))
+    role = _card(rc)["role"]
+    assert (role["id"], role["title"]) == ("head-of-sales", "Head of Sales")
+
+
+def test_each_viewer_sees_the_seat_the_agent_serves_for_them(monkeypatch):
+    """ent#814: a shared companion serves Maya in the CFO seat and Leo in his."""
+    seats = {EMAIL: {"role_id": "cfo", "source": "person"}}
+    _seats(seat_for=lambda a: {"case": "serves", "role_id": "sales-lead", "seats": ["sales-lead", "cfo"]},
+           served_seat_for=lambda a, e: seats.get(e))
+    rc = _wire(monkeypatch, FakeClient({"template.yaml": TEMPLATE,
+                                        "canon/roles/cfo.yaml": ROLE.replace("id: sales-lead", "id: cfo")
+                                        .replace("title: Sales Lead", "title: CFO")}))
+    card = _card(rc)
+    assert (card["role"]["id"], card["role"]["title"], card["seat_source"]) == ("cfo", "CFO", "person")
+
+
+def test_no_seat_on_record_is_named_on_the_role_and_supported_work_still_reads(monkeypatch):
+    """ent#812: a canon agent nobody's seat is on owns nothing, says why, and
+    still shows what it supports."""
+    from services import assignment_provider as ap
+    ap.clear_provider()
+    rc = _wire(monkeypatch, _full_client())
+    card = _card(rc)
+    assert card["role"]["error"] == "no_seat" and card["role"]["id"] is None
+    assert card["seat_source"] == "none"
+    assert [o["id"] for o in card["objectives"]] == ["q4-icp-demand"]
+    assert card["objectives"][0]["owned"] is False
+
+
+def test_the_relationship_is_the_viewers_assignment_kind(monkeypatch):
+    """The live check: Priya, the agent's primary, read "no assignment recorded"
+    because the line was never wired. It is the provider's `kinds_for`."""
+    _seats(seat_for=lambda a: {"case": "serves", "role_id": "sales-lead", "seats": ["sales-lead"]},
+           kinds_for=lambda a, e: {"kind": "primary", "role_id": "sales-lead"} if e == EMAIL else None)
+    rc = _wire(monkeypatch, _full_client())
+    assert _card(rc)["relationship"] == "primary"
+    # A stopped agent still knows who you are to it — the record is not in the container.
+    rc = _wire(monkeypatch, _full_client(), state="exited")
+    assert _card(rc)["relationship"] == "primary"
+
+
+def test_no_assignment_is_none_never_a_guess(monkeypatch):
+    rc = _wire(monkeypatch, _full_client())
+    assert _card(rc)["relationship"] is None
 
 
 @pytest.mark.parametrize("files,expected", [
@@ -230,8 +319,10 @@ def test_a_traversal_shaped_canon_path_or_role_id_never_reaches_a_read(monkeypat
     shared = FakeClient({"template.yaml": TEMPLATE.replace("clone_path: canon", "clone_path: shared/canon"),
                          "shared/canon/roles/sales-lead.yaml": ROLE})
     assert _card(_wire(monkeypatch, shared))["role"]["path"] == "shared/canon/roles/sales-lead.yaml"
-    bad = TEMPLATE.replace("role: sales-lead", "role: ../../secrets")
-    rc2 = _wire(monkeypatch, FakeClient({"template.yaml": bad}))
+    # The seat id now comes from the record; a traversal-shaped one is refused
+    # by the same id rule before any read.
+    _seats(seat_for=lambda a: {"case": "serves", "role_id": "../../secrets", "seats": []})
+    rc2 = _wire(monkeypatch, FakeClient({"template.yaml": TEMPLATE}))
     assert _card(rc2)["role"]["error"] == "role_id_invalid"
 
 

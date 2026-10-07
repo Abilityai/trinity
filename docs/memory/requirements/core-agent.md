@@ -3378,7 +3378,7 @@ to localStorage in the clear.
 - **Flow**: `docs/memory/feature-flows/workspace-drafts.md`
 
 ### 5.36 Workspace — the role card in Agent details: role, objectives with metric freshness, readiness (trinity-enterprise#527)
-- **Status**: ✅ Implemented (2026-09-21) — the Role + Readiness half; the relationship line waits for ent#500. OSS-core (Workspace).
+- **Status**: ✅ Implemented (2026-09-21); the role and the relationship line read the assignment record since 2026-10-07 (ent#811/#814 follow-up, the #3271 / ent#818 live check). OSS-core (Workspace).
 - **Requirement ID**: WORKSPACE_ROLE_CARD
 - **GitHub Issue**: abilityai/trinity-enterprise#527 (+ #663, the 1.0 gate on who flips readiness; + #676, 2026-09-30, the objectives cut over to the ent#666 join)
 - **Description**: When a companion has a role (Tandem, ent#497), the Info rail's
@@ -3389,17 +3389,24 @@ to localStorage in the clear.
 - **Files are truth, read through the platform, never a second store.** Everything the
   card shows about the role comes from the agent's own container on each read
   (`client_portal/role_card.py`, via the agent client — the same door the Files tab
-  uses): `template.yaml → x-role: {role, status, seat?}` (written by the
-  `create-agent:role-companion` wizard, #511) and `x-canon.clone_path` (default
-  `canon`); the role file `<canon>/roles/<id>.yaml` and `<canon>/objectives/*.yaml`
+  uses): `template.yaml → x-canon.clone_path` (default `canon`) and `x-role.status`
+  (the template's readiness claim, #511); the role file `<canon>/roles/<id>.yaml`
+  where `<id>` is **the seat on record** — the seat this agent serves for the
+  viewer (`assignment_provider.resolve_served_seat`: held → the viewer's own →
+  the primary's), never `x-role.role`. `seat_source` (holds / person / primary /
+  none) is rendered as words, never a person. No seat → `role.error = no_seat`
+  with the supported objectives still listed. **Your relationship** is the
+  viewer's assignment kind (`kinds_for` on the provider; primary / approver /
+  collaborator / viewer), "no assignment recorded" only when there is none.
+  The role file `<canon>/roles/<id>.yaml` and `<canon>/objectives/*.yaml`
   (framework §3.4 grammar — `owner: role:<id>` or `supporting_agents` names this
   agent). The role file is the card's own read; the objectives and their numbers
   are **not** — they come from the one objective ↔ metric join
   (`objective_join_service.read_objective_join`, §50 of
   `lifecycle-observability.md`), called in process with the template and the agent
   client the card already holds (trinity-enterprise#676). Nothing is cached or
-  copied platform-side. Every read is fail-soft and **named**: no `x-role` → no
-  card at all (the panel is unchanged, AC 5); a role file that cannot be read or
+  copied platform-side. Every read is fail-soft and **named**: no seat, no canon
+  and no `x-role` → no card at all (the panel is unchanged, AC 5); a role file that cannot be read or
   parsed → the card says so (`role.error`), never an empty role; a stopped agent
   → "the agent is stopped; the card reads its files when it runs"; objectives
   that could not be read → one line saying so (`objectives_error`), never an

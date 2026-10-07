@@ -14,7 +14,9 @@
          an assignment is a relationship on top of an operator's access. -->
     <AgentAssignmentsSection :agent-name="agentName" />
 
-    <!-- Add operator -->
+    <!-- Add operator. `min-w-0` lets the input give way at phone width; without
+         it the input's intrinsic width plus the button pushed the page 47px
+         wider than a 390px screen. -->
     <form @submit.prevent="addOperator" class="flex items-center space-x-3">
       <input
         v-model="newEmail"
@@ -22,12 +24,12 @@
         required
         placeholder="operator@company.com"
         :disabled="adding"
-        class="flex-1 px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-500 text-sm focus:outline-none focus:ring-1 focus:ring-blue-500"
+        class="flex-1 min-w-0 px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-500 text-sm focus:outline-none focus:ring-1 focus:ring-blue-500"
       />
       <button
         type="submit"
         :disabled="adding || !newEmail.trim()"
-        class="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-lg text-white bg-blue-600 hover:bg-blue-700 disabled:opacity-50"
+        class="inline-flex shrink-0 whitespace-nowrap items-center px-4 py-2 border border-transparent text-sm font-medium rounded-lg text-white bg-blue-600 hover:bg-blue-700 disabled:opacity-50"
       >
         <svg v-if="adding" class="animate-spin -ml-1 mr-2 h-4 w-4 text-white" fill="none" viewBox="0 0 24 24">
           <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
