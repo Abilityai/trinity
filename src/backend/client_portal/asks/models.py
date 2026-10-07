@@ -29,12 +29,13 @@ class WorkspaceAsk(BaseModel):
     proposal: Optional[Dict[str, Any]] = None
     created_at: str
     expires_at: Optional[str] = None
-    # pending | answered | cancelled | expired. A listing carries pending asks,
+    # pending | answered | dismissed | cancelled | expired (`dismissed`:
+    # trinity-enterprise#748, the addressee chose not to answer). A listing carries pending asks,
     # plus — with `include_ended` — the ones that ended in the last 7 days
     # (trinity-enterprise#611); the ANSWER response projects the row it recorded.
     status: str
     # How the ask ended, COARSE on purpose (trinity-enterprise#611): `ended_by`
-    # is `you` | `operator` | `timeout`, never an email, and the operator's
+    # is `you` | `operator` | `platform` (#3246) | `timeout`, never an email, and the operator's
     # cancel reason never crosses. `ended_at` is when it ended — None when the
     # platform does not know (a row that ended before the ledger), never the
     # time the ask was filed.
@@ -45,12 +46,20 @@ class WorkspaceAsk(BaseModel):
     # as opposed to a background ask (schedule / loop / gate) whose `chat_id` is
     # Main only as the reply target and which renders in no chat.
     raised_in_turn: bool = False
+    # trinity-enterprise#747: the chat this ask's addressee opened to discuss it,
+    # when they did. Platform-written; Discuss on an ask that has one continues
+    # it instead of opening a second.
+    discussion_chat_id: Optional[str] = None
     # #2915: what the platform last established about the agent's own copy of
     # this ask, COARSE on purpose — `confirmed | changed | closed | unconfirmed`.
     # A client never sees the reason (it names the operator's infrastructure)
     # nor a poller timestamp. `aging` is the operator's configured bound.
     sync: str = "unconfirmed"
     aging: bool = False
+    # #3242: an approval decided only by its options (platform-minted — a skill
+    # gate). The surface hides the "Something else" chip, which the sink would
+    # refuse (`not_off_menu`). Says nothing else about the gate.
+    decided_by_options: bool = False
     # ent#430 AC #5: whether answering this ask sets work in motion, so a
     # surface can say "answered" without implying the agent started working.
     # Populated only on the ANSWER response — a pending ask has not been
@@ -133,3 +142,13 @@ class WorkspaceAskContext(BaseModel):
     origin: Optional[WorkspaceAskOrigin] = None
     run: Optional[WorkspaceAskRun] = None
     recent_answers: List[WorkspaceAskAnswered] = []
+
+
+class WorkspaceAskDiscussion(BaseModel):
+    """The chat an ask is discussed in (trinity-enterprise#747). `created` is
+    False when Discuss continued the chat an earlier click opened."""
+    chat_id: str
+    agent_name: str
+    title: Optional[str] = None
+    created: bool
+    ask: WorkspaceAsk

@@ -45,7 +45,13 @@ from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Set, 
 
 from database import db
 from services import operator_resume_service
-from services.operator_queue_choices import validate_response_choice
+from services.operator_queue_choices import (
+    SOMETHING_ELSE,
+    NotOffMenuError,
+    options_cap_violation,
+    title_cap_violation,
+    validate_response_choice,
+)
 from services.platform_audit_service import AuditEventType, platform_audit_service
 from utils.helpers import parse_iso_timestamp, to_utc_iso, utc_now_iso
 
@@ -54,6 +60,9 @@ logger = logging.getLogger(__name__)
 ANSWERED = "answered"
 CANCELLED = "cancelled"
 EXPIRED = "expired"
+# trinity-enterprise#748: the person the ask was addressed to chose not to
+# answer. A ledger value, not a status — the row's status is `cancelled`.
+DISMISSED = "dismissed"
 
 # WebSocket manager injected from main.py
 _websocket_manager = None
@@ -113,7 +122,7 @@ class EndingEvent:
     """What an ending observer receives: the rows THIS call ended, never a row
     another writer ended first."""
 
-    disposition: str                 # answered | cancelled | expired
+    disposition: str                 # answered | cancelled | dismissed | expired
     rows: tuple                      # the CAS-won rows, as they stand after the transition
     actor_email: Optional[str]       # the person; None for timeout
     reason: Optional[str] = None     # the operator's cancel reason — DATA, never instructions
@@ -180,7 +189,7 @@ def may_end(row: Mapping[str, Any], actor: "Actor", *, cancelling: bool = False)
 
 
 # ---------------------------------------------------------------------------
-# The four ways an ask ends
+# The ways an ask ends
 # ---------------------------------------------------------------------------
 
 def answer(
@@ -194,12 +203,17 @@ def answer(
 ) -> Ending:
     """A person answered `item` (the row the caller read and checked).
 
-    Raises `ResponseNotOfferedError` (#2376) before anything is written, then
+    Raises `ResponseNotOfferedError` (#2376), or a `ReservedAnswerError` for the
+    reserved `SOMETHING_ELSE` decision (#3242), before anything is written, then
     `AskNotFound` / `AskConflict` when the compare-and-set did not land. The
     options are frozen at ingest, so validating against the caller's read is
     sound; the status is not, which is what the compare-and-set is for.
     """
-    validate_response_choice(item, response)
+    # #3242: a platform-minted approval (a skill gate) counts only its own
+    # options and no agent reads the instruction — refused, named.
+    if response == SOMETHING_ELSE and decided_by_options(item):
+        raise NotOffMenuError()
+    validate_response_choice(item, response, response_text=response_text)
     if not may_end(item, actor):
         raise AskNotAddressee(item["id"])
     updated = db.respond_to_operator_queue_item(
@@ -221,6 +235,14 @@ def answer(
     return _ended(EndingEvent(ANSWERED, (updated,), actor.email), audit, trigger)
 
 
+def decided_by_options(item: Dict[str, Any]) -> bool:
+    """An approval the platform minted (a skill gate, #751): decided only by one
+    of its options, so the reserved `SOMETHING_ELSE` never applies (#3242). The
+    Workspace projection exposes exactly this boolean, nothing else about it."""
+    from services.operator_queue_service import is_platform_minted
+    return (item or {}).get("type") == "approval" and is_platform_minted(item)
+
+
 def cancel(item_id: str, *, actor: Actor, reason: Optional[str] = None) -> Ending:
     """A person cancelled one ask. Raises `AskNotFound` / `AskConflict` /
     `AskNotAddressee` (a gate approval the actor may not end, #751)."""
@@ -236,6 +258,27 @@ def cancel(item_id: str, *, actor: Actor, reason: Optional[str] = None) -> Endin
     trigger = _broadcast_payload({"type": "operator_queue_cancelled",
                                   "data": {"id": updated["id"], "agent_name": updated["agent_name"]}})
     return _ended(EndingEvent(CANCELLED, (updated,), actor.email, reason=reason), audit, trigger)
+
+
+def dismiss(item_id: str, *, actor: Actor) -> Ending:
+    """The person an ask was addressed to dismissed it without answering
+    (trinity-enterprise#748). Raises `AskNotFound` / `AskConflict`.
+
+    The same compare-and-set as `cancel`, recorded as `dismissed`, so the
+    agent's readback tells "the person chose not to answer" apart from an
+    operator's cancel, an answer and an expiry. No reason: dismissing is one
+    click and asks for none.
+    """
+    updated = db.cancel_operator_queue_item(item_id, disposed_by_email=actor.email,
+                                            disposition=DISMISSED)
+    if not updated:
+        raise AskNotFound(item_id)
+    if updated.pop("_status_conflict", False):
+        raise AskConflict("not_pending", updated)
+    audit = [_audit_row("dismissed", updated, actor, {})]
+    trigger = _broadcast_payload({"type": "operator_queue_cancelled",
+                                  "data": {"id": updated["id"], "agent_name": updated["agent_name"]}})
+    return _ended(EndingEvent(DISMISSED, (updated,), actor.email), audit, trigger)
 
 
 def bulk_cancel(
@@ -302,6 +345,58 @@ def expire() -> Ending:
         "details": {"agent_name": r["agent_name"]},
     } for r in rows]
     return _ended(EndingEvent(EXPIRED, tuple(rows), None), audit, None)
+
+
+# #3246: the platform ends its own alerts for exactly these reasons — DATA on
+# the ledger (`disposition_reason`), rendered by name on the card. A person's
+# cancel reason is free text; the platform's is a closed vocabulary.
+CONDITION_CLEARED = "condition_cleared"
+SUPERSEDED = "superseded"
+PLATFORM_ENDING_REASONS = (CONDITION_CLEARED, SUPERSEDED)
+
+
+def clear_platform(ids: Iterable[str], *, reason: str, batch_id: Optional[str] = None) -> Ending:
+    """The PLATFORM ended its own alerts: the condition cleared, or a newer
+    reading superseded them (#3246). Mirrors `expire`: no Actor, the ending is
+    `cancelled` / `disposed_by = 'platform'` / NULL email, and only the rows
+    this call won the compare-and-set for are returned and handed to the
+    observers — a row a person ended first is skipped, never re-ended. One
+    audit row (`platform_cleared`) and one thin `operator_queue_cancelled`
+    trigger per agent; listeners refetch through the access-controlled list.
+    """
+    if reason not in PLATFORM_ENDING_REASONS:
+        raise ValueError(f"platform ending reason must be one of {PLATFORM_ENDING_REASONS}, got {reason!r}")
+    ids = list(dict.fromkeys(ids))
+    out = db.end_operator_queue_items_by_platform(ids, reason=reason, batch_id=batch_id)
+    rows, batch_id = out["rows"], out["batch_id"]
+    if not rows:
+        return Ending(rows=[], batch_id=None)
+    audit = [{
+        "event_action": "platform_cleared",
+        "source": "system",
+        "target_type": "operator_queue",
+        "details": {
+            "batch_id": batch_id,
+            "reason": reason,
+            "cancelled": len(rows),
+            "skipped": len(ids) - len(rows),
+            "ids": [r["id"] for r in rows],
+            "agent_names": sorted({r["agent_name"] for r in rows}),
+        },
+    }]
+    agents = list(dict.fromkeys(r["agent_name"] for r in rows))
+    triggers = [_broadcast_payload({"type": "operator_queue_cancelled",
+                                    "data": {"agent_name": agent, "batch_id": batch_id}})
+                for agent in agents]
+    for extra in triggers[1:]:
+        try:
+            operator_resume_service.spawn_on_loop(lambda extra=extra: _announce([], extra))
+        except Exception:  # noqa: BLE001 — the ending is committed; it must stand
+            logger.warning("[AskService] could not schedule a platform-clear trigger", exc_info=True)
+    return _ended(
+        EndingEvent(CANCELLED, tuple(rows), None, reason=reason, batch_id=batch_id),
+        audit, triggers[0], batch_id=batch_id,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -378,6 +473,11 @@ def raise_ask(
        `status: "replayed"`, plus `differs` (what this call changed). Before
        every time- or state-dependent check, so a retry minutes later gets its
        receipt back rather than a refusal it did not earn the first time;
+    2b. the authoring caps (#3243) — option count and length (gate raises
+       too), a lookalike of the reserved `SOMETHING_ELSE`, and an agent's
+       title length. After the replay, deliberately: an ask raised before the
+       caps existed still gets its receipt back on retry. Before the rate cap,
+       like every other 422, so a refusal spends no token;
     3. the #1632 rate caps — the SAME buckets as the file poller, so the two
        channels share one budget. Before every check that reads the database,
        so a refusal below spends a token and cannot be repeated for free (the
@@ -414,6 +514,7 @@ def raise_ask(
     existing = db.get_operator_queue_item_for_agent_by_request_id(agent_name, norm["request_id"])
     if existing:
         return _replay(existing, norm, oqs, raised_by)
+    _refuse_over_caps(norm, oqs, raised_by)
 
     if raised_by == "agent" and not _rate_allowed(agent_name, oqs):
         raise AskRejected(429, "rate_limited",
@@ -522,6 +623,38 @@ def _platform_turn(agent_name: str, execution_id: Optional[str]) -> Optional[str
         return None
 
 
+_CAP_MESSAGES = {
+    "too_many_options": (
+        "Too many options. Split independent decisions into separate asks, or drop "
+        "variants — the person can always answer (something else); for an open choice "
+        "among many, ask a question instead. Do not retry unchanged."),
+    "option_too_long": (
+        "An option is too long. Name the choice only; put the reasoning in question and "
+        "what the option does in proposal. Do not retry unchanged."),
+    "invalid_options": (
+        f"An option reads as {SOMETHING_ELSE!r}, which the platform offers on every "
+        "approval; do not list it or a lookalike as an option."),
+    "title_too_long": (
+        "The title is too long. Shorten it to one line a person reads at a glance and "
+        "move the detail into question. Do not retry unchanged."),
+}
+
+
+def _refuse_over_caps(norm: Dict[str, Any], oqs, raised_by: str) -> None:
+    """Step 2b of `raise_ask`: the #3243 authoring caps, one shared predicate
+    with the queue-file ingest. The title limit applies to an agent's raise
+    only — a gate's title is platform-authored."""
+    hit = options_cap_violation(norm.get("options"),
+                                max_options=oqs.OPERATOR_QUEUE_MAX_OPTIONS,
+                                max_chars=oqs.OPERATOR_QUEUE_OPTION_MAX_CHARS)
+    if hit is None and raised_by == "agent":
+        hit = title_cap_violation(norm.get("title"),
+                                  max_chars=oqs.OPERATOR_QUEUE_ASK_TITLE_MAX_CHARS)
+    if hit is not None:
+        code, extras = hit
+        raise AskRejected(422, code, _CAP_MESSAGES[code], **extras)
+
+
 def _too_large(field: str, limit: int, unit: str) -> AskRejected:
     return AskRejected(422, "field_too_large", f"{field} is over {limit} {unit}.",
                        field=field, limit=limit, unit=unit)
@@ -564,6 +697,13 @@ def _validated_ask(ask: Any, oqs, *, raised_by: str = "agent") -> Dict[str, Any]
     if not isinstance(title, str) or not title.strip():
         raise AskRejected(422, "invalid_title", "An ask needs a title.")
     if len(title) > oqs.OPERATOR_QUEUE_TITLE_MAX:
+        if raised_by == "agent":
+            # #3243: name the agent's limit on the FIRST refusal, so a title
+            # over the outer 300 belt is not refused twice by two codes.
+            raise AskRejected(
+                422, "title_too_long", _CAP_MESSAGES["title_too_long"],
+                limit=min(oqs.OPERATOR_QUEUE_TITLE_MAX, oqs.OPERATOR_QUEUE_ASK_TITLE_MAX_CHARS),
+                length=len(title))
         raise _too_large("title", oqs.OPERATOR_QUEUE_TITLE_MAX, "characters")
     question = ask.get("question")
     if question is not None and not isinstance(question, str):
@@ -575,6 +715,11 @@ def _validated_ask(ask: Any, oqs, *, raised_by: str = "agent") -> Dict[str, Any]
         if (not isinstance(options, list)
                 or any(not isinstance(o, str) or not o.strip() for o in options)):
             raise AskRejected(422, "invalid_options", "options must be a list of non-empty strings.")
+        if SOMETHING_ELSE in options:
+            # #3242: the platform's reserved decision, offered on every approval.
+            raise AskRejected(422, "invalid_options",
+                              f"{SOMETHING_ELSE!r} is reserved by the platform and offered on "
+                              "every approval; do not list it as an option.")
         if oqs._json_bytes(options) > oqs.OPERATOR_QUEUE_OPTIONS_MAX_BYTES:
             raise _too_large("options", oqs.OPERATOR_QUEUE_OPTIONS_MAX_BYTES, "bytes")
     if kind == "approval" and not options:

@@ -26,7 +26,7 @@ Enables agents to send proactive messages to specific users by verified email ac
 - **Redis-based rate limiting**: 10 messages per recipient per hour (survives restarts)
 - **Mandatory audit logging**: All proactive sends logged via platform_audit_service
 - **Multi-channel delivery**: Auto-selection tries telegram → slack → web. WhatsApp is an explicit-only channel (`channel="whatsapp"`) and not part of `auto` — Twilio's 24-hour session window makes it unreliable for inactive recipients.
-- **MCP tool access**: Agents use `send_message` MCP tool for outreach
+- **MCP tool access**: Agents use `send_message` MCP tool for outreach. Its description repeats the delegation contract's rule sentence (ent#568): a send that errored without a named refusal may still have reached the person, so it is never re-sent under a new `dedup_label` or from a later turn (the per-turn effect dedupe, #1084, covers only a same-turn repeat)
 - **History-aware (#1600)**: a delivered message is appended to the recipient's channel session, so the agent's next turn knows what it sent
 
 ## Architecture
@@ -177,6 +177,15 @@ actor_id=agent_name
 target_type="user"
 target_id=recipient_email
 ```
+
+### 4b. Cross-execution idempotency key (trinity-enterprise#665)
+
+Optional `idempotency_key` + `idempotency_ttl` on the request. After the consent check
+and before the rate limit, `idempotency_service.intent_guard` claims
+`(agent, recipient, key)`. An earlier run's send inside the TTL → nothing is delivered;
+the response carries `sent:false, suppressed_by, first_sent_at, first_execution_id`, an
+audit `suppressed` event is written, and a `Trinity`-labelled `system` row is added to the
+first send's session. Full contract: [effect-idempotency.md](effect-idempotency.md#cross-execution-intent-keys-trinity-enterprise665).
 
 ### 5. Session-History Persistence (#1600)
 

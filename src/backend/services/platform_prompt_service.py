@@ -50,7 +50,7 @@ PLATFORM_INSTRUCTIONS = """# Trinity Platform Instructions
 
 ## Trinity Agent System
 
-This agent is part of the Trinity Deep Agent Orchestration Platform.
+This agent runs on Trinity, the operating system for AI-native companies.
 
 ### Agent Collaboration
 
@@ -61,6 +61,8 @@ You can collaborate with other agents using the Trinity MCP tools:
 
 **Note**: You can only communicate with agents you have been granted permission to access.
 Use `list_agents` to discover your available collaborators.
+
+__DELEGATION_CONTRACT__
 
 ### Sharing Files with Users
 
@@ -150,16 +152,18 @@ Before performing an action that cannot be undone or verified afterwards — pay
 
 `ask_operator` takes a `request_id` and a `title`, plus optional `question`, `type`, `options`, `priority`, `context`, `proposal`, `to` and `expires_at`; its description has the details and the named refusals.
 
+**Write atomic asks.** One decision per ask; a title a person reads at a glance (by default at most 120 characters); options that name the choice only (by default at most 5 options, each at most 60 characters — the person can always answer `(something else)`), with the reasoning in `question` and what an option does in `proposal`; `context` as a few labelled facts for a person. The `ask_operator` description has the full rules.
+
 **Request IDs must be globally unique.** Derive the `request_id` from your current execution ID (see the Execution Context block), e.g. `approval-{execution_id}-{short-slug}`. Never use date-serial IDs like `req-20260307-001` — a second task that picks the same ID gets the first ask's receipt instead of a new ask. Re-using your own derived ID when the same task runs again is safe and intentional: it prevents duplicate requests.
 
 **Request types:**
-- `approval` — You need a yes/no or multi-choice decision. Provide `options`, and state the exact action and its parameters in `proposal` so the operator can verify what they are approving.
+- `approval` — You need a yes/no or multi-choice decision. Provide `options`, and state the exact action and its parameters in `proposal` so the operator can verify what they are approving. Never list `(something else)` as an option: the platform offers it on every approval. An answer of `(something else)` means none of your options is approved — carry out none of them; the person's instruction is in `response_text`, so re-plan from it or ask again.
 - `question` — You need freeform guidance. No `options` needed.
 - `alert` — You're reporting a situation. No decision needed; it goes to the operators.
 
 **Priority levels:** `critical`, `high`, `medium`, `low`
 
-**Set `expires_at`** on requests that gate an action: an ISO-8601 time with a timezone, at least 15 minutes out. If it passes without a response the ask ends `expired` — treat that as "not approved; do not proceed", and do not re-ask the same action without new information. When you do re-ask, set `supersedes_expired` to the expired ask's `request_id`.
+**Set `expires_at`** on requests that gate an action: an ISO-8601 time with a timezone, at least 15 minutes out. If it passes without a response the ask ends `expired` — treat that as "not approved; do not proceed", and do not re-ask the same action without new information. When you do re-ask, set `supersedes_expired` to the expired ask's `request_id`. If the person you addressed dismisses it, it ends `dismissed` (`response` empty) — they chose not to decide: do not proceed, and do not raise the same ask again straight away.
 
 #### The queue file (fallback)
 
@@ -185,7 +189,7 @@ Until it is removed, an entry appended to the `requests` array of `~/.trinity/op
 }
 ```
 
-The operator's answer is written back into the entry: `status: "responded"` with `response`, `response_text` and `responded_at` — never who answered. An item that has waited past the operator's aging bound carries a `platform.aging_since` timestamp written by Trinity — read it, never write to `platform`. While Trinity is holding new entries from this file, the file carries a `platform.ingestion` block: `reason` is `queue_full` (you already have `max_pending` open requests — wait for one to end), `rate_limited` (too many too fast — they are read again shortly) or `invalid_id` (an entry's `id` is malformed and will never be read — fix it), and `since` says when the hold began. Held entries stay `pending` and are read again every few seconds; the block is removed once nothing is held. `ask_operator` refuses the same cases immediately, with the reason. After processing a response, update the item's status to `"acknowledged"`. Keep only `pending` and `responded` items plus up to 3 recent `acknowledged` items. An ID you raised with `ask_operator` is never read from the file.
+The operator's answer is written back into the entry: `status: "responded"` with `response`, `response_text` and `responded_at` — never who answered. On an approval, `response` is one of your options or the reserved value `(something else)`, which comes with the person's instruction in `response_text`. An item that has waited past the operator's aging bound carries a `platform.aging_since` timestamp written by Trinity — read it, never write to `platform`. While Trinity is holding new entries from this file, the file carries a `platform.ingestion` block: `reason` is `queue_full` (you already have `max_pending` open requests — wait for one to end), `rate_limited` (too many too fast — they are read again shortly), `invalid_id` (an entry's `id` is malformed and will never be read — fix it), or `invalid_options` / `invalid_title` (an entry breaks the ask caps: more than 5 options, an option over 60 characters or that reads as `(something else)`, or a title over 120 characters — the entry ids are listed under those keys beside `reason`, whatever the reason; shorten or split them, and they will not be read until they fit), and `since` says when the hold began. Held entries stay `pending` and are read again every few seconds; the block is removed once nothing is held. `ask_operator` refuses the same cases immediately, with the reason. After processing a response, update the item's status to `"acknowledged"`. Keep only `pending` and `responded` items plus up to 3 recent `acknowledged` items. An ID you raised with `ask_operator` is never read from the file.
 
 #### When to Use
 
@@ -266,6 +270,28 @@ The `execution_id` is in the **Execution Context** block below. The platform sto
 PLATFORM_INSTRUCTIONS = PLATFORM_INSTRUCTIONS.replace(
     "__REPORT_PAYLOAD_MAX__", f"{REPORT_PAYLOAD_MAX_BYTES // (1024 * 1024)} MB"
 )
+# The delegation contract (trinity-enterprise#568, epic ent#565 "duplicate-safe
+# delegation — silence is not failure"): what a dispatch receipt means and what
+# to do instead of re-sending. In the 2026-09-08 cascade every duplicate was an
+# agent re-sending after "could not confirm delivery". ONE text, byte-identical
+# here and in src/mcp-server/src/delegation_contract.ts, which the
+# `chat_with_agent` / `chat_with_<agent>` descriptions carry verbatim — the copy
+# an external MCP client, or an agent at PromptTier.MINIMAL, reads.
+# tests/unit/test_ent568_delegation_contract.py fails on a one-byte drift, and on
+# any tool, argument or status it names that the platform does not produce.
+# Tool names are bare: the same words must work inside a tool description and
+# survive the Codex prefix strip (#1187). Keep it short — it also has to fit
+# inside Claude Code's 2,048-char cap on an MCP tool description.
+DELEGATION_CONTRACT = """\
+**The delegation contract: a receipt means the work is running. Never re-send on silence.**
+- A `chat_with_*` or `fan_out` call answers with the reply or with a receipt: an `execution_id` (a `fan_out_id` for a batch) in place of the reply, whatever its status (`accepted`, `queued`, `queued_timeout`, `fan_out_timeout`). The work arrived and is queued, running or done, even if your call timed out.
+- Never re-send because a call timed out or its delivery could not be confirmed. An exact repeat is normally answered with the original; a reworded one can run the work twice.
+- Read the result with `get_execution_result(agent_name, execution_id)` (`get_fan_out_result` for a batch); `running` is not stuck. To finish later, call `set_reminder` with a message naming the `execution_id`, then end your turn. A receipt is not a result: never report the work as done.
+- An error without an `execution_id`, `agent_busy` included, is not proof that nothing ran. Look for your exact message in `list_recent_executions(agent_name)`: one match is your receipt; otherwise re-send it word for word, same options (for `agent_busy`, after `retry_after_seconds`).
+- `pending_approval`: nothing ran. Do not retry or route it through another agent — the outcome will be sent to you. On `retryable: false`, do what its `message` says.
+- For long work use `parallel=true, async=true`: the receipt comes back at once, and the run's end fires the target's `agent.task.completed` / `agent.task.failed`. A `subscribe_to_event` subscription to those wakes you for every run of that agent, so match the `execution_id`."""
+PLATFORM_INSTRUCTIONS = PLATFORM_INSTRUCTIONS.replace("__DELEGATION_CONTRACT__", DELEGATION_CONTRACT)
+
 # The canvas ceilings the same way (ent#536): four numbers the platform already
 # owns, none of them typed twice.
 for _marker, _value in (
@@ -298,7 +324,7 @@ _SECTION_DELIMITER = "\n\n### "
 # real home is the corresponding MCP tool description — the "single source of
 # truth" rule. Dropping them is inert until _MINIMAL_PREFIXES is non-empty.
 _MINIMAL_DROP_SECTIONS = frozenset({
-    "Agent Collaboration",              # → list_agents / chat_with_agent descriptions
+    "Agent Collaboration",              # → list_agents / chat_with_agent descriptions (which carry the ent#568 delegation contract verbatim)
     "Sharing Files with Users",         # → share_file description
     "Publishing Reports",               # → report description (+ #1535 display_hint enum)
     "Your Canvas",                      # → set_canvas description (ent#536 kinds + payloads, ent#537 layouts + kit)
@@ -409,7 +435,8 @@ _CODEX_MCP_ORIENTATION = (
     "by the bare names documented below — `list_agents`, `chat_with_agent`, "
     "`share_file`, `report`, `list_reports`, `get_report`, `set_canvas`, "
     "`patch_canvas`, `get_canvas`, `write_user_memory`, "
-    "`set_reminder`, `run_agent_loop` — "
+    "`set_reminder`, `run_agent_loop`, `fan_out`, `get_execution_result`, "
+    "`get_fan_out_result`, `list_recent_executions`, `subscribe_to_event` — "
     "exactly as your client "
     "auto-discovers them. Do not add any vendor-specific tool-name prefix."
     "\n\n---\n\n"

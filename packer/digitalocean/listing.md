@@ -7,7 +7,7 @@ are versioned together rather than the copy living only in the portal.
 
 ---
 
-## Trinity — sovereign infrastructure for autonomous AI agents
+## Trinity — the operating system for the AI-native company
 
 Trinity deploys, orchestrates and governs fleets of autonomous AI agents on
 hardware you own. Every agent runs in its own Docker container with a

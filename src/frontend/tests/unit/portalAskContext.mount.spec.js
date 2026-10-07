@@ -127,6 +127,16 @@ describe('PortalAskContext (mounted)', () => {
     expect(w.emitted('open-chat')[1]).toEqual(['/workspace/c/s-run?anchor=d:r1'])
   })
 
+  it('your recent answers render the agent\'s markdown, never the raw asterisks (#3115)', async () => {
+    const w = await mountCtx({ origin: MAIN, run: null, recent_answers: [
+      { id: 'old2', title: 'Approve the **Q4 press release**', answer: '**Send** now', ended_at: ago(24 * H) },
+    ] })
+    const answers = el(w, 'inbox-ask-context-answers')
+    expect(answers.text()).not.toContain('**')
+    expect(el(w, 'inbox-ask-context-answer-title').find('strong').text()).toBe('Q4 press release')
+    expect(el(w, 'inbox-ask-context-answer-text').find('strong').text()).toBe('Send')
+  })
+
   it('an unverified origin says where it was filed, with no excerpt and no deliverables read', async () => {
     const w = await mountCtx({ origin: MAIN, run: null, recent_answers: [] })
     expect(el(w, 'inbox-ask-context-origin').text()).toContain('Filed in your Main chat')

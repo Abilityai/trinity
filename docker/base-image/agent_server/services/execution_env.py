@@ -70,6 +70,9 @@ INITIAL_ENV: Dict[str, str] = dict(os.environ)
 PROTECTED_KEYS = frozenset({
     "PATH", "HOME", "LD_PRELOAD", "LD_LIBRARY_PATH", "LD_AUDIT",
     "PYTHONHOME", "PYTHONPATH", "PYTHONSTARTUP", "BASH_ENV", "ENV", "IFS",
+    # ent#787: Claude Code prepends this to every shell-form hook, the Bash
+    # tool and stdio MCP servers, so a `.env` line would decide what runs them.
+    "CLAUDE_CODE_SHELL_PREFIX",
     # Node equivalents (#2010 review): every runtime here is a Node process, and
     # `NODE_OPTIONS=--require /tmp/x.js` is LD_PRELOAD for Node. NODE_REPL_*
     # and the loader flags are the same mechanism under other names.

@@ -35,10 +35,17 @@
   >
     <div v-if="mode === 'sheet'" class="absolute inset-0 bg-black/30" @click="$emit('close')"></div>
 
+    <!-- ent#621: the shell's modal probe is a DOM query for
+         `[aria-modal="true"]`, and the rail's own sheet is one. The rail keys
+         must be able to act INSIDE it (⌘. closes it, ⌥. cycles its tabs) while
+         every other key still stops at it — so `data-ws-rail-sheet` goes on the
+         SAME element that carries `aria-modal`, which is the node the probe
+         matches: a marker on the wrapper would never exclude anything. -->
     <aside
       :class="ASIDE[mode]"
       :role="mode === 'sheet' ? 'dialog' : undefined"
       :aria-modal="mode === 'sheet' ? 'true' : undefined"
+      :data-ws-rail-sheet="mode === 'sheet' ? 'true' : undefined"
       aria-label="Conversation rail"
     >
       <!-- ============================ COLLAPSED ============================ -->
@@ -47,8 +54,9 @@
           <button
             type="button"
             :class="[ICON_BTN, 'text-gray-400']"
-            title="Open"
+            :title="`Open (${RAIL_KEY_HINT})`"
             aria-label="Open the conversation rail"
+            :aria-keyshortcuts="RAIL_KEY_SHORTCUTS"
             aria-expanded="false"
             data-testid="portal-rail-expand"
             @click="setOpen(true)"
@@ -66,8 +74,9 @@
             :key="s.id"
             type="button"
             :class="[ICON_BTN, 'relative', s.shape ? 'text-gray-600 dark:text-gray-300' : 'text-gray-400']"
-            :title="s.title"
+            :title="`${s.title} · ${TAB_KEY_HINT} next tab`"
             :aria-label="`Open ${s.title}`"
+            :aria-keyshortcuts="TAB_KEY_SHORTCUTS"
             :data-testid="`portal-rail-tab-${s.id}`"
             @click="openOn(s.id)"
           >
@@ -97,8 +106,9 @@
             <button
               type="button"
               :class="[ICON_BTN, 'text-gray-400']"
-              :title="mode === 'sheet' ? 'Close' : 'Collapse'"
+              :title="`${mode === 'sheet' ? 'Close' : 'Collapse'} (${RAIL_KEY_HINT})`"
               :aria-label="mode === 'sheet' ? 'Close the conversation rail' : 'Collapse the conversation rail'"
+              :aria-keyshortcuts="RAIL_KEY_SHORTCUTS"
               :aria-expanded="mode === 'sheet' ? undefined : 'true'"
               data-testid="portal-rail-collapse"
               @click="mode === 'sheet' ? $emit('close') : setOpen(false)"
@@ -190,6 +200,14 @@ import {
   signalShape,
   railTitle,
 } from './portalRail'
+// ent#621: the rail's two keys, derived from the map rather than typed here.
+import { keyHint, keyShortcutsFor, hostPlatform } from './portalKeymap'
+
+const KEY_PLATFORM = hostPlatform()
+const RAIL_KEY_HINT = keyHint('rail-toggle', KEY_PLATFORM)
+const RAIL_KEY_SHORTCUTS = keyShortcutsFor('rail-toggle', KEY_PLATFORM)
+const TAB_KEY_HINT = keyHint('rail-tab-next', KEY_PLATFORM)
+const TAB_KEY_SHORTCUTS = keyShortcutsFor('rail-tab-next', KEY_PLATFORM)
 
 const props = defineProps({
   // The tabs THIS session may see — already filtered by `visibleTabs`. The
@@ -223,7 +241,16 @@ const stripTabs = computed(() =>
     const signal = signalShape(sig)
     // The dot's meaning on hover ("Info · 2 suggestions"), so it is never an
     // unexplained circle (ent#610 sign-off).
-    return { id: t.id, label: t.label, signal, signalTitle: signal ? railTitle(t, sig) : undefined }
+    // The key hint rides the tooltip the dot already uses, so an open rail's
+    // tabs say what the collapsed strip's buttons say — one hint, two forms.
+    const title = signal ? railTitle(t, sig) : t.label
+    return {
+      id: t.id,
+      label: t.label,
+      signal,
+      signalTitle: `${title} · ${TAB_KEY_HINT} next tab`,
+      ariaKeyshortcuts: TAB_KEY_SHORTCUTS,
+    }
   })
 )
 const activeSignal = computed(() => signalFor(props.signals, active.value))

@@ -8,7 +8,7 @@
  * documented uPlot-bars failure mode). One column per day; segments sized
  * by count / max-day-total; hover shows the per-bucket breakdown.
  */
-import { ref, computed } from 'vue'
+import { ref, computed, nextTick, onBeforeUnmount } from 'vue'
 
 const props = defineProps({
   // timeline points: [{ date, total, by_type: { bucket: count } }]
@@ -55,6 +55,70 @@ const props = defineProps({
 })
 
 const hover = ref(null)
+
+// #3264: the tooltip renders in <body> at fixed coordinates taken from the
+// hovered bar. As an `absolute bottom-full` child of the bar it always opened
+// upward, so on the Workspace band — a 23px chart just under the header, inside
+// ScanlineReveal's clip-path — its top rows were covered and the date and top
+// buckets unreadable. Out of every parent, nothing can clip or cover it.
+const TIP_GAP = 4 // px between bar and tooltip (the old `mb-1`)
+const VIEWPORT_MARGIN = 8 // px the tooltip keeps from every viewport edge
+const barEls = []
+const tipEl = ref(null)
+const tipPos = ref(null) // { top, left, side } once measured; hidden until then
+
+const hoverDay = computed(() => (hover.value == null ? null : props.data[hover.value]))
+
+// Above when it fits, else below when that fits, else whichever side has more
+// room (clamped). Horizontally centred on the bar, clamped into the viewport.
+function placeTooltip(bar, tip, vw, vh) {
+  const roomAbove = bar.top - TIP_GAP - VIEWPORT_MARGIN
+  const roomBelow = vh - bar.bottom - TIP_GAP - VIEWPORT_MARGIN
+  const side = tip.height <= roomAbove || (tip.height > roomBelow && roomAbove >= roomBelow)
+    ? 'above'
+    : 'below'
+  const rawTop = side === 'above' ? bar.top - TIP_GAP - tip.height : bar.bottom + TIP_GAP
+  const top = Math.max(VIEWPORT_MARGIN, Math.min(rawTop, vh - VIEWPORT_MARGIN - tip.height))
+  const rawLeft = bar.left + bar.width / 2 - tip.width / 2
+  const left = Math.max(VIEWPORT_MARGIN, Math.min(rawLeft, vw - VIEWPORT_MARGIN - tip.width))
+  return { top, left, side }
+}
+
+function positionTooltip() {
+  const bar = hover.value == null ? null : barEls[hover.value]
+  if (!bar || !tipEl.value) return
+  const t = tipEl.value.getBoundingClientRect()
+  tipPos.value = placeTooltip(
+    bar.getBoundingClientRect(),
+    { width: t.width, height: t.height },
+    window.innerWidth,
+    window.innerHeight,
+  )
+}
+
+// While a tooltip is up, follow the bar through any scroll (capture: an inner
+// scroller moves it too) and through a resize.
+function listen(on) {
+  const fn = on ? window.addEventListener : window.removeEventListener
+  fn('scroll', positionTooltip, true)
+  fn('resize', positionTooltip)
+}
+
+async function onEnter(i) {
+  hover.value = i
+  tipPos.value = null
+  listen(true)
+  await nextTick() // the tooltip must exist before it can be measured
+  if (hover.value === i) positionTooltip()
+}
+
+function onLeave() {
+  hover.value = null
+  tipPos.value = null
+  listen(false)
+}
+
+onBeforeUnmount(() => listen(false))
 
 const maxTotal = computed(() =>
   Math.max(1, ...props.data.map((d) => d.total || 0))
@@ -131,9 +195,11 @@ function showLabel(i) {
       <div
         v-for="(d, i) in data"
         :key="i"
+        :ref="(el) => (barEls[i] = el)"
+        data-chart-bar
         class="relative flex-1 flex flex-col-reverse justify-start items-center min-w-0"
-        @mouseenter="hover = i"
-        @mouseleave="hover = null"
+        @mouseenter="onEnter(i)"
+        @mouseleave="onLeave"
       >
         <!-- baseline tick for empty days so the axis reads as continuous -->
         <div
@@ -141,8 +207,8 @@ function showLabel(i) {
           class="w-full max-w-[56px] rounded-sm bg-gray-200 dark:bg-gray-700"
           style="height: 2px"
         ></div>
-        <!-- cap rounding by index, not :last-child — the hover tooltip is a
-             later sibling, so last: would drop the cap's rounding mid-hover -->
+        <!-- cap rounding by index: the topmost segment is the last bucket in
+             stack order -->
         <div
           v-for="(b, bi) in bucketsForDay(d)"
           :key="b"
@@ -155,24 +221,34 @@ function showLabel(i) {
           }"
         ></div>
 
-        <!-- hover tooltip -->
-        <div
-          v-if="hover === i && d.total"
-          class="absolute bottom-full left-1/2 -translate-x-1/2 mb-1 z-20 w-max max-w-[200px] px-2.5 py-1.5 rounded-md shadow-lg text-[11px] bg-gray-900 text-gray-100 dark:bg-gray-700 pointer-events-none"
-        >
-          <div class="font-semibold mb-1 whitespace-nowrap">{{ fmtDate(d.date) }}</div>
-          <div v-for="b in bucketsForDay(d)" :key="b" class="flex items-center justify-between gap-3 whitespace-nowrap">
-            <span class="flex items-center">
-              <span class="inline-block w-2 h-2 rounded-sm mr-1.5" :style="{ backgroundColor: colorFor(b) }"></span>{{ labelFor(b) }}
-            </span>
-            <span class="font-mono">{{ d.by_type[b] }}</span>
-          </div>
-          <div class="flex items-center justify-between gap-3 mt-1 pt-1 border-t border-gray-700 dark:border-gray-600">
-            <span>Total</span><span class="font-mono">{{ d.total }}</span>
-          </div>
-        </div>
       </div>
     </div>
+
+    <!-- hover tooltip (#3264): in <body>, fixed, placed by positionTooltip().
+         Hidden until measured so it never flashes at 0,0. -->
+    <Teleport to="body">
+      <div
+        v-if="hoverDay && hoverDay.total"
+        ref="tipEl"
+        data-chart-tooltip
+        :data-side="tipPos?.side"
+        class="fixed z-50 w-max max-w-[200px] px-2.5 py-1.5 rounded-md shadow-lg text-[11px] bg-gray-900 text-gray-100 dark:bg-gray-700 pointer-events-none"
+        :style="tipPos
+          ? { top: tipPos.top + 'px', left: tipPos.left + 'px' }
+          : { top: '0px', left: '0px', visibility: 'hidden' }"
+      >
+        <div class="font-semibold mb-1 whitespace-nowrap">{{ fmtDate(hoverDay.date) }}</div>
+        <div v-for="b in bucketsForDay(hoverDay)" :key="b" class="flex items-center justify-between gap-3 whitespace-nowrap">
+          <span class="flex items-center">
+            <span class="inline-block w-2 h-2 rounded-sm mr-1.5" :style="{ backgroundColor: colorFor(b) }"></span>{{ labelFor(b) }}
+          </span>
+          <span class="font-mono">{{ hoverDay.by_type[b] }}</span>
+        </div>
+        <div class="flex items-center justify-between gap-3 mt-1 pt-1 border-t border-gray-700 dark:border-gray-600">
+          <span>Total</span><span class="font-mono">{{ hoverDay.total }}</span>
+        </div>
+      </div>
+    </Teleport>
 
     <!-- x labels (sparse) -->
     <div v-if="axis" class="flex gap-px mt-1">

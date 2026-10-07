@@ -4915,6 +4915,21 @@ def resolve_duplicate_emails(rows):
         members.sort()
         losers += [(uid, uname) for _, uid, uname in members[1:]]
     return losers
+def _migrate_chat_session_claude_id(cursor, conn):
+    """#3127 — per-user `/chat` memory on pull pilots.
+
+    `chat_sessions.cached_claude_session_id` holds the Claude session id the
+    session's next pulled `/chat` turn resumes. Nullable, no backfill: a session
+    without one starts a fresh conversation.
+    PostgreSQL half: Alembic `0091_chat_session_claude_id`.
+    """
+    _safe_add_column(
+        cursor,
+        "chat_sessions",
+        "cached_claude_session_id",
+        "ALTER TABLE chat_sessions ADD COLUMN cached_claude_session_id TEXT",
+    )
+    conn.commit()
 
 
 def _migrate_agent_skill_sets(cursor, conn):
@@ -5178,6 +5193,169 @@ def _migrate_supersede_queue_flood_backlog(cursor, conn):
     conn.commit()
 
 
+# #3246: the shared sweep — both tracks run this function over their own
+# connection (the Alembic revision imports it), so the survivor rule cannot
+# drift between them. `run(sql, params, fetch=False)` is the one driver seam:
+# sqlite3 and SQLAlchemy `text()` both bind `:name` parameters.
+# `raised_by IS NULL` is the platform-row discriminator: the agent file seam
+# writes 'agent' and gates write 'gate', and an agent can mint an id under a
+# reserved prefix on its own name (the git-token-scrub prefix was unreserved
+# before #3246), so the id shape alone must never pick a survivor.
+_PLATFORM_ALERT_SWEEP_SELECT = """
+SELECT id, agent_name, request_id, status, created_at, expires_at, context,
+       subject, disposed_by, disposed_at, raised_by
+FROM operator_queue
+WHERE raised_by IS NULL
+  AND (status = 'pending'
+       OR (disposed_by = 'person' AND subject IS NULL AND disposed_at >= :since))
+"""
+
+_PLATFORM_ALERT_SWEEP_END = """
+UPDATE operator_queue
+SET status = 'cancelled',
+    disposition = 'cancelled',
+    disposed_at = :now,
+    disposed_by = 'platform',
+    disposed_by_email = NULL,
+    disposition_reason = 'superseded',
+    batch_id = :batch_id
+WHERE status = 'pending' AND raised_by IS NULL AND id IN ({ids})
+"""
+
+_SWEEP_CHUNK = 400  # well under every driver's bound-parameter limit
+
+
+def run_platform_alert_sweep(run, *, now=None, batch_id=None) -> dict:
+    """#3246: collapse the platform-alert backlog to one pending row per subject.
+
+    Reads every pending row plus the person-ended rows inside the snooze
+    window, hands them to the leaf's pure ``plan_sweep`` (the ONE source of
+    per-kind id parsing — imported function-locally so neither migration
+    track pulls the service graph into ``init_database()``), then writes:
+
+    * survivors: ``subject``, ``last_seen_at``, ``context.seen_count = 1`` and
+      ``expires_at`` only where it was NULL;
+    * every other pending row of the subject: ended as ONE batch —
+      ``cancelled`` / ``platform`` / ``superseded`` / NULL email / ``batch_id``
+      — the ent#611 vocabulary, compare-and-set on ``status = 'pending'`` so a
+      row a person ends first is never overwritten;
+    * known kinds with no derivable subject: ``expires_at`` only (the row
+      leaves on its own; nothing is merged on a guess);
+    * person-ended rows inside the snooze window: ``subject`` only.
+
+    Agent-raised rows and gate rows (``raised_by IS NOT NULL``) are excluded
+    by the SELECT and skipped again by the planner; external prefixes never
+    derive. None of them is ever stamped or ended. Idempotent: a second run finds the survivors stamped
+    and plans nothing. Returns the write counts for the boot log.
+    """
+    import json as _json
+    import uuid as _uuid
+    from datetime import datetime as _dt, timezone as _tz
+
+    from services.platform_alerts import plan_sweep, snooze_window
+
+    now = now or _dt.now(_tz.utc)
+    now_iso = now.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+    since_iso = (now - snooze_window()).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+    cols = ("id", "agent_name", "request_id", "status", "created_at", "expires_at",
+            "context", "subject", "disposed_by", "disposed_at", "raised_by")
+    rows = [dict(zip(cols, r)) for r in run(_PLATFORM_ALERT_SWEEP_SELECT, {"since": since_iso}, fetch=True)]
+    plan = plan_sweep(rows, now=now)
+    counts = {"survivors": 0, "ended": 0, "lifetime_only": 0, "snoozed": 0}
+    if plan.is_empty():
+        return counts
+
+    for stamp in plan.survivor_stamps:
+        # `expires_at` is only in the statement when the planner set one: an
+        # untyped NULL bound into COALESCE is driver-dependent on PostgreSQL,
+        # and a stamp that carries none has nothing to write there.
+        params = {"id": stamp.id, "subject": stamp.subject, "last_seen_at": stamp.last_seen_at,
+                  "context": _json.dumps(stamp.context) if stamp.context is not None else None}
+        expiry_sql = ""
+        if stamp.expires_at is not None:
+            expiry_sql = ", expires_at = COALESCE(expires_at, :expires_at)"
+            params["expires_at"] = stamp.expires_at
+        run(
+            "UPDATE operator_queue SET subject = :subject, last_seen_at = :last_seen_at, "
+            f"context = :context{expiry_sql} "
+            "WHERE id = :id AND status = 'pending' AND raised_by IS NULL",
+            params,
+        )
+        counts["survivors"] += 1
+
+    batch = batch_id or _uuid.uuid4().hex
+    ended = list(plan.ended_ids)
+    for start in range(0, len(ended), _SWEEP_CHUNK):
+        chunk = ended[start:start + _SWEEP_CHUNK]
+        params = {f"e{i}": id_ for i, id_ in enumerate(chunk)}
+        placeholders = ", ".join(f":{k}" for k in params)
+        params.update({"now": now_iso, "batch_id": batch})
+        run(_PLATFORM_ALERT_SWEEP_END.format(ids=placeholders), params)
+        counts["ended"] += len(chunk)
+
+    for stamp in plan.lifetime_stamps:
+        run("UPDATE operator_queue SET expires_at = :expires_at "
+            "WHERE id = :id AND status = 'pending' AND expires_at IS NULL AND raised_by IS NULL",
+            {"id": stamp.id, "expires_at": stamp.expires_at})
+        counts["lifetime_only"] += 1
+
+    for stamp in plan.snooze_stamps:
+        run("UPDATE operator_queue SET subject = :subject "
+            "WHERE id = :id AND subject IS NULL AND raised_by IS NULL",
+            {"id": stamp.id, "subject": stamp.subject})
+        counts["snoozed"] += 1
+    return counts
+
+
+# Both tracks create the same two indexes, by name (schema.py declares them too).
+PLATFORM_ALERT_INDEX_DDL = (
+    "CREATE UNIQUE INDEX IF NOT EXISTS uq_operator_queue_pending_subject "
+    "ON operator_queue(agent_name, subject) WHERE status = 'pending' AND subject IS NOT NULL",
+    "CREATE INDEX IF NOT EXISTS idx_operator_queue_agent_subject ON operator_queue(agent_name, subject)",
+)
+
+
+def _migrate_platform_alert_subjects(cursor, conn):
+    """#3246 — platform alerts: one pending row per subject.
+
+    Ordered columns → sweep → index, in ONE migration: the partial unique index
+    can only be created once the sweep has collapsed the duplicates an
+    installed backlog holds, so the three steps cannot be split across
+    migrations without breaking the upgrade of exactly the installs this is
+    for. Adds `subject TEXT` and `last_seen_at TEXT` (nullable, PRAGMA-guarded),
+    runs `run_platform_alert_sweep` (the leaf's `plan_sweep` decides; see its
+    docstring for the rules), then creates `uq_operator_queue_pending_subject`
+    (partial, pending + subject only) and `idx_operator_queue_agent_subject`.
+
+    No wake and no file write follow: these are platform-minted rows
+    (`is_platform_minted`), which take no part in either. Idempotent.
+
+    Mirrored by the Alembic revision 0090_platform_alert_subjects.
+    """
+    for column in ("subject", "last_seen_at"):
+        _safe_add_column(
+            cursor,
+            "operator_queue",
+            column,
+            f"ALTER TABLE operator_queue ADD COLUMN {column} TEXT",
+            log_msg=f"Adding {column} to operator_queue for platform alerts (#3246)",
+        )
+    conn.commit()
+
+    def _run(sql, params, fetch=False):
+        cursor.execute(sql, params)
+        return cursor.fetchall() if fetch else None
+
+    counts = run_platform_alert_sweep(_run)
+    conn.commit()
+    if any(counts.values()):
+        logger.info("Platform-alert backlog sweep (#3246): %s", counts)
+
+    for ddl in PLATFORM_ALERT_INDEX_DDL:
+        cursor.execute(ddl)
+    conn.commit()
+
+
 MIGRATIONS = [
     ("agent_sharing", _migrate_agent_sharing_table),
     ("schedule_executions_observability", _migrate_schedule_executions_observability),
@@ -5337,4 +5515,6 @@ MIGRATIONS = [
     ("pull_sync", _migrate_pull_sync),
     ("skill_gate_requests_table", _migrate_skill_gate_requests_table),
     ("supersede_queue_flood_backlog", _migrate_supersede_queue_flood_backlog),
+    ("platform_alert_subjects", _migrate_platform_alert_subjects),
+    ("chat_session_claude_id", _migrate_chat_session_claude_id),
 ]

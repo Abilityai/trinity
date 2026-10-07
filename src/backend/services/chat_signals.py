@@ -28,6 +28,17 @@ from typing import NamedTuple, Optional
 from services.execution_envelope import TaskExecutionErrorCode
 
 
+def chat_trigger(x_source_agent: Optional[str], x_via_mcp: Optional[str]) -> str:
+    """``triggered_by`` of a ``POST /chat`` turn (#96, #3127): ``agent`` for
+    agent-to-agent, ``mcp`` for a user's MCP call, ``chat`` otherwise. Admission
+    (pull routing) and the execution row read the same value."""
+    if x_source_agent:
+        return "agent"
+    if x_via_mcp:
+        return "mcp"
+    return "chat"
+
+
 class ChatAdmission(NamedTuple):
     """Result of the chat admission gate (#1026 slice 1) when a request is
     cleared to proceed. Carries the values the rest of the endpoint needs."""
@@ -41,6 +52,11 @@ class ChatAdmission(NamedTuple):
     # principal (a root). Last, with a default, so the NamedTuple stays
     # positionally compatible.
     chain_depth: Optional[int] = None
+    # trinity-enterprise#752: the skill gate's decision (a
+    # `skill_gate_service.GateDecision`), recorded by the row's setup once the
+    # execution the agent will receive exists — never under this admission's
+    # capacity-slot id. Last, with a default, for the same reason.
+    gate: Optional[object] = None
 
 
 class ChatExecutionContext(NamedTuple):
@@ -56,6 +72,10 @@ class ChatExecutionContext(NamedTuple):
     chat_activity_id: object
     session: object
     is_queued: bool
+    # trinity-enterprise#752: a self-approved turn of a gated skill runs in its
+    # own session, never the agent's shared one (the next caller would resume
+    # it with the skill loaded). Last, with a default.
+    isolated_session: bool = False
 
 
 class ChatAdmissionReplay(NamedTuple):

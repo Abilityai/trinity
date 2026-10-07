@@ -17,7 +17,7 @@ import { sidebarThreadsOf } from '@/components/portal/portalInbox'
 
 import {
   agentChatTabs,
-  landingThread,
+  agentLanding,
   orderRosterAgents,
   agentPreview,
   composerAvailabilityNotice,
@@ -26,6 +26,8 @@ import {
   agentRowTime,
   agentRowMeta,
   MAIN_TAB_LABEL,
+  visibleAgentRows,
+  searchAgents,
 } from '@/components/portal/portalUtils'
 import {
   isFileDrag,
@@ -96,44 +98,100 @@ describe('ent#523 — Main is pinned, archives stay reachable', () => {
 // Which chat you land in
 // ---------------------------------------------------------------------------
 
-describe('ent#523 — landing', () => {
-  it('opens the chat you were most recently active in', () => {
-    const landed = landingThread([
-      main(),
-      chat('c1', { last_message_at: '2026-09-07T09:00:00Z' }),
-      chat('c2', { last_message_at: '2026-09-07T12:00:00Z' }),
-    ], 'a')
-    expect(landed.id).toBe('c2')
+describe('ent#784 — landing', () => {
+  it('never resumes a USED chat, however recent', () => {
+    // ent#784 reverses ent#523: most visits start new work, so resuming cost
+    // two actions every time. Continuity is one click away in the tab strip.
+    // The 2026-10-05 ruling did not soften this — it reuses the EMPTY chat
+    // (arm 4 below), never a conversation that has been spoken in.
+    const landed = agentLanding({
+      agentName: 'a',
+      threads: [
+        main({ last_message_at: '2026-09-07T08:00:00Z', message_count: 4 }),
+        chat('c1', { last_message_at: '2026-09-07T09:00:00Z', message_count: 2 }),
+        chat('c2', { last_message_at: '2026-09-07T12:00:00Z', message_count: 2 }),
+      ],
+    })
+    expect(landed).toEqual({ agentName: 'a', sessionId: null })
   })
 
-  it('falls back to Main for a first-time visitor', () => {
-    // An unused Main has no `last_message_at` and would sort last on recency
-    // alone, so a first visit would otherwise land on nothing.
-    expect(landingThread([main()], 'a').id).toBe('main')
+  it('reuses the agent\'s unused Main rather than adding a chat beside it', () => {
+    // Arm 4 (ruling 2026-10-05): "opening an agent must not create a new chat
+    // every time; at most one empty chat per agent exists at any time". A
+    // post-ent#523 pair always HAS an unused Main, so this is the ordinary
+    // answer, and it mints nothing — the row is already there.
+    expect(agentLanding({ agentName: 'a', threads: [main()] }))
+      .toEqual({ agentName: 'a', sessionId: 'main' })
   })
 
-  it('never lands you in an archived chat', () => {
-    // Deliberately unlike the tab rule above: a tab is somewhere you can GO, a
-    // landing is where you are PUT without asking.
-    const landed = landingThread([
-      main(),
-      chat('old', { archived_at: 'x', last_message_at: '2026-09-07T23:00:00Z' }),
-    ], 'a')
-    expect(landed.id).toBe('main')
+  it('lands a first-time visitor on a new chat, minting no row', () => {
+    // AC 4: the landing itself creates nothing server-side. With no row to
+    // reuse the helper returns a null session; the row is born on the first
+    // send (`newThread`, ent#451), so repeated visits accumulate no empty
+    // chats either way.
+    expect(agentLanding({ agentName: 'a', threads: [] }))
+      .toEqual({ agentName: 'a', sessionId: null })
   })
 
-  it('returns null when there is nothing for this agent', () => {
-    expect(landingThread([chat('other', { agent_name: 'b' })], 'a')).toBeNull()
-    expect(landingThread([], 'a')).toBeNull()
-    expect(landingThread([main()], '')).toBeNull()
+  it('honours a lastOpenSessionId that is still a live chat of this agent', () => {
+    // The ent#621 seam: the agent-switch keys return you to the chat you last
+    // had open with that agent since the Workspace loaded.
+    const landed = agentLanding({
+      agentName: 'a',
+      threads: [main(), chat('c1', { last_message_at: '2026-09-07T09:00:00Z' })],
+      lastOpenSessionId: 'c1',
+    })
+    expect(landed).toEqual({ agentName: 'a', sessionId: 'c1' })
+  })
+
+  it('accepts a session_id-shaped row for that id too', () => {
+    const landed = agentLanding({
+      agentName: 'a',
+      threads: [{ session_id: 's9', agent_name: 'a' }],
+      lastOpenSessionId: 's9',
+    })
+    expect(landed.sessionId).toBe('s9')
+  })
+
+  it('falls back through the rest of the rule for an id it cannot vouch for', () => {
+    // Validated against the principal's OWN thread list, so an archived chat,
+    // another agent's chat, a room, or an id that simply is not there all fall
+    // back rather than landing somewhere they should not (the #3140 class).
+    // "Falls back" means into the arms below it, not past them to a new chat:
+    // with a used Main present there is nothing to reuse and the answer is
+    // null; the unused-Main case is the arm-4 test above.
+    const threads = [
+      main({ last_message_at: '2026-09-07T08:00:00Z', message_count: 2 }),
+      chat('arch', { archived_at: 'x', last_message_at: '2026-09-07T23:00:00Z' }),
+      chat('other', { agent_name: 'b', last_message_at: '2026-09-07T23:00:00Z' }),
+      { id: 'room1', agent_name: 'a', is_room: true },
+    ]
+    for (const id of ['arch', 'other', 'room1', 'nope']) {
+      expect(agentLanding({ agentName: 'a', threads, lastOpenSessionId: id }).sessionId)
+        .toBeNull()
+    }
+  })
+
+  it('returns null only for a caller that named no agent', () => {
+    expect(agentLanding({ agentName: '', threads: [main()] })).toBeNull()
+    expect(agentLanding({ agentName: null })).toBeNull()
+    expect(agentLanding()).toBeNull()
   })
 
   it('is the SAME rule the ?agent= deep link uses', () => {
     // Two answers to "which chat do I land in" is how a deep link and a
     // sidebar click put a first-time visitor in different places.
-    const threads = [main()]
+    const threads = [
+      main({ last_message_at: '2026-09-07T08:00:00Z', message_count: 2 }),
+      chat('c2', { last_message_at: '2026-09-07T12:00:00Z', message_count: 2 }),
+    ]
     const agents = [{ name: 'a' }]
-    expect(resolveAgentLanding({ agent: 'a', agents, threads }).sessionId).toBe('main')
+    expect(resolveAgentLanding({ agent: 'a', agents, threads }).sessionId).toBeNull()
+    // …including the arm that reuses an empty chat: one rule, both doors.
+    expect(resolveAgentLanding({ agent: 'a', agents, threads: [main()] }).sessionId).toBe('main')
+    // `?new=1` is the one way past the whole precedence.
+    expect(resolveAgentLanding({ agent: 'a', agents, threads: [main()], forceNew: true }).sessionId)
+      .toBeNull()
   })
 })
 
@@ -183,8 +241,39 @@ describe('ent#523 — roster order and preview', () => {
   it('orders the roster BEFORE the collapse', () => {
     // Bounding first would sort a slice chosen by the old order — the same bug
     // one step later.
-    expect(SIDEBAR).toMatch(/const orderedRoster = computed\(\(\) => orderRosterAgents\(/)
-    expect(SIDEBAR).toMatch(/visibleAgentRows\(orderedRoster\.value/)
+    //
+    // ent#621 T6 re-pin: the sort MOVED UP to the shell. It was a computed in
+    // the sidebar, which meant two of them (the desktop column and the mobile
+    // drawer) and no way for the switch-agent keys to walk the order the eye
+    // reads. So the shell computes it once, hands it to both instances, and the
+    // sidebar bounds what it is given — the ordering still happens first, one
+    // component higher.
+    expect(PORTAL).toMatch(/const orderedRoster = computed\(\(\) => orderRosterAgents\(/)
+    expect(PORTAL).toMatch(/:roster="orderedRoster"/)
+    expect(SIDEBAR).not.toMatch(/orderRosterAgents/)
+    expect(SIDEBAR).toMatch(/visibleAgentRows\(props\.roster/)
+    // ent#621: and the active agent is passed to it. The behaviour of `keep` is
+    // proven below against the function itself; this is the structural half —
+    // which argument the sidebar actually hands it — and there is no second way
+    // to see it, because the sidebar's collapse is not reachable without a
+    // mount of its own.
+    expect(SIDEBAR).toMatch(/visibleAgentRows\(props\.roster,[\s\S]{0,240}?keep: props\.activeAgentName/)
+  })
+
+  it('ent#621 — the active agent is never collapsed out of the sidebar', () => {
+    // The #2424 rule gains one more member. A key walk that lands on an agent
+    // behind "N more" auto-expands the list; this is the belt for a list the
+    // person collapsed by hand, and it is why `keep` exists at all.
+    const roster = Array.from({ length: 12 }, (_, i) => ({ name: `a${String(i).padStart(2, '0')}` }))
+    const last = roster[roster.length - 1].name
+    expect(visibleAgentRows(roster).map((a) => a.name)).not.toContain(last)
+    expect(visibleAgentRows(roster, { keep: last }).map((a) => a.name)).toEqual([
+      'a00', 'a01', 'a02', 'a03', 'a04', last,
+    ])
+    // An agent already in the head is not duplicated.
+    expect(visibleAgentRows(roster, { keep: 'a00' })).toHaveLength(5)
+    // And search keeps it the same way (#2424's window, one more member).
+    expect(searchAgents(roster, 'a1', { keep: last }).visible.map((a) => a.name)).toContain(last)
   })
 
   it('does not list an unused Main as a recent chat', () => {

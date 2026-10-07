@@ -129,7 +129,7 @@ would assert only that a correct container is correct.
 
 | Boundary | Behaviour |
 |---|---|
-| Backend boot, container **running** | **Read-only.** `check_base_image_state()` → `result["base_image_state"]` ∈ `stale \| current \| unknown`; `action: "none"`. WARNING names the remedy; an edge-triggered `base-image-stale-` operator-queue alarm fires on `stale` **only** (a fail-open probe must never manufacture an alert, so `unknown` never alarms). **No recreate call exists in this branch** — source-pinned. The alarm's cooldown cursor is **per-process**, and `ensure_deployed` runs once per worker's lifespan, so a stale boot files one item **per worker** (`--workers 2` ⇒ 2). Deliberate: a cross-worker cursor would put Redis or a DB read on the boot path for an advisory alarm, and the un-guessable timestamped id — which is what stops an agent pre-creating and silencing it — cannot be deduped by `on_conflict_do_nothing` anyway. |
+| Backend boot, container **running** | **Read-only.** `check_base_image_state()` → `result["base_image_state"]` ∈ `stale \| current \| unknown`; `action: "none"`. WARNING names the remedy; an edge-triggered `base-image-stale-` operator-queue alarm fires on `stale` **only** (a fail-open probe must never manufacture an alert, so `unknown` never alarms). **No recreate call exists in this branch** — source-pinned. The alarm's cooldown cursor is **per-process**, and `ensure_deployed` runs once per worker's lifespan, so a stale boot files one item **per worker** (`--workers 2` ⇒ 2). *(Since #3246 the alarm goes through `platform_alerts.observe` under the subject `base_image_stale:trinity-system`: every worker's reading lands on the SAME pending row (seen count + 1), the platform ends it when the image is current again, and it expires after a 30-day net — no longer one item per worker that stays until acknowledged.)* Deliberate: a cross-worker cursor would put Redis or a DB read on the boot path for an advisory alarm, and the un-guessable timestamped id — which is what stops an agent pre-creating and silencing it — cannot be deduped by `on_conflict_do_nothing` anyway. |
 | Backend boot, container **stopped** | Delegates to `start_agent_internal(SYSTEM_AGENT_NAME)` instead of a bare `container_start`, inheriting the #1809 cold-start image gate, #1560 clear-before-recreate ordering, the 409/NotFound concurrent-recreate hardening and the post-recreate handle re-lookup. `recreated` / `recreate_reason` are surfaced into the result. **This is where adoption happens.** |
 | `POST /api/system-agent/restart` | Explicit stop, then `start_agent_internal` — same adoption path. The response re-fetches the container so it reports the replacement's status, not the removed handle's. |
 
@@ -452,6 +452,8 @@ Backend Startup
 │ 4. Register ownership (is_system)│
 └──────────────────────────────────┘
 ```
+
+**Second trigger — first-run `/setup` (#3237).** On a browser-claimed install (every one-click / marketplace path) no admin exists at boot, so the create branch above fails with `Admin user 'admin' not found`. `POST /api/setup/admin-password` therefore schedules `routers/setup.py::_deploy_system_agent_after_setup` as a background task once the admin row is written — before `ensure_first_run_seeded`, matching the boot order (the seeder hosts its failure alerts on `trinity-system`). It never raises (Starlette runs background tasks in sequence) and skips without a Docker client; `ensure_deployed` is idempotent, so the next boot is a no-op.
 
 ### 2. Fleet Health Check Flow
 
@@ -1050,6 +1052,7 @@ ls -1 ~/reports/fleet/ | tail -1
 
 | Date | Changes |
 |------|---------|
+| 2026-10-06 | **#3237**: `/setup` deploys the system agent after creating the admin — the boot-time attempt runs before the admin exists on browser-claimed installs and was never retried. |
 | 2026-07-28 | **#1816 base-image adoption**: `ensure_deployed` is read-only when the container is running (3-state `check_base_image_state` → `base_image_state`, WARNING + an edge-triggered `base-image-stale-` operator alarm on `stale` only) and delegates to `start_agent_internal` when stopped, so the cold boundary adopts a rebuilt base image through the shared lifecycle. Creation converges on the recreate path's contract (`TRINITY_AGENT_AUTH_TOKEN`, `trinity.full-capabilities`) — the convergence invariant. AC2 is a **structural** gate in `start_agent_internal` (`is_system AND was_already_running` ⇒ `recreate_deferred="system_agent_running"`), independent of predicate count. `/restart` delegates; `/status` gains `base_image_state`. |
 | 2026-02-11 | Fixed reinitialize flow diagram - cleanup command now shows actual paths (`/home/developer/.claude`, `.trinity`, `content`, `plans`) instead of obsolete workspace reference |
 | 2026-01-27 | **Emergency Stop Prefix Filter**: Added `system_prefix` query parameter to `POST /api/ops/emergency-stop` (`routers/ops.py:607-696`). Allows targeting specific agents/schedules by name prefix. Schedule pausing respects prefix (line 638-639), agent stopping respects prefix (line 658-659). Enables safe testing with nonexistent prefix. |

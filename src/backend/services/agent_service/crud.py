@@ -30,7 +30,8 @@ from services.docker_service import (
     get_agent_status_from_container,
 )
 from services.docker_utils import (
-    volume_get, volume_create, containers_run, container_remove
+    volume_get, volume_create, containers_run, container_remove,
+    agent_volume_labels
 )
 from services.agent_runtime_state import clear_agent_breakers, clear_agent_runtime_state
 from services.template_service import (
@@ -2078,10 +2079,7 @@ async def _workspace_volume_mount(config: AgentConfig, volumes: dict) -> None:
     except docker.errors.NotFound:
         await volume_create(
             name=agent_volume_name,
-            labels={
-                'trinity.platform': 'agent-workspace',
-                'trinity.agent-name': config.name
-            }
+            labels=agent_volume_labels(config.name, 'agent-workspace'),
         )
     volumes[agent_volume_name] = {'bind': '/home/developer', 'mode': 'rw'}  # Persistent workspace
 
@@ -2114,10 +2112,7 @@ async def _shared_folder_mounts(
             except docker.errors.NotFound:
                 await volume_create(
                     name=shared_volume_name,
-                    labels={
-                        'trinity.platform': 'agent-shared',
-                        'trinity.agent-name': config.name
-                    }
+                    labels=agent_volume_labels(config.name, 'agent-shared'),
                 )
                 volume_created = True
 
@@ -2161,10 +2156,7 @@ async def _public_volume_mount(config: AgentConfig, volumes: dict) -> None:
         except docker.errors.NotFound:
             await volume_create(
                 name=public_volume_name,
-                labels={
-                    'trinity.platform': 'agent-public',
-                    'trinity.agent-name': config.name,
-                },
+                labels=agent_volume_labels(config.name, 'agent-public'),
             )
             public_volume_created = True
 

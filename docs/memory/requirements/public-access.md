@@ -461,6 +461,48 @@
   - `verify_payment()` — 15s timeout, wrapped in `asyncio.to_thread()`
   - `settle_payment()` — 30s timeout, 3 retries with exponential backoff
   - Graceful degradation: 501 if SDK not installed
+- **Plan scheme — card (fiat) plans must be payable (#3215)**: the SDK's
+  `build_payment_required` defaults `scheme="nvm:erc4337"`, and the facilitator is
+  POSTed the requirements document verbatim, so `accepts[0].scheme` is the **only**
+  channel the scheme travels through. Passing no scheme made every fiat plan's
+  token fail verification. `_build_payment_required` now takes a `PlanScheme`
+  (`None` = the pre-#3215 document, which is what keeps crypto bytes identical per
+  environment). Two sources, in order:
+  - **the presented token** (`scheme_from_token`) for **verify and settle** — the
+    token body carries `accepted.{scheme,network,planId}`, so the money path makes
+    no network call and a settle re-driven hours after its verify is byte-stable
+    with it. Caller-supplied, therefore allow-listed against the SDK's scheme and
+    `SupportedNetworks` vocabularies and checked against this agent's plan id;
+    anything else falls through to the plan-resolved scheme, then to the default.
+  - **the plan** (`resolve_plan_scheme`) for the **402 and `/info`**: `plans.get_plan`
+    parsed with the SDK's own keys (`registry.price.isCrypto`,
+    `metadata.plan.fiatPaymentProvider`; parity-tested against the SDK's
+    `resolve_scheme`/`resolve_network`), behind a `(environment, plan_id)` cache
+    (positive 300 s, negative 30 s), per-key single-flight futures, its own 2-slot
+    gate — **never** a facilitator slot, so an anonymous 402 flood cannot starve
+    paying traffic — stale-while-revalidate, and a WARNING once per negative window
+    (the SDK swallows the same failures at DEBUG, which is how a card plan silently
+    stayed crypto). Knob: `NEVERMINED_PLAN_LOOKUP_TIMEOUT_SECONDS` (default 5.0),
+    `NEVERMINED_PLAN_LOOKUP_MAX_INFLIGHT` (default 2).
+- **Public origin for `resource.url` (#3215)**: `utils/public_url.py::public_base_url`
+  is the single owner for both surfaces, with two precedences one keyword apart.
+  **Each 402 is minted for the origin the caller actually used** (the paid door, the
+  A2A door, `/info`): configured public origin (Settings `public_chat_url` →
+  `PUBLIC_CHAT_URL` → `FRONTEND_URL`) **only when its host equals the request
+  host**; otherwise the request host with an https **upgrade** (never a downgrade)
+  read from the **raw** `X-Forwarded-Proto` header. **The agent card advertises the
+  configured public origin** (`configured_wins=True`, unchanged from before #3215) —
+  it is a discovery document republished to buyers elsewhere, and the
+  `get_agent_a2a_card` MCP tool reads it from `backend:8000`; with nothing
+  configured it falls back to the request host on the same upgrade-only rule. A
+  buyer that follows the card arrives on the configured host, so the 402 it meets
+  there is minted for that host. Raw, not `request.url.scheme`:
+  the prod/hosted compose `command:` overrides the image CMD and drops
+  `--proxy-headers --forwarded-allow-ips`, so uvicorn applies no forwarded headers
+  there at all. The frontend nginx's `$fwd_proto` map stops it clobbering an
+  upstream `https` with its own `$scheme`. Restoring the uvicorn flags is a trust
+  change (it re-prices `request.client.host` for every per-IP limiter) and is
+  deliberately out of scope.
 
 ### 23.3 Paid Chat Endpoint
 - **Status**: ✅ Implemented (2026-03-04)
@@ -468,7 +510,11 @@
 - **Description**: Public x402 endpoint for external callers
 - **Endpoints**:
   - `POST /api/paid/{agent_name}/chat` — 402/403/200 flow; accepts `Idempotency-Key` (#1018)
-  - `GET /api/paid/{agent_name}/info` — Public agent info + payment requirements
+  - `GET /api/paid/{agent_name}/info` — Public agent info + payment requirements. It
+    is the card's `paymentInfoUrl`, from which a payment-aware client pays on its
+    FIRST request, so it loads the config **with the key** (#3215) to resolve the
+    plan's real scheme and emits an **absolute** `resource.url`. The key is used
+    server-side only and never appears in the body.
 - **Flow**: No header → 402; invalid token → 403; valid → verify → (idempotency gate) → execute → settle → receipt
 - **Settlement-ordering / honest status (#1018)**: `verify_payment` does **not** burn credits —
   only `settle` does. When a settle fails after retries the endpoint keeps HTTP 200 + the delivered
@@ -489,6 +535,14 @@
   converges the stored snapshot to settled. A divergent
   client header never forks execution; an underivable key (missing token/body) disables dedup (fail-open,
   never a constant collision).
+
+### Cross-Execution Idempotency Key on Human-Facing Sends (trinity-enterprise#665)
+- **Status**: ✅ Implemented
+- **Description**: `send_message`, `call_user` and `send_group_message` accept an optional caller-declared `idempotency_key` + `idempotency_ttl` (60–86400 s, default 86400). Two sends with the same `(agent, target, key)` inside the TTL, from any executions, deliver once; the store decides races (one winner; a concurrent claimer gets a retryable 409).
+- **Result**: keyed sends return `sent`; a suppressed send returns `success:true, sent:false, suppressed_by:"idempotency_key", first_sent_at, first_execution_id`. Keyless requests and responses are unchanged.
+- **Never content-derived** (the #1422 failure): the key is the caller's string; the message text is not part of it.
+- **Visibility**: audit event (`suppressed` / `group_message_suppressed` / `voip_call_suppressed`) plus a `Trinity`-labelled `system` row in the first send's conversation session (DM + group; calls audit only).
+- **Order**: consent → key → rate limit → deliver. Composes with the per-turn `effect_guard` (#1084); flow: `feature-flows/effect-idempotency.md`.
 
 ### Configurable Proactive Message Rate Limits (#1609)
 - **Status**: ✅ Implemented (2026-07-14)
@@ -573,7 +627,7 @@ Standalone mobile-friendly admin page for managing agents on the go. Designed as
 - **Description**: Mobile-optimized Operating Room showing items needing attention
 - **Key Features**:
   - Needs Response queue with expandable cards
-  - Respond/acknowledge actions inline, by item type (desktop parity, #2370): approval = select an option → restated consequence → optional note → explicit `Send: <option>` (never a one-tap irreversible answer); question = text answer; alert = `Got it`. The payload is the desktop's — the decision in `response`, a note in `response_text` — built by the shared `utils/operatorQueue.js`, so a Deny can no longer be recorded as an approval
+  - Respond/acknowledge actions inline, by item type (desktop parity, #2370): approval = select an option → restated consequence → optional note → explicit `Send: <option>` (never a one-tap irreversible answer), or the **Something else** chip (#3242; hidden on a gate approval) → required instruction → `Send instruction`; question = text answer; alert = `Got it`. The payload is the desktop's — the decision in `response` (an option, or the reserved `(something else)`), a note or the instruction in `response_text` — built by the shared `utils/operatorQueue.js`, so a Deny can no longer be recorded as an approval
   - Notification list with priority badges
   - Badge count on tab icon
   - Cost alerts summary

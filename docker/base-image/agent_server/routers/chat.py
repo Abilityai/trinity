@@ -82,7 +82,8 @@ async def chat(request: ChatRequest):
                     continue_session=True,
                     stream=request.stream,
                     system_prompt=request.system_prompt,
-                    execution_id=request.execution_id
+                    execution_id=request.execution_id,
+                    isolated_session=request.isolated_session,
                 )
             except HTTPException as exc:
                 agent_state.record_task_finish(success=False)
@@ -111,26 +112,28 @@ async def chat(request: ChatRequest):
             # Add assistant response to history
             agent_state.add_message("assistant", response_text)
 
-            # Update session-level stats
-            if metadata.cost_usd:
-                agent_state.session_total_cost += metadata.cost_usd
-            agent_state.session_total_output_tokens += metadata.output_tokens
-            # Context window usage: metadata.input_tokens should contain the complete total
-            # (from modelUsage.inputTokens which includes all turns and cached tokens)
-            # However, on a resumed session Claude Code may sometimes report only new tokens
-            # (a fresh session resets the counter first — claude_code.py, #2958)
-            # Fix: Context should monotonically increase during a session, so keep the max
-            if metadata.input_tokens > agent_state.session_context_tokens:
-                agent_state.session_context_tokens = metadata.input_tokens
-                logger.debug(f"Context updated to {metadata.input_tokens} tokens")
-            elif metadata.input_tokens > 0 and metadata.input_tokens < agent_state.session_context_tokens:
-                # Claude reported fewer tokens than before - likely only new input, not cumulative
-                # Keep the previous (higher) value as context should only grow
-                logger.warning(
-                    f"Context tokens decreased from {agent_state.session_context_tokens} to {metadata.input_tokens}. "
-                    f"Keeping previous value (likely --continue reporting issue)"
-                )
-            agent_state.session_context_window = metadata.context_window
+            # Update session-level stats — of the shared chat session, which an
+            # isolated turn (trinity-enterprise#752) never ran in.
+            if not request.isolated_session:
+                if metadata.cost_usd:
+                    agent_state.session_total_cost += metadata.cost_usd
+                agent_state.session_total_output_tokens += metadata.output_tokens
+                # Context window usage: metadata.input_tokens should contain the complete total
+                # (from modelUsage.inputTokens which includes all turns and cached tokens)
+                # However, on a resumed session Claude Code may sometimes report only new tokens
+                # (a fresh session resets the counter first — claude_code.py, #2958)
+                # Fix: Context should monotonically increase during a session, so keep the max
+                if metadata.input_tokens > agent_state.session_context_tokens:
+                    agent_state.session_context_tokens = metadata.input_tokens
+                    logger.debug(f"Context updated to {metadata.input_tokens} tokens")
+                elif metadata.input_tokens > 0 and metadata.input_tokens < agent_state.session_context_tokens:
+                    # Claude reported fewer tokens than before - likely only new input, not cumulative
+                    # Keep the previous (higher) value as context should only grow
+                    logger.warning(
+                        f"Context tokens decreased from {agent_state.session_context_tokens} to {metadata.input_tokens}. "
+                        f"Keeping previous value (likely --continue reporting issue)"
+                    )
+                agent_state.session_context_window = metadata.context_window
 
             logger.info(f"[Chat] Execution lock releasing after completion")
 

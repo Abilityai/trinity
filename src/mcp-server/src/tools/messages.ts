@@ -9,6 +9,8 @@ import { z } from "zod";
 import { TrinityClient } from "../client.js";
 import type { McpAuthContext } from "../types.js";
 import { resolveExecutionId } from "./execution_id.js";
+import { DELEGATION_RULE } from "../delegation_contract.js";
+import { INTENT_KEY_TEACHING, intentKeyParams, intentResultFields } from "./intent_key.js";
 
 /**
  * Create message tools with the given client
@@ -70,7 +72,12 @@ export function createMessageTools(
         "The recipient must have opted in to receive proactive messages from this agent " +
         "(allow_proactive flag must be set in their sharing record). " +
         "Messages are delivered via Telegram, Slack, or web based on the channel parameter. " +
-        "Rate limited to 10 messages per recipient per hour.",
+        "Rate limited to 10 messages per recipient per hour. " +
+        DELEGATION_RULE +
+        " A send that errored without a named refusal may still have reached the person: never send it " +
+        "again under a new `dedup_label` or from a later turn (the delegation contract in " +
+        "`chat_with_agent`'s description)." +
+        INTENT_KEY_TEACHING,
       parameters: z.object({
         to: z.enum(["primary", "approver", "viewer"]).optional()
           .describe("The role to message. The platform resolves the person. Use this, not recipient_email."),
@@ -106,6 +113,7 @@ export function createMessageTools(
             "recipient in one turn (e.g. 'reminder'). Default empty → at-most-one message per " +
             "(recipient, channel) per turn."
           ),
+        ...intentKeyParams,
       }),
       execute: async (
         params: {
@@ -117,6 +125,8 @@ export function createMessageTools(
           agent_name?: string;
           execution_id?: string;
           dedup_label?: string;
+          idempotency_key?: string;
+          idempotency_ttl?: number;
         },
         context?: { session?: McpAuthContext }
       ) => {
@@ -169,6 +179,8 @@ export function createMessageTools(
             reply_to_thread: params.reply_to_thread || false,
             execution_id: resolveExecutionId(authContext, params.execution_id),
             dedup_label: params.dedup_label,
+            idempotency_key: params.idempotency_key,
+            idempotency_ttl: params.idempotency_ttl,
           });
 
           if (result.success) {
@@ -179,6 +191,7 @@ export function createMessageTools(
               ...(params.to ? { to: params.to } : { recipient_email: params.recipient_email }),
               channel: result.channel,
               message_id: result.message_id,
+              ...intentResultFields(result as Record<string, unknown>),
             }, null, 2);
           } else {
             return JSON.stringify({

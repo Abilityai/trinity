@@ -79,7 +79,7 @@ source "amazon-ebs" "trinity" {
   }
 
   ami_name        = local.ami_name
-  ami_description = "Trinity ${var.image_tag} - sovereign AI agent platform on Ubuntu 24.04"
+  ami_description = "Trinity ${var.image_tag} (Ubuntu 24.04) - the operating system for the AI-native company"
   # Public, so the CloudFormation Launch Stack works outside the build account.
   # The account's "block public access for AMIs" setting must be off for this
   # to take effect.

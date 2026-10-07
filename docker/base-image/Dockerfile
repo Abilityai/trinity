@@ -237,7 +237,12 @@ COPY ./hooks/bash-guardrail.py /opt/trinity/hooks/bash-guardrail.py
 COPY ./hooks/file-guardrail.py /opt/trinity/hooks/file-guardrail.py
 COPY ./hooks/output-scanner.py /opt/trinity/hooks/output-scanner.py
 COPY ./hooks/read-only-guard.py /opt/trinity/hooks/read-only-guard.py
+# trinity-enterprise#752: the gated-skill hook (bootstrap + decision).
+COPY ./hooks/skill-gate.py /opt/trinity/hooks/skill-gate.py
+COPY ./hooks/_skill_gate.py /opt/trinity/hooks/_skill_gate.py
 COPY ./hooks/write-runtime-config.py /opt/trinity/hooks/write-runtime-config.py
+# trinity-enterprise#787: build-time smoke for the GUARD-002 registration.
+COPY ./hooks/guard002-smoke.py /opt/trinity/hooks/guard002-smoke.py
 COPY ./hooks/guardrails-baseline.json /opt/trinity/guardrails-baseline.json
 RUN chmod 0555 /opt/trinity/hooks/*.py && \
     chmod 0444 /opt/trinity/guardrails-baseline.json && \
@@ -271,6 +276,24 @@ COPY ./hooks/managed-settings.json /etc/claude-code/managed-settings.json
 RUN chown -R root:root /etc/claude-code && \
     chmod 0755 /etc/claude-code && \
     chmod 0444 /etc/claude-code/managed-settings.json
+
+# trinity-enterprise#752 — the gated-skill hook registers in its OWN drop-in.
+# The CLI validates each `managed-settings.d` file on its own and voids only the
+# file an entry fails in, so a rejected skill-gate entry can never take the
+# GUARD-002 hooks in `managed-settings.json` with it. Same ownership rules as
+# the main file: root:root 0444 in a root-owned 0755 directory.
+#
+# trinity-enterprise#787 — the GUARD-002 hooks in `managed-settings.json` run
+# the same way: exec form (`command` + `args`, so no shell and no
+# `CLAUDE_CODE_SHELL_PREFIX`) under `/usr/bin/env -i HOME=/home/developer
+# /usr/local/bin/python3 -I -S` (no inherited PYTHON*/LD_* variables, no user
+# site), and the file's policy `env` pins `CLAUDE_CODE_SHELL_PREFIX` empty for
+# everything still in shell form.
+RUN mkdir -p /etc/claude-code/managed-settings.d
+COPY ./hooks/managed-settings.d/50-skill-gate.json /etc/claude-code/managed-settings.d/50-skill-gate.json
+RUN chown -R root:root /etc/claude-code/managed-settings.d && \
+    chmod 0755 /etc/claude-code/managed-settings.d && \
+    chmod 0444 /etc/claude-code/managed-settings.d/50-skill-gate.json
 
 # `~/.claude` still belongs to the agent — Claude Code writes its own state there
 # (`.claude/projects/`, plugin cache). What is NO LONGER shipped is a
@@ -333,6 +356,10 @@ COPY --chown=developer:developer ./startup.sh /app/startup.sh
 RUN chmod +x /app/startup.sh /app/agent-server.py
 # #2971: fail the build if the pinned gemini-cli rejects any argv the runtime builds.
 RUN python3 /app/agent_server/services/gemini_cli_args.py --smoke
+# trinity-enterprise#752: fail the build unless the skill-gate hook imports and
+# decides under the exact interpreter and flags it is registered with — a hook
+# that cannot run lets every gated skill through.
+RUN /usr/local/bin/python3 -I -S /opt/trinity/hooks/skill-gate.py --self-test
 
 # Add /app to Python path so agent_server module can be imported
 ENV PYTHONPATH="/app:${PYTHONPATH}"
@@ -340,6 +367,11 @@ ENV PYTHONPATH="/app:${PYTHONPATH}"
 EXPOSE 22 8000
 
 USER root
+
+# trinity-enterprise#787: fail the build unless every GUARD-002 hook, run exactly
+# as the shipped managed file registers it, denies and allows what it should.
+# Runs before /logs is created for the agent user and removes what it writes.
+RUN /usr/local/bin/python3 -I -S /opt/trinity/hooks/guard002-smoke.py
 
 RUN mkdir -p /workspace /data /logs && \
     chown -R developer:developer /workspace /data /logs && \

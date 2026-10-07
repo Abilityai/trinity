@@ -85,28 +85,61 @@ router = APIRouter(prefix="/api/agents", tags=["a2a"])
 a2a_server_router = APIRouter(tags=["a2a-server"])
 
 
-def _base_url_from_request(request: Request) -> str:
-    """Compute the external base URL for card `url` construction.
+def _base_url_from_request(request: Request, *,
+                           configured_wins: bool = False) -> str:
+    """Compute the external base URL for the 402s (and, via `_card_base_url`,
+    for the card `url`).
 
-    Order of preference:
-      1. `PUBLIC_CHAT_URL` env if set — this is what external
-         consumers reach Trinity through (Cloudflare tunnel, etc.).
-      2. `FRONTEND_URL` env — second-best for self-hosted setups.
-      3. The request's own scheme + host — works fine for clients
-         that fetched the card from the same host they'll call.
+    Delegates to `utils.public_url.public_base_url` (#3215), which owns the
+    precedence: the operator's configured public origin when it is the host the
+    caller actually used, else the request host with an https upgrade taken from
+    the raw `X-Forwarded-Proto` header. ONE helper for the card and for both
+    payment doors — one parameter apart — because a second copy of the upgrade
+    logic is a second thing to get wrong.
 
-    Returns "" if none of the above resolve, signalling the card
-    generator to omit URL fields rather than emit a broken URL.
+    `configured_wins=True` is the card's precedence, and the card's alone (see
+    `_card_base_url`). The doors take the default: an x402 token is minted and
+    verified against `resource.url`, so the 402 must name the origin the caller
+    actually called.
+
+    The configured origin now comes from `settings_service.get_public_chat_url()`
+    — the Settings row THEN `PUBLIC_CHAT_URL` — rather than the env var alone, so
+    an operator who set it in the UI is honoured here as they already are for the
+    Telegram and WhatsApp webhook URLs.
+
+    Returns "" if nothing resolves, signalling the card generator to omit URL
+    fields rather than emit a broken URL.
     """
-    from config import FRONTEND_URL, PUBLIC_CHAT_URL  # local import: avoid circular at module load
+    from config import FRONTEND_URL  # local import: avoid circular at module load
+    from services.settings_service import settings_service
+    from utils.public_url import public_base_url
 
-    if PUBLIC_CHAT_URL:
-        return PUBLIC_CHAT_URL.rstrip("/")
-    if FRONTEND_URL:
-        return FRONTEND_URL.rstrip("/")
-    if request.url:
-        return f"{request.url.scheme}://{request.url.netloc}"
-    return ""
+    try:
+        configured = settings_service.get_public_chat_url()
+    except Exception:  # noqa: BLE001 — an unreadable setting falls back to env
+        from config import PUBLIC_CHAT_URL
+        configured = (PUBLIC_CHAT_URL or "").rstrip("/")
+    return public_base_url(request, configured=configured,
+                           frontend_url=FRONTEND_URL,
+                           configured_wins=configured_wins)
+
+
+def _card_base_url(request: Request) -> str:
+    """The origin the agent CARD advertises — configured-first (review I3).
+
+    The card is a discovery document, not a minted token: whoever fetched it
+    republishes it to buyers elsewhere, so a configured public origin wins over
+    the host it was read on. The `get_agent_a2a_card` MCP tool proxies the card
+    route from `backend:8000`, and before this split #3215 had the card
+    advertise that internal host to every external buyer — a regression on the
+    card's pre-#3215 behaviour.
+
+    Safe alongside the doors' same-host rule because a buyer that follows the
+    card arrives on the configured host, so the 402 it then meets is minted for
+    that very host: card and 402 still agree for every caller that followed the
+    card. With nothing configured the two are identical.
+    """
+    return _base_url_from_request(request, configured_wins=True)
 
 
 async def _fetch_template_data(agent_name: str, container) -> dict:
@@ -233,7 +266,7 @@ async def get_agent_card(
         raise HTTPException(status_code=404, detail="Agent not found")
 
     template_data = await _fetch_template_data(agent_name, container)
-    base_url = _base_url_from_request(request)
+    base_url = _card_base_url(request)
     card = _card_with_exposed_skills(
         agent_name=agent_name,
         template_data=template_data,
@@ -329,6 +362,14 @@ def _task_object(execution_id: str, state: str, *, text: Optional[str] = None,
     metadata always gets a `status.message`, even with no error text, because
     the metadata is the message's only reason to exist on a successful paid
     turn: no message, nowhere for the receipt to go.
+
+    It is MIRRORED onto the top-level `Task.metadata` (#3215). The spec location
+    is still `status.message.metadata` and that is what the docs name, but a
+    typed client (`a2a-sdk`'s `Task.metadata: dict | None`) renders the Task we
+    returned as `metadata: null`, which reads as "nothing was charged". One
+    assignment, the SAME dict object, inside one `if metadata:` — the free path
+    emits no `metadata` key at all, so an unpaid Task's bytes and every
+    idempotency snapshot built from them are unchanged.
     """
     task: Dict[str, Any] = {
         "id": execution_id,
@@ -351,6 +392,7 @@ def _task_object(execution_id: str, state: str, *, text: Optional[str] = None,
         }
         if metadata:
             message["metadata"] = metadata
+            task["metadata"] = metadata
         task["status"]["message"] = message
     return task
 
@@ -415,7 +457,7 @@ async def _serve_card(agent_name: str, request: Request) -> Optional[Dict[str, A
     return _card_with_exposed_skills(
         agent_name=agent_name,
         template_data=template_data,
-        base_url=_base_url_from_request(request),
+        base_url=_card_base_url(request),
     )
 
 
@@ -665,7 +707,10 @@ async def _anonymous_jsonrpc(agent_name: str, request: Request):
         return parsed
     method, params, rpc_id = parsed
 
-    base_url = str(request.base_url).rstrip("/")
+    # The origin the CALLER used (#3215, review I3), not `request.base_url` and
+    # not the card's declared origin: the 402's `resource.url` is what the
+    # buyer's token is minted and facilitator-verified against.
+    base_url = _base_url_from_request(request)
     caller_ip = request.client.host if request.client else None
     payment_service = get_nevermined_payment_service()
 
@@ -679,9 +724,17 @@ async def _anonymous_jsonrpc(agent_name: str, request: Request):
 
         access_token = a2a_payment_gate.extract_token(message, request.headers)
         if not access_token:
+            # The plan's own scheme (#3215), resolved here because the builder
+            # stays synchronous — the lookup is an outbound HTTP call.
+            plan_scheme = await payment_service.resolve_plan_scheme(
+                nvm_api_key=priced.nvm_api_key,
+                nvm_environment=priced.config.nvm_environment,
+                config=priced.config,
+            )
             status_code, body, headers = a2a_payment_gate.payment_required_response(
                 agent_name, priced.config,
                 payment_service=payment_service, base_url=base_url,
+                plan_scheme=plan_scheme,
             )
             return JSONResponse(status_code=status_code, content=body, headers=headers)
 

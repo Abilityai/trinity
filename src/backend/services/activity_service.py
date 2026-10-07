@@ -22,6 +22,8 @@ from models import (
     activity_state_for_terminal,
 )
 from database import db
+from services.sync_waiter import TERMINAL_TASK_STATUSES
+from db.activities import queued_activity_ids
 from utils.helpers import utc_now_iso
 
 logger = logging.getLogger(__name__)
@@ -242,6 +244,17 @@ class ActivityService:
         """
         try:
             activity_state = activity_state_for_terminal(terminal_status)
+            if execution_id:
+                try:
+                    await self._close_queued_activities(
+                        execution_id, activity_state, error
+                    )
+                except Exception as e:  # noqa: BLE001 — never block the dispatch close
+                    logger.warning(
+                        "[#2329] queued-activity close failed for execution %s: %s",
+                        execution_id,
+                        e,
+                    )
             if not activity_id:
                 if not execution_id:
                     return False
@@ -263,6 +276,42 @@ class ActivityService:
                 e,
             )
             return False
+
+    async def _close_queued_activities(self, execution_id, activity_state, error) -> None:
+        """#2329: close the collaboration / self-task activity a queued row
+        names, so a terminal written outside ``run_async_task`` (pull sink,
+        lease-reaper park, watchdog) does not leave it ``started``. Backlog
+        expiry calls no closer; the 120-minute sweep covers it.
+        Details carry the keys the push closers write, because whichever
+        closer wins the CAS is the one whose details persist."""
+        execution = db.get_execution(execution_id)
+        # Only a row that is terminal NOW. The lease reaper closes the dead
+        # attempt's dispatch activity as CANCELLED and re-queues the row with the
+        # same metadata: its collaboration / self-task activity belongs to the
+        # re-delivered attempt, and a CANCELLED close can never be upgraded.
+        if execution is None or execution.status not in TERMINAL_TASK_STATUSES:
+            return
+        raw = getattr(execution, "backlog_metadata", None)
+        ids = queued_activity_ids(raw)
+        if not ids:
+            return
+        details = {
+            "execution_id": execution_id,
+            "response_length": len(getattr(execution, "response", None) or ""),
+            "execution_time_ms": getattr(execution, "duration_ms", None),
+        }
+        meta = json.loads(raw)
+        if meta.get("is_self_task"):
+            # finalize_self_task records this; keep it whichever closer wins.
+            details["inject_result"] = meta.get("inject_result")
+        for aid in ids:
+            await self.complete_activity(
+                activity_id=aid,
+                status=activity_state,
+                details=details,
+                # Push closers record an error on FAILED only (#1332).
+                error=error if activity_state == ActivityState.FAILED else None,
+            )
 
     def spawn_close_execution_activity(
         self,

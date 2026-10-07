@@ -1,6 +1,6 @@
 # What is Trinity
 
-Trinity is an autonomous agent orchestration and infrastructure platform — sovereign infrastructure for deploying, orchestrating, and governing fleets of autonomous AI agents on your own hardware.
+Trinity is **the operating system for the AI-native company** — open source and self-hosted, so the compounding intelligence it builds is yours. Concretely, it is infrastructure for deploying, orchestrating, and governing fleets of autonomous AI agents on your own hardware.
 
 > 📺 **Watch:** [Trinity Platform Demo](https://youtu.be/ivljtZqsxeo) *(May 2026)* · [The Multi-Agent Platform I Run My Company On](https://youtu.be/8j6q-kABRqc) *(May 2026)* · [all videos](../videos.md)
 
