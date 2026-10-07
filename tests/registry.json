@@ -22,6 +22,18 @@
       "description": "An exception from one agent's operator-queue sync must be logged with the agent name, not dropped by `_poll_cycle`'s gather(return_exceptions=True) (#3313). Drives the real `_poll_cycle` over two agents where one sync raises: both run, the failing one is logged at ERROR with its exception type, the healthy one is not. Mutation-proven: reverting the logging goes red. No Docker, no network."
     },
     {
+      "file": "unit/test_2372_platform_alert_ack.py",
+      "feature": "#2372",
+      "added": "2026-10-07",
+      "categories": [
+        "backend",
+        "operator-queue",
+        "migrations",
+        "unit"
+      ],
+      "description": "#2372: answering a platform-minted alert (reserved request_id prefix) lands it `acknowledged` + `acknowledged_at` through the real ask sink; an agent's own ask still lands `responded`; a gate- approval keeps disposition `answered`; Clear All hides the acknowledged alert. Sync loop over a pre-ent#499 file: a non-pending reserved entry is skipped with no #1631 WARNING and no writes, with its row gone; a pending reserved entry still WARNs and is never created. Heal migration `platform_alert_responded_heal`: flips stuck responded platform rows (incl. lookalike ` Poison-x`), leaves `valX1` and agent rows, idempotent, frozen prefix list equals the live tuple, registered on both tracks. No Docker."
+    },
+    {
       "file": "unit/test_ec_backlog_admission_edges.py",
       "feature": "edge-cases-2026-10-06",
       "added": "2026-10-07",
@@ -4967,16 +4979,110 @@
       "description": "MCP list_operator_queue completeness (trinity-enterprise#815); real tool execute() over a fake TrinityClient, node:test. A broad agent-key read takes its permits first through the strict permissions read and passes {self} ∪ permitted as agent_names; a failed read is permissions_unavailable (retryable, no list call, no self-read substitute); over 500 names or an 8 KB request target is permit_set_too_large, never an unfiltered read. The output always carries count, total, has_more, next_cursor, next_offset and items; an older backend's missing fields become null with a warning; backend warnings pass through; a belt drop nulls total and warns. User and system scopes and scoped reads make no extra permissions call. cursor is opt-in (no cursor → offset 0 as before), passed through unchanged, and a two-page walk re-reads and re-sends agent_names on every page. The description states the contract within the 1,800-character headroom."
     },
     {
-      "file": "unit/test_2372_platform_alert_ack.py",
-      "feature": "#2372",
+      "file": "unit/test_3274_gate_context.py",
+      "feature": "#3274",
       "added": "2026-10-07",
       "categories": [
         "backend",
-        "operator-queue",
-        "migrations",
+        "security",
         "unit"
       ],
-      "description": "#2372: answering a platform-minted alert (reserved request_id prefix) lands it `acknowledged` + `acknowledged_at` through the real ask sink; an agent's own ask still lands `responded`; a gate- approval keeps disposition `answered`; Clear All hides the acknowledged alert. Sync loop over a pre-ent#499 file: a non-pending reserved entry is skipped with no #1631 WARNING and no writes, with its row gone; a pending reserved entry still WARNs and is never created. Heal migration `platform_alert_responded_heal`: flips stuck responded platform rows (incl. lookalike ` Poison-x`), leaves `valX1` and agent rows, idempotent, frozen prefix list equals the live tuple, registered on both tracks. No Docker."
+      "description": "trinity#3274 item 1: the free text a requester sets beside the request — a schedule's name, an MCP key's name, the requester's email, each rendered into the executor's system prompt — is scanned by the skill gate as given AND as the prompt renders it (`---` collapsed, the 80-char cut with `…`), apart from the request (never joined), shown on the approver's card only when it is what matched, never stored as the request or replayed. Driven through the execute_task backstop, /task and /chat; a parity test classifies every ExecutionContext string field as scanned or platform-controlled. Mutation-proven at each call site."
+    },
+    {
+      "file": "unit/test_3274_gate_replay.py",
+      "feature": "#3274",
+      "added": "2026-10-07",
+      "categories": [
+        "backend",
+        "security",
+        "unit"
+      ],
+      "description": "trinity#3274 item 5: an approved /task or fan-out run is sent the caller's message as the message and its system prompt as the system prompt (frozen_replay), never their concatenation; a record frozen before the split replays its request text. Driven through the /task seam, the fan-out runner and the backstop into the real _dispatch_approved over the real row writer. Mutation-proven."
+    },
+    {
+      "file": "unit/test_3274_gate_notice.py",
+      "feature": "#3274",
+      "added": "2026-10-07",
+      "categories": [
+        "backend",
+        "security",
+        "unit"
+      ],
+      "description": "trinity#3274 items 8 + 10 (#3233): outcome_delivery is the one rule for who is told the outcome (agent task / Inbox / none), carried on the 202 and its retry, and a requester nobody tells (a system key) is told so; _notify follows the same rule for every requester kind. A requester's notice never names the decider by email: a platform session or key reads the decider's display name, the Workspace and any unusable name or failed lookup read \"the agent's approver\". A held schedule row's error is the notice itself. Mutation-proven."
+    },
+    {
+      "file": "unit/test_3274_gate_wiring.py",
+      "feature": "#3274",
+      "added": "2026-10-07",
+      "categories": [
+        "backend",
+        "security",
+        "unit"
+      ],
+      "description": "trinity#3274 item 4: the three skill-gate wiring lines, each reached through the code that runs it — get_current_user stamps is_event_loopback on the EVT-001 loopback token (never a person); main._start_maintenance_services (ast-sliced and executed against stub services) registers the ending observer; OperatorQueueSyncService._poll_cycle awaits skill_gate_service.sweep(). Deleting each line turns its test red."
+    },
+    {
+      "file": "unit/test_3274_channel_quote.py",
+      "feature": "#3274",
+      "added": "2026-10-07",
+      "categories": [
+        "backend",
+        "security",
+        "unit"
+      ],
+      "description": "trinity#3274 item 2: a Telegram group reply is scanned with the quote line it carries (the Workspace twin scans its quote), through ChannelMessageRouter._run_agent_task; a reply to the bot quotes nothing, a one-to-one message is scanned as typed, and one helper renders the quote for the prompt and the scan. History, sender labels and the group title stay unscanned (decided). Mutation-proven."
+    },
+    {
+      "file": "unit/test_3274_public_skipped_status.py",
+      "feature": "#3274",
+      "added": "2026-10-07",
+      "categories": [
+        "backend",
+        "api",
+        "unit"
+      ],
+      "description": "trinity#3274 item 9: GET /api/public/executions/{token}/{id}/status returns the skill gate's notice for a skipped row the public link started (triggered_by public), so PublicChat stops polling and shows it; a skipped row another trigger started, and a running row, carry no text. Mutation-proven."
+    },
+    {
+      "file": "frontend/tests/unit/skillGate.spec.js",
+      "feature": "#3274",
+      "added": "2026-10-07",
+      "categories": [
+        "frontend",
+        "unit"
+      ],
+      "description": "trinity#3274: utils/skillGate.js — pendingApprovalMessage reads the server message off a 202 pending_approval (fallback the MCP wording) and is null for an ordinary async accept; isGateRefusal matches a named refusal by its X-Trinity-Error-Code header (plain object or get())."
+    },
+    {
+      "file": "frontend/tests/unit/skillGateSenders.spec.js",
+      "feature": "#3274",
+      "added": "2026-10-07",
+      "categories": [
+        "frontend",
+        "unit"
+      ],
+      "description": "trinity#3274 item 9, MOUNTED: ChatPanel shows a held request's notice as a platform line, polls nothing, and leaves the held lines out of the next turn's history; PublicChat stops at a skipped turn and shows its notice instead of polling to a timeout; TasksPanel keeps a held or refused request as its own row (no server row exists); PlaybooksPanel and DashboardPanel hand the notice to the agent page's toast and open nothing; refusals are named, never an object. Mutation-proven per sender."
+    },
+    {
+      "file": "frontend/tests/unit/mobileAdminSkillGate.spec.js",
+      "feature": "#3274",
+      "added": "2026-10-07",
+      "categories": [
+        "frontend",
+        "unit"
+      ],
+      "description": "trinity#3274 item 9, MOUNTED: /m chat shows a held request's notice as a platform line, polls nothing, keeps the held lines out of the next message's history, and names a refusal. Mutation-proven."
+    },
+    {
+      "file": "frontend/tests/unit/agentDetailGateNotice.spec.js",
+      "feature": "#3274",
+      "added": "2026-10-07",
+      "categories": [
+        "frontend",
+        "unit"
+      ],
+      "description": "trinity#3274 (@source-text-pin): AgentDetail hands its toast host (:notify) to PlaybooksPanel and DashboardPanel, and its toast has an info arm in the status-info family ahead of the red fallback."
     }
   ]
 }

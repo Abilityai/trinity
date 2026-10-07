@@ -890,6 +890,7 @@ async def public_execution_status(
     if not execution or execution.agent_name != agent_name:
         raise HTTPException(status_code=404, detail="Execution not found")
 
+    gate = _gate_state(execution)
     return {
         "execution_id": execution.id,
         "status": execution.status,
@@ -897,8 +898,24 @@ async def public_execution_status(
         # "cancelled by user" error; surface both like failed/success so the
         # public poller gets a reason instead of a silent null body.
         "response": execution.response if execution.status in ("success", "failed", "cancelled") else None,
-        "error": execution.error if execution.status in ("failed", "cancelled") else None,
+        "error": execution.error if execution.status in ("failed", "cancelled") or gate else None,
+        "gate": gate,
     }
+
+
+def _gate_state(execution):
+    """trinity#3274: the skill gate closes a public turn `skipped`, with its text
+    as the error — "held" when the turn waits for an approval (a gate record
+    names it), "refused" otherwise — so the page stops polling and shows a
+    wait as a notice and a refusal as an error. None for any other row, and for
+    a row this link's own chat did not start (`public`)."""
+    if execution.status != "skipped" or getattr(execution, "triggered_by", None) != "public":
+        return None
+    try:
+        record = db.get_gate_requests_by_origin_executions([execution.id]).get(execution.id)
+    except Exception:  # noqa: BLE001 — unreadable: show it as an error, never as a wait
+        record = None
+    return "held" if record and record.get("state") != "refused" else "refused"
 
 
 @router.post("/executions/{token}/{execution_id}/terminate")
