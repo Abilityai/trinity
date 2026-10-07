@@ -347,6 +347,58 @@ def expire() -> Ending:
     return _ended(EndingEvent(EXPIRED, tuple(rows), None), audit, None)
 
 
+# #3246: the platform ends its own alerts for exactly these reasons — DATA on
+# the ledger (`disposition_reason`), rendered by name on the card. A person's
+# cancel reason is free text; the platform's is a closed vocabulary.
+CONDITION_CLEARED = "condition_cleared"
+SUPERSEDED = "superseded"
+PLATFORM_ENDING_REASONS = (CONDITION_CLEARED, SUPERSEDED)
+
+
+def clear_platform(ids: Iterable[str], *, reason: str, batch_id: Optional[str] = None) -> Ending:
+    """The PLATFORM ended its own alerts: the condition cleared, or a newer
+    reading superseded them (#3246). Mirrors `expire`: no Actor, the ending is
+    `cancelled` / `disposed_by = 'platform'` / NULL email, and only the rows
+    this call won the compare-and-set for are returned and handed to the
+    observers — a row a person ended first is skipped, never re-ended. One
+    audit row (`platform_cleared`) and one thin `operator_queue_cancelled`
+    trigger per agent; listeners refetch through the access-controlled list.
+    """
+    if reason not in PLATFORM_ENDING_REASONS:
+        raise ValueError(f"platform ending reason must be one of {PLATFORM_ENDING_REASONS}, got {reason!r}")
+    ids = list(dict.fromkeys(ids))
+    out = db.end_operator_queue_items_by_platform(ids, reason=reason, batch_id=batch_id)
+    rows, batch_id = out["rows"], out["batch_id"]
+    if not rows:
+        return Ending(rows=[], batch_id=None)
+    audit = [{
+        "event_action": "platform_cleared",
+        "source": "system",
+        "target_type": "operator_queue",
+        "details": {
+            "batch_id": batch_id,
+            "reason": reason,
+            "cancelled": len(rows),
+            "skipped": len(ids) - len(rows),
+            "ids": [r["id"] for r in rows],
+            "agent_names": sorted({r["agent_name"] for r in rows}),
+        },
+    }]
+    agents = list(dict.fromkeys(r["agent_name"] for r in rows))
+    triggers = [_broadcast_payload({"type": "operator_queue_cancelled",
+                                    "data": {"agent_name": agent, "batch_id": batch_id}})
+                for agent in agents]
+    for extra in triggers[1:]:
+        try:
+            operator_resume_service.spawn_on_loop(lambda extra=extra: _announce([], extra))
+        except Exception:  # noqa: BLE001 — the ending is committed; it must stand
+            logger.warning("[AskService] could not schedule a platform-clear trigger", exc_info=True)
+    return _ended(
+        EndingEvent(CANCELLED, tuple(rows), None, reason=reason, batch_id=batch_id),
+        audit, triggers[0], batch_id=batch_id,
+    )
+
+
 # ---------------------------------------------------------------------------
 # The one way an ask begins (PR B): an agent — or, later, a gate — raises it
 # ---------------------------------------------------------------------------

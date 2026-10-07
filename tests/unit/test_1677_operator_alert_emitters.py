@@ -71,8 +71,6 @@ _ALLOWED_CALLERS = {
         "NOT platform-only — bounded instead by the #1632 depth cap, enforced ATOMICALLY "
         "per agent inside create_native_item, and by the SAME per-agent + fleet rate "
         "buckets as the file seam; every field validated at the call",
-    ("services/agent_client/circuit.py", "_emit_dormant_alert"):  # 1028: package split
-        "platform-only: edge-triggered after consecutive failed CB probes (cb-dormant)",
     ("services/archive_storage.py", "_alarm_unwritable_archive_dir"):
         "platform-only: raised from probe_archive_writability() at the start of an "
         "archival RUN (daily maintenance cadence), and the id is bucketed per path "
@@ -99,14 +97,6 @@ _ALLOWED_CALLERS = {
         "create — must never be throttled (the reason a db-sink bound was rejected)",
     ("services/operator_queue_service.py", "OperatorQueueSyncService._sync_agent"):
         "the #1632-capped agent-file ingestion seam itself (depth+rate+clamp)",
-    ("services/subscription_headroom_alerts.py", "_emit"):
-        "platform-only: edge-triggered per weekly window via a deterministic "
-        "id (sub-headroom-{sid}-{reset-day}-{tier}) whose ON CONFLICT DO NOTHING "
-        "makes a re-emit a no-op; volume is bound by the sweep cadence and a "
-        "per-cycle cap. Agent-CHOSEN names do reach the body (an agent may "
-        "spawn children and name them) but arrive sanitized and capped at five "
-        "per alert — it is the VOLUME an agent cannot drive, which is what this "
-        "exemption rests on (ent#434)",
     ("services/operator_queue_service.py", "create_bounded_alert_outcome"):
         "the #1677 budget helper's own admit-path create (the seam itself)",
     ("services/operator_queue_service.py", "_maybe_emit_alert_budget_episode"):
@@ -115,13 +105,6 @@ _ALLOWED_CALLERS = {
         "platform-only: edge-gated (fresh) + idempotent id (#1644)",
     ("services/skill_service.py", "SkillService._announce_reconcile_refusal"):
         "platform-only: assignment-driven, quasi-idempotent id (ent#236)",
-    ("services/skill_service.py", "SkillService._record_adoption_failure"):
-        "platform-only: the only input is `skills_library_url`, blocked on the "
-        "generic settings PUT by routers/settings.py LEGACY_SKILLS_LIBRARY_KEYS "
-        "(ent#346), so no agent can drive volume; the steady-state branch is "
-        "additionally idempotent by a URL-derived id ⇒ ≤1 row per refused URL. "
-        "NOT admin-driven — ent#236's auto-sync calls the same sync_library() "
-        "unattended on a 300s-86400s timer (#2744)",
     ("services/skills_sync_service.py",
      "SkillsLibrarySyncService._announce_fleet_failures"):
         "platform-only: leader-locked, one per sync run (ent#236)",
@@ -133,11 +116,6 @@ _ALLOWED_CALLERS = {
         "platform-only: deterministic per-episode id (sync-diverged-{agent}-"
         "{diverged_since}), and an episode must last > 24 h before it can raise "
         "one, so at most one per agent per day (trinity-enterprise#706)",
-    ("services/system_agent_service.py",
-     "SystemAgentService._emit_base_image_stale_alert"):
-        "platform-only: per-process cooldown, hosted on trinity-system (#1816)",
-    ("services/system_agent_service.py", "SystemAgentService._emit_start_failed_alert"):
-        "platform-only: time-bucketed idempotent id, hosted on trinity-system (#1816)",
     ("services/system_seed_service.py", "SystemSeedService._notify_operator"):
         "platform-only: deterministic id ⇒ ≤1 open row per seed kind (ent#124)",
     ("services/validation_service.py", "ValidationService._notify_operator_on_failure"):

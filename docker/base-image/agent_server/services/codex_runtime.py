@@ -14,7 +14,8 @@ Safety parity with the Claude path (#1187 decision 8, Phase C):
   * **System prompt / identity** — the backend's effective ``system_prompt``
     is prepended to every turn (Codex ``exec`` has no ``--append-system-prompt``);
     persistent identity comes from ``AGENTS.md`` (startup copies ``CLAUDE.md``).
-  * **Read-only mode** — when ``~/.trinity/read-only-config.json`` is enabled,
+  * **Read-only mode** — when ``/opt/trinity/read-only-config.json`` (or, while
+    it is missing, the home copy) is enabled,
     Codex runs with ``--sandbox read-only`` (the Claude hook can't apply here).
   * **Guardrails** — read-only is honored via the sandbox; ``disallowed_tools``
     that have no Codex equivalent are SURFACED in the logs, never silently
@@ -336,7 +337,11 @@ def calculate_codex_cost(
 
 _API_KEY_VARS = ("OPENAI_API_KEY", "CODEX_API_KEY")
 _AGENT_HOME = "/home/developer"
-_READ_ONLY_CONFIG = Path(_AGENT_HOME) / ".trinity" / "read-only-config.json"
+# ent#787: root-owned, written by the backend as root; it decides while it
+# exists. The agent-owned home copy decides only while it is missing (same
+# precedence as `read-only-guard.py`).
+_READ_ONLY_CONFIG = Path("/opt/trinity/read-only-config.json")
+_LEGACY_READ_ONLY_CONFIG = Path(_AGENT_HOME) / ".trinity" / "read-only-config.json"
 
 
 def _parse_env_value(raw_value: str) -> str:
@@ -645,7 +650,8 @@ def _is_read_only() -> bool:
     """True when the backend has put this agent in read-only mode.
 
     The signal is the same JSON file the Claude read-only *hook* consumes
-    (``~/.trinity/read-only-config.json`` → ``enabled``). Codex can't run Claude
+    (``/opt/trinity/read-only-config.json`` → ``enabled``; the home copy
+    ``~/.trinity/read-only-config.json`` while the root file is missing). Codex can't run Claude
     hooks, so we read the file directly and translate it to ``--sandbox
     read-only`` (a sandbox-native, non-cooperative enforcement).
 
@@ -657,8 +663,9 @@ def _is_read_only() -> bool:
     platform wants fail-closed, change both loaders together in a dedicated
     issue.
     """
+    config = _READ_ONLY_CONFIG if _READ_ONLY_CONFIG.exists() else _LEGACY_READ_ONLY_CONFIG
     try:
-        raw = _READ_ONLY_CONFIG.read_text()
+        raw = config.read_text()
     except FileNotFoundError:
         return False
     except OSError as exc:

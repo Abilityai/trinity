@@ -291,8 +291,7 @@ def test_a_reachable_trigger_is_not_reported(pilot, trigger):
 @pytest.mark.parametrize("trigger", ["manual", "mcp", "chat", "self_task", "voip"])
 def test_an_interactive_trigger_is_not_reported(pilot, trigger):
     """Interactive triggers are outside the autonomous set, so the stranded
-    diagnostic never names them: a pilot pulls them (#3114), except ``chat``,
-    which pushes by design."""
+    diagnostic never names them: a pilot pulls them (#3114, #3127)."""
     assert pilot.note_unreachable_pull_trigger("pilot-a", trigger) is False
 
 

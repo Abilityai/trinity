@@ -403,6 +403,7 @@ TABLES = {
             total_context_max INTEGER DEFAULT 200000,
             status TEXT DEFAULT 'active',
             subscription_id TEXT,
+            cached_claude_session_id TEXT,
             FOREIGN KEY (user_id) REFERENCES users(id)
         )
     """,
@@ -1744,6 +1745,8 @@ TABLES = {
             resolved_to TEXT,
             proposal TEXT,
             supersedes_expired TEXT,
+            subject TEXT,
+            last_seen_at TEXT,
             FOREIGN KEY (responded_by_id) REFERENCES users(id)
         )
     """,
@@ -2271,6 +2274,15 @@ INDEXES = [
     # platform-minted `id` (uuid) is the global handle; `request_id` carries the
     # agent's string, so two agents can reuse the same id without collision.
     "CREATE UNIQUE INDEX IF NOT EXISTS idx_operator_queue_agent_request ON operator_queue(agent_name, request_id)",
+    # #3246: a platform alert is a condition, not a message — at most ONE
+    # pending row per (agent, subject). Partial: ended rows and subject-less
+    # rows (agent-raised asks, gates, not-yet-migrated emitters) stay outside
+    # it. Created by the migration only AFTER the backlog sweep collapsed
+    # duplicates, so an install holding them upgrades cleanly.
+    "CREATE UNIQUE INDEX IF NOT EXISTS uq_operator_queue_pending_subject ON operator_queue(agent_name, subject) WHERE status = 'pending' AND subject IS NOT NULL",
+    # The seam's snooze lookup reads person-ended rows by subject — a partial
+    # index over pending rows cannot serve it.
+    "CREATE INDEX IF NOT EXISTS idx_operator_queue_agent_subject ON operator_queue(agent_name, subject)",
     # trinity-enterprise#751 — the gate's caps count pending rows per executor
     # and per requester; the sweep reads by state.
     "CREATE INDEX IF NOT EXISTS idx_skill_gate_requests_agent_state ON skill_gate_requests(agent_name, state)",

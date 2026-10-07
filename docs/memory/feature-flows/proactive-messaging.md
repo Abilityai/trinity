@@ -178,6 +178,15 @@ target_type="user"
 target_id=recipient_email
 ```
 
+### 4b. Cross-execution idempotency key (trinity-enterprise#665)
+
+Optional `idempotency_key` + `idempotency_ttl` on the request. After the consent check
+and before the rate limit, `idempotency_service.intent_guard` claims
+`(agent, recipient, key)`. An earlier run's send inside the TTL → nothing is delivered;
+the response carries `sent:false, suppressed_by, first_sent_at, first_execution_id`, an
+audit `suppressed` event is written, and a `Trinity`-labelled `system` row is added to the
+first send's session. Full contract: [effect-idempotency.md](effect-idempotency.md#cross-execution-intent-keys-trinity-enterprise665).
+
 ### 5. Session-History Persistence (#1600)
 
 A delivered message is appended to the recipient's channel session, so the next

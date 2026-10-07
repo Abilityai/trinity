@@ -1177,6 +1177,11 @@ async def lifespan(app: FastAPI):
     A thin orchestrator over the phase helpers above (#1028). Read the phase
     list as the boot sequence; each name links to the block it used to inline.
     """
+    # #3246: background work spawned from a thread anyio does not own
+    # (`asyncio.to_thread` — the headroom sweep, the skills reconcile) hops back
+    # to THIS loop; capture it before any phase can spawn from a thread.
+    from services import operator_resume_service as _ors
+    _ors.remember_host_loop()
     await _init_logging_and_first_run_notice()
     await _start_event_bus()
     await _log_startup_environment()

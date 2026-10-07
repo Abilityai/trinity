@@ -28,6 +28,17 @@ from typing import NamedTuple, Optional
 from services.execution_envelope import TaskExecutionErrorCode
 
 
+def chat_trigger(x_source_agent: Optional[str], x_via_mcp: Optional[str]) -> str:
+    """``triggered_by`` of a ``POST /chat`` turn (#96, #3127): ``agent`` for
+    agent-to-agent, ``mcp`` for a user's MCP call, ``chat`` otherwise. Admission
+    (pull routing) and the execution row read the same value."""
+    if x_source_agent:
+        return "agent"
+    if x_via_mcp:
+        return "mcp"
+    return "chat"
+
+
 class ChatAdmission(NamedTuple):
     """Result of the chat admission gate (#1026 slice 1) when a request is
     cleared to proceed. Carries the values the rest of the endpoint needs."""
