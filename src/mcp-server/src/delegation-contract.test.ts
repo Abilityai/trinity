@@ -398,6 +398,13 @@ describe("ent#568 the async receipt chat_with_agent answers with", () => {
     assert.equal(out.message, `${LEAD.accepted} ${readNotResendFor("ex_9")}`);
   });
 
+  it("#3245: a replayed receipt keeps its idempotent_replay marker through the re-wording", async () => {
+    const out = JSON.parse(await toolAnswering({ ...BACKEND.accepted, idempotent_replay: true }, false, [])
+      .execute({ agent_name: "agent-a", message: "m", parallel: true, async: true }, agentSession));
+    assert.equal(out.idempotent_replay, true);
+    assert.equal(out.message, `${LEAD.accepted} ${readNotResendFor("ex_9")}`);
+  });
+
   it("a completed reply is passed through untouched", async () => {
     const seen: Seen[] = [];
     const out = JSON.parse(await toolAnswering(BACKEND.accepted, false, seen).execute(

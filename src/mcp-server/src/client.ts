@@ -292,6 +292,27 @@ export function extractIdempotencyExecutionId(body: string): string | undefined 
 }
 
 /**
+ * #3245: a body the backend REPLAYED from an idempotency snapshot, marked.
+ *
+ * The backend says so in `X-Idempotent-Replay: true`, a header the model never
+ * sees. A replayed receipt names a run that is live, succeeded or may still
+ * report back (a run that ended failed/cancelled is no longer replayed, so an
+ * identical re-send starts a new one) — the caller can tell "this is the run I
+ * already started" from "this is a new run" only by this field. Present only
+ * as positive evidence: its absence does not prove a fresh dispatch (the
+ * client's own timeout-recovery receipts carry none).
+ */
+export type Replayable<T> = T & { idempotent_replay?: true };
+
+export function markIdempotentReplay<T>(response: Response, body: T): Replayable<T> {
+  const replayed = response.headers.get("X-Idempotent-Replay") === "true";
+  if (!replayed || body === null || typeof body !== "object" || Array.isArray(body)) {
+    return body as Replayable<T>;
+  }
+  return { ...body, idempotent_replay: true } as Replayable<T>;
+}
+
+/**
  * #2806: the backend refused an agent-to-agent hop past the chain-depth limit
  * (403, `detail.error === "inter_agent_depth_exceeded"`). Returned as a RESULT
  * rather than thrown, so the calling model reads "stop, do not retry or
@@ -1046,9 +1067,9 @@ export class TrinityClient {
     idempotencyKey?: string,
     turn?: string
   ): Promise<
-    | ChatResponse
+    | Replayable<ChatResponse>
     | { error: string; queue_status: "busy" | "queue_full"; retry_after: number; agent: string; details?: Record<string, unknown> }
-    | { status: "queued_timeout"; agent: string; execution_id: string; message: string }
+    | Replayable<{ status: "queued_timeout"; agent: string; execution_id: string; message: string }>
     | DepthRefusal
     | GateResult
   > {
@@ -1199,7 +1220,8 @@ export class TrinityClient {
       throw new Error(`API error (${response.status}): ${error}`);
     }
 
-    return (await response.json()) as ChatResponse;
+    // #3245: a 200 replay of a stored snapshot says so.
+    return markIdempotentReplay(response, (await response.json()) as ChatResponse);
   }
 
   /**
@@ -1322,11 +1344,11 @@ export class TrinityClient {
     turn?: string
   ): Promise<
     | GateResult
-    | ChatResponse
-    | { status: "accepted"; execution_id: string; agent_name: string; message: string; async_mode: true }
+    | Replayable<ChatResponse>
+    | Replayable<{ status: "accepted"; execution_id: string; agent_name: string; message: string; async_mode: true }>
     // #2661: sync mode may answer with the gateway-timeout receipt (same shape
     // chat() returns for #914) instead of a completed ChatResponse.
-    | { status: "queued_timeout"; agent: string; execution_id: string; message: string }
+    | Replayable<{ status: "queued_timeout"; agent: string; execution_id: string; message: string }>
     | DepthRefusal
   > {
     // Prepare headers
@@ -1483,7 +1505,8 @@ export class TrinityClient {
       throw new Error(`API error (${response.status}): ${error}`);
     }
 
-    return (await response.json()) as ChatResponse;
+    // #3245: a 200 replay of a stored snapshot says so.
+    return markIdempotentReplay(response, (await response.json()) as ChatResponse);
   }
 
   /**
@@ -1499,7 +1522,7 @@ export class TrinityClient {
   private inFlightReplayReceipt(
     name: string,
     executionId: string,
-  ): { status: "queued_timeout"; agent: string; execution_id: string; message: string } {
+  ): { status: "queued_timeout"; agent: string; execution_id: string; message: string; idempotent_replay: true } {
     return {
       status: "queued_timeout",
       agent: name,
@@ -1507,6 +1530,8 @@ export class TrinityClient {
       message:
         `This exact call was already dispatched to '${name}' and has no result to replay yet. ` +
         `${readNotResend(name, executionId)} A reworded re-send would dispatch a SECOND execution (#2661).`,
+      // #3245: a 409 is a replay of the in-flight claim, not a new dispatch.
+      idempotent_replay: true,
     };
   }
 
