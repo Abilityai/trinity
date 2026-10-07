@@ -3025,9 +3025,8 @@ async def portal_chat(agent_name: str, message: str, email: str,
     # the thread's title before this writes the derived one, and the history
     # context below must not contain the very message it is context FOR. Both
     # reads happen first, deliberately.
-    user_row_id = _persist_user_turn(agent_name, email, session_id, client_message,
-                                     voice_call_id=voice_call_id, attachments=attachments,
-                                     execution_id=execution_id)
+    user_row_id = _persist_user_turn(agent_name, email, session_id, client_message, voice_call_id=voice_call_id,
+                                     attachments=attachments, execution_id=execution_id)
 
     # ent#186 / #2579: title the thread NOW, concurrently with the turn.
     #
