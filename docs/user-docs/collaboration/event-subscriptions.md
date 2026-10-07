@@ -71,7 +71,7 @@ With **zero matching subscriptions**, nothing happens: no event row is written a
 
 ### Reporting back to the person who asked
 
-Subscriptions wake an *agent*. Independently of them, a job that started from a conversation and finished later — because the agent delegated it to another agent, or kicked off background work — reports its outcome back to the conversation it came from, success and failure alike. Four places can receive that report:
+Subscriptions wake an *agent*. Independently of them, a job that started from a conversation and finished later — because the agent delegated it to another agent, or kicked off background work — reports its outcome back to the conversation it came from, success and failure alike. For agent-to-agent delegation this holds when the agent hands the work off with `chat_with_agent(..., parallel=true, async=true)`, which reports back by default (pass `execution_id="manual"` to keep one call quiet); a plain sequential delegation is not guaranteed to report back separately, since the agent answers with the reply itself. Four places can receive that report:
 
 | Where the job started | Where the outcome lands |
 |-----------------------|-------------------------|

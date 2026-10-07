@@ -168,20 +168,24 @@ def add_portal_message(msg_id: str, agent_name: str, client_email: str,
                        role: str, content: str, cost, now: str,
                        session_id: Optional[str] = None,
                        source: Optional[str] = None,
-                       voice_call_id: Optional[str] = None) -> None:
+                       voice_call_id: Optional[str] = None,
+                       attachments: Optional[str] = None) -> None:
     # ent#534: `source`/`voice_call_id` are platform-written only (NULL for a
     # typed turn, 'voice' + the call id for a spoken one) — no request carries them.
+    # #3265: `attachments` is the user turn's JSON list, already resolved
+    # server-side (`service.resolve_turn_attachments`) — never client text.
     stmt = text(
         "INSERT INTO enterprise_portal_messages "
         "(id, agent_name, client_email, session_id, role, content, cost, created_at, "
-        " source, voice_call_id) "
-        "VALUES (:id, :agent, :email, :session, :role, :content, :cost, :now, :source, :call)"
+        " source, voice_call_id, attachments) "
+        "VALUES (:id, :agent, :email, :session, :role, :content, :cost, :now, :source, :call, "
+        " :attachments)"
     )
     with get_engine().begin() as conn:
         conn.execute(stmt, {
             "id": msg_id, "agent": agent_name, "email": (client_email or "").lower(),
             "session": session_id, "role": role, "content": content, "cost": cost, "now": now,
-            "source": source, "call": voice_call_id,
+            "source": source, "call": voice_call_id, "attachments": attachments,
         })
 
 
@@ -233,7 +237,7 @@ def get_portal_messages(agent_name: str, client_email: str, limit: int = 100,
 # every spoken row of the calls among them rides along; a row ceiling bounds the
 # payload and SAYS so, rather than silently re-creating the symptom at call #9.
 
-_MESSAGE_COLUMNS = "id, role, content, cost, created_at, source, voice_call_id"
+_MESSAGE_COLUMNS = "id, role, content, cost, created_at, source, voice_call_id, attachments"
 
 # A typed-path row. The platform's own `system` lines (the ent#523 reset notice)
 # carry NULL `source` too — they are part of the typed timeline, not of a call.

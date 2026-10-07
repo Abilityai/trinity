@@ -112,7 +112,7 @@ Per-agent sync state (last sync at, last error, ahead/behind counts on `main` an
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `/api/operator-queue` | GET | List queue items |
+| `/api/operator-queue` | GET | List queue items. Complete within `limit`: every item you may see is ranked before the cut. Returns `count`, `total`, `has_more`, `next_offset`, `next_cursor` (and `warnings` when completeness is not verified). `agent_names` (repeatable, at most 500) narrows to those agents; `cursor=start`, then each page's `next_cursor`, walks the list without repeats or skips while it changes |
 | `/api/operator-queue/stats` | GET | Queue statistics |
 | `/api/operator-queue/bulk-cancel` | POST | Cancel listed pending items (`{"ids": [...]}`); returns `{cancelled, skipped}` |
 | `/api/operator-queue/clear-resolved` | POST | Hide terminal items (acknowledged/cancelled/expired); returns `{cleared}` |
@@ -123,6 +123,17 @@ Per-agent sync state (last sync at, last error, ahead/behind counts on `main` an
 | `/api/notifications/dismiss-all` | POST | Dismiss all pending + acknowledged notifications (optional `agent_name`) |
 
 Full API reference: http://localhost:8000/docs
+
+### Is anything already pending?
+
+Before asking a person something, check whether you (or an agent you work with) already asked:
+
+1. Call `list_operator_queue({"status": "pending"})`.
+2. If `has_more` is `false`, you have every pending item you may see, and `total` counts them.
+3. If `has_more` is `true`, walk it: pass `cursor="start"`, then `cursor=next_cursor` on each next call until `has_more` is `false`. Within one walk no item is returned twice or skipped, even while the queue changes.
+4. If `has_more` or `total` is `null`, completeness is **not verified** — read `warnings`, and do not conclude that nothing is pending.
+
+A walk's guarantee has one stated bound: a change that ends an item (an answer, a cancellation or an expiry) must be saved within 5 minutes of its own timestamp (a slower one is logged at error on the platform). An expired walk (older than an hour) answers 410: start again with `cursor="start"`.
 
 ### MCP
 
