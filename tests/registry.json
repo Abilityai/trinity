@@ -4944,6 +4944,16 @@
         "unit"
       ],
       "description": "MCP list_operator_queue completeness (trinity-enterprise#815); real tool execute() over a fake TrinityClient, node:test. A broad agent-key read takes its permits first through the strict permissions read and passes {self} ∪ permitted as agent_names; a failed read is permissions_unavailable (retryable, no list call, no self-read substitute); over 500 names or an 8 KB request target is permit_set_too_large, never an unfiltered read. The output always carries count, total, has_more, next_cursor, next_offset and items; an older backend's missing fields become null with a warning; backend warnings pass through; a belt drop nulls total and warns. User and system scopes and scoped reads make no extra permissions call. cursor is opt-in (no cursor → offset 0 as before), passed through unchanged, and a two-page walk re-reads and re-sends agent_names on every page. The description states the contract within the 1,800-character headroom."
+    },
+    {
+      "file": "unit/test_3313_operator_queue_sync_error_logged.py",
+      "feature": "abilityai/trinity#3313",
+      "added": "2026-10-07",
+      "categories": [
+        "backend",
+        "operator-queue"
+      ],
+      "description": "An exception from one agent's operator-queue sync must be logged with the agent name, not dropped by `_poll_cycle`'s gather(return_exceptions=True) (#3313). Drives the real `_poll_cycle` over two agents where one sync raises: both run, the failing one is logged at ERROR with its exception type, the healthy one is not. Mutation-proven: reverting the logging goes red. No Docker, no network."
     }
   ]
 }
