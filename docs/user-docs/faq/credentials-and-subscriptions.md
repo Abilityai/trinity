@@ -4,7 +4,7 @@
 
 ## How do credentials work inside a Trinity agent?
 
-Every agent keeps its credentials as files in its own container, following a simple pattern: `.env` is the source of truth (plain `KEY=VALUE` pairs), `.mcp.json.template` declares which credentials the agent needs using `${VAR}` placeholders, and `.mcp.json` is generated at runtime from the template plus `.env`. Trinity writes these files directly into the agent — credentials are injected, not passed around as loose environment variables. The Credentials tab reads the template to show you each required credential as configured or missing. See [Credential Management](../credentials/credential-management.md).
+Every agent keeps its credentials as files in its own container, following a simple pattern: `.env` is the source of truth (plain `KEY=VALUE` pairs), `.mcp.json.template` declares MCP servers with `${VAR}` placeholders in their `env` blocks, and `.mcp.json` is rendered from the template plus `.env` when the agent starts. Trinity writes these files directly into the agent — credentials are injected, not passed around as loose environment variables. The Credentials tab shows each credential the agent's `template.yaml` declares as set or missing. See [Credential Management](../credentials/credential-management.md).
 
 ## How do I add or edit credentials on an agent?
 
@@ -12,7 +12,7 @@ Open the agent's detail page and click the **Credentials** tab. You'll see the c
 
 ## Can I change credentials on a running agent without restarting it?
 
-Yes — credential updates hot-reload. When you paste or edit credentials on a running agent, Trinity updates the `.env` file and regenerates `.mcp.json` immediately; no restart is needed. See [Credential Management](../credentials/credential-management.md).
+Yes, for `.env`. When you paste or edit credentials on a running agent, Trinity updates the `.env` file and the agent's next run sees the new values; no restart is needed. An `.env` change does not rewrite `.mcp.json`, though — see the next question for MCP servers. See [Credential Management](../credentials/credential-management.md).
 
 ## What is the .credentials.enc file, and is it safe to commit to git?
 
@@ -21,6 +21,10 @@ Yes — credential updates hot-reload. When you paste or edit credentials on a r
 ## Do I need to re-enter credentials every time an agent restarts?
 
 No. Credential files live in the agent's home directory, which sits on a persistent volume that survives restarts and container recreation. One thing that does *not* happen automatically: a fresh agent created from a repository that has a `.credentials.enc` committed but no `.env` is not filled in on startup — the startup script still tries, but the internal route it called no longer exists, so the attempt is logged as "Could not auto-import credentials" and the agent starts without them. Use **Import from Git** on the Credentials tab (or the import endpoint) once, and the credentials persist from then on. See [Credential Management](../credentials/credential-management.md).
+
+## Why didn't my MCP server pick up a credential I just changed?
+
+Because `.mcp.json` is rendered once, at agent start, and never overwrites a server that is already there. On start, Trinity adds each server from `.mcp.json.template` that is missing from `.mcp.json`, filling `${VAR}` placeholders from `.env`; a server already present — rendered on an earlier start, or edited by you — is left exactly as it is. So rotating a value in `.env` does not reach an MCP server that was already rendered, even after a restart. Inject an updated `.mcp.json` directly, or remove that server's entry and restart the agent. A server whose placeholders have no value is withheld rather than written blank, and the agent's logs say why. See [Credential Management](../credentials/credential-management.md#credential-pattern-in-the-agent).
 
 ## What kinds of credential files can I inject into an agent?
 
@@ -38,6 +42,10 @@ Yes. Binary credential files — certificates, keystores, service-account bundle
 
 Not today. Trinity ships a small OAuth helper API for those four providers that reports which ones are configured (from client IDs and secrets set as backend environment variables) and builds the provider's authorization URL, but it does not complete the exchange: there is no callback handler and no OAuth button on the Credentials tab, so approving access at the provider never turns into a stored token. Obtain the provider token yourself and add it to the agent as a `KEY=VALUE` credential; the agent's `.mcp.json.template` picks it up through `${VAR}` placeholders. The one complete OAuth flow is the platform-level Slack workspace install (**Install to Workspace** under Slack Integration settings), which is separate from per-agent credentials. See [OAuth Credentials](../credentials/oauth-credentials.md).
 
+## Why does a Google sign-in link from my agent appear unredacted in chat?
+
+Because it is meant for you. Some tools an agent runs sign in to Google by printing a consent link and waiting on a local `127.0.0.1` port for the redirect. Trinity's credential sanitizer, which scrubs secrets from replies, logs and execution records, keeps a strictly shaped Google consent link intact so you can open it and approve access. A link that carries a known secret pattern or one of the agent's own credential values is still redacted, as are OAuth callbacks and tokens. The link's `state` value belongs to your sign-in, so don't share it in a public channel. See [OAuth Credentials](../credentials/oauth-credentials.md#google-sign-in-links-from-inside-an-agent).
+
 ## Can I add my Claude key without SSH-ing to the server?
 
 Yes — no terminal and no `.env` edit is needed for any platform key. On a new install the first-run setup's **Connect Claude** step takes either a Claude subscription token (from `claude setup-token`, prefix `sk-ant-oat01-`) or an Anthropic API key (`sk-ant-api…`), and pasting one into the other's tab is caught before anything is sent. Later, or on an install that skipped it, use **Settings → Integrations → API Keys**: **Check & save** tests the key with its provider before it is stored, and **Remove** deletes it (the `.env` value, if any, applies again). A key saved in Settings wins over the same key in `.env` and takes effect without a restart. To get back to a skipped setup step, use **Settings → General → First-run setup → Re-run setup**. See [Platform Keys](../credentials/platform-keys.md).
@@ -52,7 +60,7 @@ Yes. The first-run **Connect Claude** step checks the token with Anthropic befor
 
 ## Why was my Gemini key refused, and which agents get it?
 
-A Gemini key must start with `AIza` — a key without that prefix is refused at **Check & save**. Once saved (**Settings → Integrations → API Keys**, or the **Other keys** step of first-run setup) it powers voice conversations, Telegram voice-note transcription and generated agent avatars; voice switches on without a restart, and avatars are generated with **Generate Default Avatars** under **Settings → General** or from an agent's avatar menu. An agent created on the Gemini runtime receives the key as `GEMINI_API_KEY`. `GEMINI_API_KEY` (or `GOOGLE_API_KEY`) in the server's `.env` remains the fallback when nothing is saved in Settings. See [Platform Keys](../credentials/platform-keys.md#gemini).
+A Gemini key must start with `AIza` or `AQ.` (Google AI Studio issues both kinds) — a key with neither prefix is refused at **Check & save**, before Trinity checks it with Google. Once saved (**Settings → Integrations → API Keys**, or the **Other keys** step of first-run setup) it powers voice conversations, Telegram voice-note transcription and generated agent avatars; voice switches on without a restart, and avatars are generated with **Generate Default Avatars** under **Settings → General** or from an agent's avatar menu. An agent created on the Gemini runtime receives the key as `GEMINI_API_KEY`. `GEMINI_API_KEY` (or `GOOGLE_API_KEY`) in the server's `.env` remains the fallback when nothing is saved in Settings. See [Platform Keys](../credentials/platform-keys.md#gemini).
 
 ## What are subscription credentials?
 
@@ -94,13 +102,17 @@ The rate-limited badge clears as soon as a provider probe says the subscription 
 
 No. Re-registering a subscription with a fresh token pushes the new token to every running agent on that subscription via hot-reload, and reassigning an agent to a different subscription swaps the token in place the same way. Turns already in flight finish on the old token; the next turn picks up the new one. Container recreation is only needed for image, template, or auth-*mode* changes (such as switching between subscription and API key), and on older agent base images that lack the hot-reload endpoint the switch falls back to a recreate. See [Subscription Credentials](../credentials/subscription-credentials.md).
 
+## I put an Anthropic API key in my agent's .env, so why does it still use the subscription?
+
+On purpose. On a Claude-runtime agent authenticated by a subscription, Trinity strips `ANTHROPIC_API_KEY` and `ANTHROPIC_AUTH_TOKEN` from each run's environment. Claude prefers an API key over a subscription token, so a stale key left in `.env` would silently authenticate every run, and its failures would be blamed on healthy subscriptions. To move an agent onto an API key, clear its subscription instead. The owner-only `GET /api/agents/{name}/credentials/env-drift` lists the suppressed keys by name, flagged `suppressed_for_spawn`. See [Subscription Credentials](../credentials/subscription-credentials.md#limitations).
+
 ## Why is the Register Subscription button disabled in Settings?
 
 The subscription feature requires `CREDENTIAL_ENCRYPTION_KEY` to be set in the platform's `.env` — without it, tokens can't be encrypted, so a warning banner appears on the Settings page, the Register button is disabled, and the API returns 503. The key is auto-generated by `start.sh` on fresh deployments, so this usually means an upgraded or hand-configured install is missing it. You can check with `GET /api/subscriptions/encryption-status`, then add the key and restart the backend. See [Subscription Credentials](../credentials/subscription-credentials.md).
 
 ## Should I use a per-agent GitHub PAT or the platform-wide one?
 
-Trinity stores one platform-wide GitHub PAT (**Settings → Integrations → API Keys**, or the **Other keys** step of first-run setup) that every agent inherits by default — its reach is whatever the token's owner can reach on GitHub. Set a per-agent PAT override when an agent needs to push to a repository the platform token can't see, or when you want to limit blast radius by giving each agent its own narrowly-scoped token. Per-agent PATs are validated when you set them and stored encrypted; clearing the override reverts the agent to the platform PAT. When the platform PAT changes, Trinity propagates the new token to every running agent within seconds — agents with their own override are skipped. See [GitHub PAT Setup](../integrations/github-pat-setup.md).
+Trinity stores one platform-wide GitHub PAT (**Settings → Integrations → API Keys**, or the **Other keys** step of first-run setup) that every agent inherits by default — its reach is whatever the token's owner can reach on GitHub. Set a per-agent PAT override when an agent needs to push to a repository the platform token can't see, or when you want to limit blast radius by giving each agent its own narrowly-scoped token. Per-agent PATs are validated when you set them and stored encrypted; clearing the override reverts the agent to the platform PAT. When the platform PAT changes, Trinity propagates the new token to every running agent within seconds — agents with their own override are skipped. Over MCP, `get_agent_github_pat_status(agent_name)` reports whether an agent uses its own token or the global one (never the value), and `set_agent_github_pat(agent_name, pat)` sets an override, or clears it with an empty string. A running agent gets the new token without a restart, and the response's `note` says whether live delivery completed. See [GitHub PAT Setup](../integrations/github-pat-setup.md).
 
 ## Can I use my own GitHub token instead of the platform-wide one?
 

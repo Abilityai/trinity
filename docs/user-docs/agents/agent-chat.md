@@ -2,7 +2,7 @@
 
 The Chat tab in Agent Detail provides a bubble UI for conversing with agents, with persistent history and real-time status updates.
 
-This tab is **stateless**: each message starts fresh, replaying the visible transcript as text. It is labelled as such — *Stateless chat — each message starts fresh.* — with a **Continue in Workspace →** link beside it that opens the Workspace in its own browser tab.
+This tab is **stateless**: each message starts fresh, replaying the last 20 messages of the visible transcript as text. It is labelled as such — *Stateless chat — each message starts fresh.* — with a **Continue in Workspace →** link beside it that opens the Workspace in its own browser tab.
 
 For a conversation where the agent keeps its working memory between turns — tool results, mid-task state, reasoning — use the [Workspace](../sharing-and-access/workspace.md) instead. The Session-mode toggle that used to live here has been retired in its favour, and `?tab=session` links now redirect there.
 
@@ -13,7 +13,7 @@ The tab is **text only**. Voice lives in the Workspace: the **Talk** button in t
 ## Concepts
 
 - **Chat Session** -- A conversation thread stored in the database. Each agent can have multiple sessions.
-- **Dynamic Thinking Status** -- Real-time labels showing what the agent is doing (replaces static "Thinking..."). Maps tool names to human-readable labels with 500ms anti-flicker.
+- **Dynamic Thinking Status** -- Real-time labels showing what the agent is doing (replaces static "Thinking..."). Each tool call becomes a short line such as *Reading …/src/app.py...* or *Running pytest -q...*; each label stays up at least 500 ms so fast tool calls don't flicker.
 - **Playbook Autocomplete** -- Type `/` in the chat input to trigger a dropdown of available playbooks. Ghost text shows command syntax with argument hints.
 - **Continue as Chat** -- Resume a completed or failed execution as an interactive chat, preserving the full context (150K+ tokens) via Claude Code's `--resume` flag.
 
@@ -23,9 +23,11 @@ The tab is **text only**. Voice lives in the Workspace: the **Talk** button in t
 2. Select an existing session from the dropdown or click **New Chat**.
 3. Optionally pick a model in the **Default model** dropdown above the input; empty means the agent's default. The choice is remembered in this browser.
 4. Type a message and press Enter.
-5. The agent processes the message -- the status label updates in real-time (e.g., "Reading files...", "Running tests...").
+5. The agent processes the message -- the status label updates in real-time (e.g., *Reading …/src/app.py...*, *Running pytest -q...*, *Processing results...*).
 6. The response appears as a chat bubble.
 7. Type `/` to autocomplete playbook commands.
+
+The agent must be running; a stopped agent shows **Agent Not Running** in place of the input.
 
 ### Stopping a turn
 
@@ -63,6 +65,8 @@ Oversized files are rejected client-side with an alert. Files that exceed the to
 
 ### API Endpoints
 
+The Chat tab itself sends each message as an asynchronous `POST /api/agents/{name}/task` with `save_to_session: true` (the transcript rides along as text), then follows the execution's stream and polls it for the result. `POST /chat` is the programmatic route that `chat_with_agent` and the `trinity` CLI use — see [Chat API](../api-reference/chat-api.md).
+
 | Endpoint | Method | Description |
 |----------|--------|-------------|
 | `/api/agents/{name}/chat` | POST | Send chat message (stream-json output). The response's `execution.compaction` reports an auto-compaction during the turn, or is `null` |
@@ -70,12 +74,13 @@ Oversized files are rejected client-side with an alert. Files that exceed the to
 | `/api/agents/{name}/chat/sessions/{id}` | GET | Get session with messages |
 | `/api/agents/{name}/chat/sessions/{id}/close` | POST | Close session |
 | `/api/agents/{name}/chat/history/persistent` | GET | Get persistent history |
-| `/api/agents/{name}/chat/history` | DELETE | Reset session |
+| `/api/agents/{name}/chat/history` | GET | The agent's current `/chat` conversation |
+| `/api/agents/{name}/chat/history` | DELETE | Reset the `/chat` conversation so the next turn starts fresh (owner or admin) |
 | `/api/agents/{name}/executions/{id}/terminate` | POST | Stop an in-flight turn (what **Stop** calls) |
 
 ### MCP Tools
 
-- `chat_with_agent(agent_name, message)` -- Send a message to an agent. In its default sequential mode it continues the agent's **own** chat session, shared by every caller of that agent. It never picks up a scheduled or other headless run's session. The session starts fresh after a model change or a history reset (`DELETE /api/agents/{name}/chat/history`). A turn that crosses the context limit can pay a one-off auto-compaction, which is recorded as `compact_metadata` (read it with `get_execution_result`) and does not mean the agent is degraded.
+- `chat_with_agent(agent_name, message)` -- Send a message to an agent. In its default sequential mode it continues the agent's **own** chat session, shared by every caller of that agent. It never picks up a scheduled or other headless run's session — on Claude Code and Gemini agents alike; if that session has gone missing, the turn retries once from a fresh start. The session starts fresh after a model change or a history reset (`DELETE /api/agents/{name}/chat/history`). A turn that crosses the context limit can pay a one-off auto-compaction, which is recorded as `compact_metadata` (read it with `get_execution_result`) and does not mean the agent is degraded. A turn whose run ends in an error is a failed execution with the real error, never a reply whose text is the error message. On an agent in the experimental pull-mode pilot, each caller gets their own conversation instead of the shared one — see [Chat API → Pull-mode pilot agents](../api-reference/chat-api.md#pull-mode-pilot-agents).
 - `get_chat_history(agent_name)` -- Retrieve chat history for an agent.
 
 ## See Also

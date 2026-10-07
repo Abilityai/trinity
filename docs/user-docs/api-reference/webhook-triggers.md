@@ -19,7 +19,13 @@ Expose a public URL that fires an agent schedule from an external system (CI/CD,
 | `/api/agents/{name}/schedules/{id}/webhook/secret` | DELETE | JWT | Disable signature auth (URL stays live, unauthenticated) |
 | `/api/webhooks/{token}` | POST | Token (in URL) | Public trigger — returns `202 Accepted`; optional `{"context": "..."}` body (≤4000 chars) is appended to the schedule message |
 
-**Rate limits.** The public trigger allows 10 calls per 60 seconds per token (`WEBHOOK_RATE_LIMIT`), and 60 calls per 60 seconds per client IP before the token is even looked up (`WEBHOOK_IP_RATE_LIMIT`). Over either limit the call returns `429`. Both limits fail open if Redis is unavailable.
+**Request body.** The body is optional. It may carry `{"context": "..."}` (up to 4,000 characters). A body larger than 16 KiB (`WEBHOOK_MAX_BODY_BYTES`) is refused with `413`, and a body that is not a valid request returns `422`. A revoked, rotated or unknown token returns `404`.
+
+**Duplicate deliveries.** Send an `Idempotency-Key` header when your caller may deliver the same event twice. A repeat with the same key within 24 hours does not fire again: it returns the first result with `X-Idempotent-Replay: true`, or `409` while the first delivery is still being processed. A call without the header fires a new run every time, so a plain "ping to trigger" is never swallowed.
+
+**Chain depth.** A webhook fire starts a new run with no parent, so it never counts toward an agent-to-agent chain-depth limit.
+
+**Rate limits.** The public trigger allows 10 calls per 60 seconds per token (`WEBHOOK_RATE_LIMIT`), and 60 calls per 60 seconds per client IP before the token is even looked up (`WEBHOOK_IP_RATE_LIMIT`). Over either limit the call returns `429`. Both limits fall back to a bounded in-process limiter if Redis is unavailable.
 
 ### Configuring a webhook from the UI
 
@@ -54,11 +60,11 @@ All webhook calls are audit-logged (caller IP, schedule, agent). Signature auth 
 
 **Creation precondition:** creating a schedule (`POST /api/agents/{name}/schedules`) and generating a webhook token both require the target agent to **exist and be live** (not deleted). A nonexistent or deleted agent returns **404 Not Found**. A caller without access to the agent gets **403 Forbidden** from schedule creation, and a uniform **404** from the webhook routes (the same answer as for an agent that does not exist). This guarantees a webhook URL always points at a schedule of a live agent — you cannot mint a token that would later 404 at trigger time.
 
-### Internal Execution (no auth -- internal network only)
+### Internal Execution (shared secret -- internal network only)
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `/api/internal/execute-task` | POST | Execute task (used by scheduler, supports async_mode) |
+| `/api/internal/execute-task` | POST | Execute task (used by the scheduler, supports `async_mode`). Accepts an `Idempotency-Key` header; the scheduler sends `sched:<execution_id>` |
 
 ### Slack Events
 
@@ -71,9 +77,12 @@ All webhook calls are audit-logged (caller IP, schedule, agent). Signature auth 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
 | `/api/events` | POST | Emit event (triggers subscriptions) |
+| `/api/events` | GET | List emitted events |
 | `/api/agents/{name}/emit-event` | POST | Emit for specific agent |
 
-**Note:** The `/api/internal/*` endpoints are not authenticated and should only be accessible within the Docker network. They are used by the scheduler service and agent containers.
+An agent that emits an event with at least one matching subscription passes its chain depth on to the runs the event starts; past the limit the emit is refused with `403 inter_agent_depth_exceeded`. See [Event Subscriptions](../collaboration/event-subscriptions.md).
+
+**Note:** The `/api/internal/*` endpoints take no JWT. They authenticate with a shared secret in the `X-Internal-Secret` header (`INTERNAL_API_SECRET`, falling back to `SECRET_KEY` when unset) and should only be reachable within the Docker network. They are used by the scheduler service and agent containers.
 
 ## See Also
 

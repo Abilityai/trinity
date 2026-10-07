@@ -12,7 +12,7 @@ Agent-defined dashboards via `dashboard.yaml` with 11 widget types, historical t
 - **Historical Tracking** -- Widget values are stored in the `agent_dashboard_values` table over time, enabling trend analysis.
 - **Sparklines** -- Small inline charts rendered next to metrics showing value trends over time.
 - **Trend Indicators** -- Up, down, or stable arrows with percentage change calculated from historical data.
-- **Platform Metrics** -- An auto-injected section (not defined in `dashboard.yaml`) showing Tasks 24h, Success Rate, Cost, and Health.
+- **Platform Metrics** -- An auto-injected section (not defined in `dashboard.yaml`) showing Tasks (24h), Success Rate, Cost (24h), Health, and — while executions are in flight — Running.
 - **Declared metrics** -- Business numbers (revenue, close rate, cycles completed) that the agent declares in the `metrics:` block of its `template.yaml` and records with the `record_metrics` MCP tool. Trinity stores each observation as a point and shows the latest value with a freshness verdict. See [Declared Metrics](#declared-metrics).
 - **Objectives** -- Targets for declared metrics, set in objective files in the agent's canon. Trinity joins each target to the metric's current value and reports the gap. See [Objectives](#objectives-target-vs-actual).
 
@@ -65,7 +65,7 @@ sections:                       # required, at least one
 
 The eleven types above are the closed set. A widget of any other type — or one missing a required field — is stripped by the agent server before the dashboard reaches the UI and listed in the Dashboard tab's *widgets skipped due to validation errors* banner; the rest of the dashboard still renders. The agent's compatibility report names the offending type. Only a missing `title` or an empty `sections` list makes the whole dashboard invalid.
 
-**Sparkline history is keyed by `id`.** Trinity records each `metric`, `progress`, and `status` widget's value on every fetch; `metric` and `progress` widgets draw a sparkline once they have more than one point. A widget with an explicit `id` keeps its history when you reorder or insert widgets; one without an `id` is keyed by position (`s0_w1`), so moving it starts a new series. Trend arrows compare the first and second halves of the window (more than ±5% is up or down).
+**Sparkline history is keyed by `id`.** Trinity records each `metric`, `progress`, and `status` widget's value whenever `dashboard.yaml` changes (captured on the next dashboard read, so an unchanged file adds no points); `metric` and `progress` widgets draw a sparkline once they have more than one point. A widget with an explicit `id` keeps its history when you reorder or insert widgets; one without an `id` is keyed by position (`s0_w1`), so moving it starts a new series. Trend arrows compare the first and second halves of the window (more than ±5% is up or down).
 
 ## Declared Metrics
 
@@ -102,7 +102,9 @@ A `metric`, `status`, or `progress` widget in `dashboard.yaml` can name a declar
   value: 0             # placeholder for agents on an older base image
 ```
 
-Trinity fills the widget's value, status color, and sparkline from the recorded points on every read, and marks it stale by the same rule as the tiles. A bound widget whose name is not declared, or whose metric was retired, shows the reason instead of a number. Agents on a base image built before this feature still require a `value:`, so keep a placeholder until the image is rebuilt; Trinity overwrites it whenever the binding resolves, and drops it while the metric store is unavailable, so the placeholder is never shown as a real number.
+Trinity fills the widget's value, status color, and sparkline from the recorded points on every read, and marks it stale by the same rule as the tiles. A bound widget whose name is not declared, or whose metric was retired, shows the reason instead of a number.
+
+A bound widget does not need the fields the binding fills: `value` for `metric` and `progress`, and `value` plus `color` for `status`. It still needs its `label`. The agent server and the compatibility report apply the same rule, so a bound widget without a `value` is neither stripped nor reported as missing a field — even when the name it binds is undeclared. Agents on a base image built before this feature still require a `value:` (and a status `color:`), so keep a placeholder until the image is rebuilt; Trinity overwrites it whenever the binding resolves, and drops it while the metric store is unavailable, so the placeholder is never shown as a real number. Agents scaffolded with the `create-agent` plugin write these placeholders by default.
 
 A bound `metric` tile whose metric declares `direction: up_good` or `down_good` and a `warning_threshold` or `critical_threshold` shows a **Critical** or **Warning** badge when its value crosses one (hover it for the threshold). A bound widget's trend arrow and sparkline follow the metric's `direction`: a rising `down_good` cost is red, and a metric with no `direction` declared shows a neutral grey arrow. Any `trend:` or `trend_value:` written in the file is replaced by the computed trend once the binding resolves.
 
@@ -185,7 +187,7 @@ The agent's compatibility report also flags a `dims:` selector that can never ma
 
 ### Retention and limits
 
-Recorded points are kept for `metrics_retention_days` (default 365; `0` keeps them forever). Each agent may record up to `metrics_daily_point_cap` points per UTC day (default 100,000; `0` is unlimited), and up to 1,000 points per call. Both are operator settings (`PUT /api/settings/ops/config`); until a value is saved, `METRICS_RETENTION_DAYS` and `METRICS_DAILY_POINT_CAP` in `.env` supply it. See [Monitoring → Retention Sweeps](../operations/monitoring.md#retention-sweeps).
+Recorded points are kept for `metrics_retention_days` (default 365; `0` keeps them forever). Each agent may record up to `metrics_daily_point_cap` points per UTC day (default 100,000; `0` is unlimited), and up to 1,000 points per call. Both are operator settings (`PUT /api/settings/ops/config`); until a value is saved, `METRICS_RETENTION_DAYS` and `METRICS_DAILY_POINT_CAP` in `.env` supply it. `GET /api/settings/retention` reports the effective values and where each comes from; some editions also show them as rows in **Settings → Retention**. See [Monitoring → Retention Sweeps](../operations/monitoring.md#retention-sweeps).
 
 ### Retired: `metrics.json`
 
@@ -222,7 +224,7 @@ The `dashboard.yaml` widgets above are one way an agent renders its own state. K
 
 ![The Brain Orb — Cornelius's Self-Rendering Mind, a 3D knowledge graph woven from the agent's own notes, edges, and activity](../../screenshots/brain-orb.png)
 
-The Brain Orb is a **capability-gated** surface: it appears only for agents that ship the `brain-orb` capability (Cornelius-class agents) and only when the platform Brain Orb flag is enabled — it is **off by default**. The agent owns generation and scope state; Trinity reads and renders it.
+The Brain Orb is a **capability-gated** surface: it appears only for agents that ship the `brain-orb` capability (Cornelius-class agents) and only when the platform Brain Orb flag is enabled — it is **off by default**. An admin turns it on under **Settings → General → Brain Orb** (or `BRAIN_ORB_ENABLED`); a saved setting overrides the environment variable and applies without a restart. The agent owns generation and scope state; Trinity reads and renders it.
 
 ## For Agents
 
@@ -230,14 +232,14 @@ Agents control their dashboard entirely by writing to `dashboard.yaml` in their 
 
 ### MCP Tools
 
-These tools act on the calling agent's own metrics. An agent-scoped key can read and record only its own.
+These tools act on the calling agent's own metrics. An agent records only its own points. It can read another agent's metrics with `get_metrics(agent=...)` only while it holds a permission grant on that agent — the same grant `chat_with_agent` uses.
 
 | Tool | Description |
 |------|-------------|
-| `record_metrics(points, execution_id?)` | Record up to 1,000 points (`{metric, value, ts?, dims?}`) against declared metrics. A point's identity is `(metric, ts, dims)`: re-sending the same value deduplicates, and a different value at the same identity corrects the stored point in place (reported as `corrected`). Pass `execution_id` so a re-delivered turn replays instead of recording twice. Never throws — refusals come back with a reason code per point |
+| `record_metrics(points, execution_id?)` | Record up to 1,000 points (`{metric, value, ts?, dims?}`) against declared metrics. A point's identity is `(metric, ts, dims)`: re-sending the same value deduplicates, and a different value at the same identity corrects the stored point in place (reported as `corrected`). Pass `execution_id` so a re-delivered turn replays instead of recording twice; an optional `idempotency_key` makes a re-sent identical batch return the first result. Never throws — refusals come back with a reason code per point |
 | `refresh_metric_definitions()` | Re-read `template.yaml` and reconcile the registry after you change `metrics:`. Needs the agent running |
-| `get_metrics(metric?, window?, since?, until?)` | Your declared metrics with the latest value, freshness, and a bounded series (up to 120 buckets each). Name one `metric` for its raw points, newest first |
-| `get_objectives()` | Your objectives joined to your metrics: target, actual, freshness, and gap. Use it instead of computing a gap from `get_metrics` |
+| `get_metrics(agent?, metric?, window?, since?, until?, include_retired?)` | Declared metrics with the latest value, freshness, and a bounded series (up to 120 buckets each). Name one `metric` for its raw points, newest first. `agent` reads another agent's metrics (needs a permission grant on it; otherwise refused, not retryable) |
+| `get_objectives()` | Your objectives joined to your metrics: target, actual, freshness, and gap. Use it instead of computing a gap from `get_metrics`. A metric you do not declare yourself can still get an actual when exactly one agent you hold a grant on serves it |
 
 ### API
 
@@ -245,9 +247,9 @@ These tools act on the calling agent's own metrics. An agent-scoped key can read
 |----------|--------|-------------|
 | `/api/agent-dashboard/{name}` | GET | Get dashboard data, enriched with history and platform metrics |
 | `/api/agent-dashboard/{name}/exists` | GET | What the Dashboard tab would show: `has_dashboard` (a cached `dashboard.yaml`) and `has_declared_metrics`. No container call, so it answers for a stopped agent |
-| `/api/agents/{name}/metrics` | GET | Declared metrics with latest values, freshness, and series. `window` = `auto`\|`24h`\|`7d`\|`30d`\|`90d`, or `since`/`until`; `metric` for one metric's raw points; `include_retired`. An undeclared `metric` is a `422 metric_undeclared` |
+| `/api/agents/{name}/metrics` | GET | Declared metrics with latest values, freshness, and series. `window` = `auto`\|`24h`\|`7d`\|`30d`\|`90d`, or `since`/`until`; `metric` for one metric's raw points; `include_retired`. An undeclared `metric` is a `422 metric_undeclared`. An agent key reading another agent needs a permission grant on it (`403` otherwise) |
 | `/api/agents/{name}/metrics/points` | POST | Record a batch of points (what `record_metrics` calls). Accepts `Idempotency-Key`. `422` lists a reason per bad point; `429` on the per-minute rate or the daily cap |
-| `/api/agents/{name}/metrics/definitions` | GET | The declared-metric registry as Trinity reconciled it (`include_retired` for retired names) |
+| `/api/agents/{name}/metrics/definitions` | GET | The declared-metric registry as Trinity reconciled it (`include_retired` for retired names). Same grant rule as `/metrics` |
 | `/api/agents/{name}/metrics/definitions/refresh` | POST | Re-read `template.yaml` into the registry. `409` if the agent is stopped; `503` leaves the registry unchanged if the file cannot be read |
 | `/api/agents/{name}/objectives` | GET | Objectives joined to metrics: target, actual, freshness, gap, and findings |
 
@@ -264,7 +266,7 @@ Full schemas: [Backend API Docs](http://localhost:8000/docs).
 ## Limitations
 
 - A metric's `type` is frozen once points exist under its name. To change the shape, rename the metric.
-- Metric and objective reads are self-scoped for agents: an agent cannot read another agent's metrics.
+- An agent reads another agent's metrics only through a permission grant on it, one agent per call. Cross-agent reads count against the reader's rate budget and are audited. `get_objectives` has no `agent` parameter: an agent reads only its own objectives.
 - Staleness needs a declared `cadence`. Without one, Trinity cannot tell you that a number has gone quiet.
 - Objectives are read from the running container, so they are unavailable while the agent is stopped. The metric tiles are not.
 

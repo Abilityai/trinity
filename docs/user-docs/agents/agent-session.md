@@ -25,7 +25,7 @@ This page covers the behavior of a resuming conversation — what carries over, 
 
 A resumed turn keeps the agent's working memory. A stateless turn keeps only the words. That is why long, multi-step work belongs in the Workspace: an agent that read three files in turn two still has them in turn six, instead of re-reading them.
 
-Turns on one chat are **serialized**. Two simultaneous resumes of the same session could corrupt it, so a second message while one is in flight is refused rather than queued. Start another chat if you need parallel work against the same agent.
+Turns on one chat are **serialized**. Two simultaneous resumes of the same session could corrupt it, so a second message while one is in flight waits up to 30 seconds for the first to finish and is then refused with a retry hint (`429`, `retry_after: 5` on the session API) rather than queued. Start another chat if you need parallel work against the same agent.
 
 If the underlying session file has gone missing, the platform recovers automatically: it retries once as a cold turn, re-attaching the conversation history. You get an answer; the agent has the transcript but not its prior working state.
 
@@ -104,6 +104,8 @@ The session API is unchanged and remains available; it simply has no dedicated U
 | `/api/agents/{name}/sessions/{id}/reset` | POST | Clear the cached session so the next turn is cold (the visible log stays) |
 | `/api/agents/{name}/sessions/{id}` | DELETE | Delete the session |
 | `/api/agents/{name}/guardrails` | GET / PUT | Read or change `max_turns_task`, `max_turns_chat`, `execution_timeout_sec` |
+
+On an agent in the experimental pull-mode pilot, a session turn waits on the durable queue for a worker to claim it; a turn no worker claims in time fails as a capacity error and the message route answers `429` (see [Chat API → Pull-mode pilot agents](../api-reference/chat-api.md#pull-mode-pilot-agents)).
 
 All session endpoints return 404 when the `session_tab_enabled` feature flag is off. The Workspace does **not** consult that flag — it has its own chat surface and its own routes (see [Workspace → For Agents](../sharing-and-access/workspace.md#for-agents)); its **Reset** is `POST /api/enterprise/client-portal/agents/{name}/sessions/main/reset`.
 

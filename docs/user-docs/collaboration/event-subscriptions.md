@@ -7,7 +7,7 @@ Lightweight pub/sub system for inter-agent event pipelines. Agents emit named ev
 - **Event** -- A named occurrence emitted by an agent with a structured JSON payload. Stored in the `agent_events` table.
 - **Subscription** -- A rule that says "when agent X emits event type Y, send agent Z an async task with message template M". Stored in the `agent_event_subscriptions` table.
 - **Message Template** -- The `target_message` of a subscription. Supports `{{payload.field}}` interpolation. The subscriber's task message is built from the event payload.
-- **Permission-Gated** -- Uses existing `agent_permissions`. The subscribing agent must have permission to call the source agent.
+- **Permission-Gated** -- Uses existing `agent_permissions`. The subscribing agent must have permission to call the source agent. Trinity checks this when the subscription is created and again on every delivery, so withdrawing the permission stops deliveries at the next event. The subscription is kept, and granting the permission again resumes it. An agent subscribing to its own events needs no permission (except for the reserved `agent.task.*` namespace, below).
 
 ## How It Works
 
@@ -17,6 +17,13 @@ Lightweight pub/sub system for inter-agent event pipelines. Agents emit named ev
 4. The task message is built from the subscription's template with payload fields interpolated. Each interpolated value is wrapped in `⟦ ⟧`, credential-sanitized and capped at 4000 characters, and the message gets a line telling the subscriber that the marked text is data, not instructions. Event payloads are limited to 64 KiB.
 5. Events are persisted and visible via API.
 6. WebSocket broadcast provides real-time event visibility.
+
+### Delivery limits
+
+Two limits stop an event chain from running away:
+
+- **Chain depth.** When an agent emits an event that matches a subscription, the subscriber's task counts as one more hop in the agent-to-agent call chain. Past the chain-depth limit (default 8) the emit is refused with `403` `inter_agent_depth_exceeded` before anything is stored, and `emit_event` returns it as a `retryable: false` result. See [Agent Network → Chain-Depth Limit](agent-network.md#concepts).
+- **Hourly dispatch cap.** Trinity counts dispatches from one source agent to one subscriber agent per hour, across every subscription between the two. Past the cap (default 120, operator setting `event_dispatch_max_fires_per_hour`, 1–10,000) further dispatches from that source are skipped until the hour resets. The first skip in each hour raises one high-priority alert on the subscriber, saying a subscription may be looping. The event itself is still recorded. If Redis is unavailable, the cap is not enforced.
 
 ## Task-Completion Events (system-emitted)
 
@@ -82,9 +89,9 @@ An ordinary turn that already answered inline is never reported a second time. E
 | Tool | Description |
 |------|-------------|
 | `emit_event(event_type, payload)` | Emit a named event with data |
-| `subscribe_to_event(source_agent, event_type, target_message)` | Create a subscription |
-| `list_event_subscriptions(agent_name)` | List subscriptions |
-| `delete_event_subscription(subscription_id)` | Remove a subscription |
+| `subscribe_to_event(source_agent, event_type, target_message)` | Create a subscription. Needs an agent-scoped key: the caller is the subscriber |
+| `list_event_subscriptions(direction?)` | List the calling agent's subscriptions: `subscriber` (events it listens for), `source` (others listening to it), or `both` (default) |
+| `delete_event_subscription(subscription_id)` | Remove a subscription (the subscribing agent's owner only) |
 
 ### API Endpoints
 

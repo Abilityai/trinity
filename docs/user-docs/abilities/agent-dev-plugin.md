@@ -1,6 +1,6 @@
 # agent-dev Plugin
 
-Development tools for extending existing agents — skills, memory systems, git-backed state, a GitHub Issues development cycle, cross-actor project management, long-running pipelines, multi-agent orchestration, a shared canonical-data layer, and fleet analysis and migration. Thirty skills in v1.16.5.
+Development tools for extending existing agents — skills, memory systems, git-backed state, a GitHub Issues development cycle, cross-actor project management, long-running pipelines, multi-agent orchestration, a shared canonical-data layer, and fleet analysis and migration. Thirty skills in v1.20.0.
 
 Two kinds of skill live here. **Installers** (`add-*`) put a capability into an agent. **Runtime skills** are what the agent then runs — the nine backlog-workflow skills and the five `project-*` skills. Each runtime skill is authored once in this plugin; the installers copy it in at install time (they embed nothing of their own), and the same files are mirrored into the community skills catalog Trinity ships with (`trinity-skills`), so a deployed agent can also receive them by [assignment](../automation/skills-and-playbooks.md) without running the installer.
 
@@ -16,8 +16,8 @@ Two kinds of skill live here. **Installers** (`add-*`) put a capability into an 
 
 | Skill | Description |
 |-------|-------------|
-| `/agent-dev:create-playbook` | Create a new skill/playbook for the agent |
-| `/agent-dev:adjust-playbook` | Modify an existing skill/playbook |
+| `/agent-dev:create-playbook` | Create a new skill/playbook for the agent — optionally self-improving under a propose-only contract |
+| `/agent-dev:adjust-playbook` | Modify an existing skill/playbook; `--review-proposals` approves a self-improving skill's pending proposals |
 | `/agent-dev:add-memory` | Add a memory system (file-index, brain, json-state, workspace) |
 | `/agent-dev:add-git-sync` | Add git-as-state hooks — auto-commit on stop, rebase on session start |
 | `/agent-dev:add-backlog` | Install the full GitHub Issues development cycle into the agent — copies the nine standalone workflow skills below |
@@ -36,12 +36,12 @@ Two kinds of skill live here. **Installers** (`add-*`) put a capability into an 
 | `/agent-dev:add-pipeline-stage` | Append a stage to an existing pipeline definition |
 | `/agent-dev:validate-pipeline` | Lint a pipeline.yaml — schema, DAG acyclicity, referenced skills |
 | `/agent-dev:add-orchestrator` | Make the agent a system-aware orchestrator — discover the fleet, compose systems, route and fan out work; `--check` reports installed-vs-bundled drift before you overwrite |
-| `/agent-dev:add-canon` | Give the agent a shared canonical-data layer — a fleet-wide git repo with publish, consume, reconcile, and doctor skills |
+| `/agent-dev:add-canon` | Give the agent a shared canonical-data layer — a fleet-wide git repo with publish, consume, reconcile, and doctor skills, plus a root `projects/` zone for shared projects |
 | `/agent-dev:add-canon-lint` | Install deterministic (no-LLM) consistency linting into that canon repo, with a CI workflow |
 | `/agent-dev:add-project-management` | Install cross-actor project management — GitHub Issues as the source of truth, an approval-ready completion lattice, and a project steward. Writes `PROJECT_STANDARD.md` and copies the five `project-*` skills below |
-| `/agent-dev:project-init` | Create or adopt a long-term managed project — a GitHub epic with idempotent labels and a `project_files/<slug>/` workspace stub. Materializes a missing `PROJECT_STANDARD.md` from its own template, so it works when assigned from the library without the installer |
+| `/agent-dev:project-init` | Create or adopt a long-term managed project — a GitHub epic with idempotent labels and a `project_files/<slug>/` workspace stub. `--canon` puts the workspace in the fleet's canon repo as a shared project; `--internal` tracks the tasks as files in the project folder instead of GitHub Issues. Materializes a missing `PROJECT_STANDARD.md` from its own template, so it works when assigned from the library without the installer |
 | `/agent-dev:project-task` | Create a task issue in the uniform format (Objective / Definition of Done / Context / Validation) and add it to the epic's checklist — the only sanctioned task-creation path; `--headless` for crons and other skills |
-| `/agent-dev:project-steward` | Autonomous sweep of every managed project: verify pending-verification claims, dispatch labeled work, escalate stalls, age open loops and draft follow-ups, write the digest. Never asks a human mid-run; ships a default weekday schedule |
+| `/agent-dev:project-steward` | Autonomous sweep of every managed project — GitHub-tracked and internal alike: verify pending-verification claims, dispatch labeled work, escalate stalls, age open loops and draft follow-ups, write the digest. Never asks a human mid-run; ships a default weekday schedule |
 | `/agent-dev:project-reconcile` | Sync a projection adapter (Google Tasks v1 shipped) back into the GitHub Issues registry — idempotent, refuses unkeyed items with a sync-gap alert |
 | `/agent-dev:project-intake` | Headless intake primitive — route actionable items from meetings, email, Slack, or trackers into the registry, deduped by meaning; returns the issue number. Called by other skills and crons, never interactive |
 | `/agent-dev:agent-fleet-analysis` | Audit a directory of agents in any paradigm, score maturity and migration readiness, and emit a PDF report plus an agent-executable work order |
@@ -55,7 +55,14 @@ Five of these are about a *set* of agents rather than one.
 
 **Project management** (`add-project-management`) installs a cross-actor task model on GitHub Issues, with an `open → pending-verification → done` lattice so work isn't marked complete until it's been verified, and a **loop-closure** discipline: no loop closes by silence in either direction. Every run ends by stating what is now true, what is waiting on the operator, and what happens next; work parked on someone the system cannot dispatch to (a client, a vendor, a colleague) is labeled `waiting-on:<actor>`, aged on a 3/7/14-day ladder, listed under **Your open loops** in the digest, and handed back with a drafted follow-up — the agent drafts, the human sends.
 
-The installer asks for the registry repo, the operator, the agent's name, the pending-verification age limit, and a steward cadence; then it renders `PROJECT_STANDARD.md` — the deployer's configuration surface, which all five runtime skills read — and copies `/project-init`, `/project-task`, `/project-steward`, `/project-reconcile`, and `/project-intake` into `.claude/skills/`. Re-running it offers to overwrite, install only what is missing, or upgrade an older standard in place. It governs *cross-actor* work; for a single agent's own dev backlog use `add-backlog` instead. On Trinity the same five skills can be [assigned from the skills library](../automation/skills-and-playbooks.md) — `/project-init` then materializes the standard itself on first run.
+The installer asks for the registry repo, the operator, the agent's name, the pending-verification age limit, and a steward cadence; then it renders `PROJECT_STANDARD.md` — the deployer's configuration surface, which all five runtime skills read — and copies `/project-init`, `/project-task`, `/project-steward`, `/project-reconcile`, and `/project-intake` into `.claude/skills/`. Re-running it offers to overwrite, install only what is missing, or upgrade an older standard in place. It governs *cross-actor* work; for a single agent's own dev backlog use `add-backlog` instead.
+
+A project can live at two visibility levels and use one of two tracking modes. The rules are the same in every combination: same charter (`project.md`), same steward, same intake, same decision ledger.
+
+| Choice | Options |
+|--------|---------|
+| **Where the project lives** | In the managing agent's repo at `project_files/<slug>/` (the default), or as a **shared project** in the fleet's canon repo at `projects/<slug>/` (`/project-init --canon`). Every agent and person on the canon writes the shared `projects/` zone directly; the charter's `owner:` is the steward. The epic records the location, and every project skill reads it from there rather than guessing from the slug |
+| **Where the tasks are tracked** | In GitHub Issues (external, the default), or **internally** as one file per task in the project folder (`tasks/T-NNN.md` plus an append-only `log.md`) with `/project-init --internal`. Internal tracking needs no GitHub access, and it is forced when the standard's registry is `none`. The steward sweeps both kinds in one run | On Trinity the same five skills can be [assigned from the skills library](../automation/skills-and-playbooks.md) — `/project-init` then materializes the standard itself on first run.
 
 **Fleet analysis and migration** (`agent-fleet-analysis`, `agent-fleet-migrate`) are a pair. The first scans agents written in *any* paradigm — Claude Code, n8n workflow exports, LangChain/CrewAI/AutoGen applications, hand-rolled loops — and produces both a human-readable report and a work order an agent can execute. The second carries out that work order into a fresh `fleet-migrated/` tree; your original sources are never mutated, and each migrated agent passes a review gate before the run reports success.
 
@@ -109,7 +116,9 @@ It picks a complexity tier and generates from a bundled template:
 | 2 — Stateful skill | Reads/writes agent state between runs | `stateful-skill` |
 | 3 — Full playbook | Multi-step, scheduled or delegated work | `manual`, `gated`, or `autonomous` — by automation level |
 
-Every generated skill carries a `metadata:` block with a newest-first changelog and a what's-new banner, and — for anything on a schedule — invokes by slash name so the scheduler message stays a bare call. Playbooks are written to be **called**: from a single `/name [args]` line, with inputs declared in `argument-hint`, running only themselves when invoked by another agent. See [Playbook calls](../automation/abilities-marketplace.md#playbook-calls--the-unit-of-inter-agent-work) for the convention, and the `--autonomous` run mode any gated playbook needs before it can go on a cron.
+Every generated skill carries a `metadata:` block with a newest-first changelog and a what's-new banner, and — for anything on a schedule — invokes by slash name so the scheduler message stays a bare call. Playbooks are written to be **called**: from a single `/name [args]` line, with inputs declared in `argument-hint`, running only themselves when invoked by another agent. See [Playbook calls](../automation/abilities-marketplace.md#playbook-calls--the-unit-of-inter-agent-work) for the convention, and the `--autonomous` run mode any gated playbook needs before it can go on a cron. A generated skill that needs a human decision raises it as an ask with the `ask_operator` MCP tool and reads the outcome with `get_my_ask`; only a person can answer an ask.
+
+**Self-improving skills (optional).** The wizard asks whether the skill should improve itself. If you opt in, it asks for a counterweight (the mission written as a tension, so the skill cannot optimise one goal at the expense of another), the constraints to lock, and 3–5 fixed scenarios. The generated skill is **propose-only**: a run logs its standing metrics and writes proposals with a check-back to a `self-improvement.md` ledger, and never applies its own proposal. A later run, or `/agent-dev:adjust-playbook --review-proposals`, applies a proposal under rate limits after a conflict check and a replay of the scenarios. An edit whose metric did not move is reverted. Only the skill's process can change this way; its purpose, stop rules, and write scope are locked and change only when a person asks.
 
 ### Modify an Existing Playbook
 
@@ -123,6 +132,8 @@ Options:
 - Change automation level
 - Update schedule
 - Fix issues
+- **Review proposals** (`--review-proposals`) — triage a self-improving skill's ledger and approve or reject its pending proposals; the run that proposed a change never approves it
+- **Upgrade a legacy self-improving skill** — move a skill that edits itself freely onto the propose-only contract
 - **Make callable by other agents** — retrofit an existing skill to the playbook-call rule (declared arguments, one-line invocation, a headless mode if it has gates)
 
 ## GitHub Backlog Workflow
@@ -183,15 +194,15 @@ Makes any agent a system-aware orchestrator of other agents. Two modes, picked b
 | `/discover-agents` | Discover the fleet (from the live Trinity instance and/or a repo list) into a descriptive `fleet/system-map.yaml` — including each agent's pipelines and canon declarations |
 | `/compose-system` | Turn the map into a Trinity system manifest and deploy it; members are declared as `github:Org/repo` so the fleet is reproducible from source, and a spec-less repo gets a post-deploy `/trinity:onboard in-place` playbook call |
 | `/orchestrate` | Route work to the right agent, fan N tasks out to one agent (many agents run as parallel per-agent dispatches), chain ordered steps, open a room, wire standing event reactions, or roll out an ephemeral agent for a one-off job — via Trinity MCP |
-| `/sync-fleet-to-head` | Non-destructively bring in-scope agents to their GitHub HEAD. Every in-scope agent is attempted on every run; a permission denial is reported with its verbatim error as a regression, never silently skipped |
-| `/reconcile-skill-map` | Compare `fleet/skill-map.yaml` — which Library skills each agent should hold, each with a rationale — against the agent's live assignments. Applies approved additions one skill at a time with `assign_skill_to_agent`, never with the replace-all `set_agent_skills`, and never removes a skill without a human decision. A library skill that would overwrite an agent's own skill of the same name is reported as a decision, never forced |
+| `/sync-fleet-to-head` | Non-destructively bring in-scope agents to their GitHub HEAD. Every in-scope agent is attempted on every run; a permission denial is reported with its verbatim error as a regression, never silently skipped. An agent with unpushed commits is a needs-attention finding (commit count and age of the oldest one, red after 24 hours): that work exists only on the container's disk. It stays pull-only — pushing is the agent's own job |
+| `/reconcile-skill-map` | Compare `fleet/skill-map.yaml` — which Library skills each agent should hold, each with a rationale — against the agent's live assignments. Applies approved additions one skill at a time with `assign_skill_to_agent`, never with the replace-all `set_agent_skills`, and never removes a skill without a human decision. A library skill that would overwrite an agent's own skill of the same name is reported as a decision, never forced. A map entry can name a skill set (`set:<name>`). The orchestrator needs the skill-manager permission, which an instance admin grants; without it every assignment is refused and the skill stops and reports the missing grant |
 | `/profile-fleet` | Interview and introspect agents, reconcile reality against the fleet narrative |
 | `/fleet-reconcile` | Fold already-verified deltas into every doc surface behind one gate |
 | `/project-init`, `/project-steward` *(opt-in)* | The project-management layer: create or adopt a managed project, and an autonomous steward that dispatches labeled work, escalates stalls, ages the operator's open loops, and writes a daily digest |
 
 Three conventions run through the whole bundle:
 
-- **Dispatch is a playbook call.** `/orchestrate` resolves each dispatch to a playbook from the target agent's *live* skill catalog and sends one line — `/<playbook> [args] --run <task_id>` — never a prose brief (a freeform brief is the recorded exception). Fire-and-park, never block-and-wait: it subscribes to the target's task-completion event and reports back when the work lands. See [Playbook calls](../automation/abilities-marketplace.md#playbook-calls--the-unit-of-inter-agent-work).
+- **Dispatch is a playbook call.** `/orchestrate` resolves each dispatch to a playbook from the target agent's *live* skill catalog and sends one line — `/<playbook> [args] --run <task_id>` — never a prose brief (a freeform brief is the recorded exception). Fire-and-park, never block-and-wait: it subscribes to the target's task-completion event and reports back when the work lands — to a role (`primary`, `approver`, `viewer`) through `send_message`, or as an ask when the operator is the requester. A call refused for exceeding the instance's chain-depth limit is terminal and is never retried or re-routed. See [Playbook calls](../automation/abilities-marketplace.md#playbook-calls--the-unit-of-inter-agent-work).
 - **Standing wiring uses events, not pollers.** For "whenever X happens, have Y react", `/orchestrate` wires Trinity's pub/sub layer: the source agent's playbook is instructed to `emit_event` a named domain event, and the reacting agent subscribes *itself* (subscriptions are self-service, so the setup is dispatched to the subscriber, never wired on its behalf) with a `{{payload.field}}`-interpolated task. The design rules the platform does not enforce — exact-match event names, keep custom event graphs acyclic (only the built-in task-completion events carry a loop guard), a wake reaches only a running subscriber, interpolated payloads are agent-authored text — are written into the fleet narrative so the wiring stays reviewable. See [Event Subscriptions](../collaboration/event-subscriptions.md).
 - **Loop closure.** A run is not done until the requester has been told the outcome, including failure; work parked on someone outside the fleet is labeled `waiting-on:<actor>`, aged, and handed back with a drafted follow-up. The agent drafts; the human sends.
 

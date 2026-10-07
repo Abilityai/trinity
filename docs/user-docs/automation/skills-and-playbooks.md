@@ -25,7 +25,7 @@ A private source repository authenticates with the platform GitHub PAT. Trinity 
 
 **When two sources ship the same skill name**, resolution is by priority (lower wins), then by age. Custom sources default to priority 100 and the bundled community source to 1000 — so **your own repository always wins** a name clash, and a source you add later needs no reordering.
 
-Nothing is overwritten silently. The winning skill carries a `shadowed_by` marker naming the sources whose copy is unreachable, shown in the library listing, on the source status, and as a warning at injection time. Skill names stay bare (`pdf-export`, never `community/pdf-export`), so an agent's `/skill-name` invocation never changes because a source was added.
+Nothing is overwritten silently. The winning skill carries a `shadowed_by` marker naming the sources whose copy is unreachable. The Library card shows it as a **shadowed** badge whose tooltip names those sources; it also appears on the source status and as a warning at injection time. Skill names stay bare (`pdf-export`, never `community/pdf-export`), so an agent's `/skill-name` invocation never changes because a source was added.
 
 Deleting a source does **not** unassign its skills — they keep resolving through whatever source still provides them.
 
@@ -33,7 +33,7 @@ Deleting a source does **not** unassign its skills — they keep resolving throu
 
 An installation that predates multiple sources carries one legacy skills-library URL setting. On the first sync after upgrading, an install with no sources adopts that URL as a custom source named **Migrated library** (tracking the branch it tracked before) and clears the setting — no admin action needed. If the install already has sources, the URL is matched against them by repository, so `https://github.com/Org/repo.git`, `https://github.com/Org/repo/` and `github.com/Org/repo` all count as the same source, and nothing happens.
 
-A legacy URL that names a repository which is **not** one of your sources is refused — adding a source is an admin action, never an automatic one — and Trinity files one low-priority **Legacy skills-library adoption refused** heads-up in the Operations queue, from `_skills-sync`. It is one row per refused URL, however many syncs run; a different URL raises its own. Dismiss it by **cancelling** it (`POST /api/operator-queue/{id}/cancel`, or **Clear All** on the Needs Response tab, which cancels every open item) rather than clicking **Got it**: an acknowledged alert waits for an agent reply that never comes and cannot be cleared, while a cancelled one stays gone. If you want that repository, add it as a source in the panel above. The legacy setting itself can no longer be written through the settings API.
+A legacy URL that names a repository which is **not** one of your sources is refused — adding a source is an admin action, never an automatic one — and Trinity files one low-priority **Legacy skills-library adoption refused** heads-up in the Operations queue, from `_skills-sync`. It is one row per refused URL, however many syncs run: each later sync updates that row (*seen N times*) instead of filing another, and a different URL raises its own. The platform ends the row itself once the URL is adopted or no longer configured, and it expires 14 days after the last sync that saw it (see [Approvals → Platform heads-ups](approvals.md#how-it-works)). To dismiss it sooner, **cancel** it (`POST /api/operator-queue/{id}/cancel`, or **Clear All** on the Needs Response tab, which cancels every open item) rather than clicking **Got it**: an acknowledged alert waits for an agent reply that never comes and cannot be cleared, while a cancelled one stays gone. After you end it, the same refusal files nothing for 7 days. If you want that repository, add it as a source in the panel above. The legacy setting itself can no longer be written through the settings API.
 
 #### Repository layout
 
@@ -66,6 +66,24 @@ Skills carry executable `scripts/`, and library automation can push them to your
 - **A pinned tag that moves is refused**, not adopted. If a tag now resolves to a different commit than the last sync, the sync reports `moved_tag` and leaves your fleet alone. Moving to new content means pointing the source at a new tag name — an explicit admin action. Annotated and lightweight tags are both compared by the commit they point at, so a release tag that has not moved is never refused.
 
 To revoke a skill from the community catalog, a new tag is cut without it.
+
+### Deprecated skills
+
+A library retires a skill by marking it in the skill's `SKILL.md` frontmatter:
+
+```yaml
+deprecated: true             # a real boolean
+superseded-by: new-skill     # optional: the successor, or a short sentence
+```
+
+A deprecated skill stays **listed, assignable and injected** — Trinity flags it, never hides or refuses it:
+
+- The Library card and both lists on an agent's Skills tab (assigned skills and the picker) show a **deprecated** badge beside the name, and a *Superseded by …* line when the library named a successor. Hovering the badge says the skill still works and a later library release removes it.
+- Assigning one succeeds, and a warning line under the delivery note says *<skill> is deprecated — superseded by <successor>.*, even when the agent is stopped.
+- An agent that already holds the skill keeps it unchanged; its `CLAUDE.md` is not annotated.
+- Once the library deletes the skill's directory, it moves to **Assigned but no longer in the library**.
+
+A `deprecated` value that is not a boolean, or a `superseded-by` that is not text, produces a named `frontmatter_invalid` warning and is ignored. Skill sets do not mark a deprecated member yet.
 
 ### Browsing and assigning
 
@@ -192,6 +210,7 @@ A skill's `SKILL.md` frontmatter can declare:
 - `allowed-tools:` — the tools the skill may use, as Claude Code reads it. Write it in Claude Code's comma-separated form (`allowed-tools: Read, Bash, Bash(git:*)`) or as a YAML list (`[Read, Bash]`); both give the same list, and a comma inside parentheses (`Bash(npm run lint, npm test)`) stays part of one entry. Trinity reports this list in the agent's skill listing but does not enforce it — a Trinity run is restricted by the schedule, loop, or task's own allowed tools.
 - `argument-hint:` — the argument syntax shown in `/` autocomplete. The unquoted bracket idiom (`argument-hint: [file]`) is kept as written.
 - `requires:` with `packages`, `binaries`, and `env` lists.
+- `deprecated:` and `superseded-by:` — retire a skill (see [Deprecated skills](#deprecated-skills)).
 
 At injection, Trinity runs a **declaration-only** dependency check and produces per-skill warnings (a missing binary, a missing environment variable) instead of failing. Declared package installs are surfaced but not performed. Environment checks report variable **names** only — values are never read.
 
@@ -225,11 +244,11 @@ MCP tools for skills and playbooks:
 
 | Tool | Description |
 |------|-------------|
-| `list_skills()` | List library skills. Each entry carries its `source` name and any `shadowed_by` sources. |
-| `get_skill(name)` | Skill details and contract |
+| `list_skills()` | List library skills. Each entry carries its `source` name, any `shadowed_by` sources, and `deprecated` / `superseded_by`. |
+| `get_skill(name)` | Skill details and contract, including `deprecated` / `superseded_by` |
 | `get_skills_library_status()` | Library sync status, including the per-source array |
 | `list_skill_sets()` | The skill sets the library declares: status (`ok` / `partial` / `invalid`; only `ok` can be assigned), members and their versions, problems and prerequisites |
-| `assign_skill_to_agent(skill_name, agent_name)` | Assign one skill — or a set, as `set:<name>` — and deliver it. The response's `delivery` block reports `injected`, `pending_start`, `in_progress`, or `not_delivered` with a `reason` |
+| `assign_skill_to_agent(skill_name, agent_name)` | Assign one skill — or a set, as `set:<name>` — and deliver it. The response's `delivery` block reports `injected`, `pending_start`, `in_progress`, or `not_delivered` with a `reason`; for a deprecated skill, `delivery.skills[<name>].warnings` carries `deprecated` or `deprecated:<successor>` |
 | `set_agent_skills(agent_name, skill_names)` | Set the full skill list. `set:<name>` entries add sets; the agent's other sets are left alone. Remove a set with `unassign_skill_set`. Added names are delivered, dropped names are removed; `delivery` and `removal` report each half |
 | `sync_agent_skills(agent_name)` | Force re-inject into a running agent — the manual retry after a `not_delivered` |
 | `get_agent_skills(agent_name)` | List an agent's assigned skills. Each carries `via_sets` (the sets that brought it) and `individual`; the agent's `sets` are listed too |

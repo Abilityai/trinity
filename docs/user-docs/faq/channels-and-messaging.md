@@ -135,3 +135,20 @@ Most likely the group's proactive consent is off. Every connected group carries 
 ## A file someone sent my agent in Slack never arrived. Why?
 
 Inbound Slack files are downloaded through a host allow-list: the authenticated first request may only reach Slack's own API host, and redirects are followed only to Slack's file and edge-CDN hosts, over HTTPS, with each hop re-checked and a bounded hop count. A download to any other host is refused — and logged as an error, so a refusal is visible in the platform log rather than silently dropped. Check `platform.json` for the refusal before assuming the message never arrived. See [Slack Integration](../integrations/slack-integration.md).
+
+## How do I stop a recurring agent from sending the same message every run?
+
+Give the send an idempotency key. `send_message`, `send_group_message` (Telegram and Slack) and `call_user` accept an optional `idempotency_key` — a stable name for what the agent is telling them, such as `gcp-ceiling-correction` — and an optional `idempotency_ttl` in seconds (60–86400, default 86400). Two sends with the same agent, recipient and key inside that window deliver once, even from different runs; the message text is never part of the key. Change the key when the information changes. Without a key, each run's send goes out as before. See [MCP Server → Sending once across runs](../integrations/mcp-server.md#sending-once-across-runs).
+
+## Why did my agent's message come back with `sent: false`?
+
+An earlier send with the same idempotency key already reached that recipient inside the key's window, so nothing was delivered this time. The result says `suppressed_by: "idempotency_key"` and carries `first_sent_at` and `first_execution_id` for the send that did go out. The suppression is written to the audit log, and a system note labelled **Trinity** is added to the first send's conversation. The agent should record it and move on, not resend under a new key. A `409` instead means another run is sending the same key right now; retry with the same key. See [MCP Server → Sending once across runs](../integrations/mcp-server.md#sending-once-across-runs).
+
+## Can my agent post into an existing Slack thread on its own?
+
+Yes. `send_group_message(channel_type: "slack", chat_id, message, thread_ts)` posts into the thread named by `thread_ts`; leave it out to start a new message in the channel. Find the agent's bound channels with `list_channel_groups(channel_type: "slack")`. The post needs the channel's proactive consent and counts toward the proactive rate limits. See [Slack Integration → Proactive Channel Messages](../integrations/slack-integration.md#proactive-channel-messages).
+
+## Can my agent start a WhatsApp conversation on its own?
+
+No. Proactive messages go to Telegram, Slack or the web: `send_message` and `POST /api/agents/{name}/messages` accept `auto`, `telegram`, `slack` or `web`, and `auto` never falls back to WhatsApp. Twilio also allows freeform messages only within 24 hours of the user's last message. On WhatsApp the agent replies inline to messages users send. See [WhatsApp Integration → Limitations](../integrations/whatsapp-integration.md#limitations).
+
