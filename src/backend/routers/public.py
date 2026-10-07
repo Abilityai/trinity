@@ -897,8 +897,17 @@ async def public_execution_status(
         # "cancelled by user" error; surface both like failed/success so the
         # public poller gets a reason instead of a silent null body.
         "response": execution.response if execution.status in ("success", "failed", "cancelled") else None,
-        "error": execution.error if execution.status in ("failed", "cancelled") else None,
+        "error": execution.error if execution.status in ("failed", "cancelled") else _held_notice(execution),
     }
+
+
+def _held_notice(execution):
+    """trinity#3274: a public turn the skill gate held is closed `skipped` with the
+    gate's notice as its error — the visitor's answer, so the page stops polling
+    and shows it. Only for a row this link's own chat started (`public`)."""
+    if execution.status == "skipped" and getattr(execution, "triggered_by", None) == "public":
+        return execution.error
+    return None
 
 
 @router.post("/executions/{token}/{execution_id}/terminate")

@@ -173,6 +173,8 @@ import { ref, computed, onMounted, watch } from 'vue'
 import axios from 'axios'
 import { useAuthStore } from '../stores/auth'
 import { useSkillsStore } from '../stores/skills'
+import { apiErrorMessage } from '../utils/apiError'
+import { isGateRefusal, pendingApprovalMessage, PENDING_NOTICE_TOAST } from '../utils/skillGate'
 
 const props = defineProps({
   agentName: {
@@ -182,7 +184,9 @@ const props = defineProps({
   agentStatus: {
     type: String,
     default: 'stopped'
-  }
+  },
+  // AgentDetail's toast host (`useNotification`), as A2aPanel takes it.
+  notify: { type: Function, default: null }
 })
 
 const emit = defineEmits(['run-with-instructions'])
@@ -260,6 +264,13 @@ async function runSkill(skill) {
       { headers: authStore.authHeader }
     )
 
+    // trinity#3274: a gated playbook — nothing ran, there is no run to open.
+    const held = pendingApprovalMessage(response)
+    if (held) {
+      if (props.notify) props.notify(held, 'info', PENDING_NOTICE_TOAST)
+      return
+    }
+
     const executionId = response.data.execution_id
 
     successMessage.value = `Playbook /${skill.name} started`
@@ -270,7 +281,9 @@ async function runSkill(skill) {
     emit('run-with-instructions', `__NAVIGATE_TASKS__:${executionId}`)
   } catch (e) {
     console.error('Failed to run skill:', e)
-    errorMessage.value = e.response?.data?.detail || `Failed to run /${skill.name}`
+    errorMessage.value = isGateRefusal(e)
+      ? apiErrorMessage(e)
+      : (e.response?.data?.detail || `Failed to run /${skill.name}`)
     setTimeout(() => { errorMessage.value = '' }, 3000)
   } finally {
     running.value = null

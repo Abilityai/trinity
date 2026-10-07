@@ -38,6 +38,28 @@ GATED = {"pay-invoice", "deploy.prod"}
         ("\u202e/pay-invoice", ["pay-invoice"]),           # bidi override before the slash
         ("/deploy.prod now", ["deploy.prod"]),
         ("/deploy.prod.", ["deploy.prod"]),
+        # trinity#3274: `-`, `_` and a digit before the slash no longer make a path,
+        # and a trailing `_`/`-` (markdown emphasis, a dash) ends the name.
+        ("-/pay-invoice", ["pay-invoice"]),
+        ("_/pay-invoice_", ["pay-invoice"]),
+        ("1/pay-invoice", ["pay-invoice"]),
+        ("then /pay-invoice- done", ["pay-invoice"]),
+        # trinity#3274: every Default_Ignorable code point is invisible to a model.
+        ("/\u00adpay-invoice", ["pay-invoice"]),           # soft hyphen after the slash
+        ("/\u180epay-invoice", ["pay-invoice"]),           # Mongolian vowel separator
+        ("/\u034fpay-invoice", ["pay-invoice"]),           # combining grapheme joiner
+        ("/\ufe0fpay-invoice", ["pay-invoice"]),           # variation selector 16
+        ("/\U000e0100pay-invoice", ["pay-invoice"]),       # variation selector 17
+        ("/\U000e0020pay-invoice", ["pay-invoice"]),       # tag space
+        ("/pay\u00ad-invoice", ["pay-invoice"]),           # soft hyphen inside the name
+        # ... and stripping one must never join a letter to the slash: a model
+        # reads `run\u00ad/x` as `run /x` just as easily as `run/x`.
+        ("run\u00ad/pay-invoice", ["pay-invoice"]),
+        ("a\ufe0f/pay-invoice", ["pay-invoice"]),
+        ("x\u2065/pay-invoice", ["pay-invoice"]),
+        ("run\u200b/pay-invoice", ["pay-invoice"]),        # missed before #3274
+        ("/pay-invoice\u00adx", ["pay-invoice"]),          # the name ends at the invisible
+        ("run\u00ad/pay\u200d-invoice", ["pay-invoice"]),  # one before the slash, one in the name
     ],
 )
 def test_invocations_that_name_a_gated_skill_are_found(text, expected):
@@ -51,6 +73,9 @@ def test_invocations_that_name_a_gated_skill_are_found(text, expected):
         "/pay-invoice-v2",          # a different skill
         "/pay-invoice.v2",          # a different skill (a dot followed by a name char)
         "/pay_invoice",             # a different skill
+        "/pay-invoice_v2",          # a different skill (an underscore run continues the name)
+        "/pay-invoice--v2",         # a different skill (a hyphen run continues the name)
+        "/deploy.prod-staging",     # a different skill
         "/deploy.production",       # a different skill
         "docs/pay-invoice",         # a path, not an invocation
         "https://example.com/pay-invoice",

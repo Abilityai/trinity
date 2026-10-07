@@ -575,7 +575,8 @@
             v-for="(msg, i) in chatMessages"
             :key="i"
             class="chat-bubble"
-            :class="msg.role === 'user' ? 'bubble-user' : 'bubble-assistant'"
+            :class="msg.role === 'user' ? 'bubble-user' : msg.role === 'system' ? 'bubble-system empty-state' : 'bubble-assistant'"
+            :data-testid="msg.role === 'system' ? 'chat-system-line' : undefined"
           >
             <div class="bubble-content">{{ msg.content }}</div>
             <div class="bubble-time">{{ formatTime(msg.timestamp) }}</div>
@@ -666,6 +667,7 @@ import { useAgentsStore } from '../stores/agents'
 import { agentNameTooltip } from '../utils/agentName'
 import AskMarkdown from '../components/operator/AskMarkdown.vue'
 import { apiErrorMessage } from '../utils/apiError'
+import { isGateRefusal, pendingApprovalMessage } from '../utils/skillGate'
 import { viewState, staleBannerMessage, listFrom } from '../utils/loadingState'
 import {
   queueResponseKind, buildQueueResponse, queueTypeLabel,
@@ -1103,8 +1105,10 @@ async function selectSession(session) {
 }
 
 function buildContextPrompt(userMessage) {
-  // Include last 10 exchanges for context
-  const recent = chatMessages.value.slice(-20)
+  // Include last 10 exchanges for context. A held (gated-skill) request and
+  // its notice stay on screen but out of it (trinity#3274), or every later
+  // turn would ask for the approval again.
+  const recent = chatMessages.value.filter(m => !m.held).slice(-20)
   if (recent.length === 0) return userMessage
   let context = 'Previous conversation:\n'
   recent.forEach(m => {
@@ -1129,6 +1133,7 @@ async function sendChatMessage() {
     content: message,
     timestamp: new Date().toISOString()
   })
+  const userEntry = chatMessages.value[chatMessages.value.length - 1]
   scrollChatToBottom()
 
   chatExecutionStatus.value = 'running'
@@ -1145,6 +1150,13 @@ async function sendChatMessage() {
     }
 
     const submitRes = await http.post(`/api/agents/${chatAgent.value}/task`, payload)
+    // trinity#3274: a gated skill — nothing ran, nothing to poll.
+    const held = pendingApprovalMessage(submitRes)
+    if (held) {
+      userEntry.held = true
+      chatMessages.value.push({ role: 'system', content: held, held: true, timestamp: new Date().toISOString() })
+      return
+    }
     const executionId = submitRes.data.execution_id
 
     // Poll for completion
@@ -1172,7 +1184,7 @@ async function sendChatMessage() {
   } catch (e) {
     chatMessages.value.push({
       role: 'assistant',
-      content: `Error: ${e.response?.data?.detail || e.message || 'Failed to send message'}`,
+      content: `Error: ${isGateRefusal(e) ? apiErrorMessage(e) : (e.response?.data?.detail || e.message || 'Failed to send message')}`,
       timestamp: new Date().toISOString()
     })
   } finally {
@@ -2758,6 +2770,15 @@ watch(() => authStore.isAuthenticated, (isAuth) => {
   font-size: 10px;
   color: rgba(255, 255, 255, 0.4);
   margin-top: 4px;
+}
+
+/* trinity#3274: a platform line (a held request's notice), not a bubble — the
+   muted tone and centring come from `.empty-state`, so no colour of its own. */
+.bubble-system {
+  align-self: center;
+  max-width: 100%;
+  padding: 4px 16px;
+  font-size: 12.5px;
 }
 
 .bubble-assistant .bubble-time {

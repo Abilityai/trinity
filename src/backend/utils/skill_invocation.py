@@ -19,21 +19,37 @@ import re
 import unicodedata
 from typing import Iterable, List, Optional
 
-# Zero-width and bidirectional-control characters. A model ignores them; a
-# regex does not. Stripped before matching so a zero-width space (U+200B) after
-# the slash or a bidi override in front of it cannot hide an invocation.
-_INVISIBLE = re.compile("[\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u2069\ufeff]")
+# Unicode's Default_Ignorable_Code_Point set (soft hyphen, joiners, bidi and
+# Mongolian controls, variation selectors, tag characters, fillers …). A model
+# ignores them; a regex does not. The text is matched twice — with them removed
+# (a run before a slash read as a space), and with each replaced by a space —
+# so one cannot hide an invocation either way: removed, `/\u00adx` is `/x` and
+# `/pay\u200d-x` is `/pay-x`; spaced, `/x\u00adyz` still ends `x` (trinity#3274).
+_INVISIBLE = re.compile(
+    "[\u00ad\u034f\u061c\u115f\u1160\u17b4\u17b5\u180b-\u180f\u200b-\u200f"
+    "\u202a-\u202e\u2060-\u206f\u3164\ufe00-\ufe0f\ufeff\uffa0\ufff0-\ufff8"
+    "\U0001bca0-\U0001bca3\U0001d173-\U0001d17a\U000e0000-\U000e0fff]")
+# A run of them right before a slash: removed, it could join a letter to the
+# slash and turn `run\u00ad/x` into the path `run/x`, so it reads as a space.
+_INVISIBLE_BEFORE_SLASH = re.compile(_INVISIBLE.pattern + "+(?=/)")
 
-# Before the slash: anything except a name character, a dot or another slash —
-# so `run:/x`, a backtick, a quote or a bracket still precede an invocation,
-# while `docs/x`, `https://host/x` and `//x` are paths. After the name: no
-# further name character, and no dot that continues into one.
-_BEFORE = r"(?<![a-z0-9._/-])/"
-_AFTER = r"(?![a-z0-9_-])(?!\.[a-z0-9])"
+# Before the slash: anything except a letter, a dot or another slash — so
+# `run:/x`, a backtick, a quote, a bracket, `-/x`, `_/x_` and `1/x` precede an
+# invocation, while `docs/x`, `https://host/x`, `a.b/x` and `//x` are paths
+# (a digit or `-`/`_` before the slash reads as an invocation since #3274:
+# `api/v1/x` style paths now match when their last segment is a gated name).
+# After the name: no further letter or digit, and no run of `.`, `_` or `-`
+# that continues into one — so `/x.`, `/x_` and `/x-` end the name while
+# `/x.v2`, `/x_v2` and `/x--v2` are other skills.
+_BEFORE = r"(?<![a-z./])/"
+_AFTER = r"(?![a-z0-9])(?![._-]+[a-z0-9])"
 
 
-def _normalise(text: str) -> str:
-    return _INVISIBLE.sub("", unicodedata.normalize("NFKC", text)).casefold()
+def _normalise(text: str, invisible: str = "") -> str:
+    text = unicodedata.normalize("NFKC", text)
+    if not invisible:
+        text = _INVISIBLE_BEFORE_SLASH.sub(" ", text)
+    return _INVISIBLE.sub(invisible, text).casefold()
 
 
 def find_gated_invocations(text: Optional[str], gated_names: Iterable[str]) -> List[str]:
@@ -45,10 +61,11 @@ def find_gated_invocations(text: Optional[str], gated_names: Iterable[str]) -> L
     names = list(gated_names or ())
     if not text or not names:
         return []
-    haystack = _normalise(text)
+    haystacks = [_normalise(text, ""), _normalise(text, " ")]
     found = []
     for name in names:
-        match = re.search(_BEFORE + re.escape(_normalise(name)) + _AFTER, haystack)
-        if match:
-            found.append((match.start(), name))
+        pattern = _BEFORE + re.escape(_normalise(name)) + _AFTER
+        starts = [m.start() for m in (re.search(pattern, h) for h in haystacks) if m]
+        if starts:
+            found.append((min(starts), name))
     return [name for _, name in sorted(found)]

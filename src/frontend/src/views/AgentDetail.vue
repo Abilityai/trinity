@@ -21,7 +21,9 @@
         <div v-if="notification"
           :class="[
             'fixed bottom-24 right-6 z-50 px-4 py-3 rounded-lg shadow-lg transition-all duration-300',
-            notification.type === 'success' ? 'bg-status-success-100 dark:bg-status-success-900/50 border border-status-success-400 dark:border-status-success-700 text-status-success-700 dark:text-status-success-300' : 'bg-status-danger-100 dark:bg-status-danger-900/50 border border-status-danger-400 dark:border-status-danger-700 text-status-danger-700 dark:text-status-danger-300'
+            notification.type === 'success' ? 'bg-status-success-100 dark:bg-status-success-900/50 border border-status-success-400 dark:border-status-success-700 text-status-success-700 dark:text-status-success-300'
+              : notification.type === 'info' ? 'bg-status-info-100 dark:bg-status-info-900/50 border border-status-info-400 dark:border-status-info-700 text-status-info-700 dark:text-status-info-300'
+              : 'bg-status-danger-100 dark:bg-status-danger-900/50 border border-status-danger-400 dark:border-status-danger-700 text-status-danger-700 dark:text-status-danger-300'
           ]"
         >
           <span>{{ notification.message }}</span>
@@ -192,6 +194,7 @@
                 :agent-name="agent.name"
                 :agent-status="agent.status"
                 :has-declared-metrics="hasDeclaredMetrics"
+                :notify="showNotification"
               />
             </div>
 
@@ -266,6 +269,7 @@
               <PlaybooksPanel
                 :agent-name="agent.name"
                 :agent-status="agent.status"
+                :notify="showNotification"
                 @run-with-instructions="handlePlaybookRunWithInstructions"
               />
             </div>
