@@ -209,7 +209,7 @@ Then the audit (best-effort, after the lock). A failed re-sync on a running agen
 | State | `state`, `state_detail` |
 | Timestamps | `created_at`, `decided_at`, `dispatched_at`, `notified_at` |
 
-`agent_skill_gates` (trinity-enterprise#753): SQLite `agent_skill_gates`, Alembic `0093_agent_skill_gates` on top of `0092`. See §6. `agent_name` is in `AGENT_REFS` (CASCADE); `set_by_agent` is not.
+`agent_skill_gates` (trinity-enterprise#753): SQLite `agent_skill_gates`, Alembic `0094_agent_skill_gates` on top of `0093_platform_alert_responded_heal`. See §6. `agent_name` is in `AGENT_REFS` (CASCADE); `set_by_agent` is not.
 
 `state` moves `pending → dispatching → dispatched | stale | not_run | unknown`, or `pending → denied | expired | cancelled | refused`. A `self_approved` row (trinity-enterprise#752, no migration — a new value in the same column) is inserted in that state by `record_self_approved_run` and never moves; it is never pending work, so no cap, sweep or ask reads it. Both agent columns are in `AGENT_REFS` (CASCADE).
 

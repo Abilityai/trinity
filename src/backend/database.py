@@ -3879,10 +3879,10 @@ class DatabaseManager:
 
     def respond_to_operator_queue_item(self, item_id, response, response_text,
                                         responded_by_id, responded_by_email,
-                                        divergence_acknowledged=False):
+                                        divergence_acknowledged=False, terminal=False):
         return self._operator_queue_ops.respond_to_item(
             item_id, response, response_text, responded_by_id, responded_by_email,
-            divergence_acknowledged=divergence_acknowledged,
+            divergence_acknowledged=divergence_acknowledged, terminal=terminal,
         )
 
     def cancel_operator_queue_item(self, item_id, *, disposed_by_email, reason=None,
@@ -4333,7 +4333,7 @@ class DatabaseManager:
     def start_loop_run(self, loop_id: str, run_number: int, *, execution_id=None) -> str:
         return self._loop_ops.start_loop_run(loop_id, run_number, execution_id=execution_id)
 
-    def finalize_loop_run(self, run_id: str, **kwargs):
+    def finalize_loop_run(self, run_id: str, **kwargs) -> bool:
         return self._loop_ops.finalize_loop_run(run_id, **kwargs)
 
     def list_loop_runs(self, loop_id: str):
