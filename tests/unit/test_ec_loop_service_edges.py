@@ -845,14 +845,6 @@ class TestExecutionIsLive:
 
 
 class TestRestartMidAdvance:
-    @pytest.mark.xfail(
-        strict=True,
-        reason=(
-            "BUG: a fault between claim_loop_advance and finalize_loop_run strands "
-            "the loop forever — runs_completed moved, run row still 'running', and "
-            f"neither a redelivered terminal nor reconcile_after_restart can re-claim — #3316"
-        ),
-    )
     def test_m56_fault_after_claim_is_recoverable_on_restart(self, env):
         ls, db, ts = env
         calls = {"n": 0}
@@ -879,6 +871,29 @@ class TestRestartMidAdvance:
         assert runs[0]["status"] != "running"
         assert loop["status"] in ("completed", "completed_with_errors", "stopped", "failed") \
             or len(runs) >= 2
+
+    def test_m56_repair_that_loses_the_close_does_not_dispatch(self, env):
+        """#3316: the repair path must stay exactly-once. A repairing delivery
+        whose run-row close is beaten by another advance (closed between its read
+        and its write) must not dispatch run 2 — only the closer does."""
+        ls, db, ts = env
+        calls = {"n": 0}
+
+        def _hook(run_id, **kw):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise RuntimeError("database is locked")  # strands run 1
+            if calls["n"] == 2:
+                # A concurrent advance closes run 1 first.
+                db.ops.finalize_loop_run(run_id, **kw)
+
+        db.hooks["finalize_loop_run"] = _hook
+        ts.script = [{"response": "r1"}, "queued", "queued"]
+        lid = _start(ls, max_runs=3)
+
+        assert _run(ls.LoopService().advance_on_terminal("exec_1")) is False
+        assert [r["run_number"] for r in _runs(db, lid)] == [1]
+        assert len(ts.calls) == 1
 
     def test_m56_control_fault_after_finalize_run_is_rearmed(self, env):
         """Control for m56: the same fault one write LATER (update_loop_progress)

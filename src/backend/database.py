@@ -4307,7 +4307,7 @@ class DatabaseManager:
     def start_loop_run(self, loop_id: str, run_number: int, *, execution_id=None) -> str:
         return self._loop_ops.start_loop_run(loop_id, run_number, execution_id=execution_id)
 
-    def finalize_loop_run(self, run_id: str, **kwargs):
+    def finalize_loop_run(self, run_id: str, **kwargs) -> bool:
         return self._loop_ops.finalize_loop_run(run_id, **kwargs)
 
     def list_loop_runs(self, loop_id: str):
