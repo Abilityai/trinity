@@ -1803,12 +1803,48 @@ def get_owned_agent_by_name(
 
 # The named refusal per capability: the machine-readable code an agent can branch
 # on, and a sentence that says what is missing and where it is granted.
+# trinity-enterprise#164: every refusal also tells the agent how to ASK for the
+# permission. Approving that ask is a notification only — the grant itself is
+# made by an admin in a signed-in session, never by answering a queue item.
+_ASK_FOR_IT = (
+    # #3236 review: the ask surface has no `ask_class` field (that exists only
+    # on seat decisions) and MCP `ask_operator` drops unknown fields, so the
+    # instruction must use the fields that exist. And there is no Settings UI
+    # for these grants yet (ent#756), so the remedy names the API.
+    " To request it, raise an ask to your operator (type 'question') whose title "
+    "names the permission; approving the ask does not grant it. An instance admin "
+    "grants it from a signed-in session: PUT /api/agents/{agent}/capability-grants/"
+    "{capability} with {\"granted\": true}."
+)
+
 _CAPABILITY_REFUSALS = {
     "skills.manage": (
         "skill_management_not_permitted",
         "This agent does not hold the skill-management permission, which changing "
         "any agent's skills requires \u2014 its own included. An instance admin can "
-        "grant it in Settings \u2192 Agents \u2192 Skill managers.",
+        "grant it in Settings \u2192 Agents \u2192 Skill managers." + _ASK_FOR_IT,
+    ),
+    "schedules.manage": (
+        "schedule_management_not_permitted",
+        "This agent does not hold the schedule-management permission, which "
+        "creating, changing, enabling, disabling or deleting ANOTHER agent's "
+        "schedules (and their webhooks) requires. An agent's own schedules need "
+        "no grant." + _ASK_FOR_IT,
+    ),
+    "instructions.manage": (
+        "instruction_management_not_permitted",
+        "This agent does not hold the instruction-management permission, which "
+        "writing an agent's CLAUDE.md, AGENTS.md or .claude/ files (other than "
+        "skills), or resetting it to main (reset-to-main-preserve-state), "
+        "requires \u2014 its own included." + _ASK_FOR_IT,
+    ),
+    "agents.manage": (
+        "agent_management_not_permitted",
+        "This agent does not hold the agent-management permission, which creating, "
+        "deleting, deploying or reconfiguring agents requires (spawning an "
+        "ephemeral helper does not). Even with it, an agent reaches only agents "
+        "its owner owns, deletes only agents it spawned, and cannot change its "
+        "own read-only mode or guardrails." + _ASK_FOR_IT,
     ),
 }
 
@@ -1926,6 +1962,65 @@ def _path_agent(request: Request) -> Optional[str]:
     return params.get("agent_name") or params.get("name")
 
 
+def _refuse_unless_owners_agent(current_user: User, target: str) -> None:
+    """A capability HOLDER reaches only agents its owner OWNS (#3236 review +
+    validation). Every fenced handler authorises through `can_user_access_agent`
+    / `can_user_share_agent`, which admit any `role == "admin"` — and an agent
+    key carries its owner's role — so without this one grant on a default
+    admin-owned install reached every agent on the instance, other users'
+    included. `owner_username` equality, never the admin short-circuit;
+    not-owned and nonexistent answer the same 404, so a holder learns nothing
+    about agents outside its owner's."""
+    owner = db.get_agent_owner(target) or {}
+    if owner.get("owner_username") != current_user.username:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Agent not found")
+
+
+def capability_fence(capability: str, *, own_agent_exempt: bool = False,
+                     ephemeral_target_exempt: bool = False):
+    """A route-level dependency: refuse an agent principal that does not hold
+    `capability` (trinity-enterprise#164), with the same named 403 and audit
+    row as `skills.manage`. Humans, `user`- and `system`-scoped keys pass —
+    the route's own owner/access check still applies to them.
+
+    Attach as `dependencies=[Depends(capability_fence(X))]` so it runs before
+    the route's parameters — a non-holder gets one uniform 403 whether or not
+    the target exists (#186). The returned function's name carries the
+    capability, so the guard tests can read it off FastAPI's dependant graph.
+
+    `own_agent_exempt`: an agent acting on ITSELF passes without the grant. Used
+    for `schedules.manage` (decided 2026-10-05): an agent's own schedules are its
+    own use (#2996 — `create_schedule` / `enable_schedule` via MCP), already
+    bounded by autonomy, which stays person-only; the grant is what it needs to
+    change ANOTHER agent's schedules.
+
+    `ephemeral_target_exempt`: discarding an ephemeral ("ghost") agent needs no
+    grant — ent#69 governs ghosts (spawn and discard), decided 2026-10-05.
+
+    A holder that passes is then bounded to its owner's agents
+    (`_refuse_unless_owners_agent`) whenever the route names a target — the
+    capability check runs first, so a non-holder's 403 never depends on whether
+    the target exists (#186).
+    """
+    async def fence(request: Request, current_user: User = Depends(get_current_user)) -> None:
+        target = _path_agent(request)
+        is_agent = (getattr(current_user, "mcp_scope", None) == "agent"
+                    and bool(getattr(current_user, "agent_name", None)))
+        if (own_agent_exempt and target and is_agent
+                and current_user.agent_name == target):
+            return
+        if ephemeral_target_exempt and target:
+            from database import db as _db
+            info = _db.get_agent_ephemeral_info(target)
+            if isinstance(info, dict) and info.get("is_ephemeral"):
+                return
+        await enforce_agent_capability(request, current_user, capability, target=target)
+        if is_agent and target:
+            _refuse_unless_owners_agent(current_user, target)
+    fence.__name__ = f"capability_fence_{capability.replace('.', '_')}"
+    return fence
+
+
 def require_person_or_capability(capability: str, *, self_person_only: bool = False):
     """`require_person`, except that an AGENT holding `capability` passes
     (trinity-enterprise#164 — the reconfigure routes were person-only, so no
@@ -1957,10 +2052,7 @@ def require_person_or_capability(capability: str, *, self_person_only: bool = Fa
                 assert_person(current_user)
             await enforce_agent_capability(request, current_user, capability, target=target)
             if target:
-                owner = db.get_agent_owner(target) or {}
-                if owner.get("owner_username") != current_user.username:
-                    raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
-                                        detail="Agent not found")
+                _refuse_unless_owners_agent(current_user, target)
             return current_user
         assert_person(current_user)
         return current_user

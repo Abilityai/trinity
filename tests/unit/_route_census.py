@@ -31,6 +31,10 @@ and not redefined in the file):
   ``assert_admin`` without ``allow_scopes=``. Counted and printed, not listed:
   the admin tier's own policy (which admits `trinity-system` by #2323 design) is
   guarded by test_293 / test_2323.
+* ``person_or_grant`` — ``Depends(require_person_or_capability(cap))``
+  (trinity-enterprise#164): a person, or an agent holding the named
+  self-change grant; every other machine principal is refused as by
+  ``require_person``. The grant itself is admin-and-interactive only.
 * ``admin_widened`` — ``Depends(require_admin_allowing(...))`` or
   ``assert_admin(..., allow_scopes=...)``. Each needs an ``ADMIN_WIDENED`` entry:
   a widening grants a scope and is reviewed per route.
@@ -38,7 +42,7 @@ and not redefined in the file):
   policy (#2198) owns it.
 
 A route carrying several recognised gates takes the strictest
-(``interactive > person > admin_widened > admin_tier > portal``).
+(``interactive > person > person_or_grant > admin_widened > admin_tier > portal``).
 
 Listed here, per route, with the registered ``"METHOD /full/path"`` pinned and
 checked against the live app by the runtime test:
@@ -92,6 +96,7 @@ HTTP_DECORATORS = {
 CODE_CLASSES = (
     "interactive",
     "person",
+    "person_or_grant",
     "admin_widened",
     "admin_tier",
     "portal",
@@ -105,7 +110,10 @@ _DEPENDS_GATES = {
     ("dependencies", "require_admin"): "admin_tier",
     ("client_portal.portal_auth", "get_portal_principal"): "portal",
 }
-_DEPENDS_FACTORIES = {("dependencies", "require_admin_allowing"): "admin_widened"}
+_DEPENDS_FACTORIES = {
+    ("dependencies", "require_admin_allowing"): "admin_widened",
+    ("dependencies", "require_person_or_capability"): "person_or_grant",
+}
 _IMPERATIVE_GATES = {
     ("dependencies", "reject_non_interactive_principal"): "interactive",
     ("dependencies", "assert_person"): "person",
@@ -539,6 +547,7 @@ AGENT_CALLABLE: Dict[str, Tuple[str, str]] = {
     "routers/agent_config.py::get_agent_timeout": ("GET /api/agents/{agent_name}/timeout", "a non-sensitive read of this agent's own setting (access-level)"),
     "routers/agent_config.py::get_public_channel_model": ("GET /api/agents/{agent_name}/public-channel-model", "a non-sensitive read of this agent's own setting (access-level)"),
     "routers/agent_config.py::get_agent_guardrails": ("GET /api/agents/{agent_name}/guardrails", "a non-sensitive read of this agent's own setting (access-level)"),
+    "routers/agent_config.py::list_agent_capability_grants": ("GET /api/agents/{agent_name}/capability-grants", "trinity-enterprise#164: an agent reads which self-change permissions it holds, so it knows when to raise a permission-request (owner-level; granting is interactive-admin)"),
     "routers/users.py::get_my_github_pat_status": (
         "GET /api/users/me/github-pat", "configured flags only, never the token (ent#162)"),
     # Skill sets (ent#530). The writes are the USE of the skills-manage capability, fenced like

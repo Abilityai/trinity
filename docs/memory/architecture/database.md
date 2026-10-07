@@ -1151,7 +1151,7 @@ to a named agent:
 ```sql
 CREATE TABLE agent_capability_grants (
     agent_name TEXT NOT NULL,
-    capability TEXT NOT NULL,          -- closed set: 'skills.manage'
+    capability TEXT NOT NULL,          -- closed set: 'skills.manage', 'schedules.manage', 'instructions.manage', 'agents.manage' (ent#164; enforced in code, no CHECK)
     granted_by TEXT NOT NULL,
     granted_at TEXT NOT NULL,
     PRIMARY KEY (agent_name, capability)

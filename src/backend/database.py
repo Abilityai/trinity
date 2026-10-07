@@ -2827,6 +2827,10 @@ class DatabaseManager:
     def grant_agent_capability(self, agent_name: str, capability: str, granted_by: str) -> bool:
         return self._capability_grant_ops.grant_agent_capability(agent_name, capability, granted_by)
 
+    def list_agent_capabilities(self, agent_name: str):
+        # ent#164: one agent's grants, for its Settings (ent#756)
+        return self._capability_grant_ops.list_agent_capabilities(agent_name)
+
     def revoke_agent_capability(self, agent_name: str, capability: str) -> bool:
         return self._capability_grant_ops.revoke_agent_capability(agent_name, capability)
 
