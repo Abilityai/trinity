@@ -1,6 +1,6 @@
 # Deploying Trinity
 
-Trinity runs your agents 24/7 with scheduling, monitoring, and multi-agent coordination. You run it yourself, on your own machine or server, so your agents and their data stay inside your own perimeter. Setup takes about two minutes with prebuilt images, or up to 15 minutes when you build from source.
+Trinity is the operating system for the AI-native company — open source, self-hosted, that you own. It deploys, orchestrates, and governs fleets of AI agents on your own hardware, and it is model-agnostic: each agent runs on Claude Code, Gemini CLI or OpenAI Codex. You run it yourself, on your own machine or server, so your agents and their data stay inside your own perimeter. Setup takes about two minutes with prebuilt images, or up to 15 minutes when you build from source.
 
 > 📺 **Watch:** [I Built a DevOps Agent That Deploys Other Agents](https://youtu.be/8RozanPd14Y) *(Apr 2026)* · [Control My DGX Spark From Anywhere](https://youtu.be/epDBrEtg4nE) *(Jan 2026)* · [all videos](../videos.md)
 
@@ -13,8 +13,10 @@ Trinity runs your agents 24/7 with scheduling, monitoring, and multi-agent coord
 | **Server, build from source** | `docker compose -f docker-compose.prod.yml up -d` | Servers that build their own images (custom patches, enterprise overlay) | [Single Server → Build from source](deploying/single-server.md#option-b-build-from-source) |
 | **DigitalOcean Marketplace 1-Click** | Create a Droplet from the Trinity image | HTTPS at the Droplet's IP with zero input; claim the admin account in the browser; upgrade to a domain later | [Single Server → DigitalOcean 1-Click](deploying/single-server.md#digitalocean-marketplace-1-click) |
 | **DigitalOcean, from your terminal** | `scripts/deploy/trinity-do-create.sh` (needs `doctl`) | Same result as the 1-Click, but you choose the admin password before the Droplet exists | [Deploy on DigitalOcean](deploying/digitalocean.md) |
+| **AWS EC2** | `start.sh --provision --cloud aws --hosted --unattended` on your own Ubuntu 24.04 instance | HTTPS at the instance's IP; you claim the admin account with the EC2 instance ID. A CloudFormation template and a Marketplace listing are on the way | [Deploy on AWS](deploying/aws.md) |
+| **Vultr** | `start.sh --provision --cloud vultr --hosted --unattended` on your own Ubuntu 24.04 instance | The same provisioned install on a Vultr instance | [Single Server → Vultr](deploying/single-server.md#vultr) |
 
-All five paths share one installer (`scripts/deploy/start.sh`), one `.env` contract, and one set of day-two procedures ([Upgrading](deploying/upgrading.md), [Backup and Restore](deploying/backup-and-restore.md), [Monitoring](deploying/monitoring.md)).
+All seven paths share one installer (`scripts/deploy/start.sh`), one `.env` contract, and one set of day-two procedures ([Upgrading](deploying/upgrading.md), [Backup and Restore](deploying/backup-and-restore.md), [Monitoring](deploying/monitoring.md)). Fresh server installs from prebuilt images run on a bundled PostgreSQL database; SQLite reached end-of-support on September 1, 2026 (see [Single Server → Database backend](deploying/single-server.md#database-backend)).
 
 ## Option A: Local, from Source
 
@@ -98,11 +100,11 @@ On a server, pull-only is the path you want: every platform image and the agent 
 ```bash
 git clone https://github.com/abilityai/trinity.git && cd trinity
 cp .env.example .env                    # set ADMIN_PASSWORD, ANTHROPIC_API_KEY, ...
-echo 'TRINITY_IMAGE_TAG=v0.9.0' >> .env  # pin a release; `latest` moves on every release
+echo 'TRINITY_IMAGE_TAG=v0.9.5' >> .env  # pin a release; `latest` moves on every release
 ./scripts/deploy/start.sh --hosted --unattended
 ```
 
-The repository checkout must stay beside the compose file (it mounts `./config/*`), and upgrades are a re-run of `start.sh --hosted` with a new `TRINITY_IMAGE_TAG` — not a bare `docker compose pull`. Full details, the tunnel and TLS choices, and the "which compose files go together" table: [Single Server → Prebuilt images](deploying/single-server.md#option-a-prebuilt-images-recommended).
+A fresh hosted install starts on the PostgreSQL service bundled in the hosted compose file; `start.sh` generates its password. The repository checkout must stay beside the compose file (it mounts `./config/*`), and upgrades are a re-run of `start.sh --hosted` with a new `TRINITY_IMAGE_TAG` — not a bare `docker compose pull`. Full details, the tunnel and TLS choices, and the "which compose files go together" table: [Single Server → Prebuilt images](deploying/single-server.md#option-a-prebuilt-images-recommended).
 
 ## Option C: DigitalOcean Marketplace 1-Click
 
@@ -115,6 +117,18 @@ After the first login, the first-run setup opens with a **Secure this instance**
 `scripts/deploy/trinity-do-create.sh` runs on your own machine with `doctl` signed in. It asks for the admin password, creates a stock Ubuntu Droplet whose first boot runs the same provisioning as the 1-Click, and prints the HTTPS address when it answers. Because you chose the password up front, the admin is provisioned at boot and there is no claim window. You connect Claude on first sign-in, in the setup that opens.
 
 Step by step, from installing `doctl` to adding a domain: [Deploy on DigitalOcean](deploying/digitalocean.md). Reference summary beside the 1-Click: [Single Server → DigitalOcean installer](deploying/single-server.md#digitalocean-installer-script).
+
+## Option E: AWS
+
+On your own EC2 instance (x86_64, 8 GiB, Ubuntu 24.04, public IPv4, security group open on 80 and 443), as root:
+
+```bash
+git clone --depth 1 --branch <release-tag> https://github.com/abilityai/trinity.git /opt/trinity
+cd /opt/trinity
+./scripts/deploy/start.sh --provision --cloud aws --hosted --unattended
+```
+
+It installs Docker, Caddy with a certificate for the instance's IP, and the host firewall, then Trinity. With no admin password supplied, the setup page asks for the **EC2 instance ID** before it creates the admin, so someone who finds the IP cannot claim it. A timer follows a changed public IP after a stop/start. Full procedure, the CloudFormation template, and recovery: [Deploy on AWS](deploying/aws.md).
 
 ## Key URLs (Self-Hosted)
 
@@ -151,7 +165,8 @@ Full procedure with pre-flight, verification and rollback: [Upgrading](deploying
 **Source install**
 
 ```bash
-# 1. Back up the database first (the platform also takes a pre-migration copy at boot)
+# 1. Back up the database first (dev volume shown — server paths and PostgreSQL:
+#    see Backup and Restore; the platform also takes a pre-migration copy at boot)
 docker run --rm \
   -v trinity_trinity-data:/data \
   -v ~/backups:/backup \
@@ -275,7 +290,8 @@ Step-by-step guides for each deployment scenario:
 |---|---|
 | [Local Development](deploying/local-development.md) | Docker Desktop, dev compose, hot reload, what `start.sh` generates |
 | [Deploy on DigitalOcean](deploying/digitalocean.md) | One command from your terminal to an HTTPS Droplet: `doctl` and an optional domain; you connect Claude on first sign-in |
-| [Single Server](deploying/single-server.md) | Linux VPS: prebuilt images (`--hosted`) or build from source, the DigitalOcean 1-Click and installer script, every `.env` key and which compose forwards it, Redis dual-password setup, which compose files go together |
+| [Deploy on AWS](deploying/aws.md) | Script install on your own EC2 instance, the instance-ID admin claim, the IP-refresh timer, the CloudFormation template |
+| [Single Server](deploying/single-server.md) | Linux VPS: prebuilt images (`--hosted`) or build from source, the DigitalOcean 1-Click and installer script, Vultr, the database backend, every `.env` key and which compose forwards it, Redis dual-password setup, which compose files go together |
 | [Public Access](deploying/public-access.md) | Cloudflare Tunnel, TLS postures, webhook surface, Slack/Telegram/WhatsApp integrations, `/mcp` through the tunnel |
 | [Hardening a Marketplace Install](deploying/hardening.md) | Bare IP → domain → tunnel or private network, and how to verify each stage |
 | [Upgrading](deploying/upgrading.md) | Pre-flight → backup → rebuild or re-pull → restart → verify → rollback |

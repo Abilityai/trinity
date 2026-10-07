@@ -32,7 +32,7 @@ Every template's `base_image` is validated against an allowlist, and blocked ima
 
 ## What's the difference between the Claude Code, Codex, and Gemini runtimes?
 
-The runtime is the CLI harness that executes the agent inside its container, chosen via `runtime.type` in `template.yaml`: `claude-code` (default), `codex` (OpenAI Codex), or `gemini-cli`. They differ in auth (Codex uses an `OPENAI_API_KEY` credential — Trinity logs the CLI in with it before the first turn, so an API-key Codex agent works out of the box and a rotated key is picked up on the next turn — or a ChatGPT-plan login you run yourself with `codex login`; Codex skips Claude-subscription auto-assignment, and Gemini uses a Gemini API key), instruction file (Codex reads `AGENTS.md` — at startup Trinity copies the template's `CLAUDE.md` into it only when the workspace has no `AGENTS.md`; one you ship yourself is left as it is), session resume (a Codex agent cannot resume, so its Workspace turns replay the visible history as text rather than carrying working memory forward), and cost reporting (estimated for Codex, actual for the others). The runtime is fixed at creation: to change it, recreate the agent from a template that declares a different runtime. See [Agent Runtimes](../agents/agent-runtimes.md).
+The runtime is the CLI harness that executes the agent inside its container, chosen via `runtime.type` in `template.yaml`: `claude-code` (default), `codex` (OpenAI Codex), or `gemini-cli`. They differ in auth (Codex uses an `OPENAI_API_KEY` credential — Trinity logs the CLI in with it before the first turn, so an API-key Codex agent works out of the box and a rotated key is picked up on the next turn — or a ChatGPT-plan login you run yourself with `codex login`; Codex skips Claude-subscription auto-assignment, and Gemini uses the platform Gemini key from Settings), instruction file (Codex reads `AGENTS.md` — at startup Trinity copies the template's `CLAUDE.md` into it only when the workspace has no `AGENTS.md`; one you ship yourself is left as it is), session resume (only Claude Code resumes a session in the Workspace — a Codex agent's Workspace turns replay the visible history as text, and Gemini's headless turns never resume), safety hooks (read-only mode and the guardrail hooks are Claude Code hooks; Codex enforces read-only through its sandbox), and cost reporting (reported by Claude Code, estimated from tokens for Gemini and Codex). The runtime is fixed at creation: to change it, recreate the agent from a template that declares a different runtime. See [Agent Runtimes](../agents/agent-runtimes.md).
 
 ## How do I start and stop an agent?
 
@@ -49,10 +49,6 @@ A plain stop/start keeps the same container, so everything in it survives — ex
 ## What happens when I delete an agent — is everything gone immediately?
 
 No. Deleting stops and removes the container immediately, but it is a soft delete: the workspace volumes, schedules, chat history, sharing records, permissions, and credentials are all preserved until a retention sweep purges them (default: 180 days). Schedules stop firing right away. During the retention window an admin can recover the agent — recovery restores the record but does not recreate the container, so start the agent afterwards. See [Managing Agents](../agents/managing-agents.md).
-
-## Can I create a short-lived, disposable agent that cleans itself up?
-
-Yes, with an enterprise-tier feature: a disposable ("ghost") agent is created with a hard budget — a maximum number of runs and/or a time limit. When the budget is spent it is discarded immediately and completely: the container and its data are removed with no soft-delete window and no reserved name. This is aimed at one-off jobs, often spawned on demand by another agent, rather than long-lived agents you manage by hand. In a community build agents are always long-lived (no budget). See [Managing Agents](../agents/managing-agents.md).
 
 ## Why can't I create a new agent with the same name as one I deleted?
 
@@ -76,11 +72,11 @@ It lands on **Overview** (trends, health, recent activity) and puts everything e
 
 ## What's in an agent's Settings tab?
 
-It's the owner-only home for per-agent configuration, in sections: **Guardrails** (max turns for chat and for tasks — both default to 50, settable from 1 to 500, blank inherits the platform default; the other overrides are API-only), **Parallel Capacity** (how many tasks may run at once, up to the admin's fleet ceiling, with live slot usage), **Expose via MCP** (publish the agent as its own MCP tool), **Trinity access key** (the agent-scoped key it uses to call Trinity's MCP tools, with health status and a **Regenerate** action — the running container is replaced to pick up the new key), **Reliability** (the dispatch circuit breaker, plus **Wake this agent when an ask it raised ends**, which starts a turn as soon as an approval or question is answered, cancelled or expires instead of waiting for the agent's next scheduled run), and **Voice** (spoken voice notes on messaging channels). A **Cross-model validation** section appears only on entitled installations. Resources, read-only mode, and the Running/Autonomy switches stay in the agent header and on the Dashboard. See [Agent Configuration](../agents/agent-configuration.md#the-settings-tab).
+It's the owner-only home for per-agent configuration, in sections: **Guardrails** (max turns for chat and for tasks — both default to 50, settable from 1 to 500, blank inherits the platform default; the other overrides are API-only), **Parallel Capacity** (how many tasks may run at once, up to the admin's fleet ceiling, with live slot usage), **Expose via MCP** (publish the agent as its own MCP tool), **Trinity access key** (the agent-scoped key it uses to call Trinity's MCP tools, with health status and a **Regenerate** action — the running container is replaced to pick up the new key), **Reliability** (the dispatch circuit breaker, plus **Wake this agent when an ask it raised ends**, which starts a turn as soon as an approval or question is answered, cancelled or expires instead of waiting for the agent's next scheduled run), **Git sync** (auto-sync, pulling from GitHub, and pausing schedules while sync fails), and **Voice** (spoken voice notes on messaging channels). Further sections can appear on installations with an enterprise entitlement. Resources, read-only mode, and the Running/Autonomy switches stay in the agent header and on the Dashboard. See [Agent Configuration](../agents/agent-configuration.md#the-settings-tab).
 
 ## How do I limit how much CPU and memory an agent can use?
 
-Click the gear button ("Configure resources") in the agent header to open the resource modal. Memory options are 1g through 64g and CPU options are 1, 2, 4, 8, or 16 cores; either limit can be left as "Inherit default". Limits are enforced at the container level via Linux cgroups and take effect on the next restart. Admins set the fleet-wide defaults for new agents under Settings. See [Agent Configuration](../agents/agent-configuration.md).
+Click the gear button ("Configure resources") in the agent header to open the resource modal. Memory options are 1g through 64g and CPU options are 1, 2, 4, 8, or 16 cores; either limit can be left as "Inherit default". Limits are enforced at the container level via Linux cgroups and take effect on the next restart. Admins set the fleet-wide defaults for new agents under Settings. If you pick more cores than the Docker host has, the container gets the host's CPU count instead of failing to start. See [Agent Configuration](../agents/agent-configuration.md).
 
 ## How long can an agent task run before it times out?
 
@@ -88,7 +84,7 @@ Each agent has an execution timeout, configurable from 60 to 7200 seconds (defau
 
 ## What does read-only mode do?
 
-Read-only mode prevents the agent from modifying source files (`*.py`, `*.js`, and so on) inside its container by intercepting `Write`, `Edit`, and `NotebookEdit` tool calls with hooks. Generated output is still allowed under `output/*` and `content/*`. Toggle it in the agent header. Codex agents enforce the same restriction through the Codex sandbox (`--sandbox read-only`) instead of tool hooks. See [Agent Configuration](../agents/agent-configuration.md).
+Read-only mode prevents the agent from modifying source and config files (`*.py`, `*.js`, `*.yaml`, `CLAUDE.md`, `.env`, and so on) inside its container by intercepting `Write`, `Edit`, `MultiEdit`, and `NotebookEdit` tool calls with a hook. Generated output is still allowed under `content/*`, `output/*`, `reports/*` and `exports/*`, plus `*.log` and `*.txt` files. Toggle it in the agent header. The configuration lives in a root-owned file the agent cannot edit. Codex agents enforce the same restriction through the Codex sandbox (`--sandbox read-only`) instead of tool hooks; Gemini CLI turns are not covered. See [Agent Configuration](../agents/agent-configuration.md).
 
 ## What does the autonomy toggle actually control?
 
@@ -136,7 +132,7 @@ An agent gets a working branch, auto-sync, and paused schedules while sync fails
 
 ## How do I turn my agent's auto-sync on or off?
 
-Open the agent's **Settings** tab and use the **Git sync** section: **Auto-sync to GitHub every 15 minutes**, and **Pause schedules while sync is failing**. Both apply on the next cycle with no restart, because the agent reads the auto-sync setting at the start of every cycle. The same switches are `PUT /api/agents/{name}/git/auto-sync` and `PUT /api/agents/{name}/git/freeze-schedules-if-failing`. An agent with no GitHub repository shows a note pointing you to the **Git** tab. See [GitHub Sync](../integrations/github-sync.md#turning-auto-sync-on-or-off).
+Open the agent's **Settings** tab and use the **Git sync** section: **Auto-sync to GitHub every 15 minutes**, **Pull changes from GitHub on every sync cycle**, and **Pause schedules while sync is failing**. All three apply on the next cycle with no restart. The same switches are `PUT /api/agents/{name}/git/auto-sync`, `PUT /api/agents/{name}/git/pull-sync` and `PUT /api/agents/{name}/git/freeze-schedules-if-failing`. An agent with no GitHub repository shows a note pointing you to the **Git** tab. See [GitHub Sync](../integrations/github-sync.md#turning-auto-sync-on-or-off).
 
 ## My agent was created from a public template and can't push anywhere. Can I fix that without recreating it?
 
@@ -156,7 +152,7 @@ Because Trinity merges its canonical `.gitignore` into every auto-syncing GitHub
 
 ## Can my agent disable or edit its own guardrails?
 
-No. The hook scripts live in root-owned `/opt/trinity/`, and the registration that makes Claude Code run them lives in its admin-controlled managed settings (`/etc/claude-code/managed-settings.json`) — root-owned, read-only, taking precedence over user and project settings, and outside the git-synced working tree — so neither an edit inside the container nor a push to the agent's repository can remove it. The credential-file protection hook refuses writes to those paths as well. On every boot the container checks that the registration is present and unwritable and logs `GUARDRAILS: ERROR` if not. Owners can *tighten* guardrails per agent (turn limits in the Settings tab; deny lists and disallowed tools via the API) but never loosen the baseline. See [Agent Guardrails](../agents/agent-guardrails.md).
+No. The hook scripts live in root-owned `/opt/trinity/`, and the registration that makes Claude Code run them lives in its admin-controlled managed settings (`/etc/claude-code/managed-settings.json`) — root-owned, read-only, taking precedence over user and project settings, and outside the git-synced working tree — so neither an edit inside the container nor a push to the agent's repository can remove it. The credential-file protection hook refuses writes to those paths as well, and the Bash deny-list refuses the obvious `sudo` commands against them. Each hook runs as a fixed command with an empty environment under an isolated interpreter, so a shell prefix or startup file the agent sets cannot run ahead of it. On every boot the container checks that the registration is present and unwritable and logs `GUARDRAILS: ERROR` if not, and the agent's `/health` re-checks the registration on every request. Owners can *tighten* guardrails per agent (turn limits in the Settings tab; deny lists and disallowed tools via the API) but never loosen the baseline. See [Agent Guardrails](../agents/agent-guardrails.md).
 
 ## Where do I see which credentials an agent still needs?
 
@@ -165,3 +161,35 @@ The **Credentials** tab shows a per-variable checklist: what the agent needs (re
 ## Where does the list of GitHub templates come from?
 
 Three tiers, in order: an admin-curated list in Settings, if one exists — in which case nothing else is consulted; otherwise a curated remote registry fetched over HTTPS, so the starter catalogue can refresh without upgrading Trinity; otherwise the bundled defaults, which are empty. Registry results are cached for about an hour with a durable last-known-good copy, and every failure degrades quietly to the next tier, so agent creation never depends on a registry being reachable. See [Creating Agents](../agents/creating-agents.md).
+
+## What does "What is this repository?" mean when I create an agent from my own repo?
+
+It tells Trinity how to bind the agent to git. **An agent** means the repository *is* the agent — its memory, skills and state — so it saves its work to its own branch. **A deployment of a codebase** means the repository is a product the agent runs, so it only pulls updates and never pushes. The question appears only for a custom repository with the **Clone** intent; list templates are always pull-only, and copy, fork and fork-to-own don't need it. After creation the dialog shows what Trinity decided and warns plainly when an agent was created pull-only, and the Git tab shows **Agent · own branch**, **Agent · own repo**, or **Pull-only**. See [Creating Agents](../agents/creating-agents.md#importing-an-existing-github-repository).
+
+## I asked for 8 CPUs but the server only has 4 — will my agent fail to start?
+
+No. Docker refuses a CPU limit above the host's CPU count, so Trinity caps the request at the number of CPUs the host has and logs a warning. The agent's setting keeps the value you chose, so the agent is not recreated on every start. See [Agent Configuration](../agents/agent-configuration.md#resource-allocation).
+
+## Does a Gemini agent remember earlier turns?
+
+In chat, yes: each chat turn resumes the agent's own Gemini session, never another run's, and a model change or a history reset starts fresh. Headless turns — tasks, schedules, and Workspace turns — never resume a Gemini session, so they run without the previous turn's working memory. If you need a conversation that carries working memory forward in the Workspace, use a Claude Code agent. See [Agent Runtimes](../agents/agent-runtimes.md#gemini-cli-turns).
+
+## Why did my agent's chat reply show up as a failure even though it wrote some text?
+
+Because the Claude Code CLI reported that the turn ended in an error. Trinity records such a turn as failed, with the real cause, rather than presenting partial text or an error message as the agent's answer. The one exception is when the session transcript on disk proves the turn actually finished; then the answer is kept and marked as recovered. See [Agent Runtimes](../agents/agent-runtimes.md#how-failures-are-reported).
+
+## Do guardrails and read-only mode protect agents on every runtime?
+
+Not equally. The guardrail hooks and read-only mode are Claude Code tool hooks. Codex enforces read-only mode through its own sandbox, and Gemini CLI turns pass through neither. Credential redaction applies to every runtime, because the backend scrubs execution output whatever produced it. The turn limit is enforced only on Claude Code; on Gemini and Codex the execution timeout bounds the run. See [Agent Guardrails](../agents/agent-guardrails.md).
+
+## Why did the Canvas tab jump to a different canvas while I was reading?
+
+Because the agent created a new canvas, and the panel follows a newly created canvas so you see what was just made. It waits while you are in **Manage**, searching, or sharing, and picking a canvas yourself in the meantime cancels the switch. A rewrite of a canvas that already exists never moves you. See [Agent Canvas](../agents/agent-canvas.md#how-it-works).
+
+## How do I give every agent on my instance the same rules?
+
+Write them in the **Trinity Prompt** (Settings → General, admin only). Trinity adds it after the platform instructions on every chat and task turn, for every agent and every runtime, so a saved change reaches running agents from their next turn with no restart. Add fleet rules only, keep it short, and never copy the platform's own instructions into it. A system manifest with a top-level `prompt:` replaces it. See [Recommended Trinity Prompt](../agents/recommended-fleet-prompt.md).
+
+## My agent started a background task on itself and heard nothing back. Should it send the task again?
+
+No. The `execution_id` it got back is a receipt: the task arrived and is queued, running or done. Re-sending, especially a reworded version, can run the work twice. Read the outcome with `get_execution_result(agent_name, execution_id)` — `running` does not mean stuck — or turn on result injection so the answer lands in the chat when it finishes. See [Self-Execute](../agents/self-execute.md).

@@ -9,7 +9,7 @@ AI-generated avatars for agents using reference images, emotion variants, and de
 - **Reference Image** -- Upload a reference image and the avatar is generated in that style.
 - **Variation Regeneration** -- Generate new variations from an existing avatar.
 - **Emotion Variants** -- The Agent Detail page cycles through emotion-based avatar variants every 30 seconds.
-- **Default Avatar Generation** -- The **Generate Default Avatars** button in Settings (admin) generates robot/android-style avatars for all agents without a custom avatar.
+- **Default Avatar Generation** -- The **Generate Default Avatars** button in **Settings → General** (admin) generates robot/android-style avatars for all agents without a custom avatar.
 - **Bundled Default Avatars** -- The first-run templates (`scout`, `sage`, `scribe`) ship an `avatar.webp` beside their `template.yaml`, installed at creation as the agent's default avatar — so a fresh install shows faces rather than initials before any image-generation key exists. Any `local:` template that declares an `avatar_prompt` can bundle an `avatar.webp` or `avatar.png` (up to 2 MB) the same way. It counts as a default avatar, so **Generate Default Avatars** replaces it once a key is configured; a missing or unreadable image falls back to the prompt-only seed. An agent seeded from a GitHub template (such as the bundled Cornelius) still shows initials until a key exists.
 - **WebP Conversion** -- Avatars are converted to WebP via Pillow for optimization.
 - **Stable Emotion Cache Keys** -- Emotion variants use stable cache keys to avoid redundant generation.

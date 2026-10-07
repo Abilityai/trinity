@@ -220,9 +220,9 @@ Click the remove button next to a group to deactivate it. The bot will stop resp
 | `/api/agents/{name}/telegram` | DELETE | Remove bot binding |
 | `/api/agents/{name}/telegram/test` | POST | Verify bot or send test message |
 | `/api/agents/{name}/telegram/groups` | GET | List group configs |
-| `/api/agents/{name}/telegram/groups/{id}` | PUT | Update trigger mode / welcome, and the group's `allow_proactive` consent flag (human-only) |
+| `/api/agents/{name}/telegram/groups/{id}` | PUT | Update trigger mode / welcome, plus the group's `allow_proactive` consent flag and its `context_enabled` (Group context) switch — those two are human-only |
 | `/api/agents/{name}/telegram/groups/{id}` | DELETE | Deactivate group config |
-| `/api/agents/{name}/telegram/groups/{chat_id}/messages` | POST | Post a proactive message to a connected group (owner-gated, rate-limited; what `send_group_message(channel_type: "telegram")` calls) |
+| `/api/agents/{name}/telegram/groups/{chat_id}/messages` | POST | Post a proactive message to a connected group (owner-gated, rate-limited; what `send_group_message(channel_type: "telegram")` calls). An optional `idempotency_key` / `idempotency_ttl` delivers the same message to the group once across runs — see [MCP Server → Sending once across runs](mcp-server.md#sending-once-across-runs) |
 | `/api/agents/{name}/telegram/progress-indicator` | PUT | Turn the in-progress indicator on or off for this binding (human-only) |
 
 See [Backend API Docs](http://localhost:8000/docs) for full request/response schemas.
