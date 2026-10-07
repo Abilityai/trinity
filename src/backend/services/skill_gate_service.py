@@ -38,6 +38,7 @@ from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from config import PORTAL_SOURCE_CHANNEL
 from database import db
+from db.skill_gates import ORIGIN_CLEARED
 from models import TaskExecutionStatus
 from services import rate_limiter, role_addressing
 from services.skill_gate_errors import (  # noqa: F401 — re-exported for entries and tests
@@ -98,12 +99,17 @@ class SkillGate:
 
 
 def list_skill_gates(agent_name: str) -> Dict[str, SkillGate]:
-    """The gated skills on `agent_name`, keyed by skill name.
+    """The gated skills on `agent_name`, keyed by (lowercased) skill name.
 
-    ent#753 owns the storage and replaces this body with its read. Until it
-    lands nothing is gated, so #751 ships inert.
+    Reads the gate map (trinity-enterprise#753, `agent_skill_gates`); a
+    `cleared` tombstone gates nothing. A failed read RAISES — never `{}`, which
+    reads as "nothing is gated" — so `read_gates` refuses instead (#752 note 1).
     """
-    return {}
+    return {
+        row["skill_name"]: SkillGate(approver=row["approver"], deadline_hours=row["deadline_hours"])
+        for row in db.list_agent_skill_gates(agent_name)
+        if row["origin"] != ORIGIN_CLEARED
+    }
 
 
 @dataclass(frozen=True)
@@ -934,28 +940,47 @@ async def sync_gate_marker(agent_name: str) -> Optional[bool]:
     worker — the map is read under the lock — so a slow sync that read an
     older map cannot land after a newer one.
     """
+    async with marker_lock(agent_name):
+        return await sync_marker_locked(agent_name)
+
+
+async def sync_marker_locked(agent_name: str) -> Optional[bool]:
+    """`sync_gate_marker`'s body, for a caller that already holds
+    `marker_lock(agent_name)` — the gate-map writes (trinity-enterprise#753),
+    which must write the row and re-sync under ONE hold. The lock is not
+    reentrant: never call `sync_gate_marker` from inside it."""
+    try:
+        gates = read_gates(agent_name)
+    except SkillGateRefused:
+        return None
+    want = bool(gates)
+    return want if await write_marker(agent_name, want) else None
+
+
+async def write_marker(agent_name: str, create: bool) -> bool:
+    """One exec that writes (`create`) or removes the marker. True when it
+    completed; a failure is logged, never raised."""
+    from services.docker_service import execute_command_in_container
+    try:
+        result = await execute_command_in_container(
+            container_name=f"agent-{agent_name}", command=marker_command(create),
+            timeout=MARKER_TIMEOUT_SECONDS, user="root")
+    except Exception:  # noqa: BLE001
+        logger.warning("[SkillGate] gate marker sync on %s failed", agent_name, exc_info=True)
+        return False
+    if result.get("timed_out") or result.get("exit_code") != 0:
+        logger.warning("[SkillGate] gate marker sync on %s did not complete (exit %s, timed out %s)",
+                       agent_name, result.get("exit_code"), bool(result.get("timed_out")))
+        return False
+    return True
+
+
+def marker_lock(agent_name: str):
+    """The per-agent lock every marker write holds, in this worker."""
     import asyncio
 
     loop_key = (id(asyncio.get_running_loop()), agent_name)
-    async with _marker_locks.setdefault(loop_key, asyncio.Lock()):
-        try:
-            gates = read_gates(agent_name)
-        except SkillGateRefused:
-            return None
-        want = bool(gates)
-        from services.docker_service import execute_command_in_container
-        try:
-            result = await execute_command_in_container(
-                container_name=f"agent-{agent_name}", command=marker_command(want),
-                timeout=MARKER_TIMEOUT_SECONDS, user="root")
-        except Exception:  # noqa: BLE001
-            logger.warning("[SkillGate] gate marker sync on %s failed", agent_name, exc_info=True)
-            return None
-        if result.get("timed_out") or result.get("exit_code") != 0:
-            logger.warning("[SkillGate] gate marker sync on %s did not complete (exit %s, timed out %s)",
-                           agent_name, result.get("exit_code"), bool(result.get("timed_out")))
-            return None
-        return want
+    return _marker_locks.setdefault(loop_key, asyncio.Lock())
 
 
 # One lock per (event loop, agent): a worker has one loop; the loop id keeps a

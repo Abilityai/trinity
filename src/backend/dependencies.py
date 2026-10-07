@@ -1921,6 +1921,94 @@ def can_manage_agent_skills(current_user: User, agent_name: str) -> bool:
     return bool(db.can_user_share_agent(current_user.username, agent_name))
 
 
+def _path_agent(request: Request) -> Optional[str]:
+    params = getattr(request, "path_params", None) or {}
+    return params.get("agent_name") or params.get("name")
+
+
+def require_person_or_capability(capability: str, *, self_person_only: bool = False):
+    """`require_person`, except that an AGENT holding `capability` passes
+    (trinity-enterprise#164 — the reconfigure routes were person-only, so no
+    agent could hold the power the grant exists to give an orchestrator).
+
+    Only the agent case changes: an agent key without the grant gets the named
+    capability refusal; every other principal meets `assert_person` exactly as
+    before, so a user-scoped or connector key gains nothing.
+
+    Two bounds on a holder (#3236 review), because these routes authorise
+    through `assert_agent_owner` → `can_user_share_agent`, which is True for any
+    `role == "admin"` — and an agent key carries its owner's role:
+
+    * **Reach** — the target must be an agent its owner actually OWNS
+      (`owner_username` equality, never the admin short-circuit). Without this,
+      one grant on a default admin-owned install reached every agent on the
+      instance, other users' included. Not-owned and nonexistent answer the
+      same 404, so a holder learns nothing about agents outside its owner's.
+    * **Self** — with `self_person_only`, a holder cannot target ITSELF. Used
+      for read-only mode and guardrails: the agent the setting constrains must
+      not be the one that lifts it (the grant-vs-use line, Invariant #8).
+    """
+    async def dep(request: Request, current_user: User = Depends(get_current_user)) -> User:
+        if (getattr(current_user, "mcp_scope", None) == "agent"
+                and getattr(current_user, "agent_name", None)
+                and not getattr(current_user, "vouched_source_agent", None)):
+            target = _path_agent(request)
+            if self_person_only and target == current_user.agent_name:
+                assert_person(current_user)
+            await enforce_agent_capability(request, current_user, capability, target=target)
+            if target:
+                owner = db.get_agent_owner(target) or {}
+                if owner.get("owner_username") != current_user.username:
+                    raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
+                                        detail="Agent not found")
+            return current_user
+        assert_person(current_user)
+        return current_user
+    dep.__name__ = f"require_person_or_{capability.replace('.', '_')}"
+    return dep
+
+
+async def get_skill_gate_readable_agent_by_name(
+    agent_name: str = Path(..., description="Agent name from path"),
+    current_user: User = Depends(get_current_user),
+) -> str:
+    """Who may read an agent's skill gate map (trinity-enterprise#753).
+
+    An ALLOWlist decided on the principal first, so a refused scope learns
+    nothing about the target (403 before any lookup):
+
+    * a person (signed-in session or the person's own user-scoped key) and the
+      system key — anything they may access (`get_authorized_agent_by_name`,
+      uniform 404);
+    * an agent key — its OWN gates (the in-container hook pulls; nothing is
+      pushed into the workspace), or, holding `skills.manage`, an agent its
+      owner OWNS (the orchestrator reports drift). Never the admin
+      short-circuit an agent key's owner role would otherwise carry. Any other
+      target is the same 404 as an agent that does not exist;
+    * connector, portal delegate, any other scope and a principal with no scope
+      at all — refused.
+    """
+    scope = getattr(current_user, "mcp_scope", _SCOPE_ABSENT)
+    if ((scope in PERSON_SCOPES or scope == "system")
+            and not getattr(current_user, "connector_agent", None)
+            and not getattr(current_user, "portal_delegate", False)):
+        return get_authorized_agent_by_name(agent_name=agent_name, current_user=current_user)
+    own = getattr(current_user, "agent_name", None)
+    if scope == "agent" and own and not getattr(current_user, "vouched_source_agent", None):
+        from db.capability_grants import CAPABILITY_SKILLS_MANAGE
+        owner = db.get_agent_owner(agent_name) or {}
+        holder = capability_refusal(current_user, CAPABILITY_SKILLS_MANAGE) is None
+        if owner and (agent_name == own
+                      or (holder and owner.get("owner_username") == current_user.username)):
+            return agent_name
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Agent not found")
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail={"code": "skill_gates_not_readable",
+                "message": "This key cannot read an agent's skill gates."},
+    )
+
+
 async def get_skill_managed_agent_by_name(
     request: Request,
     agent_name: str = Path(..., description="Agent name from path"),

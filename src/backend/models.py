@@ -3845,6 +3845,67 @@ class SkillGateCheckResponse(BaseModel):
     message: Optional[str] = None
 
 
+class SkillGateSetRequest(BaseModel):
+    """`PUT /api/agents/{agent_name}/skill-gates/{skill_name}` (trinity-enterprise#753).
+
+    Only the fields sent are applied: on an existing gate an omitted field keeps
+    its stored value, and `deadline_hours: null` resets to the 24-hour default.
+    Typed loosely on purpose and checked by the service, so a bad value gets a
+    NAMED refusal (`invalid_approver`, `approver_unavailable`, `invalid_deadline`)
+    — and a JSON `true` or `"24"` is refused rather than coerced to an int.
+    """
+    model_config = ConfigDict(extra="forbid")
+
+    approver: Optional[Any] = Field(
+        default=None, description="Who approves: 'primary' (default) or 'approver' (where offered).")
+    deadline_hours: Optional[Any] = Field(
+        default=None, description="Hours an approver has, 1 to 168; null for the 24-hour default.")
+
+
+class SkillGateEntry(BaseModel):
+    """One gated skill on one agent (trinity-enterprise#753)."""
+    skill_name: str
+    approver: str
+    deadline_hours: Optional[int] = None
+    origin: str                         # set | library_default
+    set_by: Optional[str] = None
+    set_by_agent: Optional[str] = None
+    set_at: Optional[str] = None
+    approver_reachable: Optional[bool] = None
+
+
+class SkillGateMapResponse(BaseModel):
+    """`GET /api/agents/{agent_name}/skill-gates`. `approver_kinds` is what this
+    install can resolve — `primary` only on OSS. `cleared_defaults` are library
+    defaults the owner cleared; they gate nothing while the skill stays assigned."""
+    agent_name: str
+    gates: List[SkillGateEntry]
+    cleared_defaults: List[str] = Field(default_factory=list)
+    approver_kinds: List[str]
+    default_deadline_hours: int
+
+
+class SkillGateWriteResponse(BaseModel):
+    """What `PUT .../skill-gates/{skill_name}` did. `warnings`:
+    `approver_unassigned` (the approver kind reaches nobody now, so a gated
+    request would be refused) and `marker_not_written` (the running agent's
+    fail-closed marker could not be written; the check re-syncs it)."""
+    agent_name: str
+    skill_name: str
+    gate: SkillGateEntry
+    changed: bool
+    warnings: List[str] = Field(default_factory=list)
+
+
+class SkillGateClearResponse(BaseModel):
+    """What `DELETE .../skill-gates/{skill_name}` did. `cleared`: `deleted`,
+    `tombstoned` (a library-assigned skill — its default stays off), or null."""
+    agent_name: str
+    skill_name: str
+    changed: bool
+    cleared: Optional[str] = None
+
+
 class BulkCancelRequest(BaseModel):
     """Body for bulk-cancelling pending queue items (#1017).
 

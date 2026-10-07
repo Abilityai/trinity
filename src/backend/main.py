@@ -83,6 +83,7 @@ from routers.canary import router as canary_router  # CANARY-001 / Issue #411
 from routers.compatibility import router as compatibility_router  # #668 agent compatibility
 from routers.skills import router as skills_router
 from routers.skill_gate import router as skill_gate_router  # trinity-enterprise#752 in-container hook check
+from routers.skill_gate import agent_router as skill_gate_agent_router  # trinity-enterprise#753 gate map
 from routers.internal import router as internal_router, pull_router as internal_pull_router
 from routers.tags import router as tags_router, set_websocket_manager as set_tags_ws_manager
 from services.skill_service import set_websocket_manager as set_skills_ws_manager
@@ -1396,6 +1397,7 @@ app.include_router(avatar_router)  # Agent Avatars (AVATAR-001)
 app.include_router(operator_queue_router)  # Operator Queue (OPS-001)
 app.include_router(operator_queue_agent_router)  # an agent's own ask readback (trinity-enterprise#611)
 app.include_router(skill_gate_router)  # the in-container skill-gate hook's check (trinity-enterprise#752)
+app.include_router(skill_gate_agent_router)  # the per-agent skill gate map (trinity-enterprise#753)
 app.include_router(voice_router)  # Voice Chat (VOICE-001)
 app.include_router(voip_public_router)  # VoIP Telephony Media Streams WS (VOIP-001)
 app.include_router(voip_auth_router)  # VoIP Telephony binding + trigger (VOIP-001)

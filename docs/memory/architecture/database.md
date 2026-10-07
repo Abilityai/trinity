@@ -1162,6 +1162,26 @@ Both tracks: SQLite `agent_capability_grants`, Alembic `0072_agent_capability_gr
 `AgentRef(..., CASCADE)` — rename re-keys, delete removes. Every read joins `agent_ownership`
 and filters `deleted_at`, so a soft-deleted agent holds nothing and recovery restores its grant.
 
+**agent_skill_gates** (trinity-enterprise#753) — the per-agent skill gate map the gated-skill
+check reads (`skill_gate_service.list_skill_gates`; writes only through
+`services/skill_gate_map_service.py`):
+```sql
+CREATE TABLE agent_skill_gates (
+    agent_name TEXT NOT NULL,
+    skill_name TEXT NOT NULL,          -- lowercased; every matcher casefolds
+    approver TEXT NOT NULL,            -- primary | approver
+    deadline_hours INTEGER,            -- 1..168; NULL → the 24h default
+    origin TEXT NOT NULL,              -- set | library_default | cleared (tombstone, gates nothing)
+    set_by TEXT NOT NULL,
+    set_by_agent TEXT,                 -- R29 provenance; not an AgentRef
+    set_at TEXT NOT NULL,
+    PRIMARY KEY (agent_name, skill_name)
+);
+```
+Both tracks: SQLite `agent_skill_gates`, Alembic `0093_agent_skill_gates` (← `0092`).
+`AgentRef(..., CASCADE)`. Writes run under `lock_agent_rows` and land only while the agent has a
+live ownership row; the PK is the ON CONFLICT target, declared in `tables.py` as well.
+
 **Tag pinning is the supply-chain control (AC#5).** Skills carry executable `scripts/`
 that the ent#139 runner executes and ent#236 re-injects fleet-wide unattended, so the
 community source — which takes public PRs — pins to a **tag we bump**, never a branch

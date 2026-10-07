@@ -137,6 +137,7 @@ from db.skills import SkillsOperations
 from db.skill_sets import SkillSetsOperations
 from db.role_readiness import RoleReadinessOperations
 from db.capability_grants import CapabilityGrantOperations
+from db.skill_gates import SkillGateOperations, KEEP as _GATE_KEEP
 from db.seat_decisions import SeatDecisionOperations
 from db.skill_sources import SkillSourcesOperations
 from db.public_chat import PublicChatOperations
@@ -1018,6 +1019,7 @@ class DatabaseManager:
         self._skill_sets_ops = SkillSetsOperations()
         self._role_readiness_ops = RoleReadinessOperations()
         self._capability_grant_ops = CapabilityGrantOperations()
+        self._skill_gate_ops = SkillGateOperations()
         self._seat_decision_ops = SeatDecisionOperations()
         self._skill_sources_ops = SkillSourcesOperations()
         self._public_chat_ops = PublicChatOperations()
@@ -2830,6 +2832,30 @@ class DatabaseManager:
 
     def delete_agent_capability_grants(self, agent_name: str) -> int:
         return self._capability_grant_ops.delete_agent_capability_grants(agent_name)
+
+    # =========================================================================
+    # Skill gate map (delegated to db/skill_gates.py) — trinity-enterprise#753
+    def list_agent_skill_gates(self, agent_name: str):
+        return self._skill_gate_ops.list_agent_skill_gates(agent_name)
+
+    def write_skill_gate(self, agent_name: str, skill_name: str, *, approver=_GATE_KEEP,
+                         deadline_hours=_GATE_KEEP, origin: str, set_by: str, set_by_agent):
+        return self._skill_gate_ops.write_skill_gate(
+            agent_name, skill_name, approver=approver, deadline_hours=deadline_hours,
+            origin=origin, set_by=set_by, set_by_agent=set_by_agent)
+
+    def clear_skill_gate(self, agent_name: str, skill_name: str, *, set_by: str, set_by_agent,
+                         recommended):
+        return self._skill_gate_ops.clear_skill_gate(
+            agent_name, skill_name, set_by=set_by, set_by_agent=set_by_agent,
+            recommended=recommended)
+
+    def reconcile_library_skill_gates(self, agent_name: str, recommended, *, set_by: str, may_drop):
+        return self._skill_gate_ops.reconcile_library_skill_gates(
+            agent_name, recommended, set_by=set_by, may_drop=may_drop)
+
+    def drop_unassigned_skill_gates(self, agent_name: str, names, *, keep=()):
+        return self._skill_gate_ops.drop_unassigned_skill_gates(agent_name, names, keep=keep)
 
     # Role readiness (delegated to db/role_readiness.py) — ent#527 / #663
     # =========================================================================
