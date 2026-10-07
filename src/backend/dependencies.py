@@ -1806,37 +1806,44 @@ def get_owned_agent_by_name(
 # trinity-enterprise#164: every refusal also tells the agent how to ASK for the
 # permission. Approving that ask is a notification only — the grant itself is
 # made by an admin in a signed-in session, never by answering a queue item.
-_ASK_FOR_IT = (
-    # #3236 review: the ask surface has no `ask_class` field (that exists only
-    # on seat decisions) and MCP `ask_operator` drops unknown fields, so the
-    # instruction must use the fields that exist. And there is no Settings UI
-    # for these grants yet (ent#756), so the remedy names the API.
-    " To request it, raise an ask to your operator (type 'question') whose title "
-    "names the permission; approving the ask does not grant it. An instance admin "
-    "grants it from a signed-in session: PUT /api/agents/{agent}/capability-grants/"
-    "{capability} with {\"granted\": true}."
-)
+def _ask_for_it(capability: str) -> str:
+    """How to ASK for `capability` (ent#164) — one sentence per refusal.
+
+    #3236 review: the ask surface has no `ask_class` field (that exists only on
+    seat decisions) and MCP `ask_operator` drops unknown fields, so the
+    instruction uses the fields that exist. The permission id goes in the title
+    VERBATIM: that is what the agent's Settings (ent#756) matches to list its
+    open permission requests. There is no grant through the queue — an admin
+    grants it from a signed-in session.
+    """
+    return (
+        f" To request it, raise an ask to your operator (type 'question') whose "
+        f"title includes '{capability}'; approving the ask does not grant it. An "
+        f"instance admin grants it in the agent's Settings \u2192 Permissions to "
+        f"change itself (or PUT /api/agents/{{agent}}/capability-grants/{capability})."
+    )
+
 
 _CAPABILITY_REFUSALS = {
     "skills.manage": (
         "skill_management_not_permitted",
         "This agent does not hold the skill-management permission, which changing "
         "any agent's skills requires \u2014 its own included. An instance admin can "
-        "grant it in Settings \u2192 Agents \u2192 Skill managers." + _ASK_FOR_IT,
+        "grant it in Settings \u2192 Agents \u2192 Skill managers." + _ask_for_it("skills.manage"),
     ),
     "schedules.manage": (
         "schedule_management_not_permitted",
         "This agent does not hold the schedule-management permission, which "
         "creating, changing, enabling, disabling or deleting ANOTHER agent's "
         "schedules (and their webhooks) requires. An agent's own schedules need "
-        "no grant." + _ASK_FOR_IT,
+        "no grant." + _ask_for_it("schedules.manage"),
     ),
     "instructions.manage": (
         "instruction_management_not_permitted",
         "This agent does not hold the instruction-management permission, which "
         "writing an agent's CLAUDE.md, AGENTS.md or .claude/ files (other than "
         "skills), or resetting it to main (reset-to-main-preserve-state), "
-        "requires \u2014 its own included." + _ASK_FOR_IT,
+        "requires \u2014 its own included." + _ask_for_it("instructions.manage"),
     ),
     "agents.manage": (
         "agent_management_not_permitted",
@@ -1844,7 +1851,7 @@ _CAPABILITY_REFUSALS = {
         "deleting, deploying or reconfiguring agents requires (spawning an "
         "ephemeral helper does not). Even with it, an agent reaches only agents "
         "its owner owns, deletes only agents it spawned, and cannot change its "
-        "own read-only mode or guardrails." + _ASK_FOR_IT,
+        "own read-only mode or guardrails." + _ask_for_it("agents.manage"),
     ),
 }
 
