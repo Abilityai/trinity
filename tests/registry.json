@@ -1,6 +1,20 @@
 {
   "test_files": [
     {
+      "file": "unit/test_2545_skill_source_pin.py",
+      "feature": "#2545, #3123",
+      "added": "2026-09-06",
+      "updated": "2026-10-06",
+      "categories": [
+        "backend",
+        "skills",
+        "config",
+        "docs",
+        "unit"
+      ],
+      "description": "Bundled community skills-catalog pin guard (static, parses SOURCE so a shell override cannot leak in): `config.DEFAULT_SKILL_SOURCE_REF` is a vX.Y.Z tag at or above the floor v0.3.0 (#3123: the first trinity-skills release with `update-dashboard`, the playbook the metrics tiles name; #2545 set v0.2.0); `.env.example` and `docs/user-docs/automation/skills-and-playbooks.md` state the same default (exactly one regex match in the doc); the fresh-install seed note reports the configured ref."
+    },
+    {
       "file": "unit/test_3246_platform_alert_surfaces.py",
       "feature": "#3246",
       "added": "2026-10-05",
