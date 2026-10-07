@@ -99,6 +99,14 @@ describe('fork-to-own at create', () => {
     await w.find('[data-testid="github-token-input"]').setValue('ghp_override')
     expect((await submit(w)).fork_to_own.github_pat).toBe('ghp_override')
   })
+
+  it('an override left EMPTY stops the submit rather than sending the saved token', async () => {
+    // #3164 review: the parent could not see the override, so an empty one
+    // read as "use my saved token".
+    const w = await forkForm()
+    await w.find('[data-testid="github-token-toggle"]').trigger('click')
+    expect(await submit(w)).toBeUndefined()
+  })
 })
 
 describe('binding an agent to a repo you own', () => {
@@ -124,5 +132,13 @@ describe('binding an agent to a repo you own', () => {
     await flushPromises()
     expect(bindAgentToOwnRepo).not.toHaveBeenCalled()
     expect(w.text()).toContain('Settings → GitHub token')
+  })
+
+  it('an override left EMPTY sends nothing — never the broad saved token', async () => {
+    const w = await bindForm()
+    await w.find('[data-testid="github-token-toggle"]').trigger('click')
+    await w.find('form').trigger('submit')
+    await flushPromises()
+    expect(bindAgentToOwnRepo).not.toHaveBeenCalled()
   })
 })

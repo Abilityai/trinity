@@ -295,7 +295,8 @@ export const useAuthStore = defineStore('auth', {
     async fetchGithubPatStatus() {
       try {
         const { data } = await axios.get('/api/users/me/github-pat')
-        return !!data?.configured
+        // `usable` (present AND decryptable) when the backend sends it.
+        return !!(data?.usable ?? data?.configured)
       } catch (e) {
         console.warn('Failed to read GitHub token status:', e?.message || e)
         return false

@@ -252,7 +252,7 @@
                     />
                     <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">Doesn't need to exist — it will be created for you. (If you pre-create it, leave it empty: no README.)</p>
                   </div>
-                  <SavedGithubTokenField v-model="forkPat" :has-saved="hasSavedGithubPat" input-id="fork-github-token">
+                  <SavedGithubTokenField v-model="forkPat" v-model:overriding="forkPatOverriding" :has-saved="hasSavedGithubPat" input-id="fork-github-token">
                     <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
                       <span class="font-medium">Recommended:</span> a fine-grained token scoped to just this repository
                       (Administration + Contents write). A classic PAT with <code>repo</code> scope also works but grants
@@ -384,6 +384,8 @@ const forkPat = ref('')
 // #3164: the user's saved personal GitHub token (presence only) stands in for
 // a typed one; the field is then an optional override.
 const hasSavedGithubPat = ref(false)
+// #3164 review: an override submitted empty is an empty token, not the saved one.
+const forkPatOverriding = ref(false)
 const forkPrivate = ref(true)
 
 // Watch for initialTemplate changes (in case modal is reused)
@@ -546,7 +548,7 @@ const createAgent = async () => {
         return
       }
       const typedPat = forkPat.value.trim()
-      if (!typedPat && !hasSavedGithubPat.value) {
+      if (!typedPat && (!hasSavedGithubPat.value || forkPatOverriding.value)) {
         error.value = 'A GitHub token is required to create the repository in your account — enter one, or save your personal token in Settings → GitHub token'
         loading.value = false
         return

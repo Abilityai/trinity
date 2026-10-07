@@ -32,17 +32,17 @@
     >
       Using your saved GitHub token (Settings → GitHub token).
     </p>
-    <input
+    <BaseInput
       v-else
       :id="inputId"
-      :value="modelValue"
+      class="mt-1"
+      :model-value="modelValue"
       type="password"
       autocomplete="off"
       placeholder="ghp_… or github_pat_…"
       :disabled="disabled"
-      class="mt-1 block w-full min-h-[38px] rounded-md border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 shadow-sm placeholder-gray-500 focus:border-action-primary-500 focus:ring-action-primary-500 disabled:opacity-50 dark:border-gray-600 dark:bg-gray-700 dark:text-gray-100 dark:placeholder-gray-400"
       data-testid="github-token-input"
-      @input="$emit('update:modelValue', $event.target.value)"
+      @update:model-value="$emit('update:modelValue', $event)"
     />
     <slot />
   </div>
@@ -51,6 +51,7 @@
 <script setup>
 import { computed, ref } from 'vue'
 import BaseButton from './base/BaseButton.vue'
+import BaseInput from './base/BaseInput.vue'
 
 const props = defineProps({
   modelValue: { type: String, default: '' },
@@ -58,13 +59,19 @@ const props = defineProps({
   inputId: { type: String, required: true },
   disabled: { type: Boolean, default: false },
 })
-const emit = defineEmits(['update:modelValue'])
+// `update:overriding` (#3164 review): the parent must know the person chose
+// "Use a different token". Without it an override submitted EMPTY looked like
+// "use my saved token" and bound the broad saved credential — most sharply on
+// a retry, where the panel clears the typed token by design and the field is
+// still in override mode.
+const emit = defineEmits(['update:modelValue', 'update:overriding'])
 
 const overriding = ref(false)
 const required = computed(() => !props.hasSaved || overriding.value)
 
 function toggle() {
   overriding.value = !overriding.value
+  emit('update:overriding', overriding.value)
   // Going back to the saved token drops whatever was typed: the form must not
   // send a half-typed override the user just chose not to use.
   if (!overriding.value) emit('update:modelValue', '')

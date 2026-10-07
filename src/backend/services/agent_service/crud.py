@@ -55,6 +55,7 @@ from utils.helpers import parse_iso_timestamp, sanitize_agent_name, to_utc_iso, 
 from utils.safe_yaml import HardenedYamlError, load_template_yaml
 from .fork_to_own import (
     SAVED_TOKEN_TIERS, fork_pat_required, fork_template_to_own_repo, saved_token_message,
+    saved_token_not_for_agents,
 )
 from . import snapshot_import
 from .helpers import validate_base_image, is_claude_runtime, validate_runtime
@@ -903,6 +904,10 @@ async def _apply_fork_to_own(
     if config.fork_to_own.github_pat is not None:
         user_pat, token_source = config.fork_to_own.github_pat.get_secret_value(), "form"
     elif github_pat_tier in SAVED_TOKEN_TIERS and github_pat_for_agent:
+        # An agent key carries its owner's identity; the owner's saved token
+        # is the owner's to spend, not the agent's.
+        if getattr(current_user, "agent_name", None):
+            raise saved_token_not_for_agents()
         user_pat, token_source = github_pat_for_agent, "saved"
     else:
         raise fork_pat_required()

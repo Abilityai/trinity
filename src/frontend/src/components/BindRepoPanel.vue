@@ -117,6 +117,7 @@
 
       <SavedGithubTokenField
         v-model="pat"
+        v-model:overriding="patOverriding"
         :has-saved="hasSavedGithubPat"
         :input-id="`bind-pat-${agentName}`"
         :disabled="binding"
@@ -223,6 +224,9 @@ const result = ref(null)
 const destinationError = ref(null)
 // #3164: a saved personal GitHub token (presence only) stands in for a typed one.
 const hasSavedGithubPat = ref(false)
+// The person chose "Use a different token": an empty field is then an empty
+// token, never a silent fall-back to the saved one.
+const patOverriding = ref(false)
 
 const isRunning = computed(() => props.agentStatus === 'running')
 
@@ -308,7 +312,7 @@ const submit = async () => {
   // cleared immediately regardless of how the request ends.
   const token = pat.value.trim()
   pat.value = ''
-  if (!token && !hasSavedGithubPat.value) {
+  if (!token && (!hasSavedGithubPat.value || patOverriding.value)) {
     binding.value = false
     error.value = {
       message: 'A GitHub token is required — enter one, or save your personal token in Settings → GitHub token.',

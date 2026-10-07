@@ -223,7 +223,11 @@ async def _resolve_template_tip(template_repo: str, read_pat: str) -> tuple:
 # created under the platform's account, and the fork path persists its token as
 # the agent's per-agent PAT (`github_pat_tier = "fork"`), which would bake the
 # global PAT into a per-agent row (ent#162 Decision 2).
-SAVED_TOKEN_TIERS = frozenset({"per_user", "per_agent"})
+#
+# `per_user` only: both create-path resolver calls pass `owner_id` alone, so a
+# `per_agent` answer cannot occur there, and admitting it would let a future
+# caller that passes `agent_name` hand an AGENT's identity to a user-owned repo.
+SAVED_TOKEN_TIERS = frozenset({"per_user"})
 
 # Refusals that are about the TOKEN — when the saved one was used, the message
 # says so, so the user fixes it in Settings rather than in a form they never
@@ -241,6 +245,33 @@ def fork_pat_required():
         "A GitHub token is needed to create the repository in your account. "
         "Save your personal token in Settings → GitHub token, or enter one here. "
         "The platform's token is never used to create a repository for you.",
+    )
+
+
+def saved_token_not_for_agents():
+    """The named 400 when an AGENT key asks for a fork with no form token.
+
+    The saved token is a person's own GitHub identity. An agent key resolves to
+    its owner, so without this an agent could have a repository created in its
+    owner's account. Bind is human-only for the same reason; fork may still run
+    from an agent key, but only with a token the request carries itself."""
+    return _http_error(
+        400, "FORK_PAT_REQUIRED",
+        "An agent cannot use its owner's saved GitHub token to create a "
+        "repository. Pass fork_to_own.github_pat explicitly.",
+    )
+
+
+def saved_token_not_for_others():
+    """The named 400 when someone binds ANOTHER user's agent with no form token.
+
+    Resolution keys on ownership, never on a calling or sharing user (the
+    `resolve_github_pat` contract): an admin binding a user's agent must not
+    make the admin's personal token that agent's identity by default."""
+    return _http_error(
+        400, "FORK_PAT_REQUIRED",
+        "Your saved GitHub token is only used for agents you own. Enter a token "
+        "here to bind this agent.",
     )
 
 
