@@ -13,6 +13,7 @@ from fastapi.responses import PlainTextResponse, StreamingResponse
 
 from models import User
 from database import db
+from dependencies import agent_may_reach
 from services.docker_service import get_agent_container
 from services.docker_utils import container_reload
 from .helpers import agent_http_request
@@ -180,7 +181,7 @@ async def list_agent_files_logic(
         request: HTTP request object
         show_hidden: If True, include hidden files (starting with .)
     """
-    if not db.can_user_access_agent(current_user.username, agent_name):
+    if not (db.can_user_access_agent(current_user.username, agent_name) and agent_may_reach(current_user, agent_name)):
         raise HTTPException(status_code=403, detail="You don't have permission to access this agent")
 
     container = get_agent_container(agent_name)
@@ -233,7 +234,7 @@ async def download_agent_file_logic(
     Download a file from the agent's workspace.
     Returns the file content as plain text.
     """
-    if not db.can_user_access_agent(current_user.username, agent_name):
+    if not (db.can_user_access_agent(current_user.username, agent_name) and agent_may_reach(current_user, agent_name)):
         raise HTTPException(status_code=403, detail="You don't have permission to access this agent")
 
     container = get_agent_container(agent_name)
@@ -285,7 +286,7 @@ async def delete_agent_file_logic(
     """
     Delete a file or directory from the agent's workspace.
     """
-    if not db.can_user_access_agent(current_user.username, agent_name):
+    if not (db.can_user_access_agent(current_user.username, agent_name) and agent_may_reach(current_user, agent_name)):
         raise HTTPException(status_code=403, detail="You don't have permission to access this agent")
 
     # ent#596: a write into the skills dir needs the skill-management capability.
@@ -355,7 +356,7 @@ async def preview_agent_file_logic(
     Get file with proper MIME type for preview.
     Streams the response from the agent container.
     """
-    if not db.can_user_access_agent(current_user.username, agent_name):
+    if not (db.can_user_access_agent(current_user.username, agent_name) and agent_may_reach(current_user, agent_name)):
         raise HTTPException(status_code=403, detail="You don't have permission to access this agent")
 
     container = get_agent_container(agent_name)
@@ -424,7 +425,7 @@ async def update_agent_file_logic(
         current_user: Current authenticated user
         request: HTTP request object
     """
-    if not db.can_user_access_agent(current_user.username, agent_name):
+    if not (db.can_user_access_agent(current_user.username, agent_name) and agent_may_reach(current_user, agent_name)):
         raise HTTPException(status_code=403, detail="You don't have permission to access this agent")
 
     # ent#596: a write into the skills dir needs the skill-management capability.
@@ -501,7 +502,7 @@ async def create_agent_folder_logic(
         current_user: Current authenticated user
         request: HTTP request object
     """
-    if not db.can_user_access_agent(current_user.username, agent_name):
+    if not (db.can_user_access_agent(current_user.username, agent_name) and agent_may_reach(current_user, agent_name)):
         raise HTTPException(status_code=403, detail="You don't have permission to access this agent")
 
     # ent#596: a write into the skills dir needs the skill-management capability.

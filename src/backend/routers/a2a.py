@@ -41,7 +41,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from database import db
-from dependencies import AuthorizedAgentByName, get_current_user, get_user_or_anonymous
+from dependencies import AuthorizedAgentByName, get_current_user, get_user_or_anonymous, agent_may_reach
 from models import A2ACallRequest, A2ACallResponse, A2ATaskRequest, User
 from routers.public import _get_client_ip
 from services import (
@@ -524,7 +524,7 @@ def _authorize_inbound(current_user: User, agent_name: str) -> None:
     HTTPException(403) when the caller is off the per-agent allow-list."""
     if not db.get_a2a_exposed(agent_name):
         raise HTTPException(status_code=404, detail="Not found")
-    if not db.can_user_access_agent(current_user.username, agent_name):
+    if not (db.can_user_access_agent(current_user.username, agent_name) and agent_may_reach(current_user, agent_name)):
         raise HTTPException(status_code=404, detail="Not found")
     caller_identity = getattr(current_user, "email", None) or current_user.username
     if not a2a_gate.check_inbound_allowed(agent_name, caller_identity):

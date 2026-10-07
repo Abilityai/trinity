@@ -27,11 +27,11 @@
  *      stamps the per-call context so `withAudit` records the refusal; a deny
  *      site that serialises its own envelope fails `audit-denial.test.ts`.
  *
- * What this is NOT: a capability boundary. The backend resolves an agent key to
- * its owner carrying the owner's role (architecture.md Invariant #8), so the
- * REST routes behind these tools admit a sibling with no edge. Whether that
- * boundary should hold one hop down is abilityai/trinity-enterprise#629; the
- * `baselined` rows carrying that reference are its work list.
+ * Not the only fence. Since abilityai/trinity-enterprise#629 the backend narrows
+ * an agent key itself (`dependencies.agent_may_reach`): it reaches itself, the
+ * agents it holds an edge to, and the agents it spawned — and only itself and
+ * its spawned agents for owner-level routes. This table is the first fence and
+ * the readable refusal; the backend is the one that holds.
  *
  * Leaf module: imports `client.js` and `types.js` only.
  */
@@ -203,8 +203,6 @@ export const AGENT_TARGET_PARAMS: ReadonlySet<string> = new Set([
   "source_agent",
 ]);
 
-const ENT629 =
-  "abilityai/trinity-enterprise#629 — the backend route is owner-equivalent for an agent key (Invariant #8); MCP gate pending that ruling";
 const ADMIN_ONLY =
   "backend rejects agent principals (require_admin / assert_admin / reject_agent_principal, #1890)";
 const TEARDOWN_HUMAN_ONLY =
@@ -236,37 +234,36 @@ const LOOP_RESOLVE =
 /**
  * One row per registered static tool, keyed by tool NAME (a module rename moves
  * nothing here). Dynamic tools (`chat_with_<slug>`, #846) pass their policy to
- * `registerDynamicTool` explicitly. The `baselined` rows referencing ent#629
- * are that issue's work list; flip a row to `enforce` when the ruling lands.
+ * `registerDynamicTool` explicitly.
  */
 export const TOOL_ACCESS_POLICY: Readonly<Record<string, ToolAccessPolicy>> = {
   // --- agents.ts ---
   list_agents: { kind: "in-tool", how: AGENTS_INLINE },
-  get_agent: { kind: "baselined", owner: ENT629 },
+  get_agent: { kind: "enforce", param: "name" },
   get_agent_info: { kind: "in-tool", how: AGENTS_INLINE },
   get_agent_compatibility_report: { kind: "in-tool", how: AGENTS_INLINE },
   create_agent: { kind: "none", why: "creates the agent; `name` is the new agent's name, not a target" },
   rename_agent: { kind: "baselined", owner: ADMIN_ONLY },
-  delete_agent: { kind: "baselined", owner: ENT629 },
-  start_agent: { kind: "baselined", owner: ENT629 },
-  stop_agent: { kind: "baselined", owner: ENT629 },
+  delete_agent: { kind: "enforce", param: "name" },
+  start_agent: { kind: "enforce", param: "name" },
+  stop_agent: { kind: "enforce", param: "name" },
   list_templates: { kind: "none", why: "no agent target" },
-  get_credential_status: { kind: "baselined", owner: ENT629 },
+  get_credential_status: { kind: "enforce", param: "name" },
   inject_credentials: { kind: "baselined", owner: ADMIN_ONLY },
   export_credentials: { kind: "baselined", owner: ADMIN_ONLY },
   import_credentials: { kind: "baselined", owner: ADMIN_ONLY },
-  export_agent_data: { kind: "baselined", owner: ENT629 },
-  import_agent_data: { kind: "baselined", owner: ENT629 },
+  export_agent_data: { kind: "enforce", param: "name" },
+  import_agent_data: { kind: "enforce", param: "name" },
   get_credential_encryption_key: { kind: "none", why: "no agent target" },
   get_agent_ssh_access: { kind: "baselined", owner: ADMIN_ONLY },
   deploy_local_agent: { kind: "none", why: "creates the agent; `name` is the new agent's name, not a target" },
-  initialize_github_sync: { kind: "baselined", owner: ENT629 },
-  get_agent_github_pat_status: { kind: "baselined", owner: ENT629 },
-  set_agent_github_pat: { kind: "baselined", owner: ENT629 },
+  initialize_github_sync: { kind: "enforce", param: "agent_name" },
+  get_agent_github_pat_status: { kind: "enforce", param: "agent_name" },
+  set_agent_github_pat: { kind: "enforce", param: "agent_name" },
   // --- chat.ts ---
   chat_with_agent: { kind: "in-tool", how: CHAT_GATE },
-  get_chat_history: { kind: "baselined", owner: ENT629 },
-  get_agent_logs: { kind: "baselined", owner: ENT629 },
+  get_chat_history: { kind: "enforce", param: "agent_name" },
+  get_agent_logs: { kind: "enforce", param: "agent_name" },
   fan_out: { kind: "in-tool", how: CHAT_GATE },
   // --- systems.ts ---
   deploy_system: { kind: "none", why: "a system manifest, not an agent" },
@@ -292,7 +289,7 @@ export const TOOL_ACCESS_POLICY: Readonly<Record<string, ToolAccessPolicy>> = {
   set_agent_skills: { kind: "baselined", owner: SKILL_MANAGER_FENCE },
   sync_agent_skills: { kind: "baselined", owner: SKILL_MANAGER_FENCE },
   unassign_skill_set: { kind: "baselined", owner: SKILL_MANAGER_FENCE },
-  get_agent_skills: { kind: "baselined", owner: ENT629 },
+  get_agent_skills: { kind: "enforce", param: "agent_name" },
   run_skill: { kind: "none", why: "runs on the calling agent; a skill name, not an agent" },
   list_runnable_skills: { kind: "none", why: "no agent target" },
   // --- schedules.ts ---
@@ -306,10 +303,10 @@ export const TOOL_ACCESS_POLICY: Readonly<Record<string, ToolAccessPolicy>> = {
   get_schedule_executions: { kind: "in-tool", how: SCHEDULES_GATE },
   // --- tags.ts ---
   list_tags: { kind: "none", why: "no agent target" },
-  get_agent_tags: { kind: "baselined", owner: ENT629 },
-  tag_agent: { kind: "baselined", owner: ENT629 },
-  untag_agent: { kind: "baselined", owner: ENT629 },
-  set_agent_tags: { kind: "baselined", owner: ENT629 },
+  get_agent_tags: { kind: "enforce", param: "agent_name" },
+  tag_agent: { kind: "enforce", param: "agent_name" },
+  untag_agent: { kind: "enforce", param: "agent_name" },
+  set_agent_tags: { kind: "enforce", param: "agent_name" },
   // --- notifications.ts ---
   send_notification: { kind: "none", why: "no agent target" },
   // --- reports.ts ---
@@ -332,14 +329,14 @@ export const TOOL_ACCESS_POLICY: Readonly<Record<string, ToolAccessPolicy>> = {
   // --- files.ts ---
   share_file: { kind: "none", why: "the calling agent's own public folder (FILES-001)" },
   // --- pipelines.ts ---
-  list_agent_pipelines: { kind: "baselined", owner: ENT629 },
-  get_agent_pipeline_state: { kind: "baselined", owner: ENT629 },
+  list_agent_pipelines: { kind: "enforce", param: "agent_name" },
+  get_agent_pipeline_state: { kind: "enforce", param: "agent_name" },
   // --- subscriptions.ts ---
   register_subscription: { kind: "none", why: "`name` is the subscription's name, not an agent" },
   list_subscriptions: { kind: "none", why: "no agent target" },
-  assign_subscription: { kind: "baselined", owner: ENT629 },
-  clear_agent_subscription: { kind: "baselined", owner: ENT629 },
-  get_agent_auth: { kind: "baselined", owner: ENT629 + "; the secrets branch is assert_admin" },
+  assign_subscription: { kind: "enforce", param: "agent_name" },
+  clear_agent_subscription: { kind: "enforce", param: "agent_name" },
+  get_agent_auth: { kind: "enforce", param: "agent_name" },  // also: the secrets branch is assert_admin
   delete_subscription: { kind: "none", why: "a subscription name, not an agent" },
   // --- monitoring.ts ---
   get_fleet_health: { kind: "none", why: "no agent target" },
@@ -347,11 +344,11 @@ export const TOOL_ACCESS_POLICY: Readonly<Record<string, ToolAccessPolicy>> = {
     kind: "none",
     why: "no agent target; the backend scopes the rows via accessible_agent_names (an agent key sees its owner's set, trinity-enterprise#707 D12)",
   },
-  get_agent_health: { kind: "baselined", owner: ENT629 },
-  trigger_health_check: { kind: "baselined", owner: ENT629 },
+  get_agent_health: { kind: "enforce", param: "agent_name" },
+  trigger_health_check: { kind: "enforce", param: "agent_name" },
   // --- nevermined.ts ---
-  configure_nevermined: { kind: "baselined", owner: ENT629 },
-  get_nevermined_config: { kind: "baselined", owner: ENT629 },
+  configure_nevermined: { kind: "enforce", param: "agent_name" },
+  get_nevermined_config: { kind: "enforce", param: "agent_name" },
   toggle_nevermined: { kind: "baselined", owner: ADMIN_ONLY },
   get_nevermined_payments: { kind: "baselined", owner: ADMIN_ONLY },
   // --- executions.ts ---
@@ -370,17 +367,14 @@ export const TOOL_ACCESS_POLICY: Readonly<Record<string, ToolAccessPolicy>> = {
   list_event_subscriptions: { kind: "none", why: "the calling agent's own subscriptions" },
   delete_event_subscription: { kind: "none", why: "a subscription id owned by the calling agent" },
   // --- channels.ts ---
-  list_channel_groups: {
-    kind: "baselined",
-    owner: ENT629 + "; the Slack branch already rejects agent principals (reject_agent_principal), the Telegram branch does not",
-  },
-  send_group_message: { kind: "baselined", owner: ENT629 },
+  list_channel_groups: { kind: "enforce", param: "agent_name" },
+  send_group_message: { kind: "enforce", param: "agent_name" },
   // --- messages.ts ---
-  send_message: { kind: "baselined", owner: ENT629 },
+  send_message: { kind: "enforce", param: "agent_name" },
   // --- voice.ts ---
-  send_voice_reply: { kind: "baselined", owner: ENT629 + "; effect-guarded per execution (#1084)" },
+  send_voice_reply: { kind: "enforce", param: "agent_name" },  // also: effect-guarded per execution (#1084)
   // --- memory.ts ---
-  write_user_memory: { kind: "baselined", owner: ENT629 },
+  write_user_memory: { kind: "enforce", param: "agent_name" },
   // --- decisions.ts (ent#638) --- the target is only ever the seat's own agent
   record_decision: { kind: "enforce", param: "agent_name" },
   list_seat_decisions: { kind: "enforce", param: "agent_name" },
@@ -393,7 +387,7 @@ export const TOOL_ACCESS_POLICY: Readonly<Record<string, ToolAccessPolicy>> = {
   list_reminders: { kind: "baselined", owner: REMINDER_SELF_GATE },
   cancel_reminder: { kind: "baselined", owner: REMINDER_SELF_GATE },
   // --- voip.ts ---
-  call_user: { kind: "baselined", owner: ENT629 + "; server-gated + rate-limited (VOIP-001)" },
+  call_user: { kind: "enforce", param: "agent_name" },  // also: server-gated + rate-limited (VOIP-001)
   // --- operator_queue.ts ---
   list_operator_queue: { kind: "in-tool", how: OPERATOR_QUEUE_GATE },
   get_operator_queue_item: { kind: "in-tool", how: "operator_queue.ts resolves the item's agent, then " + OPERATOR_QUEUE_GATE },
@@ -421,7 +415,7 @@ export const TOOL_ACCESS_POLICY: Readonly<Record<string, ToolAccessPolicy>> = {
   // --- a2a.ts ---
   get_agent_a2a_config: { kind: "in-tool", how: A2A_GATE },
   set_agent_a2a_exposure: { kind: "baselined", owner: ADMIN_ONLY + "; enterprise route, human-only" },
-  get_agent_a2a_card: { kind: "baselined", owner: ENT629 },
+  get_agent_a2a_card: { kind: "enforce", param: "agent_name" },
   set_a2a_inbound_allowlist: { kind: "baselined", owner: ADMIN_ONLY + "; enterprise route, human-only" },
   register_a2a_endpoint: { kind: "baselined", owner: A2A_OUTBOUND_ADMIN },
   list_a2a_endpoints: { kind: "in-tool", how: A2A_OUTBOUND_LIST },

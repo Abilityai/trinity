@@ -24,6 +24,7 @@ from models import (
 
 from database import db
 from dependencies import (
+    agent_may_reach,
     get_current_user,
     get_self_acting_agent,
     is_person_principal,
@@ -60,11 +61,18 @@ def _accessible_set(current_user: User) -> Optional[Set[str]]:
 
     Returns None for admins (no filter — sees everything).
     Returns a set (possibly empty) for regular users.
+
+    trinity-enterprise#629: an agent key carries its OWNER's role, so on an
+    admin-owned install it got None — every agent's queue. It always gets a set,
+    narrowed to its reach (itself, its edges, the agents it spawned).
     """
-    if current_user.role == "admin":
+    is_agent = isinstance(getattr(current_user, "agent_name", None), str) and bool(current_user.agent_name)
+    if current_user.role == "admin" and not is_agent:
         return None
     user_email = current_user.email or ""
-    names = db.get_accessible_agent_names(user_email, is_admin=False)
+    names = db.get_accessible_agent_names(user_email, is_admin=current_user.role == "admin")
+    if is_agent:
+        return {n for n in names if agent_may_reach(current_user, n)}
     return set(names)
 
 

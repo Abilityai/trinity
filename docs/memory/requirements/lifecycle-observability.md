@@ -448,9 +448,9 @@ endpoint — reports flow agent → MCP → backend.
 - **FR-8 — Agent read-back** (#1538, epic #1534): MCP `list_reports` (metadata; filters
   `agent_name`/`report_type`/`hours`/`search`, paged) and `get_report` (full payload by id)
   over the **existing** FR-3 endpoints — no new endpoint, no new tenant-boundary logic. The
-  MCP layer adds the one gate the backend structurally cannot: an agent-scoped key resolves to
-  its **owner**, so the backend scopes reads to everything the owner sees; the tool narrows a
-  broad listing to `{self} ∪ permitted` (the #1104 operator-queue rule) and re-checks the
+  MCP layer narrows the listing: an agent-scoped key resolves to its **owner**, so the backend
+  scopes a broad listing to everything the owner sees (a single report is narrowed by the
+  backend itself since trinity-enterprise#629); the tool narrows a broad listing to `{self} ∪ permitted` (the #1104 operator-queue rule) and re-checks the
   owning agent on `get_report`. A denied `get_report` returns the backend's own
   `Report not found` shape, so the deliberate 404-not-403 id-privacy choice (FR-3) is not
   widened for agent keys. Closes the write-only loop: an agent can see what it already filed

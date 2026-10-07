@@ -17,10 +17,9 @@
  *     `agent_name`, and withhold the payload on denial behind a compound
  *     uniform reason — the id is the caller's only input, and naming the agent
  *     would tell it whose loop that is.
- *   - The backend behind all three is owner-equivalent for an agent key
- *     (architecture.md Invariant #8): this is a tool-surface gate, not a
- *     capability boundary. Whether the boundary should hold one hop down is
- *     abilityai/trinity-enterprise#629.
+ *   - The backend holds the same line one hop down: since
+ *     abilityai/trinity-enterprise#629 an agent key reaches only itself, its
+ *     edges and the agents it spawned (`dependencies.agent_may_reach`).
  */
 
 import { z } from "zod";
