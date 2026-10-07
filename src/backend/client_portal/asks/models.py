@@ -35,7 +35,7 @@ class WorkspaceAsk(BaseModel):
     # (trinity-enterprise#611); the ANSWER response projects the row it recorded.
     status: str
     # How the ask ended, COARSE on purpose (trinity-enterprise#611): `ended_by`
-    # is `you` | `operator` | `timeout`, never an email, and the operator's
+    # is `you` | `operator` | `platform` (#3246) | `timeout`, never an email, and the operator's
     # cancel reason never crosses. `ended_at` is when it ended — None when the
     # platform does not know (a row that ended before the ledger), never the
     # time the ask was filed.
@@ -56,6 +56,10 @@ class WorkspaceAsk(BaseModel):
     # nor a poller timestamp. `aging` is the operator's configured bound.
     sync: str = "unconfirmed"
     aging: bool = False
+    # #3242: an approval decided only by its options (platform-minted — a skill
+    # gate). The surface hides the "Something else" chip, which the sink would
+    # refuse (`not_off_menu`). Says nothing else about the gate.
+    decided_by_options: bool = False
     # ent#430 AC #5: whether answering this ask sets work in motion, so a
     # surface can say "answered" without implying the agent started working.
     # Populated only on the ANSWER response — a pending ask has not been

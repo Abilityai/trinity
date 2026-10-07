@@ -23,30 +23,19 @@ Two consequences, both of which remove work:
 
 1. A hysteresis floor is dead code — utilization does not fall inside a window,
    so the only real re-arm is the reset.
-2. `resets_at` therefore IS the window's identity, and putting it in the alert
-   id makes the id the entire state machine:
+2. `resets_at` therefore IS the window's identity. It travels on the row's
+   context as `window` (quantised to the day — a provider that did behave as
+   rolling degrades to one window per day).
 
-       sub-headroom-{sid}-{reset-day}-{tier}
+## One row per subscription (#3246)
 
-   `db.create_operator_queue_item` maps `item["id"]` onto `request_id`, which
-   is `UNIQUE(agent_name, request_id)` with ON CONFLICT DO NOTHING. So the
-   same window re-emits into the same row (no duplicate), a reset mints a new
-   id (re-armed), and the escalation carries its own tier suffix. Cross-worker
-   and cross-restart dedup fall out for free, with no lock and no memo.
-
-The id is quantised to the DAY rather than the exact instant. Under the
-measured fixed-window semantics that is exactly one episode per window; if a
-different provider plan ever did behave as rolling, it degrades to at most one
-alert per day instead of one per probe. The cheap belt is worth more than the
-precision.
-
-## Residual, stated rather than hidden
-
-`create_item` has no UPDATE path, so a warning row keeps the number it was
-raised with — a 75% alert still reads 75% when the subscription later sits at
-92%. Same residual `retention_guard` documents for its own alarm. The
-escalation is a SEPARATE id with a self-contained body, so the newer figure
-does arrive; it just arrives as a second item rather than an edit.
+Each reading is reported through `services.platform_alerts.observe` with the
+subject `subscription_headroom:<cleaned sid>` (or `:fleet`), so a subscription
+has at most one pending row: a later reading updates it in place, a critical
+reading replaces the warning (`tier` is the material key the snooze compares),
+and the evaluation pass ends the row (`clear_recovered`) once the subscription
+is measured back under its threshold — which, under the fixed window, is the
+reset. Cross-worker dedup is the seam's partial unique index on the subject.
 """
 
 import logging
@@ -64,7 +53,6 @@ from services.subscription_headroom_service import (
     SATURATED,
     UNASSESSABLE,
 )
-from utils.helpers import utc_now_iso
 
 logger = logging.getLogger(__name__)
 
@@ -239,13 +227,14 @@ def episode_key(resets_at: Optional[str], *, now: Optional[datetime] = None) -> 
     return f"unknown-{current.date().isoformat()}"
 
 
-def alert_id(subscription_id: str, episode: str, tier: str) -> str:
-    safe_sid = _SID_SAFE.sub("-", str(subscription_id))[:64]
-    return f"{ALARM_ID_PREFIX}{safe_sid}-{episode}-{tier}"
+# #3246: the subject key of the fleet-wide alert.
+FLEET_KEY = "fleet"
 
 
-def fleet_alert_id(episode: str) -> str:
-    return f"{ALARM_ID_PREFIX}fleet-{episode}"
+def subject_key(subscription_id: str) -> str:
+    """The cleaned subscription id the legacy `sub-headroom-{sid}-…` ids
+    carried, so a row the upgrade sweep re-subjected matches a new reading."""
+    return _SID_SAFE.sub("-", str(subscription_id))[:64]
 
 
 def decide_tier(
@@ -331,42 +320,33 @@ def _fmt_reset(resets_at: Optional[str]) -> str:
     return dt.strftime("%Y-%m-%d %H:%M UTC") if dt else "reset unknown"
 
 
-def _emit(item_id: str, *, title: str, question: str, priority: str,
+def _emit(key: str, *, title: str, question: str, priority: str,
           context: Dict[str, Any]) -> bool:
-    """One platform create on the sentinel host. Never raises.
+    """Report one reading through the platform alert seam (#3246). Never raises.
 
-    Platform-only by construction: an agent cannot drive the VOLUME. The
-    cadence is the sweep's, the id is deterministic per (subscription, window,
-    tier) so a re-emit is an on-conflict no-op, and the per-cycle cap bounds a
-    whole fleet crossing at once. That is what makes it a direct create with an
-    allowlist entry in `tests/unit/test_1677_operator_alert_emitters.py` rather
-    than a `create_bounded_alert` caller.
-
-    Note the precise claim: agent-chosen *names* do reach the body (an agent may
-    spawn children and name them), but they arrive sanitized, are capped at five
-    per alert, and already appear on every operator surface. It is the volume,
-    not the absence of agent-derived text, that justifies the exemption.
+    One pending row per subject — a subscription's cleaned id, or `fleet` —
+    on the sentinel host. A newer reading updates that row in place, so a
+    critical reading replaces the warning (`tier` is the kind's material key)
+    and the figure on the row is always the latest. The row is ended by the
+    platform when the evaluation pass finds the subscription back under its
+    threshold (`clear_recovered`). Returns True when a row was filed or
+    updated.
     """
-    item = {
-        "id": item_id,
-        "type": "alert",
-        "status": "pending",
-        "priority": priority,
-        "title": title,
-        "question": question,
-        "context": context,
-        "created_at": utc_now_iso(),
-        # Must stay None: `mark_operator_queue_expired` flips any pending row
-        # past `expires_at` to expired fleet-wide every 5s.
-        "expires_at": None,
-    }
-    try:
-        db.create_operator_queue_item(ALARM_AGENT_NAME, item)
-        logger.warning("[headroom-alert] %s", title)
-        return True
-    except Exception:  # noqa: BLE001
-        logger.exception("[headroom-alert] failed to emit %s", item_id)
-        return False
+    from services import platform_alerts
+    outcome = platform_alerts.observe(
+        ALARM_AGENT_NAME, "subscription_headroom", key,
+        title=title, question=question, priority=priority, context=context,
+    )
+    logger.warning("[headroom-alert] %s (%s)", title, outcome)
+    return outcome in (platform_alerts.OBSERVED_CREATED, platform_alerts.OBSERVED_UPDATED)
+
+
+def clear_recovered(live_keys: Sequence[str]) -> int:
+    """#3246: end every pending headroom row whose subject is not in
+    `live_keys` — the subscriptions (and `fleet`) the evaluation pass could
+    not show to be back under the threshold. Never raises."""
+    from services import platform_alerts
+    return platform_alerts.reconcile(ALARM_AGENT_NAME, "subscription_headroom", live_keys)
 
 
 def emit_subscription_alert(
@@ -383,9 +363,8 @@ def emit_subscription_alert(
 ) -> bool:
     """One subscription crossed its weekly threshold.
 
-    The body is self-contained. A warning row cannot be edited later (see the
-    module docstring), so the escalation must stand on its own rather than
-    assume the operator reads it beside the earlier item.
+    The body is self-contained: the escalation replaces the warning on the
+    subscription's one row (#3246), so it must stand on its own.
     """
     label = subscription_name or subscription_id
     episode = episode_key(resets_at, now=now)
@@ -421,7 +400,7 @@ def emit_subscription_alert(
         lines.append("No agents are currently assigned to this subscription.")
 
     return _emit(
-        alert_id(subscription_id, episode, tier),
+        subject_key(subscription_id),
         title=headline,
         question="\n".join(lines),
         priority=priority_for(tier, projected_end),
@@ -433,6 +412,7 @@ def emit_subscription_alert(
             "projected_end_pct": projected_end,
             "threshold_pct": threshold_pct,
             "resets_at": resets_at,
+            "window": episode,
             "agent_count": len(agents),
             "on_pace_to_exhaust": on_pace,
         },
@@ -470,7 +450,7 @@ def emit_fleet_alert(
         "There is no subscription with meaningful headroom left to move agents onto.",
     ]
     return _emit(
-        fleet_alert_id(episode),
+        FLEET_KEY,
         title=f"All {len(saturated)} subscriptions are near their weekly limit",
         priority="high",
         question="\n".join(lines),
@@ -479,5 +459,6 @@ def emit_fleet_alert(
             "subscription_count": len(saturated),
             "threshold_pct": threshold_pct,
             "earliest_reset_at": earliest_reset,
+            "window": episode,
         },
     )

@@ -888,7 +888,9 @@ import PortalAvatar from './PortalAvatar.vue'
 import PortalStarButton from './PortalStarButton.vue'
 import PortalEditableTitle from './PortalEditableTitle.vue'
 import PortalChatTabs from './PortalChatTabs.vue'
-import { newChatHotkeyLabel, MAIN_TAB_LABEL, composerAvailabilityNotice, assistantRow, replyFromHistory, replyBaseline, readReplyBaseline } from './portalUtils'
+import { newChatHotkeyLabel, MAIN_TAB_LABEL, composerAvailabilityNotice, assistantRow, replyFromHistory, replyBaseline, readReplyBaseline, agentChatTabs, NEW_CHAT_TAB_ID } from './portalUtils'
+// ent#621: the same wrap the typeahead's roving selection uses — one modulo.
+import { cycleIndex } from './portalKeymap'
 // ent#738: the chip's one-line excerpt — the same one the Inbox's arrow hands over.
 // Aliased: `submitUserText` already takes a `replyExcerpt` (the excerpt itself).
 import { replyExcerpt as excerptForReply } from './portalInbox'
@@ -901,7 +903,7 @@ import { useConversationAnchor } from '@/composables/useConversationAnchor'
 import { useRoute, useRouter } from 'vue-router'
 import { useComposerDraft } from '@/composables/useComposerDraft'
 import { usePortalDraftsStore } from '@/stores/portalDrafts'
-import { draftKeyFor, shouldFocusOnRestore } from './portalDrafts'
+import { draftKeyFor, shouldAutoFocusComposer } from './portalDrafts'
 import PortalTypeahead from './PortalTypeahead.vue'
 import PortalJumpToLatest from './PortalJumpToLatest.vue'
 import PortalAsks from './PortalAsks.vue'
@@ -991,6 +993,11 @@ const props = defineProps({
   // This is the second bit that makes them distinguishable, mirroring the
   // backend's `new_thread`.
   newChat: { type: Boolean, default: false },
+  // ent#784 — WHY this instance is showing a fresh composer, which decides
+  // whether it may focus itself. `always` = the person just made a gesture that
+  // asks for a composer. `fine-pointer` = they LANDED here (opening an agent, a
+  // deep link), so focus only where it cannot summon an on-screen keyboard.
+  focusOnMount: { type: String, default: 'always' },
   prefill: { type: String, default: '' },
   // ent#610 round 8: `{ sessionId, messageId, excerpt }` from the Inbox arrow.
   // Shown only on the chat it belongs to; the shell clears it on `reply-done`.
@@ -1069,6 +1076,13 @@ watch(() => props.threads, (list) => {
 })
 
 function focusComposer() { textarea.value?.focus() }
+// ent#784: the landing doors pass `fine-pointer`, so opening an agent on a
+// phone shows a fresh composer without the keyboard sliding up over it. A
+// gesture door passes `always` and is unaffected.
+function mayAutoFocus() {
+  if (props.focusOnMount !== 'fine-pointer') return true
+  return shouldAutoFocusComposer(typeof window !== 'undefined' ? window.matchMedia?.bind(window) : null)
+}
 
 const loadingHistory = ref(false)
 // #2163 — "a verdict exists for this thread's history" (mirrors `onMounted`'s
@@ -1659,7 +1673,7 @@ onMounted(async () => {
   // fine pointer only (a phone would get the soft keyboard over the thread).
   // After the prefill line on purpose: an explicit "Ask about it" replaces the
   // composer today, and the write-through then makes IT the draft.
-  if (draftRestored && !props.prefill && shouldFocusOnRestore(typeof window !== 'undefined' ? window.matchMedia?.bind(window) : null)) {
+  if (draftRestored && !props.prefill && shouldAutoFocusComposer(typeof window !== 'undefined' ? window.matchMedia?.bind(window) : null)) {
     nextTick(() => {
       const el = textarea.value
       if (!el || el.disabled) return
@@ -1679,7 +1693,7 @@ onMounted(async () => {
     // instance: pressing New chat bumps `convGen`, which remounts this
     // component, so any focus set before the press is thrown away. A disabled
     // textarea (a live voice call) makes it a no-op by construction.
-    if (props.newChat) nextTick(focusComposer)
+    if (props.newChat && mayAutoFocus()) nextTick(focusComposer)
   }
   autoGrowAfterUpdate()   // `props.prefill` was assigned above; wait for the patch
 })
@@ -3024,7 +3038,37 @@ function wrapUp(project) {
   void send()
 }
 
-defineExpose({ focusComposer, startVoiceCall, endVoiceCall })
+// ent#621 — ⌥⇧↑ / ⌥⇧↓ walk this agent's chat tabs. The walk lives HERE because
+// the strip's inputs do: `threads`, the active id, whether the provisional "New
+// chat" tab is listed, and the drafts key set are all this component's, and a
+// shell that rebuilt them would be a second opinion about which tabs exist.
+// What it emits is what a tab CLICK emits — `open-thread` for a real chat,
+// `new-chat` for the provisional one — so a key and a click land identically,
+// and the shell keeps its one door per action. Fewer than two tabs is a silent
+// no-op, per the AC.
+function cycleChat(delta) {
+  const tabs = agentChatTabs(props.threads, props.agent?.name, {
+    activeId: currentSessionId.value,
+    draft: props.newChat || bornHere.value,
+    draftKeys: drafts.keys,
+  })
+  if (tabs.length < 2) return
+  // The strip's EFFECTIVE selection, the same expression `PortalChatTabs` binds:
+  // while the open chat is unsaved, `currentSessionId` is null and the
+  // provisional tab's id is not, so comparing against the id alone would start
+  // the walk from nowhere.
+  const current = currentSessionId.value
+    || ((props.newChat || bornHere.value) ? NEW_CHAT_TAB_ID : null)
+  const next = tabs[cycleIndex(tabs.findIndex((t) => t.id === current), delta, tabs.length)]
+  if (!next) return
+  if (next.thread) emit('open-thread', next.thread)
+  else if (next.provisional) emit('new-chat')
+}
+
+// `cycleChat` is exposed as an IDENTIFIER, not an inline body: two source pins
+// match `defineExpose({[^}]*})`, and a `}` inside the braces would break them
+// while the wiring itself stayed fine (#2918's class, in reverse).
+defineExpose({ focusComposer, startVoiceCall, endVoiceCall, cycleChat })
 
 // ent#474 — the rail's Work signal for a 1:1, DERIVED from the in-flight flag
 // on every change and never latched: it clears in the same `finally` that ends

@@ -57,7 +57,7 @@
             <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
             </svg>
-            <AskMarkdown :text="item.response" inline data-testid="resolved-response" />
+            <AskMarkdown :text="decisionLabel(item.response)" inline data-testid="resolved-response" />
           </span>
           <!-- The answer's note, or the operator's reason for cancelling. -->
           <span v-if="note" class="text-xs text-gray-500 dark:text-gray-400">
@@ -84,7 +84,7 @@ import { computed } from 'vue'
 import { useOperatorQueueStore } from '../../stores/operatorQueue'
 import { useAgentsStore } from '../../stores/agents'
 import { agentNameTooltip } from '../../utils/agentName'
-import { queueSyncBadge, queueEnding, queueEndingText, queueReaskBadges } from '../../utils/operatorQueue'
+import { queueSyncBadge, queueEnding, queueEndingText, queueReaskBadges, decisionLabel } from '../../utils/operatorQueue'
 import { formatLocalDateTime } from '../../utils/timestamps'
 import AgentAvatar from '../AgentAvatar.vue'
 import BaseBadge from '../base/BaseBadge.vue'
@@ -105,7 +105,10 @@ const isTerminalWithoutResponse = computed(() =>
 )
 const ending = computed(() => queueEnding(props.item))   // trinity-enterprise#611
 const endingText = computed(() => queueEndingText(ending.value))
-const note = computed(() => props.item.response_text || props.item.disposition_reason || '')
+// #3246: a platform ending's reason is a token the ending text already words
+// (`queueEndingText`), never printed raw as though an operator wrote it.
+const note = computed(() => props.item.response_text
+  || (ending.value && ending.value.who === 'the platform' ? '' : props.item.disposition_reason) || '')
 const endedAtAbsolute = computed(() => (ending.value?.when ? formatLocalDateTime(ending.value.when) : ''))
 // An answer's "who" rides beside its time; a cancel / expiry names it in its label.
 const endingMeta = computed(() => {

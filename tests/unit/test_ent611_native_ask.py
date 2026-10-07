@@ -477,7 +477,7 @@ class TestRaiseAsk:
         ({"request_id": "x" * 300}, "invalid_request_id"),
         ({"request_id": "Queue-Flood-mine"}, "reserved_request_id"),
         ({"title": ""}, "invalid_title"),
-        ({"title": "t" * 5000}, "field_too_large"),
+        ({"title": "t" * 5000}, "title_too_long"),   # #3243: an agent title names its own limit first
         ({"question": "q" * 50_000}, "field_too_large"),
         ({"options": ["o" * 3000, "p" * 3000]}, "field_too_large"),
         ({"context": {"blob": "c" * 20_000}}, "field_too_large"),

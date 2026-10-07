@@ -1569,8 +1569,8 @@ class DatabaseManager:
     def update_execution_to_queued(self, execution_id: str, backlog_metadata: str, queued_at: str, conversation_key: str = None) -> bool:
         return self._schedule_ops.update_execution_to_queued(execution_id, backlog_metadata, queued_at, conversation_key)
 
-    def claim_next_queued(self, agent_name: str, worker_id: str = None, lease_seconds: int = None, interactive_triggers=None):
-        return self._schedule_ops.claim_next_queued(agent_name, worker_id, lease_seconds, interactive_triggers)
+    def claim_next_queued(self, agent_name: str, worker_id: str = None, lease_seconds: int = None, interactive_triggers=None, waiting_conversation_prefix: str = None):
+        return self._schedule_ops.claim_next_queued(agent_name, worker_id, lease_seconds, interactive_triggers, waiting_conversation_prefix)
 
     def release_claim_to_queued(self, execution_id: str) -> bool:
         return self._schedule_ops.release_claim_to_queued(execution_id)
@@ -2111,6 +2111,16 @@ class DatabaseManager:
 
     def create_new_chat_session(self, agent_name: str, user_id: int, user_email: str, subscription_id: str = None):
         return self._chat_ops.create_new_chat_session(agent_name, user_id, user_email, subscription_id=subscription_id)
+
+    # #3127: per-session Claude id for pulled /chat turns.
+    def get_chat_session_claude_id(self, session_id: str):
+        return self._chat_ops.get_chat_session_claude_id(session_id)
+
+    def set_chat_session_claude_id(self, session_id: str, claude_session_id):
+        return self._chat_ops.set_chat_session_claude_id(session_id, claude_session_id)
+
+    def clear_chat_session_claude_ids(self, agent_name: str):
+        return self._chat_ops.clear_chat_session_claude_ids(agent_name)
 
     def delete_chat_session(self, session_id: str):
         return self._chat_ops.delete_chat_session(session_id)
@@ -3901,6 +3911,24 @@ class DatabaseManager:
         # #1631: agent-scoped — item_id is the agent's request_id, not the uuid.
         return self._operator_queue_ops.mark_acknowledged(agent_name, item_id)
 
+    # #3246 — platform alerts: one pending row per (agent, subject)
+    def find_pending_operator_queue_by_subject(self, agent_name, subject):
+        return self._operator_queue_ops.find_pending_by_subject(agent_name, subject)
+
+    def find_person_ended_operator_queue_by_subject(self, agent_name, subject, since):
+        return self._operator_queue_ops.find_person_ended_by_subject(agent_name, subject, since)
+
+    def create_platform_operator_queue_item(self, agent_name, item, *, subject,
+                                            max_pending_for_type=None):
+        # Returns {"outcome": created|updated|refused_at_budget, "row", "changed"}.
+        return self._operator_queue_ops.create_platform_item(
+            agent_name, item, subject=subject, max_pending_for_type=max_pending_for_type,
+        )
+
+    def end_operator_queue_items_by_platform(self, ids, *, reason, batch_id=None):
+        # Returns {"batch_id", "rows"} — the rows THIS call ended (CAS-won).
+        return self._operator_queue_ops.end_items_by_platform(ids, reason=reason, batch_id=batch_id)
+
     def mark_operator_queue_expired(self):
         # trinity-enterprise#611: returns the rows this sweep ended (was a count).
         return self._operator_queue_ops.mark_expired()
@@ -4196,9 +4224,9 @@ class DatabaseManager:
     # Idempotency keys (RELIABILITY-006, #525 — delegated to db/idempotency.py)
     # =========================================================================
 
-    def idempotency_claim(self, scope: str, key: str, ttl_hours: int = 24) -> dict:
+    def idempotency_claim(self, scope: str, key: str, ttl_hours: int = 24, **intent) -> dict:
         """Atomically claim (scope, key). See IdempotencyOperations.claim."""
-        return self._idempotency_ops.claim(scope, key, ttl_hours=ttl_hours)
+        return self._idempotency_ops.claim(scope, key, ttl_hours=ttl_hours, **intent)
 
     def idempotency_attach_execution(self, scope: str, key: str, execution_id: str) -> None:
         """Record the execution_id for an in-flight idempotency claim."""

@@ -1,5 +1,13 @@
 // Types for Trinity API responses
 
+/**
+ * #3242: the ONE platform-reserved approval answer — "none of the offered
+ * options; the instruction is in `response_text`". Mirrors `SOMETHING_ELSE` in
+ * `src/backend/services/operator_queue_choices.py` and
+ * `src/frontend/src/utils/operatorQueue.js` (parity-tested).
+ */
+export const SOMETHING_ELSE = "(something else)";
+
 /** #2991: `POST /api/agents/{name}/start` — skill delivery rides the response. */
 export interface StartAgentResult {
   message: string;
@@ -506,8 +514,8 @@ export interface OperatorQueueItem {
   // the ledger: read `status`).
   disposition?: string | null;        // answered | cancelled | dismissed | expired
   disposed_at?: string | null;
-  disposed_by?: string | null;        // person | timeout
-  disposition_reason?: string | null; // the operator's optional cancel reason
+  disposed_by?: string | null;        // person | timeout | platform (#3246)
+  disposition_reason?: string | null; // the operator's optional cancel reason, or the platform's (condition_cleared | superseded)
 }
 
 /**

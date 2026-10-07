@@ -443,6 +443,23 @@ describe('resolveComposerKey', () => {
     expect(resolveComposerKey({ key: 'ArrowDown', open: true, hasCandidates: false })).toBe('close')
   })
 
+  // ent#621 (Decision 36): the popup owns BARE arrows. It used to claim the
+  // arrow whatever the modifiers were, and the caller `preventDefault`s a
+  // `move-*`, so the Workspace's ⌥⇧↓ (switch chat) and ⌥↓ (switch agent) were
+  // silently dead for as long as an @-popup happened to be open — a handler
+  // claiming a chord it never declared. A modified arrow now passes.
+  it('claims a bare arrow only, and passes a chord it does not own', () => {
+    const open = { open: true, hasCandidates: true }
+    for (const mod of ['altKey', 'metaKey', 'ctrlKey', 'shiftKey']) {
+      expect(resolveComposerKey({ key: 'ArrowDown', ...open, [mod]: true }), mod).toBe('pass')
+      expect(resolveComposerKey({ key: 'ArrowUp', ...open, [mod]: true }), mod).toBe('pass')
+    }
+    expect(resolveComposerKey({ key: 'ArrowDown', altKey: true, shiftKey: true, ...open })).toBe('pass')
+    // Without candidates the popup used to CLOSE on a modified arrow; that was
+    // the same over-claim (it also prevented the event), so it passes too.
+    expect(resolveComposerKey({ key: 'ArrowDown', open: true, hasCandidates: false, altKey: true })).toBe('pass')
+  })
+
   it('accepts the top row on Tab, and lets Shift+Tab leave the composer', () => {
     expect(resolveComposerKey({ key: 'Tab', open: true, hasCandidates: true })).toBe('accept')
     expect(resolveComposerKey({ key: 'Tab', open: true, hasCandidates: true, shiftKey: true })).toBe('pass')

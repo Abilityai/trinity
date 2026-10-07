@@ -100,6 +100,7 @@ Shared User (view-only)
 | `src/backend/services/a2a_payment_gate.py` | The A2A-shaped adapter over it (ent#679) — token extraction, the 402/403 bodies, the payer's Task. Flow: [a2a-inbound-server.md](a2a-inbound-server.md) |
 | `src/backend/services/a2a_card_service.py` | `with_payment_extension` — a priced agent's A2A card declares its plan (ent#679) |
 | `src/backend/routers/nevermined.py` | Admin config endpoints (`/api/nevermined/`), `_require_agent_exists()` guard |
+| `src/backend/utils/public_url.py` | `public_base_url` — the ONE externally-reachable origin helper: same-host for both 402 doors, `configured_wins=True` for the agent card (#3215, review I3) |
 | `src/backend/db_models.py` | Pydantic models for config, payment result, payment log |
 | `src/backend/db/schema.py` | Table definitions |
 | `src/backend/db/migrations.py` | Migration #23 |
@@ -163,14 +164,77 @@ Shared User (view-only)
 | Server-side settlement retry | 501 | `/api/nevermined/retry-settlement/{log_id}` — token not stored (#1018) |
 | SDK not installed | 501 | `_check_sdk()` |
 
+## Plan scheme resolution (#3215)
+
+A Nevermined plan is paid in crypto or by card, and the x402 requirements must
+say which: the facilitator is POSTed the requirements document verbatim, so
+`accepts[0].scheme` is the only channel the scheme travels through. Passing none
+meant the SDK's `nvm:erc4337` default, and every fiat plan's token was rejected.
+
+| Call site | Scheme comes from | Why |
+|---|---|---|
+| 402 body (paid door, A2A door), `GET /api/paid/{name}/info` | `resolve_plan_scheme` → `plans.get_plan` | No token exists yet. `/info` is the card's `paymentInfoUrl`, so it must advertise the same scheme as the 402 it replaces |
+| `verify_payment`, `settle_payment` (incl. the detached re-settle and the `tasks/get` re-verify) | `scheme_from_token` → the token's own `accepted.{scheme,network,planId}` | Zero network calls on the money path, and a settle re-driven hours after its verify is byte-stable with it. Allow-listed (SDK scheme + `SupportedNetworks`) and plan-id-checked, because it is caller-supplied |
+
+Fallback chain, in order: token → plan → `default_plan_scheme(environment)` (the
+pre-#3215 document). Trinity parses the plan itself with the SDK's own keys
+(`registry.price.isCrypto`, `metadata.plan.fiatPaymentProvider`), parity-tested
+against `payments_py.x402.resolve_scheme` — the SDK swallows every lookup failure
+at DEBUG and returns crypto, so a card plan silently stayed unpayable with nothing
+in Trinity's logs. Trinity logs a WARNING once per negative window instead.
+
+The lookup is cached per `(environment, plan_id)` — not `plan_id` alone, which is
+the SDK's cache and would let a sandbox answer serve a live request — positive
+300 s, negative 30 s, with per-key single-flight futures (50 cold 402s cost one
+`get_plan`) and stale-while-revalidate. The erc4337 environment→network map stays
+an explicit frozen literal pinned by a golden test, so a payments-py bump (#3216)
+cannot move a live agent's network silently.
+
+## Public origin for `resource.url` (#3215)
+
+`utils/public_url.py::public_base_url(request, configured=, frontend_url=,
+configured_wins=)` is the single owner — ONE module, one upgrade rule, two
+precedences, because the card and a 402 are different kinds of document.
+
+**Each 402 is minted for the origin the caller actually used** (the default, and
+unchanged for the paid door, the A2A door and `/info`): an x402 token is minted
+and facilitator-verified against `resource.url`, so a 402 quoting any other
+origin mints a token for a URL the client never calls. Precedence: the configured
+public origin (Settings `public_chat_url` → `PUBLIC_CHAT_URL` → `FRONTEND_URL`)
+**only when its host equals the request host** (a caller on a private host must
+not be redirected to a public one whose narrow tunnel may not route the path),
+else the request host with an https **upgrade** — never a downgrade — from the
+**raw** `X-Forwarded-Proto` header.
+
+**The agent card advertises the configured public origin** (`configured_wins=True`
+on both card routes — unchanged from before #3215). A card is a discovery
+document, not a minted token: whoever fetched it republishes it to buyers
+elsewhere, and the `get_agent_a2a_card` MCP tool proxies the card route from
+`backend:8000`, so a same-host card would advertise an internal host to every
+external buyer. Only when nothing is configured does the card fall back to the
+request host, on the same upgrade-only rule as the doors. The two cannot
+disagree where it matters: a buyer that follows the card arrives on the
+configured host, so the 402 it then meets is minted for that very host.
+
+Raw, not `request.url.scheme`: `docker-compose.prod.yml` / `.hosted.yml` override
+the image `command:` and drop the Dockerfile CMD's `--proxy-headers
+--forwarded-allow-ips=*`, so uvicorn applies no forwarded headers there at all.
+The frontend `nginx.conf` `$fwd_proto` map stops that hop clobbering an upstream
+`https` with its own always-`http` `$scheme`. Restoring the uvicorn flags is a
+trust change (`--forwarded-allow-ips=*` would let any agent on the agent network
+spoof `X-Forwarded-For` into every per-IP limiter) and is deliberately deferred.
+
 ## Configuration (operator knobs)
 
-Both are env-only and read at import, so a change needs a backend restart.
+All four are env-only and read at import, so a change needs a backend restart.
 
 | Variable | Default | What it bounds |
 |----------|---------|----------------|
 | `NEVERMINED_MAX_INFLIGHT` | `8` | Fleet-wide ceiling on **concurrent** facilitator calls. Every verify and settle attempt runs on the default thread executor, so a slow facilitator would otherwise hold backend threads for the whole fleet. Deliberately fleet-wide rather than per agent — the thread pool is a platform resource — and a priced agent's public URL needs no credential to make the backend dial out, so per-IP rate limiting cannot supply this bound (it has to hold *across* IPs). |
 | `NEVERMINED_FACILITATOR_WAIT_SECONDS` | `5.0` | How long a call waits for a free slot before giving up. Bounded because the caller is holding an HTTP request open: "busy, retry" is an honest answer, an unbounded queue is not. A refused call never reaches the facilitator, so it burns nothing. |
+
+| `NEVERMINED_PLAN_LOOKUP_TIMEOUT_SECONDS` | `5.0` | How long one plan-scheme lookup may take, and how long a follower waits on an in-flight one. The 402 door is anonymous, so the caller is holding an HTTP request open on an outbound call Trinity does not control. A timeout serves the fallback chain, never a 500. |
+| `NEVERMINED_PLAN_LOOKUP_MAX_INFLIGHT` | `2` | Concurrent plan lookups, on a gate of their own. Never a facilitator slot: `asyncio.wait_for` does not cancel the worker thread (and `get_plan` has a `(10, 30)` s requests timeout), so a timed-out lookup holding a facilitator slot would release it while the thread lingered — and an anonymous 402 flood could starve paying verify/settle. |
 
 The gate is one semaphore **per event loop** (`_FACILITATOR_GATES`, keyed weakly
 on the running loop): a module-level semaphore would bind whichever loop first
@@ -198,6 +262,7 @@ production there is one loop per worker and the bound is per worker.
 
 | Issue | Change |
 |-------|--------|
+| [#3215](https://github.com/abilityai/trinity/issues/3215) | Card (fiat) plans are payable: the plan's x402 scheme reaches the facilitator (token-derived on the money path, plan-derived for the 402 and `/info`); one shared public origin for `resource.url` with an `X-Forwarded-Proto` upgrade and the nginx `$fwd_proto` map; the A2A reply Task mirrors its x402 metadata onto the top-level `metadata` |
 | #1018 | **Settlement-ordering / honest status.** Settle-fail → `success_unsettled` (was lying `"success"`); concurrent effect-guard settle → `settle_in_progress:true`; wired `Idempotency-Key` keyed on `(payment-signature ∥ message)` with in-flight-409 / settled-verbatim-replay / unsettled-re-drive-and-converge (`_finalize_settled` + `upgrade_snapshot`); `fail()` on 403/exception/failed paths; stop leaking the body on `failed` executions (keep it on `cancelled`); `/retry-settlement` stub → honest 501. Tier 2 durable stored-credential retry split to a follow-up. |
 | ent#679 | **The same paywall on the A2A door.** `paid.py`'s 402/verify/settle orchestration extracted to `services/paid_turn_service.py` (behaviour-preserving) and reused by `POST /a2a/{name}`; metadata-first token carriage with the `payment-signature` header as deprecated fallback; the priced agent's A2A card declares its plan; `credits_per_request` accepts **0** for a duration plan (a negative is still a named 422). No migration. Requirement: `requirements/mcp.md` §32.6. |
 | #1084 | `settle_payment_once` + `effect_guard` on `payment:{agent_request_id}` (local exactly-once + receipt replay). |

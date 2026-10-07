@@ -19,7 +19,11 @@ from sqlalchemy.exc import OperationalError
 
 from database import db
 from services import ask_service
-from services.operator_queue_choices import ResponseNotOfferedError
+from services.operator_queue_choices import (
+    SOMETHING_ELSE,
+    ReservedAnswerError,
+    ResponseNotOfferedError,
+)
 from utils.helpers import iso_cutoff, utc_now_iso
 
 from .models import WorkspaceAsk
@@ -104,7 +108,9 @@ def _ending_of(item: dict, viewer_email: Optional[str]) -> tuple:
     """`(ended_at, ended_by)` for a client — COARSE on purpose.
 
     `ended_by` is `you` (the viewer answered), `operator` (another person
-    answered or cancelled) or `timeout`; never an email and never the cancel
+    answered or cancelled), `platform` (the platform ended the row itself —
+    `disposed_by = 'platform'`, #3246: never a person's answer, never a
+    timeout) or `timeout`; never an email and never the cancel
     reason (both are the operator's, not the client's). `ended_at` is the
     ledger's time, or a legacy answer's time — never `created_at`, which is when
     the ask was filed, not when it ended.
@@ -114,6 +120,8 @@ def _ending_of(item: dict, viewer_email: Optional[str]) -> tuple:
         return None, None
     if status == "expired":
         return item.get("disposed_at"), "timeout"
+    if item.get("disposed_by") == "platform":
+        return item.get("disposed_at"), "platform"
     by = item.get("disposed_by_email") or (item.get("responded_by_email") if status == "answered" else None)
     who = "you" if by and viewer_email and by.lower() == viewer_email.lower() else "operator"
     at = item.get("disposed_at") or (item.get("responded_at") if status == "answered" else None)
@@ -161,6 +169,7 @@ def _project(item: dict, *, viewer_email: Optional[str] = None,
         resume_requested=resume_requested,
         sync=_coarse_sync(item),
         aging=bool(is_aged(item)),
+        decided_by_options=ask_service.decided_by_options(item),
     )
 
 
@@ -453,6 +462,9 @@ def answer_ask(item_id: str, email: str, is_platform: bool,
         )
     except ResponseNotOfferedError as e:
         raise AskError(422, e.code, str(e), {"offered_options": e.options})
+    except ReservedAnswerError as e:
+        # #3242: the reserved "(something else)" decision, refused by name.
+        raise AskError(422, e.code, str(e))
     except ask_service.AskNotFound:
         raise AskError(409, "already_resolved", "This ask was just answered elsewhere.")
     except ask_service.AskNotAddressee:
@@ -864,6 +876,15 @@ def _origin(item: dict, run: Optional[dict], email: str):
     return None
 
 
+def _answer_label(row: dict, excerpt) -> str:
+    """The viewer's own answer, as a person reads it. The reserved decision
+    (#3242) is never shown raw: "Something else: <their instruction>"."""
+    if row.get("response") == SOMETHING_ELSE:
+        text = excerpt(row.get("response_text"), limit=RECENT_ANSWER_EXCERPT_MAX)
+        return f"Something else: {text}" if text else "Something else"
+    return excerpt(row.get("response"), limit=RECENT_ANSWER_EXCERPT_MAX)
+
+
 def _recent_answers(item: dict, email: str):
     from client_portal.chat_previews import _arrival_excerpt
     from .models import WorkspaceAskAnswered
@@ -891,7 +912,7 @@ def _recent_answers(item: dict, email: str):
     return [
         WorkspaceAskAnswered(
             id=row["id"], title=row.get("title") or "",
-            answer=_arrival_excerpt(row.get("response"), limit=RECENT_ANSWER_EXCERPT_MAX),
+            answer=_answer_label(row, _arrival_excerpt),
             ended_at=ended_at,
         )
         for _, row, ended_at in mine[:RECENT_ANSWERS]

@@ -58,7 +58,7 @@ IP="$(cat ${STATE_DIR}/public-ip 2>/dev/null)"
 TAG="$(cat ${STATE_DIR}/release 2>/dev/null)"
 
 echo
-echo "  Trinity ${TAG:-} — the sovereign AI agents platform"
+echo "  Trinity ${TAG:-} — the operating system for the AI-native company"
 echo "  ---------------------------------------------------------------"
 
 if [ -f "${STATE_DIR}/firstboot-failed" ]; then
