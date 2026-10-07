@@ -25,13 +25,17 @@ from typing import Iterable, List, Optional
 # (a run before a slash read as a space), and with each replaced by a space —
 # so one cannot hide an invocation either way: removed, `/\u00adx` is `/x` and
 # `/pay\u200d-x` is `/pay-x`; spaced, `/x\u00adyz` still ends `x` (trinity#3274).
-_INVISIBLE = re.compile(
-    "[\u00ad\u034f\u061c\u115f\u1160\u17b4\u17b5\u180b-\u180f\u200b-\u200f"
-    "\u202a-\u202e\u2060-\u206f\u3164\ufe00-\ufe0f\ufeff\uffa0\ufff0-\ufff8"
-    "\U0001bca0-\U0001bca3\U0001d173-\U0001d17a\U000e0000-\U000e0fff]")
+_INVISIBLE_CHAR = (
+    "(?:[\u00ad\u034f\u061c\u115f\u1160\u17b4\u17b5\u180b-\u180f\u200b-\u200f"
+    "\u202a-\u202e\u2060-\u206f\u3164\ufe00-\ufe0f\ufeff\uffa0\ufff0-\ufff8]"
+    # Each range beyond the Basic Multilingual Plane in a class of its own:
+    # CodeQL reads such a range as `\ufffd-\ufffd`, so several in one class look
+    # like overlapping ranges (py/overly-large-range). Same characters either way.
+    "|[\U0001bca0-\U0001bca3]|[\U0001d173-\U0001d17a]|[\U000e0000-\U000e0fff])")
+_INVISIBLE = re.compile(_INVISIBLE_CHAR)
 # A run of them right before a slash: removed, it could join a letter to the
 # slash and turn `run\u00ad/x` into the path `run/x`, so it reads as a space.
-_INVISIBLE_BEFORE_SLASH = re.compile(_INVISIBLE.pattern + "+(?=/)")
+_INVISIBLE_BEFORE_SLASH = re.compile(_INVISIBLE_CHAR + "+(?=/)")
 
 # Before the slash: anything except a letter, a dot or another slash — so
 # `run:/x`, a backtick, a quote, a bracket, `-/x`, `_/x_` and `1/x` precede an
