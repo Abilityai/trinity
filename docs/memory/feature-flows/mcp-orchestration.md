@@ -497,7 +497,12 @@ chat_with_agent({
 // right for a REST caller, impossible for an MCP one — so `runAgentChat` rewrites the
 // `message` of an `accepted`/`queued` receipt (ent#568); every other field is untouched.
 // The lead claims nothing about liveness: the backend stores this receipt as the
-// idempotency snapshot at dispatch and replays it for 24 h (#3245).
+// idempotency snapshot at dispatch and replays it within 24 h while the run is live,
+// succeeded or may still report back (a `lease_expired` failure inside its hold
+// window). Since #3245 a run that ended failed/cancelled is NOT replayed — an identical
+// re-send starts a new run — and a replayed answer carries `"idempotent_replay": true`
+// (the client copies the backend's `X-Idempotent-Replay` header into the body; absence
+// is not proof of a fresh dispatch).
 ```
 
 **When `async: true` (with `parallel: true`)**:
@@ -648,7 +653,8 @@ silent wrong data, strictly worse than the loud error it replaced.
 | `/task` recovers on `AbortError` **only** | A `TypeError` may mean the request never landed, and on this route a concurrent peer row is the normal state |
 
 **Retry guidance the tool description now states:** an *identical* re-send is
-deduplicated server-side and answers with the original `execution_id`; a
+deduplicated server-side and answers with the original `execution_id` (since
+#3245, not once that run ended `failed` or `cancelled`); a
 **reworded** one derives a different idempotency key and dispatches a second
 execution. That asymmetry is why the opaque error was dangerous — it invited the
 rewrite.
@@ -671,13 +677,18 @@ The receipts above only help a caller who knows what they mean. The rule is now
   re-send (`agent_busy` included — it is not "nothing ran", #3244); `pending_approval` is not
   retried; `parallel=true, async=true` for long work, whose end fires
   `agent.task.*` for a subscriber (a sequential `/chat` turn fires none).
+  #3245 added: after a confirmed `failed` or `cancelled`, re-send word for word
+  to retry; if the same `execution_id` comes back (a `lease_expired` failure is
+  held until its window ends), `set_reminder` and end the turn.
 - **The 2,048-char cap.** Claude Code cuts every MCP tool description at
   `CLAUDE_CODE_MAX_MCP_DESCRIPTION_LENGTH` (default 2,048). #2958 (2026-09-24)
   took the `chat_with_agent` description from 2,035 to 2,424 chars, so from then
   on Claude Code cut its last paragraph — the `list_recent_executions` advice and
   "prefer `parallel=true, async=true`" — before the model read it (other
   runtimes' MCP clients were not measured). It is now a
-  lead, one line of modes and the contract (1,940 chars published); per-mode detail moved into the `parallel` / `async` /
+  lead, one line of modes and the contract (2,030 chars published since #3245, which
+  added the confirmed-failure bullet, raised the contract's own pin 1,650 → 1,730
+  and dropped "(the primary way to use sub-agents)" from the lead); per-mode detail moved into the `parallel` / `async` /
   `timeout_seconds` parameter descriptions, which are not cut.
   `src/delegation-contract.test.ts` reads every carrying description back through
   a real `tools/list` and pins it under the cap.

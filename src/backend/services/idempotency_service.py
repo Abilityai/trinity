@@ -20,10 +20,15 @@ import json
 import logging
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from typing import Any, AsyncIterator, Optional, Union
+from datetime import datetime, timedelta
+from typing import Any, AsyncIterator, NamedTuple, Optional, Union
 
 from database import db
 from db.idempotency import STATE_COMPLETED, STATE_IN_FLIGHT, STATE_NEW
+from models import TaskExecutionStatus
+from services.execution_envelope import TaskExecutionErrorCode
+from services.slot_service import SLOT_TTL_BUFFER
+from utils.helpers import parse_iso_timestamp, utc_now
 
 logger = logging.getLogger(__name__)
 
@@ -761,6 +766,143 @@ def discard_stale_replay(scope: Optional[str], key: Optional[str]) -> None:
         db.idempotency_discard_completed(scope, key)
     except Exception as e:
         logger.warning("Idempotency discard_stale_replay failed (scope=%s): %s", scope, e)
+
+
+# ---------------------------------------------------------------------------
+# Replay liveness (#3245)
+#
+# A stored dispatch receipt names an execution. Replaying it is truthful only
+# while that run can still succeed; once it ended without success (or its row
+# is gone) an identical request should dispatch a new run. These two helpers
+# are the mechanism; the policy (which snapshots, which keys, when to reclaim)
+# lives at the admission seam, `dispatch_admission_service._reclaim_ended_receipt`.
+# ---------------------------------------------------------------------------
+
+LIVENESS_LIVE = "live"                    # queued / running / pending_retry
+LIVENESS_SUCCEEDED = "succeeded"
+LIVENESS_ENDED = "ended"                  # failed / cancelled / skipped — will not succeed
+LIVENESS_GONE = "gone"                    # no execution row
+LIVENESS_MAYBE_ALIVE = "maybe_alive"      # lease_expired FAILED inside its hold window
+LIVENESS_INDETERMINATE = "indeterminate"  # cannot tell — callers must not re-run
+
+_LIVE_STATUSES = frozenset({
+    TaskExecutionStatus.QUEUED.value,
+    TaskExecutionStatus.RUNNING.value,
+    TaskExecutionStatus.PENDING_RETRY.value,
+})
+# Decision D1/Q6 (#3245): `skipped` and `cancelled` count as ended.
+_ENDED_STATUSES = frozenset({
+    TaskExecutionStatus.CANCELLED.value,
+    TaskExecutionStatus.SKIPPED.value,
+})
+# The slot reaper's mark (`cleanup_service._LEASE_EXPIRED_TAG`, parity-tested).
+# `.value`, never the member: `TaskExecutionErrorCode` is a fieldless
+# `@dataclass` str-Enum whose members all compare equal (#1085).
+_LEASE_EXPIRED_PREFIX = f"{TaskExecutionErrorCode.LEASE_EXPIRED.value}:"
+
+
+class Liveness(NamedTuple):
+    """`execution_liveness` result. `hold_until` is set only for `maybe_alive`."""
+    verdict: str
+    hold_until: Optional[datetime] = None
+
+
+def _now() -> datetime:
+    """Aware-UTC clock; a module hook so tests can pin time without sleeping."""
+    return utc_now()
+
+
+def _status_value(status: Any) -> str:
+    return str(getattr(status, "value", status))
+
+
+def lease_expired_horizon(completed_at: Optional[str], agent_name: str) -> datetime:
+    """When a `lease_expired` FAILED stops being "maybe alive" (#3245, decision 1).
+
+    ``completed_at`` (the moment the reaper wrote FAILED) + the agent's CURRENT
+    execution timeout + ``SLOT_TTL_BUFFER``. Anchored at the failure, not the
+    start: the reaper fires only after the slot TTL (timeout + buffer from
+    acquire) already ran out, so a start anchor would never hold. A heuristic,
+    not a bound — the agent's restart sweep re-posts results with no age limit.
+    Raises on a missing/unparseable stamp or an unreadable timeout.
+    """
+    if not completed_at:
+        raise ValueError("no completed_at on a lease_expired FAILED row")
+    failed_at = parse_iso_timestamp(completed_at)  # naive legacy → UTC, always aware
+    timeout = int(db.get_execution_timeout(agent_name))
+    return failed_at + timedelta(seconds=timeout + SLOT_TTL_BUFFER)
+
+
+def execution_liveness(
+    execution_id: Optional[str], agent_name: str, *, now: Optional[datetime] = None,
+) -> Liveness:
+    """Can the run a stored receipt names still succeed? Never raises.
+
+    Reads `get_execution_gate_state` (owner + status) and, only when that says
+    ``failed``, `get_execution_failure_stamp` (status, error, completed_at).
+    Every doubt resolves to ``indeterminate`` — which callers treat as "do not
+    re-run" — except a missing row, which is ``gone`` (decision 3: a vanished
+    row must never wedge a key).
+    """
+    if not execution_id or execution_id == MANUAL_EXECUTION_ID:
+        return Liveness(LIVENESS_INDETERMINATE)
+    try:
+        state = db.get_execution_gate_state(execution_id)
+    except Exception as e:
+        logger.warning("execution_liveness: gate-state read failed for %s: %s", execution_id, e)
+        return Liveness(LIVENESS_INDETERMINATE)
+    if state is None:
+        # The effect resolver calls this `unknown` (no such execution); for
+        # replay purposes it is `gone`.
+        return Liveness(LIVENESS_GONE)
+    owner, status = state
+    if owner != agent_name:
+        return Liveness(LIVENESS_INDETERMINATE)
+    status = _status_value(status)
+    if status in _LIVE_STATUSES:
+        return Liveness(LIVENESS_LIVE)
+    if status == TaskExecutionStatus.SUCCESS.value:
+        return Liveness(LIVENESS_SUCCEEDED)
+    if status in _ENDED_STATUSES:
+        return Liveness(LIVENESS_ENDED)
+    if status != TaskExecutionStatus.FAILED.value:
+        return Liveness(LIVENESS_INDETERMINATE)
+    try:
+        stamp = db.get_execution_failure_stamp(execution_id)
+    except Exception as e:
+        logger.warning("execution_liveness: failure-stamp read failed for %s: %s", execution_id, e)
+        return Liveness(LIVENESS_INDETERMINATE)
+    if stamp is None or _status_value(stamp[0]) != TaskExecutionStatus.FAILED.value:
+        return Liveness(LIVENESS_INDETERMINATE)  # changed between the two reads
+    _, error, completed_at = stamp
+    # Tag first: an ordinary failure is ended without needing a timestamp or
+    # the timeout, so neither can hold it.
+    if not (isinstance(error, str) and error.startswith(_LEASE_EXPIRED_PREFIX)):
+        return Liveness(LIVENESS_ENDED)
+    try:
+        hold_until = lease_expired_horizon(completed_at, agent_name)
+    except Exception as e:
+        logger.warning("execution_liveness: no lease_expired horizon for %s: %s", execution_id, e)
+        return Liveness(LIVENESS_INDETERMINATE)
+    current = now if now is not None else _now()
+    if current < hold_until:
+        return Liveness(LIVENESS_MAYBE_ALIVE, hold_until)
+    return Liveness(LIVENESS_ENDED)
+
+
+def discard_replay_of(
+    scope: Optional[str], key: Optional[str], execution_id: Optional[str],
+) -> Optional[bool]:
+    """Compare-and-delete the completed row for (scope, key) while it still
+    names ``execution_id`` (#3245). True deleted, False no match (another retry
+    already moved the key on), None the delete raised (logged, swallowed)."""
+    if not scope or not key or not execution_id:
+        return False
+    try:
+        return bool(db.idempotency_discard_completed_if_execution(scope, key, execution_id))
+    except Exception as e:
+        logger.warning("Idempotency discard_replay_of failed (scope=%s): %s", scope, e)
+        return None
 
 
 def fail(decision: IdempotencyDecision) -> None:
