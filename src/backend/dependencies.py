@@ -1807,9 +1807,14 @@ def get_owned_agent_by_name(
 # permission. Approving that ask is a notification only — the grant itself is
 # made by an admin in a signed-in session, never by answering a queue item.
 _ASK_FOR_IT = (
-    " To request it, raise an ask to your operator with ask_class "
-    "'permission-request' naming the permission; approving the ask does not grant "
-    "it — an admin grants it in the agent's Settings."
+    # #3236 review: the ask surface has no `ask_class` field (that exists only
+    # on seat decisions) and MCP `ask_operator` drops unknown fields, so the
+    # instruction must use the fields that exist. And there is no Settings UI
+    # for these grants yet (ent#756), so the remedy names the API.
+    " To request it, raise an ask to your operator (type 'question') whose title "
+    "names the permission; approving the ask does not grant it. An instance admin "
+    "grants it from a signed-in session: PUT /api/agents/{agent}/capability-grants/"
+    "{capability} with {\"granted\": true}."
 )
 
 _CAPABILITY_REFUSALS = {
@@ -1830,14 +1835,16 @@ _CAPABILITY_REFUSALS = {
         "instruction_management_not_permitted",
         "This agent does not hold the instruction-management permission, which "
         "writing an agent's CLAUDE.md, AGENTS.md or .claude/ files (other than "
-        "skills), or resetting its git workspace, requires \u2014 its own "
-        "included." + _ASK_FOR_IT,
+        "skills), or resetting it to main (reset-to-main-preserve-state), "
+        "requires \u2014 its own included." + _ASK_FOR_IT,
     ),
     "agents.manage": (
         "agent_management_not_permitted",
         "This agent does not hold the agent-management permission, which creating, "
         "deleting, deploying or reconfiguring agents requires (spawning an "
-        "ephemeral helper does not)." + _ASK_FOR_IT,
+        "ephemeral helper does not). Even with it, an agent reaches only agents "
+        "its owner owns, deletes only agents it spawned, and cannot change its "
+        "own read-only mode or guardrails." + _ASK_FOR_IT,
     ),
 }
 
@@ -1992,7 +1999,7 @@ def capability_fence(capability: str, *, own_agent_exempt: bool = False,
     return fence
 
 
-def require_person_or_capability(capability: str):
+def require_person_or_capability(capability: str, *, self_person_only: bool = False):
     """`require_person`, except that an AGENT holding `capability` passes
     (trinity-enterprise#164 — the reconfigure routes were person-only, so no
     agent could hold the power the grant exists to give an orchestrator).
@@ -2000,12 +2007,33 @@ def require_person_or_capability(capability: str):
     Only the agent case changes: an agent key without the grant gets the named
     capability refusal; every other principal meets `assert_person` exactly as
     before, so a user-scoped or connector key gains nothing.
+
+    Two bounds on a holder (#3236 review), because these routes authorise
+    through `assert_agent_owner` → `can_user_share_agent`, which is True for any
+    `role == "admin"` — and an agent key carries its owner's role:
+
+    * **Reach** — the target must be an agent its owner actually OWNS
+      (`owner_username` equality, never the admin short-circuit). Without this,
+      one grant on a default admin-owned install reached every agent on the
+      instance, other users' included. Not-owned and nonexistent answer the
+      same 404, so a holder learns nothing about agents outside its owner's.
+    * **Self** — with `self_person_only`, a holder cannot target ITSELF. Used
+      for read-only mode and guardrails: the agent the setting constrains must
+      not be the one that lifts it (the grant-vs-use line, Invariant #8).
     """
     async def dep(request: Request, current_user: User = Depends(get_current_user)) -> User:
         if (getattr(current_user, "mcp_scope", None) == "agent"
                 and getattr(current_user, "agent_name", None)
                 and not getattr(current_user, "vouched_source_agent", None)):
-            await enforce_agent_capability(request, current_user, capability, target=_path_agent(request))
+            target = _path_agent(request)
+            if self_person_only and target == current_user.agent_name:
+                assert_person(current_user)
+            await enforce_agent_capability(request, current_user, capability, target=target)
+            if target:
+                owner = db.get_agent_owner(target) or {}
+                if owner.get("owner_username") != current_user.username:
+                    raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
+                                        detail="Agent not found")
             return current_user
         assert_person(current_user)
         return current_user

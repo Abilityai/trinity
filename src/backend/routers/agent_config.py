@@ -135,7 +135,7 @@ async def get_agent_read_only_status(
 async def set_agent_read_only_status(
     agent_name: str,
     body: dict,
-    current_user: User = Depends(require_person_or_capability("agents.manage"))
+    current_user: User = Depends(require_person_or_capability("agents.manage", self_person_only=True))
 ):
     """
     Set the read-only mode status for an agent.
@@ -767,7 +767,7 @@ async def get_agent_guardrails(
 async def set_agent_guardrails(
     agent_name: str,
     body: dict,
-    current_user: User = Depends(require_person_or_capability("agents.manage")),
+    current_user: User = Depends(require_person_or_capability("agents.manage", self_person_only=True)),
 ):
     """Set per-agent guardrails overrides. Owner-only. Requires container
     recreation to take effect (the runtime config file is written during
@@ -834,7 +834,14 @@ async def set_agent_capability_grant(
         try:  # best-effort: the grant has already committed
             await platform_audit_service.log(
                 event_type=AuditEventType.AUTHORIZATION,
-                event_action="capability_grant" if body.granted else "capability_revoke",
+                # One verb per capability whichever door granted it (#3236
+                # review): `skills.manage` keeps the skill-manager route's
+                # verb, so an audit query for it finds both doors.
+                event_action=(
+                    ("skill_manager_grant" if body.granted else "skill_manager_revoke")
+                    if capability == "skills.manage"
+                    else ("capability_grant" if body.granted else "capability_revoke")
+                ),
                 source="api",
                 actor_user=admin_user,
                 actor_ip=request.client.host if request.client else None,

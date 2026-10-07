@@ -57,6 +57,9 @@ def held(monkeypatch):
     from database import db
     monkeypatch.setattr(db, "agent_has_capability",
                         lambda agent, cap: cap in grants.get(agent, set()))
+    # Every agent here is owned by the principals' owner (#3236's reach bound
+    # is pinned through real keys in test_2996_owner_config_person_only).
+    monkeypatch.setattr(db, "get_agent_owner", lambda agent: {"owner_username": "owner"})
     return grants
 
 
@@ -105,7 +108,9 @@ def test_a_non_holder_gets_a_named_refusal_that_says_how_to_ask(held, cap, code)
         capability_refusal = dependencies.capability_refusal
     got_code, message = capability_refusal(_principal("agent", SIBLING), cap)
     assert got_code == code
-    assert "permission-request" in message and "admin grants it" in message
+    # The ask surface has no `ask_class`; the remedy names the grant route.
+    assert "type 'question'" in message and "permission-request" not in message
+    assert "/capability-grants/" in message
     assert capability_refusal(_principal("agent", HOLDER), cap) is None
     for human in (_principal(None), _principal("user"), _principal("system")):
         assert capability_refusal(human, cap) is None        # humans are never fenced
@@ -276,6 +281,14 @@ def test_spawning_a_ghost_needs_no_grant(held, audit):
     (".claude", True, True),                             # deleting .claude deletes instructions
     ("/home/developer", True, True),
     ("notes", True, False),
+    # ent#792 (trinity#3276): `normpath` keeps exactly two leading slashes, so
+    # these once classified as "not an instruction file" and skipped the fence.
+    ("//home/developer/CLAUDE.md", False, True),
+    ("///home/developer/CLAUDE.md", False, True),
+    ("//home/developer/.claude/settings.json", False, True),
+    ("//home/developer/.claude/skills/x/SKILL.md", False, False),
+    ("//home/developer/.claude", True, True),
+    ("//home/developer", True, True),
 ])
 def test_what_counts_as_an_instruction_file(path, ancestors, expected):
     from services.agent_service.files import _touches_instructions
