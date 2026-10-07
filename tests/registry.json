@@ -1,6 +1,18 @@
 {
   "test_files": [
     {
+      "file": "unit/test_2372_platform_alert_ack.py",
+      "feature": "#2372",
+      "added": "2026-10-07",
+      "categories": [
+        "backend",
+        "operator-queue",
+        "migrations",
+        "unit"
+      ],
+      "description": "#2372: answering a platform-minted alert (reserved request_id prefix) lands it `acknowledged` + `acknowledged_at` through the real ask sink; an agent's own ask still lands `responded`; a gate- approval keeps disposition `answered`; Clear All hides the acknowledged alert. Sync loop over a pre-ent#499 file: a non-pending reserved entry is skipped with no #1631 WARNING and no writes, with its row gone; a pending reserved entry still WARNs and is never created. Heal migration `platform_alert_responded_heal`: flips stuck responded platform rows (incl. lookalike ` Poison-x`), leaves `valX1` and agent rows, idempotent, frozen prefix list equals the live tuple, registered on both tracks. No Docker."
+    },
+    {
       "file": "unit/test_ec_backlog_admission_edges.py",
       "feature": "edge-cases-2026-10-06",
       "added": "2026-10-07",

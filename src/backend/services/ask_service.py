@@ -216,6 +216,7 @@ def answer(
     validate_response_choice(item, response, response_text=response_text)
     if not may_end(item, actor):
         raise AskNotAddressee(item["id"])
+    from services.operator_queue_service import is_platform_minted
     updated = db.respond_to_operator_queue_item(
         item_id=item["id"],
         response=response,
@@ -223,6 +224,9 @@ def answer(
         responded_by_id=responded_by_id,
         responded_by_email=actor.email,
         divergence_acknowledged=divergence_acknowledged,
+        # #2372: a platform alert has no agent audience — nobody will ever
+        # acknowledge it from a file, so the person's answer is its last event.
+        terminal=is_platform_minted(item),
     )
     if not updated:
         raise AskNotFound(item["id"])

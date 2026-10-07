@@ -5376,6 +5376,54 @@ def _migrate_platform_alert_subjects(cursor, conn):
     conn.commit()
 
 
+# #2372: the platform-minted prefixes on the day the heal shipped. Frozen on
+# purpose — a one-time fix of rows that already exist must not widen when a
+# prefix is reserved later (`operator_queue_service._RESERVED_ID_PREFIXES` stays
+# the live definition; a unit test pins the two equal at ship time).
+PLATFORM_ALERT_HEAL_PREFIXES = (
+    "queue-flood-", "poison-", "cb-dormant-", "sync-failing-", "git-bloat-",
+    "sync-diverged-", "skill-not-found-", "val_", "system-seed-",
+    "base-image-stale-", "alert-budget-", "effect-unguarded-", "db-backup-",
+    "log-archive-", "sub-headroom-", "skills-legacy-adoption-",
+    "workspace-problem-", "portal-inbox-collision-", "gitignore-untracked-",
+    "skills-reconcile-", "skills-fleet-reinject-", "retention-guard-",
+    "ent615-git-token-scrub-", "role-drift-", "gate-",
+)
+PLATFORM_ALERT_HEAL_SELECT_SQL = "SELECT id, request_id FROM operator_queue WHERE status = 'responded'"
+PLATFORM_ALERT_HEAL_UPDATE_SQL = (
+    "UPDATE operator_queue SET status = 'acknowledged', acknowledged_at = :now "
+    "WHERE id = :id AND status = 'responded'"
+)
+
+
+def platform_alert_heal_ids(rows):
+    """Ids of `responded` rows that are platform-minted — matched the way
+    `is_platform_minted` matches (strip + lowercase + prefix), in Python,
+    because SQL `LIKE` reads the `_` in `val_` as a wildcard."""
+    return [
+        row_id for row_id, request_id in rows
+        if str(request_id or "").strip().lower().startswith(PLATFORM_ALERT_HEAL_PREFIXES)
+    ]
+
+
+def _migrate_platform_alert_responded_heal(cursor, conn):
+    """#2372: platform alerts an operator acknowledged before the fix sat in
+    `responded` — no agent ever acknowledges them, so they stayed for the 90-day
+    floor and out of Clear All. Moves each to `acknowledged` (`acknowledged_at`
+    = now), the state an operator's answer now lands in. Agents' own asks and
+    non-`responded` rows are untouched. Idempotent.
+
+    Mirrored by the Alembic revision 0093_platform_alert_responded_heal.
+    """
+    from utils.helpers import utc_now_iso
+    cursor.execute(PLATFORM_ALERT_HEAL_SELECT_SQL)
+    now = utc_now_iso()
+    sql = PLATFORM_ALERT_HEAL_UPDATE_SQL.replace(":now", "?").replace(":id", "?")
+    for row_id in platform_alert_heal_ids(cursor.fetchall()):
+        cursor.execute(sql, (now, row_id))
+    conn.commit()
+
+
 MIGRATIONS = [
     ("agent_sharing", _migrate_agent_sharing_table),
     ("schedule_executions_observability", _migrate_schedule_executions_observability),
@@ -5538,4 +5586,5 @@ MIGRATIONS = [
     ("platform_alert_subjects", _migrate_platform_alert_subjects),
     ("chat_session_claude_id", _migrate_chat_session_claude_id),
     ("portal_messages_attachments", _migrate_portal_messages_attachments),
+    ("platform_alert_responded_heal", _migrate_platform_alert_responded_heal),
 ]
