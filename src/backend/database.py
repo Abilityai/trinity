@@ -3840,6 +3840,13 @@ class DatabaseManager:
     def list_operator_queue_agent_names(self, **kwargs):
         return self._operator_queue_ops.list_item_agent_names(**kwargs)
 
+    def list_operator_queue_items_walk(self, **kwargs):
+        # trinity-enterprise#815: one page of a cursor walk, `(item, key)` pairs.
+        return self._operator_queue_ops.list_items_walk(**kwargs)
+
+    def operator_queue_walk_alert_priorities(self, **kwargs):
+        return self._operator_queue_ops.walk_alert_priorities(**kwargs)
+
     def respond_to_operator_queue_item(self, item_id, response, response_text,
                                         responded_by_id, responded_by_email,
                                         divergence_acknowledged=False):

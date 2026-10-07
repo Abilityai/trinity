@@ -118,6 +118,41 @@ export class ApiError extends Error {
  * `/chat` sits queued, and the `/chat` abort would then attribute it. The
  * trigger set is a per-call-site argument for exactly this reason.
  */
+/** The filters `GET /api/operator-queue` takes (trinity-enterprise#815). */
+export interface OperatorQueueListParams {
+  status?: string;
+  type?: string;
+  priority?: string;
+  agent_name?: string;
+  since?: string;
+  limit?: number;
+  offset?: number;
+  /** Narrowing only: one `agent_names` query parameter per name. */
+  agent_names?: string[];
+  /** Keyset walk: "start", then each page's `next_cursor`. */
+  cursor?: string;
+}
+
+/**
+ * The request target (path + query) `listOperatorQueue` sends. Exported so the
+ * tool can measure the exact request before it sends it and refuse one too
+ * large for an HTTP request line (trinity-enterprise#815).
+ */
+export function operatorQueueListTarget(params: OperatorQueueListParams = {}): string {
+  const sp = new URLSearchParams();
+  if (params.status) sp.set("status", params.status);
+  if (params.type) sp.set("type", params.type);
+  if (params.priority) sp.set("priority", params.priority);
+  if (params.agent_name) sp.set("agent_name", params.agent_name);
+  if (params.since) sp.set("since", params.since);
+  if (params.limit !== undefined) sp.set("limit", String(params.limit));
+  if (params.offset !== undefined) sp.set("offset", String(params.offset));
+  for (const name of params.agent_names ?? []) sp.append("agent_names", name);
+  if (params.cursor !== undefined) sp.set("cursor", params.cursor);
+  const qs = sp.toString();
+  return `/api/operator-queue${qs ? `?${qs}` : ""}`;
+}
+
 export const CHAT_RECOVERY_TRIGGERS = ["mcp", "agent"] as const;
 
 /** #2661: `/task` additionally sees `self_task` rows (SELF-EXEC-001). */
@@ -830,8 +865,24 @@ export class TrinityClient {
   /**
    * Get permitted agents for a source agent (Phase 9.10)
    * Returns list of agent names that the source agent can communicate with
+   *
+   * `strict` (trinity-enterprise#815): asks the backend for `?strict=true` —
+   * a 503 when Docker cannot be read instead of an answer with no peers — and
+   * THROWS on any failure. A caller that must not mistake an error for "no
+   * peers" (a broad queue read deciding completeness) uses it. Without the
+   * option the read keeps its fail-closed `[]`, as every other caller expects.
    */
-  async getPermittedAgents(sourceAgent: string): Promise<string[]> {
+  async getPermittedAgents(
+    sourceAgent: string,
+    options: { strict?: boolean } = {},
+  ): Promise<string[]> {
+    if (options.strict) {
+      const response = await this.request<{ permitted_agents: Array<{ name: string }> }>(
+        "GET",
+        `/api/agents/${encodeURIComponent(sourceAgent)}/permissions?strict=true`
+      );
+      return response.permitted_agents.map((a) => a.name);
+    }
     try {
       const response = await this.request<{ permitted_agents: Array<{ name: string }> }>(
         "GET",
@@ -2476,31 +2527,14 @@ export class TrinityClient {
 
   /**
    * List operator-queue (Operating Room) items with optional filters. The
-   * backend applies owner-level accessible-agent filtering; the MCP tool layer
-   * additionally gates agent-scoped keys down to agent_permissions.
+   * backend applies owner-level accessible-agent filtering, narrows an
+   * agent-scoped key to {self} ∪ permitted, and intersects `agent_names`
+   * (trinity-enterprise#815); the MCP tool layer still gates agent-scoped keys.
    */
-  async listOperatorQueue(params: {
-    status?: string;
-    type?: string;
-    priority?: string;
-    agent_name?: string;
-    since?: string;
-    limit?: number;
-    offset?: number;
-  } = {}): Promise<OperatorQueueListResponse> {
-    const sp = new URLSearchParams();
-    if (params.status) sp.set("status", params.status);
-    if (params.type) sp.set("type", params.type);
-    if (params.priority) sp.set("priority", params.priority);
-    if (params.agent_name) sp.set("agent_name", params.agent_name);
-    if (params.since) sp.set("since", params.since);
-    if (params.limit !== undefined) sp.set("limit", String(params.limit));
-    if (params.offset !== undefined) sp.set("offset", String(params.offset));
-    const qs = sp.toString();
-    return this.request<OperatorQueueListResponse>(
-      "GET",
-      `/api/operator-queue${qs ? `?${qs}` : ""}`,
-    );
+  async listOperatorQueue(
+    params: OperatorQueueListParams = {},
+  ): Promise<OperatorQueueListResponse> {
+    return this.request<OperatorQueueListResponse>("GET", operatorQueueListTarget(params));
   }
 
   /**
