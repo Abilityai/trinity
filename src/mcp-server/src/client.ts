@@ -430,6 +430,9 @@ export interface GateResult {
   skills?: string[];
   approver_role?: string;
   expires_at?: string | null;
+  /** trinity#3233: how the backend will tell this caller the outcome —
+   * `agent_task`, `inbox`, or `none` (absent from an older backend = none). */
+  outcome_delivery?: string;
   retryable: false;
   message: string;
 }
@@ -449,6 +452,9 @@ export function parseGateResult(
   try {
     const parsed = JSON.parse(body) as Record<string, unknown>;
     if (status === 202 && parsed?.status === "pending_approval") {
+      const delivery = typeof parsed.outcome_delivery === "string" ? parsed.outcome_delivery : undefined;
+      // trinity#3233: promise a delivery only when the backend says it makes one.
+      const delivered = delivery === "agent_task" || delivery === "inbox";
       return {
         status: "pending_approval",
         agent,
@@ -457,10 +463,14 @@ export function parseGateResult(
         skills: Array.isArray(parsed.skills) ? (parsed.skills as string[]) : undefined,
         approver_role: typeof parsed.approver_role === "string" ? parsed.approver_role : undefined,
         expires_at: typeof parsed.expires_at === "string" ? parsed.expires_at : null,
+        outcome_delivery: delivery,
         retryable: false,
         message:
           `${typeof parsed.message === "string" ? parsed.message : "Not run: this needs approval."} ` +
-          "Do not retry or route it through another agent — the outcome will be sent to you.",
+          (delivered
+            ? "Do not retry or route it through another agent — the outcome will be sent to you."
+            : "Do not retry or route it through another agent. To learn the outcome, look for a " +
+              `new run with list_recent_executions(agent_name="${agent}") later.`),
       };
     }
     const d = ((parsed?.detail ?? parsed) as Record<string, unknown>) || {};
@@ -3034,6 +3044,10 @@ export class TrinityClient {
       { email, agent, message },
       Number(process.env.MCP_CHAT_TIMEOUT_MS || 25000)
     );
+    // trinity#3274: a gated skill answers like it does on the other tiers —
+    // checked first, so a named refusal (even a 403) keeps its code.
+    const gate = await readGateResult(response, agent);
+    if (gate) return gate;
     if (response.status === 403) {
       throw new Error(`You do not have access to "${agent}".`);
     }

@@ -328,6 +328,11 @@ async def admit_chat_request(
     gate = await skill_gate_service.enforce(
         name,
         request_text=request.message,
+        # trinity#3274: the key's name and the email reach the executor's
+        # prompt beside the request.
+        context_text=skill_gate_service.requester_context_text(
+            mcp_key_name=getattr(current_user, "mcp_key_name", None),
+            source_email=current_user.email or current_user.username),
         requester=skill_gate_service.requester_from_principal(
             current_user, source_agent=x_source_agent, execution_id=x_trinity_execution_id),
         triggered_by=gate_trigger,
