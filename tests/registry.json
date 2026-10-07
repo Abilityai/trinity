@@ -5072,6 +5072,73 @@
         "operator-queue"
       ],
       "description": "An exception from one agent's operator-queue sync must be logged with the agent name, not dropped by `_poll_cycle`'s gather(return_exceptions=True) (#3313). Drives the real `_poll_cycle` over two agents where one sync raises: both run, the failing one is logged at ERROR with its exception type, the healthy one is not. Mutation-proven: reverting the logging goes red. No Docker, no network."
+    },
+    {
+      "file": "unit/test_ent753_gate_storage.py",
+      "feature": "abilityai/trinity-enterprise#753",
+      "added": "2026-10-07",
+      "categories": [
+        "backend",
+        "database",
+        "security",
+        "unit"
+      ],
+      "description": "trinity-enterprise#753: the agent_skill_gates table on both tracks (the registered SQLite entry run twice; the Alembic revision extends the single head), the PK in tables.py (ON CONFLICT on a tables.py-built database), the write merging unsent fields under the lock, writes only to a live agent, rename/soft-delete/purge through the AGENT_REFS cascade, facade signature parity, and the read seam: list_skill_gates skips tombstones and a failed read raises so read_gates refuses 503 (never {}); a gate written mixed-case holds through the real matcher."
+    },
+    {
+      "file": "unit/test_ent753_gate_map_service.py",
+      "feature": "abilityai/trinity-enterprise#753",
+      "added": "2026-10-07",
+      "categories": [
+        "backend",
+        "security",
+        "unit"
+      ],
+      "description": "trinity-enterprise#753: skill_gate_map_service over the real per-test DB with Docker, the library and the audit stubbed. Named refusals (name, approver, approver_unavailable on OSS, deadline incl. JSON true and \"24\", ghost 409); update semantics; tombstones only for assigned recommended skills; the state-driven reconcile (backfill, tighten-only, unreadable library retried, ghosts skipped, zero cost with nothing to do, a concurrent worker's insert audited once); a default kept until its package is gone (deferred removal, route report, start prune); the person-only drop of explicit gates (still-unassigned only, conflict kept); marker ordering (written before the first gate, removed after the last, never on a stopped agent, failed write saves with a warning) and two critical-section races held inside the lock; two partial PUTs at once keep both fields; audit who/from-where. Mutation-checked."
+    },
+    {
+      "file": "unit/test_ent753_gate_routes.py",
+      "feature": "abilityai/trinity-enterprise#753",
+      "added": "2026-10-07",
+      "categories": [
+        "backend",
+        "api",
+        "security",
+        "unit"
+      ],
+      "description": "trinity-enterprise#753: GET/PUT/DELETE /api/agents/{agent_name}/skill-gates over the real routes and dependencies (get_current_user overridden through the dependant tree). Write matrix: owner session/user key/admin/holder on a sibling pass; system, connector, ops, a non-holder agent, a holder on itself and a scopeless principal are refused 403 on the principal alone; an admin-owned holder on another user's agent and a non-owner person get the same 404 as a missing agent. Read matrix incl. byte-identical 404s and principal-only 403s. A machine key never reads set_by. Named codes and X-Trinity-Error-Code on the wire; PUT→GET round trip; census entries."
+    },
+    {
+      "file": "unit/test_ent753_assignment_hooks.py",
+      "feature": "abilityai/trinity-enterprise#753",
+      "added": "2026-10-07",
+      "categories": [
+        "backend",
+        "security",
+        "unit"
+      ],
+      "description": "trinity-enterprise#753: an AST guard that every agent_skills writer in src/backend (facade under any alias, the set service, by call or by reference) reaches the gate reconcile, with the discovered sites pinned and mutation cases; and behaviour through routers/skills.py, the start path and the library sweep over the real DB: a recommended skill is gated before its package is delivered (assign, replace, set assign, manual Sync), a person's completed unassign drops explicit gates while an agent's, the system key's or a deferred removal keeps them (no unassign-reassign laundering), defaults go only after the package is gone (route report or prune), and existing holders are backfilled on start and sweep."
+    },
+    {
+      "file": "unit/test_ent753_approval_metadata.py",
+      "feature": "abilityai/trinity-enterprise#753",
+      "added": "2026-10-07",
+      "categories": [
+        "backend",
+        "unit"
+      ],
+      "description": "trinity-enterprise#753: the approval: frontmatter key (top level or the trinity: block) parsed into the skill contract from the closed set {recommended}; YAML bool/int/date/mapping/list and unknown words are named frontmatter_invalid:approval and never raise; the value rides list_skills entries and SkillInfo."
+    },
+    {
+      "file": "mcp-server/src/tools/skill-gates.test.ts",
+      "feature": "abilityai/trinity-enterprise#753",
+      "added": "2026-10-07",
+      "categories": [
+        "mcp-server",
+        "typescript",
+        "unit"
+      ],
+      "description": "trinity-enterprise#753: list_skill_gates / set_skill_gate / clear_skill_gate reach their routes with names url-encoded; set_skill_gate sends only the fields given (an omitted field keeps its stored value, null resets the deadline, stray keys dropped); the zod schema refuses a bad approver or a deadline outside 1-168 (incl. bool/string); list_skills carries the library's approval recommendation; each tool has a TOOL_ACCESS_POLICY row and fits the 2,048-character description cap."
     }
   ]
 }

@@ -1789,6 +1789,28 @@ TABLES = {
         )
     """,
 
+    # trinity-enterprise#753 — the per-agent skill gate map: which skills on an
+    # agent need approval, and which kind of person approves. One row per
+    # (agent, skill); no row = ungated. `skill_name` is stored lowercased (skill
+    # names are ASCII and every matcher casefolds). `origin`: `set` (a person or
+    # an orchestrator), `library_default` (the library recommends approval) or
+    # `cleared` — a tombstone for a default the owner cleared, which gates
+    # nothing and stops the reconcile re-applying it. `agent_name` is a CASCADE
+    # AgentRef; `set_by_agent` is audit-only provenance and deliberately not.
+    "agent_skill_gates": """
+        CREATE TABLE IF NOT EXISTS agent_skill_gates (
+            agent_name TEXT NOT NULL,
+            skill_name TEXT NOT NULL,
+            approver TEXT NOT NULL,
+            deadline_hours INTEGER,
+            origin TEXT NOT NULL,
+            set_by TEXT NOT NULL,
+            set_by_agent TEXT,
+            set_at TEXT NOT NULL,
+            PRIMARY KEY (agent_name, skill_name)
+        )
+    """,
+
     # Nevermined Payment Integration (NVM-001)
     "nevermined_agent_config": """
         CREATE TABLE IF NOT EXISTS nevermined_agent_config (

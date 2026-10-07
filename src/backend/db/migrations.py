@@ -5424,6 +5424,35 @@ def _migrate_platform_alert_responded_heal(cursor, conn):
     conn.commit()
 
 
+def _migrate_agent_skill_gates(cursor, conn):
+    """trinity-enterprise#753 — the per-agent skill gate map.
+
+    One row per (agent, skill) that needs approval before it runs: the approver
+    kind and an optional deadline. The table the dispatch check (#751) and the
+    in-container hook (#752) read through ``skill_gate_service.list_skill_gates``.
+    See the DDL comment in db/schema.py. Additive: no row = ungated, so every
+    existing agent is unchanged on upgrade.
+
+    Mirrored by the Alembic revision 0094_agent_skill_gates.
+    """
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS agent_skill_gates (
+            agent_name TEXT NOT NULL,
+            skill_name TEXT NOT NULL,
+            approver TEXT NOT NULL,
+            deadline_hours INTEGER,
+            origin TEXT NOT NULL,
+            set_by TEXT NOT NULL,
+            set_by_agent TEXT,
+            set_at TEXT NOT NULL,
+            PRIMARY KEY (agent_name, skill_name)
+        )
+        """
+    )
+    conn.commit()
+
+
 MIGRATIONS = [
     ("agent_sharing", _migrate_agent_sharing_table),
     ("schedule_executions_observability", _migrate_schedule_executions_observability),
@@ -5587,4 +5616,5 @@ MIGRATIONS = [
     ("chat_session_claude_id", _migrate_chat_session_claude_id),
     ("portal_messages_attachments", _migrate_portal_messages_attachments),
     ("platform_alert_responded_heal", _migrate_platform_alert_responded_heal),
+    ("agent_skill_gates", _migrate_agent_skill_gates),
 ]
