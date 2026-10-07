@@ -551,6 +551,7 @@ enterprise_portal_messages = Table(
     Column("source", Text),         # ent#534: NULL typed | 'voice'
     Column("voice_call_id", Text),  # ent#534: groups one voice call's rows
     Column("attachments", Text),    # #3265: JSON list on a user turn
+    Column("execution_id", Text),   # #3166: the turn that wrote the row
 )
 
 # ent#359 — per-user star + read cursor for a Workspace chat of either kind

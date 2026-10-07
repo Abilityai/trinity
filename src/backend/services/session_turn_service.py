@@ -440,6 +440,7 @@ async def run_resumable_turn(
     lock_ttl: Optional[int] = None,
     cold_message: Optional[str] = None,
     on_resume_failure: Optional[Callable[[], None]] = None,
+    wait_for_lock: bool = False,
     **execute_kwargs,
 ) -> ResumableTurn:
     """Run one turn that reattaches to ``cached_uuid`` when there is one.
@@ -467,6 +468,11 @@ async def run_resumable_turn(
     under ``WAITING_CONVERSATION_PREFIX``: on a pull pilot the claim orders it
     with interactive turns whatever its trigger (#3127).
 
+    ``wait_for_lock`` (#3166): wait for a held lock as long as it can live
+    (its TTL) rather than ``LOCK_WAIT_TOTAL_SECONDS``. The Workspace sets it: a
+    second message on a thread queues behind the first instead of being refused
+    whenever the first runs longer than 30s.
+
     Raises ``ResumeLockBusy`` (429) when another turn holds the lock. Never
     raises on an agent-side failure: that arrives as ``result.status``.
     """
@@ -490,7 +496,8 @@ async def run_resumable_turn(
     fallback_fired = False
     fallback_reason: Optional[str] = None
 
-    async with ResumeLock(agent_name, resumed_with, session_key, ttl_seconds=ttl):
+    async with ResumeLock(agent_name, resumed_with, session_key, ttl_seconds=ttl,
+                          wait_seconds=ttl if wait_for_lock else None):
         result = await dispatch_and_await_terminal(
             agent_name=agent_name,
             message=message,

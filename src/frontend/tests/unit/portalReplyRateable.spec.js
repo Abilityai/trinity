@@ -31,7 +31,7 @@ describe('#2580 — assistantRow carries what a thumb needs', () => {
   it('keeps the persisted id and the caller’s own rating', () => {
     expect(assistantRow({ content: 'hi', id: 'm1', my_rating: 'up' })).toEqual({
       role: 'assistant', content: 'hi', id: 'm1', myRating: 'up',
-      source: null, voiceCallId: null,
+      source: null, voiceCallId: null, executionId: null,
     })
   })
 
@@ -192,7 +192,7 @@ describe('#2580 — every path that builds a reply uses the shared rule', () => 
     // reattached turn. Two dropped the id. Sharing the mapper is what stops a
     // fix landing in one twin and not the other (the #2211 lesson).
     expect((CONV.match(/assistantRow\(/g) || []).length).toBeGreaterThanOrEqual(3)
-    expect(CONV).toContain('replyFromHistory(data.messages, baseline)')
+    expect(CONV).toContain('replyFromHistory(data.messages, baseline, executionId)')
     // No hand-built assistant row may survive beside the mapper.
     expect(CONV).not.toMatch(/push\(\{\s*role: 'assistant'/)
   })
