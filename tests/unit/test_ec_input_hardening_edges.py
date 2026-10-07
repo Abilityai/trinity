@@ -641,10 +641,6 @@ class TestSanitizerBoundaries:
         out = CS.sanitize_text("FOO=bar GH_TOKEN=s1 PASSWORD=s2\nAPI_SECRET='s3'")
         assert out == f"FOO=bar GH_TOKEN={RED} PASSWORD={RED}\nAPI_SECRET={RED}"
 
-    @pytest.mark.xfail(strict=True, reason=(
-        "BUG: a non-sensitive `k=v` glued to a sensitive pair (`a=1&token=X`, "
-        "`--env=GH_TOKEN=X`) swallows it — regression from #1670, the pre-#1661 "
-        "regex redacted these — #3311"))
     @pytest.mark.parametrize("text,secret", [
         ("https://api.example.com/v1?client=me&access_token=s3cr3tv4lue", "s3cr3tv4lue"),
         ("curl -d user=alice&password=hunter2xyz https://x", "hunter2xyz"),

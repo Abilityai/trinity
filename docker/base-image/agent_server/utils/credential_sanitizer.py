@@ -139,7 +139,31 @@ _sensitive_var_re = [re.compile(p, re.IGNORECASE) for p in SENSITIVE_VAR_PATTERN
 # cases it names (`!`*n, `!=`+`!=!`*n) are pinned as tests in
 # tests/unit/test_1661_sanitizer_linear.py and run in ~1ms at 64 KB. Do not
 # "simplify" the lookbehind away.
-_KV_LINE_RE = re.compile(r'(?<![^\s"\'=])([^\s"\'=]+)=(["\']?)([^\s"\']+)\2')
+_KV_LINE_RE = re.compile(r'(?<![^\s"\'=&;,])([^\s"\'=&;,]+)=')
+
+# --- #3311: a harmless pair must not swallow a sensitive one ------------------
+# #1670 matched the whole PAIR in one regex — key up to the first `=`, value up
+# to whitespace — and `.sub` never re-examines consumed text. So in
+# `user=a&password=X` the key was `user` (harmless) and `a&password=X` was
+# consumed as its value and returned verbatim: the sensitive pair was never
+# looked at. Same for `?client=me&access_token=X` and `--env=GITHUB_TOKEN=X`.
+# The pre-#1661 composed regex redacted all of these.
+#
+# Now `_KV_LINE_RE` above finds only `KEY=` (the key stops at `&`, `;`, `,` as
+# well as whitespace/quotes/`=`, and the lookbehind lets a key start after any
+# of them), and `_redact_kv_pairs` walks those keys: a harmless key consumes
+# NOTHING, so the next key in the chain is still examined; only a sensitive
+# key takes its value — and that value keeps the old shape (`_KV_PAIR_RE`, up
+# to whitespace), so a secret containing `&`/`;`/`,` is redacted whole, never
+# split and partly leaked. The cost of that choice is over-redaction of pairs
+# chained AFTER a sensitive one, which is the safe direction (and what keeps
+# the Google-consent exemption seeing the whole URL).
+#
+# Still linear: the key search only ever moves forward, a failed value match
+# backtracks at most to the next quote/whitespace, and the lookbehind still
+# pins each key to the start of its run. Cases in
+# tests/unit/test_1661_sanitizer_linear.py::TestChainedPairs.
+_KV_PAIR_RE = re.compile(r'([^\s"\'=&;,]+)=(["\']?)([^\s"\']+)\2')
 
 # A name pattern must match a SUFFIX of the key, not the whole key: the old
 # composed regex could start matching mid-token, so `DB_.*` redacted
@@ -160,7 +184,7 @@ _KV_LINE_RE = re.compile(r'(?<![^\s"\'=])([^\s"\'=]+)=(["\']?)([^\s"\']+)\2')
 #     sanitize_subprocess_line  ->  read_stdout  (headless_executor)
 #
 # The old docstring called `key` "a short KEY= name". It is not: the key is
-# whatever preceded an `=` in `_KV_LINE_RE`'s `([^\s"\'=]+)`, which is
+# whatever preceded an `=` in `_KV_LINE_RE`'s `([^\s"\'=&;,]+)`, which is
 # UNBOUNDED — and the stack above reaches here from stream-json tool RESULTS
 # via recursive `sanitize_dict`, so multi-KB "keys" are the normal case rather
 # than an adversarial one. That wrong assumption is what made a quadratic test
@@ -302,6 +326,33 @@ def _redact_kv_match(match: "re.Match") -> str:
     if _is_sensitive_kv_key(key):
         return f"{key}={REDACTION_PLACEHOLDER}"
     return match.group(0)
+
+
+def _redact_kv_pairs(text: str) -> str:
+    """Redact every sensitive `key=value` in `text`, wherever it sits in a chain.
+
+    A harmless key consumes nothing, so a sensitive key glued after it
+    (`a=1&token=X`, `--env=GH_TOKEN=X`) is still found (#3311). See the note
+    at `_KV_PAIR_RE`.
+    """
+    out = []
+    kept = 0  # end of the text already copied to `out`
+    pos = 0   # where the next key search starts; only ever moves forward
+    while True:
+        key = _KV_LINE_RE.search(text, pos)
+        if key is None:
+            break
+        pos = key.end()
+        if not _is_sensitive_kv_key(key.group(1)):
+            continue
+        pair = _KV_PAIR_RE.match(text, key.start())
+        if pair is None:
+            continue
+        out.append(text[kept:pair.start()])
+        out.append(_redact_kv_match(pair))
+        kept = pos = pair.end()
+    out.append(text[kept:])
+    return "".join(out)
 
 
 _secret_value_re = [re.compile(p) for p in SECRET_VALUE_PATTERNS]
@@ -449,7 +500,7 @@ def sanitize_text(text: str) -> str:
     # #1661: ONE linear pass (see _KV_LINE_RE) — this used to compile a
     # line-scanning regex per name pattern, which cost CPU-minutes on a large
     # line and pegged a core.
-    result = _KV_LINE_RE.sub(_redact_kv_match, result)
+    result = _redact_kv_pairs(result)
 
     return result
 

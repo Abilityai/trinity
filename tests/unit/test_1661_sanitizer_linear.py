@@ -210,3 +210,78 @@ class TestPreservedSemantics:
         """
         assert AGENT._is_sensitive_kv_key("MY_DB_PASS") is True
         assert BACKEND._is_sensitive_kv_key("MY_DB_PASS") is False
+
+
+class TestChainedPairs:
+    """#3311: a sensitive pair chained after a harmless one is still redacted.
+
+    #1670's single regex took the key up to the FIRST `=` and the value as
+    everything up to whitespace, so in `user=a&password=X` the key was `user`
+    (not sensitive) and `a&password=X` was consumed as its value and returned
+    verbatim — the sensitive pair was never examined. A harmless pair must not
+    consume its value; only a sensitive one does.
+    """
+
+    @pytest.mark.parametrize("mod", BOTH)
+    @pytest.mark.parametrize(
+        "text,expected",
+        [
+            # The issue's table, row by row.
+            ("password=hunter2xyz", "password=***REDACTED***"),
+            ("user=a&password=hunter2xyz", "user=a&password=***REDACTED***"),
+            (
+                "https://host/?client=me&access_token=s3cr3tv4lue",
+                "https://host/?client=me&access_token=***REDACTED***",
+            ),
+            # Not token-shaped, so only the KEY=value pass can catch it.
+            ("--env=GITHUB_TOKEN=plainsecret", "--env=GITHUB_TOKEN=***REDACTED***"),
+            # Every separator the AC names (`&` is the row above).
+            ("user=a;password=hunter2xyz", "user=a;password=***REDACTED***"),
+            ("user=a,password=hunter2xyz", "user=a,password=***REDACTED***"),
+            ("user=a password=hunter2xyz", "user=a password=***REDACTED***"),
+            ("user=a\tpassword=hunter2xyz", "user=a\tpassword=***REDACTED***"),
+            # Several harmless pairs ahead of it are all kept verbatim.
+            (
+                "a=1&b=2;c=3,API_KEY=k3yk3yk3y",
+                "a=1&b=2;c=3,API_KEY=***REDACTED***",
+            ),
+            # Two sensitive pairs in one chain.
+            (
+                "user=a&password=p1&x=1;secret=p2",
+                "user=a&password=***REDACTED***",
+            ),
+        ],
+    )
+    def test_sensitive_pair_anywhere_in_a_chain_is_redacted(self, mod, text, expected):
+        assert mod.sanitize_text(text) == expected
+
+    @pytest.mark.parametrize("mod", BOTH)
+    def test_a_sensitive_value_is_never_split_at_a_separator(self, mod):
+        """The value of a sensitive pair still runs to whitespace — a password
+        containing `&`, `;` or `,` is redacted whole, never partly leaked.
+        (Trailing pairs after a sensitive one are therefore redacted with it:
+        over-redaction is the safe direction.)"""
+        out = mod.sanitize_text("password=ab;cd,ef&gh next=1")
+        assert out == "password=***REDACTED*** next=1"
+
+    @pytest.mark.parametrize("mod", BOTH)
+    def test_harmless_chain_is_untouched(self, mod):
+        text = "https://host/path?page=2&sort=asc;lang=en,fmt=json --flag=x=y"
+        assert mod.sanitize_text(text) == text
+
+    @pytest.mark.parametrize("mod", BOTH)
+    @pytest.mark.parametrize(
+        "attack",
+        [
+            pytest.param(lambda n: "a=1&" * (n // 4), id="many-harmless-pairs"),
+            pytest.param(lambda n: "a=" * (n // 2), id="equals-chain"),
+            pytest.param(lambda n: "&" * n, id="all-separators"),
+            pytest.param(lambda n: "TOKEN=" + ",a" * (n // 2), id="separator-value"),
+            pytest.param(lambda n: "TOKEN='TOKEN=\"" * (n // 14), id="mixed-quotes"),
+            pytest.param(lambda n: 'TOKEN="' + "x" * n, id="sensitive-unterminated-quote"),
+        ],
+    )
+    def test_chain_shapes_stay_linear(self, mod, attack):
+        start = time.perf_counter()
+        mod.sanitize_text(attack(64_000))
+        assert time.perf_counter() - start < 1.0
