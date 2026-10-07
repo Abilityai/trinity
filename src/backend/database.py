@@ -3849,10 +3849,10 @@ class DatabaseManager:
 
     def respond_to_operator_queue_item(self, item_id, response, response_text,
                                         responded_by_id, responded_by_email,
-                                        divergence_acknowledged=False):
+                                        divergence_acknowledged=False, terminal=False):
         return self._operator_queue_ops.respond_to_item(
             item_id, response, response_text, responded_by_id, responded_by_email,
-            divergence_acknowledged=divergence_acknowledged,
+            divergence_acknowledged=divergence_acknowledged, terminal=terminal,
         )
 
     def cancel_operator_queue_item(self, item_id, *, disposed_by_email, reason=None,

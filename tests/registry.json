@@ -4944,6 +4944,18 @@
         "unit"
       ],
       "description": "MCP list_operator_queue completeness (trinity-enterprise#815); real tool execute() over a fake TrinityClient, node:test. A broad agent-key read takes its permits first through the strict permissions read and passes {self} ∪ permitted as agent_names; a failed read is permissions_unavailable (retryable, no list call, no self-read substitute); over 500 names or an 8 KB request target is permit_set_too_large, never an unfiltered read. The output always carries count, total, has_more, next_cursor, next_offset and items; an older backend's missing fields become null with a warning; backend warnings pass through; a belt drop nulls total and warns. User and system scopes and scoped reads make no extra permissions call. cursor is opt-in (no cursor → offset 0 as before), passed through unchanged, and a two-page walk re-reads and re-sends agent_names on every page. The description states the contract within the 1,800-character headroom."
+    },
+    {
+      "file": "unit/test_2372_platform_alert_ack.py",
+      "feature": "#2372",
+      "added": "2026-10-07",
+      "categories": [
+        "backend",
+        "operator-queue",
+        "migrations",
+        "unit"
+      ],
+      "description": "#2372: answering a platform-minted alert (reserved request_id prefix) lands it `acknowledged` + `acknowledged_at` through the real ask sink; an agent's own ask still lands `responded`; a gate- approval keeps disposition `answered`; Clear All hides the acknowledged alert. Sync loop over a pre-ent#499 file: a non-pending reserved entry is skipped with no #1631 WARNING and no writes, with its row gone; a pending reserved entry still WARNs and is never created. Heal migration `platform_alert_responded_heal`: flips stuck responded platform rows (incl. lookalike ` Poison-x`), leaves `valX1` and agent rows, idempotent, frozen prefix list equals the live tuple, registered on both tracks. No Docker."
     }
   ]
 }

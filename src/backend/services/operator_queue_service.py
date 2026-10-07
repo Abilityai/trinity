@@ -2025,6 +2025,14 @@ class OperatorQueueSyncService:
                 _RESERVED_ID_PREFIXES
             ):
                 key = (agent_name, req_id)
+                # #2372: only a PENDING entry can pre-create (and so suppress)
+                # a platform row. A non-pending one is what the pre-ent#499
+                # write-back left in the file — the platform's own entry, not
+                # the agent's — and nothing removes it, so the row may already
+                # be pruned. Skipped quietly; the WARNING stays for the
+                # impersonation case.
+                if req.get("status", "pending") != "pending":
+                    continue
                 if key not in self._rejected_reserved:
                     if len(self._rejected_reserved) >= _MAX_QUARANTINE_ENTRIES:
                         self._rejected_reserved.clear()  # safety valve
