@@ -3450,7 +3450,8 @@ async def resolve_turn_attachments(agent_name: str, email: str, requested) -> st
     """The JSON stored on the user row, or None when nothing was attached."""
     if not requested:
         return None
-    inbox = {it["filename"]: it for it in await _read_inbox(agent_name, email)}
+    listing = await _read_inbox_or_none(agent_name, email)
+    inbox = {it["filename"]: it for it in (listing or [])}
     out, seen = [], set()
     for a in requested:
         name = (getattr(a, "filename", "") or "").strip()
@@ -3464,6 +3465,13 @@ async def resolve_turn_attachments(agent_name: str, email: str, requested) -> st
             it = inbox[name]
             out.append({"filename": name, "size_bytes": it.get("size_bytes"),
                         "mime_type": it.get("mime_type")})
+        elif listing is None:
+            # The uploads could not be READ (agent not running, Docker
+            # unreadable) — not the same as "not there". Stored without size or
+            # type rather than as a permanent failure (the #2196 collapse). Safe:
+            # a name is all that is stored, and every read path resolves the
+            # file from the caller's own uploads, never from this row.
+            out.append({"filename": name})
         else:
             out.append({"filename": name, "failed": True, "error": _NOT_IN_UPLOADS})
     return json.dumps(out) if out else None
@@ -4938,12 +4946,19 @@ def _inbox_list_cmd(inbox: str, legacy: str | None = None) -> str:
 async def _read_inbox(agent_name: str, email: str) -> list[dict]:
     """Raw inbox listing for a client on a running agent. Returns [] if the agent
     is offline or the inbox is empty — never raises (best-effort read)."""
+    return await _read_inbox_or_none(agent_name, email) or []
+
+
+async def _read_inbox_or_none(agent_name: str, email: str) -> list[dict] | None:
+    """`_read_inbox`, but None when the listing could not be read at all (agent
+    not running, exec failed, unparsable output) — so a caller that must tell
+    "couldn't read" from "not there" can (#3265). Never raises."""
     from services.docker_service import get_agent_container
     from services.docker_utils import container_exec_run
 
     container = get_agent_container(agent_name)
     if not container or getattr(container, "status", "") != "running":
-        return []
+        return None
     try:
         legacy = (
             _legacy_client_inbox(email)
@@ -4954,12 +4969,12 @@ async def _read_inbox(agent_name: str, email: str) -> list[dict]:
             container, _inbox_list_cmd(_client_inbox(email), legacy), user="developer"
         )
         if getattr(res, "exit_code", 1) != 0:
-            return []
+            return None
         raw = res.output.decode() if isinstance(res.output, (bytes, bytearray)) else str(res.output)
         items = json.loads(raw.strip() or "[]")
     except Exception as e:  # noqa: BLE001 — listing is best-effort
         logger.warning("portal inbox list failed for %s: %s", agent_name, e)
-        return []
+        return None
     out = []
     for it in items:
         mtime = it.get("mtime")

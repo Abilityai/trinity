@@ -2455,10 +2455,16 @@ function markFailed(index, content, error, { retryable = true } = {}) {
 // means "a turn is running" and is read by the header, the Stop control and
 // the reattach poller.
 const escalatingNow = ref(false)
+// #3265 review: the ordinary send has the same window. It clears the composer
+// and then waits for in-flight uploads, and `sending` is only set later, in
+// `deliver()` — so without this a second Enter with new text started a second
+// turn alongside the first. Its own flag for the reason `escalatingNow` is;
+// released when `send()` returns, by which time `sending` has taken over.
+const settlingUploads = ref(false)
 
 async function send() {
   const text = input.value.trim()
-  if (!text || sending.value || escalatingNow.value) return
+  if (!text || sending.value || escalatingNow.value || settlingUploads.value) return
   // The composer is about to be cleared programmatically, which fires no input
   // event — so the popup and its Esc sentinel are cleared here rather than left
   // armed against a message that no longer exists.
@@ -2524,15 +2530,22 @@ async function send() {
   // only a settled chip can say whether it is a sent file or a failed one, and
   // a failed one is shown on the message rather than dropped.
   let carried = null
-  if (attachments.value.length) {
-    await attachmentsSettled()
-    carried = sentAttachments(attachments.value)
-    // The message carries them now, so the composer lets go at once rather
-    // than showing the same files twice until the turn ends.
-    clearAttachments()
+  // Held until the turn is under way (`deliver()` sets `sending`), not just
+  // until the uploads settle — the hand-off between the two is awaited too.
+  settlingUploads.value = true
+  try {
+    if (attachments.value.length) {
+      await attachmentsSettled()
+      carried = sentAttachments(attachments.value)
+      // The message carries them now, so the composer lets go at once rather
+      // than showing the same files twice until the turn ends.
+      clearAttachments()
+    }
+    await submitUserText(text, { replyId: reply?.messageId || null, replyExcerpt: reply?.excerpt || '',
+                                 attachments: carried })
+  } finally {
+    settlingUploads.value = false
   }
-  await submitUserText(text, { replyId: reply?.messageId || null, replyExcerpt: reply?.excerpt || '',
-                               attachments: carried })
 }
 
 // The tail every user utterance shares, typed or spoken (ent#440). Extracted

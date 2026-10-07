@@ -266,7 +266,7 @@ describe('#2794 the 1:1 hands the attachments over', () => {
     // the floor: message gone, no error, no composer to recover it from.
     const start = CONVERSATION.indexOf('async function send()')
     const send = CONVERSATION.slice(start, CONVERSATION.indexOf('async function submitUserText', start))
-    expect(send).toMatch(/if \(!text \|\| sending\.value \|\| escalatingNow\.value\) return/)
+    expect(send).toMatch(/if \(!text \|\| sending\.value \|\| escalatingNow\.value( \|\| settlingUploads\.value)?\) return/)
     expect(send).toMatch(/escalatingNow\.value = true/)
     // Released on BOTH paths: a flag left set would outlive a failed
     // escalation and leave the composer the shell just restored dead.

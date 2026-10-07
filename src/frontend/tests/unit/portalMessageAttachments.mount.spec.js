@@ -4,7 +4,8 @@
  *
  * The composer's chip used to vanish when the turn went out and the bubble
  * showed only the typed text. Now the message carries its attachments: a
- * thumbnail per image, a chip per other file, a failed chip with its reason
+ * thumbnail per image (a named box when the picture can't be read), a chip per
+ * other file, a failed chip with its reason
  * for an upload that did not land. Mounted (#2918): what the person sees on the
  * message is the bug, so the test reads the rendered DOM.
  */
@@ -77,11 +78,14 @@ describe('PortalMessageAttachments (#3265)', () => {
     expect(failed.text()).toContain('Too large (40 MB).')
   })
 
-  it('falls back to a chip when the thumbnail cannot be read', async () => {
+  it('keeps the fixed thumbnail box, named, when the picture cannot be read', async () => {
+    // Review: collapsing a refused thumbnail to a chip shifted the layout.
     const { w } = render([IMG], vi.fn(async () => { throw new Error('429') }))
     await flushPromises()
-    expect(w.find('[data-testid="portal-message-attachment-image"]').exists()).toBe(false)
-    expect(w.find('[data-testid="portal-message-attachment-file"]').text()).toContain('q3-chart.png')
+    const box = w.find('[data-testid="portal-message-attachment-image"]')
+    expect(box.classes()).toEqual(expect.arrayContaining(['w-40', 'h-28']))
+    expect(box.find('img').exists()).toBe(false)
+    expect(box.find('[data-testid="portal-message-attachment-image-fallback"]').text()).toContain('q3-chart.png')
   })
 
   it('downloads the file on click through the same route', async () => {

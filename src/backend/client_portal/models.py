@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from typing import Literal, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class PortalExposureConfig(BaseModel):
@@ -321,6 +321,11 @@ class PortalExchangeResponse(BaseModel):
     expires_in: int
 
 
+#: The most files one chat turn carries (#3265) — the composer's
+#: `MAX_BATCH_FILES`, mirrored.
+MAX_TURN_ATTACHMENTS = 20
+
+
 class PortalTurnAttachment(BaseModel):
     """One file the client attached to a chat turn (#3265).
 
@@ -332,7 +337,15 @@ class PortalTurnAttachment(BaseModel):
     """
     filename: str = Field(min_length=1, max_length=255)
     failed: bool = False
-    error: Optional[str] = Field(None, max_length=300)
+    # Trimmed, not rejected: a long client-side upload error must never cost
+    # the person their message (a 422 here fails the whole turn, and Retry
+    # resends the same list).
+    error: Optional[str] = None
+
+    @field_validator("error", mode="before")
+    @classmethod
+    def _trim_error(cls, v):
+        return v[:300] if isinstance(v, str) else v
 
 
 class PortalMessageAttachment(BaseModel):
@@ -372,8 +385,15 @@ class PortalChatRequest(BaseModel):
     # #3265 — the files attached to this turn, by upload filename. Optional;
     # every existing caller is unaffected. Bounded like an upload batch
     # (`MAX_BATCH_FILES`), and resolved against the caller's own uploads before
-    # anything is stored (`service.resolve_turn_attachments`).
-    attachments: Optional[list[PortalTurnAttachment]] = Field(None, max_length=20)
+    # anything is stored (`service.resolve_turn_attachments`). The bound KEEPS
+    # the first 20 rather than rejecting: a message that sent fine before #3265
+    # must not start failing with a 422 because of what it carries.
+    attachments: Optional[list[PortalTurnAttachment]] = None
+
+    @field_validator("attachments", mode="before")
+    @classmethod
+    def _keep_first_attachments(cls, v):
+        return v[:MAX_TURN_ATTACHMENTS] if isinstance(v, list) else v
     # ent#403 — the model this turn should run on. THREE states, preserving the
     # #894 shape rather than collapsing it to two: a curated id = an explicit
     # choice; `None`/`""`/whitespace = INHERIT (the agent's `public_channel_model`,

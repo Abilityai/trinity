@@ -22,7 +22,7 @@
       </span>
 
       <button
-        v-else-if="isImageAttachment(a) && thumbs[i] !== 'failed'"
+        v-else-if="isImageAttachment(a)"
         type="button"
         class="block w-40 h-28 shrink-0 overflow-hidden rounded-lg border border-gray-200 dark:border-gray-750 bg-gray-100 dark:bg-gray-750 focus:outline-none focus-visible:ring-2 focus-visible:ring-action-primary-500"
         :title="`${a.filename} — click to download`"
@@ -30,7 +30,18 @@
         data-testid="portal-message-attachment-image"
         @click="download(a)"
       >
-        <img v-if="thumbs[i]" :src="thumbs[i]" :alt="a.filename" class="w-full h-full object-cover" />
+        <!-- A refused thumbnail keeps the box: collapsing it to a chip moved
+             everything after it (review). The name stays, the click still
+             downloads. -->
+        <span
+          v-if="thumbs[i] === 'failed'"
+          class="flex flex-col items-center justify-center gap-1 w-full h-full px-2 text-xs text-gray-500 dark:text-gray-400"
+          data-testid="portal-message-attachment-image-fallback"
+        >
+          <svg class="w-5 h-5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" /></svg>
+          <span class="truncate max-w-full">{{ a.filename }}</span>
+        </span>
+        <img v-else-if="thumbs[i]" :src="thumbs[i]" :alt="a.filename" class="w-full h-full object-cover" />
         <span v-else class="block w-full h-full animate-pulse motion-reduce:animate-none" aria-hidden="true"></span>
       </button>
 
