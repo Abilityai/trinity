@@ -887,7 +887,7 @@ curl -X POST http://localhost:8000/api/agents \
 
 A GitHub template can declare `fork_to_own: required` in its `template.yaml`; `_build_template` surfaces the flag (plus `tagline`) on `GET /api/templates`, and creation from such a template copies the repo into a **user-owned** destination first. Cornelius is the first user; the mechanism is template-generic.
 
-**Request**: `POST /api/agents` with `fork_to_own: {destination_repo: "owner/name", github_pat (SecretStr), private: true}`. Backend enforces the `required` flag (400 `FORK_TO_OWN_REQUIRED`), rejects `@branch` syntax and non-`github:` templates with the block, and pins `source_mode=True` + `source_branch=<template default branch>`.
+**Request**: `POST /api/agents` with `fork_to_own: {destination_repo: "owner/name", github_pat (SecretStr, optional), private: true}`. With no `github_pat`, the creator's saved personal token (`per_user` tier) is used — never the platform token, and never from an agent key (#3164). Backend enforces the `required` flag (400 `FORK_TO_OWN_REQUIRED`), rejects `@branch` syntax and non-`github:` templates with the block, and pins `source_mode=True` + `source_branch=<template default branch>`.
 
 **Copy pipeline** (`services/agent_service/fork_to_own.py`, runs in the `github:` branch of `create_agent_internal` BEFORE the docker try-block so structured `FORK_*` errors reach the UI):
 1. `validate_destination_pat(user_pat)` → login; USER-owner mismatch → 400 `FORK_DESTINATION_FORBIDDEN`. Called **before** `_resolve_template_tip` so a bad PAT reports `FORK_PAT_INVALID` even when the template is also unreachable.

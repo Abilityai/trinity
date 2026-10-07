@@ -65,7 +65,8 @@ handle. Human-only by construction.
 
 ```
 UI (GitPanel → BindRepoPanel)
-  destination_repo · github_pat (password) · private (default true)
+  destination_repo · github_pat (password; optional when a personal token is saved
+    and the caller OWNS the agent — #3164) · private (default true)
         │  POST /api/agents/{name}/git/bind-to-own-repo      [axios, 300s]
         ▼
 routers/git.py                     ← thin HTTP mapper ONLY

@@ -982,6 +982,27 @@ async def bind_agent_to_own_repo(
 
     reject_agent_principal(current_user)
 
+    from services.agent_service.fork_to_own import (
+        fork_pat_required, saved_token_message, saved_token_not_for_others,
+    )
+
+    # #3164: no form token → the CALLER's own saved personal token (Settings →
+    # GitHub token), read by user id. Never the agent's per-agent token (that
+    # is the agent's current identity, not the binding person's) and never the
+    # platform token, which must not become a user-owned repo's identity.
+    if body.github_pat is not None:
+        user_pat, token_source = body.github_pat.get_secret_value(), "form"
+    else:
+        # Only for the caller's OWN agent. `OwnedAgentByName` admits an admin
+        # too, and the admin's personal token must not become another user's
+        # agent identity by default.
+        owner = db.get_agent_owner(agent_name) or {}
+        if owner.get("owner_id") != current_user.id:
+            raise saved_token_not_for_others()
+        user_pat, token_source = db.get_user_github_pat(current_user.id), "saved"
+        if not user_pat:
+            raise fork_pat_required()
+
     destination = body.destination_repo
     scope = idempotency_service.make_agent_scope(agent_name)
     # Verb-folded key: a client reusing ONE Idempotency-Key across different
@@ -1042,7 +1063,7 @@ async def bind_agent_to_own_repo(
             outcome = await _bind(
                 agent_name=agent_name,
                 destination_repo=destination,
-                user_pat=body.github_pat.get_secret_value(),
+                user_pat=user_pat,
                 private=body.private,
                 owner_username=current_user.username,
             )
@@ -1059,9 +1080,11 @@ async def bind_agent_to_own_repo(
         })
         with contextlib.suppress(Exception):
             idempotency_service.fail(idem)
+        saved_message = saved_token_message(e.code, e.message) if token_source == "saved" else None
         raise HTTPException(
             status_code=e.status_code,
-            detail={"error": e.message, "code": e.code, "partial": e.partial},
+            detail={"error": saved_message or e.message, "code": e.code, "partial": e.partial,
+                    **({"token_source": "saved"} if saved_message else {})},
         )
     except HTTPException as e:
         # Lock contention / 503 — no agent state was touched.
@@ -1083,7 +1106,10 @@ async def bind_agent_to_own_repo(
         # charset guard (`models._validate_pat_secret`) is the primary fix;
         # this is the belt, because the next foreign exception type is not
         # knowable in advance.
-        safe = scrub_secret_and_urls(str(e), body.github_pat.get_secret_value())
+        # `user_pat`, not `body.github_pat`: on the saved-token path the body
+        # carries no token, and dereferencing it here raised before the scrub,
+        # skipping the audit row and the idempotency release (#3164 review).
+        safe = scrub_secret_and_urls(str(e), user_pat)
         logger.error(
             "repo-bind: unexpected failure for %s (%s): %s",
             agent_name, type(e).__name__, safe,
