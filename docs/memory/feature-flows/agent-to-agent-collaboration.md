@@ -251,6 +251,7 @@ When `MCP_AGENT_CHAT_PULL_ENABLED` is ON, a **sequential** (`parallel=false`) ag
     authContext?.scope === "agent" &&
     !isSelfTask;
   ```
+- **Pull branch** — `chat.ts::runAgentChat`, the `if (usePullRouting)` branch: calls `apiClient.task(agent_name, message, { async_mode: true, parent_execution_id }, sourceAgent, mcpKeyInfo, idempotencyKey, callerTurn)` and returns the receipt JSON. Only `async_mode` and the parent are forwarded (#3232: the pull-routed call is an async receipt, so it carries the caller's turn by default — see [channel-completion-report.md](channel-completion-report.md#how-an-mcp-delegation-carries-the-parent-3232)); `model`/`allowed_tools`/`system_prompt` are parallel-only and were never applied in sequential mode, so omitting them preserves sequential semantics (agent defaults).
 - **Pull branch** — chat.ts:391-402: calls `apiClient.task(agent_name, message, { async_mode: true }, sourceAgent, mcpKeyInfo, idempotencyKey)` and returns the receipt JSON (a replayed one carries `idempotent_replay: true`, #3245). If that run ends `failed` or `cancelled`, an identical re-send dispatches a new run under the same key (#3245) — for a `lease_expired` failure only after its hold window (agent timeout + 5 min after the failure); until then the original receipt comes back. Only `async_mode` is forwarded; `model`/`allowed_tools`/`system_prompt` are parallel-only and were never applied in sequential mode, so omitting them preserves sequential semantics (agent defaults).
 
 ### D8 — Route is part of the idempotency identity
@@ -763,6 +764,14 @@ result = mcp__trinity__chat_with_agent(
 - Long-running analysis that doesn't need immediate response
 - Load distribution across multiple agents
 
+**Report-back to the conversation (#3232)**: when the calling turn serves a
+Slack, Telegram or Workspace conversation, an async delegation carries that
+turn as `parent_execution_id` by default, so the delegated run posts its
+outcome there when it ends (the receipt says `report_back: "requested"`).
+Pass `execution_id="manual"` to keep a call quiet; a `parallel=true` sync call opts in by
+passing your own `execution_id`. Rules and debugging:
+[channel-completion-report.md](channel-completion-report.md#how-an-mcp-delegation-carries-the-parent-3232).
+
 See [Parallel Headless Execution](parallel-headless-execution.md) for complete async mode documentation.
 
 ---
@@ -780,3 +789,4 @@ See [Parallel Headless Execution](parallel-headless-execution.md) for complete a
 | 2026-01-29 | **MCP Schedule Management (MCP-SCHED-001)**: Added System Agent Schedule Management section - system-scoped agents can now manage schedules across all agents via 8 new MCP schedule tools. Updated Related Flows to reference scheduling.md |
 | 2026-01-30 | **Async Mode**: Added async mode (fire-and-forget) section to Parallel Delegation Mode. When `async=true` with `parallel=true`, orchestrator receives `execution_id` immediately and can poll for results later. |
 | 2026-06-21 | **Pull-Pilot Routing (#946)**: Added Pull-Pilot Routing section (Phase 2 PoC, Epic #1045/#1081). Flag-gated (`MCP_AGENT_CHAT_PULL_ENABLED`, default OFF) MCP routing fork — sequential agent→agent (`scope='agent'`, non-self) `chat_with_agent` routed through async `/task` with a poll-for-result receipt. Documents the D8 idempotency route token, flag plumbing, feature-flag exposure, and the T5 `/task` deny-path claim release. |
+| 2026-10-06 | **Report-back from MCP delegation (#3232)**: the pull branch forwards `parent_execution_id`; async delegations report back into the caller's conversation by default (`execution_id="manual"` opts out). |

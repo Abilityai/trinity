@@ -1497,6 +1497,13 @@ async def send_voice_reply_endpoint(
 
     # Only user-facing channel turns have a deliverable voice destination.
     channel = execution.source_channel or execution.triggered_by
+    # #3232: a delegated child carries its parent's channel context only so its
+    # completion report (consent-gated, ent#224/ent#265) can find the way back.
+    # It must not speak into that conversation itself — this route has no
+    # proactive-consent check. `source_channel_agent` is set by inheritance and
+    # by nothing else (`turn_audience._is_delegated`), so non-NULL = inherited.
+    if getattr(execution, "source_channel_agent", None):
+        return {"delivered": False, "channel": channel, "reason": "delegated_turn"}
     if channel == app_config.PORTAL_SOURCE_CHANNEL:
         # #2157: the Workspace has no audio destination — but it is NOT text-only;
         # it narrates the agent's text whenever the client turns the speaker on.

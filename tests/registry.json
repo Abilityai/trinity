@@ -27,6 +27,32 @@
       "description": "A dispatch receipt replays only while its run can still succeed (#3245). An async `/task`, a timed-out sync `/task` and a timed-out pulled `/chat` store a receipt (`async_mode: true`, `accepted`/`queued`/`queued_timeout`) as the `completed` idempotency row; before the fix an identical retry got the dead run's receipt for 24 h. Real SQLite (`IdempotencyOperations`, temp DB) with non-ambient ids. Pins: the compare-and-delete `discard_completed_if_execution` deletes only the row still naming the dead execution, so a slow retry cannot erase a faster retry's fresh record (both interleavings, plus a teeth case where an unconditional delete starts two runs); `execution_liveness` maps queued/running/pending_retry → live, success → succeeded, failed/cancelled/skipped → ended, no row → gone, and every doubt (lookup error, foreign owner, `manual`, a status flip between the two reads) → indeterminate, which replays; the `lease_expired` hold on a fixed clock at the boundary (T+899 s replays and logs `receipt_hold until=`, T+900 s and T+901 s go fresh), with the tag checked before the stamp or the timeout, a naive stored `completed_at` read as UTC and the agent's current timeout used; both admission seams (`begin_task_idempotency`, `admit_chat_request`) incl. the receipt written by the real `run_pulled_chat_turn` timeout branch, `sched:` keys never reclaimed, a skill-gate record answering before the reclaim on `/chat` and `/task`, pre-fix rows healed, the reclaim log outcomes, and AC2 end to end over the real `execute_parallel_task` (dispatch, fail, identical re-send → new `execution_id` without `X-Idempotent-Replay`, a third send while running replays the new id). AST guards: both seams call the reclaim right after `begin`; every `fail_stale_slot_execution` error carries the `lease_expired:` tag (parity with `TaskExecutionErrorCode.LEASE_EXPIRED`); nothing writes a claim after its receipt is stored (the CAS precondition). Mutation-proven (reclaim calls removed: 24 red; CAS without the execution-id predicate: 5; no hold: 7; gate moved after the claim on `/task`: 2). SQLite only, no PostgreSQL proof. No Docker, no live backend."
     },
     {
+      "file": "mcp-server/src/chat-parent-execution.test.ts",
+      "feature": "#3232",
+      "added": "2026-10-06",
+      "categories": [
+        "mcp-server",
+        "typescript",
+        "unit",
+        "channels",
+        "executions"
+      ],
+      "description": "#3232: parent_execution_id leaves the MCP server on every /task route. Real createServer + a real MCP client over streamable HTTP + the real reconciler for a dedicated chat_with_<agent> tool, against a fake backend that records the /task and /chat bodies, the forwarded X-Trinity-Execution-Id and the Idempotency-Key (node:test). Covers: the async default (parallel+async and #946 pull-routed send the platform header turn), sync opt-in, header wins over a typed id, malformed/`manual` typed ids never forwarded, typed `manual` opt-out keeps the forwarded turn header, self-task inject_result excluded, sequential /chat carries nothing, the parent never enters the Idempotency-Key (Invariant #18), report_back result fields on every result path and never on gate/depth/thrown results, the MCP_REPORT_BACK_ENABLED kill switch (false/0/no/off, any case) incl. the env read and the dedicated tool, the shared execution_id parameter text, and resolveReportBack over its full 864-combination input product against an independent oracle. Every 'nothing sent' assertion is paired with a forwarding sibling, so the file is red on dev."
+    },
+    {
+      "file": "unit/test_3232_voice_reply_delegated_child.py",
+      "feature": "#3232",
+      "added": "2026-10-06",
+      "categories": [
+        "backend",
+        "unit",
+        "voice",
+        "channels",
+        "security"
+      ],
+      "description": "#3232: POST /api/agents/{name}/voice-reply refuses a delegated child (a row with source_channel_agent set, i.e. it inherited its parent's conversation) with reason=delegated_turn before any channel branch, on Slack and Telegram; a direct channel turn still delivers; an agent tasking itself is still a delegated child (3 tests). Red on dev."
+    },
+    {
       "file": "unit/test_3246_platform_alert_surfaces.py",
       "feature": "#3246",
       "added": "2026-10-05",
@@ -4575,7 +4601,7 @@
         "reliability",
         "mcp"
       ],
-      "description": "The delegation contract (ent#568): what a dispatch receipt means and what to do instead of re-sending, taught as ONE text in the platform prompt (§Agent Collaboration, spliced from DELEGATION_CONTRACT) and, byte-identical, in src/mcp-server/src/delegation_contract.ts, which the chat_with_agent and chat_with_<agent> descriptions carry. Pins: the contract renders once inside §Agent Collaboration for every runtime with no unspliced __MARKER__ left; it is runtime-neutral (no mcp__trinity__, no heading); the TS array parses strictly as JSON (exactly one anchored declaration) and equals the Python constant, with guard-the-guard cases proving a comment inside the array raises and a one-character edit is seen; the rule sentence fan_out/send_message repeat is the contract's own; every backticked token is classified and proven real -- each tool exists in a non-test MCP module with each named argument in its zod schema, each status is emitted by a pinned DISPATCH-route file (so ask_operator's `replayed` cannot vouch for it), the events are TASK_COMPLETED_EVENT/TASK_FAILED_EVENT; the Codex orientation lists the tools; the contract stays under its 1,730-char budget (raised from 1,650 by #3245 for the confirmed-failure retry bullet, which `test_a_confirmed_failure_is_retried_word_for_word` pins as one bullet naming `failed`/`cancelled`, the word-for-word re-send and `set_reminder`) and §Agent Collaboration stays shorter than §Operator Communication (AC4). The MCP half -- published tools/list descriptions under Claude Code's 2,048-char cap, receipt messages -- is src/mcp-server/src/delegation-contract.test.ts. Mutation-proven (splice dropped / Codex name dropped / TS copy drifted each go red). No Docker, no live backend."
+      "description": "The delegation contract (ent#568): what a dispatch receipt means and what to do instead of re-sending, taught as ONE text in the platform prompt (§Agent Collaboration, spliced from DELEGATION_CONTRACT) and, byte-identical, in src/mcp-server/src/delegation_contract.ts, which the chat_with_agent and chat_with_<agent> descriptions carry. Pins: the contract renders once inside §Agent Collaboration for every runtime with no unspliced __MARKER__ left; it is runtime-neutral (no mcp__trinity__, no heading); the TS array parses strictly as JSON (exactly one anchored declaration) and equals the Python constant, with guard-the-guard cases proving a comment inside the array raises and a one-character edit is seen; the rule sentence fan_out/send_message repeat is the contract's own; every backticked token is classified and proven real -- each tool exists in a non-test MCP module with each named argument in its zod schema, each status is emitted by a pinned DISPATCH-route file (so ask_operator's `replayed` cannot vouch for it), the events are TASK_COMPLETED_EVENT/TASK_FAILED_EVENT; the Codex orientation lists the tools; the contract stays under its 1,650-char budget and §Agent Collaboration stays shorter than §Operator Communication (AC4). The MCP half -- published tools/list descriptions under Claude Code's 2,048-char cap, receipt messages -- is src/mcp-server/src/delegation-contract.test.ts. Mutation-proven (splice dropped / Codex name dropped / TS copy drifted each go red). No Docker, no live backend."
     },
     {
       "file": "unit/test_3215_plan_scheme.py",
