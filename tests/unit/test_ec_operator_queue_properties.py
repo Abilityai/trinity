@@ -284,6 +284,9 @@ def test_marker_apply_converges_and_is_idempotent(data, wanted, wanted2):
     data = {"requests": [], **copy.deepcopy(data)}
     oqs._apply_ingestion_marker(data, wanted, "T1")
     assert not oqs._marker_differs(data, wanted)
+    # T1, or a string `since` the file already carried for this same reason
+    # (a continuing hold keeps its start, even a blank one).
+    first_since = (oqs._current_marker(data) or {}).get("since")
     snapshot = json.dumps(data, sort_keys=True, default=str)
     assert oqs._apply_ingestion_marker(data, wanted, "T2") is False
     assert json.dumps(data, sort_keys=True, default=str) == snapshot   # since kept
@@ -293,7 +296,7 @@ def test_marker_apply_converges_and_is_idempotent(data, wanted, wanted2):
     if wanted2 is None:
         assert cur is None
     elif wanted is not None and wanted["reason"] == wanted2["reason"]:
-        assert cur["since"] == "T1"
+        assert cur["since"] == first_since
     else:
         assert cur["since"] == "T3"
 
