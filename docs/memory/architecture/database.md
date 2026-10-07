@@ -1180,7 +1180,7 @@ CREATE TABLE agent_skill_gates (
     PRIMARY KEY (agent_name, skill_name)
 );
 ```
-Both tracks: SQLite `agent_skill_gates`, Alembic `0093_agent_skill_gates` (← `0092`).
+Both tracks: SQLite `agent_skill_gates`, Alembic `0094_agent_skill_gates` (← `0093_platform_alert_responded_heal`).
 `AgentRef(..., CASCADE)`. Writes run under `lock_agent_rows` and land only while the agent has a
 live ownership row; the PK is the ON CONFLICT target, declared in `tables.py` as well.
 

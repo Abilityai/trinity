@@ -73,11 +73,11 @@ def test_the_registered_sqlite_migration_builds_the_table_idempotently(tmp_path)
 def test_the_alembic_revision_extends_the_single_head():
     import importlib.util
     root = _BACKEND / "migrations" / "versions"
-    spec = importlib.util.spec_from_file_location("rev753", root / "0093_agent_skill_gates.py")
+    spec = importlib.util.spec_from_file_location("rev753", root / "0094_agent_skill_gates.py")
     rev = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(rev)
     assert (rev.revision, rev.down_revision) == (
-        "0093_agent_skill_gates", "0092_portal_messages_attachments")
+        "0094_agent_skill_gates", "0093_platform_alert_responded_heal")
 
 
 def test_tables_metadata_declares_the_primary_key():

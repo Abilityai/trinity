@@ -9,14 +9,14 @@ from (``set`` | ``library_default`` | ``cleared``, the last a tombstone that
 gates nothing). ``agent_name`` is a CASCADE entry in ``db/agent_cleanup.py``.
 Additive: no row = ungated, so no existing agent changes on upgrade.
 
-Revision ID: 0093_agent_skill_gates
-Revises: 0092_portal_messages_attachments
+Revision ID: 0094_agent_skill_gates
+Revises: 0093_platform_alert_responded_heal
 """
 from alembic import op
 import sqlalchemy as sa
 
-revision = "0093_agent_skill_gates"
-down_revision = "0092_portal_messages_attachments"
+revision = "0094_agent_skill_gates"
+down_revision = "0093_platform_alert_responded_heal"
 branch_labels = None
 depends_on = None
 

@@ -5433,7 +5433,7 @@ def _migrate_agent_skill_gates(cursor, conn):
     See the DDL comment in db/schema.py. Additive: no row = ungated, so every
     existing agent is unchanged on upgrade.
 
-    Mirrored by the Alembic revision 0093_agent_skill_gates.
+    Mirrored by the Alembic revision 0094_agent_skill_gates.
     """
     cursor.execute(
         """
