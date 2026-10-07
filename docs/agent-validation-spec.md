@@ -94,6 +94,7 @@
 | X-006 | INFO | AI | Consistency | The agent's stated use cases are achievable given its declared tools and MCP servers |
 | X-007 | SOFT | STATIC | Consistency | Scheduled messages resolve to an existing `.claude/skills/<name>/SKILL.md` **or** `.claude/commands/<name>.md` |
 | X-008 | INFO | AI | Consistency | Resource allocation (`cpu`/`memory`) is appropriate for the agent's stated workload |
+| X-009 | SOFT | STATIC | Consistency | `dashboard.yaml` bindings can resolve: `metric:` is text, and each `dims:` selector names declared dimensions of its metric in `template.yaml` |
 | I-001 | SOFT | AI | Composability | If the agent is callable by others (declares Trinity MCP or `permissions`), it documents its output format in `template.yaml` or `CLAUDE.md` |
 | I-002 | SOFT | AI | Composability | Scheduled/autonomous tasks write structured output to a file or shared folder, not only as a chat response |
 | I-006 | INFO | STATIC | Composability | The Trinity plugin (`trinity@abilityai`) is installed, so the agent can run `/trinity:onboard` in place and make itself compatible without a human checkout |
@@ -564,6 +565,16 @@ If `schedules[].message` names `/some-command`, verify a target exists. **Both l
 **X-008** — Resource allocation appropriate for workload  
 Severity: INFO | Type: AI  
 Prompt: "Given this agent's stated purpose and use cases, is the resource allocation (cpu: X, memory: Yg) appropriate? Flag obvious mismatches: a video-processing agent with 512m memory, or a simple Q&A agent over-provisioned with 16 CPUs."
+
+**X-009** — `dashboard.yaml` bindings can resolve (ent#730)  
+Severity: SOFT | Type: STATIC  
+A bound widget may name one series of a dimensioned metric with `dims: {channel: meta}`. A selector that can never match is refused on the tile by name, but that refusal renders only in the browser, so this check puts it where an agent can read it (the compatibility report, MCP `get_agent_compatibility_report`). For each widget it reports, with the **same code and sentence the tile shows**:
+
+- a `metric:` that is a truthy non-text value (a number, boolean, list or mapping): `metric_name_invalid`. The binding refuses that widget. Before ent#730 a list or mapping failed the whole dashboard read, and a scalar such as `metric: 5` or `metric: true` read `metric_undeclared`. A falsy value (`0`, `false`, `[]`, `{}`) leaves the widget unbound, as before;
+- `dims:` with no `metric:`: `dims_without_metric` (the selector does nothing);
+- a `dims:` selector on a metric declared in `template.yaml` that is not a mapping, has a non-text, empty, over-long or control-character value, names more than 10 keys (`metric_dimension_invalid`), or names a key the metric does not declare (`metric_dimension_undeclared`).
+
+The selector is validated by the binding's own parser (`metric_read_service.parse_dims_selector`), which wraps the write path's `validate_dims`, so "is this selector valid" has one answer on the report, the tile and the point write path. Deliberately **not** flagged: a valid selector with no points yet (a runtime fact the tile states), a partial selector (a point may carry any subset of the declared dimensions, so it is not provably wrong from the template), and a widget whose metric is undeclared or malformed (D-009 owns malformed entries). `dims: {}` and `dims: null` mean "no selector". `metric:` and `dims:` are judged as the tile receives them: the agent server sends the parsed `dashboard.yaml` as JSON, so an unquoted YAML date (`dims: {day: 2024-01-01}`) arrives as the text `"2024-01-01"` and is not flagged, while a number stays a number (`dims: {channel: 2024}` is flagged). Skipped when `dashboard.yaml` is missing or invalid; the selector half is skipped when `template.yaml` is missing or invalid. Fails closed with the exception's type name only if it cannot evaluate. Every echoed string is clipped to printable text, and values are never echoed.
 
 ---
 

@@ -126,7 +126,7 @@
 - [VoIP Telephony](advanced/voip-telephony.md) — Agents place outbound phone calls via Twilio + Gemini Live
 - [Image Generation](advanced/image-generation.md) — Gemini two-step image pipeline
 - [Agent Avatars](advanced/agent-avatars.md) — AI-generated avatars, emotion variants
-- [Dynamic Dashboards](advanced/dynamic-dashboards.md) — Custom agent dashboards via YAML
+- [Dynamic Dashboards](advanced/dynamic-dashboards.md) — Custom agent dashboards via YAML, declared metrics, and [binding a widget to one series with `dims:`](advanced/dynamic-dashboards.md#one-series-per-tile-dims)
 
 ## API Reference
 
