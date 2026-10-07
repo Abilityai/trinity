@@ -102,7 +102,7 @@ Agents can inspect the queue and resolve a pending item programmatically:
 
 | Tool | Description |
 |------|-------------|
-| `list_operator_queue` | List queue items, broad or filtered by `agent_name` |
+| `list_operator_queue` | List queue items, broad or filtered by `agent_name`. Returns `count`, `total`, `has_more`, `next_cursor` and `next_offset`; page with `cursor="start"`, then `cursor=next_cursor` until `has_more` is `false`. `null` means not verified |
 | `get_operator_queue_item` | Fetch a single item by id |
 | `respond_to_operator_queue(item_id, response, response_text?, acknowledge_divergence?)` | Submit the decision for a pending item, with a person's own API key — the same rules as the `respond` route: `response` must be an offered option or `(something else)` with the instruction in `response_text`, an item that is no longer pending (or past its deadline, or changed by the agent without `acknowledge_divergence`) returns a structured error, and an agent's key is refused |
 | `ask_operator(request_id, title, …)` | The calling agent raises an item as itself and gets a receipt: whether it was created or replayed, the role it went to, and `wakes_on_ending` (whether the agent will be woken when the item ends). `expires_at` needs a timezone and must be at least 15 minutes out; a re-ask names the expired item in `supersedes_expired`. A refusal comes back as its named code. Acts as the agent the key belongs to — there is no agent parameter |

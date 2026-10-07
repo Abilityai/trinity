@@ -236,6 +236,31 @@ class IdempotencyOperations:
                 )
             )
 
+    def discard_completed_if_execution(self, scope: str, key: str, execution_id: str) -> bool:
+        """Compare-and-delete a COMPLETED row only while it still names ``execution_id``.
+
+        #3245: a stored dispatch receipt whose run ended is dropped so an
+        identical retry can dispatch fresh. Two retries that both saw the dead
+        run's row race here: the faster one deletes it, re-claims and
+        re-completes the key with its NEW execution id; the slower one's delete
+        must then match nothing, or it would erase the fresh record and start a
+        second run (``discard_completed`` deletes any completed row, so it is
+        not safe here). ``execution_id`` is required — there is no
+        unconditional form. Returns True iff a row was deleted.
+        """
+        with get_engine().begin() as conn:
+            result = conn.execute(
+                delete(idempotency_keys).where(
+                    and_(
+                        idempotency_keys.c.scope == scope,
+                        idempotency_keys.c.idempotency_key == key,
+                        idempotency_keys.c.status == STATE_COMPLETED,
+                        idempotency_keys.c.execution_id == execution_id,
+                    )
+                )
+            )
+            return (result.rowcount or 0) > 0
+
     def purge_expired(self, ttl_hours: int = 24) -> int:
         """Delete rows older than ttl_hours. Returns rows removed."""
         cutoff = iso_cutoff(hours=ttl_hours)
