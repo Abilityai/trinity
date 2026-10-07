@@ -439,12 +439,16 @@ class _LoopDB:
         return rid
 
     def finalize_loop_run(self, rid, **kw):
+        # CAS on status='running', as the real one (#3316).
         for runs in self.runs.values():
             for r in runs:
                 if r["id"] == rid:
+                    if r["status"] != "running":
+                        return False
                     r.update({k: v for k, v in kw.items() if not (k == "execution_id" and v is None)})
                     r["completed_at"] = "now"
-                    return
+                    return True
+        return False
 
     def list_loop_runs(self, lid):
         return [dict(r) for r in sorted(self.runs.get(lid, []), key=lambda r: r["run_number"])]
