@@ -452,13 +452,32 @@ async def _execute_claude_code_once(
         # Outer asyncio.wait_for is a safety net with a small grace period for
         # drain/cleanup after the inner process.wait() already bounded itself.
         loop = asyncio.get_event_loop()
+        waiter_abandoned = threading.Event()
+
+        def read_owned_subprocess_output():
+            try:
+                return read_subprocess_output()
+            finally:
+                if waiter_abandoned.is_set():
+                    loop.call_soon_threadsafe(lambda: registry.unregister(execution_id))
+
+        # Unlike headless execution, chat has already spawned its child before
+        # submitting the reader. Even a queued reader must run to reap it.
+        worker = loop.run_in_executor(_executor, read_owned_subprocess_output)
+        # A timeout/cancel can end the HTTP waiter before this worker. Consume
+        # its eventual exception without changing what an active await sees.
+        worker.add_done_callback(lambda done: None if done.cancelled() else done.exception())
         try:
             try:
                 stderr_output, return_code = await asyncio.wait_for(
-                    loop.run_in_executor(_executor, read_subprocess_output),
+                    asyncio.shield(worker),
                     timeout=timeout_seconds + 60
                 )
+            except asyncio.CancelledError:
+                waiter_abandoned.set()
+                raise
             except asyncio.TimeoutError:
+                waiter_abandoned.set()
                 logger.error(
                     f"[Chat] Outer timeout on session {execution_id} "
                     f"— killing process group as last resort"

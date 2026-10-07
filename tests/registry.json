@@ -1,6 +1,17 @@
 {
   "test_files": [
     {
+      "file": "unit/test_runtime_process_ownership.py",
+      "feature": "#3307",
+      "added": "2026-10-06",
+      "categories": [
+        "agent-server",
+        "execution",
+        "unit"
+      ],
+      "description": "Cancelled or timed-out chat/headless waiters retain live subprocess ownership and executor completion closes log streams; queued headless cancellation does not spawn, queued chat readers reap existing children, result finalization ordering is preserved, and unconfirmed termination retains ownership. Disposable Python children only; no model, provider, or live-agent calls."
+    },
+    {
       "file": "unit/test_3246_platform_alert_surfaces.py",
       "feature": "#3246",
       "added": "2026-10-05",
