@@ -19,8 +19,11 @@ pytestmark = pytest.mark.unit
 _PATH = Path(__file__).resolve().parents[1] / "system_chains" / "chain_report.py"
 _spec = importlib.util.spec_from_file_location("chain_report_under_test", _PATH)
 cr = importlib.util.module_from_spec(_spec)
-sys.modules[_spec.name] = cr  # dataclasses resolve their module by name
-_spec.loader.exec_module(cr)
+# dataclasses resolve their module by name while the classes are built; the
+# registration is scoped to the load so nothing leaks into the session (#762).
+with pytest.MonkeyPatch.context() as _mp:
+    _mp.setitem(sys.modules, _spec.name, cr)
+    _spec.loader.exec_module(cr)
 
 
 class Skipped(Exception):
