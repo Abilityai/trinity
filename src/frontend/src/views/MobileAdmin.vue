@@ -575,8 +575,9 @@
             v-for="(msg, i) in chatMessages"
             :key="i"
             class="chat-bubble"
-            :class="msg.role === 'user' ? 'bubble-user' : msg.role === 'system' ? 'bubble-system empty-state' : 'bubble-assistant'"
+            :class="msg.role === 'user' ? 'bubble-user' : msg.role === 'system' ? 'bubble-system' : 'bubble-assistant'"
             :data-testid="msg.role === 'system' ? 'chat-system-line' : undefined"
+            :role="msg.role === 'system' ? 'status' : undefined"
           >
             <div class="bubble-content">{{ msg.content }}</div>
             <div class="bubble-time">{{ formatTime(msg.timestamp) }}</div>
@@ -1182,9 +1183,14 @@ async function sendChatMessage() {
       chatSessionId.value = chatSessions.value[0].id
     }
   } catch (e) {
+    // A refused gated request stays out of the next message's history too:
+    // resent, it would be refused again on every later turn (#3274).
+    const refused = isGateRefusal(e)
+    if (refused) userEntry.held = true
     chatMessages.value.push({
       role: 'assistant',
-      content: `Error: ${isGateRefusal(e) ? apiErrorMessage(e) : (e.response?.data?.detail || e.message || 'Failed to send message')}`,
+      content: `Error: ${refused ? apiErrorMessage(e) : (e.response?.data?.detail || e.message || 'Failed to send message')}`,
+      held: refused,
       timestamp: new Date().toISOString()
     })
   } finally {
@@ -2772,13 +2778,16 @@ watch(() => authStore.isAuthenticated, (isAuth) => {
   margin-top: 4px;
 }
 
-/* trinity#3274: a platform line (a held request's notice), not a bubble — the
-   muted tone and centring come from `.empty-state`, so no colour of its own. */
+/* trinity#3274: a platform line (a held request's notice), not a bubble —
+   centred and muted, gray-400 on this view's dark ground (gray-500 is below
+   AA there). A theme() token, not a literal. */
 .bubble-system {
   align-self: center;
   max-width: 100%;
   padding: 4px 16px;
   font-size: 12.5px;
+  text-align: center;
+  color: theme('colors.gray.400');
 }
 
 .bubble-assistant .bubble-time {

@@ -281,6 +281,12 @@ async function runSkill(skill) {
     emit('run-with-instructions', `__NAVIGATE_TASKS__:${executionId}`)
   } catch (e) {
     console.error('Failed to run skill:', e)
+    // A gate refusal names something to act on: it goes to the agent page's
+    // toast, which keeps an error until it is dismissed (principle 18).
+    if (isGateRefusal(e) && props.notify) {
+      props.notify(apiErrorMessage(e), 'error')
+      return
+    }
     errorMessage.value = isGateRefusal(e)
       ? apiErrorMessage(e)
       : (e.response?.data?.detail || `Failed to run /${skill.name}`)

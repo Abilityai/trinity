@@ -77,6 +77,25 @@ describe('/m chat — a gated skill', () => {
     expect(second.message).not.toContain(NOTICE)
   })
 
+  it('leaves a refused request out of the next message\'s history too', async () => {
+    let calls = 0
+    const w = await mountView(async () => {
+      calls += 1
+      if (calls === 1) {
+        throw Object.assign(new Error('Request failed with status code 409'), {
+          response: { status: 409, headers: { 'x-trinity-error-code': 'gated_skill_not_installed' },
+            data: { detail: { status: 'refused', code: 'gated_skill_not_installed', message: REFUSED } } },
+        })
+      }
+      return { status: 202, data: { status: 'accepted', execution_id: 'e2' } }
+    })
+    await send(w, '/pay-invoice 100 EUR')
+    w.vm.chatExecutionStatus = null
+    const second = w.vm.buildContextPrompt('what is on today?')
+    expect(second).not.toContain('/pay-invoice')
+    expect(second).not.toContain(REFUSED)
+  })
+
   it('names a refusal', async () => {
     const w = await mountView(async () => {
       throw Object.assign(new Error('Request failed with status code 409'), {

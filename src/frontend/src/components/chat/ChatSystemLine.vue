@@ -5,6 +5,7 @@
        tertiary ink. trinity#3274: a held (gated-skill) request's notice. -->
   <p
     class="my-3 text-center text-xs text-gray-500 dark:text-gray-400 whitespace-pre-wrap break-words"
+    role="status"
     data-testid="chat-system-line"
   >{{ content }}</p>
 </template>

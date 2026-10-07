@@ -131,7 +131,7 @@ describe('ChatPanel', () => {
     await w.vm.sendMessage('/pay-invoice 100 EUR')
     await flush()
     expect(w.text()).toContain(REFUSED)
-    expect(w.text()).not.toContain('[object Object]')
+    expect(w.text()).not.toContain('"code"')              // not the detail object as JSON
   })
 })
 
@@ -144,21 +144,50 @@ describe('PublicChat', () => {
     serve({
       '/api/public/link/': { data: { valid: true, agent_available: true, require_email: false,
         agent_name: AGENT } },
-      '/status': { data: { execution_id: 'e1', status: 'skipped', response: null, error: NOTICE } },
+      '/status': { data: { execution_id: 'e1', status: 'skipped', response: null, error: NOTICE,
+        gate: 'held' } },
       '/api/public/history/': { data: { messages: [] } },
     }, { '/api/public/chat/': { data: { status: 'accepted', execution_id: 'e1', async_mode: true } } })
     wrapper = mount(PublicChat)
     await flush()
     vi.useFakeTimers()
-    const sending = wrapper.vm.sendMessage('/pay-invoice 100 EUR')
-    await vi.advanceTimersByTimeAsync(5000)
-    await sending
+    wrapper.vm.sendMessage('/pay-invoice 100 EUR')
+    // Two poll intervals: a sender that does not stop at `skipped` polls again
+    // and shows nothing — an assertion failure, not a test timeout.
+    await vi.advanceTimersByTimeAsync(10_000)
+    const pollsAfterSkip = polled().length
+    const line = wrapper.find('[data-testid="chat-system-line"]')
+    wrapper.vm.chatLoading = false          // ends a poll loop that did not stop on its own
     vi.useRealTimers()
     await flush()
 
-    expect(polled().length).toBe(1)
-    expect(wrapper.find('[data-testid="chat-system-line"]').text()).toBe(NOTICE)
+    expect(pollsAfterSkip).toBe(1)
+    expect(line.exists() && line.text()).toBe(NOTICE)
     expect(wrapper.text()).not.toContain('timed out')
+  })
+})
+
+describe('PublicChat — a refusal', () => {
+  it('shows a gate refusal as an error, not as a waiting notice', async () => {
+    const REFUSAL_ROW = 'Refused by the skill gate (gated_skill_not_installed): ' + REFUSED
+    serve({
+      '/api/public/link/': { data: { valid: true, agent_available: true, require_email: false,
+        agent_name: AGENT } },
+      '/status': { data: { execution_id: 'e1', status: 'skipped', response: null,
+        error: REFUSAL_ROW, gate: 'refused' } },
+      '/api/public/history/': { data: { messages: [] } },
+    }, { '/api/public/chat/': { data: { status: 'accepted', execution_id: 'e1', async_mode: true } } })
+    wrapper = mount(PublicChat)
+    await flush()
+    vi.useFakeTimers()
+    wrapper.vm.sendMessage('/pay-invoice 100 EUR')
+    await vi.advanceTimersByTimeAsync(10_000)
+    wrapper.vm.chatLoading = false
+    vi.useRealTimers()
+    await flush()
+
+    expect(wrapper.find('[data-testid="chat-system-line"]').exists()).toBe(false)
+    expect(wrapper.vm.chatError).toBe(REFUSAL_ROW)
   })
 })
 
@@ -190,6 +219,7 @@ describe('TasksPanel', () => {
   it('keeps a refused request with its named reason (no server row exists)', async () => {
     const w = await tasksPanel(() => Promise.reject(refusal()))
     expect(w.text()).toContain(REFUSED)
+    expect(w.text()).not.toContain('"code"')              // not the detail object as JSON
   })
 })
 
@@ -215,9 +245,9 @@ describe('PlaybooksPanel', () => {
     expect(w.text()).not.toContain('started')
   })
 
-  it('names a refusal', async () => {
-    const { w } = await playbooks(() => Promise.reject(refusal()))
-    expect(w.text()).toContain(REFUSED)
+  it('names a refusal in the persistent error toast, not a 3-second one', async () => {
+    const { w, notify } = await playbooks(() => Promise.reject(refusal()))
+    expect(notify).toHaveBeenCalledWith(REFUSED, 'error')
     expect(w.text()).not.toContain('"code"')              // not the detail object as JSON
   })
 })

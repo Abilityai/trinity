@@ -215,7 +215,7 @@ async def enforce(
             f"{_skill_list(names)} on {agent_name} needs approval, which "
             "can't be requested from here. Ask in chat instead.", skills=names)
 
-    clean_text = sanitize_text(request_text or "")
+    clean_text = _card_text(request_text, dispatch)
     # The context lines go on the card only when a skill was named nowhere else
     # — otherwise the approver would read a request that names no gated skill.
     card_context = _card_context(context_text) if beside else ""
@@ -329,6 +329,29 @@ def _skill_list(names: List[str]) -> str:
 
 def _json_bytes(text: str) -> int:
     return len(json.dumps(text).encode("utf-8"))
+
+
+# On the card, the caller's own system prompt is named as such: it reaches the
+# executor with system authority, not as the request's text.
+SYSTEM_PROMPT_LABEL = "With these instructions as its system prompt:"
+
+
+def _card_text(request_text: Optional[str], dispatch: Optional[Mapping[str, Any]]) -> str:
+    """What the card shows, and so what Approve runs (trinity#3274).
+
+    A request frozen with replay parts (`/task`, fan-out — `frozen_replay`)
+    shows exactly those parts, each already sanitised on its own. Sanitising the
+    JOIN again can redact across the line between them (a credential pattern
+    that ends one part and starts the next) and hide from the approver a part
+    the run still sends. Every other request shows its sanitised request text,
+    which is also what its approved run sends."""
+    replay = dispatch or {}
+    if REPLAY_MESSAGE not in replay:
+        return sanitize_text(request_text or "")
+    text = replay[REPLAY_MESSAGE]
+    if replay.get(REPLAY_SYSTEM_PROMPT):
+        text += f"\n\n{SYSTEM_PROMPT_LABEL}\n{replay[REPLAY_SYSTEM_PROMPT]}"
+    return text
 
 
 CARD_CONTEXT_LINE_CHARS = 200

@@ -19,6 +19,7 @@
              `bottom-24` clears the global HelpChatWidget FAB (bottom-6 + h-14 = 80px),
              which is why this is not the `bottom-4 right-4` used elsewhere. -->
         <div v-if="notification"
+          :role="notification.type === 'error' ? 'alert' : 'status'"
           :class="[
             'fixed bottom-24 right-6 z-50 px-4 py-3 rounded-lg shadow-lg transition-all duration-300',
             notification.type === 'success' ? 'bg-status-success-100 dark:bg-status-success-900/50 border border-status-success-400 dark:border-status-success-700 text-status-success-700 dark:text-status-success-300'

@@ -153,7 +153,10 @@ def test_a_workspace_client_reads_the_agents_approver_even_when_a_name_exists(wo
     async def _go():
         await _GATE.enforce(W.FIN, request_text="/pay-invoice 2 EUR", requester=requester,
                             triggered_by="public", gates=world.gates,
+                            # A user id too: the Workspace arm must decide on its own,
+                            # not ride on the missing-id arm before it.
                             dispatch={"triggered_by": "public", "source_channel": PORTAL_SOURCE_CHANNEL,
+                                      "source_user_id": world.other_id,
                                       "source_user_email": "client@example.com"})
     with pytest.raises(SkillApprovalRequired) as info:
         asyncio.run(_go())

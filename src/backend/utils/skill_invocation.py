@@ -35,18 +35,21 @@ _INVISIBLE_CHAR = (
 _INVISIBLE = re.compile(_INVISIBLE_CHAR)
 # A run of them right before a slash: removed, it could join a letter to the
 # slash and turn `run\u00ad/x` into the path `run/x`, so it reads as a space.
-_INVISIBLE_BEFORE_SLASH = re.compile(_INVISIBLE_CHAR + "+(?=/)")
+# Matched only from the start of a run (the lookbehind): otherwise every offset
+# inside a long run with no slash after it rescans the rest — quadratic time.
+_INVISIBLE_BEFORE_SLASH = re.compile("(?<!" + _INVISIBLE_CHAR + ")" + _INVISIBLE_CHAR + "+(?=/)")
 
 # Before the slash: anything except a letter, a dot or another slash — so
 # `run:/x`, a backtick, a quote, a bracket, `-/x`, `_/x_` and `1/x` precede an
 # invocation, while `docs/x`, `https://host/x`, `a.b/x` and `//x` are paths
 # (a digit or `-`/`_` before the slash reads as an invocation since #3274:
 # `api/v1/x` style paths now match when their last segment is a gated name).
-# After the name: no further letter or digit, and no run of `.`, `_` or `-`
-# that continues into one — so `/x.`, `/x_` and `/x-` end the name while
-# `/x.v2`, `/x_v2` and `/x--v2` are other skills.
+# After the name: no further letter or digit, no run of `_`/`-` that continues
+# into one, and no dot directly before one — so `/x.`, `/x_`, `/x-`, `/x...y`
+# and `/x._y` end the name while `/x.v2`, `/x_v2` and `/x--v2` are other skills.
+# Every change since #751 only widens what matches (a property test holds it).
 _BEFORE = r"(?<![a-z./])/"
-_AFTER = r"(?![a-z0-9])(?![._-]+[a-z0-9])"
+_AFTER = r"(?![a-z0-9])(?![_-]+[a-z0-9])(?!\.[a-z0-9])"
 
 
 def _normalise(text: str, invisible: str = "") -> str:

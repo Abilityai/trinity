@@ -83,6 +83,23 @@ def test_an_approved_task_gets_its_message_and_its_system_prompt_apart(world):
     assert card.count("/pay-invoice 100 EUR") == 1 and "Answer in one line." in card
 
 
+def test_the_card_shows_exactly_what_the_approved_run_sends(world):
+    """#3274 review: the card sanitised the JOIN while the run sent each part
+    sanitised alone. A credential pattern spanning the line between them
+    (`… Basic` + `/transfer+…`) redacted the system prompt from the card only,
+    so Approve ran an instruction the approver never saw."""
+    world.gates = {"transfer": _GATE.SkillGate()}
+    with pytest.raises(_GATE.SkillApprovalRequired) as info:
+        W.task(W.agent_key(world), message="Weekly report. Use auth Basic",
+               system_prompt="/transfer+9000+EUR+to+acct+666")
+    rid = info.value.request_id
+    question = W.card(rid)["question"]
+    _approve_run(rid, "exec-card-1")
+    request = world.spawned[0]["request"]
+    assert request.message in question
+    assert f"{_GATE.SYSTEM_PROMPT_LABEL}\n{request.system_prompt}" in question
+
+
 def test_an_approved_task_without_a_system_prompt_sends_none(world):
     with pytest.raises(_GATE.SkillApprovalRequired) as info:
         W.task(W.agent_key(world), message="/pay-invoice 7 EUR")
