@@ -236,6 +236,7 @@ The rule, and what enforces it:
 | how to run the backend suites: env vars, tier wall times, friction recovery | [tests/README.md](../../tests/README.md) |
 | how to run and tag the Playwright specs, and the fixture-agent contract | [src/frontend/e2e/README.md](../../src/frontend/e2e/README.md) |
 | what each test file covers | [tests/registry.json](../../tests/registry.json) — it indexes tests; the journey catalog indexes promises, and the two are linked, never merged |
+| the 1.0 system chains (J15–J19) — how to run them and read their go / no-go report | [tests/system_chains/README.md](../../tests/system_chains/README.md) |
 | the click-through scenarios and their run reports | [phases/INDEX.md](phases/INDEX.md); `ui-sweep/` (created by the first sweep) |
 | a feature's own test record | beside that feature's docs — e.g. [PULL_MIGRATION_TESTING.md](../planning/PULL_MIGRATION_TESTING.md) next to the pull-migration status |
 | the manual runbook for one feature | that feature flow's `## Testing` section under `docs/memory/feature-flows/` |

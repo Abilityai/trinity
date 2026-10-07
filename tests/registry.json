@@ -5139,6 +5139,70 @@
         "unit"
       ],
       "description": "trinity-enterprise#753: list_skill_gates / set_skill_gate / clear_skill_gate reach their routes with names url-encoded; set_skill_gate sends only the fields given (an omitted field keeps its stored value, null resets the deadline, stray keys dropped); the zod schema refuses a bad approver or a deadline outside 1-168 (incl. bool/string); list_skills carries the library's approval recommendation; each tool has a TOOL_ACCESS_POLICY row and fits the 2,048-character description cap."
+    },
+    {
+      "file": "unit/test_ent794_chain_report.py",
+      "feature": "abilityai/trinity-enterprise#794",
+      "added": "2026-10-07",
+      "categories": [
+        "unit",
+        "system-test",
+        "reporting"
+      ],
+      "description": "The system chain report's verdicts: every step passing is passed; a failing step is failed at that step by name; a skip is not run with its reason; a skip inside a step marks that step not run; a step that could not run makes the chain partial, never passed; a pass with no step recorded is a failure; the summary is a go only when every chain passed (an empty run is not evidence); JSON and markdown carry every chain and escape a pipe in a reason."
+    },
+    {
+      "file": "system_chains/test_j18_library_change_chain.py",
+      "feature": "abilityai/trinity-enterprise#794",
+      "added": "2026-10-07",
+      "categories": [
+        "system-test",
+        "live-stack",
+        "skills"
+      ],
+      "description": "J18 (live, TRINITY_CHAIN_TESTS=1): a skill committed to a test github.com repo is synced into the library, assigned to two agents, and carried at the library's version in each container's platform-written .trinity-skill.json; a change to it reaches both holders through fleet re-inject (turned on for the run when the shipped default is off, and said so) with no per-agent action; an agent key without skills.manage is refused on itself and on another agent and changes nothing. NOT RUN without CHAIN_SKILLS_REPO / CHAIN_SKILLS_GITHUB_TOKEN."
+    },
+    {
+      "file": "system_chains/test_j19_objective_to_person_chain.py",
+      "feature": "abilityai/trinity-enterprise#794",
+      "added": "2026-10-07",
+      "categories": [
+        "system-test",
+        "live-stack",
+        "objectives",
+        "metrics"
+      ],
+      "description": "J19 (live, TRINITY_CHAIN_TESTS=1): a canon objective names a target; the agent records the number with its own key; the Workspace role card and the operator objectives read show it owned against the target and not stale; with recording stopped it reads stale on the card past 2x cadence, keeping the last value. The brief step is recorded NOT RUN (the platform puts no objective number in a brief), so the chain reports partial."
+    },
+    {
+      "file": "system_chains/test_j15_rollout_chain.py",
+      "feature": "abilityai/trinity-enterprise#794",
+      "added": "2026-10-07",
+      "categories": [
+        "system-test",
+        "skeleton"
+      ],
+      "description": "J15 skeleton: a fleet rolls out from one definition — reports NOT RUN, blocked by abilityai/trinity-enterprise#793 (the reference company)."
+    },
+    {
+      "file": "system_chains/test_j16_canon_fact_chain.py",
+      "feature": "abilityai/trinity-enterprise#794",
+      "added": "2026-10-07",
+      "categories": [
+        "system-test",
+        "skeleton"
+      ],
+      "description": "J16 skeleton: a canon fact reaches its consumers — reports NOT RUN, blocked by ent#793 and the change-propagation work (ent#804); no canon-version or staleness record exists on dev."
+    },
+    {
+      "file": "system_chains/test_j17_fact_routing_chain.py",
+      "feature": "abilityai/trinity-enterprise#794",
+      "added": "2026-10-07",
+      "categories": [
+        "system-test",
+        "skeleton"
+      ],
+      "description": "J17 skeleton: a fact reaches its owner — reports NOT RUN, blocked by ent#793 and fact routing (ent#804)."
     }
   ]
 }
