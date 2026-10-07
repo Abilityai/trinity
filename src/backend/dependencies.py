@@ -2060,6 +2060,47 @@ def require_person_or_capability(capability: str, *, self_person_only: bool = Fa
     return dep
 
 
+async def get_skill_gate_readable_agent_by_name(
+    agent_name: str = Path(..., description="Agent name from path"),
+    current_user: User = Depends(get_current_user),
+) -> str:
+    """Who may read an agent's skill gate map (trinity-enterprise#753).
+
+    An ALLOWlist decided on the principal first, so a refused scope learns
+    nothing about the target (403 before any lookup):
+
+    * a person (signed-in session or the person's own user-scoped key) and the
+      system key — anything they may access (`get_authorized_agent_by_name`,
+      uniform 404);
+    * an agent key — its OWN gates (the in-container hook pulls; nothing is
+      pushed into the workspace), or, holding `skills.manage`, an agent its
+      owner OWNS (the orchestrator reports drift). Never the admin
+      short-circuit an agent key's owner role would otherwise carry. Any other
+      target is the same 404 as an agent that does not exist;
+    * connector, portal delegate, any other scope and a principal with no scope
+      at all — refused.
+    """
+    scope = getattr(current_user, "mcp_scope", _SCOPE_ABSENT)
+    if ((scope in PERSON_SCOPES or scope == "system")
+            and not getattr(current_user, "connector_agent", None)
+            and not getattr(current_user, "portal_delegate", False)):
+        return get_authorized_agent_by_name(agent_name=agent_name, current_user=current_user)
+    own = getattr(current_user, "agent_name", None)
+    if scope == "agent" and own and not getattr(current_user, "vouched_source_agent", None):
+        from db.capability_grants import CAPABILITY_SKILLS_MANAGE
+        owner = db.get_agent_owner(agent_name) or {}
+        holder = capability_refusal(current_user, CAPABILITY_SKILLS_MANAGE) is None
+        if owner and (agent_name == own
+                      or (holder and owner.get("owner_username") == current_user.username)):
+            return agent_name
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Agent not found")
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail={"code": "skill_gates_not_readable",
+                "message": "This key cannot read an agent's skill gates."},
+    )
+
+
 async def get_skill_managed_agent_by_name(
     request: Request,
     agent_name: str = Path(..., description="Agent name from path"),

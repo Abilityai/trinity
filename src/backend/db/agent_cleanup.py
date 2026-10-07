@@ -287,6 +287,10 @@ AGENT_REFS: List[AgentRef] = [
     # for it finds no record on its ending and runs nothing.
     AgentRef("skill_gate_requests",          "agent_name",        Policy.CASCADE),
     AgentRef("skill_gate_requests",          "source_agent",      Policy.CASCADE),
+    # trinity-enterprise#753 — the agent's skill gate map follows it (rename
+    # re-keys, purge removes). `set_by_agent` is audit-only provenance and
+    # deliberately not registered (the `assigned_by_agent` precedent).
+    AgentRef("agent_skill_gates",            "agent_name",        Policy.CASCADE),
     AgentRef("access_requests",              "agent_name",        Policy.CASCADE),
 
     # --- MCP keys (scope='agent' only — user/system keys are not per-agent)
