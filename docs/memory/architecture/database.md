@@ -1162,6 +1162,8 @@ Both tracks: SQLite `agent_capability_grants`, Alembic `0072_agent_capability_gr
 `AgentRef(..., CASCADE)` — rename re-keys, delete removes. Every read joins `agent_ownership`
 and filters `deleted_at`, so a soft-deleted agent holds nothing and recovery restores its grant.
 
+**skill_gate_requests** (trinity-enterprise#751) — a gated-skill request frozen while its approval ask is open (`db/skill_gate_requests.py`); the ask records the decision, this row the effect: `pending → dispatching` is a CAS and `dispatched_execution_id` is UNIQUE, so an approval runs exactly once; a `self_approved` row (#752) is the clearance the in-container hook honours. Both tracks (SQLite `skill_gate_requests_table`, Alembic `0088`); `agent_name` and `source_agent` are CASCADE AgentRefs; machine keys never read these rows (#715).
+
 **agent_skill_gates** (trinity-enterprise#753) — the per-agent skill gate map the gated-skill
 check reads (`skill_gate_service.list_skill_gates`; writes only through
 `services/skill_gate_map_service.py`):
