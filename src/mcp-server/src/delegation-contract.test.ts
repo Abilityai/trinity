@@ -113,6 +113,7 @@ describe("ent#568 what tools/list publishes (real server, real transport)", () =
       client: built.client,
       requireApiKey: built.requireApiKey,
       agentChatPullEnabled: built.agentChatPullEnabled,
+      reportBackEnabled: built.reportBackEnabled,
       registerDynamicTool: built.registerDynamicTool,
       unregisterDynamicTool: built.unregisterDynamicTool,
       operatorOnly: built.operatorOnly,
