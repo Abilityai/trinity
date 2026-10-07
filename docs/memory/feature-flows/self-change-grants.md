@@ -28,13 +28,16 @@ People (JWT, their own `user` key) and the system agent are never fenced.
 | `instructions.manage` | `CLAUDE.md`, `AGENTS.md`, `.claude/**` except `.claude/skills/**` through the file routes; `git/reset-to-main-preserve-state` | — |
 | `agents.manage` | create a durable agent, delete, `deploy-local`, `systems/deploy`, `PUT /model`, and `read-only` / `resources` / `timeout` / `public-channel-model` / `guardrails` | spawning or discarding an **ephemeral** agent (ent#69) |
 
-Bounds on an `agents.manage` holder:
-- **Reach**: on the five reconfigure routes the target must be an agent its
-  owner **owns** (`owner_username` equality). The handlers authorise through
-  `assert_agent_owner` → `can_user_share_agent`, which admits any admin, and an
-  agent key carries its owner's role — so without this bound one grant on an
-  admin-owned install reached every agent on the instance. Not-owned answers
-  404, like nonexistent.
+Bounds on a holder:
+- **Reach** (every capability): on every fenced route that names a target —
+  the five reconfigure routes, the schedule writes, `PUT /model`, delete and
+  `git/reset-to-main-preserve-state` — the target must be an agent its owner
+  **owns** (`owner_username` equality, `dependencies._refuse_unless_owners_agent`).
+  The handlers authorise through `can_user_access_agent` / `can_user_share_agent`,
+  which admit any admin, and an agent key carries its owner's role — so without
+  this bound one grant on an admin-owned install reached every agent on the
+  instance. Not-owned answers 404, like nonexistent; a non-holder's 403 comes
+  first, so the 404 is never an existence oracle.
 - **Self**: a holder cannot change its **own** `read-only` mode or `guardrails`
   — those stay person-only when target == caller.
 - **Delete** is still limited by `enforce_agent_spawn_scope` to agents the

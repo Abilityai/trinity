@@ -1962,6 +1962,20 @@ def _path_agent(request: Request) -> Optional[str]:
     return params.get("agent_name") or params.get("name")
 
 
+def _refuse_unless_owners_agent(current_user: User, target: str) -> None:
+    """A capability HOLDER reaches only agents its owner OWNS (#3236 review +
+    validation). Every fenced handler authorises through `can_user_access_agent`
+    / `can_user_share_agent`, which admit any `role == "admin"` — and an agent
+    key carries its owner's role — so without this one grant on a default
+    admin-owned install reached every agent on the instance, other users'
+    included. `owner_username` equality, never the admin short-circuit;
+    not-owned and nonexistent answer the same 404, so a holder learns nothing
+    about agents outside its owner's."""
+    owner = db.get_agent_owner(target) or {}
+    if owner.get("owner_username") != current_user.username:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Agent not found")
+
+
 def capability_fence(capability: str, *, own_agent_exempt: bool = False,
                      ephemeral_target_exempt: bool = False):
     """A route-level dependency: refuse an agent principal that does not hold
@@ -1982,12 +1996,18 @@ def capability_fence(capability: str, *, own_agent_exempt: bool = False,
 
     `ephemeral_target_exempt`: discarding an ephemeral ("ghost") agent needs no
     grant — ent#69 governs ghosts (spawn and discard), decided 2026-10-05.
+
+    A holder that passes is then bounded to its owner's agents
+    (`_refuse_unless_owners_agent`) whenever the route names a target — the
+    capability check runs first, so a non-holder's 403 never depends on whether
+    the target exists (#186).
     """
     async def fence(request: Request, current_user: User = Depends(get_current_user)) -> None:
         target = _path_agent(request)
-        if (own_agent_exempt and target
-                and getattr(current_user, "mcp_scope", None) == "agent"
-                and getattr(current_user, "agent_name", None) == target):
+        is_agent = (getattr(current_user, "mcp_scope", None) == "agent"
+                    and bool(getattr(current_user, "agent_name", None)))
+        if (own_agent_exempt and target and is_agent
+                and current_user.agent_name == target):
             return
         if ephemeral_target_exempt and target:
             from database import db as _db
@@ -1995,6 +2015,8 @@ def capability_fence(capability: str, *, own_agent_exempt: bool = False,
             if isinstance(info, dict) and info.get("is_ephemeral"):
                 return
         await enforce_agent_capability(request, current_user, capability, target=target)
+        if is_agent and target:
+            _refuse_unless_owners_agent(current_user, target)
     fence.__name__ = f"capability_fence_{capability.replace('.', '_')}"
     return fence
 
@@ -2030,10 +2052,7 @@ def require_person_or_capability(capability: str, *, self_person_only: bool = Fa
                 assert_person(current_user)
             await enforce_agent_capability(request, current_user, capability, target=target)
             if target:
-                owner = db.get_agent_owner(target) or {}
-                if owner.get("owner_username") != current_user.username:
-                    raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
-                                        detail="Agent not found")
+                _refuse_unless_owners_agent(current_user, target)
             return current_user
         assert_person(current_user)
         return current_user

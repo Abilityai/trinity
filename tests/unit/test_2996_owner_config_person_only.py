@@ -523,6 +523,42 @@ def test_every_write_in_the_file_is_person_gated():
 # ===========================================================================
 
 
+class TestFenceReachRealKeys:
+    """#3236 validation: the `capability_fence` routes (schedules, model, delete,
+    git reset) have no `owner_username` check of their own — their handlers go
+    through `can_user_access_agent`, which admits any admin. Through the REAL
+    `get_current_user` and grant table: an admin-owned holder reaches its own
+    agent and its owner's, and gets 404 on another user's."""
+
+    @pytest.fixture
+    def probe(self, world):
+        from fastapi import Depends
+        fence = dependencies.capability_fence("schedules.manage", own_agent_exempt=True)
+        world.app.add_api_route("/api/agents/{name}/probe", lambda name: {"ok": name},
+                                methods=["POST"], dependencies=[Depends(fence)])
+        return world
+
+    def test_an_admin_owned_holder_gets_404_on_another_users_agent(self, probe):
+        headers = _admin_owned_agent_key()
+        db.grant_agent_capability(ADMIN_ORCH, "schedules.manage", "admin")
+        try:
+            res = probe.client.post(f"/api/agents/{AGENT}/probe", headers=headers)
+            assert res.status_code == 404, res.text
+            assert probe.client.post(f"/api/agents/{GHOST}/probe", headers=headers).status_code == 404
+            assert probe.client.post(f"/api/agents/{ADMIN_ORCH}/probe", headers=headers).status_code == 200
+        finally:
+            db.revoke_agent_capability(ADMIN_ORCH, "schedules.manage")
+
+    def test_a_non_holder_is_refused_before_reach_is_decided(self, probe):
+        res = probe.client.post(f"/api/agents/{AGENT}/probe", headers=_admin_owned_agent_key())
+        assert res.status_code == 403, res.text
+        assert res.json()["detail"]["code"] == "schedule_management_not_permitted"
+        assert probe.client.post(f"/api/agents/{GHOST}/probe", headers=_admin_owned_agent_key()).status_code == 403
+
+    def test_a_person_is_never_bounded_by_the_fence(self, probe):
+        assert probe.client.post(f"/api/agents/{AGENT}/probe", headers=_jwt(ADMIN)).status_code == 200
+
+
 class TestCapabilityGrantRoute:
     URL = f"/api/agents/{AGENT}/capability-grants"
 

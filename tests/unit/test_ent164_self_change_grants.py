@@ -138,6 +138,12 @@ def test_every_schedule_write_takes_the_schedules_fence_and_trigger_does_not():
         assert "capability_fence_schedules_manage" in _calls(table[key]), key
     trigger = table[("/api/agents/{name}/schedules/{schedule_id}/trigger", "POST")]
     assert "capability_fence_schedules_manage" not in _calls(trigger)
+    # Derived from the router, not only the literal above (#3236 validation):
+    # every schedule WRITE is either fenced or `trigger`, so a write route added
+    # tomorrow without the fence fails here instead of staying green.
+    writes = {k for k in table if k[1] in {"POST", "PUT", "DELETE", "PATCH"}
+              and k[0].startswith("/api/agents/{name}/schedules")}
+    assert writes == set(fenced) | {("/api/agents/{name}/schedules/{schedule_id}/trigger", "POST")}
 
 
 def test_every_reconfigure_route_admits_only_a_person_or_a_holder():
@@ -218,6 +224,36 @@ def test_an_agent_manages_its_own_schedules_without_a_grant(held, audit):
     with pytest.raises(HTTPException) as e:
         asyncio.run(fence(other, _principal("agent", SIBLING)))
     assert e.value.detail["code"] == "schedule_management_not_permitted"
+
+
+@pytest.mark.parametrize("module,key,name", [
+    ("schedules", ("/api/agents/{name}/schedules", "POST"), "capability_fence_schedules_manage"),
+    ("chat", ("/api/agents/{name}/model", "PUT"), "capability_fence_agents_manage"),
+    ("git", ("/api/agents/{agent_name}/git/reset-to-main-preserve-state", "POST"), "capability_fence_instructions_manage"),
+    ("agents", ("/api/agents/{agent_name}", "DELETE"), "capability_fence_agents_manage"),
+])
+def test_a_holder_reaches_only_agents_its_owner_owns_through_every_fence(held, audit, monkeypatch, module, key, name):
+    """#3236 validation: the fenced routes authorise through `can_user_access_agent`,
+    which admits any admin, and an admin-owned agent's key carries `admin` — so
+    the FENCE bounds a holder to its owner's agents, as `require_person_or_capability`
+    already did for the five reconfigure routes. Foreign and nonexistent answer
+    the same 404; a non-holder still gets the 403 first (no existence oracle)."""
+    from database import db
+    owners = {"foreign": {"owner_username": "someone-else"}, SIBLING: {"owner_username": "owner"}}
+    monkeypatch.setattr(db, "get_agent_owner", lambda agent: owners.get(agent))
+    monkeypatch.setattr(db, "get_agent_ephemeral_info", lambda name: {"is_ephemeral": False})
+    fence = _dep(module, key, name)
+    param = "name" if "{name}" in key[0] else "agent_name"
+    for target in ("foreign", "no-such-agent"):
+        with pytest.raises(HTTPException) as e:
+            asyncio.run(fence(_request(params={param: target}), _principal("agent", HOLDER)))
+        assert e.value.status_code == 404, (key, target)
+    with pytest.raises(HTTPException) as e:
+        asyncio.run(fence(_request(params={param: "foreign"}), _principal("agent", SIBLING)))
+    assert e.value.status_code == 403
+    assert asyncio.run(fence(_request(params={param: SIBLING}), _principal("agent", HOLDER))) is None
+    for person in (_principal(None), _principal("user")):
+        assert asyncio.run(fence(_request(params={param: "foreign"}), person)) is None
 
 
 def test_the_own_agent_exemption_is_schedules_only(held, audit):
