@@ -593,6 +593,13 @@ export interface OperatorAskReceipt {
 export interface OperatorQueueListResponse {
   items: OperatorQueueItem[];
   count: number;
+  // trinity-enterprise#815 — optional because an older backend omits them
+  // (the tool then reports null + a warning); null when not verified.
+  total?: number | null;
+  has_more?: boolean | null;
+  next_offset?: number | null;
+  next_cursor?: string | null;
+  warnings?: string[];
 }
 
 // Agent compatibility validation (#668)

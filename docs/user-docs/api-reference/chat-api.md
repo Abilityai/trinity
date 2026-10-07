@@ -100,10 +100,46 @@ curl -X POST http://localhost:8000/api/agents/my-agent/task \
   -d '{"message": "Summarize the latest reports"}'
 ```
 
-- The same key within 24 hours returns the original result with the header `X-Idempotent-Replay: true` — no second execution is created.
+- The same key within 24 hours returns the original result with the header `X-Idempotent-Replay: true` — no second execution is created. The one exception is a **receipt** whose run has ended without success (see the table below): then the same key starts a new run.
 - A duplicate sent while the first request is still running returns **409** with the original `execution_id` to poll (for `/fan-out`, that field carries the batch's `fan_out_id`).
 - If the first attempt was rejected before dispatch (e.g., at capacity), the key is released so the retry goes through.
 - The header is optional and fail-open: omitting it preserves normal behavior, and a dedup-layer error never blocks a real request.
+
+### Retrying after a failed run (`/chat` and `/task`)
+
+An async `/task` answers with a receipt — `{"status": "accepted" | "queued" | "queued_timeout", "execution_id": ..., "async_mode": true}`. A sync `/task`, or a `/chat` turn on a pull-mode agent, that outlives its wait answers `504` but stores the same kind of receipt (`queued_timeout`). That stored receipt is what an identical request replays, as a `200` with `X-Idempotent-Replay: true`. Whether it is replayed depends on how its run is doing:
+
+| The receipt's run is… | An identical request with the same key gets |
+|---|---|
+| `queued`, `running` or `pending_retry` | the original receipt (`X-Idempotent-Replay: true`) |
+| `success` | the original receipt — read the result from the execution |
+| `failed`, `cancelled` or `skipped`, or the execution no longer exists | a **new** run with a new `execution_id`, no replay header |
+| `failed` with an error starting `lease_expired:` (no result arrived before the slot expired, so the run may still report back) | the original receipt until the agent's timeout + 5 minutes after the failure; after that, a new run |
+
+A non-receipt result (a completed sync reply) always replays. Scheduler-issued keys (`sched:…`) are never reclaimed, and a request for an approval-gated skill is answered by its approval record first.
+
+```bash
+# 1. Dispatch async with a key
+curl -s -X POST http://localhost:8000/api/agents/my-agent/task \
+  -H "Authorization: Bearer <token>" -H "Idempotency-Key: report-2026-10-06" \
+  -H "Content-Type: application/json" \
+  -d '{"message": "Summarize the latest reports", "async_mode": true}'
+# -> 200 {"status": "accepted", "execution_id": "<first-id>", "async_mode": true, ...}
+
+# 2. Check the outcome
+curl -s -H "Authorization: Bearer <token>" \
+  http://localhost:8000/api/agents/my-agent/executions/<first-id>
+# -> {"status": "failed", ...}
+
+# 3. Re-send the identical request: a new run, no X-Idempotent-Replay header
+curl -s -X POST http://localhost:8000/api/agents/my-agent/task \
+  -H "Authorization: Bearer <token>" -H "Idempotency-Key: report-2026-10-06" \
+  -H "Content-Type: application/json" \
+  -d '{"message": "Summarize the latest reports", "async_mode": true}'
+# -> 200 {"status": "accepted", "execution_id": "<second-id>", ...}
+```
+
+Checking the status tells you **whether** to retry; it cannot make a retry safe. Anything the failed run already did (a message sent, a file written) may happen again in the new run — effect de-duplication is per execution, and the new run has a new `execution_id`. Two identical retries that arrive together start one new run.
 
 Wired boundaries: `/api/agents/{name}/chat`, `/api/agents/{name}/task`, `/api/agents/{name}/fan-out`, `/api/agents/{name}/voip/call`, [webhook triggers](webhook-triggers.md) (key auto-derived from token + body when the header is absent), and the MCP `chat_with_agent` / `fan_out` tools (deterministic key derived from the call arguments).
 
