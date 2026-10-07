@@ -39,6 +39,11 @@ if not ENABLED:
 _RESULTS: list = []
 #: Read once through the authenticated client (``/api/version`` needs a token).
 _TARGET = {"version": "unknown"}
+#: ``CHAIN_KEEP_AGENTS=1`` leaves the agents a chain created in place, so a person
+#: can open them in the UI afterwards; the report lists them. Off by default —
+#: the tier's rule is that it leaves nothing behind.
+KEEP_AGENTS = os.getenv("CHAIN_KEEP_AGENTS", "").strip() == "1"
+_KEPT: list = []
 
 
 def not_run(reason: str) -> None:
@@ -65,9 +70,17 @@ def chain(request) -> ChainRun:
 def pytest_runtest_makereport(item, call):
     outcome = yield
     rep = outcome.get_result()
-    run = getattr(item, "_chain_run", None)
-    if run is None or getattr(item, "_chain_reported", False):
+    if getattr(item, "_chain_reported", False):
         return
+    run = getattr(item, "_chain_run", None)
+    if run is None:
+        # Setup broke before the `chain` fixture ran (e.g. the suite-wide
+        # autouse login failed): the chain is still reported — from its marker —
+        # never silently missing from the report.
+        marker = item.get_closest_marker("chain")
+        if marker is None or len(marker.args) < 2:
+            return
+        run = ChainRun(chain_id=marker.args[0], title=marker.args[1])
     # The verdict comes from the first phase that did not pass, else from call.
     if rep.when == "setup" and rep.passed:
         return
@@ -78,7 +91,13 @@ def pytest_runtest_makereport(item, call):
         skip_reason = rep.longrepr[2]
     error = None
     if rep.failed:
-        error = (str(rep.longrepr).strip().splitlines() or [""])[-1][:300]
+        # The crash line ("httpx.HTTPStatusError: 401 Unauthorized …"), not the
+        # last line of the traceback, which is often a footer or a doc link.
+        crash = getattr(rep.longrepr, "reprcrash", None)
+        error = (getattr(crash, "message", None)
+                 or (str(rep.longrepr).strip().splitlines() or [""])[-1])[:300]
+        if rep.when == "setup":
+            error = f"setup failed before the chain started: {error}"
     _RESULTS.append(verdict(run, outcome=rep.outcome, skip_reason=skip_reason, error=error))
     item._chain_reported = True
 
@@ -94,6 +113,8 @@ def pytest_sessionfinish(session, exitstatus):
         "run_at": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
         "runner": platform.node() or "unknown",
     }
+    if _KEPT:
+        meta["kept agents"] = ", ".join(_KEPT)
     (out / "chain-report.json").write_text(to_json(_RESULTS, meta))
     (out / "chain-report.md").write_text(to_markdown(_RESULTS, meta))
 
@@ -120,6 +141,16 @@ def chain_client(api_client):
     except Exception:  # noqa: BLE001 — the report still names the target URL
         pass
     return api_client
+
+
+def release_agent(client, name: str) -> None:
+    """Teardown for a chain's agent: deleted, unless ``CHAIN_KEEP_AGENTS=1``."""
+    if KEEP_AGENTS:
+        _KEPT.append(name)
+        return
+    from journeys.conftest import delete_agent_idempotent
+
+    delete_agent_idempotent(client, name)
 
 
 def wait_agent_server(client, agent: str) -> None:

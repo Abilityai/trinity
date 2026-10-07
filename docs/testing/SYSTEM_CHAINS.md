@@ -38,6 +38,10 @@ once the next release cut carries the file to `main` — GitHub registers
 stack, runs the chains and uploads `chain-report` (configure
 `vars.CHAIN_SKILLS_REPO` and `secrets.CHAIN_SKILLS_GITHUB_TOKEN` for J18).
 
+To look at what a chain did in the UI, set `CHAIN_KEEP_AGENTS=1`: the agents it
+created are left in place (named in the report as **kept agents**) instead of
+deleted — delete them yourself afterwards.
+
 The chains are collected only with `TRINITY_CHAIN_TESTS=1`, which the runner
 sets — they never ride along with `run-full.sh` or the per-PR journey lane.
 Reading an agent's own key needs the Docker socket of the host running the

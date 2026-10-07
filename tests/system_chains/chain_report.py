@@ -135,6 +135,10 @@ def to_markdown(results: List[dict], meta: Optional[dict] = None) -> str:
         lines.append(" · ".join(f"**{k}**: {v}" for k, v in meta.items()))
         lines.append("")
     c = s["counts"]
+    if not results:
+        lines.append("**No chain reported.** Nothing ran, which is not evidence — treat this "
+                     "run as failed.")
+        return "\n".join(lines) + "\n"
     lines.append(f"**{c['passed']} passed · {c['failed']} failed · {c['partial']} partial · "
                  f"{c['not_run']} not run** of {s['total']}. "
                  + ("All chains passed." if s["all_passed"] else

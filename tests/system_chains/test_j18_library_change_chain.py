@@ -37,6 +37,7 @@ from __future__ import annotations
 import base64
 import json
 import os
+import time
 import uuid
 
 import pytest
@@ -45,11 +46,10 @@ import requests
 from journeys.conftest import (
     agent_mcp_key,
     create_agent_and_wait,
-    delete_agent_idempotent,
     poll_until,
 )
 
-from .conftest import not_run, wait_agent_server
+from .conftest import not_run, release_agent, wait_agent_server
 
 REPO = os.getenv("CHAIN_SKILLS_REPO", "").strip()
 TOKEN = os.getenv("CHAIN_SKILLS_GITHUB_TOKEN", "").strip()
@@ -129,9 +129,20 @@ def skills_repo():
         not_run("no test skills repo — set CHAIN_SKILLS_REPO (owner/name on github.com) and "
                 "CHAIN_SKILLS_GITHUB_TOKEN (push access)")
     repo = _Repo(REPO, TOKEN, REF)
-    r = requests.get(f"{GH}/repos/{REPO}", headers=repo.h, timeout=30)
-    if r.status_code != 200:
-        not_run(f"the test skills repo {REPO} is not reachable with the given token ({r.status_code})")
+    # The repo is a precondition: unreachable (no network, bad token, no such
+    # repo) means the chain cannot run — never a failure of the platform.
+    status, last_error = None, None
+    for _ in range(3):
+        try:
+            status = requests.get(f"{GH}/repos/{REPO}", headers=repo.h, timeout=30).status_code
+            break
+        except requests.RequestException as e:
+            last_error = type(e).__name__
+            time.sleep(3)
+    if status is None:
+        not_run(f"could not reach GitHub to check the test skills repo {REPO} ({last_error})")
+    if status != 200:
+        not_run(f"the test skills repo {REPO} is not reachable with the given token ({status})")
     return repo
 
 
@@ -145,7 +156,7 @@ def holders(chain_client):
         yield names
     finally:
         for n in names:
-            delete_agent_idempotent(chain_client, n)
+            release_agent(chain_client, n)
 
 
 @pytest.mark.chain("J18", "A library change reaches every holder")

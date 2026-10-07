@@ -11,9 +11,10 @@
 # per chain, passed / failed at a named step / partial / not run. The markdown
 # is what you attach to #783 as go / no-go evidence.
 #
-# Exit code: 0 only when EVERY chain passed. A chain that did not run, or ran
-# only in part, is not a pass — so the exit is non-zero while any chain is
-# blocked; read the report for why.
+# Exit code: 0 only when EVERY chain passed; 1 when any chain FAILED (or no
+# chain was reported at all); 3 when
+# nothing failed but a chain was partial or not run. A chain that did not run,
+# or ran only in part, is not a pass — read the report for why.
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -46,5 +47,11 @@ cat "$REPORT_DIR/chain-report.md"
 python - "$REPORT_DIR/chain-report.json" <<'PY'
 import json, sys
 s = json.load(open(sys.argv[1]))["summary"]
-sys.exit(0 if s["all_passed"] else 3)
+# 0 every chain passed · 1 a chain FAILED (a defect, or the run itself broke)
+# · 3 nothing failed, but a chain was partial or not run (not yet evidence)
+if s["total"] == 0:
+    sys.exit(1)          # an empty report is a broken run, never "not yet"
+if s["all_passed"]:
+    sys.exit(0)
+sys.exit(1 if s["counts"]["failed"] else 3)
 PY

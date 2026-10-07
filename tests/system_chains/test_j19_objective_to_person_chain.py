@@ -35,11 +35,10 @@ import yaml
 from journeys.conftest import (
     agent_mcp_key,
     create_agent_and_wait,
-    delete_agent_idempotent,
     poll_until,
 )
 
-from .conftest import not_run, wait_agent_server
+from .conftest import not_run, release_agent, wait_agent_server
 
 #: Per run: a seat id is unique on the instance, and a chain must not depend on
 #: an earlier run's cleanup (a soft-deleted agent kept its held seat — found by
@@ -111,7 +110,7 @@ def agent(chain_client):
         wait_agent_server(chain_client, name)
         yield name
     finally:
-        delete_agent_idempotent(chain_client, name)
+        release_agent(chain_client, name)
 
 
 @pytest.mark.chain("J19", "An objective reaches the person")

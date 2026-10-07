@@ -107,3 +107,9 @@ def test_the_reports_carry_every_chain_and_say_why_it_is_not_a_go():
     md = cr.to_markdown(results, {"version": "1.0.0-rc1"})
     assert "Not a go" in md and "1.0.0-rc1" in md
     assert "blocked \\| by ent#793" in md, "a pipe in a reason must not break the table"
+
+
+def test_an_empty_report_says_nothing_ran_and_is_not_a_go():
+    md = cr.to_markdown([])
+    assert "No chain reported" in md
+    assert cr.summary([])["total"] == 0 and cr.summary([])["all_passed"] is False
