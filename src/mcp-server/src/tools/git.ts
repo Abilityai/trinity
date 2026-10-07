@@ -308,6 +308,7 @@ export function createGitTools(client: TrinityClient, requireApiKey: boolean) {
       name: "reset_to_main_preserve_state",
       description:
         "⚠️ DESTRUCTIVE recovery (#384): adopt origin/main as the new baseline and " +
+        "With an agent key, this needs the instruction-management permission an instance admin grants (its own workspace included); without it the call is refused with `instruction_management_not_permitted`. " +
         "FORCE-PUSH (--force-with-lease), preserving only the persistent-state " +
         "allowlist. Use ONLY to break a parallel-history deadlock that sync/pull " +
         "cannot resolve — it discards the agent's divergent history on the working " +

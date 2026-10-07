@@ -26,9 +26,26 @@ from utils.helpers import utc_now_iso
 #: holder's owner holds, including the holder itself.
 CAPABILITY_SKILLS_MANAGE = "skills.manage"
 
+#: trinity-enterprise#164 (re-scoped 2026-10-02): the rest of "an agent changing
+#: its own shape". Each is a PERMISSION an admin grants, never a per-action
+#: approval — without it the call is refused and names what is missing.
+#: Create / update / delete / enable / disable an agent's schedules, and its
+#: schedules' webhooks.
+CAPABILITY_SCHEDULES_MANAGE = "schedules.manage"
+#: Platform writes to an agent's CLAUDE.md, AGENTS.md and `.claude/**` (except
+#: `.claude/skills/**`, which stays `skills.manage`), and git reset-to-main.
+CAPABILITY_INSTRUCTIONS_MANAGE = "instructions.manage"
+#: Create (non-ephemeral) / delete / deploy agents and systems, and reconfigure
+#: them (resources, timeout, guardrails, read-only, models, rename). Autonomy is
+#: NOT in it: raising autonomy stays person-only and is never granted.
+CAPABILITY_AGENTS_MANAGE = "agents.manage"
+
 #: The closed set. A grant for anything else is refused at the sink, so a typo
 #: can never persist a capability nothing checks.
-CAPABILITIES = frozenset({CAPABILITY_SKILLS_MANAGE})
+CAPABILITIES = frozenset({
+    CAPABILITY_SKILLS_MANAGE, CAPABILITY_SCHEDULES_MANAGE,
+    CAPABILITY_INSTRUCTIONS_MANAGE, CAPABILITY_AGENTS_MANAGE,
+})
 
 
 def _live_holder(capability: str):
@@ -74,6 +91,22 @@ class CapabilityGrantOperations:
         )
         with get_engine().connect() as conn:
             return [dict(r) for r in conn.execute(stmt).mappings()]
+
+    def list_agent_capabilities(self, agent_name: str) -> List[dict]:
+        """Every capability this LIVE agent holds, with who and when (ent#164 —
+        the Settings view, ent#756). A soft-deleted agent holds nothing."""
+        if not agent_name:
+            return []
+        out = []
+        for capability in sorted(CAPABILITIES):
+            stmt = _live_holder(capability).where(
+                agent_capability_grants.c.agent_name == agent_name)
+            with get_engine().connect() as conn:
+                row = conn.execute(stmt).mappings().first()
+            if row:
+                out.append({"capability": capability, "granted_by": row["granted_by"],
+                            "granted_at": row["granted_at"]})
+        return out
 
     def grant_agent_capability(self, agent_name: str, capability: str, granted_by: str) -> bool:
         """Grant. Idempotent: an existing grant keeps its original who/when.

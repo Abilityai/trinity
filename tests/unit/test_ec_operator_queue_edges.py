@@ -565,9 +565,6 @@ class TestUnhashableEntryValues:
         import test_2915_operator_queue_sync_honesty as h
         return h
 
-    @pytest.mark.xfail(strict=True, reason="#3313: " + BUG.format(
-        "an unhashable `priority` (list/object) makes `_clamp_ingested_item` raise TypeError, "
-        "breaking its never-raises contract; the ask is quarantined and never surfaced"))
     @pytest.mark.parametrize("priority", [
         pytest.param(["high"], id="r145-priority-list"),
         pytest.param({"level": "high"}, id="r146-priority-object"),
@@ -584,9 +581,6 @@ class TestUnhashableEntryValues:
         out = oqs._clamp_ingested_item({"id": "u-1", "status": "pending", "priority": priority})
         assert out["priority"] == "medium"
 
-    @pytest.mark.xfail(strict=True, reason="#3313: " + BUG.format(
-        "one pending entry with an unhashable `id` raises out of `_sync_agent` before the "
-        "write-back, so NONE of that agent's answers are delivered, silently, every cycle"))
     def test_an_unhashable_id_does_not_stop_the_agents_answers(self, monkeypatch):
         """r147. REACHABILITY: in `_sync_agent`'s loop the reserved-prefix,
         native, seen and terminal checks are each `isinstance(req_id, str)`-
@@ -606,9 +600,6 @@ class TestUnhashableEntryValues:
         asyncio.run(svc._sync_agent("a"))
         client.write_file.assert_awaited_once()
 
-    @pytest.mark.xfail(strict=True, reason="#3313: " + BUG.format(
-        "rewriting an INGESTED entry's priority to a list raises out of `changed_fields`, "
-        "halting the agent's whole sync (no answers delivered) every cycle, silently"))
     def test_an_unhashable_priority_rewrite_is_a_change_not_a_crash(self, monkeypatch):
         """r148. REACHABILITY: for an entry whose id matches an open pending row,
         `_sync_agent` calls `changed_fields(row, req)` outside any try;
