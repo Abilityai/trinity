@@ -2825,6 +2825,10 @@ class DatabaseManager:
     def grant_agent_capability(self, agent_name: str, capability: str, granted_by: str) -> bool:
         return self._capability_grant_ops.grant_agent_capability(agent_name, capability, granted_by)
 
+    def list_agent_capabilities(self, agent_name: str):
+        # ent#164: one agent's grants, for its Settings (ent#756)
+        return self._capability_grant_ops.list_agent_capabilities(agent_name)
+
     def revoke_agent_capability(self, agent_name: str, capability: str) -> bool:
         return self._capability_grant_ops.revoke_agent_capability(agent_name, capability)
 
@@ -4303,7 +4307,7 @@ class DatabaseManager:
     def start_loop_run(self, loop_id: str, run_number: int, *, execution_id=None) -> str:
         return self._loop_ops.start_loop_run(loop_id, run_number, execution_id=execution_id)
 
-    def finalize_loop_run(self, run_id: str, **kwargs):
+    def finalize_loop_run(self, run_id: str, **kwargs) -> bool:
         return self._loop_ops.finalize_loop_run(run_id, **kwargs)
 
     def list_loop_runs(self, loop_id: str):

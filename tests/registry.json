@@ -5050,6 +5050,16 @@
         "unit"
       ],
       "description": "trinity#3274 (@source-text-pin): AgentDetail hands its toast host (:notify) to PlaybooksPanel and DashboardPanel, and its toast has an info arm in the status-info family ahead of the red fallback."
+    },
+    {
+      "file": "unit/test_3313_operator_queue_sync_error_logged.py",
+      "feature": "abilityai/trinity#3313",
+      "added": "2026-10-07",
+      "categories": [
+        "backend",
+        "operator-queue"
+      ],
+      "description": "An exception from one agent's operator-queue sync must be logged with the agent name, not dropped by `_poll_cycle`'s gather(return_exceptions=True) (#3313). Drives the real `_poll_cycle` over two agents where one sync raises: both run, the failing one is logged at ERROR with its exception type, the healthy one is not. Mutation-proven: reverting the logging goes red. No Docker, no network."
     }
   ]
 }
