@@ -1,6 +1,226 @@
 {
   "test_files": [
     {
+      "file": "unit/test_ec_backlog_admission_edges.py",
+      "feature": "edge-cases-2026-10-06",
+      "added": "2026-10-07",
+      "categories": [
+        "backend",
+        "execution",
+        "unit"
+      ],
+      "description": "/edge-cases sweep 2026-10-06 — parametrized boundary/edge cases for services/backlog_service.py + services/dispatch_admission_service.py. Real bugs are strict-xfail and name their issue. No Docker, no network."
+    },
+    {
+      "file": "unit/test_ec_backlog_admission_properties.py",
+      "feature": "edge-cases-2026-10-06",
+      "added": "2026-10-07",
+      "categories": [
+        "backend",
+        "execution",
+        "unit"
+      ],
+      "description": "/edge-cases sweep 2026-10-06 — Hypothesis property tests for services/backlog_service.py + services/dispatch_admission_service.py. Real bugs are strict-xfail and name their issue. No Docker, no network."
+    },
+    {
+      "file": "unit/test_ec_capacity_slots_edges.py",
+      "feature": "edge-cases-2026-10-06",
+      "added": "2026-10-07",
+      "categories": [
+        "backend",
+        "execution",
+        "unit"
+      ],
+      "description": "/edge-cases sweep 2026-10-06 — parametrized boundary/edge cases for services/capacity_manager.py + services/slot_service.py (#3318, #3319). Real bugs are strict-xfail and name their issue. No Docker, no network."
+    },
+    {
+      "file": "unit/test_ec_capacity_slots_properties.py",
+      "feature": "edge-cases-2026-10-06",
+      "added": "2026-10-07",
+      "categories": [
+        "backend",
+        "execution",
+        "unit"
+      ],
+      "description": "/edge-cases sweep 2026-10-06 — Hypothesis property tests for services/capacity_manager.py + services/slot_service.py (#3318, #3319). Real bugs are strict-xfail and name their issue. No Docker, no network."
+    },
+    {
+      "file": "unit/test_ec_credential_crypto_edges.py",
+      "feature": "edge-cases-2026-10-06",
+      "added": "2026-10-07",
+      "categories": [
+        "backend",
+        "security",
+        "unit"
+      ],
+      "description": "/edge-cases sweep 2026-10-06 — parametrized boundary/edge cases for services/credential_encryption.py + services/secret_settings.py (#3325). Real bugs are strict-xfail and name their issue. No Docker, no network."
+    },
+    {
+      "file": "unit/test_ec_credential_crypto_properties.py",
+      "feature": "edge-cases-2026-10-06",
+      "added": "2026-10-07",
+      "categories": [
+        "backend",
+        "security",
+        "unit"
+      ],
+      "description": "/edge-cases sweep 2026-10-06 — Hypothesis property tests for services/credential_encryption.py + services/secret_settings.py (#3325). Real bugs are strict-xfail and name their issue. No Docker, no network."
+    },
+    {
+      "file": "unit/test_ec_dispatch_breaker_edges.py",
+      "feature": "edge-cases-2026-10-06",
+      "added": "2026-10-07",
+      "categories": [
+        "backend",
+        "reliability",
+        "unit"
+      ],
+      "description": "/edge-cases sweep 2026-10-06 — parametrized boundary/edge cases for services/dispatch_breaker.py + services/redelivery_governor.py (Lua tier needs lupa, #3326). Real bugs are strict-xfail and name their issue. No Docker, no network."
+    },
+    {
+      "file": "unit/test_ec_dispatch_breaker_properties.py",
+      "feature": "edge-cases-2026-10-06",
+      "added": "2026-10-07",
+      "categories": [
+        "backend",
+        "reliability",
+        "unit"
+      ],
+      "description": "/edge-cases sweep 2026-10-06 — Hypothesis property tests for services/dispatch_breaker.py + services/redelivery_governor.py (Lua tier needs lupa, #3326). Real bugs are strict-xfail and name their issue. No Docker, no network."
+    },
+    {
+      "file": "unit/test_ec_idempotency_edges.py",
+      "feature": "edge-cases-2026-10-06",
+      "added": "2026-10-07",
+      "categories": [
+        "backend",
+        "execution",
+        "unit"
+      ],
+      "description": "/edge-cases sweep 2026-10-06 — parametrized boundary/edge cases for services/idempotency_service.py + db/idempotency.py (#3320). Real bugs are strict-xfail and name their issue. No Docker, no network."
+    },
+    {
+      "file": "unit/test_ec_idempotency_properties.py",
+      "feature": "edge-cases-2026-10-06",
+      "added": "2026-10-07",
+      "categories": [
+        "backend",
+        "execution",
+        "unit"
+      ],
+      "description": "/edge-cases sweep 2026-10-06 — Hypothesis property tests for services/idempotency_service.py + db/idempotency.py (#3320). Real bugs are strict-xfail and name their issue. No Docker, no network."
+    },
+    {
+      "file": "unit/test_ec_input_hardening_edges.py",
+      "feature": "edge-cases-2026-10-06",
+      "added": "2026-10-07",
+      "categories": [
+        "backend",
+        "security",
+        "unit"
+      ],
+      "description": "/edge-cases sweep 2026-10-06 — parametrized boundary/edge cases for utils/safe_yaml.py, services/credential_paths.py, utils/credential_sanitizer.py (#3311, #3312, #3324). Real bugs are strict-xfail and name their issue. No Docker, no network."
+    },
+    {
+      "file": "unit/test_ec_input_hardening_properties.py",
+      "feature": "edge-cases-2026-10-06",
+      "added": "2026-10-07",
+      "categories": [
+        "backend",
+        "security",
+        "unit"
+      ],
+      "description": "/edge-cases sweep 2026-10-06 — Hypothesis property tests for utils/safe_yaml.py, services/credential_paths.py, utils/credential_sanitizer.py (#3311, #3312, #3324). Real bugs are strict-xfail and name their issue. No Docker, no network."
+    },
+    {
+      "file": "unit/test_ec_loop_service_edges.py",
+      "feature": "edge-cases-2026-10-06",
+      "added": "2026-10-07",
+      "categories": [
+        "backend",
+        "execution",
+        "unit"
+      ],
+      "description": "/edge-cases sweep 2026-10-06 — parametrized boundary/edge cases for services/loop_service.py (#3316, #3317). Real bugs are strict-xfail and name their issue. No Docker, no network."
+    },
+    {
+      "file": "unit/test_ec_loop_service_properties.py",
+      "feature": "edge-cases-2026-10-06",
+      "added": "2026-10-07",
+      "categories": [
+        "backend",
+        "execution",
+        "unit"
+      ],
+      "description": "/edge-cases sweep 2026-10-06 — Hypothesis property tests for services/loop_service.py (#3316, #3317). Real bugs are strict-xfail and name their issue. No Docker, no network."
+    },
+    {
+      "file": "unit/test_ec_operator_queue_edges.py",
+      "feature": "edge-cases-2026-10-06",
+      "added": "2026-10-07",
+      "categories": [
+        "backend",
+        "operator-queue",
+        "unit"
+      ],
+      "description": "/edge-cases sweep 2026-10-06 — parametrized boundary/edge cases for services/operator_queue_service.py + services/operator_queue_choices.py (#3313, #3314, #3315). Real bugs are strict-xfail and name their issue. No Docker, no network."
+    },
+    {
+      "file": "unit/test_ec_operator_queue_properties.py",
+      "feature": "edge-cases-2026-10-06",
+      "added": "2026-10-07",
+      "categories": [
+        "backend",
+        "operator-queue",
+        "unit"
+      ],
+      "description": "/edge-cases sweep 2026-10-06 — Hypothesis property tests for services/operator_queue_service.py + services/operator_queue_choices.py (#3313, #3314, #3315). Real bugs are strict-xfail and name their issue. No Docker, no network."
+    },
+    {
+      "file": "unit/test_ec_pull_coordination_edges.py",
+      "feature": "edge-cases-2026-10-06",
+      "added": "2026-10-07",
+      "categories": [
+        "backend",
+        "execution",
+        "unit"
+      ],
+      "description": "/edge-cases sweep 2026-10-06 — parametrized boundary/edge cases for services/pull_coordination_service.py + services/pull_pilot.py + db/schedules/queue.py (#3321). Real bugs are strict-xfail and name their issue. No Docker, no network."
+    },
+    {
+      "file": "unit/test_ec_pull_coordination_properties.py",
+      "feature": "edge-cases-2026-10-06",
+      "added": "2026-10-07",
+      "categories": [
+        "backend",
+        "execution",
+        "unit"
+      ],
+      "description": "/edge-cases sweep 2026-10-06 — Hypothesis property tests for services/pull_coordination_service.py + services/pull_pilot.py + db/schedules/queue.py (#3321). Real bugs are strict-xfail and name their issue. No Docker, no network."
+    },
+    {
+      "file": "unit/test_ec_url_validation_edges.py",
+      "feature": "edge-cases-2026-10-06",
+      "added": "2026-10-07",
+      "categories": [
+        "backend",
+        "security",
+        "unit"
+      ],
+      "description": "/edge-cases sweep 2026-10-06 — parametrized boundary/edge cases for utils/url_validation.py (#3322, #3323). Real bugs are strict-xfail and name their issue. No Docker, no network."
+    },
+    {
+      "file": "unit/test_ec_url_validation_properties.py",
+      "feature": "edge-cases-2026-10-06",
+      "added": "2026-10-07",
+      "categories": [
+        "backend",
+        "security",
+        "unit"
+      ],
+      "description": "/edge-cases sweep 2026-10-06 — Hypothesis property tests for utils/url_validation.py (#3322, #3323). Real bugs are strict-xfail and name their issue. No Docker, no network."
+    },
+    {
       "file": "unit/test_3246_platform_alert_surfaces.py",
       "feature": "#3246",
       "added": "2026-10-05",
