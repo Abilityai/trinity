@@ -21,7 +21,7 @@
 
         <div class="eyebrow">Trinity · First-time setup</div>
         <h1>Welcome to <span class="grad">Trinity</span></h1>
-        <p class="lede">Sovereign infrastructure for your fleet of autonomous agents. Let's create your admin account.</p>
+        <p class="lede">The operating system for the AI-native company — open source, self-hosted, that you own. Let's create your admin account.</p>
         <div class="props">
           <span><i></i> Governed</span>
           <span><i></i> Auditable</span>

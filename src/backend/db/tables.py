@@ -417,6 +417,8 @@ chat_sessions = Table(
     Column("total_context_max", Integer),
     Column("status", Text),
     Column("subscription_id", Text),
+    # #3127: the Claude session a pulled /chat turn resumes.
+    Column("cached_claude_session_id", Text),
 )
 
 chat_messages = Table(
@@ -1494,7 +1496,7 @@ operator_queue = Table(
     # compare-and-set UPDATE that flips `status`, so only the winning writer
     # records an ending. Nullable, no backfill: a row that ended before the
     # ledger reads from `status`.
-    Column("disposition", Text),         # answered|cancelled|expired
+    Column("disposition", Text),         # answered|cancelled|expired|dismissed
     Column("disposed_at", Text),
     Column("disposed_by", Text),         # person|timeout|platform (#3130: superseded flood alarms)
     Column("disposed_by_email", Text),   # NULL for timeout; withheld from agent principals
@@ -1508,6 +1510,20 @@ operator_queue = Table(
     Column("resolved_to", Text),         # JSON list of person refs
     Column("proposal", Text),            # JSON — the frozen action
     Column("supersedes_expired", Text),  # the predecessor row's uuid
+    # #3246: a platform alert is a condition, not a message. `subject` is
+    # `kind:key`, the dedup key the seam keeps at most one pending row for;
+    # `last_seen_at` moves on every reading. Both nullable, no backfill beyond
+    # the upgrade sweep: agent-raised asks and gates never carry a subject.
+    Column("subject", Text),
+    Column("last_seen_at", Text),
+    Index(
+        "uq_operator_queue_pending_subject",
+        "agent_name", "subject",
+        unique=True,
+        sqlite_where=text("status = 'pending' AND subject IS NOT NULL"),
+        postgresql_where=text("status = 'pending' AND subject IS NOT NULL"),
+    ),
+    Index("idx_operator_queue_agent_subject", "agent_name", "subject"),
 )
 
 skill_gate_requests = Table(

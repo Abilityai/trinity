@@ -1,6 +1,130 @@
 {
   "test_files": [
     {
+      "file": "unit/test_3246_platform_alert_surfaces.py",
+      "feature": "#3246",
+      "added": "2026-10-05",
+      "categories": [
+        "backend",
+        "operator-queue",
+        "unit"
+      ],
+      "description": "#3246 C8′: a row the platform ended reads `platform` on the Workspace projection (`client_portal/asks/service.py::_ending_of`), never a person's answer or a timeout; the canary L-03 orphan scan exempts the `_skills-sync` alarm host."
+    },
+    {
+      "file": "unit/test_3246_platform_alert_emitters.py",
+      "feature": "#3246",
+      "added": "2026-10-05",
+      "categories": [
+        "backend",
+        "operator-queue",
+        "unit"
+      ],
+      "description": "#3246 C5′: the four named emitter families report through the platform alert seam on the unit island's real SQLite — a repeated reading is one pending row updated in place, and the place the code knows the condition cleared ends it as the platform (circuit breaker: recovery from dormant and the admin reset). No Docker, no Redis (the Lua scripts are stubbed)."
+    },
+    {
+      "file": "unit/test_3246_platform_alerts_seam.py",
+      "feature": "#3246",
+      "added": "2026-10-05",
+      "categories": [
+        "backend",
+        "operator-queue",
+        "unit"
+      ],
+      "description": "#3246 C4: platform_alerts.observe / clear / reconcile at the seam on the unit island's real SQLite — two readings are one row updated in place (fields, seen_count, last_seen_at, expires_at), the kind's lifetime is the deadline (30 d net, 14 d default, none for person kinds) and a real mark_expired ends it, rows wear their kind prefix and are platform-minted, an unregistered kind is refused and a DB fault returns FAILED without raising; clear ends the pending row as the platform (condition_cleared) and is a no-op otherwise; reconcile ends only subjects no longer live; T5 snooze: after a person's ending the same reading files nothing for 7 days, a priority increase or material change files a fresh row, a platform ending never snoozes. No Docker."
+    },
+    {
+      "file": "unit/test_3246_platform_alerts_registry.py",
+      "feature": "#3246",
+      "added": "2026-10-05",
+      "categories": [
+        "backend",
+        "operator-queue",
+        "unit"
+      ],
+      "description": "#3246 C4: the seam's static guards — two-way prefix parity between the kind registry and _RESERVED_ID_PREFIXES (the four newly reserved families are platform-minted); the EMITTERS_NOT_YET_ON_SEAM ratchet (every direct or #1677-budgeted platform emitter listed with its follow-up, no stale entries, prefixes registered); the clear-site check (every hook kind on the seam has a platform_alerts.clear/reconcile call naming it, or a named NO_CLEAR_SITE reason); the caller guard (only the seam calls the #3246 accessors). AST, no DB."
+    },
+    {
+      "file": "unit/test_3246_platform_alert_sweep.py",
+      "feature": "#3246",
+      "added": "2026-10-05",
+      "categories": [
+        "backend",
+        "operator-queue",
+        "migrations",
+        "unit"
+      ],
+      "description": "#3246 C2: the upgrade sweep, driven as the registered SQLite migration (`platform_alert_subjects`) against the real schema.py operator_queue DDL with the two new columns and indexes stripped (a pre-upgrade install holding duplicates). Ordered columns → sweep → index: `subject` / `last_seen_at` added PRAGMA-guarded; the newest pending row per derived subject survives stamped (subject, last_seen_at, context.seen_count=1, expires_at only where NULL — opt-out kinds keep NULL) and the rest end as ONE batch (cancelled / platform / superseded / NULL email / one batch_id); known kinds without a derivable subject get a lifetime stamp only (never merged on a guess); person-ended rows inside the 7-day snooze window get subject only; agent-raised, gate- and external-prefix rows untouched; a second run changes nothing; the partial unique index exists only after the run, bites on a second pending row, and matches schema.py's DDL; both tracks registered after the #3130 flood sweep, tables.py declares columns and both indexes. No Docker."
+    },
+    {
+      "file": "unit/test_3246_platform_alerts_db.py",
+      "feature": "#3246",
+      "added": "2026-10-05",
+      "categories": [
+        "backend",
+        "operator-queue",
+        "unit"
+      ],
+      "description": "#3246 C3: the locked platform-alert accessors and the platform ending, on the unit island's real SQLite. `create_platform_item` is find → touch → count → insert in one locked transaction: two readings of a subject are one pending row updated in place (seen_count+1, rendered fields, last_seen_at), a bare repeat is `changed=False`, a budgeted kind is refused only when there is nothing to update, `subject=None` always inserts, and a person-ended row is never overwritten (the next reading opens a fresh row); the partial unique index refuses a second pending row. `mark_expired` keeps a row refreshed between its candidate select and its per-id CAS and still expires an overdue one. `end_items_by_platform` / `ask_service.clear_platform` end only CAS-won rows in the ent#611 vocabulary authored by the platform (no actor), refuse a reason outside `PLATFORM_ENDING_REASONS`, announce once per call, and hand observers exactly the rows won. No Docker."
+    },
+    {
+      "file": "unit/test_3246_platform_alerts_leaf.py",
+      "feature": "#3246",
+      "added": "2026-10-05",
+      "categories": [
+        "backend",
+        "operator-queue",
+        "unit"
+      ],
+      "description": "#3246 C1: the platform-alert leaf (services/platform_alerts.py) — loads by path in a bare interpreter (stdlib-only, so both migration tracks can import it); kind registry with lifetime classes (14 d default + env knob, 30 d net, none for the four a person must act on) and the 7-day snooze knob; key belt (id-shaped kept, else sha256[:16]); every legacy id shape mapped to its subject or to 'known kind, no subject', unknown/external prefixes never derived; plan_sweep keeps the newest pending row per (agent, subject), ends the rest, stamps survivors, gives subject-less known kinds a lifetime stamp, stamps person-ended rows inside the snooze window, and is idempotent on its own output. Mutation-checked (survivor rule, sid greediness, snooze window, prefix order). No DB, no Docker."
+    },
+    {
+      "file": "unit/test_3246_platform_alerts_thread_origin.py",
+      "feature": "#3246",
+      "added": "2026-10-06",
+      "categories": [
+        "backend",
+        "operator-queue",
+        "unit"
+      ],
+      "description": "#3246 merge-train fix: the platform ending seam works from every thread origin — `platform_alerts.clear` / `observe` driven through `asyncio.to_thread` (the loop's default executor, which anyio does not own — the headroom sweep and the skills reconcile) still land the `platform_cleared` audit row and the `operator_queue_cancelled` / sync trigger with no 'could not schedule' warning; `spawn_on_loop` from the default executor and from a plain `threading.Thread` once the host loop is known; `main.py::lifespan` captures the host loop before any boot phase; with no running loop, no anyio portal and no live host loop it still raises loudly (never a silent no-op), and a captured loop that was closed is not a target. No Docker."
+    },
+    {
+      "file": "unit/test_ent665_send_idempotency_key.py",
+      "feature": "abilityai/trinity-enterprise#665",
+      "added": "2026-10-06",
+      "categories": [
+        "backend",
+        "unit",
+        "reliability",
+        "mcp"
+      ],
+      "description": "Caller-declared cross-execution idempotency key on send_message / call_user / send_group_message (ent#665). Real schema via db_harness. Pins: intent claim TTL expires only completed rows and the checking call's TTL decides; a live in_flight row survives a short TTL and a stale one is reclaimed after the 300s lease; default claim path unchanged; two executions deliver once with first_sent_at/first_execution_id; in-flight is a retryable 409 (IntentInProgressError), never suppressed; held-inside-critical-section race yields one sender; key has no text input (#1422); two keys in one execution are two sends; consent refusal beats suppression; suppressed costs no rate limit; audit + system-role conversation note; request validation (StrictInt TTL, key charset, ttl needs key); messages route keyless response byte-identical; voip suppressed call is not dialed and audits voip_call_suppressed; Telegram + Slack group routes suppress. MCP half: src/mcp-server/src/tools/intent_key.test.ts. No Docker, no live backend."
+    },
+    {
+      "file": "unit/test_3243_atomic_asks.py",
+      "feature": "#3243",
+      "added": "2026-10-05",
+      "categories": [
+        "backend",
+        "operator-queue",
+        "mcp",
+        "prompt"
+      ],
+      "description": "Atomic asks (#3243): an agent-raised ask is refused over the option-count / option-length / agent-title caps with too_many_options / option_too_long / title_too_long naming the limit in force (a title over the 300 outer belt names the agent limit on the FIRST refusal; a gate title keeps field_too_large), an option reading as the (something else) chip is refused on both create paths after NFKC + zero-width stripping (fullwidth forms and parentheses, ZWSP/ZWJ/BOM insertions) while an option merely containing the words is admitted and cross-script confusables are pinned out of scope, over-cap queue-file entries are held and named on the marker, the env knobs are floored, and the tool description / platform prompt quote the literal DEFAULTS ('by default') so the guard stays green on a re-tuned install."
+    },
+    {
+      "file": "unit/test_3237_system_agent_after_setup.py",
+      "feature": "#3237",
+      "added": "2026-10-06",
+      "categories": [
+        "backend",
+        "setup",
+        "system-agent"
+      ],
+      "description": "First-run /setup deploys the system agent: a successful setup schedules _deploy_system_agent_after_setup before ensure_first_run_seeded, the deploy runs with the admin row already present, never raises, is skipped without a Docker client, and a refused setup schedules nothing."
+    },
+    {
       "file": "unit/test_ent761_outbound_control_oss.py",
       "feature": "trinity-enterprise#761",
       "added": "2026-10-02",
@@ -845,7 +969,7 @@
         "files",
         "credentials"
       ],
-      "description": "Integration tests for the .mcp.json RCE-by-config bypass closure: AISEC-C2 exact reproduction (PUT /files?path=.mcp.json + credentials/inject vectors), full path_deny coverage (15 protected paths), path traversal variants (8), credentials inject allowlist (rejected paths + .env/.credentials.enc regression), defense-in-depth verification (block at backend layer for stopped agents), file-state proof (content unchanged after blocked write). Pairs with tests/unit/test_files_protected_paths.py (32 unit tests)."
+      "description": "Integration tests for the .mcp.json RCE-by-config bypass closure: AISEC-C2 exact reproduction (PUT /files?path=.mcp.json + credentials/inject vectors), full path_deny coverage (15 protected paths), path traversal variants (8), credentials inject allowlist (rejected paths + .env/.credentials.enc regression), defense-in-depth verification (block at backend layer for stopped agents), file-state proof (content unchanged after blocked write). Pairs with tests/unit/test_files_protected_paths.py. trinity-enterprise#792: two-leading-slash paths in the traversal set; DELETE of protected paths and the directories holding them (.ssh, .claude, a // path, /proc/self/cwd) and a // mkdir refused at the backend against a stopped agent."
     },
     {
       "file": "test_mcp_validator_endpoint.py",
@@ -3760,7 +3884,29 @@
         "security",
         "skills"
       ],
-      "description": "Only designated agents may change an agent's skills — their own included (ent#596). The scope ALLOWLIST as a ten-row matrix (JWT / user / system pass unchanged; agent passes only with a live grant; connector, ops, portal_delegate and a scope invented tomorrow are refused; a principal with no mcp_scope fails closed); the composed dependency checks the capability BEFORE the owner fence, so a non-holder gets one uniform named 403 for an existing, nonexistent or foreign target and a holder gains no reach beyond its owner; the route table read off FastAPI's real dependant graph (every skill-changing route takes the fence; the grant routes exist and are not shadowed); a refused agent key changes nothing on any of the four routes through a real FastAPI app; the file-route side door (.claude/skills/** via PUT/DELETE/mkdir, including a delete of an ancestor) and that people and holders still edit skills there; grants over a real SQLite file (live-only via the agent_ownership join, idempotent who/when, soft-delete and recovery, orphan rows fail closed, unknown capability refused at the sink, no call permission written); the grant service (404 / system / ephemeral refusals, revoke needs no validation); the grant route refuses an admin's own MCP key and audits only real changes; attribution (the acting agent recorded, the system agent named, a bulk replace does not re-stamp kept names); both migration tracks executed; the CASCADE AgentRef. Eight mutations each red."
+      "description": "Only designated agents may change an agent's skills — their own included (ent#596). The scope ALLOWLIST as a ten-row matrix (JWT / user / system pass unchanged; agent passes only with a live grant; connector, ops, portal_delegate and a scope invented tomorrow are refused; a principal with no mcp_scope fails closed); the composed dependency checks the capability BEFORE the owner fence, so a non-holder gets one uniform named 403 for an existing, nonexistent or foreign target and a holder gains no reach beyond its owner; the route table read off FastAPI's real dependant graph (every skill-changing route takes the fence; the grant routes exist and are not shadowed); a refused agent key changes nothing on any of the four routes through a real FastAPI app; the file-route side door (.claude/skills/** via PUT/DELETE/mkdir, including a delete of an ancestor, and the same writes spelled with two leading slashes, ent#792) and that people and holders still edit skills there; grants over a real SQLite file (live-only via the agent_ownership join, idempotent who/when, soft-delete and recovery, orphan rows fail closed, unknown capability refused at the sink, no call permission written); the grant service (404 / system / ephemeral refusals, revoke needs no validation); the grant route refuses an admin's own MCP key and audits only real changes; attribution (the acting agent recorded, the system agent named, a bulk replace does not re-stamp kept names); both migration tracks executed; the CASCADE AgentRef. Eight mutations each red."
+    },
+    {
+      "file": "unit/test_ent792_file_guardrail_hook.py",
+      "feature": "trinity-enterprise#792",
+      "added": "2026-10-06",
+      "categories": [
+        "agent",
+        "security",
+        "guardrails"
+      ],
+      "description": "The in-agent PreToolUse file guardrail reads any run of leading slashes as one: runs the SHIPPED docker/base-image/hooks/file-guardrail.py main() through run_hook against the shipped guardrails-baseline.json (lib loaded by path, sys.path and sys.modules restored). //- and ///-prefixed .ssh, .aws, .claude/settings*.json, /opt/trinity and /etc/claude-code paths are denied (exit 2) like the one-slash form; ordinary // paths stay allowed; the baseline is asserted to carry the absolute patterns so the rows are not vacuous. Pairs with the // rows in test_read_only_guard.py. Reverting the hook fix turns 7 red."
+    },
+    {
+      "file": "unit/test_files_protected_paths.py",
+      "feature": "Issue #590 / AISEC-C2, trinity-enterprise#792",
+      "added": "2026-10-06",
+      "categories": [
+        "backend",
+        "security",
+        "files"
+      ],
+      "description": "The backend file-route deny list, run against the SHIPPED services.agent_service.files (it used to test an inline copy, which is how ent#792 went unseen). AISEC-C2 reproduction, protected paths, traversal, allowed paths, edge cases; any number of leading slashes is refused (normpath keeps exactly two); DELETE refuses a protected path and any directory that holds one (.ssh, .claude, the home dir, the /proc/self/root and /proc/self/cwd doors), with the derived anchor tuple pinned and the derivation rule tested on hypothetical glob shapes; three Hypothesis properties (the normalised form equals an independent segment-stack resolution, extra leading slashes never change a verdict, DELETE refused iff writing is or the path holds an anchor); through the route logic and through the real FastAPI router (mkdir takes its path in the JSON body): // paths refused on PUT, mkdir and DELETE with the exact refusal, ordinary deletes reach the container lookup, and the agent is sent the normalised path that was checked. Five mutations each red."
     },
     {
       "file": "unit/test_ent689_readiness_gate.py",
@@ -3948,16 +4094,6 @@
         "migrations"
       ],
       "description": "The container's pull cycle (ent#703, invariant G3) on real repos with a human clone pushing underneath: behind+clean fast-forwards; a local commit is rebased on top; uncommitted edits survive a pull (stashed and re-applied); incoming changes colliding with uncommitted edits are UNDONE — same HEAD, same edits, empty stash, failure recorded (the autostash trap; red against a naive --autostash mutant); a rebase conflict is aborted and recorded; never while an execution runs, including one starting mid-cycle, and an unknown registry counts as busy; a busy repo is skipped without a state write; a pull never touches the push's fields. The loop gate reads the flag live on /git/pull-sync with the env fallback; the interval defaults to the push interval. Both migration tracks: columns + backfill only where auto-sync is on."
-    },
-    {
-      "file": "unit/test_ent610_asks_unavailable.py",
-      "feature": "trinity-enterprise#610",
-      "added": "2026-09-28",
-      "categories": [
-        "backend",
-        "workspace"
-      ],
-      "description": "Workspace asks read fails loud (ent#610 PR A0): a fault in any of the three queue reads (agent set, count, page — #3059) and an unreadable roster each raise AsksUnavailable and the route answers 503 asks_unavailable with Retry-After: 20 (never []); a genuinely off-roster agent is still dropped with a 200; answer_ask stays a uniform 404 on a roster outage (Invariant #8); the suggestions build still degrades to no ask ids through its own attempt() (a guard for the new raise path; it also passes pre-fix). The app is a module-scoped fixture. Mutation: revert the raise to return an empty page (9 red across this file and test_ent428)."
     },
     {
       "file": "unit/test_ent527_readiness_on_lists.py",
@@ -4216,6 +4352,104 @@
       "description": "trinity-enterprise#751: discovery guards — every function that posts to an agent is behind the gate (structural checks per site), every producer passes the requester's own words or is named unwrapped, and every execute_task keyword is classified in the frozen dispatch."
     },
     {
+      "file": "unit/test_ent752_skill_gate_hook.py",
+      "feature": "ent#752",
+      "added": "2026-10-05",
+      "categories": [
+        "agent",
+        "security",
+        "unit"
+      ],
+      "description": "trinity-enterprise#752: the in-container hook executed in its own process under -I -S (import-level seam, stub platform, fake /proc) — the verdict table, every no-verdict path against the marker, the 10 s deadline, one retry, identity from /proc never its own env, crash injection through the bootstrap (never exit 1), FIFO traps, the log without the key, the build self-test."
+    },
+    {
+      "file": "unit/test_ent752_name_resolution.py",
+      "feature": "ent#752",
+      "added": "2026-10-05",
+      "categories": [
+        "agent",
+        "security",
+        "unit"
+      ],
+      "description": "trinity-enterprise#752: which names a call loads — generous resolution is a superset of #751's _FINGERPRINT_SCRIPT (every key it resolves is sent whichever name the skill is invoked by), YAML-faithful front matter (BOM, quotes, comments, beyond 4 KiB), the skills: forms of a subagent definition, subagent lookup by front-matter name."
+    },
+    {
+      "file": "unit/test_ent752_check_endpoint.py",
+      "feature": "ent#752",
+      "added": "2026-10-05",
+      "categories": [
+        "backend",
+        "api",
+        "security",
+        "unit"
+      ],
+      "description": "trinity-enterprise#752: POST /api/skill-gate/check over the real route and DB — only the agent itself (from its key) may ask, every verdict (approved / self-approved / D3 per skill / no run / could not tell), identical answers and reads for unknown, foreign and finished runs, 503 on an unreadable map, named 422s, the throttled skill_gate_refused audit, the rate-limited marker heal, and the hook's own request replayed against the route."
+    },
+    {
+      "file": "unit/test_ent752_self_approval_clearance.py",
+      "feature": "ent#752",
+      "added": "2026-10-05",
+      "categories": [
+        "backend",
+        "security",
+        "unit"
+      ],
+      "description": "trinity-enterprise#752: a self-approval is recorded on the run the agent receives — /task, /chat (moved from admission to the row's setup) and the Workspace backstop; the self_approved record's lattice and idempotency; the completion report and the backstop never read it as an approved run; AST guard: audit_self_approved only inside record_self_approval."
+    },
+    {
+      "file": "unit/test_ent752_marker_sync.py",
+      "feature": "ent#752",
+      "added": "2026-10-05",
+      "categories": [
+        "backend",
+        "agent",
+        "unit"
+      ],
+      "description": "trinity-enterprise#752: the outage marker — written / removed by a constant root argv (executed against a temp path), never touched on an unreadable map or a failed exec, the gated-only fire-and-forget spawn, and both lifecycle tails (start, recreate) driven through their real bodies with Docker mocked."
+    },
+    {
+      "file": "unit/test_ent752_isolated_chat_session.py",
+      "feature": "ent#752",
+      "added": "2026-10-05",
+      "categories": [
+        "backend",
+        "agent",
+        "unit"
+      ],
+      "description": "trinity-enterprise#752: a self-approved /chat turn runs in its own session — the router carries the decision and the isolation, the payload carries isolated_session, the agent server passes it to the runtime and keeps the shared stats, and the real execute_claude_code (#2958 fake CLI) neither resumes nor captures nor moves the shared model."
+    },
+    {
+      "file": "unit/test_ent752_managed_registration.py",
+      "feature": "ent#752",
+      "added": "2026-10-05",
+      "categories": [
+        "agent",
+        "security",
+        "unit"
+      ],
+      "description": "trinity-enterprise#752: the managed-settings drop-in's exact shape, its matcher evaluated by a port of the CLI's own plain-name branch, exec form with env -i and -I -S, loader pins within PROTECTED_KEYS, managed-settings.json untouched, and the image wiring (COPY, root ownership, the --self-test smoke, USER developer)."
+    },
+    {
+      "file": "unit/test_ent752_cli_pin.py",
+      "feature": "ent#752",
+      "added": "2026-10-05",
+      "categories": [
+        "agent",
+        "unit"
+      ],
+      "description": "trinity-enterprise#752: the hook's CLI facts were verified against the Claude Code version the image pins (SKILL_GATE_CLI_VERIFIED == ARG CLAUDE_CODE_VERSION), with the re-audit list beside it."
+    },
+    {
+      "file": "unit/test_ent752_health_skill_gate.py",
+      "feature": "ent#752",
+      "added": "2026-10-05",
+      "categories": [
+        "agent",
+        "unit"
+      ],
+      "description": "trinity-enterprise#752: the agent /health skill_gate_hook enum — missing / not_root_owned / writable / ok over the drop-in, its directory and both scripts, unsupported_runtime off Claude Code."
+    },
+    {
       "file": "unit/test_3185_a2a_payment_outcome.py",
       "feature": "abilityai/trinity#3185",
       "added": "2026-10-03",
@@ -4258,7 +4492,7 @@
         "payments",
         "security"
       ],
-      "description": "The payer\u2192task binding at the layer that implements it (ent#679 I6): `db/nevermined.py::payer_owns_execution` run against a throwaway SQLite carrying the real `nevermined_payment_log`, because every A2A gate test stubs `db.nevermined_payer_owns_execution` and the one new query on the money path \u2014 the one carrying T5's security property \u2014 never executed in CI. Pins that the payer matches their own settled (and settle_failed) task across the facilitator's unstable checksum casing, that another payer / another agent / an unknown execution are all False, that a SQL-shaped wallet is a bound parameter rather than SQL, and that a missing argument fails closed."
+      "description": "The payer→task binding at the layer that implements it (ent#679 I6): `db/nevermined.py::payer_owns_execution` run against a throwaway SQLite carrying the real `nevermined_payment_log`, because every A2A gate test stubs `db.nevermined_payer_owns_execution` and the one new query on the money path — the one carrying T5's security property — never executed in CI. Pins that the payer matches their own settled (and settle_failed) task across the facilitator's unstable checksum casing, that another payer / another agent / an unknown execution are all False, that a SQL-shaped wallet is a bound parameter rather than SQL, and that a missing argument fails closed."
     },
     {
       "file": "unit/test_ent679_paid_turn_service.py",
@@ -4304,6 +4538,62 @@
         "payments"
       ],
       "description": "The priced A2A agent card (ent#679 checkpoint C, AC2). A stranger could previously learn an agent's price only by calling and being refused; the card is A2A's discovery document, so a priced agent now declares `agentId` / `planId` / `credits` there and an x402 client meets the paywall on its first request. The hard line first: no config, a DISABLED config, or an enabled one missing its plan or agent id all return the card object BY IDENTITY, so every install that sells nothing is byte-identical and `generate_a2a_card` stays pure with no payment knowledge and no I/O. The declared vocabulary is Nevermined's own `urn:nevermined:payment` (the provider SDK's card helper's URI) and the official Google/Coinbase x402 extension URI is asserted ABSENT — declaring it would advertise an `X-A2A-Extensions` activation handshake Trinity does not run, leaving a generic client waiting for a negotiation that never comes. Both card surfaces are driven over a real TestClient (ent#180 FR-3: the public well-known card and the authenticated per-agent card must not disagree) and `paymentInfoUrl` is proven to be built from the requesting instance's own origin rather than a hardcoded host, omitted entirely when there is no base URL. T9: `credits_per_request = 0` is a Nevermined DURATION plan (charged by time, so Trinity sends no amount and the plan defines the burn) — the model accepts 0, a negative is still a named 422, the default is still 1, and 0 declares `paymentType: dynamic` rather than the contradictory `fixed`/0 that reads as free and that the SDK's own card validator rejects. Fail-open is asserted with its WARNING: an unreadable payment config still serves the card, because a card route has never 5xx'd and the gate reads the config independently and still answers 402. Mutation-proven (router wiring dropped / official URI declared / paymentType hardcoded / credits floor restored each go red). No Docker, no live backend, no facilitator."
+    },
+    {
+      "file": "unit/test_ent568_delegation_contract.py",
+      "feature": "abilityai/trinity-enterprise#568",
+      "added": "2026-10-05",
+      "categories": [
+        "backend",
+        "unit",
+        "reliability",
+        "mcp"
+      ],
+      "description": "The delegation contract (ent#568): what a dispatch receipt means and what to do instead of re-sending, taught as ONE text in the platform prompt (§Agent Collaboration, spliced from DELEGATION_CONTRACT) and, byte-identical, in src/mcp-server/src/delegation_contract.ts, which the chat_with_agent and chat_with_<agent> descriptions carry. Pins: the contract renders once inside §Agent Collaboration for every runtime with no unspliced __MARKER__ left; it is runtime-neutral (no mcp__trinity__, no heading); the TS array parses strictly as JSON (exactly one anchored declaration) and equals the Python constant, with guard-the-guard cases proving a comment inside the array raises and a one-character edit is seen; the rule sentence fan_out/send_message repeat is the contract's own; every backticked token is classified and proven real -- each tool exists in a non-test MCP module with each named argument in its zod schema, each status is emitted by a pinned DISPATCH-route file (so ask_operator's `replayed` cannot vouch for it), the events are TASK_COMPLETED_EVENT/TASK_FAILED_EVENT; the Codex orientation lists the tools; the contract stays under its 1,650-char budget and §Agent Collaboration stays shorter than §Operator Communication (AC4). The MCP half -- published tools/list descriptions under Claude Code's 2,048-char cap, receipt messages -- is src/mcp-server/src/delegation-contract.test.ts. Mutation-proven (splice dropped / Codex name dropped / TS copy drifted each go red). No Docker, no live backend."
+    },
+    {
+      "file": "unit/test_3215_plan_scheme.py",
+      "feature": "abilityai/trinity#3215",
+      "added": "2026-10-04",
+      "categories": [
+        "backend",
+        "payments",
+        "security"
+      ],
+      "description": "Card (fiat) plans are payable (#3215). `_build_payment_required` passed no `scheme=` to the SDK helper, so every 402, verify and settle advertised the default `nvm:erc4337`; the facilitator is POSTed that requirements document verbatim, so `accepts[0].scheme` is the only channel the scheme travels through and every card token was rejected. Pins a card plan's 402 (scheme + the plan's fiat network), crypto bytes as frozen golden literals per environment (a payments-py bump must not move a live agent's network, #3216), 402 == verify == settle for one card token, Trinity's own plan parser against the SDK's `resolve_scheme`/`resolve_network` on thirteen payloads including malformed ones, 50 concurrent cold 402s costing exactly one `get_plan` and zero facilitator slots, `scheme_from_token` as an allow-list over a caller-supplied field (bad scheme / bad network / another agent's planId / non-str all fall through), and a settle re-driven after the cache expired with the lookup now failing still settling as card. Mutation-proven: dropping `scheme=` goes red in 5, swapping settle's token-derived scheme for a plan lookup in 2. No Docker, no network, no facilitator."
+    },
+    {
+      "file": "unit/test_3215_public_base_url.py",
+      "feature": "abilityai/trinity#3215",
+      "added": "2026-10-04",
+      "categories": [
+        "backend",
+        "payments",
+        "security"
+      ],
+      "description": "The 402's `resource.url` origin (#3215 AC5). A token is minted and verified against that URL and the facilitator compares origin+path, so one wrong scheme character mints a token for a URL the client never calls. Pins `utils/public_url.py` precedence (the configured public origin only when its host equals the request host, else the request host with an https upgrade and never a downgrade, read from the RAW `X-Forwarded-Proto` because the prod/hosted compose `command:` drops uvicorn's proxy-header trust so `request.url.scheme` is inert exactly where the bug was reported), one origin shared by the agent card and both payment doors for a single request, `GET /api/paid/{name}/info` advertising the plan's real scheme and an absolute URL with the nvm api key never serialised, the 402 door itself honouring the forwarded proto, and the nginx `$fwd_proto` map that stops that hop clobbering an upstream https with its own always-http `$scheme`. Mutation-proven: removing the header upgrade goes red in 9. No Docker, no network."
+    },
+    {
+      "file": "unit/test_3215_task_metadata.py",
+      "feature": "abilityai/trinity#3215",
+      "added": "2026-10-04",
+      "categories": [
+        "backend",
+        "a2a",
+        "payments"
+      ],
+      "description": "A settled A2A Task must not report `metadata: null` (#3215, operator scope-add). The x402 payment status and receipt live at `status.message.metadata` — the spec location the provider SDK's own `X402A2AUtils` reads — and are now mirrored onto the Task's top-level `metadata` from the same assignment, so a strictly typed a2a-sdk `Task` carries the receipt instead of null on a turn that was charged. Asserted through `Task.model_validate` and through the SDK reader, over the real producer (`task_from_paid_payload`) on the settled, unsettled and failed outcomes, and the two locations are proven to be the SAME dict object so they cannot drift. Also pins that a free turn emits no `metadata` key at all, keeping unpaid Task bytes and the idempotency snapshots over them unchanged. Mutation-proven: removing the mirror goes red in 6. No Docker, no network."
+    },
+    {
+      "file": "unit/test_ent787_guardrail_exec_form.py",
+      "feature": "abilityai/trinity-enterprise#787",
+      "added": "2026-10-06",
+      "categories": [
+        "agent",
+        "security",
+        "unit"
+      ],
+      "description": "trinity-enterprise#787: the GUARD-002 hooks register in exec form under env -i + -I -S with a policy-pinned empty CLAUDE_CODE_SHELL_PREFIX (exact shape, key set of a known-loading entry, a port of CLI 2.1.281's hook spawn branch ratcheted to the image's CLI pin); each hook executed under its registered flags/env keeps its deny/allow tables; a hostile PYTHONPATH and a user-site usercustomize flip a deny under the old invocation (precondition) and not under the registered flags; read-only config is root-owned (guard and Codex never read the home file; the backend's root-exec argv writes the config as data, injection payloads included); startup.sh's legacy cleanup, executed under bash, removes both shipped claude-settings.json versions and keeps anything else. Mutation-proven."
     }
   ]
 }

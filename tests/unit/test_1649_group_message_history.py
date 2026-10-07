@@ -39,6 +39,8 @@ _backend = str(Path(__file__).resolve().parents[2] / "src" / "backend")
 if _backend not in sys.path:
     sys.path.insert(0, _backend)
 
+from models import SlackChannelMessageRequest, TelegramGroupMessageRequest  # noqa: E402
+
 pytestmark = pytest.mark.unit
 
 
@@ -201,7 +203,7 @@ class TestRoutersPersist:
             return True, None, "1720000000.111222"
         monkeypatch.setattr(slack_router.slack_service, "send_message_detailed", _send)
 
-        req = types.SimpleNamespace(message="deploy at 4pm", thread_ts=None)
+        req = SlackChannelMessageRequest(message="deploy at 4pm", thread_ts=None)
         # connector_agent=None, mcp_scope=None: the migrated owner gate (assert_agent_owner →
         # _enforce_connector_scope, #1710) reads this; a real non-connector
         # User carries it. can_user_share_agent stays stubbed True, so the owner
@@ -237,7 +239,7 @@ class TestRoutersPersist:
             return True, None, "9999.0000"  # the reply's own ts — must NOT be the key
         monkeypatch.setattr(slack_router.slack_service, "send_message_detailed", _send)
 
-        req = types.SimpleNamespace(message="ack", thread_ts="1720000000.111222")
+        req = SlackChannelMessageRequest(message="ack", thread_ts="1720000000.111222")
         # connector_agent=None, mcp_scope=None: the migrated owner gate (assert_agent_owner →
         # _enforce_connector_scope, #1710) reads this; a real non-connector
         # User carries it. can_user_share_agent stays stubbed True, so the owner
@@ -283,7 +285,7 @@ class TestRoutersPersist:
 
         monkeypatch.setattr(tg_router.httpx, "AsyncClient", lambda **kw: _Client())
 
-        req = types.SimpleNamespace(message="standup in 5")
+        req = TelegramGroupMessageRequest(message="standup in 5")
         await tg_router.send_telegram_group_message("atlas", "-100999", req)
 
         assert captured, "the router never persisted the broadcast"
@@ -313,7 +315,7 @@ class TestRoutersPersist:
             return False, "channel_not_found", None
         monkeypatch.setattr(slack_router.slack_service, "send_message_detailed", _send)
 
-        req = types.SimpleNamespace(message="hi", thread_ts=None)
+        req = SlackChannelMessageRequest(message="hi", thread_ts=None)
         # connector_agent=None, mcp_scope=None: the migrated owner gate (assert_agent_owner →
         # _enforce_connector_scope, #1710) reads this; a real non-connector
         # User carries it. can_user_share_agent stays stubbed True, so the owner

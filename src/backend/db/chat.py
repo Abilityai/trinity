@@ -325,3 +325,61 @@ class ChatOperations:
             )
 
             return result.rowcount > 0
+
+    # ---- Claude session id cache (#3127) -------------------------------------
+    # On a pull pilot each chat session resumes its own Claude conversation, so
+    # /chat memory is per (agent, user). Push agents never write these.
+
+    def get_chat_session_claude_id(self, session_id: str) -> Optional[str]:
+        with get_engine().connect() as conn:
+            row = conn.execute(
+                select(chat_sessions.c.cached_claude_session_id).where(
+                    chat_sessions.c.id == session_id
+                )
+            ).mappings().first()
+            return row["cached_claude_session_id"] if row else None
+
+    def set_chat_session_claude_id(
+        self, session_id: str, claude_session_id: Optional[str]
+    ) -> bool:
+        with get_engine().begin() as conn:
+            result = conn.execute(
+                update(chat_sessions)
+                .where(chat_sessions.c.id == session_id)
+                .values(cached_claude_session_id=claude_session_id)
+            )
+            return result.rowcount > 0
+
+    def clear_chat_session_claude_ids(self, agent_name: str) -> int:
+        """Reset the agent's pulled /chat conversations (#3127): every chat
+        session carrying a cached Claude id is closed and the id forgotten, so
+        each user's next pulled /chat turn starts a fresh conversation in a new
+        session and ``GET /chat/history`` shows it empty. Sessions /chat never
+        used (no cached id) are left alone."""
+        with get_engine().begin() as conn:
+            result = conn.execute(
+                update(chat_sessions)
+                .where(
+                    and_(
+                        chat_sessions.c.agent_name == agent_name,
+                        chat_sessions.c.cached_claude_session_id.isnot(None),
+                    )
+                )
+                .values(cached_claude_session_id=None, status="closed")
+            )
+            return result.rowcount
+
+    def list_active_claude_session_ids(self, agent_name: str) -> List[str]:
+        """Cached Claude ids of this agent's chat sessions — part of the JSONL
+        reaper's keep set (#3127, #2610)."""
+        stmt = select(chat_sessions.c.cached_claude_session_id).where(
+            and_(
+                chat_sessions.c.agent_name == agent_name,
+                chat_sessions.c.cached_claude_session_id.isnot(None),
+            )
+        )
+        with get_engine().connect() as conn:
+            return [
+                row["cached_claude_session_id"]
+                for row in conn.execute(stmt).mappings()
+            ]

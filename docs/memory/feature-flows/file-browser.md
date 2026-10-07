@@ -7,6 +7,7 @@
 ## Revision History
 | Date | Changes |
 |------|---------|
+| 2026-10-06 | **Backend deny list covers DELETE; paths normalised before every check** (trinity-enterprise#792): `_normalize_user_path` collapses any run of leading slashes (`posixpath.normpath` keeps exactly two). `DELETE /files` refuses deny-listed paths and any directory that holds one (`_is_user_deletable_path`). PUT, mkdir and DELETE send the agent the normalised path that was checked. |
 | 2026-03-03 | **Per-agent Files tab restored** (Issue #51): FilesPanel.vue rewritten with full file manager (tree + preview). Uses `file-manager/FileTreeNode.vue` and `file-manager/FilePreview.vue`. Standalone `/files` route removed. |
 | 2026-02-18 | Files tab removed from AgentDetail.vue. Users directed to standalone File Manager. |
 | 2026-01-23 | Verified all line numbers. Updated frontend architecture (FilesPanel + composable). Documented protected paths (delete/edit). |
@@ -339,13 +340,17 @@ The file browser feature uses a **thin router + service layer** architecture:
 - `agent_name` (path) - Agent identifier
 - `path` (query, required) - File path to delete
 
-**Protected Paths**: Cannot delete `CLAUDE.md`, `.trinity`, `.git`, `.gitignore`, `.env`, `.mcp.json`, `.mcp.json.template`
+**Protected Paths**: two layers.
+- **Backend** (`_is_user_deletable_path`, trinity-enterprise#792), checked after the access check and the `skills.manage` fence, before the container lookup. It refuses everything the write deny list refuses, plus any directory that holds a path-anchored protected path: `.ssh`, `.aws`, `.gcp`, `.trinity`, `.git`, **`.claude`** (holds `settings.json`), the home dir and `/`. Anchors are derived from `_FILE_WRITE_DENY_PATTERNS` (`_DENY_ANCHORS`). `/proc/*` is load-bearing, because `/proc/self/root/…` and `/proc/self/cwd/…` resolve into the home dir inside the agent container. Basename patterns (`.env`, `.credentials.enc`) are name-only on DELETE, so a directory that merely contains one is not refused. Refusal: 403 `Cannot delete protected path: {path}`, which the Files tab shows as `Failed to delete: …`.
+- **Agent server** (`PROTECTED_PATHS`, by name at any depth and on any parent): `CLAUDE.md`, `.trinity`, `.git`, `.gitignore`, `.env`, `.mcp.json`, `.mcp.json.template`.
+
+**Path normalisation** (all three write routes): `_normalize_user_path` resolves `.`/`..` lexically, anchors relative paths at `/home/developer`, and collapses any run of leading slashes to one. The agent is sent that normalised path, never the raw input, so the check and the action read one string. The agent echoes the string it received, so the `path` / `deleted` fields and the agent's own 404/409 messages (`File not found: …`, `Directory already exists: …`) carry the absolute normalised path, not the string the caller sent.
 
 **Response**:
 ```json
 {
   "success": true,
-  "deleted": "path/to/file",
+  "deleted": "/home/developer/path/to/file",
   "type": "file",
   "file_count": 1
 }
@@ -363,14 +368,14 @@ The file browser feature uses a **thin router + service layer** architecture:
 - `path` (query, required) - File path to update
 - `body.content` (body, required) - New file content
 
-**Protected Paths** (#590, AISEC-C2): Cannot edit `.trinity`, `.git`, `.gitignore`, `.env`, `.mcp.json`, `.mcp.json.template`, `.credentials.enc`
+**Protected Paths** (#590, AISEC-C2): Cannot edit `.trinity`, `.git`, `.gitignore`, `.env`, `.mcp.json`, `.mcp.json.template`, `.credentials.enc` (agent server). The backend deny list (`_is_user_writable_path`, broader: `.ssh/*`, `.aws/*`, `.gcp/*`, `.claude/settings*.json`, `/opt/trinity/*`, `/proc/*`, …) runs first on the normalised path; a `//`-prefixed spelling is refused like the canonical one (trinity-enterprise#792).
 **Note**: `CLAUDE.md` IS editable (owners manage agent instructions). `.mcp.json` is no longer editable here — raw content defines executable tool commands; use the platform regenerate-from-template flow.
 
 **Response**:
 ```json
 {
   "success": true,
-  "path": "CLAUDE.md",
+  "path": "/home/developer/CLAUDE.md",
   "size": 1234,
   "modified": "2025-12-01T10:30:00.123456"
 }
@@ -554,7 +559,7 @@ EDIT_PROTECTED_PATHS = [
     ".credentials.enc",   # added #590 — overwrite swaps encrypted backup
 ]
 ```
-**Defense in depth**: the backend `update_agent_file_logic` in `src/backend/services/agent_service/files.py` runs the same deny check (broader: also blocks `.ssh/*`, `.aws/*`, `/opt/trinity/*`, etc.) BEFORE proxying to the agent-server, so a future router/proxy gap can't bypass the agent-server's check.
+**Defense in depth**: the backend `update_agent_file_logic` / `create_agent_folder_logic` / `delete_agent_file_logic` in `src/backend/services/agent_service/files.py` run the same deny check (broader: also blocks `.ssh/*`, `.aws/*`, `/opt/trinity/*`, etc.; DELETE also refuses directories holding a protected path) BEFORE proxying to the agent-server, so a future router/proxy gap can't bypass the agent-server's check. They forward the normalised path they checked.
 
 **Business Logic**:
 1. Validate path is within workspace
@@ -655,6 +660,9 @@ This feature does not emit real-time events.
 | Agent not running | 400 | "Agent must be running to browse/download files" | Backend |
 | Agent server not ready | 503 | "Agent server not ready. The agent may still be starting up." | Backend |
 | No access permission | 403 | "You don't have permission to access this agent" | Backend |
+| Protected path (edit, backend deny list) | 403 | "Cannot edit protected path: {path}" | Backend |
+| Protected path (mkdir, backend deny list) | 403 | "Cannot create folder in protected path: {path}" | Backend |
+| Protected path (delete, backend deny list incl. holding directories) | 403 | "Cannot delete protected path: {path}" | Backend |
 | Path outside workspace | 403 | "Access denied: only /home/developer accessible" | Agent Server |
 | Protected path (delete) | 403 | "Cannot delete protected path: {name}" | Agent Server |
 | Protected path (edit) | 403 | "Cannot edit protected path: {name}" | Agent Server |
@@ -692,11 +700,13 @@ This feature does not emit real-time events.
 
 ### Protected Path Handling
 **Delete-Protected** (cannot be deleted):
-- `CLAUDE.md`, `.trinity`, `.git`, `.gitignore`, `.env`, `.mcp.json`, `.mcp.json.template`
+- Agent server, by name: `CLAUDE.md`, `.trinity`, `.git`, `.gitignore`, `.env`, `.mcp.json`, `.mcp.json.template`
+- Backend (trinity-enterprise#792): everything on the write deny list, plus directories holding a protected path (`.ssh`, `.aws`, `.gcp`, `.claude`, the home dir). See DELETE above.
 
 **Edit-Protected** (cannot be modified):
-- `.trinity`, `.git`, `.gitignore`, `.env`, `.mcp.json.template`
-- Note: `CLAUDE.md` and `.mcp.json` ARE editable since users need to modify them
+- Agent server: `.trinity`, `.git`, `.gitignore`, `.env`, `.mcp.json`, `.mcp.json.template`, `.credentials.enc`
+- Backend deny list: the above plus `.env.*`, `.ssh/*`, `.aws/*`, `.gcp/*`, `.claude/settings*.json`, `/opt/trinity/*`, `/etc/*`, `/proc/*`, `/sys/*`
+- Note: `CLAUDE.md` IS editable (owners manage agent instructions); `.mcp.json` is not (#590)
 
 ### Rate Limiting
 - Not currently implemented (consider for future if abuse occurs)

@@ -81,7 +81,10 @@ DELETE /api/agents/{n}/files        …/.claude/skills/** OR  │ → the same e
   and the fence above would have been decorative. A delete of an ancestor counts,
   since it removes every skill. The shared deny-list (mirrored in the agent image
   and the guardrails baseline) is untouched, so people can still edit skills in
-  the Files tab.
+  the Files tab. Paths are normalised before the check, so a `//`-prefixed spelling is
+  caught too (trinity-enterprise#792). Since that issue, deleting `.claude` itself
+  is refused for every caller by the backend deny list, because it holds
+  `settings.json`.
 - **A grants table, not a column.** Who granted it and when is the question an
   incident review asks; a row answers it, and later capabilities (ent#590,
   ent#341) share the seam.
@@ -117,4 +120,4 @@ self-modification; the other owner-equivalent routes of ent#629.
 | Side door | `services/agent_service/files.py` (`_touches_skills_dir`, `_require_skill_capability`) | `.claude/skills/**` via `/files` |
 | MCP | `src/mcp-server/src/access.ts` (`SKILL_MANAGER_FENCE`) · `tools/skills.ts` (descriptions) | three-surface sync |
 | UI | `components/SkillManagersPanel.vue` · `stores/skillManagers.js` · `views/Settings.vue` | the grant surface |
-| Tests | `tests/unit/test_ent596_skill_manager.py` (65) · `src/frontend/tests/unit/skillManagersPanel.spec.js` (7, mounted) · `src/mcp-server/src/access.test.ts` (+1) | |
+| Tests | `tests/unit/test_ent596_skill_manager.py` (74) · `src/frontend/tests/unit/skillManagersPanel.spec.js` (7, mounted) · `src/mcp-server/src/access.test.ts` (+1) | |

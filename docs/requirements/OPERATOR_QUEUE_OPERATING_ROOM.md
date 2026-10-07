@@ -381,7 +381,7 @@ These tools allow the system agent or orchestrator agents to process queue items
 - Full question with markdown rendering
 - Context displayed as structured key-value pairs
 - Response controls:
-  - Approval: buttons for each option + optional notes textarea
+  - Approval: buttons for each option + a "Something else" choice (#3242) + notes textarea — optional with an option, required (the instruction) with "Something else"
   - Question: freeform textarea
   - Alert: single "Acknowledge" button + optional notes
 - History of past interactions with this agent (collapsible)

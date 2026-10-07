@@ -997,9 +997,42 @@ SIBLING of the rail, never a rail tab (ruled 2026-09-05); **ent#547 reversed tha
 door, the room restriction and why the 2026-09-05 objections are answered rather than
 dropped. Both read one payload through `composables/usePortalAgentPage.js`.
 Canvas, Files and recent work are **not** duplicated here — they have been rail tabs since
-ent#475/#525. `portalUtils.js::landingThread` is the one rule for which chat you land in,
+ent#475/#525. `portalUtils.js::agentLanding` is the one rule for which chat you land in,
 and the `?agent=` deep link's `resolveAgentLanding` defers to it so the two entry points
-cannot disagree. Main is named by its role in both the tab strip and the header and is
+cannot disagree. Since **ent#784** that rule replaced ent#523's most-recently-active
+`landingThread` with a **precedence**, settled by the operator's 2026-10-05 ruling: a link
+naming a CHAT wins (and never reaches the rule); then a validated `lastOpenSessionId` — the
+ent#621 seam, checked against the principal's own thread list; then the agent's chat
+holding an unsent **draft**, newest `updatedAt` first, where a `new:<agent>` winner lands on
+a new chat (that key IS where the words are) and a thread winner opens that thread; then
+the agent's existing **empty** chat, reused (`agentEmptyChat` — an unarchived,
+non-room thread of this agent with no message sent: no `last_message_at` AND
+`message_count` 0 or absent, since the two fields come from different reads;
+Main first, then newest `created_at`, so list order never decides); then a new,
+empty chat. The write-side twin of that arm is `ensureMainListed`, a GET that
+INSERTS: it now also returns early when the agent already has an empty chat, so
+visiting an agent can never add a SECOND empty row ("at most one empty chat per
+agent at any time"). An agent whose chats are all used still gets its Main on
+the visit, which is the case #2579 was about. The drafts arm reads
+`portalDrafts.js::isDraftedThread` — the SAME predicate `agentsWithDrafts` lights the
+sidebar's agent-row mark from, shared rather than copied so "the mark means click here to
+continue" cannot drift (a room and an **archived** thread are excluded on both sides). The
+drafts map is passed IN by each door (`landOnAgent`, `resolveAgentLanding`), never read
+inside the rule, so it stays pure; `?new=1` outranks the whole precedence. Nothing in it
+mints a row: the drafted-`new:` and fresh arms are both `sessionId: null`, and the empty
+arm opens a row that already exists.
+`landOnAgent` is therefore synchronous, keeps `/workspace/a/:name`, and guards the
+call before writing `activeAgentName`; the composer's mount focus is gated by a
+`focusOnMount` mode (`always` for a gesture, `fine-pointer` for a landing) so an
+unasked-for landing cannot raise a soft keyboard. Because that URL is now where a new chat
+RESTS, three things follow from it. It carries the **rail** like every other chat: the rail
+rules read it as a rail-free page only until the landing has put the named agent on stage
+(`unlandedAgentPage`), and its column is reserved mid-load like `/workspace/c/:id`. Clicking
+the row of the agent whose new chat is **already on stage** is a no-op in `openAgentPage`
+— the push would not re-fire the landing, and clearing `startingNewChat` there sent the
+first message without `new_thread`, i.e. into Main. And a landing that **reuses a chat**
+(the empty one, a remembered one) mounts as a thread, which focuses nothing, so the shell
+hands the caret over under the same pointer rule (`focusLandedComposer`). Main is named by its role in both the tab strip and the header and is
 not renameable; an archived chat stays a tab (ruled “becomes the newest tab”), though you never LAND in one by default;
 an unused Main is filtered from the **sidebar** only (a projection, not a filter on
 `threads`, because the strip must show Main from the first visit).

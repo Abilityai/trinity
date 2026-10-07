@@ -141,3 +141,84 @@ def persist_outbound_group_message(
             "— the message WAS delivered; history will be missing this turn",
             channel, agent_name, exc_info=True,
         )
+
+
+def persist_suppressed_note(
+    agent_name: str,
+    channel: str,
+    session_identifier: Optional[str],
+    idempotency_key: str,
+    first_sent_at: Optional[str],
+) -> None:
+    """Note in the conversation that a send was suppressed by its idempotency key (ent#665).
+
+    Lands in the session the FIRST send was persisted to, so a person reading the
+    thread sees the repeat was stopped. Role `system`, labelled `Trinity`, with
+    `sender_email=None` so it never folds into one person's MEM-001 memory. The
+    message body is not repeated. Fail-soft, like the delivered-turn writers.
+
+    Kept as one function so dropping the note, if it proves noisy, is one call site
+    per sink.
+    """
+    if not session_identifier:
+        logger.info(
+            "[ent#665] suppressed %s send for agent %s not noted in the conversation: "
+            "the first send recorded no session", channel, agent_name,
+        )
+        return
+    # ent#279: the key is agent-authored free text.
+    note = f'Not sent (idempotency key "{idempotency_key}"): already sent at {first_sent_at}.'
+    _staged = get_staged_values()
+    if _staged:
+        note = scrub_text(_staged, note)
+    try:
+        session = db.get_or_create_public_chat_session(agent_name, session_identifier, channel)
+        session_id = session.id if hasattr(session, "id") else session["id"]
+        db.add_public_chat_message(
+            session_id,
+            "system",
+            note,
+            sender_email=None,
+            sender_label="Trinity",
+        )
+    except Exception:
+        logger.error(
+            "[ent#665] failed to note a suppressed %s send for agent %s", channel, agent_name,
+            exc_info=True,
+        )
+
+
+async def record_group_suppression(
+    agent_name: str,
+    channel: str,
+    target_id: str,
+    intent,
+    idempotency_key: str,
+) -> None:
+    """Audit + conversation note for a group send its idempotency key suppressed (ent#665)."""
+    from services.platform_audit_service import AuditEventType, platform_audit_service
+
+    try:
+        await platform_audit_service.log(
+            event_type=AuditEventType.PROACTIVE_MESSAGE,
+            event_action="group_message_suppressed",
+            source="api",
+            actor_agent_name=agent_name,
+            target_type="group",
+            target_id=target_id,
+            details={
+                "channel": channel,
+                "idempotency_key": idempotency_key,
+                "first_sent_at": intent.first_sent_at,
+                "first_execution_id": intent.first_execution_id,
+            },
+        )
+    except Exception as e:
+        logger.warning("[ent#665] failed to audit a suppressed group send: %s", e)
+    persist_suppressed_note(
+        agent_name=agent_name,
+        channel=channel,
+        session_identifier=intent.first.get("session_identifier"),
+        idempotency_key=idempotency_key,
+        first_sent_at=intent.first_sent_at,
+    )

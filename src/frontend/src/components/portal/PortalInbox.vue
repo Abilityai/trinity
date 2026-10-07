@@ -182,7 +182,7 @@
           @back="back"
           @open-chat="(url) => url && $emit('open-chat', url)"
           @reply="(url, reply) => url && $emit('reply', url, reply)"
-          @open-thread="(t) => $emit('open-chat', `/workspace/c/${t.id}`)"
+          @open-thread="(t) => $emit('open-thread', t)"
         />
         <!-- #3060: while the list has no verdict there is nothing to pick yet —
              the pane's placeholder, as the stage skeleton draws it. -->
@@ -242,7 +242,10 @@ const props = defineProps({
   // verdict: a false result is `inbox-pane-read-error`.
   markRead: { type: Function, default: null },
 })
-const emit = defineEmits(['refresh', 'open-chat', 'reply', 'update:preview', 'open-menu', 'open-canvas'])
+// `open-thread` carries `{ id, agent_name }`, not a URL: the chat can be one this
+// shell has not listed yet (a Discuss chat, trinity-enterprise#747), and only the
+// shell's `openThread` adopts an id the thread list does not hold (#3140).
+const emit = defineEmits(['refresh', 'open-chat', 'open-thread', 'reply', 'update:preview', 'open-menu', 'open-canvas'])
 
 const store = useClientPortalStore()
 const route = useRoute()

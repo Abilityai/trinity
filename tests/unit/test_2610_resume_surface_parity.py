@@ -36,6 +36,8 @@ COVERED = {
     "agent_sessions": "db/sessions.py",
     "enterprise_portal_sessions": "client_portal/db.py",
     "enterprise_room_participants": "shared_sessions/db.py",
+    # #3127: per-user /chat memory on pull pilots.
+    "chat_sessions": "db/chat.py",
 }
 
 
@@ -128,7 +130,7 @@ def test_the_chat_session_marker_is_swept_exactly_once():
     """#2958: the FOURTH surface stores its resume handle in agent memory, not a
     table, so the schema anchor above cannot see it. The agent publishes it to a
     marker file and the sweep reads it through `_chat_session_keep_id`; one call
-    in `_sweep_agent` is the property. The three-table count above is unchanged
+    in `_sweep_agent` is the property. The table count above is unaffected
     (the reader never calls a table accessor)."""
     sweep_src = (BACKEND / "services" / "session_cleanup_service.py").read_text()
     body = sweep_src[sweep_src.index("def _sweep_agent"):]

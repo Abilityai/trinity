@@ -123,6 +123,12 @@ _ALLOWED_USES = {
         "the canary alert label — a DOCUMENTED deliberate write (#1987): the "
         "docstring says 'This tier can WRITE' and why a read-only variant would "
         "return None on exactly the un-configured install the tier exists to label",
+    ("services/instance_identity.py", "get_instance_id",
+     "get_or_create_installation_id"):
+        "the agent-volume ownership stamp (#3214) — a volume created while the "
+        "id does not exist yet would carry no owner and could never be reclaimed "
+        "by the #1581 sweep, so the create path must make it exist; the id is the "
+        "same write-once value the label tier above already mints (ent#545)",
     ("services/telemetry_sharing_service.py", "set_consent",
      "get_or_mint_sharing_id"):
         "opting IN mints the egress id (opting out deletes it in the same "

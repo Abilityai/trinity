@@ -3,8 +3,10 @@
 ## Overview
 
 The **backend** deterministically emits `agent.task.completed` / `agent.task.failed`
-at **every CAS-won execution terminal**, delivered over the existing EVT-001
-subscription-dispatch machinery. A caller/orchestrator that subscribed to a worker's
+at **every CAS-won execution terminal** of a task-path run, delivered over the existing EVT-001
+subscription-dispatch machinery. The one exception is the synchronous `/chat` route
+(`chat_execution_service.run_chat_turn` — a sequential `chat_with_agent`, unless the #946
+pull pilot reroutes it through `/task`): it writes its terminal without emitting. A caller/orchestrator that subscribed to a worker's
 `agent.task.*` events is **woken with an automatic report-back task** when a long async
 task finishes — instead of polling `get_execution_result`. Implements the missing half
 of `TARGET_ARCHITECTURE.md` §Async-First Communication and is a down-payment on Epic

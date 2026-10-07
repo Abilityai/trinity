@@ -198,9 +198,11 @@ The `can_share` gate matches the backend's owner-only `PUT` check, so a non-owne
 
 ## Agent-Side Enforcement (`docker/base-image/`)
 
-This is where guardrails actually *bite*. All hooks are root-owned in `/opt/trinity/hooks/` and registered permanently in the base image's `~/.claude/settings.json` — the agent cannot deregister them (the settings file is itself in `path_deny`).
+This is where guardrails actually *bite*. All hooks are root-owned in `/opt/trinity/hooks/` and registered in root-owned `/etc/claude-code/managed-settings.json` (ent#345) — the agent cannot deregister them without `sudo` (the file is also in `path_deny`).
 
-### Hook registration — `hooks/claude-settings.json`
+### Hook registration — `hooks/managed-settings.json`
+
+Each hook registers in exec form (trinity-enterprise#787): `"command": "/usr/bin/env"`, `"args": ["-i", "HOME=/home/developer", "/usr/local/bin/python3", "-I", "-S", "/opt/trinity/hooks/<hook>.py"]`, `"timeout": 30`. No shell runs, so `CLAUDE_CODE_SHELL_PREFIX` does not wrap the hook; `env -i` drops inherited `PYTHON*`/`LD_*` variables and `-I -S` drops the user site. The file's policy `env` pins `CLAUDE_CODE_SHELL_PREFIX` to `""`, and `CLAUDE_CODE_SHELL_PREFIX` is in `execution_env.PROTECTED_KEYS`, so `.env` cannot set it. The image build runs `/opt/trinity/hooks/guard002-smoke.py`, which executes each hook exactly as this file registers it (`[command] + args`) against known inputs and fails the build otherwise. None of this is a boundary against an agent using its passwordless `sudo`.
 
 | Event | Matcher | Hook(s) |
 |-------|---------|---------|
@@ -228,7 +230,7 @@ Loads config → compiles `bash_deny` (baseline regex) → first match wins → 
 
 ### File deny — `hooks/file-guardrail.py` (77 lines)
 
-`_normalise(path)` → absolute (expands `~`, prefixes `/home/developer` for relative). `_matches_glob` runs `fnmatch` against **both** the full path and the basename, so `.env` patterns catch nested copies. Checks `path_deny` (baseline globs) then `extra_path_deny` (literals). `deny` with `tool`, `path`, `pattern`.
+`_normalise(path)` → absolute (expands `~`, prefixes `/home/developer` for relative, collapses any run of leading slashes to one — `normpath` keeps exactly two, which made `//home/developer/.ssh/x` match no absolute pattern, trinity-enterprise#792; `read-only-guard.py` normalises the same way). `_matches_glob` runs `fnmatch` against **both** the full path and the basename, so `.env` patterns catch nested copies. Checks `path_deny` (baseline globs) then `extra_path_deny` (literals). `deny` with `tool`, `path`, `pattern`.
 
 ### Credential scanner — `hooks/output-scanner.py` (58 lines, PostToolUse)
 
@@ -284,7 +286,7 @@ Immutable, root-owned `0444`. Contents:
 
 Guardrails and read-only mode are **independent, complementary** layers:
 
-- The read-only feature's config file `~/.trinity/read-only-config.json` is itself **protected by guardrails** — both by `path_deny` (block Write/Edit) *and* by a dedicated `bash_deny` regex (block shell redirects/pipes at it). Defense-in-depth: an agent can't disable read-only mode by overwriting its own config.
+- The read-only feature's live config `/opt/trinity/read-only-config.json` is root-owned `0444` in a root-owned directory, written by the backend through a root `docker exec`, and covered by `path_deny` via `/opt/trinity/*` (trinity-enterprise#787). The home copy `~/.trinity/read-only-config.json` decides only while the root file is missing (no effect while it exists) and is protected by `path_deny` (block Write/Edit) *and* by a dedicated `bash_deny` regex (block shell redirects/pipes at it).
 - `file-guardrail.py` and `read-only-guard.py` both run on the same `Edit|Write|…` matcher. Guardrails fire **regardless of read-only state** — disabling read-only does *not* re-open `path_deny` targets.
 - `#887` moved the read-only guard into the base image (`/opt/trinity/hooks/`, root-owned) and made it fail-closed via the same `run_hook()` wrapper documented above.
 
@@ -298,6 +300,7 @@ See [read-only-mode.md](read-only-mode.md).
 |------|----------|
 | `tests/unit/test_guardrails.py` | Baseline bash deny-list (dangerous blocked / normal allowed), required credential patterns, router `_validate_guardrails_payload` bounds, `write-runtime-config.py` sanitization + clamping + malformed-env handling, migration idempotency |
 | `tests/test_files_guardrail_bypass.py` | AISEC-C2 RCE-by-config bypass repro, `PUT /files` deny-list coverage for protected paths, credential-inject allowlist rejection |
+| `tests/unit/test_ent787_guardrail_exec_form.py` | Exec-form registration shape of the four GUARD-002 hooks, no shell-prefix wrap, each hook's verdicts under the registered invocation and a hostile env, smoke-script coverage, `CLAUDE_CODE_SHELL_PREFIX` in `PROTECTED_KEYS` (trinity-enterprise#787) |
 
 ---
 
@@ -329,7 +332,8 @@ See [read-only-mode.md](read-only-mode.md).
 | Restart inject | `src/backend/services/agent_service/lifecycle.py` | 383-390 |
 | Env match check | `src/backend/services/agent_service/helpers.py` | ~408-430 |
 | Baseline | `docker/base-image/hooks/guardrails-baseline.json` | — |
-| Hook registration | `docker/base-image/hooks/claude-settings.json` | — |
+| Hook registration | `docker/base-image/hooks/managed-settings.json` | — |
+| Registration smoke (build) | `docker/base-image/hooks/guard002-smoke.py` | — |
 | Hook lib | `docker/base-image/hooks/lib.py` | 1-103 |
 | Bash hook | `docker/base-image/hooks/bash-guardrail.py` | 1-54 |
 | File hook | `docker/base-image/hooks/file-guardrail.py` | 1-77 |

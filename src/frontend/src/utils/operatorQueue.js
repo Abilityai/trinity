@@ -43,6 +43,52 @@ export function optionsOf(item) {
 }
 
 /**
+ * #3242: the ONE platform-reserved approval answer — "none of the offered
+ * options; the instruction is in `response_text`". Mirrors `SOMETHING_ELSE` in
+ * `src/backend/services/operator_queue_choices.py` and
+ * `src/mcp-server/src/types.ts` (parity-tested). Never shown raw to a person:
+ * see `decisionLabel`.
+ */
+export const SOMETHING_ELSE = '(something else)'
+export const SOMETHING_ELSE_LABEL = 'Something else'
+
+/** The ingestion clamp's placeholder (#1632) — a record, never a choice. */
+export const OPTIONS_DROPPED_MARKER = '(options omitted: exceeded size cap)'
+
+/**
+ * The agent's own options as pickable chips: `optionsOf` minus the reserved
+ * literal (rendered once, by the surface, as its own chip) and the size-cap
+ * marker. `optionsOf` and `queueResponseKind` stay unfiltered — they must agree
+ * with the sink about whether an approval offered anything.
+ *
+ * @param {{options?: unknown}|undefined} item
+ * @returns {string[]}
+ */
+export function offeredChips(item) {
+  return optionsOf(item).filter((o) => o !== SOMETHING_ELSE && o !== OPTIONS_DROPPED_MARKER)
+}
+
+/** A recorded decision as a person reads it: the reserved value is "Something else". */
+export function decisionLabel(response) {
+  return response === SOMETHING_ELSE ? SOMETHING_ELSE_LABEL : response
+}
+
+/**
+ * Is this approval decided only by its options (a platform-minted approval)?
+ * The sink refuses the reserved answer there (`not_off_menu`), so no surface
+ * offers the chip. Every projection — the Workspace's and the operator queue's
+ * list and item — carries the sink's own predicate as `decided_by_options`, and
+ * that boolean wins. The `gate-` prefix is only the fallback for an item that
+ * lacks the field (a payload from before #3242).
+ */
+export function decidedByOptions(item) {
+  if (!item || typeof item !== 'object') return false
+  if (typeof item.decided_by_options === 'boolean') return item.decided_by_options
+  const id = String(item.request_id || item.id || '').trim().toLowerCase()
+  return id.startsWith('gate-')
+}
+
+/**
  * Which controls an item gets — by TYPE, and total:
  *
  *   approval with usable options → 'approval'    (option buttons → note → Send)
@@ -107,6 +153,9 @@ export function buildQueueResponse({ kind, option, note = '', answer = '' } = {}
     case 'approval': {
       const opt = typeof option === 'string' ? option : option == null ? '' : String(option)
       if (!opt.length) return null
+      // #3242: the reserved answer needs the instruction — the agent cannot act
+      // on "none of these" alone.
+      if (opt === SOMETHING_ELSE && !(typeof note === 'string' && note.trim())) return null
       return queueResponseBody(opt, note)
     }
     case 'question': {
@@ -327,29 +376,46 @@ export const QUEUE_RESPONSE_NOT_ADDRESSEE =
  * item is still pending.
  *
  * `{ kind, label, who, when }`:
- *   - `kind` — `answered | cancelled | expired`: the ledger's `disposition`,
+ *   - `kind` — `answered | dismissed | cancelled | expired`: the ledger's
+ *     `disposition` (`dismissed`, trinity-enterprise#748: the person it was
+ *     addressed to chose not to answer; its status is `cancelled`),
  *     else the terminal status (a row that ended before the ledger). The
  *     Workspace projection's own `status` (`answered`) reads the same way.
  *   - `who` — the person, for the Operating Room (`disposed_by_email`, or a
  *     legacy answer's `responded_by_email`); the Workspace projection's coarse
- *     `ended_by` (`you` / `the operator`); `timeout` for an expiry; `null` when
- *     the platform does not know.
+ *     `ended_by` (`you` / `the operator`); `timeout` for an expiry; `the
+ *     platform` for a row the platform itself ended (#3246: `disposed_by =
+ *     'platform'`, or the projection's `ended_by = 'platform'`); `null` when the
+ *     platform does not know.
+ *   - `reason` — #3246: the platform's ending in words (`condition_cleared`,
+ *     `superseded`); `null` for every other ending. A platform ending is never a
+ *     person's answer and never a timeout.
+ *   - `alert` — the row is an alert: its expiry reads "nobody acted on it",
+ *     because nobody was asked anything.
  *   - `when` — the ledger's `disposed_at`, the projection's `ended_at`, or a
  *     legacy answer's `responded_at`. NEVER `created_at`: that is when the ask
  *     was filed, and showing it as the ending time is the defect this replaces.
  */
 export const ENDING_LABELS = Object.freeze({
   answered: 'Answered',
+  dismissed: 'Dismissed',
   cancelled: 'Cancelled',
   expired: 'Expired',
 })
 
+/** #3246 — why the platform ended a row, in words. An unknown reason token
+ *  falls back to nothing rather than being printed raw. */
+export const PLATFORM_ENDING_REASONS = Object.freeze({
+  condition_cleared: 'the condition cleared',
+  superseded: 'superseded by a newer reading',
+})
+
 function endingKind(item) {
   const d = item.disposition
-  if (d === 'answered' || d === 'cancelled' || d === 'expired') return d
+  if (d === 'answered' || d === 'dismissed' || d === 'cancelled' || d === 'expired') return d
   const s = item.status
   if (s === 'responded' || s === 'acknowledged' || s === 'answered') return 'answered'
-  if (s === 'cancelled' || s === 'expired') return s
+  if (s === 'dismissed' || s === 'cancelled' || s === 'expired') return s
   return null
 }
 
@@ -359,8 +425,12 @@ export function queueEnding(item) {
   if (!kind) return null
   const when = item.disposed_at || item.ended_at || (kind === 'answered' ? item.responded_at : null) || null
   let who = null
+  let reason = null
   if (kind === 'expired') {
     who = 'timeout'
+  } else if (item.disposed_by === 'platform' || item.ended_by === 'platform') {
+    who = 'the platform'
+    reason = PLATFORM_ENDING_REASONS[item.disposition_reason] || null
   } else if (item.ended_by === 'you') {
     who = 'you'
   } else if (item.ended_by === 'operator') {
@@ -368,15 +438,47 @@ export function queueEnding(item) {
   } else {
     who = item.disposed_by_email || (kind === 'answered' ? item.responded_by_email : null) || null
   }
-  return { kind, label: ENDING_LABELS[kind], who, when }
+  return { kind, label: ENDING_LABELS[kind], who, when, reason, alert: item.type === 'alert' }
 }
 
 /** The ending in words: "Cancelled by op@…", "Answered by you",
- *  "Expired — nobody answered in time", or the bare label when nobody is known. */
+ *  "Ended by the platform — the condition cleared", "Expired — nobody answered
+ *  in time" ("nobody acted on it" for an alert), or the bare label when nobody
+ *  is known. */
 export function queueEndingText(ending) {
   if (!ending) return ''
-  if (ending.kind === 'expired') return `${ending.label} — nobody answered in time`
+  if (ending.kind === 'expired') {
+    return `${ending.label} — ${ending.alert ? 'nobody acted on it' : 'nobody answered in time'}`
+  }
+  if (ending.who === 'the platform') {
+    return ending.reason ? `Ended by the platform — ${ending.reason}` : 'Ended by the platform'
+  }
   return ending.who ? `${ending.label} by ${ending.who}` : ending.label
+}
+
+function relativeAgo(iso, now) {
+  const then = new Date(iso).getTime()
+  if (Number.isNaN(then)) return null
+  const diffMin = Math.floor((now - then) / 60000)
+  if (diffMin < 1) return 'just now'
+  if (diffMin < 60) return `${diffMin}m ago`
+  const diffHr = Math.floor(diffMin / 60)
+  if (diffHr < 24) return `${diffHr}h ago`
+  return `${Math.floor(diffHr / 24)}d ago`
+}
+
+/**
+ * #3246 — a pending platform alert is ONE row per condition, updated in place by
+ * every new reading, so a row seen many times must not read as a fresh alert.
+ * "seen N times · last seen 5m ago" when `context.seen_count > 1`; `''` for an
+ * ended row, a row seen once, and anything that is not an alert.
+ */
+export function queueSeenLine(item, now = Date.now()) {
+  if (!item || item.status !== 'pending' || item.type !== 'alert') return ''
+  const n = Number(item.context && item.context.seen_count)
+  if (!Number.isInteger(n) || n < 2) return ''
+  const ago = item.last_seen_at ? relativeAgo(item.last_seen_at, now) : null
+  return ago ? `seen ${n} times · last seen ${ago}` : `seen ${n} times`
 }
 
 /** What the resolved feed sorts by (#627 AC6): when the item ended; a legacy

@@ -320,6 +320,7 @@ async def test_the_route_sends_to_the_resolved_person(ra, monkeypatch):
 
     class _Result:
         success, channel, message_id, error = True, "web", "m1", None
+        sent = suppressed_by = first_sent_at = first_execution_id = None  # ent#665
 
     async def fake_send(**kwargs):
         sent.update(kwargs)

@@ -1,5 +1,21 @@
 // Shared helpers for the client-portal chat shell (#138).
 
+// ent#784: the landing rule's drafts arm reads the drafts module's predicate
+// rather than a second copy of it. `portalDrafts.js` imports nothing, so this
+// edge adds no cycle — and it must stay that way: `portalInbox.js` already
+// imports THIS file, so an import of `portalInbox` from either of these two
+// would close one.
+import { draftedLandingFor } from './portalDrafts'
+
+// ent#621: the key map is the single declaration of every Workspace chord, so
+// the two hotkey helpers below delegate to it rather than keeping a second
+// definition of "⌘J". That closes a cycle with `portalKeymap.js` (which reuses
+// `isMacLike` and `nextActiveIndex` from here) — benign, and it must STAY
+// benign: neither module may touch an import of the other at module-evaluation
+// time. Both init orders are exercised, by `workspaceKeymap.spec.js` (map
+// first) and `portalChatTabsAndTitles.spec.js` (utils first).
+import { resolveWorkspaceKey, findBinding, chordLabel } from './portalKeymap'
+
 // Deterministic per-agent color — used for the avatar tint and the small thread
 // color dots in the sidebar so a thread visually ties to its agent.
 export function agentColor(name) {
@@ -145,7 +161,15 @@ export const AGENT_COLLAPSE_LIMIT = 5
 // trinity-enterprise#657: an agent holding an UNSENT DRAFT is lifted the same
 // way — "a Draft mark visible without opening the chat" is false for a row
 // hidden under "N more". Same append-not-float rule, same reason.
-export function visibleAgentRows(roster, { expanded = false, askCounts = {}, draftAgents = null, limit = AGENT_COLLAPSE_LIMIT } = {}) {
+//
+// ent#621: `keep` is one more member of the same family — the agent you are
+// LOOKING AT is never collapsed out. It is the belt rather than the braces: the
+// sidebar auto-expands when a key walk lands beyond the fold (Decision 27/37),
+// and this is what holds the active row visible in a list the person collapsed
+// by hand.
+export function visibleAgentRows(roster, {
+  expanded = false, askCounts = {}, draftAgents = null, limit = AGENT_COLLAPSE_LIMIT, keep = null,
+} = {}) {
   const list = Array.isArray(roster) ? roster : []
   if (expanded) return list
 
@@ -154,7 +178,7 @@ export function visibleAgentRows(roster, { expanded = false, askCounts = {}, dra
   const counts = askCounts || {}
   const drafted = draftAgents instanceof Set ? draftAgents : new Set()
   const waiting = list.filter((a) => a?.name && !shown.has(a.name)
-    && ((Number(counts[a.name]) || 0) > 0 || drafted.has(a.name)))
+    && ((Number(counts[a.name]) || 0) > 0 || drafted.has(a.name) || a.name === keep))
   return waiting.length ? [...head, ...waiting] : head
 }
 
@@ -431,6 +455,48 @@ export function agentHasMain(threads, agentName) {
     .some((t) => t && !t.is_room && t.agent_name === agentName && !!t.is_main)
 }
 
+/**
+ * ent#784 arm 4 — has this agent an EMPTY chat already? Its id, or null.
+ *
+ * The operator's 2026-10-05 ruling: opening an agent must not create a new
+ * chat every time, so an empty one is REUSED and at most one exists per agent
+ * at any moment. "Empty" is the same "unused" test ent#523 applied to an
+ * unused Main, widened to any row that fits it: an unarchived, non-room thread
+ * of this agent with no message sent — no `last_message_at`, and
+ * `message_count` 0 or absent. Both halves are required, because the two
+ * fields come from different reads: the cross-agent batch omits
+ * `message_count` entirely, so counting an absent count as "used" would make
+ * every row non-empty there, and treating a present count of 2 as empty
+ * because `last_message_at` is missing would land the person in a used chat.
+ *
+ * Deterministic when legacy data holds several: **Main first**, then the newest
+ * `created_at`, then the id — so the answer never depends on list order. Main
+ * first is not a tiebreak detail: it is the row the tab strip pins and the one
+ * every post-ent#523 pair already has, so reusing anything else would leave an
+ * unused Main sitting beside the chat being typed in.
+ *
+ * Pure, like the rest of the rule: it reads the list it is handed and mints
+ * nothing. The matching promise on the WRITE side is `Portal.vue`'s
+ * `ensureMainListed`, which must not add a Main to an agent that already has
+ * an empty chat.
+ */
+export function agentEmptyChat(threads, agentName) {
+  if (!agentName) return null
+  const empty = (Array.isArray(threads) ? threads : []).filter((t) => t
+    && !t.is_room && t.agent_name === agentName && !t.archived_at
+    && !t.last_message_at && !Number(t.message_count || 0))
+  if (!empty.length) return null
+  const ts = (t) => {
+    const n = Date.parse(t.created_at || '')
+    return Number.isFinite(n) ? n : 0
+  }
+  const id = (t) => t.id || t.session_id || ''
+  empty.sort((a, b) => (b.is_main ? 1 : 0) - (a.is_main ? 1 : 0)
+    || ts(b) - ts(a)
+    || String(id(a)).localeCompare(String(id(b))))
+  return id(empty[0]) || null
+}
+
 // #2579: is this thread inside the window where a generated title may still
 // land? Two `touch_portal_session(added=1)` calls happen per exchange (the
 // user's message and the reply), and `_title_plan` gates on the PRE-turn
@@ -473,14 +539,16 @@ export function moreTabsLabel(n) {
   return `${n} more`
 }
 
-// --- New chat hotkey (ent#451) ----------------------------------------------
+// --- New chat hotkey (ent#451, now one entry in the ent#621 map) ------------
 // ⌘J on Mac, Ctrl+J elsewhere — ruled 2026-09-06 (⌘N is the browser's, ⌘⇧O
 // declined). Plain modifier only: Shift/Alt variants are someone else's.
+//
+// The predicate is kept (its callers and its truth table are the contract) but
+// the RULE now lives in `portalKeymap.js` with the other eight chords, so
+// "what ⌘J means" has one answer. The map adds the physical `KeyJ` arm, which
+// only widens the set: a layout whose `key` is not `j` now works too.
 export function isNewChatHotkey(e) {
-  if (!e || typeof e.key !== 'string') return false
-  if (e.key.toLowerCase() !== 'j') return false
-  if (e.shiftKey || e.altKey) return false
-  return !!(e.metaKey || e.ctrlKey) && !(e.metaKey && e.ctrlKey)
+  return resolveWorkspaceKey(e) === 'new-chat'
 }
 
 export function isMacLike(platform) {
@@ -515,7 +583,7 @@ export function titleGenerationNotice(health) {
 }
 
 export function newChatHotkeyLabel(platform) {
-  return isMacLike(platform) ? '⌘J' : 'Ctrl+J'
+  return chordLabel(findBinding('new-chat').chord, platform)
 }
 
 // #2101: bounded briefing hint grid. Order deterministically — a card with a
@@ -565,21 +633,18 @@ function isTransportError(err) {
     || code === 'ECONNABORTED' || code === 'ERR_NETWORK' || code === 'ETIMEDOUT'
 }
 
-export function resolveAgentLanding({ agent, forceNew = false, agents = [], threads = [] } = {}) {
+export function resolveAgentLanding({ agent, forceNew = false, agents = [], threads = [], drafts = null } = {}) {
   if (!agent || typeof agent !== 'string') return null
   if (!Array.isArray(agents) || !agents.some((a) => a && a.name === agent)) return null
+  // ent#784: the same rule the sidebar's agent row uses (`agentLanding`), not a
+  // second one — a deep link and a sidebar click must land in the same place.
+  // `forceNew` is the one way past the whole precedence: `?new=1` says "a fresh
+  // chat" in so many words, so it outranks a waiting draft and an empty chat
+  // alike. Without it this door passes no `lastOpenSessionId` (a deep link
+  // carries no session memory) but DOES pass the drafts map, so a deep link and
+  // a sidebar click land on the same words.
   if (forceNew) return { agentName: agent, sessionId: null }
-
-  // ent#523: the same rule the sidebar's agent row uses (`landingThread`), not
-  // a second one. This used to take the first row of an already-sorted list,
-  // which agreed with "most recent" by accident; once Main exists, an unused
-  // Main sorts last on recency and "first row" would skip it, so a deep link
-  // and a sidebar click could land a first-time visitor in different places.
-  const latest = landingThread(threads, agent)
-  return {
-    agentName: agent,
-    sessionId: latest ? (latest.id || latest.session_id || null) : null,
-  }
+  return agentLanding({ agentName: agent, threads, drafts })
 }
 
 // ent#358: the Workspace is now the ONLY continuous-conversation surface, so a
@@ -1105,9 +1170,12 @@ export function searchAgents(roster, query, {
   draftAgents = null,
   expanded = false,
   limit = SIDEBAR_AGENT_RESULT_LIMIT,
+  // ent#621: the active agent is held in its own result list for the same
+  // reason #2424 holds an asked one — see `visibleAgentRows`.
+  keep = null,
 } = {}) {
   const { items } = filterAgentCandidates(roster, query, { requireMentionable: false })
-  const visible = visibleAgentRows(items, { expanded, askCounts, draftAgents, limit })
+  const visible = visibleAgentRows(items, { expanded, askCounts, draftAgents, limit, keep })
   return {
     items,
     visible,
@@ -1269,11 +1337,17 @@ export function resolveComposerKey({
   // A faithful reproduction of Vue's `.exact`: any modifier falls through
   // unprevented and inserts a newline, exactly as today.
   const plainEnter = key === 'Enter' && !shiftKey && !ctrlKey && !metaKey && !altKey
+  // ent#621 (Decision 36): the popup owns BARE arrows only. Claiming `⌥↓` —
+  // and `preventDefault`ing it, which is what the caller does with `move-down`
+  // — was a handler claiming a chord it never declared, so the Workspace's
+  // switch-chat key died over an open @-popup. A modified arrow now falls
+  // through to `pass`, where the shell's declared binding can have it.
+  const bareArrow = !shiftKey && !ctrlKey && !metaKey && !altKey
 
   if (open) {
     if (key === 'Escape') return 'dismiss'
-    if (key === 'ArrowDown') return hasCandidates ? 'move-down' : 'close'
-    if (key === 'ArrowUp') return hasCandidates ? 'move-up' : 'close'
+    if (key === 'ArrowDown' && bareArrow) return hasCandidates ? 'move-down' : 'close'
+    if (key === 'ArrowUp' && bareArrow) return hasCandidates ? 'move-up' : 'close'
     if (key === 'Tab' && !shiftKey) return hasCandidates ? 'accept' : 'pass'
     if (plainEnter && hasCandidates && hasActive) return 'accept'
     if (CARET_KEYS.has(key)) return 'close'
@@ -1748,32 +1822,57 @@ export function feedbackAcknowledgement(captureFeedback) {
   return FEEDBACK_REACHED_AGENT.has(captureFeedback) ? FEEDBACK_SENT_TEXT : FEEDBACK_RECORDED_TEXT
 }
 
-// --- Agents at the centre (ent#523) ------------------------------------------
+// --- Agents at the centre (ent#523, landing rule replaced by ent#784) --------
 
-// Which chat opening an agent lands you in. Most recently ACTIVE wins, and Main
-// is the floor — never a blank stage, and never "the oldest thread happened to
-// sort first". Returns null only when the caller has no chats with this agent at
-// all, which the caller reads as "open Main once the list arrives".
+// Where opening an agent lands you. ONE rule, called by every door that has to
+// RESOLVE a landing: the sidebar/rail row via `landOnAgent`, the `?agent=` deep
+// link via `resolveAgentLanding`, and — since ent#621 — the switch-agent KEYS,
+// which call `landOnAgent` with the `lastOpenSessionId` arm 2 reads. The gesture
+// doors still do not call this, because they already mean "fresh": New chat, the
+// agent picker, and ⌘J.
 //
-// Deliberately NOT `agentChatTabs()[0]`: that pins Main to the front, so it
-// would land you in Main every time regardless of where you were last — the
-// exact behaviour AC 1 replaced.
-export function landingThread(threads, agentName) {
-  if (!agentName) return null
-  const mine = (Array.isArray(threads) ? threads : [])
-    .filter((t) => t && !t.is_room && t.agent_name === agentName && !t.archived_at)
-  if (!mine.length) return null
-  const ts = (t) => {
-    const iso = t.last_message_at || t.created_at
-    const n = iso ? new Date(iso).getTime() : 0
-    return Number.isNaN(n) ? 0 : n
+// ent#784 reverses ent#523's rule: the default is a NEW, empty chat
+// (`sessionId: null`), because most visits to an agent start new work and
+// resuming cost two actions every time.
+//
+// The operator's 2026-10-05 ruling on ent#784 settles the precedence, and
+// these are the arms, in order:
+//
+//   1. a link that names a CHAT opens that chat — not this function's job, and
+//      unchanged (the `/workspace/c/:id` route never reaches here);
+//   2. `lastOpenSessionId`, the seam ent#621's agent-switch keys pass. Honoured
+//      only when it still names a live, unarchived chat of THIS agent in
+//      `threads` — the principal's own list — so a stale or forged id falls
+//      through rather than landing somewhere it should not (the #3140 class);
+//   3. the agent's chat holding an unsent DRAFT, newest edit first
+//      (`draftedLandingFor`). A draft mark on the agent's row has to mean
+//      "click here to continue", so this and the mark share one predicate
+//      rather than two rules that agree today;
+//   4. the agent's existing EMPTY chat, reused rather than adding another one;
+//   5. a new chat.
+//
+// Arms 3 and 5 mint nothing server-side: a drafted `new:` chat and a fresh one
+// are both `sessionId: null`, and the row is born on the first send
+// (`newThread`, ent#451). Arm 4 opens a row that already exists. So landing
+// repeatedly, however often, accumulates no empty chats.
+//
+// `drafts` is the drafts store's map (`{ key: { text, updatedAt } }`) passed in
+// by the caller, never read from the store here: this stays a pure function
+// every door can test without mounting the shell. Omitting it simply disables
+// arm 3 — the old behaviour — rather than throwing.
+export function agentLanding({ agentName, threads = [], lastOpenSessionId = null, drafts = null } = {}) {
+  if (!agentName || typeof agentName !== 'string') return null
+  if (lastOpenSessionId) {
+    const row = (Array.isArray(threads) ? threads : []).find((t) => t && !t.is_room
+      && t.agent_name === agentName && !t.archived_at
+      && (t.id || t.session_id) === lastOpenSessionId)
+    if (row) return { agentName, sessionId: lastOpenSessionId }
   }
-  // An unused Main has no `last_message_at` and would sort last on recency
-  // alone, so a first-time visitor would land on nothing. Falling back to it
-  // explicitly is cheaper to read than a comparator that special-cases zero.
-  const used = mine.filter((t) => t.last_message_at)
-  if (used.length) return used.slice().sort((a, b) => ts(b) - ts(a))[0]
-  return mine.find((t) => t.is_main) || mine[0]
+  const drafted = draftedLandingFor({ agentName, threads, drafts })
+  if (drafted) return { agentName, sessionId: drafted.sessionId }
+  const empty = agentEmptyChat(threads, agentName)
+  if (empty) return { agentName, sessionId: empty }
+  return { agentName, sessionId: null }
 }
 
 // The sidebar's agent order (ent#523 AC 6).

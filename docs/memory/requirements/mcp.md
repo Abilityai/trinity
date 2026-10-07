@@ -904,8 +904,19 @@ revision — the kind is a label inside the existing envelope.
   requirements builder both doors share — a 402 built differently from the later
   verify is a rejection the caller cannot act on. `resource.url` names **this**
   door (`/a2a/{name}`), not the paid one: an x402 token signs the resource URL,
-  so a token minted against the paid chat door cannot authorize an A2A call. A
-  rejected token answers **403** with a `reject` log row.
+  so a token minted against the paid chat door cannot authorize an A2A call, and
+  its **origin** is the shared public origin (`utils/public_url.py`), not
+  `request.base_url` (#3215). `accepts[0].scheme` is the plan's own scheme, so a
+  card (fiat) plan is payable here too. A rejected token answers **403** with a
+  `reject` log row.
+- **FR-4a — The reply Task carries the receipt where a client looks (#3215)**:
+  the x402 metadata's primary location is **`status.message.metadata`** — the
+  spec location, which the provider SDK's own `X402A2AUtils` reads — and it is
+  **mirrored** onto the Task's top-level `metadata` from the same assignment (the
+  same dict object, so the two cannot drift). Without the mirror a strictly typed
+  client renders a settled, charged turn as `metadata: null`. A **free** turn
+  emits no `metadata` key at all, so unpaid Task bytes and the idempotency
+  snapshots built from them are unchanged.
 - **FR-5 — Metadata-first token carriage**: the token is read from the A2A
   message metadata (`x402.payment.payload`) first and from the deprecated
   `payment-signature` header only as a fallback, matching the provider SDK's own
@@ -972,7 +983,9 @@ registers a dedicated `chat_with_<slug>` tool — functionally identical to `cha
 with the agent name pre-filled — so a curated, well-known agent surfaces as a named tool
 instead of requiring `list_agents` + `chat_with_agent`. Toggling adds/removes the tool at
 runtime with **no MCP-server restart**. The flag publishes a surface only; execution always
-runs the same access gate, so ownership/sharing is never bypassed.
+runs the same access gate, so ownership/sharing is never bypassed. Each dedicated tool's
+description also carries the delegation contract verbatim (abilityai/trinity-enterprise#568,
+[scheduling.md §37.5](scheduling.md#375-the-delegation-contract-taught-where-callers-read-abilityaitrinity-enterprise568)).
 
 - **FR-1 — Toggle**: `agent_ownership.mcp_exposed INTEGER DEFAULT 0`; owner-only `GET`/`PUT
   /api/agents/{name}/mcp-exposed`. PUT refuses the system agent (403). Getter/setter both guard

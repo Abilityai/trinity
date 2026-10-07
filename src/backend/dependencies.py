@@ -1162,8 +1162,9 @@ PERSON_SCOPES = frozenset({None, "user"})
 def is_person_principal(current_user: User) -> bool:
     """Is this caller a PERSON — the only author an ask's ending may record?
 
-    The endings ledger records `disposed_by` as an enum of two, `person` or
-    `timeout` (trinity-enterprise#611). An agent-scoped key resolves to its OWNER
+    The endings ledger records `disposed_by` as `person`, `timeout` or — for a
+    platform alert the platform itself ended (#3130/#3246) — `platform`; only
+    `person` is a principal (trinity-enterprise#611). An agent-scoped key resolves to its OWNER
     carrying the owner's role, so before this an agent could answer or cancel any
     ask its owner could reach — its own approval included — and the row recorded
     the owner. Recording that as `person` would make the ledger lie.
@@ -1673,6 +1674,19 @@ def get_self_acting_agent(
             },
         )
     return get_authorized_agent(name, current_user)
+
+
+def get_self_agent(current_user: User = Depends(get_current_user)) -> str:
+    """The calling agent, derived from its KEY alone (trinity-enterprise#752).
+
+    For a route an agent calls about itself that names no agent: an
+    agent-scoped key is its own agent, the system key is `trinity-system`.
+    Nothing in the request can name another one — and nothing has to, which
+    matters because a renamed agent's container keeps its old `AGENT_NAME`
+    while its key follows the rename. Every other principal gets
+    `get_self_acting_agent`'s uniform 403, then the access check its 404.
+    """
+    return get_self_acting_agent(acting_agent_name(current_user) or "", current_user)
 
 
 def get_owned_agent(

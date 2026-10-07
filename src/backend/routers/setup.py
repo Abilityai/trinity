@@ -137,6 +137,31 @@ def _take_claim() -> Path:
     return taken
 
 
+async def _deploy_system_agent_after_setup() -> None:
+    """Deploy `trinity-system` now that its owner exists (#3237).
+
+    The boot-time attempt (`main.py::_init_docker_and_system_agent`) runs before
+    /setup has created the admin on every browser-claimed install, fails with
+    "Admin user 'admin' not found", and is never retried. This is that retry.
+
+    Never raises: Starlette runs background tasks in sequence, so a raise here
+    would also skip the first-run seed and the operator intake. Imports are
+    lazy to keep this router's import isolation (see the setup tests).
+    """
+    try:
+        from services.docker_service import docker_client
+        from services.system_agent_service import system_agent_service
+
+        if not docker_client:
+            return
+        result = await system_agent_service.ensure_deployed()
+        logger.info(f"System agent after setup: {result['action']} - {result['message']}")
+        if result.get('status') == 'error':
+            logger.warning(f"  Warning: System agent deployment issue - {result.get('message')}")
+    except Exception as e:
+        logger.error(f"Error deploying system agent after setup: {e}")
+
+
 @router.get("/status")
 async def get_setup_status():
     """
@@ -316,6 +341,12 @@ async def set_admin_password(
             taken_claim.unlink(missing_ok=True)
         except OSError as e:
             logger.warning("Could not delete the setup claim file: %s", type(e).__name__)
+
+    # The system agent (#3237): its boot-time deploy ran before this admin
+    # existed and failed. Scheduled BEFORE the seed — the boot order, and the
+    # seeder hosts its failure alerts on `trinity-system`. Idempotent, so a
+    # later restart is a no-op.
+    background_tasks.add_task(_deploy_system_agent_after_setup)
 
     # First-run seeding: the default Cornelius agent (ent#107) plus the default
     # system manifest (trinity-enterprise#124), sequenced under ONE persisted

@@ -11,7 +11,7 @@ TAG="$(cat ${STATE_DIR}/baked-image-tag 2>/dev/null)"
 CLOUD="$(cat ${STATE_DIR}/cloud 2>/dev/null)"
 
 echo
-echo "  Trinity ${TAG:-} — the sovereign AI agents platform"
+echo "  Trinity ${TAG:-} — the operating system for the AI-native company"
 echo "  ---------------------------------------------------------------"
 
 if [ -f "${STATE_DIR}/firstboot-failed" ]; then
