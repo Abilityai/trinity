@@ -70,8 +70,13 @@ class ForkToOwnRequest(BaseModel):
     destination_repo: str = Field(
         ..., description="Destination repo as owner/name in the user's account or org"
     )
-    github_pat: SecretStr = Field(
-        ..., description="User's GitHub PAT — creates the repo and becomes the agent's git identity"
+    github_pat: Optional[SecretStr] = Field(
+        None,
+        description=(
+            "User's GitHub PAT — creates the repo and becomes the agent's git identity. "
+            "Omit to use the creator's saved personal token (#3164); the platform "
+            "token is never used for a fork"
+        ),
     )
     private: bool = Field(
         True, description="Destination repo visibility (private by default)"
@@ -90,8 +95,8 @@ class ForkToOwnRequest(BaseModel):
 
     @field_validator("github_pat")
     @classmethod
-    def _validate_pat(cls, v: SecretStr) -> SecretStr:
-        return _validate_pat_secret(v)
+    def _validate_pat(cls, v: Optional[SecretStr]) -> Optional[SecretStr]:
+        return None if v is None else _validate_pat_secret(v)
 
 
 class BindAgentRepoRequest(BaseModel):
@@ -114,11 +119,12 @@ class BindAgentRepoRequest(BaseModel):
         ...,
         description="Destination repo as owner/name in the user's account or org",
     )
-    github_pat: SecretStr = Field(
-        ...,
+    github_pat: Optional[SecretStr] = Field(
+        None,
         description=(
             "User's GitHub PAT — creates/authorizes the repo and becomes the "
-            "agent's git identity"
+            "agent's git identity. Omit to use the caller's saved personal token "
+            "(#3164); the platform token is never used"
         ),
     )
     private: bool = Field(
@@ -138,8 +144,8 @@ class BindAgentRepoRequest(BaseModel):
 
     @field_validator("github_pat")
     @classmethod
-    def _validate_pat(cls, v: SecretStr) -> SecretStr:
-        return _validate_pat_secret(v)
+    def _validate_pat(cls, v: Optional[SecretStr]) -> Optional[SecretStr]:
+        return None if v is None else _validate_pat_secret(v)
 
 
 class BindAgentRepoResponse(BaseModel):
@@ -4802,6 +4808,24 @@ class SkillManagersResponse(BaseModel):
 class SkillManagerGrantRequest(BaseModel):
     """`PUT /api/agents/{agent_name}/skill-manager` — grant (true) or revoke (false)."""
     granted: bool
+
+
+class CapabilityGrantRequest(BaseModel):
+    """`PUT /api/agents/{agent_name}/capability-grants/{capability}` (ent#164)."""
+    granted: bool
+
+
+class AgentCapabilityGrant(BaseModel):
+    """One capability on one agent, for its Settings (ent#164 / ent#756)."""
+    capability: str
+    granted: bool
+    granted_by: Optional[str] = None
+    granted_at: Optional[str] = None
+
+
+class AgentCapabilityGrants(BaseModel):
+    agent_name: str
+    grants: List[AgentCapabilityGrant]
 
 
 class SkillManagerGrantResult(BaseModel):

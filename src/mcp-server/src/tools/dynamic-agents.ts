@@ -19,7 +19,7 @@
 
 import { z } from "zod";
 import { TrinityClient } from "../client.js";
-import { runAgentChat } from "./chat.js";
+import { EXECUTION_ID_PARAM_DESCRIPTION, runAgentChat } from "./chat.js";
 import { DELEGATION_CONTRACT } from "../delegation_contract.js";
 import type { ToolAccessPolicy } from "../access.js";
 
@@ -41,7 +41,9 @@ export function makeDedicatedChatTool(
   agentChatPullEnabled: boolean,
   agentName: string,
   toolName: string,
-  description: string
+  description: string,
+  /** #3232 MCP_REPORT_BACK_ENABLED — trailing and optional so positional callers keep compiling. */
+  reportBackEnabled: boolean = true
 ) {
   // ent#568: the tool answers with chat_with_agent's receipts, so it carries
   // the same delegation contract, verbatim, after the backend's name-only line
@@ -103,6 +105,12 @@ export function makeDedicatedChatTool(
         .describe(
           "Chat session ID to link this self-task to. Required for inject_result=true."
         ),
+      // #3232: declared, or zod strips it before execute and the parent never
+      // leaves (the gap that made "functionally identical" false).
+      execution_id: z
+        .string()
+        .optional()
+        .describe(EXECUTION_ID_PARAM_DESCRIPTION),
     }),
     execute: async (
       params: {
@@ -115,6 +123,7 @@ export function makeDedicatedChatTool(
         async?: boolean;
         inject_result?: boolean;
         chat_session_id?: string;
+        execution_id?: string;
       },
       context: any
     ) => {
@@ -136,8 +145,10 @@ export function makeDedicatedChatTool(
           async: params.async,
           inject_result: params.inject_result,
           chat_session_id: params.chat_session_id,
+          execution_id: params.execution_id,
         },
-        context
+        context,
+        reportBackEnabled
       );
     },
   };
@@ -149,6 +160,12 @@ export interface ReconcilerOptions {
   client: TrinityClient;
   requireApiKey: boolean;
   agentChatPullEnabled: boolean;
+  /**
+   * #3232 MCP_REPORT_BACK_ENABLED. Required, not optional: a start site that
+   * forgets it would leave every dedicated tool ignoring the kill switch, and
+   * `tsc` is the guard that catches that.
+   */
+  reportBackEnabled: boolean;
   /** Register a dynamic tool with the operator-only gate + bound audit target. */
   registerDynamicTool: (tool: any, canAccess: (auth: any) => boolean, auditTargetId: string, policy: ToolAccessPolicy) => void;
   /** Remove a previously-registered dynamic tool by name. */
@@ -189,6 +206,7 @@ export function startExposedToolsReconciler(opts: ReconcilerOptions): Reconciler
     client,
     requireApiKey,
     agentChatPullEnabled,
+    reportBackEnabled,
     registerDynamicTool,
     unregisterDynamicTool,
     operatorOnly,
@@ -278,7 +296,8 @@ export function startExposedToolsReconciler(opts: ReconcilerOptions): Reconciler
           agentChatPullEnabled,
           name,
           spec.tool_name,
-          spec.description
+          spec.description,
+          reportBackEnabled
         );
         // Per-tool guard: a single addTool failure must not abort the whole pass
         // (and starve every later agent). On failure, leave `name` out of

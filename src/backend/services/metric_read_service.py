@@ -62,7 +62,12 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
-from services.metric_points_service import canonical_dims
+from services.metric_points_service import (
+    MAX_DIMENSIONS,
+    _safe_echo,
+    canonical_dims,
+    validate_dims,
+)
 from utils.helpers import parse_iso_timestamp, to_utc_iso
 
 logger = logging.getLogger(__name__)
@@ -881,7 +886,15 @@ def _status_color(definition: Dict[str, Any], value: Any) -> Optional[str]:
     return None
 
 
-def _threshold_color(definition: Dict[str, Any], value: Any) -> Optional[str]:
+def _threshold_verdict(
+    definition: Dict[str, Any], value: Any
+) -> Optional[Dict[str, Any]]:
+    """`{"level": "critical" | "warning", "threshold": n}` when breached.
+
+    The ONE threshold rule (ent#730): `color` is a two-line mapping of this,
+    and a bound tile's typed `threshold_verdict` is this, so the colour and the
+    badge can never disagree about the same value.
+    """
     if not isinstance(value, (int, float)) or isinstance(value, bool):
         return None
     # The registry's vocabulary is `up_good` / `down_good` / `neutral`
@@ -899,10 +912,276 @@ def _threshold_color(definition: Dict[str, Any], value: Any) -> Optional[str]:
     breached = ((lambda v, t: v >= t) if direction == "down_good"
                 else (lambda v, t: v <= t))
     if critical is not None and breached(value, critical):
-        return "red"
+        return {"level": "critical", "threshold": critical}
     if warning is not None and breached(value, warning):
-        return "yellow"
+        return {"level": "warning", "threshold": warning}
     return None
+
+
+_VERDICT_COLOR = {"critical": "red", "warning": "yellow"}
+
+
+def _threshold_color(definition: Dict[str, Any], value: Any) -> Optional[str]:
+    verdict = _threshold_verdict(definition, value)
+    return _VERDICT_COLOR.get(verdict["level"]) if verdict else None
+
+
+def _judgeable(definition: Dict[str, Any]) -> bool:
+    """True when the declaration lets a numeric value be judged at all.
+
+    A property of the DECLARATION, not of the value, so it does not change
+    between polls: the panel reserves the verdict badge's footprint on every
+    judgeable tile, and crossing a threshold swaps it in place instead of
+    shifting the layout (design-system rule: a background refresh never moves
+    anything).
+    """
+    return (definition.get("type") != "status"
+            and definition.get("direction") in ("up_good", "down_good")
+            and (definition.get("critical_threshold") is not None
+                 or definition.get("warning_threshold") is not None))
+
+
+#: The write-path leaf's codes, spelled for a widget (ent#730). Two of the
+#: leaf's three collapse into one: "too many" and "not text" are both "this
+#: selector is malformed", and the sentence already says which.
+_DIMS_CODE = {
+    "dimension_undeclared": "metric_dimension_undeclared",
+    "dimension_value_invalid": "metric_dimension_invalid",
+    "dimensions_too_many": "metric_dimension_invalid",
+}
+
+#: How many other series a `metric_series_not_found` refusal lists.
+_RECENT_SERIES_LISTED = 5
+
+
+def _dims_value_hint(value: Any) -> Optional[str]:
+    """The fix for a NON-TEXT selector value, chosen by its type.
+
+    By type, never by matching the leaf's wording, so the leaf stays the only
+    spelling of the rule. YAML is where these come from: `2024` and `yes`
+    arrive as an int and a bool, `[meta, google]` as a list.
+    """
+    if value is None:
+        return "the value is missing"
+    if isinstance(value, (list, tuple, set, dict)):
+        return "one value per tile; a tile cannot combine series"
+    return "quote it in dashboard.yaml (e.g. '2024')"
+
+
+def parse_dims_selector(
+    raw: Any, declared: List[str]
+) -> Tuple[Optional[Dict[str, str]], Optional[Tuple[str, str]]]:
+    """A widget's `dims:` selector, validated by the write path's own leaf.
+
+    * `(None, None)`  — no selector (`raw` is `None` or `{}`): the fold.
+    * `(clean, None)` — a valid selector, leaf-cleaned strings.
+    * `(None, (code, message))` — `code` is `metric_dimension_invalid` or
+      `metric_dimension_undeclared`; `message` carries NO `metric '<name>': `
+      prefix and no backticks.
+
+    Pure and total over any value (the dashboard config arrives as JSON from
+    the agent server or the cache, and X-009 hands it raw YAML), because the
+    binding's per-widget loop runs outside the store `try`: a raise here would
+    take the whole dashboard read down with it. Shared with compat X-009, so
+    "is this selector valid" has exactly one answer on both surfaces, and it
+    is `metric_points_service.validate_dims`'s answer underneath: a selector
+    is valid exactly when a recorded point could carry it as its `dims`.
+    """
+    if raw is None or (isinstance(raw, dict) and not raw):
+        return (None, None)
+    if not isinstance(raw, dict):
+        return (None, ("metric_dimension_invalid",
+                       "dims must be a mapping of dimension: value"))
+    declared = list(declared or [])
+    clean, error = validate_dims(raw, declared)
+    if error is None:
+        return (clean, None)
+    leaf_code, leaf_message = error
+    code = _DIMS_CODE.get(leaf_code, "metric_dimension_invalid")
+    if leaf_code == "dimensions_too_many":
+        return (None, (code, f"dims names more than {MAX_DIMENSIONS} dimensions"))
+    if leaf_code == "dimension_value_invalid":
+        # The leaf stops at the first bad key; ask it about each key alone so
+        # the key named here is the one it named, without parsing its prose.
+        for key, value in raw.items():
+            if validate_dims({key: value}, declared)[1] is None:
+                continue
+            if not isinstance(value, str):
+                sentence = f"dims value for '{_safe_echo(key)}' must be text"
+                return (None, (code, f"{sentence} — {_dims_value_hint(value)}"))
+            break
+    return (None, (code, leaf_message))
+
+
+def _dims_text(dims: Optional[Dict[str, Any]]) -> str:
+    """`channel=meta, geo=us` in canonical key order.
+
+    A value containing whitespace, `,` or `=` is JSON-quoted so the pair stays
+    unambiguous and on one line (the leaf lets tab/newline/CR through).
+    Mirrors `metricFormat.js::formatDims`.
+    """
+    parts = []
+    for key in sorted((dims or {}).keys(), key=str):
+        value = str((dims or {})[key])
+        if any(ch.isspace() or ch in ",=" for ch in value):
+            value = json.dumps(value, ensure_ascii=False)
+        parts.append(f"{key}={value}")
+    return ", ".join(parts)
+
+
+def _fold_source(entry: Dict[str, Any]) -> Dict[str, Any]:
+    """Today's numbers: the cross-series fold, unchanged (AC4)."""
+    latest = entry.get("latest")
+    chart = entry.get("chart")
+    bound_series = None
+    if latest is not None and chart:
+        basis = chart.get("basis")
+        dims = chart.get("dims")
+        if basis == "folded" and not _numeric(entry):
+            # `fold` returns the newest series' value for a non-numeric metric
+            # (a `status` declaring `sum`), so the number is that series, not
+            # a fold: captioning it "sum of 3" would describe something the
+            # tile does not show.
+            basis = "series"
+            newest = (entry.get("latest_by_series") or [{}])[0]
+            dims = newest.get("dims")
+        bound_series = {
+            "basis": basis,
+            "aggregation": chart.get("aggregation"),
+            "series_count": entry.get("series_count"),
+            "dims": dims,
+            "dimensions": list(entry.get("dimensions") or []),
+        }
+        if basis == "folded":
+            listed = entry.get("latest_by_series") or []
+            bound_series["stale_count"] = (
+                sum(1 for row in listed if row.get("stale") is True)
+                if (entry.get("series_count") or 0) <= MAX_SERIES_PER_METRIC
+                else None)
+    return {
+        "has_value": latest is not None,
+        "value": latest["value"] if latest is not None else None,
+        "last_point_at": entry.get("last_point_at"),
+        "stale": entry.get("stale"),
+        "freshness": entry.get("freshness"),
+        "buckets": chart["buckets"] if chart else None,
+        "bound_series": bound_series,
+        "clear_author_overrides": False,
+    }
+
+
+def _select_series(
+    entry: Dict[str, Any], raw: Any
+) -> Tuple[Optional[Dict[str, Any]],
+           Optional[Tuple[str, str, Optional[Dict[str, Any]]]]]:
+    """`(source, None)` or `(None, (code, message, binding_detail))`.
+
+    A closed decision: no selector is the fold; any other selector is the one
+    matching series OR a named refusal. No branch with a non-empty selector
+    reaches the fold, so a failed selector can never show the total under a
+    per-channel label (the ent#730 harm).
+    """
+    name = entry.get("name")
+    clean, error = parse_dims_selector(raw, entry.get("dimensions") or [])
+    if error is not None:
+        return (None, (error[0], f"metric '{name}': {error[1]}", None))
+    if clean is None:
+        return (_fold_source(entry), None)
+
+    key = canonical_dims(clean)
+    listed = entry.get("latest_by_series") or []
+    row = next((r for r in listed if canonical_dims(r.get("dims")) == key),
+               None)
+    series_row = next(
+        (s for s in entry.get("series") or []
+         if canonical_dims(s.get("dims")) == key), None)
+    if row is None or series_row is None:
+        # Facts, not prose: the browser writes the second line, so the copy can
+        # change without an API change. Never "does not exist": the read is
+        # bounded (200 newest points, 50 series), so all it can say is that no
+        # RECENT point matched.
+        recent = [dict(r.get("dims") or {})
+                  for r in listed[:_RECENT_SERIES_LISTED]]
+        series_count = entry.get("series_count") or 0
+        pairs = set(clean.items())
+        near = [dict(r.get("dims") or {}) for r in listed
+                if pairs <= set((r.get("dims") or {}).items())]
+        detail = {
+            "selector": clean,
+            "recent_series": recent,
+            "more": max(series_count - len(recent), 0),
+            "window_points": LATEST_POINTS_PER_METRIC,
+            "series_cap": (MAX_SERIES_PER_METRIC
+                           if series_count > MAX_SERIES_PER_METRIC else None),
+            "near": near[:_RECENT_SERIES_LISTED],
+        }
+        return (None, ("metric_series_not_found",
+                       f"metric '{name}': no recent data for {_dims_text(clean)}",
+                       detail))
+    return ({
+        "has_value": True,
+        "value": row.get("value"),
+        "last_point_at": row.get("ts"),
+        "stale": row.get("stale"),
+        "freshness": row.get("freshness"),
+        "buckets": list(series_row.get("buckets") or []),
+        "bound_series": {
+            "basis": "selected",
+            "aggregation": str(entry.get("aggregation") or "last").lower(),
+            "series_count": entry.get("series_count"),
+            "dims": row.get("dims"),
+            "dimensions": list(entry.get("dimensions") or []),
+        },
+        "clear_author_overrides": True,
+    }, None)
+
+
+#: Every key a successful bind fills, plus the author overrides a refused tile
+#: must not keep: a refusal shows a reason and NO number, so nothing that
+#: describes a number may survive it (an author arrow beside a refused `-` is a
+#: success cue on a failed tile).
+_REFUSAL_POPS = ("value", "history", "color", "bound_series", "last_point_at",
+                 "stale", "freshness", "trend", "trend_value",
+                 "threshold_verdict", "direction")
+
+
+def _kind_of(value: Any) -> str:
+    """A YAML value's kind in an author's words, never the value itself."""
+    if isinstance(value, bool):
+        return "true/false"
+    if isinstance(value, (int, float)):
+        return "a number"
+    if isinstance(value, (list, tuple, set)):
+        return "a list"
+    if isinstance(value, dict):
+        return "a mapping"
+    return "a value of another type"
+
+
+def invalid_metric_name(value: Any) -> Optional[str]:
+    """The refusal sentence for a bound widget's `metric:` that is not text.
+
+    `None` when `value` is text or falsy (falsy is simply unbound). Public
+    because compat X-009 reports the same sentence the tile shows (ent#730).
+    Names the YAML kind, never the value.
+    """
+    if not value or isinstance(value, str):
+        return None
+    return ("metric must be the name of a declared metric, as text, not "
+            f"{_kind_of(value)}")
+
+
+def _refuse_widget(widget: Dict[str, Any], code: str, message: str,
+                   detail: Optional[Dict[str, Any]] = None) -> None:
+    widget["binding_error"] = message
+    widget["binding_error_code"] = code
+    widget["bound"] = False
+    if detail is not None:
+        widget["binding_detail"] = detail
+    else:
+        widget.pop("binding_detail", None)
+    for key in _REFUSAL_POPS:
+        widget.pop(key, None)
 
 
 def bind_dashboard_widgets(
@@ -922,11 +1201,20 @@ def bind_dashboard_widgets(
     widgets and leaves every unbound widget untouched. A dashboard is never
     5xx'd because one widget named a metric.
 
-    Three refusals, each with a machine `binding_error_code` beside the
+    Seven refusals, each with a machine `binding_error_code` beside the
     sentence (the route's `{reason, message}` pair, spelled for a widget):
     `metric_store_unavailable`, `metric_undeclared`, and `metric_retired` —
     the last is TD-10's rule applied to a reader who cannot pass
-    `include_retired`, so a retired metric never reads as current here either.
+    `include_retired`, so a retired metric never reads as current here either
+    — `metric_name_invalid` (a `metric:` that is not text, ent#730), and the
+    three `dims:` refusals (ent#730): `metric_dimension_invalid`,
+    `metric_dimension_undeclared` and `metric_series_not_found`.
+
+    A widget carrying `dims: {key: value}` names ONE series of a dimensioned
+    metric (ent#730). Pick a source, fill once: the selected series or today's
+    fold, then one fill block writes value, colour and history from whichever
+    was picked, so the two paths cannot drift. `_latest_entry`'s fold is not
+    touched: the objective join and the role card read it.
     """
     if not isinstance(config, dict):
         return config
@@ -949,10 +1237,21 @@ def bind_dashboard_widgets(
             widget["binding_error"] = "metric store unavailable"
             widget["binding_error_code"] = "metric_store_unavailable"
             widget["bound"] = False
+            # The docs recommend a `value: 0` placeholder for older base
+            # images; during an outage it would read as a real 0 (ent#730).
+            widget.pop("value", None)
         return config
 
     for widget in widgets:
         name = widget.get("metric")
+        name_problem = invalid_metric_name(name)
+        if name_problem is not None:
+            # YAML `metric: [ad_spend]` or `{a: b}` is truthy, so it is bound;
+            # `by_name.get(<list>)` then raised out of this loop, which runs
+            # outside the store `try`, and took the WHOLE dashboard read down
+            # (ent#730). Refuse this widget by name; the rest render.
+            _refuse_widget(widget, "metric_name_invalid", name_problem)
+            continue
         entry = by_name.get(name)
         if entry is None:
             widget["binding_error"] = (
@@ -978,28 +1277,59 @@ def bind_dashboard_widgets(
             widget.pop("value", None)
             widget.pop("history", None)
             continue
-        latest = entry.get("latest")
+        source, refusal = _select_series(entry, widget.get("dims"))
+        if refusal is not None:
+            _refuse_widget(widget, *refusal)
+            continue
         widget["bound"] = True
         widget.pop("binding_error", None)
         widget.pop("binding_error_code", None)
-        widget["last_point_at"] = entry.get("last_point_at")
-        widget["stale"] = entry.get("stale")
-        widget["freshness"] = entry.get("freshness")
+        widget.pop("binding_detail", None)
+        if source["clear_author_overrides"]:
+            # A selected series owns its colour: an author value typed for the
+            # old fold must not contradict it (AC8).
+            widget.pop("color", None)
+        # Every successful bind owns the trend: the panel prefers an author
+        # `trend:` over `history.trend`, so an author arrow would contradict
+        # the computed sparkline beside it (ent#730, fold path included).
+        widget.pop("trend", None)
+        widget.pop("trend_value", None)
+        widget["last_point_at"] = source["last_point_at"]
+        widget["stale"] = source["stale"]
+        widget["freshness"] = source["freshness"]
         widget["unit"] = widget.get("unit") or entry.get("unit")
         widget["label"] = widget.get("label") or entry.get("label")
-        if latest is None:
+        if source["bound_series"] is not None:
+            widget["bound_series"] = source["bound_series"]
+        else:
+            widget.pop("bound_series", None)
+        # The registry owns the direction (like `bound_series`): the panel
+        # colours a bound tile's trend by it, so an author value cannot win.
+        widget["direction"] = entry.get("direction") or "neutral"
+        if not source["has_value"]:
             widget.pop("value", None)
+            widget.pop("threshold_verdict", None)
             continue
         # Overwrite: an author keeping a placeholder `value:` for an older
         # base image must not see the placeholder once the binding works.
-        widget["value"] = latest["value"]
-        color = (_status_color(entry, latest["value"])
+        value = source["value"]
+        widget["value"] = value
+        color = (_status_color(entry, value)
                  if entry.get("type") == "status"
-                 else _threshold_color(entry, latest["value"]))
+                 else _threshold_color(entry, value))
         if color:
             widget["color"] = color
-        chart = entry.get("chart")
-        if chart:
+        # Written whenever the metric is judgeable, `ok` included, so the
+        # field's presence never changes between polls (only its level does).
+        numeric = isinstance(value, (int, float)) and not isinstance(value, bool)
+        if _judgeable(entry) and numeric:
+            verdict = _threshold_verdict(entry, value)
+            widget["threshold_verdict"] = (
+                verdict if verdict else {"level": "ok", "threshold": None})
+        else:
+            widget.pop("threshold_verdict", None)
+        buckets = source["buckets"]
+        if buckets is not None:
             # The SAME shape `_enrich_widgets_with_history` writes
             # (`{values, trend, trend_percent, min, max, avg}`), not a bare
             # list: `DashboardPanel.vue` reads `widget.history.values` and
@@ -1007,12 +1337,13 @@ def bind_dashboard_widgets(
             # silently lose its sparkline and its trend arrow while every
             # backend test still passed. One consumer, one shape.
             #
-            # Drawn from `chart`, not `series[0]`: the widget's `value` above
-            # is the cross-series fold, so its history must be the same fold
-            # or the trend arrow would describe one region of a total.
+            # Drawn from the SOURCE's buckets: `chart` on the fold path (the
+            # widget's `value` is the cross-series fold, so its history must be
+            # the same fold or the trend arrow would describe one region of a
+            # total), the selected series' own buckets on the `dims:` path.
             values = [
                 {"t": b["ts"], "v": b["value"]}
-                for b in chart["buckets"]
+                for b in buckets
             ]
             stats = db.calculate_widget_stats(values) if values else None
             widget["history"] = {

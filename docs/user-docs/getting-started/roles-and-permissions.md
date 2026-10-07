@@ -17,7 +17,7 @@ Roles are hierarchical: admin > creator > operator > user. Higher roles inherit 
 
 ### The admin account
 
-The `admin` account is created once: from `ADMIN_PASSWORD` at first boot, or through the first-run **Create your admin account** form when no password was set (the DigitalOcean Marketplace 1-Click path — the first browser visitor claims the instance). The form only ever provisions the **first** admin — on an install that already has a usable admin account it refuses, whether or not the setup flag says setup is complete. See [Setup](setup.md).
+The `admin` account is created once: from `ADMIN_PASSWORD` at first boot, or through the first-run **Create your admin account** form when no password was set (the one-click marketplace and AWS paths — the first browser visitor claims the instance; on AWS they must also enter the EC2 instance ID). The form only ever provisions the **first** admin — on an install that already has a usable admin account it refuses, whether or not the setup flag says setup is complete. See [Setup](setup.md).
 
 If two-factor authentication applies to the account (requires an entitlement), a correct password does not sign you in on its own: the login page moves to the second-factor step, and no session exists until it is completed. Two-factor can start applying the moment an administrator enables the role policy, before anyone has enrolled.
 
@@ -43,8 +43,8 @@ Admins can change a user's role at any time via Settings.
 | Turn usage sharing on or off | Admin, **human only** |
 | Mint a **Portal delegate** MCP key | Admin, **human only** |
 | Mint an **Ops (read-only)** MCP key | Admin, **interactive browser session only** — no key of any scope can mint one |
-| Create any MCP key | Any user, **signed-in session only** — no key of any scope can create one |
-| Change your own sign-in email or personal GitHub token | Any user, **signed-in session only** |
+| Create or list MCP keys | Any user, **signed-in session only** — no key of any scope can create or list them |
+| Change your own sign-in email or personal GitHub token | Any user, **signed-in session only**; a new sign-in email also needs the 6-digit code mailed to it |
 
 ### Role is not the same as "human"
 
