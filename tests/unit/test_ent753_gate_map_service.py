@@ -222,9 +222,11 @@ def test_an_approver_nobody_fills_is_saved_with_a_warning(world):
     gated request would be refused `role_unassigned`. Said, not hidden."""
     out = _run(world.gms.set_gate(BARE, "pay-invoice", changes={}, ctx=world.ctx))
     assert out["warnings"] == ["approver_unassigned"]
+    assert out["gate"]["approver_reachable"] is False          # the same answer GET gives
+    assert _run(world.gms.set_gate(FIN, "x", changes={}, ctx=world.ctx))["gate"]["approver_reachable"] is True
     view = world.gms.list_gates(BARE)
     assert [g["approver_reachable"] for g in view["gates"]] == [False]
-    assert [g["approver_reachable"] for g in world.gms.list_gates(FIN)["gates"]] == []
+    assert [g["approver_reachable"] for g in world.gms.list_gates(FIN)["gates"]] == [True]
 
 
 def test_clearing_is_idempotent_and_deletes_an_unassigned_name(world):

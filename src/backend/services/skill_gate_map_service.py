@@ -337,8 +337,10 @@ async def set_gate(agent_name: str, skill_name: str, *, changes: Mapping[str, An
             "skill": key, "approver": current["approver"], "deadline_hours": current["deadline_hours"],
             "previous": _public(previous) if previous else None,
         })
-    return {"agent_name": agent_name, "skill_name": key, "gate": _public(current),
-            "changed": changed, "warnings": _warnings(agent_name, current["approver"], marker)}
+    warnings = _warnings(agent_name, current["approver"], marker)
+    gate = {**_public(current), "approver_reachable": "approver_unassigned" not in warnings}
+    return {"agent_name": agent_name, "skill_name": key, "gate": gate,
+            "changed": changed, "warnings": warnings}
 
 
 def _warnings(agent_name: str, approver: str, marker: Optional[str]) -> List[str]:
