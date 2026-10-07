@@ -19,7 +19,7 @@ This is the *outbound* counterpart of inbound voice transcription (users sending
 
 ### 1. Admin — provide a voice key (once)
 
-Set the ElevenLabs key under **Settings → General → Voice (ElevenLabs)** (stored setting, with an env-var fallback for older deployments). Optionally set a **platform default voice** there too. Until a key resolves, the whole feature is unavailable — the `tts_available` flag is false and the agent config UI is disabled.
+Set the ElevenLabs key under **Settings → General → Voice (ElevenLabs)** (stored setting, with `ELEVENLABS_API_KEY` in `.env` as the fallback for older deployments). Optionally set a **platform default voice** there too. Until a key resolves, the whole feature is unavailable — the `tts_available` flag is false and the agent config UI is disabled.
 
 ### 2. Owner — enable and configure the agent
 
@@ -46,7 +46,7 @@ WhatsApp voice notes work even when the agent's file-sharing toggle is off — v
 | Endpoint | Method | Description |
 |----------|--------|-------------|
 | `/api/agents/{name}/voice-replies` | GET | `{enabled, voice_id, channels:{telegram,slack,whatsapp}, effective_voice_id, default_voice_id, available}` — `available` reflects a resolvable platform key |
-| `/api/agents/{name}/voice-replies` | PUT | Owner-only partial update of `{enabled?, voice_id?, channels?}`; 400 if none provided |
+| `/api/agents/{name}/voice-replies` | PUT | Owner-only partial update of `{enabled?, voice_id?, channels?}`; 400 unless `enabled` or `channels` is present, or when enabling with no agent voice and no platform default |
 | `/api/agents/{name}/voice-reply` | POST | Per-message delivery backing the tool; fail-soft `{delivered, channel, reason}`; 409 on an in-flight duplicate for the same turn |
 | `/api/settings/elevenlabs` | GET / PUT | Admin key + default voice: `{key_configured, key_source, default_voice_id}`, plus the key's speech-to-text status for Workspace dictation (`stt_capability`, `stt_detail`, `stt_checked_at`, `stt_last_failure`); key stored encrypted, never echoed |
 

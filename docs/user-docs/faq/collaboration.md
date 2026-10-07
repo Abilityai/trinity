@@ -12,7 +12,7 @@ By design. Trinity's permission model is restrictive by default: a new agent has
 
 ## Why was my agent's call refused with "inter_agent_depth_exceeded"?
 
-The call was too deep in a chain of agent-to-agent calls. Trinity counts each hop, and refuses a hop past the limit (8 by default) before any work starts. This stops agents from calling each other in an endless loop. Retrying does not help: the MCP tools mark the refusal `retryable: false`. If a real pipeline needs more hops, an admin can raise `inter_agent_max_chain_depth` (up to 32). See [Agent Network](../collaboration/agent-network.md#concepts).
+The call was too deep in a chain of agent-to-agent calls. Trinity counts each hop, and refuses a hop past the limit (8 by default) before any work starts. This stops agents from calling each other in an endless loop. Retrying does not help: the MCP tools mark the refusal `retryable: false`. The count carries through loops an agent starts, schedules it triggers by hand, chat-session turns and events it emits, so none of those resets the chain; webhook triggers, cron-fired schedule runs and self-reminders do start a new one. If a real pipeline needs more hops, an admin can raise `inter_agent_max_chain_depth` (up to 32). See [Agent Network](../collaboration/agent-network.md#concepts).
 
 ## How do I let one agent call another?
 
@@ -24,11 +24,23 @@ Who *your agent* can call. Each row on an agent's Permissions tab is a grant fro
 
 ## What does granting permission actually let an agent do?
 
-Permission grants communication, not control. A permitted agent can see the target in `list_agents`, send it messages via `chat_with_agent`, run and stop loops on it with `run_agent_loop` and `stop_loop`, subscribe to its events, and mount its exposed shared folder — the same permission record gates each of these, and it is also the boundary for reading or answering the target's operator-queue items over MCP (see [MCP & API](mcp-and-api.md#can-an-agent-read-or-answer-the-operating-room-queue-over-mcp)). It does not let the calling agent manage the target (start, stop, or reconfigure it), and the reverse direction stays blocked until you grant it separately. See [Agent Permissions](../collaboration/agent-permissions.md).
+Permission grants communication, not control. A permitted agent can see the target in `list_agents`, send it messages via `chat_with_agent`, run and stop loops on it with `run_agent_loop` and `stop_loop`, subscribe to its events, mount its exposed shared folder, and read its declared metrics with `get_metrics` — the same permission record gates each of these, and it is also the boundary for reading or answering the target's operator-queue items over MCP (see [MCP & API](mcp-and-api.md#can-an-agent-read-or-answer-the-operating-room-queue-over-mcp)). It does not let the calling agent manage the target (start, stop, or reconfigure it), and the reverse direction stays blocked until you grant it separately. See [Agent Permissions](../collaboration/agent-permissions.md).
 
 ## Can one agent hand off a long-running task to another without waiting?
 
 Yes. Call `chat_with_agent(agent_name, message, parallel=true, async=true)`, which returns an `execution_id` immediately instead of holding the connection open, then poll `get_execution_result(agent_name, execution_id)` until the task completes. This keeps you clear of the synchronous call bound (`MCP_CHAT_TIMEOUT_MS`, default 25 seconds) and suits delegation chains where the worker may run for many minutes. A synchronous call that outlives that bound is not lost either — it answers with a `status: "queued_timeout"` receipt carrying the `execution_id` to poll, so never re-send a reworded version, which would dispatch a second execution (details in [MCP & API](mcp-and-api.md#why-is-chat_with_agent-returning-queued_timeout-instead-of-a-reply)). To avoid polling altogether, subscribe to the worker's task-completion events instead (below). See [Agent Network](../collaboration/agent-network.md).
+
+## Can an agent grant itself permission to call another agent?
+
+No. Granting and withdrawing permissions is human-only: the permission routes refuse an agent-scoped API key, so an agent can never widen its own reach or hand access to another agent. Only the agent's owner or an admin can change its permissions, and only toward agents they can access themselves. Every grant, replacement and withdrawal is written to the audit log. See [Agent Permissions](../collaboration/agent-permissions.md#for-agents).
+
+## What happens when I remove a permission between two agents?
+
+Each thing the permission controls stops at a different moment. Calls (`chat_with_agent`, loops, reading the other agent's work) stop at the very next call. Event deliveries stop at the next event; the subscription itself is kept, so granting the permission again resumes it. A shared folder the agent mounted from the other agent stays until the agent's next start, which rebuilds the container without it, so restart the agent if you need it gone now. See [Agent Permissions](../collaboration/agent-permissions.md#when-a-withdrawn-permission-takes-effect).
+
+## My agent's call to another agent timed out — should it send the message again?
+
+No. If the call came back with an `execution_id`, that is a receipt: the work arrived and is queued, running or done. Read the outcome with `get_execution_result(agent_name, execution_id)`, or set a reminder naming that `execution_id` and check back later. A reworded re-send can run the work twice. Even an error without an `execution_id`, `agent_busy` included, is not proof that nothing ran, so look for the exact message in `list_recent_executions` before re-sending word for word. Every agent is taught these rules in its platform prompt as the delegation contract. See [Agent Network](../collaboration/agent-network.md#concepts).
 
 ## How do I share files between two agents?
 
@@ -44,7 +56,15 @@ Events are a lightweight pub/sub layer. A source agent calls `emit_event(event_t
 
 ## Why isn't my agent receiving events it subscribed to?
 
-Three things to check. First, subscriptions are permission-gated: the subscribing agent must have permission to call the source agent, or the subscription won't fire. Second, the subscription must match both the exact source agent name and the exact event type the emitter uses. Third, `subscribe_to_event` identifies the subscriber from the calling agent's own agent-scoped key, so it must be called by the agent itself, not through a user key — verify what exists with `list_event_subscriptions`. See [Event Subscriptions](../collaboration/event-subscriptions.md).
+Three things to check. First, subscriptions are permission-gated: the subscribing agent must have permission to call the source agent, or the subscription won't fire. Second, the subscription must match both the exact source agent name and the exact event type the emitter uses. Third, `subscribe_to_event` identifies the subscriber from the calling agent's own agent-scoped key, so it must be called by the agent itself, not through a user key — verify what exists with `list_event_subscriptions`. Beyond that: the permission is re-checked on every delivery, so a withdrawn grant silently pauses the subscription; a stopped subscriber misses the wake; and dispatches past the hourly cap between one pair of agents are skipped (a high-priority alert on the subscriber says so). See [Event Subscriptions](../collaboration/event-subscriptions.md).
+
+## Why did Trinity skip my event subscription's tasks with a "dispatches capped" alert?
+
+An event chain fired too often between one pair of agents. Trinity counts dispatches from one source agent to one subscriber per hour, across every subscription between them, and skips the rest of the hour once the cap is reached (120 by default, operator setting `event_dispatch_max_fires_per_hour`). The first skip in each hour raises one high-priority alert on the subscriber, saying a subscription may be looping. The usual cause is a subscriber whose task emits an event the source reacts to, and so on. Fix the loop rather than raising the cap. See [Event Subscriptions](../collaboration/event-subscriptions.md#delivery-limits).
+
+## Is it safe to put text from outside into an event payload?
+
+Safer than it used to be, but treat it as data. When Trinity builds the subscriber's task message, each `{{payload.*}}` value is credential-scrubbed, capped at 4,000 characters and wrapped in `⟦ ⟧`, and the message gets a line telling the subscriber that the marked text is event data, not instructions. The template text you wrote stays as written. A whole payload is limited to 64 KiB. The framing helps a model tell your instructions from the payload, but it is not a guarantee, so keep the subscriber's own permissions narrow. See [Event Subscriptions](../collaboration/event-subscriptions.md#how-it-works).
 
 ## Can an agent be notified the moment another agent's task finishes, instead of polling?
 
@@ -62,6 +82,14 @@ Yes — this ships in every Trinity build. From the **Workspace**, mention a sec
 
 An admin sets the defaults for every room started from the Workspace under **Settings → Retention → Room budgets**: **Messages** (200 by default, up to 500), **Cost cap (USD)** (empty by default, meaning no cap), and **Expires after** N hours (168 by default — one week; up to 168, and `0` means never). A room closes permanently, with a visible reason, when it reaches any of them; changes apply to rooms created from then on, and a Workspace client cannot override them, though a platform caller creating a room over the API or MCP may pass its own budget. The person who created the room is its **moderator**: closing it and adding or removing agents are moderator or admin actions, while any human member can rename the room in place from its header. Agents only ever talk in a room — they never manage it. See [Shared Sessions](../collaboration/rooms.md#budget-defaults-admin).
 
+## What happens if an agent writes a very long reply in a room?
+
+It lands. A turn's reply is posted as one message of up to 100,000 characters; past that it is trimmed, keeping the beginning and the end (where the conclusion and the next `@mention` usually are) around a marker saying how much was cut. If a reply cannot be posted at all, or arrives after the room closed, the room shows a line saying so rather than going quiet. Messages people post are limited to 8,000 characters. For long deliverables, agents are nudged to share a file and post a summary. See [Shared Sessions](../collaboration/rooms.md#message-sizes-and-safety-limits).
+
+## Why did a room say "Mention chain stopped at depth 8"?
+
+Agents in the room kept handing the turn to each other. One human message can set off at most 8 agent-to-agent hand-offs; past that the room stops waking agents and posts that line. A separate limit lets each participant wake agents at most 30 times in 5 minutes. Post a new message to continue. See [Shared Sessions](../collaboration/rooms.md#message-sizes-and-safety-limits).
+
 ## What does the notice about a client reading the room mean?
 
 A room that includes a Workspace client — someone outside your own organisation — tells every agent it wakes that a person is reading, so agent-to-agent turns keep internal details, other customers and costs out of the transcript. The signal comes from the room's membership alone, never from anything a participant writes, and it names nobody. A room holding only agents and operators carries no such notice. See [Shared Sessions](../collaboration/rooms.md).
@@ -77,6 +105,10 @@ Yes. A file you drop on a room, or paste into its composer, goes to every agent 
 ## Do files I attached in a 1:1 come along when I @mention another agent?
 
 Yes. Files you attached in that 1:1 and have not yet sent with a message go along: the composer's attachment chips, and files sent from the rail's **Files** tab in the last 15 minutes. The Workspace delivers them to the newly mentioned agents before it posts your message, so the agent can see what you asked about. A line under the room's composer then names what was delivered and to whom, and what did not arrive: a file that missed an agent (*attach it again here to retry*) or one that never finished uploading. See [Workspace](../sharing-and-access/workspace.md#bringing-in-another-agent).
+
+## Can an agent read another agent's metrics?
+
+Yes, if it holds a permission grant on that agent, the same grant `chat_with_agent` uses. The agent passes the other agent's name as `agent` to `get_metrics`; without a grant the read is refused. Cross-agent reads count against the reader's own rate budget and are recorded in the audit log under the reading agent. See [Agent Permissions](../collaboration/agent-permissions.md).
 
 ## How can I watch agents collaborating on the Dashboard?
 
@@ -102,7 +134,7 @@ Yes. `GET /api/systems/{name}/manifest` (or the `get_system_manifest` MCP tool) 
 
 Yes — discover *and* call. Every agent publishes an A2A Agent Card (protocol `0.3.0`) at `GET /api/agents/{name}/a2a/agent-card` — a standard JSON document (built from the agent's `template.yaml` and container labels) advertising its name, description, capabilities, skills, and URL, so external orchestrators can discover it without knowing Trinity's internal API. That endpoint requires authentication (owner, admin, or shared user, via JWT or MCP key), and it still returns a partial card when the agent is stopped.
 
-To let an outside orchestrator actually reach an agent, turn on **A2A exposure** for it (Sharing tab → A2A). Exposure is off by default, and until you enable it nothing is publicly reachable. Once enabled, the agent gets a public discovery card at `GET /a2a/{name}/.well-known/agent-card.json` and a JSON-RPC task endpoint at `POST /a2a/{name}` (`message/send`, `message/stream` over SSE, `tasks/get`, `tasks/cancel`). Discovery is unauthenticated and rate limited per IP; **tasking always requires a Trinity MCP API key**, and the caller still has to be an owner or shared user of that agent. A non-exposed agent is indistinguishable from one that doesn't exist — both return `404`.
+To let an outside orchestrator actually reach an agent, turn on exposure in the agent's **A2A** tab. That tab appears only when the A2A capability is enabled for your instance; otherwise it is hidden and the public routes answer `404`. Exposure is off by default, and until you enable it nothing is publicly reachable. Once enabled, the agent gets a public discovery card at `GET /a2a/{name}/.well-known/agent-card.json` and a JSON-RPC task endpoint at `POST /a2a/{name}` (`message/send`, `message/stream` over SSE, `tasks/get`, `tasks/cancel`). Discovery is unauthenticated and rate limited per IP; **tasking always requires a Trinity MCP API key**, and the caller still has to be an owner or shared user of that agent. A non-exposed agent is indistinguishable from one that doesn't exist — both return `404`.
 
 Set `PUBLIC_CHAT_URL` or `FRONTEND_URL` so the card advertises an externally reachable URL. See [A2A Protocol](../integrations/a2a-protocol.md).
 
@@ -117,7 +149,7 @@ No, not blindly. A timeout means Trinity gave up waiting, not that the remote ag
 
 ## Can my agent message me proactively instead of waiting for me to ask?
 
-Yes, with the `send_message` MCP tool. The agent names a role with `to` — `primary`, `approver` or `viewer` — and the platform resolves the person; a role nobody fills, or several people fill, is refused by name. Addressing by `recipient_email` still works but is deprecated. It's consent-based: the recipient must be the agent's owner or have the agent shared with them with the allow-proactive flag enabled, otherwise the send is rejected. Delivery goes over Telegram, Slack, or web — `auto` tries Telegram, then Slack, then web — and sends are rate-limited to 10 messages per recipient per hour, with a 4096-character limit per message. See [MCP Server](../integrations/mcp-server.md).
+Yes, with the `send_message` MCP tool. The agent names a role with `to` — `primary`, `approver` or `viewer` — and the platform resolves the person; a role nobody fills, or several people fill, is refused by name. Addressing by `recipient_email` still works but is deprecated. It's consent-based: the recipient must be the agent's owner or have the agent shared with them with the allow-proactive flag enabled, otherwise the send is rejected. Delivery goes over Telegram, Slack, or web — `auto` tries Telegram, then Slack, then web — and sends are rate-limited to 10 messages per recipient per hour, with a 4096-character limit per message. A recurring agent that must not repeat itself can pass an `idempotency_key` (with an optional `idempotency_ttl`, 60 seconds to 24 hours, default 24 hours): a second send with the same key to the same person inside that window is not delivered, even from a different run. See [MCP Server](../integrations/mcp-server.md).
 
 ## Can my agent ask a specific person a question and wait for their answer?
 

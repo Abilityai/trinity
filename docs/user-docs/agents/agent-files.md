@@ -8,11 +8,17 @@ Two-panel file manager in the Agent Detail Files tab for browsing, previewing, a
 2. The left panel displays a file tree with search and expandable directories.
 3. The right panel shows a preview of the selected file.
 4. Supported previews: images, video, audio, PDF, and text files.
-5. Click the edit button on any text file to modify and save it inline.
-6. Click **New folder** on any directory to create a subfolder in place (workspace-confined; edit-protected paths are rejected).
-7. Delete files directly from the file manager. Protected path warnings appear for critical files.
-8. Toggle **Show hidden files** to reveal dotfiles (`.env`, `.claude/`, etc.).
-9. The agent workspace root is `/home/developer/`.
+5. Click **Edit** on a text file to modify it inline, then **Save**. Edit-protected files (`.env`, `.git`, `.gitignore`, `.trinity`, `.mcp.json.template`) have no Edit button. **Download** saves the selected file (up to 100 MB).
+6. Click the new-folder icon in the tree header to create a subfolder in the selected folder, or in the workspace root when the selection is not a folder (workspace-confined; protected paths are rejected).
+7. Click **Delete** to remove a file or folder after a confirmation. Protected files show *This is a protected system file and cannot be deleted.* and their Delete button is disabled.
+8. Tick **Hidden** to reveal dotfiles (`.env`, `.claude/`, etc.).
+9. The agent workspace root is `/home/developer/`. The agent must be running to browse, preview, edit, or delete files.
+
+### Protected paths
+
+The backend refuses writes, new folders, and deletes on credential and platform-managed paths, whatever the UI shows: `.env` and `.env.*`, `.mcp.json`, `.mcp.json.template`, `.credentials.enc`, `.gitignore`, `.claude/settings.json`, `.claude/settings.local.json`, and anything under `.ssh/`, `.aws/`, `.gcp/`, `.trinity/`, `.git/`, `/etc/`, `/opt/trinity/`, `/proc/` or `/sys/`. A delete is also refused for a folder that *contains* one of those directories — `.ssh`, `.claude`, or the home directory itself — since deleting the folder deletes everything in it. `CLAUDE.md` can be edited but not deleted. Refusals answer `403` (`Cannot edit protected path: …`, `Cannot delete protected path: …`). Paths are normalised before the check, so `..` segments and extra leading slashes (`//home/developer/.ssh/…`) cannot slip past it.
+
+Writing or deleting under `.claude/skills/` is the same act as assigning a skill, so an agent's own key needs skill-management permission for it; people and the system agent are unaffected.
 
 ### Content Folder Convention
 
@@ -45,7 +51,7 @@ share_file({ filename: "report.csv", execution_id: "<from the Execution Context 
 # Returns: { url, expires_at, size_bytes, mime_type, visible_to_requester, visibility_note, addressed_to }
 ```
 
-The agent drops a file into `/home/developer/public/`, then calls `share_file` with the filename (optionally `display_name`, `expires_in`, and `audience_email`). Trinity extracts it, stores it securely, and returns a signed URL valid for 7 days.
+The agent drops a file into `/home/developer/public/`, then calls `share_file` with the filename (optionally `display_name`, `expires_in`, `audience_email`, and `dedup_label`). Trinity extracts it, stores it securely, and returns a signed URL valid for 7 days by default (`expires_in` takes 60 seconds to 7 days). Sharing the same file to the same person twice in one turn returns the one share; pass a different `dedup_label` to mint a second one deliberately.
 
 **Opening a link.** The link works wherever it is pasted, including in-app browsers on a phone (Telegram, iOS Safari): audio, video, images, and PDFs open inline and stream with range requests, so a voice note plays without a forced download. Anything that could carry script — HTML and SVG — is always delivered as a download. Append `?download=1` to force a download for any file. A media player's chunked reads count as one download.
 
@@ -56,7 +62,7 @@ The agent drops a file into `/home/developer/public/`, then calls `share_file` w
   - A file shared from a schedule, an operator chat, or an agent-to-agent call has no person behind it, so it is listed for the agent's **owner** only.
   - A file sent over WhatsApp is addressed to that number, and reaches a Workspace Files tab only if that number verified an email with the agent.
   - An agent can address a file to a *different* person it is shared with by passing `audience_email`. An address the agent is not shared with is refused (`AUDIENCE_NOT_ON_ROSTER`) — it is never widened silently.
-  - If Trinity cannot tell which conversation a share came from, it does not guess: the file is listed for the owner only, and the tool result says so (`visible_to_requester: false`, with a `visibility_note` explaining how to fix it). Passing the turn's `execution_id` to `share_file` is what makes this reliable.
+  - If Trinity cannot tell which conversation a share came from, it does not guess: the file is listed for the owner only, and the tool result says so (`visible_to_requester: false`, with a `visibility_note` explaining how to fix it). Trinity normally supplies the turn's execution id to `share_file` automatically; passing `execution_id` yourself is the fallback for agents on an older base image.
 - Files shared before this behaviour existed are listed for the owner only; every share expires within seven days.
 
 **From the UI:**
@@ -80,8 +86,8 @@ The signed URL is the only credential a download needs: it is not tied to a chat
 | Endpoint | Method | Description |
 |----------|--------|-------------|
 | `/api/agents/{name}/files` | GET | List workspace files (tree structure) |
-| `/api/agents/{name}/files` | PUT | Save a text file (what the inline editor calls) |
-| `/api/agents/{name}/files` | DELETE | Delete a file (protected paths are refused) |
+| `/api/agents/{name}/files` | PUT | Save a text file (what the inline editor calls); protected paths are refused with `403` |
+| `/api/agents/{name}/files` | DELETE | Delete a file or folder. Protected paths, and folders that hold a protected directory, are refused with `403` |
 | `/api/agents/{name}/files/download` | GET | Download file content (100 MB limit) |
 | `/api/agents/{name}/files/preview` | GET | File content with its real MIME type, for previews |
 | `/api/agents/{name}/files/mkdir` | POST | Create a directory in the workspace |

@@ -93,7 +93,11 @@ Restrictions: system agents cannot be renamed. Only owners and admins have permi
 
 ### Delete
 
-Use the Delete button on the Agent Detail page. A confirmation dialog is required. Deletion cleans up the container, network, sharing records, schedules, activities, and event subscriptions.
+Use the Delete button on the Agent Detail page. A confirmation dialog is required.
+
+Deletion is a soft delete. The container is stopped and removed at once, and the agent's schedules stop firing. Its workspace volumes, schedules, chat history, sharing records, permissions and credentials are kept until a retention sweep purges them (`agent_soft_delete_retention_days`, default 180 days). Until then the name stays reserved, and an admin can recover the agent with `POST /api/admin/soft-deleted/agents/{name}/recover` (list them with `GET /api/admin/soft-deleted/agents`). Recovery restores the record but not the container, so start the agent afterwards.
+
+Volume clean-up stays inside this Trinity installation. Each agent volume carries the installation's id, so when two Trinity stacks share one Docker daemon, neither the purge nor the sweep for orphaned agent volumes touches the other stack's volumes. The orphan sweep never reclaims a volume created before that label existed; unattached ones of those are named in a warning in the backend log for a person to review.
 
 - **API:** `DELETE /api/agents/{name}`
 - **MCP:** `delete_agent(name)`
@@ -102,13 +106,13 @@ Use the Delete button on the Agent Detail page. A confirmation dialog is require
 
 The agent header displays status (Running/Stopped), CPU and memory usage, network I/O, and uptime. Telemetry auto-refreshes every 10 seconds.
 
-Fleet-wide monitoring is available at `GET /api/monitoring/fleet-health`. Health levels, from best to worst: healthy, degraded, unhealthy, critical, unknown.
+Fleet-wide health for the agents you can access is at `GET /api/monitoring/status`; one agent's is at `GET /api/monitoring/agents/{name}`. Admins also have `GET /api/ops/fleet/health` — see [Monitoring](../operations/monitoring.md). Health levels, from best to worst: healthy, degraded, unhealthy, critical, unknown.
 
 - **MCP:** `get_agent_health(name)`, `get_fleet_health()` (includes each agent's git `sync` block), `get_fleet_sync_audit()`, `trigger_health_check()`
 
 ### Resource Allocation
 
-Configure per-agent memory and CPU limits from the agent header: click the gear button ("Configure resources") to open the resource modal. Limits are enforced at the container level and take effect on the next restart -- see [Agent Configuration](agent-configuration.md#resource-allocation) for valid values and fleet-wide defaults.
+Configure per-agent memory and CPU limits from the agent header: click the gear button ("Configure resources") to open the resource modal. Limits are enforced at the container level and take effect on the next restart. A CPU limit above the host's CPU count is capped to that count -- see [Agent Configuration](agent-configuration.md#resource-allocation) for valid values and fleet-wide defaults.
 
 Execution timeout is configurable per agent (range: 60--7200 seconds, default: 3600 seconds / 60 minutes).
 
