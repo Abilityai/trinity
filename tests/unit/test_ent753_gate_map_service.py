@@ -60,13 +60,17 @@ def _run(coro):
 
 @pytest.fixture
 def world(db_backend, monkeypatch):
+    import importlib
     from database import db
     from db_models import UserCreate
-    import services.docker_service as DS
     from services import docker_utils, assignment_provider
-    import services.platform_audit_service as PAS
     from services.skill_service import skill_service
     from services import skill_gate_map_service as gms
+    # Through sys.modules, which the code under test imports from at call time
+    # — never `import services.x as X`, which reads the package attribute and
+    # can be a stale copy after another test's re-import (learning 2026-10-05).
+    DS = importlib.import_module("services.docker_service")
+    PAS = importlib.import_module("services.platform_audit_service")
 
     db.create_user(UserCreate(username=OWNER, role="user", email=OWNER_EMAIL))
     db.create_user(UserCreate(username=NOMAIL, role="user"))
@@ -554,12 +558,13 @@ def test_an_agent_actor_is_recorded_as_the_agent(world):
 
 
 def test_a_failed_audit_never_fails_the_write(world, monkeypatch):
-    import services.platform_audit_service as PAS
+    import importlib
 
     async def _boom(*a, **kw):
         raise RuntimeError("audit sink down")
 
-    monkeypatch.setattr(PAS.platform_audit_service, "log", _boom)
+    monkeypatch.setattr(importlib.import_module("services.platform_audit_service").platform_audit_service,
+                        "log", _boom)
     out = _run(world.gms.set_gate(FIN, "pay-invoice", changes={}, ctx=world.ctx))
     assert out["changed"] is True
 

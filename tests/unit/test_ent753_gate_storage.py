@@ -49,7 +49,7 @@ def gates_db(db_backend):
 
 
 def _write(db, agent, skill, *, approver="primary", deadline=None, origin="set"):
-    return db.write_skill_gate(agent, skill, approver=approver, deadline_hours=deadline,
+    return db.write_skill_gate(agent, skill, changes={"approver": approver, "deadline_hours": deadline},
                                origin=origin, set_by="owner-753-storage", set_by_agent=None)
 
 
@@ -101,9 +101,9 @@ def test_an_upsert_works_on_a_database_built_from_tables_py(tmp_path, monkeypatc
             agent_name=FIN, owner_id=1, created_at="2026-10-07T00:00:00Z"))
     monkeypatch.setattr(mod, "get_engine", lambda: engine)
     ops = mod.SkillGateOperations()
-    ops.write_skill_gate(FIN, "pay-invoice", approver="primary", deadline_hours=None,
+    ops.write_skill_gate(FIN, "pay-invoice", changes={"approver": "primary", "deadline_hours": None},
                          origin="set", set_by="o", set_by_agent=None)
-    prev, cur, changed = ops.write_skill_gate(FIN, "pay-invoice", approver="primary", deadline_hours=48,
+    prev, cur, changed = ops.write_skill_gate(FIN, "pay-invoice", changes={"deadline_hours": 48},
                                               origin="set", set_by="o", set_by_agent=None)
     assert prev["deadline_hours"] is None and cur["deadline_hours"] == 48 and changed
     assert [r["skill_name"] for r in ops.list_agent_skill_gates(FIN)] == ["pay-invoice"]
@@ -124,11 +124,10 @@ def test_write_lowercases_the_key_and_reports_previous_and_current(gates_db):
 def test_a_field_not_sent_keeps_what_is_stored(gates_db):
     """The merge happens under the lock, in the write itself: two partial
     writes never drop each other's field."""
-    from db.skill_gates import KEEP
     _write(gates_db, FIN, "pay-invoice", approver="approver", deadline=8)
-    gates_db.write_skill_gate(FIN, "pay-invoice", approver=KEEP, deadline_hours=4, origin="set",
+    gates_db.write_skill_gate(FIN, "pay-invoice", changes={"deadline_hours": 4}, origin="set",
                               set_by="o", set_by_agent=None)
-    gates_db.write_skill_gate(FIN, "pay-invoice", approver="primary", deadline_hours=KEEP, origin="set",
+    gates_db.write_skill_gate(FIN, "pay-invoice", changes={"approver": "primary"}, origin="set",
                               set_by="o", set_by_agent=None)
     [row] = gates_db.list_agent_skill_gates(FIN)
     assert (row["approver"], row["deadline_hours"]) == ("primary", 4)

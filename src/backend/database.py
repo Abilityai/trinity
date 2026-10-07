@@ -137,7 +137,7 @@ from db.skills import SkillsOperations
 from db.skill_sets import SkillSetsOperations
 from db.role_readiness import RoleReadinessOperations
 from db.capability_grants import CapabilityGrantOperations
-from db.skill_gates import SkillGateOperations, KEEP as _GATE_KEEP
+from db.skill_gates import SkillGateOperations
 from db.seat_decisions import SeatDecisionOperations
 from db.skill_sources import SkillSourcesOperations
 from db.public_chat import PublicChatOperations
@@ -2838,11 +2838,11 @@ class DatabaseManager:
     def list_agent_skill_gates(self, agent_name: str):
         return self._skill_gate_ops.list_agent_skill_gates(agent_name)
 
-    def write_skill_gate(self, agent_name: str, skill_name: str, *, approver=_GATE_KEEP,
-                         deadline_hours=_GATE_KEEP, origin: str, set_by: str, set_by_agent):
+    def write_skill_gate(self, agent_name: str, skill_name: str, *, changes, origin: str,
+                         set_by: str, set_by_agent):
         return self._skill_gate_ops.write_skill_gate(
-            agent_name, skill_name, approver=approver, deadline_hours=deadline_hours,
-            origin=origin, set_by=set_by, set_by_agent=set_by_agent)
+            agent_name, skill_name, changes=changes, origin=origin, set_by=set_by,
+            set_by_agent=set_by_agent)
 
     def clear_skill_gate(self, agent_name: str, skill_name: str, *, set_by: str, set_by_agent,
                          recommended):

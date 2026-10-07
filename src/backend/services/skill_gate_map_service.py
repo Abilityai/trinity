@@ -44,7 +44,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Set, Tuple
 
 from database import db
-from db.skill_gates import KEEP, ORIGIN_CLEARED, ORIGIN_LIBRARY_DEFAULT, ORIGIN_SET
+from db.skill_gates import ORIGIN_CLEARED, ORIGIN_LIBRARY_DEFAULT, ORIGIN_SET
 from services import role_addressing, skill_gate_service
 from services.skill_gate_service import SkillGate  # noqa: F401 — re-exported for callers
 from services.skill_packaging import SKILL_NAME_RE
@@ -325,8 +325,7 @@ async def set_gate(agent_name: str, skill_name: str, *, changes: Mapping[str, An
         # The merge with what is stored happens in the DB write, under the
         # lock: two partial PUTs never drop each other's field.
         previous, current, changed = db.write_skill_gate(
-            agent_name, key, approver=fields.get("approver", KEEP),
-            deadline_hours=fields.get("deadline_hours", KEEP), origin=ORIGIN_SET,
+            agent_name, key, changes=fields, origin=ORIGIN_SET,
             set_by=set_by, set_by_agent=set_by_agent)
         return (previous, current, changed), changed
 

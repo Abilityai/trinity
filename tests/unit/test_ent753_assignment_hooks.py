@@ -229,7 +229,8 @@ def skills_api(db_backend, monkeypatch):
     from db.capability_grants import CAPABILITY_SKILLS_MANAGE
     from routers import skills
     from services import docker_utils, assignment_provider, skill_set_service
-    import services.platform_audit_service as PAS
+    import importlib
+    PAS = importlib.import_module("services.platform_audit_service")   # sys.modules, not the package attribute
 
     db.create_user(UserCreate(username=OWNER, role="user", email=f"{OWNER}@example.com"))
     db.create_user(UserCreate(username=ADMIN, role="admin", email=f"{ADMIN}@example.com"))
@@ -281,7 +282,7 @@ def skills_api(db_backend, monkeypatch):
     client = TestClient(app)
 
     def gate(name, origin="set"):
-        db.write_skill_gate(FIN, name, approver="primary", deadline_hours=None, origin=origin,
+        db.write_skill_gate(FIN, name, changes={}, origin=origin,
                             set_by=OWNER, set_by_agent=None)
 
     def gated():
@@ -311,7 +312,7 @@ def test_a_persons_unassign_removes_the_explicit_gate(skills_api):
 @pytest.mark.parametrize("target", [FIN, ORCH], ids=["sibling", "itself"])
 def test_an_agents_unassign_keeps_the_explicit_gate_so_it_cannot_launder_it(skills_api, target):
     skills_api.client.post(f"/api/agents/{target}/skills/pay-invoice")
-    skills_api.db.write_skill_gate(target, "pay-invoice", approver="primary", deadline_hours=None,
+    skills_api.db.write_skill_gate(target, "pay-invoice", changes={},
                                    origin="set", set_by=OWNER, set_by_agent=None)
     skills_api.principal["user"] = _user(OWNER, scope="agent", agent=ORCH)
     r = skills_api.client.delete(f"/api/agents/{target}/skills/pay-invoice")

@@ -24,7 +24,7 @@ the agent has a live ownership row: a rename or purge that wins the race leaves
 nothing under a name a later agent could inherit. SQLAlchemy Core, so it runs
 unchanged on SQLite and PostgreSQL.
 """
-from typing import Iterable, List, Optional, Set, Tuple
+from typing import Any, Iterable, List, Mapping, Optional, Set, Tuple
 
 from sqlalchemy import and_, delete, select
 
@@ -36,9 +36,6 @@ from utils.helpers import utc_now_iso
 ORIGIN_SET = "set"
 ORIGIN_LIBRARY_DEFAULT = "library_default"
 ORIGIN_CLEARED = "cleared"
-
-#: `write_skill_gate`'s "keep what is stored" marker for a field the caller did not send.
-KEEP = object()
 
 _COLUMNS = (
     agent_skill_gates.c.agent_name,
@@ -101,12 +98,15 @@ class SkillGateOperations:
         with get_engine().connect() as conn:
             return [dict(r) for r in conn.execute(stmt).mappings()]
 
-    def write_skill_gate(self, agent_name: str, skill_name: str, *, approver=KEEP,
-                         deadline_hours=KEEP, origin: str, set_by: str,
+    def write_skill_gate(self, agent_name: str, skill_name: str, *, changes: Mapping[str, Any],
+                         origin: str, set_by: str,
                          set_by_agent: Optional[str]) -> Tuple[Optional[dict], Optional[dict], bool]:
-        """Insert or update one row. A field passed as ``KEEP`` keeps the stored
-        value (a tombstone has none: ``primary``, no deadline). The merge happens
-        here, under the lock, so two partial writes never drop each other's field.
+        """Insert or update one row. ``changes`` holds only the fields to set
+        (``approver``, ``deadline_hours``); a field it does not hold keeps the
+        stored value (a tombstone has none: ``primary``, no deadline). The merge
+        happens here, under the lock, so two partial writes never drop each
+        other's field. A mapping, not a sentinel: a module reload must never
+        turn "keep" into a value written to the row.
 
         Returns ``(previous, current, changed)``; ``(None, None, False)`` when the
         agent has no live ownership row, and ``changed`` False when the row
@@ -117,10 +117,10 @@ class SkillGateOperations:
                 return None, None, False
             previous = _row(conn, agent_name, skill_name)
             live = previous if previous and previous["origin"] != ORIGIN_CLEARED else None
-            if approver is KEEP:
-                approver = live["approver"] if live else "primary"
-            if deadline_hours is KEEP:
-                deadline_hours = live["deadline_hours"] if live else None
+            approver = changes["approver"] if "approver" in changes else (
+                live["approver"] if live else "primary")
+            deadline_hours = changes["deadline_hours"] if "deadline_hours" in changes else (
+                live["deadline_hours"] if live else None)
             if (previous and previous["origin"] == origin
                     and (previous["approver"], previous["deadline_hours"]) == (approver, deadline_hours)):
                 return previous, previous, False

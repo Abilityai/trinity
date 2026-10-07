@@ -90,7 +90,8 @@ def api(db_backend, monkeypatch):
     from db_models import UserCreate
     from db.capability_grants import CAPABILITY_SKILLS_MANAGE
     from services import docker_utils, assignment_provider
-    import services.platform_audit_service as PAS
+    import importlib
+    PAS = importlib.import_module("services.platform_audit_service")   # sys.modules, not the package attribute
     from services.skill_service import skill_service
 
     for name, role in ((OWNER, "user"), (OTHER, "user"), (ADMIN, "admin")):
