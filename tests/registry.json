@@ -109,6 +109,17 @@
       "description": "Compat X-009 (SOFT, static): a `dims:` selector that can never match the dimensions its metric declares in template.yaml, a `dims:` with no `metric:`, and a `metric:` that is not text are reported with the tile's own code and sentence (parity with `parse_dims_selector` and the binding); valid selectors pass with no points anywhere; undeclared or malformed metrics and empty selectors are not its finding; no dashboard / no or invalid template skip; a raise fails closed with the type name only; nothing raw from the author (a declared `channel\\n`, a bidi or control character in a label) reaches the persisted detail; the user doc's recipe passes X-009 and D-003; and each widget is judged as the tile receives it over the agent server's JSON response (an unquoted YAML date in `dims:` or `metric:` arrives as ISO text, an int stays an int and is still flagged)."
     },
     {
+      "file": "unit/test_3262_admin_username_owner.py",
+      "feature": "#3262",
+      "added": "2026-10-06",
+      "categories": [
+        "backend",
+        "system-agent",
+        "setup"
+      ],
+      "description": "With ADMIN_USERNAME=root and only a root admin: the system agent's create path looks up and names the configured admin, a running system agent is registered to it, the Cornelius seed provisions under it, and the default system seed no longer defers waiting for an 'admin' user."
+    },
+    {
       "file": "unit/test_3246_platform_alert_surfaces.py",
       "feature": "#3246",
       "added": "2026-10-05",

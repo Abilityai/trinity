@@ -7,7 +7,7 @@ directions, both covered here:
   * **False negative** (the reason this issue exists): since ent#124 seeds a
     fleet on first run, "zero agents" is permanently false, so a browser-side
     freshness check never fires again. The seed is deployed under the admin
-    account (`SEED_OWNER`), so no actor-based check can tell it apart either —
+    account (`admin_username()`), so no actor-based check can tell it apart either —
     only the seed's own naming contract can.
   * **False positive**, the worse one: a card that appears over somebody's
     mature fleet. Hence every failure path resolves to `first_run: False`.
