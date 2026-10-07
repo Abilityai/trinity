@@ -271,7 +271,14 @@ def class_evidence(rows: List[dict], ask_class: str, *, today: Optional[date] = 
             if not _has_lapsed(r, day):
                 reversals += 1
             continue
-        if eff in ("expired", "routed"):
+        if eff != "active":
+            # Only a live, active record is evidence. `effective_status` returns
+            # the STORED status for `closed` and `superseded` unconditionally, so
+            # they never become `expired`: admitted, a superseded copy counted as
+            # its own source (one judgment, superseded twice, graduated), and a
+            # closed record with a past `review_by` pinned `expires_at` in the
+            # past forever (#2984 review I1). `expired` and `routed` were
+            # already skipped; this names the rule instead of the exceptions.
             continue
         window.append(r)
         ids.append(r["id"])

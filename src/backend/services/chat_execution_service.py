@@ -75,6 +75,7 @@ from services.upload_service import (
     WEB_MAX_TOTAL_IMAGE_SIZE,
 )
 from services.sync_waiter import signal_sync_waiter, wait_for_sync_terminal
+from services import event_dispatch_service
 from services.event_dispatch_service import (
     RESERVED_EVENT_TRIGGER,
     RESERVED_EVENT_TRIGGER_HEADER_VALUE,
@@ -84,6 +85,7 @@ from services import idempotency_service
 from services import dispatch_admission_service
 from services import chat_persistence_service
 from services import skill_gate_service
+from services import session_turn_service
 from services.runtime_secret_scrub import get_staged_values, scrub_obj, scrub_text
 from services.platform_prompt_service import (
     ExecutionContext,
@@ -94,6 +96,7 @@ from services.platform_prompt_service import (
 from services.chat_signals import (
     ChatExecutionContext,
     ChatDispatchError,
+    chat_trigger,
 )
 from utils.credential_sanitizer import (
     sanitize_dict,
@@ -145,6 +148,7 @@ async def prepare_chat_execution(
     capacity_result: object,
     queue_result: str,
     chain_depth: Optional[int] = None,
+    gate: Optional[object] = None,
 ) -> ChatExecutionContext:
     """Execution setup for chat_with_agent (#1026 slice 2).
 
@@ -153,6 +157,10 @@ async def prepare_chat_execution(
     gets/creates the chat session, tracks the chat-start activity, and logs the
     inbound user message. Returns a ChatExecutionContext carrying the ids/records
     the downstream execute+finalize body consumes.
+
+    `gate` is the admission's skill-gate decision (trinity-enterprise#752): a
+    self-approval is recorded here, on the row the agent receives, and the turn
+    is marked to run in its own session.
     """
     is_queued = capacity_result.state == "queued_in_memory"
 
@@ -168,13 +176,7 @@ async def prepare_chat_execution(
     # Create execution record for ALL chat calls (user, MCP, and agent-to-agent)
     # This ensures every execution appears in the Tasks tab for unified tracking (#96)
     task_execution_id = None
-    # Determine triggered_by: "agent" for agent-to-agent, "mcp" for user MCP calls, "chat" for UI chat
-    if x_source_agent:
-        triggered_by = "agent"
-    elif x_via_mcp:
-        triggered_by = "mcp"
-    else:
-        triggered_by = "chat"
+    triggered_by = chat_trigger(x_source_agent, x_via_mcp)
     # Look up subscription for this agent (best-effort, for usage tracking SUB-004)
     # We fetch this early so it can be passed to the execution record too
     try:
@@ -202,6 +204,16 @@ async def prepare_chat_execution(
     logger.info(
         f"[Chat] Created task execution {task_execution_id} for {triggered_by} call on agent '{name}'"
     )
+
+    # trinity-enterprise#752: the self-approval is recorded on THIS row — the
+    # id `build_chat_payload` sends — never on the admission's capacity-slot
+    # id, which no agent ever sees. Such a turn also runs in its own session.
+    isolated_session = bool(gate is not None and not gate.ungated and gate.self_approved_by)
+    if gate is not None:
+        await skill_gate_service.record_self_approval(
+            name, gate, execution_id=task_execution_id, current_user=current_user,
+            endpoint=f"/api/agents/{name}/chat", request_text=request.message,
+            triggered_by=triggered_by)
 
     # Broadcast collaboration event if this is agent-to-agent communication
     collaboration_activity_id = None
@@ -276,6 +288,7 @@ async def prepare_chat_execution(
         chat_activity_id=chat_activity_id,
         session=session,
         is_queued=is_queued,
+        isolated_session=isolated_session,
     )
 
 
@@ -287,14 +300,19 @@ def build_chat_payload(
     current_user: User,
     x_source_agent: Optional[str],
     task_execution_id: object,
+    isolated_session: bool = False,
 ) -> dict:
     """Build the agent-server /api/chat payload: message + model + the
     runtime-aware platform/execution-context system prompt (MEM-001, #1187), and
     mark the execution dispatched (#686) so the no-session sweep doesn't falsely
-    fail a long turn."""
+    fail a long turn. `isolated_session` (trinity-enterprise#752) asks the agent
+    to run the turn fresh and not keep it as its chat session; an older agent
+    image ignores the field."""
     payload = {"message": request.message, "stream": False}
     if request.model:
         payload["model"] = request.model
+    if isolated_session:
+        payload["isolated_session"] = True
     # Resolve the agent runtime (best-effort, never raises) so the MCP-tool
     # naming in the platform prompt matches the harness (#1187 F-MCP). Lazy +
     # guarded so a re-import under a stubbed services.docker_service can't break
@@ -836,9 +854,14 @@ async def run_chat_turn(
     chat_timeout: int,
     idem: object,
     capacity: object,
+    chain_depth: Optional[int] = None,
+    isolated_session: bool = False,
 ):
     """Execute the chat against the agent and finalize (#1026 slice 3;
     **transitional** sync-chat applier, RD15).
+
+    ``capacity is None`` is a pull pilot's admission (#3127): the turn goes to
+    ``run_pulled_chat_turn`` and this push body does not run.
 
     Dispatches to the agent server, then on success finalizes (persist + activity
     completion + terminal SUCCESS row + idempotency snapshot); on the agent-call
@@ -846,6 +869,24 @@ async def run_chat_turn(
     ``ChatDispatchError`` (mapped to HTTP by the router). The ``finally`` always
     releases the capacity slot and any still-in-flight idempotency claim.
     """
+    if capacity is None:
+        return await run_pulled_chat_turn(
+            name=name,
+            request=request,
+            current_user=current_user,
+            x_source_agent=x_source_agent,
+            triggered_by=triggered_by,
+            task_execution_id=task_execution_id,
+            _chat_subscription_id=_chat_subscription_id,
+            chat_activity_id=chat_activity_id,
+            collaboration_activity_id=collaboration_activity_id,
+            session=session,
+            execution=execution,
+            queue_result=queue_result,
+            idem=idem,
+            chain_depth=chain_depth,
+            isolated_session=isolated_session,
+        )
     idem_done = False
     try:
         payload = build_chat_payload(
@@ -855,6 +896,7 @@ async def run_chat_turn(
             current_user=current_user,
             x_source_agent=x_source_agent,
             task_execution_id=task_execution_id,
+            isolated_session=isolated_session,
         )
         start_time = datetime.utcnow()
         response = await agent_post_with_retry(
@@ -907,6 +949,262 @@ async def run_chat_turn(
         # RELIABILITY-006 (#525): on any non-success exit, release the in-flight
         # idempotency claim so the caller can legitimately retry (no-op on the
         # success path, where complete() already finalized it).
+        if not idem_done:
+            idempotency_service.fail(idem)
+
+
+def _valid_claude_session_id(value) -> Optional[str]:
+    """``value`` when it parses as a UUID, else None (the #686 UC1 guard: a
+    malformed id from the agent never reaches a resume)."""
+    if value is None:
+        return None
+    try:
+        uuid.UUID(str(value))
+    except (ValueError, TypeError, AttributeError):
+        return None
+    return str(value)
+
+
+def _parse_execution_log(raw) -> list:
+    """The row's JSON transcript as the list the push response carries."""
+    if isinstance(raw, list):
+        return raw
+    try:
+        parsed = json.loads(raw) if raw else []
+    except (TypeError, ValueError):
+        return []
+    return parsed if isinstance(parsed, list) else []
+
+
+async def _close_chat_activities(
+    chat_activity_id, collaboration_activity_id, state, error=None, details=None
+):
+    """Close the chat-start and collaboration activities of a pulled turn. The
+    pull sink may already have closed the chat-start one; the close is a CAS,
+    so the second writer is a no-op."""
+    await activity_service.complete_activity(
+        activity_id=chat_activity_id, status=state, error=error, details=details,
+    )
+    if collaboration_activity_id:
+        await activity_service.complete_activity(
+            activity_id=collaboration_activity_id, status=state, error=error,
+            details=details,
+        )
+
+
+async def run_pulled_chat_turn(
+    *,
+    name: str,
+    request: ChatMessageRequest,
+    current_user: User,
+    x_source_agent: Optional[str],
+    triggered_by: str,
+    task_execution_id: object,
+    _chat_subscription_id: object,
+    chat_activity_id: object,
+    collaboration_activity_id: object,
+    session: object,
+    execution: object,
+    queue_result: str,
+    idem: object,
+    chain_depth: Optional[int] = None,
+    isolated_session: bool = False,
+):
+    """``POST /chat`` on a pull pilot (#3127).
+
+    The turn goes onto the durable queue through the resumable-turn engine the
+    Session tab uses, so each chat session (one per agent and user) resumes its
+    own Claude conversation from ``chat_sessions.cached_claude_session_id``. A
+    second turn of the same session waits on the resume lock for the default
+    ``LOCK_WAIT_TOTAL_SECONDS``, then gets 429; other users' turns run in
+    parallel. The wait must stay under the #106 no-session sweep: the waiting
+    turn's admission row is ``running`` with no Claude session meanwhile.
+
+    The worker's result reaches the row through the pull sink, which writes the
+    terminal, closes the chat-start activity and runs SUB-003. This function
+    persists the assistant message, closes the collaboration activity, caches
+    the Claude id, and stores the idempotency snapshot. No slot is held, so
+    nothing is released.
+
+    ``isolated_session`` (trinity-enterprise#752, a self-approved gated skill):
+    the turn starts cold and its Claude id is not cached, so the session's next
+    turn never resumes a context with the skill loaded.
+    """
+    idem_done = False
+    user_email = current_user.email or current_user.username
+    try:
+        start_time = datetime.utcnow()
+        cached_uuid = None if isolated_session else db.get_chat_session_claude_id(session.id)
+        try:
+            turn = await session_turn_service.run_resumable_turn(
+                agent_name=name,
+                session_key=f"chat:{session.id}",
+                message=request.message,
+                # ent#751: `admit_chat_request` already ran the skill gate with
+                # the authenticated requester. The backstop rebuilds the
+                # requester from the row and never self-approves, so a second
+                # gate would turn an approver's own request into a pending ask.
+                request_text=request.message,
+                gate_checked=True,
+                cached_uuid=cached_uuid,
+                triggered_by=triggered_by,
+                on_resume_failure=lambda: db.set_chat_session_claude_id(session.id, None),
+                execution_id=task_execution_id,
+                source_user_id=current_user.id,
+                source_user_email=user_email,
+                source_agent_name=x_source_agent,
+                source_mcp_key_id=getattr(current_user, "mcp_key_id", None),
+                source_mcp_key_name=getattr(current_user, "mcp_key_name", None),
+                model=request.model,
+                subscription_id=_chat_subscription_id,
+                chain_depth=chain_depth,
+                collaboration_activity_id=collaboration_activity_id,
+            )
+        except session_turn_service.ResumeLockBusy as busy:
+            error = "Another turn on this chat session is in progress"
+            # #1804: only the CAS winner closes the activity and emits the
+            # terminal event.
+            won = bool(task_execution_id) and db.update_execution_status(
+                execution_id=task_execution_id,
+                status=TaskExecutionStatus.FAILED,
+                result=ExecutionResult(error=error),
+            )
+            if won or not task_execution_id:
+                await activity_service.close_execution_activity(
+                    task_execution_id, TaskExecutionStatus.FAILED, error=error,
+                    activity_id=chat_activity_id,
+                )
+            if won:
+                event_dispatch_service.spawn_task_terminal_event(
+                    name, task_execution_id,
+                    terminal_status=TaskExecutionStatus.FAILED,
+                    summary_or_error=error,
+                )
+            if collaboration_activity_id:
+                await activity_service.complete_activity(
+                    activity_id=collaboration_activity_id,
+                    status=ActivityState.FAILED, error=error,
+                )
+            raise ChatDispatchError(
+                429, busy.detail,
+                headers=_error_code_headers(TaskExecutionErrorCode.CAPACITY),
+            )
+
+        result = turn.result
+        execution_id = result.execution_id or task_execution_id
+        if (
+            getattr(getattr(result, "error_code", None), "value", None)
+            == TaskExecutionErrorCode.TIMEOUT.value
+        ):
+            # The wait ran out. The row is the authority: a terminal that landed
+            # meanwhile is used; a turn still running gets the /task receipt.
+            from services.task_execution_service import result_from_execution_row
+
+            row_result = result_from_execution_row(execution_id)
+            if row_result is not None and row_result.status in _SYNC_BACKLOG_TERMINAL:
+                result = row_result
+            else:
+                receipt = {
+                    "status": "queued_timeout",
+                    "execution_id": execution_id,
+                    "task_execution_id": execution_id,
+                    "agent_name": name,
+                    "message": (
+                        f"Chat turn on agent '{name}' did not complete in time. "
+                        f"Execution {execution_id} may still be running; poll "
+                        f"GET /api/agents/{name}/executions/{execution_id}."
+                    ),
+                    "async_mode": True,
+                }
+                idempotency_service.complete(idem, execution_id, receipt)
+                idem_done = True
+                raise ChatDispatchError(504, receipt["message"])
+
+        if result.status != TaskExecutionStatus.SUCCESS:
+            await _close_chat_activities(
+                chat_activity_id,
+                collaboration_activity_id,
+                activity_state_for_terminal(result.status),
+                result.error if result.status == TaskExecutionStatus.FAILED else None,
+            )
+            if result.status in ("failed", "cancelled"):
+                # _map_task_failure releases the claim itself; a second release
+                # in the finally could drop a retry's fresh claim.
+                idem_done = True
+            _map_task_failure(name, result, idem=idem)
+            # A non-terminal status here means the dispatch never resolved.
+            raise ChatDispatchError(503, result.error or "Chat turn did not complete")
+
+        real_uuid = _valid_claude_session_id(turn.real_uuid)
+        if turn.real_uuid is not None and real_uuid is None:
+            logger.warning(
+                f"[Chat] Discarding malformed claude_session_id from pulled turn "
+                f"(execution_id={execution_id})"
+            )
+        if real_uuid and real_uuid != cached_uuid and not isolated_session:
+            db.set_chat_session_claude_id(session.id, real_uuid)
+
+        execution_time_ms = int((datetime.utcnow() - start_time).total_seconds() * 1000)
+        execution_log = _parse_execution_log(result.execution_log)
+        metadata = (result.raw_response or {}).get("metadata") or {}
+        compact_events = metadata.get("compact_events") or []
+        response_text = result.response or ""
+        # ent#279: scrub staged secrets before the chat_messages write.
+        _staged = get_staged_values()
+        if _staged:
+            response_text = scrub_text(_staged, response_text)
+
+        assistant_message = db.add_chat_message(
+            session_id=session.id,
+            agent_name=name,
+            user_id=current_user.id,
+            user_email=user_email,
+            role="assistant",
+            content=response_text,
+            fields=ChatMessageFields(
+                cost=result.cost,
+                context_used=result.context_used,
+                context_max=result.context_max,
+                tool_calls=result.execution_log,
+                execution_time_ms=execution_time_ms,
+                subscription_id=_chat_subscription_id,
+            ),
+        )
+        await _close_chat_activities(
+            chat_activity_id,
+            collaboration_activity_id,
+            ActivityState.COMPLETED,
+            details={
+                "related_chat_message_id": assistant_message.id,
+                "execution_time_ms": execution_time_ms,
+                "execution_id": execution_id,
+            },
+        )
+
+        response_data = {
+            "response": response_text,
+            "execution_log": execution_log,
+            "metadata": {
+                "cost_usd": result.cost,
+                "session_id": real_uuid,
+                "compact_events": compact_events,
+            },
+            "session": {
+                "context_tokens": result.context_used,
+                "context_window": result.context_max or DEFAULT_CONTEXT_WINDOW,
+            },
+            "execution": {
+                "id": execution.id,
+                "task_execution_id": execution_id,
+                "queue_status": queue_result,
+                "was_queued": True,
+                "compaction": _compaction_summary({"compact_events": compact_events}),
+            },
+        }
+        idempotency_service.complete(idem, execution_id, response_data)
+        idem_done = True
+        return response_data
+    finally:
         if not idem_done:
             idempotency_service.fail(idem)
 
@@ -1165,34 +1463,17 @@ async def run_async_task(
 
         execution_time_ms = int((datetime.utcnow() - start_time).total_seconds() * 1000)
 
-        # Post-task side effects (each guarded + self-isolating; see helpers).
-        chat_session_id = (
-            await chat_persistence_service.persist_and_broadcast_chat_session(
-                agent_name=agent_name,
-                request=request,
-                result=result,
-                execution_id=execution_id,
-                user_id=user_id,
-                user_email=user_email,
-                subscription_id=subscription_id,
-                execution_time_ms=execution_time_ms,
-            )
-        )
-        await complete_collaboration_activity(
-            collaboration_activity_id,
-            result,
-            execution_id,
-            execution_time_ms,
-        )
-        await finalize_self_task(
-            is_self_task=is_self_task,
-            self_task_activity_id=self_task_activity_id,
+        chat_session_id = await run_post_turn_delivery(
             agent_name=agent_name,
             request=request,
             result=result,
             execution_id=execution_id,
+            collaboration_activity_id=collaboration_activity_id,
             user_id=user_id,
             user_email=user_email,
+            subscription_id=subscription_id,
+            is_self_task=is_self_task,
+            self_task_activity_id=self_task_activity_id,
             execution_time_ms=execution_time_ms,
         )
 
@@ -1204,6 +1485,60 @@ async def run_async_task(
         # Issue #498: signal any sync HTTP caller waiting on this execution.
         # No-op when no waiter is registered (the common async path).
         signal_sync_waiter(execution_id, result, chat_session_id)
+
+
+async def run_post_turn_delivery(
+    *,
+    agent_name,
+    request,
+    result,
+    execution_id,
+    collaboration_activity_id,
+    user_id,
+    user_email,
+    subscription_id,
+    is_self_task,
+    self_task_activity_id,
+    execution_time_ms,
+):
+    """Apply what the caller asked to happen with a finished turn's result:
+    chat-session persistence, collaboration-activity completion, self-task
+    finalisation. Each step is guarded and self-isolating (see the helpers).
+    Returns the chat_session_id the turn was saved to, or None.
+
+    #2329: the push path (`run_async_task`) and the pull sink
+    (`pull_coordination_service.apply_task_result`) both call this, so a pulled
+    turn honours the same delivery settings as a pushed one. Driven by the
+    request's settings only, never by the trigger.
+    """
+    chat_session_id = await chat_persistence_service.persist_and_broadcast_chat_session(
+        agent_name=agent_name,
+        request=request,
+        result=result,
+        execution_id=execution_id,
+        user_id=user_id,
+        user_email=user_email,
+        subscription_id=subscription_id,
+        execution_time_ms=execution_time_ms,
+    )
+    await complete_collaboration_activity(
+        collaboration_activity_id,
+        result,
+        execution_id,
+        execution_time_ms,
+    )
+    await finalize_self_task(
+        is_self_task=is_self_task,
+        self_task_activity_id=self_task_activity_id,
+        agent_name=agent_name,
+        request=request,
+        result=result,
+        execution_id=execution_id,
+        user_id=user_id,
+        user_email=user_email,
+        execution_time_ms=execution_time_ms,
+    )
+    return chat_session_id
 
 
 async def complete_collaboration_activity(
@@ -1728,7 +2063,9 @@ def _map_task_failure(name, result, *, idem):
         # from the row's `[code]` prefix (#3114); a row with no prefix has none,
         # and the at-capacity branch below fills `capacity` (#2919).
         code_headers = _error_code_headers(getattr(result, "error_code", None))
-        if "at capacity" in (result.error or ""):
+        if "at capacity" in (result.error or "") or getattr(
+            getattr(result, "error_code", None), "value", None
+        ) == TaskExecutionErrorCode.CAPACITY.value:
             # #2919: the capacity rejection carries no code, so `capacity`
             # fills the ABSENT one. A code the result already carries is the
             # producer's structured verdict on a turn that ran (e.g. #2638
@@ -1932,7 +2269,9 @@ async def _dispatch_sync_backlog(*, name, execution_id, sync_effective_timeout, 
                 "claude_session_id": row.claude_session_id,
             },
         )
-        sync_chat_session_id = None
+        # #2329: the pull sink signals `result=None` with the session it saved
+        # the turn to; the DB-poll wake (another worker) carries none.
+        sync_chat_session_id = (wait_payload or {}).get("chat_session_id")
 
     _map_task_failure(name, result, idem=idem)
 
@@ -2122,10 +2461,11 @@ async def dispatch_parallel_task(
     # `system_prompt`, which the executor receives appended to its own. A
     # Chat-tab history that mentions a gated skill re-gates later turns: the
     # safe direction.
+    gate_text = "\n".join(
+        t for t in (request.message, request.user_message, request.system_prompt) if t)
     gate = await skill_gate_service.enforce(
         name,
-        request_text="\n".join(
-            t for t in (request.message, request.user_message, request.system_prompt) if t),
+        request_text=gate_text,
         requester=skill_gate_service.requester_from_principal(
             current_user, source_agent=x_source_agent,
             # The platform-injected turn (#2392) first; the model-typed
@@ -2187,9 +2527,12 @@ async def dispatch_parallel_task(
         idem=idem,
         chain_depth=chain_depth,
     )
-    await skill_gate_service.audit_self_approved(
-        name, gate, current_user=current_user,
-        endpoint=f"/api/agents/{name}/task", execution_id=execution_id)
+    # trinity-enterprise#752: clear the run the agent receives for the skills
+    # it was self-approved for (the in-container hook's clearance), + audit.
+    await skill_gate_service.record_self_approval(
+        name, gate, execution_id=execution_id, current_user=current_user,
+        endpoint=f"/api/agents/{name}/task", request_text=gate_text,
+        triggered_by=derivation.triggered_by)
 
     if request.async_mode:
         return await _dispatch_async(

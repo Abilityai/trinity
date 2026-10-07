@@ -180,7 +180,8 @@ class GeminiRuntime(AgentRuntime):
         continue_session: bool = False,
         stream: bool = False,
         system_prompt: Optional[str] = None,
-        execution_id: Optional[str] = None
+        execution_id: Optional[str] = None,
+        isolated_session: bool = False,  # trinity-enterprise#752: Claude Code only (D4); ignored
     ) -> Tuple[str, List[ExecutionLogEntry], ExecutionMetadata, List[Dict]]:
         """
         Execute a Gemini chat turn.

@@ -6,8 +6,8 @@ import os
 import re
 import unicodedata
 
-from pydantic import BaseModel, ConfigDict, EmailStr, Field, SecretStr, field_validator, model_validator
-from typing import Any, Dict, List, Literal, Optional, Union
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, SecretStr, StrictInt, field_validator, model_validator
+from typing import Annotated, Any, Dict, List, Literal, Optional, Union
 from datetime import datetime
 from enum import Enum
 
@@ -318,7 +318,9 @@ class AgentStatus(BaseModel):
     # head_sha, file_count}; set only on the create response of a snapshot import.
     import_snapshot: Optional[Dict[str, Any]] = None
     # trinity-enterprise#705: on a `github:` create, how the git mode was decided
-    # — {kind, source_mode, reason} — so "why is this agent pull-only?" has an answer.
+    # — {kind, source_mode, pushes, reason} — so "why is this agent pull-only?" has an
+    # answer. `pushes` (ent#704) is whether it auto-pushes; fork-to-own is
+    # source_mode AND pushes, so the UI must never infer it from source_mode.
     git_mode: Optional[dict] = None
 
     class Config:
@@ -1258,6 +1260,10 @@ class SystemAgentConfig(BaseModel):
     folders: Optional[dict] = None  # {"expose": bool, "consume": bool}
     schedules: Optional[List[dict]] = None  # [{name, cron, message, ...}]
     tags: Optional[List[str]] = None  # Additional tags for this agent (ORG-001 Phase 4)
+    # trinity-enterprise#704: what each member is — "agent" (its repository IS
+    # the agent) or "deployment" (a deployment of a codebase). Omitted → the
+    # platform default (AgentConfig.kind, ent#705).
+    kind: Optional[Literal["agent", "deployment"]] = None
 
 
 class SystemPermissions(BaseModel):
@@ -3613,7 +3619,36 @@ class Reminder(ReminderSummary):
 # =============================================================================
 
 
-class SendMessageRequest(BaseModel):
+class IntentKeyFields(BaseModel):
+    """Caller-declared cross-execution idempotency (ent#665) for the human-facing
+    sends: send_message, call_user and the group messages. Absent → unchanged."""
+    idempotency_key: Optional[str] = Field(
+        default=None,
+        min_length=1,
+        max_length=200,
+        pattern=r"^[A-Za-z0-9_.:/-]+$",
+        description=(
+            "A stable name for what you are telling them (e.g. 'gcp-ceiling-correction'). "
+            "Across ALL your runs, a send with the same key to the same recipient within "
+            "idempotency_ttl is delivered once; later ones return sent=false. Never derived "
+            "from the text: change the key when the information changes."
+        ),
+    )
+    idempotency_ttl: Optional[StrictInt] = Field(
+        default=None,
+        ge=60,
+        le=86400,
+        description="Suppression window in seconds (60–86400, default 86400). Needs idempotency_key.",
+    )
+
+    @model_validator(mode="after")
+    def _ttl_needs_key(self):
+        if self.idempotency_ttl is not None and not self.idempotency_key:
+            raise ValueError("idempotency_ttl needs idempotency_key")
+        return self
+
+
+class SendMessageRequest(IntentKeyFields):
     """Request to send a proactive message to a user.
 
     Address it with ``to`` — a ROLE the platform resolves through the agent's
@@ -3675,11 +3710,21 @@ class SendMessageRequest(BaseModel):
 
 
 class SendMessageResponse(BaseModel):
-    """Response from sending a proactive message."""
+    """Response from sending a proactive message.
+
+    The ent#665 fields are set only when the request carried an idempotency_key;
+    the route uses ``response_model_exclude_unset`` so a keyless response is
+    unchanged. ``sent=false`` + ``suppressed_by`` means nothing was delivered
+    because an earlier run already sent it.
+    """
     success: bool
     channel: str
     message_id: Optional[str] = None
     error: Optional[str] = None
+    sent: Optional[bool] = None
+    suppressed_by: Optional[str] = None
+    first_sent_at: Optional[str] = None
+    first_execution_id: Optional[str] = None
 
 
 class ProactiveShareUpdate(BaseModel):
@@ -3712,7 +3757,9 @@ class DismissAllRequest(BaseModel):
 class OperatorResponse(BaseModel):
     """Body for responding to a queue item."""
     response: str
-    response_text: Optional[str] = None
+    # #3242: carries the instruction with the reserved "(something else)"
+    # decision; bounded like the Workspace answer and the resume frame.
+    response_text: Optional[str] = Field(default=None, max_length=4000)
     # #2915: a response to an item the agent changed or closed on its side is
     # refused with 409 `item_diverged` unless the human has SEEN the divergence
     # and answers anyway. The UI sets this on the second click, after showing it.
@@ -3761,6 +3808,35 @@ class OperatorAskCreate(BaseModel):
     expires_at: Optional[str] = None
     to: Optional[str] = None
     supersedes_expired: Optional[str] = None
+
+
+class SkillGateCheckRequest(BaseModel):
+    """What the in-container skill-gate hook asks (trinity-enterprise#752):
+    `POST /api/skill-gate/check`, with the agent's own key.
+
+    No field names an agent — the platform takes it from the key. `names` is
+    every name the invoked skill (or a subagent's preloads) answers to;
+    `resolved` is False when the hook could not tell which skill a call loads.
+    The bounds are the hook's own: a body outside them is a 422, which the
+    hook reads as "no answer".
+    """
+    model_config = ConfigDict(extra="forbid")
+
+    via: Literal["skill_tool", "subagent_preload"]
+    invoked: Optional[str] = Field(default=None, max_length=256)
+    names: List[Annotated[str, Field(max_length=256)]] = Field(default_factory=list, max_length=64)
+    resolved: bool = True
+    subagent: Optional[str] = Field(default=None, max_length=256)
+    execution_id: Optional[str] = Field(default=None, max_length=128)
+    marker: Optional[bool] = None
+
+
+class SkillGateCheckResponse(BaseModel):
+    """The verdict. `allowed` is the only field the hook acts on; `message`
+    is what the model reads when it is refused."""
+    allowed: bool
+    gated: bool
+    message: Optional[str] = None
 
 
 class BulkCancelRequest(BaseModel):
@@ -4310,9 +4386,11 @@ class TelegramGroupConfigUpdateRequest(BaseModel):
     context_enabled: Optional[bool] = None
 
 
-class TelegramGroupMessageRequest(BaseModel):
+class TelegramGroupMessageRequest(IntentKeyFields):
     """Request model for proactive group messaging (Issue #349)."""
     message: str
+    # Recorded as the first sender of an idempotency_key (ent#665); not a dedup key here.
+    execution_id: Optional[str] = Field(default=None, max_length=200)
 
 
 class TelegramProgressIndicatorRequest(BaseModel):
@@ -4325,10 +4403,12 @@ class SlackChannelProactiveRequest(BaseModel):
     allow_proactive: bool
 
 
-class SlackChannelMessageRequest(BaseModel):
+class SlackChannelMessageRequest(IntentKeyFields):
     """Request model for proactive Slack channel messaging (#350)."""
     message: str
     thread_ts: Optional[str] = None  # optionally reply in an existing thread
+    # Recorded as the first sender of an idempotency_key (ent#665); not a dedup key here.
+    execution_id: Optional[str] = Field(default=None, max_length=200)
 
 
 # =============================================================================
@@ -4431,7 +4511,7 @@ class VoipBindingResponse(BaseModel):
     enabled: Optional[bool] = None
 
 
-class VoipCallRequest(BaseModel):
+class VoipCallRequest(IntentKeyFields):
     to_number: str
     context: Optional[str] = None
     process_transcript: bool = True

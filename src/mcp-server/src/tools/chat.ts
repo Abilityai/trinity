@@ -11,6 +11,7 @@ import { TrinityClient, isDepthRefusal, isGateResult, type DepthRefusal } from "
 import { MANUAL_EXECUTION_ID } from "./execution_id.js";
 import type { McpAuthContext, AgentAccessCheckResult } from "../types.js";
 import { accessDenied, checkAgentEdge, resolveClient, uniformDenial } from "../access.js";
+import { DELEGATION_CONTRACT, DELEGATION_RULE, readNotResend } from "../delegation_contract.js";
 
 /**
  * RELIABILITY-006 (#525): derive a deterministic Idempotency-Key for an MCP
@@ -134,6 +135,37 @@ function depthRefusalResult(refusal: DepthRefusal): string {
     `[Chain Depth #2806] refused -> ${refusal.agent} (depth ${refusal.depth} > ${refusal.max_depth})`,
   );
   return JSON.stringify(refusal, null, 2);
+}
+
+/**
+ * ent#568: a receipt the BACKEND wrote tells a REST caller to "poll GET
+ * /api/agents/{name}/executions/{execution_id}" — a request an MCP caller
+ * cannot make, read at the very moment it decides whether to re-send. Keep
+ * every field and say what an MCP caller does instead (the backend's text stays
+ * right for its REST callers).
+ *
+ * The leads claim nothing about liveness: the backend stores the async receipt
+ * as the idempotency snapshot at dispatch time and replays it for 24 h, after the
+ * run may have finished or failed. Three shapes: async `accepted` / `queued`, and
+ * the `queued_timeout` a sync `/task` stores when its long-poll gives up — told
+ * apart from the MCP server's own `queued_timeout` (client.ts), which already
+ * carries `readNotResend`, by that sentence.
+ */
+function asyncReceipt<T extends object>(agent: string, response: T): T {
+  const r = response as { status?: unknown; execution_id?: unknown; message?: unknown };
+  const id = r.execution_id;
+  if (typeof id !== "string") return response;
+  let lead: string;
+  if (r.status === "accepted") {
+    lead = `Accepted by '${agent}' as ${id} — it may still be running or already done.`;
+  } else if (r.status === "queued") {
+    lead = `Queued on '${agent}' as ${id} while it was at capacity — it may have run since.`;
+  } else if (r.status === "queued_timeout" && !String(r.message ?? "").includes("Do not re-send:")) {
+    lead = `The platform stopped waiting for ${id} on '${agent}' — it may still be running.`;
+  } else {
+    return response;
+  }
+  return { ...response, message: `${lead} ${readNotResend(agent, id)}` };
 }
 
 /**
@@ -294,13 +326,13 @@ export async function runAgentChat(
     if ('status' in response && response.status === 'queued_timeout') {
       console.log(`[Task Timeout Recovery] Agent '${agent_name}' execution_id=${response.execution_id} — caller should poll get_execution_result (#2661)`);
     }
-    return JSON.stringify(response, null, 2);
+    return JSON.stringify(asyncReceipt(agent_name, response), null, 2);
   }
 
   // #946 pull pilot: agent→agent sequential call routed through the
   // durable async /task path. Returns an immediate {accepted|queued,
-  // execution_id} receipt; the caller polls get_execution_result
-  // (polling is the contract — the backend emits no completion event).
+  // execution_id} receipt; the caller reads get_execution_result, or is woken
+  // by the run's agent.task.* event if it subscribed (#1578).
   // Only async_mode is forwarded: model/allowed_tools/system_prompt are
   // parallel-only and were never applied in sequential mode, so omitting
   // them preserves sequential semantics (agent defaults). The idempotency
@@ -319,7 +351,7 @@ export async function runAgentChat(
     );
     if (isGateResult(receipt)) return JSON.stringify(receipt, null, 2);
     if (isDepthRefusal(receipt)) return depthRefusalResult(receipt);
-    return JSON.stringify(receipt, null, 2);
+    return JSON.stringify(asyncReceipt(agent_name, receipt), null, 2);
   }
 
   // Sequential chat mode - uses queue, maintains context
@@ -385,37 +417,18 @@ export function createChatTools(
     // ========================================================================
     chatWithAgent: {
       name: "chat_with_agent",
+      // ent#568: Claude Code shows the model only the first 2,048 characters of
+      // a tool description (CLAUDE_CODE_MAX_MCP_DESCRIPTION_LENGTH); the old
+      // 2,424-char text lost its async advice to that cut. So this is a lead,
+      // one line of modes and the delegation contract; per-mode detail lives in
+      // the parameter descriptions below, which are not cut.
+      // delegation-contract.test.ts pins the published length.
       description:
-        "Send a message to an agent and receive a response. " +
-        "This is the primary way to delegate tasks to sub-agents. " +
-        "The message will be processed by Claude Code running inside the agent container. " +
-        "Responses may take some time depending on the complexity of the task. " +
-        "\n\n**Execution Modes:**\n" +
-        "- `parallel=false` (default): Sequential chat mode. Uses execution queue, maintains conversation history. " +
-        "Best for multi-turn conversations requiring context. It continues this agent's own chat session " +
-        "(shared by every caller of this agent, never a scheduled or other headless run's). A turn that " +
-        "crosses the context limit can pay a one-off auto-compaction: it is recorded as `compact_metadata`, " +
-        "readable via `get_execution_result`, and is not a sign the agent is degraded. The session restarts " +
-        "after a model change or a `/api/chat/history` reset.\n" +
-        "- `parallel=true`: Parallel task mode. Stateless, no queue, can run N tasks concurrently. " +
-        "Best for independent tasks, batch processing, orchestrator delegation.\n" +
-        "- `async=true` (with parallel=true): Fire-and-forget mode. Returns immediately with execution_id. " +
-        "Poll GET /api/agents/{name}/executions/{execution_id} for results." +
-        "\n\n**Gateway-Timeout Receipt (EVERY sync mode — #914 sequential, #2661 parallel):** " +
-        "If the MCP-server's synchronous fetch to the backend takes longer than `MCP_CHAT_TIMEOUT_MS` " +
-        "(default 25s, set under the typical 30-60s MCP gateway ceiling), the call returns " +
-        "`{status: \"queued_timeout\", agent, execution_id, message}` instead of a generic `fetch failed`. " +
-        "This applies to `parallel=false` AND `parallel=true` sync calls. " +
-        "The task IS still running on the agent — call `get_execution_result(execution_id)` to poll for the " +
-        "result instead of retrying. Retrying will duplicate-queue and Trinity's concurrent-duplicate guard " +
-        "will kill mid-execution, burning budget. **Never re-send a reworded variant** after any failure you " +
-        "cannot confirm: an identical re-send is deduplicated server-side and answers with the original " +
-        "`execution_id`, but a REWORDED one derives a different idempotency key and dispatches a second " +
-        "execution. If no execution can be attributed to your call, the error says so explicitly and names " +
-        "`list_recent_executions` — check it before retrying. " +
-        "In sync `parallel=true` mode `timeout_seconds` bounds only the agent-side run, not how long this " +
-        "call waits. For tasks you know will exceed the gateway timeout, prefer " +
-        "`parallel=true, async=true` from the start.",
+        "Delegate a task to another agent (the primary way to use sub-agents) and get back its reply or a receipt." +
+        "\n\n**Modes:** `parallel=false` (default) continues the agent's own chat session, one queue for every " +
+        "caller. `parallel=true` runs a stateless task; several can run at once. `async=true` (with " +
+        "`parallel=true`) answers with a receipt at once.\n\n" +
+        DELEGATION_CONTRACT,
       parameters: z.object({
         agent_name: z.string().describe("The name of the agent to chat with"),
         message: z
@@ -430,7 +443,13 @@ export function createChatTools(
           .describe(
             "If true, run in parallel task mode (stateless, no queue). " +
             "Use for independent tasks that don't need conversation history. " +
-            "Multiple parallel=true calls can run simultaneously."
+            "Multiple parallel=true calls can run simultaneously. " +
+            "If false (default), the message continues this agent's own chat session — shared by every " +
+            "caller of this agent, never a scheduled or other headless run's — through its execution queue. " +
+            "A turn that crosses the context limit can pay a one-off auto-compaction: it is recorded as " +
+            "`compact_metadata`, readable via `get_execution_result`, and is not a sign the agent is degraded. " +
+            "The session restarts after a model change or a `/api/chat/history` reset. " +
+            "On a pull-pilot agent each calling user has their own session instead."
           ),
         model: z
           .string()
@@ -458,15 +477,16 @@ export function createChatTools(
             "agent's configured execution_timeout_seconds — this per-call value " +
             "is now clamped to that cap and will be removed in a future release. " +
             "If omitted, the agent cap applies (default 900s, max 7200s). " +
-            "Only applies when parallel=true."
+            "Only applies when parallel=true. In sync parallel mode it bounds only the agent-side run, " +
+            "not how long this call waits."
           ),
         async: z
           .boolean()
           .optional()
           .default(false)
           .describe(
-            "If true, return immediately with execution_id (fire-and-forget). " +
-            "Only applies when parallel=true. Poll the execution endpoint for results."
+            "If true, return immediately with a receipt carrying the execution_id (fire-and-forget). " +
+            "Only applies when parallel=true. Read the outcome with get_execution_result."
           ),
         inject_result: z
           .boolean()
@@ -623,7 +643,9 @@ export function createChatTools(
         "`{status: 'fan_out_timeout', agent, fan_out_id, execution_ids, task_count, message}` " +
         "instead of results — the batch is STILL RUNNING and nothing was lost. Poll " +
         "`get_fan_out_result(agent_name, fan_out_id)` for the aggregate. " +
-        "\n\nDo not re-send to 'try again': an IDENTICAL re-send is deduplicated " +
+        "\n\nThe delegation contract in `chat_with_agent`'s description applies here. " +
+        DELEGATION_RULE +
+        " An IDENTICAL re-send is deduplicated " +
         "server-side and answers with the same batch, but a REWORDED one derives a " +
         "different idempotency key and dispatches all N tasks a second time — N more " +
         "executions, N more times the cost, against an agent already working.",

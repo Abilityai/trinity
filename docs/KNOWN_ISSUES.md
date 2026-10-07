@@ -54,21 +54,20 @@
 
 ### 🟡 Agent-to-Agent MCP Calls Timeout at 60 Seconds
 
-**Status**: KNOWN LIMITATION (Claude Code upstream)
+**Status**: KNOWN LIMITATION (Claude Code upstream) — MITIGATED in Trinity: the MCP server answers with a receipt before the client gives up (#914, #2661, #2670), and every agent is taught what a receipt means (the delegation contract, abilityai/trinity-enterprise#568)
 **Priority**: HIGH
 **Affects**: All agent-to-agent collaboration via `chat_with_agent` MCP tool
 
 **Symptoms:**
-- Agent A calls `mcp__trinity__chat_with_agent(agent_name="B", message="...", timeout_seconds=900)`
-- After exactly 60 seconds, the call fails with a timeout error
-- Agent B may still be processing, but the result is lost
-- The `timeout_seconds` parameter has no effect on the 60s limit
+- Agent A calls `mcp__trinity__chat_with_agent(agent_name="B", message="...", timeout_seconds=900)` and B works longer than the client's ceiling
+- Before the mitigation, the call failed with a timeout error and the result was lost. Now the MCP server stops waiting at `MCP_CHAT_TIMEOUT_MS` (25 seconds by default) and answers with `{status: "queued_timeout", execution_id, …}` while B keeps working; read the outcome with `get_execution_result` and never re-send
+- The `timeout_seconds` parameter has no effect on either limit
 
 **Cause:**
 Claude Code has a hardcoded 60-second timeout for all MCP HTTP tool calls. This is an upstream limitation in Claude Code's MCP transport layer, not in Trinity. The `timeout_seconds` parameter controls the backend execution timeout, but Claude Code drops the HTTP connection before the backend timeout is reached.
 
 **Workarounds:**
-1. **Design tasks to complete within 60 seconds** — Break complex work into smaller sub-tasks
+1. **Design tasks to complete within the synchronous bound** (`MCP_CHAT_TIMEOUT_MS`, 25 seconds by default) when you need the reply in the same call — break complex work into smaller sub-tasks
 2. **Use async mode with polling** — Fire-and-forget pattern avoids the timeout:
    ```python
    # Start task (returns immediately)

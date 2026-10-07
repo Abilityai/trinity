@@ -28,6 +28,28 @@ The decision is logged (`[ent#705] git mode for …`) and returned as
 `git_mode` on the create response only, never on the `/ws` broadcast (#918).
 Cornelius is pinned `kind=deployment`: it is built from a shared public upstream.
 
+**Where `kind` is chosen (trinity-enterprise#704):**
+
+- **Create modal:** `CreateAgentModal.vue` shows `AgentKindPicker.vue` only
+  for a custom repo with the *clone* intent — the one path where "an agent"
+  can produce a working branch. A GitHub template from the list is a catalog
+  entry, which `_apply_agent_kind_default` always makes pull-only, so it is
+  not asked. The answer rides the payload as `kind`; otherwise nothing is sent.
+- **After create:** `ImportValidationStep.vue` renders `GitModeNotice.vue` from
+  the response's `git_mode`. It warns when an agent fell back to pull-only.
+- **Git panel:** `GitPanel.vue` renders `GitBindingBadge.vue` (`Agent · own
+  branch` / `Agent · own repo` / `Pull-only`) from `db_config.pushes` and
+  `db_config.source_mode` on `GET /api/agents/{name}/git/status`.
+- **Both key on `pushes`, never on `source_mode` alone:** fork-to-own is
+  source-mode on its own fork AND auto-pushes there. `git_mode.pushes` is the
+  `_git_auto_sync_baked` predicate the container env is baked from;
+  `db_config.pushes` is `not source_mode or auto_sync_enabled` (a source-mode
+  row with auto-sync on is the fork-to-own population; a working branch pushes
+  even while its auto-sync is paused).
+- **System manifest:** a per-agent `kind:` key (`system_service.parse_manifest`)
+  is passed to create by `deploy_manifest`, and `export_manifest` writes
+  `kind: deployment` for a pull-only git member so it round-trips.
+
 ### Source Mode
 **Unidirectional pull-only sync**: Agent tracks a source branch (default: `main`) and can pull updates on demand. Changes made in the agent are local only and not pushed back. This is ideal for agents developed locally and deployed to Trinity. **Public** templates need no GitHub PAT at all — see [Tokenless (Anonymous) Clone of Public Templates](#tokenless-anonymous-clone-of-public-templates-ent123) (ent#123).
 

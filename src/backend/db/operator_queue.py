@@ -19,6 +19,7 @@ from typing import Optional, List, Dict, Set, Tuple
 from datetime import datetime
 
 from sqlalchemy import select, update, func, and_, or_, case, delete
+from sqlalchemy.exc import IntegrityError
 
 from .engine import get_engine, make_insert
 from .tables import operator_queue
@@ -44,6 +45,25 @@ _DB_BELT_ID_MAX = 512
 # native ask cap nor the file poller's #1632 depth cap. The gate caps its own
 # raises. NULL `raised_by` is a legacy or file row, so it counts.
 _NOT_A_GATE_ROW = or_(operator_queue.c.raised_by.is_(None), operator_queue.c.raised_by != "gate")
+
+
+def _own_pending_conds(agent_name: str, exclude_request_id_prefixes=None) -> list:
+    """The pending rows that spend an agent's OWN ask budget — the one predicate
+    both depth caps read (the file seam's #1632 cap and the native `queue_full`,
+    trinity-enterprise#611), so the two cannot drift.
+
+    #3130: the caller passes the platform's reserved id prefixes to leave out the
+    rows the PLATFORM filed against the agent (its flood alarm above all — counted,
+    it kept the cap tripped forever and was re-minted every cooldown window).
+    Agents cannot mint those prefixes on either seam, so the exclusion cannot hide
+    an agent's own row. Gate rows are left out as before (#751).
+    """
+    return [
+        operator_queue.c.agent_name == agent_name,
+        operator_queue.c.status == "pending",
+        _NOT_A_GATE_ROW,
+        *OperatorQueueOperations._not_prefixed(exclude_request_id_prefixes),
+    ]
 
 # trinity-enterprise#611: expiry is swept by a text comparison
 # (`expires_at < now`), so a deadline written with an offset ("…+02:00") or
@@ -153,6 +173,9 @@ class OperatorQueueOperations:
             "resolved_to": json.loads(row["resolved_to"]) if row["resolved_to"] else None,
             "proposal": json.loads(row["proposal"]) if row["proposal"] else None,
             "supersedes_expired": row["supersedes_expired"],
+            # #3246 — the platform alert's condition key and its latest reading
+            "subject": row["subject"],
+            "last_seen_at": row["last_seen_at"],
         }
 
     # Columns selected for a full queue-item record, in the canonical order.
@@ -198,6 +221,8 @@ class OperatorQueueOperations:
         operator_queue.c.resolved_to,
         operator_queue.c.proposal,
         operator_queue.c.supersedes_expired,
+        operator_queue.c.subject,  # #3246 — platform alerts: kind:key
+        operator_queue.c.last_seen_at,
     )
 
     def create_item(
@@ -280,6 +305,7 @@ class OperatorQueueOperations:
         resolved_to: Optional[List[str]],
         proposal: Optional[Dict],
         supersedes_expired: Optional[str],
+        exclude_request_id_prefixes=None,
     ) -> Dict:
         """Create an agent-raised ask, atomically per agent (trinity-enterprise#611).
 
@@ -333,10 +359,7 @@ class OperatorQueueOperations:
             if max_pending is not None:
                 pending = conn.execute(
                     select(func.count()).where(and_(
-                        operator_queue.c.agent_name == agent_name,
-                        operator_queue.c.status == "pending",
-                        _NOT_A_GATE_ROW,
-                    ))
+                        *_own_pending_conds(agent_name, exclude_request_id_prefixes)))
                 ).scalar() or 0
                 if pending >= max_pending:
                     return {"outcome": "queue_full", "row": None}
@@ -374,6 +397,8 @@ class OperatorQueueOperations:
         *,
         channel: Optional[str],
         raised_by: Optional[str],
+        subject: Optional[str] = None,
+        last_seen_at: Optional[str] = None,
     ) -> Tuple[str, Dict]:
         """The DB-sink belts and the column values of a new row, shared by every
         create so the belts cannot drift between the file and native paths."""
@@ -460,8 +485,207 @@ class OperatorQueueOperations:
             # it does not decide it, and it must never derive it from `context`
             # (which is agent-authored).
             addressed_to_email=item.get("addressed_to_email"),
+            # #3246: platform-owned, keyword-only — never read from `item`.
+            subject=subject,
+            last_seen_at=last_seen_at,
         )
         return request_id, values
+
+    # ------------------------------------------------------------------
+    # #3246 — platform alerts: one pending row per (agent, subject)
+    # ------------------------------------------------------------------
+    _RENDERED_FIELDS = ("title", "question", "priority")
+
+    def find_pending_by_subject(self, agent_name: str, subject: str) -> Optional[Dict]:
+        """The one pending row for `(agent, subject)`, or None (#3246)."""
+        with get_engine().connect() as conn:
+            row = self._find_pending_by_subject(conn, agent_name, subject)
+        return self._row_to_item(row) if row else None
+
+    def _find_pending_by_subject(self, conn, agent_name: str, subject: str):
+        return conn.execute(
+            select(*self._SELECT_COLS).where(and_(
+                operator_queue.c.agent_name == agent_name,
+                operator_queue.c.subject == subject,
+                operator_queue.c.status == "pending",
+            ))
+        ).mappings().first()
+
+    def find_person_ended_by_subject(
+        self, agent_name: str, subject: str, since: str,
+    ) -> Optional[Dict]:
+        """The newest row for `(agent, subject)` a PERSON ended at or after
+        `since` (ISO-Z text, Invariant #16), any terminal status — the seam's
+        snooze read (#3246). Served by `idx_operator_queue_agent_subject`."""
+        stmt = (
+            select(*self._SELECT_COLS)
+            .where(and_(
+                operator_queue.c.agent_name == agent_name,
+                operator_queue.c.subject == subject,
+                operator_queue.c.status != "pending",
+                operator_queue.c.disposed_by == "person",
+                operator_queue.c.disposed_at.isnot(None),
+                operator_queue.c.disposed_at >= since,
+            ))
+            .order_by(operator_queue.c.disposed_at.desc(), operator_queue.c.id.desc())
+            .limit(1)
+        )
+        with get_engine().connect() as conn:
+            row = conn.execute(stmt).mappings().first()
+        return self._row_to_item(row) if row else None
+
+    def create_platform_item(
+        self,
+        agent_name: str,
+        item: Dict,
+        *,
+        subject: Optional[str],
+        max_pending_for_type: Optional[int] = None,
+    ) -> Dict:
+        """Record a platform reading: find → touch → count → insert, in ONE
+        locked transaction (#3246).
+
+        `subject` is the condition key (`kind:key`); None is an event, which is
+        always a new row. With a subject, the pending row for `(agent, subject)`
+        is updated in place — title / question / priority / context /
+        `last_seen_at` / `expires_at`, `context.seen_count` + 1 — by a
+        compare-and-set on `status = 'pending'`: a row a person ended first is
+        never overwritten (the lock covers creates, not `respond_to_item`), and
+        a lost CAS falls through to a fresh row. The find runs BEFORE the
+        #1677 per-type count, so a would-be update is never refused at budget;
+        `max_pending_for_type` is the cap for a budgeted kind (None: unbudgeted).
+
+        Returns `{"outcome": "created" | "updated" | "refused_at_budget",
+        "row", "changed"}`; `changed` is whether a RENDERED field (title /
+        question / priority / context minus `seen_count`) moved, so a bare
+        repeat reading sends no broadcast. The partial unique index
+        `uq_operator_queue_pending_subject` is the backstop for a lock that
+        failed open: its `IntegrityError` is caught and the call re-finds and
+        touches the row that won.
+        """
+        now = utc_now_iso()
+        for attempt in (1, 2):
+            try:
+                with get_engine().begin() as conn:
+                    self._lock_agent_for_create(conn, agent_name)
+                    if subject is not None:
+                        current = self._find_pending_by_subject(conn, agent_name, subject)
+                        if current is not None:
+                            touched = self._touch(conn, current, item, now=now)
+                            if touched is not None:
+                                return touched
+                    if attempt == 2:
+                        # The index said a pending row existed and it is gone
+                        # (ended between the two transactions): fall through.
+                        pass
+                    if max_pending_for_type is not None:
+                        pending = conn.execute(
+                            select(func.count()).where(and_(
+                                *_own_pending_conds(agent_name),
+                                operator_queue.c.type == item.get("type", "question"),
+                            ))
+                        ).scalar() or 0
+                        if pending >= max_pending_for_type:
+                            return {"outcome": "refused_at_budget", "row": None, "changed": False}
+                    context = item.get("context")
+                    context = dict(context) if isinstance(context, dict) else {}
+                    if subject is not None:
+                        context["seen_count"] = 1
+                    values_item = {**item, "context": context or None}
+                    request_id, values = self._insert_values(
+                        agent_name, values_item, channel=None, raised_by=None,
+                        subject=subject, last_seen_at=now,
+                    )
+                    conn.execute(
+                        make_insert(operator_queue).values(**values).on_conflict_do_nothing(
+                            index_elements=["agent_name", "request_id"])
+                    )
+                    row = conn.execute(select(*self._SELECT_COLS).where(and_(
+                        operator_queue.c.agent_name == agent_name,
+                        operator_queue.c.request_id == request_id,
+                    ))).mappings().first()
+                    return {"outcome": "created", "row": self._row_to_item(row), "changed": True}
+            except IntegrityError:
+                if subject is None or attempt == 2:
+                    raise
+                # the partial unique index won the race the lock did not cover:
+                # a pending row for the subject now exists — re-find and touch it.
+                continue
+
+    def _touch(self, conn, current, item: Dict, *, now: str) -> Optional[Dict]:
+        """Update the pending row `current` in place; None when the CAS lost."""
+        old_context = json.loads(current["context"]) if current["context"] else {}
+        if not isinstance(old_context, dict):
+            old_context = {}
+        new_context = item.get("context")
+        new_context = dict(new_context) if isinstance(new_context, dict) else {}
+        seen = old_context.get("seen_count")
+        new_context["seen_count"] = (seen if isinstance(seen, int) and seen > 0 else 1) + 1
+        changed = any(
+            (item.get(f) if item.get(f) is not None else current[f]) != current[f]
+            for f in self._RENDERED_FIELDS
+        ) or {k: v for k, v in old_context.items() if k != "seen_count"} !=             {k: v for k, v in new_context.items() if k != "seen_count"}
+        context_json = json.dumps(new_context)
+        if len(context_json.encode("utf-8")) > _DB_BELT_CONTEXT_MAX_BYTES:
+            raise ValueError(f"operator-queue 'context' exceeds {_DB_BELT_CONTEXT_MAX_BYTES} bytes")
+        result = conn.execute(
+            update(operator_queue)
+            .where(and_(operator_queue.c.id == current["id"], operator_queue.c.status == "pending"))
+            .values(
+                title=item.get("title") or current["title"],
+                question=item.get("question") or current["question"],
+                priority=item.get("priority") or current["priority"],
+                context=context_json,
+                last_seen_at=now,
+                expires_at=_iso_z_deadline(item.get("expires_at")),
+            )
+        )
+        if not result.rowcount:
+            return None
+        row = conn.execute(
+            select(*self._SELECT_COLS).where(operator_queue.c.id == current["id"])
+        ).mappings().first()
+        return {"outcome": "updated", "row": self._row_to_item(row), "changed": bool(changed)}
+
+    def end_items_by_platform(
+        self, ids: List[str], *, reason: str, batch_id: Optional[str] = None,
+    ) -> Dict:
+        """End the listed pending rows as the PLATFORM (#3246): the
+        `bulk_cancel_items` shape — one compare-and-set UPDATE on
+        `status = 'pending'` stamping the ent#611 ledger with
+        `disposed_by = 'platform'`, no email — re-selected by `batch_id`, so
+        the rows returned are exactly the ones THIS call ended; a row a person
+        ended first is skipped, never re-ended. Returns `{"batch_id", "rows"}`;
+        `batch_id` is None when nothing was ended."""
+        empty = {"batch_id": None, "rows": []}
+        ids = list(dict.fromkeys(ids or ()))
+        if not ids:
+            return empty
+        batch_id = batch_id or uuid.uuid4().hex
+        now = utc_now_iso()
+        with get_engine().begin() as conn:
+            result = conn.execute(
+                update(operator_queue)
+                .where(and_(operator_queue.c.status == "pending", operator_queue.c.id.in_(ids)))
+                .values(
+                    status="cancelled",
+                    disposition="cancelled",
+                    disposed_at=now,
+                    disposed_by="platform",
+                    disposed_by_email=None,
+                    disposition_reason=reason,
+                    batch_id=batch_id,
+                )
+            )
+            if result.rowcount == 0:
+                return empty
+            rows = conn.execute(
+                select(*self._SELECT_COLS).where(and_(
+                    operator_queue.c.id.in_(ids),
+                    operator_queue.c.batch_id == batch_id,
+                ))
+            ).mappings().all()
+        return {"batch_id": batch_id, "rows": [self._row_to_item(r) for r in rows]}
 
     def get_item(self, item_id: str) -> Optional[Dict]:
         """Get a single queue item by ID."""
@@ -859,8 +1083,14 @@ class OperatorQueueOperations:
         *,
         disposed_by_email: str,
         reason: Optional[str] = None,
+        disposition: str = "cancelled",
     ) -> Optional[Dict]:
         """Cancel a pending queue item, recording who ended it (trinity-enterprise#611).
+
+        `disposition` (trinity-enterprise#748) is `cancelled` (an operator ended
+        it) or `dismissed` (the person it was addressed to chose not to answer).
+        Both leave `status='cancelled'`, so every terminal-status reader is
+        unchanged; only the ledger says which of the two it was.
 
         The status flip and the endings ledger are ONE compare-and-set, the mirror
         of `respond_to_item`: a caller that loses the race (the ask was answered,
@@ -868,6 +1098,8 @@ class OperatorQueueOperations:
         writes nothing, so the ending it would have recorded never overwrites the
         one that happened. Returns None when the item does not exist.
         """
+        if disposition not in ("cancelled", "dismissed"):
+            raise ValueError(f"not a cancel disposition: {disposition!r}")
         now = utc_now_iso()
         with get_engine().begin() as conn:
             result = conn.execute(
@@ -880,7 +1112,7 @@ class OperatorQueueOperations:
                 )
                 .values(
                     status="cancelled",
-                    disposition="cancelled",
+                    disposition=disposition,
                     disposed_at=now,
                     disposed_by="person",
                     disposed_by_email=disposed_by_email,
@@ -898,6 +1130,42 @@ class OperatorQueueOperations:
                 item["_status_conflict"] = True
                 return item
 
+        return self.get_item(item_id)
+
+    def set_discussion_link(self, item_id: str, key: str, chat_id: str) -> Optional[Dict]:
+        """Link a PENDING ask to the chat a person opened to discuss it
+        (trinity-enterprise#747), at most once.
+
+        Writes `context[key] = chat_id` with a compare-and-set on the stored
+        context text as it was read, plus `status='pending'`, so two Discuss
+        clicks racing link ONE chat: the loser writes nothing. Returns the row as
+        it stands after the attempt (its `context[key]` is the chat that won, or
+        absent when the ask was no longer pending), or None when it does not
+        exist. The key is platform-only (stripped from agent content at
+        ingestion), so nothing an agent wrote can pre-empt it.
+        """
+        with get_engine().begin() as conn:
+            row = conn.execute(
+                select(operator_queue.c.status, operator_queue.c.context)
+                .where(operator_queue.c.id == item_id)
+            ).mappings().first()
+            if not row:
+                return None
+            raw = row["context"]
+            context = json.loads(raw) if raw else {}
+            if not isinstance(context, dict):
+                context = {}
+            if row["status"] == "pending" and not context.get(key):
+                context[key] = chat_id
+                same_text = (operator_queue.c.context.is_(None) if raw is None
+                             else operator_queue.c.context == raw)
+                conn.execute(
+                    update(operator_queue)
+                    .where(and_(operator_queue.c.id == item_id,
+                                operator_queue.c.status == "pending",
+                                same_text))
+                    .values(context=json.dumps(context))
+                )
         return self.get_item(item_id)
 
     def bulk_cancel_items(
@@ -1157,6 +1425,11 @@ class OperatorQueueOperations:
                         and_(
                             operator_queue.c.id == item_id,
                             operator_queue.c.status == "pending",
+                            # #3246: a platform alert refreshed between the
+                            # candidate select and this CAS moved its deadline;
+                            # it is not expired, and the refresh wins.
+                            operator_queue.c.expires_at.isnot(None),
+                            operator_queue.c.expires_at < now,
                         )
                     )
                     .values(
@@ -1602,7 +1875,8 @@ class OperatorQueueOperations:
             return conn.execute(stmt).first() is not None
 
     def count_pending_for_agent(
-        self, agent_name: str, item_type: Optional[str] = None
+        self, agent_name: str, item_type: Optional[str] = None,
+        exclude_request_id_prefixes=None,
     ) -> int:
         """#1632: count an agent's currently-pending operator-queue rows.
 
@@ -1619,12 +1893,12 @@ class OperatorQueueOperations:
 
         trinity-enterprise#751: gate-raised rows are left out — they are not
         the agent's budget to spend.
+
+        #3130: ``exclude_request_id_prefixes`` leaves out platform-minted rows
+        (`_own_pending_conds`). The ingestion cap passes it; the #1677 per-type
+        budget read does not — platform rows are exactly what it budgets.
         """
-        conds = [
-            operator_queue.c.agent_name == agent_name,
-            operator_queue.c.status == "pending",
-            _NOT_A_GATE_ROW,
-        ]
+        conds = _own_pending_conds(agent_name, exclude_request_id_prefixes)
         if item_type is not None:
             conds.append(operator_queue.c.type == item_type)
         stmt = select(func.count()).where(and_(*conds))

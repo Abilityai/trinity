@@ -100,9 +100,22 @@
           Other seats · {{ page.other_seats.length }}
         </summary>
         <ul class="mt-1 space-y-1">
-          <li v-for="c in page.other_seats" :key="c.seat + c.ask_class" class="text-[11.5px] text-gray-500 dark:text-gray-400 px-3">
-            <span class="font-mono">{{ c.ask_class }}</span> · {{ c.seat }} ·
-            {{ c.unprompted ? 'unprompted' : 'on-request' }}
+          <li v-for="c in page.other_seats" :key="c.seat + c.ask_class"
+              class="flex items-center justify-between gap-2 text-[11.5px] text-gray-500 dark:text-gray-400 px-3">
+            <span class="min-w-0 truncate">
+              <span class="font-mono">{{ c.ask_class }}</span> · {{ c.seat }} ·
+              {{ c.unprompted ? 'unprompted' : 'on-request' }}
+            </span>
+            <!-- #2984 review I2: a seat holds, the OWNER releases — the spec's
+                 main path. Without this a client's hold could only be undone
+                 through the API. -->
+            <span v-if="c.held" class="flex shrink-0 items-center gap-1.5">
+              <BaseBadge variant="warning" dot>held</BaseBadge>
+              <BaseButton v-if="c.writable && page.can_release" size="sm" variant="secondary"
+                          :data-testid="'portal-autonomy-release-' + c.seat + '-' + c.ask_class"
+                          :loading="store.autonomyBusy === c.ask_class"
+                          @click="act(c, 'release')">Release</BaseButton>
+            </span>
           </li>
         </ul>
       </details>

@@ -139,10 +139,10 @@ export const useOperatorQueueStore = defineStore('operatorQueue', () => {
 
   async function respondToItem(id, response, responseText = '', { acknowledgeDivergence = false } = {}) {
     const item = items.value.find(i => i.id === id)
-    if (!item) return
+    if (!item) return false
     // A decision is required — never let an empty/undefined one be stringified
     // into the body (the callers guard this today; this is the belt).
-    if (response == null || String(response).trim() === '') return
+    if (response == null || String(response).trim() === '') return false
 
     // #2370: ONE builder for every producer of this body — the decision rides
     // `response`, the note rides `response_text` (trimmed; empty → null).
@@ -171,10 +171,13 @@ export const useOperatorQueueStore = defineStore('operatorQueue', () => {
       if (nextOpen) {
         expandedItemId.value = nextOpen.id
       }
+      // #3242: true = recorded, so a form clears only on success (a 409
+      // divergence must not wipe a typed instruction).
+      return true
     } catch (err) {
       if (respondRefusedAsNotAddressee(err)) {
         notAddresseeItemId.value = id
-        return
+        return false
       }
       if (respondRefusedAsDiverged(err)) {
         // #2915: the agent rewrote or closed this item after the card was read.
@@ -184,7 +187,7 @@ export const useOperatorQueueStore = defineStore('operatorQueue', () => {
         await fetchItems()
         divergedItemId.value = id
         expandedItemId.value = id
-        return
+        return false
       }
       if (respondRefusedAsNotPending(err)) {
         // Item left 'pending' under us (409 — e.g. another operator cleared
@@ -209,6 +212,7 @@ export const useOperatorQueueStore = defineStore('operatorQueue', () => {
       } else {
         error.value = apiErrorMessage(err, 'Request failed')
       }
+      return false
     }
   }
 

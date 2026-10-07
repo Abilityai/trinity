@@ -39,6 +39,30 @@ from db.write_params import ExecutionResult
 logger = logging.getLogger(__name__)
 
 
+def request_from_metadata(metadata: Dict[str, Any]) -> ParallelTaskRequest:
+    """Rebuild the caller's `ParallelTaskRequest` from a queued row's
+    `backlog_metadata` (the flat keys `enqueue` writes).
+
+    #2329: the push drain and the pull sink both read the request back through
+    this one function, so a delivery key added to `enqueue` reaches both paths.
+    """
+    return ParallelTaskRequest(
+        message=metadata.get("message") or "",
+        model=metadata.get("model"),
+        allowed_tools=metadata.get("allowed_tools"),
+        system_prompt=metadata.get("system_prompt"),
+        timeout_seconds=metadata.get("timeout_seconds"),
+        max_turns=metadata.get("max_turns"),
+        async_mode=True,
+        save_to_session=metadata.get("save_to_session") or False,
+        user_message=metadata.get("user_message"),
+        create_new_session=metadata.get("create_new_session") or False,
+        chat_session_id=metadata.get("chat_session_id"),
+        resume_session_id=metadata.get("resume_session_id"),
+        inject_result=metadata.get("inject_result") or False,
+    )
+
+
 class BacklogService:
     """Service-level backlog operations (enqueue, drain, maintenance)."""
 
@@ -324,21 +348,7 @@ class BacklogService:
         """
         from services.chat_execution_service import run_async_task
 
-        request = ParallelTaskRequest(
-            message=metadata.get("message") or "",
-            model=metadata.get("model"),
-            allowed_tools=metadata.get("allowed_tools"),
-            system_prompt=metadata.get("system_prompt"),
-            timeout_seconds=metadata.get("timeout_seconds"),
-            max_turns=metadata.get("max_turns"),
-            async_mode=True,
-            save_to_session=metadata.get("save_to_session") or False,
-            user_message=metadata.get("user_message"),
-            create_new_session=metadata.get("create_new_session") or False,
-            chat_session_id=metadata.get("chat_session_id"),
-            resume_session_id=metadata.get("resume_session_id"),
-            inject_result=metadata.get("inject_result") or False,
-        )
+        request = request_from_metadata(metadata)
 
         task = asyncio.create_task(
             run_async_task(

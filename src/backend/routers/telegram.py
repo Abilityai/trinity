@@ -24,7 +24,7 @@ import httpx
 from fastapi import APIRouter, HTTPException, Request, Depends
 
 from database import db
-from services import channel_history, rate_limiter
+from services import channel_history, idempotency_service, rate_limiter
 from services.settings_service import get_proactive_rate_limit
 from services.telegram_group_context import flag_from_bot_info, group_context_status  # ent#600
 from dependencies import (
@@ -485,92 +485,120 @@ async def send_telegram_group_message(
     if not target_group:
         raise HTTPException(status_code=404, detail="Group not found or not active for this agent")
 
-    # Rate limit: per-group then per-agent, caps from settings (#1609; 0 = skip).
-    per_group = get_proactive_rate_limit("telegram_proactive_per_group")
-    per_agent = get_proactive_rate_limit("telegram_proactive_per_agent")
-    if per_group > 0:
-        rate_limiter.enforce(
-            f"telegram_proactive:{agent_name}:{chat_id}",
-            per_group, _PROACTIVE_RATE_LIMIT_WINDOW,
-            detail=f"Too many messages to this group (cap {per_group}/hour).",
-        )
-    if per_agent > 0:
-        rate_limiter.enforce(
-            f"telegram_proactive:{agent_name}",
-            per_agent, _PROACTIVE_RATE_LIMIT_WINDOW,
-            detail=f"Too many proactive messages from this agent (cap {per_agent}/hour).",
-        )
-
-    # Validate message length
-    if not request.message or not request.message.strip():
-        raise HTTPException(status_code=400, detail="Message cannot be empty")
-    if len(request.message) > 4096:
-        raise HTTPException(status_code=400, detail="Message exceeds Telegram's 4096 character limit")
-
-    # Get bot token and send
-    bot_token = db.get_telegram_bot_token(agent_name)
-    if not bot_token:
-        raise HTTPException(status_code=500, detail="Failed to retrieve bot token")
-
+    # ent#665: caller-declared idempotency key — after the binding/group checks,
+    # before the rate limit (a suppressed send costs no budget).
     try:
-        async with httpx.AsyncClient(timeout=30) as client:
-            response = await client.post(
-                f"https://api.telegram.org/bot{bot_token}/sendMessage",
-                json={
+        async with idempotency_service.intent_guard(
+            "group_message",
+            agent_name=agent_name,
+            target=f"telegram:{chat_id}",
+            idempotency_key=request.idempotency_key,
+            ttl_seconds=request.idempotency_ttl,
+            execution_id=request.execution_id,
+        ) as intent:
+            if intent.suppressed:
+                await channel_history.record_group_suppression(
+                    agent_name, "telegram", chat_id, intent, request.idempotency_key)
+                return {
+                    "ok": True,
+                    "message_id": None,
                     "chat_id": chat_id,
-                    "text": request.message,
-                    "parse_mode": "HTML",
+                    "group_title": target_group.get("chat_title"),
+                    **intent.result_fields(),
                 }
-            )
 
-            if response.status_code == 429:
-                # Telegram rate limit
-                retry_after = response.json().get("parameters", {}).get("retry_after", 60)
-                raise HTTPException(
-                    status_code=429,
-                    detail=f"Telegram rate limit. Retry after {retry_after} seconds."
+            # Rate limit: per-group then per-agent, caps from settings (#1609; 0 = skip).
+            per_group = get_proactive_rate_limit("telegram_proactive_per_group")
+            per_agent = get_proactive_rate_limit("telegram_proactive_per_agent")
+            if per_group > 0:
+                rate_limiter.enforce(
+                    f"telegram_proactive:{agent_name}:{chat_id}",
+                    per_group, _PROACTIVE_RATE_LIMIT_WINDOW,
+                    detail=f"Too many messages to this group (cap {per_group}/hour).",
+                )
+            if per_agent > 0:
+                rate_limiter.enforce(
+                    f"telegram_proactive:{agent_name}",
+                    per_agent, _PROACTIVE_RATE_LIMIT_WINDOW,
+                    detail=f"Too many proactive messages from this agent (cap {per_agent}/hour).",
                 )
 
-            if response.status_code != 200:
-                error_body = response.json()
-                logger.error(f"Telegram API error: {error_body}")
-                raise HTTPException(
-                    status_code=502,
-                    detail=f"Telegram API error: {error_body.get('description', 'Unknown error')}"
-                )
+            # Validate message length
+            if not request.message or not request.message.strip():
+                raise HTTPException(status_code=400, detail="Message cannot be empty")
+            if len(request.message) > 4096:
+                raise HTTPException(status_code=400, detail="Message exceeds Telegram's 4096 character limit")
 
-            result = response.json().get("result", {})
+            # Get bot token and send
+            bot_token = db.get_telegram_bot_token(agent_name)
+            if not bot_token:
+                raise HTTPException(status_code=500, detail="Failed to retrieve bot token")
 
-            # #1649: record the broadcast in the group's channel session so the
-            # agent can recall it. The per-chat group session #1649 named as
-            # the missing piece exists since ent#600 (`get_session_identifier`
-            # has a group branch), so the key derived below IS the session a
-            # participant's reply reads — `sender_id` is passed for the
-            # signature only and no longer shapes the key. A group whose
-            # context is off records nothing, broadcasts included (ent#600).
-            if target_group.get("context_enabled", True) is not False:
-                channel_history.persist_outbound_group_message(
-                    agent_name=agent_name,
-                    channel="telegram",
-                    session_identifier=channel_history.session_key_for_telegram_group(
-                        bot_id=binding.get("bot_id", ""),
-                        sender_id=agent_name,   # synthetic: the agent is the speaker
-                        chat_id=chat_id,
-                    ),
-                    text=request.message,
-                )
+            try:
+                async with httpx.AsyncClient(timeout=30) as client:
+                    response = await client.post(
+                        f"https://api.telegram.org/bot{bot_token}/sendMessage",
+                        json={
+                            "chat_id": chat_id,
+                            "text": request.message,
+                            "parse_mode": "HTML",
+                        }
+                    )
 
-            return {
-                "ok": True,
-                "message_id": result.get("message_id"),
-                "chat_id": chat_id,
-                "group_title": target_group.get("chat_title"),
-            }
+                    if response.status_code == 429:
+                        # Telegram rate limit
+                        retry_after = response.json().get("parameters", {}).get("retry_after", 60)
+                        raise HTTPException(
+                            status_code=429,
+                            detail=f"Telegram rate limit. Retry after {retry_after} seconds."
+                        )
 
-    except httpx.TimeoutException:
-        raise HTTPException(status_code=504, detail="Telegram API timeout")
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Failed to send proactive message: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail="Failed to send message")
+                    if response.status_code != 200:
+                        error_body = response.json()
+                        logger.error(f"Telegram API error: {error_body}")
+                        raise HTTPException(
+                            status_code=502,
+                            detail=f"Telegram API error: {error_body.get('description', 'Unknown error')}"
+                        )
+
+                    result = response.json().get("result", {})
+
+                    # #1649: record the broadcast in the group's channel session so the
+                    # agent can recall it. The per-chat group session #1649 named as
+                    # the missing piece exists since ent#600 (`get_session_identifier`
+                    # has a group branch), so the key derived below IS the session a
+                    # participant's reply reads — `sender_id` is passed for the
+                    # signature only and no longer shapes the key. A group whose
+                    # context is off records nothing, broadcasts included (ent#600).
+                    if target_group.get("context_enabled", True) is not False:
+                        group_session = channel_history.session_key_for_telegram_group(
+                            bot_id=binding.get("bot_id", ""),
+                            sender_id=agent_name,   # synthetic: the agent is the speaker
+                            chat_id=chat_id,
+                        )
+                        intent.record = {"session_identifier": group_session}
+                        channel_history.persist_outbound_group_message(
+                            agent_name=agent_name,
+                            channel="telegram",
+                            session_identifier=group_session,
+                            text=request.message,
+                        )
+
+                    return {
+                        "ok": True,
+                        "message_id": result.get("message_id"),
+                        "chat_id": chat_id,
+                        "group_title": target_group.get("chat_title"),
+                        **intent.result_fields(),
+                    }
+
+            except httpx.TimeoutException:
+                raise HTTPException(status_code=504, detail="Telegram API timeout")
+            except HTTPException:
+                raise
+            except Exception as e:
+                logger.error(f"Failed to send proactive message: {e}", exc_info=True)
+                raise HTTPException(status_code=500, detail="Failed to send message")
+    except idempotency_service.EffectInProgressError as e:
+        # ent#665: another run is sending under this key right now — retryable.
+        raise HTTPException(status_code=409, detail=str(e))

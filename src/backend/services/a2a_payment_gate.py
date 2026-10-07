@@ -155,7 +155,8 @@ def _encode_payload(payload: Dict[str, Any]) -> Optional[str]:
 
 
 def payment_required_response(
-    agent_name: str, config, *, payment_service, base_url: str
+    agent_name: str, config, *, payment_service, base_url: str,
+    plan_scheme=None,
 ) -> tuple[int, dict, dict]:
     """The 402, byte-identical to the paid door's (T2) → (status, body, headers).
 
@@ -168,13 +169,19 @@ def payment_required_response(
     against `/api/paid/{name}/chat` cannot authorize a call to `/a2a/{name}` —
     and a non-Trinity client follows `resource.url` out of the 402 verbatim.
 
+    `plan_scheme` (#3215) is the `(scheme, network)` pair the plan is actually
+    payable with, resolved by the router before it calls: a fiat plan advertised
+    under the SDK's default `nvm:erc4337` mints a token the facilitator rejects.
+    `None` keeps the pre-#3215 document.
+
     A builder failure is the paid door's 500 branch: a broken plan config is
     ours, not the caller's, and inventing requirements would mint a token
     nothing can verify.
     """
     try:
         payment_required = payment_service.build_402_response(
-            config, base_url, f"{base_url}/a2a/{agent_name}"
+            config, base_url, f"{base_url}/a2a/{agent_name}",
+            plan_scheme=plan_scheme,
         )
     except Exception as e:  # noqa: BLE001
         logger.error("Failed to build 402 response for a2a/%s: %s", agent_name, e)

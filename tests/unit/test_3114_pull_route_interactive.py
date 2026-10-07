@@ -2,8 +2,8 @@
 
 What is pinned here:
 
-* ``pull_owns_dispatch`` covers every interactive trigger but ``chat``, plus
-  ``validation``, on a pull pilot.
+* ``pull_owns_dispatch`` covers every interactive trigger (``chat`` since
+  #3127) plus ``validation`` on a pull pilot.
 
 * ``execute_task``'s queue payload carries what the push payload sends beside
   the request (conversation key, persist_session, images, schedule context,
@@ -129,15 +129,15 @@ _IMG = [{"media_type": "image/png", "data": "iVBORw0KGgo+AIzaQQQQ"}]
 # ---------------------------------------------------------------------------
 
 
-def test_pilot_pulls_interactive_triggers_except_chat(monkeypatch):
+def test_pilot_pulls_every_interactive_trigger(monkeypatch):
     from services import pull_pilot as pp
 
     monkeypatch.setenv("PULL_MODE_PILOT_AGENTS", AGENT)
-    assert pp.PULL_REACHABLE_NON_AUTONOMOUS == (pp.INTERACTIVE_TRIGGERS - {"chat"}) | {"validation"}
+    # #3127: ``chat`` is pulled too.
+    assert pp.PULL_REACHABLE_NON_AUTONOMOUS == pp.INTERACTIVE_TRIGGERS | {"validation"}
     for trigger in pp.PULL_REACHABLE_NON_AUTONOMOUS:
         assert pp.pull_owns_dispatch(AGENT, trigger) is True, trigger
         assert pp.pull_owns_dispatch("not-a-pilot", trigger) is False, trigger
-    assert pp.pull_owns_dispatch(AGENT, "chat") is False
     assert pp.pull_owns_dispatch(AGENT, None) is False
 
 
@@ -526,6 +526,71 @@ async def test_a2a_takes_the_claim_phase(seed_agent, monkeypatch):
     )
     assert out.status == "failed"
     assert out.error_code.value == "capacity"
+
+
+@pytest.mark.asyncio
+async def test_agent_chat_turn_takes_the_claim_phase(seed_agent, monkeypatch):
+    """#3127: an agent-to-agent ``/chat`` turn (trigger ``agent``, autonomous)
+    has a caller blocked on it. ``run_resumable_turn`` opts into the claim
+    phase, so an unclaimed turn answers FAILED/CAPACITY within one agent
+    timeout instead of running later for nobody."""
+    seed_agent(timeout=1)
+    _row("e1", trigger="agent")
+    import importlib
+
+    from services.execution_envelope import TaskExecutionResult
+
+    sts = importlib.import_module("services.session_turn_service")
+    tes = importlib.import_module("services.task_execution_service")
+    seen = {}
+
+    async def _execute(**kw):
+        seen.update(kw)
+        return TaskExecutionResult(execution_id="e1", status="queued", response="")
+
+    monkeypatch.setattr(tes, "get_task_execution_service",
+                        lambda: SimpleNamespace(execute_task=_execute))
+    monkeypatch.setattr(tes, "QUEUE_CLAIM_POLL_INTERVAL", 0.05)
+    monkeypatch.setattr(sts, "ResumeLock", _NoLock)
+    waited = AsyncMock(side_effect=AssertionError("must not reach the terminal wait"))
+    monkeypatch.setattr("services.sync_waiter.wait_for_sync_terminal", waited)
+    _terminal_hooks(monkeypatch, tes)
+
+    turn = await sts.run_resumable_turn(
+        agent_name=AGENT, session_key="chat:s1", message="hi", cached_uuid=None,
+        triggered_by="agent", collaboration_activity_id="act-collab",
+    )
+    assert turn.result.status == "failed"
+    assert turn.result.error_code.value == "capacity"
+    assert seen["conversation_key"] == "session:chat:s1"
+    assert seen["collaboration_activity_id"] == "act-collab"
+    assert "caller_waiting" not in seen  # consumed by the adapter
+
+
+def test_agent_chat_payload_carries_the_collaboration_activity(monkeypatch):
+    """#3127: the pull sink can only close what the queued row carries."""
+    from services import task_execution_service as tes
+
+    monkeypatch.setattr(tes, "pull_owns_dispatch", lambda a, t: True)
+    payload = tes.build_pull_queue_payload(
+        agent_name=AGENT, triggered_by="agent", execution_id="e1", message="m",
+        model=None, allowed_tools=None, system_prompt=None, timeout_seconds=60,
+        resume_session_id=None, subscription_id=None, source_user_id=1,
+        source_user_email=None, source_agent_name="caller", slot_already_held=False,
+        collaboration_activity_id="act-collab",
+    )
+    assert payload.collaboration_activity_id == "act-collab"
+
+
+def test_sink_delivers_a_collaboration_only_row():
+    """#3127 + #2329: an agent-to-agent /chat row carries only the
+    collaboration activity id; the sink's post-turn delivery still picks it up,
+    so a turn whose caller gave up (504) closes the activity at the terminal."""
+    import services.pull_coordination_service as pcs
+
+    meta = {"collaboration_activity_id": "act-collab"}
+    execution = SimpleNamespace(backlog_metadata=json.dumps(meta))
+    assert pcs._delivery_metadata(execution) == meta
 
 
 @pytest.mark.asyncio

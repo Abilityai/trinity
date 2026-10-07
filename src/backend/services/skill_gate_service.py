@@ -8,7 +8,9 @@ that agent invokes a gated skill, `enforce` decides before anything else runs:
 * **ungated** — nothing in the request names a gated skill; dispatch as today.
 * **self-approved** — a PERSON proven by the entry point (never an agent key, a
   system key, a channel or public identity, an event loopback or a schedule)
-  who is the approver asked; dispatch, and the entry audits it.
+  who is the approver asked; dispatch, and the entry records the run it let
+  through (`record_self_approval` — the clearance the in-container hook of
+  trinity-enterprise#752 honours) and audits it.
 * **SkillApprovalRequired** — the request is frozen in `skill_gate_requests`
   and an approval ask is raised to the role; nothing runs now. On approval the
   ending observer dispatches the frozen request exactly once.
@@ -28,6 +30,7 @@ per-requester rate — before the in-container exec.
 import hashlib
 import json
 import logging
+import os
 import uuid
 from dataclasses import dataclass
 from datetime import timedelta
@@ -35,6 +38,7 @@ from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from config import PORTAL_SOURCE_CHANNEL
 from database import db
+from models import TaskExecutionStatus
 from services import rate_limiter, role_addressing
 from services.skill_gate_errors import (  # noqa: F401 — re-exported for entries and tests
     APPROVAL_PENDING_CODE,
@@ -280,9 +284,15 @@ def _approvers(agent_name: str, role: str) -> List[str]:
 
 def read_gates(agent_name: str) -> Dict[str, SkillGate]:
     """The agent's gate map, or a named refusal — never "nothing is gated"
-    because the read failed."""
+    because the read failed. A store that returns None has not answered
+    (trinity-enterprise#752): ent#753's read must raise or return None on a
+    failure, never {}, because the in-container hook fails closed on exactly
+    that difference."""
     try:
-        return dict(list_skill_gates(agent_name) or {})
+        gates = list_skill_gates(agent_name)
+        if gates is None:
+            raise ValueError("the gate map read returned nothing")
+        return dict(gates)
     except Exception:
         logger.exception("[SkillGate] gate map unreadable for %s — refusing", agent_name)
         raise SkillGateRefused(
@@ -669,6 +679,314 @@ async def audit_self_approved(agent_name: str, decision: GateDecision, *, curren
 
 
 # ---------------------------------------------------------------------------
+# The in-container hook (trinity-enterprise#752)
+# ---------------------------------------------------------------------------
+#
+# The check above reads what a requester typed, so a request that names a
+# skill only in prose reaches the executor, and the agent's own `Skill` call
+# loads it. A PreToolUse hook in the agent image asks `check_invocation`
+# before Claude Code loads a skill into a run, and the answer comes from the
+# platform's own records: the gate map, the gate record that dispatched the run
+# (#751's approved run), and the `self_approved` record `record_self_approval`
+# writes wherever a self-approval lets a run through.
+
+# What a self-approved run's record keeps of the request; the run's own row
+# holds all of it, so a long chat message is not stored twice.
+SELF_APPROVAL_TEXT_MAX_CHARS = 6000
+# Gate records that clear the run they name.
+_CLEARING_STATES = frozenset({"dispatching", "dispatched", "self_approved"})
+# A run is cleared only while it is live: a finished run's id must not keep
+# unlocking a skill for whatever later re-uses it.
+_LIVE_RUN_STATUSES = frozenset(s.value for s in (
+    TaskExecutionStatus.RUNNING, TaskExecutionStatus.QUEUED, TaskExecutionStatus.PENDING_RETRY))
+REFUSAL_AUDIT_WINDOW_SECONDS = 600
+# The per-run key is the caller's own execution id, so a per-agent budget is
+# what bounds the rows one agent can write into the append-only audit log.
+REFUSAL_AUDITS_PER_AGENT = 20
+# Root-owned, on the container's writable layer (gone on recreate, which is why
+# the lifecycle tails re-sync it). Its presence is what the hook falls back to
+# when the platform does not answer.
+MARKER = "/opt/trinity/skill-gates-active"
+MARKER_TIMEOUT_SECONDS = 10
+MARKER_HEAL_WINDOW_SECONDS = 300
+
+
+async def record_self_approval(agent_name: str, decision: GateDecision, *,
+                               execution_id: Optional[str], current_user, endpoint: str,
+                               request_text: Optional[str] = None,
+                               triggered_by: Optional[str] = None) -> None:
+    """The one way a self-approval is written down: a `self_approved` record
+    clearing the run the agent RECEIVES (`execution_id`) for the gated skills,
+    then #751's audit row. The record is what the in-container hook honours;
+    the audit is what an operator reads. Never raises — the dispatch already
+    began: a failed write is logged, the run proceeds, and the hook refuses
+    the skill inside it, which is the fail-closed direction."""
+    if decision.ungated or not decision.self_approved_by:
+        return
+    if execution_id:
+        text = sanitize_text(request_text or "")
+        if len(text) > SELF_APPROVAL_TEXT_MAX_CHARS:
+            text = (text[:SELF_APPROVAL_TEXT_MAX_CHARS]
+                    + " … (truncated; the whole request is on the execution)")
+        try:
+            db.record_self_approved_run(
+                request_id=_self_approval_id(agent_name, execution_id),
+                agent_name=agent_name, skills=list(decision.skills), request_text=text,
+                requester_email=decision.self_approved_by, triggered_by=triggered_by,
+                dispatched_execution_id=execution_id)
+        except Exception:  # noqa: BLE001 — the run proceeds; the hook refuses inside it
+            logger.warning("[SkillGate] self-approval record for run %s on %s not written; "
+                           "the in-container hook will refuse the skill in it",
+                           execution_id, agent_name, exc_info=True)
+    await audit_self_approved(agent_name, decision, current_user=current_user,
+                              endpoint=endpoint, execution_id=execution_id)
+
+
+def _self_approval_id(agent_name: str, execution_id: str) -> str:
+    """One record per run, whatever retries it."""
+    raw = f"{agent_name}\x00{execution_id}".encode("utf-8")
+    return "gate-self-" + hashlib.sha256(raw).hexdigest()[:40]
+
+
+def _and_join(items: List[str]) -> str:
+    items = list(items)
+    if len(items) <= 1:
+        return "".join(items)
+    return ", ".join(items[:-1]) + " and " + items[-1]
+
+
+def _one_line(value: Optional[str], limit: int = 128) -> Optional[str]:
+    """A name the hook sent, made safe to echo into one line of copy."""
+    text = " ".join(str(value or "").split())[:limit]
+    return text or None
+
+
+def hook_refusal_text(skills: List[str], *, no_run: bool, subagent: Optional[str] = None) -> str:
+    """What the executor reads when the hook refuses (D1: hand it back).
+
+    Unlike #751's notices this names the slash form to send — it is a tool
+    result the model reads, and the platform never replays it as a request.
+    It names no person and no role (#715). "Includes", not "starts with": a
+    Slack message starting with `/` is a Slack command.
+    """
+    one = len(skills) == 1
+    noun = ("the skill " if one else "the skills ") + _and_join(skills)
+    need, they, obj, its = ("needs", "it", "it", "its") if one else ("need", "they", "them", "their")
+    slashes = _and_join([f"/{s}" for s in skills])
+    if subagent:
+        head = f"The subagent {subagent} loads {noun}, which {need} approval before {they} can run"
+    else:
+        head = f"{noun[0].upper()}{noun[1:]} {need} approval before {they} can run"
+    if no_run:
+        return (f"{head}, and this session is not a Trinity run, so it cannot carry an approval. "
+                f"It was not run. Do not carry out {its} steps another way. To run {obj}, ask for "
+                f"{obj} in the agent's chat with a message that includes {slashes} and what you "
+                "want done. It will then wait for a decision, or run at once if you are the one "
+                f"who approves {obj}.")
+    return (f"{head}, and this run was not approved for {obj}, so it was not run. Do not carry "
+            f"out {its} steps another way. Tell whoever asked for {obj} that {they} {need} "
+            f"approval, and that they can request {obj} through Trinity with a message that "
+            f"includes {slashes} and what they want done. It will then wait for a decision, or "
+            f"run at once if they are the one who approves {obj}.")
+
+
+def _could_not_tell_text(subagent: Optional[str]) -> str:
+    what = (f"which skills the subagent {subagent} loads" if subagent
+            else "which skill this call loads")
+    return (f"This agent has skills that need approval, and Trinity could not tell {what}, "
+            "so it was not run. Do not carry out its steps another way.")
+
+
+async def check_invocation(agent_name: str, *, via: str, invoked: Optional[str],
+                           names: List[str], resolved: bool, subagent: Optional[str] = None,
+                           execution_id: Optional[str] = None, marker: Optional[bool] = None,
+                           current_user=None) -> Dict[str, Any]:
+    """The in-container hook's question: may this run load these skills?
+
+    `names` are every name the invoked skill (or a subagent's preloads)
+    answers to; `resolved` is False when the hook could not tell. Not gated →
+    allowed. Gated → allowed only when `execution_id` is this agent's LIVE run
+    and a gate record clears it for every gated skill the call loads (D3: the
+    execution and the skill). Every verdict is RETURNED: a raise would reach
+    the app handler as a non-200, which the hook reads as "no answer" and
+    decides by its marker. Only an unreadable gate map raises (503).
+    """
+    gates = read_gates(agent_name)
+    _heal_marker(agent_name, has_gates=bool(gates), reported=marker)
+    if not gates:
+        return {"allowed": True, "gated": False, "message": None}
+    who = _one_line(subagent) if via == "subagent_preload" else None
+    run = execution_id if execution_id and execution_id != "manual" else None
+    refusal = dict(via=via, subagent=who, execution_id=run, current_user=current_user)
+    if not resolved:
+        return await _refuse(agent_name, [], reason="could_not_tell",
+                             text=_could_not_tell_text(who), **refusal)
+    wanted = {n.casefold() for n in [*(names or []), invoked or ""] if n}
+    hits = sorted(k for k in gates if k.casefold() in wanted)
+    if not hits:
+        return {"allowed": True, "gated": False, "message": None}
+    if run is None:
+        return await _refuse(agent_name, hits, reason="no_run",
+                             text=hook_refusal_text(hits, no_run=True, subagent=who), **refusal)
+    cleared, live = _cleared_skills(agent_name, run)
+    uncleared = [h for h in hits if h.casefold() not in cleared]
+    if not uncleared:
+        return {"allowed": True, "gated": True, "message": None}
+    return await _refuse(agent_name, uncleared, reason="not_cleared" if live else "run_not_live",
+                         text=hook_refusal_text(uncleared, no_run=False, subagent=who), **refusal)
+
+
+def _cleared_skills(agent_name: str, execution_id: str) -> Tuple[set, bool]:
+    """`(casefolded skills the run is cleared for, whether the run is live)`.
+
+    Always both reads, whatever the first one finds, so an unknown id, another
+    agent's run and a finished one cost the same and answer the same. The
+    record and the row must both be this agent's (#2433 class; Invariant #8).
+    """
+    row = db.get_execution_gate_state(execution_id)
+    record = db.get_gate_request_by_dispatched_execution(execution_id)
+    live = bool(row) and row[0] == agent_name and row[1] in _LIVE_RUN_STATUSES
+    if not (live and record and record.get("agent_name") == agent_name
+            and record.get("state") in _CLEARING_STATES):
+        return set(), live
+    return {str(s).casefold() for s in (record.get("skills") or [])}, live
+
+
+async def _refuse(agent_name: str, skills: List[str], *, reason: str, text: str, via: str,
+                  subagent: Optional[str], execution_id: Optional[str], current_user) -> Dict:
+    logger.info("[SkillGate] in-container refusal on %s: reason=%s via=%s skills=%s run=%s",
+                agent_name, reason, via, ",".join(skills) or "-", execution_id or "-")
+    await _audit_refusal(agent_name, skills, reason=reason, via=via, subagent=subagent,
+                         execution_id=execution_id, current_user=current_user)
+    return {"allowed": False, "gated": True, "message": text}
+
+
+async def _audit_refusal(agent_name: str, skills: List[str], *, reason: str, via: str,
+                         subagent: Optional[str], execution_id: Optional[str],
+                         current_user) -> None:
+    """One audit row per run and skill per 10 minutes, and at most
+    `REFUSAL_AUDITS_PER_AGENT` per agent in that window, so an owner can see a
+    bypass attempt without an agent filling the log — by retrying, or by
+    sending a different execution id each time. Ids and names only. Best
+    effort; the log line in `_refuse` is written either way."""
+    key = (f"skill_gate_refused:{agent_name}:{execution_id or 'none'}:"
+           f"{','.join(skills) or 'unresolved'}")
+    try:
+        if not rate_limiter.check(key, 1, REFUSAL_AUDIT_WINDOW_SECONDS).allowed:
+            return
+        if not rate_limiter.check(f"skill_gate_refused_agent:{agent_name}",
+                                  REFUSAL_AUDITS_PER_AGENT, REFUSAL_AUDIT_WINDOW_SECONDS).allowed:
+            return
+        from services.platform_audit_service import AuditEventType, platform_audit_service
+        await platform_audit_service.log(
+            event_type=AuditEventType.EXECUTION,
+            event_action="skill_gate_refused",
+            source="api",
+            actor_agent_name=agent_name,
+            mcp_key_id=getattr(current_user, "mcp_key_id", None),
+            mcp_key_name=getattr(current_user, "mcp_key_name", None),
+            mcp_scope=getattr(current_user, "mcp_scope", None),
+            target_type="agent",
+            target_id=agent_name,
+            endpoint="/api/skill-gate/check",
+            request_id=None,
+            details={"skills": list(skills), "execution_id": execution_id, "reason": reason,
+                     "via": via, "subagent": subagent},
+        )
+    except Exception:  # noqa: BLE001 — the refusal stands either way
+        logger.warning("[SkillGate] refusal audit failed for %s", agent_name, exc_info=True)
+
+
+def _heal_marker(agent_name: str, *, has_gates: bool, reported: Optional[bool]) -> None:
+    """The hook reports whether it found the marker. When that disagrees with
+    the map, re-sync — at most once per agent per 5 minutes, across workers.
+    The report only TRIGGERS a sync; what is written comes from the map."""
+    if reported is None or bool(reported) == has_gates:
+        return
+    try:
+        if rate_limiter.check(f"skill_gate_marker:{agent_name}", 1,
+                              MARKER_HEAL_WINDOW_SECONDS).allowed:
+            spawn_gate_marker_sync(agent_name, only_if_gated=False)
+    except Exception:  # noqa: BLE001 — a heal is an optimisation, never the answer
+        logger.warning("[SkillGate] marker heal for %s not scheduled", agent_name, exc_info=True)
+
+
+def marker_command(create: bool, path: str = MARKER) -> List[str]:
+    """The argv that writes (0444, through a temp file, so a rewrite never
+    leaves a moment without it) or removes the marker. Constant: no agent or
+    skill name is ever part of it; the path rides as a positional argument."""
+    if not create:
+        return ["rm", "-f", path]
+    script = ('set -e; t=$(mktemp "$1/.skill-gates-active.XXXXXX"); '
+              'printf "1\\n" > "$t"; chmod 0444 "$t"; mv -f "$t" "$2"')
+    return ["/bin/sh", "-c", script, "sh", os.path.dirname(path), path]
+
+
+async def sync_gate_marker(agent_name: str) -> Optional[bool]:
+    """Make the marker in the agent's container say whether it has gates:
+    True written, False removed, None when nothing was changed (an unreadable
+    map, a failed or timed-out exec).
+
+    Ordering contract for gate writers (trinity-enterprise#753): sync BEFORE
+    an agent's first gate takes effect, and remove only AFTER its last gate is
+    gone. The other order leaves a window in which a gated skill runs while
+    the platform cannot be reached. Syncs of one agent are serialised in this
+    worker — the map is read under the lock — so a slow sync that read an
+    older map cannot land after a newer one.
+    """
+    import asyncio
+
+    loop_key = (id(asyncio.get_running_loop()), agent_name)
+    async with _marker_locks.setdefault(loop_key, asyncio.Lock()):
+        try:
+            gates = read_gates(agent_name)
+        except SkillGateRefused:
+            return None
+        want = bool(gates)
+        from services.docker_service import execute_command_in_container
+        try:
+            result = await execute_command_in_container(
+                container_name=f"agent-{agent_name}", command=marker_command(want),
+                timeout=MARKER_TIMEOUT_SECONDS, user="root")
+        except Exception:  # noqa: BLE001
+            logger.warning("[SkillGate] gate marker sync on %s failed", agent_name, exc_info=True)
+            return None
+        if result.get("timed_out") or result.get("exit_code") != 0:
+            logger.warning("[SkillGate] gate marker sync on %s did not complete (exit %s, timed out %s)",
+                           agent_name, result.get("exit_code"), bool(result.get("timed_out")))
+            return None
+        return want
+
+
+# One lock per (event loop, agent): a worker has one loop; the loop id keeps a
+# lock from being reused on a loop it was not created for.
+_marker_locks: Dict[Tuple[int, str], Any] = {}
+
+
+def spawn_gate_marker_sync(agent_name: str, *, only_if_gated: bool = True) -> bool:
+    """Fire-and-forget `sync_gate_marker`; True when a sync was scheduled.
+    `only_if_gated` (start and recreate) skips the exec for an agent with no
+    gates, and for an unreadable map, so an agent start costs nothing while
+    the gate is unused. A heal passes False. Never raises."""
+    import asyncio
+
+    if only_if_gated:
+        try:
+            if not read_gates(agent_name):
+                return False
+        except SkillGateRefused:
+            return False
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return False
+    task = loop.create_task(sync_gate_marker(agent_name))
+    _inflight.add(task)
+    task.add_done_callback(_inflight.discard)
+    return True
+
+
+# ---------------------------------------------------------------------------
 # The frozen dispatch — what an approved run re-uses of the request
 # ---------------------------------------------------------------------------
 
@@ -704,6 +1022,7 @@ DISPATCH_FIELDS: Dict[str, str] = {
     "fan_out_id": DROP,
     "loop_id": DROP,
     "parent_activity_id": DROP,
+    "collaboration_activity_id": DROP,
     "extra_activity_details": DROP,
     "schedule_context": DROP,
     "images": DROP,

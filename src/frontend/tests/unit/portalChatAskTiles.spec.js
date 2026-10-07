@@ -185,7 +185,57 @@ async function open() {
 const sequence = () => wrapper.findAll('[data-message-id], [data-ask-id]')
   .map((n) => n.attributes('data-message-id') || `ask:${n.attributes('data-ask-id')}`)
 
+describe("an answered ask's result lands in the open chat (ent#747, mounted)", () => {
+  it('watches for the completion report and appends it once, then stops', async () => {
+    vi.useFakeTimers()
+    try {
+      await open()
+      const before = wrapper.findAll('[data-message-id]').length
+      const report = { id: 'r1', role: 'assistant', content: '**Finished**\n\nOutline updated.',
+        source: 'completion:done', created_at: '2026-09-30T10:20:00Z' }
+      store.fetchHistory = vi.fn(async () => ({ sessionId: 's1', messages: [report] }))
+      store.askResultWatch = { askId: 'q1', agentName: 'scout', chatId: 's1', since: Date.now() }
+      await flushPromises()
+
+      vi.advanceTimersByTime(5000)
+      await flushPromises()
+
+      expect(wrapper.findAll('[data-message-id]').length).toBe(before + 1)
+      expect(wrapper.find('[data-message-id="r1"]').exists()).toBe(true)
+      expect(store.askResultWatch).toBeNull()
+      vi.advanceTimersByTime(20000)
+      await flushPromises()
+      expect(store.fetchHistory).toHaveBeenCalledTimes(1)
+      expect(wrapper.findAll('[data-message-id="r1"]')).toHaveLength(1)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('a watch for another chat reads nothing here', async () => {
+    vi.useFakeTimers()
+    try {
+      await open()
+      store.fetchHistory = vi.fn(async () => ({ sessionId: 's1', messages: [] }))
+      store.askResultWatch = { askId: 'q1', agentName: 'scout', chatId: 'other', since: Date.now() }
+      await flushPromises()
+      vi.advanceTimersByTime(30000)
+      await flushPromises()
+      expect(store.fetchHistory).not.toHaveBeenCalled()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+})
+
 describe('the chat thread (mounted)', () => {
+  it("forwards a tile's open-thread (Discuss) to the shell (ent#747)", async () => {
+    store.asks = [ask('here', { created_at: '2026-09-30T10:03:00Z' })]
+    await open()
+    wrapper.findComponent(PortalAsks).vm.$emit('open-thread', { id: 'chat-new', agent_name: 'scout' })
+    expect(wrapper.emitted('open-thread')).toEqual([[{ id: 'chat-new', agent_name: 'scout' }]])
+  })
+
   it("draws this chat's chat-turn ask among its messages, by time, and nothing else", async () => {
     store.asks = [
       ask('here', { created_at: '2026-09-30T10:03:00Z' }),

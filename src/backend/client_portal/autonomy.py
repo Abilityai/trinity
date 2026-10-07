@@ -15,7 +15,7 @@ Writes split by direction, because they are not the same act:
 
 * **hold** — refuse unprompted work for a class. Own seat or the owner: a
   person may always make their own companion ask first.
-* **release** — let it run unprompted again. **Owner/admin only.** Releasing is
+* **release** — let it run unprompted again. **Owner only (`role_card._is_owner`).** Releasing is
   a GRANT (Invariant #8); holding is a refusal, and a refusal is never a
   privilege. The same asymmetry as `hold`-never-`promote`: the rule promotes, a
   human can only refuse.

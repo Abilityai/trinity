@@ -123,7 +123,8 @@
       <!-- Sidebar: persistent on desktop, drawer on mobile -->
       <div class="hidden sm:flex shrink-0 min-w-0 overflow-hidden sm:w-[var(--ws-sidebar,18rem)]">
         <PortalSidebar
-          :roster="store.agents"
+          :roster="orderedRoster"
+          :active-agent-name="activeAgentName"
           :threads="sidebarThreads"
           :client-email="store.clientEmail"
           :current-session-id="activeSessionId"
@@ -141,6 +142,7 @@
           @open-agent="openAgentPage"
           @open-thread="openThread"
           @open-projects="openProjects(null)"
+          @open-keys="keyListOpen = true"
           @toggle-star="toggleStar"
           @sign-out="onSignOut"
         />
@@ -169,7 +171,8 @@
         <div class="absolute inset-0 bg-black/40" @click="mobileNav = false"></div>
         <div class="absolute inset-y-0 left-0">
           <PortalSidebar
-            :roster="store.agents"
+            :roster="orderedRoster"
+            :active-agent-name="activeAgentName"
             :threads="sidebarThreads"
             :client-email="store.clientEmail"
             :current-session-id="activeSessionId"
@@ -188,6 +191,7 @@
             @open-thread="(t) => { mobileNav = false; openThread(t) }"
             @open-inbox="mobileNav = false"
             @open-projects="openProjects(null)"
+            @open-keys="() => { mobileNav = false; keyListOpen = true }"
             @toggle-star="toggleStar"
             @sign-out="onSignOut"
           />
@@ -237,9 +241,13 @@
              agent — it resolves to the chat you were last in and renders the
              conversation, with the agent's numbers in the band above it and its
              context one click away in Agent details. The URL is kept (every
-             link to it still works); `landOnAgent` replaces it with the
-             thread's own URL as soon as the list is in hand. The skeleton below
-             covers that beat, so nothing renders here.
+             link to it still works). ent#784 then made the landing a
+             PRECEDENCE — a validated `lastOpenSessionId`, else the chat holding
+             an unsent draft (newest first), else the agent's existing empty
+             chat, else a new one — and only the two arms that name a THREAD
+             replace this URL with the thread's own (via `openThread`); a new
+             chat stays here, which is what makes it reloadable. The skeleton
+             below covers that beat, so nothing renders here.
 
              ent#360's reasoning is not reverted — an agent still has a home with
              its history, what it can do and a place to ask you something. It is
@@ -362,6 +370,7 @@
           @update:preview="(k) => { inboxPreview = k }"
           @refresh="refreshThreads"
           @open-chat="(url) => router.push(url)"
+          @open-thread="openNewThread"
           @reply="replyInChat"
         >
           <template #header-end>
@@ -414,6 +423,7 @@
           :roster="store.agents"
           :session-id="pendingSession"
           :new-chat="startingNewChat"
+          :focus-on-mount="composerFocusMode"
           :prefill="prefill"
           :reply-target="replyTarget"
           :starred="isStarred('thread', activeSessionId || pendingSession)"
@@ -429,7 +439,7 @@
           @open-menu="mobileNav = true"
           @escalate-to-room="onEscalateToRoom"
           @toggle-star="toggleStar"
-          @open-thread="openThread"
+          @open-thread="openNewThread"
           @work-state="onWorkState"
           @open-work="openRailOn('work')"
           @open-project="openProjects"
@@ -824,6 +834,23 @@
       @cancel="onLeaveCallCancel"
     />
 
+    <!-- ent#621: what a key move says out loud. The agent band, the tab strip
+         and the browser-tab title carry the same fact visually; a move that
+         only redraws is a move a screen-reader user cannot follow. The region
+         is always in the DOM — a live region mounted together with its text is
+         not announced — and sits outside the sign-in branches so no landing can
+         unmount it mid-sentence. -->
+    <p class="sr-only" aria-live="polite" data-testid="ws-key-announce">{{ keyAnnouncement }}</p>
+
+    <!-- ent#621: `⌘/`. ALWAYS mounted and v-model driven — a `v-if` toggle
+         unmounts past `BaseModal`'s close branch and focus never comes back to
+         the message field. Rows come from the map, never from this template. -->
+    <PortalKeyList
+      v-model="keyListOpen"
+      :rows="keyListRowsNow"
+      :platform="keyPlatform"
+    />
+
     <!-- ent#361: picking who is in a chat is an explicit act now -->
     <PortalAgentPicker
       v-if="pickerOpen"
@@ -843,7 +870,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { useClientPortalStore, MULTI_AGENT_UNAVAILABLE, PLATFORM_LOGIN_ROUTE } from '@/stores/clientPortal'
 import { useAuthStore } from '@/stores/auth'
 import { usePortalDraftsStore } from '@/stores/portalDrafts'
-import { threadKey } from '@/components/portal/portalDrafts'
+import { threadKey, shouldAutoFocusComposer } from '@/components/portal/portalDrafts'
 import { safeStorage } from '@/utils/safeStorage'
 import PortalSidebar from '@/components/portal/PortalSidebar.vue'
 import PortalBrand from '@/components/portal/PortalBrand.vue'
@@ -876,6 +903,7 @@ import { useColumnResize, RAIL_COLLAPSED } from '@/composables/useColumnResize'
 import { useContainerWidth } from '@/composables/useContainerWidth'
 import PortalSkeleton from '@/components/portal/PortalSkeleton.vue'
 import PortalThemeSwitch from '@/components/portal/PortalThemeSwitch.vue'
+import PortalKeyList from '@/components/portal/PortalKeyList.vue'
 import PortalRail from '@/components/portal/PortalRail.vue'
 import PortalRailPlaceholder from '@/components/portal/PortalRailPlaceholder.vue'
 import PortalRailStrip from '@/components/portal/PortalRailStrip.vue'
@@ -894,15 +922,18 @@ import {
   railSizedOpen,
   railParticipantsFor,
   railVisibleFor,
+  activeTabFor,
   saveRailState,
   visibleTabs,
   infoSignalFrom,
 } from '@/components/portal/portalRail'
 import { stageZone } from '@/components/portal/portalBriefingState'
 import {
-  isNewChatHotkey, resolveAgentLanding, shouldMarkTurnRead, shouldEscapeStage,
-  landingThread,
-  agentHasMain, titleSettling, shouldFetchTitleHealth, titleGenerationNotice,
+  resolveAgentLanding, shouldMarkTurnRead, shouldEscapeStage,
+  // ent#621: the announcer names the chat it landed on the way the strip does.
+  threadTitle,
+  agentLanding,
+  agentHasMain, agentEmptyChat, titleSettling, shouldFetchTitleHealth, titleGenerationNotice,
   TITLE_SETTLE_DELAYS_MS,
   // ent#557: the SAME sum the sidebar renders, so the tab and the rows cannot
   // disagree about the number.
@@ -910,7 +941,16 @@ import {
   // trinity-enterprise#610 §3g S4: the read's optimistic zero and its rollback.
   optimisticRead, rollbackRead,
   asksHomeRoute,
+  // ent#621 T6: the order the sidebar SHOWS is now computed here, once, and
+  // passed down — so the switch-agent keys walk exactly what the eye reads.
+  orderRosterAgents,
 } from '@/components/portal/portalUtils'
+// ent#621 — the Workspace key map. The rules are pure and live there; this view
+// owns the one listener and the dispatch table (T3).
+import {
+  resolveWorkspaceKey, workspaceChord, keymapSuppressed, hasModalOpen, nextAgent, recordLastOpen,
+  nextRailTab, keyListRows, hostPlatform, WORKSPACE_KEYMAP,
+} from '@/components/portal/portalKeymap'
 // ent#557: the tab title's unread half. The router owns the label; this pushes
 // the count. See `utils/tabTitle.js` for why neither writes `document.title`.
 import { setUnreadCount, clearUnreadCount } from '@/utils/tabTitle'
@@ -1054,9 +1094,20 @@ const inboxAgentLabels = computed(() => agentLabels(store.agents))
 // ent#661: `/workspace/projects` and `/workspace/projects/:projectId`.
 const projectsRoute = computed(() => route.name === 'WorkspaceProjects' || route.name === 'WorkspaceProject')
 const activeProjectId = computed(() => route.params.projectId || null)
-// A stage page that never carries a rail: the agent page (ent#360) and the
-// Projects pages (ent#661). Both rail rules read it as their `agentPage`.
-const railFreePage = computed(() => activeAgentPageName.value || (projectsRoute.value ? 'projects' : null))
+// ent#784 (review): `/workspace/a/:name` used to be left within a tick, so the
+// rail rules could read it as "a page, not a conversation". It is now where a
+// landed new chat RESTS — the same conversation `/workspace` and
+// `/workspace/c/:id` show, one URL apart — so it is rail-free only until the
+// landing has put the named agent on stage. Reading it as a page for longer
+// gave a new chat no rail, and the first send (which moves the URL to the
+// thread's own) then slid one in beside a reply already streaming.
+const unlandedAgentPage = computed(() => (
+  activeAgentPageName.value && activeAgentName.value !== activeAgentPageName.value
+    ? activeAgentPageName.value
+    : null))
+// A stage page that carries no rail: an agent URL that has not landed yet, and
+// the Projects pages (ent#661). The rail rules read it as their `agentPage`.
+const railFreePage = computed(() => unlandedAgentPage.value || (projectsRoute.value ? 'projects' : null))
 const activeAgent = computed(() => {
   if (isInboxRoute.value) {
     return inboxSelectedAgent({ item: inboxSelection.value, threads: threads.value, asks: store.asks, agents: store.agents })
@@ -1216,7 +1267,7 @@ const roomParticipants = ref([])
 const workSignal = ref(emptySignal())
 
 const railParticipants = computed(() => railParticipantsFor({
-  agentPage: activeAgentPageName.value,
+  agentPage: unlandedAgentPage.value,
   roomId: activeRoomIdFromRoute.value,
   roomParticipants: roomParticipants.value,
   activeAgent: activeAgent.value?.name,
@@ -1257,9 +1308,13 @@ const railVisible = computed(() => railVisibleFor({
 const RAIL_MOTION = 'transition-[width] duration-300 ease-out overflow-hidden '
   + 'motion-reduce:transition-none motion-reduce:duration-0'
 
+// ent#784 (review): NOT `railFreePage` here. That is true for an agent URL
+// until it lands, which on a cold link is the whole of the loading stage — the
+// only stage this rule answers for — so reading it would never reserve the
+// column for a route that is now a 1:1 conversation like `/workspace/c/:id`.
 const railColumnReserved = computed(() => Boolean(
   railColumnReservedFor({
-    agentPage: railFreePage.value,
+    agentPage: projectsRoute.value ? 'projects' : null,
     stageState: stage.value.state,
     roomId: activeRoomIdFromRoute.value,
   }) && !voiceCanvasHasColumn.value
@@ -1401,6 +1456,17 @@ function openSuggestionSection(name) {
 function focusConversationComposer() {
   conversationRef.value?.focusComposer?.()
 }
+// ent#784 (review): the caret for a LANDING, under the landing's own rule. A
+// new chat focuses itself when it mounts (`focusOnMount`); a landing that
+// reuses a chat — the agent's empty one, a remembered one — mounts as a thread,
+// and a thread mount focuses nothing. So the shell hands the caret over for
+// those, reading the same `composerFocusMode` the mount reads: a landing on a
+// touch device still does not summon the keyboard.
+function focusLandedComposer() {
+  if (composerFocusMode.value === 'fine-pointer'
+    && !shouldAutoFocusComposer(typeof window !== 'undefined' ? window.matchMedia?.bind(window) : null)) return
+  nextTick(focusConversationComposer)
+}
 function onRoomParticipants(list) { roomParticipants.value = Array.isArray(list) ? list : [] }
 
 // A signal belongs to the chat that reported it. The conversation is keyed by
@@ -1470,6 +1536,13 @@ const pickerBusy = ref(false)
 // thread exists (`openThread`, and the send that gets a session id back), so it
 // can never make a SECOND turn open another thread.
 const startingNewChat = ref(false)
+// ent#784 / #2579 — WHY the composer is being focused, which decides whether it
+// may summon a soft keyboard. `always` is a gesture the person just made (New
+// chat, ⌘J, the agent picker, switch-agent): they asked for a composer, so the
+// keyboard is the answer, not an ambush. `fine-pointer` is a LANDING they did
+// not ask for in those words (opening an agent, an `?agent=` link), where a
+// keyboard sliding up over a phone is exactly the "unprompted" the issue names.
+const composerFocusMode = ref('always')
 
 function newChat() {
   if (guardLeaveCall(() => newChat())) return   // ent#551: ask, then leave
@@ -1728,18 +1801,35 @@ function openRoom(roomId) {
 // where a row carrying an unread badge opened the unread chat instead. The
 // count still shows on the row; the page's Overview lists the chats it belongs
 // to, so the conversation is one click further, not lost.
-// ent#523: clicking an agent opens the CONVERSATION you were last in, not a
-// report about the agent. The `/workspace/a/:name` URL is kept — every existing
-// link, and the sidebar row, still route through it — and `landOnAgent`
-// swaps it for the thread's own URL once the list is in hand. Landing here
-// rather than pushing the thread URL directly is deliberate: the thread list
-// may not have loaded yet on a cold deep link, and this way the URL is honest
-// at every instant instead of pointing at a chat we have not resolved.
+// ent#784: clicking an agent opens a NEW chat with it, not a report about the
+// agent and not the chat you were last in. The `/workspace/a/:name` URL is kept
+// — every existing link, and the sidebar row, still route through it — and it
+// now STAYS: a landed new chat is "new chat with X", which that URL says
+// exactly, so a reload, a bookmark or a copied link keeps the agent. The first
+// send replaces it with the thread's own `/workspace/c/:id` (`onSessionAdopted`),
+// which is the first moment there is a thread to name. Landing here rather than
+// pushing a thread URL directly is deliberate: the thread list may not have
+// loaded yet on a cold deep link, and this way the URL is honest at every
+// instant instead of pointing at a chat we have not resolved.
 function openAgentPage(name) {
   if (!name) return
   // ent#551 QA: the rail's agent row. It pushed a route with no guard, so the
   // conversation remounted and the call ended without a word.
   if (guardLeaveCall(() => openAgentPage(name))) return
+  // ent#784 (review): the row of the agent whose landed new chat is ALREADY on
+  // stage. The push below would be a no-op (same URL), so the route watcher
+  // would not re-fire and nothing would re-land — while the two writes above it
+  // would still spend `startingNewChat`. The composer then kept reading "New
+  // chat" and sent its first message without `new_thread`, which the server
+  // files in the agent's MAIN chat. There is nothing to open: the person is
+  // where the click leads, so it only hands the caret back to the field the
+  // click took it from.
+  if (activeAgentPageName.value === name && activeAgentName.value === name
+    && startingNewChat.value && !pendingSession.value) {
+    composerFocusMode.value = 'fine-pointer'
+    focusLandedComposer()
+    return
+  }
   unreachableAgent.value = null
   pendingSession.value = null
   startingNewChat.value = false
@@ -1747,49 +1837,80 @@ function openAgentPage(name) {
   router.push(`/workspace/a/${encodeURIComponent(name)}`)
 }
 
-// ent#523 — turn `/workspace/a/:name` into the chat to land in.
+// ent#784 — turn `/workspace/a/:name` into the chat to land in.
 // Named `landOnAgent` to stay clear of the pure `resolveAgentLanding` above,
 // which answers the same question for the `?agent=` deep link; both defer to
-// `landingThread` so there is ONE rule for which chat you land in.
+// `agentLanding` so there is ONE rule for which chat you land in.
 //
-// `landingThread` is the rule (most recently active, Main as the floor); it is
-// pure and lives in portalUtils so it is testable without a mount. With no
-// chats at all the agent's Main has not been minted yet, so the shell asks the
-// server for the list — which is what mints it — and lands on what comes back.
-// A failure leaves the caller on the agent URL with the stage's own error
-// states, rather than dropping them somewhere unrelated.
-async function landOnAgent(name) {
+// `agentLanding` is the rule, and since ent#784 its answer is a NEW chat unless
+// the caller hands it a session to return to (the ent#621 seam). So this is now
+// SYNCHRONOUS: there is nothing to fetch before it can answer, and the awaited
+// `ensureMainListed` that used to sit on this path is gone from it. The pinned
+// Main is still minted on the first visit — `watch(activeAgentName)` below owns
+// that promise (ent#523) — it simply no longer blocks the landing.
+//
+// No `escapeStage` / no push to bare `/workspace`: staying on this URL is what
+// makes the landed chat reloadable and linkable.
+//
+// ent#621 adds the ONE option the keys need: `lastOpenSessionId` is the chat
+// this person last had open with this agent (the shell's `lastOpen` memory), and
+// `agentLanding` validates it against the thread list before honouring it — so a
+// stale, archived or other-agent id falls through to the ordinary arms. `focus`
+// is the arrival's focus mode: a key press IS a gesture (there is a keyboard in
+// the room by definition), so the keys ask for `'always'` where the route
+// watcher keeps ent#784's `'fine-pointer'`.
+function landOnAgent(name, { lastOpenSessionId = null, focus = 'fine-pointer' } = {}) {
   if (!name) return
-  activeAgentName.value = name
-  const target = landingThread(threads.value, name)
-  if (target) { openThread(target); return }
-  try {
-    // #2579: this branch used to destructure `{ sessions }` off the store's
-    // return value — which is an ARRAY (`data.sessions || []`). `sessions` was
-    // therefore always `undefined`, `landingThread` always missed, and the
-    // repair branch this comment describes never once ran: a first-time
-    // visitor always fell through to a fresh chat, and the Main the call had
-    // just minted server-side never reached the screen. It now goes through
-    // `ensureMainListed`, which does the same per-agent read AND folds the
-    // result into `threads` — one seam for "the list must show this agent's
-    // Main", shared with the watcher below.
-    await ensureMainListed(name)
-    // The watcher fires on the route param AND on the thread list arriving, so
-    // two landings can be in flight at once on a cold deep link: the first
-    // misses (no threads yet) and goes to the network, the second finds the
-    // list and navigates. Without this the first one's late resolution
-    // navigates too — moving the person off a chat they have since chosen. The
-    // route is the authority; if it no longer names this agent, this landing
-    // has been overtaken and has nothing to say. Re-checked HERE, after the
-    // await: the ensure spends two round trips where the old code spent one.
-    if (activeAgentPageName.value !== name) return
-    const landed = landingThread(threads.value, name)
-    if (landed) { openThread(landed); return }
-  } catch {
-    // Fall through: a fresh chat is a better answer than a dead stage.
+  // ent#551 class: `activeAgentName` feeds `convKey`, so writing it remounts
+  // the conversation and ends a live call without a word. The click doors ask
+  // first; back/forward and a typed `/workspace/a/:name` come through here, and
+  // did not. Ask before touching anything.
+  if (guardLeaveCall(() => landOnAgent(name, { lastOpenSessionId, focus }))) return
+  // ent#621 Decision 34 — the guard is the FIRST thing, above the focus-mode
+  // write and above `agentLanding`. It used to sit after the branch, which made
+  // it a guard against re-minting and nothing else: the key path's own
+  // `router.push('/workspace/a/:name')` re-fires the route watcher, and a
+  // second `agentLanding` run over a thread list that has meanwhile grown a
+  // freshly minted Main resolves arm 4 (`agentEmptyChat`) and `openThread`s it —
+  // replacing the chat the key just landed on. Evaluated first, the re-fire is
+  // a no-op, and it can no longer downgrade `composerFocusMode` either.
+  if (activeAgentName.value === name && startingNewChat.value && !pendingSession.value) return
+  // ent#784: landing is not a gesture, so the composer focuses only where that
+  // cannot summon an on-screen keyboard (see `focusOnMount` below). Set BEFORE
+  // the branch, not only on the new-chat path: a landing on a drafted chat is
+  // the same kind of arrival, and `openThread` does not touch this ref — so
+  // leaving a gesture's `always` standing would make the next landing focus on
+  // a touch device (the T3(b) rule, one door at a time).
+  composerFocusMode.value = focus
+  const landing = agentLanding({
+    agentName: name,
+    threads: threads.value,
+    // The drafts arm's candidates. Passed in rather than read inside the rule,
+    // so `agentLanding` stays a pure function both doors can be tested through.
+    drafts: drafts.drafts,
+    // ent#621: the chat to return to, when there is one. `agentLanding` owns
+    // the validation — one rule, one place.
+    lastOpenSessionId,
+  })
+  if (!landing) return
+  if (landing.sessionId) {
+    const row = threads.value.find((t) => (t.id || t.session_id) === landing.sessionId)
+    // `openThread` remounts the conversation on the landed session, which is
+    // what restores the draft: the fresh instance's `useComposerDraft` reads
+    // `thread:<id>` at setup and `PortalConversation`'s mount then puts the
+    // caret at its end, on a fine pointer only — the same rule as above, shared
+    // through `shouldAutoFocusComposer` rather than re-decided here.
+    //
+    // (review) A landing on a chat with NO draft — the agent's empty one — is
+    // restored by nothing, so that mount leaves focus on the sidebar row the
+    // click came from. `focusLandedComposer` covers it under the same rule.
+    if (row) { openThread(row); focusLandedComposer(); return }
   }
-  if (activeAgentPageName.value !== name) return
-  newChatWithAgent(name)
+  unreachableAgent.value = null
+  activeAgentName.value = name
+  activeRoomId.value = null
+  startingNewChat.value = true
+  pendingSession.value = null; prefill.value = ''; convGen.value++
 }
 
 // #2579 — make sure this agent's pinned Main is IN the list on screen.
@@ -1818,6 +1939,15 @@ const MAIN_ENSURE_ATTEMPTS = 2
 function ensureMainListed(name) {
   if (!name) return Promise.resolve()
   if (agentHasMain(threads.value, name)) return Promise.resolve()
+  // ent#784 arm 4, the write side of "at most one empty chat per agent at any
+  // time" (operator ruling 2026-10-05). This is a GET that INSERTS, so for an
+  // agent that already has an empty chat but no Main — legacy data, since
+  // nothing mints a non-Main empty row today — visiting it would add a SECOND
+  // empty chat and then land on one of them. The ruling outranks #2579's "the
+  // pinned tab has to be there": the empty chat that exists is the one arm 4
+  // reuses, and the person is never shown two. An agent whose chats are all
+  // used still gets its Main on this visit, which is the case #2579 was about.
+  if (agentEmptyChat(threads.value, name)) return Promise.resolve()
   const inflight = mainEnsured.get(name)
   if (inflight) return inflight
   const spent = mainAttempts.get(name) || 0
@@ -1867,6 +1997,10 @@ function newChatWithAgent(name) {
   if (guardLeaveCall(() => newChatWithAgent(name))) return   // ent#534/ent#551: ask, then leave
   unreachableAgent.value = null
   activeAgentName.value = name
+  // ent#784: every door into here is a gesture the person just made — the New
+  // chat button, ⌘J, the agent picker, switch-agent — so the composer focuses
+  // on any pointer. Only the landing doors hold back (#2579 AC 2 kept).
+  composerFocusMode.value = 'always'
   // ent#451: this function has always MEANT a fresh chat — it clears
   // `pendingSession` — but a null session id is also what an unresolved thread
   // looks like, so the conversation could not tell the two apart and loaded the
@@ -1899,6 +2033,14 @@ function openThread(t) {
   pendingSession.value = sid; prefill.value = ''; convGen.value++
   search.value = ''
   router.push(`/workspace/c/${sid}`)
+}
+// trinity-enterprise#747: open a chat that may have just been created (Discuss)
+// — adopted through `openThread`, so the #3140 guard does not read an id the
+// list has not caught up with as "not yours", then the list is refreshed so the
+// sidebar shows it.
+function openNewThread(t) {
+  openThread(t)
+  refreshThreads()
 }
 function onSessionAdopted(id) {
   pendingSession.value = id
@@ -1956,6 +2098,17 @@ const isStarred = (kind, id) => !!(id && chatState.value[`${kind}:${id}`]?.starr
 // trinity-enterprise#610 (D13): the predicate lives in `portalInbox.js` so the
 // Inbox's counts and this projection are one rule, property-tested there.
 const sidebarThreads = computed(() => sidebarThreadsOf(threads.value))
+
+// ent#621 T6 — the roster order, computed ONCE here and handed to both sidebar
+// instances, because the switch-agent keys must walk exactly the order the eye
+// reads. It was a computed inside `PortalSidebar`, which meant two of them on a
+// viewport that renders the drawer as well, and no way for the shell to know
+// what either one decided. `sidebarThreads` is the list the sidebar itself gets;
+// `primaryName` stays null (ent#500 does not exist) and the fourth argument is
+// ent#491's session-stable recency snapshot, so an incoming reply cannot
+// re-order the walk under the person's hands mid-press.
+const orderedRoster = computed(() => orderRosterAgents(
+  store.agents, sidebarThreads.value, null, store.agentRecency))
 // trinity-enterprise#610 (D5/D13): the previews that ride `/chat-state` while
 // the Inbox is on screen, and the thread list's verdict — latched on the first
 // good read, so the Inbox's empty copy never stands in for "not loaded yet".
@@ -2178,21 +2331,251 @@ function renameRoom(roomId, title) {
 }
 
 // ent#451: ⌘J / Ctrl+J — New chat with the agent in front of you (the page
-// or the conversation); with no agent in front of you, the picker. Armed at
-// mount, above bootstrap's await (contract #23), and inert until signed in.
-function onGlobalKeydown(e) {
-  if (!isNewChatHotkey(e)) return
-  if (!store.isClientSignedIn) return
-  if (voiceCall.value.active) {        // ent#534/ent#551: the call owns the stage — ask first
-    e.preventDefault()
-    guardLeaveCall(() => onGlobalKeydown(e))
-    return
-  }
-  e.preventDefault()
+// or the conversation); with no agent in front of you, the picker.
+function newChatFromKey() {
   const name = activeAgentPageName.value
     || (!activeRoomIdFromRoute.value && !unreachableAgent.value ? activeAgent.value?.name : null)
   if (name) newChatWithAgent(name)
   else newChat()
+}
+
+// ent#621 — what the last chat with each agent WAS, since this Workspace loaded.
+//
+// A plain Map, not a store and not storage: the AC scopes the memory to the page
+// load, and a persisted id would be a second thing to validate for a memory
+// nobody asked to survive a reload. ONE writer (below), so there is one answer.
+const lastOpen = new Map()
+
+// The one writer. `pendingSession` is a LOAD INSTRUCTION, not the chat on stage:
+// `openAgentPage` nulls it with the agent unchanged, and so do `openRoom` and the
+// unreachable arm — recording those would forget the chat the person was reading
+// a moment before they clicked. So a null under an UNCHANGED agent is ignored,
+// while a null under a NEW agent is real (an unsent new chat) and is recorded as
+// such: `agentLanding`'s own arms then return to the draft, the agent's empty
+// chat, or a fresh one. The rule is `recordLastOpen` (pure, ent#621 Decision 35);
+// this reads REFS rather than route computeds, because every writer here fires
+// before its own push has resolved.
+//
+// Review H1: "the agent changed" is not the only real null. ⌘J and the strip's
+// New chat tab (both `newChatWithAgent`) null `pendingSession` on the agent
+// ALREADY on stage, which is the commonest way to be sitting on an unsent chat
+// — and under the agent-only test that read as an instruction, so ⌥↑ came back
+// to the chat ⌘J had just left. `startingNewChat` is what separates the two: a
+// deliberate fresh chat sets it, while every load-instruction clear
+// (`openAgentPage`, `openRoom`, the unreachable arm, `openThread`) clears it,
+// so the ignore rule still holds for them.
+let lastOpenAgent = null
+watch([activeAgentName, pendingSession, startingNewChat], ([agent, sid, fresh]) => {
+  const onStage = !!agent && !activeRoomId.value && !unreachableAgent.value
+  const keyChanged = agent !== lastOpenAgent
+  lastOpenAgent = agent
+  if (!onStage) return
+  recordLastOpen(lastOpen, {
+    agentName: agent,
+    sessionId: sid,
+    keyChanged: keyChanged || (fresh && !sid),
+  })
+})
+
+// What assistive tech hears after a key move. The shell says it once; the band,
+// the tab strip and the browser-tab title say it visually.
+const keyAnnouncement = ref('')
+function announceKey(text) { keyAnnouncement.value = text || '' }
+
+// ⌥↑ / ⌥↓ — the next agent in the order the SIDEBAR shows, wrapping at both
+// ends. One agent (or none) is a silent no-op, per the AC.
+function stepAgent(delta) {
+  const name = nextAgent(orderedRoster.value, activeAgentName.value, delta)
+  if (!name) return
+  landOnAgent(name, { lastOpenSessionId: lastOpen.get(name) ?? null, focus: 'always' })
+  // The fresh arm does not navigate (ent#784 keeps `/workspace/a/:name` as the
+  // landed URL), so without this push the URL still names the chat we LEFT —
+  // and the next `threads.length` change makes the `/workspace/c/:id` watcher
+  // snap the stage back to it. Pushed AFTER the state write so the watcher's
+  // re-fire is absorbed by `landOnAgent`'s hoisted guard; pushing first would
+  // land through the watcher instead, with `'fine-pointer'` focus and no
+  // `lastOpenSessionId`. Arms 2-4 need no push — `openThread` pushes `/c/:id`.
+  if (activeAgentName.value === name && startingNewChat.value && !pendingSession.value) {
+    router.push(`/workspace/a/${encodeURIComponent(name)}`)
+  }
+  const landed = pendingSession.value
+    && threads.value.find((t) => (t.id || t.session_id) === pendingSession.value)
+  announceKey(`${inboxAgentLabels.value[name] || name} — ${landed ? threadTitle(landed) : 'New chat'}`)
+}
+
+// ⌥⇧↑ / ⌥⇧↓ — through the chat tabs of the agent in front of you. The
+// conversation owns the strip's inputs, so it owns the walk: `cycleChat` emits
+// `open-thread` / `new-chat` exactly as a tab click does.
+function stepChat(delta) {
+  conversationRef.value?.cycleChat?.(delta)
+}
+
+// Which FORM the rail keys act on right now — the column at and above `sm`,
+// the bottom sheet below it — or null when they have nothing to act on at all:
+// the agent page and Projects have no rail, and during a call its column is the
+// voice canvas. `null` is what makes the key leave the chord to the BROWSER
+// (`keymapSuppressed`'s `railAvailable`) rather than claim it for a no-op.
+function railKeyForm() {
+  const narrow = !isWideViewport(typeof window !== 'undefined' ? window : null)
+  if (narrow) return railVisible.value && railTabs.value.length ? 'sheet' : null
+  return railHasColumn.value ? 'column' : null
+}
+const railKeysAvailable = () => railKeyForm() !== null
+
+// ⌘. — exactly what the expand/collapse button does, in whichever form the
+// viewport is showing. Nothing new is stored: the remembered tab and the
+// remembered width come back with it, because they are the button's memory too
+// (T5). A phone's sheet never persists `open`.
+function toggleRail() {
+  const form = railKeyForm()
+  if (!form) return
+  const open = form === 'sheet' ? !railSheetOpen.value : !railState.value.open
+  if (form === 'sheet') railSheetOpen.value = open
+  else setRailOpen(open)
+  // Reopening says which tab came back — the part a person cannot predict from
+  // the key itself.
+  announceKey(open ? `${railTabLabel(railState.value.tab)} — rail open` : 'Rail closed')
+}
+
+// ⌥. — the next tab the rail is SHOWING. A closed rail opens on its remembered
+// tab first (one press to see it, a second to move on), and the walk is over
+// `railTabs` — the tabs this session may see — never the registry, so a
+// door-failed tab stays as unreachable by key as it is by click (Decision 25).
+function stepRailTab() {
+  const form = railKeyForm()
+  if (!form) return
+  const showing = form === 'sheet' ? railSheetOpen.value : railState.value.open
+  if (!showing) {
+    const tab = activeTabFor(railState.value, railTabs.value)
+    if (!tab) return
+    setRailTab(tab)
+    if (form === 'sheet') railSheetOpen.value = true
+    else setRailOpen(true)
+    announceKey(`${railTabLabel(tab)} — rail open`)
+    return
+  }
+  const next = nextRailTab(railTabs.value, railState.value.tab)
+  if (!next) return
+  setRailTab(next)
+  announceKey(railTabLabel(next))
+}
+
+const railTabLabel = (id) => (railTabs.value.find((t) => t.id === id) || {}).label || 'Rail'
+
+// ⌘/ — the key list. It toggles rather than only opening, because the chord
+// that showed you the list is the chord your hand is already on; `key-list` is
+// the one action allowed to see through its own dialog (`MODAL_IGNORE`).
+const keyListOpen = ref(false)
+const keyPlatform = hostPlatform()
+// Rendered FROM the map, with the live answer to "is there a rail on this
+// page" — a rail row that silently disappears where there is no rail is the
+// row a person retries forever.
+const keyListRowsNow = computed(() => keyListRows(WORKSPACE_KEYMAP, keyPlatform, {
+  railAvailable: Boolean(railVisible.value && railTabs.value.length),
+}))
+
+// Which overlay a given key is allowed to see THROUGH. Per action, never
+// blanket: a sheet the rail keys may act inside must still stop the agent keys
+// from moving the stage behind it (Decision 28).
+const MODAL_IGNORE = Object.freeze({
+  'rail-toggle': '[data-ws-rail-sheet]',
+  'rail-tab-next': '[data-ws-rail-sheet]',
+  'key-list': '[data-ws-key-list]',
+})
+
+// The keys that CHANGE which conversation is on stage. A thread mount focuses
+// nothing on its own (only a new chat or a restored draft does), so the
+// dispatcher puts the caret back in the message field itself — the AC's "the
+// cursor stays in the message field" for every move, with no new focus mode and
+// no latch (Decision 38).
+const STAGE_KEYS = Object.freeze(['agent-next', 'agent-prev', 'chat-next', 'chat-prev'])
+
+const KEY_DISPATCH = Object.freeze({
+  'new-chat': newChatFromKey,
+  'agent-next': () => stepAgent(1),
+  'agent-prev': () => stepAgent(-1),
+  'chat-next': () => stepChat(1),
+  'chat-prev': () => stepChat(-1),
+  'rail-toggle': toggleRail,
+  'rail-tab-next': stepRailTab,
+  'key-list': () => { keyListOpen.value = !keyListOpen.value },
+})
+
+// ent#621 — the ONE listener, and the whole ladder. Armed at mount, above
+// bootstrap's await (contract #23, guarded by `mountListenerOrdering.spec.js`),
+// and inert until signed in. In order, because the order IS the design:
+//
+//   0. A key REPEAT never dispatches — one press is one action — but the repeat
+//      of the press the shell just claimed is swallowed (`heldKey`, below).
+//   1. `resolveWorkspaceKey` — a chord we do not own or an IME composition
+//      returns null, and we return WITHOUT `preventDefault`: ⌘K must keep
+//      reaching the browser until ent#577 binds it.
+//   2. Signed in. The OTP form answers no keys.
+//   3. ⌘J keeps its place at the top AND its own "leave the call?" ask
+//      (ent#534/551) — the one key a call answers rather than swallows.
+//   4. An action with no entry in `KEY_DISPATCH` (a declared protocol key a
+//      component owns, a reserved chord) is left to the browser rather than
+//      silently eaten.
+//   5. A focused `<select>` owns Alt+↓ natively on Firefox/Windows — the one
+//      editable target the agent keys step aside for (the composer is a
+//      textarea and must keep working).
+//   6. `keymapSuppressed`: a nearer owner already claimed the event
+//      (`defaultPrevented` — the Esc protocol, the typeahead's bare arrows),
+//      anything modal, the mobile drawer, or a live voice call.
+// Only then `preventDefault`, and only then the action.
+//
+// (review) `heldKey` is the action of the press the shell last CLAIMED. A held
+// key auto-repeats, and those repeats used to fall out at step 1 unprevented —
+// so the browser got them: a held ⌥. typed `≥` into the message field on a
+// Mac, a held Ctrl+J opened Downloads. The repeat is matched to the claimed
+// PRESS rather than re-run down the ladder, for two reasons: the action has
+// usually changed what the ladder would say (⌘J has just opened the picker,
+// which is modal), and the repeat of a press the shell did NOT claim must stay
+// the browser's exactly as the press did (⌘. on a page with no rail). Any new
+// press ends the hold, so a stale claim can never eat a later key.
+//
+// (merge-train 2026-10-06) `resumed` is the second pass of a ⌘J the call parked
+// at step 3. That pass re-enters with the SAME event, which step 3 has already
+// `preventDefault`ed — so read as "a nearer owner claimed it", the resumed ⌘J
+// was dead exactly when the person had just said "end the call and leave".
+// The flag tells the suppression rung whose mark that is. It re-runs after a
+// `nextTick` on purpose: the confirm dialog that asked is `aria-modal`, and
+// `onLeaveCallConfirm` closes it on the same flush the continuation runs in,
+// so a same-tick re-probe of `hasModalOpen` would still find it and bail.
+let heldKey = null
+function onGlobalKeydown(e, { resumed = false } = {}) {
+  if (e.repeat) {
+    if (heldKey && workspaceChord(e) === heldKey) e.preventDefault()
+    return
+  }
+  heldKey = null
+  const action = resolveWorkspaceKey(e)
+  if (!action) return
+  if (!store.isClientSignedIn) return
+  if (action === 'new-chat') {
+    if (voiceCall.value.active) {        // ent#534/ent#551: the call owns the stage — ask first
+      e.preventDefault()
+      heldKey = action
+      guardLeaveCall(() => nextTick(() => onGlobalKeydown(e, { resumed: true })))
+      return
+    }
+  }
+  const run = KEY_DISPATCH[action]
+  if (!run) return
+  if (action.startsWith('agent-') && e.target && e.target.tagName === 'SELECT') return
+  if (keymapSuppressed({
+    action,
+    modalOpen: hasModalOpen(document, { ignore: MODAL_IGNORE[action] || [] }),
+    drawerOpen: mobileNav.value,
+    callActive: voiceCall.value.active,
+    defaultPrevented: e.defaultPrevented,
+    resumed,
+    railAvailable: railKeysAvailable(),
+  })) return
+  e.preventDefault()
+  heldKey = action
+  run()
+  if (STAGE_KEYS.includes(action)) nextTick(focusConversationComposer)
 }
 
 // Opening a chat is what "reading" it means here. Clear the badge locally first
@@ -2319,10 +2702,8 @@ watch([() => route.params.sessionId, () => threads.value.length], () => {
 // Watched on BOTH the route param and the thread list, for the same reason the
 // `sessionId` watcher above watches both: on a cold deep link the agent name
 // arrives long before the threads do, so a param-only watcher would resolve
-// against an empty list and always mint a new chat. Re-entrancy is guarded by
-// the fact that `landOnAgent` navigates away from this route as soon as it
-// succeeds; while it has not, re-running is harmless and idempotent.
-watch([activeAgentPageName, () => threads.value.length], ([name]) => {
+// against an empty list and always mint a new chat.
+watch([activeAgentPageName, () => threads.value.length], ([name], [prevName]) => {
   if (!name || !store.isClientSignedIn) return
   // Wait for the roster verdict. Landing before it means `activeAgent` cannot
   // resolve the name yet, and the "you don't have access" branch would fire for
@@ -2335,6 +2716,24 @@ watch([activeAgentPageName, () => threads.value.length], ([name]) => {
     unreachableAgent.value = name
     return
   }
+  // ent#784: the landing no longer navigates away, so — unlike every earlier
+  // version of this watcher — it can re-fire with the route unchanged, once per
+  // thread-list refresh, for as long as the person stays on this URL. The
+  // landing rule reads nothing from the list, so a list-only re-fire cannot
+  // change the answer; re-running it would null a session the first send has
+  // since adopted (`onSessionAdopted` writes the state, then replaces the route
+  // asynchronously, and itself ends in a `refreshThreads`) and remount an empty
+  // composer over the thread whose reply is streaming.
+  //
+  // Keyed on "the route did not change on this fire", AND on having already
+  // landed this name — the two have to hold together:
+  //   * the name alone would swallow the cold deep link, whose only fire IS the
+  //     list arriving with the param already in place (the reason above);
+  //   * `pendingSession` must NOT be the key: back/forward from
+  //     `/workspace/c/:id` to `/workspace/a/:name` arrives with a session set
+  //     and has to land fresh. A thread URL carries no `agentName` param, so
+  //     that hop always changes `name` and is never mistaken for a re-fire.
+  if (name === prevName && activeAgentName.value === name) return
   landOnAgent(name)
 })
 
@@ -2368,6 +2767,9 @@ function resolveAgentQuery() {
     forceNew,
     agents: store.agents,
     threads: threads.value,
+    // ent#784: the same drafts map `landOnAgent` passes — ONE rule for every
+    // door, so a `?agent=` link and a sidebar click land on the same chat.
+    drafts: drafts.drafts,
   })
   if (!landing) {
     // The link named an agent this caller cannot reach (un-shared since the URL
@@ -2406,7 +2808,12 @@ function resolveAgentQuery() {
   // ambiguity ent#451 exists to remove — it also means "unresolved". AND-ed
   // with the landing so a `?new=1` that still resolved a thread (it cannot
   // today, but the two are independent functions) never claims a fresh start.
-  startingNewChat.value = forceNew && !landing.sessionId
+  // ent#784: `forceNew` no longer changes the answer — a landing IS a new chat
+  // unless the resolver handed back a session — so the intent follows the
+  // resolved landing rather than the query flag.
+  startingNewChat.value = !landing.sessionId
+  // A deep link is a landing, not a gesture (see `composerFocusMode`).
+  composerFocusMode.value = 'fine-pointer'
   // The bare path drops the query, so this replace is ALSO the strip on this
   // branch — recorded so the `finally` does not start a competing navigation.
   if (landing.sessionId) { landingReplaced = true; router.replace(`/workspace/c/${landing.sessionId}`) }

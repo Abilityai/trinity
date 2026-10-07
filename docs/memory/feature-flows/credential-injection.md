@@ -483,7 +483,8 @@ async def decrypt_and_inject(request: InternalDecryptInjectRequest):
      would be a privilege **grant**. The harvest goes to
      `.trinity/git-credential`, which nothing exports.
 9. **`.env` may not set loader/exec-redirecting names** (`execution_env.PROTECTED_KEYS`
-   + the ent#615 prefix rule): `PATH`, `LD_PRELOAD`, `NODE_OPTIONS`,
+   + the ent#615 prefix rule): `PATH`, `LD_PRELOAD`, `CLAUDE_CODE_SHELL_PREFIX`
+   (trinity-enterprise#787), `NODE_OPTIONS`,
    `GIT_SSH_COMMAND`, `GIT_CONFIG_KEY_*`/`GIT_CONFIG_VALUE_*`,
    `GIT_CONFIG_NOSYSTEM`, `GIT_ASKPASS`, `GIT_PROXY_COMMAND`, … — the file is
    agent-writable and is re-read at every spawn, and `GIT_CONFIG_NOSYSTEM`

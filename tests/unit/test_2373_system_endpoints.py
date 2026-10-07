@@ -267,6 +267,48 @@ def test_export_scopes_permission_edges_to_members_in_both_branches():
     assert 'startswith(f"{system_name}-")' not in src
 
 
+def test_export_round_trips_kind_so_a_deployment_stays_pull_only(monkeypatch):
+    """PR #3022 review (D3 contract): export never wrote `kind`. Redeploying a
+    system whose members were deployed as `kind: deployment` then took the
+    agent default, and a creator whose own token can push would get working
+    branches and auto-push into product repos meant to be pulled from only.
+
+    A pull-only git member (source mode, not auto-pushing) exports as a
+    deployment; a member that pushes (a working branch, or fork-to-own: source
+    mode on its own fork with auto-sync on) and a member with no git binding
+    export no `kind`."""
+    import types
+    import yaml
+    from services import system_service as svc
+
+    rows = {
+        "acme-web": types.SimpleNamespace(source_mode=True, auto_sync_enabled=False),
+        "acme-brain": types.SimpleNamespace(source_mode=False, auto_sync_enabled=True),
+        "acme-fork": types.SimpleNamespace(source_mode=True, auto_sync_enabled=True),
+    }
+    monkeypatch.setattr(svc.db, "get_git_config", lambda n: rows.get(n), raising=False)
+    monkeypatch.setattr(svc.db, "get_agent_permissions", lambda n: [], raising=False)
+    monkeypatch.setattr(svc.db, "list_agent_schedules", lambda n: [], raising=False)
+    monkeypatch.setattr(svc.db, "get_agent_tags", lambda n: [], raising=False)
+    monkeypatch.setattr(svc.db, "get_agent_folder_config", lambda n: None, raising=False)
+
+    agents = [
+        {"name": "acme-web", "template": "github:acme/web"},
+        {"name": "acme-brain", "template": "github:alice/brain"},
+        {"name": "acme-fork", "template": "github:acme/fork"},
+        {"name": "acme-local", "template": "local:scout"},
+    ]
+    exported = svc.export_manifest("acme", agents)
+    out = yaml.safe_load(exported)["agents"]
+
+    assert out["web"]["kind"] == "deployment"
+    assert "kind" not in out["brain"]
+    assert "kind" not in out["fork"]
+    assert "kind" not in out["local"]
+    # and it parses back to the same thing
+    assert svc.parse_manifest(exported).agents["web"].kind == "deployment"
+
+
 # ---------------------------------------------------------------------------
 # H5 / H6 — the preview hardenings
 # ---------------------------------------------------------------------------
@@ -297,6 +339,28 @@ def test_a_fully_recognised_manifest_warns_about_nothing_per_agent():
         "name: acme\nagents:\n  web:\n    template: local:starter\n    tags: [x]\n"
     )
     assert manifest.unknown_agent_keys == {}
+
+
+def test_manifest_kind_is_a_recognised_per_agent_key():
+    """trinity-enterprise#704: a composed fleet declares per member whether it
+    is an agent or a deployment of a codebase — parsed, not warned about."""
+    from services.system_service import parse_manifest
+    manifest = parse_manifest(
+        "name: acme\nagents:\n  web:\n    template: github:acme/web\n"
+        "    kind: deployment\n  brain:\n    template: github:acme/brain\n"
+    )
+    assert manifest.unknown_agent_keys == {}
+    assert manifest.agents["web"].kind == "deployment"
+    assert manifest.agents["brain"].kind is None
+
+
+def test_manifest_kind_outside_the_two_values_is_rejected():
+    from services.system_service import parse_manifest
+    with pytest.raises(ValueError):
+        parse_manifest(
+            "name: acme\nagents:\n  web:\n    template: github:acme/web\n"
+            "    kind: fork\n"
+        )
 
 
 def test_preview_and_deploy_resolve_the_same_resource_default():

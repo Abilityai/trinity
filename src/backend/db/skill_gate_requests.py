@@ -18,6 +18,11 @@ is refused by construction:
 
     pending ──claim──▶ dispatching ──▶ dispatched | stale | not_run | unknown
        └──▶ denied | expired | cancelled | refused
+
+A ``self_approved`` row (trinity-enterprise#752) is outside the lattice: an
+approver's own request ran at once, and the row records which run it cleared
+(``dispatched_execution_id``) for which skills — the clearance the in-container
+hook honours. It is inserted in that state and never moves.
 """
 
 import json
@@ -43,6 +48,7 @@ DENIED = "denied"
 EXPIRED = "expired"
 CANCELLED = "cancelled"
 REFUSED = "refused"
+SELF_APPROVED = "self_approved"
 
 # to_state → the states it may be entered from. `dispatching` is entered only
 # through `claim_gate_request_for_dispatch`, which also writes the run's id.
@@ -57,7 +63,8 @@ _ENTERED_FROM = {
     UNKNOWN: (DISPATCHING,),
 }
 TERMINAL_STATES = tuple(_ENTERED_FROM)
-STATES = (PENDING, DISPATCHING) + TERMINAL_STATES
+# `self_approved` is never a transition target and never a source.
+STATES = (PENDING, DISPATCHING) + TERMINAL_STATES + (SELF_APPROVED,)
 
 _JSON_COLUMNS = ("skills", "fingerprints", "dispatch")
 
@@ -102,6 +109,45 @@ class SkillGateRequestOperations:
         with get_engine().begin() as conn:
             created = conn.execute(stmt).rowcount == 1
         return self.get_gate_request(values["request_id"]), created
+
+    def record_self_approved_run(self, *, request_id: str, agent_name: str, skills: List[str],
+                                 request_text: str, requester_email: str,
+                                 triggered_by: Optional[str],
+                                 dispatched_execution_id: str) -> bool:
+        """Record that an approver's own request ran as `dispatched_execution_id`
+        (trinity-enterprise#752). True only for the insert that landed.
+
+        Idempotent: a second insert for the same `request_id` changes nothing,
+        and one for the same run under another id is refused by the unique run
+        column rather than raised — a run is cleared once.
+        """
+        now = utc_now_iso()
+        values = {c.name: None for c in skill_gate_requests.columns}
+        values.update(
+            request_id=request_id,
+            agent_name=agent_name,
+            skills=json.dumps(list(skills), sort_keys=True),
+            request_text=request_text or "",
+            requester_kind="person",
+            requester_key=f"person:{requester_email.strip().casefold()}",
+            requester_email=requester_email,
+            triggered_by=triggered_by,
+            dispatch=json.dumps({}),
+            state=SELF_APPROVED,
+            dispatched_execution_id=dispatched_execution_id,
+            created_at=now,
+            decided_at=now,
+            dispatched_at=now,
+        )
+        stmt = make_insert(skill_gate_requests).values(**values).on_conflict_do_nothing(
+            index_elements=["request_id"])
+        try:
+            with get_engine().begin() as conn:
+                return conn.execute(stmt).rowcount == 1
+        except IntegrityError:
+            logger.info("[SkillGate] run %s is already cleared under another record",
+                        dispatched_execution_id)
+            return False
 
     def get_gate_request(self, request_id: str) -> Optional[Dict]:
         stmt = select(skill_gate_requests).where(skill_gate_requests.c.request_id == request_id)

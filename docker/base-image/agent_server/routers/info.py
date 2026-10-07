@@ -128,6 +128,36 @@ def _guardrails_registration() -> str:
     return "ok"
 
 
+SKILL_GATE_REGISTRATION = "/etc/claude-code/managed-settings.d/50-skill-gate.json"
+SKILL_GATE_HOOK_FILES = ("/opt/trinity/hooks/skill-gate.py", "/opt/trinity/hooks/_skill_gate.py")
+
+
+def _skill_gate_hook() -> str:
+    """trinity-enterprise#752: is the gated-skill hook in force in this container?
+
+    Only Claude Code has it (D4), and an image built before it has none — a
+    gated agent in either state is not enforced in-container, which the
+    platform can now say. The same checks as `guardrails_registration` over
+    the drop-in, its directory and both scripts. Enum only.
+    """
+    from ..services.runtime_adapter import _CLAUDE_RUNTIMES
+
+    if str(agent_state.agent_runtime or "").lower() not in _CLAUDE_RUNTIMES:   # as get_runtime()
+        return "unsupported_runtime"
+    paths = (SKILL_GATE_REGISTRATION, os.path.dirname(SKILL_GATE_REGISTRATION)) + tuple(SKILL_GATE_HOOK_FILES)
+    stats = []
+    for path in paths:
+        try:
+            stats.append((path, os.stat(path)))
+        except OSError:
+            return "missing"
+    if any(st.st_uid != 0 for _path, st in stats):
+        return "not_root_owned"
+    if any(os.access(path, os.W_OK) for path, _st in stats):
+        return "writable"
+    return "ok"
+
+
 @router.get("/")
 async def root():
     """Root endpoint - no UI, just API info"""
@@ -217,6 +247,9 @@ async def health_check():
         # #3105: "ok"|"missing"|"not_root_owned"|"writable" — stat of the
         # guardrail registration on every request, not only at boot.
         "guardrails_registration": _guardrails_registration(),
+        # trinity-enterprise#752: the same, for the gated-skill hook, plus
+        # "unsupported_runtime" (no hooks on Codex / Gemini).
+        "skill_gate_hook": _skill_gate_hook(),
         "diagnostics": _diagnostics(),
     }
 

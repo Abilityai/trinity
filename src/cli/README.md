@@ -1,6 +1,6 @@
 # Trinity CLI
 
-Command-line interface for the [Trinity](https://github.com/abilityai/trinity) Autonomous Agent Orchestration Platform.
+Command-line interface for [Trinity](https://github.com/abilityai/trinity), the operating system for the AI-native company.
 
 ## Install
 

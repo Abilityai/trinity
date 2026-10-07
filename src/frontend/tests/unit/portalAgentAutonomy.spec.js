@@ -222,6 +222,26 @@ describe('PortalAgentAutonomy (mounted)', () => {
     expect(w.get('[data-testid="portal-autonomy-other-seats"]').text()).toContain('Other seats · 1')
   })
 
+  it("the owner releases another seat's hold, for that seat", async () => {
+    // #2984 review I2: the backend allowed it and nothing in the UI did.
+    const held = klass({ seat: 'ops@example.com', ask_class: 'ops-approval', writable: true,
+                         held: true, unprompted: false })
+    const w = await mountWith(page({ can_release: true, other_seats: [held] }))
+    axios.post.mockResolvedValueOnce({ data: { class: { ...held, held: false } } })
+    axios.get.mockResolvedValueOnce({ data: page({ can_release: true, other_seats: [{ ...held, held: false }] }) })
+    await w.get('[data-testid="portal-autonomy-release-ops@example.com-ops-approval"]').trigger('click')
+    await flushPromises()
+    expect(axios.post).toHaveBeenCalledWith(
+      `${URL}/classes/ops-approval`, { action: 'release', seat: 'ops@example.com' }, expect.anything())
+  })
+
+  it("a non-owner sees another seat's hold but no Release", async () => {
+    const held = klass({ seat: 'ops@example.com', ask_class: 'ops-approval', writable: false, held: true })
+    const w = await mountWith(page({ can_release: false, other_seats: [held] }))
+    expect(w.text()).toContain('held')
+    expect(w.find('[data-testid="portal-autonomy-release-ops@example.com-ops-approval"]').exists()).toBe(false)
+  })
+
   // Loading, empty and failed share one footprint (design contract p4/p15):
   // the section is always mounted, so nothing appears or vanishes on arrival.
   it('shows a skeleton, not the empty copy, before the first load lands', async () => {

@@ -395,6 +395,28 @@ class TestNotAOneWayRatchet:
         assert dial.class_evidence(rows, "vendor-renewal", today=after)["reversals"] == 0
 
 
+class TestOnlyActiveRecordsAreEvidence:
+    """#2984 review I1: `effective_status` returns the stored status for
+    `closed` and `superseded`, which therefore never expire. Admitted to the
+    window they made the dial a one-way ratchet in the other direction."""
+
+    @staticmethod
+    def _row(i, status="active", review_by=FUTURE):
+        return {"id": f"d{i}", "ask_class": "vendor-renewal", "status": status,
+                "review_by": review_by, "source_execution_id": None, "criterion": CRITERION}
+
+    def test_superseded_copies_are_not_extra_sources(self, dial):
+        rows = [self._row(0, "superseded"), self._row(1, "superseded"), self._row(2)]
+        ev = dial.class_evidence(rows, "vendor-renewal", today=TODAY)
+        assert (ev["count"], ev["sources"]) == (1, 1)
+
+    def test_a_closed_record_past_review_does_not_pin_expiry(self, dial):
+        past = (TODAY - timedelta(days=3)).isoformat()
+        rows = [self._row(9, "closed", review_by=past)] + [self._row(i) for i in range(3)]
+        ev = dial.class_evidence(rows, "vendor-renewal", today=TODAY)
+        assert ev["count"] == 3 and ev["expires_at"] == FUTURE
+
+
 # --------------------------------------------------------------------------- #
 # 5. Writes, events and gates
 # --------------------------------------------------------------------------- #
@@ -630,13 +652,13 @@ def test_the_table_is_on_both_tracks_and_in_the_cleanup_registry():
     tables = (REPO / "src/backend/db/tables.py").read_text()
     mig = (REPO / "src/backend/db/migrations.py").read_text()
     cleanup = (REPO / "src/backend/db/agent_cleanup.py").read_text()
-    rev = (REPO / "src/backend/migrations/versions/0089_seat_ask_class_state.py").read_text()
+    rev = (REPO / "src/backend/migrations/versions/0093_seat_ask_class_state.py").read_text()
     assert "CREATE TABLE IF NOT EXISTS seat_ask_class_state" in schema
     assert "idx_seat_ask_class_state_seat" in schema
     assert "seat_ask_class_state = Table(" in tables
     assert '("seat_ask_class_state_table", _migrate_seat_ask_class_state_table)' in mig
     assert 'AgentRef("seat_ask_class_state"' in cleanup
-    assert 'down_revision = "0088_skill_gate_requests"' in rev
+    assert 'down_revision = "0091_chat_session_claude_id"' in rev
     assert 'has_table("seat_ask_class_state")' in rev
 
 

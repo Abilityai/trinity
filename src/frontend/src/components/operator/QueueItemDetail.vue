@@ -21,7 +21,7 @@
                 class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium"
                 :class="typeBadge(item.type)"
               >
-                {{ item.type }}
+                {{ queueTypeLabel(item.type) }}
               </span>
               <span
                 class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium"
@@ -40,6 +40,8 @@
             <h2 class="text-lg font-semibold text-gray-900 dark:text-white">
               {{ item.title }}
             </h2>
+            <!-- #3246: one row per condition, updated in place — say how often. -->
+            <p v-if="seenLine" class="mt-0.5 text-xs opacity-75" data-testid="queue-seen-line">{{ seenLine }}</p>
           </div>
         </div>
 
@@ -98,11 +100,18 @@
       <div v-if="item.status !== 'pending'" class="p-4 border-b border-gray-200 dark:border-gray-700">
         <h3 class="text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wider mb-2">Response</h3>
         <div class="bg-status-success-50 dark:bg-status-success-900/20 rounded-lg p-3 space-y-1">
-          <p class="text-sm font-medium text-status-success-800 dark:text-status-success-300">{{ item.response }}</p>
-          <p v-if="item.response_text" class="text-sm text-status-success-700 dark:text-status-success-400">{{ item.response_text }}</p>
-          <p class="text-xs text-status-success-600 dark:text-status-success-500">
-            by {{ item.responded_by_email }} &middot; {{ formatDate(item.responded_at) }}
+          <!-- #3246: a row the platform ended is not a person's answer — say who
+               ended it and why (utils/operatorQueue.js::queueEndingText). -->
+          <p v-if="endedByPlatform" class="text-sm font-medium text-status-success-800 dark:text-status-success-300" data-testid="queue-detail-ending">
+            {{ endingText }}<template v-if="item.disposed_at"> &middot; {{ formatDate(item.disposed_at) }}</template>
           </p>
+          <template v-else>
+            <p class="text-sm font-medium text-status-success-800 dark:text-status-success-300" data-testid="detail-response">{{ decisionLabel(item.response) }}</p>
+            <p v-if="item.response_text" class="text-sm text-status-success-700 dark:text-status-success-400">{{ item.response_text }}</p>
+            <p class="text-xs text-status-success-600 dark:text-status-success-500">
+              by {{ item.responded_by_email }} &middot; {{ formatDate(item.responded_at) }}
+            </p>
+          </template>
         </div>
       </div>
 
@@ -114,38 +123,50 @@
         <div v-if="responseKind === 'approval'" class="space-y-3">
           <div class="flex flex-wrap gap-2">
             <button
-              v-for="(option, idx) in item.options"
+              v-for="(option, idx) in chips"
               :key="option"
               @click="selectedOption = option"
               class="px-4 py-2 rounded-lg text-sm font-medium border-2 transition-colors"
-              :class="selectedOption === option
-                ? optionSelectedClass(idx)
-                : 'border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-300 hover:border-gray-400 dark:hover:border-gray-500'"
+              :class="selectedOption === option ? optionSelectedClass(idx) : CHIP_IDLE_CLASS"
             >
               {{ option }}
             </button>
+            <!-- #3242: the platform's off-menu answer; hidden where the sink refuses it. -->
+            <button
+              v-if="offersSomethingElse"
+              data-testid="something-else-chip"
+              @click="selectedOption = SOMETHING_ELSE"
+              class="px-4 py-2 rounded-lg text-sm font-medium border-2 border-dashed transition-colors"
+              :class="somethingElseArmed ? optionSelectedClass(-1) : CHIP_IDLE_CLASS"
+              :aria-pressed="somethingElseArmed"
+            >
+              {{ SOMETHING_ELSE_LABEL }}
+            </button>
           </div>
 
-          <!-- Optional notes -->
+          <!-- Optional notes; the instruction when "Something else" is armed -->
           <div>
-            <label class="block text-xs text-gray-500 dark:text-gray-400 mb-1">Notes (optional)</label>
+            <label class="block text-xs text-gray-500 dark:text-gray-400 mb-1" data-testid="detail-note-label">{{ somethingElseArmed ? 'Instruction (required)' : 'Notes (optional)' }}</label>
             <textarea
               v-model="responseText"
               rows="2"
+              maxlength="4000"
+              data-testid="approval-note"
               class="w-full text-sm rounded-lg border-gray-300 dark:border-gray-600 dark:bg-gray-700 dark:text-white focus:ring-blue-500 focus:border-blue-500"
-              placeholder="Add context for the agent..."
+              :placeholder="somethingElseArmed ? 'None of the options will be carried out — what should it do instead?' : 'Add context for the agent...'"
             ></textarea>
           </div>
 
           <button
+            data-testid="approval-send"
             @click="submitResponse"
-            :disabled="!selectedOption"
+            :disabled="!sendBody"
             class="w-full py-2 px-4 rounded-lg text-sm font-medium text-white transition-colors"
-            :class="selectedOption
+            :class="sendBody
               ? 'bg-blue-600 hover:bg-blue-700 dark:bg-blue-500 dark:hover:bg-blue-600'
               : 'bg-gray-300 dark:bg-gray-600 cursor-not-allowed'"
           >
-            Submit Response
+            {{ somethingElseArmed ? 'Submit instruction' : 'Submit Response' }}
           </button>
         </div>
 
@@ -195,7 +216,10 @@ import { renderMarkdown } from '../../utils/markdown'
 import { useOperatorQueueStore } from '../../stores/operatorQueue'
 import { useAgentsStore } from '../../stores/agents'
 import { agentNameTooltip } from '../../utils/agentName'
-import { queueResponseKind } from '../../utils/operatorQueue'
+import {
+  queueResponseKind, queueTypeLabel, queueEnding, queueEndingText, queueSeenLine,
+  SOMETHING_ELSE, SOMETHING_ELSE_LABEL, offeredChips, decidedByOptions, decisionLabel, buildQueueResponse,
+} from '../../utils/operatorQueue'
 
 const store = useOperatorQueueStore()
 const agentsStore = useAgentsStore()
@@ -209,6 +233,10 @@ const item = computed(() => store.selectedItem)
 // closed from the queue at all — and a budgeted alert type whose items
 // cannot be closed jams its own pending cap permanently.
 const responseKind = computed(() => queueResponseKind(item.value))
+const ending = computed(() => queueEnding(item.value))
+const endedByPlatform = computed(() => ending.value?.who === 'the platform')
+const endingText = computed(() => queueEndingText(ending.value))
+const seenLine = computed(() => queueSeenLine(item.value))
 
 const selectedOption = ref(null)
 const responseText = ref('')
@@ -219,11 +247,27 @@ watch(() => store.selectedItemId, () => {
   responseText.value = ''
 })
 
-function submitResponse() {
-  if (!selectedOption.value || !item.value) return
-  store.respondToItem(item.value.id, selectedOption.value, responseText.value)
-  selectedOption.value = null
-  responseText.value = ''
+// #3242: the agent's chips, then the platform's "Something else"; typing with
+// no pick arms it (T3). Computed from the input, never a watcher, so it cannot
+// fight the reset-on-select watcher above.
+const CHIP_IDLE_CLASS = 'border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-300 hover:border-gray-400 dark:hover:border-gray-500'
+const chips = computed(() => offeredChips(item.value))
+const offersSomethingElse = computed(() => !decidedByOptions(item.value))
+const decision = computed(() => selectedOption.value
+  ?? (offersSomethingElse.value && responseText.value.trim() ? SOMETHING_ELSE : null))
+const somethingElseArmed = computed(() => decision.value === SOMETHING_ELSE)
+const sendBody = computed(() => buildQueueResponse({ kind: 'approval', option: decision.value, note: responseText.value }))
+
+async function submitResponse() {
+  const body = sendBody.value
+  if (!body || !item.value) return
+  // Cleared only once recorded: a 409 divergence keeps the typed instruction
+  // for the second send.
+  const ok = await store.respondToItem(item.value.id, body.response, body.response_text ?? '')
+  if (ok) {
+    selectedOption.value = null
+    responseText.value = ''
+  }
 }
 
 function submitQuestionResponse() {
@@ -248,7 +292,9 @@ function typeBadge(type) {
   const badges = {
     approval: 'bg-accent-purple-100 text-accent-purple-700 dark:bg-accent-purple-900/30 dark:text-accent-purple-400',
     question: 'bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400',
-    alert: 'bg-state-autonomous-100 text-state-autonomous-700 dark:bg-state-autonomous-900/30 dark:text-state-autonomous-400'
+    alert: 'bg-state-autonomous-100 text-state-autonomous-700 dark:bg-state-autonomous-900/30 dark:text-state-autonomous-400',
+    // #3130: the budgeted flood alarm is still an alert — same badge as the card.
+    queue_flood: 'bg-state-autonomous-100 text-state-autonomous-700 dark:bg-state-autonomous-900/30 dark:text-state-autonomous-400'
   }
   return badges[type] || ''
 }

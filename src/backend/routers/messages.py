@@ -38,7 +38,8 @@ router = APIRouter(prefix="/api/agents", tags=["messages"])
 # =============================================================================
 
 
-@router.post("/{agent_name}/messages", response_model=SendMessageResponse)
+@router.post("/{agent_name}/messages", response_model=SendMessageResponse,
+             response_model_exclude_unset=True)
 async def send_proactive_message(
     request: SendMessageRequest,
     agent_name: AuthorizedAgentByName,
@@ -64,13 +65,23 @@ async def send_proactive_message(
             reply_to_thread=request.reply_to_thread,
             execution_id=request.execution_id,
             dedup_label=request.dedup_label,
+            idempotency_key=request.idempotency_key,
+            idempotency_ttl=request.idempotency_ttl,
         )
 
+        # ent#665 fields are set only when a key was supplied, so with
+        # exclude_unset a keyless response is unchanged.
+        intent_fields = {
+            k: getattr(result, k)
+            for k in ("sent", "suppressed_by", "first_sent_at", "first_execution_id")
+            if getattr(result, k) is not None
+        }
         return SendMessageResponse(
             success=result.success,
             channel=result.channel,
             message_id=result.message_id,
             error=result.error,
+            **intent_fields,
         )
 
     except EffectUnguardedError as e:

@@ -505,6 +505,18 @@ class ScheduleExecutionsMixin:
             # caller passes None and this clause never engages.
             if claim_token is not None:
                 conds.append(schedule_executions.c.claim_token == claim_token)
+                if status == TaskExecutionStatus.SUCCESS:
+                    # #2329: the token is never cleared at terminal, so a
+                    # worker's retried result POST would win this CAS a second
+                    # time and re-run the sink's non-idempotent delivery (chat
+                    # messages saved twice). Only a FAILED row may still be
+                    # corrected by a late SUCCESS (#1083).
+                    conds.append(
+                        schedule_executions.c.status.notin_((
+                            TaskExecutionStatus.SUCCESS,
+                            TaskExecutionStatus.SKIPPED,
+                        ))
+                    )
 
             where_clause = and_(*conds)
 
@@ -776,6 +788,17 @@ class ScheduleExecutionsMixin:
         with get_engine().connect() as conn:
             row = conn.execute(stmt).mappings().first()
         return self._row_to_schedule_execution(row) if row else None
+
+    def get_execution_gate_state(self, execution_id: str) -> Optional[tuple]:
+        """`(agent_name, status)` of one execution, or None — the two columns
+        the skill-gate hook's check needs (trinity-enterprise#752), without
+        the row's response and log."""
+        stmt = select(schedule_executions.c.agent_name, schedule_executions.c.status).where(
+            schedule_executions.c.id == execution_id
+        )
+        with get_engine().connect() as conn:
+            row = conn.execute(stmt).first()
+        return (row.agent_name, row.status) if row else None
 
     # ent#525 — the in-flight rows a Workspace chat is waiting on.
     _CHAT_INFLIGHT_STATUSES = ("running", "queued")
