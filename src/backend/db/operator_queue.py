@@ -1162,8 +1162,18 @@ class OperatorQueueOperations:
         responded_by_id: Optional[str],
         responded_by_email: str,
         divergence_acknowledged: bool = False,
+        terminal: bool = False,
     ) -> Optional[Dict]:
         """Record a response to a queue item.
+
+        `terminal` (#2372): the row has no agent audience (a platform-minted
+        alert — the caller decides, this layer knows no prefixes), so the
+        answer is its last event: the same compare-and-set writes
+        `status='acknowledged'` + `acknowledged_at` instead of `responded`. No
+        agent will ever acknowledge it, and `responded` is kept from Clear All
+        and retained for the 90-day floor. `acknowledged_at` therefore means
+        "the agent acknowledged" on an agent's ask and "an operator
+        acknowledged" on a platform alert.
 
         `divergence_acknowledged` (#2989 review): the operator saw that the agent
         had rewritten or closed the entry and answered anyway; the write-back then
@@ -1204,7 +1214,8 @@ class OperatorQueueOperations:
                     )
                 )
                 .values(
-                    status="responded",
+                    status="acknowledged" if terminal else "responded",
+                    acknowledged_at=now if terminal else None,
                     response=response,
                     response_text=response_text,
                     responded_by_id=responded_by_id,
