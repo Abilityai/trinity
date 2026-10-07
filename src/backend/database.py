@@ -1904,6 +1904,10 @@ class DatabaseManager:
     def get_execution_gate_state(self, execution_id: str):
         return self._schedule_ops.get_execution_gate_state(execution_id)
 
+    def get_execution_failure_stamp(self, execution_id: str):
+        """`(status, error, completed_at)` or None — the #3245 liveness read."""
+        return self._schedule_ops.get_execution_failure_stamp(execution_id)
+
     def get_fan_out_executions(self, agent_name: str, fan_out_id: str, limit: int = 200):
         """Every execution row of one fan-out batch (#2670)."""
         return self._schedule_ops.get_fan_out_executions(agent_name, fan_out_id, limit)
@@ -3836,6 +3840,13 @@ class DatabaseManager:
     def list_operator_queue_agent_names(self, **kwargs):
         return self._operator_queue_ops.list_item_agent_names(**kwargs)
 
+    def list_operator_queue_items_walk(self, **kwargs):
+        # trinity-enterprise#815: one page of a cursor walk, `(item, key)` pairs.
+        return self._operator_queue_ops.list_items_walk(**kwargs)
+
+    def operator_queue_walk_alert_priorities(self, **kwargs):
+        return self._operator_queue_ops.walk_alert_priorities(**kwargs)
+
     def respond_to_operator_queue_item(self, item_id, response, response_text,
                                         responded_by_id, responded_by_email,
                                         divergence_acknowledged=False):
@@ -4243,6 +4254,10 @@ class DatabaseManager:
     def idempotency_discard_completed(self, scope: str, key: str) -> None:
         """Delete a completed replay row whose recorded resource is gone (#2040 F3)."""
         return self._idempotency_ops.discard_completed(scope, key)
+
+    def idempotency_discard_completed_if_execution(self, scope: str, key: str, execution_id: str) -> bool:
+        """Compare-and-delete a completed row still naming execution_id (#3245)."""
+        return self._idempotency_ops.discard_completed_if_execution(scope, key, execution_id)
 
     def idempotency_purge_expired(self, ttl_hours: int = 24) -> int:
         """Purge idempotency rows older than ttl_hours. Returns rows removed."""

@@ -350,6 +350,7 @@ async def admit_chat_request(
     idem = idempotency_service.begin(
         idempotency_service.make_agent_scope(name), idempotency_key
     )
+    idem = _reclaim_ended_receipt(idem, name=name)
     if idem.replay:
         await _audit_idempotent_replay(
             name=name, endpoint=f"/api/agents/{name}/chat", x_via_mcp=x_via_mcp,
@@ -457,6 +458,83 @@ async def admit_chat_request(
     )
 
 
+# #3245: the receipt shapes a dispatch stores as its `completed` row — async
+# `/task` (`accepted`/`queued`), and the timed-out sync `/task` and pulled
+# `/chat` (`queued_timeout`). A sync success body is never one of these.
+_RECEIPT_STATUSES = frozenset({"accepted", "queued", "queued_timeout"})
+# Liveness verdicts after which a receipt replay would be a lie. Everything
+# else (live, succeeded, maybe_alive, indeterminate) replays.
+_FRESH_AFTER = frozenset({
+    idempotency_service.LIVENESS_ENDED, idempotency_service.LIVENESS_GONE,
+})
+
+
+def _is_dispatch_receipt(snapshot) -> bool:
+    return (
+        isinstance(snapshot, dict)
+        and snapshot.get("async_mode") is True
+        and snapshot.get("status") in _RECEIPT_STATUSES
+    )
+
+
+def _decision_outcome(decision) -> str:
+    if not decision.enabled:
+        return "no_dedup"
+    if not decision.replay:
+        return "new"
+    return "in_flight" if decision.in_flight else "completed"
+
+
+def _reclaim_ended_receipt(idem, *, name: str):
+    """Let a retry dispatch fresh when the receipt it would replay names a run
+    that ended without success (#3245). Shared by ``/chat`` and ``/task``.
+
+    Before #3245 the stored receipt replayed for 24h even after its run
+    failed, so a caller retrying word for word got the dead run back forever.
+    This runs at replay time, between ``begin`` and the replay branch: it adds
+    no side effect to any terminal writer (#1804) and heals rows written
+    before the fix. Only receipt-shaped ``completed`` snapshots are checked;
+    ``sched:`` keys are the scheduler's own and never reclaimed. On an ended
+    or gone run the row is compare-and-deleted (only while it still names the
+    dead execution, so two racing retries start one run) and the key is
+    claimed again exactly once — no loop. A delete error replays the original.
+    Returns the decision the caller should act on.
+    """
+    if not (idem.replay and not idem.in_flight and idem.execution_id):
+        return idem
+    if str(idem.key or "").startswith("sched:"):
+        return idem
+    if not _is_dispatch_receipt(idem.snapshot):
+        return idem
+    liveness = idempotency_service.execution_liveness(idem.execution_id, name)
+    verdict = liveness.verdict
+    if verdict == idempotency_service.LIVENESS_MAYBE_ALIVE:
+        hold_until = liveness.hold_until.isoformat() if liveness.hold_until else None
+        logger.info(
+            "[#3245] receipt_hold agent=%s stale_exec=%s verdict=%s until=%s",
+            name, idem.execution_id, verdict, hold_until,
+        )
+        return idem
+    if verdict not in _FRESH_AFTER:
+        return idem
+    cas = idempotency_service.discard_replay_of(idem.scope, idem.key, idem.execution_id)
+    if cas is None:
+        logger.info(
+            "[#3245] receipt_reclaim agent=%s stale_exec=%s verdict=%s cas=error "
+            "outcome=replay_original replay_exec=%s",
+            name, idem.execution_id, verdict, idem.execution_id,
+        )
+        return idem
+    decision = idempotency_service.begin(idem.scope, idem.key)
+    logger.info(
+        "[#3245] receipt_reclaim agent=%s stale_exec=%s verdict=%s cas=%s outcome=%s "
+        "replay_exec=%s",
+        name, idem.execution_id, verdict, "deleted" if cas else "no_match",
+        _decision_outcome(decision), decision.execution_id if decision.replay else None,
+    )
+    return decision
+
+
 def begin_task_idempotency(
     *,
     name: str,
@@ -473,6 +551,7 @@ def begin_task_idempotency(
     idem = idempotency_service.begin(
         idempotency_service.make_agent_scope(name), idempotency_key
     )
+    idem = _reclaim_ended_receipt(idem, name=name)
     if idem.replay:
         return idem, ChatAdmissionReplay(
             execution_id=idem.execution_id, in_flight=idem.in_flight, snapshot=idem.snapshot,
