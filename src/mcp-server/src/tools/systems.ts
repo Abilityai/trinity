@@ -115,6 +115,7 @@ export function createSystemTools(
       name: "deploy_system",
       description:
         "Deploy a multi-agent system from a YAML manifest. " +
+        "With an agent key, this needs the agent-management permission an instance admin grants (ephemeral helpers excepted); without it the call is refused with `agent_management_not_permitted`. " +
         "The manifest defines the system name, agents, permissions, schedules, and shared folders. " +
         "Supports dry_run mode for validation without deployment — a dry run resolves each `local:` template, "
         + "so `status: 'invalid'` with a populated `failed[]` means the manifest would not deploy cleanly. " +
