@@ -32,6 +32,14 @@
     />
 
     <div v-else class="space-y-4" data-testid="self-change-ready">
+      <!-- A failed refresh keeps what is on screen and says so (ent#253). -->
+      <InlineError
+        v-if="view.stale"
+        :message="`Couldn't refresh the permissions — showing the last ones that loaded. ${store.loadError}`"
+        retryable
+        data-testid="self-change-stale"
+        @retry="retry"
+      />
       <p
         v-if="!canEdit"
         class="text-xs text-gray-600 dark:text-gray-300"
@@ -51,10 +59,10 @@
         <div class="flex items-start justify-between gap-3">
           <BaseToggle
             :model-value="cap.granted"
-            :disabled="!canEdit || store.busy === cap.id"
+            :disabled="!canEdit || !!store.busy[cap.id]"
             :label="cap.label"
             :data-testid="`self-change-toggle-${cap.id}`"
-            @update:model-value="(v) => store.setGranted(cap.id, v)"
+            @update:model-value="(v) => store.setGranted(agentName, cap.id, v)"
           />
           <span
             class="shrink-0 text-xs text-gray-500 dark:text-gray-400 tabular-nums"
@@ -74,7 +82,7 @@
           class="mt-2"
           :message="store.actionErrors[cap.id]"
           retryable
-          @retry="store.setGranted(cap.id, !cap.granted)"
+          @retry="store.setGranted(agentName, cap.id, !cap.granted)"
           @dismiss="store.clearActionError(cap.id)"
         />
       </div>

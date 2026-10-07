@@ -21,6 +21,8 @@ import SelfChangePermissionsPanel from '../../src/components/settings/SelfChange
 // eslint-disable-next-line import/first
 import { useAuthStore } from '../../src/stores/auth'
 // eslint-disable-next-line import/first
+import { useCapabilityGrantsStore } from '../../src/stores/capabilityGrants'
+// eslint-disable-next-line import/first
 import { permissionRequests, SELF_CHANGE_CAPABILITIES } from '../../src/utils/capabilityGrants'
 
 const AGENT = 'orchestrator'
@@ -146,6 +148,54 @@ describe('SelfChangePermissionsPanel (ent#756)', () => {
       { params: { agent_name: AGENT, status: 'pending', limit: 200 } })
     expect(byId(w, 'self-change-request-q1').text()).toContain('Open in Operations')
     expect(byId(w, 'self-change-request-q2').exists()).toBe(false)
+  })
+})
+
+describe('SelfChangePermissionsPanel — races and refreshes (#3330 review)', () => {
+  it('a PUT that lands after the panel switched agents never retargets the panel', async () => {
+    // C1: the store reloaded the OLD agent after the await, so the panel on
+    // screen showed A's grants and its next toggle wrote to A.
+    route()
+    let release
+    put.mockImplementationOnce(() => new Promise((r) => { release = r })).mockResolvedValue({ data: {} })
+    const w = await mountAs('admin')
+    await byId(w, 'self-change-toggle-agents.manage').trigger('click')
+    await w.setProps({ agentName: 'sales-companion' })
+    await flushPromises()
+    release({ data: {} })
+    await flushPromises()
+    expect(useCapabilityGrantsStore().agentName).toBe('sales-companion')
+    await byId(w, 'self-change-toggle-skills.manage').trigger('click')
+    await flushPromises()
+    expect(put.mock.calls.map((c) => c[0])).toEqual([
+      `/api/agents/${AGENT}/capability-grants/agents.manage`,
+      '/api/agents/sales-companion/capability-grants/skills.manage',
+    ])
+  })
+
+  it('one in-flight toggle does not re-enable another that is still in flight', async () => {
+    route()
+    const releases = []
+    put.mockImplementation(() => new Promise((r) => releases.push(r)))
+    const w = await mountAs('admin')
+    await byId(w, 'self-change-toggle-skills.manage').trigger('click')
+    await byId(w, 'self-change-toggle-agents.manage').trigger('click')
+    releases[0]({ data: {} })
+    await flushPromises()
+    expect(byId(w, 'self-change-toggle-agents.manage').attributes('disabled')).toBeDefined()
+    releases[1]({ data: {} })
+    await flushPromises()
+  })
+
+  it('a failed refresh keeps the toggles on screen and says so', async () => {
+    route()
+    const w = await mountAs('admin')
+    put.mockResolvedValue({ data: {} })
+    route({ grants: httpError(500, 'boom') })
+    await byId(w, 'self-change-toggle-schedules.manage').trigger('click')
+    await flushPromises()
+    expect(byId(w, 'self-change-ready').exists()).toBe(true)
+    expect(byId(w, 'self-change-stale').text()).toContain("Couldn't refresh the permissions")
   })
 })
 

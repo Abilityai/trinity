@@ -31,8 +31,9 @@ export const useCapabilityGrantsStore = defineStore('capabilityGrants', () => {
   const autonomyEnabled = ref(null)
   const requests = ref([])
   const requestsError = ref('')
-  // Per-capability, so one pending write never disables the other three.
-  const busy = ref(null)
+  // Per-capability, so one pending write never disables — or re-enables — the
+  // other three.
+  const busy = ref({})
   const actionErrors = ref({})
   let generation = 0
 
@@ -46,7 +47,7 @@ export const useCapabilityGrantsStore = defineStore('capabilityGrants', () => {
     requests.value = []
     requestsError.value = ''
     actionErrors.value = {}
-    busy.value = null
+    busy.value = {}
   }
 
   async function load (name) {
@@ -86,25 +87,33 @@ export const useCapabilityGrantsStore = defineStore('capabilityGrants', () => {
     }
   }
 
-  async function setGranted (capability, granted) {
-    const name = agentName.value
-    busy.value = capability
+  /**
+   * The agent is passed by the caller, never read from the store after the
+   * await: a panel that switched agents while the PUT was in flight must not be
+   * reset back to the old one — its next toggle would then grant on the agent
+   * no longer on screen (#3330 review C1).
+   */
+  async function setGranted (name, capability, granted) {
+    const current = () => name === agentName.value
+    busy.value = { ...busy.value, [capability]: true }
     actionErrors.value = { ...actionErrors.value, [capability]: '' }
     try {
       await api.put(
         `/api/agents/${encodeURIComponent(name)}/capability-grants/${encodeURIComponent(capability)}`,
         { granted },
       )
-      await load(name)
+      if (current()) await load(name)
       return true
     } catch (err) {
-      actionErrors.value = {
-        ...actionErrors.value,
-        [capability]: refusalText(err, granted ? 'Could not grant it.' : 'Could not revoke it.'),
+      if (current()) {
+        actionErrors.value = {
+          ...actionErrors.value,
+          [capability]: refusalText(err, granted ? 'Could not grant it.' : 'Could not revoke it.'),
+        }
       }
       return false
     } finally {
-      busy.value = null
+      if (current()) busy.value = { ...busy.value, [capability]: false }
     }
   }
 
