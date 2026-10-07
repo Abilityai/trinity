@@ -1,6 +1,18 @@
 {
   "test_files": [
     {
+      "file": "unit/test_3245_async_replay_after_failure.py",
+      "feature": "abilityai/trinity#3245",
+      "added": "2026-10-06",
+      "categories": [
+        "backend",
+        "unit",
+        "reliability",
+        "database"
+      ],
+      "description": "A dispatch receipt replays only while its run can still succeed (#3245). An async `/task`, a timed-out sync `/task` and a timed-out pulled `/chat` store a receipt (`async_mode: true`, `accepted`/`queued`/`queued_timeout`) as the `completed` idempotency row; before the fix an identical retry got the dead run's receipt for 24 h. Real SQLite (`IdempotencyOperations`, temp DB) with non-ambient ids. Pins: the compare-and-delete `discard_completed_if_execution` deletes only the row still naming the dead execution, so a slow retry cannot erase a faster retry's fresh record (both interleavings, plus a teeth case where an unconditional delete starts two runs); `execution_liveness` maps queued/running/pending_retry → live, success → succeeded, failed/cancelled/skipped → ended, no row → gone, and every doubt (lookup error, foreign owner, `manual`, a status flip between the two reads) → indeterminate, which replays; the `lease_expired` hold on a fixed clock at the boundary (T+899 s replays and logs `receipt_hold until=`, T+900 s and T+901 s go fresh), with the tag checked before the stamp or the timeout, a naive stored `completed_at` read as UTC and the agent's current timeout used; both admission seams (`begin_task_idempotency`, `admit_chat_request`) incl. the receipt written by the real `run_pulled_chat_turn` timeout branch, `sched:` keys never reclaimed, a skill-gate record answering before the reclaim on `/chat` and `/task`, pre-fix rows healed, the reclaim log outcomes, and AC2 end to end over the real `execute_parallel_task` (dispatch, fail, identical re-send → new `execution_id` without `X-Idempotent-Replay`, a third send while running replays the new id). AST guards: both seams call the reclaim right after `begin`; every `fail_stale_slot_execution` error carries the `lease_expired:` tag (parity with `TaskExecutionErrorCode.LEASE_EXPIRED`); nothing writes a claim after its receipt is stored (the CAS precondition). Mutation-proven (reclaim calls removed: 24 red; CAS without the execution-id predicate: 5; no hold: 7; gate moved after the claim on `/task`: 2). SQLite only, no PostgreSQL proof. No Docker, no live backend."
+    },
+    {
       "file": "unit/test_2545_skill_source_pin.py",
       "feature": "#2545, #3123",
       "added": "2026-09-06",

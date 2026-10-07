@@ -146,10 +146,13 @@ function depthRefusalResult(refusal: DepthRefusal): string {
  *
  * The leads claim nothing about liveness: the backend stores the async receipt
  * as the idempotency snapshot at dispatch time and replays it for 24 h, after the
- * run may have finished or failed. Three shapes: async `accepted` / `queued`, and
- * the `queued_timeout` a sync `/task` stores when its long-poll gives up — told
- * apart from the MCP server's own `queued_timeout` (client.ts), which already
- * carries `readNotResend`, by that sentence.
+ * run may have finished (since #3245 a run that ended failed/cancelled is no
+ * longer replayed — an identical re-send starts a new run — but one that
+ * succeeded, or may still report back, is). Three shapes: async `accepted` /
+ * `queued`, and the `queued_timeout` a sync `/task` stores when its long-poll
+ * gives up — told apart from the MCP server's own `queued_timeout` (client.ts),
+ * which already carries `readNotResend`, by that sentence. Every other field is
+ * kept, including `idempotent_replay: true` on a replay (#3245).
  */
 function asyncReceipt<T extends object>(agent: string, response: T): T {
   const r = response as { status?: unknown; execution_id?: unknown; message?: unknown };
@@ -424,7 +427,7 @@ export function createChatTools(
       // the parameter descriptions below, which are not cut.
       // delegation-contract.test.ts pins the published length.
       description:
-        "Delegate a task to another agent (the primary way to use sub-agents) and get back its reply or a receipt." +
+        "Delegate a task to another agent and get back its reply or a receipt." +
         "\n\n**Modes:** `parallel=false` (default) continues the agent's own chat session, one queue for every " +
         "caller. `parallel=true` runs a stateless task; several can run at once. `async=true` (with " +
         "`parallel=true`) answers with a receipt at once.\n\n" +
