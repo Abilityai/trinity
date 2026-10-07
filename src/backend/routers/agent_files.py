@@ -832,18 +832,18 @@ async def share_agent_file(
     agent_name matches the path. User-scoped MCP keys of non-owners
     are rejected.
     """
-    # Owner gate (the agent's owner always passes)
-    assert_agent_owner(current_user, agent_name, detail="Only the owner or admin can share files from this agent.")
-
-    # Defense in depth: if this is an agent-scoped key, it must be for
-    # the same agent. Prevents Agent A's key from being used to share
-    # files from Agent B's volume even when both are owned by the same user.
+    # An agent-scoped key may share only from its OWN volume. Checked first so
+    # the refusal names the rule; the owner gate below (narrowed to the agent's
+    # reach since ent#629) would refuse a sibling too, less specifically.
     actor_agent = getattr(current_user, "agent_name", None)
     if actor_agent and actor_agent != agent_name:
         raise HTTPException(
             status_code=403,
             detail="Agent-scoped MCP key cannot share files for a different agent.",
         )
+
+    # Owner gate (the agent's owner always passes)
+    assert_agent_owner(current_user, agent_name, detail="Only the owner or admin can share files from this agent.")
 
     try:
         result = await create_share(

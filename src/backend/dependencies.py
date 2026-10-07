@@ -2010,7 +2010,15 @@ async def get_skill_managed_agent_by_name(
     await enforce_agent_capability(
         request, current_user, CAPABILITY_SKILLS_MANAGE, target=agent_name
     )
-    # The grant IS the reach to the owner's other agents — not narrowed (ent#629).
+    return get_capability_owned_agent_by_name(agent_name, current_user)
+
+
+def get_capability_owned_agent_by_name(agent_name: str, current_user: User) -> str:
+    """The owner fence a CAPABILITY dependency applies after its grant check.
+
+    Not narrowed to the agent's reach (ent#629): the capability IS the instance
+    admin's grant to manage the owner's other agents (ent#596) — the fence still
+    stops it at the owner's agents."""
     return _owned_agent_or_404(agent_name, current_user, narrow=False)
 
 

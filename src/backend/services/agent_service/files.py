@@ -154,6 +154,20 @@ def _touches_skills_dir(path: str, *, include_ancestors: bool = False) -> bool:
     return False
 
 
+def _may_reach_for_path(current_user, agent_name, path, *, include_ancestors=False) -> bool:
+    """trinity-enterprise#629 reach, plus the ent#596 exception: `skills.manage`
+    IS the grant to change the skills of the owner's other agents, so a holder
+    writing a skills path reaches the target without a permission edge (the
+    capability gate below still decides the write)."""
+    if agent_may_reach(current_user, agent_name):
+        return True
+    if not _touches_skills_dir(path, include_ancestors=include_ancestors):
+        return False
+    from dependencies import capability_refusal
+    from db.capability_grants import CAPABILITY_SKILLS_MANAGE
+    return capability_refusal(current_user, CAPABILITY_SKILLS_MANAGE) is None
+
+
 async def _require_skill_capability(path, current_user, request, agent_name, *, include_ancestors=False):
     if _touches_skills_dir(path, include_ancestors=include_ancestors):
         from dependencies import enforce_agent_capability
@@ -286,7 +300,7 @@ async def delete_agent_file_logic(
     """
     Delete a file or directory from the agent's workspace.
     """
-    if not (db.can_user_access_agent(current_user.username, agent_name) and agent_may_reach(current_user, agent_name)):
+    if not (db.can_user_access_agent(current_user.username, agent_name) and _may_reach_for_path(current_user, agent_name, path, include_ancestors=True)):
         raise HTTPException(status_code=403, detail="You don't have permission to access this agent")
 
     # ent#596: a write into the skills dir needs the skill-management capability.
@@ -425,7 +439,7 @@ async def update_agent_file_logic(
         current_user: Current authenticated user
         request: HTTP request object
     """
-    if not (db.can_user_access_agent(current_user.username, agent_name) and agent_may_reach(current_user, agent_name)):
+    if not (db.can_user_access_agent(current_user.username, agent_name) and _may_reach_for_path(current_user, agent_name, path)):
         raise HTTPException(status_code=403, detail="You don't have permission to access this agent")
 
     # ent#596: a write into the skills dir needs the skill-management capability.
@@ -502,7 +516,7 @@ async def create_agent_folder_logic(
         current_user: Current authenticated user
         request: HTTP request object
     """
-    if not (db.can_user_access_agent(current_user.username, agent_name) and agent_may_reach(current_user, agent_name)):
+    if not (db.can_user_access_agent(current_user.username, agent_name) and _may_reach_for_path(current_user, agent_name, path)):
         raise HTTPException(status_code=403, detail="You don't have permission to access this agent")
 
     # ent#596: a write into the skills dir needs the skill-management capability.

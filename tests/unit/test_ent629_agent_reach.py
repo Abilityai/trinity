@@ -179,6 +179,21 @@ def test_the_skills_capability_keeps_its_owner_wide_reach(fleet, monkeypatch):
     assert got == C
 
 
+def test_a_skills_holder_reaches_a_siblings_skills_dir_and_nothing_else(fleet, monkeypatch):
+    """files.py: `skills.manage` (ent#596) is the grant to change the owner's
+    other agents' skills, so a holder reaches a sibling's skills path with no
+    edge — and only that path."""
+    from services.agent_service import files
+
+    monkeypatch.setattr(dependencies.db, "agent_has_capability",
+                        lambda agent, cap: agent == A and cap == "skills.manage")
+    key = _agent_key()
+    assert files._may_reach_for_path(key, C, ".claude/skills/x/SKILL.md") is True
+    assert files._may_reach_for_path(key, C, "notes.md") is False
+    monkeypatch.setattr(dependencies.db, "agent_has_capability", lambda agent, cap: False)
+    assert files._may_reach_for_path(key, C, ".claude/skills/x/SKILL.md") is False
+
+
 def test_a2a_inbound_is_narrowed_too(fleet, monkeypatch):
     import routers.a2a as a2a
 
@@ -255,6 +270,8 @@ _EXEMPT = {
         "portal principals are people; agent keys never reach the client portal",
 }
 _PREDICATES = {"can_user_access_agent", "can_user_share_agent"}
+#: `_may_reach_for_path` is files.py's reach plus the ent#596 skills-holder case.
+_REACH_HELPERS = {"agent_may_reach", "_may_reach_for_path"}
 
 
 def _offenders():
@@ -278,7 +295,7 @@ def _offenders():
                      for n in ast.walk(sub)}
             own = [c for c in calls if id(c) not in inner
                    and getattr(c.func, "attr", None) in _PREDICATES]
-            if not own or "agent_may_reach" in names:
+            if not own or names & _REACH_HELPERS:
                 continue
             if (rel, fn.name) in _EXEMPT or (rel, "*") in _EXEMPT:
                 continue
