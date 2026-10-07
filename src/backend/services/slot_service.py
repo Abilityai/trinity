@@ -117,11 +117,9 @@ class SlotService:
             timeout_seconds: Agent's execution timeout (TIMEOUT-001). Slot TTL = timeout + 5min buffer.
 
         Returns:
-            True if slot acquired, False if at capacity
+            True only for a new admission; False if at capacity or already held
         """
         slots_key = self._slots_key(agent_name)
-        now = time.time()
-
         # TIMEOUT-001: Dynamic slot TTL based on agent timeout + buffer
         slot_ttl = timeout_seconds + SLOT_TTL_BUFFER
 
@@ -129,28 +127,47 @@ class SlotService:
         # default fallback; per-slot metadata TTL takes precedence for each slot.
         await self._cleanup_stale_slots_for_agent(agent_name, default_slot_ttl=slot_ttl)
 
-        # Check current count
-        current_count = self.redis.zcard(slots_key)
-        if current_count >= max_parallel_tasks:
-            logger.info(
-                f"[Slots] Agent '{agent_name}' at capacity ({current_count}/{max_parallel_tasks}), "
-                f"rejecting execution {execution_id}"
-            )
-            return False
-
-        # Add slot (ZADD with timestamp score)
-        self.redis.zadd(slots_key, {execution_id: now})
-
-        # Store metadata with dynamic TTL
         metadata_key = self._metadata_key(agent_name, execution_id)
-        slot_number = current_count + 1  # Assign next available slot number
-        self.redis.hset(metadata_key, mapping={
-            "started_at": utc_now_iso(),
-            "message_preview": message_preview[:100] if message_preview else "",
-            "slot_number": str(slot_number),
-            "timeout_seconds": str(timeout_seconds)
-        })
-        self.redis.expire(metadata_key, slot_ttl)
+        # A count followed by ZADD races across backend workers. WATCH makes
+        # count + membership + metadata one admission decision. Retrying a
+        # conflicted transaction does not dispatch work; only its winner may
+        # return True. In particular, a duplicate ID is NOT an idempotent
+        # success: callers interpret True as permission to start an execution.
+        while True:
+            with self.redis.pipeline() as pipe:
+                try:
+                    pipe.watch(slots_key, metadata_key)
+                    if pipe.zscore(slots_key, execution_id) is not None:
+                        return False
+                    # EXEC isolates commands but does not roll back a command
+                    # error. Reject malformed metadata before queuing ZADD;
+                    # watching this key prevents a type change before EXEC.
+                    if pipe.type(metadata_key) not in ("none", "hash"):
+                        raise redis.ResponseError("Slot metadata must be a Redis hash")
+                    current_count = pipe.zcard(slots_key)
+                    if current_count >= max_parallel_tasks:
+                        logger.info(
+                            f"[Slots] Agent '{agent_name}' at capacity "
+                            f"({current_count}/{max_parallel_tasks}), "
+                            f"rejecting execution {execution_id}"
+                        )
+                        return False
+                    slot_number = current_count + 1
+                    pipe.multi()
+                    pipe.zadd(slots_key, {execution_id: time.time()})
+                    pipe.hset(metadata_key, mapping={
+                        "started_at": utc_now_iso(),
+                        "message_preview": message_preview[:100] if message_preview else "",
+                        "slot_number": str(slot_number),
+                        "timeout_seconds": str(timeout_seconds)
+                    })
+                    pipe.expire(metadata_key, slot_ttl)
+                    pipe.execute()
+                    break
+                except redis.WatchError:
+                    # Another admission/release/renewal changed the count gate.
+                    # Re-read instead of committing an obsolete capacity check.
+                    continue
 
         logger.info(
             f"[Slots] Agent '{agent_name}' acquired slot {slot_number}/{max_parallel_tasks} "
