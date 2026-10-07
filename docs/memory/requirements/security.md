@@ -711,7 +711,7 @@
 - **Description**: Pre-configure Claude Code hooks in the base image (`/etc/claude-code/managed-settings.json` — root-owned; see 28.2.1) that all agents inherit. Hooks fire deterministically on every tool call — including in `--dangerously-skip-permissions` mode.
 - **Key Features**:
   - `PreToolUse` hooks on `Bash` tool: deny-list of destructive patterns (`rm -rf /`, `rm -rf ~`, `chmod 777`, `curl | sh`, `git push --force`, production domain access)
-  - `PreToolUse` hooks on `Edit`/`Write` tools: block writes to credential files (`.env`, `.mcp.json`, `~/.ssh/`, `~/.aws/`)
+  - `PreToolUse` hooks on `Edit`/`Write` tools: block writes to credential files (`.env`, `.mcp.json`, `~/.ssh/`, `~/.aws/`) and to the runtime config files `~/.claude.json`, `~/.claude/.credentials.json`, `~/.gemini/settings.json` and `~/.tmp/codex/*` (trinity-enterprise#823)
   - `PostToolUse` hooks on `Bash`: scan stdout/stderr for leaked credentials (API key patterns: `sk-`, `ghp_`, `AKIA`, bearer tokens)
   - Hook scripts installed at `/opt/trinity/hooks/` in base image
   - Configurable per-agent overrides via `agent-config.yaml` (operator can relax rules for specific agents that need broader access)

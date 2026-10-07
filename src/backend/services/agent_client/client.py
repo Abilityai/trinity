@@ -36,6 +36,24 @@ from services.model_context import DEFAULT_CONTEXT_WINDOW
 logger = logging.getLogger(__name__)
 
 
+def _warn_if_link_refusal(agent_name: str, path: str, response) -> None:
+    """trinity-enterprise#819: the agent server does not open a file that is a
+    link. A platform read that meets one still fails soft; this names the file
+    so the template can ship it as a real file instead."""
+    if response.status_code != 403:
+        return
+    try:
+        detail = response.json().get("detail")
+    except Exception:  # noqa: BLE001 - a non-JSON body is not the refusal
+        return
+    if isinstance(detail, dict) and detail.get("code") == "resolved_path_mismatch":
+        logger.warning(
+            "Agent %s: platform read of %s refused because the file is a link; "
+            "file reads do not follow links, so ship it as a real file",
+            agent_name, path,
+        )
+
+
 # ============================================================================
 # Circuit Breaker (per-agent, Redis-backed for cross-worker coordination, #631)
 # ============================================================================
@@ -598,6 +616,7 @@ class AgentClient:
             elif response.status_code == 404:
                 return {"success": True, "content": None, "not_found": True}
             else:
+                _warn_if_link_refusal(self.agent_name, path, response)
                 return {
                     "success": False,
                     "error": response.text,

@@ -3,15 +3,17 @@ File browser endpoints.
 """
 import hashlib
 import logging
+import errno
 import mimetypes
 import os
 import shutil
+import stat as stat_mod
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException
-from fastapi.responses import PlainTextResponse, FileResponse
+from fastapi.responses import PlainTextResponse, StreamingResponse
 from pydantic import BaseModel
 
 
@@ -21,6 +23,65 @@ class FileUpdateRequest(BaseModel):
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+
+# The agent's home: the only tree these routes serve. A module constant so the
+# handlers can be driven over a temporary home in tests.
+_HOME = Path("/home/developer")
+
+# trinity-enterprise#819: download and preview never follow a link. The backend
+# maps this code to its own refusal and an audit row; keep the code in sync with
+# services/agent_service/files.py.
+_LINK_REFUSAL = {
+    "code": "resolved_path_mismatch",
+    "message": "This path is a link. Links are not opened by the file routes; open the file it points to.",
+}
+_MAX_READ_BYTES = 100 * 1024 * 1024  # 100MB
+
+
+def _open_for_read(path: str, base: Optional[Path] = None) -> tuple[int, os.stat_result]:
+    """Open a regular file under `base` for reading without following any link.
+
+    The path is walked one component at a time with O_NOFOLLOW, each step
+    relative to the directory opened before it, and the caller serves the
+    descriptor this returns: the file that was checked is the file that is
+    read, and a path swapped for a link after the check cannot be read through.
+    A path that is a link, or passes through one, is refused with 403
+    `resolved_path_mismatch`. Returns (fd, fstat); the caller owns fd.
+    """
+    base = _HOME if base is None else base
+    raw = path if path.startswith("/") else str(base / path)
+    # Leading slashes collapsed first: normpath keeps exactly two.
+    lexical = Path("/" + os.path.normpath(raw).lstrip("/"))
+    if not lexical.is_relative_to(base):
+        raise HTTPException(status_code=403, detail="Access denied: only /home/developer accessible")
+    parts = lexical.relative_to(base).parts
+    fd = os.open(base, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    try:
+        for i, part in enumerate(parts):
+            last = i == len(parts) - 1
+            flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | (os.O_NONBLOCK if last else os.O_DIRECTORY)
+            try:
+                nxt = os.open(part, flags, dir_fd=fd)
+            except OSError as e:
+                try:
+                    is_link = stat_mod.S_ISLNK(os.lstat(part, dir_fd=fd).st_mode)
+                except FileNotFoundError:
+                    raise HTTPException(status_code=404, detail=f"File not found: {path}") from e
+                if is_link:
+                    raise HTTPException(status_code=403, detail=dict(_LINK_REFUSAL)) from e
+                if e.errno in (errno.ENOTDIR, errno.ELOOP):
+                    # a file used as a directory
+                    raise HTTPException(status_code=400, detail=f"Not a file: {path}") from e
+                raise HTTPException(status_code=500, detail=f"Failed to read file: {e}") from e
+            os.close(fd)
+            fd = nxt
+        st = os.fstat(fd)
+        if not stat_mod.S_ISREG(st.st_mode):
+            raise HTTPException(status_code=400, detail=f"Not a file: {path}")
+        return fd, st
+    except BaseException:
+        os.close(fd)
+        raise
 
 
 def _iso_z_from_mtime(mtime: float) -> str:
@@ -130,41 +191,22 @@ async def download_file(path: str):
     Only allows access to /home/developer for security.
     Max file size: 100MB
 
-    Returns file content as plain text.
+    Returns file content as plain text. Never follows a link (ent#819): the
+    file is opened without following any link and that descriptor is read.
     """
-    # Security: Only allow workspace access
-    allowed_base = Path("/home/developer")
-
-    # Handle both absolute and relative paths
-    if path.startswith('/'):
-        requested_path = Path(path).resolve()
-    else:
-        requested_path = (allowed_base / path).resolve()
-
-    # Ensure requested path is within workspace
-    if not str(requested_path).startswith(str(allowed_base)):
-        raise HTTPException(status_code=403, detail="Access denied: only /home/developer accessible")
-
-    if not requested_path.exists():
-        raise HTTPException(status_code=404, detail=f"File not found: {path}")
-
-    if not requested_path.is_file():
-        raise HTTPException(status_code=400, detail=f"Not a file: {path}")
-
-    # Check file size (100MB limit)
-    max_size = 100 * 1024 * 1024  # 100MB
-    file_size = requested_path.stat().st_size
-    if file_size > max_size:
-        raise HTTPException(status_code=413, detail=f"File too large: {file_size} bytes (max {max_size})")
-
-    try:
-        # Read file content
-        content = requested_path.read_text(encoding='utf-8', errors='replace')
-        return PlainTextResponse(content=content)
-
-    except Exception as e:
-        logger.error(f"File download error: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to read file: {str(e)}")
+    fd, st = _open_for_read(path)
+    with os.fdopen(fd, "rb") as f:
+        if st.st_size > _MAX_READ_BYTES:
+            raise HTTPException(
+                status_code=413, detail=f"File too large: {st.st_size} bytes (max {_MAX_READ_BYTES})"
+            )
+        try:
+            # At most the size it had when opened: a file that grows is not read past it.
+            content = f.read(st.st_size).decode("utf-8", errors="replace")
+        except Exception as e:
+            logger.error(f"File download error: {e}")
+            raise HTTPException(status_code=500, detail=f"Failed to read file: {str(e)}")
+    return PlainTextResponse(content=content)
 
 
 # Protected paths that cannot be deleted
@@ -176,6 +218,8 @@ PROTECTED_PATHS = [
     ".env",
     ".mcp.json",
     ".mcp.json.template",
+    ".claude.json",
+    ".credentials.json",
 ]
 
 # Paths that cannot be edited via the file-write endpoint.
@@ -209,7 +253,35 @@ EDIT_PROTECTED_PATHS = [
     ".mcp.json",
     ".mcp.json.template",
     ".credentials.enc",
+    ".claude.json",
+    ".credentials.json",
 ]
+
+# trinity-enterprise#823: runtime config these routes never write, matched on
+# the RESOLVED path (relative to `_HOME`), so a link elsewhere in the home that
+# points here is refused too. Some names are too generic for the by-name lists
+# above (settings.json, auth.json, config.toml). `.tmp/codex` is Codex's
+# CODEX_HOME (its login and MCP config), so everything under it is covered.
+# No platform writer of these goes through these routes.
+_RUNTIME_CONFIG_PATHS = (
+    ".claude.json",
+    ".claude/.credentials.json",
+    ".gemini/settings.json",
+    ".tmp/codex",
+)
+
+
+def _touches_runtime_config(resolved: Path, *, include_ancestors: bool) -> bool:
+    """True when `resolved` is a runtime config path or lies under one; with
+    `include_ancestors` (DELETE), also when it is a directory above one."""
+    home = _HOME.resolve()
+    for rel in _RUNTIME_CONFIG_PATHS:
+        target = home / rel
+        if resolved == target or resolved.is_relative_to(target):
+            return True
+        if include_ancestors and target.is_relative_to(resolved):
+            return True
+    return False
 
 
 def _is_protected_path(path: Path) -> bool:
@@ -310,7 +382,7 @@ async def delete_file(path: str):
     Cannot delete protected paths (CLAUDE.md, .trinity, .git, etc.)
     """
     # Security: Only allow workspace access
-    allowed_base = Path("/home/developer")
+    allowed_base = _HOME
 
     # Handle both absolute and relative paths
     if path.startswith('/'):
@@ -326,8 +398,8 @@ async def delete_file(path: str):
     if requested_path == allowed_base:
         raise HTTPException(status_code=403, detail="Cannot delete home directory")
 
-    # Check if it's a protected path
-    if _is_protected_path(requested_path):
+    # Check if it's a protected path, or a directory holding runtime config
+    if _is_protected_path(requested_path) or _touches_runtime_config(requested_path, include_ancestors=True):
         raise HTTPException(
             status_code=403,
             detail=f"Cannot delete protected path: {requested_path.name}"
@@ -369,51 +441,47 @@ async def preview_file(path: str):
     Supports images, videos, audio, PDFs, and text files.
     Only allows access to /home/developer for security.
     Max file size: 100MB
+
+    Never follows a link (ent#819): the file is opened without following any
+    link and that descriptor is streamed, then closed.
     """
-    # Security: Only allow workspace access
-    allowed_base = Path("/home/developer")
-
-    # Handle both absolute and relative paths
-    if path.startswith('/'):
-        requested_path = Path(path).resolve()
-    else:
-        requested_path = (allowed_base / path).resolve()
-
-    # Ensure requested path is within workspace
-    if not str(requested_path).startswith(str(allowed_base)):
-        raise HTTPException(status_code=403, detail="Access denied: only /home/developer accessible")
-
-    if not requested_path.exists():
-        raise HTTPException(status_code=404, detail=f"File not found: {path}")
-
-    if not requested_path.is_file():
-        raise HTTPException(status_code=400, detail=f"Not a file: {path}")
-
-    # Check file size (100MB limit)
-    max_size = 100 * 1024 * 1024  # 100MB
-    file_size = requested_path.stat().st_size
-    if file_size > max_size:
-        raise HTTPException(status_code=413, detail=f"File too large: {file_size} bytes (max {max_size})")
-
-    try:
-        # Detect MIME type
-        mime_type, _ = mimetypes.guess_type(str(requested_path))
-        if mime_type is None:
-            # Default to binary for unknown types
-            mime_type = "application/octet-stream"
-
-        # Return file with correct Content-Type for browser preview.
-        # Use inline disposition so text/media files render in the preview
-        # panel rather than triggering a download.
-        return FileResponse(
-            path=requested_path,
-            media_type=mime_type,
-            headers={"Content-Disposition": f'inline; filename="{requested_path.name}"'}
+    fd, st = _open_for_read(path)
+    f = os.fdopen(fd, "rb")
+    if st.st_size > _MAX_READ_BYTES:
+        f.close()
+        raise HTTPException(
+            status_code=413, detail=f"File too large: {st.st_size} bytes (max {_MAX_READ_BYTES})"
         )
 
-    except Exception as e:
-        logger.error(f"File preview error: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to preview file: {str(e)}")
+    name = Path(os.path.normpath(path)).name
+    # Detect MIME type; default to binary for unknown types
+    mime_type, _ = mimetypes.guess_type(name)
+    if mime_type is None:
+        mime_type = "application/octet-stream"
+
+    def _chunks():
+        # At most the declared Content-Length: a file that grows is not read past it.
+        remaining = st.st_size
+        try:
+            while remaining > 0:
+                chunk = f.read(min(64 * 1024, remaining))
+                if not chunk:
+                    break
+                remaining -= len(chunk)
+                yield chunk
+        finally:
+            f.close()
+
+    # Inline disposition so text/media files render in the preview panel
+    # rather than triggering a download.
+    return StreamingResponse(
+        _chunks(),
+        media_type=mime_type,
+        headers={
+            "Content-Disposition": f'inline; filename="{name}"',
+            "Content-Length": str(st.st_size),
+        },
+    )
 
 
 def content_sha256(text: str) -> str:
@@ -484,7 +552,7 @@ async def update_file(
     # is_relative_to() — the CWE-022 barrier create_folder already uses — rather
     # than a string prefix, which a sibling name such as /home/developer2 would
     # satisfy (#2915).
-    allowed_base = Path("/home/developer").resolve()
+    allowed_base = _HOME.resolve()
 
     # Handle both absolute and relative paths
     if path.startswith('/'):
@@ -506,6 +574,13 @@ async def update_file(
                 status_code=403,
                 detail=f"Cannot edit protected path: {requested_path.name}"
             )
+
+    # ent#823: runtime config is never written here, platform or not.
+    if _touches_runtime_config(requested_path, include_ancestors=False):
+        raise HTTPException(
+            status_code=403,
+            detail=f"Cannot edit protected path: {requested_path.name}"
+        )
 
     # If path exists and is a directory, reject
     if requested_path.exists() and not requested_path.is_file():
@@ -561,7 +636,7 @@ async def create_folder(path: str):
     """
     # Security: Only allow workspace access. allowed_base is resolved so the
     # containment check below compares resolved-path to resolved-path.
-    allowed_base = Path("/home/developer").resolve()
+    allowed_base = _HOME.resolve()
 
     if path.startswith('/'):
         requested_path = Path(path).resolve()
@@ -584,7 +659,9 @@ async def create_folder(path: str):
     # Reject creation inside an edit-protected path (.trinity, .git, etc.).
     # _is_edit_protected_path walks parents, so a nested target under a
     # protected dir is rejected too.
-    if _is_edit_protected_path(requested_path):
+    if _is_edit_protected_path(requested_path) or _touches_runtime_config(
+        requested_path, include_ancestors=False
+    ):
         raise HTTPException(
             status_code=403,
             detail=f"Cannot create folder in protected path: {requested_path.name}"

@@ -197,17 +197,35 @@ def fold(definition: Any, state: Any, *, executing_agent: str,
                      health=health[:32] if health else None, updated_at=updated, stages=stages)
 
 
-async def _download_capped(client: httpx.AsyncClient, base: str, path: str) -> Optional[bytes]:
-    """Stream one agent file under the byte budget; None past it or on any non-200."""
+async def _read_capped(r: httpx.Response) -> Optional[bytes]:
+    """A streamed body under the byte budget; None past it."""
     buf = bytearray()
+    async for chunk in r.aiter_bytes():
+        buf.extend(chunk)
+        if len(buf) > MAX_FILE_BYTES:
+            return None
+    return bytes(buf)
+
+
+async def _download_capped(client: httpx.AsyncClient, base: str, path: str,
+                           agent_name: str) -> Optional[bytes]:
+    """Stream one agent file under the byte budget; None past it or on any non-200.
+
+    A 403 body is read under the same budget so a linked file is named in the
+    log (trinity-enterprise#819, the warning `agent_client.read_file` logs).
+    """
+    from services.agent_client import client as agent_client_module
+
     async with client.stream("GET", f"{base}/api/files/download", params={"path": path}) as r:
+        if r.status_code == 403:
+            body = await _read_capped(r)
+            if body is not None:
+                agent_client_module._warn_if_link_refusal(
+                    agent_name, path, httpx.Response(403, content=body))
+            return None
         if r.status_code != 200:
             return None
-        async for chunk in r.aiter_bytes():
-            buf.extend(chunk)
-            if len(buf) > MAX_FILE_BYTES:
-                return None
-    return bytes(buf)
+        return await _read_capped(r)
 
 
 async def _read(agent_name: str, started_at: Optional[str], roster: Optional[set]) -> WorkSteps:
@@ -237,7 +255,7 @@ async def _read(agent_name: str, started_at: Optional[str], roster: Optional[set
         # live work.
         chosen: Optional[Tuple[str, dict]] = None
         for pid, iid, _size, _mod in candidates:
-            raw = await _download_capped(client, base, f"{STATE_DIR}/{pid}/{iid}.json")
+            raw = await _download_capped(client, base, f"{STATE_DIR}/{pid}/{iid}.json", agent_name)
             if raw is None:
                 continue
             try:
@@ -256,7 +274,7 @@ async def _read(agent_name: str, started_at: Optional[str], roster: Optional[set
 
         pid, state = chosen
         definition: Any = None
-        raw_def = await _download_capped(client, base, f"{PIPELINES_DIR}/{pid}.yaml")
+        raw_def = await _download_capped(client, base, f"{PIPELINES_DIR}/{pid}.yaml", agent_name)
         if raw_def:
             try:
                 definition = load_hardened_yaml(

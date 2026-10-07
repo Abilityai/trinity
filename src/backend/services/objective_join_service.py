@@ -753,6 +753,11 @@ async def _read_yaml(client, path: str, *,
     status = getattr(response, "status_code", 0)
     if status == 404:
         return None, "not_found"
+    if status == 403:
+        # trinity-enterprise#819: a linked file is not opened; name it in the log.
+        from services.agent_client import client as agent_client_module
+        agent_client_module._warn_if_link_refusal(
+            getattr(client, "agent_name", None), path, response)
     if status != 200:
         return None, "unreadable"
     try:

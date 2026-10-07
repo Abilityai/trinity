@@ -96,7 +96,8 @@ def test_protected_paths_lists_unchanged():
     """
     source = _FILES_PY.read_text()
 
-    # PROTECTED_PATHS (delete protection) — unchanged since S4
+    # PROTECTED_PATHS (delete protection) — refreshed by trinity-enterprise#823:
+    # added .claude.json and .credentials.json (Claude Code's login files).
     expected_protected = (
         "PROTECTED_PATHS = [\n"
         '    "CLAUDE.md",\n'
@@ -106,10 +107,13 @@ def test_protected_paths_lists_unchanged():
         '    ".env",\n'
         '    ".mcp.json",\n'
         '    ".mcp.json.template",\n'
+        '    ".claude.json",\n'
+        '    ".credentials.json",\n'
         "]"
     )
     # EDIT_PROTECTED_PATHS (edit protection) — refreshed by #590:
-    # added .mcp.json and .credentials.enc.
+    # added .mcp.json and .credentials.enc; trinity-enterprise#823 added
+    # .claude.json and .credentials.json.
     expected_edit_protected = (
         "EDIT_PROTECTED_PATHS = [\n"
         '    ".trinity",\n'
@@ -119,6 +123,8 @@ def test_protected_paths_lists_unchanged():
         '    ".mcp.json",\n'
         '    ".mcp.json.template",\n'
         '    ".credentials.enc",\n'
+        '    ".claude.json",\n'
+        '    ".credentials.json",\n'
         "]"
     )
     assert expected_protected in source, (

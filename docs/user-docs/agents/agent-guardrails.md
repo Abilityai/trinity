@@ -42,6 +42,9 @@ The `PreToolUse` hook on `Edit`, `Write`, and `NotebookEdit` blocks modification
 - `.credentials.enc` -- Encrypted credential backups
 - `~/.ssh/*`, `~/.aws/*`, `~/.gcp/*` -- Cloud and SSH credentials
 - `~/.claude/settings.json`, `~/.claude/settings.local.json` -- Claude Code user settings
+- `~/.claude.json`, `~/.claude/.credentials.json` -- Claude Code's configuration and login
+- `~/.gemini/settings.json` -- Gemini runtime configuration
+- `~/.tmp/codex/*` -- Codex runtime login and MCP configuration
 - `~/.trinity/read-only-config.json` -- Read-only mode configuration fallback, used while the root-owned copy under `/opt/trinity/` is missing
 - `/opt/trinity/*` -- Platform guardrail hook scripts
 - `/etc/claude-code/*` -- The managed settings that register the hooks

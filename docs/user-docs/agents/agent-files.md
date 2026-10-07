@@ -75,6 +75,22 @@ The agent drops a file into `/home/developer/public/`, then calls `share_file` w
 
 The signed URL is the only credential a download needs: it is not tied to a chat session or a verified email, so a recipient outside Trinity can open it. Revoke the link if it reaches the wrong hands.
 
+## Reading credential files
+
+Credential files open, preview and download only for the agent's **owner** or an **admin**, signed in or using their own user-scoped MCP key. This covers `.env` and `.env.*`, `.mcp.json` and `.mcp.json.template`, `.credentials.enc`, `~/.ssh`, `~/.aws`, `~/.gcp`, the Claude Code settings and login files, the Gemini and Codex runtime config, `.git/config`, key and certificate files (`*.key`, `*.pem`, `*.p12`, `*.pfx`), `~/.kube/config`, `~/.config/gcloud`, and Trinity's own copies at `.trinity/git-credential` and `.trinity/backup/`. Anyone else the agent is shared with sees: "Credential files can be opened only by the agent's owner or an admin. You can still chat with this agent, and it keeps using its credentials. To view or change them, ask the agent's owner or an admin." Agent, system and connector keys cannot read these files. Every refused read, and every read by anyone other than the owner signed in, is recorded in the audit log.
+
+All other files, including `.trinity/pipelines/` and `.trinity/pipeline-state/`, stay readable by anyone the agent is shared with.
+
+## Links
+
+Files that are links, or that sit inside a linked folder, are not opened, previewed or downloaded through the Files tab, by anyone; the message says the path is a link. Open the file it points to instead. Ship real files, not links, at the paths Trinity reads itself (`CLAUDE.md`, `template.yaml`, dashboard images): a linked `CLAUDE.md`, for example, stops receiving the refreshed Platform Skills section.
+
+If an agent still runs an older image, opening, previewing or downloading its files is refused for anyone other than its owner or an admin (agent keys included), with: "This agent needs a restart to apply an update. Ask the agent's owner or an admin to stop and start it in Trinity." Stop and start the agent from Trinity: that recreates it on the current image.
+
+## Protected runtime files
+
+The Files tab cannot change or delete the agent runtimes' login and configuration files: `~/.claude.json`, `~/.claude/.credentials.json`, `~/.gemini/settings.json` and everything under `~/.tmp/codex/`. Because `~/.tmp/codex/` holds the Codex runtime's login, the `.tmp` folder cannot be deleted from the Files tab.
+
 ## For Agents
 
 | Endpoint | Method | Description |
