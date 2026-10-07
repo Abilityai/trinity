@@ -34,7 +34,15 @@ STATE_COMPLETED = "completed"  # a prior claim finished — replay its snapshot
 class IdempotencyOperations:
     """CRUD for the idempotency_keys table."""
 
-    def claim(self, scope: str, key: str, ttl_hours: int = 24) -> dict:
+    def claim(
+        self,
+        scope: str,
+        key: str,
+        ttl_hours: int = 24,
+        *,
+        ttl_seconds: Optional[int] = None,
+        in_flight_lease_seconds: Optional[int] = None,
+    ) -> dict:
         """Atomically claim (scope, key).
 
         Returns a dict: {state, execution_id, snapshot}.
@@ -44,20 +52,41 @@ class IdempotencyOperations:
 
         An existing row older than ttl_hours is treated as expired: it is
         deleted and the claim re-taken as new.
+
+        Caller-declared intent keys (ent#665) pass ``ttl_seconds`` and
+        ``in_flight_lease_seconds`` instead: the TTL then expires only a
+        COMPLETED row (by ``created_at``), and an ``in_flight`` row is reclaimed
+        only once its ``updated_at`` is older than the lease. A slow send is not
+        stolen by a caller with a short TTL, and a send whose process died
+        mid-flight does not block the message for the whole TTL.
         """
         now = utc_now_iso()
-        cutoff = iso_cutoff(hours=ttl_hours)
         with get_engine().begin() as conn:
             # Drop an expired row for this key so it can be re-claimed.
-            conn.execute(
-                delete(idempotency_keys).where(
-                    and_(
-                        idempotency_keys.c.scope == scope,
-                        idempotency_keys.c.idempotency_key == key,
-                        idempotency_keys.c.created_at < cutoff,
-                    )
-                )
+            this_key = and_(
+                idempotency_keys.c.scope == scope,
+                idempotency_keys.c.idempotency_key == key,
             )
+            if ttl_seconds is None:
+                conn.execute(delete(idempotency_keys).where(and_(
+                    this_key, idempotency_keys.c.created_at < iso_cutoff(hours=ttl_hours),
+                )))
+            else:
+                conn.execute(delete(idempotency_keys).where(and_(
+                    this_key,
+                    idempotency_keys.c.status == STATE_COMPLETED,
+                    idempotency_keys.c.created_at < iso_cutoff(seconds=ttl_seconds),
+                )))
+                if in_flight_lease_seconds is not None:
+                    # ponytail: no owner token, so a send stalled past the lease can
+                    # be re-sent by the reclaimer, and its late complete() overwrites
+                    # (or its late release() deletes) the reclaimer's row. Add a
+                    # claim token if sends ever run that long.
+                    conn.execute(delete(idempotency_keys).where(and_(
+                        this_key,
+                        idempotency_keys.c.status == STATE_IN_FLIGHT,
+                        idempotency_keys.c.updated_at < iso_cutoff(seconds=in_flight_lease_seconds),
+                    )))
             try:
                 # SAVEPOINT so a PK conflict rolls back ONLY this INSERT, not the
                 # whole transaction — PostgreSQL aborts the entire transaction on
@@ -92,8 +121,25 @@ class IdempotencyOperations:
                 ).mappings().first()
                 if row is None:
                     # Extremely unlikely (row deleted between INSERT-fail and
-                    # SELECT). Treat as new so the caller doesn't wedge.
-                    return {"state": STATE_NEW, "execution_id": None, "snapshot": None}
+                    # SELECT, e.g. a concurrent release). Take the claim for real
+                    # rather than proceed with no row — an unrecorded send would be
+                    # repeated by the next caller (ent#665).
+                    try:
+                        with conn.begin_nested():
+                            conn.execute(
+                                insert(idempotency_keys).values(
+                                    scope=scope,
+                                    idempotency_key=key,
+                                    execution_id=None,
+                                    status=STATE_IN_FLIGHT,
+                                    response_snapshot=None,
+                                    created_at=now,
+                                    updated_at=now,
+                                )
+                            )
+                        return {"state": STATE_NEW, "execution_id": None, "snapshot": None}
+                    except IntegrityError:
+                        return {"state": STATE_IN_FLIGHT, "execution_id": None, "snapshot": None}
                 snapshot = None
                 if row["response_snapshot"]:
                     try:
@@ -189,6 +235,31 @@ class IdempotencyOperations:
                     )
                 )
             )
+
+    def discard_completed_if_execution(self, scope: str, key: str, execution_id: str) -> bool:
+        """Compare-and-delete a COMPLETED row only while it still names ``execution_id``.
+
+        #3245: a stored dispatch receipt whose run ended is dropped so an
+        identical retry can dispatch fresh. Two retries that both saw the dead
+        run's row race here: the faster one deletes it, re-claims and
+        re-completes the key with its NEW execution id; the slower one's delete
+        must then match nothing, or it would erase the fresh record and start a
+        second run (``discard_completed`` deletes any completed row, so it is
+        not safe here). ``execution_id`` is required — there is no
+        unconditional form. Returns True iff a row was deleted.
+        """
+        with get_engine().begin() as conn:
+            result = conn.execute(
+                delete(idempotency_keys).where(
+                    and_(
+                        idempotency_keys.c.scope == scope,
+                        idempotency_keys.c.idempotency_key == key,
+                        idempotency_keys.c.status == STATE_COMPLETED,
+                        idempotency_keys.c.execution_id == execution_id,
+                    )
+                )
+            )
+            return (result.rowcount or 0) > 0
 
     def purge_expired(self, ttl_hours: int = 24) -> int:
         """Delete rows older than ttl_hours. Returns rows removed."""

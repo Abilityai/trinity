@@ -8,6 +8,8 @@
 import { z } from "zod";
 import { TrinityClient } from "../client.js";
 import type { McpAuthContext } from "../types.js";
+import { resolveExecutionId } from "./execution_id.js";
+import { INTENT_KEY_TEACHING, intentKeyParams, intentResultFields, type IntentKeyParams } from "./intent_key.js";
 
 /**
  * Create channel tools with the given client
@@ -157,7 +159,8 @@ export function createChannelTools(
       description:
         "Send a proactive message to a channel group (Telegram group, Slack channel). " +
         "Use this to broadcast updates, alerts, or information to groups you're connected to. " +
-        "Rate limited to prevent spam: 10 messages/hour/group, 100 messages/hour/agent.",
+        "Rate limited to prevent spam: 10 messages/hour/group, 100 messages/hour/agent." +
+        INTENT_KEY_TEACHING,
       parameters: z.object({
         channel_type: z.enum(["telegram", "slack"])
           .describe("Channel type: 'telegram' group or 'slack' channel."),
@@ -172,6 +175,7 @@ export function createChannelTools(
             "Agent name to send as. Required for user-scoped API keys. " +
             "For agent-scoped keys, defaults to the calling agent."
           ),
+        ...intentKeyParams,
       }),
       execute: async (
         params: {
@@ -180,7 +184,7 @@ export function createChannelTools(
           message: string;
           thread_ts?: string;
           agent_name?: string;
-        },
+        } & IntentKeyParams,
         context?: { session?: McpAuthContext }
       ) => {
         const authContext = context?.session;
@@ -203,6 +207,12 @@ export function createChannelTools(
 
         try {
           const agentName = getAgentName(authContext, params.agent_name);
+          // Keyless → no intent fields, so the request body is unchanged (ent#665).
+          const intent = params.idempotency_key ? {
+            idempotency_key: params.idempotency_key,
+            idempotency_ttl: params.idempotency_ttl,
+            execution_id: resolveExecutionId(authContext, undefined),
+          } : undefined;
 
           console.log(
             `[send_group_message] Sending to ${params.channel_type} group ${params.chat_id} ` +
@@ -213,7 +223,8 @@ export function createChannelTools(
             const result = await apiClient.sendTelegramGroupMessage(
               agentName,
               params.chat_id,
-              params.message.trim()
+              params.message.trim(),
+              intent
             );
 
             return JSON.stringify({
@@ -223,6 +234,7 @@ export function createChannelTools(
               chat_id: result.chat_id,
               group_title: result.group_title,
               message_id: result.message_id,
+              ...intentResultFields(result as Record<string, unknown>),
             }, null, 2);
           }
 
@@ -231,16 +243,19 @@ export function createChannelTools(
               agentName,
               params.chat_id,
               params.message.trim(),
-              params.thread_ts
+              params.thread_ts,
+              intent
             );
 
             return JSON.stringify({
-              success: result.sent,
+              // A suppressed post (ent#665) is a successful call that sent nothing.
+              success: result.sent || Boolean(result.suppressed_by),
               agent_name: agentName,
               channel_type: params.channel_type,
               chat_id: result.channel_id,
               group_title: result.channel_name,
               thread_ts: result.thread_ts,
+              ...intentResultFields(result as Record<string, unknown>),
             }, null, 2);
           }
 

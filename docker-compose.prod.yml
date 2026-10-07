@@ -220,6 +220,8 @@ services:
       - OPERATOR_QUEUE_EMAIL_MAX=${OPERATOR_QUEUE_EMAIL_MAX:-320}                               # ent#364: addressee email length clamp (RFC 5321)
       - OPERATOR_QUEUE_FLOOD_ALERT_COOLDOWN_SECONDS=${OPERATOR_QUEUE_FLOOD_ALERT_COOLDOWN_SECONDS:-300}  # one flood alert / agent / window
       - OPERATOR_ALERT_MAX_PENDING_PER_TYPE=${OPERATOR_ALERT_MAX_PENDING_PER_TYPE:-5}     # per-(agent,type) platform-alert budget (#1677)
+      - OPERATOR_PLATFORM_ALERT_LIFETIME_DAYS=${OPERATOR_PLATFORM_ALERT_LIFETIME_DAYS:-14}   # #3246: platform alert expires N days after its last reading
+      - OPERATOR_PLATFORM_ALERT_SNOOZE_DAYS=${OPERATOR_PLATFORM_ALERT_SNOOZE_DAYS:-7}        # #3246: a person's ending holds N days unless priority rises
       - GITHUB_PAT=${GITHUB_PAT}
       # Log Retention & Archival Configuration (#1039)
       # These were MISSING from prod — prod launches standalone (no base-compose
@@ -775,6 +777,8 @@ services:
       # #946 pull-pilot routing gate — see docker-compose.yml. Without this the
       # flag cannot be enabled in prod (the #1056/#1039 packaging-gap class).
       - MCP_AGENT_CHAT_PULL_ENABLED=${MCP_AGENT_CHAT_PULL_ENABLED:-false}
+      # #3232 report-back kill switch — see docker-compose.yml.
+      - MCP_REPORT_BACK_ENABLED=${MCP_REPORT_BACK_ENABLED:-true}
       # #848 inline email auth — THIS is the session-tier gate: with it OFF a
       # keyless MCP connection is refused outright and no login tools register.
       # Same packaging-gap class as the line above; the backend reads the same key

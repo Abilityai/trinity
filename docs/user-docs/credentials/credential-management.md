@@ -4,7 +4,7 @@ Add, edit, and hot-reload credentials on agents without restarting them.
 
 ## Concepts
 
-- **Credential Injection** -- Direct file injection system. Credentials are written as `.env` (KEY=VALUE) and `.mcp.json` (generated from template) directly to the agent container.
+- **Credential Injection** -- Direct file injection system. Credentials are written as `.env` (KEY=VALUE) and other allow-listed credential files directly to the agent container. `.mcp.json` is rendered from `.mcp.json.template` when the agent starts.
 - **Credential Vault** -- A platform-level store of named, encrypted credentials that an admin grants to agents, so an agent can fetch a shared secret by name at runtime instead of carrying its own injected copy. Additive to file injection. The vault itself is an enterprise capability; the MCP tools and the transcript scrub described below ship in every build.
 - **Credential Declaration** -- A template says which credentials its agent needs in `template.yaml`: `credentials:` lists the variable **names**, and the optional sibling `credential_setup:` describes each one.
 - **Setup Checklist** -- The per-variable view on the Credentials tab: what this agent needs, which are already set, and where to get the missing ones.
@@ -68,15 +68,23 @@ Add credentials using one of four methods on the **Credentials** tab:
 - **Upload Credential File** -- Upload one file to a destination path (service-account JSON, TLS certs and keys, kubeconfig, SSH keys — see [Which Files Can Be Injected](#which-files-can-be-injected)).
 - **Import from Git** -- Decrypt and inject the `.credentials.enc` backup in the agent's workspace; **Export to Git** writes it.
 
-**Hot-reload:** paste or edit credentials on a running agent. The `.env` file is updated and `.mcp.json` is regenerated immediately. No restart needed.
+**Hot-reload:** paste or edit credentials on a running agent. The `.env` file is updated and the agent's next run sees the new values. No restart needed.
+
+MCP server configuration is different. An `.env` injection does not rewrite `.mcp.json`; to change an MCP server's credential on a running agent, inject an updated `.mcp.json` directly (it is structurally validated first).
 
 ### Credential Pattern in the Agent
 
 ```
 .env                    # Source of truth (KEY=VALUE)
-.mcp.json.template      # Template with ${VAR} placeholders
-.mcp.json               # Generated at runtime from template + .env
+.mcp.json.template      # Template with ${VAR} placeholders (in `env` blocks only)
+.mcp.json               # Rendered at agent start from template + .env
 ```
+
+When the agent starts, Trinity adds each server declared in `.mcp.json.template` that is **missing** from `.mcp.json`, filling `${VAR}` placeholders inside the server's `env` block from `.env`. Three rules apply:
+
+- **Merge, never overwrite.** A server already in `.mcp.json` is left exactly as it is, including one you edited and the platform's own `trinity` entry. Rotating a value in `.env` therefore does not update an MCP server that was already rendered; inject an updated `.mcp.json`, or remove that server entry and restart the agent.
+- **Missing values withhold the server.** A server whose placeholders cannot be resolved is left out, with the reason in the agent's logs. It is never written with blank values.
+- **Each server is validated on its own.** One invalid server does not cost the agent the others.
 
 ### Which Files Can Be Injected
 

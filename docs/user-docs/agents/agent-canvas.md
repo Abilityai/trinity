@@ -19,6 +19,8 @@ Every agent has a **Canvas** tab on its detail page. In the Workspace the same c
 3. Open the agent's **Canvas** tab, or the rail's **Canvas** tab in the Workspace. A dot on the rail tab means the canvas changed since you last looked. Narrow screens and the rail collapse layouts to one column. Pick which canvas to show from the dropdown in the one-line control row above it: pinned canvases come first with 📌, long titles are shortened (the full title is in the canvas header), and with a single canvas the dropdown is disabled rather than hidden, so the row stays the same height for any number of canvases.
 4. Ask for changes the same way. The agent patches only the blocks that changed; the header timestamp moves.
 
+When the agent creates a **new** canvas while you are looking at another one, the panel switches to the new canvas. If you are in **Manage**, searching, or have the share dialog open, the switch waits until you finish, and picking a canvas yourself in the meantime cancels it. A rewrite of a canvas that already exists never pulls you away from the one you are reading.
+
 In the Workspace, the canvas you have open on the rail is the one the agent means by "this". A request that names no canvas lands on the open one, then on `main` if nothing is open, and the agent says which canvas it changed when you did not name one. If you delete the open canvas mid-conversation, the agent's next write does not recreate it. The Chat tab on Agent Detail does not carry an open canvas — name the canvas there.
 
 During a [voice call](../advanced/voice-chat.md) the agent draws on `main` while it talks, and what it drew stays on the canvas afterwards. Blocks the agent wrote itself survive a call untouched: the call only ever replaces its own.
@@ -97,7 +99,7 @@ the **Canvas tab in the Workspace rail**.
 - **Deleting the default canvas is fine.** The agent recreates it the next time
   it writes; you lose the contents, not the surface.
 
-**There is a limit.** Each agent can hold 100 canvases, and the Canvas tab tells
+**There is a limit.** Each agent can hold 100 canvases by default (an operator can change it with `CANVAS_MAX_PER_AGENT`), and the Canvas tab tells
 you the count as you approach it rather than only when the agent is refused. At the limit the agent
 can still *update* everything it has, but creating a *new* one is refused with a
 message telling it to retire one first — nothing is ever deleted automatically to

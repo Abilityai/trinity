@@ -62,19 +62,19 @@ The first four tools need the A2A capability enabled; the three outbound-registr
 
 ## Part 2 — Consume an exposed agent (external orchestrator)
 
-Once an agent is exposed, an external A2A client discovers and tasks it in three steps. The examples below use `curl` against a local instance (front door on port `8001`); a real A2A SDK does the same automatically.
+Once an agent is exposed, an external A2A client discovers and tasks it in three steps. The examples below use `curl` against a local instance (the frontend's front door on port `80`); a real A2A SDK does the same automatically.
 
 ### 1. Discover — fetch the Agent Card
 
 ```bash
-curl -s http://localhost:8001/a2a/new_cool_agent/.well-known/agent-card.json | jq
+curl -s http://localhost/a2a/new_cool_agent/.well-known/agent-card.json | jq
 ```
 
 ```json
 {
   "protocolVersion": "0.3.0",
   "name": "new_cool_agent",
-  "url": "http://localhost:8001/a2a/new_cool_agent",
+  "url": "http://localhost/a2a/new_cool_agent",
   "preferredTransport": "JSONRPC",
   "capabilities": { "streaming": true },
   "securitySchemes": { "bearerAuth": { "type": "http", "scheme": "bearer" } },
@@ -93,7 +93,7 @@ Issue an MCP key from **Settings → MCP Keys** (or the API) and share it with t
 **Synchronous (`message/send`):**
 
 ```bash
-curl -s -X POST http://localhost:8001/a2a/new_cool_agent \
+curl -s -X POST http://localhost/a2a/new_cool_agent \
   -H "Authorization: Bearer $TOKEN" \
   -H 'Content-Type: application/json' \
   -d '{
@@ -170,6 +170,8 @@ price. An agent with no payment config has a byte-identical card to before.
 > agent *costs*; A2A exposure is what makes the paid A2A door reachable. On a
 > build without the exposure feature, a configured price block points at a door
 > that answers `404` — turn exposure on for that agent to open it.
+
+Crypto and card (fiat) plans both work: Trinity advertises the x402 scheme that matches the agent's plan, and the 402's `resource.url` uses the public origin buyers reach you on. See [Nevermined Payments](nevermined-payments.md) for both.
 
 **Time-based (duration) plans.** Set **Credits per Request** to `0`. A duration
 plan charges by time, so Trinity sends no per-call amount and the plan decides
@@ -469,6 +471,7 @@ Auth failures are transport-level `401`; exposure/allow-list failures are `404`/
 
 - [MCP Server](mcp-server.md) — Trinity's own inter-agent protocol, and where the Bearer key comes from
 - [Agent Network](../collaboration/agent-network.md) — agent-to-agent calls inside one Trinity instance
+- [Nevermined Payments](nevermined-payments.md) — configuring the price an inbound A2A caller pays
 
 **External references:**
 

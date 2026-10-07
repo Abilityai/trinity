@@ -1540,12 +1540,92 @@ from the registry on every read: `value`, `color` (from the declared status
   metric_retired`, with `retired_at`): TD-10 refuses `metric=<retired>` on the
   route so a retired metric never silently reads as current, and a widget is
   that same read with nobody there to pass `include_retired`. Each refusal
-  carries a machine `binding_error_code` beside its sentence
-  (`metric_store_unavailable` / `metric_undeclared` / `metric_retired`), the
-  route's `{reason, message}` pair spelled for a widget.
-- A bound widget's `history` is built from `chart`, the same fold its `value`
+  carries a machine `binding_error_code` beside its sentence, the route's
+  `{reason, message}` pair spelled for a widget. There are seven, and every one
+  drops `value`: `metric_store_unavailable` (drops `value` only, ent#730: the
+  docs recommend a `value: 0` placeholder, which an outage would otherwise show
+  as a real 0), `metric_undeclared` (drops `value`), `metric_retired` (drops
+  `value` and `history`), `metric_name_invalid` (a `metric:` that is a truthy
+  non-text value: a number, boolean, list or mapping; ent#730. Before it, a
+  list or mapping crashed the whole dashboard read, and a scalar such as
+  `metric: 5` or `metric: true` read `metric_undeclared`. A falsy value — `0`,
+  `false`, `[]`, `{}` — leaves the widget unbound, as before; it drops the same
+  keys as the `dims` refusals), and the three `dims` refusals below.
+- A bound widget's `history` (without `dims:`) is built from `chart`, the same fold its `value`
   comes from, so its sparkline and trend arrow describe the metric the number
   names.
+- **A bound widget may name one series with `dims: {key: value}`** next to
+  `metric:` (ent#730). `value`, `last_point_at`, `stale`, `freshness`, `color`
+  and `history` then all come from **that one series**: its own latest point,
+  its own staleness judged by the one rule, its own bucket list. Selecting a
+  series is a singleton fold, so the number equals what the tile would show if
+  that series were the metric's only one. `_latest_entry`'s cross-series fold is
+  **not** changed: the objective join and the role card read it.
+- **Matching is the store's identity**, not a literal comparison. The selector
+  is validated by the **same leaf** that validates a recorded point's `dims`
+  (`metric_points_service.validate_dims`: declared keys only, non-empty string
+  values, ≤ 10 keys), then compared with `canonical_dims`, so key order never
+  matters. **Exact match only**: a selector must name every dimension the series
+  carries; a partial selector is refused, not a sub-fold. `dims` absent, `null`
+  or `{}` means **no selector**, and the tile shows the fold exactly as before.
+- **Never the fold on a failed selector.** Three refusals, in the same
+  `{binding_error, binding_error_code, bound: false}` shape, each dropping
+  `value`, `history`, `color`, `bound_series`, `last_point_at`, `stale`,
+  `freshness`, `threshold_verdict`, `direction` and an author-typed
+  `trend`/`trend_value`:
+
+  | Code | When |
+  |---|---|
+  | `metric_dimension_invalid` | `dims` is not a mapping, a value is not a non-empty string (YAML `2024` / `yes`), is over-long or holds a control character, or there are more than 10 keys. A hint is added only for a non-text value, chosen by its type: quote it / one value per tile / the value is missing. |
+  | `metric_dimension_undeclared` | A key the metric does not declare. The sentence lists the declared keys, or says the metric declares none. |
+  | `metric_series_not_found` | Valid and declared, but no recent series matches, including on a metric with no points at all. `binding_error` is "metric 'ad_spend': no recent data for channel=tiktok" (never "does not exist"); the rest travels as `binding_detail` facts (`selector`, `recent_series` ≤ 5, `more`, `window_points`, `series_cap`, `near` ≤ 5) and the browser writes the second line. |
+
+- **Known limit, documented not fixed:** the read keeps each metric's 200 newest
+  points (`LATEST_POINTS_PER_METRIC`) and lists 50 series
+  (`MAX_SERIES_PER_METRIC`). A series that reports rarely beside a busy one can
+  fall outside that window and is then refused `metric_series_not_found` even
+  though it still reports; the refusal states the window as facts and the hint
+  says so. A selector-specific lookup is the fix (follow-up bug #3293).
+- **Every successfully bound widget says what its number is** through
+  `bound_series` (facts; the browser writes the caption):
+
+  | Field | `selected` | `series` | `folded` | unselected, 0 points |
+  |---|---|---|---|---|
+  | `basis` | `"selected"` | `"series"` (a single series, the newest of several under `last`, or a non-numeric metric declaring `sum`/`avg`, whose fold is the newest value) | `"folded"` | no `bound_series` |
+  | `aggregation` | normalised | `chart.aggregation` | `chart.aggregation` | |
+  | `series_count` | `entry.series_count` | `entry.series_count` | `entry.series_count` | |
+  | `dims` | the matched series' dims | `chart.dims` (may be `null`; the newest series' dims for a non-numeric `sum`/`avg`) | `null` | |
+  | `dimensions` | declared keys | declared keys | declared keys | |
+  | `stale_count` | absent | absent | stale series in `latest_by_series` when `series_count ≤ 50`, else `null` | |
+
+- **A successful bind owns the trend and the direction.** It pops an
+  author-typed `trend`/`trend_value` (on the selected and the fold path alike,
+  so an author arrow never contradicts the computed sparkline) and writes
+  `direction` (the registry's `up_good` / `down_good` / `neutral`, overwriting
+  an author value). A matched selector also clears an author `color`.
+- **Threshold verdict.** `threshold_verdict = {level, threshold}` is written on
+  a successful bind whose value is a number, for a judgeable metric (not
+  `status`, `up_good`/`down_good`, at least one threshold): `level` is
+  `critical` / `warning` / `ok`, `threshold` is the breached one (`null` on
+  `ok`). It is computed by the same `_threshold_verdict` rule that gives `color`,
+  on the selected series' value or on the fold, so each per-channel tile is
+  judged on its own number. Because judgeability depends only on the
+  declaration, the field is present on every poll, and the panel reserves the
+  badge's width so crossing a threshold never shifts the layout. The panel shows
+  it as a Critical / Warning badge on bound `metric` tiles only (`status` and
+  `progress` already show the verdict through `color`).
+- **Bound tiles colour their trend by the declared direction.** The trend arrow
+  and sparkline of a bound widget use the shared `metricFormat.trendClasses` /
+  `sparklineColor`, so a rising `down_good` cost reads red and a `neutral`
+  metric reads a grey arrow over a blue sparkline, exactly like its declared-metric tile. Unbound widgets keep
+  their colours.
+- **Compat X-009 (SOFT, static)** reports, with the tile's own code and
+  sentence, a truthy `metric:` that is not text, a `dims:` with no `metric:`, and a
+  `dims:` selector that can never match the dimensions its metric declares in
+  `template.yaml` (validated by the shared `parse_dims_selector`). It never
+  consults points, so a valid selector with no data yet passes. The refusal
+  otherwise renders only in the browser; the compatibility report is how an
+  agent sees it.
 - A store outage degrades **per widget**; a dashboard is never 5xx'd because one
   widget named a metric.
 - The agent-server `validate_widget` no longer requires `value` (or `color` on a
@@ -1571,7 +1651,9 @@ place** instead: the route still exists but reads neither `template.yaml` nor
 serving the file would have left the agent half of a deleted backend read alive
 (Invariant #5) and made `metrics.json` a second source of truth for a number the
 registry owns. `series_limit` and the bucket count as Settings rows — they are
-read bounds on one query, not operator policy.
+read bounds on one query, not operator policy. A `dims` selector on
+`GET /api/agents/{name}/metrics` and MCP `get_metrics`: ent#730 shipped the
+widget half only (follow-up ent#828).
 
 ### Acceptance
 

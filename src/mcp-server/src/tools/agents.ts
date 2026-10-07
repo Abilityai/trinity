@@ -237,6 +237,7 @@ export function createAgentTools(
       name: "create_agent",
       description:
         "Create a new agent in the Trinity platform. " +
+        "With an agent key, this needs the agent-management permission an instance admin grants (ephemeral helpers excepted); without it the call is refused with `agent_management_not_permitted`. " +
         "You can create agents from: (1) any GitHub repo using 'github:owner/repo' format (PAT must have access), " +
         "(2) pre-defined templates from list_templates, or (3) local templates. " +
         "The agent will be started automatically after creation.",
@@ -463,6 +464,7 @@ export function createAgentTools(
       name: "delete_agent",
       description:
         "Delete an agent from the Trinity platform (owner or admin). " +
+        "With an agent key, this needs the agent-management permission an instance admin grants (ephemeral helpers excepted); without it the call is refused with `agent_management_not_permitted`. " +
         "Durable agents are SOFT-deleted: the container is removed but data is " +
         "recoverable by an admin until the retention window (default 180d) expires. " +
         "Ephemeral 'ghost' agents are HARD-discarded immediately: container, storage, " +
@@ -787,6 +789,7 @@ export function createAgentTools(
       // recipe therefore lives on `archive`, and the rules come first here.
       description:
         "Deploy a Trinity-compatible local agent to the remote Trinity platform. " +
+        "With an agent key, this needs the agent-management permission an instance admin grants (ephemeral helpers excepted); without it the call is refused with `agent_management_not_permitted`. " +
         "IMPORTANT: package the directory locally AND embed an integrity manifest (.trinity-manifest.json, #2060) BEFORE calling — " +
         "follow the exact four steps in the `archive` parameter (manifest script, COPYFILE_DISABLE=1 tar with the same excludes, base64, call). " +
         "The backend verifies the extracted tree against the embedded manifest and REFUSES drift (400 MANIFEST_DRIFT naming missing/altered/extra paths) — a pruned or mangled archive can never deploy silently; a missing manifest is refused (MANIFEST_REQUIRED). " +

@@ -6,15 +6,15 @@ A short, research-backed set of fleet rules you can paste into your instance's *
 
 The Trinity prompt is one block of instance-wide instructions that an admin writes once and every agent receives.
 
-- **Where to set it**: **Settings → General → Trinity prompt** (admin only). It is stored as the `trinity_prompt` setting. Clear the field to remove it.
-- **What it applies to**: every agent on the instance, on every chat and task turn. Trinity adds it to the end of the platform instructions under a `## Custom Instructions` heading. The prompt is rebuilt for each turn, so a change takes effect from the next turn.
+- **Where to set it**: **Settings → General → Trinity Prompt**, in the **Custom Instructions** field (admin only). It is stored as the `trinity_prompt` setting. Clear the field to remove it. The **How it works** box under the field links to this page.
+- **What it applies to**: every agent on the instance, whatever its runtime, on every chat and task turn. It is not written into `CLAUDE.md` and is not read once at startup. Trinity adds it to the end of the platform instructions under a `## Custom Instructions` heading. The prompt is rebuilt for each turn, so a change takes effect from the next turn.
 - **How it relates to the other layers**: each agent sees three layers of instructions:
 
 | Layer | Written by | Scope | Contains |
 |-------|-----------|-------|----------|
 | Platform instructions | Trinity | Every agent | How tools, asks, reports, canvases, files and the turn lifecycle work. Updated with each release. |
 | Trinity prompt | Your admin | Every agent on this instance | Fleet rules: how agents on *this* instance should behave |
-| Agent `CLAUDE.md` | The agent's author | One agent | That agent's role, skills and domain knowledge |
+| Agent `CLAUDE.md` (`AGENTS.md` on Codex) | The agent's author | One agent | That agent's role, skills and domain knowledge |
 
 > **Note:** Deploying a [system manifest](../collaboration/system-manifest.md#things-the-preview-will-make-you-confirm) with a top-level `prompt:` key **replaces** the Trinity prompt for every agent on the instance. If you have adopted the prompt below, check a manifest's preview before you deploy it.
 

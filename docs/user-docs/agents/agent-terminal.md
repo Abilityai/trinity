@@ -50,7 +50,7 @@ The system agent (`trinity-system`) exposes the same WebSocket terminal to API c
 | Endpoint | Method | Description |
 |----------|--------|-------------|
 | `/api/agents/{name}/ssh-access` | POST | Inject a public key for `ttl_hours` and return connection details (admin only, agent must be running) |
-| `/api/agents/{name}/terminal` | WebSocket | Interactive PTY over WebSocket; `?mode=claude\|gemini\|bash`, optional `&model=` for the Claude Code TUI |
+| `/api/agents/{name}/terminal` | WebSocket | Interactive PTY over WebSocket (agent owner or admin). The first message, within 10 seconds, must be `{"type": "auth", "token": "<jwt>"}`. `?mode=claude\|gemini\|codex\|bash` (default `claude`; any other value opens bash), optional `&model=` passed to the chosen CLI |
 | `/api/system-agent/terminal` | WebSocket | The same PTY for the system agent (admin only) |
 
 **MCP tool**: `get_agent_ssh_access(agent_name, public_key, ttl_hours=4)` — the same operation for MCP clients; admin only.

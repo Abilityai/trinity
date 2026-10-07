@@ -1427,6 +1427,133 @@ def c_x007(snap):
     return _with_template(snap, f)
 
 
+def _as_wire(value):
+    """`value` as the bound tile receives it from the agent server (ent#730).
+
+    The agent server's `GET /api/dashboard` returns the parsed YAML as a plain
+    dict, which FastAPI renders with `jsonable_encoder` and then `json.dumps`.
+    The real encoder turns a YAML `date`/`datetime` into its ISO text (keys
+    included), and the JSON round trip makes every mapping key text, exactly
+    as the backend's `response.json()` sees them. NaN is kept as a number (the
+    real response refuses it outright; a "must be text" finding is the more
+    useful report). Raises on anything the encoder cannot render, which the
+    caller's fail-closed `try` turns into a failed check.
+    """
+    import json
+
+    from fastapi.encoders import jsonable_encoder
+
+    return json.loads(json.dumps(jsonable_encoder(value)))
+
+
+def c_x009(snap):
+    """SOFT, STATIC: `dashboard.yaml` bindings that can never resolve (ent#730).
+
+    A `dims:` selector's refusal renders only in the browser, and the
+    dashboard route is `# mcp: none`, so an agent never sees its own mistake.
+    This rides the compatibility report instead, and validates each selector
+    against the dimensions its metric declares in `template.yaml` with the
+    binding's OWN parser (`metric_read_service.parse_dims_selector`, which
+    wraps the write path's `validate_dims`): the report and the tile give the
+    same code and the same sentence. It also reports a `metric:` that is not
+    text (`invalid_metric_name`, the binding's sentence), and a `dims:` with no
+    `metric:`, which does nothing.
+
+    Deliberately NOT flagged: a valid selector with no points yet (a runtime
+    fact the tile states), a partial selector (a point may carry any subset of
+    the declared dimensions, so it is not provably wrong from the template),
+    and a widget whose metric is undeclared or malformed (D-009 owns malformed
+    entries, and no check flags undeclared bindings). D-003 is untouched; the
+    bound predicate is the same truthy `metric` it, the agent server and
+    `is_bound` use.
+
+    It judges each widget's `metric:` and `dims:` AS THE TILE RECEIVES THEM,
+    not as raw YAML. The agent server returns the parsed `dashboard.yaml`
+    through FastAPI's JSON response, so an unquoted `dims: {day: 2024-01-01}`
+    (a YAML date) reaches the binding as the text `"2024-01-01"` and binds,
+    and an unquoted `metric: 2024-01-01` is text the tile calls undeclared.
+    A number stays a number on the wire, so `dims: {channel: 2024}` is still
+    flagged. `_as_wire` applies the same conversion.
+
+    Function-local imports, per the D-009 / T-018 convention, and fail CLOSED
+    on a raise for D-009's reason verbatim (a raise inside `run_static` would
+    be persisted as a clean bill of health).
+    """
+    if not _exists(snap, "dashboard.yaml"):
+        return _skip("dashboard.yaml missing (see F-010)", "no_dashboard")
+    _d, widgets, err = _dashboard(snap)
+    if err:
+        return _skip("dashboard.yaml invalid (see D-001)", "invalid_dashboard")
+    try:
+        from services import metric_read_service, template_metrics
+
+        findings: List[Dict[str, str]] = []
+        selecting = []
+        for w in widgets or []:
+            metric = _as_wire(w.get("metric"))
+            name_problem = metric_read_service.invalid_metric_name(metric)
+            if name_problem is not None:
+                findings.append({"metric": "(not text)",
+                                 "label": _clip(w.get("label") or ""),
+                                 "code": "metric_name_invalid",
+                                 "problem": _clip(name_problem, 240)})
+                continue
+            raw = _as_wire(w.get("dims"))
+            if raw is None or (isinstance(raw, dict) and not raw):
+                continue
+            if not metric:
+                findings.append({"metric": "(none)",
+                                 "label": _clip(w.get("label") or ""),
+                                 "code": "dims_without_metric",
+                                 "problem": "dims selects a series of a bound "
+                                            "metric, so without metric: it "
+                                            "does nothing"})
+                continue
+            selecting.append((w, metric, raw))
+
+        if selecting:
+            data, terr = _template(snap)
+            if terr and not findings:
+                return (_skip("template.yaml missing (see F-001)", "no_template")
+                        if terr == "missing"
+                        else _skip("template.yaml invalid (see T-001)",
+                                   "invalid_template"))
+            declared = {}
+            if not terr:
+                for entry in template_metrics.normalize_declared_metrics(
+                        (data or {}).get("metrics")):
+                    declared[entry["name"]] = list(entry.get("dimensions") or [])
+            for w, name, raw in selecting:
+                if name not in declared:
+                    continue
+                _clean, problem = metric_read_service.parse_dims_selector(
+                    raw, declared[name])
+                if problem is None:
+                    continue
+                findings.append({"metric": _echo_key(name),
+                                 "label": _clip(w.get("label") or ""),
+                                 "code": problem[0],
+                                 # The leaf interpolates DECLARED keys raw, and
+                                 # the registry's name regex accepts a trailing
+                                 # newline: clip, which drops non-printables.
+                                 "problem": _clip(problem[1], 240)})
+    except Exception as e:  # noqa: BLE001
+        # Type name ONLY: `detail` is persisted to checks_json and rendered,
+        # and `str(e)` can embed untrusted template content (D-009).
+        return _fail("dims selectors could not be evaluated",
+                     {"error_type": type(e).__name__})
+
+    if findings:
+        return _fail(
+            f"dashboard.yaml metric:/dims: bindings that can never resolve: "
+            f"{len(findings)} widget(s)",
+            {"widgets": findings[:25]},
+        )
+    if not selecting:
+        return _ok("no widget carries dims:")
+    return _ok("dims: selectors name declared dimensions")
+
+
 # ===========================================================================
 # I — Composability (static parts)
 # ===========================================================================
@@ -1652,7 +1779,7 @@ STATIC_CHECKS = {
     "A-001": c_a001, "A-002": c_a002, "A-004": c_a004,
     "D-001": c_d001, "D-002": c_d002, "D-003": c_d003, "D-004": c_d004,
     "D-005": c_d005, "D-008": c_d008, "D-009": c_d009, "D-010": c_d010,
-    "X-003": c_x003, "X-004": c_x004, "X-007": c_x007,
+    "X-003": c_x003, "X-004": c_x004, "X-007": c_x007, "X-009": c_x009,
     "I-006": c_i006,
     "DP-001": c_dp001, "DP-002": c_dp002, "DP-003": c_dp003,
     "DP-004": c_dp004,

@@ -12,7 +12,7 @@ not-planned) made that predicate permanently false: a fresh install now comes up
 with the bundled system's agents plus Cornelius already running, so the
 first-run surface it was gating never appeared again.
 
-The seed is deployed **as the admin user** (``system_seed_service.SEED_OWNER``),
+The seed is deployed **as the admin user** (``utils.admin_identity.admin_username()``),
 so it is indistinguishable from a human admin's own work in ``audit_log`` — an
 actor-based predicate cannot answer this. What CAN answer it is the seed's own
 naming contract, which is deterministic: the manifest deploys ``{system}-{short}``

@@ -59,8 +59,12 @@ def _normalize_user_path(raw: str) -> str:
     if not raw:
         return ""
     # posixpath.normpath collapses `..` and `.` lexically; fine for matching.
+    # It also keeps exactly two leading slashes (POSIX leaves `//` implementation-
+    # defined), while Linux and the agent server's resolve() read them as one —
+    # left alone, `//home/developer/.ssh/x` matched no path pattern and no fence
+    # (trinity-enterprise#792).
     if raw.startswith("/"):
-        return posixpath.normpath(raw)
+        return posixpath.normpath("/" + raw.lstrip("/"))
     return posixpath.normpath(posixpath.join("/home/developer", raw))
 
 
@@ -89,6 +93,41 @@ def _is_user_writable_path(path: str) -> bool:
     return True
 
 
+def _deny_anchor(pattern: str) -> str:
+    """The fixed directory (or file) a path-anchored deny pattern lives under:
+    its literal prefix, cut back to the last `/` before the first glob char.
+    Relative patterns are anchored at /home/developer, as the matcher reads them."""
+    glob_at = min((i for i, c in enumerate(pattern) if c in "*?["), default=None)
+    head = pattern if glob_at is None else pattern[:pattern.rfind("/", 0, glob_at) + 1]
+    if not head.startswith("/"):
+        head = posixpath.join("/home/developer", head)
+    return head.rstrip("/") or "/"
+
+
+# trinity-enterprise#792: DELETE removes everything under a directory, so
+# deleting `.ssh` (or `.claude`, or the home dir) is the same act as deleting
+# `.ssh/authorized_keys`. The `/proc` anchor is load-bearing here:
+# `/proc/self/root/...` and `/proc/self/cwd/...` resolve into the home dir in
+# the agent container.
+_DENY_ANCHORS = tuple(_deny_anchor(p) for p in _FILE_WRITE_DENY_PATTERNS if "/" in p)
+
+
+def _is_user_deletable_path(path: str) -> bool:
+    """Reject deleting a protected path or any directory that holds one.
+
+    Only the path-anchored patterns can be checked that way. A basename pattern
+    (`.env`, `.credentials.enc`) can sit in any directory, so deleting a
+    directory that merely contains one is not refused here; the agent server's
+    own by-name `PROTECTED_PATHS` block applies on its side. Fails closed: an
+    empty path is refused (via the write check), and `/` holds every anchor.
+    """
+    if not _is_user_writable_path(path):
+        return False
+    normalized = _normalize_user_path(path)
+    head = normalized.rstrip("/")
+    return not any(a == normalized or a.startswith(head + "/") for a in _DENY_ANCHORS)
+
+
 # trinity-enterprise#596: the skills directory is where a library skill lands
 # (`skill_service.inject_skills`). Writing it through the generic file routes is
 # the same act as assigning a skill — an executable package in the agent's head —
@@ -114,12 +153,45 @@ def _touches_skills_dir(path: str, *, include_ancestors: bool = False) -> bool:
     return False
 
 
+# trinity-enterprise#164: the agent's INSTRUCTIONS — its top-level CLAUDE.md /
+# AGENTS.md and everything under `.claude/` except the skills dir (which is
+# `skills.manage`, one permission per file class). A platform write there
+# changes how the agent behaves, so it takes `instructions.manage`. Only the
+# agent's own top-level files count: a `docs/CLAUDE.md` is an ordinary file.
+_HOME = "/home/developer"
+_INSTRUCTION_FILES = (f"{_HOME}/CLAUDE.md", f"{_HOME}/AGENTS.md")
+_CLAUDE_DIR = f"{_HOME}/.claude"
+
+
+def _touches_instructions(path: str, *, include_ancestors: bool = False) -> bool:
+    """True for CLAUDE.md, AGENTS.md, or `.claude/**` outside the skills dir;
+    with `include_ancestors`, also for a directory ABOVE them (deleting `.claude`
+    or the home dir removes the instructions as surely)."""
+    normalized = _normalize_user_path(path)
+    if not normalized:
+        return False
+    if normalized in _INSTRUCTION_FILES:
+        return True
+    if normalized.startswith(_CLAUDE_DIR + "/") and not _touches_skills_dir(normalized):
+        return True
+    if normalized == _CLAUDE_DIR:
+        return include_ancestors
+    if include_ancestors:
+        return _CLAUDE_DIR.startswith(normalized.rstrip("/") + "/")
+    return False
+
+
 async def _require_skill_capability(path, current_user, request, agent_name, *, include_ancestors=False):
+    from dependencies import enforce_agent_capability
     if _touches_skills_dir(path, include_ancestors=include_ancestors):
-        from dependencies import enforce_agent_capability
         from db.capability_grants import CAPABILITY_SKILLS_MANAGE
         await enforce_agent_capability(
             request, current_user, CAPABILITY_SKILLS_MANAGE, target=agent_name
+        )
+    if _touches_instructions(path, include_ancestors=include_ancestors):
+        from db.capability_grants import CAPABILITY_INSTRUCTIONS_MANAGE
+        await enforce_agent_capability(
+            request, current_user, CAPABILITY_INSTRUCTIONS_MANAGE, target=agent_name
         )
 
 
@@ -252,6 +324,18 @@ async def delete_agent_file_logic(
     # ent#596: a write into the skills dir needs the skill-management capability.
     await _require_skill_capability(path, current_user, request, agent_name, include_ancestors=True)
 
+    # trinity-enterprise#792: the write deny list applies to DELETE too, and to
+    # any directory that holds a protected path.
+    if not _is_user_deletable_path(path):
+        logger.warning(
+            "File delete blocked at backend deny-list: agent=%s path=%s user=%s",
+            agent_name, path, current_user.username,
+        )
+        raise HTTPException(
+            status_code=403,
+            detail=f"Cannot delete protected path: {path}"
+        )
+
     container = get_agent_container(agent_name)
     if not container:
         raise HTTPException(status_code=404, detail="Agent not found")
@@ -266,7 +350,8 @@ async def delete_agent_file_logic(
             agent_name,
             "DELETE",
             "/api/files",
-            params={"path": path},
+            # ent#792: send the path the checks above approved, not the raw input
+            params={"path": _normalize_user_path(path)},
             max_retries=3,
             retry_delay=1.0,
             timeout=30.0
@@ -405,7 +490,8 @@ async def update_agent_file_logic(
             agent_name,
             "PUT",
             "/api/files",
-            params={"path": path},
+            # ent#792: send the path the checks above approved, not the raw input
+            params={"path": _normalize_user_path(path)},
             json={"content": content},
             max_retries=3,
             retry_delay=1.0,
@@ -482,7 +568,8 @@ async def create_agent_folder_logic(
             agent_name,
             "POST",
             "/api/files/mkdir",
-            params={"path": path},
+            # ent#792: send the path the checks above approved, not the raw input
+            params={"path": _normalize_user_path(path)},
             max_retries=3,
             retry_delay=1.0,
             timeout=30.0

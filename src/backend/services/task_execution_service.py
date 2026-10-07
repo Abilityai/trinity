@@ -615,6 +615,7 @@ def build_pull_queue_payload(
     schedule_context: Optional[dict] = None,
     attempt: Optional[int] = None,
     images: Optional[list] = None,
+    collaboration_activity_id: Optional[str] = None,
 ) -> Optional[PersistentTaskPayload]:
     """The #2391 producer gate: the overflow payload that lets THIS producer put
     a row on the durable queue, or ``None`` to keep today's ``"reject"`` policy.
@@ -701,7 +702,8 @@ def build_pull_queue_payload(
         subscription_id=subscription_id,
         x_source_agent=source_agent_name,
         triggered_by=triggered_by,
-        collaboration_activity_id=None,
+        # #3127: an agent-to-agent /chat turn's activity, closed by the sink.
+        collaboration_activity_id=collaboration_activity_id,
         # #3114: what the push payload sends beside the request. The worker
         # needs persist_session and images to run the same turn; the claim
         # composes the prompt from schedule_context and attempt; the claim
@@ -746,6 +748,7 @@ async def dispatch_and_await_terminal(
     wait_timeout: Optional[float] = None,
     claim_budget: Optional[float] = None,
     service: Optional["TaskExecutionService"] = None,
+    caller_waiting: bool = False,
     **execute_kwargs,
 ) -> TaskExecutionResult:
     """``execute_task`` for a caller that genuinely needs the answer in-line.
@@ -775,7 +778,9 @@ async def dispatch_and_await_terminal(
     FAILED/``CAPACITY``, which is what push answers for an agent with no free
     slot. A cancel that loses the race means a worker just claimed the row, so
     the wait carries on. Phase 2 is the terminal wait, timed from the claim.
-    Other triggers keep the single terminal wait.
+    Other triggers keep the single terminal wait, unless the caller passes
+    ``caller_waiting=True``: a blocked caller whose trigger is autonomous (an
+    agent-to-agent ``/chat``, #3127) opts into the two phases explicitly.
 
     A wait that times out returns a FAILED result with ``TIMEOUT`` rather than
     raising — the execution keeps running and its real terminal still lands on
@@ -808,7 +813,7 @@ async def dispatch_and_await_terminal(
         "[TaskExecService] %s dispatch for %s queued as %s; awaiting its terminal",
         triggered_by, agent_name, result.execution_id,
     )
-    if triggered_by in _CLAIM_WAITING_TRIGGERS:
+    if caller_waiting or triggered_by in _CLAIM_WAITING_TRIGGERS:
         try:
             claimed = await _wait_until_claimed(result.execution_id, claim_budget)
         except asyncio.CancelledError:
@@ -1475,6 +1480,9 @@ class TaskExecutionService:
         # approver run their own gated request; None ⇒ the requester is derived
         # from the row's fields and never self-approves.
         gate_requester: Optional["skill_gate_service.Requester"] = None,
+        # #3127: the agent-to-agent /chat collaboration activity. Only a pull
+        # pilot's queue reads it (the pull sink closes it); ignored on push.
+        collaboration_activity_id: Optional[str] = None,
     ) -> TaskExecutionResult:
         """
         Execute a task on an agent container with full lifecycle management.
@@ -1602,6 +1610,7 @@ class TaskExecutionService:
             schedule_context=schedule_context,
             attempt=attempt,
             images=images,
+            collaboration_activity_id=collaboration_activity_id,
         )
 
         # Wrap entire execution flow to ensure execution status is updated on any failure.
@@ -2067,6 +2076,9 @@ class TaskExecutionService:
                     status=TaskExecutionStatus.FAILED,
                     response="",
                     error=error_msg,
+                    # #3127: a full backlog answers a sync caller 429/capacity,
+                    # as a full slot pool does.
+                    error_code=TaskExecutionErrorCode.CAPACITY,
                 )
             except CircuitOpen as e:
                 # #526: dispatch breaker open — fast-fail before any agent
