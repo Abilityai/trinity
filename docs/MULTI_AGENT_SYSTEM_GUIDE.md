@@ -819,7 +819,7 @@ mcp__trinity__chat_with_agent(
 
 **What this means for agent design:**
 - A long synchronous call no longer just fails: when the server can match it to its execution, it answers with a receipt and the target keeps running it; when it cannot, the error says so and names `list_recent_executions`
-- The caller reads the outcome with `get_execution_result(agent_name, execution_id)` and never re-sends — a reworded re-send runs the work twice. Every agent is taught this as the delegation contract in its platform prompt (§Agent Collaboration); the `chat_with_agent` description carries the same text
+- The caller reads the outcome with `get_execution_result(agent_name, execution_id)` and never re-sends — unless the outcome is a confirmed `failed` or `cancelled`, which a word-for-word re-send retries (if the same `execution_id` comes back, set a reminder and end the turn). A reworded re-send runs the work twice. Every agent is taught this as the delegation contract in its platform prompt (§Agent Collaboration); the `chat_with_agent` description carries the same text
 - The calling turn still decides what to do while it waits: read later, arm `set_reminder`, or — for a `parallel=true` run — subscribe to the target's `agent.task.completed` / `agent.task.failed`
 
 **Design patterns that work within this constraint:**

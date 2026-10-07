@@ -215,14 +215,190 @@ export function sparklinePoints(metric = {}) {
 export function chartBasisNote(metric = {}) {
   const chart = metric.chart
   if (!chart || chart.basis !== 'series' || !(chart.series_count > 1)) return null
-  const dims = Object.entries(chart.dims || {})
-    .map(([k, v]) => `${k}=${v}`)
-    .join(',')
+  const dims = formatDims(chart.dims)
   return {
     label: dims ? `chart: ${dims}` : 'chart: 1 series',
     title: `A '${chart.aggregation || 'last'}' metric has no cross-series fold, so this `
       + `chart and its trend show the most recently updated of `
       + `${chart.series_count} dimension series, not all of them.`,
+  }
+}
+
+/**
+ * One series' dimensions as `channel=meta, geo=us` (ent#730).
+ *
+ * Keys in canonical (sorted) order, the order the store's series identity
+ * uses (`metric_points_service.canonical_dims`). A value containing
+ * whitespace, `,` or `=` is JSON-quoted so the pair stays unambiguous and on
+ * one line. Mirrors the backend's `_dims_text`, which writes the same pairs
+ * into a `metric_series_not_found` sentence.
+ */
+export function formatDims(dims) {
+  if (!dims || typeof dims !== 'object') return ''
+  return Object.keys(dims)
+    .sort()
+    .map((key) => {
+      const value = String(dims[key])
+      return `${key}=${/[\s,=]/.test(value) ? JSON.stringify(value) : value}`
+    })
+    .join(', ')
+}
+
+/**
+ * The published docs section a `dims:` refusal links to. The published site,
+ * not a `github.com/.../blob/main/...` URL (the `HARDENING_DOCS_URL`
+ * precedent): `docs/user-docs/advanced/dynamic-dashboards.md` is published as
+ * `guides/dynamic-dashboards`.
+ */
+export const DIMS_DOCS_URL = 'https://docs.ability.ai/guides/dynamic-dashboards#one-series-per-tile-dims'
+
+/** The `binding_error_code`s a `dims:` selector can produce. */
+export const DIMS_REFUSAL_CODES = new Set([
+  'metric_series_not_found',
+  'metric_dimension_undeclared',
+  'metric_dimension_invalid',
+])
+
+const FOLD_WORDS = { sum: 'sum', avg: 'avg' }
+const FOLD_TITLE_WORDS = { sum: 'sum', avg: 'average' }
+
+/**
+ * What a bound widget's number IS, from the backend's `bound_series` facts
+ * (ent#730) — `{text, dims, tone, title}` or `null` when there is nothing to
+ * qualify (one series, no selector).
+ *
+ * `text` is prose (sans) and `dims` is the machine `k=v` part (mono); the
+ * component renders them side by side. The backend sends facts and this
+ * writes the copy, so the wording can change without an API change.
+ */
+export function boundSeriesNote(widget = {}) {
+  const bs = widget.bound_series
+  if (!widget.metric || widget.bound !== true || !bs || typeof bs !== 'object') return null
+  const count = bs.series_count
+  const dims = formatDims(bs.dims)
+  if (bs.basis === 'selected') {
+    return {
+      text: '',
+      dims,
+      tone: 'tertiary',
+      title: `Only the ${dims} series of ${widget.metric}, chosen by dims in dashboard.yaml.`,
+    }
+  }
+  if (!(count > 1)) return null
+  const dimensions = Array.isArray(bs.dimensions) ? bs.dimensions : []
+  const fold = bs.basis === 'folded' ? FOLD_WORDS[bs.aggregation] : undefined
+  if (fold) {
+    const noun = dimensions.length === 1 ? `${dimensions[0]} values` : 'series'
+    const stale = bs.stale_count > 0 ? ` · ${bs.stale_count} stale` : ''
+    const each = dimensions.length === 1 ? `${dimensions[0]}s` : 'series'
+    return {
+      text: `${fold} of ${count} ${noun}${stale}`,
+      dims: '',
+      tone: 'tertiary',
+      title: `The ${FOLD_TITLE_WORDS[bs.aggregation]} of the latest value of each of ${count} ${each}. `
+        + 'Add dims to show one.',
+    }
+  }
+  return {
+    text: dims ? `newest of ${count}: ` : `newest of ${count} series`,
+    dims,
+    tone: 'secondary',
+    title: `This tile shows the most recently updated of its ${count} series, not all of them. `
+      + 'Add dims to pin one.',
+  }
+}
+
+/**
+ * The second line of a `metric_series_not_found` refusal, from the backend's
+ * `binding_detail` facts — or `null` without them. Deterministic hints only:
+ * a partial selector's real series, a casing mismatch, "no points yet", and
+ * otherwise the recent values and the read window. No fuzzy matching.
+ */
+export function refusalHint(widget = {}) {
+  const detail = widget.binding_detail
+  if (!detail || typeof detail !== 'object') return null
+  const selector = detail.selector || {}
+  const recent = Array.isArray(detail.recent_series) ? detail.recent_series : []
+  const near = Array.isArray(detail.near) ? detail.near : []
+  // Own keys only: `in` would find a dimension named `constructor` on Object.prototype.
+  const has = (obj, key) => Object.prototype.hasOwnProperty.call(obj, key)
+  if (near.length) {
+    const missing = Object.keys(near[0]).filter((k) => !has(selector, k)).sort()
+    return `Exact match also needs ${missing.join(', ')}: ${formatDims(near[0])}`
+  }
+  const wanted = formatDims(selector).toLowerCase()
+  const cased = recent.find((dims) => formatDims(dims).toLowerCase() === wanted)
+  if (cased && formatDims(cased) !== formatDims(selector)) {
+    return `Did you mean ${formatDims(cased)}?`
+  }
+  if (!recent.length) return 'This metric has no points yet.'
+  const keys = Object.keys(selector)
+  const single = keys.length === 1
+    && recent.every((dims) => dims && Object.keys(dims).length === 1 && has(dims, keys[0]))
+  const noun = single ? keys[0] : 'series'
+  // One declared key: list the values alone ("meta, google"), not "channel=meta".
+  const shown = recent.slice(0, 2)
+    .map((dims) => (single ? formatDims(dims).slice(keys[0].length + 1) : formatDims(dims)))
+  const rest = recent.length - shown.length + (detail.more || 0)
+  const list = `${shown.join(single ? ', ' : '; ')}${rest > 0 ? `, +${rest}` : ''}`
+  const lead = `Check the selector or confirm this ${noun} reports. Recent ${noun}: ${list}`
+  if (detail.series_cap) {
+    return `${lead}. Only the ${detail.series_cap} newest series are read, so this one may be outside them.`
+  }
+  return `${lead} (among the ${detail.window_points} newest points; a ${noun} that reports rarely `
+    + 'can fall outside them).'
+}
+
+const VERDICTS = {
+  critical: { variant: 'danger', label: 'Critical', reserved: false },
+  warning: { variant: 'warning', label: 'Warning', reserved: false },
+  // `ok` keeps the slot: the badge renders invisible rather than not at all,
+  // so a background poll that crosses a threshold swaps it in place instead
+  // of adding one and shifting the layout. Its label is arbitrary — the
+  // badge's width does not depend on which word is current (VERDICT_WORDS).
+  ok: { variant: 'danger', label: 'Critical', reserved: true },
+}
+
+/**
+ * Every word a verdict badge can show, each spelled once (from `VERDICTS`).
+ *
+ * `BoundMetricMark` stacks ALL of them in one grid cell and hides all but the
+ * current one, so the badge is as wide as the wider word in whatever font
+ * renders it — critical, warning and the reserved `ok` slot are one width, and
+ * crossing a threshold never resizes the badge. A fixed min-width cannot do
+ * that: the app uses the system font stack, so a floor sized in one font is
+ * too narrow in another ("Warning" measured 77.34px against a 76px floor in
+ * macOS system-ui).
+ */
+export const VERDICT_WORDS = Object.freeze([...new Set(Object.values(VERDICTS).map((v) => v.label))])
+
+/**
+ * The threshold verdict badge on a bound `metric` tile (ent#730), from the
+ * backend's typed `threshold_verdict` — `{variant, label, title, reserved}` or
+ * `null`.
+ *
+ * `metric` tiles only: `status` and `progress` tiles already show the verdict
+ * through `color`, and a badge there would say it twice. A truthy `metric` and
+ * `bound === true` both, because the backend never touches an unbound widget,
+ * so an author could type `bound: true` on one. The label is the word alone:
+ * a number in it would change the badge's width between Warning and Critical,
+ * which defeats the reserved slot; the number is in `title`.
+ */
+export function verdictBadge(widget = {}) {
+  if (widget.type !== 'metric' || !widget.metric || widget.bound !== true) return null
+  const level = widget.threshold_verdict?.level
+  const base = Object.prototype.hasOwnProperty.call(VERDICTS, level) ? VERDICTS[level] : null
+  if (!base) return null
+  if (base.reserved) return { ...base }
+  const threshold = widget.threshold_verdict.threshold
+  const shown = typeof threshold === 'number'
+    ? threshold.toLocaleString('en-US', { maximumFractionDigits: 2 })
+    : String(threshold)
+  const lowerIsBetter = widget.direction === 'down_good'
+  return {
+    ...base,
+    title: `${widget.metric} is at or ${lowerIsBetter ? 'above' : 'below'} its ${level} threshold, `
+      + `${shown} (set in template.yaml). ${lowerIsBetter ? 'Lower' : 'Higher'} is better.`,
   }
 }
 

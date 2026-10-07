@@ -342,7 +342,7 @@ delete the file.
 | Errors | 422 `window_invalid` · 422 `metric_undeclared` (retired names get "retired at T — pass `include_retired=true`") · 503 `metric_store_unavailable` + `Retry-After: 30` |
 | Series | Bucketed (≤ 120/series) by default; raw `points` only on the `metric=` path, truncation keeps the **newest**. A bucket covers the **window**: a point outside `[since, until]` is dropped before indexing, never clamped into bucket 0 |
 | Dimensions | Grouped by `canonical_dims`, folded by the declared `aggregation`, with `latest_by_series[]` carrying each series' own freshness |
-| Chart | `chart` is the one bucket list the sparkline, `stats` and a bound widget's `history` all read, so they describe the same thing as `latest.value`: `basis: "folded"` (the cross-series fold, for `sum`/`avg`) or `basis: "series"` + `dims` (for `last`, where a cross-series fold is undefined — the UI labels it) |
+| Chart | `chart` is the one bucket list the sparkline, `stats` and a bound widget's `history` all read, so they describe the same thing as `latest.value`: `basis: "folded"` (the cross-series fold, for `sum`/`avg`) or `basis: "series"` + `dims` (for `last`, where a cross-series fold is undefined — the UI labels it). A `dims:`-bound widget (ent#730) draws its own series' buckets from `series`, not `chart` |
 
 ### The one staleness rule
 
@@ -492,10 +492,10 @@ locally before pushing — the first must report exactly **one** head.
 | Budget | `src/backend/services/objectives_read_budget.py` | The per-agent bucket on the objective fan-out — `enforce` for the operator route, `admit` for the Workspace role card (ent#676) |
 | Route | `src/backend/routers/agent_files.py` | `GET/POST .../metrics*`, `GET .../objectives` |
 | Health | `src/backend/routers/monitoring.py`, `db_models.AgentHealthDetail` | The informational block |
-| Compat | `src/backend/services/compatibility/static_checks.py` | D-009 (shape), D-010 (`metrics.json` superseded) |
+| Compat | `src/backend/services/compatibility/static_checks.py` | D-009 (shape), D-010 (`metrics.json` superseded), X-009 (`dashboard.yaml` `metric:`/`dims:` bindings that can never resolve, ent#730) |
 | MCP | `src/mcp-server/src/tools/metrics.ts` | `record_metrics`, `get_metrics`, `get_objectives` |
 | Frontend | `src/frontend/src/components/DeclaredMetricsTiles.vue` | The tiles |
-| Frontend | `src/frontend/src/components/BoundMetricMark.vue` | A bound widget's point time / stale mark / binding error |
+| Frontend | `src/frontend/src/components/BoundMetricMark.vue` | A bound widget's point time / stale mark / binding error / which series (ent#730 caption) / threshold verdict badge |
 | Frontend | `src/frontend/src/utils/metricFormat.js` | Type- and direction-aware formatting, shared by both surfaces |
 | Frontend | `src/frontend/src/utils/agentTabs.js` | `buildTabs({hasDashboardFlag, hasDeclaredMetrics})` |
 | Store | `src/frontend/src/stores/agents.js` | `getAgentMetrics`, the two-flag `checkDashboardExists` |
