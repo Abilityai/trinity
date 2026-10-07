@@ -1,5 +1,7 @@
 """Atomic admission regression; opt-in real Redis via TEST_SLOT_REDIS_URL.
 
+Regression for #3305.
+
 Use a disposable Redis database. Only unique test keys are removed.
 """
 import asyncio
