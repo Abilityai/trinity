@@ -1,0 +1,43 @@
+{
+  "version": "1.2.3",
+  "date": "2026-10-07",
+  "mode": "diff-daily",
+  "scope": "#2372",
+  "phases_run": [
+    0,
+    1,
+    2,
+    5,
+    7,
+    8,
+    9,
+    12,
+    13,
+    14
+  ],
+  "stack_cve_quicklist": [],
+  "attack_surface": {
+    "new_endpoints": 0,
+    "new_ingress": 0
+  },
+  "findings": [],
+  "hypotheses": [],
+  "coverage_gaps": [
+    "no docker pass (diff run)",
+    "heal not executed on PostgreSQL locally; CI pg-migrations covers it"
+  ],
+  "supply_chain_summary": {
+    "scanner": "n/a \u2014 no dependency change"
+  },
+  "filter_stats": {
+    "candidates": 0,
+    "dropped": 0
+  },
+  "totals": {
+    "critical": 0,
+    "high": 0,
+    "medium": 0,
+    "low": 0
+  },
+  "trend": "n/a"
+}
