@@ -53,6 +53,62 @@
       "description": "#3232: POST /api/agents/{name}/voice-reply refuses a delegated child (a row with source_channel_agent set, i.e. it inherited its parent's conversation) with reason=delegated_turn before any channel branch, on Slack and Telegram; a direct channel turn still delivers; an agent tasking itself is still a delegated child (3 tests). Red on dev."
     },
     {
+      "file": "unit/test_ent815_broad_list_agent_scope.py",
+      "feature": "abilityai/trinity-enterprise#815",
+      "added": "2026-10-07",
+      "categories": [
+        "backend",
+        "unit",
+        "database",
+        "security"
+      ],
+      "description": "A broad GET /api/operator-queue is complete before its limit (trinity-enterprise#815). Real router in a small FastAPI app over a real SQLite file and real agent_permissions rows. An agent-scoped key is narrowed in SQL to {self} ∪ permitted before LIMIT (window test: 30 high-priority stranger rows cannot hide the caller's or a permitted peer's medium rows at limit=10, for an admin and a non-admin owner); a JWT person, a user key and a system key are not narrowed; an agent key naming a stranger gets an empty, self-uniform page; an agent scope with no agent name is 403; the flags count only the narrowed set; agent_names only ever narrows (≤500, no blanks, 422 otherwise). A machine's about-a-person exclusion (gate-, workspace-problem-, portal-inbox-collision-) runs in SQL on both list routes and equals the Python rule: case-insensitive, leading whitespace stripped exactly as str.strip() (all 29 str.isspace() characters), U+212A and U+0130 rewritten to Python's lower() form, NULL request_id kept — so a page cannot be emptied and total is exact, including for legacy rows off the current page; B17 also runs under a PostgreSQL-style lower. total/has_more/next_offset: has_more is read off a limit+1 page, never the count; offset paging visits every visible row once over a static set; a forced belt drop nulls total with a warning. permissions?strict=true answers 503 when Docker cannot be read, builds peers from one agent_container_states() snapshot, and leaves the lenient path unchanged. Dialect compile checks for postgresql and sqlite. Mutation-proven per acceptance criterion."
+    },
+    {
+      "file": "unit/test_ent815_queue_walk.py",
+      "feature": "abilityai/trinity-enterprise#815",
+      "added": "2026-10-07",
+      "categories": [
+        "backend",
+        "unit",
+        "database",
+        "reliability"
+      ],
+      "description": "The opt-in keyset (cursor) walk on GET /api/operator-queue (trinity-enterprise#815): within one walk no id is returned twice and every row matching at the start and when reached is returned exactly once while the queue changes. Inserts ahead of and behind the cursor (incl. a file-seam row with an old created_at); all five pending→ended writers between pages (ordering as of a watermark W = start − 300 s); a status=pending walk with answers; a permission change mid-walk; platform-alert priority changes through the walk's Redis priority snapshot (fakeredis), an alert raised mid-walk pinned to rank 4; a hypothesis property test (derandomize) over random interleavings of every write. The commit-lag bound: a write stamped before the walk began is not repeated, and a commit past the margin is logged at error. Strict cursor decoding (422 naming cursor; cursor+offset 422; filter mismatch 422; expired walk 410; Redis unreachable or failing 503; the decoded-bytes cap isolated); a forged token never widens visibility; an over-cap sort key (incl. non-ASCII and quote-heavy legacy ids) ends the page with has_more true, next_cursor null and a warning, and every issued cursor decodes; offset mode's order is unchanged; the walk statement compiles on postgresql and sqlite with one set of shared expressions. Mutation-proven."
+    },
+    {
+      "file": "mcp-server/src/operator_queue_list.test.ts",
+      "feature": "abilityai/trinity-enterprise#815",
+      "added": "2026-10-07",
+      "categories": [
+        "mcp-server",
+        "typescript",
+        "unit"
+      ],
+      "description": "MCP list_operator_queue completeness (trinity-enterprise#815); real tool execute() over a fake TrinityClient, node:test. A broad agent-key read takes its permits first through the strict permissions read and passes {self} ∪ permitted as agent_names; a failed read is permissions_unavailable (retryable, no list call, no self-read substitute); over 500 names or an 8 KB request target is permit_set_too_large, never an unfiltered read. The output always carries count, total, has_more, next_cursor, next_offset and items; an older backend's missing fields become null with a warning; backend warnings pass through; a belt drop nulls total and warns. User and system scopes and scoped reads make no extra permissions call. cursor is opt-in (no cursor → offset 0 as before), passed through unchanged, and a two-page walk re-reads and re-sends agent_names on every page. The description states the contract within the 1,800-character headroom."
+    },
+    {
+      "file": "unit/test_ent730_bound_widget_dims.py",
+      "feature": "abilityai/trinity-enterprise#730",
+      "added": "2026-10-06",
+      "categories": [
+        "backend",
+        "unit"
+      ],
+      "description": "A bound dashboard.yaml widget names ONE series with `dims:`: each per-channel tile shows its own series' number, freshness, sparkline and colour (pick a source, fill once), matching by `canonical_dims` with exact match only; a selector that cannot match is one of three named refusals (`metric_dimension_invalid` with a type hint, `metric_dimension_undeclared`, `metric_series_not_found` with `binding_detail` facts) and never the fold; `bound_series` says what an unselected number is; selection equals the fold over that series alone (parity with `latest_by_metric`); the 200-point / 50-series window is pinned against a fake that honours the real store's SQL contract (and once against the real store); a Hypothesis property over arbitrary JSON `dims` never raises; the typed `threshold_verdict` and `direction` (one rule behind verdict and colour, each row stated independently); a store outage drops an author's placeholder `value`; a successful bind drops an author trend; a non-text `metric:` refuses one widget instead of failing the dashboard read; and the user doc's recipe YAML runs through the real agent-server validator and the bind."
+    },
+    {
+      "file": "unit/test_ent730_dims_compat.py",
+      "feature": "abilityai/trinity-enterprise#730",
+      "added": "2026-10-06",
+      "categories": [
+        "backend",
+        "compatibility",
+        "unit"
+      ],
+      "description": "Compat X-009 (SOFT, static): a `dims:` selector that can never match the dimensions its metric declares in template.yaml, a `dims:` with no `metric:`, and a `metric:` that is not text are reported with the tile's own code and sentence (parity with `parse_dims_selector` and the binding); valid selectors pass with no points anywhere; undeclared or malformed metrics and empty selectors are not its finding; no dashboard / no or invalid template skip; a raise fails closed with the type name only; nothing raw from the author (a declared `channel\\n`, a bidi or control character in a label) reaches the persisted detail; the user doc's recipe passes X-009 and D-003; and each widget is judged as the tile receives it over the agent server's JSON response (an unquoted YAML date in `dims:` or `metric:` arrives as ISO text, an int stays an int and is still flagged)."
+    },
+    {
       "file": "unit/test_3246_platform_alert_surfaces.py",
       "feature": "#3246",
       "added": "2026-10-05",
@@ -4646,41 +4702,6 @@
         "unit"
       ],
       "description": "trinity-enterprise#787: the GUARD-002 hooks register in exec form under env -i + -I -S with a policy-pinned empty CLAUDE_CODE_SHELL_PREFIX (exact shape, key set of a known-loading entry, a port of CLI 2.1.281's hook spawn branch ratcheted to the image's CLI pin); each hook executed under its registered flags/env keeps its deny/allow tables; a hostile PYTHONPATH and a user-site usercustomize flip a deny under the old invocation (precondition) and not under the registered flags; read-only config is root-owned (guard and Codex never read the home file; the backend's root-exec argv writes the config as data, injection payloads included); startup.sh's legacy cleanup, executed under bash, removes both shipped claude-settings.json versions and keeps anything else. Mutation-proven."
-    },
-    {
-      "file": "unit/test_ent815_broad_list_agent_scope.py",
-      "feature": "abilityai/trinity-enterprise#815",
-      "added": "2026-10-07",
-      "categories": [
-        "backend",
-        "unit",
-        "database",
-        "security"
-      ],
-      "description": "A broad GET /api/operator-queue is complete before its limit (trinity-enterprise#815). Real router in a small FastAPI app over a real SQLite file and real agent_permissions rows. An agent-scoped key is narrowed in SQL to {self} ∪ permitted before LIMIT (window test: 30 high-priority stranger rows cannot hide the caller's or a permitted peer's medium rows at limit=10, for an admin and a non-admin owner); a JWT person, a user key and a system key are not narrowed; an agent key naming a stranger gets an empty, self-uniform page; an agent scope with no agent name is 403; the flags count only the narrowed set; agent_names only ever narrows (≤500, no blanks, 422 otherwise). A machine's about-a-person exclusion (gate-, workspace-problem-, portal-inbox-collision-) runs in SQL on both list routes and equals the Python rule: case-insensitive, leading whitespace stripped exactly as str.strip() (all 29 str.isspace() characters), U+212A and U+0130 rewritten to Python's lower() form, NULL request_id kept — so a page cannot be emptied and total is exact, including for legacy rows off the current page; B17 also runs under a PostgreSQL-style lower. total/has_more/next_offset: has_more is read off a limit+1 page, never the count; offset paging visits every visible row once over a static set; a forced belt drop nulls total with a warning. permissions?strict=true answers 503 when Docker cannot be read, builds peers from one agent_container_states() snapshot, and leaves the lenient path unchanged. Dialect compile checks for postgresql and sqlite. Mutation-proven per acceptance criterion."
-    },
-    {
-      "file": "unit/test_ent815_queue_walk.py",
-      "feature": "abilityai/trinity-enterprise#815",
-      "added": "2026-10-07",
-      "categories": [
-        "backend",
-        "unit",
-        "database",
-        "reliability"
-      ],
-      "description": "The opt-in keyset (cursor) walk on GET /api/operator-queue (trinity-enterprise#815): within one walk no id is returned twice and every row matching at the start and when reached is returned exactly once while the queue changes. Inserts ahead of and behind the cursor (incl. a file-seam row with an old created_at); all five pending→ended writers between pages (ordering as of a watermark W = start − 300 s); a status=pending walk with answers; a permission change mid-walk; platform-alert priority changes through the walk's Redis priority snapshot (fakeredis), an alert raised mid-walk pinned to rank 4; a hypothesis property test (derandomize) over random interleavings of every write. The commit-lag bound: a write stamped before the walk began is not repeated, and a commit past the margin is logged at error. Strict cursor decoding (422 naming cursor; cursor+offset 422; filter mismatch 422; expired walk 410; Redis unreachable or failing 503; the decoded-bytes cap isolated); a forged token never widens visibility; an over-cap sort key (incl. non-ASCII and quote-heavy legacy ids) ends the page with has_more true, next_cursor null and a warning, and every issued cursor decodes; offset mode's order is unchanged; the walk statement compiles on postgresql and sqlite with one set of shared expressions. Mutation-proven."
-    },
-    {
-      "file": "mcp-server/src/operator_queue_list.test.ts",
-      "feature": "abilityai/trinity-enterprise#815",
-      "added": "2026-10-07",
-      "categories": [
-        "mcp-server",
-        "typescript",
-        "unit"
-      ],
-      "description": "MCP list_operator_queue completeness (trinity-enterprise#815); real tool execute() over a fake TrinityClient, node:test. A broad agent-key read takes its permits first through the strict permissions read and passes {self} ∪ permitted as agent_names; a failed read is permissions_unavailable (retryable, no list call, no self-read substitute); over 500 names or an 8 KB request target is permit_set_too_large, never an unfiltered read. The output always carries count, total, has_more, next_cursor, next_offset and items; an older backend's missing fields become null with a warning; backend warnings pass through; a belt drop nulls total and warns. User and system scopes and scoped reads make no extra permissions call. cursor is opt-in (no cursor → offset 0 as before), passed through unchanged, and a two-page walk re-reads and re-sends agent_names on every page. The description states the contract within the 1,800-character headroom."
     }
   ]
 }
