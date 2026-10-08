@@ -2460,12 +2460,22 @@ async def dispatch_parallel_task(
     # `message` behind a harmless `user_message`) — and the caller's
     # `system_prompt`, which the executor receives appended to its own. A
     # Chat-tab history that mentions a gated skill re-gates later turns: the
-    # safe direction.
-    gate_text = "\n".join(
-        t for t in (request.message, request.user_message, request.system_prompt) if t)
+    # safe direction. A part identical to an earlier one is read (and shown on
+    # the card) once. trinity#3274: the approved run gets the message and the
+    # system prompt apart (`frozen_replay`), never this join; and the key's
+    # name and the email, which the executor's prompt carries beside the
+    # request, are scanned as context.
+    gate_parts = []
+    for part in (request.message, request.user_message, request.system_prompt):
+        if part and part not in gate_parts:
+            gate_parts.append(part)
+    gate_text = "\n".join(gate_parts)
     gate = await skill_gate_service.enforce(
         name,
         request_text=gate_text,
+        context_text=skill_gate_service.requester_context_text(
+            mcp_key_name=getattr(current_user, "mcp_key_name", None),
+            source_email=current_user.email or current_user.username),
         requester=skill_gate_service.requester_from_principal(
             current_user, source_agent=x_source_agent,
             # The platform-injected turn (#2392) first; the model-typed
@@ -2474,18 +2484,21 @@ async def dispatch_parallel_task(
             execution_id=x_trinity_execution_id or getattr(request, "parent_execution_id", None)),
         triggered_by=derivation.triggered_by,
         occurrence_key=idempotency_key,
-        dispatch=skill_gate_service.frozen_dispatch(
-            triggered_by=derivation.triggered_by,
-            model=request.model,
-            timeout_seconds=request.timeout_seconds,
-            allowed_tools=request.allowed_tools,
-            source_user_id=current_user.id,
-            source_user_email=current_user.email or current_user.username,
-            source_agent_name=x_source_agent,
-            source_mcp_key_id=getattr(current_user, "mcp_key_id", None),
-            source_mcp_key_name=getattr(current_user, "mcp_key_name", None),
-            chain_depth=chain_depth,
-        ),
+        dispatch={
+            **skill_gate_service.frozen_dispatch(
+                triggered_by=derivation.triggered_by,
+                model=request.model,
+                timeout_seconds=request.timeout_seconds,
+                allowed_tools=request.allowed_tools,
+                source_user_id=current_user.id,
+                source_user_email=current_user.email or current_user.username,
+                source_agent_name=x_source_agent,
+                source_mcp_key_id=getattr(current_user, "mcp_key_id", None),
+                source_mcp_key_name=getattr(current_user, "mcp_key_name", None),
+                chain_depth=chain_depth,
+            ),
+            **skill_gate_service.frozen_replay(request.message, request.system_prompt),
+        },
     )
 
     # RELIABILITY-006 (#525): idempotency begin/replay (shared with /chat, RD2).

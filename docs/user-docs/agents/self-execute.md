@@ -39,6 +39,8 @@ mcp__trinity__chat_with_agent({
 
 The call returns immediately with an `execution_id`. The result appears in chat when the task completes.
 
+That `execution_id` is a receipt: the task arrived and is queued, running or done. Never send the same task again because a call timed out or delivery could not be confirmed — a reworded repeat can run the work twice. To check on it, call `get_execution_result(agent_name, execution_id)`; `running` does not mean stuck. Every agent is taught this rule in its platform instructions and in the `chat_with_agent` tool description. See [Agent Network](../collaboration/agent-network.md).
+
 ### REST API
 
 ```bash

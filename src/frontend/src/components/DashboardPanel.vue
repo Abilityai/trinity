@@ -210,7 +210,7 @@
                   {{ formatValue(widget.value) }}
                   <span v-if="widget.unit" class="text-lg text-gray-500 dark:text-gray-400">{{ widget.unit }}</span>
                 </div>
-                <div v-if="widget.trend || widget.history?.trend" class="flex items-center text-sm" :class="getTrendColor(widget.trend || widget.history?.trend)">
+                <div v-if="widget.trend || widget.history?.trend" class="flex items-center text-sm" :class="getTrendColor(widget.trend || widget.history?.trend, widget)" data-testid="widget-trend">
                   <svg v-if="(widget.trend || widget.history?.trend) === 'up'" class="w-4 h-4" fill="currentColor" viewBox="0 0 20 20">
                     <path fill-rule="evenodd" d="M5.293 9.707a1 1 0 010-1.414l4-4a1 1 0 011.414 0l4 4a1 1 0 01-1.414 1.414L11 7.414V15a1 1 0 11-2 0V7.414L6.707 9.707a1 1 0 01-1.414 0z" clip-rule="evenodd" />
                   </svg>
@@ -265,7 +265,7 @@
                   <template v-if="widget.value === null || widget.value === undefined">—</template>
                   <template v-else>{{ widget.value }}%</template>
                 </span>
-                <div v-if="widget.history?.trend" class="flex items-center text-sm" :class="getTrendColor(widget.history.trend)">
+                <div v-if="widget.history?.trend" class="flex items-center text-sm" :class="getTrendColor(widget.history.trend, widget)" data-testid="widget-trend">
                   <svg v-if="widget.history.trend === 'up'" class="w-4 h-4" fill="currentColor" viewBox="0 0 20 20">
                     <path fill-rule="evenodd" d="M5.293 9.707a1 1 0 010-1.414l4-4a1 1 0 011.414 0l4 4a1 1 0 01-1.414 1.414L11 7.414V15a1 1 0 11-2 0V7.414L6.707 9.707a1 1 0 01-1.414 0z" clip-rule="evenodd" />
                   </svg>
@@ -447,10 +447,13 @@ import { useAuthStore } from '../stores/auth'
 import axios from 'axios'
 import SparklineChart from './SparklineChart.vue'
 import BoundMetricMark from './BoundMetricMark.vue'
+import { trendClasses, sparklineColor } from '../utils/metricFormat'
 import ScanlineReveal from './ScanlineReveal.vue'
 import LoadFailed from './LoadFailed.vue'
 import InlineError from './InlineError.vue'
 import { viewState, staleBannerMessage } from '../utils/loadingState'
+import { apiErrorMessage } from '../utils/apiError'
+import { isGateRefusal, pendingApprovalMessage, PENDING_NOTICE_TOAST } from '../utils/skillGate'
 
 const props = defineProps({
   agentName: {
@@ -468,7 +471,9 @@ const props = defineProps({
   hasDeclaredMetrics: {
     type: Boolean,
     default: false
-  }
+  },
+  // AgentDetail's toast host (`useNotification`), as A2aPanel takes it.
+  notify: { type: Function, default: null }
 })
 
 const agentsStore = useAgentsStore()
@@ -549,11 +554,18 @@ const checkUpdateDashboardPlaybook = async () => {
 const triggerUpdateDashboard = async () => {
   updatingDashboard.value = true
   try {
-    await axios.post(`/api/agents/${props.agentName}/task`, {
+    const response = await axios.post(`/api/agents/${props.agentName}/task`, {
       message: '/update-dashboard'
     }, {
       headers: authStore.authHeader
     })
+    // trinity#3274: a gated playbook — nothing ran, so there is nothing to wait for.
+    const held = pendingApprovalMessage(response)
+    if (held) {
+      if (props.notify) props.notify(held, 'info', PENDING_NOTICE_TOAST)
+      updatingDashboard.value = false
+      return
+    }
     // Wait a bit then refresh the dashboard to show updated data
     setTimeout(() => {
       loadDashboard()
@@ -561,6 +573,7 @@ const triggerUpdateDashboard = async () => {
     }, 5000)
   } catch (error) {
     console.error('Failed to trigger update-dashboard:', error)
+    if (isGateRefusal(error) && props.notify) props.notify(apiErrorMessage(error), 'error')
     updatingDashboard.value = false
   }
 }
@@ -588,8 +601,16 @@ const formatRelativeTime = (isoString) => {
 
 // renderMarkdown imported from utils/markdown
 
+// A widget bound to a declared metric (ent#730) colours its trend by the
+// registry's `direction`, through the same rule as the declared-metric tiles,
+// so rising `down_good` spend is red and a `neutral` metric is not judged.
+// Truthy `metric` AND `bound === true`: the backend never touches a widget
+// without `metric:`, so `bound` there is whatever the author typed.
+const isBoundToMetric = (widget) => Boolean(widget?.metric) && widget.bound === true
+
 // Get trend color
-const getTrendColor = (trend) => {
+const getTrendColor = (trend, widget) => {
+  if (isBoundToMetric(widget)) return trendClasses(trend, widget.direction)
   if (trend === 'up') return 'text-status-success-600'
   if (trend === 'down') return 'text-status-danger-600'
   return 'text-gray-500'
@@ -597,6 +618,7 @@ const getTrendColor = (trend) => {
 
 // Get sparkline color based on trend
 const getSparklineColor = (widget) => {
+  if (isBoundToMetric(widget)) return sparklineColor(widget.history?.trend, widget.direction)
   const trend = widget.history?.trend
   if (trend === 'up') return '#10b981'  // green-500
   if (trend === 'down') return '#ef4444'  // red-500

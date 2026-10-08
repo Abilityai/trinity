@@ -2,6 +2,8 @@
 
 The abilities marketplace is a curated collection of Claude Code plugins covering the full agent lifecycle — from scaffolding and onboarding to deployment, scheduling, and ongoing operations.
 
+The plugins are Claude Code tooling: they run in a Claude Code session, and the agents they scaffold are Claude Code agents. Trinity itself is model-agnostic — agents can also run on Gemini CLI or OpenAI Codex ([Agent Runtimes](../agents/agent-runtimes.md)) — but those are built without these plugins.
+
 > 📺 **Watch:** [Build and Deploy Agents in Cursor](https://youtu.be/amqiysdlEWY) *(Apr 2026)* · [Building Agents — Playbooks, Plugins, Deployment](https://youtu.be/MDxRZBikf70) *(Apr 2026)* · [all videos](../videos.md)
 
 ## Concepts
@@ -26,7 +28,7 @@ The abilities marketplace is a curated collection of Claude Code plugins coverin
 Or from the terminal:
 
 ```bash
-claude plugin add abilityai/abilities
+claude plugin marketplace add abilityai/abilities
 ```
 
 Then install the plugins you need:
@@ -39,10 +41,10 @@ Then install the plugins you need:
 /plugin install utilities@abilityai       # Ops and productivity
 ```
 
-### Listing available plugins
+### Browsing available plugins
 
 ```bash
-/plugin list abilityai
+/plugin    # opens the interactive plugin manager, where you can browse the marketplace
 ```
 
 ### Plugins inside a deployed agent
@@ -53,9 +55,9 @@ The `trinity` plugin itself is also **provided by the platform**: Trinity's agen
 
 ## The 5 Plugins
 
-Versions and skill counts below are those published in the marketplace on 2026-09-22.
+Versions and skill counts below are those published in the marketplace on 2026-10-06.
 
-### create-agent — 6 skills (v2.1.1)
+### create-agent — 6 skills (v2.2.0)
 
 Create new Claude Code agents from an interview, or review, adjust, and clone existing ones.
 
@@ -73,13 +75,15 @@ Create new Claude Code agents from an interview, or review, adjust, and clone ex
 
 The eight pre-built domain wizards (prospector, chief-of-staff, webmaster, recon, receptionist, ghostwriter, kb-agent, doctor) were retired in 2.0.0 — `custom` builds every one of those shapes from the same interview, and a knowledge base is `custom` plus `/agent-dev:add-memory`. Every agent `custom` creates includes `CLAUDE.md`, 2–4 starter skills, `template.yaml` (with `plugins:`, `schedules:`, credential declarations, and a `metrics:` block for the agent's business KPIs), `dashboard.yaml`, and an onboarding tracker. The generated `/update-dashboard` writes `dashboard.yaml` and records the same numbers as metric points with the `record_metrics` MCP tool, skipping that step silently off Trinity. Generated `CLAUDE.md` guidelines carry the playbook-call rule, and every generated schedule message is a one-line playbook call — `/create-agent:review` reports prose delegation between agents, and prose schedule messages, as findings.
 
-### agent-dev — 30 skills (v1.16.5)
+`custom` also has a **headless mode** for builder agents — a deployed Trinity agent that creates other agents. The brief carries every answer, real gaps go out as one `ask_operator` question, a single approval ask comes before anything is pushed or created, and the new agent is created on the builder's own instance (from a private repo when a GitHub token is available, otherwise from local files with a warning that it has no reproducible source). See the [create-agent plugin page](../abilities/create-agent-plugin.md#headless-mode-inside-a-deployed-agent).
+
+### agent-dev — 30 skills (v1.20.0)
 
 Extend and develop existing agents: playbooks, memory, git-backed state, a full GitHub Issues dev cycle, long-running pipelines, cross-actor project management, a shared canonical-data layer, and multi-agent orchestration — plus tooling to assess and migrate an existing fleet.
 
 ```bash
-/agent-dev:create-playbook    # Add a new skill/playbook (three tiers, bundled templates)
-/agent-dev:adjust-playbook    # Modify an existing skill — incl. "make callable by other agents"
+/agent-dev:create-playbook    # Add a new skill/playbook (three tiers, bundled templates; optional propose-only self-improvement)
+/agent-dev:adjust-playbook    # Modify an existing skill — incl. "make callable by other agents"; --review-proposals
 /agent-dev:add-memory         # Add a memory system
 /agent-dev:add-git-sync       # Git-as-state hooks (auto-commit, rebase, snapshot)
 /agent-dev:add-backlog        # Install the GitHub Issues dev cycle (copies the nine runtime skills below)
@@ -98,7 +102,7 @@ Plus `backlog`, `close`, `groom`, `roadmap`, `add-pipeline-instance`, `add-pipel
 Five are the **project-management runtime** — the skills `add-project-management` installs, now standalone so they can also be assigned from the bundled community skills catalog on Trinity:
 
 ```bash
-/agent-dev:project-init       # Create or adopt a managed project (epic + labels + workspace stub)
+/agent-dev:project-init       # Create or adopt a managed project; --canon = shared in the canon repo, --internal = tasks as files
 /agent-dev:project-task       # Create a task issue in the uniform format; --headless for crons
 /agent-dev:project-steward    # Autonomous sweep: verify, dispatch, escalate, close loops, digest
 /agent-dev:project-reconcile  # Sync a projection adapter (Google Tasks v1) back into the registry
@@ -115,9 +119,11 @@ Five more cover fleet-scale work:
 /agent-dev:agent-fleet-migrate    # Execute that work order into a verified Claude Code fleet
 ```
 
+**Shared projects and internal tracking.** A project lives either in the managing agent's repo (`project_files/<slug>/`) or, with `/project-init --canon`, as a shared project in the canon repo's root `projects/` zone, which every agent and person on the canon writes directly. Its tasks are tracked either in GitHub Issues (the default) or, with `--internal`, as one file per task inside the project folder — no GitHub access needed. The charter, steward, intake, and decision ledger work the same in every combination.
+
 `agent-fleet-analysis` and `agent-fleet-migrate` are a pair: the first scans agents in **any** paradigm — Claude Code, n8n workflow exports, LangChain/CrewAI/AutoGen apps, hand-rolled loops — and produces a report plus an agent-executable work order; the second carries it out non-destructively into a fresh `fleet-migrated/` tree, leaving your sources untouched.
 
-**Skill-map governance.** `/agent-dev:add-orchestrator` also installs `/reconcile-skill-map`. It compares `fleet/skill-map.yaml` (which Library skills each agent should hold, with a rationale) against live assignments and applies approved additions one skill at a time, never removing a skill without a human decision.
+**Skill-map governance.** `/agent-dev:add-orchestrator` also installs `/reconcile-skill-map`. It compares `fleet/skill-map.yaml` (which Library skills each agent should hold, with a rationale) against live assignments and applies approved additions one skill at a time, never removing a skill without a human decision. It needs the skill-manager permission, which an instance admin grants. The bundled `/sync-fleet-to-head` reports an agent with unpushed commits as a needs-attention finding, since that work exists only on the container's disk.
 
 **Orchestrator maintenance.** `/agent-dev:add-orchestrator --check` is a read-only report comparing each orchestration skill installed in an agent against the bundled version — *upgrade available*, *hand-edited locally* (an overwrite would discard it), or *ahead of the bundle* (an overwrite would be a downgrade) — and the same check runs inside every overwrite prompt when you re-run the installer. Gated skills that run on a cron declare a `--autonomous` run mode; see [Playbook calls](#playbook-calls--the-unit-of-inter-agent-work).
 
@@ -130,7 +136,7 @@ Five more cover fleet-scale work:
 | `json-state` | Structured state, counters, config |
 | `workspace` | Multi-session project tracking |
 
-### trinity — 7 skills (v2.11.1)
+### trinity — 7 skills (v2.11.3)
 
 Connect, deploy, operate, and sync agents on Trinity.
 
@@ -146,7 +152,7 @@ Connect, deploy, operate, and sync agents on Trinity.
 
 **`/trinity:start-here` is the recommended entry point.** Install just `trinity@abilityai` and run it: it walks you from "what is Trinity" through getting an instance, connecting MCP (with a live smoke test), and creating your first working agent, handing off to the other skills as needed. It's resumable, so you can stop and pick it up later.
 
-**Deployment is repository-first.** `/trinity:onboard` deploys an agent from its **GitHub repository** — Trinity clones the repo and tracks the branch. That needs an instance-level GitHub token (Settings → GitHub token, a fine-grained PAT with *Contents: Read*; public repos work without one). Deploying from local files still works as a fallback. Afterwards you iterate by pushing commits and running `/trinity:sync`, which advances the deployed agent to the new commit.
+**Deployment is repository-first.** `/trinity:onboard` deploys an agent from its **GitHub repository**. With your own GitHub token (**Settings → MCP Keys → Personal GitHub Token**, *Contents: Read and write*) on a repo your account owns, the agent gets a working branch with auto-sync, so its work lands back in git. A read-only or instance-wide token gives a pull-only agent that tracks the branch; public repos clone pull-only with no token. See [GitHub Sync](../integrations/github-sync.md). Deploying from local files still works as a fallback. Afterwards you iterate by pushing commits and running `/trinity:sync`, which advances the deployed agent to the new commit.
 
 **Three ways in.** `/trinity:onboard` has three modes: the default interactive run (asks whether to deploy, adapt only, or onboard in place), `/trinity:onboard analyze` (report only, no changes), and `/trinity:onboard in-place`. Beyond deploying an adapted repo (the default) and deploying local files (the fallback), it can run *inside* an agent that is already deployed: create the agent from a bare repository as-is — Trinity tolerates a missing `template.yaml` — then run `/trinity:onboard` in that agent and pick **Onboard in place** (auto-recommended when the skill detects it is running inside a deployed agent; `/trinity:onboard in-place` skips the question). It writes the Trinity files including the `plugins:` block, installs the declared plugins immediately, commits and pushes the result back to the repo (or, if the agent has no write credentials, prints the patch and says plainly that the result is container-local), reconciles declared schedules, and finishes with the platform's own compatibility report — zero HARD findings is the definition of done. The `trinity` plugin the in-place run needs is provided by the platform (see [Plugins inside a deployed agent](#plugins-inside-a-deployed-agent)); only an agent on an image that predates the pre-install needs the one-time bootstrap from its terminal: `claude plugin marketplace add abilityai/abilities && claude plugin install trinity@abilityai --yes`.
 

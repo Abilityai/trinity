@@ -175,9 +175,17 @@
                agent row's "needs you" mark — the same feed (`openAsks`) and
                the same hover words as the pinned Inbox row's, so the two read
                as one fact. -->
+          <!-- trinity-enterprise#836: an UNFILLED orange circle — a ring, the
+               count in urgent ink at the AA tier (700 light / 400 dark) — not
+               the filled pill (operator ask, 2026-10-07: "more alarming than it
+               needs to be"). Still a different SHAPE from the filled unread
+               pill beside it (principle 24), still counted, still named. The
+               pinned Inbox row and the Inbox's Action counter keep their filled
+               700 pills; the rail's Asks tab wears this same recipe
+               (`OverflowTabs` `urgent-outline`). -->
           <span
             v-if="askCountFor(a.name)"
-            class="shrink-0 min-w-[1.25rem] px-1.5 h-5 rounded-full bg-status-urgent-700 text-white text-[11px] font-semibold flex items-center justify-center"
+            class="shrink-0 min-w-[1.25rem] px-1.5 h-5 rounded-full ring-1 ring-inset ring-status-urgent-600 dark:ring-status-urgent-400 text-status-urgent-700 dark:text-status-urgent-400 text-[11px] font-semibold tabular-nums flex items-center justify-center"
             :title="askBadgeTitle(askCountFor(a.name))"
             aria-hidden="true"
             data-testid="agent-ask-count"

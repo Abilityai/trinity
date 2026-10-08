@@ -166,9 +166,15 @@ def _validate_ts(
     return (normalised, None)
 
 
-def _validate_dims(
+def validate_dims(
     dims: Optional[Dict[str, Any]], declared: List[str]
 ) -> Tuple[Optional[Dict[str, str]], Optional[Tuple[str, str]]]:
+    """A point's `dims` against the metric's declared keys: `(clean, error)`.
+
+    Public because the READ path reuses it (ent#730): a `dashboard.yaml`
+    widget's `dims:` selector is valid exactly when this leaf would accept it
+    as a recorded point's `dims`, so the two can never drift apart.
+    """
     if not dims:
         return (None, None)
     if len(dims) > MAX_DIMENSIONS:
@@ -359,7 +365,7 @@ def validate_batch(
             errors.append(PointError(index, metric, *ts_error))
             continue
 
-        dims, dim_error = _validate_dims(
+        dims, dim_error = validate_dims(
             point.get("dims"), definition.get("dimensions") or []
         )
         if dim_error:

@@ -202,6 +202,10 @@ async def get_my_github_pat_status(current_user: User = Depends(get_current_user
 
     return {
         "configured": db.has_user_github_pat(current_user.id),
+        # #3164: present AND decryptable — what fork-to-own and repo binding can
+        # actually use. `configured` alone said "using your saved token" for a
+        # row that reads back as None, and the submit then got FORK_PAT_REQUIRED.
+        "usable": db.get_user_github_pat(current_user.id) is not None,
         # Lets the UI say "your agents fall back to the platform token" when the
         # user has none of their own but a global PAT exists.
         "has_global": bool(get_github_pat()),

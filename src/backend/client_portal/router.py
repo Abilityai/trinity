@@ -1356,6 +1356,10 @@ async def portal_chat(
             agent_name, email, body.session_id, getattr(body, "reply_to_message_id", None))
         result = await service.portal_chat(agent_name, body.message, email, session_id=body.session_id,
                                           include_owned=include_owned,
+                                          # #3265 — resolved against the caller's
+                                          # own uploads before anything is stored.
+                                          attachments=await service.resolve_turn_attachments(
+                                              agent_name, email, getattr(body, "attachments", None)),
                                           new_thread=body.new_thread,
                                           # ent#555 — validated HERE, before it is
                                           # stamped anywhere: the id is
@@ -2053,6 +2057,9 @@ async def portal_chat_stream(
             model=requested_model,   # ent#403, same rule as the flag above
             reply_context=reply_context,
             gate_is_person=principal.is_person,   # trinity-enterprise#751, same rule
+            # #3265 — same resolution as the sync path above.
+            attachments=await service.resolve_turn_attachments(
+                agent_name, email, getattr(body, "attachments", None)),
         )
     except ClientPortalError as e:
         idempotency_service.fail(decision)

@@ -2837,7 +2837,10 @@ async def portal_chat(agent_name: str, message: str, email: str,
                       # person (`PortalPrincipal.is_person`), so an approver may run
                       # their own gated request. False for any caller that did not
                       # (voice relays a model's paraphrase of the speech).
-                      gate_is_person: bool = False) -> dict:
+                      gate_is_person: bool = False,
+                      # #3265 — the turn's attachments, already resolved by
+                      # `resolve_turn_attachments` (JSON). Stored on the user row.
+                      attachments: str | None = None) -> dict:
     """Run one client chat turn against a rostered agent as a standard platform
     execution (``triggered_by="public"`` — the external-caller path, observable +
     cost-tracked). Scoped to the caller's roster; raises ``ClientPortalError`` on
@@ -3022,7 +3025,8 @@ async def portal_chat(agent_name: str, message: str, email: str,
     # the thread's title before this writes the derived one, and the history
     # context below must not contain the very message it is context FOR. Both
     # reads happen first, deliberately.
-    _persist_user_turn(agent_name, email, session_id, client_message, voice_call_id=voice_call_id)
+    _persist_user_turn(agent_name, email, session_id, client_message, voice_call_id=voice_call_id,
+                       attachments=attachments)
 
     # ent#186 / #2579: title the thread NOW, concurrently with the turn.
     #
@@ -3432,8 +3436,63 @@ def _voice_attribution(voice_call_id: str | None) -> dict:
     return {"voice_call_id": voice_call_id} if voice_call_id else {}
 
 
+# #3265 — what a user turn carried. The upload itself already happened (the
+# composer uploads on attach); the turn only NAMES the files. A successful entry
+# is kept only when that filename is in the caller's own uploads to this agent,
+# with size and type read from there, so a request cannot put a file on its
+# message that it never sent. A failed one keeps its name and reason — the
+# person is told on the message, never by silence.
+_FAILED_UPLOAD = "This file did not upload."
+_NOT_IN_UPLOADS = "This file is not in your uploads to this agent."
+
+
+async def resolve_turn_attachments(agent_name: str, email: str, requested) -> str | None:
+    """The JSON stored on the user row, or None when nothing was attached."""
+    if not requested:
+        return None
+    listing = await _read_inbox_or_none(agent_name, email)
+    inbox = {it["filename"]: it for it in (listing or [])}
+    out, seen = [], set()
+    for a in requested:
+        name = (getattr(a, "filename", "") or "").strip()
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        if getattr(a, "failed", False):
+            out.append({"filename": name, "failed": True,
+                        "error": (getattr(a, "error", None) or _FAILED_UPLOAD)[:300]})
+        elif name in inbox:
+            it = inbox[name]
+            out.append({"filename": name, "size_bytes": it.get("size_bytes"),
+                        "mime_type": it.get("mime_type")})
+        elif listing is None:
+            # The uploads could not be READ (agent not running, Docker
+            # unreadable) — not the same as "not there". Stored without size or
+            # type rather than as a permanent failure (the #2196 collapse). Safe:
+            # a name is all that is stored, and every read path resolves the
+            # file from the caller's own uploads, never from this row.
+            out.append({"filename": name})
+        else:
+            out.append({"filename": name, "failed": True, "error": _NOT_IN_UPLOADS})
+    return json.dumps(out) if out else None
+
+
+def decode_turn_attachments(raw) -> list | None:
+    """The stored column as a list; None for no attachments or an unreadable value."""
+    if not raw:
+        return None
+    try:
+        items = json.loads(raw)
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(items, list):
+        return None
+    return [i for i in items if isinstance(i, dict) and i.get("filename")] or None
+
+
 def _persist_user_turn(agent_name: str, email: str, session_id: str, content: str,
-                       voice_call_id: str | None = None) -> None:
+                       voice_call_id: str | None = None,
+                       attachments: str | None = None) -> None:
     """Write the client's own message, before the turn runs. Best-effort.
 
     Idempotent against a RETRY. The message is written before the turn so a
@@ -3461,7 +3520,11 @@ def _persist_user_turn(agent_name: str, email: str, session_id: str, content: st
     try:
         now = utc_now_iso()
         db.add_portal_message(uuid.uuid4().hex, agent_name, email, "user", content,
-                              None, now, session_id=session_id, **_voice_attribution(voice_call_id))
+                              None, now, session_id=session_id,
+                              **_voice_attribution(voice_call_id),
+                              # #3265: only when the turn carried files, so the
+                              # ordinary write is byte-identical to before.
+                              **({"attachments": attachments} if attachments else {}))
         db.touch_portal_session(session_id, now, added=1,
                                 title_if_empty=_derive_title(content))
     except Exception as e:  # noqa: BLE001 — never block a turn on bookkeeping
@@ -3891,7 +3954,9 @@ async def start_portal_turn(agent_name: str, message: str, email: str,
                             # ent#610 — see `portal_chat`.
                             reply_context: str = "",
                             # trinity-enterprise#751 — see `portal_chat`.
-                            gate_is_person: bool = False) -> dict:
+                            gate_is_person: bool = False,
+                            # #3265 — see `portal_chat`.
+                            attachments: str | None = None) -> dict:
     """Begin a turn and return as soon as it is dispatchable.
 
     Returns ``{execution_id, session_id}``. The caller subscribes to the
@@ -3991,6 +4056,7 @@ async def start_portal_turn(agent_name: str, message: str, email: str,
         try:
             await portal_chat(agent_name, message, email, session_id=session_id,
                               include_owned=include_owned, execution_id=execution_id,
+                              attachments=attachments,   # #3265
                               turn_timeout_seconds=turn_timeout,
                               # #2196: already resolved above — one Docker read per turn.
                               availability=availability,
@@ -4461,6 +4527,9 @@ def get_history(agent_name: str, email: str, session_id: str | None = None,
     # the thumb they already gave. One query for the thread rather than one per
     # message, and scoped to this evaluator — nobody sees anyone else's rating.
     _attach_own_ratings(messages, email, is_platform=include_owned)
+    # #3265: the stored JSON becomes the list the bubble renders.
+    for m in messages:
+        m["attachments"] = decode_turn_attachments(m.get("attachments"))
     # ent#286: a client that reloaded mid-turn has lost the execution id it was
     # streaming. It arrives here, on the fetch the client already makes on
     # mount, so reattaching costs no extra round trip.
@@ -4877,12 +4946,19 @@ def _inbox_list_cmd(inbox: str, legacy: str | None = None) -> str:
 async def _read_inbox(agent_name: str, email: str) -> list[dict]:
     """Raw inbox listing for a client on a running agent. Returns [] if the agent
     is offline or the inbox is empty — never raises (best-effort read)."""
+    return await _read_inbox_or_none(agent_name, email) or []
+
+
+async def _read_inbox_or_none(agent_name: str, email: str) -> list[dict] | None:
+    """`_read_inbox`, but None when the listing could not be read at all (agent
+    not running, exec failed, unparsable output) — so a caller that must tell
+    "couldn't read" from "not there" can (#3265). Never raises."""
     from services.docker_service import get_agent_container
     from services.docker_utils import container_exec_run
 
     container = get_agent_container(agent_name)
     if not container or getattr(container, "status", "") != "running":
-        return []
+        return None
     try:
         legacy = (
             _legacy_client_inbox(email)
@@ -4893,12 +4969,12 @@ async def _read_inbox(agent_name: str, email: str) -> list[dict]:
             container, _inbox_list_cmd(_client_inbox(email), legacy), user="developer"
         )
         if getattr(res, "exit_code", 1) != 0:
-            return []
+            return None
         raw = res.output.decode() if isinstance(res.output, (bytes, bytearray)) else str(res.output)
         items = json.loads(raw.strip() or "[]")
     except Exception as e:  # noqa: BLE001 — listing is best-effort
         logger.warning("portal inbox list failed for %s: %s", agent_name, e)
-        return []
+        return None
     out = []
     for it in items:
         mtime = it.get("mtime")

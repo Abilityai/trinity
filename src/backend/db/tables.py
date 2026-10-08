@@ -550,6 +550,7 @@ enterprise_portal_messages = Table(
     Column("created_at", Text),
     Column("source", Text),         # ent#534: NULL typed | 'voice'
     Column("voice_call_id", Text),  # ent#534: groups one voice call's rows
+    Column("attachments", Text),    # #3265: JSON list on a user turn
 )
 
 # ent#359 — per-user star + read cursor for a Workspace chat of either kind
@@ -1578,6 +1579,21 @@ skill_gate_requests = Table(
     Column("dispatched_at", Text),
     Column("notified_at", Text),
     UniqueConstraint("dispatched_execution_id"),
+)
+
+# trinity-enterprise#753 — the per-agent skill gate map. See the DDL comment in
+# db/schema.py. The primary key is the ON CONFLICT target of every write.
+agent_skill_gates = Table(
+    "agent_skill_gates",
+    metadata,
+    Column("agent_name", Text, primary_key=True),
+    Column("skill_name", Text, primary_key=True),      # lowercased
+    Column("approver", Text, nullable=False),          # primary | approver
+    Column("deadline_hours", _Integer),                # 1..168; NULL → the 24h default
+    Column("origin", Text, nullable=False),            # set | library_default | cleared
+    Column("set_by", Text, nullable=False),
+    Column("set_by_agent", Text),
+    Column("set_at", Text, nullable=False),
 )
 
 nevermined_agent_config = Table(

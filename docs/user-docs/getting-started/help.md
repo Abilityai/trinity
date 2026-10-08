@@ -92,7 +92,8 @@ Your self-hosted instance never stores a GitHub token; reports post to an Abilit
 |----------|-------------|
 | [GitHub Issues](https://github.com/abilityai/trinity/issues) | Report bugs and request features |
 | [GitHub Discussions](https://github.com/abilityai/trinity/discussions) | Ask questions and share ideas |
-| [Demo Video](https://youtu.be/SWpNphnuPpQ) | Watch Trinity in action |
+| [Platform Demo](https://youtu.be/ivljtZqsxeo) | Full UI walkthrough, end to end |
+| [Video Library](../videos.md) | Workshops, demos, and deep-dives, newest first |
 | [API Docs](http://localhost:8000/docs) | Interactive Swagger documentation |
 
 ## See Also

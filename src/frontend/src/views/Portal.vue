@@ -758,6 +758,11 @@
             @focus-composer="focusConversationComposer"
           />
         </template>
+        <!-- ent#836: Asks — the agent's open asks, each a door into the Inbox.
+             Reads the one asks feed; present only while something waits. -->
+        <template #tab-asks="{ participants }">
+          <PortalRailAsks :participants="participants" />
+        </template>
       </PortalRail>
       <!-- Round 3: an open rail on the Inbox before anything is selected. It
            has no agent to show, but it keeps its column (the Inbox chose its
@@ -819,6 +824,10 @@
           @use-playbook="(text) => { railSheetOpen = false; usePlaybook(text) }"
           @focus-composer="() => { railSheetOpen = false; focusConversationComposer() }"
         />
+      </template>
+      <!-- ent#836: the sheet's own `#tab-asks`; a row's navigation closes it. -->
+      <template #tab-asks="{ participants }">
+        <PortalRailAsks :participants="participants" @open="railSheetOpen = false" />
       </template>
     </PortalRail>
 
@@ -882,6 +891,7 @@ import PortalWork from '@/components/portal/PortalWork.vue'
 import PortalRailFiles from '@/components/portal/PortalRailFiles.vue'
 import PortalProjects from '@/components/portal/projects/PortalProjects.vue'
 import PortalRailProjects from '@/components/portal/projects/PortalRailProjects.vue'
+import PortalRailAsks from '@/components/portal/PortalRailAsks.vue'
 import { useProjectsStore } from '@/stores/projects'
 import PortalCodeInput from '@/components/portal/PortalCodeInput.vue'
 import PortalAgentPicker from '@/components/portal/PortalAgentPicker.vue'
@@ -927,6 +937,8 @@ import {
   visibleTabs,
   infoSignalFrom,
 } from '@/components/portal/portalRail'
+// ent#836: the Asks tab's signal — the agent row's own count, as a rail signal.
+import { asksSignalFrom } from '@/components/portal/portalRailAsks'
 import { stageZone } from '@/components/portal/portalBriefingState'
 import {
   resolveAgentLanding, shouldMarkTurnRead, shouldEscapeStage,
@@ -941,6 +953,10 @@ import {
   // trinity-enterprise#610 §3g S4: the read's optimistic zero and its rollback.
   optimisticRead, rollbackRead,
   asksHomeRoute,
+  // ent#836: the per-agent ask counts the sidebar's mark reads — handed to the
+  // rail's door gate (the Asks tab's presence) and its signal, so the tab and
+  // the mark cannot disagree.
+  asksByAgent,
   // ent#621 T6: the order the sidebar SHOWS is now computed here, once, and
   // passed down — so the switch-agent keys walk exactly what the eye reads.
   orderRosterAgents,
@@ -1276,10 +1292,14 @@ const railParticipants = computed(() => railParticipantsFor({
 // sheet all read this list and never the registry, so a tab whose door this
 // session fails has no icon, no label and no mounted body — and therefore no
 // request for whatever that body would fetch.
+// ent#836: ONE projection of the asks feed for the rail — the same
+// `asksByAgent(openAsks)` the sidebar's "needs you" mark reads.
+const railAskCounts = computed(() => asksByAgent(store.openAsks))
 const railTabs = computed(() => visibleTabs(RAIL_TABS, {
   isPlatform: store.isPlatformSession,
   participants: railParticipants.value,
   capabilities: { projects: store.projectsAvailable },
+  askCounts: railAskCounts.value,
 }))
 // Keyed on the route and the stage VERDICT — synchronous facts — never on data
 // still arriving (a room's participants land with its own fetch), so a live
@@ -1406,9 +1426,12 @@ watch(
   (name) => { if (name) store.loadAgentSuggestions(name) },
   { immediate: true },
 )
+// ent#836: the Asks tab's count — the participants' share of the same feed.
+const asksSignal = computed(() => asksSignalFrom(railAskCounts.value, railParticipants.value))
 const railSignals = computed(() => ({
   ...rail.signals.value,
   ...(infoSignal.value ? { info: infoSignal.value } : {}),
+  ...(asksSignal.value ? { asks: asksSignal.value } : {}),
 }))
 
 function setRailOpen(open) { railState.value = { ...railState.value, open } }

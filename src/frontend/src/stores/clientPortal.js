@@ -764,7 +764,8 @@ export const useClientPortalStore = defineStore('clientPortal', {
     // on BOTH turn actions — a field honoured by only one brings the bug back
     // exactly when streaming fails and this fallback runs.
     async sendPortalChat(agentName, message, sessionId = null,
-                    { newThread = false, openCanvasId = null, model = null, replyToMessageId = null } = {}) {
+                    { newThread = false, openCanvasId = null, model = null, replyToMessageId = null,
+                      attachments = null } = {}) {
       const { data } = await portalHttp.post(
         `/api/enterprise/client-portal/agents/${agentName}/chat`,
         {
@@ -780,6 +781,10 @@ export const useClientPortalStore = defineStore('clientPortal', {
           // quotes the stored row into the prompt, and refuses (422) one that
           // is not in this caller's thread.
           reply_to_message_id: replyToMessageId || null,
+          // #3265 — the files this message carries, by upload name. The server
+          // keeps only names in this caller's own uploads, and stores them on
+          // the user row so a reload shows them.
+          attachments: attachments && attachments.length ? attachments : null,
         },
         { headers: this.authHeader }
       )
@@ -792,7 +797,8 @@ export const useClientPortalStore = defineStore('clientPortal', {
     // for headless clients (ent#83), and is still the fallback when streaming
     // is unavailable.
     async startPortalChat(agentName, message, sessionId = null,
-                    { newThread = false, openCanvasId = null, model = null, replyToMessageId = null } = {}) {
+                    { newThread = false, openCanvasId = null, model = null, replyToMessageId = null,
+                      attachments = null } = {}) {
       const { data } = await portalHttp.post(
         `/api/enterprise/client-portal/agents/${agentName}/chat/stream`,
         {
@@ -808,6 +814,10 @@ export const useClientPortalStore = defineStore('clientPortal', {
           // quotes the stored row into the prompt, and refuses (422) one that
           // is not in this caller's thread.
           reply_to_message_id: replyToMessageId || null,
+          // #3265 — the files this message carries, by upload name. The server
+          // keeps only names in this caller's own uploads, and stores them on
+          // the user row so a reload shows them.
+          attachments: attachments && attachments.length ? attachments : null,
         },
         { headers: this.authHeader }
       )

@@ -1,10 +1,19 @@
 # mcp: none — owner configuration surface (autonomy / timeout / resources / capabilities) — a grant, not a use; deliberately unexposed (Invariant #8)
 """Per-agent configuration endpoints: api-key, autonomy, read-only, resources, capabilities, capacity, timeout."""
+import logging
+
 from fastapi import APIRouter, Depends, HTTPException, Request
 
-from models import User, AgentCapacityUpdate, PublicChannelModelUpdate
+from models import (
+    User, AgentCapacityUpdate, PublicChannelModelUpdate,
+    AgentCapabilityGrant, AgentCapabilityGrants, CapabilityGrantRequest, SkillManagerGrantResult,
+)
 from database import db
 from dependencies import (
+    require_person_or_capability,
+    require_admin,
+    reject_non_interactive_principal,
+    OwnedAgentByName,
     get_current_user,
     AuthorizedAgentByName,
     assert_agent_access,
@@ -20,6 +29,8 @@ from services.agent_service import (
     set_autonomy_status_logic,
 )
 from services.platform_audit_service import platform_audit_service, AuditEventType
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/agents", tags=["agents"])
 
@@ -124,7 +135,7 @@ async def get_agent_read_only_status(
 async def set_agent_read_only_status(
     agent_name: str,
     body: dict,
-    current_user: User = Depends(require_person)
+    current_user: User = Depends(require_person_or_capability("agents.manage", self_person_only=True))
 ):
     """
     Set the read-only mode status for an agent.
@@ -186,7 +197,7 @@ async def set_agent_resources(
     agent_name: str,
     body: dict,
     request: Request,
-    current_user: User = Depends(require_person)
+    current_user: User = Depends(require_person_or_capability("agents.manage"))
 ):
     """
     Set the resource limits for an agent.
@@ -514,7 +525,7 @@ async def get_agent_timeout(
 async def set_agent_timeout(
     agent_name: str,
     body: dict,
-    current_user: User = Depends(require_person)
+    current_user: User = Depends(require_person_or_capability("agents.manage"))
 ):
     """
     Set the execution timeout for an agent.
@@ -622,7 +633,7 @@ async def set_public_channel_model(
     agent_name: str,
     body: PublicChannelModelUpdate,
     request: Request,
-    current_user: User = Depends(require_person),
+    current_user: User = Depends(require_person_or_capability("agents.manage")),
 ):
     """Set or clear the per-agent public-channel model override (owner-only, #894).
 
@@ -756,7 +767,7 @@ async def get_agent_guardrails(
 async def set_agent_guardrails(
     agent_name: str,
     body: dict,
-    current_user: User = Depends(require_person),
+    current_user: User = Depends(require_person_or_capability("agents.manage", self_person_only=True)),
 ):
     """Set per-agent guardrails overrides. Owner-only. Requires container
     recreation to take effect (the runtime config file is written during
@@ -777,3 +788,69 @@ async def set_agent_guardrails(
         "agent_name": agent_name,
         "guardrails": cleaned,
     }
+
+
+# ============================================================================
+# Self-change permissions (trinity-enterprise#164; the Settings view is ent#756)
+# ============================================================================
+
+@router.get("/{agent_name}/capability-grants", response_model=AgentCapabilityGrants)
+async def list_agent_capability_grants(agent_name: OwnedAgentByName):
+    """Which self-change permissions this agent holds — all four, held or not,
+    with who granted each and when. Visible to the owner (and admins); never
+    to the agent's other users."""
+    from db.capability_grants import CAPABILITIES
+    held = {g["capability"]: g for g in db.list_agent_capabilities(agent_name)}
+    return AgentCapabilityGrants(agent_name=agent_name, grants=[
+        AgentCapabilityGrant(capability=c, granted=c in held,
+                             granted_by=(held.get(c) or {}).get("granted_by"),
+                             granted_at=(held.get(c) or {}).get("granted_at"))
+        for c in sorted(CAPABILITIES)
+    ])
+
+
+@router.put("/{agent_name}/capability-grants/{capability}", response_model=SkillManagerGrantResult)
+async def set_agent_capability_grant(
+    agent_name: str,
+    capability: str,
+    body: CapabilityGrantRequest,
+    request: Request,
+    admin_user: User = Depends(require_admin),
+):
+    """Grant or revoke one self-change permission (ent#164). The GRANT half of
+    grant-vs-use: an admin in a signed-in session only — never a key, never an
+    agent, and answering a `permission-request` ask does not do it. Idempotent
+    both ways; every change is audited."""
+    reject_non_interactive_principal(admin_user)
+    from services import capability_grant_service
+    from services.capability_grant_service import CapabilityGrantRefused
+
+    try:
+        result = capability_grant_service.set_grant(
+            agent_name, capability, body.granted, admin_user.username)
+    except CapabilityGrantRefused as e:
+        raise HTTPException(status_code=e.status_code, detail=e.as_detail())
+    if result["changed"]:
+        try:  # best-effort: the grant has already committed
+            await platform_audit_service.log(
+                event_type=AuditEventType.AUTHORIZATION,
+                # One verb per capability whichever door granted it (#3236
+                # review): `skills.manage` keeps the skill-manager route's
+                # verb, so an audit query for it finds both doors.
+                event_action=(
+                    ("skill_manager_grant" if body.granted else "skill_manager_revoke")
+                    if capability == "skills.manage"
+                    else ("capability_grant" if body.granted else "capability_revoke")
+                ),
+                source="api",
+                actor_user=admin_user,
+                actor_ip=request.client.host if request.client else None,
+                endpoint=request.scope["path"],
+                request_id=getattr(request.state, "request_id", None),
+                target_type="agent",
+                target_id=agent_name,
+                details={"capability": capability, "granted": body.granted},
+            )
+        except Exception:  # noqa: BLE001
+            logger.warning("capability grant audit failed for %s", agent_name)
+    return SkillManagerGrantResult(**result)

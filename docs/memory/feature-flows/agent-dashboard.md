@@ -327,6 +327,44 @@ widget (`BoundMetricMark.vue`), because the panel's own header timestamp says
 when the *dashboard* was fetched, which for a bound number says nothing about
 the number.
 
+**Naming one series with `dims:` (ent#730).** A dimensioned metric (one series
+per channel, region, …) folds every series into one number. A widget that wants
+one series names it:
+
+```yaml
+widgets:
+  - type: metric
+    label: "Spend: Google"
+    metric: ad_spend
+    dims: {channel: google}  # every dimension the series was recorded with, exact match
+```
+
+`value`, `last_point_at`, `stale`, `freshness`, `color` and `history` then come
+from that one series, through the same single fill block the fold uses ("pick
+a source, fill once"), so the two paths cannot drift. The selector is validated
+by the write path's own leaf (`metric_points_service.validate_dims`, through
+`metric_read_service.parse_dims_selector`) and matched by `canonical_dims`, so
+key order never matters. `dims` absent, `null` or `{}` is no selector.
+
+**Every bound widget says what its number is.** The backend sends
+`bound_series` facts (`basis` `selected` / `series` / `folded`, `aggregation`,
+`series_count`, `dims`, `dimensions`, `stale_count`) and `BoundMetricMark.vue`
+writes the caption through `metricFormat.boundSeriesNote`: `channel=meta` for a
+selected series, `sum of 3 channel values` (`· 1 stale` when some are stale) for
+a fold, and `newest of 3: channel=meta` for a `last` metric with several series.
+A single unselected series gets no caption.
+
+**Verdict and trend colours.** A successful bind writes the registry's
+`direction` and, for a judgeable metric (not `status`, `up_good`/`down_good`,
+at least one threshold) with a numeric value, a typed `threshold_verdict`
+(`{level: critical | warning | ok, threshold}`) from the same rule that gives
+`color`. A bound `metric` tile shows it as a Critical / Warning `BaseBadge`
+whose footprint is reserved on `ok`, so a poll crossing a threshold swaps it in
+place. A bound widget's trend arrow and sparkline use the shared direction-aware
+`trendClasses` / `sparklineColor`: rising `down_good` spend is red, `neutral` is a
+grey arrow over a blue sparkline. A successful bind also pops an author-typed `trend`/`trend_value`, so an
+author arrow cannot contradict the computed sparkline.
+
 **Order, and why it matters:** cache → snapshot → **bind** → history-enrich, on
 both the live and the cached path. The snapshot writer and the history
 enrichment both **skip** bound widgets, through one shared `is_bound` predicate
@@ -343,10 +381,21 @@ so a consumer telling one refusal from another never substring-matches English:
 |---|---|---|
 | The name is not declared | `metric_undeclared` | `binding_error: "metric 'x' is not declared in template.yaml"`, and **no value** — a wrong number is worse than no number |
 | The name is **retired** | `metric_retired` | `binding_error: "metric 'x' was retired at T — …"` plus `retired_at`, and no value. TD-10 refuses `metric=<retired>` on the route so a retired metric never silently reads as current; a widget is that same read with nobody there to pass `include_retired`, so it refuses too |
-| The metric store is down | `metric_store_unavailable` | `binding_error: "metric store unavailable"`; unbound widgets render normally and the dashboard is never 5xx'd |
+| The metric store is down | `metric_store_unavailable` | `binding_error: "metric store unavailable"`, and an author `value:` placeholder is dropped (it would read as a real 0, ent#730); unbound widgets render normally and the dashboard is never 5xx'd |
+| `metric:` is a truthy non-text value (a number, boolean, list or mapping) | `metric_name_invalid` | `binding_error` naming the type, no value; the rest of the dashboard renders. Before ent#730 a list or mapping raised out of the bind and failed the whole read, and a scalar such as `metric: 5` or `metric: true` read `metric_undeclared`. A falsy value (`0`, `false`, `[]`, `{}`) leaves the widget unbound, as before |
+| `dims:` is not a mapping, or a value is not non-empty text (or is over-long or holds a control character), or > 10 keys | `metric_dimension_invalid` | The sentence, plus a type hint for a non-text value (quote it / one value per tile / the value is missing), in warning ink |
+| `dims:` names a key the metric does not declare | `metric_dimension_undeclared` | The sentence lists the declared keys, in warning ink |
+| No recent series matches the selector (also on a metric with no points) | `metric_series_not_found` | A neutral footer row: chip, selector caption, "no recent data", and a hint built from `binding_detail` facts (a partial selector's real series, a casing mismatch, "no points yet", or the 200-point / 50-series window). **Never the fold** |
 | Declared, no points yet | — | "declared, no points yet" instead of a number |
 
-A resolved binding **clears** a previous refusal (both keys are popped), so a
+Compat **X-009** reports the `metric_name_invalid`, `metric_dimension_invalid`
+and `metric_dimension_undeclared` cases (and a `dims:` with no `metric:`) with
+the tile's own sentence, so an agent sees them in its compatibility report
+without opening the dashboard. It judges each widget as the tile receives it
+(the agent server returns the parsed YAML as JSON), so an unquoted YAML date
+in `dims:` arrives as ISO text and binds, while a number is still flagged.
+
+A resolved binding **clears** a previous refusal (both keys, and any `binding_detail`, are popped), so a
 retry after the store comes back cannot leave a widget bound and erroring at
 once.
 

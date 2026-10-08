@@ -202,6 +202,7 @@ import {
 } from './portalRail'
 // ent#621: the rail's two keys, derived from the map rather than typed here.
 import { keyHint, keyShortcutsFor, hostPlatform } from './portalKeymap'
+import { capCount } from '@/utils/tabTitle'
 
 const KEY_PLATFORM = hostPlatform()
 const RAIL_KEY_HINT = keyHint('rail-toggle', KEY_PLATFORM)
@@ -244,13 +245,26 @@ const stripTabs = computed(() =>
     // The key hint rides the tooltip the dot already uses, so an open rail's
     // tabs say what the collapsed strip's buttons say — one hint, two forms.
     const title = signal ? railTitle(t, sig) : t.label
-    return {
+    const out = {
       id: t.id,
       label: t.label,
       signal,
       signalTitle: `${title} · ${TAB_KEY_HINT} next tab`,
       ariaKeyshortcuts: TAB_KEY_SHORTCUTS,
     }
+    // ent#836 — a COUNTED tab (Asks) wears the count, not the dot: the same
+    // unfilled "needs you" mark the agent row wears, so the two read as one
+    // number. `OverflowTabs` draws the badge INSTEAD of the signal dot, and
+    // names the tab with the words ("Asks, 2 asks") so a reader never hears
+    // "Asks 2". The collapsed strip keeps the dot + tooltip, the design pass's
+    // own vocabulary for an icon with no room for a number.
+    if (sig.count) {
+      out.badge = capCount(sig.count)
+      out.badgeVariant = 'urgent-outline'
+      out.badgeLabel = `${t.label}, ${sig.note || sig.count}`
+      out.signal = null
+    }
+    return out
   })
 )
 const activeSignal = computed(() => signalFor(props.signals, active.value))
@@ -337,6 +351,9 @@ const ICONS = {
   // wears Work's lightning bolt in the collapsed strip AND in its empty state,
   // and nothing fails.
   info: 'M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z',
+  // ent#836 — Asks: a speech bubble with a line (heroicons `annotation`), a
+  // thing said to you — distinct from Info's circle beside it in the strip.
+  asks: 'M7 8h10M7 12h4m1 8l-4-4H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-3l-4 4z',
 }
 const GLYPHS = {
   expand: 'M11 19l-7-7 7-7m8 14l-7-7 7-7',
