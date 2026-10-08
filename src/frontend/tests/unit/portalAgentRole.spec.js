@@ -71,7 +71,7 @@ function card(over = {}) {
     agent_name: AGENT,
     role: { id: 'sales-lead', title: 'Sales Lead', mission: 'Close ICP-fit pipeline.', status: 'active',
             review_by: '2099-12-01', stale: false, path: 'canon/roles/sales-lead.yaml', error: null },
-    seat: 'gary@example.com',
+    seat_source: 'person',
     objectives: [{
       id: 'q4-close-rate', statement: 'Raise close rate this quarter.', horizon: 'quarter', status: 'active', owned: true,
       metrics: [
@@ -233,6 +233,16 @@ describe('PortalAgentRole (mounted)', () => {
     expect(w.text()).not.toContain('Objectives')
   })
 
+  it('an agent with no seat on record says so, and still lists the work it supports (ent#812)', async () => {
+    const sentence = 'This agent neither holds a seat nor serves someone who holds one, so it owns no objective yet.'
+    const none = await mountWith(card({ objectives: [], objectives_error: null, finding_codes: ['no_seat'] }))
+    expect(none.get('[data-testid="portal-role-no-seat"]').text()).toBe(sentence)
+    expect(none.find('[data-testid="portal-role-objectives-error"]').exists()).toBe(false)   // not a failed read
+    const supporting = await mountWith(card({ finding_codes: ['no_seat'] }))
+    expect(supporting.get('[data-testid="portal-role-no-seat"]').text()).toBe(sentence)
+    expect(supporting.findAll('[data-testid="portal-role-objective"]')).toHaveLength(1)
+  })
+
   it('a list with objective files that failed to read says it may be incomplete', async () => {
     const w = await mountWith(card({ objectives_partial: true }))
     expect(w.findAll('[data-testid="portal-role-objective"]')).toHaveLength(1)   // what did load still shows
@@ -255,6 +265,37 @@ describe('PortalAgentRole (mounted)', () => {
     const w = await mountWith(card({ role: { id: 'sales-lead', error: 'role_file_not_found', path: 'canon/roles/sales-lead.yaml' }, objectives: [] }))
     expect(w.get('[data-testid="portal-role-title"]').text()).toBe('sales-lead')
     expect(w.get('[data-testid="portal-role-error"]').text()).toContain("not in the agent's canon yet")
+  })
+
+  it('says where the seat comes from, for this viewer — never a person (ent#814)', async () => {
+    const mine = await mountWith(card({ seat_source: 'person' }))
+    expect(mine.get('[data-testid="portal-role-seat-source"]').text()).toBe('Your seat on this agent')
+    const held = await mountWith(card({ seat_source: 'holds' }))
+    expect(held.get('[data-testid="portal-role-seat-source"]').text()).toBe('The agent holds this seat itself')
+    const primary = await mountWith(card({ seat_source: 'primary' }))
+    expect(primary.get('[data-testid="portal-role-seat-source"]').text()).toBe("Its primary's seat")
+    const none = await mountWith(card({ seat_source: 'none' }))
+    expect(none.find('[data-testid="portal-role-seat-source"]').exists()).toBe(false)
+  })
+
+  it("the viewer's relationship comes from their assignment, and is stated when there is none", async () => {
+    const primary = await mountWith(card({ relationship: 'primary' }))
+    expect(primary.get('[data-testid="portal-role-relationship"]').text()).toContain('primary — it works for you')
+    const approver = await mountWith(card({ relationship: 'approver' }))
+    expect(approver.get('[data-testid="portal-role-relationship"]').text()).toContain('approver')
+    const unknown = await mountWith(card({ relationship: 'owner-of-everything' }))
+    expect(unknown.get('[data-testid="portal-role-relationship"]').text()).toContain('no assignment recorded')
+  })
+
+  it('no seat on record is said once, on the role, and the supported work still shows', async () => {
+    const sentence = 'This agent neither holds a seat nor serves someone who holds one, so it owns no objective yet.'
+    const w = await mountWith(card({
+      seat_source: 'none', finding_codes: ['no_seat'],
+      role: { id: null, title: null, error: 'no_seat', path: null },
+    }))
+    expect(w.get('[data-testid="portal-role-error"]').text()).toBe(sentence)
+    expect(w.find('[data-testid="portal-role-no-seat"]').exists()).toBe(false)
+    expect(w.findAll('[data-testid="portal-role-objective"]').length).toBe(1)
   })
 
   it('a stopped agent says the files live in the container', async () => {

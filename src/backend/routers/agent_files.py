@@ -12,6 +12,7 @@ from database import db
 from dependencies import get_current_user, AuthorizedAgentByName, reject_agent_principal, assert_agent_owner, is_interactive_principal
 from services.agent_auth import agent_httpx_client
 from services import (
+    canon_roles_service,
     metric_access_service,
     metric_read_service,
     objective_join_service,
@@ -39,6 +40,7 @@ from services.agent_service import (
     set_file_sharing_status_logic,
 )
 from models import (
+    CanonRolesRead,
     CreateFolderRequest,
     FileUpdateRequest,
     ObjectiveJoinRead,
@@ -463,6 +465,31 @@ async def get_agent_metrics(
             detail="metric_store_unavailable",
             headers={"Retry-After": "30"},
         )
+
+
+@router.get("/{agent_name}/canon/roles", response_model=CanonRolesRead)
+async def get_agent_canon_roles(
+    agent_name: AuthorizedAgentByName,
+    current_user: User = Depends(get_current_user),
+):
+    """The seats this agent's canon defines — `<canon>/roles/*.yaml` with each
+    file's id, `title` and `updated` stamp (trinity-enterprise#817).
+
+    Read from the agent's own container through the same door as its objectives,
+    and drawing on the same per-agent budget (`objectives_read_budget`), because
+    it is the same kind of fan-out against the same container. An agent key reads
+    only its own canon. OSS-core (operator ruling 2026-10-06).
+    """
+    if current_user.agent_name and current_user.agent_name != agent_name:
+        raise HTTPException(
+            status_code=403,
+            detail="Agent-scoped key may only read its own canon",
+        )
+    objectives_read_budget.enforce(
+        agent_name,
+        detail="Canon read rate limit exceeded for this agent.",
+    )
+    return await canon_roles_service.read_canon_roles(agent_name)
 
 
 @router.get("/{agent_name}/objectives", response_model=ObjectiveJoinRead)

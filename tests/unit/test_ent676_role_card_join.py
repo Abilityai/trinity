@@ -882,3 +882,21 @@ def test_the_card_module_does_not_import_the_metrics_stack_at_module_top():
              if "objective_join" in name or "metric_read" in name
              or "metric_points" in name]
     assert heavy == []
+
+
+@pytest.fixture(autouse=True)
+def _seat_on_record():
+    """trinity-enterprise#812: the join reads the seat from Trinity's record,
+    not from `x-role`; record the seat these templates declare, as a companion's."""
+    from services import assignment_provider as ap
+
+    class _Seats:
+        def assignment_for(self, agent_name, triggered_by):
+            return None
+
+        def seat_for(self, agent_name):
+            return {"case": "serves", "role_id": ROLE, "seats": [ROLE]}
+
+    ap.register_provider(_Seats())
+    yield
+    ap.clear_provider()

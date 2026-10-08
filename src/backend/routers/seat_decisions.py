@@ -29,7 +29,7 @@ from database import db
 from dependencies import get_current_user, assert_agent_access
 from db_models import User
 from services import idempotency_service, rate_limiter, schedule_seat_memory, seat_decision_service
-from services.assignment_provider import resolve_assignment
+from services.assignment_provider import resolve_assignment, resolve_served_seat
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/agents", tags=["seat-decisions"])
@@ -85,7 +85,12 @@ async def record_seat_decision(
             raise HTTPException(status_code=409, detail="A record with this Idempotency-Key is in flight")
         return {**(idem.snapshot or {}), "replayed": True}
 
-    role = body.decided_by_role
+    # ent#814: the decision is stamped with the seat THIS run serves — the
+    # served person's own seat, the agent's own if it holds one, the primary's
+    # as the default. Resolved here, not taken from the agent, whose prompt
+    # used to name the primary's seat on every run; the agent's value is only
+    # the fallback when nobody's seat is on record.
+    role = resolve_served_seat(agent_name, seat_email)["role_id"] or body.decided_by_role
     if not role:
         assignment = resolve_assignment(agent_name, getattr(execution, "triggered_by", None))
         role = (assignment or {}).get("role_id") or None

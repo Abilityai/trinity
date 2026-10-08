@@ -3398,7 +3398,7 @@ to localStorage in the clear.
 - **Flow**: `docs/memory/feature-flows/workspace-drafts.md`
 
 ### 5.36 Workspace — the role card in Agent details: role, objectives with metric freshness, readiness (trinity-enterprise#527)
-- **Status**: ✅ Implemented (2026-09-21) — the Role + Readiness half; the relationship line waits for ent#500. OSS-core (Workspace).
+- **Status**: ✅ Implemented (2026-09-21); the role and the relationship line read the assignment record since 2026-10-07 (ent#811/#814 follow-up, the #3271 / ent#818 live check). OSS-core (Workspace).
 - **Requirement ID**: WORKSPACE_ROLE_CARD
 - **GitHub Issue**: abilityai/trinity-enterprise#527 (+ #663, the 1.0 gate on who flips readiness; + #676, 2026-09-30, the objectives cut over to the ent#666 join)
 - **Description**: When a companion has a role (Tandem, ent#497), the Info rail's
@@ -3409,17 +3409,24 @@ to localStorage in the clear.
 - **Files are truth, read through the platform, never a second store.** Everything the
   card shows about the role comes from the agent's own container on each read
   (`client_portal/role_card.py`, via the agent client — the same door the Files tab
-  uses): `template.yaml → x-role: {role, status, seat?}` (written by the
-  `create-agent:role-companion` wizard, #511) and `x-canon.clone_path` (default
-  `canon`); the role file `<canon>/roles/<id>.yaml` and `<canon>/objectives/*.yaml`
+  uses): `template.yaml → x-canon.clone_path` (default `canon`) and `x-role.status`
+  (the template's readiness claim, #511); the role file `<canon>/roles/<id>.yaml`
+  where `<id>` is **the seat on record** — the seat this agent serves for the
+  viewer (`assignment_provider.resolve_served_seat`: held → the viewer's own →
+  the primary's), never `x-role.role`. `seat_source` (holds / person / primary /
+  none) is rendered as words, never a person. No seat → `role.error = no_seat`
+  with the supported objectives still listed. **Your relationship** is the
+  viewer's assignment kind (`kinds_for` on the provider; primary / approver /
+  collaborator / viewer), "no assignment recorded" only when there is none.
+  The role file `<canon>/roles/<id>.yaml` and `<canon>/objectives/*.yaml`
   (framework §3.4 grammar — `owner: role:<id>` or `supporting_agents` names this
   agent). The role file is the card's own read; the objectives and their numbers
   are **not** — they come from the one objective ↔ metric join
   (`objective_join_service.read_objective_join`, §50 of
   `lifecycle-observability.md`), called in process with the template and the agent
   client the card already holds (trinity-enterprise#676). Nothing is cached or
-  copied platform-side. Every read is fail-soft and **named**: no `x-role` → no
-  card at all (the panel is unchanged, AC 5); a role file that cannot be read or
+  copied platform-side. Every read is fail-soft and **named**: no seat, no canon
+  and no `x-role` → no card at all (the panel is unchanged, AC 5); a role file that cannot be read or
   parsed → the card says so (`role.error`), never an empty role; a stopped agent
   → "the agent is stopped; the card reads its files when it runs"; objectives
   that could not be read → one line saying so (`objectives_error`), never an
@@ -3491,11 +3498,16 @@ to localStorage in the clear.
   for the verdict: a held brief is a `skipped` execution whose reason names the fix
   ("Held: … runs once its owner marks it ready"), a `schedule_execution_skipped` event, and
   advanced run times — never a failure, a retry or an alert. **Every ambiguity fails open
-  and is logged** (verdict call failed, container not running, Docker or template.yaml
-  unreadable within 3 s). The template is read only to learn whether the agent is a
-  companion; `x-role.status` is agent-writable and is never trusted (#663). Honest limit: an
-  *unstamped* companion can take itself out of scope (drop `x-role`, or stall the read into
-  fail-open); an owner's stamp is the one thing it cannot touch.
+  and is logged** (verdict call failed, stamp unreadable). `x-role.status` is
+  agent-writable and is never trusted (#663). **Who is a companion (trinity-enterprise#813,
+  ruling 2026-10-06):** asked only for an unstamped agent, and answered by the seat on
+  record (`assignment_provider.resolve_seat`), not the template — a companion is an agent
+  whose primary is assigned and holds a seat. An agent holding a seat itself (an autonomous
+  player), no primary with a seat, no seat lookup or a lookup error all read as "not a
+  companion", so the brief fires; each decision is logged with its reason. The template is
+  no longer read, so an agent cannot take itself out of scope by editing its own files —
+  the seat is admin-written. A companion template with no assigned primary therefore sends
+  its brief until its primary is assigned.
   - **Rollout (ruled 2026-09-24, amended from option 1 at plan review)**: a one-time,
     database-only seed on both migration tracks stamps `ready` (`changed_by =
     rollout:ent#689`) for every live agent with autonomy on and an enabled, non-deleted

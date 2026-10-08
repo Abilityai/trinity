@@ -1741,10 +1741,15 @@ file-level codes are the deliberate exception**: `objective_invalid` and
 carries nothing that says whose concern it is, and silence there is how a file
 disappears from a read that claims to show them all.
 
-An objective reaches an agent two ways: `owner: role:<id>` matching the
-template's `x-role.role` (**owned**), or the agent's own name in
-`supporting_agents` (**supporting**). An agent with no `x-role` can still
-support.
+An objective reaches an agent two ways: `owner: role:<id>` matching a seat the
+agent owns through (**owned**), or the agent's own name in `supporting_agents`
+(**supporting**). Since trinity-enterprise#812 (operator ruling 2026-10-06) the
+seat comes from Trinity's record through `assignment_provider.resolve_seat`, not
+from the template: the seat the agent **holds** itself (that seat only), else
+the seats its assigned people hold — primary first; a shared companion owns the
+union. `x-role` is neither required nor read. An agent with no seat owns nothing
+— a `no_seat` finding says so — and can still support. `supporting_agents` is
+read as before but frozen: nothing new is built on agent names in canon.
 
 ### 50.2 The four sources, and which one owns what
 
@@ -1858,7 +1863,7 @@ it. Findings appear twice — flat in `findings[]` with `objective_id` / `metric
 | `objective_id_invalid` | a file's `id:` is not a valid id | the **file name** is used instead and the finding says so — a *missing* `id` falls back silently, an id the author wrote and this read refused does not, because the ent#661 v3 project view keys objectives by id across agents |
 | `objective_file_skipped` | a `*.yaml` in `objectives/` whose NAME is not a plain path segment (a space, a non-ASCII character) | rename it; the file is never fetched, and `source.objectives_skipped` counts them so "not there" can be told from "there under a name this read will not open" |
 | `objectives_read_timeout` | the fan-out exceeded `OBJECTIVES_READ_BUDGET_SEC` | retry; the agent is answering, just too slowly — `source.objectives_dir: "timeout"`, no objective joined |
-| `role_id_invalid` | `x-role.role` is not a valid id | fix `template.yaml`; no owned objective can match until then |
+| `no_seat` | the agent neither holds a seat nor serves a person who holds one (trinity-enterprise#812; replaces `role_id_invalid`, which read `x-role`) | assign its primary with the seat they hold on the Access tab, or record the seat the agent holds; supporting objectives still show |
 | `canon_path_invalid` | `x-canon.clone_path` is not a plain path | fix it; **no file is read with that path** |
 
 Every code in this table above the file-level pair is published **only for the
@@ -1919,7 +1924,7 @@ stopped is an *answer*, not an error.
 
 ```
 {agent_name, generated_at, stale_rule: "2x cadence",
- role: {id, path} | null,          # from x-role; null → objectives can only be supporting
+ role: {id, path, case, seats} | null,   # the seat on record (#812): case holds|serves|none
  canon_root: "canon" | null,
  unavailable: null | agent_stopped | agent_missing | agent_unreachable,
  source: {template, objectives_dir, objectives_listed, objectives_scanned,
@@ -2010,10 +2015,10 @@ too (`isinstance(True, int)` is `True`, and `true` is not `1`).
 
 ### 50.9 Zero config
 
-An agent with no `x-role` and no `x-canon` costs one container-state read and
-one `template.yaml` read — **no store query at all** — and answers
-`{objectives: [], message: "no x-role or x-canon in template.yaml — nothing to
-join…"}`. Every empty state carries `message` naming the next action: the
+An agent with no `x-canon` costs one container-state read and one
+`template.yaml` read — **no store query at all** — and answers
+`{objectives: [], message: "no x-canon in template.yaml — nothing to join…"}`
+(trinity-enterprise#812: the canon declaration alone enables the join). Every empty state carries `message` naming the next action: the
 `objectives/` directory that was not found, the agent that is stopped, the fact
 that no active objective names this agent.
 

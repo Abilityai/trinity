@@ -9,9 +9,20 @@ freshness, the viewer's relationship to it, and its readiness state. Framework
 from the agent's own container on each request, through the same agent door
 the Files tab uses — never copied platform-side:
 
-* `template.yaml` → `x-role: {role, status, seat?}` (the wizard writes it,
-  #511) and `x-canon.clone_path` (default `canon`);
+* `template.yaml` → `x-canon.clone_path` (default `canon`), and `x-role.status`
+  for the template's own readiness claim (the wizard writes it, #511);
 * `<canon>/roles/<id>.yaml` (framework §3.4).
+
+**Which role is the seat on record, not the template (ent#811/#814).** The
+role is the seat this agent serves FOR THIS VIEWER
+(`assignment_provider.resolve_served_seat`): the seat it holds itself, else the
+viewer's own seat on it, else its primary's — the same answer the agent is
+given in its prompt. `x-role.role` / `x-role.seat` are no longer read; a
+template that still says `x-role: sales-lead` while the Access tab says Head
+of Sales showed two truths on one screen. `seat_source` says where the seat
+came from (holds | person | primary | none). No seat → `role.error = no_seat`,
+and supporting objectives still show. The viewer's relationship is the
+provider's `kinds_for` (ent#638's optional method).
 
 **The objectives are not this module's to compute (ent#676).** What the agent
 is supposed to move, where each number is and whether to believe it is the one
@@ -23,7 +34,7 @@ operator's remediation sentences, objective file paths and `owner: role:<id>`
 stay on the operator door (the #78 auth-path invariant), and a finding crosses
 as its code.
 
-Every read is fail-soft and NAMED: no `x-role` → no card; an unreadable or
+Every read is fail-soft and NAMED: no seat, no canon and no `x-role` → no card; an unreadable or
 unparseable role file → `role.error`, never an empty role; a stopped agent →
 `unavailable: agent_stopped`; objectives that could not be read →
 `objectives_error`, never an empty list dressed as "this agent has none".
@@ -292,9 +303,8 @@ async def build_role_card(agent_name: str, email: str, *, is_platform: bool,
                           admit_objectives: Callable[[], bool]) -> dict:
     """Everything the Role card shows, or `{"role": None}` when the agent has no role.
 
-    The relationship line reads from ent#500's assignments when they land;
-    until then it is `None`, which the client renders as "no assignment
-    recorded" rather than blank.
+    The relationship line is the viewer's assignment kind on this agent
+    (`kinds_for`), or `None` — rendered as "no assignment recorded", never blank.
 
     `admit_objectives` is the router's check against the objective-read budget
     (`services/objectives_read_budget`), called here — once, and only when the
@@ -312,6 +322,7 @@ async def build_role_card(agent_name: str, email: str, *, is_platform: bool,
     from services import objective_join_service
 
     stamp = _readiness_stamp(agent_name)
+    relationship = _relationship(agent_name, email)
 
     try:
         state = await docker_utils.agent_container_state_async(agent_name)
@@ -326,19 +337,22 @@ async def build_role_card(agent_name: str, email: str, *, is_platform: bool,
             "role": None,
             "unavailable": "agent_stopped" if state else "agent_unreachable",
             "readiness": effective_readiness(None, stamp) if stamp else None,
-            "relationship": None,
+            "relationship": relationship,
             "can_flip_readiness": _is_owner(agent_name, email, is_platform),
         }
 
     client = get_agent_client(agent_name)
     template, terr = await _read_yaml(client, "template.yaml")
     xrole = template.get("x-role") if isinstance(template, dict) else None
-    if not isinstance(xrole, dict):
-        # No role → no card (AC 5). An unreadable template is the same answer:
-        # there is nothing to show and nothing to warn about.
+    xrole = xrole if isinstance(xrole, dict) else {}
+    has_canon = isinstance(template, dict) and isinstance(template.get("x-canon"), dict)
+    served = _served_seat(agent_name, email)
+    if not (served["role_id"] or has_canon or xrole):
+        # No seat, no canon, no role declared → no card (AC 5). An unreadable
+        # template with no seat on record is the same answer: nothing to show.
         return {"agent_name": agent_name, "role": None}
 
-    role_id = _safe_id(xrole.get("role"))
+    role_id = _safe_id(served["role_id"])
     # The join's validator, not a copy of it — one rule for what may reach a
     # file read.
     root = objective_join_service.canon_root(template)
@@ -350,7 +364,7 @@ async def build_role_card(agent_name: str, email: str, *, is_platform: bool,
             "path": f"{root}/roles/{role_id}.yaml" if (root and role_id) else None,
             "error": None,
         },
-        "seat": _text(xrole.get("seat"), 128),
+        "seat_source": served["source"],
         "objectives": [],
         "objectives_error": None,
         "objectives_partial": False,
@@ -360,24 +374,29 @@ async def build_role_card(agent_name: str, email: str, *, is_platform: bool,
         # brief nor see the schedules it comes from (the flip is platform-only too).
         "brief_held": is_platform and _brief_held(agent_name, stamp),
         "walkthrough": _walkthrough(agent_name, email, is_platform),
-        "relationship": None,
+        "relationship": relationship,
         "can_flip_readiness": _is_owner(agent_name, email, is_platform),
     }
-    if not role_id or not root:
-        card["role"]["error"] = "role_id_invalid" if not role_id else "canon_path_invalid"
+    if not root:
+        card["role"]["error"] = "canon_path_invalid"
         return card
-
-    role, rerr = await _read_yaml(client, card["role"]["path"])
-    if rerr:
-        card["role"]["error"] = f"role_file_{rerr}"
-        return card
-    card["role"].update({
-        "title": _text(role.get("title"), 120) or role_id,
-        "mission": _text(role.get("mission")),
-        "status": _text(role.get("status"), 32),
-        "review_by": _text(role.get("review_by"), 32),
-        "stale": is_stale(_text(role.get("review_by"), 32)) if role.get("review_by") else False,
-    })
+    if not role_id:
+        # No seat on record (or one that is not a valid id): say so on the role,
+        # and still read the objectives — supporting work shows without a seat
+        # (ent#812), and the join names the same `no_seat`.
+        card["role"]["error"] = "role_id_invalid" if served["role_id"] else "no_seat"
+    else:
+        role, rerr = await _read_yaml(client, card["role"]["path"])
+        if rerr:
+            card["role"]["error"] = f"role_file_{rerr}"
+            return card
+        card["role"].update({
+            "title": _text(role.get("title"), 120) or role_id,
+            "mission": _text(role.get("mission")),
+            "status": _text(role.get("status"), 32),
+            "review_by": _text(role.get("review_by"), 32),
+            "stale": is_stale(_text(role.get("review_by"), 32)) if role.get("review_by") else False,
+        })
 
     if not admit_objectives():
         card["objectives_error"] = "objectives_rate_limited"
@@ -400,6 +419,31 @@ async def build_role_card(agent_name: str, email: str, *, is_platform: bool,
     card["objectives_partial"] = objectives_partial(join)
     card["finding_codes"] = finding_codes(join)
     return card
+
+
+def _served_seat(agent_name: str, email: str) -> dict:
+    """The seat this agent serves for this viewer — the seam's own never-raising
+    answer, with a belt for an import-time failure."""
+    try:
+        from services import assignment_provider
+        return assignment_provider.resolve_served_seat(agent_name, email)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("role card: seat read failed for %s: %s", agent_name, e)
+        return {"role_id": None, "source": "none"}
+
+
+def _relationship(agent_name: str, email: str) -> Optional[str]:
+    """The viewer's assignment kind on this agent, or None. The reader gate's
+    own rule (`seat_decision_service.reader_kind`): a missing method, a raise or
+    an unknown kind all read as None."""
+    if not email:
+        return None
+    try:
+        from services import seat_decision_service
+        return seat_decision_service.reader_kind(agent_name, email.strip().lower())
+    except Exception as e:  # noqa: BLE001
+        logger.warning("role card: relationship read failed for %s: %s", agent_name, e)
+        return None
 
 
 def _brief_held(agent_name: str, stamp: Optional[dict]) -> bool:

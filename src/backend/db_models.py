@@ -58,6 +58,9 @@ class AgentShare(BaseModel):
     shared_by_email: str  # Email or username of who shared it
     created_at: datetime
     allow_proactive: bool = False  # Can agent send proactive messages to this user
+    # trinity-enterprise#817: consented | declined | not_asked — `allow_proactive`
+    # alone cannot tell "never asked" from "said no".
+    proactive_consent: str = "not_asked"
 
 
 class AgentOperatorAccess(BaseModel):
@@ -74,6 +77,7 @@ class AgentOperatorAccess(BaseModel):
     last_active: Optional[str] = None  # ISO-Z last_login; None until first login
     status: str                        # 'active' | 'pending'
     allow_proactive: bool = False
+    proactive_consent: str = "not_asked"  # ent#817: consented | declined | not_asked
 
 
 class AgentShareRequest(BaseModel):

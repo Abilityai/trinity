@@ -6,10 +6,10 @@ Pinned here, and why:
 
 * **The unstamped companion — the case that exists on every install today** —
   is held, and an unstamped NON-companion is not (the gate must not mute every
-  scheduled delivery). The template is read only to learn whether the agent
-  declares `x-role`; its `status` never decides anything (#663).
-* **Every ambiguity fires** (#1638): stamp unreadable, container not running,
-  Docker unreadable, template slow/unparsable.
+  scheduled delivery). Since trinity-enterprise#813 a companion is an agent whose
+  primary holds a seat (the seat on record); the template is not read at all.
+* **Every ambiguity fires** (#1638): stamp unreadable, no seat lookup, a lookup
+  error.
 * **The rollout seed** stamps exactly the agents whose seat brief fires today —
   never over an existing stamp — on BOTH migration tracks, idempotently.
 * **The card** calls a rollout stamp "carried over", never a person's act, and
@@ -61,13 +61,18 @@ class TestDecide:
 
 
 class TestBriefReadiness:
+    """trinity-enterprise#813: who is a companion comes from the seat on record
+    (`assignment_provider.resolve_seat`), not from the template — a companion is
+    an agent whose primary holds a seat. The template is never read."""
+
     @pytest.fixture()
     def wired(self, monkeypatch):
         import database
-        from services import docker_utils
         from services import agent_client
+        from services import assignment_provider as ap
         gate = _gate()
-        state = {"stamp": None, "container": "running", "file": {"success": True, "content": "x-role:\n  role: sales-lead\n  status: ready\n"}, "raise": None}
+        state = {"stamp": None, "raise": None, "asked": 0,
+                 "seat": {"case": "serves", "role_id": "sales-lead", "seats": ["sales-lead"]}}
 
         def stamp(agent):
             if state["raise"] == "stamp":
@@ -76,58 +81,88 @@ class TestBriefReadiness:
         monkeypatch.setattr(database.db, "get_agent_role_readiness", stamp)
         monkeypatch.setattr(database.db, "get_agent_owner", lambda name: {"owner_id": 1})
 
-        async def container(agent):
-            if state["raise"] == "docker":
-                raise RuntimeError("docker unreadable")
-            return state["container"]
-        monkeypatch.setattr(docker_utils, "agent_container_state_async", container)
+        def no_template_read(name):
+            raise AssertionError("the gate must not read the agent's files (#813)")
+        monkeypatch.setattr(agent_client, "get_agent_client", no_template_read)
 
-        class Client:
-            async def read_file(self, path, timeout=30.0):
-                assert timeout <= gate.TEMPLATE_READ_TIMEOUT_SECONDS
-                if state["raise"] == "slow":
-                    await asyncio.sleep(10)
-                return state["file"]
-        monkeypatch.setattr(agent_client, "get_agent_client", lambda name: Client())
-        monkeypatch.setattr(gate, "TEMPLATE_READ_TIMEOUT_SECONDS", 0.05)
-        return gate, state
+        class Seats:
+            def assignment_for(self, agent_name, triggered_by):
+                return None
+
+            def seat_for(self, agent_name):
+                state["asked"] += 1
+                if state["raise"] == "seat":
+                    raise RuntimeError("provider down")
+                return state["seat"]
+        ap.register_provider(Seats())
+        yield gate, state
+        ap.clear_provider()
 
     @pytest.mark.asyncio
-    async def test_an_unstamped_companion_is_held_even_when_its_file_says_ready(self, wired):
+    async def test_an_unstamped_companion_is_held(self, wired):
         gate, state = wired
         v = await gate.brief_readiness(AGENT)
         assert not v.fire and v.basis == "unstamped_companion"
 
     @pytest.mark.asyncio
-    async def test_the_stamp_decides_without_reading_the_container(self, wired):
+    async def test_a_stamped_calibrating_companion_with_a_primary_is_still_held(self, wired):
+        """The ent#689 behaviour this change must keep (#813 AC)."""
+        gate, state = wired
+        state["stamp"] = {"status": "calibrating"}
+        v = await gate.brief_readiness(AGENT)
+        assert not v.fire and v.basis == "stamp" and "marks it ready" in v.reason
+
+    @pytest.mark.asyncio
+    async def test_the_stamp_decides_without_asking_for_the_seat(self, wired):
         gate, state = wired
         state["stamp"] = {"status": "ready"}
-        state["raise"] = "docker"   # would fail open if it were consulted
         v = await gate.brief_readiness(AGENT)
         assert v.fire and v.basis == "stamp"
+        assert state["asked"] == 0, "a stamped agent never asks for its seat"
 
     @pytest.mark.asyncio
-    async def test_no_x_role_and_no_template_are_not_companions(self, wired):
+    @pytest.mark.parametrize("seat,why", [
+        ({"case": "holds", "role_id": "orchestrator", "seats": []}, "holds the seat orchestrator itself"),
+        ({"case": "none", "role_id": None, "seats": []}, "no primary with a seat"),
+    ], ids=["holds-a-seat-itself", "no-primary-with-a-seat"])
+    async def test_an_agent_that_is_not_a_companion_fires_and_says_why(self, wired, seat, why):
         gate, state = wired
-        state["file"] = {"success": True, "content": "name: plain-agent\n"}
-        assert (await gate.brief_readiness(AGENT)).basis == "not_companion"
-        state["file"] = {"success": True, "not_found": True, "content": None}
-        assert (await gate.brief_readiness(AGENT)).basis == "not_companion"
+        state["seat"] = seat
+        v = await gate.brief_readiness(AGENT)
+        assert v.fire and v.basis == "not_companion" and why in v.reason
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("case", ["stamp", "docker", "stopped", "slow", "unreadable", "unparsable"])
-    async def test_every_ambiguity_fires(self, wired, case):
+    @pytest.mark.parametrize("case", ["no_provider", "seat_error", "no_answer", "malformed"])
+    async def test_an_unknown_seat_reads_as_not_a_companion_and_fires(self, wired, case):
+        """#813 AC: no provider, no primary, or a resolver error → not a companion."""
+        from services import assignment_provider as ap
         gate, state = wired
-        if case in ("stamp", "docker", "slow"):
-            state["raise"] = case
-        elif case == "stopped":
-            state["container"] = "exited"
-        elif case == "unreadable":
-            state["file"] = {"success": False}
+        if case == "no_provider":
+            ap.clear_provider()
+        elif case == "seat_error":
+            state["raise"] = "seat"
+        elif case == "no_answer":
+            state["seat"] = None
         else:
-            state["file"] = {"success": True, "content": "x-role: [unclosed"}
+            state["seat"] = {"case": "serves"}
+        v = await gate.brief_readiness(AGENT)
+        assert v.fire and v.basis == "not_companion" and "seat lookup unavailable" in v.reason
+
+    @pytest.mark.asyncio
+    async def test_an_unreadable_stamp_still_fails_open(self, wired):
+        gate, state = wired
+        state["raise"] = "stamp"
         v = await gate.brief_readiness(AGENT)
         assert v.fire and v.basis == "fail_open"
+
+    @pytest.mark.asyncio
+    async def test_the_decision_is_logged_with_its_reason(self, wired, caplog):
+        import logging
+        gate, state = wired
+        with caplog.at_level(logging.INFO, logger="services.role_readiness_gate"):
+            await gate.brief_readiness(AGENT)
+        assert any("[ent#813]" in r.message and "its primary holds the seat sales-lead" in r.message
+                   and "held" in r.message for r in caplog.records)
 
 
 # ---------------------------------------------------------------------------

@@ -1,6 +1,62 @@
 {
   "test_files": [
     {
+      "file": "unit/test_ent814_served_seat.py",
+      "feature": "trinity-enterprise#814",
+      "added": "2026-10-06",
+      "categories": [
+        "backend",
+        "assignments",
+        "prompt",
+        "seat-decisions"
+      ],
+      "description": "A shared companion serves the seat of the person each run is for: resolve_served_seat answers the person's own seat, holds wins, the primary's as fallback for every degraded provider answer; the prompt keeps the Primary human line and adds 'Seat this run serves' only when different (chat user or a brief's Workspace address, never rendered); a seat decision is stamped with the served seat over the agent's claim."
+    },
+    {
+      "file": "unit/test_ent817_proactive_consent.py",
+      "feature": "trinity-enterprise#817",
+      "added": "2026-10-06",
+      "categories": [
+        "backend",
+        "sharing",
+        "consent",
+        "migrations"
+      ],
+      "description": "Proactive consent in three states on real SQLite: a new share is NULL (not asked), the toggle writes declined/consented and both read paths say which, only consented may be messaged, and the data migration moves legacy 0s to NULL idempotently on both tracks."
+    },
+    {
+      "file": "unit/test_ent817_canon_roles.py",
+      "feature": "trinity-enterprise#817",
+      "added": "2026-10-06",
+      "categories": [
+        "backend",
+        "canon",
+        "api"
+      ],
+      "description": "canon_roles_service lists <canon>/roles/*.yaml with id, title and updated through the agent door; names every empty answer (no canon, traversing path, no roles dir, empty, stopped, unreachable, timeout), names an unparsable file, caps and says so; the route self-gates agent keys and draws on the objectives budget."
+    },
+    {
+      "file": "unit/test_ent812_objective_join_seat.py",
+      "feature": "trinity-enterprise#812",
+      "added": "2026-10-06",
+      "categories": [
+        "backend",
+        "objectives",
+        "assignments"
+      ],
+      "description": "The objective join owns objectives through the seat on record (assignment_provider.resolve_seat), not x-role: a held seat owns only itself, a companion owns the union of its people's seats (primary first), x-canon alone enables the join, no seat owns nothing with a no_seat finding while supporting work still shows."
+    },
+    {
+      "file": "unit/test_ent811_resolve_seat.py",
+      "feature": "trinity-enterprise#811",
+      "added": "2026-10-06",
+      "categories": [
+        "backend",
+        "assignments"
+      ],
+      "description": "assignment_provider.resolve_seat answers holds/serves/none with no triggering user; every degraded case (no agent, no provider, no seat_for, a raise, no answer, a malformed shape) reads as no seat with a named reason, never a raise."
+    },
+    {
       "file": "unit/test_2372_platform_alert_ack.py",
       "feature": "#2372",
       "added": "2026-10-07",
