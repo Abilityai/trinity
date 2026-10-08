@@ -31,6 +31,14 @@ Deliberately NOT asserted here: that the DB actually dedupes. That is
 `(agent_name, request_id)`), covered by its own tests. What the service controls
 — and what this file asserts — is that the id is **stable and URL-derived**.
 
+**#3246 re-pin.** The emitter now reports through `platform_alerts.observe`
+with ONE subject per URL (`skills_legacy_adoption:<sha256(url)[:12]>`) shared
+by all three call sites, so the guarantee is stated on the subject: one sync —
+or any number of them — never files a second row for one URL. Test 4 now pins
+that the actionable branches keep `high` on that same subject; the repeat is
+visible as the row's seen count. The seam's own dedup (one pending row per
+subject) is covered by `test_3246_platform_alerts_*`.
+
 Lives in its own file rather than appended to `test_ent346_skills_source_injection.py`
 because #2763 is being implemented in the same function and wants that file.
 """
@@ -78,19 +86,19 @@ REJECTED_URL = "https://evil.example.com/x"
 PAT = "ghp_AAAABBBBCCCCDDDDEEEEFFFFGGGGHHHH0000"
 PAT_URL = f"https://{PAT}@github.com/acme/private-skills"
 
-STABLE_PREFIX = "skills-legacy-adoption-refused-"
 _ID_RE = re.compile(r"^[A-Za-z0-9._:-]+$")
 _DB_BELT_ID_MAX = 512
 
 
-def expected_stable_id(url: str) -> str:
+def expected_subject(url: str) -> str:
     """The contract, spelled out rather than re-derived from the source.
 
-    Asserting "the two ids differ" alone cannot distinguish an id derived from
-    the URL from one derived from the clock — the timestamp satisfies it on the
-    unfixed tree. Only the exact form pins AC 3.
+    #3246: the identity moved from the `request_id` to the platform alert
+    subject — one per URL, `sha256(url)[:12]`, shared by both branches.
+    Asserting "the two subjects differ" alone cannot distinguish one derived
+    from the URL from one derived from the clock; only the exact form pins AC 3.
     """
-    return f"{STABLE_PREFIX}{hashlib.sha256(url.strip().encode()).hexdigest()[:12]}"
+    return f"skills_legacy_adoption:{hashlib.sha256(url.strip().encode()).hexdigest()[:12]}"
 
 
 # ---------------------------------------------------------------------------
@@ -140,9 +148,17 @@ def _wire(monkeypatch, url, *, count=3, sources=(), list_raises=False):
     monkeypatch.setattr(
         svc_mod.db, "create_skill_source", lambda **kw: created.append(kw)
     )
-    monkeypatch.setattr(
-        svc_mod.db, "create_operator_queue_item", lambda agent, item: items.append(item)
-    )
+    # #3246: the emitter reports through the platform alert seam; capture each
+    # reading as the item the seam would file or update.
+    from services import platform_alerts
+
+    def _observe(agent, kind, key=None, **kw):
+        items.append({"agent": agent, "subject": platform_alerts.subject_for(kind, key), **kw})
+        return platform_alerts.OBSERVED_CREATED
+
+    monkeypatch.setattr(platform_alerts, "observe", _observe)
+    monkeypatch.setattr(platform_alerts, "clear", lambda *a, **kw: 0)
+    monkeypatch.setattr(platform_alerts, "reconcile", lambda *a, **kw: 0)
     return items, created
 
 
@@ -213,11 +229,11 @@ def test_n_syncs_in_the_terminal_state_file_exactly_one_item(monkeypatch):
     assert created == [], "the terminal branch must never create a source"
     assert len(items) == 5, "the refusal must stay observable on every sync"
     _assert_terminal_branch(items[0])
-    assert len({i["id"] for i in items}) == 1, (
-        "five syncs minted five distinct request_ids — the ON CONFLICT dedup "
-        "cannot collapse them, which is the unbounded growth this fixes"
+    assert len({i["subject"] for i in items}) == 1, (
+        "five syncs reported five distinct subjects — the seam cannot collapse "
+        "them onto one row, which is the unbounded growth this fixes"
     )
-    assert items[0]["id"] == expected_stable_id(TERMINAL_URL)
+    assert items[0]["subject"] == expected_subject(TERMINAL_URL)
 
 
 # ---------------------------------------------------------------------------
@@ -240,10 +256,10 @@ def test_a_different_refused_url_gets_its_own_item(monkeypatch):
         service._adopt_legacy_clone()          # the SAME url twice
         assert items, "the refusal must be observable"
         _assert_terminal_branch(items[0])
-        assert {i["id"] for i in items} == {expected_stable_id(url)}, (
-            f"the id for {url} is not the sha256 of that URL"
+        assert {i["subject"] for i in items} == {expected_subject(url)}, (
+            f"the subject for {url} is not the sha256 of that URL"
         )
-        ids[url] = items[0]["id"]
+        ids[url] = items[0]["subject"]
 
     assert ids[TERMINAL_URL] != ids[OTHER_URL], (
         "two different refused URLs collapsed onto one id — a second refused "
@@ -290,14 +306,12 @@ def test_the_terminal_refusal_is_not_high_priority(monkeypatch, caplog):
         ("adoption exception", TERMINAL_URL, True, "adoption failed"),
     ],
 )
-def test_the_actionable_branches_keep_high_and_repeat_visible_ids(
+def test_the_actionable_branches_keep_high_on_the_urls_one_subject(
     monkeypatch, case, url, list_raises, marker
 ):
-    """A repeat here carries information: something is still broken.
-
-    This is the anti-regression half of the fix. It is GREEN on the unfixed
-    tree by design — it goes red only if the `low` / stable-id treatment is
-    applied to all three call sites instead of the one the issue names.
+    """A repeat here carries information: something is still broken — so the
+    failure branches keep `high`. Since #3246 the repeat shows as the one
+    row's seen count rather than as a second row.
     """
     _increment_clock(monkeypatch)
     items, _ = _wire(monkeypatch, url, count=0, list_raises=list_raises)
@@ -306,17 +320,16 @@ def test_the_actionable_branches_keep_high_and_repeat_visible_ids(
     service._adopt_legacy_clone()
     service._adopt_legacy_clone()
 
-    assert len(items) == 2, f"{case}: expected one alarm per attempt"
+    assert len(items) == 2, f"{case}: expected one reading per attempt"
     for item in items:
         assert marker in item["question"], f"{case}: drove the wrong branch"
         assert item["priority"] == "high", f"{case}: lost its severity"
-        assert not item["id"].startswith(STABLE_PREFIX), (
-            f"{case}: took the steady-state id — a repeat of a genuine failure "
-            "is no longer visible as a repeat (AC 4)"
-        )
-    assert items[0]["id"] != items[1]["id"], (
-        f"{case}: two attempts share one request_id, so the second is deduped "
-        "away by ON CONFLICT DO NOTHING"
+    # #3246: the failure branches share the URL's one subject with the steady
+    # state, so one sync never files a second row (#2744's guarantee); the
+    # repeat stays visible as the row's seen count, not as a new row.
+    assert {i["subject"] for i in items} == {expected_subject(url)}, (
+        f"{case}: two attempts reported two subjects — each would file its own "
+        "row, which is the per-sync growth #2744 removed"
     )
 
 
@@ -341,20 +354,24 @@ def test_the_stable_id_is_reserved_and_id_shaped(monkeypatch):
     service = _service()
     service._adopt_legacy_clone()
 
+    from services import platform_alerts
+
     assert items
     _assert_terminal_branch(items[0])
-    item_id = items[0]["id"]
+    subject = items[0]["subject"]
+    prefix = platform_alerts.KINDS["skills_legacy_adoption"].prefix
 
-    assert any(item_id.startswith(p) for p in oqs._RESERVED_ID_PREFIXES), (
-        f"{item_id!r} uses no reserved prefix — an agent can pre-create it and "
+    assert any(prefix.startswith(p) for p in oqs._RESERVED_ID_PREFIXES), (
+        f"{prefix!r} is no reserved prefix — an agent can pre-create the row and "
         "suppress the platform's own alarm (#1632 C2)"
     )
-    digest = item_id[len(STABLE_PREFIX):]
+    digest = subject.split(":", 1)[1]
     assert re.fullmatch(r"[0-9a-f]{12}", digest), (
-        "the id segment is not a 12-char sha256 prefix"
+        "the subject key is not a 12-char sha256 prefix"
     )
-    assert TERMINAL_URL not in item_id, "the raw URL must never be the conflict key"
-    assert _ID_RE.match(item_id) and len(item_id) <= _DB_BELT_ID_MAX
+    assert TERMINAL_URL not in subject, "the raw URL must never be the conflict key"
+    request_id = f"{prefix}{digest}-2026-09-14T00:00:00.000000Z"
+    assert _ID_RE.match(request_id) and len(request_id) <= _DB_BELT_ID_MAX
 
 
 # ---------------------------------------------------------------------------

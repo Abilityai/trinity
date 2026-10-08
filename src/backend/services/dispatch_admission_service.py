@@ -32,11 +32,13 @@ from models import User, ChatMessageRequest, ExecutionSource
 from database import db
 from services import idempotency_service, skill_gate_service
 from services.capacity_manager import (
+    AcquireResult,
     CapacityFull,
     CircuitOpen,
     EphemeralBudgetExhausted,
     get_capacity_manager,
 )
+from services import pull_pilot
 from services.task_execution_service import dispatch_breaker_active
 from services.platform_audit_service import platform_audit_service, AuditEventType
 from services.activity_service import activity_service
@@ -46,6 +48,7 @@ from services.chat_signals import (
     ChatAdmissionReplay,
     INTER_AGENT_DEPTH_EXCEEDED,
     InterAgentDepthExceeded,
+    chat_trigger,
 )
 from db.agents import SYSTEM_AGENT_NAME
 from models import ActivityType, ActivityState
@@ -300,6 +303,10 @@ async def admit_chat_request(
     (queue full) / ``EphemeralBudgetExhausted`` (ghost spent) — each after
     releasing the idempotency claim so the caller can retry. The router maps them.
 
+    On a pull pilot (#3127) the acquire is skipped: the admission carries
+    ``capacity=None`` and a ``queued_persistent`` result, and the turn is queued
+    by ``chat_execution_service.run_pulled_chat_turn``.
+
     Raises ``InterAgentDepthExceeded`` (#2806) FIRST — before the claim, the
     breaker read and the acquire — so a refused hop leaves nothing behind.
 
@@ -321,6 +328,11 @@ async def admit_chat_request(
     gate = await skill_gate_service.enforce(
         name,
         request_text=request.message,
+        # trinity#3274: the key's name and the email reach the executor's
+        # prompt beside the request.
+        context_text=skill_gate_service.requester_context_text(
+            mcp_key_name=getattr(current_user, "mcp_key_name", None),
+            source_email=current_user.email or current_user.username),
         requester=skill_gate_service.requester_from_principal(
             current_user, source_agent=x_source_agent, execution_id=x_trinity_execution_id),
         triggered_by=gate_trigger,
@@ -343,6 +355,7 @@ async def admit_chat_request(
     idem = idempotency_service.begin(
         idempotency_service.make_agent_scope(name), idempotency_key
     )
+    idem = _reclaim_ended_receipt(idem, name=name)
     if idem.replay:
         await _audit_idempotent_replay(
             name=name, endpoint=f"/api/agents/{name}/chat", x_via_mcp=x_via_mcp,
@@ -375,6 +388,31 @@ async def admit_chat_request(
             # can retry with the same key once the breaker recovers (#525).
             idempotency_service.fail(idem)
             raise CircuitOpen(name, int(_disp.get("retry_after_seconds") or 0))
+
+    # #3127: on a pull pilot /chat takes no slot here. The turn goes onto the
+    # durable queue in ``chat_execution_service.run_pulled_chat_turn`` and the
+    # agent's worker pool is its capacity; ``capacity=None`` selects that path.
+    if pull_pilot.pull_owns_dispatch(name, chat_trigger(x_source_agent, x_via_mcp)):
+        queue_result = "queued"
+        logger.info(f"[Chat] Agent '{name}' execution {chat_execution_id}: pull queue")
+        await _audit_chat_started(
+            name=name, x_via_mcp=x_via_mcp, x_source_agent=x_source_agent,
+            current_user=current_user, execution_id=chat_execution_id,
+            queue_result=queue_result, source=source, message=request.message,
+        )
+        return ChatAdmission(
+            idem=idem,
+            execution_id=chat_execution_id,
+            capacity_result=AcquireResult(
+                state="queued_persistent", execution_id=chat_execution_id
+            ),
+            capacity=None,
+            queue_result=queue_result,
+            chat_timeout=chat_timeout,
+            chain_depth=chain_depth,
+            # ent#752: the row's setup records a self-approval from this.
+            gate=gate,
+        )
     try:
         capacity_result = await capacity.acquire(
             agent_name=name,
@@ -425,6 +463,83 @@ async def admit_chat_request(
     )
 
 
+# #3245: the receipt shapes a dispatch stores as its `completed` row — async
+# `/task` (`accepted`/`queued`), and the timed-out sync `/task` and pulled
+# `/chat` (`queued_timeout`). A sync success body is never one of these.
+_RECEIPT_STATUSES = frozenset({"accepted", "queued", "queued_timeout"})
+# Liveness verdicts after which a receipt replay would be a lie. Everything
+# else (live, succeeded, maybe_alive, indeterminate) replays.
+_FRESH_AFTER = frozenset({
+    idempotency_service.LIVENESS_ENDED, idempotency_service.LIVENESS_GONE,
+})
+
+
+def _is_dispatch_receipt(snapshot) -> bool:
+    return (
+        isinstance(snapshot, dict)
+        and snapshot.get("async_mode") is True
+        and snapshot.get("status") in _RECEIPT_STATUSES
+    )
+
+
+def _decision_outcome(decision) -> str:
+    if not decision.enabled:
+        return "no_dedup"
+    if not decision.replay:
+        return "new"
+    return "in_flight" if decision.in_flight else "completed"
+
+
+def _reclaim_ended_receipt(idem, *, name: str):
+    """Let a retry dispatch fresh when the receipt it would replay names a run
+    that ended without success (#3245). Shared by ``/chat`` and ``/task``.
+
+    Before #3245 the stored receipt replayed for 24h even after its run
+    failed, so a caller retrying word for word got the dead run back forever.
+    This runs at replay time, between ``begin`` and the replay branch: it adds
+    no side effect to any terminal writer (#1804) and heals rows written
+    before the fix. Only receipt-shaped ``completed`` snapshots are checked;
+    ``sched:`` keys are the scheduler's own and never reclaimed. On an ended
+    or gone run the row is compare-and-deleted (only while it still names the
+    dead execution, so two racing retries start one run) and the key is
+    claimed again exactly once — no loop. A delete error replays the original.
+    Returns the decision the caller should act on.
+    """
+    if not (idem.replay and not idem.in_flight and idem.execution_id):
+        return idem
+    if str(idem.key or "").startswith("sched:"):
+        return idem
+    if not _is_dispatch_receipt(idem.snapshot):
+        return idem
+    liveness = idempotency_service.execution_liveness(idem.execution_id, name)
+    verdict = liveness.verdict
+    if verdict == idempotency_service.LIVENESS_MAYBE_ALIVE:
+        hold_until = liveness.hold_until.isoformat() if liveness.hold_until else None
+        logger.info(
+            "[#3245] receipt_hold agent=%s stale_exec=%s verdict=%s until=%s",
+            name, idem.execution_id, verdict, hold_until,
+        )
+        return idem
+    if verdict not in _FRESH_AFTER:
+        return idem
+    cas = idempotency_service.discard_replay_of(idem.scope, idem.key, idem.execution_id)
+    if cas is None:
+        logger.info(
+            "[#3245] receipt_reclaim agent=%s stale_exec=%s verdict=%s cas=error "
+            "outcome=replay_original replay_exec=%s",
+            name, idem.execution_id, verdict, idem.execution_id,
+        )
+        return idem
+    decision = idempotency_service.begin(idem.scope, idem.key)
+    logger.info(
+        "[#3245] receipt_reclaim agent=%s stale_exec=%s verdict=%s cas=%s outcome=%s "
+        "replay_exec=%s",
+        name, idem.execution_id, verdict, "deleted" if cas else "no_match",
+        _decision_outcome(decision), decision.execution_id if decision.replay else None,
+    )
+    return decision
+
+
 def begin_task_idempotency(
     *,
     name: str,
@@ -441,6 +556,7 @@ def begin_task_idempotency(
     idem = idempotency_service.begin(
         idempotency_service.make_agent_scope(name), idempotency_key
     )
+    idem = _reclaim_ended_receipt(idem, name=name)
     if idem.replay:
         return idem, ChatAdmissionReplay(
             execution_id=idem.execution_id, in_flight=idem.in_flight, snapshot=idem.snapshot,

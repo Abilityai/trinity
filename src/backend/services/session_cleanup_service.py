@@ -326,6 +326,20 @@ class SessionCleanupService:
             per["errors"] += 1
             return per
 
+        # #3127: on a pull pilot each `/chat` session resumes its own Claude
+        # conversation, cached on `chat_sessions`. Same fail-closed rule.
+        try:
+            from db.chat import ChatOperations
+            keep_set.update(ChatOperations().list_active_claude_session_ids(agent_name))
+        except Exception as e:
+            logger.warning(
+                "[SessionCleanup] agent=%s could not load chat keep set — "
+                "skipping sweep rather than reaping against a partial set: %s",
+                agent_name, e,
+            )
+            per["errors"] += 1
+            return per
+
         container = f"agent-{agent_name}"
 
         # #2958: the FOURTH surface — the agent's own /api/chat session, which

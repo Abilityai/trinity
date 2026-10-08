@@ -1162,8 +1162,9 @@ PERSON_SCOPES = frozenset({None, "user"})
 def is_person_principal(current_user: User) -> bool:
     """Is this caller a PERSON — the only author an ask's ending may record?
 
-    The endings ledger records `disposed_by` as an enum of two, `person` or
-    `timeout` (trinity-enterprise#611). An agent-scoped key resolves to its OWNER
+    The endings ledger records `disposed_by` as `person`, `timeout` or — for a
+    platform alert the platform itself ended (#3130/#3246) — `platform`; only
+    `person` is a principal (trinity-enterprise#611). An agent-scoped key resolves to its OWNER
     carrying the owner's role, so before this an agent could answer or cancel any
     ask its owner could reach — its own approval included — and the row recorded
     the owner. Recording that as `person` would make the ledger lie.
@@ -1802,12 +1803,55 @@ def get_owned_agent_by_name(
 
 # The named refusal per capability: the machine-readable code an agent can branch
 # on, and a sentence that says what is missing and where it is granted.
+# trinity-enterprise#164: every refusal also tells the agent how to ASK for the
+# permission. Approving that ask is a notification only — the grant itself is
+# made by an admin in a signed-in session, never by answering a queue item.
+def _ask_for_it(capability: str) -> str:
+    """How to ASK for `capability` (ent#164) — one sentence per refusal.
+
+    #3236 review: the ask surface has no `ask_class` field (that exists only on
+    seat decisions) and MCP `ask_operator` drops unknown fields, so the
+    instruction uses the fields that exist. The permission id goes in the title
+    VERBATIM: that is what the agent's Settings (ent#756) matches to list its
+    open permission requests. There is no grant through the queue — an admin
+    grants it from a signed-in session.
+    """
+    return (
+        f" To request it, raise an ask to your operator (type 'question') whose "
+        f"title includes '{capability}'; approving the ask does not grant it. An "
+        f"instance admin grants it in the agent's Settings \u2192 Permissions to "
+        f"change itself (or PUT /api/agents/{{agent}}/capability-grants/{capability})."
+    )
+
+
 _CAPABILITY_REFUSALS = {
     "skills.manage": (
         "skill_management_not_permitted",
         "This agent does not hold the skill-management permission, which changing "
         "any agent's skills requires \u2014 its own included. An instance admin can "
-        "grant it in Settings \u2192 Agents \u2192 Skill managers.",
+        "grant it in Settings \u2192 Agents \u2192 Skill managers." + _ask_for_it("skills.manage"),
+    ),
+    "schedules.manage": (
+        "schedule_management_not_permitted",
+        "This agent does not hold the schedule-management permission, which "
+        "creating, changing, enabling, disabling or deleting ANOTHER agent's "
+        "schedules (and their webhooks) requires. An agent's own schedules need "
+        "no grant." + _ask_for_it("schedules.manage"),
+    ),
+    "instructions.manage": (
+        "instruction_management_not_permitted",
+        "This agent does not hold the instruction-management permission, which "
+        "writing an agent's CLAUDE.md, AGENTS.md or .claude/ files (other than "
+        "skills), or resetting it to main (reset-to-main-preserve-state), "
+        "requires \u2014 its own included." + _ask_for_it("instructions.manage"),
+    ),
+    "agents.manage": (
+        "agent_management_not_permitted",
+        "This agent does not hold the agent-management permission, which creating, "
+        "deleting, deploying or reconfiguring agents requires (spawning an "
+        "ephemeral helper does not). Even with it, an agent reaches only agents "
+        "its owner owns, deletes only agents it spawned, and cannot change its "
+        "own read-only mode or guardrails." + _ask_for_it("agents.manage"),
     ),
 }
 
@@ -1918,6 +1962,150 @@ def can_manage_agent_skills(current_user: User, agent_name: str) -> bool:
     if capability_refusal(current_user, CAPABILITY_SKILLS_MANAGE) is not None:
         return False
     return bool(db.can_user_share_agent(current_user.username, agent_name))
+
+
+def _path_agent(request: Request) -> Optional[str]:
+    params = getattr(request, "path_params", None) or {}
+    return params.get("agent_name") or params.get("name")
+
+
+def _refuse_unless_owners_agent(current_user: User, target: str) -> None:
+    """A capability HOLDER reaches only agents its owner OWNS (#3236 review +
+    validation). Every fenced handler authorises through `can_user_access_agent`
+    / `can_user_share_agent`, which admit any `role == "admin"` — and an agent
+    key carries its owner's role — so without this one grant on a default
+    admin-owned install reached every agent on the instance, other users'
+    included. `owner_username` equality, never the admin short-circuit;
+    not-owned and nonexistent answer the same 404, so a holder learns nothing
+    about agents outside its owner's."""
+    owner = db.get_agent_owner(target) or {}
+    if owner.get("owner_username") != current_user.username:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Agent not found")
+
+
+def capability_fence(capability: str, *, own_agent_exempt: bool = False,
+                     ephemeral_target_exempt: bool = False):
+    """A route-level dependency: refuse an agent principal that does not hold
+    `capability` (trinity-enterprise#164), with the same named 403 and audit
+    row as `skills.manage`. Humans, `user`- and `system`-scoped keys pass —
+    the route's own owner/access check still applies to them.
+
+    Attach as `dependencies=[Depends(capability_fence(X))]` so it runs before
+    the route's parameters — a non-holder gets one uniform 403 whether or not
+    the target exists (#186). The returned function's name carries the
+    capability, so the guard tests can read it off FastAPI's dependant graph.
+
+    `own_agent_exempt`: an agent acting on ITSELF passes without the grant. Used
+    for `schedules.manage` (decided 2026-10-05): an agent's own schedules are its
+    own use (#2996 — `create_schedule` / `enable_schedule` via MCP), already
+    bounded by autonomy, which stays person-only; the grant is what it needs to
+    change ANOTHER agent's schedules.
+
+    `ephemeral_target_exempt`: discarding an ephemeral ("ghost") agent needs no
+    grant — ent#69 governs ghosts (spawn and discard), decided 2026-10-05.
+
+    A holder that passes is then bounded to its owner's agents
+    (`_refuse_unless_owners_agent`) whenever the route names a target — the
+    capability check runs first, so a non-holder's 403 never depends on whether
+    the target exists (#186).
+    """
+    async def fence(request: Request, current_user: User = Depends(get_current_user)) -> None:
+        target = _path_agent(request)
+        is_agent = (getattr(current_user, "mcp_scope", None) == "agent"
+                    and bool(getattr(current_user, "agent_name", None)))
+        if (own_agent_exempt and target and is_agent
+                and current_user.agent_name == target):
+            return
+        if ephemeral_target_exempt and target:
+            from database import db as _db
+            info = _db.get_agent_ephemeral_info(target)
+            if isinstance(info, dict) and info.get("is_ephemeral"):
+                return
+        await enforce_agent_capability(request, current_user, capability, target=target)
+        if is_agent and target:
+            _refuse_unless_owners_agent(current_user, target)
+    fence.__name__ = f"capability_fence_{capability.replace('.', '_')}"
+    return fence
+
+
+def require_person_or_capability(capability: str, *, self_person_only: bool = False):
+    """`require_person`, except that an AGENT holding `capability` passes
+    (trinity-enterprise#164 — the reconfigure routes were person-only, so no
+    agent could hold the power the grant exists to give an orchestrator).
+
+    Only the agent case changes: an agent key without the grant gets the named
+    capability refusal; every other principal meets `assert_person` exactly as
+    before, so a user-scoped or connector key gains nothing.
+
+    Two bounds on a holder (#3236 review), because these routes authorise
+    through `assert_agent_owner` → `can_user_share_agent`, which is True for any
+    `role == "admin"` — and an agent key carries its owner's role:
+
+    * **Reach** — the target must be an agent its owner actually OWNS
+      (`owner_username` equality, never the admin short-circuit). Without this,
+      one grant on a default admin-owned install reached every agent on the
+      instance, other users' included. Not-owned and nonexistent answer the
+      same 404, so a holder learns nothing about agents outside its owner's.
+    * **Self** — with `self_person_only`, a holder cannot target ITSELF. Used
+      for read-only mode and guardrails: the agent the setting constrains must
+      not be the one that lifts it (the grant-vs-use line, Invariant #8).
+    """
+    async def dep(request: Request, current_user: User = Depends(get_current_user)) -> User:
+        if (getattr(current_user, "mcp_scope", None) == "agent"
+                and getattr(current_user, "agent_name", None)
+                and not getattr(current_user, "vouched_source_agent", None)):
+            target = _path_agent(request)
+            if self_person_only and target == current_user.agent_name:
+                assert_person(current_user)
+            await enforce_agent_capability(request, current_user, capability, target=target)
+            if target:
+                _refuse_unless_owners_agent(current_user, target)
+            return current_user
+        assert_person(current_user)
+        return current_user
+    dep.__name__ = f"require_person_or_{capability.replace('.', '_')}"
+    return dep
+
+
+async def get_skill_gate_readable_agent_by_name(
+    agent_name: str = Path(..., description="Agent name from path"),
+    current_user: User = Depends(get_current_user),
+) -> str:
+    """Who may read an agent's skill gate map (trinity-enterprise#753).
+
+    An ALLOWlist decided on the principal first, so a refused scope learns
+    nothing about the target (403 before any lookup):
+
+    * a person (signed-in session or the person's own user-scoped key) and the
+      system key — anything they may access (`get_authorized_agent_by_name`,
+      uniform 404);
+    * an agent key — its OWN gates (the in-container hook pulls; nothing is
+      pushed into the workspace), or, holding `skills.manage`, an agent its
+      owner OWNS (the orchestrator reports drift). Never the admin
+      short-circuit an agent key's owner role would otherwise carry. Any other
+      target is the same 404 as an agent that does not exist;
+    * connector, portal delegate, any other scope and a principal with no scope
+      at all — refused.
+    """
+    scope = getattr(current_user, "mcp_scope", _SCOPE_ABSENT)
+    if ((scope in PERSON_SCOPES or scope == "system")
+            and not getattr(current_user, "connector_agent", None)
+            and not getattr(current_user, "portal_delegate", False)):
+        return get_authorized_agent_by_name(agent_name=agent_name, current_user=current_user)
+    own = getattr(current_user, "agent_name", None)
+    if scope == "agent" and own and not getattr(current_user, "vouched_source_agent", None):
+        from db.capability_grants import CAPABILITY_SKILLS_MANAGE
+        owner = db.get_agent_owner(agent_name) or {}
+        holder = capability_refusal(current_user, CAPABILITY_SKILLS_MANAGE) is None
+        if owner and (agent_name == own
+                      or (holder and owner.get("owner_username") == current_user.username)):
+            return agent_name
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Agent not found")
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail={"code": "skill_gates_not_readable",
+                "message": "This key cannot read an agent's skill gates."},
+    )
 
 
 async def get_skill_managed_agent_by_name(

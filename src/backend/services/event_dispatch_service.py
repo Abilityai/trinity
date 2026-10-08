@@ -173,9 +173,10 @@ def _get_internal_token(
     from config import SECRET_KEY, ALGORITHM
     from datetime import datetime, timedelta
     from dependencies import EVENT_LOOPBACK_SCOPE
+    from utils.admin_identity import admin_username
 
     payload = {
-        "sub": "admin",
+        "sub": admin_username(),
         "scope": EVENT_LOOPBACK_SCOPE,
         "exp": datetime.utcnow() + timedelta(minutes=5),
     }

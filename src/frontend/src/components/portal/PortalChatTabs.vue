@@ -48,6 +48,7 @@
 import { computed } from 'vue'
 import OverflowTabs from '@/components/OverflowTabs.vue'
 import { agentChatTabs, moreTabsLabel, NEW_CHAT_TAB_ID } from './portalUtils'
+import { keyHint, keyShortcutsFor, hostPlatform } from './portalKeymap'
 
 const props = defineProps({
   threads: { type: Array, default: () => [] },
@@ -64,8 +65,22 @@ const props = defineProps({
 })
 const emit = defineEmits(['select', 'new-chat'])
 
+// ent#621: the chat keys are discoverable from the strip they walk. The hint
+// rides `signalTitle` (the title channel `OverflowTabs` already renders) and
+// the ARIA spelling rides `ariaKeyshortcuts` — both DERIVED from the key map,
+// so a chord that changes there changes here in the same commit.
+const CHAT_KEYS = ['chat-prev', 'chat-next']
+const KEY_PLATFORM = hostPlatform()
+const CHAT_KEY_HINT = keyHint(CHAT_KEYS, KEY_PLATFORM)
+const CHAT_KEY_SHORTCUTS = keyShortcutsFor(CHAT_KEYS, KEY_PLATFORM)
+
 const tabs = computed(() =>
   agentChatTabs(props.threads, props.agentName, { activeId: props.activeId, draft: props.draft, draftKeys: props.draftKeys })
+    .map((t) => ({
+      ...t,
+      signalTitle: `${t.signalTitle || t.label} · ${CHAT_KEY_HINT} switch chat`,
+      ariaKeyshortcuts: CHAT_KEY_SHORTCUTS,
+    }))
 )
 
 // The strip's EFFECTIVE selection — the same expression `:model-value` binds.

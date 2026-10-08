@@ -252,22 +252,14 @@
                     />
                     <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">Doesn't need to exist — it will be created for you. (If you pre-create it, leave it empty: no README.)</p>
                   </div>
-                  <div>
-                    <label class="block text-sm font-medium text-gray-700 dark:text-gray-300">GitHub token <span class="text-status-danger-500">*</span></label>
-                    <input
-                      v-model="forkPat"
-                      type="password"
-                      autocomplete="off"
-                      class="mt-1 block w-full border border-gray-300 dark:border-gray-600 rounded-md shadow-sm px-3 py-2 focus:ring-action-primary-500 focus:border-action-primary-500 sm:text-sm bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-500"
-                      placeholder="ghp_… or github_pat_…"
-                    />
+                  <SavedGithubTokenField v-model="forkPat" v-model:overriding="forkPatOverriding" :has-saved="hasSavedGithubPat" input-id="fork-github-token">
                     <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
                       <span class="font-medium">Recommended:</span> a fine-grained token scoped to just this repository
                       (Administration + Contents write). A classic PAT with <code>repo</code> scope also works but grants
                       access to <em>all</em> your repositories — and the agent can read its own git credential, so prefer
                       the narrow token. Stored encrypted as this agent's git identity.
                     </p>
-                  </div>
+                  </SavedGithubTokenField>
                   <div>
                     <label class="block text-sm font-medium text-gray-700 dark:text-gray-300">Visibility</label>
                     <div class="mt-1 flex gap-4">
@@ -349,6 +341,8 @@ import api from '../api'
 import ImportIntentPicker from './ImportIntentPicker.vue'
 import AgentKindPicker from './AgentKindPicker.vue'
 import ImportValidationStep from './ImportValidationStep.vue'
+import SavedGithubTokenField from './SavedGithubTokenField.vue'
+import { useAuthStore } from '../stores/auth'
 
 const props = defineProps({
   initialTemplate: {
@@ -387,6 +381,11 @@ const postCreate = ref(null)
 // Fork-to-own inputs (trinity-enterprise#93)
 const forkDestination = ref('')
 const forkPat = ref('')
+// #3164: the user's saved personal GitHub token (presence only) stands in for
+// a typed one; the field is then an optional override.
+const hasSavedGithubPat = ref(false)
+// #3164 review: an override submitted empty is an empty token, not the saved one.
+const forkPatOverriding = ref(false)
 const forkPrivate = ref(true)
 
 // Watch for initialTemplate changes (in case modal is reused)
@@ -548,14 +547,16 @@ const createAgent = async () => {
         loading.value = false
         return
       }
-      if (!forkPat.value.trim()) {
-        error.value = 'A GitHub token is required to create the repository in your account'
+      const typedPat = forkPat.value.trim()
+      if (!typedPat && (!hasSavedGithubPat.value || forkPatOverriding.value)) {
+        error.value = 'A GitHub token is required to create the repository in your account — enter one, or save your personal token in Settings → GitHub token'
         loading.value = false
         return
       }
+      // No token in the payload → the backend uses the saved personal one.
       payload.fork_to_own = {
         destination_repo: dest,
-        github_pat: forkPat.value.trim(),
+        ...(typedPat ? { github_pat: typedPat } : {}),
         private: forkPrivate.value
       }
     }
@@ -601,5 +602,6 @@ const createAgent = async () => {
 
 onMounted(() => {
   fetchTemplates()
+  useAuthStore().fetchGithubPatStatus().then((saved) => { hasSavedGithubPat.value = saved })
 })
 </script>

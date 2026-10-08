@@ -54,7 +54,10 @@ from services.github_service import GitHubService, GitHubError
 from services.agent_auth import derive_agent_token
 from utils.helpers import parse_iso_timestamp, sanitize_agent_name, to_utc_iso, utc_now_iso
 from utils.safe_yaml import HardenedYamlError, load_template_yaml
-from .fork_to_own import fork_template_to_own_repo
+from .fork_to_own import (
+    SAVED_TOKEN_TIERS, fork_pat_required, fork_template_to_own_repo, saved_token_message,
+    saved_token_not_for_agents,
+)
 from . import snapshot_import
 from .helpers import validate_base_image, is_claude_runtime, validate_runtime
 from .lifecycle import RESTRICTED_CAPABILITIES, FULL_CAPABILITIES
@@ -856,8 +859,9 @@ async def _apply_fork_to_own(
             detail={
                 "error": (
                     f"Template '{config.template}' requires fork-to-own "
-                    f"creation: provide fork_to_own.destination_repo and "
-                    f"fork_to_own.github_pat so the agent's repo is your "
+                    f"creation: provide fork_to_own.destination_repo (and "
+                    f"fork_to_own.github_pat, unless your personal GitHub "
+                    f"token is saved in Settings) so the agent's repo is your "
                     f"own, not the shared template."
                 ),
                 "code": "FORK_TO_OWN_REQUIRED",
@@ -894,15 +898,36 @@ async def _apply_fork_to_own(
             },
         )
     # Unwrap the SecretStr exactly once; plain str flows inward
-    # (docker env, GitHubService header, push auth).
-    user_pat = config.fork_to_own.github_pat.get_secret_value()
-    fork_result = await fork_template_to_own_repo(
-        template_repo=github_repo_for_agent,
-        destination_repo=destination,
-        user_pat=user_pat,
-        read_pat=github_pat_for_agent or "",
-        private=config.fork_to_own.private,
-    )
+    # (docker env, GitHubService header, push auth). #3164: with no form token
+    # the creator's SAVED personal token is the write identity — the resolver
+    # already found it (`github_pat_tier` per_user) — and the platform token
+    # never is (named 400 instead).
+    if config.fork_to_own.github_pat is not None:
+        user_pat, token_source = config.fork_to_own.github_pat.get_secret_value(), "form"
+    elif github_pat_tier in SAVED_TOKEN_TIERS and github_pat_for_agent:
+        # An agent key carries its owner's identity; the owner's saved token
+        # is the owner's to spend, not the agent's.
+        if getattr(current_user, "agent_name", None):
+            raise saved_token_not_for_agents()
+        user_pat, token_source = github_pat_for_agent, "saved"
+    else:
+        raise fork_pat_required()
+    try:
+        fork_result = await fork_template_to_own_repo(
+            template_repo=github_repo_for_agent,
+            destination_repo=destination,
+            user_pat=user_pat,
+            read_pat=github_pat_for_agent or "",
+            private=config.fork_to_own.private,
+        )
+    except HTTPException as e:
+        detail = e.detail if isinstance(e.detail, dict) else None
+        message = (saved_token_message(detail.get("code"), detail.get("error", ""))
+                   if token_source == "saved" and detail else None)
+        if message is None:
+            raise
+        raise HTTPException(status_code=e.status_code,
+                            detail={**detail, "error": message, "token_source": "saved"}) from e
     fork_upstream_repo = github_repo_for_agent
     github_repo_for_agent = fork_result.destination_repo
     github_pat_for_agent = user_pat

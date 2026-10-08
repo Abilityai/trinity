@@ -258,6 +258,8 @@
                 <!-- The API field is `type`; a read of a misnamed field here rendered a blank line for months (issue 2370). -->
                 <div class="ops-card-type" data-testid="queue-type">{{ queueTypeLabel(item.type) }}</div>
                 <p v-if="item.title && item.title !== item.question" class="ops-card-title" data-testid="queue-title"><AskMarkdown :text="item.title" inline /></p>
+                <!-- #3246: one row per condition — how often the platform saw it. -->
+                <p v-if="queueSeenLine(item)" class="ops-card-type" data-testid="queue-seen-line">{{ queueSeenLine(item) }}</p>
                 <!-- #3115: agent-written markdown, rendered — never shown raw. -->
                 <AskMarkdown class="ops-card-message" :text="item.message || item.question || item.description" :prose="false" data-testid="queue-message" />
                 <!-- trinity-enterprise#611: the exact action this approval would run,
@@ -573,7 +575,9 @@
             v-for="(msg, i) in chatMessages"
             :key="i"
             class="chat-bubble"
-            :class="msg.role === 'user' ? 'bubble-user' : 'bubble-assistant'"
+            :class="msg.role === 'user' ? 'bubble-user' : msg.role === 'system' ? 'bubble-system' : 'bubble-assistant'"
+            :data-testid="msg.role === 'system' ? 'chat-system-line' : undefined"
+            :role="msg.role === 'system' ? 'status' : undefined"
           >
             <div class="bubble-content">{{ msg.content }}</div>
             <div class="bubble-time">{{ formatTime(msg.timestamp) }}</div>
@@ -664,6 +668,7 @@ import { useAgentsStore } from '../stores/agents'
 import { agentNameTooltip } from '../utils/agentName'
 import AskMarkdown from '../components/operator/AskMarkdown.vue'
 import { apiErrorMessage } from '../utils/apiError'
+import { isGateRefusal, pendingApprovalMessage } from '../utils/skillGate'
 import { viewState, staleBannerMessage, listFrom } from '../utils/loadingState'
 import {
   queueResponseKind, buildQueueResponse, queueTypeLabel,
@@ -672,7 +677,7 @@ import {
   QUEUE_RESPONSE_DIVERGED, respondRefusedAsDiverged,
   QUEUE_RESPONSE_NOT_ADDRESSEE, respondRefusedAsNotAddressee } from '../utils/operatorQueue'
 // trinity-enterprise#611: a second line so the #2370 import pin above stays byte-exact.
-import { queueEnding, queueEndingText, recentlyEnded } from '../utils/operatorQueue'
+import { queueEnding, queueEndingText, queueSeenLine, recentlyEnded } from '../utils/operatorQueue'
 import { formatLocalDateTime } from '../utils/timestamps'
 import LoadFailed from '../components/LoadFailed.vue'
 import InlineError from '../components/InlineError.vue'
@@ -1101,8 +1106,10 @@ async function selectSession(session) {
 }
 
 function buildContextPrompt(userMessage) {
-  // Include last 10 exchanges for context
-  const recent = chatMessages.value.slice(-20)
+  // Include last 10 exchanges for context. A held (gated-skill) request and
+  // its notice stay on screen but out of it (trinity#3274), or every later
+  // turn would ask for the approval again.
+  const recent = chatMessages.value.filter(m => !m.held).slice(-20)
   if (recent.length === 0) return userMessage
   let context = 'Previous conversation:\n'
   recent.forEach(m => {
@@ -1127,6 +1134,7 @@ async function sendChatMessage() {
     content: message,
     timestamp: new Date().toISOString()
   })
+  const userEntry = chatMessages.value[chatMessages.value.length - 1]
   scrollChatToBottom()
 
   chatExecutionStatus.value = 'running'
@@ -1143,6 +1151,13 @@ async function sendChatMessage() {
     }
 
     const submitRes = await http.post(`/api/agents/${chatAgent.value}/task`, payload)
+    // trinity#3274: a gated skill — nothing ran, nothing to poll.
+    const held = pendingApprovalMessage(submitRes)
+    if (held) {
+      userEntry.held = true
+      chatMessages.value.push({ role: 'system', content: held, held: true, timestamp: new Date().toISOString() })
+      return
+    }
     const executionId = submitRes.data.execution_id
 
     // Poll for completion
@@ -1168,9 +1183,14 @@ async function sendChatMessage() {
       chatSessionId.value = chatSessions.value[0].id
     }
   } catch (e) {
+    // A refused gated request stays out of the next message's history too:
+    // resent, it would be refused again on every later turn (#3274).
+    const refused = isGateRefusal(e)
+    if (refused) userEntry.held = true
     chatMessages.value.push({
       role: 'assistant',
-      content: `Error: ${e.response?.data?.detail || e.message || 'Failed to send message'}`,
+      content: `Error: ${refused ? apiErrorMessage(e) : (e.response?.data?.detail || e.message || 'Failed to send message')}`,
+      held: refused,
       timestamp: new Date().toISOString()
     })
   } finally {
@@ -2756,6 +2776,18 @@ watch(() => authStore.isAuthenticated, (isAuth) => {
   font-size: 10px;
   color: rgba(255, 255, 255, 0.4);
   margin-top: 4px;
+}
+
+/* trinity#3274: a platform line (a held request's notice), not a bubble —
+   centred and muted, gray-400 on this view's dark ground (gray-500 is below
+   AA there). A theme() token, not a literal. */
+.bubble-system {
+  align-self: center;
+  max-width: 100%;
+  padding: 4px 16px;
+  font-size: 12.5px;
+  text-align: center;
+  color: theme('colors.gray.400');
 }
 
 .bubble-assistant .bubble-time {

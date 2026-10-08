@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from typing import Optional, Literal
 
 from database import db
-from services import idempotency_service
+from services import channel_history, idempotency_service
 from services.platform_audit_service import platform_audit_service, AuditEventType
 from services.runtime_secret_scrub import get_staged_values, scrub_text
 from services.settings_service import get_proactive_rate_limit  # #1609
@@ -70,6 +70,11 @@ class DeliveryResult:
     # here, which would drift from the adapter and silently mint a second
     # session. None ⇒ the channel can't resolve a session (nothing to persist).
     session_identifier: Optional[str] = None
+    # ent#665: set only when the caller supplied an idempotency_key.
+    sent: Optional[bool] = None
+    suppressed_by: Optional[str] = None
+    first_sent_at: Optional[str] = None
+    first_execution_id: Optional[str] = None
 
 
 class ProactiveMessageService:
@@ -150,12 +155,14 @@ class ProactiveMessageService:
         success: bool,
         error: Optional[str] = None,
         message_preview: Optional[str] = None,
+        action: str = "send",
+        extra: Optional[dict] = None,
     ) -> None:
         """Log proactive message send to audit trail."""
         try:
             await platform_audit_service.log(
                 event_type=AuditEventType.PROACTIVE_MESSAGE,
-                event_action="send",
+                event_action=action,
                 source="proactive_message_service",
                 actor_agent_name=agent_name,
                 target_type="user",
@@ -165,6 +172,7 @@ class ProactiveMessageService:
                     "success": success,
                     "error": error,
                     "message_preview": message_preview[:100] if message_preview else None,
+                    **(extra or {}),
                 },
             )
         except Exception as e:
@@ -179,6 +187,8 @@ class ProactiveMessageService:
         reply_to_thread: bool = False,
         execution_id: Optional[str] = None,
         dedup_label: str = "",
+        idempotency_key: Optional[str] = None,
+        idempotency_ttl: Optional[int] = None,
     ) -> DeliveryResult:
         """
         Send a proactive message to a user.
@@ -199,6 +209,10 @@ class ProactiveMessageService:
                 can intentionally send two distinct messages to the same recipient
                 in one turn. Default "" → at-most-one send per (recipient, channel)
                 per turn.
+            idempotency_key / idempotency_ttl: Caller-declared cross-execution
+                key (ent#665): one delivery per (agent, recipient, key) within the
+                TTL across ALL executions. A suppressed send returns
+                ``sent=False`` and is audited and noted in the conversation.
 
         Returns:
             DeliveryResult with success status and channel used
@@ -225,9 +239,15 @@ class ProactiveMessageService:
         # a mid-chunk crash re-sends the whole message on retry (at-least-once for
         # chunks, documented in effect-idempotency.md). A concurrent in-flight
         # duplicate raises EffectInProgressError (retryable, not a silent skip).
+        # ent#665: the intent key is part of the per-turn identity, so a turn's
+        # suppressed send under key A never replays for its send under key B.
+        # Keyless → the dict (and so the key hash) is unchanged.
+        identity = {"recipient": recipient_email, "channel": channel}
+        if idempotency_key:
+            identity["intent"] = idempotency_key
         async with idempotency_service.effect_guard(
             "message",
-            {"recipient": recipient_email, "channel": channel},
+            identity,
             execution_id=execution_id,
             agent_name=agent_name,
             dedup_label=dedup_label,
@@ -239,15 +259,26 @@ class ProactiveMessageService:
                     channel=snap.get("channel", channel),
                     message_id=snap.get("message_id"),
                     error=snap.get("error"),
+                    sent=snap.get("sent"),
+                    suppressed_by=snap.get("suppressed_by"),
+                    first_sent_at=snap.get("first_sent_at"),
+                    first_execution_id=snap.get("first_execution_id"),
                 )
             result = await self._send_message_inner(
-                agent_name, recipient_email, text, channel, reply_to_thread
+                agent_name, recipient_email, text, channel, reply_to_thread,
+                execution_id=execution_id,
+                idempotency_key=idempotency_key,
+                idempotency_ttl=idempotency_ttl,
             )
             guard.snapshot = {
                 "success": result.success,
                 "channel": result.channel,
                 "message_id": result.message_id,
                 "error": result.error,
+                "sent": result.sent,
+                "suppressed_by": result.suppressed_by,
+                "first_sent_at": result.first_sent_at,
+                "first_execution_id": result.first_execution_id,
             }
             return result
 
@@ -258,10 +289,13 @@ class ProactiveMessageService:
         text: str,
         channel: Literal["auto", "telegram", "slack", "whatsapp", "web"],
         reply_to_thread: bool,
+        execution_id: Optional[str] = None,
+        idempotency_key: Optional[str] = None,
+        idempotency_ttl: Optional[int] = None,
     ) -> DeliveryResult:
-        """Auth → rate-limit → channel delivery. Wrapped by send_message's
-        effect guard (#1084), so a success here is recorded for replay and an
-        exception releases the claim for retry."""
+        """Auth → intent key → rate-limit → channel delivery. Wrapped by
+        send_message's effect guard (#1084), so a success here is recorded for
+        replay and an exception releases the claim for retry."""
         message_preview = text[:100] if text else ""
 
         # 1. Authorization check
@@ -272,6 +306,55 @@ class ProactiveMessageService:
                 "Recipient must opt in via allow_proactive flag."
             )
 
+        # 2. Caller-declared intent key (ent#665): after consent (a revoked
+        # recipient is refused, not "suppressed"), before the rate limit (a
+        # suppressed send costs no budget).
+        async with idempotency_service.intent_guard(
+            "message",
+            agent_name=agent_name,
+            target=recipient_email,
+            idempotency_key=idempotency_key,
+            ttl_seconds=idempotency_ttl,
+            execution_id=execution_id,
+        ) as intent:
+            if intent.suppressed:
+                first_channel = intent.first.get("channel") or channel
+                await self._audit_send(
+                    agent_name, recipient_email, first_channel, False,
+                    message_preview=message_preview, action="suppressed",
+                    extra={
+                        "suppressed_by": idempotency_service.SUPPRESSED_BY_IDEMPOTENCY_KEY,
+                        "idempotency_key": idempotency_key,
+                        "first_sent_at": intent.first_sent_at,
+                        "first_execution_id": intent.first_execution_id,
+                    },
+                )
+                channel_history.persist_suppressed_note(
+                    agent_name=agent_name,
+                    channel=first_channel,
+                    session_identifier=intent.first.get("session_identifier"),
+                    idempotency_key=idempotency_key,
+                    first_sent_at=intent.first_sent_at,
+                )
+                return DeliveryResult(success=True, channel=first_channel, **intent.result_fields())
+            result = await self._rate_limit_and_deliver(
+                agent_name, recipient_email, text, channel, reply_to_thread, message_preview,
+            )
+            intent.record = {"channel": result.channel, "session_identifier": result.session_identifier}
+            for k, v in intent.result_fields().items():
+                setattr(result, k, v)
+            return result
+
+    async def _rate_limit_and_deliver(
+        self,
+        agent_name: str,
+        recipient_email: str,
+        text: str,
+        channel: str,
+        reply_to_thread: bool,
+        message_preview: str,
+    ) -> DeliveryResult:
+        """Rate limit, then try each channel; raises when none delivers."""
         # 2. Rate limit check
         if not self._check_rate_limit(agent_name, recipient_email):
             await self._audit_send(agent_name, recipient_email, channel, False, "rate_limited")

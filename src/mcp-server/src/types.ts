@@ -514,8 +514,8 @@ export interface OperatorQueueItem {
   // the ledger: read `status`).
   disposition?: string | null;        // answered | cancelled | dismissed | expired
   disposed_at?: string | null;
-  disposed_by?: string | null;        // person | timeout
-  disposition_reason?: string | null; // the operator's optional cancel reason
+  disposed_by?: string | null;        // person | timeout | platform (#3246)
+  disposition_reason?: string | null; // the operator's optional cancel reason, or the platform's (condition_cleared | superseded)
 }
 
 /**
@@ -593,6 +593,13 @@ export interface OperatorAskReceipt {
 export interface OperatorQueueListResponse {
   items: OperatorQueueItem[];
   count: number;
+  // trinity-enterprise#815 — optional because an older backend omits them
+  // (the tool then reports null + a warning); null when not verified.
+  total?: number | null;
+  has_more?: boolean | null;
+  next_offset?: number | null;
+  next_cursor?: string | null;
+  warnings?: string[];
 }
 
 // Agent compatibility validation (#668)

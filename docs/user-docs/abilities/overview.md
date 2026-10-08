@@ -2,6 +2,8 @@
 
 The official agent development toolkit for Claude Code. Curated plugins covering the full agent lifecycle — from scaffolding and onboarding to deployment, scheduling, and ongoing operations.
 
+Abilities is **Claude Code tooling**: the plugins run in your Claude Code session (or inside a deployed Claude Code agent), and the agents its wizards scaffold are Claude Code agents. Trinity itself is model-agnostic — an agent can also run on Gemini CLI or OpenAI Codex (see [Agent Runtimes](../agents/agent-runtimes.md)) — but you build those without these plugins.
+
 > 📺 **Watch:** [Build and Deploy Agents in Cursor](https://youtu.be/amqiysdlEWY) *(Apr 2026)* · [all videos](../videos.md)
 
 ## Quick Start
@@ -20,8 +22,8 @@ Prefer to drive yourself?
 # Add the abilities marketplace (one-time)
 /plugin marketplace add abilityai/abilities
 
-# List available plugins
-/plugin list abilityai
+# Browse the marketplace's plugins (interactive plugin manager)
+/plugin
 
 # Install core plugins
 /plugin install create-agent@abilityai
@@ -32,7 +34,7 @@ Prefer to drive yourself?
 Or from the terminal:
 
 ```bash
-claude plugin add abilityai/abilities
+claude plugin marketplace add abilityai/abilities
 claude plugin install create-agent@abilityai
 ```
 
@@ -40,9 +42,9 @@ claude plugin install create-agent@abilityai
 
 | Plugin | Version | Skills | Purpose | Key Skills |
 |--------|---------|--------|---------|------------|
-| [create-agent](create-agent-plugin.md) | 2.1.1 | 6 | Agent creation — interview-driven, any domain | `/create-agent:custom`, `/create-agent:review` |
-| [agent-dev](agent-dev-plugin.md) | 1.16.5 | 30 | Extend existing agents, and work fleet-wide | `/agent-dev:create-playbook`, `/agent-dev:add-memory`, `/agent-dev:add-project-management`, `/agent-dev:add-orchestrator`, `/agent-dev:add-canon`, `/agent-dev:agent-fleet-analysis` |
-| [trinity](trinity-plugin.md) | 2.11.1 | 7 | Deploy to and operate on Trinity | `/trinity:start-here`, `/trinity:connect`, `/trinity:onboard`, `/trinity:sync`, `/trinity:loop` |
+| [create-agent](create-agent-plugin.md) | 2.2.0 | 6 | Agent creation — interview-driven, any domain | `/create-agent:custom`, `/create-agent:review` |
+| [agent-dev](agent-dev-plugin.md) | 1.20.0 | 30 | Extend existing agents, and work fleet-wide | `/agent-dev:create-playbook`, `/agent-dev:add-memory`, `/agent-dev:add-project-management`, `/agent-dev:add-orchestrator`, `/agent-dev:add-canon`, `/agent-dev:agent-fleet-analysis` |
+| [trinity](trinity-plugin.md) | 2.11.3 | 7 | Deploy to and operate on Trinity | `/trinity:start-here`, `/trinity:connect`, `/trinity:onboard`, `/trinity:sync`, `/trinity:loop` |
 | [dev-methodology](dev-methodology-plugin.md) | 1.2.1 | 24 | Development workflow | `/dev-methodology:implement`, `/dev-methodology:validate-pr` |
 | [utilities](utilities-plugin.md) | 1.2.2 | 7 | Ops and productivity | `/utilities:safe-deploy`, `/utilities:docker-ops` |
 
@@ -63,7 +65,7 @@ Abilities supports a four-step workflow:
 
 **Develop** — Use `/agent-dev:create-playbook` to add capabilities, `/agent-dev:add-memory` for persistence, and `/agent-dev:add-backlog` (the agent's own dev backlog) or `/agent-dev:add-project-management` (cross-actor projects) for task management.
 
-**Deploy** — Run `/trinity:connect` once to authenticate, push the agent's repo, then `/trinity:onboard` per agent — Trinity clones the repo and tracks the branch. An agent that is already deployed from a bare repo can be onboarded *in place* by running `/trinity:onboard` inside it.
+**Deploy** — Run `/trinity:connect` once to authenticate, push the agent's repo, then `/trinity:onboard` per agent — Trinity clones the repo. With your own GitHub token that can push to your own repo, the agent gets a working branch with auto-sync, so its work lands back in git; otherwise it is pull-only on the tracked branch. An agent that is already deployed from a bare repo can be onboarded *in place* by running `/trinity:onboard` inside it.
 
 **Iterate** — Push changes and run `/trinity:sync`, which also reconciles declared schedules and plugins onto the instance. Use `/create-agent:review` and `/create-agent:adjust` to audit and improve.
 
@@ -75,7 +77,7 @@ Every agent created with `/create-agent:custom` includes:
 - **Initial skills** — 2-4 playbooks based on agent purpose
 - **Onboarding system** — `onboarding.json` + `/onboarding` skill
 - **Dashboard** — `dashboard.yaml` + `/update-dashboard` skill
-- **Trinity files** — `template.yaml` (declaring credentials, `schedules:`, and `plugins:`), `.env.example`, `.mcp.json.template`
+- **Trinity files** — `template.yaml` (declaring credentials, `schedules:`, `plugins:`, and `metrics:`), `.env.example`, `.mcp.json.template`
 - **Git repo** — Initialized and committed
 
 ## See Also

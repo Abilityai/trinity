@@ -797,6 +797,9 @@ class SkillService:
             url = get_skills_library_url()
         except Exception:  # noqa: BLE001
             return None
+        # #3246: a refusal row is live only while the setting still names its
+        # URL — a removed or changed setting ends the rows it no longer backs.
+        self._reconcile_adoption_alerts(url)
         if not url:
             return None
 
@@ -855,6 +858,7 @@ class SkillService:
             existing = [s for s in db.list_skill_sources()
                         if _same_skills_repo(s.url, normalized_url)]
             if existing:
+                self._clear_adoption_alert(url)
                 return existing[0].id
 
             if db.count_skill_sources() > 0:
@@ -916,8 +920,37 @@ class SkillService:
                 source.id, e,
             )
 
+        self._clear_adoption_alert(url)
         logger.info("migrated skills_library_url into skill source %s", source.id)
         return source.id
+
+    # #3246: the legacy adoption refusal is one platform condition per URL.
+
+    @staticmethod
+    def _adoption_alert_key(url: Any) -> str:
+        """`sha256(url)[:12]` over the RAW value — never the URL itself (a raw
+        URL is a conflict key that could carry a PAT). Raises on a non-str
+        setting value; every caller is inside a try."""
+        return hashlib.sha256(url.strip().encode()).hexdigest()[:12]
+
+    def _clear_adoption_alert(self, url: Any) -> None:
+        """Adoption succeeded (or the URL already names a source): end the
+        URL's refusal row as the platform. Never raises."""
+        from services import platform_alerts
+        try:
+            platform_alerts.clear(RECONCILE_ALARM_AGENT_NAME, "skills_legacy_adoption",
+                                  self._adoption_alert_key(url))
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"could not clear skills adoption alarm: {e}")
+
+    def _reconcile_adoption_alerts(self, url: Any) -> None:
+        """End every refusal row whose URL is no longer the setting. Never raises."""
+        from services import platform_alerts
+        try:
+            live = [self._adoption_alert_key(url)] if url else []
+            platform_alerts.reconcile(RECONCILE_ALARM_AGENT_NAME, "skills_legacy_adoption", live)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"could not reconcile skills adoption alarms: {e}")
 
     # -------------------------------------------------------------------------
     # Durable sync status (ent#236)
@@ -1110,6 +1143,8 @@ class SkillService:
             # #672 lifecycle: derived on every parse, never persisted.
             "deprecated": False,
             "superseded_by": None,
+            # trinity-enterprise#753: `recommended` gates it by default where assigned.
+            "approval": None,
         }
 
         try:
@@ -1127,6 +1162,7 @@ class SkillService:
                 "contract_warnings": warnings,
                 "deprecated": contract["deprecated"],
                 "superseded_by": contract["superseded_by"],
+                "approval": contract["approval"],
             })
 
             # Fallback: first non-header paragraph
@@ -2511,43 +2547,32 @@ print(json.dumps(out))
         silently is how the refusal gets rediscovered as "skills stopped
         working".
 
-        A NEW CALL SITE MUST CHOOSE `steady_state` EXPLICITLY. The default is
-        the unbounded timestamped/`high` shape, which is correct only for a
-        genuine transient failure — nothing enforces that choice (the #1677 AST
-        guard scans call sites of `create_operator_queue_item`, not of this
-        method), so the docstring is the enforcement.
+        A NEW CALL SITE MUST CHOOSE `steady_state` EXPLICITLY — it picks the
+        severity of the reading.
 
-        Two classes of refusal share this emitter (#2744):
+        Two classes of refusal share this emitter (#2744), and since #3246 one
+        subject — `skills_legacy_adoption:<sha256(url)[:12]>` on the
+        `_skills-sync` host — so a URL has at most one pending row:
 
         * A genuine FAILURE — the URL failed validation, or adoption threw.
-          `priority: "high"` and a TIMESTAMPED id, so a repeat is visible AS a
-          repeat rather than deduped away by `create_item`'s ON CONFLICT DO
-          NOTHING. Repeat-visible here is a PRODUCT DECISION, not a claim that
-          these branches are bounded: a permanently invalid `skills_library_url`
-          re-enters the validation branch on every sync just as forever.
+          `priority: "high"`, `logger.error`. A repeat is visible AS a repeat
+          through the row's seen count and last-seen time, not as a new row.
         * The STEADY STATE — "this install already has sources, so it is past
           migration": the designed resting state of every migrated install whose
-          legacy key lingers, not a failure. `priority: "low"`, `logger.info`,
-          and a STABLE id derived from the refused URL, so the `(agent_name,
-          request_id)` ON CONFLICT collapses every repeat to ONE row and an
-          operator's dismissal sticks. The family prefix is registered in
-          `operator_queue_service._RESERVED_ID_PREFIXES`, because a stable id
-          derived from an admin-visible URL is guessable and an agent could
-          otherwise pre-create it and silence the alarm (the #1632 C2 class);
-          that tuple also drives `is_platform_minted`.
+          legacy key lingers, not a failure. `priority: "low"`, `logger.info`.
+          A person's dismissal holds through the seam's snooze window.
 
-        The id is the sha256 of the URL, never the URL itself: `request_id` is a
-        conflict key, not a display field, and a raw URL would break the
-        id-shape (`^[A-Za-z0-9._:-]+$`) the reserved-prefix machinery assumes.
+        The kind's id prefix stays in
+        `operator_queue_service._RESERVED_ID_PREFIXES`, so an agent cannot
+        pre-create one of these rows (the #1632 C2 class); that tuple also
+        drives `is_platform_minted`. The key is the sha256 of the URL, never
+        the URL itself: a raw URL is not id-shaped and could carry a PAT.
 
-        **The bound this emitter's #1677 platform-only classification rests on**
-        is: the only input is the `skills_library_url` setting, which
-        `routers/settings.py` blocks on the generic settings PUT
+        The volume bound: the only input is the `skills_library_url` setting,
+        which `routers/settings.py` blocks on the generic settings PUT
         (`LEGACY_SKILLS_LIBRARY_KEYS`, 422) and no other writer reaches — so no
-        agent can drive the volume. It is NOT "admin-driven cadence": ent#236's
-        auto-sync calls the same `sync_library()` unattended on a 300s-86400s
-        timer. Keep this comment and the `_ALLOWED_CALLERS` justification in
-        `tests/unit/test_1677_operator_alert_emitters.py` in step.
+        agent can drive it. ent#236's auto-sync calls the same `sync_library()`
+        unattended on a 300s-86400s timer, which is why one row per URL matters.
 
         The echoed URL is SCRUBBED (#2744). Naming what was refused is the whole
         point of the alarm, but `EmbeddedCredentialError` is a `ValueError`
@@ -2564,38 +2589,25 @@ print(json.dumps(out))
         else:
             logger.error(f"[ent#346] {message} (url={safe_url})")
         try:
-            from utils.helpers import utc_now_iso
+            from services import platform_alerts
 
-            context = {
-                "alert_type": "skills_legacy_adoption_refused",
-                "url": safe_url,
-            }
-            if steady_state:
-                # Computed INSIDE the try: `url.strip().encode()` raises
-                # AttributeError on a non-str setting value, and out here that
-                # degrades to a warning and no alarm — the fail-soft guarantee.
-                # Hoisting it above the try turns a decorative alarm into a
-                # raiser.
-                request_id = (
-                    "skills-legacy-adoption-refused-"
-                    f"{hashlib.sha256(url.strip().encode()).hexdigest()[:12]}"
-                )
-            else:
-                # Timestamped, so a repeated failure is visible as repeated
-                # rather than silently deduped by the ON CONFLICT DO NOTHING
-                # in `create_item`.
-                request_id = f"skills-legacy-adoption-{utc_now_iso()}"
-
-            db.create_operator_queue_item(
-                RECONCILE_ALARM_AGENT_NAME,
-                {
-                    "id": request_id,
-                    "type": "alert",
-                    "priority": "low" if steady_state else "high",
-                    "title": "Legacy skills-library adoption refused",
-                    "question": message,
-                    "context": context,
-                    "expires_at": None,
+            # #3246: one platform condition per URL — `sha256(raw url)[:12]`
+            # (computed INSIDE the try: a non-str setting value raises here and
+            # degrades to a warning, the fail-soft guarantee). Both branches
+            # share the subject, so a repeat — steady-state or a genuine
+            # failure — updates the one pending row (seen count, latest
+            # message and priority) instead of filing a second, and the row is
+            # ended by the platform when adoption succeeds or the setting is
+            # removed (`_clear_adoption_alert` / `_reconcile_adoption_alerts`).
+            platform_alerts.observe(
+                RECONCILE_ALARM_AGENT_NAME, "skills_legacy_adoption",
+                self._adoption_alert_key(url),
+                priority="low" if steady_state else "high",
+                title="Legacy skills-library adoption refused",
+                question=message,
+                context={
+                    "alert_type": "skills_legacy_adoption_refused",
+                    "url": safe_url,
                 },
             )
         except Exception as e:  # noqa: BLE001 — the alarm is decorative

@@ -26,6 +26,8 @@ As a platform administrator, I want to configure and sync a GitHub repository co
 
 Both default OFF; a zero-config install behaves exactly as before.
 
+`_reinject_agent` also reconciles each agent's skill-gate library defaults (trinity-enterprise#753): before the re-inject (a newly `approval: recommended` skill is gated on every holder) and, when the set reconcile dropped members, after the prune (`drop_after_prune`). See [skill-gate.md](skill-gate.md) §6.
+
 ```
 skills_sync_service loop (every worker, self-gating, config re-read per cycle)
    │  skills:sync:leader  (SET NX, TTL 3×interval, own-lease refresh, fail-open)
@@ -707,6 +709,7 @@ CREATE TABLE IF NOT EXISTS system_settings (
 
 | Date | Changes |
 |------|---------|
+| 2026-10-06 | **#3123**: bundled community-catalog pin bumped to `trinity-skills` **v0.3.0** (fresh-install seed only). The catalog gains `update-dashboard`, the playbook the metrics tiles already point users at, and drops the four retired `add-*` installers (now marketplace-only), giving 38 skills. The guard floor rises to v0.3.0, and `docs/user-docs/automation/skills-and-playbooks.md` joins `.env.example` in the parity check. Existing instances keep their row (ent#529); that user doc now carries the steps for moving one to a newer tag (`PUT /api/skills/sources/{id}`, then a full sync). |
 | 2026-09-30 | **ent#672**: the listing the sync produces now carries each skill's lifecycle keys — `deprecated` and `superseded_by` (the library's `superseded-by`) — parsed on every listing, never persisted, so a re-sync that drops the key clears the flag. Contract details: [skill-injection.md](skill-injection.md). |
 | 2026-09-06 | **#2545 + #2550**: bundled community-catalog pin bumped to `trinity-skills` **v0.2.0** (fresh-install seed only — adds the `project-management` category, 14 skills; `.env.example` documents the same value, `tests/unit/test_2545_skill_source_pin.py` keeps them in step). Update-path tag pin now compares the tag **peeled** (`refs/tags/<ref>^{commit}`): an annotated tag's bare rev-parse is the tag object, so the unmoved bundled source was refused as `moved_tag` on every sync after the first (`tests/unit/test_2550_annotated_tag_pin.py`, both tag kinds). |
 | 2026-07-29 | **ent#236 lifecycle automation**: scheduled leader-locked auto-sync, commit-gated fleet-wide re-inject with an honest per-agent report, durable sync status (`--workers 2` gap), and the dedicated range-validated `GET/PUT /api/settings/skills-library` route. Removal-on-unassign is documented in [skill-injection.md](skill-injection.md). |
@@ -716,5 +719,5 @@ CREATE TABLE IF NOT EXISTS system_settings (
 
 ---
 
-**Last Updated**: 2026-09-30
-**Status**: Verified - Updated for ent#672 lifecycle keys on the listing
+**Last Updated**: 2026-10-06
+**Status**: Verified - Updated for #3123 bundled catalog pin v0.3.0

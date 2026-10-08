@@ -162,6 +162,8 @@ services:
       - OPERATOR_QUEUE_EMAIL_MAX=${OPERATOR_QUEUE_EMAIL_MAX:-320}                               # ent#364: addressee email length clamp (RFC 5321)
       - OPERATOR_QUEUE_FLOOD_ALERT_COOLDOWN_SECONDS=${OPERATOR_QUEUE_FLOOD_ALERT_COOLDOWN_SECONDS:-300}  # one flood alert / agent / window
       - OPERATOR_ALERT_MAX_PENDING_PER_TYPE=${OPERATOR_ALERT_MAX_PENDING_PER_TYPE:-5}     # per-(agent,type) platform-alert budget (#1677)
+      - OPERATOR_PLATFORM_ALERT_LIFETIME_DAYS=${OPERATOR_PLATFORM_ALERT_LIFETIME_DAYS:-14}   # #3246: platform alert expires N days after its last reading
+      - OPERATOR_PLATFORM_ALERT_SNOOZE_DAYS=${OPERATOR_PLATFORM_ALERT_SNOOZE_DAYS:-7}        # #3246: a person's ending holds N days unless priority rises
       - GITHUB_PAT=${GITHUB_PAT:-}
       - HOST_TEMPLATES_PATH=${PWD}/config/agent-templates
       # First-run default system seed (trinity-enterprise#124): a path to an
@@ -598,6 +600,9 @@ services:
       # gate (the backend reads the same key only for feature-flags observability).
       # Must be wired here or the flag is un-flippable on deploy (#1056/#1039 class).
       - MCP_AGENT_CHAT_PULL_ENABLED=${MCP_AGENT_CHAT_PULL_ENABLED:-false}
+      # #3232 report-back kill switch (default on): false stops every
+      # chat_with_* call from sending parent_execution_id, default or typed.
+      - MCP_REPORT_BACK_ENABLED=${MCP_REPORT_BACK_ENABLED:-true}
       # #848 inline email auth — THIS is the session-tier gate: with it OFF a
       # keyless MCP connection is refused outright and no login tools register.
       # The backend reads the same key to gate /api/internal/mcp-auth/*. Both

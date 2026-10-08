@@ -6,6 +6,7 @@
 
 | Date | Changes |
 |------|---------|
+| 2026-10-07 | trinity-enterprise#815: `GET /api/agents/{name}/permissions?strict=true` — one tri-state Docker snapshot, 503 when Docker cannot be read (never "200, no peers"); `getPermittedAgents(name, {strict: true})` throws instead of returning `[]`. Caller: the MCP's broad `list_operator_queue`. Without the flag, unchanged. |
 | 2026-02-19 | **BREAKING**: Changed default permissions to restrictive. New agents start with NO permissions (was: bidirectional with same-owner agents). Updated `grant_default_permissions()` to no-op. |
 | 2026-01-23 | Verified all line numbers against implementation. Updated router endpoints (641-681), database delegation (1070-1091), frontend component references (PermissionsPanel.vue). |
 | 2026-01-03 | Added `get_agent_info` MCP tool enforcement. Documented access control dependencies from `dependencies.py`. |
@@ -50,7 +51,7 @@ When an agent is created, it starts with **NO permissions** to communicate with 
 - **chat_with_agent**: `src/mcp-server/src/tools/chat.ts:29-100` - Blocks unauthorized calls
 
 ### Backend API
-- `GET /api/agents/{name}/permissions` - List permitted agents
+- `GET /api/agents/{name}/permissions` - List permitted agents (`?strict=true`: 503 when Docker cannot be read, trinity-enterprise#815)
 - `PUT /api/agents/{name}/permissions` - Bulk set permissions
 - `POST /api/agents/{name}/permissions/{target}` - Add single permission
 - `DELETE /api/agents/{name}/permissions/{target}` - Remove permission
@@ -256,6 +257,8 @@ async def get_agent_permissions_logic(agent_name: str, current_user: User) -> di
     }
 ```
 
+**Strict mode (trinity-enterprise#815).** `?strict=true` (router `agent_files.py:287-297`) routes to `_strict_permissions` (`permissions.py:76`). The lenient path reads Docker twice through helpers that swallow faults: `get_agent_container` turns an error into a 404, and `get_accessible_agents` → `list_all_agents_fast` turns one into an empty fleet, so a Docker fault reads as "200, no peers". Strict mode reads `agent_container_states()` ONCE: `None` (Docker unreadable) is a **503**, an agent missing from the snapshot is a 404, and the permitted and available peers both come from that one snapshot plus the same DB visibility rules (admin sees every container, orphans included; otherwise owned or shared). Its entries are `{name, status, permitted}` (no `type`). The access check (403) runs first, as before. Without the flag the behaviour is unchanged (the frontend and the lenient MCP callers). Its caller is the MCP's broad `list_operator_queue` under an agent-scoped key (`client.ts getPermittedAgents(name, {strict: true})`), which must not mistake a fault for "no peers" when it decides whether the queue page is complete — see [operating-room.md](operating-room.md).
+
 ### Endpoint: PUT /api/agents/{name}/permissions
 
 **Router**: `src/backend/routers/agent_files.py`
@@ -385,6 +388,10 @@ async getPermittedAgents(sourceAgent: string): Promise<string[]> {
     return [];
   }
 }
+
+// trinity-enterprise#815: getPermittedAgents(sourceAgent, { strict: true }) calls
+// `/permissions?strict=true` and THROWS on any failure (a 503 included) instead of
+// returning [] — used by the broad list_operator_queue only.
 
 // Check if source is permitted to call target
 async isAgentPermitted(sourceAgent: string, targetAgent: string): Promise<boolean> {

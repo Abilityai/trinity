@@ -8,7 +8,7 @@
 import { z } from "zod";
 import { createHash } from "crypto";
 import { TrinityClient, isDepthRefusal, isGateResult, type DepthRefusal } from "../client.js";
-import { MANUAL_EXECUTION_ID } from "./execution_id.js";
+import { MANUAL_EXECUTION_ID, isWellFormedExecutionId, resolveExecutionId } from "./execution_id.js";
 import type { McpAuthContext, AgentAccessCheckResult } from "../types.js";
 import { accessDenied, checkAgentEdge, resolveClient, uniformDenial } from "../access.js";
 import { DELEGATION_CONTRACT, DELEGATION_RULE, readNotResend } from "../delegation_contract.js";
@@ -120,8 +120,10 @@ export interface RunAgentChatParams {
   async?: boolean;
   inject_result?: boolean;
   chat_session_id?: string;
-  /** ent#224: YOUR current execution_id, so the delegated task inherits the
-   *  Slack channel/thread this work came from and can report back on finish. */
+  /** ent#224/#3232: the model-typed execution_id. A non-empty value other than
+   *  `manual` opts a call into report-back (sync parallel needs it; async
+   *  dispatches default to the platform turn without it); `manual` opts out.
+   *  Which id goes out is `resolveReportBack`'s call — the header turn wins. */
   execution_id?: string;
 }
 
@@ -146,10 +148,13 @@ function depthRefusalResult(refusal: DepthRefusal): string {
  *
  * The leads claim nothing about liveness: the backend stores the async receipt
  * as the idempotency snapshot at dispatch time and replays it for 24 h, after the
- * run may have finished or failed. Three shapes: async `accepted` / `queued`, and
- * the `queued_timeout` a sync `/task` stores when its long-poll gives up — told
- * apart from the MCP server's own `queued_timeout` (client.ts), which already
- * carries `readNotResend`, by that sentence.
+ * run may have finished (since #3245 a run that ended failed/cancelled is no
+ * longer replayed — an identical re-send starts a new run — but one that
+ * succeeded, or may still report back, is). Three shapes: async `accepted` /
+ * `queued`, and the `queued_timeout` a sync `/task` stores when its long-poll
+ * gives up — told apart from the MCP server's own `queued_timeout` (client.ts),
+ * which already carries `readNotResend`, by that sentence. Every other field is
+ * kept, including `idempotent_replay: true` on a replay (#3245).
  */
 function asyncReceipt<T extends object>(agent: string, response: T): T {
   const r = response as { status?: unknown; execution_id?: unknown; message?: unknown };
@@ -169,6 +174,188 @@ function asyncReceipt<T extends object>(agent: string, response: T): T {
 }
 
 /**
+ * #3232: how a chat_with_* call runs, which decides whether it can carry a parent.
+ * `task-async` = parallel+async, `task-sync` = parallel sync, `pull` = the #946
+ * pull-routed sequential call (always an async receipt), `chat` = sequential /chat.
+ */
+export type ReportBackRoute = "task-async" | "task-sync" | "pull" | "chat";
+
+/** Why an opted-in call sends no parent, in precedence order. */
+export type ReportBackReason = "disabled" | "manual_session" | "invalid_execution_id" | "sequential_chat";
+
+/** The fields a result gains when a parent is (or, for an opted-in call, cannot be) sent. */
+export interface ReportBackFields {
+  report_back: "requested" | "off";
+  report_back_reason?: ReportBackReason;
+  report_back_note?: string;
+}
+
+export interface ReportBackInput {
+  route: ReportBackRoute;
+  isSelfTask: boolean;
+  injectResult: boolean;
+  /** The model-typed `execution_id` param, raw. */
+  typed: string | undefined;
+  /** The platform turn header (#2392), already format-checked: a turn id, `manual`, or undefined. */
+  header: string | undefined;
+  /** MCP_REPORT_BACK_ENABLED. */
+  enabled: boolean;
+  /** For the log line only. */
+  caller: string | undefined;
+  target: string;
+}
+
+export interface ReportBackDecision {
+  /** default = no typed id, async route, header names a turn; typed = opted in; opt_out = typed `manual`. */
+  arm: "default" | "typed" | "opt_out" | "none";
+  parentExecutionId?: string;
+  fields?: ReportBackFields;
+  logLine: string;
+}
+
+/**
+ * #3232 (D5): the one `execution_id` parameter text, published by
+ * `chat_with_agent` and every dedicated `chat_with_<agent>` so the promise cannot
+ * drift between them. It lives in the PARAMETER description (not cut at Claude
+ * Code's 2,048-character tool-description cap; the tool descriptions and
+ * DELEGATION_CONTRACT stay byte-unchanged). It must state the default on its own:
+ * it is the only text a model sees when a default-armed call ends in an error.
+ */
+export const EXECUTION_ID_PARAM_DESCRIPTION =
+  "Report-back to the Slack, Telegram or Workspace conversation you are serving. It is on by default " +
+  "for async delegation (parallel=true, async=true, or a sequential call this platform routes as a task): " +
+  "when the delegated run ends, success or failure, it posts a note there, and runs it delegates onward may " +
+  "post their own. An error from an async call, or from one you opted in, does not mean nothing will post: the run may have started. " +
+  "Pass \"manual\" to turn it off for this call. For a sync " +
+  "call, pass your own execution_id (from your Execution Context, not one from a receipt) to ask for it. " +
+  "The result's report_back field says whether it was requested; even requested is not a guarantee (the " +
+  "conversation may not allow such notes, or the send may fail). The note may arrive before or after your " +
+  "own reply: give your own answer, and if you follow up later, add what is new rather than repeat it. A " +
+  "sequential call that answers with the reply itself does not report back. A repeated identical request " +
+  "returns the earlier run, which reports wherever that run was asked to; do not re-send or reword it to " +
+  "change that. Optional.";
+
+/** On default-armed results: the call reports back although nothing was typed. */
+export const REPORT_BACK_DEFAULT_NOTE =
+  "Report-back is on by default: when this run ends it posts its outcome into the Slack, Telegram or " +
+  "Workspace conversation your turn is serving, if there is one and it allows such notes, possibly after " +
+  "your reply; runs it delegates onward may post too. If you follow up yourself (or set a reminder to), add " +
+  "what is new; do not repeat the outcome. A repeat of an earlier identical request reports where that run " +
+  "was asked to; never re-send or reword this call to change that. To stop it on a later call, pass " +
+  "execution_id=\"manual\".";
+
+/**
+ * On `report_back: off` results of an opted-in call. Future-only, and never on a
+ * `queued_timeout` / `agent_busy` result: the delegation contract tells the caller
+ * not to re-send (or to re-send word for word) on exactly those, and a re-send
+ * shaped differently changes the idempotency key and runs the work twice.
+ */
+export const REPORT_BACK_OFF_NOTES: Record<ReportBackReason, string> = {
+  disabled: "Report-back is switched off on this platform, so nothing reports back. Do not re-send this one.",
+  manual_session:
+    "This session has no execution to report back to, so nothing reports back. Do not re-send this one.",
+  invalid_execution_id:
+    "The execution_id you passed is not an execution id, so nothing reports back. Next time pass your own " +
+    "execution_id from your Execution Context. Do not re-send this one.",
+  sequential_chat:
+    "A sequential call that answers with the reply itself does not report back. For your next long " +
+    "delegation, use parallel=true, async=true. Do not re-send this one.",
+};
+
+/**
+ * #3232: the one rule for whether a chat_with_* call carries `parent_execution_id`
+ * (so ent#224/ent#265 can report the delegated run's end into the caller's
+ * conversation) and what the result says about it. Pure; called once per call.
+ *
+ * - **Async dispatches default on**: with nothing typed, `task-async` and `pull`
+ *   send the platform header turn when it names a real turn — the caller's turn
+ *   ends with a receipt, so the child's note is usually the person's only news.
+ *   A self-task with `inject_result` is excluded (it already named a destination).
+ * - **Sync is opt-in**: a typed id arms it (the caller answers inline, so a default
+ *   would double-post). A typed `manual` opts out everywhere.
+ * - **Header first**: the header turn wins over a typed id (resumed sessions copy
+ *   stale ids) — `resolveExecutionId`, the house rule. A typed id is forwarded only
+ *   if it passes the header's own format check; `manual` is never forwarded.
+ * - Sequential /chat never carries one; `enabled=false` sends nothing anywhere.
+ *
+ * Decides only the body field and the result fields — never `callerTurn`, the
+ * turn header forwarded to the backend, which the skill gate reads.
+ */
+export function resolveReportBack(input: ReportBackInput): ReportBackDecision {
+  const typed = input.typed?.trim() ?? "";
+  const headerTurn = input.header && input.header !== MANUAL_EXECUTION_ID ? input.header : undefined;
+  const asyncRoute = input.route === "task-async" || input.route === "pull";
+
+  let arm: ReportBackDecision["arm"];
+  if (typed === MANUAL_EXECUTION_ID) arm = "opt_out";
+  else if (typed !== "") arm = "typed";
+  else if (asyncRoute && headerTurn && !(input.isSelfTask && input.injectResult)) arm = "default";
+  else arm = "none";
+
+  const typedOk = arm === "typed" && isWellFormedExecutionId(typed);
+  let parent: string | undefined;
+  if (input.enabled && input.route !== "chat") {
+    if (arm === "default") {
+      parent = headerTurn;
+    } else if (arm === "typed") {
+      const resolved = resolveExecutionId(
+        input.header ? ({ executionId: input.header } as McpAuthContext) : undefined,
+        typedOk ? typed : undefined,
+      );
+      parent = resolved === MANUAL_EXECUTION_ID ? undefined : resolved;
+    }
+  }
+
+  let fields: ReportBackFields | undefined;
+  if (arm === "default") {
+    if (input.enabled) fields = { report_back: "requested", report_back_note: REPORT_BACK_DEFAULT_NOTE };
+  } else if (arm === "typed") {
+    if (parent !== undefined) {
+      fields = { report_back: "requested" };
+    } else {
+      const reason: ReportBackReason = !input.enabled
+        ? "disabled"
+        : input.header === MANUAL_EXECUTION_ID
+          ? "manual_session"
+          : !typedOk && !headerTurn
+            ? "invalid_execution_id"
+            : "sequential_chat";
+      fields = { report_back: "off", report_back_reason: reason, report_back_note: REPORT_BACK_OFF_NOTES[reason] };
+    }
+  }
+
+  const source = parent === undefined ? "none" : parent === headerTurn ? "header" : "typed";
+  const overridden = arm === "typed" && source === "header" && typed !== parent;
+  const verdict = !fields
+    ? "n/a"
+    : fields.report_back === "off"
+      ? `off:${fields.report_back_reason}`
+      : "requested";
+  const logLine =
+    `[Report-Back #3232] ${input.caller ?? "unknown"} -> ${input.target} ` +
+    `caller_turn=${input.header ?? "none"} route=${input.route} arm=${arm} parent=${parent ?? "none"} ` +
+    `source=${source} overridden=${overridden} report_back=${verdict}`;
+
+  return { arm, parentExecutionId: parent, fields, logLine };
+}
+
+/**
+ * #3232: put the report-back fields on a result the call answered with. Never
+ * called for gate results, depth refusals or thrown errors — those stay
+ * byte-unchanged. The remedy note on `off` is left off `queued_timeout` /
+ * `agent_busy` (see REPORT_BACK_OFF_NOTES).
+ */
+function withReportBack<T extends object>(result: T, fields: ReportBackFields | undefined): T {
+  if (!fields) return result;
+  const status = (result as { status?: unknown }).status;
+  if (fields.report_back === "off" && (status === "queued_timeout" || status === "agent_busy")) {
+    const { report_back_note: _note, ...rest } = fields;
+    return { ...result, ...rest };
+  }
+  return { ...result, ...fields };
+}
+
+/**
  * The shared chat_with_agent execution body (#846).
  *
  * Single source of truth for chatting with one agent — used verbatim by the
@@ -184,7 +371,9 @@ export async function runAgentChat(
   agentChatPullEnabled: boolean,
   agent_name: string,
   params: RunAgentChatParams,
-  context: any
+  context: any,
+  /** #3232 MCP_REPORT_BACK_ENABLED: false sends no parent on any route. */
+  reportBackEnabled: boolean = true
 ): Promise<string> {
   const {
     message,
@@ -250,6 +439,20 @@ export async function runAgentChat(
     authContext?.scope === "agent" &&
     !isSelfTask;
 
+  // #3232: whether this call carries the caller's turn as the child's parent
+  // (report-back), decided once. `callerTurn` above is untouched by it.
+  const reportBack = resolveReportBack({
+    route: parallel ? (asyncMode ? "task-async" : "task-sync") : usePullRouting ? "pull" : "chat",
+    isSelfTask,
+    injectResult: inject_result === true,
+    typed: execution_id,
+    header: authContext?.executionId,
+    enabled: reportBackEnabled,
+    caller: sourceAgent || authContext?.userId,
+    target: agent_name,
+  });
+  console.log(reportBack.logLine);
+
   // Log collaboration or self-task
   if (authContext?.scope === "agent") {
     if (isSelfTask) {
@@ -305,9 +508,9 @@ export async function runAgentChat(
         // SELF-EXEC-001: Pass inject_result and chat_session_id for self-tasks
         inject_result: isSelfTask ? inject_result : undefined,
         chat_session_id: isSelfTask ? chat_session_id : undefined,
-        // ent#224: carry the caller's execution so the child inherits the
-        // originating channel/thread and its completion can be reported back.
-        parent_execution_id: execution_id,
+        // ent#224/#3232: carry the caller's turn so the child inherits the
+        // originating channel/thread and its completion is reported back there.
+        parent_execution_id: reportBack.parentExecutionId,
       },
       sourceAgent,
       mcpKeyInfo,
@@ -326,14 +529,14 @@ export async function runAgentChat(
     if ('status' in response && response.status === 'queued_timeout') {
       console.log(`[Task Timeout Recovery] Agent '${agent_name}' execution_id=${response.execution_id} — caller should poll get_execution_result (#2661)`);
     }
-    return JSON.stringify(asyncReceipt(agent_name, response), null, 2);
+    return JSON.stringify(withReportBack(asyncReceipt(agent_name, response), reportBack.fields), null, 2);
   }
 
   // #946 pull pilot: agent→agent sequential call routed through the
   // durable async /task path. Returns an immediate {accepted|queued,
   // execution_id} receipt; the caller reads get_execution_result, or is woken
   // by the run's agent.task.* event if it subscribed (#1578).
-  // Only async_mode is forwarded: model/allowed_tools/system_prompt are
+  // Only async_mode and the parent (#3232) are forwarded: model/allowed_tools/system_prompt are
   // parallel-only and were never applied in sequential mode, so omitting
   // them preserves sequential semantics (agent defaults). The idempotency
   // key carries the pull route token (D8), so this can't collide with the
@@ -343,7 +546,7 @@ export async function runAgentChat(
     const receipt = await apiClient.task(
       agent_name,
       message,
-      { async_mode: true },
+      { async_mode: true, parent_execution_id: reportBack.parentExecutionId },
       sourceAgent,
       mcpKeyInfo,
       idempotencyKey,
@@ -351,7 +554,7 @@ export async function runAgentChat(
     );
     if (isGateResult(receipt)) return JSON.stringify(receipt, null, 2);
     if (isDepthRefusal(receipt)) return depthRefusalResult(receipt);
-    return JSON.stringify(asyncReceipt(agent_name, receipt), null, 2);
+    return JSON.stringify(withReportBack(asyncReceipt(agent_name, receipt), reportBack.fields), null, 2);
   }
 
   // Sequential chat mode - uses queue, maintains context
@@ -368,13 +571,13 @@ export async function runAgentChat(
   // Surface the structured receipt so the caller polls rather than retries.
   if ('status' in response && response.status === 'queued_timeout') {
     console.log(`[Chat Timeout Recovery] Agent '${agent_name}' execution_id=${response.execution_id} — caller should poll get_execution_result (#914)`);
-    return JSON.stringify(response, null, 2);
+    return JSON.stringify(withReportBack(response, reportBack.fields), null, 2);
   }
 
   // Check if response is a queue status (agent busy)
   if ('queue_status' in response) {
     console.log(`[Queue Full] Agent '${agent_name}' is busy, queue is full`);
-    return JSON.stringify({
+    return JSON.stringify(withReportBack({
       status: "agent_busy",
       agent: agent_name,
       queue_status: response.queue_status,
@@ -383,10 +586,10 @@ export async function runAgentChat(
         `Please wait ${response.retry_after} seconds before retrying, or try a different agent. ` +
         `Consider using parallel=true for independent tasks.`,
       details: response.details,
-    }, null, 2);
+    }, reportBack.fields), null, 2);
   }
 
-  return JSON.stringify(response, null, 2);
+  return JSON.stringify(withReportBack(response, reportBack.fields), null, 2);
 }
 
 /**
@@ -397,11 +600,14 @@ export async function runAgentChat(
  *   (scope='agent', non-self) *sequential* chat_with_agent is routed through the
  *   durable async /task path instead of the synchronous /chat. Default OFF —
  *   flag-OFF, scope='user', self-task, and parallel=true are all unchanged.
+ * @param reportBackEnabled - #3232 MCP_REPORT_BACK_ENABLED. When false, no call
+ *   sends `parent_execution_id` (default-armed or typed). Default ON.
  */
 export function createChatTools(
   client: TrinityClient,
   requireApiKey: boolean,
-  agentChatPullEnabled: boolean = false
+  agentChatPullEnabled: boolean = false,
+  reportBackEnabled: boolean = true
 ) {
   /**
    * Get Trinity client with appropriate authentication
@@ -424,7 +630,7 @@ export function createChatTools(
       // the parameter descriptions below, which are not cut.
       // delegation-contract.test.ts pins the published length.
       description:
-        "Delegate a task to another agent (the primary way to use sub-agents) and get back its reply or a receipt." +
+        "Delegate a task to another agent and get back its reply or a receipt." +
         "\n\n**Modes:** `parallel=false` (default) continues the agent's own chat session, one queue for every " +
         "caller. `parallel=true` runs a stateless task; several can run at once. `async=true` (with " +
         "`parallel=true`) answers with a receipt at once.\n\n" +
@@ -448,7 +654,8 @@ export function createChatTools(
             "caller of this agent, never a scheduled or other headless run's — through its execution queue. " +
             "A turn that crosses the context limit can pay a one-off auto-compaction: it is recorded as " +
             "`compact_metadata`, readable via `get_execution_result`, and is not a sign the agent is degraded. " +
-            "The session restarts after a model change or a `/api/chat/history` reset."
+            "The session restarts after a model change or a `/api/chat/history` reset. " +
+            "On a pull-pilot agent each calling user has their own session instead."
           ),
         model: z
           .string()
@@ -505,11 +712,7 @@ export function createChatTools(
         execution_id: z
           .string()
           .optional()
-          .describe(
-            "Your CURRENT execution_id. Pass it when delegating long-running work so the " +
-            "delegated task inherits the channel/thread this request came from and its " +
-            "completion is reported back there (ent#224). Optional."
-          ),
+          .describe(EXECUTION_ID_PARAM_DESCRIPTION),
       }),
       execute: async (
         {
@@ -523,6 +726,7 @@ export function createChatTools(
           async: asyncMode,
           inject_result,
           chat_session_id,
+          execution_id,
         }: {
           agent_name: string;
           message: string;
@@ -534,6 +738,7 @@ export function createChatTools(
           async?: boolean;
           inject_result?: boolean;
           chat_session_id?: string;
+          execution_id?: string;
         },
         context: any
       ) => {
@@ -555,8 +760,10 @@ export function createChatTools(
             async: asyncMode,
             inject_result,
             chat_session_id,
+            execution_id,
           },
-          context
+          context,
+          reportBackEnabled
         );
       },
     },

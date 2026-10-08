@@ -40,6 +40,7 @@ This default is **on** out of the box (secure-by-default). It applies at agent-c
 | **Slack** | Automatic — workspace OAuth provides the email |
 | **WhatsApp** | User sends `/login your@email.com`, receives a code, replies to verify |
 | **Web (public links)** | Email verification during public chat session |
+| **Workspace** | A 6-digit code emailed at sign-in — see [Workspace](workspace.md) |
 
 ### Access Modes
 
@@ -57,7 +58,7 @@ When someone requests access:
 2. Click **Approve** to grant access (adds them to the share list).
 3. Click **Deny** to reject.
 
-Approving auto-adds the email to your shared users list.
+Approving auto-adds the email to your shared users list, which also puts the agent on that person's [Workspace](workspace.md) roster.
 
 **The requester is notified automatically.** When you approve a request that came in over Telegram, Slack, or WhatsApp, Trinity sends the requester a message on that same channel confirming they now have access — closing the loop on the "I'll let you know once the owner responds" reply they got when they first messaged. Web users see the change through the dashboard. Denials are silent (the agent's existence is not confirmed to the requester). A delivery failure (e.g. the user blocked the bot) never blocks or rolls back the approval; the outcome is recorded in the audit log.
 
@@ -107,10 +108,11 @@ For Telegram groups, you can require at least one verified member before the bot
 
 - Group chats with `group_auth_mode: "none"` bypass email verification entirely.
 - Slack requires `users:read.email` scope for email resolution.
-- Pending login state is in-memory — lost on backend restart (user re-sends `/login`).
+- A pending `/login` on Telegram or WhatsApp expires after 10 minutes; the user re-sends `/login` with their email to get a new code. If Redis is unavailable the pending code is not kept, and the user has to start again.
 
 ## See Also
 
 - [Agent Sharing](agent-sharing.md) — Manual sharing with specific users
 - [Telegram Integration](../integrations/telegram-integration.md) — Telegram bot setup
 - [Slack Integration](../integrations/slack-integration.md) — Slack workspace connection
+- [Workspace](workspace.md) — the signed-in chat app for the people an agent is shared with

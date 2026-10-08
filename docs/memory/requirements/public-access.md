@@ -243,6 +243,18 @@
   - **At-most-once**: `effect_guard("channel_completion_report", {channel, chat_id, thread}, execution_id, agent_name=row.agent_name)` (#1084) — identity is the resolved destination, never the generated body; the guard's `agent_name` is ALWAYS the executing agent (a binding-agent passthrough fail-opens resolution and silently disarms dedup). A failed send claims completed (at-most-once bias; never blind-retry an ambiguous send).
   - **Sanitize-before-truncate**: `_summarize` credential-sanitises over a 2× window before capping at 2800 chars (the #1578 emit-chokepoint rule — every egress surface).
   - **D10 structure**: per-channel resolver dispatch map; `SUPPORTED_CHANNELS` derives from it — a WhatsApp leg is additive.
+- **MCP caller contract (#3232)** — how `chat_with_agent` and every dedicated `chat_with_<agent>` tool carry the parent (`src/mcp-server/src/tools/chat.ts::resolveReportBack`, one decision per call):
+  - **Async dispatches report back by default.** An async delegation — `parallel=true, async=true`, or a sequential call the #946 pull pilot routes as a `/task` — sends the caller's turn as `parent_execution_id` with no argument, whenever the platform's `X-Trinity-Execution-Id` header (#2392) names a real turn (not `manual`, not absent). The caller's turn usually ends with the receipt, so the child's note is the only way the person hears the outcome. The default is tied to the dispatch, not to the receipt: an error from the call does not mean nothing will post, because the run may have started.
+  - **Opt-out:** a typed `execution_id="manual"` sends no parent and adds no result fields. It does not change the turn header the MCP server forwards (`callerTurn`, read by the skill gate and pull-mode refusals).
+  - **Self-task with `inject_result=true` is excluded from the default**: the agent already named a destination (its own chat session). A typed id still opts it in, and both deliveries happen.
+  - **Sync stays opt-in.** A `parallel=true` sync call carries a parent only when the agent passes `execution_id`; the caller answers inline, so a default would double-post. A sync call that falls through to `queued_timeout` still reports at its end.
+  - **Which id goes out:** the header turn wins over a typed id (a resumed session can copy a stale one); with no header the typed id is sent only if it passes the header's own format check (`isWellFormedExecutionId`). A typed `manual` or a malformed typed id is never forwarded.
+  - **Sequential `/chat` carries nothing**: `ChatMessageRequest` has no parent field and the `/chat` terminals never spawn a report. A typed id there answers `report_back: off`, reason `sequential_chat`.
+  - **Result fields:** when a parent is sent, the tool result carries `report_back: "requested"` (plus an informational `report_back_note` on default-armed calls); an opted-in call that cannot carry one says `report_back: "off"` with `report_back_reason` (`disabled` > `manual_session` > `invalid_execution_id` > `sequential_chat`) and a future-only note, left off `queued_timeout` / `agent_busy` results. Gate results, depth refusals and thrown errors are never touched. `requested` means a parent was sent, not that a note will land.
+  - **Kill switch:** `MCP_REPORT_BACK_ENABLED=false` (mcp-server env, default `true`) stops every parent, default and typed; default-armed results then carry no fields, so receipts are byte-identical to the pre-#3232 shape.
+  - The parent is **not** part of the idempotency key (Invariant #18). The ent#265 provenance guard stays the only gate on inheritance; the header is not a trust boundary.
+  - **Chains post once per async hop**: A (channel turn) → B async inherits; B → C async inherits from B's row; the thread gets B's note and later C's. B can pass `execution_id="manual"`.
+  - Delivery stays best-effort: per-channel consent, a missing binding or token, or a failed send suppresses the note.
 - **Per-channel consent units**:
   - **Slack**: channel-binding `allow_proactive` (ent#223); no binding / no consent → suppress.
   - **Telegram group**: `telegram_group_configs.allow_proactive` (INTEGER DEFAULT 1 — allow for existing AND new groups; opt-out mute via the "Completion reports" toggle in TelegramChannelPanel; human-only PUT arm — `reject_agent_principal`). Requires `is_active` too.
@@ -251,7 +263,7 @@
   - **Two DM consent regimes (deliberate)**: reporting on *user-initiated work* is the deferred sibling of the inline reply and needs no flag; *agent-initiated outreach* (#321 proactive messaging) keeps its own `agent_sharing.allow_proactive` per-recipient consent. The #321 flag is NOT honored as DM report revocation — it cannot distinguish "explicitly revoked" from "never opted in" (default 0), so honoring it would kill the flagship delegated-DM case for every verified shared user. A future unified consent model inherits this rationale.
 - **Rendering (Telegram)**: pre-escape `&`/`<`/`>` → `_markdown_to_html` → re-cap at 4096 (entity expansion; "message too long" is a 400 the parse-fallback doesn't catch); thread = the triggering `message_id`, passed as `reply_parameters` when numeric, DMs anchored too, `allow_sending_without_reply` makes a deleted original safe.
 - **Database**: `schedule_executions.source_channel_agent TEXT` (nullable; `AgentRef` KEEP — rename cascades, #772 90-day sweep is retention); `telegram_group_configs.allow_proactive INTEGER DEFAULT 1`. Dual-track migration (SQLite `channel_report_back_columns` + Alembic `0031_channel_report_back`).
-- **Known limits (v1)**: lease-reaper/bulk-sweep/pull-sink and operator-terminate (Path B) terminals don't report; a restart mid-inline-turn loses the inline reply and reports nothing (F7); a late token-gated FAILED→SUCCESS resurrection replays the guard — no corrective ✅ (correct at-most-once); fan-out = one report per child execution (per-execution identity — no persisted parent key); pre-migration rows with NULL chat context suppress; Telegram forum topics not threaded (inbound never captures `message_thread_id`); no channel-history persistence of the report.
+- **Known limits (v1)**: lease-reaper/bulk-sweep and operator-terminate (Path B) terminals don't report; a child closed by backend shutdown (the `task_execution_service.py` CancelledError terminal) or by the cleanup service's stale-execution and stale-slot sweeps writes `failed` with no report, so a hung or orphaned child fails silently; a plain sequential `/chat` delegation never reports (#3232, follow-up #3295); a delegated `/task` whose message needs a skill-gate approval never reports: the gate fires before the row is created, so nothing is inherited, and the approved run is re-created from the frozen dispatch, which carries no `source_channel*` (#3232, follow-up); an MCP delegation that repeats a byte-identical earlier one within 24 h is an idempotent replay of the first run (the backend returns before inheritance), so no new child is created and any report goes to the first call's thread — under the async default the replayed receipt still says `requested` (#3296; fix belongs to ent#566's intent key); a restart mid-inline-turn loses the inline reply and reports nothing (F7); a late token-gated FAILED→SUCCESS resurrection replays the guard — no corrective ✅ (correct at-most-once); MCP and REST `fan_out` send no parent (`FanOutRequest` has no parent field), so fan-out children never inherit a conversation and never report (#3232, follow-up) — were they to, fan-out = one report per child execution (per-execution identity — no persisted parent key); pre-migration rows with NULL chat context suppress; Telegram forum topics not threaded (inbound never captures `message_thread_id`); no channel-history persistence of the report.
 - **Deliberate scope cut**: the proactive group-send endpoint (`POST …/telegram/groups/{chat_id}/messages`) is NOT gated on `allow_proactive` here (ent#223 did gate Slack's) — with default 1 the eventual coherence gate is a no-op for un-toggled groups; follow-up issue filed at ship time.
 - **Flow**: `docs/memory/feature-flows/channel-completion-report.md`
 
@@ -535,6 +547,14 @@
   converges the stored snapshot to settled. A divergent
   client header never forks execution; an underivable key (missing token/body) disables dedup (fail-open,
   never a constant collision).
+
+### Cross-Execution Idempotency Key on Human-Facing Sends (trinity-enterprise#665)
+- **Status**: ✅ Implemented
+- **Description**: `send_message`, `call_user` and `send_group_message` accept an optional caller-declared `idempotency_key` + `idempotency_ttl` (60–86400 s, default 86400). Two sends with the same `(agent, target, key)` inside the TTL, from any executions, deliver once; the store decides races (one winner; a concurrent claimer gets a retryable 409).
+- **Result**: keyed sends return `sent`; a suppressed send returns `success:true, sent:false, suppressed_by:"idempotency_key", first_sent_at, first_execution_id`. Keyless requests and responses are unchanged.
+- **Never content-derived** (the #1422 failure): the key is the caller's string; the message text is not part of it.
+- **Visibility**: audit event (`suppressed` / `group_message_suppressed` / `voip_call_suppressed`) plus a `Trinity`-labelled `system` row in the first send's conversation session (DM + group; calls audit only).
+- **Order**: consent → key → rate limit → deliver. Composes with the per-turn `effect_guard` (#1084); flow: `feature-flows/effect-idempotency.md`.
 
 ### Configurable Proactive Message Rate Limits (#1609)
 - **Status**: ✅ Implemented (2026-07-14)
@@ -838,6 +858,13 @@ of the epic #24 voice-replies feature.
 - **FR-8 — Migration of existing agents**: an already-`tts_voice_replies_enabled`
   agent keeps all three channel flags ON but no longer auto-speaks every reply
   (behavior change: always-voice → agent-chosen).
+- **FR-9 — A delegated child never speaks (#3232)**: the route answers
+  `{delivered: false, reason: "delegated_turn"}` for an execution whose
+  `source_channel_agent` is set — a child that inherited its parent's channel
+  context only so its consent-gated completion report (§15.1h) can find the way
+  back. Checked before any channel branch; this route has no proactive-consent
+  check of its own, and #3232's async report-back default makes such children
+  common.
 - **API**: `send_voice_reply` MCP tool → `POST /api/agents/{name}/voice-reply`
   (`AuthorizedAgentByName` + agent-scoped self-check; user-facing channel triggers
   only); `GET/PUT /api/agents/{name}/voice-replies` extended with per-channel

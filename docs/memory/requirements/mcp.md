@@ -1019,6 +1019,13 @@ description also carries the delegation contract verbatim (abilityai/trinity-ent
   A 403 without that code (access denial, SELF-EXEC-001) still throws as before.
   Since #2973 `run_agent_loop`, `trigger_agent_schedule` and `emit_event` return the same
   refusal object (`client.ts::depthRefusalFromError`).
+- **FR-5b — `execution_id` parity (#3232)**: dedicated `chat_with_<slug>` tools declare and
+  forward `execution_id` with `chat_with_agent`'s semantics, including the async report-back
+  default and the `manual` opt-out ([public-access.md §15.1h](public-access.md), MCP caller
+  contract). The parameter must be **declared**: the zod schema drops an undeclared key before
+  `execute`, which is how the value used to vanish. Both tools publish the one
+  `EXECUTION_ID_PARAM_DESCRIPTION`, and the reconciler takes a required `reportBackEnabled`
+  so the `MCP_REPORT_BACK_ENABLED` kill switch reaches the dedicated tools too.
 - **FR-6 — Surfacing**: `mcp_exposed` is exposed on `GET /api/agents` / MCP `list_agents`. A
   Settings-tab toggle ("Expose via MCP") shows the computed tool name and up-to-poll-interval
   latency copy.

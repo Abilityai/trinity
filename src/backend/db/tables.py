@@ -417,6 +417,8 @@ chat_sessions = Table(
     Column("total_context_max", Integer),
     Column("status", Text),
     Column("subscription_id", Text),
+    # #3127: the Claude session a pulled /chat turn resumes.
+    Column("cached_claude_session_id", Text),
 )
 
 chat_messages = Table(
@@ -548,6 +550,7 @@ enterprise_portal_messages = Table(
     Column("created_at", Text),
     Column("source", Text),         # ent#534: NULL typed | 'voice'
     Column("voice_call_id", Text),  # ent#534: groups one voice call's rows
+    Column("attachments", Text),    # #3265: JSON list on a user turn
 )
 
 # ent#359 — per-user star + read cursor for a Workspace chat of either kind
@@ -1508,6 +1511,20 @@ operator_queue = Table(
     Column("resolved_to", Text),         # JSON list of person refs
     Column("proposal", Text),            # JSON — the frozen action
     Column("supersedes_expired", Text),  # the predecessor row's uuid
+    # #3246: a platform alert is a condition, not a message. `subject` is
+    # `kind:key`, the dedup key the seam keeps at most one pending row for;
+    # `last_seen_at` moves on every reading. Both nullable, no backfill beyond
+    # the upgrade sweep: agent-raised asks and gates never carry a subject.
+    Column("subject", Text),
+    Column("last_seen_at", Text),
+    Index(
+        "uq_operator_queue_pending_subject",
+        "agent_name", "subject",
+        unique=True,
+        sqlite_where=text("status = 'pending' AND subject IS NOT NULL"),
+        postgresql_where=text("status = 'pending' AND subject IS NOT NULL"),
+    ),
+    Index("idx_operator_queue_agent_subject", "agent_name", "subject"),
 )
 
 skill_gate_requests = Table(
@@ -1539,6 +1556,21 @@ skill_gate_requests = Table(
     Column("dispatched_at", Text),
     Column("notified_at", Text),
     UniqueConstraint("dispatched_execution_id"),
+)
+
+# trinity-enterprise#753 — the per-agent skill gate map. See the DDL comment in
+# db/schema.py. The primary key is the ON CONFLICT target of every write.
+agent_skill_gates = Table(
+    "agent_skill_gates",
+    metadata,
+    Column("agent_name", Text, primary_key=True),
+    Column("skill_name", Text, primary_key=True),      # lowercased
+    Column("approver", Text, nullable=False),          # primary | approver
+    Column("deadline_hours", _Integer),                # 1..168; NULL → the 24h default
+    Column("origin", Text, nullable=False),            # set | library_default | cleared
+    Column("set_by", Text, nullable=False),
+    Column("set_by_agent", Text),
+    Column("set_at", Text, nullable=False),
 )
 
 nevermined_agent_config = Table(
