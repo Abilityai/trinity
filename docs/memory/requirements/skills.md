@@ -238,28 +238,58 @@ entries (`actor_type=system` for the automated paths).
 
 ---
 
-## 22. Playbooks Tab (Agent Local Skills)
+## 22. Skills Tab (Agent Detail): own and shared skills
 
-> **Design**: Browse and invoke agent's local skills directly from UI.
-> Spec: `docs/requirements/PLAYBOOKS_TAB.md`
-> Flow: `docs/memory/feature-flows/playbooks-tab.md`
+> **Design**: one place to see, run and configure everything an agent can do.
+> Flow: `docs/memory/feature-flows/skills-tab.md` (absorbs the retired `playbooks-tab.md`)
 
-### 22.1 Playbooks Tab
-- **Status**: ✅ Implemented (2026-02-27)
-- **Requirement ID**: PLAYBOOK-001
-- **Description**: UI tab to view and invoke agent's local `.claude/skills/` directory
-- **Key Features**:
-  - Grid display of skills parsed from SKILL.md YAML frontmatter
-  - One-click run (sends `/{skill-name}` to `/task` endpoint)
-  - Run with instructions (prefills Tasks tab input)
-  - Search/filter by name or description
-  - Automation badge (autonomous/gated/manual)
-- **Agent Endpoint**: `GET /api/skills` - Lists skills from `.claude/skills/`
-- **Backend Proxy**: `GET /api/agents/{name}/playbooks`
-- **Frontend**: `PlaybooksPanel.vue` component
+### 22.1 Skills Tab (trinity-enterprise#754, supersedes PLAYBOOK-001)
+- **Status**: ✅ Implemented (2026-10-08). It replaces the Playbooks tab (PLAYBOOK-001, 2026-02-27) and the library-only Skills tab (§22.2's surface), which are now one tab. OSS-core, per ent#753's edition ruling. The `approver` kind appears only where the assignments provider resolves it.
+- **Tab**: one tab, labelled **Skills**. It is visible to everyone with access to the agent, the system agent included. The old `?tab=playbooks` deep link resolves to it (`TAB_ALIASES`, in both the mount and KeepAlive-activate paths).
+- **Two sections of fixed-size cards** (approved design, 2026-10-08):
+  - **Own skills**: every skill the agent reports (its `.claude/skills/`, `GET /api/skills` via `GET /api/agents/{name}/playbooks`) that the Shared section does not render.
+  - **Shared skills**: library assignments and sets (§22.2).
+  - Every name renders in exactly one section. A #2914 name conflict shows in both, as today: the agent's own copy runs.
+  - A skill dir that carries the platform marker but has no assignment renders under Own, with a "left from the library" note.
+- **One card shape on both sections**. Fixed slots, in order:
+  - name;
+  - one top-left badge area: the author's mode chip first, then platform facts;
+  - description (two lines);
+  - argument hint;
+  - a note line;
+  - the gate line;
+  - **Run** and **Edit & Run**;
+  - for the owner or an admin, the approval row.
 
-### 22.2 Skills Tab (Platform Library)
-- **Status**: ✅ Implemented (visible — unhidden & rebuilt, trinity-enterprise#235 / PR #1877, 2026-07-29)
+  Long text clips, with the full text on hover or in a details dialog, so content never changes a card's size. Verb errors render inside the card.
+- **Mode chip** (the author's `automation:` frontmatter, a declaration nothing enforces, ent#754 Q4): `autonomous` → "runs unattended" (amber `state-autonomous`), `gated` → "asks mid-run" (`status-info`), `manual` → "start by hand" (neutral). Each has an icon and the raw value on hover. The words "approval" and "gated" belong only to the enforced gate.
+- **Run** sends `POST /api/agents/{name}/task` with `{message: "/<name>", async_mode: true}`.
+  - A **202** pending answer means an approval was raised and nothing ran. The page shows the server's own message as an info notice and does not navigate (trinity#3274).
+  - A named refusal shows as an error notice.
+  - Otherwise the page opens the run on the Tasks tab.
+  - Run needs the agent running, the skill present in the LIVE list, and `user_invocable`.
+  - Run is disabled on a Shared card whose name the agent's own skill shadows. **Edit & Run** prefills the Tasks tab.
+- **Approval (ent#753's gate map, `GET/PUT/DELETE /api/agents/{name}/skill-gates[/{skill}]`)**:
+  - **Everyone sees the gate.** A gated card shows a lock and "Needs approval from <kind>". When the viewer fills the approver kind, it reads "you approve this" (server-computed `viewer_fills`). When nobody fills the kind, it reads "nobody fills it yet". The line names a **kind**, never a person: the map is readable by every viewer and by agent keys.
+  - **Only the owner or an admin**, as a person, gets the controls: the Requires approval toggle and an approver picker over the install's kinds (`primary`, plus `approver` where the assignments provider resolves it). A kind nobody fills is shown and cannot be selected.
+  - No approval controls on an **ephemeral** agent (ent#753 refuses them) or on the system agent.
+  - Turning approval on sends the selected kind.
+  - A gate whose skill is not in the agent's list is kept (ent#753: sticky until cleared). It renders as "Not in this agent's skills list: gate kept", with Clear for the owner or an admin.
+- **Approval recommended**: a skill whose metadata says `approval: recommended` and that is not gated shows the owner an "Author recommends approval: not gated" line. Library skills read it from the library contract (§21.6). Own skills read it from the agent server's `approval` field (agent images built after ent#754).
+- **In-agent enforcement**: when the agent has gates, the owner sees a warning if the agent's `/health → skill_gate_hook` is not `ok`:
+  - a runtime without hooks (Codex, Gemini);
+  - an image older than the hook (no field);
+  - a hook that is missing or was altered.
+
+  `GET /skill-gates?probe=true` reads it, honoured only for a person who may write gates. No answer is "unknown" and shows nothing.
+- **Stopped agent**: the Own section shows the **last-known list** with Run disabled and "Start the agent to run". The list is a Redis copy of the last successful listing, `agent:skills_list:{name}`, with no TTL, cleared on delete / rename / purge, never on stop; it is served by `GET /playbooks?last_known=true`. With no copy it says so, never an empty grid. An unreachable running agent is labelled as such. The last-known list never drives Run.
+- **Self-approved runs** (the 10-03 eyeball): a run that went through without approval because its requester is the approver is marked on the Tasks row, the execution page and the Workspace turn: "Ran without approval: you are the approver" (or "its approver started it" for another viewer). It is derived from ent#752's `skill_gate_requests` self-approved record. No email leaves the server.
+- **Vocabulary**: UI copy on agent surfaces says "skills". That covers the chat `/` menu, the Workspace `/` menu, the placeholders, the Sharing/Connector panels and the exposed-skills list. API names (`/playbooks`, `exposed_playbooks`, `run_playbook`) are unchanged.
+- **Deviation from AC5**: the approver picker offers assignment **kinds** only. Canon roles that resolve to people are follow-up trinity-enterprise#848 (ent#753 stores kinds in v1; operator ruling 2026-10-08).
+- **Agent endpoint**: `GET /api/skills` reports per skill `source` (`platform` when the platform's `.trinity-skill.json` marker is present, else `agent`), `dir` and `approval` (closed set `recommended`, read with the backend contract's precedence). These are informational only, never access-deciding. The public link (`/api/public/playbooks/{token}`) strips all three.
+
+### 22.2 Shared Skills Section (Platform Library)
+- **Status**: ✅ Implemented (unhidden & rebuilt, trinity-enterprise#235 / PR #1877, 2026-07-29). Since ent#754 it is the **Shared skills** section of the §22.1 tab: the assigned list became cards, the library picker opens in an "Assign skills" dialog, and sets show as status chips with a "Manage sets" dialog.
 - **Description**: Per-agent skill assignment from the platform library, on Agent Detail
 - **Key Features**: assigned-skills list with honest per-skill injection status (§21.4 results incl. warnings), assign/unassign against the library list, manual re-inject; agent-scoped store `stores/skills.js` (its `emptyReason` discriminator is agent-scoped — do not reuse it on fleet surfaces)
 - **Deprecated skills (trinity-enterprise#672)**: a skill the library marks `deprecated` (§21.6) carries a warning `deprecated` badge beside its name and a "Superseded by …" line on both lists — the assigned rows (so an agent already holding one shows it on load, with nothing else about it changed) and the library picker (so it is visible before ticking). Saving a draft that adds one succeeds, and a warning line under the save note names the skill and, where the successor is a skill name, what supersedes it — on every delivery outcome, a stopped agent included. A manual sync's per-skill warning list leaves the code out — that list is for what went wrong with the delivery, and the row's badge already says it. Never hidden, never refused, never a confirm dialog

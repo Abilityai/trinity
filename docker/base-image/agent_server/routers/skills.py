@@ -17,6 +17,17 @@ from ..safe_yaml import AliasPolicy, load_hardened_yaml
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
+# trinity-enterprise#754: the platform marks every library skill it delivers
+# with this file (backend `skill_packaging.META_FILENAME`); a skill directory
+# without it is the agent's own (#2914). Duplicated because this image cannot
+# import the backend — `tests/unit/test_ent754_agent_server_skillinfo.py`
+# keeps the two copies equal.
+PLATFORM_MARKER_FILENAME = ".trinity-skill.json"
+
+# trinity-enterprise#753: the values `approval:` may take (backend
+# `skill_packaging.APPROVAL_VALUES`; the same test keeps them equal).
+APPROVAL_VALUES = frozenset({"recommended"})
+
 
 class SkillInfo(BaseModel):
     """Information about a single skill/playbook."""
@@ -32,6 +43,13 @@ class SkillInfo(BaseModel):
     allowed_tools: Optional[List[str]] = None
     argument_hint: Optional[str] = None
     has_schedule: bool = False  # Placeholder for future schedule integration
+    # trinity-enterprise#754 — where the skill came from, and what its author
+    # recommends. Informational ONLY: the agent can write both the marker and
+    # its own frontmatter, so neither may decide access; the platform's gate
+    # map stays the authority.
+    source: Optional[str] = None    # "platform" (marker present) | "agent"
+    dir: Optional[str] = None       # the directory name; the gate fingerprint resolves it first
+    approval: Optional[str] = None  # "recommended" | None
 
 
 class SkillsResponse(BaseModel):
@@ -232,6 +250,31 @@ def _field(skill_md: Path, field: str, value: Any, normalize) -> Any:
         return None
 
 
+def _source(skill_dir: Path) -> str:
+    """trinity-enterprise#754: `platform` when the platform's marker is in the
+    directory (the same `isfile` test the backend's managed-skill listing and
+    the gate fingerprint use), else `agent`."""
+    return "platform" if (skill_dir / PLATFORM_MARKER_FILENAME).is_file() else "agent"
+
+
+def _approval(skill_md: Path, frontmatter: Dict[str, Any]) -> Optional[str]:
+    """trinity-enterprise#754: `approval:` read exactly as the backend's
+    `skill_packaging.extract_contract` reads it — a `trinity:` mapping first,
+    then the flat key, the first non-null value winning — and kept only when
+    it is in the closed set. Anything else (YAML 1.1 hands `yes` as a bool and
+    an unquoted date as a date) is skipped and warned once."""
+    block = frontmatter.get('trinity')
+    sources = ([block] if isinstance(block, dict) else []) + [frontmatter]
+    raw = next((s['approval'] for s in sources if s.get('approval') is not None), None)
+    if raw is None:
+        return None
+    if isinstance(raw, str) and raw.strip().lower() in APPROVAL_VALUES:
+        return raw.strip().lower()
+    _report_skipped_field(skill_md, 'approval', raw,
+                          'expected one of: ' + ', '.join(sorted(APPROVAL_VALUES)))
+    return None
+
+
 def scan_skills_directory(skills_dir: Path) -> List[SkillInfo]:
     """
     Scan a skills directory for subdirectories containing SKILL.md files.
@@ -295,7 +338,10 @@ def scan_skills_directory(skills_dir: Path) -> List[SkillInfo]:
                 automation=_field(skill_md, 'automation', frontmatter.get('automation'), _coerce_optional_str),
                 allowed_tools=_field(skill_md, 'allowed-tools', frontmatter.get('allowed-tools'), normalize_allowed_tools),
                 argument_hint=_field(skill_md, 'argument-hint', frontmatter.get('argument-hint'), _coerce_argument_hint),
-                has_schedule=False  # TODO: Check if schedule exists for this skill
+                has_schedule=False,  # TODO: Check if schedule exists for this skill
+                source=_source(entry),
+                dir=entry.name,
+                approval=_approval(skill_md, frontmatter),
             )
             skills.append(skill)
 
@@ -308,6 +354,10 @@ def scan_skills_directory(skills_dir: Path) -> List[SkillInfo]:
                 name=entry.name,
                 description=None,
                 path=_display_path(skill_md),
+                # #754: both come from the filesystem, so a card can still be
+                # placed in its section when the file itself is unreadable.
+                source=_source(entry),
+                dir=entry.name,
             ))
 
     return skills
