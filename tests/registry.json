@@ -5097,6 +5097,17 @@
       "description": "trinity-enterprise#754, MOUNTED: a self-approved run says \"ran without approval\" on its Tasks row and its execution page, \"you are the approver\" only to the person who ran it, from the server's two booleans."
     },
     {
+      "file": "frontend/tests/unit/tasksPanelRunRefresh.spec.js",
+      "feature": "abilityai/trinity-enterprise#754",
+      "added": "2026-10-08",
+      "categories": [
+        "frontend",
+        "unit",
+        "mount"
+      ],
+      "description": "trinity-enterprise#754, MOUNTED (eyeball round): a skill's Run opens the Tasks tab while it is still running, and the row settles without a Refresh — the poll re-reads the list while a row is queued / running / pending_retry and stops when none is, never stacks a read, holds off while a typed task is awaited (no duplicate row), applies only the latest read, opens the highlighted row once, and shows a settled row's result. Mutation-proven."
+    },
+    {
       "file": "frontend/tests/unit/portalSelfApprovedTurn.spec.js",
       "feature": "abilityai/trinity-enterprise#754",
       "added": "2026-10-08",
