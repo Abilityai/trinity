@@ -52,6 +52,7 @@ OTHER = User(id=2, username="viewer", email="viewer@example.com", role="user")
 ADMIN = User(id=3, username="admin", email="admin@example.com", role="admin")
 AGENT_KEY = User(id=1, username="owner", email="Owner@Example.com", role="user",
                  mcp_scope="agent", agent_name="sibling")
+SYSTEM_KEY = User(id=3, username="admin", email="admin@example.com", role="admin", mcp_scope="system")
 
 
 class FakeProvider:
@@ -257,6 +258,20 @@ def test_probe_for_the_owner_reads_health_once_with_a_short_timeout(env):
 @pytest.mark.parametrize("user", [OTHER, AGENT_KEY])
 def test_probe_is_ignored_for_anyone_who_cannot_manage(env, user):
     body = _get(env, user, probe="true")
+
+    assert body["hook"] is None
+    assert env.health.calls == []
+
+
+@pytest.mark.parametrize("principal", [SYSTEM_KEY, AGENT_KEY], ids=["system_key", "agent_key_with_skills_manage"])
+def test_probe_is_a_persons_even_for_a_key_that_may_manage_skills(env, principal):
+    """`can_manage_agent_skills` admits both — a system-scoped key, and an agent
+    key holding `skills.manage` on an agent its owner owns — so only the
+    person check keeps the in-agent probe from a machine caller."""
+    env.monkeypatch.setattr(db, "agent_has_capability", lambda agent, cap: agent == "sibling")
+    assert route_mod.can_manage_agent_skills(principal, AGENT) is True     # the manage check alone admits it
+
+    body = _get(env, principal, probe="true")
 
     assert body["hook"] is None
     assert env.health.calls == []

@@ -124,6 +124,26 @@ def test_no_email_leaves_the_server(world):
     assert "ana@example.com" not in str({k: v for k, v in detail.items() if "gate" in k}).lower()
 
 
+def test_a_run_someone_else_approved_is_not_marked(world):
+    """A request the approver let through is dispatched under the same UNIQUE
+    `dispatched_execution_id` as a self-approved one; only the `self_approved`
+    state means "ran without approval" — and never "you" for its requester."""
+    from database import db
+
+    db.create_gate_request(request_id="gate-approved", agent_name=AGENT, skills=["send-invoice"],
+                           request_text="/send-invoice", fingerprints={"send-invoice": "f0"}, dispatch={},
+                           requester_kind="person", requester_key="person:ana@example.com",
+                           requester_email="Ana@Example.com", triggered_by="manual")
+    assert db.claim_gate_request_for_dispatch("gate-approved", world["plain"]) is True
+    assert db.transition_gate_request("gate-approved", "dispatched") is True
+
+    row = _list(world, APPROVER)[world["plain"]]
+    detail = _detail(world, APPROVER, world["plain"])
+
+    assert (_get(row, "gate_self_approved"), _get(row, "gate_self_approved_by_viewer")) == (False, False)
+    assert (detail.gate_self_approved, detail.gate_self_approved_by_viewer) == (False, False)
+
+
 def test_a_record_for_another_agents_run_does_not_leak_across(world):
     """The batch read is scoped to the agent as well as to the ids."""
     from database import db
