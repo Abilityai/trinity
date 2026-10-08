@@ -658,6 +658,8 @@ def a2a_client(monkeypatch):
 
     monkeypatch.setattr(a2a, "db", SimpleNamespace(
         get_a2a_exposed=lambda name: name == AGENT,
+        # ent#838: every agent here is public-scope — today's A2A behaviour.
+        get_a2a_scope=lambda name: {"scope": "public", "keyless": True},
         can_user_access_agent=lambda user, name: name == AGENT,
         # ent#679: the inbound door asks whether the agent declares a price
         # first; this harness's agent does not (the test_157 stub).
