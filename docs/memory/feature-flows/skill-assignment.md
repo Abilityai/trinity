@@ -6,6 +6,7 @@
 
 | Date | Changes |
 |------|---------|
+| 2026-10-08 | **trinity-enterprise#754** — the assignment UI is now the **Shared skills** section of the merged Skills tab ([skills-tab.md](skills-tab.md)), visible to everyone with access; the controls stay owner/admin-only. `SkillsPanel.vue` is deleted: assigned rows became cards, the library picker moved into `SkillAssignModal.vue` ("Assign skills"), the #2914 conflict / delivery warnings / superseded text open in `SkillDetailsModal.vue`, and sets show as chips with `AgentSkillSets.vue` in a "Manage sets" dialog. Routes and store unchanged. |
 | 2026-10-07 | **trinity-enterprise#753** — every route here that writes `agent_skills` (PUT, POST, DELETE, the inject Sync, POST/DELETE set) now also keeps the agent's skill gate map in line (`_sync_gates` → `skill_gate_map_service`), and answers with a `gates` block (`gate_defaults` applied/removed, `gates_removed`, `gates_kept`, or null). A library skill whose metadata says `approval: recommended` is gated BEFORE its package is delivered; a gate on an unassigned skill goes only once its package removal completed, and an explicit gate only when a person unassigned it. See [skill-gate.md](skill-gate.md) §6. |
 | 2026-09-30 | **ent#672** — a deprecated library skill is marked and its assignment says so. `SkillsPanel.vue` shows a `deprecated` badge + "Superseded by …" line on the assigned rows (an agent already holding one shows it on load) and on the picker rows (before the tick); `POST` / `PUT` still succeed and their `delivery.skills[name].warnings` carries `deprecated[:<successor>]`, rendered as a warning line under the save note; after a manual Sync the per-skill warning list says it in words. See "Deprecated skills" below and [skill-injection.md](skill-injection.md). |
 | 2026-09-24 | **ent#530** — skill **sets**. `agent_skill_sets` + `agent_skills.individual`; `POST`/`DELETE /api/agents/{name}/skill-sets/{set}` (ent#596 fence), `GET …/skill-sets` (honest status), `GET /api/skills/library/sets`. The PUT adds `set:` entries / replaces with `sets` (absent = untouched) and resolves held sets inside its transaction so set-derived rows survive a replace; a single unassign of a set-named skill answers `retained_via_sets`. The Skills tab renders `AgentSkillSets.vue`, badges `via <set>`, locks set-only members, and its draft is the INDIVIDUAL list. See *Skill sets* below. |
@@ -28,8 +29,8 @@ As an agent owner, I want to assign platform skills to my agents so that they fo
 ## Entry Points
 
 ### User Configuration (UI)
-- **Component**: `src/frontend/src/components/SkillsPanel.vue:27-36` - "Save" button for bulk assignment
-- **Tab Access**: Agent Detail page -> Skills tab (shown for agent owners)
+- **Component**: `src/frontend/src/components/skills/SkillAssignModal.vue:75-77` - "Save assignments" (bulk PUT), opened by **Assign skills** in the Skills tab's Shared section (`SkillsTab.vue:97`)
+- **Tab Access**: Agent Detail page -> Skills tab, visible to everyone with access since trinity-enterprise#754; the assignment controls (Assign skills, Manage sets, Sync now, Unassign) are for the owner or an admin, never on the system agent. See [skills-tab.md](skills-tab.md)
 
 ### Backend API
 - `GET /api/agents/{name}/skills` - List assigned skills
@@ -44,174 +45,43 @@ As an agent owner, I want to assign platform skills to my agents so that they fo
 
 ### Components
 
-#### SkillsPanel.vue - Skill Assignment Interface
-**File**: `src/frontend/src/components/SkillsPanel.vue` (325 lines)
+Since trinity-enterprise#754 the assignment surface is the **Shared skills** section of the agent's Skills tab; the tab itself (cards, Run, approval, the own list) is documented once in [skills-tab.md](skills-tab.md). `SkillsPanel.vue` is deleted. The writers:
 
-> **ent#263**: the panel's skill-package fact chips (automation, invocability, file count/size) now render via the shared contract seam `components/skills/{SkillContractChips.vue, contract.js}` — one rendering consumed by both this per-agent tab and the Library page's fleet browse ([library-page.md](library-page.md)); the panel's former local `SkillMeta`/`formatBytes`/`deps` helpers were extracted there.
+| Control | File | Call |
+|---|---|---|
+| **Assign skills** → tick → **Save assignments** | `components/skills/SkillAssignModal.vue:134-146` | `store.saveAssignments(draft)` → `PUT /api/agents/{name}/skills` |
+| **Unassign** on a Shared card | `components/skills/SkillsTab.vue:448-463` | `store.saveAssignments(individualNames − name)` → the same PUT |
+| **Unassign library skill** (#2914 conflict) | `components/skills/SkillDetailsModal.vue:31-40` → `SkillsTab.onUnassign` | the same PUT |
+| **Manage sets** | `components/skills/AgentSkillSets.vue` in a `BaseModal` (`SkillsTab.vue:212-217`) | `store.assignSet` / `unassignSet` → `POST` / `DELETE /api/agents/{name}/skill-sets/{set}` |
+| **Sync now** | `SkillsTab.vue:99-108,471-477` | `store.inject()` → `POST /api/agents/{name}/skills/inject` |
 
-The SkillsPanel provides a checkbox-based interface for selecting and assigning skills:
-
-| Section | Lines | Description |
-|---------|-------|-------------|
-| Header with buttons | 6-38 | "Inject to Agent" (running only) and "Save" buttons |
-| Loading state | 41-43 | Spinner while fetching data |
-| Library not configured | 46-58 | Warning when skills library URL not set |
-| Skills grid | 61-105 | Searchable checkbox list of available skills |
-| Library status footer | 123-137 | Shows library URL, commit SHA, last sync time |
-| Toast messages | 141-148 | Success/error notifications |
-
-#### Key UI Elements
-
-```vue
-<!-- SkillsPanel.vue:27-36 - Save button -->
-<button
-  @click="saveAssignments"
-  :disabled="saving || !hasChanges"
-  class="inline-flex items-center px-3 py-1.5 border border-transparent text-sm font-medium rounded-md text-white bg-green-600 hover:bg-green-700 disabled:opacity-50 disabled:cursor-not-allowed"
->
-  {{ saving ? 'Saving...' : 'Save' }}
-</button>
-```
-
-```vue
-<!-- SkillsPanel.vue:76-104 - Skill checkbox cards -->
-<div
-  v-for="skill in filteredSkills"
-  :key="skill.name"
-  class="relative flex items-start p-3 border rounded-lg cursor-pointer transition-colors"
-  :class="[
-    selectedSkills.has(skill.name)
-      ? 'border-indigo-500 bg-indigo-50 dark:bg-indigo-900/30'
-      : 'border-gray-200 dark:border-gray-700 hover:border-gray-300'
-  ]"
-  @click="toggleSkill(skill.name)"
->
-  <input type="checkbox" :checked="selectedSkills.has(skill.name)" />
-  <div class="ml-3 flex-1">
-    <label class="font-medium text-sm text-gray-900 dark:text-white">{{ skill.name }}</label>
-    <p v-if="skill.description" class="text-xs text-gray-500">{{ skill.description }}</p>
-  </div>
-</div>
-```
+The picker keeps its ent#235 / ent#530 / ent#672 / #2914 behaviour: the draft is the INDIVIDUAL list, a set-only member is ticked and locked, a deprecated skill is marked before it is ticked, and a draft survives a sync that re-reads the same assignment set. Package fact chips render through the shared seam `components/skills/{SkillContractChips.vue, contract.js}` (ent#263, shared with the Library page).
 
 ### State Management
 
-**File**: `src/frontend/src/components/SkillsPanel.vue:152-314`
+**File**: `src/frontend/src/stores/skills.js` (agent-scoped; all HTTP through `api`, Invariant #7)
 
-The component manages its own state using Vue 3 Composition API:
-
-```javascript
-// SkillsPanel.vue:171-190 - State variables
-const loading = ref(true)
-const saving = ref(false)
-const injecting = ref(false)
-const searchQuery = ref('')
-const successMessage = ref('')
-const errorMessage = ref('')
-
-// Data
-const availableSkills = ref([])      // All skills in library
-const assignedSkills = ref([])        // Skills assigned to this agent
-const selectedSkills = ref(new Set()) // Current UI selection
-const originalSelection = ref(new Set()) // For dirty checking
-const libraryStatus = ref({...})
-```
-
-#### hasChanges Computed Property
-
-```javascript
-// SkillsPanel.vue:202-208 - Dirty state detection
-const hasChanges = computed(() => {
-  if (selectedSkills.value.size !== originalSelection.value.size) return true
-  for (const skill of selectedSkills.value) {
-    if (!originalSelection.value.has(skill)) return true
-  }
-  return false
-})
-```
+- `library`, `libraryStatus`, `assigned` (the rows, with `individual` / `via_sets` / `delivery_status`), `sets`, `librarySets`; `injectionResults` + `lastInjectionAt` (the last Sync, per skill); `lastDelivery` (the last save's #2703 report).
+- Derived: `individualNames` (the draft's source — what the bulk PUT replaces), `setOnlyNames` (locked rows), `conflictNames` (#2914), `emptyReason` (`library_unconfigured` / `library_empty` / `none_assigned`).
+- The picker's dirty check compares the sorted draft with `individualNames` (`SkillAssignModal.vue:120-124`); the draft resets only when that set changes (`:132`).
 
 ### API Calls
 
-#### loadData() - Initial Load
-**File**: `src/frontend/src/components/SkillsPanel.vue:211-235`
+**`load(name)`** (`stores/skills.js:221-254`): `GET /api/skills/library/status` + `GET /api/agents/{name}/skills` together; only when the library is configured, `GET /api/skills/library` and `loadSets()` (`GET /api/agents/{name}/skill-sets?probe=true`, `GET /api/skills/library/sets`). A failed read is an error, never a confident empty.
+
+**`saveAssignments(names)`** (`stores/skills.js:322-340`):
 
 ```javascript
-async function loadData() {
-  loading.value = true
-  try {
-    // Load library status, available skills, and assigned skills in parallel
-    const [statusRes, skillsRes, assignedRes] = await Promise.all([
-      axios.get('/api/skills/library/status', { headers: authStore.authHeader }),
-      axios.get('/api/skills/library', { headers: authStore.authHeader }).catch(() => ({ data: [] })),
-      axios.get(`/api/agents/${props.agentName}/skills`, { headers: authStore.authHeader })
-    ])
-
-    libraryStatus.value = statusRes.data
-    availableSkills.value = skillsRes.data
-    assignedSkills.value = assignedRes.data
-
-    // Initialize selection from assigned skills
-    selectedSkills.value = new Set(assignedSkills.value.map(s => s.skill_name))
-    originalSelection.value = new Set(selectedSkills.value)
-  } catch (e) {
-    errorMessage.value = 'Failed to load skills data'
-  } finally {
-    loading.value = false
-  }
-}
+const { data: saved } = await api.put(
+  `/api/agents/${agentName.value}/skills`, { skills: names }, { timeout: ASSIGN_TIMEOUT_MS },  // 45 s: the PUT delivers (#2703)
+)
+lastDelivery.value = saved?.delivery ?? null
+const { data } = await api.get(`/api/agents/${agentName.value}/skills`)   // re-read the rows
 ```
 
-#### saveAssignments() - Bulk Save
-**File**: `src/frontend/src/components/SkillsPanel.vue:247-266`
+The dialog then emits `saved` with `deliveryText(lastDelivery, {saved: true})` and `deprecationText(lastDelivery)` (`SkillAssignModal.vue:134-146`); the tab shows it on the Shared line and arms the Sync emphasis only when delivery did not land.
 
-```javascript
-async function saveAssignments() {
-  saving.value = true
-  try {
-    await axios.put(
-      `/api/agents/${props.agentName}/skills`,
-      { skills: Array.from(selectedSkills.value) },
-      { headers: authStore.authHeader }
-    )
-
-    originalSelection.value = new Set(selectedSkills.value)
-    successMessage.value = 'Skills saved successfully'
-    setTimeout(() => { successMessage.value = '' }, 3000)
-  } catch (e) {
-    errorMessage.value = e.response?.data?.detail || 'Failed to save skills'
-    setTimeout(() => { errorMessage.value = '' }, 3000)
-  } finally {
-    saving.value = false
-  }
-}
-```
-
-#### injectSkills() - Push to Running Agent
-**File**: `src/frontend/src/components/SkillsPanel.vue:268-291`
-
-```javascript
-async function injectSkills() {
-  injecting.value = true
-  try {
-    const response = await axios.post(
-      `/api/agents/${props.agentName}/skills/inject`,
-      {},
-      { headers: authStore.authHeader }
-    )
-
-    const result = response.data
-    if (result.success) {
-      successMessage.value = `Injected ${result.skills_injected} skills`
-    } else {
-      successMessage.value = `Injected ${result.skills_injected} skills, ${result.skills_failed} failed`
-    }
-  } catch (e) {
-    errorMessage.value = e.response?.data?.detail || 'Failed to inject skills'
-  } finally {
-    injecting.value = false
-  }
-}
-```
+**`inject()`** (`stores/skills.js:352-378`): `POST /api/agents/{name}/skills/inject` (a repair: `force` server-side). Results are stored per skill (`injectionResults`), then the rows are re-read so a #2914 verdict that was set or cleared shows at once. A 409 reads "A skill sync is already running for this agent. Try again in a moment."
 
 ---
 
@@ -562,7 +432,7 @@ db.delete_agent_skills(agent_name)
 ## Side Effects
 
 ### Skill Injection to Running Agents
-When "Inject to Agent" is clicked, the assigned skills are written to the agent container's `.claude/skills/` directory. See [skill-injection.md](skill-injection.md) for details.
+When **Sync now** is clicked, the assigned skills are written to the agent container's `.claude/skills/` directory. See [skill-injection.md](skill-injection.md) for details.
 
 ### No WebSocket Broadcasts
 Skill assignment changes are persisted to the database but do not trigger WebSocket broadcasts. The UI updates locally after successful API calls.
@@ -598,7 +468,7 @@ Skill assignments are not currently logged to the audit service.
 User Action                Frontend                     Backend API              Database
 -----------                --------                     -----------              --------
 
-1. Open Skills tab    -->  loadData()
+1. Open Skills tab    -->  stores/skills.js load()
                            |
                            +--> GET /api/skills/library/status
                            +--> GET /api/skills/library
@@ -606,19 +476,18 @@ User Action                Frontend                     Backend API             
                                                                                                    |
                            <-- [library_status, available_skills, assigned_skills] <--------------+
 
-2. Toggle checkboxes  -->  toggleSkill()
-                           |
+2. Assign skills,     -->  SkillAssignModal.vue draft (checkbox v-model)
+   tick boxes              |
                            v
-                           selectedSkills.add/delete()
-                           hasChanges = true
+                           dirty = draft != individualNames
 
-3. Click Save         -->  saveAssignments()
+3. Save assignments   -->  store.saveAssignments(draft)
                            |
                            +--> PUT /api/agents/{name}/skills  -->  db.set_agent_skills()  -->  DELETE + INSERT
                                 { skills: [...] }                                                    |
                            <-- { success: true, skills_assigned: N } <-----------------------------+
 
-4. Success toast      <--  successMessage = 'Skills saved'
+4. Delivery note      <--  deliveryText(lastDelivery), via the dialog's `saved` event (dialog + Shared line)
 ```
 
 ---
@@ -632,30 +501,30 @@ User Action                Frontend                     Backend API             
 
 ### Test Steps
 
-1. **Load Skills Panel**
+1. **Open the Shared section**
    - Action: Navigate to Agent Detail -> Skills tab
-   - Expected: Grid of available skills with checkboxes
-   - Verify: Skills show name and description, library status in footer
+   - Expected: The Shared skills section lists the assignments as cards (or a named empty state); the owner sees **Assign skills**, **Manage sets** and **Sync now** in its head
+   - Verify: A shared (non-owner) user sees the cards without those controls
 
 2. **Assign Skills**
-   - Action: Check 2-3 skills, click Save
-   - Expected: "Skills saved successfully" toast, Save button disabled
-   - Verify: Refresh page, skills remain checked
+   - Action: **Assign skills**, tick 2-3 skills, **Save assignments**
+   - Expected: The delivery note ("Saved and delivered — available now" on a running agent); Save is disabled again
+   - Verify: Refresh page, the skills are Shared cards and ticked in the dialog
 
 3. **Unassign Skills**
-   - Action: Uncheck a skill, click Save
-   - Expected: "Skills saved successfully" toast
+   - Action: **Unassign** on a Shared card (or untick in the dialog and save)
+   - Expected: "Unassigned <name>." on the Shared line
    - Verify: Database shows correct assignments (`sqlite3 ~/trinity-data/trinity.db "SELECT * FROM agent_skills"`)
 
-4. **Search Skills**
-   - Action: Type in search box
-   - Expected: Grid filters to matching skills
-   - Verify: Clear search shows all skills
+4. **Filter Skills**
+   - Action: Type in the tab's filter box
+   - Expected: Both sections narrow to matching skills
+   - Verify: Clearing it shows all skills
 
-5. **Inject to Running Agent**
-   - Action: Start agent, click "Inject to Agent"
-   - Expected: "Injected N skills" toast
-   - Verify: SSH to agent, check `~/.claude/skills/` contains SKILL.md files
+5. **Sync to Running Agent**
+   - Action: Start agent, click **Sync now**
+   - Expected: Each Shared card's badge shows the result (`synced` / `up to date` / `partial` / `failed`); "Last sync <time>" on the Shared line
+   - Verify: In the agent, `~/.claude/skills/` contains the SKILL.md files
 
 ### Edge Cases
 - Assign to non-existent agent (should fail gracefully)
@@ -673,23 +542,25 @@ User Action                Frontend                     Backend API             
 library SKILL.md frontmatter (deprecated, superseded-by)
   → skill_packaging.extract_contract → _parse_skill_info → GET /api/skills/library (SkillInfo)
   → stores/skills.js library / assignedSkills (the library entries joined to the rows)
-  → SkillsPanel.vue: badge + supersededLine() on the assigned row AND the picker row
+  → utils/skillCards.js: badge + "Superseded by …" note on the Shared card   (ent#754)
+  → SkillAssignModal.vue: badge + supersededLine() on the picker row
 
 Save (PUT) / assign (POST)  — unchanged: the row is written and delivered
   → skill_service.deliver_assigned: report.skills[name].warnings = ["deprecated[:<successor>]"]
-  → SkillsPanel.onSave: deprecationNote = deprecationText(store.lastDelivery)
+  → SkillAssignModal.onSave: emit('saved', {…, deprecation: deprecationText(store.lastDelivery)})
+  → SkillsTab.onSaved: notice = that verdict (the dialog and the Shared line render it)
 ```
 
 - **Nothing is refused or hidden.** Assigning a deprecated skill is allowed; the marker is on the picker before the tick and the note is on the save after it. No confirm dialog, no 409.
-- **An agent that already holds one** shows the badge on its assigned row because the row is the library entry joined to the assignment — nothing about the assignment, the package or the agent's CLAUDE.md changes.
-- **The note belongs to its save**: it is a local ref written in `onSave` and rendered only beside that save's note, never a computed over `store.lastDelivery` (which outlives the note and is also written by a set assign).
-- **After a manual Sync** the injection result carries `deprecated[:<successor>]`, and the row's warning list leaves it out (`runWarnings`): that list says what went wrong with the delivery, and the badge already says the skill is retired.
+- **An agent that already holds one** shows the badge on its Shared card because the card is the library entry joined to the assignment — nothing about the assignment, the package or the agent's CLAUDE.md changes.
+- **The note belongs to its save**: it rides the tab's `notice` object, written from the dialog's `saved` event and replaced by the next verb, and is rendered only beside that save's note — never a computed over `store.lastDelivery` (which outlives the note and is also written by a set assign).
+- **After a manual Sync** the injection result carries `deprecated[:<successor>]`, and the card's warning list leaves it out (`utils/skillCards.js::runWarnings`): that list says what went wrong with the delivery, and the badge already says the skill is retired.
 - **Skill sets** are not marked: a deprecated member gets the delivery warning on the wire, but the set notes do not render it.
 
 ## Skill sets (ent#530)
 
 ```
-AgentSkillSets.vue / LibrarySkillSets.vue
+AgentSkillSets.vue (the Skills tab's "Manage sets" dialog, ent#754) / LibrarySkillSets.vue
   → stores/skills.js assignSet / unassignSet   (stores/skillsLibrary.js assignSet)
   → POST|DELETE /api/agents/{a}/skill-sets/{set}   [get_skill_managed_agent_by_name]
   → skill_set_service.assign|unassign  (require_set: 404 unknown_set / 422 set_member_missing)
@@ -706,6 +577,7 @@ AgentSkillSets.vue / LibrarySkillSets.vue
 
 | Flow | Relationship |
 |------|--------------|
+| [skills-tab.md](skills-tab.md) | **UI** - The Skills tab whose Shared section is this flow's surface (trinity-enterprise#754) |
 | [skill-injection.md](skill-injection.md) | **Downstream** - Injects assigned skills to agent containers |
 | [skills-crud.md](skills-crud.md) | **Upstream** - Admin management of skill library |
 | [mcp-skill-tools.md](mcp-skill-tools.md) | **Related** - Programmatic skill assignment via MCP |

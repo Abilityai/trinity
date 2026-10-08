@@ -1315,6 +1315,15 @@ threw it away — so it returns `message_id`, **declared on `PortalChatResponse`
 response model strips undeclared keys in silence. The `v-if="item.message.id"` gate stays:
 carry the identifier with the flag and let the consumer still refuse an empty one.
 
+**A self-approved reply says so (trinity-enterprise#754).** `get_history` (both the window and the
+reply poll's `limit` read) calls `skill_gate_map_service.annotate_self_approved_turns`, which marks
+each agent reply whose `execution_id` has an ent#752 `self_approved` record with
+`gate_self_approved` / `gate_self_approved_by_viewer` (the portal session's email, casefolded,
+against the record's requester key). Both are declared on `PortalHistoryMessage` (an undeclared
+key is stripped by `response_model`); no email is added. `assistantRow` / `replyFromHistory`
+carry them, so a just-landed reply shows `ExecutionGateMarker` under the bubble without a reload.
+Rows from before #3166 (NULL `execution_id`) read false.
+
 **A reply names its turn (#3166).** `enterprise_portal_messages.execution_id` holds the
 execution that wrote the row: the dispatched id the client watches (never a cold retry's
 second row), on the reply, on the skill-approval notice and on the user row (stamped after

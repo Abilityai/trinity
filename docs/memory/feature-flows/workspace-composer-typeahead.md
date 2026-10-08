@@ -250,6 +250,15 @@ composer sitting at ~y=250. Eight rows render, with a counted
 `N more — keep typing to filter` footer (principle 28: bounded viewport, stated
 total).
 
+**Copy says "skills" (trinity-enterprise#754).** The `/` popup's heading reads **Skills**
+(`PortalTypeahead.vue:104`); the screen-reader count says "N further skill(s) are not
+listed and must be asked for by name." (`:110`); the source-empty line is
+`EMPTY_REASON_NO_PLAYBOOKS` = "No skills are available for this agent right now."
+(`portalUtils.js:1032`); the composer placeholder reads `Message <agent>…  ·  / for skills`
+(`PortalConversation.vue:1872`). Data and API names (`agent.playbooks`,
+`filterPlaybookCandidates`) are unchanged. The agent page's own tab is
+[skills-tab.md](skills-tab.md).
+
 `z-30` is the same tier as this component's own agent-picker dropdown and
 strictly below the two `z-40` overlays (mobile nav, files panel) that must cover
 it; the two `z-30` panels sit at opposite ends of the pane and cannot overlap.
