@@ -215,12 +215,16 @@ async def post_message(room_id: str, body: RoomMessageCreate,
     from services import idempotency_service
 
     decision = idempotency_service.begin(f"room:{room_id}", idempotency_key)
+    # begin() reports an in-flight claim as replay=True too, so this check
+    # must come first or it never runs (#3320). Same detail shape as /chat.
+    if decision.in_flight:
+        raise HTTPException(status_code=409, detail={
+            "error": "request_in_progress",
+            "message": "A post with this Idempotency-Key is still being processed.",
+            "execution_id": decision.execution_id,
+        })
     if decision.replay:
         return {**(decision.snapshot or {}), "replayed": True}
-    if decision.in_flight:
-        raise HTTPException(status_code=409,
-                            detail={"code": "in_flight",
-                                    "message": "An identical post is already in flight"})
     try:
         result = await service.post_message(current_user, room_id, body.content)
     except RoomError as e:
