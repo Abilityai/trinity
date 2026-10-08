@@ -22,11 +22,12 @@ synthetic (``"a1" * 32`` etc.). The process-wide ``CREDENTIAL_ENCRYPTION_KEY``
 is pinned per test via ``monkeypatch`` and the rotation secondary is always
 cleared first, so an operator shell that exports either cannot leak in.
 
-Two real bugs are kept as strict xfails (see the report):
-  * ``decrypt`` breaks its "raises ValueError" contract on a non-object JSON
+Two real bugs found here were fixed by #3325:
+  * ``decrypt`` broke its "raises ValueError" contract on a non-object JSON
     document or a non-string nonce (AttributeError / TypeError), and
-    ``.credentials.enc`` is agent-writable, so the import route answers 500
-    where it promises 400.
+    ``.credentials.enc`` is agent-writable, so the import route answered 500
+    where it promises 400 (M50a-g).
+Still kept as a strict xfail (see the report):
   * ``encrypt_secret_setting`` reports a lone-surrogate VALUE as a missing
     ``CREDENTIAL_ENCRYPTION_KEY`` — ``UnicodeEncodeError`` is a ``ValueError``.
 """
@@ -272,11 +273,6 @@ def test_wrong_key_fails_closed_and_names_the_cause():  # M49
         _svc(KEY_B).decrypt(blob)
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "BUG: decrypt raises AttributeError/TypeError (not its documented ValueError) "
-    "for a non-object JSON document or a non-string nonce; .credentials.enc is "
-    "agent-writable so POST /api/agents/{n}/credentials/import answers 500 not 400 "
-    "— #3325"))
 @pytest.mark.parametrize("blob", [
     pytest.param("[]", id="M50a-json-array"),
     pytest.param("null", id="M50b-json-null"),
@@ -290,10 +286,6 @@ def test_non_object_or_non_string_envelope_raises_valueerror(blob):
         _svc().decrypt(blob)
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "BUG: a .credentials.enc holding '[]' makes import_to_agent raise "
-    "AttributeError, which routers/credentials.py maps to 500 instead of the "
-    "400 its ValueError arm gives every other malformed archive — see #3325"))
 def test_import_of_non_object_archive_is_a_valueerror():  # M50g
     svc = _svc()
     svc.read_agent_credential_files = AsyncMock(return_value={".credentials.enc": "[]"})
