@@ -20,7 +20,7 @@ P3  TTL oracle + monotonicity: the per-agent sweep reaps exactly
 P4  in-memory overflow: enqueue/pop sequences match a deque oracle, positions
     are ``depth + 1``, depth never exceeds IN_MEMORY_DEPTH, listing is FIFO.
 
-Single-process only: cross-worker atomicity is the strict-xfail
+Single-process only: cross-worker atomicity is
 ``test_r14`` in the edges file, not a property here.
 """
 
