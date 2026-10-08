@@ -8,22 +8,21 @@ View container logs for debugging and real-time telemetry metrics in the agent h
 
 1. Open the agent detail page and click the **Logs** tab.
 2. A fixed-height scrollable container displays Docker container stdout/stderr.
-3. **Auto-refresh (10s)** is a toggle; a line-count selector sets how many lines are fetched, and a refresh button fetches on demand. Auto-scroll is smart: new content scrolls to the bottom automatically, but scrolling stops if you scroll up manually.
-4. API: `GET /api/agents/{name}/logs`
-5. MCP: `get_agent_logs(name)`
+3. **Auto-refresh (10s)** is a toggle; a line-count selector (50, 100, 200, or 500) sets how many lines are fetched, and a refresh button fetches on demand. Auto-scroll is smart: new content scrolls to the bottom automatically, but scrolling stops if you scroll up manually.
+4. API: `GET /api/agents/{name}/logs?tail=100`
+5. MCP: `get_agent_logs(agent_name, lines=100)`
 
 ### Live Telemetry (Agent Header)
 
 The agent header bar on the detail page displays live resource metrics:
 
-- **CPU** -- usage percentage
-- **Memory** -- usage in MB
-- **Network I/O** -- bytes in and out
+- **CPU** -- usage percentage, against the agent's CPU limit in cores
+- **MEM** -- memory in use, against the agent's memory limit
 - **Uptime** -- how long the agent container has been running
 
 Metrics auto-refresh every 10 seconds.
 
-API: `GET /api/agents/{name}/stats`
+API: `GET /api/agents/{name}/stats` (also reports network bytes in and out, which the header does not show)
 
 ### Host Telemetry (Dashboard Header)
 
@@ -35,18 +34,20 @@ API: `GET /api/telemetry/host`
 
 All container logs are captured by the Vector log aggregator and written to structured JSON files:
 
-- Platform logs: `/data/logs/platform.json`
-- Agent logs: `/data/logs/agents.json`
+- Platform logs: `/data/logs/platform-YYYY-MM-DD.json`
+- Agent logs: `/data/logs/agents-YYYY-MM-DD.json`
+
+Files rotate daily.
 
 Logs are enriched with container metadata (name, labels). To query agent logs directly:
 
 ```bash
-docker exec trinity-vector sh -c "tail -50 /data/logs/agents.json" | jq .
+docker exec trinity-vector sh -c "tail -50 /data/logs/agents-$(date -u +%F).json" | jq .
 ```
 
 ### OpenTelemetry
 
-Claude Code agents export OTel metrics including cost, token usage, and productivity. These metrics are available on the Dashboard.
+Claude Code agents export OTel metrics — cost and tokens by model, lines added and removed, sessions, active time, commits, and pull requests — to Trinity's OTel collector (on by default; `OTEL_ENABLED=0` turns it off). Read the rollup with `GET /api/observability/metrics` (and `GET /api/observability/status` for whether the collector is reachable). There is no UI panel for these metrics today.
 
 ## For Agents
 

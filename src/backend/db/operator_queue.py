@@ -14,9 +14,10 @@ unchanged.
 
 import hashlib
 import json
+import logging
 import uuid
 from typing import Optional, List, Dict, Set, Tuple
-from datetime import datetime
+from datetime import datetime, timezone
 
 from sqlalchemy import select, update, func, and_, or_, case, delete
 from sqlalchemy.exc import IntegrityError
@@ -24,6 +25,31 @@ from sqlalchemy.exc import IntegrityError
 from .engine import get_engine, make_insert
 from .tables import operator_queue
 from utils.helpers import utc_now_iso, iso_cutoff, parse_iso_timestamp, to_utc_iso
+
+logger = logging.getLogger(__name__)
+
+# trinity-enterprise#815: a cursor walk orders rows "as of" a watermark this many
+# seconds before it began (`W`). Every pending → ended writer stamps `now` before
+# it commits; a write whose stamp is at or before `W` but which commits after a
+# page was read would move its row between sections and be returned twice. The
+# margin absorbs any write that commits within it of its own stamp — the walk's
+# one BOUND. SQLite's busy timeout (30 s) keeps it in practice; PostgreSQL has no
+# statement or lock timeout configured, so a breach is logged at error
+# (`_note_commit_lag`), never silent. ONE home: the watermark and the lag check
+# read the same constant.
+WALK_WATERMARK_MARGIN_S = 300
+
+
+def _note_commit_lag(stamp: str) -> None:
+    """After a pending → ended write commits: if it landed more than the walk
+    margin after the timestamp it stamped, say so at error (ent#815). Called by
+    the five writers that end an ask, once their transaction is committed."""
+    lag = (datetime.now(timezone.utc) - parse_iso_timestamp(stamp)).total_seconds()
+    if lag > WALK_WATERMARK_MARGIN_S:
+        logger.error(
+            "operator-queue end committed %ds after its timestamp; cursor walks "
+            "open across it may repeat this row (ent#815)", int(lag),
+        )
 
 
 # #1632: generous hard "belt" caps enforced at the DB sink itself. The agent
@@ -685,6 +711,7 @@ class OperatorQueueOperations:
                     operator_queue.c.batch_id == batch_id,
                 ))
             ).mappings().all()
+        _note_commit_lag(now)
         return {"batch_id": batch_id, "rows": [self._row_to_item(r) for r in rows]}
 
     def get_item(self, item_id: str) -> Optional[Dict]:
@@ -802,6 +829,7 @@ class OperatorQueueOperations:
         hide_ended_before: Optional[str] = None,
         types: Optional[Tuple[str, ...]] = None,
         context_contains: Optional[Tuple[str, ...]] = None,
+        exclude_request_id_prefixes: Optional[Tuple[str, ...]] = None,
     ) -> Optional[list]:
         """The WHERE conditions `list_items`, `count_items` and
         `list_item_agent_names` share (#3059) — ONE definition, so a page, its
@@ -857,6 +885,7 @@ class OperatorQueueOperations:
             # `_` or `%` in the fragment matches only itself.
             escaped = fragment.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
             conds.append(operator_queue.c.context.like(f"%{escaped}%", escape="\\"))
+        conds.extend(self._request_id_not_prefixed_ci(exclude_request_id_prefixes))
         return conds
 
     def count_items(self, **filters) -> int:
@@ -898,8 +927,18 @@ class OperatorQueueOperations:
         hide_ended_before: Optional[str] = None,
         types: Optional[Tuple[str, ...]] = None,
         context_contains: Optional[Tuple[str, ...]] = None,
+        exclude_request_id_prefixes: Optional[Tuple[str, ...]] = None,
     ) -> List[Dict]:
         """List queue items with optional filters.
+
+        exclude_request_id_prefixes (trinity-enterprise#815): leave out rows
+        whose `request_id` starts with one of these prefixes — the platform's
+        heads-ups ABOUT a person, which a machine key never receives. A SQL
+        condition, not a filter on the result, for the `addressed_to_email`
+        reason below: dropped after the limit, they emptied a machine's page
+        while its own rows sat just below the cut. Case-insensitive and
+        leading-whitespace-tolerant, and a NULL `request_id` is kept — the
+        rule `operator_queue_service.is_about_a_person` applies in Python.
 
         types (#3059): narrow to a set of item types in SQL, so a caller that
         shows only some kinds pages and counts over exactly what it shows.
@@ -942,6 +981,7 @@ class OperatorQueueOperations:
             include_cleared=include_cleared, addressed_to_email=addressed_to_email,
             hide_ended_before=hide_ended_before, types=types,
             context_contains=context_contains,
+            exclude_request_id_prefixes=exclude_request_id_prefixes,
         )
         if conds is None:
             return []
@@ -993,6 +1033,127 @@ class OperatorQueueOperations:
 
         return [self._row_to_item(row) for row in rows]
 
+    # ------------------------------------------------------------------
+    # trinity-enterprise#815 — the keyset (cursor) walk
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _walk_sort_keys(watermark: str, snapshot: Optional[Dict[str, int]] = None):
+        """The walk's sort key `(sec, prk, st)`, ordered `sec ASC, prk ASC,
+        st DESC, id ASC` — today's order, taken "as of" `watermark`.
+
+        A row is in the pending section (`sec = 0`) if it is pending NOW or
+        ended after `watermark` (every pending → ended writer stamps
+        `disposed_at` in the same UPDATE, and nothing returns a row to pending),
+        so a row answered mid-walk keeps the key it had when the walk began.
+        Nothing else moves a key, except a pending platform alert's priority
+        (#3246 `_touch`): `snapshot` maps those rows' ids to the priority rank
+        recorded when the walk began, and an alert not in it (raised during the
+        walk) ranks 4 — a fixed value, so its key cannot move either.
+
+        `coalesce(…, '')` keeps a NULL out of every comparison (a NULL key would
+        fail them all and be skipped); `db/tables.py` declares these columns
+        nullable even though the DDL does not.
+        """
+        oq = operator_queue.c
+        as_pending = or_(oq.status == "pending", oq.disposed_at > watermark)
+        sec = case((as_pending, 0), else_=1)
+        rank = case(
+            (oq.priority == "critical", 0),
+            (oq.priority == "high", 1),
+            (oq.priority == "medium", 2),
+            (oq.priority == "low", 3),
+            else_=4,
+        )
+        if snapshot is not None:
+            by_rank: Dict[int, List[str]] = {}
+            for item_id, r in snapshot.items():
+                by_rank.setdefault(int(r), []).append(item_id)
+            whens = [(oq.id.in_(sorted(ids)), r) for r, ids in sorted(by_rank.items())]
+            whens.append((oq.subject.isnot(None), 4))
+            rank = case(*whens, else_=rank)
+        prk = case((as_pending, rank), else_=0)
+        st = case(
+            (as_pending, func.coalesce(oq.created_at, "")),
+            else_=func.coalesce(oq.disposed_at, oq.responded_at, oq.created_at, ""),
+        )
+        return sec, prk, st
+
+    def _walk_query(
+        self,
+        *,
+        watermark: str,
+        snapshot: Optional[Dict[str, int]],
+        after: Optional[Tuple[int, int, str, str]],
+        limit: int,
+        **filters,
+    ):
+        """`(statement, (sec, prk, st))` for one walk page — None when the
+        filters match nothing. The after-cursor predicate, the ORDER BY and the
+        read-back key columns use the SAME expression objects, so the three
+        compare text under one collation and cannot disagree on either dialect.
+        The predicate is an OR-expansion (portable; handles the mixed
+        directions)."""
+        conds = self._list_conditions(**filters)
+        if conds is None:
+            return None, None
+        sec, prk, st = self._walk_sort_keys(watermark, snapshot)
+        where = list(conds)
+        if after is not None:
+            s, p, t, i = after
+            where.append(or_(
+                sec > s,
+                and_(sec == s, prk > p),
+                and_(sec == s, prk == p, st < t),
+                and_(sec == s, prk == p, st == t, operator_queue.c.id > i),
+            ))
+        stmt = select(*self._SELECT_COLS, sec.label("_k_sec"), prk.label("_k_prk"),
+                      st.label("_k_st"))
+        if where:
+            stmt = stmt.where(and_(*where))
+        stmt = stmt.order_by(sec, prk, st.desc(), operator_queue.c.id).limit(limit)
+        return stmt, (sec, prk, st)
+
+    def list_items_walk(
+        self,
+        *,
+        watermark: str,
+        snapshot: Optional[Dict[str, int]] = None,
+        after: Optional[Tuple[int, int, str, str]] = None,
+        limit: int = 100,
+        **filters,
+    ) -> List[Tuple[Dict, Tuple[int, int, str, str]]]:
+        """One page of a cursor walk (trinity-enterprise#815): `(item, key)`
+        pairs in walk order, after `after`. The key is read back from SQL —
+        Python never re-derives it — so a cursor built from the last row is
+        exactly where the next page starts. Same `_list_conditions` as
+        `list_items`/`count_items`, so the page and `total` share one WHERE.
+        `list_items` (and its callers' order) is untouched."""
+        stmt, _ = self._walk_query(watermark=watermark, snapshot=snapshot,
+                                   after=after, limit=limit, **filters)
+        if stmt is None:
+            return []
+        with get_engine().connect() as conn:
+            rows = conn.execute(stmt).mappings().all()
+        return [
+            (self._row_to_item(r), (int(r["_k_sec"]), int(r["_k_prk"]), r["_k_st"], r["id"]))
+            for r in rows
+        ]
+
+    def walk_alert_priorities(self, *, watermark: str, **filters) -> Dict[str, int]:
+        """`{id: priority rank}` of the platform alerts (`subject` set, #3246)
+        the walk orders as pending — the snapshot a walk takes when it begins
+        (trinity-enterprise#815), over the same filters as its pages."""
+        conds = self._list_conditions(**filters)
+        if conds is None:
+            return {}
+        _, prk, _ = self._walk_sort_keys(watermark)
+        oq = operator_queue.c
+        as_pending = or_(oq.status == "pending", oq.disposed_at > watermark)
+        stmt = select(oq.id, prk).where(and_(*conds, oq.subject.isnot(None), as_pending))
+        with get_engine().connect() as conn:
+            return {r[0]: int(r[1]) for r in conn.execute(stmt).all()}
+
     def respond_to_item(
         self,
         item_id: str,
@@ -1001,8 +1162,18 @@ class OperatorQueueOperations:
         responded_by_id: Optional[str],
         responded_by_email: str,
         divergence_acknowledged: bool = False,
+        terminal: bool = False,
     ) -> Optional[Dict]:
         """Record a response to a queue item.
+
+        `terminal` (#2372): the row has no agent audience (a platform-minted
+        alert — the caller decides, this layer knows no prefixes), so the
+        answer is its last event: the same compare-and-set writes
+        `status='acknowledged'` + `acknowledged_at` instead of `responded`. No
+        agent will ever acknowledge it, and `responded` is kept from Clear All
+        and retained for the 90-day floor. `acknowledged_at` therefore means
+        "the agent acknowledged" on an agent's ask and "an operator
+        acknowledged" on a platform alert.
 
         `divergence_acknowledged` (#2989 review): the operator saw that the agent
         had rewritten or closed the entry and answered anyway; the write-back then
@@ -1043,7 +1214,8 @@ class OperatorQueueOperations:
                     )
                 )
                 .values(
-                    status="responded",
+                    status="acknowledged" if terminal else "responded",
+                    acknowledged_at=now if terminal else None,
                     response=response,
                     response_text=response_text,
                     responded_by_id=responded_by_id,
@@ -1075,6 +1247,7 @@ class OperatorQueueOperations:
                 item["_status_conflict"] = True
                 return item
 
+        _note_commit_lag(now)
         return self.get_item(item_id)
 
     def cancel_item(
@@ -1130,6 +1303,7 @@ class OperatorQueueOperations:
                 item["_status_conflict"] = True
                 return item
 
+        _note_commit_lag(now)
         return self.get_item(item_id)
 
     def set_discussion_link(self, item_id: str, key: str, chat_id: str) -> Optional[Dict]:
@@ -1231,6 +1405,7 @@ class OperatorQueueOperations:
                     )
                 )
             ).mappings().all()
+        _note_commit_lag(now)
         return {"batch_id": batch_id, "rows": [self._row_to_item(r) for r in rows]}
 
     def clear_resolved_items(
@@ -1446,6 +1621,7 @@ class OperatorQueueOperations:
             rows = conn.execute(
                 select(*self._SELECT_COLS).where(operator_queue.c.id.in_(won))
             ).mappings().all()
+        _note_commit_lag(now)
         return [self._row_to_item(r) for r in rows]
 
     def get_stats(self, accessible_agent_names: Optional[Set[str]] = None) -> Dict:
@@ -1750,6 +1926,54 @@ class OperatorQueueOperations:
         channel column; a native (`mcp`) ask has no file entry to reconcile,
         flag or write back into."""
         return or_(operator_queue.c.channel.is_(None), operator_queue.c.channel == "file")
+
+    # Exactly the characters `str.strip()` removes (`str.isspace()`: ASCII
+    # whitespace, the ASCII separators U+001C-U+001F, NEL, NBSP and the Unicode
+    # spaces), so the SQL trims what `is_about_a_person` trims (ent#815 fix 1).
+    # `ltrim(text, chars)` is multi-byte aware on SQLite and PostgreSQL alike.
+    # Ingest refuses such ids (`_ID_RE`); only a legacy row can carry one.
+    _PY_WHITESPACE = (
+        "\t\n\x0b\x0c\r\x1c\x1d\x1e\x1f \x85\xa0\u1680"
+        "\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a"
+        "\u2028\u2029\u202f\u205f\u3000"
+    )
+
+    @staticmethod
+    def _request_id_not_prefixed_ci(prefixes):
+        """`request_id` does not start with any of `prefixes`, compared the way
+        `operator_queue_service.is_about_a_person` compares in Python
+        (trinity-enterprise#815), so the two rules exclude exactly the same rows
+        and `total` is exact: case-insensitive, leading whitespace ignored, and
+        a NULL `request_id` kept (`coalesce`: a bare `substr(NULL) != p` is
+        NULL, which would DROP the row).
+
+        Equal to Python's `.strip().lower().startswith(p)` for these all-ASCII
+        prefixes on SQLite and on a UTF-8 PostgreSQL database with a
+        non-Turkic collation (the supported deployment). Under a Turkic
+        collation (`tr`/`az`) `lower('I')` is `ı`, so a legacy upper-case
+        `PORTAL-INBOX-…` row passes this exclusion; the Python belt then drops
+        it and the response carries `total: null` with a warning — never
+        wider, never narrower. `ltrim` takes Python's whitespace set;
+        U+212A KELVIN SIGN is the one non-ASCII code point whose Python
+        `.lower()` is ASCII (`k`), and SQLite's `lower` is ASCII-only, so it is
+        rewritten first; U+0130 lowers to `i` + U+0307 in Python but to a bare
+        `i` under PostgreSQL's glibc `lower`, so it is rewritten to Python's
+        form first. `lower`, `replace`, `ltrim(text, chars)`, `coalesce` and
+        `substr` exist on SQLite and PostgreSQL alike — no dialect branch.
+
+        Deliberately not `_not_prefixed` below: that one is the sweeps' and the
+        own-budget predicate's (case-sensitive, NULL-dropping), and is left
+        exactly as it is."""
+        normalised = func.lower(func.replace(func.replace(
+            func.ltrim(
+                func.coalesce(operator_queue.c.request_id, ""),
+                OperatorQueueOperations._PY_WHITESPACE,
+            ),
+            "\u212a", "k"), "\u0130", "i\u0307"))
+        return [
+            func.substr(normalised, 1, len(p)) != p.lower()
+            for p in (prefixes or ())
+        ]
 
     @staticmethod
     def _not_prefixed(prefixes):

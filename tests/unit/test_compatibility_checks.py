@@ -117,7 +117,8 @@ class TestSpecConsistency:
         # not a revival of retired D-006 — `test_retired_ids_are_never_reissued`
         # below still asserts D-006 stays out of the catalog.
         # ent#479: +1 (D-010, metrics.json superseded) -> 91.
-        assert len(spec.CHECKS) == 91, f"expected 91 checks, found {len(spec.CHECKS)}"
+        # ent#730: +1 (X-009, dashboard metric:/dims: bindings) -> 92.
+        assert len(spec.CHECKS) == 92, f"expected 92 checks, found {len(spec.CHECKS)}"
 
     def test_retired_ids_are_never_reissued(self):
         """#2137: persisted `checks_json` rows predate the retirement.
@@ -445,6 +446,15 @@ class TestStaticChecks:
         snap = self._dash(good_snapshot(), "widgets:\n  - type: metric\n    metric: revenue\n")
         status, msg, _detail = _run_one("D-003", snap)
         assert status == "fail" and "'metric' needs label" in msg
+
+    def test_d003_a_bound_widget_with_a_dims_selector_needs_no_value(self):
+        """ent#730: `dims:` narrows a binding to one series; it is still a
+        binding, so D-003's exemption (the same truthy `metric` predicate)
+        holds and the selector is X-009's business, not D-003's."""
+        snap = self._dash(good_snapshot(), (
+            "widgets:\n  - type: metric\n    label: Google\n"
+            "    metric: ad_spend\n    dims: {channel: google}\n"))
+        assert _run_one("D-003", snap)[0] == "pass"
 
     def test_d003_a_binding_to_an_undeclared_name_is_not_a_required_field_failure(self):
         """Decided in #3186: the renderer drops `value` for an undeclared

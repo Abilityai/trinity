@@ -18,6 +18,8 @@ import { flushPromises, mount } from '@vue/test-utils'
 
 const createAgent = vi.fn()
 vi.mock('../../src/stores/agents', () => ({ useAgentsStore: () => ({ createAgent }) }))
+// #3164: the modal reads whether a personal GitHub token is saved (presence only).
+vi.mock('../../src/stores/auth', () => ({ useAuthStore: () => ({ fetchGithubPatStatus: async () => false }) }))
 
 const TEMPLATES = [
   { id: 'github:acme/helper', source: 'github', display_name: 'Helper', github_repo: 'acme/helper' },

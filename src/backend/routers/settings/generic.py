@@ -409,6 +409,16 @@ async def update_setting(
             ),
         )
 
+    if key in ("a2a_trusted_networks", "a2a_internal_base_url"):
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"{key} must be set via PUT /api/settings/a2a-trusted-networks, "
+                "which refuses the platform's own networks, loopback and "
+                "link-local ranges (trinity-enterprise#838)."
+            ),
+        )
+
     if key in LEGACY_SKILLS_LIBRARY_KEYS:
         raise HTTPException(
             status_code=422,

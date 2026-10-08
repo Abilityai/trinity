@@ -19,9 +19,12 @@
              `bottom-24` clears the global HelpChatWidget FAB (bottom-6 + h-14 = 80px),
              which is why this is not the `bottom-4 right-4` used elsewhere. -->
         <div v-if="notification"
+          :role="notification.type === 'error' ? 'alert' : 'status'"
           :class="[
             'fixed bottom-24 right-6 z-50 px-4 py-3 rounded-lg shadow-lg transition-all duration-300',
-            notification.type === 'success' ? 'bg-status-success-100 dark:bg-status-success-900/50 border border-status-success-400 dark:border-status-success-700 text-status-success-700 dark:text-status-success-300' : 'bg-status-danger-100 dark:bg-status-danger-900/50 border border-status-danger-400 dark:border-status-danger-700 text-status-danger-700 dark:text-status-danger-300'
+            notification.type === 'success' ? 'bg-status-success-100 dark:bg-status-success-900/50 border border-status-success-400 dark:border-status-success-700 text-status-success-700 dark:text-status-success-300'
+              : notification.type === 'info' ? 'bg-status-info-100 dark:bg-status-info-900/50 border border-status-info-400 dark:border-status-info-700 text-status-info-700 dark:text-status-info-300'
+              : 'bg-status-danger-100 dark:bg-status-danger-900/50 border border-status-danger-400 dark:border-status-danger-700 text-status-danger-700 dark:text-status-danger-300'
           ]"
         >
           <span>{{ notification.message }}</span>
@@ -148,7 +151,7 @@
             <div v-show="activeTab === 'chat'" class="flex-1 overflow-hidden flex flex-col">
               <div class="flex items-center justify-end gap-2 px-3 py-1.5 border-b border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-900/40">
                 <span class="text-xs text-gray-500 dark:text-gray-400">
-                  Stateless chat — each message starts fresh.
+                  Each message runs as a new agent session; the last 20 messages are included for context.
                 </span>
                 <!-- ent#456: opens a new tab, so the agent page you were on is
                      still here when you come back. The ?tab=session REDIRECT
@@ -192,6 +195,7 @@
                 :agent-name="agent.name"
                 :agent-status="agent.status"
                 :has-declared-metrics="hasDeclaredMetrics"
+                :notify="showNotification"
               />
             </div>
 
@@ -266,6 +270,7 @@
               <PlaybooksPanel
                 :agent-name="agent.name"
                 :agent-status="agent.status"
+                :notify="showNotification"
                 @run-with-instructions="handlePlaybookRunWithInstructions"
               />
             </div>

@@ -439,12 +439,16 @@ class _LoopDB:
         return rid
 
     def finalize_loop_run(self, rid, **kw):
+        # CAS on status='running', as the real one (#3316).
         for runs in self.runs.values():
             for r in runs:
                 if r["id"] == rid:
+                    if r["status"] != "running":
+                        return False
                     r.update({k: v for k, v in kw.items() if not (k == "execution_id" and v is None)})
                     r["completed_at"] = "now"
-                    return
+                    return True
+        return False
 
     def list_loop_runs(self, lid):
         return [dict(r) for r in sorted(self.runs.get(lid, []), key=lambda r: r["run_number"])]
@@ -654,6 +658,8 @@ def a2a_client(monkeypatch):
 
     monkeypatch.setattr(a2a, "db", SimpleNamespace(
         get_a2a_exposed=lambda name: name == AGENT,
+        # ent#838: every agent here is public-scope — today's A2A behaviour.
+        get_a2a_scope=lambda name: {"scope": "public", "keyless": True},
         can_user_access_agent=lambda user, name: name == AGENT,
         # ent#679: the inbound door asks whether the agent declares a price
         # first; this harness's agent does not (the test_157 stub).

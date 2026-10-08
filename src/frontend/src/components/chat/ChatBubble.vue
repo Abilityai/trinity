@@ -13,6 +13,8 @@
     </div>
     <p v-if="formattedTime" class="text-xs text-gray-500 dark:text-gray-400 mt-1 text-right">{{ formattedTime }}</p>
   </div>
+  <!-- A platform line (trinity#3274: a held request's notice) — not a bubble -->
+  <ChatSystemLine v-else-if="role === 'system'" :content="content" />
   <!-- Self-task result message (SELF-EXEC-001) - collapsible by default -->
   <div
     v-else-if="source === 'self_task'"
@@ -93,12 +95,13 @@
 <script setup>
 import { computed, ref } from 'vue'
 import { renderMarkdown } from '../../utils/markdown'
+import ChatSystemLine from './ChatSystemLine.vue'
 
 const props = defineProps({
   role: {
     type: String,
     required: true,
-    validator: (value) => ['user', 'assistant'].includes(value)
+    validator: (value) => ['user', 'assistant', 'system'].includes(value)
   },
   content: {
     type: String,

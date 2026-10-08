@@ -2837,7 +2837,10 @@ async def portal_chat(agent_name: str, message: str, email: str,
                       # person (`PortalPrincipal.is_person`), so an approver may run
                       # their own gated request. False for any caller that did not
                       # (voice relays a model's paraphrase of the speech).
-                      gate_is_person: bool = False) -> dict:
+                      gate_is_person: bool = False,
+                      # #3265 — the turn's attachments, already resolved by
+                      # `resolve_turn_attachments` (JSON). Stored on the user row.
+                      attachments: str | None = None) -> dict:
     """Run one client chat turn against a rostered agent as a standard platform
     execution (``triggered_by="public"`` — the external-caller path, observable +
     cost-tracked). Scoped to the caller's roster; raises ``ClientPortalError`` on
@@ -3022,7 +3025,8 @@ async def portal_chat(agent_name: str, message: str, email: str,
     # the thread's title before this writes the derived one, and the history
     # context below must not contain the very message it is context FOR. Both
     # reads happen first, deliberately.
-    _persist_user_turn(agent_name, email, session_id, client_message, voice_call_id=voice_call_id)
+    user_row_id = _persist_user_turn(agent_name, email, session_id, client_message, voice_call_id=voice_call_id,
+                                     attachments=attachments, execution_id=execution_id)
 
     # ent#186 / #2579: title the thread NOW, concurrently with the turn.
     #
@@ -3161,12 +3165,17 @@ async def portal_chat(agent_name: str, message: str, email: str,
                 agent_name, message, email, session_id, resolved_model,
                 open_canvas_id=open_canvas_id)
             if execution_id:
+                # #3166: the user row was written before this turn had an id.
+                _stamp_user_turn(user_row_id, execution_id)
                 # #3114: plus the claim waits a pull pilot's turn and its cold
                 # retry may spend.
                 from services.pull_pilot import pull_queue_allowance
+                from services.session_turn_service import resolve_lock_ttl
                 mark_turn_inflight(
                     session_id, execution_id,
-                    turn_timeout + 60 + 2 * pull_queue_allowance(agent_name),
+                    # #3166: plus the wait for the thread's lock.
+                    turn_timeout + 60 + 2 * pull_queue_allowance(agent_name)
+                    + resolve_lock_ttl(agent_name),
                 )
                 owns_marker = True
 
@@ -3210,12 +3219,17 @@ async def portal_chat(agent_name: str, message: str, email: str,
             # own held `/x` would otherwise send it to the agent unread.
             request_text=reply_prefix + client_text,
             gate_requester=_gate_requester(email, gate_is_person),
+            # #3166: a second message on this thread queues behind the first
+            # for as long as the first can hold the lock, instead of a 429
+            # after 30s. The wait budget below covers it.
+            wait_for_lock=True,
         )
     except SkillApprovalRequired as e:
         # trinity-enterprise#751: the message names a gated skill — nothing ran,
         # an approval was raised. Waiting is not failing: the thread renders a
         # non-retryable error as a Failed turn, so the notice is the reply.
-        return _persist_reply(agent_name, email, session_id, e.message, None, voice_call_id)
+        return _persist_reply(agent_name, email, session_id, e.message, None, voice_call_id,
+                              execution_id)
     except SkillGateError as e:
         raise ClientPortalError(e.status_code, str(e), category="gated", retryable=False)
     except ResumeLockBusy:
@@ -3390,18 +3404,24 @@ async def portal_chat(agent_name: str, message: str, email: str,
     # It now runs concurrently with the turn, immediately after
     # `_persist_user_turn` — see the comment there for why, and for the two
     # behaviour changes that buys.
-    return _persist_reply(agent_name, email, session_id, reply, cost, voice_call_id)
+    return _persist_reply(agent_name, email, session_id, reply, cost, voice_call_id, execution_id)
 
 
 def _persist_reply(agent_name: str, email: str, session_id: str, reply: str, cost,
-                   voice_call_id: str | None) -> dict:
-    """Persist the assistant half of a turn and build the turn's answer."""
+                   voice_call_id: str | None, execution_id: str | None = None) -> dict:
+    """Persist the assistant half of a turn and build the turn's answer.
+
+    #3166: `execution_id` is the DISPATCHED turn's id — the one the client is
+    watching — never a cold retry's second row. The client accepts only the
+    reply carrying it, so a reply from another turn on the same thread is not
+    shown as this turn's answer."""
     message_id = None
     try:
         now = utc_now_iso()
         new_message_id = uuid.uuid4().hex
         db.add_portal_message(new_message_id, agent_name, email, "assistant", reply, cost, now,
-                              session_id=session_id, **_voice_attribution(voice_call_id))
+                              session_id=session_id, **_voice_attribution(voice_call_id),
+                              **_turn_attribution(execution_id))
         message_id = new_message_id
         db.touch_portal_session(session_id, now, added=1)
     except Exception as e:  # noqa: BLE001
@@ -3432,8 +3452,70 @@ def _voice_attribution(voice_call_id: str | None) -> dict:
     return {"voice_call_id": voice_call_id} if voice_call_id else {}
 
 
+# #3265 — what a user turn carried. The upload itself already happened (the
+# composer uploads on attach); the turn only NAMES the files. A successful entry
+# is kept only when that filename is in the caller's own uploads to this agent,
+# with size and type read from there, so a request cannot put a file on its
+# message that it never sent. A failed one keeps its name and reason — the
+# person is told on the message, never by silence.
+_FAILED_UPLOAD = "This file did not upload."
+_NOT_IN_UPLOADS = "This file is not in your uploads to this agent."
+
+
+async def resolve_turn_attachments(agent_name: str, email: str, requested) -> str | None:
+    """The JSON stored on the user row, or None when nothing was attached."""
+    if not requested:
+        return None
+    listing = await _read_inbox_or_none(agent_name, email)
+    inbox = {it["filename"]: it for it in (listing or [])}
+    out, seen = [], set()
+    for a in requested:
+        name = (getattr(a, "filename", "") or "").strip()
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        if getattr(a, "failed", False):
+            out.append({"filename": name, "failed": True,
+                        "error": (getattr(a, "error", None) or _FAILED_UPLOAD)[:300]})
+        elif name in inbox:
+            it = inbox[name]
+            out.append({"filename": name, "size_bytes": it.get("size_bytes"),
+                        "mime_type": it.get("mime_type")})
+        elif listing is None:
+            # The uploads could not be READ (agent not running, Docker
+            # unreadable) — not the same as "not there". Stored without size or
+            # type rather than as a permanent failure (the #2196 collapse). Safe:
+            # a name is all that is stored, and every read path resolves the
+            # file from the caller's own uploads, never from this row.
+            out.append({"filename": name})
+        else:
+            out.append({"filename": name, "failed": True, "error": _NOT_IN_UPLOADS})
+    return json.dumps(out) if out else None
+
+
+def decode_turn_attachments(raw) -> list | None:
+    """The stored column as a list; None for no attachments or an unreadable value."""
+    if not raw:
+        return None
+    try:
+        items = json.loads(raw)
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(items, list):
+        return None
+    return [i for i in items if isinstance(i, dict) and i.get("filename")] or None
+
+
+def _turn_attribution(execution_id: str | None) -> dict:
+    """#3166: the `add_portal_message` kwarg naming the turn that wrote a row —
+    and NOTHING when there is no turn, so an unattributed write is unchanged."""
+    return {"execution_id": execution_id} if execution_id else {}
+
+
 def _persist_user_turn(agent_name: str, email: str, session_id: str, content: str,
-                       voice_call_id: str | None = None) -> None:
+                       voice_call_id: str | None = None,
+                       attachments: str | None = None,
+                       execution_id: str | None = None) -> str | None:
     """Write the client's own message, before the turn runs. Best-effort.
 
     Idempotent against a RETRY. The message is written before the turn so a
@@ -3446,6 +3528,10 @@ def _persist_user_turn(agent_name: str, email: str, session_id: str, content: st
     The test is "is this already the last thing said, with no answer since" —
     which is exactly the state a failed turn leaves behind, and never the state
     of someone deliberately sending the same message again after a reply.
+
+    #3166: returns the id of the row that now stands for this message (new, or
+    the reused one on a retry), or None when nothing could be written. A reused
+    row is moved to the retrying turn, so its reply sits under it after a reload.
     """
     try:
         recent = db.get_portal_messages(agent_name, email, limit=1, session_id=session_id)
@@ -3454,18 +3540,39 @@ def _persist_user_turn(agent_name: str, email: str, session_id: str, content: st
         if (recent and recent[-1].get("role") == "user" and recent[-1].get("content") == content
                 and recent[-1].get("source") is None):
             logger.info("portal: skipping duplicate user row on retry for session %s", session_id)
-            return
+            _stamp_user_turn(recent[-1].get("id"), execution_id)
+            return recent[-1].get("id")
     except Exception as e:  # noqa: BLE001 — a read failure must not block the turn
         logger.warning("portal duplicate-check failed for %s: %s", session_id, e)
 
+    row_id = None
     try:
         now = utc_now_iso()
-        db.add_portal_message(uuid.uuid4().hex, agent_name, email, "user", content,
-                              None, now, session_id=session_id, **_voice_attribution(voice_call_id))
+        new_id = uuid.uuid4().hex
+        db.add_portal_message(new_id, agent_name, email, "user", content,
+                              None, now, session_id=session_id,
+                              **_voice_attribution(voice_call_id),
+                              # #3265: only when the turn carried files, so the
+                              # ordinary write is byte-identical to before.
+                              **({"attachments": attachments} if attachments else {}),
+                              **_turn_attribution(execution_id))
+        row_id = new_id
         db.touch_portal_session(session_id, now, added=1,
                                 title_if_empty=_derive_title(content))
     except Exception as e:  # noqa: BLE001 — never block a turn on bookkeeping
         logger.warning("portal user-message persist failed for %s/%s: %s", agent_name, email, e)
+    return row_id
+
+
+def _stamp_user_turn(row_id: str | None, execution_id: str | None) -> None:
+    """#3166: name the turn a user row belongs to, after the fact. Best-effort —
+    a missed stamp costs only where the reply sits after a reload."""
+    if not row_id or not execution_id:
+        return
+    try:
+        db.set_portal_message_execution_id(row_id, execution_id)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("portal user-row execution stamp failed for %s: %s", row_id, e)
 
 
 def _inflight_key(session_id: str) -> str:
@@ -3545,6 +3652,18 @@ def portal_max_turn_seconds(turn_timeout: int) -> int:
     `tests/unit/test_2133_*` pins this arithmetic so a change drifts loudly.
     """
     return 2 * portal_attempt_ceiling_seconds(turn_timeout) + 60
+
+
+def portal_wait_budget_seconds(agent_name: str, turn_timeout: int) -> int:
+    """How long a Workspace client may wait for one turn: the turn's own bound,
+    the pull-pilot claim allowance (#3114), and the wait for the thread's lock
+    (#3166) — a turn sent while another runs on the same thread queues behind
+    it for up to the lock's TTL before it starts. The marker TTL and the 202
+    budget are this one number."""
+    from services.pull_pilot import pull_queue_allowance
+    from services.session_turn_service import resolve_lock_ttl
+    return (portal_max_turn_seconds(turn_timeout) + 2 * pull_queue_allowance(agent_name)
+            + resolve_lock_ttl(agent_name))
 
 
 def mark_turn_inflight(session_id: str, execution_id: str,
@@ -3891,7 +4010,9 @@ async def start_portal_turn(agent_name: str, message: str, email: str,
                             # ent#610 — see `portal_chat`.
                             reply_context: str = "",
                             # trinity-enterprise#751 — see `portal_chat`.
-                            gate_is_person: bool = False) -> dict:
+                            gate_is_person: bool = False,
+                            # #3265 — see `portal_chat`.
+                            attachments: str | None = None) -> dict:
     """Begin a turn and return as soon as it is dispatchable.
 
     Returns ``{execution_id, session_id}``. The caller subscribes to the
@@ -3976,10 +4097,9 @@ async def start_portal_turn(agent_name: str, message: str, email: str,
     # the client's budget and the actual turn disagree about one turn's life.
     from services.session_turn_service import resolve_turn_timeout
     turn_timeout = resolve_turn_timeout(agent_name)
-    # #3114: on a pull pilot each of the two attempts may first wait up to one
-    # agent timeout for a worker to claim it.
-    from services.pull_pilot import pull_queue_allowance
-    wait_budget = portal_max_turn_seconds(turn_timeout) + 2 * pull_queue_allowance(agent_name)
+    # #3114 / #3166: plus the pull-pilot claim allowance and the wait for the
+    # thread's lock — see `portal_wait_budget_seconds`.
+    wait_budget = portal_wait_budget_seconds(agent_name, turn_timeout)
 
     # #2320: drop any verdict left by the PREVIOUS turn on this thread before
     # the new marker lands. Without this, a client polling turn N+1 is handed
@@ -3991,6 +4111,7 @@ async def start_portal_turn(agent_name: str, message: str, email: str,
         try:
             await portal_chat(agent_name, message, email, session_id=session_id,
                               include_owned=include_owned, execution_id=execution_id,
+                              attachments=attachments,   # #3265
                               turn_timeout_seconds=turn_timeout,
                               # #2196: already resolved above — one Docker read per turn.
                               availability=availability,
@@ -4461,6 +4582,9 @@ def get_history(agent_name: str, email: str, session_id: str | None = None,
     # the thumb they already gave. One query for the thread rather than one per
     # message, and scoped to this evaluator — nobody sees anyone else's rating.
     _attach_own_ratings(messages, email, is_platform=include_owned)
+    # #3265: the stored JSON becomes the list the bubble renders.
+    for m in messages:
+        m["attachments"] = decode_turn_attachments(m.get("attachments"))
     # ent#286: a client that reloaded mid-turn has lost the execution id it was
     # streaming. It arrives here, on the fetch the client already makes on
     # mount, so reattaching costs no extra round trip.
@@ -4492,12 +4616,9 @@ def get_history(agent_name: str, email: str, session_id: str | None = None,
                     # (#2133) — a `lost` verdict never retries, so under-waiting
                     # only costs a premature "check shortly" message, but it is
                     # still the dishonest one.
-                    from services.pull_pilot import pull_queue_allowance
                     from services.session_turn_service import resolve_turn_timeout
-                    wait_budget = (
-                        portal_max_turn_seconds(resolve_turn_timeout(agent_name))
-                        + 2 * pull_queue_allowance(agent_name)  # #3114
-                    )
+                    wait_budget = portal_wait_budget_seconds(
+                        agent_name, resolve_turn_timeout(agent_name))
                 else:
                     wait_budget = ttl
         except Exception as e:  # noqa: BLE001 — budget None → the client falls back
@@ -4877,12 +4998,19 @@ def _inbox_list_cmd(inbox: str, legacy: str | None = None) -> str:
 async def _read_inbox(agent_name: str, email: str) -> list[dict]:
     """Raw inbox listing for a client on a running agent. Returns [] if the agent
     is offline or the inbox is empty — never raises (best-effort read)."""
+    return await _read_inbox_or_none(agent_name, email) or []
+
+
+async def _read_inbox_or_none(agent_name: str, email: str) -> list[dict] | None:
+    """`_read_inbox`, but None when the listing could not be read at all (agent
+    not running, exec failed, unparsable output) — so a caller that must tell
+    "couldn't read" from "not there" can (#3265). Never raises."""
     from services.docker_service import get_agent_container
     from services.docker_utils import container_exec_run
 
     container = get_agent_container(agent_name)
     if not container or getattr(container, "status", "") != "running":
-        return []
+        return None
     try:
         legacy = (
             _legacy_client_inbox(email)
@@ -4893,12 +5021,12 @@ async def _read_inbox(agent_name: str, email: str) -> list[dict]:
             container, _inbox_list_cmd(_client_inbox(email), legacy), user="developer"
         )
         if getattr(res, "exit_code", 1) != 0:
-            return []
+            return None
         raw = res.output.decode() if isinstance(res.output, (bytes, bytearray)) else str(res.output)
         items = json.loads(raw.strip() or "[]")
     except Exception as e:  # noqa: BLE001 — listing is best-effort
         logger.warning("portal inbox list failed for %s: %s", agent_name, e)
-        return []
+        return None
     out = []
     for it in items:
         mtime = it.get("mtime")

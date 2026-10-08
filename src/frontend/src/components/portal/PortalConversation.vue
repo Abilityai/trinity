@@ -388,6 +388,14 @@
               class="max-w-full"
               @remove="dropReply(item.index)"
             />
+            <!-- #3265: what this message carried — kept on the stored row, so a
+                 reload shows it too. -->
+            <PortalMessageAttachments
+              v-if="item.message.attachments && item.message.attachments.length"
+              :attachments="item.message.attachments"
+              :agent-name="agent.name"
+              :load-blob="loadUploadBlob"
+            />
             <div
               class="rounded-2xl rounded-br-md px-3.5 py-3 text-sm leading-relaxed whitespace-pre-wrap"
               :class="item.message.failed ? 'bg-status-danger-50 dark:bg-status-danger-900/30 text-status-danger-800 dark:text-status-danger-200 ring-1 ring-status-danger-300 dark:ring-status-danger-800' : 'bg-action-primary-600 text-white'"
@@ -888,7 +896,7 @@ import PortalAvatar from './PortalAvatar.vue'
 import PortalStarButton from './PortalStarButton.vue'
 import PortalEditableTitle from './PortalEditableTitle.vue'
 import PortalChatTabs from './PortalChatTabs.vue'
-import { newChatHotkeyLabel, MAIN_TAB_LABEL, composerAvailabilityNotice, assistantRow, replyFromHistory, replyBaseline, readReplyBaseline, agentChatTabs, NEW_CHAT_TAB_ID } from './portalUtils'
+import { newChatHotkeyLabel, MAIN_TAB_LABEL, composerAvailabilityNotice, assistantRow, replyFromHistory, replyBaseline, readReplyBaseline, agentChatTabs, NEW_CHAT_TAB_ID, pairRepliesWithQuestions } from './portalUtils'
 // ent#621: the same wrap the typeahead's roving selection uses — one modulo.
 import { cycleIndex } from './portalKeymap'
 // ent#738: the chip's one-line excerpt — the same one the Inbox's arrow hands over.
@@ -898,6 +906,8 @@ import { chatTurnAsks, placeAsksInThread, askTileMode, askHistoryLine, isDiscuss
 import AskMarkdown from '@/components/operator/AskMarkdown.vue'
 import { formatLocalDateTime } from '@/utils/timestamps'
 import { usePortalFileDrop, attachmentState } from '@/composables/usePortalFileDrop'
+import PortalMessageAttachments from './PortalMessageAttachments.vue'
+import { sentAttachments, attachmentsForRequest } from './portalMessageAttachments'
 import { useStickToBottom } from '@/composables/useStickToBottom'
 import { useConversationAnchor } from '@/composables/useConversationAnchor'
 import { useRoute, useRouter } from 'vue-router'
@@ -1406,6 +1416,9 @@ const {
   settled: attachmentsSettled,
   handlers: dropHandlers,
 } = usePortalFileDrop((file) => store.uploadDocument(props.agent.name, file))
+// #3265: a sent message's thumbnails and downloads read the upload back
+// through the same authenticated route the Files tab uses.
+const loadUploadBlob = (agentName, filename) => store.fetchUploadBlob(agentName, filename)
 const offline = ref(typeof navigator !== 'undefined' && navigator.onLine === false)
 
 const scrollEl = ref(null)
@@ -1475,12 +1488,15 @@ async function loadThread(sessionId) {
     // own role; only the assistant shape is shared.
     // trinity-enterprise#610: `at` is the row's persisted time, which is what
     // places a chat-turn ask among the messages (`threadRows`).
-    messages.value = (msgs || []).map((m) => ({
+    // #3166: each reply under its own question, when two turns overlapped.
+    messages.value = pairRepliesWithQuestions(msgs).map((m) => ({
       ...(m.role === 'assistant'
         ? assistantRow(m)
         // ent#534: spoken rows and the call they belong to — folded by `threadItems`.
         : { role: m.role, content: m.content, id: m.id, myRating: m.my_rating || null,
-            source: m.source || null, voiceCallId: m.voice_call_id || null }),
+            source: m.source || null, voiceCallId: m.voice_call_id || null,
+            // #3265: what the turn carried, stored on its row.
+            attachments: m.attachments || null }),
       at: m.created_at || null,
     }))
     inFlight = inFlightExecutionId
@@ -1989,7 +2005,7 @@ let elapsedTimer = null
 // "Thinking… / Working on it… / Still working…" label went with the dots.
 const elapsed = ref(0)
 
-async function deliver(text, { replyId = null } = {}) {
+async function deliver(text, { replyId = null, attachments = null } = {}) {
   terminalOutcome.value = null
   sending.value = true
   elapsed.value = 0
@@ -2021,7 +2037,9 @@ async function deliver(text, { replyId = null } = {}) {
                                               // ent#555 — what the user is looking at.
                                               openCanvasId: openCanvasId.value,
                                               // ent#610 — the message this replies to.
-                                              replyToMessageId: replyId })
+                                              replyToMessageId: replyId,
+                                              // #3265 — what the message carries.
+                                              attachments: attachmentsForRequest(attachments) })
     } catch (dispatchErr) {
       // Nothing was created, so a retry is safe — but only retry when the
       // ROUTE is what failed. A 404/405 means an older backend without this
@@ -2041,7 +2059,8 @@ async function deliver(text, { replyId = null } = {}) {
                                           // ent#555 — the fallback carries it too, or the
                                           // context silently depends on streaming working.
                                           openCanvasId: openCanvasId.value,
-                                          replyToMessageId: replyId })
+                                          replyToMessageId: replyId,
+                                          attachments: attachmentsForRequest(attachments) })
     }
 
     if (started) {
@@ -2375,7 +2394,9 @@ async function awaitPersistedReply(sessionId, baseline, budgetSeconds,
     // caller's own rating out with the text. They were always in hand here —
     // this reads the row the server WROTE — and were being dropped, which is
     // the whole of the "not rateable until reload" defect.
-    const reply = replyFromHistory(data.messages, baseline)
+    // #3166: matched on THIS turn's id — another turn on the thread may have
+    // written its reply after our baseline was read.
+    const reply = replyFromHistory(data.messages, baseline, executionId)
     if (reply) return { ...reply, session_id: data.sessionId || sessionId }
     // #2320: the server told us how this turn ended. Authoritative regardless
     // of the marker — a verdict naming THIS execution means it is over — and
@@ -2437,10 +2458,16 @@ function markFailed(index, content, error, { retryable = true } = {}) {
 // means "a turn is running" and is read by the header, the Stop control and
 // the reattach poller.
 const escalatingNow = ref(false)
+// #3265 review: the ordinary send has the same window. It clears the composer
+// and then waits for in-flight uploads, and `sending` is only set later, in
+// `deliver()` — so without this a second Enter with new text started a second
+// turn alongside the first. Its own flag for the reason `escalatingNow` is;
+// released when `send()` returns, by which time `sending` has taken over.
+const settlingUploads = ref(false)
 
 async function send() {
   const text = input.value.trim()
-  if (!text || sending.value || escalatingNow.value) return
+  if (!text || sending.value || escalatingNow.value || settlingUploads.value) return
   // The composer is about to be cleared programmatically, which fires no input
   // event — so the popup and its Esc sentinel are cleared here rather than left
   // armed against a message that no longer exists.
@@ -2501,7 +2528,27 @@ async function send() {
   // (its label, and Retry resends it), so the next message is not a reply.
   const reply = replyTo.value
   if (reply) emit('reply-done')
-  await submitUserText(text, { replyId: reply?.messageId || null, replyExcerpt: reply?.excerpt || '' })
+  // #3265: the files go WITH the message, so it can show them. Uploads still in
+  // flight are waited for first (the escalation path above does the same):
+  // only a settled chip can say whether it is a sent file or a failed one, and
+  // a failed one is shown on the message rather than dropped.
+  let carried = null
+  // Held until the turn is under way (`deliver()` sets `sending`), not just
+  // until the uploads settle — the hand-off between the two is awaited too.
+  settlingUploads.value = true
+  try {
+    if (attachments.value.length) {
+      await attachmentsSettled()
+      carried = sentAttachments(attachments.value)
+      // The message carries them now, so the composer lets go at once rather
+      // than showing the same files twice until the turn ends.
+      clearAttachments()
+    }
+    await submitUserText(text, { replyId: reply?.messageId || null, replyExcerpt: reply?.excerpt || '',
+                                 attachments: carried })
+  } finally {
+    settlingUploads.value = false
+  }
 }
 
 // The tail every user utterance shares, typed or spoken (ent#440). Extracted
@@ -2509,7 +2556,7 @@ async function send() {
 // be a second conversation wearing the same thread, which is the whole thing
 // this feature exists not to be. Returns the outcome so a caller that is not a
 // person watching the screen — the voice loop — can decide what to do next.
-async function submitUserText(text, { replyId = null, replyExcerpt = '' } = {}) {
+async function submitUserText(text, { replyId = null, replyExcerpt = '', attachments: carried = null } = {}) {
   // ent#491: the user's own activity is the ordering signal, so the bump happens
   // HERE — on send — and not when a reply lands. Any agent this message wakes
   // counts, mirroring the room fan-out (`unreadByAgent`): if you @mention two
@@ -2525,6 +2572,8 @@ async function submitUserText(text, { replyId = null, replyExcerpt = '' } = {}) 
   const index = messages.value.push({
     role: 'user', content: text, failed: false, error: null,
     replyTo: replyId ? { messageId: replyId, excerpt: replyExcerpt } : null,
+    // #3265: what the message carried, shown on it from the moment it is sent.
+    attachments: carried && carried.length ? carried : null,
     // trinity-enterprise#610: sent from here — placed at the newest server time
     // before it, so an ask this turn raises lands below it without the browser's
     // clock taking part (`placeAsksInThread`); the reload brings the server's time.
@@ -2536,7 +2585,7 @@ async function submitUserText(text, { replyId = null, replyExcerpt = '' } = {}) 
   await pinToBottom()
   // A stale "couldn't stop the turn" must not outlive the turn it described.
   cancelError.value = ''
-  const res = await deliver(text, { replyId })
+  const res = await deliver(text, { replyId, attachments: carried })
   return settleDelivery(index, text, res)
 }
 
@@ -2607,7 +2656,8 @@ async function retry(i) {
   // A stale "couldn't stop the turn" must not outlive the turn it described —
   // and `retry` is a new turn, so it clears it for the same reason `send` does.
   cancelError.value = ''
-  const res = await deliver(content, { replyId: msg.replyTo?.messageId || null })
+  const res = await deliver(content, { replyId: msg.replyTo?.messageId || null,
+                                       attachments: msg.attachments || null })
   settleDelivery(i, content, res)
 }
 

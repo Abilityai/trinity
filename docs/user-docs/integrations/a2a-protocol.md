@@ -62,19 +62,19 @@ The first four tools need the A2A capability enabled; the three outbound-registr
 
 ## Part 2 — Consume an exposed agent (external orchestrator)
 
-Once an agent is exposed, an external A2A client discovers and tasks it in three steps. The examples below use `curl` against a local instance (front door on port `8001`); a real A2A SDK does the same automatically.
+Once an agent is exposed, an external A2A client discovers and tasks it in three steps. The examples below use `curl` against a local instance (the frontend's front door on port `80`); a real A2A SDK does the same automatically.
 
 ### 1. Discover — fetch the Agent Card
 
 ```bash
-curl -s http://localhost:8001/a2a/new_cool_agent/.well-known/agent-card.json | jq
+curl -s http://localhost/a2a/new_cool_agent/.well-known/agent-card.json | jq
 ```
 
 ```json
 {
   "protocolVersion": "0.3.0",
   "name": "new_cool_agent",
-  "url": "http://localhost:8001/a2a/new_cool_agent",
+  "url": "http://localhost/a2a/new_cool_agent",
   "preferredTransport": "JSONRPC",
   "capabilities": { "streaming": true },
   "securitySchemes": { "bearerAuth": { "type": "http", "scheme": "bearer" } },
@@ -93,7 +93,7 @@ Issue an MCP key from **Settings → MCP Keys** (or the API) and share it with t
 **Synchronous (`message/send`):**
 
 ```bash
-curl -s -X POST http://localhost:8001/a2a/new_cool_agent \
+curl -s -X POST http://localhost/a2a/new_cool_agent \
   -H "Authorization: Bearer $TOKEN" \
   -H 'Content-Type: application/json' \
   -d '{
@@ -170,6 +170,8 @@ price. An agent with no payment config has a byte-identical card to before.
 > agent *costs*; A2A exposure is what makes the paid A2A door reachable. On a
 > build without the exposure feature, a configured price block points at a door
 > that answers `404` — turn exposure on for that agent to open it.
+
+Crypto and card (fiat) plans both work: Trinity advertises the x402 scheme that matches the agent's plan, and the 402's `resource.url` uses the public origin buyers reach you on. See [Nevermined Payments](nevermined-payments.md) for both.
 
 **Time-based (duration) plans.** Set **Credits per Request** to `0`. A duration
 plan charges by time, so Trinity sends no per-call amount and the plan decides
@@ -375,6 +377,29 @@ A few behaviors that surprise people, all deliberate: the **calling agent's cont
 
 Register the remote instance's agent endpoint (`https://their-trinity.example.com/a2a/their-agent`) with a **Trinity MCP API key from that instance** as the credential. Both sides speak A2A v0.3, so it works with no extra configuration.
 
+### Between your own instances on a private network
+
+When your Trinity instances share a private network (a tailnet or a VPN), they can call each other's agents over it, without the public internet and without exchanging keys. It takes one step on each side, after an admin declares the network once.
+
+**1. Declare the network (admin, on both instances).** List the network's address range, the names your instances use on it, or both. Optionally set the address this instance has on that network, so internal agents advertise it on their card:
+
+```bash
+curl -X PUT http://localhost:8000/api/settings/a2a-trusted-networks \
+  -H "Authorization: Bearer $ADMIN_TOKEN" -H "Content-Type: application/json" \
+  -d '{"entries": ["100.64.0.0/10", "*.your-tailnet.ts.net"],
+       "internal_base_url": "http://this-instance.your-tailnet.ts.net"}'
+```
+
+The platform refuses entries that would trust its own Docker networks, loopback, link-local or reserved ranges, or anything broader than a /8.
+
+**2. Provider side:** in the agent's **A2A** settings, turn on **Expose over A2A** and choose **Our own networks only**. The agent now answers only callers whose address is in a declared range. Everyone else, including the public address, sees an unexposed agent. **No key needed on our networks** is on by default; turn it off to require a Trinity key even from the private network.
+
+**3. Caller side:** register `http://<provider-instance>.<your-network>/a2a/<agent>` as an outbound endpoint, with no credential. Plain `http://` and private addresses are accepted only because the host matches a declared entry. The check runs again on every call, so a name that later resolves outside the declared ranges is refused.
+
+Keyless calls are rate-limited and recorded with the caller's address. A keyless caller can read and cancel only the tasks it started.
+
+> **Pair it with a network rule.** "No key on our network" trusts every machine on that network. If the network also carries laptops or other people's devices, add a network ACL that admits A2A traffic only between your Trinity instances.
+
 ### Troubleshooting
 
 | Symptom | Cause |
@@ -469,6 +494,7 @@ Auth failures are transport-level `401`; exposure/allow-list failures are `404`/
 
 - [MCP Server](mcp-server.md) — Trinity's own inter-agent protocol, and where the Bearer key comes from
 - [Agent Network](../collaboration/agent-network.md) — agent-to-agent calls inside one Trinity instance
+- [Nevermined Payments](nevermined-payments.md) — configuring the price an inbound A2A caller pays
 
 **External references:**
 

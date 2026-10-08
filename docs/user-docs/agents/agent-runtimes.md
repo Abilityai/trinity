@@ -1,6 +1,6 @@
 # Agent Runtimes
 
-Trinity agents run on a pluggable runtime — the CLI harness that executes the agent inside its container. Trinity supports Claude Code (default), Gemini CLI, and OpenAI Codex.
+Trinity is model-agnostic: each agent runs on a pluggable runtime — the CLI harness that executes the agent inside its container. Trinity supports three runtimes: Claude Code (the default), Gemini CLI, and OpenAI Codex.
 
 ## Concepts
 
@@ -20,20 +20,31 @@ runtime:
 
 The runtime is fixed when the agent is created. To change it, recreate the agent from a template that declares a different runtime — there is no post-creation switch.
 
-On the Agent Detail page, a runtime badge shows which runtime the agent is using. Chat works the same across all runtimes, with full conversation continuity. Codex cannot resume a session, so in the [Workspace](../sharing-and-access/workspace.md) a Codex agent's turns replay the visible history as text instead of carrying working memory forward (see Limitations).
+On the Agent Detail page, a runtime badge shows which runtime the agent is using. Chat works on all three runtimes, and each continues its **own** chat session from turn to turn. Only Claude Code resumes a session in the [Workspace](../sharing-and-access/workspace.md): a Codex agent's Workspace turns replay the visible history as text instead, and Gemini's headless turns never resume (see Limitations).
 
 ### Runtime Comparison
 
 | | Claude Code (default) | Gemini CLI | OpenAI Codex |
 |---|---|---|---|
-| Auth model | Claude subscription / OAuth, or platform API key | Gemini API key | `OPENAI_API_KEY` in `.env` (or a ChatGPT-plan login; Codex skips Claude-subscription auto-assign) |
+| Auth model | Claude subscription / OAuth, or platform API key | The platform Gemini key (Settings, or `GEMINI_API_KEY` / `GOOGLE_API_KEY` on the backend) | `OPENAI_API_KEY` in `.env` (or a ChatGPT-plan login; Codex skips Claude-subscription auto-assign) |
 | System-prompt file | `CLAUDE.md` | `CLAUDE.md` | `AGENTS.md` |
-| Chat continuity | Yes | Yes | Yes |
-| Working memory across turns | Yes | Yes | No (history replayed as text) |
+| Chat continuity (own session) | Yes | Yes | Yes |
+| Workspace session resume | Yes | No (headless turns never resume) | No (history replayed as text) |
 | MCP support | Yes | Yes | Yes |
-| Cost reporting | Actual | Actual | Estimated |
+| Cost reporting | Reported by the CLI | Estimated from tokens | Estimated from tokens |
+| CLI version | Pinned in the base image | Pinned in the base image | Pinned in the base image |
 
-Safety controls apply across all runtimes: read-only mode and credential redaction work the same regardless of runtime. Codex enforces read-only through its own sandbox (`--sandbox read-only`) rather than the Claude tool-use hook.
+Safety controls are not the same on every runtime. Platform controls (which credentials the agent holds, which agents and platform calls its key may reach) apply to all three, and so does credential redaction of stored results: the backend scrubs execution output whichever CLI produced it. The in-container controls differ:
+
+| In-container control | Claude Code | OpenAI Codex | Gemini CLI |
+|---|---|---|---|
+| [Guardrail](agent-guardrails.md) hooks (Bash deny-list, credential-file protection, leak scan) | Yes | No | No |
+| Read-only mode | Yes, through a hook | Yes, through Codex's own read-only sandbox (`--sandbox read-only`) | No |
+| Credential redaction of output | Yes, inside the container | Yes, inside the container | No; only the platform's pattern-based scrub when results are stored |
+| Turn limit | Yes | No; the execution timeout bounds the run | No; the execution timeout bounds the run |
+| Per-agent disallowed tools | Yes | No | No |
+
+See [How Trinity Keeps Agents in Bounds](../guides/keeping-agents-in-bounds.md#coverage-by-runtime) for where the boundary sits.
 
 ### Codex authentication
 
@@ -41,6 +52,21 @@ A Codex agent authenticates in one of two ways, and Trinity handles the file the
 
 - **API key** — inject `OPENAI_API_KEY` (or `CODEX_API_KEY`) as a credential. Trinity logs the CLI in with that key before the agent's first turn, so an API-key Codex agent works out of the box. If you rotate the key in `.env`, the next turn re-logs in with the new one.
 - **ChatGPT plan** — run `codex login` yourself from the agent's terminal. Trinity never overwrites a plan login with an API key.
+
+### Gemini authentication
+
+A Gemini agent uses the platform's Gemini key. Trinity reads the key saved in **Settings** first, then `GEMINI_API_KEY` or `GOOGLE_API_KEY` on the backend, and passes it to the container as `GEMINI_API_KEY` when the container is created. Settings accepts Google AI Studio keys that start with `AIza` or `AQ.` — see [Platform Keys](../credentials/platform-keys.md). With no key configured, the agent is still created, but its turns fail with "GEMINI_API_KEY not configured".
+
+### Gemini CLI turns
+
+Trinity pins `gemini-cli` in the base image, and the image build checks that the pinned CLI accepts every argument Trinity passes. A new CLI release that drops a flag therefore fails the image build instead of every turn. Gemini CLI has no system-prompt flag, so Trinity puts the platform instructions in front of each turn's input. The execution log still shows only your message as the user turn.
+
+A chat turn resumes only the agent's own chat session, never the newest session on disk, so a scheduled or headless run never leaks into the chat. Changing the model or resetting the chat history starts a fresh session. If the saved session is gone, the turn retries once from a fresh session.
+
+### How failures are reported
+
+- **Claude Code chat:** a turn that ends with an error is recorded as **failed**, even when it produced some text first. The one exception is when the session transcript on disk proves the turn finished. The answer is then kept and marked as recovered.
+- **Codex:** a failure counts as a rate limit only when the error says so ("rate limit", "quota", "too many requests") or reports an HTTP `429` status. A bare `429` inside a timestamp, port or process id is not misread as a rate limit.
 
 ### Headless runs on Claude Code
 
@@ -64,16 +90,19 @@ There is no API or MCP endpoint to switch an agent's runtime after creation. See
 ## Limitations
 
 - **Codex cannot resume a session.** In the Workspace, a Codex agent's turns replay the visible history as text instead of carrying its working memory forward — the conversation stays coherent, but tool results and mid-task state do not survive between turns.
+- **Gemini headless turns never resume a session.** Tasks, schedules and Workspace turns on a Gemini agent run without the previous turn's working memory. Only the Chat path resumes the agent's own Gemini session.
+- **No turn cap on Gemini or Codex.** Neither CLI has a per-run turn limit, so the guardrail `max_turns` settings are logged but not enforced there. The execution timeout bounds the run.
 - **The headless tool denial reaches an agent on its next container recreate** after the base image is rebuilt; the prompt guidance reaches every agent as soon as the platform is updated.
 - **No runtime switch after creation.** Recreate the agent from a different template to change runtimes — a post-creation runtime-switch endpoint is planned.
 - **Codex cost is estimated**, not metered exactly.
-- **Claude Code is pinned in the base image.** A model newer than the pinned Claude Code version is refused, and the run fails with `model_unsupported` rather than an auth error (see [Model Selection](agent-configuration.md#model-selection)). Rebuild the base image after upgrading Trinity so agents pick up the newer CLI.
+- **Each CLI is pinned in the base image.** A model newer than the pinned Claude Code version is refused, and the run fails with `model_unsupported` rather than an auth error (see [Model Selection](agent-configuration.md#model-selection)). Rebuild the base image after upgrading Trinity so agents pick up the newer CLIs.
 - **Codex vision/image input and SSE streaming are out of scope** for the current release (planned).
 
 ## See Also
 
 - [Creating Agents](creating-agents.md) -- Selecting a runtime via the template
-- [Continuous Conversations](agent-session.md) -- What resuming preserves (Claude/Gemini only)
+- [Continuous Conversations](agent-session.md) -- What resuming preserves (Claude Code only)
+- [Platform Keys](../credentials/platform-keys.md) -- The Gemini key a Gemini agent uses
 - [Agent Guardrails](agent-guardrails.md) -- Your own `disallowed_tools`, merged with the platform's headless denials
 - [Chat](agent-chat.md) -- Standard chat, available on all runtimes
 - [Subscription Credentials](../credentials/subscription-credentials.md) -- Claude-subscription auto-assignment (skipped for Codex)

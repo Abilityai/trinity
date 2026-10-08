@@ -1060,6 +1060,22 @@ cannot clobber the fresh listing. Per agent and not one shared token, because a 
 runs three of these concurrently for three different agents and a shared counter lets each
 invalidate the last.
 
+**A sent message keeps what it carried (#3265).** The 1:1 send waits for in-flight uploads
+(`settled()`, as the room escalation does), snapshots the settled chips onto the message
+(`components/portal/portalMessageAttachments.js::sentAttachments`, named by the upload
+route's stored `filename`) and clears the composer, then sends the names as
+`PortalChatRequest.attachments` on both `/chat` and `/chat/stream`.
+`client_portal/service.py::resolve_turn_attachments` reads the sender's own inbox once and
+keeps a successful entry only when that filename is there, with size and type from the
+listing — a request cannot put a file it never sent on its message. A failed upload is
+stored with its reason. The JSON lands on the user row (`enterprise_portal_messages.
+attachments`, both migration tracks) and `get_history` returns it on `PortalHistoryMessage`,
+so a reload shows it. `PortalMessageAttachments.vue` renders a fixed-size thumbnail per
+image, a chip per other file and a failed chip; thumbnails read through the
+rate-limited upload route (20/min, 100/h), so each is fetched once per tab, only when the
+message scrolls into view, and falls back to a chip when refused. Room messages
+(`enterprise_room_messages`) do not carry attachments yet.
+
 **The Files tab's own verbs (#2582 + ent#548).** Rows render from ONE flat projection
 (`components/portal/portalFiles.js::flattenFiles`) that owns both the render order and the
 preview index — two orderings would drift and the modal would silently open the wrong
@@ -1298,6 +1314,27 @@ sites. The synchronous fallback genuinely had no id — `portal_chat` minted one
 threw it away — so it returns `message_id`, **declared on `PortalChatResponse`** because the
 response model strips undeclared keys in silence. The `v-if="item.message.id"` gate stays:
 carry the identifier with the flag and let the consumer still refuse an empty one.
+
+**A reply names its turn (#3166).** `enterprise_portal_messages.execution_id` holds the
+execution that wrote the row: the dispatched id the client watches (never a cold retry's
+second row), on the reply, on the skill-approval notice and on the user row (stamped after
+the fact on the synchronous path, and moved to the retrying turn when a retry reuses the
+failed turn's row). Once history rows carry the key, `replyFromHistory` accepts only the row
+with the caller's own execution id. A row with NULL (a completion report) is never this
+turn's reply; rows without the key (an older backend) keep the identity/count rule. On load,
+`pairRepliesWithQuestions` places each reply under its own question, except across a voice
+call's rows or when the question is outside the window. A second message on a thread
+queues behind the first: `portal_chat` runs the turn with `wait_for_lock=True`, so the resume
+lock is waited for up to its TTL instead of `LOCK_WAIT_TOTAL_SECONDS` (30s, still the rule
+for the Session surface), and `portal_wait_budget_seconds` adds that TTL to the marker and
+the client's wait budget. A first turn over 30s no longer turns the second into a 429.
+Every `portal_chat` caller waits this way: the synchronous `POST .../chat` and the voice
+path hold their request open for up to the lock TTL (about agent timeout + 30s) where they
+held 30s. The queued turn's row is already `running`, so the wait is registered with
+`track_inflight_dispatch` (the watchdog's proof of life; without it a turn queued behind a
+first turn over 60s is orphaned), `started_at` is re-anchored once the lock is held (the
+#2433 rule, so the wait does not spend the run's timeout), and a cancel that lands during
+the wait finalizes the row without dispatching.
 
 **Flow**: [workspace-agents-at-the-centre.md](../feature-flows/workspace-agents-at-the-centre.md) ·
 **Requirements**: `requirements/core-agent.md` §5.23, §5.30

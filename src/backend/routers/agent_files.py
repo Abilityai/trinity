@@ -284,10 +284,17 @@ async def create_agent_folder_endpoint(
 async def get_agent_permissions(
     agent_name: str,
     request: Request,
+    strict: bool = Query(
+        False,
+        description=(
+            "503 when Docker cannot be read, instead of an answer with no peers "
+            "(trinity-enterprise#815)."
+        ),
+    ),
     current_user: User = Depends(get_current_user)
 ):
     """Get permissions for an agent."""
-    return await get_agent_permissions_logic(agent_name, current_user)
+    return await get_agent_permissions_logic(agent_name, current_user, strict=strict)
 
 
 @router.put("/{agent_name}/permissions")

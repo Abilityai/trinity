@@ -6,6 +6,7 @@ Two owner-only tabs on the Agent Detail page control who can reach an agent: the
 
 - **Operator** — A Trinity platform user. Operators log into the Trinity UI and get interact-level access to agents shared with them.
 - **External client** — Someone without a Trinity account who reaches the agent through a channel (Slack, Telegram, WhatsApp, a phone call) or a public link. Identified by verified email.
+- **Workspace roster** — Every email an agent is shared with can sign in to the [Workspace](workspace.md) and chat with it there. Sharing an agent to an email *is* that person's Workspace account; unsharing removes the agent from their roster.
 - **Access policy** — The per-agent Restricted/Open switch controlling whether unknown verified users may chat. See [Access Control](access-control.md) for the cross-channel verification model.
 
 ## Access Tab — Trinity Operators
@@ -68,6 +69,15 @@ Compact status rows for **Slack**, **Telegram**, **WhatsApp**, and **Voice calls
 
 Each channel dialog also carries that channel's **voice-replies allow flag** — replies are text by default and the agent opts individual replies into voice per message. See [Voice Replies](../advanced/voice-replies.md).
 
+### Portal clients
+
+A list of the people you've shared this agent with, as Workspace (client portal) sign-ins: each row shows when they were last seen, whether they are blocked, and when their sessions were last ended. **Refresh** reloads it.
+
+- **Log out** — ends this person's live Workspace sessions everywhere. One sign-in covers every agent shared with them, so there is no per-agent session to end. They can sign straight back in. Any owner of an agent shared with them can do this.
+- **Block** / **Unblock** — admins only. A block keeps the person out of the whole platform until an admin lifts it, and ends their sessions; their chat history and memory are kept. To remove someone from *this agent only*, unshare them instead.
+
+Both actions are recorded in the audit log, and an agent's own API key cannot perform them.
+
 ### Client roster — who's reaching this agent
 
 A read-only table of external channel users who have messaged the agent, aggregated across Telegram and WhatsApp (more channels to follow): client name, channel, verified email, message count, and last-active time, ordered by most recent. The roster is database-sourced, so it renders even when the agent container is stopped.
@@ -89,6 +99,9 @@ Two collapsible panels for distributing the agent's output rather than granting 
 | `/api/agents/{name}/access` | GET | Operator roster (active + pending) for the Access tab |
 | `/api/agents/{name}/shares/proactive` | GET / PUT | Per-recipient proactive-DM permission; PUT body `{email, allow_proactive}` (owner/admin) |
 | `/api/agents/{name}/clients` | GET | External client roster (owner-only, read-only) |
+| `/api/enterprise/client-portal/agents/{name}/clients` | GET | Portal clients with last-seen, block and session state (owner/admin; the prefix is historical) |
+| `/api/enterprise/client-portal/agents/{name}/clients/{email}/logout` | POST | End the client's live Workspace sessions (owner/admin, people only) |
+| `/api/enterprise/client-portal/agents/{name}/clients/{email}/block` | POST / DELETE | Block (optional `{reason}`) or unblock the client platform-wide (admin, people only) |
 | `/api/agents/{name}/public-prompt` | GET / PUT | Public/channel-only custom instructions (owner-only, ≤4000 chars; empty clears) |
 | `/api/agents/{name}/public-channel-model` | GET / PUT | Public-channel model override (owner-only; null clears to platform default) |
 
@@ -97,6 +110,7 @@ See [Backend API Docs](http://localhost:8000/docs) for full request/response sch
 ## See Also
 
 - [Access Control](access-control.md) — cross-channel email verification and access requests
+- [Workspace](workspace.md) — where the people you share an agent with chat with it
 - [Public Links](public-links.md) — shareable chat URLs
 - [Voice Replies](../advanced/voice-replies.md) — spoken replies on Slack, Telegram, and WhatsApp
 - [MCP Server](../integrations/mcp-server.md) — exposing an agent as a dedicated MCP tool

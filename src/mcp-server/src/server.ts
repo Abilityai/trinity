@@ -73,6 +73,12 @@ export interface ServerConfig {
    */
   agentChatPullEnabled?: boolean;
   /**
+   * #3232 report-back kill switch. When false, no chat_with_* call sends
+   * `parent_execution_id` — neither the async default nor a typed opt-in — so a
+   * delegated run never posts into the caller's conversation. Default ON.
+   */
+  reportBackEnabled?: boolean;
+  /**
    * #848 inline email auth. When true, a request arriving with NO Authorization
    * header opens an anonymous sentinel session that may call request_login /
    * verify_login (and the connector tools, which refuse to act until an email
@@ -423,6 +429,12 @@ export async function createServer(config: ServerConfig = {}) {
     // ServerConfig.agentChatPullEnabled). Same env key the backend declares in
     // config.py (MCP_AGENT_CHAT_PULL_ENABLED) so a single-.env deploy can't drift.
     agentChatPullEnabled = process.env.MCP_AGENT_CHAT_PULL_ENABLED === "true",
+    // #3232 report-back kill switch — default ON; "false", "0", "no" or "off"
+    // (any case, whitespace trimmed) turns it off; anything else, unset or
+    // empty included, leaves it on (see ServerConfig.reportBackEnabled).
+    reportBackEnabled = !["false", "0", "no", "off"].includes(
+      (process.env.MCP_REPORT_BACK_ENABLED ?? "").trim().toLowerCase()
+    ),
     // #848 inline email auth — default OFF. When off, a request with no
     // Authorization header is rejected exactly as before and no session is
     // created. When on, it yields an anonymous sentinel session that may only
@@ -560,6 +572,14 @@ export async function createServer(config: ServerConfig = {}) {
   // #946 pilot — surface the routing mode at startup so the soak's control vs
   // treatment window is unambiguous in the logs.
   console.log(`Agent→agent chat pull routing (#946): ${agentChatPullEnabled ? "ON (async /task)" : "OFF (sync /chat)"}`);
+  // #3232 — whether delegations can post back into the caller's conversation.
+  console.log(
+    `Delegation report-back (#3232): ${
+      reportBackEnabled
+        ? "ON (async dispatches carry the caller's turn by default)"
+        : "OFF (MCP_REPORT_BACK_ENABLED is false/0/no/off — no parent is ever sent)"
+    }`
+  );
   // #848 — a keyless session tier is a posture change; make it unambiguous in
   // the startup log which mode the server came up in.
   console.log(
@@ -625,7 +645,7 @@ export async function createServer(config: ServerConfig = {}) {
   // Build tool groups once, then register + count (SEC-001 Phase 3).
   const toolGroups: Record<string, any>[] = [
     createAgentTools(client, requireApiKey),
-    createChatTools(client, requireApiKey, agentChatPullEnabled),
+    createChatTools(client, requireApiKey, agentChatPullEnabled, reportBackEnabled),
     createSystemTools(client, requireApiKey),
     createDocsTools(),
     createSkillsTools(client, requireApiKey),
@@ -716,6 +736,7 @@ export async function createServer(config: ServerConfig = {}) {
     client,
     requireApiKey,
     agentChatPullEnabled,
+    reportBackEnabled,
     trinityApiUrl,
     operatorOnly,
     builtinToolNames,

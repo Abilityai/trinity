@@ -4,7 +4,7 @@
 
 ## How do I start chatting with an agent?
 
-Two places. The **Workspace** (`/workspace`, opened from the nav in its own browser tab) is the main one: click an agent in the sidebar and you land in the chat you were last in with it — its pinned **Main** chat the first time — and the conversation keeps its memory from turn to turn. The **Chat** tab on the agent's detail page is a quick stateless surface — fine for one-off questions, but each message starts fresh. Either way the agent must be running. See [Workspace](../sharing-and-access/workspace.md) and [Agent Chat](../agents/agent-chat.md).
+Two places. The **Workspace** (`/workspace`, opened from the nav in its own browser tab) is the main one: click an agent in the sidebar and you land in the chat you were last in with it — its pinned **Main** chat the first time — and the conversation keeps its memory from turn to turn. The **Chat** tab on the agent's detail page is a quick surface for one-off questions: each message runs as a new agent session, with the last 20 messages included for context. Either way the agent must be running. See [Workspace](../sharing-and-access/workspace.md) and [Agent Chat](../agents/agent-chat.md).
 
 ## What's the difference between the Workspace and the Chat tab?
 
@@ -44,7 +44,7 @@ A short list computed for you and the agent in front of you: questions it is wai
 
 ## How do I make the agent forget the conversation and start fresh?
 
-Start a new chat (**New chat** or **⌘J** / **Ctrl+J**): it has no memory of the previous one. If you're in the agent's **Main**, use **Reset** in the header instead — it archives the current Main and starts the agent cold, keeping the old conversation in your list as an ordinary chat. Reach for either when the agent is going in circles, when you're switching topic and don't want bleed-over, or when repeated auto-compaction has degraded its answers. On the Chat tab every message already starts fresh, so there is nothing to clear. See [Continuous Conversations](../agents/agent-session.md#clearing-working-memory).
+Start a new chat (**New chat** or **⌘J** / **Ctrl+J**): it has no memory of the previous one. If you're in the agent's **Main**, use **Reset** in the header instead — it archives the current Main and starts the agent cold, keeping the old conversation in your list as an ordinary chat. Reach for either when the agent is going in circles, when you're switching topic and don't want bleed-over, or when repeated auto-compaction has degraded its answers. On the Chat tab each message already runs as a new agent session, with only the last 20 messages sent along as context, so there is no working memory to clear. See [Continuous Conversations](../agents/agent-session.md#clearing-working-memory).
 
 ## What do `/` and `@` do in the Workspace composer?
 
@@ -64,7 +64,7 @@ Yes, up to the agent's parallel-capacity limit (`max_parallel_tasks`, default 3)
 
 ## Why am I told the conversation is already handling a message?
 
-Turns on one conversation are serialized on purpose — two simultaneous resumes of the same session could corrupt its state. Send a second message while one is still running and you get a busy response with a retry hint rather than a queue. Wait for the current turn to finish, or start a separate chat for the parallel line of work. See [Continuous Conversations](../agents/agent-session.md).
+Turns on one conversation are serialized on purpose — two simultaneous resumes of the same session could corrupt its state. Send a second message while one is still running and it waits up to 30 seconds for the first to finish, then gets a busy response with a retry hint — it is not queued. Wait for the current turn to finish, or start a separate chat for the parallel line of work. See [Continuous Conversations](../agents/agent-session.md).
 
 ## How can I tell what the agent is doing while it works in the Workspace?
 
@@ -77,6 +77,26 @@ In the Workspace and on the Chat tab, **Send** becomes **Stop** while a turn run
 ## Why did my message fail, and why isn't there always a Retry button?
 
 A failed send tells you the real reason — the agent is busy, the turn timed out, the message was too large, there were too many messages, or the agent hit its usage limit — rather than a bare failure. **Retry** is offered only when nothing reached the agent: a turn the agent already ran is not silently sent and billed twice, so in that case ask again in your own words. An agent that is stopped or unreachable is labelled above the field before you type; the message still sends and the server's refusal is the answer. See [Workspace](../sharing-and-access/workspace.md#while-the-agent-works).
+
+## Why does a chat turn show as failed when the agent had already written part of an answer?
+
+Because the run ended in an error, and Trinity records that as a failure rather than passing the partial text — or an error message such as *API Error: 500* — off as the agent's reply. The execution is marked failed with the real error, which you can read on the Execution Detail page, and the chat route answers with an error status instead of a normal reply. If the evidence shows the agent did finish the turn and only its final result event was lost, Trinity recovers the reply instead of failing it. See [Chat API](../api-reference/chat-api.md#failed-turns).
+
+## Will my chat pick up where a scheduled run left off?
+
+No. A chat continues only its own session, never the most recent session on the agent, so a schedule or other background run that happened in between does not leak into your conversation. That holds on Claude Code and Gemini agents alike. To deliberately carry a finished run's context into a chat, open the execution and click **Continue as Chat**: the Chat tab opens with a banner naming the execution, and the agent has the full context of that run. The button appears once the run has finished and has a resumable session. See [Agent Chat](../agents/agent-chat.md#continue-as-chat).
+
+## Do `chat_with_agent` calls share a conversation with my Workspace chats?
+
+No — they are separate conversations. A sequential `chat_with_agent` call (and `POST /api/agents/{name}/chat`, which the `trinity` CLI also uses) continues the agent's own chat session, which every caller of that route shares. Your Workspace chats are yours alone, and the Chat tab replays its own transcript with no session at all. The agent's owner or an admin can wipe the shared session with `DELETE /api/agents/{name}/chat/history`; it also starts fresh after a model change. On an agent in the experimental pull-mode pilot, each caller gets their own `/chat` conversation instead. See [Agent Chat](../agents/agent-chat.md#mcp-tools) and [Chat API](../api-reference/chat-api.md#pull-mode-pilot-agents).
+
+## Where are my earlier conversations on the Chat tab?
+
+In the session dropdown at the top left of the Chat tab: it lists previous chats with their date, message count and last message, and selecting one loads it. **New Chat** starts an empty one. These conversations are stored in the platform database and survive container restarts, but remember the tab is stateless — reopening an old chat shows its messages and replays the last 20 of them as text on the next turn; the agent has no working memory of it. See [Agent Chat](../agents/agent-chat.md#session-management).
+
+## Why does the Chat tab say "Agent Not Running"?
+
+The Chat tab needs a running container, so for a stopped agent it shows **Agent Not Running** — *Start the agent to begin chatting* — in place of the input. Start the agent from its header and the input returns. The same applies to the chat API: `POST /chat` on a stopped agent answers 503. See [Managing Agents](../agents/managing-agents.md).
 
 ## Can the agent keep working on something in the background while I chat?
 

@@ -510,6 +510,7 @@
   - MCP `chat_with_agent` / `fan_out` forward a deterministic key over the call args so a transport retry dedupes.
   - Header is OPTIONAL on chat/task/MCP (absent → no dedup, full back-compat); upfront at-capacity rejections release the claim so the caller can retry; in-flight duplicate → 409.
   - Audit event `idempotent_replay` on every replay (duplicate-storms observable); 24h TTL purge folded into the cleanup-service retention sweep.
+  - **A dispatch receipt is replayed only while its run can still succeed (#3245).** On `/chat` and `/task`, a stored receipt (`async_mode: true`, status `accepted` / `queued` / `queued_timeout`) whose execution ended `failed`, `cancelled` or `skipped`, or whose execution row is gone, is not replayed: an identical request dispatches a new run under the same key. **Exception:** a `failed` run whose error starts `lease_expired:` (the slot reaper's mark, written when no result arrived before the slot TTL) may still report success, so it keeps replaying until the agent's execution timeout + 5 min after the failure, then goes fresh. Carve-outs: a gated skill's approval record answers before the receipt is checked; `sched:` keys (the scheduler's own) are never reclaimed; non-receipt snapshots (sync results) replay as before. Concurrency: identical retries that observe the same dead run start one new run (compare-and-delete on the stored execution id), barring a dedupe-layer failure. Effects can repeat across attempts — effect dedupe is per execution, and a new attempt has a new execution id. The MCP client marks a replayed receipt `idempotent_replay: true`.
 - **Architectural Invariant**: #18 — every new trigger type must accept an `Idempotency-Key` before merge.
 
 #### 10.10.1 Effect-Scoped Idempotency for Outbound Side Effects
@@ -1372,7 +1373,11 @@ schedules:
     Never re-send because a call timed out or its delivery could not be
     confirmed. Read with `get_execution_result` / `get_fan_out_result`; to
     finish later, `set_reminder` naming the `execution_id` and end the turn;
-    never report delegated work as done from a receipt. An error without an
+    never report delegated work as done from a receipt. After a confirmed
+    `failed` or `cancelled` outcome, re-send word for word to request a new
+    attempt; if the same `execution_id` comes back (a `lease_expired` failure
+    keeps replaying until its hold window ends, §10.10), `set_reminder` and end
+    the turn (#3245). An error without an
     `execution_id` — `agent_busy` included — is checked against
     `list_recent_executions` before a word-for-word re-send (`agent_busy` after
     `retry_after_seconds`). `agent_busy` is not "nothing ran": the MCP client
@@ -1407,8 +1412,12 @@ schedules:
     `parallel=true, async=true`" before the model read them (other runtimes'
     MCP clients were not measured). Every description that
     carries the contract is pinned under the cap on the text the server
-    publishes (1,940 for `chat_with_agent`), and mode details moved into
-    parameter descriptions, which are not cut.
+    publishes (2,030 for `chat_with_agent`), and mode details moved into
+    parameter descriptions, which are not cut. #3245 added the
+    confirmed-failure bullet: the contract budget was raised deliberately from
+    1,650 to 1,730 chars (the contract is 1,720), and `chat_with_agent`'s lead
+    dropped "(the primary way to use sub-agents)" to stay under the cap (it
+    would publish 2,066 otherwise).
   - **Receipt text.** Every `execution_id` receipt a `chat_with_*` caller gets
     carries the same "Do not re-send: read the outcome with
     `get_execution_result(agent_name=…, execution_id=…)`" line: the
@@ -1418,7 +1427,9 @@ schedules:
     whose REST "poll GET …" line `runAgentChat` rewrites. Those rewritten leads
     claim nothing about liveness ("it may still be running or already done"):
     the backend stores the async receipt as the idempotency snapshot at dispatch
-    and replays it for 24 h, even after the run failed (#3245). `fan_out_timeout`
+    and replays it while the run is live, succeeded or may still report back —
+    since #3245 a run that ended `failed`/`cancelled` is not replayed, and a
+    replayed answer carries `idempotent_replay: true` (§10.10). `fan_out_timeout`
     keeps its own `get_fan_out_result` line (#2670). The "concurrent-duplicate
     guard will kill mid-execution" claim the receipts and the old description
     made is gone — no such guard exists in the backend or the agent server.
@@ -1427,7 +1438,7 @@ schedules:
   typed outcome (ent#569), the unforwarded `chat_with_agent` `execution_id`
   (#3232), the system-scoped gate-outcome gap (#3233), the post-run 429
   labelled `agent_busy` (#3244), the async receipt replayed after a failed run
-  (#3245), and the trinity-pm canon pointer (AC6, post-merge).
+  (#3245 — since fixed, §10.10), and the trinity-pm canon pointer (AC6, post-merge).
 
 ## 38. Sequential Agent Loops (#740)
 

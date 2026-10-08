@@ -24,11 +24,11 @@ Redeploying an existing agent you own does not count against your quota — it's
 
 ## Configuring Quotas
 
-**Admin only**: Navigate to **Settings** and find the **Agent Quotas** section.
+**Admin only**: Open **Settings → Agents** and find the **Agent Quotas** section.
 
-1. Set limits for each role (creator, operator, user).
+1. Set limits for each role (Creator, Operator, User).
 2. Enter `0` for unlimited.
-3. Click **Save**.
+3. Click **Save Quotas**.
 
 Admin quota is always unlimited and cannot be changed.
 
@@ -40,15 +40,16 @@ Admin quota is always unlimited and cannot be changed.
 GET /api/settings/agent-quotas
 ```
 
-**Response:**
+Admin only. **Response** (values are strings, as stored):
 ```json
 {
   "quotas": {
-    "admin": {"value": 0, "description": "Unlimited (not editable)"},
-    "creator": {"value": 10, "default": 10},
-    "operator": {"value": 3, "default": 3},
-    "user": {"value": 1, "default": 1}
-  }
+    "max_agents_creator": {"value": "10", "default": "10", "description": "...", "is_default": true},
+    "max_agents_operator": {"value": "3", "default": "3", "description": "...", "is_default": true},
+    "max_agents_user": {"value": "1", "default": "1", "description": "...", "is_default": true}
+  },
+  "admin_unlimited": true,
+  "legacy_setting": null
 }
 ```
 
@@ -66,6 +67,8 @@ PUT /api/settings/agent-quotas
   "max_agents_user": "2"
 }
 ```
+
+Admin only. Only the fields you send are updated. Each value must be a non-negative integer (`0` = unlimited); anything else returns HTTP 400.
 
 ### Error Response
 
@@ -85,6 +88,10 @@ HTTP status: 429 Too Many Requests
 ## System Agents
 
 System agents (those with `is_system=true`) are excluded from quota counts. Only user-created agents count toward the limit.
+
+## Ephemeral Agents
+
+Ephemeral (short-lived) agents do not count against the per-role quota. They have their own cap: at most `max_ephemeral_agents_per_owner` live ephemeral agents per owner (default 5, `0` = unlimited). Going over it also returns HTTP 429.
 
 ## Migration from Legacy Setting
 

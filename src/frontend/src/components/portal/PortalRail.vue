@@ -84,6 +84,10 @@
             <span v-if="s.shape" class="absolute top-1 right-1" :class="dotClass(s.shape)" aria-hidden="true"></span>
           </button>
         </div>
+        <!-- ent#621 (follow-up): 48px holds no panel, so the collapsed strip
+             carries the tips as ONE door at its foot — the same list the open
+             rail's panel opens, and gone with it once dismissed. -->
+        <PortalKeyTips v-if="keyTips" compact class="mt-auto" @open-keys="$emit('open-keys')" />
       </template>
 
       <!-- ========================== OPEN / SHEET ========================== -->
@@ -177,6 +181,18 @@
             </div>
           </slot>
         </div>
+
+        <!-- ent#621 (follow-up): the tips panel, pinned to the bottom of the
+             OPEN column. After the body and outside it, so the body keeps its
+             own scroll axis and the panel never covers what it shows; `mt-auto`
+             holds it at the foot even when no tab body is mounted. Not on the
+             sheet: a phone has no keyboard to hint at. -->
+        <PortalKeyTips
+          v-if="keyTips && mode === 'open'"
+          class="mt-auto"
+          @open-keys="$emit('open-keys')"
+          @dismiss="$emit('dismiss-key-tips')"
+        />
       </template>
     </aside>
   </div>
@@ -188,6 +204,7 @@ import OverflowTabs from '../OverflowTabs.vue'
 import BaseButton from '@/components/base/BaseButton.vue'
 import BaseBadge from '@/components/base/BaseBadge.vue'
 import PortalAvatar from './PortalAvatar.vue'
+import PortalKeyTips from './PortalKeyTips.vue'
 import {
   RAIL_SIGNAL_LIVE,
   RAIL_SIGNAL_UPDATED,
@@ -202,6 +219,7 @@ import {
 } from './portalRail'
 // ent#621: the rail's two keys, derived from the map rather than typed here.
 import { keyHint, keyShortcutsFor, hostPlatform } from './portalKeymap'
+import { capCount } from '@/utils/tabTitle'
 
 const KEY_PLATFORM = hostPlatform()
 const RAIL_KEY_HINT = keyHint('rail-toggle', KEY_PLATFORM)
@@ -221,9 +239,13 @@ const props = defineProps({
   participants: { type: Array, default: () => [] },
   // The mobile bottom-sheet form. A sheet is always "open".
   sheet: { type: Boolean, default: false },
+  // ent#621 (follow-up): show the shortcut tips — the panel at the foot of the
+  // open column, the icon at the foot of the collapsed strip. The shell turns
+  // it off once the person has closed it; the rail holds no memory of its own.
+  keyTips: { type: Boolean, default: false },
 })
 
-const emit = defineEmits(['update:open', 'update:activeTab', 'close', 'see-hints'])
+const emit = defineEmits(['update:open', 'update:activeTab', 'close', 'see-hints', 'open-keys', 'dismiss-key-tips'])
 
 const mode = computed(() => (props.sheet ? 'sheet' : props.open ? 'open' : 'collapsed'))
 
@@ -244,13 +266,26 @@ const stripTabs = computed(() =>
     // The key hint rides the tooltip the dot already uses, so an open rail's
     // tabs say what the collapsed strip's buttons say — one hint, two forms.
     const title = signal ? railTitle(t, sig) : t.label
-    return {
+    const out = {
       id: t.id,
       label: t.label,
       signal,
       signalTitle: `${title} · ${TAB_KEY_HINT} next tab`,
       ariaKeyshortcuts: TAB_KEY_SHORTCUTS,
     }
+    // ent#836 — a COUNTED tab (Asks) wears the count, not the dot: the same
+    // unfilled "needs you" mark the agent row wears, so the two read as one
+    // number. `OverflowTabs` draws the badge INSTEAD of the signal dot, and
+    // names the tab with the words ("Asks, 2 asks") so a reader never hears
+    // "Asks 2". The collapsed strip keeps the dot + tooltip, the design pass's
+    // own vocabulary for an icon with no room for a number.
+    if (sig.count) {
+      out.badge = capCount(sig.count)
+      out.badgeVariant = 'urgent-outline'
+      out.badgeLabel = `${t.label}, ${sig.note || sig.count}`
+      out.signal = null
+    }
+    return out
   })
 )
 const activeSignal = computed(() => signalFor(props.signals, active.value))
@@ -337,6 +372,9 @@ const ICONS = {
   // wears Work's lightning bolt in the collapsed strip AND in its empty state,
   // and nothing fails.
   info: 'M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z',
+  // ent#836 — Asks: a speech bubble with a line (heroicons `annotation`), a
+  // thing said to you — distinct from Info's circle beside it in the strip.
+  asks: 'M7 8h10M7 12h4m1 8l-4-4H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-3l-4 4z',
 }
 const GLYPHS = {
   expand: 'M11 19l-7-7 7-7m8 14l-7-7 7-7',

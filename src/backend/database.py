@@ -137,6 +137,7 @@ from db.skills import SkillsOperations
 from db.skill_sets import SkillSetsOperations
 from db.role_readiness import RoleReadinessOperations
 from db.capability_grants import CapabilityGrantOperations
+from db.skill_gates import SkillGateOperations
 from db.seat_decisions import SeatDecisionOperations
 from db.skill_sources import SkillSourcesOperations
 from db.public_chat import PublicChatOperations
@@ -1018,6 +1019,7 @@ class DatabaseManager:
         self._skill_sets_ops = SkillSetsOperations()
         self._role_readiness_ops = RoleReadinessOperations()
         self._capability_grant_ops = CapabilityGrantOperations()
+        self._skill_gate_ops = SkillGateOperations()
         self._seat_decision_ops = SeatDecisionOperations()
         self._skill_sources_ops = SkillSourcesOperations()
         self._public_chat_ops = PublicChatOperations()
@@ -1452,6 +1454,12 @@ class DatabaseManager:
 
     def get_a2a_exposed_agents(self):
         return self._agent_ops.get_a2a_exposed_agents()
+
+    def get_a2a_scope(self, agent_name: str):
+        return self._agent_ops.get_a2a_scope(agent_name)
+
+    def set_a2a_scope(self, agent_name: str, *, scope: str, keyless: bool) -> bool:
+        return self._agent_ops.set_a2a_scope(agent_name, scope=scope, keyless=keyless)
 
     # =========================================================================
     # Per-agent MCP connector (ent#46; OSS-core since #118)
@@ -1903,6 +1911,10 @@ class DatabaseManager:
 
     def get_execution_gate_state(self, execution_id: str):
         return self._schedule_ops.get_execution_gate_state(execution_id)
+
+    def get_execution_failure_stamp(self, execution_id: str):
+        """`(status, error, completed_at)` or None — the #3245 liveness read."""
+        return self._schedule_ops.get_execution_failure_stamp(execution_id)
 
     def get_fan_out_executions(self, agent_name: str, fan_out_id: str, limit: int = 200):
         """Every execution row of one fan-out batch (#2670)."""
@@ -2821,11 +2833,39 @@ class DatabaseManager:
     def grant_agent_capability(self, agent_name: str, capability: str, granted_by: str) -> bool:
         return self._capability_grant_ops.grant_agent_capability(agent_name, capability, granted_by)
 
+    def list_agent_capabilities(self, agent_name: str):
+        # ent#164: one agent's grants, for its Settings (ent#756)
+        return self._capability_grant_ops.list_agent_capabilities(agent_name)
+
     def revoke_agent_capability(self, agent_name: str, capability: str) -> bool:
         return self._capability_grant_ops.revoke_agent_capability(agent_name, capability)
 
     def delete_agent_capability_grants(self, agent_name: str) -> int:
         return self._capability_grant_ops.delete_agent_capability_grants(agent_name)
+
+    # =========================================================================
+    # Skill gate map (delegated to db/skill_gates.py) — trinity-enterprise#753
+    def list_agent_skill_gates(self, agent_name: str):
+        return self._skill_gate_ops.list_agent_skill_gates(agent_name)
+
+    def write_skill_gate(self, agent_name: str, skill_name: str, *, changes, origin: str,
+                         set_by: str, set_by_agent):
+        return self._skill_gate_ops.write_skill_gate(
+            agent_name, skill_name, changes=changes, origin=origin, set_by=set_by,
+            set_by_agent=set_by_agent)
+
+    def clear_skill_gate(self, agent_name: str, skill_name: str, *, set_by: str, set_by_agent,
+                         recommended):
+        return self._skill_gate_ops.clear_skill_gate(
+            agent_name, skill_name, set_by=set_by, set_by_agent=set_by_agent,
+            recommended=recommended)
+
+    def reconcile_library_skill_gates(self, agent_name: str, recommended, *, set_by: str, may_drop):
+        return self._skill_gate_ops.reconcile_library_skill_gates(
+            agent_name, recommended, set_by=set_by, may_drop=may_drop)
+
+    def drop_unassigned_skill_gates(self, agent_name: str, names, *, keep=()):
+        return self._skill_gate_ops.drop_unassigned_skill_gates(agent_name, names, keep=keep)
 
     # Role readiness (delegated to db/role_readiness.py) — ent#527 / #663
     # =========================================================================
@@ -3836,12 +3876,19 @@ class DatabaseManager:
     def list_operator_queue_agent_names(self, **kwargs):
         return self._operator_queue_ops.list_item_agent_names(**kwargs)
 
+    def list_operator_queue_items_walk(self, **kwargs):
+        # trinity-enterprise#815: one page of a cursor walk, `(item, key)` pairs.
+        return self._operator_queue_ops.list_items_walk(**kwargs)
+
+    def operator_queue_walk_alert_priorities(self, **kwargs):
+        return self._operator_queue_ops.walk_alert_priorities(**kwargs)
+
     def respond_to_operator_queue_item(self, item_id, response, response_text,
                                         responded_by_id, responded_by_email,
-                                        divergence_acknowledged=False):
+                                        divergence_acknowledged=False, terminal=False):
         return self._operator_queue_ops.respond_to_item(
             item_id, response, response_text, responded_by_id, responded_by_email,
-            divergence_acknowledged=divergence_acknowledged,
+            divergence_acknowledged=divergence_acknowledged, terminal=terminal,
         )
 
     def cancel_operator_queue_item(self, item_id, *, disposed_by_email, reason=None,
@@ -4244,6 +4291,10 @@ class DatabaseManager:
         """Delete a completed replay row whose recorded resource is gone (#2040 F3)."""
         return self._idempotency_ops.discard_completed(scope, key)
 
+    def idempotency_discard_completed_if_execution(self, scope: str, key: str, execution_id: str) -> bool:
+        """Compare-and-delete a completed row still naming execution_id (#3245)."""
+        return self._idempotency_ops.discard_completed_if_execution(scope, key, execution_id)
+
     def idempotency_purge_expired(self, ttl_hours: int = 24) -> int:
         """Purge idempotency rows older than ttl_hours. Returns rows removed."""
         return self._idempotency_ops.purge_expired(ttl_hours=ttl_hours)
@@ -4288,7 +4339,7 @@ class DatabaseManager:
     def start_loop_run(self, loop_id: str, run_number: int, *, execution_id=None) -> str:
         return self._loop_ops.start_loop_run(loop_id, run_number, execution_id=execution_id)
 
-    def finalize_loop_run(self, run_id: str, **kwargs):
+    def finalize_loop_run(self, run_id: str, **kwargs) -> bool:
         return self._loop_ops.finalize_loop_run(run_id, **kwargs)
 
     def list_loop_runs(self, loop_id: str):

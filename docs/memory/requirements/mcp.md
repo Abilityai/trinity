@@ -765,8 +765,14 @@ sign.
 - `securitySchemes` **never** selects the credential. The card cannot cause a
   different credential to be chosen, nor a credential to be attached to an
   unregistered origin.
-- **Card-vs-RPC normalisation**: the card is always derived from
-  `{scheme}://{netloc}/.well-known/agent-card.json`. If the registered URL
+- **Card-vs-RPC normalisation** (discovery order revised by
+  trinity-enterprise#838): a registered URL that IS a card URL
+  (`…/.well-known/agent-card.json`) is fetched as given and its declared `url`
+  is the target. A registered URL with a path is an endpoint, and its own card,
+  `{path}/.well-known/agent-card.json`, is tried first: that is where a
+  per-agent server like Trinity publishes one, and Trinity serves nothing at
+  its origin. Then `{scheme}://{netloc}/.well-known/agent-card.json`. Only a 404
+  moves on; any other card failure is the answer. If the registered URL
   carries a path, it is accepted as the RPC target **only** when the card's
   declared `url` matches it exactly; ambiguity is refused with a named error.
 - An unreachable card therefore blocks the RPC (the same-origin pin depends on
@@ -975,6 +981,57 @@ revision — the kind is a label inside the existing envelope.
 
 ---
 
+### 32.7 A2A Trusted Internal Networks (trinity-enterprise#838)
+- **Status**: 🚧 In Progress
+- **Implements**: trinity-enterprise#838 (parent trinity-enterprise#421).
+  Builds on #736/#761 (outbound) and ent#157 (inbound).
+- **Problem**: instances on one private network (a tailnet, a VPN) could not
+  call each other's agents: outbound refused private/CGNAT addresses and
+  `http://`, and inbound required a key or a payment for every pair.
+- **Trusted networks** (OSS-core, admin and human only):
+  `GET/PUT /api/settings/a2a-trusted-networks`. Entries are CIDRs, exact host
+  names or `*.domain`. Refused by name: a CIDR overlapping the platform's own
+  Docker networks (agents and the public tunnel reach the backend from there),
+  loopback, link-local (cloud metadata), reserved and multicast ranges,
+  anything broader than /8 (IPv4) or /32 (IPv6), a one-label wildcard. The
+  generic `PUT /api/settings/{key}` refuses the key. Optional
+  `internal_base_url`: the origin an internal-scope agent's card advertises.
+- **Outbound**: an endpoint is trusted when its host matches a name entry or
+  every address it resolves to is public or inside a CIDR entry. When CIDR
+  entries exist, every non-public address must be inside one — a trusted name
+  that resolves outside them is refused. A trusted endpoint may be
+  private/CGNAT and `http://`; metadata, loopback and the platform networks are
+  refused whatever the entries say. Re-checked on every call, pinned as before.
+  Every other endpoint keeps the public-HTTPS rule unchanged.
+- **Inbound scope** (OSS columns `agent_ownership.a2a_scope` `public|internal`
+  and `a2a_keyless_internal`, written only by the entitled enterprise exposure
+  route): an internal-scope agent answers only requests from a trusted CIDR and
+  never through the public tunnel (cloudflared's `CF-Connecting-IP`/`Cf-Ray`).
+  To anyone else its card is 404, a keyed call 404 and an anonymous call the
+  401 an unexposed agent gives.
+- **Source**: the TCP peer, or `X-Real-IP` only when the peer is the platform's
+  own proxy, found by container name (`A2A_PROXY_HOSTS`, default
+  `trinity-frontend`). nginx and the Vite dev proxy both overwrite it, and an
+  agent on the bridge cannot name its own source. Host names never grant
+  inbound trust.
+- **Keyless** (default on for an internal-scope agent; switch per agent): a
+  trusted caller runs `message/send`/`message/stream` with no key,
+  rate-limited per source (120/min) and per agent (300/min), attributed in
+  `schedule_executions.source_host`. `tasks/get`/`tasks/cancel` see only tasks
+  stamped with the caller's own address. With keyless off, a trusted caller
+  needs a key. The inbound allow-list governs keyed callers only.
+- **Card**: an internal-scope agent advertises `internal_base_url`. Outbound
+  discovery tries the registered endpoint's own card before the origin's
+  (§32.5), without which one Trinity could not discover another's per-agent card.
+- **Unchanged**: public scope, key-authenticated calls and the x402 gate (#679).
+  The anonymous door still runs its limiter before any DB read; the trusted
+  list it consults first is cached per worker (5 s).
+- **Network boundary is an ops step**: pair keyless trust with a network ACL
+  that admits A2A traffic only between your own instances.
+- **Tests**: `tests/unit/test_ent838_a2a_trusted_networks.py`, enterprise
+  `tests/test_838_a2a_internal_scope.py`.
+- **Flow**: `docs/memory/feature-flows/a2a-inbound-server.md` → Trusted internal networks
+
 ## 45. Per-Agent MCP Exposure — Dedicated Dynamic Tools (#846)
 
 **Description**: A per-agent owner-toggled flag (`mcp_exposed`, default off) that publishes
@@ -1019,6 +1076,13 @@ description also carries the delegation contract verbatim (abilityai/trinity-ent
   A 403 without that code (access denial, SELF-EXEC-001) still throws as before.
   Since #2973 `run_agent_loop`, `trigger_agent_schedule` and `emit_event` return the same
   refusal object (`client.ts::depthRefusalFromError`).
+- **FR-5b — `execution_id` parity (#3232)**: dedicated `chat_with_<slug>` tools declare and
+  forward `execution_id` with `chat_with_agent`'s semantics, including the async report-back
+  default and the `manual` opt-out ([public-access.md §15.1h](public-access.md), MCP caller
+  contract). The parameter must be **declared**: the zod schema drops an undeclared key before
+  `execute`, which is how the value used to vanish. Both tools publish the one
+  `EXECUTION_ID_PARAM_DESCRIPTION`, and the reconciler takes a required `reportBackEnabled`
+  so the `MCP_REPORT_BACK_ENABLED` kill switch reaches the dedicated tools too.
 - **FR-6 — Surfacing**: `mcp_exposed` is exposed on `GET /api/agents` / MCP `list_agents`. A
   Settings-tab toggle ("Expose via MCP") shows the computed tool name and up-to-poll-interval
   latency copy.
