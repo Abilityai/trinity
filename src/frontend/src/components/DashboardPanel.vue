@@ -452,6 +452,8 @@ import ScanlineReveal from './ScanlineReveal.vue'
 import LoadFailed from './LoadFailed.vue'
 import InlineError from './InlineError.vue'
 import { viewState, staleBannerMessage } from '../utils/loadingState'
+import { apiErrorMessage } from '../utils/apiError'
+import { isGateRefusal, pendingApprovalMessage, PENDING_NOTICE_TOAST } from '../utils/skillGate'
 
 const props = defineProps({
   agentName: {
@@ -469,7 +471,9 @@ const props = defineProps({
   hasDeclaredMetrics: {
     type: Boolean,
     default: false
-  }
+  },
+  // AgentDetail's toast host (`useNotification`), as A2aPanel takes it.
+  notify: { type: Function, default: null }
 })
 
 const agentsStore = useAgentsStore()
@@ -550,11 +554,18 @@ const checkUpdateDashboardPlaybook = async () => {
 const triggerUpdateDashboard = async () => {
   updatingDashboard.value = true
   try {
-    await axios.post(`/api/agents/${props.agentName}/task`, {
+    const response = await axios.post(`/api/agents/${props.agentName}/task`, {
       message: '/update-dashboard'
     }, {
       headers: authStore.authHeader
     })
+    // trinity#3274: a gated playbook — nothing ran, so there is nothing to wait for.
+    const held = pendingApprovalMessage(response)
+    if (held) {
+      if (props.notify) props.notify(held, 'info', PENDING_NOTICE_TOAST)
+      updatingDashboard.value = false
+      return
+    }
     // Wait a bit then refresh the dashboard to show updated data
     setTimeout(() => {
       loadDashboard()
@@ -562,6 +573,7 @@ const triggerUpdateDashboard = async () => {
     }, 5000)
   } catch (error) {
     console.error('Failed to trigger update-dashboard:', error)
+    if (isGateRefusal(error) && props.notify) props.notify(apiErrorMessage(error), 'error')
     updatingDashboard.value = false
   }
 }

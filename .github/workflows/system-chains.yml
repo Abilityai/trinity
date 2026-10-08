@@ -1,0 +1,102 @@
+# System chain tests (trinity-enterprise#794) — the 1.0 system test's chains,
+# run against a freshly booted stack of the chosen ref (a release candidate tag,
+# or `dev`). Manual: the chains create agents, push to a test skills repo and
+# wait minutes for staleness, so they gate a release cut, never a PR.
+#
+# Every run uploads `chain-report` (json + md): per chain, passed / failed at a
+# named step / partial / not run. Attach the markdown to #783 as the go / no-go
+# evidence. The job is red unless EVERY chain passed — a chain that could not
+# run is not a pass.
+#
+# Optional configuration (without it, J18 reports NOT RUN):
+#   vars.CHAIN_SKILLS_REPO            owner/name of a github.com test skills repo
+#   secrets.CHAIN_SKILLS_GITHUB_TOKEN token with push access to that repo
+name: system-chains
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Ref to boot and test (a release candidate tag, or dev)"
+        required: true
+        default: dev
+
+permissions:
+  contents: read
+
+concurrency:
+  group: system-chains-${{ inputs.ref }}
+  cancel-in-progress: false
+
+jobs:
+  system-chains:
+    name: system-chains
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref }}
+          submodules: false
+
+      - uses: actions/setup-python@v7
+        with:
+          # Must equal the image pin (#1891, test_1891_python_version_parity.py).
+          python-version: '3.13'
+
+      - name: Install test dependencies
+        run: pip install -r tests/requirements-test.txt
+
+      - name: Generate a throwaway admin password
+        run: |
+          set -euo pipefail
+          PASS="$(openssl rand -base64 24 | tr -d '/+=\n')Aa1!"
+          echo "::add-mask::$PASS"
+          echo "ADMIN_PASSWORD=$PASS" >> "$GITHUB_ENV"
+
+      - name: Boot the stack
+        run: |
+          set -uo pipefail
+          cp .env.example .env
+          echo "ADMIN_PASSWORD=$ADMIN_PASSWORD" >> .env
+          echo "SECRET_KEY=$(openssl rand -hex 32)" >> .env
+          echo "TRINITY_DEFAULT_SYSTEM_MANIFEST=disabled" >> .env
+          ./scripts/deploy/start.sh || { echo "::error title=Stack failed to start::the chains never ran"; exit 1; }
+          for i in $(seq 1 120); do
+            if curl -fsS http://localhost:8000/health >/dev/null 2>&1; then exit 0; fi
+            sleep 2
+          done
+          echo "::error title=Backend never became healthy::/health did not answer within 240s"
+          exit 1
+
+      - name: Run the chains
+        env:
+          TRINITY_API_URL: http://localhost:8000
+          TRINITY_TEST_PASSWORD: ${{ env.ADMIN_PASSWORD }}
+          CHAIN_SKILLS_REPO: ${{ vars.CHAIN_SKILLS_REPO }}
+          CHAIN_SKILLS_GITHUB_TOKEN: ${{ secrets.CHAIN_SKILLS_GITHUB_TOKEN }}
+        run: |
+          set -uo pipefail
+          rc=0
+          scripts/system/run_chains.sh --report-dir "$RUNNER_TEMP/chain-report" || rc=$?
+          if [ -f "$RUNNER_TEMP/chain-report/chain-report.md" ]; then
+            cat "$RUNNER_TEMP/chain-report/chain-report.md" >> "$GITHUB_STEP_SUMMARY"
+          fi
+          exit "$rc"
+
+      - name: Upload the report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: chain-report
+          path: ${{ runner.temp }}/chain-report
+          if-no-files-found: warn
+
+      - name: Stack logs on failure
+        if: failure()
+        run: docker compose logs --tail 200 backend || true
+
+      - name: Tear down
+        if: always()
+        run: docker compose down -v --remove-orphans || true

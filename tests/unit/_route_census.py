@@ -569,6 +569,16 @@ AGENT_CALLABLE: Dict[str, Tuple[str, str]] = {
     # run's clearance; the agent comes from the key (get_self_agent), every person is refused.
     "routers/skill_gate.py::check_skill_invocation": (
         "POST /api/skill-gate/check", "the in-container hook's check: own gates and own run only, agent from the key (get_self_agent)"),
+    # trinity-enterprise#753: the per-agent skill gate map. The writes take the #3236 shape
+    # (require_person_or_capability("skills.manage", self_person_only=True)): a person, or a
+    # skills.manage holder on an agent its owner owns — never itself; then the owner fence.
+    # The read: an agent key reads its own gates (the hook pulls), a holder an agent its owner owns.
+    "routers/skill_gate.py::list_agent_skill_gates": (
+        "GET /api/agents/{agent_name}/skill-gates", "ent#753 read: anyone with access; an agent key its own gates, a skills.manage holder an agent its owner owns"),
+    "routers/skill_gate.py::set_agent_skill_gate": (
+        "PUT /api/agents/{agent_name}/skill-gates/{skill_name}", "ent#753 skills.manage USE on an owner-owned agent, never itself; persons pass assert_person + owner fence"),
+    "routers/skill_gate.py::clear_agent_skill_gate": (
+        "DELETE /api/agents/{agent_name}/skill-gates/{skill_name}", "ent#753 skills.manage USE on an owner-owned agent, never itself; persons pass assert_person + owner fence"),
     # ent#703: the agent's pull loop reads its own switch every cycle with its own key.
     # The write (PUT .../git/pull-sync) is a setting, so it is person-only.
     "routers/git.py::get_pull_sync_config": (

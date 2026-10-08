@@ -80,7 +80,21 @@ def test_the_notice_names_no_role_and_promises_only_a_decision():
     from services.skill_gate_errors import SkillApprovalRequired
 
     e = SkillApprovalRequired(request_id="gate-x", agent_name="testfix", skills=["pay-invoice"],
-                              approver_role="primary", expires_at=None)
+                              approver_role="primary", expires_at=None, outcome_delivery="inbox")
     assert e.message == ("Not run: the skill pay-invoice on testfix needs approval before it "
                          "can run. Request gate-x is waiting for a decision.")
     assert e.detail()["approver_role"] == "primary"      # the role stays machine-readable
+
+
+def test_a_requester_nobody_will_tell_is_told_so_and_where_the_outcome_shows():
+    """trinity#3233: the default is "none" — an answer that does not know who
+    will be told never promises a delivery."""
+    from services.skill_gate_errors import SkillApprovalRequired
+
+    e = SkillApprovalRequired(request_id="gate-x", agent_name="testfix", skills=["pay-invoice"],
+                              approver_role="primary", expires_at=None)
+    assert e.message == ("Not run: the skill pay-invoice on testfix needs approval before it "
+                         "can run. Request gate-x is waiting for a decision. Nothing will be "
+                         "sent back when it is decided: if it is approved, it runs as a new "
+                         "execution on testfix; if not, nothing runs.")
+    assert e.detail()["outcome_delivery"] == "none"

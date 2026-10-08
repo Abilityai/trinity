@@ -170,6 +170,8 @@ import { useSkillsStore } from '../stores/skills'
 import { ChatMessages, ChatInput, ChatEmptyState } from './chat'
 import { shouldCancelOnEscape, restoreDraft, cancelOutcome, isNoopCancel } from '../utils/turnCancel'
 import ModelSelector from './ModelSelector.vue'
+import { apiErrorMessage } from '../utils/apiError'
+import { isGateRefusal, pendingApprovalMessage } from '../utils/skillGate'
 import { getStatusFromStreamEvent, MIN_LABEL_DISPLAY_MS, HEARTBEAT_TIMEOUT_MS } from '../utils/execution-status'
 
 const props = defineProps({
@@ -412,8 +414,11 @@ const buildContextPrompt = (userMessage) => {
     return userMessage
   }
 
-  // Build conversation context (last 10 exchanges)
-  const recentMessages = messages.value.slice(-20) // Last 20 messages (10 exchanges)
+  // Build conversation context (last 10 exchanges). A held request and its
+  // notice stay on screen but out of the context (trinity#3274): resent, the
+  // gated command would hold every later turn — and ride along if one of
+  // those were approved.
+  const recentMessages = messages.value.filter(m => !m.held).slice(-20) // Last 20 messages (10 exchanges)
   let context = '### Previous conversation:\n\n'
 
   for (const msg of recentMessages) {
@@ -586,6 +591,7 @@ const sendMessage = async (userMessage, files = []) => {
     content: userMessage,
     timestamp: new Date().toISOString()
   })
+  const userEntry = messages.value[messages.value.length - 1]
 
   // Clear input
   message.value = ''
@@ -622,6 +628,15 @@ const sendMessage = async (userMessage, files = []) => {
     const submitResponse = await axios.post(`/api/agents/${props.agentName}/task`, payload, {
       headers: authStore.authHeader
     })
+
+    // trinity#3274: the request names a gated skill — nothing ran and there is
+    // nothing to poll. The server's own message is the answer.
+    const held = pendingApprovalMessage(submitResponse)
+    if (held) {
+      userEntry.held = true
+      messages.value.push({ role: 'system', content: held, held: true, timestamp: new Date().toISOString() })
+      return
+    }
 
     const executionId = submitResponse.data.execution_id
     if (!executionId) {
@@ -672,7 +687,9 @@ const sendMessage = async (userMessage, files = []) => {
   } catch (err) {
     console.error('Chat error:', err)
     closeSSE()
-    error.value = err.response?.data?.detail || 'Failed to send message. Please try again.'
+    error.value = isGateRefusal(err)
+      ? apiErrorMessage(err)
+      : (err.response?.data?.detail || 'Failed to send message. Please try again.')
     // Remove the user message if send failed
     messages.value.pop()
   } finally {
