@@ -60,11 +60,12 @@ def _note_commit_lag(stamp: str) -> None:
 # "platform bypasses the boundary" exemption stops being solely load-bearing —
 # a caller that skips the service clamp still can't persist a multi-MB field.
 # An order of magnitude above the service caps (title 300 / question 4000 /
-# context 8 KiB / id 256).
+# context 8 KiB / id 256 / type 64).
 _DB_BELT_TITLE_MAX_BYTES = 4 * 1024
 _DB_BELT_QUESTION_MAX_BYTES = 16 * 1024
 _DB_BELT_CONTEXT_MAX_BYTES = 64 * 1024
 _DB_BELT_ID_MAX = 512
+_DB_BELT_TYPE_MAX_BYTES = 1024
 
 # trinity-enterprise#751: gate-raised rows (gated-skill approvals and the
 # gate's notices) never count toward an AGENT's pending budget — neither the
@@ -448,6 +449,9 @@ class OperatorQueueOperations:
         question = item.get("question")
         if question and len(str(question).encode("utf-8")) > _DB_BELT_QUESTION_MAX_BYTES:
             raise ValueError(f"operator-queue 'question' exceeds {_DB_BELT_QUESTION_MAX_BYTES} bytes")
+        item_type = item.get("type")
+        if item_type and len(str(item_type).encode("utf-8")) > _DB_BELT_TYPE_MAX_BYTES:
+            raise ValueError(f"operator-queue 'type' exceeds {_DB_BELT_TYPE_MAX_BYTES} bytes")
 
         options_json = json.dumps(item.get("options")) if item.get("options") else None
         context_json = json.dumps(item.get("context")) if item.get("context") else None
