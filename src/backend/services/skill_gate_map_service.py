@@ -187,6 +187,14 @@ def self_approved_flags(agent_name: str, execution_ids: Iterable[str],
     the record's requester key, so the email itself never leaves the server.
     Runs with no record are absent (false). Never raises: a marker is a hint,
     never a reason to fail the executions read."""
+    requester = skill_gate_service.requester_from_principal(principal)
+    mine = (f"person:{requester.email.strip().casefold()}"
+            if requester.is_person and requester.email else None)
+    return _self_approved_flags_for_key(agent_name, execution_ids, mine)
+
+
+def _self_approved_flags_for_key(agent_name: str, execution_ids: Iterable[str],
+                                 viewer_key: Optional[str]) -> Dict[str, Tuple[bool, bool]]:
     ids = [e for e in execution_ids if e]
     if not ids:
         return {}
@@ -195,10 +203,26 @@ def self_approved_flags(agent_name: str, execution_ids: Iterable[str],
     except Exception:  # noqa: BLE001
         logger.warning("[skill_gate_map] self-approved read failed for %s", agent_name, exc_info=True)
         return {}
-    requester = skill_gate_service.requester_from_principal(principal)
-    mine = (f"person:{requester.email.strip().casefold()}"
-            if requester.is_person and requester.email else None)
-    return {eid: (True, mine is not None and key == mine) for eid, key in runs.items()}
+    return {eid: (True, viewer_key is not None and key == viewer_key) for eid, key in runs.items()}
+
+
+def annotate_self_approved_turns(agent_name: str, messages: List[Dict[str, Any]],
+                                 viewer_email: Optional[str]) -> None:
+    """trinity-enterprise#754 (C9): mark, in place, each Workspace agent reply
+    whose turn went through without approval because its requester is the
+    approver. A Workspace message names the turn that wrote it (#3166's
+    `execution_id`), so this is the executions marker applied to a thread.
+    The viewer is the portal session's person — the same identity the
+    Workspace gate requester carries — compared casefolded; no email is added
+    to the payload. Questions, rows no turn wrote and older rows (no
+    `execution_id`) read false. One read per thread; never raises."""
+    viewer = (viewer_email or "").strip().casefold()
+    replies = [m for m in messages if m.get("role") == "assistant" and m.get("execution_id")]
+    flags = _self_approved_flags_for_key(
+        agent_name, [m["execution_id"] for m in replies], f"person:{viewer}" if viewer else None)
+    for m in messages:
+        hit = flags.get(m.get("execution_id")) if m.get("role") == "assistant" else None
+        m["gate_self_approved"], m["gate_self_approved_by_viewer"] = hit or (False, False)
 
 
 # trinity-enterprise#754: the in-agent gate check's states, as the agent's

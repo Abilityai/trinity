@@ -32,6 +32,8 @@ describe('#2580 — assistantRow carries what a thumb needs', () => {
     expect(assistantRow({ content: 'hi', id: 'm1', my_rating: 'up' })).toEqual({
       role: 'assistant', content: 'hi', id: 'm1', myRating: 'up',
       source: null, voiceCallId: null, executionId: null,
+      // trinity-enterprise#754: the self-approved marker, false unless the server said so.
+      selfApproved: false, selfApprovedByViewer: false,
     })
   })
 
@@ -72,7 +74,8 @@ describe('#2580 — replyFromHistory reads the row the server wrote', () => {
     const before = replyBaseline(hist(1))
     const reply = replyFromHistory([...hist(2), { role: 'user', content: 'q' }], before)
     // #3063: no cost — history no longer carries it, and nothing read it off the reply.
-    expect(reply).toEqual({ response: 'a1', id: 'm1', myRating: null, at: null })
+    expect(reply).toEqual({ response: 'a1', id: 'm1', myRating: null, at: null,
+      gateSelfApproved: false, gateSelfApprovedByViewer: false })   // trinity-enterprise#754
   })
 
   it("carries the row's stored time (trinity-enterprise#610: it places a chat-turn ask before this reply)", () => {
@@ -202,7 +205,9 @@ describe('#2580 — every path that builds a reply uses the shared rule', () => 
     // fallback gets it from the server, which now returns `message_id` (it used
     // to mint the row id inline and discard it).
     expect(CONV).toContain('id: data.id || data.message_id')
-    expect(CONV).toMatch(/assistantRow\(\{ content: data\.response, id: data\.id, my_rating: data\.myRating \}\)/)
+    // trinity-enterprise#754 extended the reattach call with the marker's two
+    // fields; the pin is still that the id and rating ride the shared mapper.
+    expect(CONV).toMatch(/assistantRow\(\{ content: data\.response, id: data\.id, my_rating: data\.myRating,/)
   })
 
   it('KEEPS the id gate on the rating control', () => {

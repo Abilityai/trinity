@@ -463,6 +463,14 @@
                 :initial-rating="item.message.myRating"
               />
             </PortalAgentBubble>
+            <!-- trinity-enterprise#754: this turn went through without approval
+                 because the person who asked IS the approver (server-decided). -->
+            <ExecutionGateMarker
+              class="mt-1"
+              variant="line"
+              :self-approved="!!item.message.selfApproved"
+              :by-viewer="!!item.message.selfApprovedByViewer"
+            />
           </div>
         </div>
         </div>
@@ -922,6 +930,7 @@ import PortalDeliverables from './PortalDeliverables.vue'
 import PortalSkeleton from './PortalSkeleton.vue'
 import { workSignalFrom } from './portalRail'
 import PortalRating from './PortalRating.vue'
+import ExecutionGateMarker from '../skills/ExecutionGateMarker.vue'  // trinity-enterprise#754
 import {
   deliveryFailureReason,
   mentionedAgents,
@@ -1606,7 +1615,9 @@ async function reattach(executionId, budgetSeconds, budgetReadAt) {
     if (data?.response) {
       // #2580: `id` + `myRating` from the persisted row, so a reattached reply is
       // rateable the moment it lands rather than on the next load.
-      messages.value.push({ ...assistantRow({ content: data.response, id: data.id, my_rating: data.myRating }), at: data.at || null })
+      messages.value.push({ ...assistantRow({ content: data.response, id: data.id, my_rating: data.myRating,
+        gate_self_approved: data.gateSelfApproved, gate_self_approved_by_viewer: data.gateSelfApprovedByViewer }),
+      at: data.at || null })
       refreshAsksAfterTurn()
       // A reattached reply is still a reply the user just watched land, so it
       // has to announce itself like `deliver()` does. Without this the thread
@@ -2146,6 +2157,9 @@ async function deliver(text, { replyId = null, attachments = null } = {}) {
         content: data.response || '(no response)',
         id: data.id || data.message_id,
         my_rating: data.myRating,
+        // trinity-enterprise#754: read off the persisted reply, like the id.
+        gate_self_approved: data.gateSelfApproved,
+        gate_self_approved_by_viewer: data.gateSelfApprovedByViewer,
       }),
       at: data.at || null,
     })

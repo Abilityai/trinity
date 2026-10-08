@@ -45,7 +45,7 @@ from services.chat_title import (
 # #2157: the surface stamp written onto every portal execution — see
 # `config.PORTAL_SOURCE_CHANNEL` for why it exists and why it is not a channel.
 from config import PORTAL_SOURCE_CHANNEL
-from services import turn_context
+from services import skill_gate_map_service, turn_context
 from services.skill_gate_errors import SkillApprovalRequired, SkillGateError
 from services.channel_completion_report import COMPLETION_SOURCE_DONE, COMPLETION_SOURCE_FAILED
 
@@ -4582,6 +4582,9 @@ def get_history(agent_name: str, email: str, session_id: str | None = None,
     # the thumb they already gave. One query for the thread rather than one per
     # message, and scoped to this evaluator — nobody sees anyone else's rating.
     _attach_own_ratings(messages, email, is_platform=include_owned)
+    # trinity-enterprise#754: a reply whose turn skipped approval because the
+    # asker IS the approver says so (one read for the thread; no email added).
+    skill_gate_map_service.annotate_self_approved_turns(agent_name, messages, email)
     # #3265: the stored JSON becomes the list the bubble renders.
     for m in messages:
         m["attachments"] = decode_turn_attachments(m.get("attachments"))

@@ -5087,6 +5087,17 @@
       "description": "trinity-enterprise#754, MOUNTED: a self-approved run says \"ran without approval\" on its Tasks row and its execution page, \"you are the approver\" only to the person who ran it, from the server's two booleans."
     },
     {
+      "file": "frontend/tests/unit/portalSelfApprovedTurn.spec.js",
+      "feature": "abilityai/trinity-enterprise#754",
+      "added": "2026-10-08",
+      "categories": [
+        "frontend",
+        "unit",
+        "mount"
+      ],
+      "description": "trinity-enterprise#754 (C9): the Workspace carries the self-approved marker through assistantRow and replyFromHistory (true only when the server said true; a just-landed reply included) and binds it to the marker under the agent bubble (shallow-mounted PortalConversation)."
+    },
+    {
       "file": "frontend/tests/unit/skillGateSenders.spec.js",
       "feature": "#3274",
       "added": "2026-10-07",
@@ -5224,6 +5235,17 @@
         "database"
       ],
       "description": "trinity-enterprise#754: the executions list and detail carry gate_self_approved / gate_self_approved_by_viewer, derived from ent#752's self_approved records (no new column): the record is written through the real record_self_approval and read back through the real routes on a real DB; only the requester is \"you\", a machine key never is, and no email leaves."
+    },
+    {
+      "file": "unit/test_ent754_workspace_self_approved.py",
+      "feature": "abilityai/trinity-enterprise#754",
+      "added": "2026-10-08",
+      "categories": [
+        "backend",
+        "unit",
+        "database"
+      ],
+      "description": "trinity-enterprise#754 (C9): a Workspace reply whose turn skipped approval because the asker is the approver is marked on the history read (the window and the reply poll's narrow read), from ent#752's self_approved record via #3166's execution_id — only that reply, casefolded viewer compare, both fields declared on the route model, no email added. Through the real get_history and record_self_approval on a real DB."
     },
     {
       "file": "mcp-server/src/tools/skill-gates.test.ts",

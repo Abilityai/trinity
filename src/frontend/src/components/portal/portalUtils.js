@@ -2103,7 +2103,8 @@ export function agentRowTime(threads, agentName, now = Date.now()) {
 // was built without one" where a missing key says nothing at all.
 export function assistantRow({ content = '', id = null, my_rating = null,
                                source = null, voice_call_id = null,
-                               execution_id = null } = {}) {
+                               execution_id = null, gate_self_approved = false,
+                               gate_self_approved_by_viewer = false } = {}) {
   return {
     role: 'assistant',
     content,
@@ -2113,6 +2114,10 @@ export function assistantRow({ content = '', id = null, my_rating = null,
     voiceCallId: voice_call_id || null,
     // #3166: the turn that wrote the row.
     executionId: execution_id || null,
+    // trinity-enterprise#754: the turn went through without approval because
+    // the asker is the approver, and whether the viewer is that person.
+    selfApproved: gate_self_approved === true,
+    selfApprovedByViewer: gate_self_approved_by_viewer === true,
   }
 }
 
@@ -2207,6 +2212,10 @@ function replyFields(row) {
     // trinity-enterprise#610: the stored time, which places a chat-turn ask
     // before this reply without the browser's clock (`placeAsksInThread`).
     at: row.created_at || null,
+    // trinity-enterprise#754: a just-landed reply shows "ran without
+    // approval" without waiting for a reload.
+    gateSelfApproved: row.gate_self_approved === true,
+    gateSelfApprovedByViewer: row.gate_self_approved_by_viewer === true,
   }
 }
 
