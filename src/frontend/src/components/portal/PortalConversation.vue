@@ -1858,7 +1858,7 @@ watch(typeaheadBound, (b) => { activeIndex.value = clampActiveIndex(activeIndex.
 // promising something the build cannot do is the #2128 dead end in text form.
 const composerPlaceholder = computed(() => {
   if (listening.value) return 'Listening…'
-  const base = `Message ${agentDisplayName(props.agent)}…  ·  / for playbooks`
+  const base = `Message ${agentDisplayName(props.agent)}…  ·  / for skills`
   return store.multiAgentChatAvailable ? `${base}  ·  @ to add an agent` : base
 })
 

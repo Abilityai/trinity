@@ -282,7 +282,7 @@
           v-model="message"
           :disabled="chatLoading"
           :public-token="token"
-          placeholder="Type your message or / for playbooks..."
+          placeholder="Type your message or / for skills..."
           :cancellable="canCancelTurn"
           :cancelling="cancelling"
           @submit="sendMessage"

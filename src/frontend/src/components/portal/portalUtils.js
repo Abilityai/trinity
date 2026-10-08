@@ -1029,7 +1029,7 @@ export function availabilityChip(agent, { detailed = false } = {}) {
     }
 }
 
-export const EMPTY_REASON_NO_PLAYBOOKS = 'No playbooks are available for this agent right now.'
+export const EMPTY_REASON_NO_PLAYBOOKS = 'No skills are available for this agent right now.'
 export const EMPTY_REASON_NO_PEERS = 'No other agents are shared with you.'
 export const EMPTY_REASON_NO_MENTIONABLE_PEERS =
   "The other agents shared with you can't be @mentioned — their names aren't valid mention handles."
