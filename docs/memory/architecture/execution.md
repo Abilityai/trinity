@@ -210,3 +210,33 @@ Durable one-shot deferred self-trigger â€” the time-deferred sibling of loops (Â
 
 **Chat compaction attribution (#2958).** The `/chat` path writes `compact_metadata` like the task path: `_finalize_chat_success` on the SUCCESS row (plus an additive `execution.compaction` summary in the response), `_finalize_http_failure` on the FAILED row from the #678 structured body. The agent reads the events from the JSONL before its error checks. 504 / 429 / plain-500 bodies carry no metadata, so those failures stay unattributed.
 
+
+### Process lifetime and cancelled waiters
+
+The agent-side `ProcessRegistry` owns a child until its exit is observed.
+Cancelling a chat or headless HTTP coroutine does not cancel a thread already
+running in its executor, so `unregister()` retains a still-live child, its log
+subscribers and its orphan-sweep allowlist entry. The child remains visible to
+execution status and explicit termination; a lost waiter does not imply that
+work completed or that another writer may start. Existing runtime deadlines
+still apply. If the waiter is cancelled or its outer timeout expires, its
+executor worker releases registry ownership and closes the log stream when the worker actually finishes; ordinary
+successful runs still finalize their result before closing the stream. A chat
+reader is shielded from cancellation because the child has already spawned;
+a headless task still queued in its executor can be cancelled before spawning.
+Retaining ownership does not recover a lost HTTP response or persist a
+successful result.
+
+`terminate()` confirms success only after its child wait returns. If the child
+still has not exited after SIGINT and SIGKILL waits, it returns
+`success: false, reason: termination_unconfirmed` and keeps the handle for
+inspection or another stop attempt. Pending, not-yet-spawned cancellation
+retains its existing kill-at-spawn semantics.
+
+Regression coverage: `tests/unit/test_runtime_process_ownership.py` cancels the
+actual chat/headless coroutine while a disposable Python child runs, checks
+live ownership and cleanup, and exercises unconfirmed termination.
+It makes no model/provider calls. This registry contract does not itself supply
+cross-worker backend capacity or durable ownership across an agent-server
+restart. Nor does it close the pending-before-Popen gap when a started worker
+has not yet registered its child; those are separate execution boundaries.
