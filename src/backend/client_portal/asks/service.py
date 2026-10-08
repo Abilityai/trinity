@@ -503,6 +503,10 @@ def answer_ask(item_id: str, email: str, is_platform: bool,
         # the deadline refused it before the poller swept the row.
         if conflict.code == "expired":
             raise AskError(409, "expired", "This ask expired before it was answered.")
+        if (conflict.item or {}).get("disposed_by") == "agent":
+            # #3247: nobody answered it — the agent replaced it first.
+            raise AskError(409, "already_resolved",
+                           "The agent just replaced this ask with a newer one.")
         raise AskError(409, "already_resolved", "This ask was just answered elsewhere.")
     updated = ending.rows[0]
 

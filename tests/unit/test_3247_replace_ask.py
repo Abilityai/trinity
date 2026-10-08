@@ -156,6 +156,31 @@ class TestReplaceCas:
         assert out["predecessor"]["disposed_by"] == "agent"
         assert out["predecessor"]["replaced_by"] == new["id"]
 
+    def test_a_replace_never_edits_the_old_ask_in_place(self, real_db):
+        """The predecessor is ENDED, never rewritten: what a person was shown —
+        its title, question, options and proposal — reads the same after the
+        replace, whatever the successor says. Only the ending moves."""
+        old = self._own_pending(
+            real_db, "c-old-keep", title="Refund 100 USD", question="Refund the March order?",
+            options=["approve", "reject"], proposal={"action": "refund", "amount": 100})
+        before = real_db.get_operator_queue_item(old["id"])
+        out = _native(
+            real_db, self.AGENT, "c-new-keep", replaces=old["id"], type="question",
+            priority="low", title="Refund 900 USD", question="Refund the whole year?",
+            options=["yes", "no", "later"], proposal={"action": "refund", "amount": 900})
+        assert out["outcome"] == "created"
+        after = real_db.get_operator_queue_item(old["id"])
+        for field in ("title", "question", "options", "proposal"):
+            assert before[field] is not None, field
+            assert after[field] == before[field], field
+            assert out["predecessor"][field] == before[field], field
+        # ...and nothing else either: the ending and the link are all that changed.
+        ending = {"status", "disposition", "disposed_at", "disposed_by",
+                  "disposed_by_email", "disposition_reason", "replaced_by"}
+        changed = {k for k in before if after.get(k) != before[k]}
+        assert changed <= ending, changed - ending
+        assert changed >= {"status", "disposition", "disposed_by", "replaced_by"}
+
     def test_a_person_who_answered_first_wins_and_nothing_is_created(self, real_db):
         old = self._own_pending(real_db, "c-old-2")
         answered = real_db.respond_to_operator_queue_item(
@@ -242,11 +267,14 @@ class TestReplaceCas:
         half-replace — predecessor ended, successor never inserted — must not
         commit: the result is `replayed` with the winner, predecessor untouched."""
         from sqlalchemy import insert
-        from db.operator_queue import OperatorQueueOperations
         from db.tables import operator_queue
+        # The class the live facade is built from, not a fresh import: a test
+        # that reloads `db.operator_queue` earlier in the run would leave an
+        # imported name pointing at a class `real_db` no longer uses.
+        ops_cls = type(real_db._operator_queue_ops)
         agent = "agent-3247-collide"
         old = _native(real_db, agent, "col-old")["row"]
-        real_cas = OperatorQueueOperations._replace_predecessor
+        real_cas = ops_cls._replace_predecessor
         winner_id = "f" * 32
 
         def cas_then_collide(self, conn, *args, **kwargs):
@@ -257,7 +285,7 @@ class TestReplaceCas:
                 created_at=_iso(), channel="file", raised_by="agent"))
             return out
 
-        monkeypatch.setattr(OperatorQueueOperations, "_replace_predecessor", cas_then_collide)
+        monkeypatch.setattr(ops_cls, "_replace_predecessor", cas_then_collide)
         out = _native(real_db, agent, "col-new", replaces=old["id"])
         assert out["outcome"] == "replayed"
         # On SQLite the simulated winner rides the create's own connection, so
@@ -787,10 +815,18 @@ class TestPendingLine:
             assert absent not in line, absent
         assert "replaces" in line
 
-    @pytest.mark.parametrize("triggered_by", ["public", "paid", "Public"])
+    @pytest.mark.parametrize("triggered_by", [
+        "public", "paid", "Public",
+        # a channel turn dispatches with the channel type as its label
+        "telegram", "slack", "whatsapp", "voip", "room", "a2a",
+        # ...and a label nobody has classified yet is outside until someone does
+        "a-label-added-next-year", "", None,
+    ])
     def test_an_outside_turn_lists_ids_type_and_age_without_titles(self, real_db, triggered_by):
         """I1: a turn serving someone other than the owner or an operator never
-        sees the agent's own ask titles — each entry is `request_id (type, age)`."""
+        sees the agent's own ask titles — each entry is `request_id (type, age)`.
+        Titles are shown by ALLOWLIST: only a trigger known to be the owner's or
+        an operator's gets them, so a new or unknown label fails closed."""
         from services.platform_prompt_service import ExecutionContext, compose_system_prompt
         self._seed(real_db)
         line = self._line(compose_system_prompt(
@@ -968,6 +1004,37 @@ class TestWorkspaceProjection:
         if new_to:
             # nor does the other addressee learn the old ask's name
             assert _project(new, viewer_email=new_to).replaces is None
+
+    def test_answering_an_ask_the_agent_just_replaced_says_so(self, real_db, monkeypatch):
+        """The agent wins the race: the person's page still showed the ask as
+        pending, and their answer loses the compare-and-set. Nobody answered it
+        — the refusal says the agent replaced it, not "answered elsewhere"."""
+        import client_portal.asks.service as asks
+        to = "ws-race@example.com"
+        old = _native(real_db, self.AGENT, "ws-old-race", addressed_to_email=to)["row"]
+        stale = dict(real_db.get_operator_queue_item(old["id"]))   # what the page read
+        assert _native(real_db, self.AGENT, "ws-new-race", replaces=old["id"],
+                       addressed_to_email=to)["outcome"] == "created"
+        monkeypatch.setattr(asks, "_owned_ask", lambda *a, **k: stale)
+        with pytest.raises(asks.AskError) as ei:
+            asks.answer_ask(old["id"], to, False, "approve", None)
+        assert (ei.value.status_code, ei.value.code) == (409, "already_resolved")
+        assert "replaced" in ei.value.detail and "answered" not in ei.value.detail
+        # the lost answer wrote nothing
+        row = real_db.get_operator_queue_item(old["id"])
+        assert row["disposed_by"] == "agent" and row["response"] is None
+
+    def test_an_answer_that_loses_to_a_person_still_reads_answered_elsewhere(self, real_db, monkeypatch):
+        import client_portal.asks.service as asks
+        to = "ws-race2@example.com"
+        old = _native(real_db, self.AGENT, "ws-old-race2", addressed_to_email=to)["row"]
+        stale = dict(real_db.get_operator_queue_item(old["id"]))
+        real_db.cancel_operator_queue_item(old["id"], disposed_by_email="op@example.com")
+        monkeypatch.setattr(asks, "_owned_ask", lambda *a, **k: stale)
+        with pytest.raises(asks.AskError) as ei:
+            asks.answer_ask(old["id"], to, False, "approve", None)
+        assert (ei.value.status_code, ei.value.code) == (409, "already_resolved")
+        assert ei.value.detail == "This ask was just answered elsewhere."
 
     def test_a_replaced_ask_leaves_the_pending_listing(self, real_db):
         from client_portal.asks.service import list_asks_page

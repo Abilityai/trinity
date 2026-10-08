@@ -48,11 +48,20 @@ ENDED_ASKS_WINDOW_HOURS = 24
 # scheduled run that cannot see them re-asks what it already asked.
 MAX_PENDING_ASKS = 8
 MAX_PENDING_TITLE_LEN = 48
-# The trigger labels of a turn that serves someone OTHER than the agent's owner
-# or an operator (an anonymous public link, a Workspace client, an x402 paid
-# turn). The pending line shows the agent's own ask titles only on the other
-# turns; here each entry is `request_id (type, age)` and nothing more.
-_OUTSIDE_AUDIENCES = frozenset({"public", "paid"})
+# The trigger labels of a turn that serves the agent's owner or an operator.
+# The pending line shows the agent's own ask titles on these turns ONLY; on
+# every other one — a public link, a Workspace client, an x402 paid turn, a
+# channel turn (its label is the channel type: telegram / slack / whatsapp),
+# voip, a room, inbound a2a, no label at all — each entry is
+# `request_id (type, age)` and nothing more. An allowlist, named one by one
+# (the `canvas_service._OPERATOR_SIDE_TRIGGERS` shape): a label nobody has
+# classified yet is outside until someone adds it here.
+_OWNER_OR_OPERATOR_TRIGGERS = frozenset({
+    "manual", "chat", "user", "session", "schedule", "webhook", "mcp",
+    "loop", "reminder", "event", "retry", "validation", "operator_response",
+    "operator_ending", "skill_gate",
+    "agent",  # a fleet agent's own call, kept as #3247 shipped it
+})
 
 # Static platform instructions — moved from agent-side trinity.py
 PLATFORM_INSTRUCTIONS = """# Trinity Platform Instructions
@@ -868,7 +877,7 @@ def _render_pending_asks(ctx: ExecutionContext, *, titles: bool = True) -> Optio
     oldest first, bounded, the rest as a count. The title is the agent's own,
     sanitized and cut — never a question or anything a person wrote — and is
     rendered only when `titles` is set: the caller clears it on a turn that
-    serves someone other than the owner or an operator (`_OUTSIDE_AUDIENCES`),
+    is not known to serve the owner or an operator (`_OWNER_OR_OPERATOR_TRIGGERS`),
     so each entry is then `request_id (type, age)` alone."""
     if not ctx.pending_asks:
         return None
@@ -1014,9 +1023,10 @@ def build_execution_context(ctx: ExecutionContext) -> str:
             lines.append(f"- **Collaborators**: {collaborators}")
 
         # The one place the turn's audience is known: titles only when the
-        # turn serves the owner or an operator, never a public or paid caller.
-        outside = (ctx.triggered_by or "").strip().lower() in _OUTSIDE_AUDIENCES
-        pending_asks = _render_pending_asks(ctx, titles=not outside)
+        # trigger is known to be the owner's or an operator's — never a public,
+        # paid or channel caller, and never a label this list has not met.
+        inside = (ctx.triggered_by or "").strip().lower() in _OWNER_OR_OPERATOR_TRIGGERS
+        pending_asks = _render_pending_asks(ctx, titles=inside)
         if pending_asks:
             lines.append(f"- **Pending asks**: {pending_asks}")
 
