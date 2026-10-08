@@ -254,8 +254,8 @@ total).
 (`PortalTypeahead.vue:104`); the screen-reader count says "N further skill(s) are not
 listed and must be asked for by name." (`:110`); the source-empty line is
 `EMPTY_REASON_NO_PLAYBOOKS` = "No skills are available for this agent right now."
-(`portalUtils.js:1032`); the composer placeholder reads `Message <agent>…  ·  / for skills`
-(`PortalConversation.vue:1872`). Data and API names (`agent.playbooks`,
+(`portalUtils.js:1057`); the composer placeholder reads `Message <agent>…  ·  / for skills`
+(`PortalConversation.vue:1879`). Data and API names (`agent.playbooks`,
 `filterPlaybookCandidates`) are unchanged. The agent page's own tab is
 [skills-tab.md](skills-tab.md).
 

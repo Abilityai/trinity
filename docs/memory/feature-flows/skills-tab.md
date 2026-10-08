@@ -165,7 +165,7 @@ Shown where the approval row is (owner or admin, not a ghost, not the system age
 A run that went through without approval because its requester is the approver (ent#752's `self_approved` record):
 - **Tasks row**: `TasksPanel.vue:244-247`, a `locked` badge "ran without approval" after the compacted chip, from `task.gate_self_approved` / `gate_self_approved_by_viewer` (list read `TasksPanel.vue:724`);
 - **Execution page**: `views/ExecutionDetail.vue:179,205-210`, a line in the Execution Origin card (the card also shows when the run has no other origin data);
-- **Workspace turn**: `components/portal/PortalConversation.vue:468-473`, a line under the agent bubble, from `assistantRow` (`portalUtils.js:2118-2136`). History rows map through it (`PortalConversation.vue:1501-1510`). A just-finished turn gets the flag from the reply poll (`replyFields`, `portalUtils.js:2221-2234` → `PortalConversation.vue:2155-2165`), as does a reattached turn (`PortalConversation.vue:1618-1619`).
+- **Workspace turn**: `components/portal/PortalConversation.vue:472-477`, a line under the agent bubble, from `assistantRow` (`portalUtils.js:2143-2161`). History rows map through it (`PortalConversation.vue:1508-1517`). A just-finished turn gets the flag from the reply poll (`replyFields`, `portalUtils.js:2246-2259` → `PortalConversation.vue:2162-2172`), as does a reattached turn (`PortalConversation.vue:1625-1626`).
 
 Copy: "Ran without approval: you are the approver." for the requester, else "Ran without approval: its approver started it.".
 
@@ -229,7 +229,7 @@ The server enforces the same lines: gate writes need a person who owns the agent
 
 ### Vocabulary (agent surfaces say "skills"; API names unchanged)
 
-`components/chat/ChatInput.vue:25` (`/` menu heading) and `:248` (placeholder); `views/PublicChat.vue:285`; `components/portal/PortalConversation.vue:1872` ("/ for skills"); `components/portal/PortalTypeahead.vue:104` (heading) and `:110` (screen-reader count); `components/portal/portalUtils.js:1032` (empty line); `components/DashboardPanel.vue:149`; `components/ExposedToolsPanel.vue:14` ("Exposed skills"); `components/ConnectorChannelPanel.vue:6`; `components/SharingPanel.vue:210`. `/playbooks`, `exposed_playbooks`, `run_playbook` and `list_playbooks` keep their names.
+`components/chat/ChatInput.vue:25` (`/` menu heading) and `:248` (placeholder); `views/PublicChat.vue:285`; `components/portal/PortalConversation.vue:1879` ("/ for skills"); `components/portal/PortalTypeahead.vue:104` (heading) and `:110` (screen-reader count); `components/portal/portalUtils.js:1057` (empty line); `components/DashboardPanel.vue:149`; `components/ExposedToolsPanel.vue:14` ("Exposed skills"); `components/ConnectorChannelPanel.vue:6`; `components/SharingPanel.vue:210`. `/playbooks`, `exposed_playbooks`, `run_playbook` and `list_playbooks` keep their names.
 
 ## Backend Layer
 
@@ -285,10 +285,10 @@ Auth is unchanged (`get_skill_gate_readable_agent_by_name`). Models: `SkillGateA
 ### 3. "Ran without approval" flags — derived, no new column
 
 - **Source**: ent#752's `self_approved` row in `skill_gate_requests`, written by `skill_gate_service.record_self_approval` at the `/task`, `/chat` and backstop seams; its UNIQUE `dispatched_execution_id` is the run the agent received.
-- **`db.get_self_approved_runs(agent, ids)`** (`db/skill_gate_requests.py:169-187`, facade `database.py:2315`): one `SELECT dispatched_execution_id, requester_key … WHERE agent_name = ? AND state = 'self_approved' AND dispatched_execution_id IN (…)`.
+- **`db.get_self_approved_runs(agent, ids)`** (`db/skill_gate_requests.py:169-187`, facade `database.py:2321`): one `SELECT dispatched_execution_id, requester_key … WHERE agent_name = ? AND state = 'self_approved' AND dispatched_execution_id IN (…)`.
 - **`skill_gate_map_service.self_approved_flags(agent, ids, principal)`** (`:180-206`) → `{id: (True, by_viewer)}`. `by_viewer` is `requester_key == "person:" + casefold(email)` for a person principal, so the email never leaves the server. People only: a machine principal (agent, MCP, connector or system key) gets `{}`, since beside `source_user_email` the marker names who fills the approver kind (operator ruling; the `set_by` rule, #715). The Workspace twin takes `viewer_is_person` for the same rule. It never raises: a failed read means no flags.
 - **Executions**: `routers/schedules.py:891-917` (`get_agent_executions`, one batch read per page) and `:920-938` (`get_execution`) take `current_user` and add `gate_self_approved` / `gate_self_approved_by_viewer` (`ExecutionSummary` `models.py:4121-4122`, `ExecutionResponse` `:4178-4179`). The PERF-001 summary column list is unchanged.
-- **Workspace**: `client_portal/router.py:1623-1648` (`portal_history`) → `service.get_history(agent, principal.email, …)` → `annotate_self_approved_turns` (`client_portal/service.py:4598`; `skill_gate_map_service.py:217-235`). Only assistant rows with an `execution_id` (#3166) are looked up, the viewer is the portal session's email, and questions, report rows and pre-#3166 rows read false. `PortalHistoryMessage` gains both fields (`client_portal/models.py:1012-1013`).
+- **Workspace**: `client_portal/router.py:1653-1678` (`portal_history`) → `service.get_history(agent, principal.email, …)` → `annotate_self_approved_turns` (`client_portal/service.py:4629`; `skill_gate_map_service.py:217-235`). Only assistant rows with an `execution_id` (#3166) are looked up, the viewer is the portal session's email, and questions, report rows and pre-#3166 rows read false. `PortalHistoryMessage` gains both fields (`client_portal/models.py:1012-1013`).
 
 ### Database Operations
 
