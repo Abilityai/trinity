@@ -269,6 +269,102 @@ class TestChainedPairs:
         text = "https://host/path?page=2&sort=asc;lang=en,fmt=json --flag=x=y"
         assert mod.sanitize_text(text) == text
 
+    # --- the merge-train finding on #3335 ---------------------------------
+    # Walking the chain made the SUBSTRING key rule (`.*AUTH.*`, `.*TOKEN.*`)
+    # apply to keys `dev` never examined, so everyday query parameters that
+    # merely CONTAIN a sensitive word were redacted — and, because a sensitive
+    # value runs to whitespace, took the rest of the URL with them. AC1 says
+    # the harmless pairs are kept.
+
+    @pytest.mark.parametrize("mod", BOTH)
+    @pytest.mark.parametrize(
+        "text",
+        [
+            # The three shapes named in the finding.
+            "https://example.com/org/repo/issues?q=is:open&author=bob&page=2",
+            "https://example.com/usage?page=2&tokens_used=10&model=x",
+            "https://example.com/login?sort=asc&passwordless=true&lang=en",
+            # Neighbours: the same words in their other everyday forms.
+            "?page=2&authors=bob,alice&lang=en",
+            "?page=2&coauthor=bob&lang=en",
+            "?page=2&authority=example.com&lang=en",
+            "?page=2&author_id=7&lang=en",
+            "?page=2&token_count=10&model=x",
+            "?model=x&max_tokens=100&input_tokens=7&output_tokens=9",
+            "?model=x&prompt_tokens=7;completion_tokens=9,total_tokens=16",
+            "?page=2&tokenizer=bpe&tokenized=true",
+            "?page=2&secretary=bob&lang=en",
+            "sort=asc;AUTHOR=bob,PASSWORDLESS=1",
+            "--env=AUTHOR=bob",
+            'curl -d "user=a&author=bob" https://example.com',
+            'q="x&author=bob"',
+        ],
+    )
+    def test_a_harmless_word_containing_a_sensitive_one_is_kept(self, mod, text):
+        assert mod.sanitize_text(text) == text
+
+    @pytest.mark.parametrize("mod", BOTH)
+    @pytest.mark.parametrize(
+        "text,expected",
+        [
+            ("FOO=bar API_KEY=k3yk3yk3y", "FOO=bar API_KEY=***REDACTED***"),
+            ("a=1&access_token=abc", "a=1&access_token=***REDACTED***"),
+            ("x=1&password=hunter2", "x=1&password=***REDACTED***"),
+            # The exemption is a closed list of WORDS, not a word-boundary
+            # rule: every other key containing a sensitive literal — glued,
+            # camelCase, plural, suffixed — is still redacted mid-chain.
+            ("a=1&auth=abc", "a=1&auth=***REDACTED***"),
+            ("a=1&authorization=abc", "a=1&authorization=***REDACTED***"),
+            ("a=1&authorisation=abc", "a=1&authorisation=***REDACTED***"),
+            ("a=1&authentication=abc", "a=1&authentication=***REDACTED***"),
+            ("a=1&authkey=abc", "a=1&authkey=***REDACTED***"),
+            ("a=1&oauth=abc", "a=1&oauth=***REDACTED***"),
+            ("a=1&accessToken=abc", "a=1&accessToken=***REDACTED***"),
+            ("a=1&csrftoken=abc", "a=1&csrftoken=***REDACTED***"),
+            ("a=1&token=abc", "a=1&token=***REDACTED***"),
+            ("a=1&tokens=abc", "a=1&tokens=***REDACTED***"),
+            ("a=1&access_tokens=abc", "a=1&access_tokens=***REDACTED***"),
+            ("a=1&token_value=abc", "a=1&token_value=***REDACTED***"),
+            ("a=1&secretkey=abc", "a=1&secretkey=***REDACTED***"),
+            ("a=1&secrets=abc", "a=1&secrets=***REDACTED***"),
+            ("a=1&passwords=abc", "a=1&passwords=***REDACTED***"),
+            ("a=1&password_confirmation=abc", "a=1&password_confirmation=***REDACTED***"),
+            ("a=1&credentials=abc", "a=1&credentials=***REDACTED***"),
+            # A harmless word does not launder a sensitive one beside it.
+            ("a=1&author_token=abc", "a=1&author_token=***REDACTED***"),
+            ("a=1&passwordless_secret=abc", "a=1&passwordless_secret=***REDACTED***"),
+            ("a=1&max_tokens_secret=abc", "a=1&max_tokens_secret=***REDACTED***"),
+            ("a=1&tokens_used_password=abc", "a=1&tokens_used_password=***REDACTED***"),
+            ("a=1&max_tokensecret=abc", "a=1&max_tokensecret=***REDACTED***"),
+        ],
+    )
+    def test_the_harmless_words_do_not_shelter_a_real_credential(self, mod, text, expected):
+        assert mod.sanitize_text(text) == expected
+
+    @pytest.mark.parametrize("mod", BOTH)
+    @pytest.mark.parametrize(
+        "text,expected",
+        [
+            ("author=bob", "author=***REDACTED***"),
+            ("page=2 tokens_used=10", "page=2 tokens_used=***REDACTED***"),
+            ('{"passwordless=true"}', '{"passwordless=***REDACTED***"}'),
+            # After a separator, but not inside a harmless pair's value: `dev`
+            # read `x,author` / `y&authority` as ONE key and redacted it.
+            ("x,author=bob", "x,author=***REDACTED***"),
+            ("q=x y&authority=bob", "q=x y&authority=***REDACTED***"),
+            # Straight after a redacted pair `dev` resumed with `&author` as
+            # the key, so the exemption does not carry across one.
+            ('token="x"&author=bob', "token=***REDACTED***&author=***REDACTED***"),
+        ],
+    )
+    def test_a_key_dev_already_examined_keeps_the_dev_rule(self, mod, text, expected):
+        """The exemption is ONLY for a key sitting inside what #1670 consumed
+        as a harmless pair's value — the keys this fix newly examines. Every
+        key `dev` already tested with plain containment keeps that verdict:
+        this is a fix for a regression, not a second opinion on the key rule,
+        and it must never redact LESS than `dev` did."""
+        assert mod.sanitize_text(text) == expected
+
     @pytest.mark.parametrize("mod", BOTH)
     @pytest.mark.parametrize(
         "attack",
@@ -279,6 +375,12 @@ class TestChainedPairs:
             pytest.param(lambda n: "TOKEN=" + ",a" * (n // 2), id="separator-value"),
             pytest.param(lambda n: "TOKEN='TOKEN=\"" * (n // 14), id="mixed-quotes"),
             pytest.param(lambda n: 'TOKEN="' + "x" * n, id="sensitive-unterminated-quote"),
+            pytest.param(lambda n: "a=1&" + "AUTHOR" * (n // 6) + "=x", id="harmless-word-key"),
+            pytest.param(lambda n: "a=1&" + "MAX_TOKENS" * (n // 10) + "=x", id="harmless-count-key"),
+            pytest.param(lambda n: "a=1&" + "AUTHORI" * (n // 7) + "=x", id="harmless-near-miss-key"),
+            pytest.param(lambda n: "a=1&" + "_" * n + "TOKENS=x", id="separator-run-key"),
+            pytest.param(lambda n: "a=1&" + "author=1&" * (n // 9), id="many-harmless-word-pairs"),
+            pytest.param(lambda n: ("a=" + "x" * 200 + "&author=1 ") * (n // 212), id="long-gaps"),
         ],
     )
     def test_chain_shapes_stay_linear(self, mod, attack):

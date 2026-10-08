@@ -261,6 +261,60 @@ def _is_sensitive_kv_key(key: str) -> bool:
     return any(lit in upper for lit in _SENSITIVE_KEY_LITERALS)
 
 
+# --- #3311 (merge-train finding): harmless words in a CHAINED key ------------
+# Walking the chain put keys under the containment test above that `dev` never
+# examined at all (they sat inside a harmless pair's value). Containment is
+# deliberately broad, so everyday query parameters that merely CONTAIN a
+# sensitive word were redacted — `&author=bob` (AUTH), `&tokens_used=10`
+# (TOKEN), `&passwordless=true` (PASSWORD) — and since a sensitive value runs
+# to whitespace, each took the rest of the URL with it. AC1: harmless pairs
+# are kept.
+#
+# The narrowing is a CLOSED LIST OF WORDS, not a word-boundary rule. A boundary
+# rule ("the literal must end the word") is the obvious shape and leaks an open
+# class: `secretkey`, `authkey`, `tokenvalue`, `passwords`, `credentials`,
+# `authorization` are all a literal plus more letters. Here every key keeps the
+# containment verdict unless the ONLY thing that made it sensitive is one of
+# the words below — they are blanked out and the remainder is tested as before,
+# so `author_token` and `max_tokens_secret` still redact. What this can let
+# through is exactly what is listed, nothing adjacent to it.
+#
+#   AUTHOR…      author(s), authored, authority, coauthor — but NOT
+#                authoriz…/authoris… (`authorization` carries credentials)
+#   PASSWORDLESS, SECRETARY/-IES/-IAT, TOKENIZ…/TOKENIS… (tokenizer, tokenized)
+#   token COUNTS  max/total/input/output/prompt/completion_tokens and
+#                token(s)_used/_count/_limit/_usage — numbers, never secrets
+#
+# Applies ONLY to a key that sits inside what #1670 consumed as a harmless
+# pair's VALUE: glued after `=`, `&`, `;` or `,`, with nothing but value
+# characters back to the previous `KEY=` (`_KV_CHAIN_GAP_RE`, scanned over
+# exactly the gap between two keys, so the gaps are disjoint and the walk stays
+# linear). Every other key — one that starts its run (`author=bob`,
+# `page=2 tokens_used=10`), follows a bare word (`x,author=bob`) or follows a
+# redacted pair — was already under plain containment on `dev` and still is:
+# this restores AC1 for the keys this fix newly reaches, it does not
+# re-litigate the key rule. No quantifier beyond `S?` in the word list.
+_KV_CHAIN_SEPARATORS = "=&;,"
+_KV_CHAIN_GAP_RE = re.compile(r'["\']?[^\s"\']*')
+_CHAINED_HARMLESS_WORD_RE = re.compile(
+    r'AUTHOR(?!I[SZ])'
+    r'|PASSWORDLESS'
+    r'|SECRETAR(?:Y|IES|IAT)'
+    r'|TOKENI[SZ]'
+    r'|(?<![A-Z0-9])(?:MAX|TOTAL|INPUT|OUTPUT|PROMPT|COMPLETION)_TOKENS(?![A-Z0-9])'
+    r'|TOKENS?_(?:USED|COUNT|LIMIT|USAGE)(?![A-Z0-9])'
+)
+
+
+def _is_sensitive_chained_key(key: str) -> bool:
+    """`_is_sensitive_kv_key` for a key chained after another pair (#3311).
+
+    Same containment test, with the known-harmless words blanked out first.
+    """
+    upper = _CHAINED_HARMLESS_WORD_RE.sub(" ", key.upper())
+    return any(lit in upper for lit in _SENSITIVE_KEY_LITERALS)
+
+
 def _is_public_google_consent_match(match: "re.Match", credential_values=()) -> bool:
     """Recognize supported consent links, never OAuth callbacks or tokens.
 
@@ -338,12 +392,23 @@ def _redact_kv_pairs(text: str) -> str:
     out = []
     kept = 0  # end of the text already copied to `out`
     pos = 0   # where the next key search starts; only ever moves forward
+    prev = -1  # end of the previous harmless `KEY=`; -1 = none in this chain
     while True:
         key = _KV_LINE_RE.search(text, pos)
         if key is None:
             break
         pos = key.end()
-        if not _is_sensitive_kv_key(key.group(1)):
+        start = key.start()
+        # Chained = inside the value of the harmless pair before it (see
+        # `_CHAINED_HARMLESS_WORD_RE`). Anything else keeps the full rule.
+        chained = (
+            prev >= 0
+            and text[start - 1] in _KV_CHAIN_SEPARATORS
+            and _KV_CHAIN_GAP_RE.match(text, prev, start).end() == start
+        )
+        prev = pos
+        is_sensitive = _is_sensitive_chained_key if chained else _is_sensitive_kv_key
+        if not is_sensitive(key.group(1)):
             continue
         pair = _KV_PAIR_RE.match(text, key.start())
         if pair is None:
@@ -351,6 +416,7 @@ def _redact_kv_pairs(text: str) -> str:
         out.append(text[kept:pair.start()])
         out.append(_redact_kv_match(pair))
         kept = pos = pair.end()
+        prev = -1
     out.append(text[kept:])
     return "".join(out)
 
