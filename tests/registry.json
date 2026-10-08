@@ -4068,6 +4068,17 @@
       "description": "`GET /api/agents/{name}/objectives` through a real TestClient with the service's edges stubbed. Gate order copied from `/metrics` and proved in order (the self-gate fires BEFORE the service is called and before the limiter), the route's own 60/min knob rather than the store read's 240 because this one drives the container, a store outage as 503 + `Retry-After`, and an unreachable agent as a 200 that SAYS so — an agent being stopped is an answer, not an error. The model-is-the-contract half walks the service's own dict against every model's fields recursively, so an additive service key fails the build instead of being silently filtered out by `response_model`; author-shaped targets (`.nan`, `.inf`, lists, bools, 4 KB strings) are pushed through the real route and parsed with `parse_constant` armed, since a bare `NaN` on the wire is what blanks the card."
     },
     {
+      "file": "unit/test_ent839_seat_decisions_self_gate.py",
+      "feature": "trinity-enterprise#839",
+      "added": "2026-10-08",
+      "categories": [
+        "backend",
+        "security",
+        "workspace"
+      ],
+      "description": "CWE-863: through the real seat_decisions router, a sibling agent key (resolving to an admin owner) gets the 403 on POST and GET /api/agents/{name}/decisions before the access check or the execution read; the key's own agent and a person pass the gate."
+    },
+    {
       "file": "unit/test_ent638_seat_decisions.py",
       "feature": "trinity-enterprise#638",
       "added": "2026-09-22",
