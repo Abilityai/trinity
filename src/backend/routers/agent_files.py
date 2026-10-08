@@ -98,8 +98,6 @@ async def get_agent_playbooks_endpoint(
         return await agent_skills_listing.list_skills(agent_name, last_known=last_known)
     except agent_skills_listing.SkillsListUnavailable as e:
         raise HTTPException(status_code=e.status_code, detail=e.detail)
-    except HTTPException:
-        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to fetch playbooks: {str(e)}")
 

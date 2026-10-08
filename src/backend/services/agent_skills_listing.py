@@ -34,6 +34,7 @@ import json
 import logging
 from typing import Any, Dict, Optional
 
+import docker
 import httpx
 
 from services.agent_auth import agent_httpx_client
@@ -66,13 +67,15 @@ class SkillsListUnavailable(Exception):
     (no container), `not_running`, `unreachable` (timeout / connect error)
     or `agent_error` (the agent answered non-200). ``status_code`` / ``detail``
     are the HTTP answer the agent page has always given; the other callers
-    keep their own wording for the reasons they word differently."""
+    keep their own wording for the reasons they word differently
+    (``agent_text`` is the agent's own error body, for `agent_error`)."""
 
-    def __init__(self, reason: str, status_code: int, detail: str):
+    def __init__(self, reason: str, status_code: int, detail: str, agent_text: str = ""):
         super().__init__(detail)
         self.reason = reason
         self.status_code = status_code
         self.detail = detail
+        self.agent_text = agent_text
 
 
 def _key(agent_name: str) -> str:
@@ -96,7 +99,13 @@ async def fetch_live(agent_name: str) -> Any:
     container = get_agent_container(agent_name)
     if not container:
         raise SkillsListUnavailable("not_found", 404, "Agent not found")
-    await container_reload(container)
+    try:
+        await container_reload(container)
+    except docker.errors.NotFound:
+        # Removed between the lookup and the reload: gone, as a missed lookup
+        # says — never Docker's own text (its URL and container id), which a
+        # caller's catch-all would otherwise hand on, to the public link too.
+        raise SkillsListUnavailable("not_found", 404, "Agent not found")
     if container.status != "running":
         raise SkillsListUnavailable(
             "not_running", 503, "Agent is not running. Start the agent to view its skills.")
@@ -105,11 +114,14 @@ async def fetch_live(agent_name: str) -> Any:
             response = await client.get(f"http://agent-{agent_name}:8000/api/skills")
     except httpx.TimeoutException:
         raise SkillsListUnavailable("unreachable", 504, "Agent is starting up, please try again")
-    except httpx.ConnectError:
+    except httpx.TransportError:
+        # Connect, read or protocol failure: the agent did not answer — a
+        # connection dropped mid-answer is as unreachable as one refused.
         raise SkillsListUnavailable("unreachable", 503, "Could not connect to agent")
     if response.status_code != 200:
         raise SkillsListUnavailable(
-            "agent_error", response.status_code, f"Agent returned error: {response.text}")
+            "agent_error", response.status_code, f"Agent returned error: {response.text}",
+            agent_text=response.text)
     body = response.json()
     remember(agent_name, body)
     return body

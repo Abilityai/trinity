@@ -43,6 +43,8 @@ import logging
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Set, Tuple
 
+import httpx
+
 from database import db
 from db.skill_gates import ORIGIN_CLEARED, ORIGIN_LIBRARY_DEFAULT, ORIGIN_SET
 from services import role_addressing, skill_gate_service
@@ -248,7 +250,10 @@ async def hook_status(agent_name: str) -> str:
         if response.status_code != 200:
             return HOOK_UNKNOWN
         data = response.json()
-    except Exception:  # noqa: BLE001 — stopped, slow, unreachable or not JSON: no answer
+    except (httpx.HTTPError, ValueError):  # stopped, slow, unreachable or not JSON: no answer
+        return HOOK_UNKNOWN
+    except Exception:  # noqa: BLE001 — no answer too, but one that may recur on every call
+        logger.debug("[skill_gate_map] hook probe for %s failed", agent_name, exc_info=True)
         return HOOK_UNKNOWN
     if not isinstance(data, dict):
         return HOOK_UNKNOWN

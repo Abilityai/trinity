@@ -2101,6 +2101,20 @@ export function agentRowTime(threads, agentName, now = Date.now()) {
 // `id` defaults to `null`, never `undefined`: the consumer's gate is a
 // truthiness test either way, but a row whose id is explicitly null says "this
 // was built without one" where a missing key says nothing at all.
+/**
+ * trinity-enterprise#754: the two "ran without approval" facts of a reply that
+ * just landed, in the shape `assistantRow` takes, from either shape the reply
+ * arrives in: the streaming path's row (`gateSelfApproved`, mapped by
+ * `replyFromHistory`) or the synchronous fallback's raw `POST …/chat` body
+ * (`gate_self_approved`). True only when the server said true.
+ */
+export function turnGateFlags(data) {
+  return {
+    gate_self_approved: (data?.gateSelfApproved ?? data?.gate_self_approved) === true,
+    gate_self_approved_by_viewer: (data?.gateSelfApprovedByViewer ?? data?.gate_self_approved_by_viewer) === true,
+  }
+}
+
 export function assistantRow({ content = '', id = null, my_rating = null,
                                source = null, voice_call_id = null,
                                execution_id = null, gate_self_approved = false,

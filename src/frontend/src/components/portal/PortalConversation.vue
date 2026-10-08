@@ -904,7 +904,7 @@ import PortalAvatar from './PortalAvatar.vue'
 import PortalStarButton from './PortalStarButton.vue'
 import PortalEditableTitle from './PortalEditableTitle.vue'
 import PortalChatTabs from './PortalChatTabs.vue'
-import { newChatHotkeyLabel, MAIN_TAB_LABEL, composerAvailabilityNotice, assistantRow, replyFromHistory, replyBaseline, readReplyBaseline, agentChatTabs, NEW_CHAT_TAB_ID, pairRepliesWithQuestions } from './portalUtils'
+import { newChatHotkeyLabel, MAIN_TAB_LABEL, composerAvailabilityNotice, assistantRow, replyFromHistory, replyBaseline, readReplyBaseline, agentChatTabs, NEW_CHAT_TAB_ID, pairRepliesWithQuestions, turnGateFlags } from './portalUtils'
 // ent#621: the same wrap the typeahead's roving selection uses — one modulo.
 import { cycleIndex } from './portalKeymap'
 // ent#738: the chip's one-line excerpt — the same one the Inbox's arrow hands over.
@@ -1616,7 +1616,7 @@ async function reattach(executionId, budgetSeconds, budgetReadAt) {
       // #2580: `id` + `myRating` from the persisted row, so a reattached reply is
       // rateable the moment it lands rather than on the next load.
       messages.value.push({ ...assistantRow({ content: data.response, id: data.id, my_rating: data.myRating,
-        gate_self_approved: data.gateSelfApproved, gate_self_approved_by_viewer: data.gateSelfApprovedByViewer }),
+        ...turnGateFlags(data) }),
       at: data.at || null })
       refreshAsksAfterTurn()
       // A reattached reply is still a reply the user just watched land, so it
@@ -2157,9 +2157,9 @@ async function deliver(text, { replyId = null, attachments = null } = {}) {
         content: data.response || '(no response)',
         id: data.id || data.message_id,
         my_rating: data.myRating,
-        // trinity-enterprise#754: read off the persisted reply, like the id.
-        gate_self_approved: data.gateSelfApproved,
-        gate_self_approved_by_viewer: data.gateSelfApprovedByViewer,
+        // trinity-enterprise#754: read off the persisted reply, like the id —
+        // either spelling, since the synchronous body is snake_case.
+        ...turnGateFlags(data),
       }),
       at: data.at || null,
     })

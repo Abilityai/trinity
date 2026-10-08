@@ -119,3 +119,18 @@ def test_the_route_model_keeps_both_fields_and_adds_no_email(thread):
     new_keys = {k for k in paid if "self_approved" in k}
     assert new_keys == {"gate_self_approved", "gate_self_approved_by_viewer"}
     assert "ana@example.com" not in str({k: paid[k] for k in new_keys}).lower()
+
+
+def test_through_the_route_a_machine_viewer_sees_the_fact_but_is_never_you(thread):
+    """A system-scoped key on the platform session is admitted (`is_person`
+    False); like the executions path, it never reads "you"."""
+    from client_portal import router as portal_router
+    from client_portal.portal_auth import PortalPrincipal
+
+    def paid(principal):
+        out = portal_router.portal_history(AGENT, session_id=THREAD, limit=None, principal=principal)
+        m = next(m for m in out["messages"] if m["content"] == "Paid.")
+        return m["gate_self_approved"], m["gate_self_approved_by_viewer"]
+
+    assert paid(PortalPrincipal(ANA, True, is_person=True)) == (True, True)
+    assert paid(PortalPrincipal(ANA, True, is_person=False)) == (True, False)

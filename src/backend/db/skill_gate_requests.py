@@ -49,6 +49,7 @@ EXPIRED = "expired"
 CANCELLED = "cancelled"
 REFUSED = "refused"
 SELF_APPROVED = "self_approved"
+SELF_APPROVED_READ_CHUNK = 500   # ids per statement in `get_self_approved_runs`
 
 # to_state → the states it may be entered from. `dispatching` is entered only
 # through `claim_gate_request_for_dispatch`, which also writes the run's id.
@@ -171,15 +172,19 @@ class SkillGateRequestOperations:
         the "ran without approval" marker). One read per page of executions,
         served by the UNIQUE `dispatched_execution_id` index."""
         ids = [e for e in (execution_ids or []) if e]
-        if not ids:
-            return {}
-        stmt = (select(skill_gate_requests.c.dispatched_execution_id,
-                       skill_gate_requests.c.requester_key)
-                .where(and_(skill_gate_requests.c.agent_name == agent_name,
-                            skill_gate_requests.c.state == SELF_APPROVED,
-                            skill_gate_requests.c.dispatched_execution_id.in_(ids))))
+        out: Dict[str, str] = {}
+        # The page is the caller's `limit` (unbounded); SQLite and PostgreSQL
+        # both cap bound parameters, so the IN is read in bounded chunks.
         with get_engine().connect() as conn:
-            return {r.dispatched_execution_id: r.requester_key for r in conn.execute(stmt)}
+            for at in range(0, len(ids), SELF_APPROVED_READ_CHUNK):
+                stmt = (select(skill_gate_requests.c.dispatched_execution_id,
+                               skill_gate_requests.c.requester_key)
+                        .where(and_(skill_gate_requests.c.agent_name == agent_name,
+                                    skill_gate_requests.c.state == SELF_APPROVED,
+                                    skill_gate_requests.c.dispatched_execution_id.in_(
+                                        ids[at:at + SELF_APPROVED_READ_CHUNK]))))
+                out.update({r.dispatched_execution_id: r.requester_key for r in conn.execute(stmt)})
+        return out
 
     def get_gate_requests_by_origin_executions(self, execution_ids: List[str]) -> Dict[str, Dict]:
         """`{origin execution id: record}` — which SKIPPED rows the gate closed

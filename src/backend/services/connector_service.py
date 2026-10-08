@@ -120,9 +120,13 @@ async def fetch_live_playbooks(agent_name: str) -> List[dict]:
     try:
         body = await agent_skills_listing.fetch_live(agent_name)
     except agent_skills_listing.SkillsListUnavailable as e:
-        detail = "Agent is not running." if e.reason == "not_running" else e.detail
+        detail = {"not_running": "Agent is not running.",
+                  "agent_error": f"Agent error: {e.agent_text}"}.get(e.reason, e.detail)
         raise HTTPException(status_code=e.status_code, detail=detail)
-    return body.get("skills", []) if isinstance(body, dict) else []
+    if not isinstance(body, dict):
+        # A body that is not a listing is the agent's failure, never "no skills".
+        raise HTTPException(status_code=500, detail="Agent returned an unreadable skills listing")
+    return body.get("skills", [])
 
 
 def resolve_exposed_playbooks(

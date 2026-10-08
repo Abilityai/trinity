@@ -3229,7 +3229,7 @@ async def portal_chat(agent_name: str, message: str, email: str,
         # an approval was raised. Waiting is not failing: the thread renders a
         # non-retryable error as a Failed turn, so the notice is the reply.
         return _persist_reply(agent_name, email, session_id, e.message, None, voice_call_id,
-                              execution_id)
+                              execution_id, viewer_is_person=gate_is_person)
     except SkillGateError as e:
         raise ClientPortalError(e.status_code, str(e), category="gated", retryable=False)
     except ResumeLockBusy:
@@ -3404,11 +3404,13 @@ async def portal_chat(agent_name: str, message: str, email: str,
     # It now runs concurrently with the turn, immediately after
     # `_persist_user_turn` — see the comment there for why, and for the two
     # behaviour changes that buys.
-    return _persist_reply(agent_name, email, session_id, reply, cost, voice_call_id, execution_id)
+    return _persist_reply(agent_name, email, session_id, reply, cost, voice_call_id, execution_id,
+                          viewer_is_person=gate_is_person)
 
 
 def _persist_reply(agent_name: str, email: str, session_id: str, reply: str, cost,
-                   voice_call_id: str | None, execution_id: str | None = None) -> dict:
+                   voice_call_id: str | None, execution_id: str | None = None, *,
+                   viewer_is_person: bool = False) -> dict:
     """Persist the assistant half of a turn and build the turn's answer.
 
     #3166: `execution_id` is the DISPATCHED turn's id — the one the client is
@@ -3431,8 +3433,16 @@ def _persist_reply(agent_name: str, email: str, session_id: str, reply: str, cos
     # only because `PortalChatResponse` DECLARES it. The route's `response_model`
     # strips undeclared keys in silence, so adding a key here alone is a no-op
     # that every service-layer test would still pass.
+    # trinity-enterprise#754: on this fallback the answer is all the bubble has
+    # before a reload, so it says, like the history read, whether the turn
+    # skipped approval because the asker is the approver ("you" for a person only).
+    turn = {"role": "assistant", "execution_id": execution_id}
+    skill_gate_map_service.annotate_self_approved_turns(
+        agent_name, [turn], email if viewer_is_person else None)
     return {"response": reply, "cost": cost, "session_id": session_id,
-            "message_id": message_id}
+            "message_id": message_id,
+            "gate_self_approved": turn["gate_self_approved"],
+            "gate_self_approved_by_viewer": turn["gate_self_approved_by_viewer"]}
 
 
 def _gate_requester(email: str, is_person: bool):
@@ -4550,7 +4560,8 @@ def _attach_own_ratings(messages: list, email: str, *, is_platform: bool = False
 
 
 def get_history(agent_name: str, email: str, session_id: str | None = None,
-                include_owned: bool = False, limit: int | None = None) -> dict:
+                include_owned: bool = False, limit: int | None = None,
+                viewer_is_person: bool = True) -> dict:
     """A client's conversation with a rostered agent (oldest-first). Roster-scoped
     (miss → 404). With ``session_id`` it returns that thread (validated to belong
     to the caller — miss → 404); with none it returns the client's most-recent
@@ -4584,7 +4595,9 @@ def get_history(agent_name: str, email: str, session_id: str | None = None,
     _attach_own_ratings(messages, email, is_platform=include_owned)
     # trinity-enterprise#754: a reply whose turn skipped approval because the
     # asker IS the approver says so (one read for the thread; no email added).
-    skill_gate_map_service.annotate_self_approved_turns(agent_name, messages, email)
+    # A machine principal (a system key on the platform session) is never "you".
+    skill_gate_map_service.annotate_self_approved_turns(
+        agent_name, messages, email if viewer_is_person else None)
     # #3265: the stored JSON becomes the list the bubble renders.
     for m in messages:
         m["attachments"] = decode_turn_attachments(m.get("attachments"))

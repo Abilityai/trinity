@@ -429,6 +429,10 @@ class PortalChatResponse(BaseModel):
     # it. `None` then, and the client's `v-if="message.id"` correctly withholds
     # the thumbs rather than offering a control whose POST would 404.
     message_id: Optional[str] = None
+    # trinity-enterprise#754: the turn went through without approval because the
+    # asker is the approver (and the asker is this caller) — as on history rows.
+    gate_self_approved: bool = False
+    gate_self_approved_by_viewer: bool = False
 
 
 class PortalTurnStarted(BaseModel):

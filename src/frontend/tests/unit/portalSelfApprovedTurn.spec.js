@@ -29,7 +29,7 @@ vi.mock('axios', () => {
   }
 })
 
-import { assistantRow, replyFromHistory } from '@/components/portal/portalUtils'
+import { assistantRow, replyFromHistory, turnGateFlags } from '@/components/portal/portalUtils'
 import PortalConversation from '@/components/portal/PortalConversation.vue'
 import ExecutionGateMarker from '@/components/skills/ExecutionGateMarker.vue'
 import { useClientPortalStore } from '@/stores/clientPortal'
@@ -53,6 +53,22 @@ describe('the row mappers carry the marker', () => {
     const got = replyFromHistory([{ role: 'user', content: 'q', execution_id: 'exec-self' }, reply()],
       null, 'exec-self')
     expect(got).toMatchObject({ response: 'Paid.', gateSelfApproved: true, gateSelfApprovedByViewer: true })
+  })
+})
+
+describe('a reply that just landed carries them in either shape it arrives in', () => {
+  it('the streaming row (camelCase) and the synchronous POST …/chat body (snake_case) alike', () => {
+    expect(turnGateFlags({ gateSelfApproved: true, gateSelfApprovedByViewer: true }))
+      .toEqual({ gate_self_approved: true, gate_self_approved_by_viewer: true })
+    expect(turnGateFlags({ response: 'Paid.', message_id: 'm9', gate_self_approved: true,
+      gate_self_approved_by_viewer: false }))
+      .toEqual({ gate_self_approved: true, gate_self_approved_by_viewer: false })
+  })
+
+  it('true only when the server said true', () => {
+    const none = { gate_self_approved: false, gate_self_approved_by_viewer: false }
+    expect(turnGateFlags(null)).toEqual(none)
+    expect(turnGateFlags({ gate_self_approved: 'yes', gateSelfApprovedByViewer: 1 })).toEqual(none)
   })
 })
 

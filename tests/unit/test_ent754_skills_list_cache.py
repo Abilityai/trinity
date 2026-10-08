@@ -460,3 +460,103 @@ async def test_the_connector_read_on_a_stopped_agent_keeps_its_503(env):
 
     assert exc.value.status_code == 503
     assert exc.value.detail == "Agent is not running."
+
+
+# ---------------------------------------------------------------------------
+# 7. The answers each reader words itself (review round)
+# ---------------------------------------------------------------------------
+
+
+def _vanish(monkeypatch):
+    """The container is removed between the lookup and the reload."""
+    import docker
+
+    async def _gone(_c):
+        raise docker.errors.NotFound(
+            "404 Client Error for http+docker://localhost/v1.47/containers/0123abcd/json: Not Found")
+
+    monkeypatch.setattr(listing, "container_reload", _gone)
+
+
+def test_a_container_removed_mid_read_is_not_found_without_dockers_words(env, monkeypatch):
+    _vanish(monkeypatch)
+
+    r = _get(env)
+
+    assert r.status_code == 404
+    assert r.json()["detail"] == "Agent not found"
+
+
+def test_the_public_link_never_hears_dockers_error_text(env, monkeypatch):
+    _vanish(monkeypatch)
+    client = _public_client(monkeypatch)
+
+    r = client.get("/api/public/playbooks/tok")
+
+    assert r.status_code == 503
+    assert r.json()["detail"] == "Agent is not running"
+
+
+@pytest.mark.parametrize("exc", [httpx.ReadError("connection reset"), httpx.RemoteProtocolError("peer closed")],
+                         ids=["read_error", "remote_protocol_error"])
+def test_a_connection_dropped_mid_answer_is_unreachable(env, exc):
+    _get(env)                                   # a live read keeps a copy
+    env.agent.answer = exc
+
+    r = _get(env)
+    kept = _get(env, last_known="true")
+
+    assert r.status_code == 503 and r.json()["detail"] == "Could not connect to agent"
+    assert kept.status_code == 200
+    assert kept.json()["last_known"]["reason"] == "unreachable"
+
+
+@pytest.mark.asyncio
+async def test_the_connector_keeps_its_own_wording_for_an_agent_error(env):
+    from fastapi import HTTPException
+    from services import connector_service
+
+    env.agent.answer = FakeResponse(500, None, text="boom")
+
+    with pytest.raises(HTTPException) as exc:
+        await connector_service.fetch_live_playbooks(AGENT)
+
+    assert exc.value.status_code == 500
+    assert exc.value.detail == "Agent error: boom"
+
+
+@pytest.mark.asyncio
+async def test_the_connector_refuses_a_body_that_is_not_a_listing(env):
+    """Before the listing service it raised on `.get` of a non-dict (a 500); an
+    empty list would tell the connector the agent has no skills."""
+    from fastapi import HTTPException
+    from services import connector_service
+
+    env.agent.answer = FakeResponse(200, ["not", "a", "listing"])
+
+    with pytest.raises(HTTPException) as exc:
+        await connector_service.fetch_live_playbooks(AGENT)
+
+    assert exc.value.status_code == 500
+
+
+def test_the_library_listing_names_each_skills_approval(monkeypatch):
+    """ent#753 keeps `approval` on the library contract and `SkillInfo` declares
+    it, but the route builds `SkillInfo` field by field and never named it, so
+    it was always null over REST: a Shared card's "author recommends approval"
+    (AC8) had no source for a stopped agent or an older image."""
+    import asyncio
+    from types import SimpleNamespace
+
+    from routers import skills as skills_route
+
+    fake = SimpleNamespace(list_skills=lambda: [
+        {"name": "pay-invoice", "path": "pay-invoice/SKILL.md", "approval": "recommended"},
+        {"name": "plain", "path": "plain/SKILL.md", "approval": None},
+    ])
+    monkeypatch.setattr(skills_route, "skill_service", fake)
+    user = SimpleNamespace(id=1, username="owner", role="user", agent_name=None)
+
+    body = {s.name: s.approval for s in asyncio.run(skills_route.list_skills(current_user=user))}
+
+    assert body == {"pay-invoice": "recommended", "plain": None}

@@ -144,6 +144,34 @@ def test_a_run_someone_else_approved_is_not_marked(world):
     assert (detail.gate_self_approved, detail.gate_self_approved_by_viewer) == (False, False)
 
 
+def test_a_large_page_is_read_in_statements_under_every_bind_limit(world):
+    """The page is the caller's `limit` (unbounded). SQLite builds cap bound
+    parameters (999 on old ones, 32,766 since 3.32) and PostgreSQL at 65,535;
+    one IN over the whole page would raise there, and fail open to "no run is
+    marked". The read is chunked, so every statement stays far below any cap."""
+    from sqlalchemy import event
+
+    from db import skill_gate_requests as sgr
+    from services import skill_gate_map_service
+
+    sizes = []
+
+    def _count(conn, cursor, statement, parameters, context, executemany):
+        if "skill_gate_requests" in statement and "dispatched_execution_id" in statement:
+            sizes.append(len(parameters))
+
+    engine = sgr.get_engine()
+    event.listen(engine, "before_cursor_execute", _count)
+    try:
+        ids = [f"exec-{i}" for i in range(1_201)] + [world["self"]]
+        flags = skill_gate_map_service.self_approved_flags(AGENT, ids, world["User"](**APPROVER))
+    finally:
+        event.remove(engine, "before_cursor_execute", _count)
+
+    assert flags == {world["self"]: (True, True)}
+    assert len(sizes) >= 3 and max(sizes) <= 500 + 2     # the chunk, plus agent_name and state
+
+
 def test_a_record_for_another_agents_run_does_not_leak_across(world):
     """The batch read is scoped to the agent as well as to the ids."""
     from database import db

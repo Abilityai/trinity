@@ -277,6 +277,23 @@ def test_probe_is_a_persons_even_for_a_key_that_may_manage_skills(env, principal
     assert env.health.calls == []
 
 
+def test_an_unexpected_probe_failure_is_unknown_and_says_why(env, caplog):
+    """No answer is `unknown` (never a warning), but a fault that recurs on
+    every call — #1159's fail-closed client, say — must leave a trace, or the
+    owner would never see a warning and nobody would know why."""
+    import logging
+
+    def _boom(name, **kw):
+        raise RuntimeError("agent auth secret missing")
+
+    env.monkeypatch.setattr(skill_gate_map_service, "agent_httpx_client", _boom)
+    with caplog.at_level(logging.DEBUG, logger=skill_gate_map_service.logger.name):
+        body = _get(env, OWNER, probe="true")
+
+    assert body["hook"] == "unknown"
+    assert any(r.exc_info for r in caplog.records if "hook probe" in r.getMessage())
+
+
 def test_probe_is_honoured_for_an_admin(env):
     assert _get(env, ADMIN, probe="true")["hook"] == "ok"
 

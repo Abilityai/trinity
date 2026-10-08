@@ -190,6 +190,13 @@ describe('Workspace reply baseline follows the server-resolved thread', () => {
 })
 
 describe('#2580 — every path that builds a reply uses the shared rule', () => {
+  it('both live-turn sites take the "ran without approval" facts through turnGateFlags (trinity-enterprise#754)', () => {
+    // Supplementary pin: the helper is executed in portalSelfApprovedTurn.spec.js;
+    // this keeps the synchronous fallback (raw snake_case body) from reading
+    // only the streaming row's camelCase keys again.
+    expect(CONV.match(/\.\.\.turnGateFlags\(data\)/g)).toHaveLength(2)
+  })
+
   it('routes all three construction sites through assistantRow', () => {
     // Three sites built this row: history load, a completed turn, and a
     // reattached turn. Two dropped the id. Sharing the mapper is what stops a
