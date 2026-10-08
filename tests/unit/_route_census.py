@@ -583,6 +583,12 @@ AGENT_CALLABLE: Dict[str, Tuple[str, str]] = {
     # The write (PUT .../git/pull-sync) is a setting, so it is person-only.
     "routers/git.py::get_pull_sync_config": (
         "GET /api/agents/{agent_name}/git/pull-sync", "ent#703 the agent's pull loop reads its own switch live each cycle"),
+    # The autonomy dial (ent#641): reads a companion needs to tell a person why it asks first.
+    # The writes are the GRANT (PUT /api/settings/autonomy-dial, admin + interactive).
+    "routers/seat_decisions.py::get_seat_autonomy": (
+        "GET /api/agents/{agent_name}/seat-autonomy", "ent#641 read of this companion's seat verdict; ask classes only, never a person"),
+    "routers/settings/autonomy_dial.py::get_autonomy_dial": (
+        "GET /api/settings/autonomy-dial", "ent#641 read of the instance ceiling; reading the level is not a grant"),
 }
 
 # Authenticates itself, or unauthenticated by design. key -> ("METHOD /full/path", reason)

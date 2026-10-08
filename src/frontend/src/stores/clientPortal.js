@@ -454,6 +454,14 @@ export const useClientPortalStore = defineStore('clientPortal', {
     _suggestionsInFlight: null, // the running load, shared by both placements
     _suggestionsLoadSeq: 0,     // only the LATEST load may write
     _suggestionsDismissed: [],  // keys dismissed since the last load STARTED
+    // ent#641 — the autonomy dial: what this agent may do unprompted for me.
+    autonomyAgent: null,
+    _autonomyGeneration: 0,
+    autonomy: null,           // PortalAutonomyDial
+    autonomyLoaded: false,
+    autonomyError: null,
+    autonomyActionError: null,
+    autonomyBusy: null,       // ask_class in flight
     reportPayloads: {},
     // id -> {total, loaded}; present only for a payload the server actually
     // windowed, so a bounded document never renders a paging footer.
@@ -1301,6 +1309,63 @@ export const useClientPortalStore = defineStore('clientPortal', {
     },
 
     clearSuggestionError() { this.suggestionError = null },
+
+    // ---- ent#641: the autonomy dial --------------------------------------
+
+    resetAgentAutonomy(agentName = null) {
+      this._autonomyGeneration += 1
+      this.autonomyAgent = agentName
+      this.autonomy = null
+      this.autonomyLoaded = false
+      this.autonomyError = null
+      this.autonomyActionError = null
+      this.autonomyBusy = null
+    },
+
+    async loadAgentAutonomy(agentName) {
+      if (this.autonomyAgent !== agentName) this.resetAgentAutonomy(agentName)
+      const gen = this._autonomyGeneration
+      this.autonomyError = null
+      try {
+        const { data } = await portalHttp.get(
+          `/api/enterprise/client-portal/agents/${agentName}/autonomy`,
+          { headers: this.authHeader },
+        )
+        if (gen !== this._autonomyGeneration) return
+        this.autonomy = data
+        this.autonomyLoaded = true
+      } catch {
+        if (gen !== this._autonomyGeneration) return
+        this.autonomyError = 'The request failed. Check your connection and try again.'
+      }
+    },
+
+    /** hold (anyone, own seat) / release (owner only — a grant). */
+    async actOnAskClass(agentName, askClass, body) {
+      const gen = this._autonomyGeneration
+      this.autonomyActionError = null
+      this.autonomyBusy = askClass
+      try {
+        const { data } = await portalHttp.post(
+          `/api/enterprise/client-portal/agents/${agentName}/autonomy/classes/${encodeURIComponent(askClass)}`,
+          body, { headers: this.authHeader },
+        )
+        if (gen !== this._autonomyGeneration) return data
+        await this.loadAgentAutonomy(agentName)
+        return data
+      } catch (e) {
+        if (gen !== this._autonomyGeneration) return null
+        const d = e?.response?.data?.detail
+        this.autonomyActionError = {
+          askClass,
+          message: (d && typeof d === 'object' && d.message) || (typeof d === 'string' ? d : null)
+            || 'That did not work. Try again.',
+        }
+        return null
+      } finally {
+        if (gen === this._autonomyGeneration) this.autonomyBusy = null
+      }
+    },
 
     // ---- ent#638: the seat decision record ------------------------------
 

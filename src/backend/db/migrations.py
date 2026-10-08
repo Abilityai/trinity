@@ -4723,6 +4723,44 @@ def _migrate_seat_decisions_table(cursor, conn):
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_seat_decisions_review ON seat_decisions(agent_name, review_by)")
     conn.commit()
 
+def _migrate_seat_ask_class_state_table(cursor, conn):
+    """The autonomy dial's earned half (trinity-enterprise#641, P12).
+
+    One row per (agent, seat, ask class) recording what was EARNED — the state,
+    the evidence, and when that evidence expires. The instance LEVEL is not a
+    table: it is one validated `system_settings` key
+    (`autonomy_dial_service.LEVEL_KEY`). The live conjuncts (level, the agent's
+    autonomy switch, the clock) are read, never written.
+
+    Mirrored by the Alembic revision 0096_seat_ask_class_state.
+    """
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS seat_ask_class_state (
+            id TEXT PRIMARY KEY,
+            agent_name TEXT NOT NULL,
+            seat_email TEXT NOT NULL,
+            ask_class TEXT NOT NULL,
+            state TEXT NOT NULL DEFAULT 'on_request',
+            blocked_by TEXT NOT NULL DEFAULT '[]',
+            evidence TEXT NOT NULL DEFAULT '{}',
+            evidence_hash TEXT,
+            evidence_expires_at TEXT,
+            guard_metric TEXT NOT NULL DEFAULT 'not_assessed',
+            held INTEGER NOT NULL DEFAULT 0,
+            held_by TEXT,
+            held_at TEXT,
+            promoted_at TEXT,
+            demoted_at TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE(agent_name, seat_email, ask_class)
+        )
+        """
+    )
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_seat_ask_class_state_seat ON seat_ask_class_state(agent_name, seat_email)")
+    conn.commit()
+
 
 def _migrate_agent_capability_grants(cursor, conn):
     """trinity-enterprise#596 — only designated agents may change an agent's skills.
@@ -5617,4 +5655,5 @@ MIGRATIONS = [
     ("portal_messages_attachments", _migrate_portal_messages_attachments),
     ("platform_alert_responded_heal", _migrate_platform_alert_responded_heal),
     ("agent_skill_gates", _migrate_agent_skill_gates),
+    ("seat_ask_class_state_table", _migrate_seat_ask_class_state_table),
 ]
