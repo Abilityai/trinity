@@ -323,15 +323,12 @@ class TestFingerprintRoundTrip:
         row = _ingest_and_read_back(real_db, entry)
         assert oqs.changed_fields(row, entry) == []
 
-    @pytest.mark.xfail(strict=True, reason="#3314: " + BUG.format(
-        "a falsy non-null `options` ([] / \"\") is stored NULL, so the untouched entry reads "
-        "`changed:options` and every answer is refused 409 item_diverged"))
     @pytest.mark.parametrize("options", [
         pytest.param([], id="r88-options-empty-list"),
         pytest.param("", id="r89-options-empty-string"),
     ])
     def test_a_falsy_options_value_is_not_a_rewrite(self, real_db, options):
-        """REACHABILITY: `_sync_agent` ingests the entry (clamp keeps `[]` —
+        """Regression for #3314. `_sync_agent` ingests the entry (clamp keeps `[]` —
         `options is not None` and it is under the byte cap), then
         `db/operator_queue.py:426` stores `json.dumps(options) if options else
         None` → NULL. Next cycle `changed_fields` compares `_row_content`
@@ -348,15 +345,13 @@ class TestFingerprintRoundTrip:
         row = _ingest_and_read_back(real_db, entry)
         assert oqs.changed_fields(row, entry) == []
 
-    @pytest.mark.xfail(strict=True, reason="#3314: " + BUG.format(
-        "a non-string title/question is stored verbatim but fingerprinted as the default, "
-        "so the untouched entry reads `changed`"))
     @pytest.mark.parametrize("over", [
         pytest.param({"title": 123}, id="r90-title-int"),
         pytest.param({"question": 5}, id="r91-question-int"),
+        pytest.param({"title": True}, id="r90b-title-bool"),
     ])
     def test_a_non_string_title_is_not_a_rewrite(self, real_db, over):
-        """REACHABILITY: same seam as above; `_clamp_ingested_item` only
+        """Regression for #3314. Before the fix `_clamp_ingested_item` only
         truncates `str` titles and passes others through, `_insert_values`
         stores `item.get("title") or "Agent request"` (the int survives), while
         `_entry_content` maps any non-str to None → "Agent request". Lower

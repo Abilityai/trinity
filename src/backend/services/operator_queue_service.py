@@ -675,6 +675,16 @@ def _truncate_with_marker(text: str, max_len: int) -> str:
     return text[:keep] + _TRUNC_MARKER
 
 
+def _scalar_text(value):
+    """#3314: a JSON number/bool title or question is stored as its text, so the
+    stored value is the same on every DB backend and the fingerprint can match it.
+    Anything else is returned unchanged (str, None, and containers — a non-empty
+    container still fails the insert, as today)."""
+    if isinstance(value, (bool, int, float)):
+        return str(value)
+    return value
+
+
 def _validated_addressee(agent_name: str, raw) -> Optional[str]:
     """The email an ask is addressed to, or None (ent#364).
 
@@ -852,11 +862,11 @@ def _clamp_ingested_item(req: dict, agent_name: str = "") -> dict:
     """
     out = dict(req)
 
-    title = out.get("title")
+    title = _scalar_text(out.get("title"))
     if isinstance(title, str):
         out["title"] = _truncate_with_marker(title, OPERATOR_QUEUE_TITLE_MAX)
 
-    question = out.get("question")
+    question = _scalar_text(out.get("question"))
     if isinstance(question, str):
         out["question"] = _truncate_with_marker(question, OPERATOR_QUEUE_QUESTION_MAX)
 
@@ -1027,7 +1037,11 @@ def _normalise_expires(value) -> str:
 
 
 def _canonical_options(options) -> str:
-    if options is None:
+    # #3314: mirrors `db/operator_queue.py` storing `json.dumps(options) if
+    # item.get("options") else None` — a falsy value ([], "", {}, 0, False) is
+    # stored NULL, so it must canonicalise like None or the untouched entry
+    # reads as a rewrite.
+    if not options:
         return ""
     try:
         return json.dumps(options, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
@@ -1041,9 +1055,9 @@ def _entry_content(req: dict) -> dict:
     matches what the row stored at ingest byte for byte. `_clamp_ingested_item`
     itself is deliberately not called: it reads the roster and may create a
     workspace thread, and must never run speculatively."""
-    title = req.get("title")
+    title = _scalar_text(req.get("title"))
     title = _truncate_with_marker(title, OPERATOR_QUEUE_TITLE_MAX) if isinstance(title, str) else None
-    question = req.get("question")
+    question = _scalar_text(req.get("question"))
     question = _truncate_with_marker(question, OPERATOR_QUEUE_QUESTION_MAX) if isinstance(question, str) else None
     options = req.get("options")
     if options is not None:
