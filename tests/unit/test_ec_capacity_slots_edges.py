@@ -191,7 +191,7 @@ def test_r10_agents_are_isolated():
 
 
 def test_r11_reacquire_same_id_under_cap_does_not_double_count():
-    """Re-acquiring a held id under the cap is idempotent: True, counted once."""
+    """ZADD on an existing member updates the score; the member is counted once."""
     svc = _svc()
     assert _run(svc.acquire_slot("a", "e1", 3))
     assert _run(svc.acquire_slot("a", "e1", 3))

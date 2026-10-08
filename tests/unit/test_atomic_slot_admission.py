@@ -25,20 +25,44 @@ def slots(monkeypatch):
     return SlotService("redis://unused")
 
 
-def test_duplicate_is_idempotent_and_cannot_recount_or_replace_metadata(slots):
+def test_duplicate_under_cap_refreshes_the_lease_and_counts_once(slots, monkeypatch):
+    """A held id re-acquired under the cap is the same atomic write as a new
+    admission (dev's contract): the score is re-anchored to now and the metadata
+    hash + TTL are rewritten, so a re-dispatch never runs on the lease dated
+    from the original admission (#2433 class). The member is counted once."""
+    from services import slot_service
+    clock = SimpleNamespace(now=1_000_000.0)
+    monkeypatch.setattr(slot_service, "time", SimpleNamespace(time=lambda: clock.now))
     assert asyncio.run(slots.acquire_slot("test-agent", "first", 3, "original", 900))
+    assert slots.redis.zscore("agent:slots:test-agent", "first") == 1_000_000.0
+    clock.now += 600
+    assert asyncio.run(slots.acquire_slot("test-agent", "first", 3, "replacement", 60))
+    assert slots.redis.zrange("agent:slots:test-agent", 0, -1) == ["first"]
+    assert slots.redis.zscore("agent:slots:test-agent", "first") == 1_000_600.0
+    metadata = slots.redis.hgetall("agent:slot:test-agent:first")
+    assert metadata["message_preview"] == "replacement"
+    assert metadata["timeout_seconds"] == "60"
+    assert 350 < slots.redis.ttl("agent:slot:test-agent:first") <= 360
+
+
+def test_duplicate_under_cap_restores_expired_metadata(slots):
+    assert asyncio.run(slots.acquire_slot("test-agent", "first", 3, "original", 900))
+    slots.redis.delete("agent:slot:test-agent:first")
+    assert asyncio.run(slots.acquire_slot("test-agent", "first", 3, "again", 900))
+    assert slots.redis.zcard("agent:slots:test-agent") == 1
+    assert slots.redis.hget("agent:slot:test-agent:first", "message_preview") == "again"
+
+
+def test_duplicate_at_cap_is_refused_and_left_untouched(slots):
+    """At the cap a held id counts itself (dev's contract, pinned by the p1
+    oracle in test_ec_capacity_slots_properties.py): refused, nothing written."""
+    assert asyncio.run(slots.acquire_slot("test-agent", "first", 1, "original", 900))
     before = slots.redis.hgetall("agent:slot:test-agent:first")
     score = slots.redis.zscore("agent:slots:test-agent", "first")
-    # Held under the cap: True (False reads as capacity-full to CapacityManager),
-    # counted once, slot and metadata untouched.
-    assert asyncio.run(slots.acquire_slot("test-agent", "first", 3, "replacement", 60))
-    assert slots.redis.zcard("agent:slots:test-agent") == 1
+    assert not asyncio.run(slots.acquire_slot("test-agent", "first", 1, "replacement", 60))
+    assert slots.redis.zrange("agent:slots:test-agent", 0, -1) == ["first"]
     assert slots.redis.hgetall("agent:slot:test-agent:first") == before
     assert slots.redis.zscore("agent:slots:test-agent", "first") == score
-    assert slots.redis.ttl("agent:slot:test-agent:first") > 1190
-    # At the cap a held id still counts itself, so it is not re-admitted.
-    assert not asyncio.run(slots.acquire_slot("test-agent", "first", 1))
-    assert slots.redis.zcard("agent:slots:test-agent") == 1
 
 
 def test_wrong_type_metadata_rejects_without_partial_admission(slots):
@@ -51,18 +75,64 @@ def test_wrong_type_metadata_rejects_without_partial_admission(slots):
     assert 590 < slots.redis.ttl(key) <= 600
 
 
+def _lose_exec(monkeypatch, *, committed, failures=None):
+    """Lose the connection at EXEC, underneath the real Pipeline.execute.
+
+    The fault is raised from the connection's send inside the real
+    _execute_transaction, so redis-py's own handling runs: on a WATCHing
+    pipeline it disconnects and reports WatchError. (Replacing execute()
+    wholesale raised a ConnectionError production never sees from there.)
+    `committed` delivers MULTI..EXEC to the server before the connection dies,
+    i.e. the transaction commits and only its response is lost.
+    `failures=None` fails every attempt.
+    """
+    original = redis.client.Pipeline._execute_transaction
+    attempts = []
+    def lost_response(pipe, connection, commands, raise_on_error):
+        attempts.append(1)
+        if failures is not None and len(attempts) > failures:
+            return original(pipe, connection, commands, raise_on_error)
+        real_send = connection.send_packed_command
+        def send_then_die(command, *args, **kwargs):
+            if committed:
+                real_send(command, *args, **kwargs)
+            raise redis.ConnectionError("test connection lost during EXEC")
+        connection.send_packed_command = send_then_die
+        try:
+            return original(pipe, connection, commands, raise_on_error)
+        finally:
+            del connection.send_packed_command
+    monkeypatch.setattr(redis.client.Pipeline, "_execute_transaction", lost_response)
+    return attempts
+
+
 @pytest.mark.parametrize("committed", [False, True])
-def test_exec_connection_loss_never_authorizes_dispatch(slots, monkeypatch, committed):
-    original = redis.client.Pipeline.execute
-    def lost_response(pipe, *args, **kwargs):
-        if committed:
-            original(pipe, *args, **kwargs)
-        raise redis.ConnectionError("test connection lost during EXEC")
-    monkeypatch.setattr(redis.client.Pipeline, "execute", lost_response)
-    with pytest.raises(redis.ConnectionError):
+def test_persistent_exec_loss_raises_within_the_bound(slots, monkeypatch, committed):
+    """An admission that can never get an EXEC answer must terminate with an
+    error — never True/False, never an unbounded synchronous spin."""
+    from services.slot_service import MAX_ADMISSION_ATTEMPTS, SlotAdmissionError
+    attempts = _lose_exec(monkeypatch, committed=committed)
+    with pytest.raises(SlotAdmissionError):
         asyncio.run(slots.acquire_slot("test-agent", "first", 3))
-    assert (slots.redis.zscore("agent:slots:test-agent", "first") is not None) == committed
-    assert bool(slots.redis.exists("agent:slot:test-agent:first")) == committed
+    assert len(attempts) == MAX_ADMISSION_ATTEMPTS
+    monkeypatch.undo()
+    client = slots.redis
+    # Never committed -> no slot. Committed-but-lost -> the reservation stays
+    # for stale-slot reconciliation; the caller was still not authorized.
+    assert (client.zscore("agent:slots:test-agent", "first") is not None) == committed
+    assert bool(client.exists("agent:slot:test-agent:first")) == committed
+    assert client.zcard("agent:slots:test-agent") == (1 if committed else 0)
+
+
+@pytest.mark.parametrize("committed", [False, True])
+def test_one_lost_exec_response_is_retried_and_admits_once(slots, monkeypatch, committed):
+    """Under the cap a lost response is retried; if the first EXEC did commit,
+    the retry finds the id held and refreshes it — one member either way."""
+    attempts = _lose_exec(monkeypatch, committed=committed, failures=1)
+    assert asyncio.run(slots.acquire_slot("test-agent", "first", 3))
+    assert len(attempts) == 2
+    assert slots.redis.zrange("agent:slots:test-agent", 0, -1) == ["first"]
+    assert slots.redis.exists("agent:slot:test-agent:first")
 
 
 def test_metadata_capacity_release_and_sentinel_handoff(slots):
