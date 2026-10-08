@@ -65,7 +65,7 @@ import ssl
 import time
 import uuid
 from dataclasses import dataclass, field
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlsplit, urlunsplit
 
 import httpx
@@ -675,6 +675,37 @@ def _card_url_for(validated: ValidatedPublicUrl) -> str:
     return urlunsplit((parts.scheme, parts.netloc, "/.well-known/agent-card.json", "", ""))
 
 
+_CARD_SUFFIX = "/.well-known/agent-card.json"
+
+
+def _card_urls_for(validated: ValidatedPublicUrl) -> List[str]:
+    """Where to look for the card, in order (trinity-enterprise#838).
+
+    * A registered URL that IS a card URL (ends ``/.well-known/agent-card.json``)
+      is fetched as given — the operator named the card.
+    * A registered URL with a path is an endpoint; its OWN card, under that
+      path, comes first. That is where a per-agent server publishes one: a
+      Trinity instance serves ``/a2a/<agent>/.well-known/agent-card.json`` and
+      nothing at its origin, so origin-only discovery could never reach another
+      Trinity's agent. This is the card of the endpoint the operator named, not
+      "a different agent's card" — the F5 concern was appending to a CARD URL,
+      which the first case now handles.
+    * The origin card last — today's rule, and the only one for a bare origin.
+
+    Every candidate is same-origin with the registered URL by construction,
+    and `resolve_rpc_target` still applies its pins to whichever card answers.
+    """
+    parts = urlsplit(validated.url)
+    path = (parts.path or "").rstrip("/")
+    origin = _card_url_for(validated)
+    if path.endswith(_CARD_SUFFIX):
+        return [urlunsplit((parts.scheme, parts.netloc, path, "", ""))]
+    if path:
+        own = urlunsplit((parts.scheme, parts.netloc, path + _CARD_SUFFIX, "", ""))
+        return [own, origin]
+    return [origin]
+
+
 async def fetch_card(
     client: httpx.AsyncClient, validated: ValidatedPublicUrl
 ) -> Dict[str, Any]:
@@ -687,10 +718,36 @@ async def fetch_card(
     import json
 
     address = validated.addresses[0]
-    raw = await _read_capped(
+    candidates = _card_urls_for(validated)
+    raw = None
+    for i, card_url in enumerate(candidates):
+        try:
+            raw = await _fetch_card_bytes(client, validated, address, card_url)
+            break
+        except A2ACallError as exc:
+            # Only "no card here" moves on to the next place to look; any other
+            # failure (redirect, size, timeout, a 5xx) is the answer.
+            if exc.reason != "card_http_error" or exc.remote_status != 404 \
+                    or i == len(candidates) - 1:
+                raise
+    try:
+        card = json.loads(raw.decode("utf-8"))
+    except Exception:  # noqa: BLE001
+        raise A2ACallError(
+            "card_invalid",
+            "The A2A endpoint's agent card is not valid JSON.",
+        ) from None
+    if not isinstance(card, dict):
+        raise A2ACallError("card_invalid", "The A2A endpoint's agent card is not an object.")
+    return card
+
+
+async def _fetch_card_bytes(client: httpx.AsyncClient, validated: ValidatedPublicUrl,
+                            address: str, card_url: str) -> bytes:
+    return await _read_capped(
         client,
         "GET",
-        _pinned_url(_card_url_for(validated), address),
+        _pinned_url(card_url, address),
         sni=validated.hostname,
         host_header=_host_header(validated),
         max_bytes=A2A_CARD_MAX_BYTES,
@@ -703,16 +760,6 @@ async def fetch_card(
         # of the window and leave the CREDENTIALED send 15 s.
         timeout=httpx.Timeout(A2A_CARD_FETCH_TIMEOUT, connect=A2A_CONNECT_TIMEOUT),
     )
-    try:
-        card = json.loads(raw.decode("utf-8"))
-    except Exception:  # noqa: BLE001
-        raise A2ACallError(
-            "card_invalid",
-            "The A2A endpoint's agent card is not valid JSON.",
-        ) from None
-    if not isinstance(card, dict):
-        raise A2ACallError("card_invalid", "The A2A endpoint's agent card is not an object.")
-    return card
 
 
 def resolve_rpc_target(validated: ValidatedPublicUrl, card: Dict[str, Any]) -> str:
@@ -736,6 +783,10 @@ def resolve_rpc_target(validated: ValidatedPublicUrl, card: Dict[str, Any]) -> s
     declared = card.get("url")
     parts = urlsplit(validated.url)
     registered_path = (parts.path or "").rstrip("/")
+    if registered_path.endswith(_CARD_SUFFIX):
+        # ent#838: the operator registered the CARD, not an endpoint — the
+        # card's declared url is the target (still same-origin pinned below).
+        registered_path = ""
 
     if isinstance(declared, str) and declared.strip():
         declared = declared.strip()

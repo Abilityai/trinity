@@ -157,6 +157,9 @@ def _sig(route):
 # the guard worth keeping; the alternative (moving the pinned blob forward on
 # every merge) silently re-baselines whatever drifted in with it.
 _ADDED_SINCE_SPLIT = {
+    # trinity-enterprise#838 — the admin's trusted internal networks for A2A.
+    ("/api/settings/a2a-trusted-networks", ("GET",), "get_a2a_trusted_networks"),
+    ("/api/settings/a2a-trusted-networks", ("PUT",), "set_a2a_trusted_networks"),
     # ent#437 — "don't ask again" marker for the Finish-setup consent card.
     ("/api/settings/telemetry-sharing/ask/dismiss", ("POST",),
      "dismiss_telemetry_ask"),

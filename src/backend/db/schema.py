@@ -100,6 +100,8 @@ TABLES = {
             circuit_breaker_enabled INTEGER DEFAULT 0,
             mcp_exposed INTEGER DEFAULT 0,
             a2a_exposed INTEGER DEFAULT 0,
+            a2a_scope TEXT DEFAULT 'public',
+            a2a_keyless_internal INTEGER DEFAULT 1,
             operator_resume_enabled INTEGER DEFAULT 0,
             tts_voice_replies_enabled INTEGER DEFAULT 0,
             tts_voice_id TEXT,
@@ -289,6 +291,7 @@ TABLES = {
             source_channel_thread TEXT,
             source_channel_agent TEXT,
             source_channel_client TEXT,
+            source_host TEXT,
             -- ent#555: which canvas the user had OPEN when they sent this turn.
             -- Context, never authority — it says what is being discussed and
             -- never widens what the agent may read or write. Validated against

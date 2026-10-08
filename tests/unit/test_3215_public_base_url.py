@@ -455,6 +455,8 @@ def surfaces(monkeypatch):
 
     monkeypatch.setattr(a2a, "db", types.SimpleNamespace(
         get_a2a_exposed=lambda name: name == AGENT,
+        # ent#838: every agent here is public-scope — today's A2A behaviour.
+        get_a2a_scope=lambda name: {"scope": "public", "keyless": True},
         get_nevermined_config=lambda name: None,   # unpriced card: no extension
         get_nevermined_config_with_key=lambda name: (
             {"config": _config(), "nvm_api_key": "sandbox:jwt"}
