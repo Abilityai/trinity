@@ -30,8 +30,10 @@
 <script setup>
 /**
  * The Workspace's one Undo toast (ent#841). Dismisses itself after
- * `UNDO_TOAST_MS`; a new message restarts the clock, so closing two chats in a
- * row offers Undo for the second one for the full window.
+ * `UNDO_TOAST_MS`; a new close restarts the clock, so closing two chats in a
+ * row offers Undo for the second one for the full window. The restart is keyed
+ * on `closeKey` — one value per close — because every close carries the SAME
+ * message, and a watch on the text alone never sees the second one.
  */
 import { watch, onUnmounted } from 'vue'
 
@@ -39,12 +41,13 @@ const UNDO_TOAST_MS = 8000
 
 const props = defineProps({
   message: { type: String, default: '' },
+  closeKey: { type: [String, Number], default: '' },
 })
 const emit = defineEmits(['undo', 'dismiss'])
 
 let timer = null
 const clear = () => { if (timer) { clearTimeout(timer); timer = null } }
-watch(() => props.message, (m) => {
+watch(() => [props.message, props.closeKey], ([m]) => {
   clear()
   if (m) timer = setTimeout(() => emit('dismiss'), UNDO_TOAST_MS)
 }, { immediate: true })

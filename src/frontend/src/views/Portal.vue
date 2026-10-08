@@ -876,6 +876,7 @@
     <!-- ent#841: Undo for the chat just closed from its tab. -->
     <PortalUndoToast
       :message="undoClose ? 'Chat archived' : ''"
+      :close-key="undoClose ? undoClose.seq : 0"
       @undo="undoLastClose"
       @dismiss="undoClose = null"
     />
@@ -2368,7 +2369,8 @@ async function toggleStar(t) {
 // tab back. A refusal reverts the move, returns the person to the chat if it
 // was open, and names the reason under the strip.
 const closeError = ref('')
-const undoClose = ref(null)   // { thread, wasActive } for the toast's Undo
+const undoClose = ref(null)   // { thread, wasActive, seq } for the toast's Undo
+let closeSeq = 0               // one per completed close: restarts the toast's clock
 
 function applyArchiveOverrides(list, live) {
   if (!live.size) return list
@@ -2406,7 +2408,7 @@ async function closeChat(t) {
   try {
     await store.setThreadArchived(t.agent_name, sid, true)
     archiveGuard.settle(key, write, true)
-    undoClose.value = { thread: { ...t, archived_at: null }, wasActive }
+    undoClose.value = { thread: { ...t, archived_at: null }, wasActive, seq: ++closeSeq }
   } catch (err) {
     if (!archiveGuard.settle(key, write, false)) return
     setArchivedLocally(key, t.archived_at || null)
