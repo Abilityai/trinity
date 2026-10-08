@@ -27,9 +27,9 @@ Two real bugs found here were fixed by #3325:
     document or a non-string nonce (AttributeError / TypeError), and
     ``.credentials.enc`` is agent-writable, so the import route answered 500
     where it promises 400 (M50a-g).
-Still kept as a strict xfail (see the report):
-  * ``encrypt_secret_setting`` reports a lone-surrogate VALUE as a missing
-    ``CREDENTIAL_ENCRYPTION_KEY`` — ``UnicodeEncodeError`` is a ``ValueError``.
+  * ``encrypt_secret_setting`` reported a lone-surrogate VALUE as a missing
+    ``CREDENTIAL_ENCRYPTION_KEY`` — ``UnicodeEncodeError`` is a ``ValueError``
+    (M58).
 """
 from __future__ import annotations
 
@@ -669,11 +669,6 @@ def test_decrypt_secret_setting_honours_rotation_secondary(monkeypatch):  # M128
     assert decrypt_secret_setting("github_pat", old) == "v"
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "BUG: a lone-surrogate credential VALUE raises MissingEncryptionKeyError "
-    "('add CREDENTIAL_ENCRYPTION_KEY to your .env') although the key is configured "
-    "— UnicodeEncodeError is a ValueError; reachable via PUT /api/settings/api-keys/"
-    "anthropic with a JSON \\ud800 escape — #3325"))
 def test_unencodable_value_is_not_misreported_as_missing_key():  # M58
     with pytest.raises(ValueError) as exc:
         encrypt_secret_setting("anthropic_api_key", "sk-ant-api03-\ud800")

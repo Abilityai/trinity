@@ -1241,6 +1241,13 @@ from error_handlers import skill_gate_error as _skill_gate_error
 
 app.add_exception_handler(_SkillGateError, _skill_gate_error)
 
+# #3325: a credential setting whose VALUE cannot be stored is a named 422, not a
+# 500 telling a configured install to add CREDENTIAL_ENCRYPTION_KEY.
+from services.secret_settings import SecretSettingValueError as _SecretSettingValueError
+from error_handlers import secret_setting_value_error as _secret_setting_value_error
+
+app.add_exception_handler(_SecretSettingValueError, _secret_setting_value_error)
+
 # Add CORS middleware
 app.add_middleware(
     CORSMiddleware,

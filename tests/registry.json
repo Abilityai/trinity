@@ -124,6 +124,17 @@
       "description": "/edge-cases sweep 2026-10-06 — parametrized boundary/edge cases for services/credential_encryption.py + services/secret_settings.py (#3325). Real bugs are strict-xfail and name their issue. No Docker, no network."
     },
     {
+      "file": "unit/test_3325_credential_error_types.py",
+      "feature": "#3325",
+      "added": "2026-10-08",
+      "categories": [
+        "backend",
+        "security",
+        "unit"
+      ],
+      "description": "#3325 — an unstorable credential value is SecretSettingValueError → value-free 422 (anthropic, Slack OAuth, Slack connect routes); the secret reaches no message, chain or log line; a missing key is still reported first; main.py registers the handler. No Docker, no network."
+    },
+    {
       "file": "unit/test_ec_credential_crypto_properties.py",
       "feature": "edge-cases-2026-10-06",
       "added": "2026-10-07",
