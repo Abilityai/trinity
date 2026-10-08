@@ -44,54 +44,41 @@
     </div>
 
     <template v-else>
-      <!-- Who can reach it (ent#838): public, or our own trusted networks only -->
-      <div class="mt-5 pt-5 border-t border-gray-200 dark:border-gray-700" data-testid="a2a-scope">
-        <h4 class="text-sm font-semibold text-gray-900 dark:text-gray-100 mb-2">Who can reach it</h4>
-        <div class="space-y-2">
-          <label class="flex items-start gap-2 text-sm text-gray-700 dark:text-gray-300">
-            <input type="radio" value="public" :checked="scope === 'public'" :disabled="toggleLoading"
-                   class="mt-1" data-testid="a2a-scope-public" @change="onScope('public')" />
-            <span>
-              <span class="font-medium">Anyone with a key</span>
-              <span class="block text-xs text-gray-500 dark:text-gray-400">Through the public address, with a Trinity key or a payment.</span>
-            </span>
-          </label>
-          <label class="flex items-start gap-2 text-sm text-gray-700 dark:text-gray-300">
-            <input type="radio" value="internal" :checked="scope === 'internal'" :disabled="toggleLoading"
-                   class="mt-1" data-testid="a2a-scope-internal" @change="onScope('internal')" />
-            <span>
-              <span class="font-medium">Our own networks only</span>
-              <span class="block text-xs text-gray-500 dark:text-gray-400">Answers only callers on the trusted networks an admin declared; everyone else sees an unexposed agent.</span>
-            </span>
-          </label>
-        </div>
-        <label v-if="scope === 'internal'" class="mt-3 flex items-start gap-2 text-sm text-gray-700 dark:text-gray-300">
-          <input type="checkbox" :checked="config.a2a_keyless_internal" :disabled="toggleLoading"
-                 class="mt-1 rounded" data-testid="a2a-keyless" @change="onKeyless($event.target.checked)" />
-          <span>
-            <span class="font-medium">No key needed on our networks</span>
-            <span class="block text-xs text-gray-500 dark:text-gray-400">Turn off to require a Trinity key even from a trusted network. Keyless calls are rate-limited and attributed to the caller's address.</span>
-          </span>
-        </label>
-        <div v-if="scope === 'internal'" class="mt-3">
-          <template v-if="config.internal_endpoint_url">
-            <p class="text-xs text-gray-500 dark:text-gray-400 mb-1">Register this URL as an A2A endpoint on the calling instance:</p>
-            <div class="flex items-center gap-2">
-              <code class="flex-1 font-mono text-xs bg-gray-100 dark:bg-gray-800 px-2 py-1.5 rounded overflow-x-auto whitespace-nowrap" data-testid="a2a-internal-url">{{ config.internal_endpoint_url }}</code>
-              <button
-                type="button"
-                @click="copyText(config.internal_endpoint_url, 'internal')"
-                class="inline-flex items-center gap-1.5 px-3 py-1.5 text-sm font-semibold rounded-md transition-all duration-300 shrink-0"
-                :class="copied === 'internal'
-                  ? 'bg-status-success-600 text-white ring-2 ring-status-success-400'
-                  : 'text-gray-700 dark:text-gray-200 bg-gray-200 dark:bg-gray-700 hover:bg-gray-300 dark:hover:bg-gray-600'"
-              >{{ copied === 'internal' ? 'Copied!' : 'Copy' }}</button>
-            </div>
-          </template>
-          <p v-else class="text-xs text-gray-500 dark:text-gray-400" data-testid="a2a-internal-url-missing">
-            An admin sets the internal address in the trusted-networks settings; until then, use this instance's address on your private network.
-          </p>
-        </div>
+      <!-- Who can reach it (ent#838): public, or our own trusted networks
+           only. Primitives throughout (select, toggle, read-only field). -->
+      <div class="mt-4 space-y-3" data-testid="a2a-scope">
+        <BaseSelect
+          :model-value="scope"
+          label="Who can reach it"
+          :help="scopeHelp"
+          :disabled="toggleLoading"
+          data-testid="a2a-scope-select"
+          @update:model-value="onScope"
+        >
+          <option value="public">Anyone with a key</option>
+          <option value="internal">Our own networks only</option>
+        </BaseSelect>
+        <template v-if="scope === 'internal'">
+          <BaseToggle
+            :model-value="config.a2a_keyless_internal"
+            label="No key needed on our networks"
+            :disabled="toggleLoading"
+            data-testid="a2a-keyless"
+            @update:model-value="onKeyless"
+          />
+          <div v-if="config.internal_endpoint_url" class="flex items-end gap-2">
+            <BaseInput
+              class="flex-1"
+              :model-value="config.internal_endpoint_url"
+              label="Register this URL as an A2A endpoint on the calling instance"
+              readonly
+              data-testid="a2a-internal-url"
+            />
+            <BaseButton variant="secondary" @click="copyText(config.internal_endpoint_url, 'internal')">
+              {{ copied === 'internal' ? 'Copied!' : 'Copy' }}
+            </BaseButton>
+          </div>
+        </template>
       </div>
 
       <!-- Agent Card URL (one-click copy, #1575 idiom) -->
@@ -300,6 +287,10 @@
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useAgentsStore } from '../stores/agents'
 import { copyToClipboard } from '../utils/clipboard'
+import BaseSelect from './base/BaseSelect.vue'
+import BaseToggle from './base/BaseToggle.vue'
+import BaseInput from './base/BaseInput.vue'
+import BaseButton from './base/BaseButton.vue'
 
 const props = defineProps({
   agentName: { type: String, required: true },
@@ -429,6 +420,13 @@ async function loadSkills() {
 
 // ent#838: exposure scope and the keyless switch.
 const scope = computed(() => (config.value.a2a_scope === 'internal' ? 'internal' : 'public'))
+const scopeHelp = computed(() => {
+  if (scope.value === 'public') return 'Through the public address, with a Trinity key or a payment.'
+  const base = 'Answers only callers on the trusted networks an admin declared; everyone else sees an unexposed agent. Keyless calls are rate-limited and attributed to the caller\'s address.'
+  return config.value.internal_endpoint_url
+    ? base
+    : `${base} An admin sets this instance's internal address in the trusted-networks settings.`
+})
 
 async function saveScope(extra, message) {
   toggleLoading.value = true
