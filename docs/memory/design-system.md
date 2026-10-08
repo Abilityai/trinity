@@ -255,7 +255,7 @@ laid out at its intrinsic width — which for a strip of **unbounded** labels (u
 model text, today only the Workspace chat tabs) means one long title stretches its tab
 and pushes every sibling under "N more". Such a strip may opt into `fixedWidth`.
 
-**Recipe:** every tab `FIXED_TAB_WIDTH` (`w-40` / 160px) and `shrink-0`, Main and short
+**Recipe:** every tab `FIXED_TAB_WIDTH` (`w-48` / 192px) and `shrink-0`, Main and short
 labels included — uniform width is the point, so an ellipsis is a property of the
 content, not a jagged strip; the label clamps in a `min-w-0 truncate` span; the full
 text rides `title=` on the button **and** on the overflow-menu row, so nothing is
@@ -263,7 +263,7 @@ recoverable only by widening the window.
 
 - **Do:** opt in per consumer; keep every width class behind the prop.
 - **Don't:** make it the default, couple it to `dense`, or clamp a strip of short fixed
-  labels — a tooltip on "Overview" is noise, and a 160px "Files" tab is waste.
+  labels — a tooltip on "Overview" is noise, and a 192px "Files" tab is waste.
 - **Watch:** the width class belongs in **both** rows (a mirror that measures narrower
   than the visible row overflows one tab too late), but `shrink-0` and the visible nav's
   `overflow-hidden` belong to the **visible** row only. `inlineCount` starts at

@@ -265,13 +265,14 @@ def wired(svc, monkeypatch):
     monkeypatch.setattr(svc, "_resolve_timeout", lambda agent: 3600)
 
     reads = []
+    answers = {}   # agent -> the read's verdict; default: stages reported
 
     async def fake_steps(agent, started_at=None, roster=None):
         reads.append(agent)
-        return svc.WorkSteps(state="reported", current="publish")
+        return answers.get(agent) or svc.WorkSteps(state="reported", current="publish")
 
     monkeypatch.setattr(svc.pipeline_state, "read_pipeline_steps", fake_steps)
-    return SimpleNamespace(ledger=ledger, reads=reads)
+    return SimpleNamespace(ledger=ledger, reads=reads, answers=answers)
 
 
 def test_off_roster_names_are_dropped_not_answered(svc, wired):
@@ -325,14 +326,31 @@ def test_earlier_is_bounded_and_the_total_counts_finished_work(svc, wired):
     assert [it.id for it in out.now] == ["run-now"]
 
 
-def test_steps_are_read_only_for_one_running_row_per_agent(svc, wired):
+def test_reported_stages_are_not_attributed_when_an_agent_has_two_runs(svc, wired):
     wired.ledger.running = [_row(id="a-1"), _row(id="b-1", agent_name=OTHER),
                             _row(id="b-2", agent_name=OTHER)]
     out = _run(svc.get_work(EMAIL, [AGENT, OTHER]))
-    assert wired.reads == [AGENT]
+    assert sorted(wired.reads) == sorted([AGENT, OTHER])   # one read per agent, not per run
     by_id = {it.id: it for it in out.now}
     assert by_id["a-1"].steps.state == "reported"
     assert by_id["b-1"].steps.state == "unknown" and by_id["b-2"].steps.state == "unknown"
+
+
+def test_two_runs_on_an_agent_that_publishes_nothing_read_none(svc, wired):
+    """#3357: a second run used to set every card to `unknown` without reading,
+    so an agent with no pipeline showed "Steps could not be read" on both."""
+    wired.answers[OTHER] = svc.WorkSteps(state="none")
+    wired.ledger.running = [_row(id="b-1", agent_name=OTHER), _row(id="b-2", agent_name=OTHER)]
+    out = _run(svc.get_work(EMAIL, [OTHER]))
+    assert wired.reads == [OTHER]
+    assert [it.steps.state for it in out.now] == ["none", "none"]
+
+
+def test_a_failed_read_for_two_runs_stays_unknown(svc, wired):
+    wired.answers[OTHER] = svc.WorkSteps(state="unknown")
+    wired.ledger.running = [_row(id="b-1", agent_name=OTHER), _row(id="b-2", agent_name=OTHER)]
+    out = _run(svc.get_work(EMAIL, [OTHER]))
+    assert [it.steps.state for it in out.now] == ["unknown", "unknown"]
 
 
 def test_a_stale_row_gets_no_pipeline_read(svc, wired):
