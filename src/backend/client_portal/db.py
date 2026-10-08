@@ -169,24 +169,39 @@ def add_portal_message(msg_id: str, agent_name: str, client_email: str,
                        session_id: Optional[str] = None,
                        source: Optional[str] = None,
                        voice_call_id: Optional[str] = None,
-                       attachments: Optional[str] = None) -> None:
+                       attachments: Optional[str] = None,
+                       execution_id: Optional[str] = None) -> None:
     # ent#534: `source`/`voice_call_id` are platform-written only (NULL for a
     # typed turn, 'voice' + the call id for a spoken one) — no request carries them.
     # #3265: `attachments` is the user turn's JSON list, already resolved
     # server-side (`service.resolve_turn_attachments`) — never client text.
+    # #3166: `execution_id` names the turn that wrote the row, so a client can
+    # take its OWN reply off a thread another turn is writing to.
     stmt = text(
         "INSERT INTO enterprise_portal_messages "
         "(id, agent_name, client_email, session_id, role, content, cost, created_at, "
-        " source, voice_call_id, attachments) "
+        " source, voice_call_id, attachments, execution_id) "
         "VALUES (:id, :agent, :email, :session, :role, :content, :cost, :now, :source, :call, "
-        " :attachments)"
+        " :attachments, :execution)"
     )
     with get_engine().begin() as conn:
         conn.execute(stmt, {
             "id": msg_id, "agent": agent_name, "email": (client_email or "").lower(),
             "session": session_id, "role": role, "content": content, "cost": cost, "now": now,
             "source": source, "call": voice_call_id, "attachments": attachments,
+            "execution": execution_id,
         })
+
+
+def set_portal_message_execution_id(msg_id: str, execution_id: str) -> None:
+    """#3166: name the turn a user row belongs to after the row was written —
+    the synchronous path creates its execution after the user row, and a retry
+    reuses the failed turn's row instead of writing a second one."""
+    with get_engine().begin() as conn:
+        conn.execute(
+            text("UPDATE enterprise_portal_messages SET execution_id = :execution WHERE id = :id"),
+            {"id": msg_id, "execution": execution_id},
+        )
 
 
 def get_portal_messages(agent_name: str, client_email: str, limit: int = 100,
@@ -218,7 +233,7 @@ def get_portal_messages(agent_name: str, client_email: str, limit: int = 100,
         # #2694: `id` is a uuid — the tiebreak is STABLE, not chronological. Equal
         # stamps cannot come from the live writers (one clock, microseconds,
         # per-session monotonic voice stamps); this only makes a read repeatable.
-        f"SELECT id, role, content, cost, created_at, source, voice_call_id "
+        f"SELECT id, role, content, cost, created_at, source, voice_call_id, execution_id "
         f"FROM enterprise_portal_messages "
         f"WHERE {where} ORDER BY created_at DESC, id DESC LIMIT :lim"
     )
@@ -237,7 +252,8 @@ def get_portal_messages(agent_name: str, client_email: str, limit: int = 100,
 # every spoken row of the calls among them rides along; a row ceiling bounds the
 # payload and SAYS so, rather than silently re-creating the symptom at call #9.
 
-_MESSAGE_COLUMNS = "id, role, content, cost, created_at, source, voice_call_id, attachments"
+_MESSAGE_COLUMNS = ("id, role, content, cost, created_at, source, voice_call_id, attachments, "
+                    "execution_id")
 
 # A typed-path row. The platform's own `system` lines (the ent#523 reset notice)
 # carry NULL `source` too — they are part of the typed timeline, not of a call.

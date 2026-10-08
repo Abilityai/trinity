@@ -219,10 +219,20 @@ export function previewTitle(message) {
  * the card shows the activity line, or the stages, or nothing. `unknown` keeps
  * its sentence — "could not be read" reports a real failure.
  */
-export function stepsLine(steps) {
+export function stepsLine(steps, options) {
+  const liveSignal = !!(options && typeof options === 'object' && options.liveSignal)
   // `undefined` = not read yet (the chat's card before the feed has the row):
   // say nothing rather than "could not be read", which is a different claim.
   if (steps === undefined) return { kind: 'pending', text: '' }
+  // #3357: a card that is showing a live activity line has its evidence of
+  // progress on screen. "Could not be read" beside it reads as a fault the
+  // agent is visibly not having, so a run that reports what it is doing is
+  // never described as unreadable — whatever the feed says. Stages, when the
+  // read has them, still render.
+  if (liveSignal && !(steps && steps.state === 'reported'
+      && Array.isArray(steps.stages) && steps.stages.length)) {
+    return { kind: 'none', text: '' }
+  }
   if (!steps || typeof steps !== 'object' || steps.state === 'unknown') {
     return { kind: 'unknown', text: 'Steps could not be read right now.' }
   }
@@ -264,9 +274,14 @@ export function holderLine(holder, { agentName = null, masked = false } = {}) {
  * 1:1 — a delegated child lives on the delegate, and the server found it by
  * the chat, not by the participant (review A2).
  */
+//
+// #3166: another person-sent turn on the same thread (the chat open in a
+// second tab) carries the same chat id but is not a child of this turn — it is
+// a sibling, and "held by <agent>" over its title read as this turn's work.
 export function childrenForChat(items, chatId, excludeId = null) {
   if (!chatId) return []
-  return liveItems(items).filter((it) => it.chat_id === chatId && it.id !== excludeId)
+  return liveItems(items).filter((it) => it.chat_id === chatId && it.id !== excludeId
+    && it.kind !== 'turn')
 }
 
 /**

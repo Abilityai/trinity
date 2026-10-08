@@ -1,5 +1,5 @@
 <template>
-  <!-- `data-ws-key-list` is how `⌘/` can CLOSE the list it opened: the probe
+  <!-- `data-ws-key-list` is how `⌥/` can CLOSE the list it opened: the probe
        suppresses every shell key under anything `aria-modal`, and the key list
        is one. The marker rides the dialog element itself (the same element that
        carries `aria-modal`), because that is the element the `:not(...)`
@@ -41,9 +41,7 @@
               <span class="block text-sm text-gray-900 dark:text-gray-100">{{ row.label }}</span>
               <span v-if="row.note" class="block text-xs text-gray-500 dark:text-gray-400">{{ row.note }}</span>
             </span>
-            <!-- `<kbd>` on gray + `font-mono`, the Dashboard's shape: a key cap
-                 reads as a key cap without a hue claiming meaning it has not got. -->
-            <kbd class="shrink-0 rounded border border-gray-200 bg-gray-50 px-1.5 py-0.5 text-[11px] font-mono text-gray-600 dark:border-gray-700 dark:bg-gray-900 dark:text-gray-300">{{ row.keys }}</kbd>
+            <PortalKeyCap>{{ row.keys }}</PortalKeyCap>
           </li>
         </ul>
       </section>
@@ -60,7 +58,7 @@
 
 <script setup>
 /**
- * The `⌘/` key list (ent#621).
+ * The `⌥/` key list (ent#621).
  *
  * Every row is rendered from `keyListRows(WORKSPACE_KEYMAP, …)` — the same
  * declaration the dispatcher resolves against. A hand-typed list is a second
@@ -75,6 +73,7 @@
  */
 import { computed } from 'vue'
 import BaseModal from '@/components/base/BaseModal.vue'
+import PortalKeyCap from './PortalKeyCap.vue'
 import { SCOPE_MOVING, SCOPE_DOING, OWNER_PROTOCOL } from './portalKeymap'
 import { isMacLike } from './portalUtils'
 

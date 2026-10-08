@@ -302,6 +302,13 @@ export function threadTitle(t) {
   return (t.title || '').trim() || 'New chat'
 }
 
+// A chat's name in a chat list. Main is named by its role (ent#523), as its tab,
+// the header and the Inbox name it; its stored title is whatever the generator
+// made of its first message.
+export function chatRowTitle(t) {
+  return t?.is_main ? MAIN_TAB_LABEL : threadTitle(t)
+}
+
 // --- Chat titles (ent#473) --------------------------------------------------
 // The client-side mirror of `services/chat_title.py::normalize_chat_title`,
 // so a person is told BEFORE the request; the server stays the authority and
@@ -2120,7 +2127,8 @@ export function agentRowTime(threads, agentName, now = Date.now()) {
 // truthiness test either way, but a row whose id is explicitly null says "this
 // was built without one" where a missing key says nothing at all.
 export function assistantRow({ content = '', id = null, my_rating = null,
-                               source = null, voice_call_id = null } = {}) {
+                               source = null, voice_call_id = null,
+                               execution_id = null } = {}) {
   return {
     role: 'assistant',
     content,
@@ -2128,6 +2136,8 @@ export function assistantRow({ content = '', id = null, my_rating = null,
     myRating: my_rating || null,
     source: source || null,
     voiceCallId: voice_call_id || null,
+    // #3166: the turn that wrote the row.
+    executionId: execution_id || null,
   }
 }
 
@@ -2185,8 +2195,24 @@ export async function readReplyBaseline(fetchHistory, sessionId) {
   }
 }
 
-export function replyFromHistory(messages, baseline) {
-  const last = latestTypedReply(messages)
+// #3166: `executionId` is the turn this caller is waiting on. Once the server
+// sends `execution_id` on its rows, only the row carrying that id is this
+// turn's reply: another turn on the same thread (the chat open in two tabs) can
+// land its reply first, and a row with no id (a completion report) belongs to
+// no turn. Without the field (an older backend) or without an id, the identity
+// and count rules below still apply.
+export function replyFromHistory(messages, baseline, executionId = null) {
+  const rows = Array.isArray(messages) ? messages : []
+  if (executionId && rows.some((m) => m && 'execution_id' in m)) {
+    for (let i = rows.length - 1; i >= 0; i--) {
+      const m = rows[i]
+      if (m && m.role === 'assistant' && m.source !== 'voice' && m.execution_id === executionId) {
+        return replyFields(m)
+      }
+    }
+    return null
+  }
+  const last = latestTypedReply(rows)
   if (!last) return null
   const base = baseline && typeof baseline === 'object'
     ? baseline
@@ -2195,14 +2221,44 @@ export function replyFromHistory(messages, baseline) {
     ? last.id !== base.id
     : typedReplyCount(messages) > (Number(base.count) || 0)
   if (!isNew) return null
+  return replyFields(last)
+}
+
+function replyFields(row) {
   return {
-    response: last.content,
-    id: last.id || null,
-    myRating: last.my_rating || null,
+    response: row.content,
+    id: row.id || null,
+    myRating: row.my_rating || null,
     // trinity-enterprise#610: the stored time, which places a chat-turn ask
     // before this reply without the browser's clock (`placeAsksInThread`).
-    at: last.created_at || null,
+    at: row.created_at || null,
   }
+}
+
+// #3166: history is stored in save order, so two turns that overlap on one
+// thread read Q_A, Q_B, R_A, R_B after a reload. Each typed reply that names
+// its turn is moved to directly after the question of the same turn (and that
+// turn's earlier replies). A reply stays where it is when its question is not
+// in the window or carries no id, or when the move would cross a voice call's
+// rows, whose folding depends on their position.
+export function pairRepliesWithQuestions(messages) {
+  const out = []
+  for (const m of Array.isArray(messages) ? messages : []) {
+    const eid = m && m.role === 'assistant' && !m.source ? m.execution_id : null
+    if (eid) {
+      const qi = out.findIndex((x) => x && x.role === 'user' && !x.source && x.execution_id === eid)
+      if (qi !== -1) {
+        let at = qi + 1
+        while (at < out.length && out[at]?.execution_id === eid) at += 1
+        if (at < out.length && out.slice(at).every((x) => !x?.source)) {
+          out.splice(at, 0, m)
+          continue
+        }
+      }
+    }
+    out.push(m)
+  }
+  return out
 }
 
 // trinity-enterprise#610 §3g S4 — the read's optimistic zero, and its rollback.

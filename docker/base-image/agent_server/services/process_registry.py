@@ -241,8 +241,20 @@ class ProcessRegistry:
                 )
 
     def unregister(self, execution_id: str):
-        """Unregister a completed process and signal stream end to subscribers."""
+        """Release only a completed process, never just a cancelled waiter.
+
+        Cancelling an asyncio coroutine does not stop its executor thread or
+        child. Retain ownership (including logs and the sweep allowlist) until
+        a process exit is observed, so cancellation cannot hide active work.
+        """
         with self._lock:
+            entry = self._processes.get(execution_id)
+            if entry is not None and entry["process"].poll() is None:
+                logger.warning(
+                    "[ProcessRegistry] Retaining live execution %s after its waiter ended",
+                    execution_id,
+                )
+                return
             if execution_id in self._processes:
                 del self._processes[execution_id]
                 logger.info(f"[ProcessRegistry] Unregistered execution {execution_id}")
@@ -285,6 +297,7 @@ class ProcessRegistry:
             - {"success": True, "returncode": int} on success
             - {"success": False, "reason": "not_found"} if not registered
             - {"success": False, "reason": "already_finished", "returncode": int}
+            - {"success": False, "reason": "termination_unconfirmed"} if exit was not observed
             - {"success": False, "reason": "error", "error": str}
         """
         with self._lock:
@@ -350,6 +363,10 @@ class ProcessRegistry:
                     logger.error(
                         f"[ProcessRegistry] Execution {execution_id} did not exit after SIGKILL"
                     )
+                    # A signal is a request, not confirmation of exit. Keep
+                    # the handle visible for status checks and another stop
+                    # attempt; callers must not free capacity on this result.
+                    return {"success": False, "reason": "termination_unconfirmed"}
 
             returncode = process.returncode
 

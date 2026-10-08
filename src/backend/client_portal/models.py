@@ -995,6 +995,12 @@ class PortalHistoryMessage(BaseModel):
     # #3265: the files a user turn carried, so a reload shows them on the
     # message. None for every other row.
     attachments: Optional[list[PortalMessageAttachment]] = None
+    # #3166: the turn that wrote this row, so the client can take its own reply
+    # off a thread another turn is also writing to, and place each reply under
+    # its own question. The caller already holds these ids (the dispatch
+    # response, `in_flight_execution_id`, `last_turn_outcome`); NULL on rows
+    # written before the column existed and on rows no turn wrote (reports).
+    execution_id: Optional[str] = None
 
 
 class PortalTurnOutcome(BaseModel):

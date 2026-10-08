@@ -121,13 +121,13 @@ const isResumeMode = computed(() =>        // Show banner when in resume mode AN
 | `loadSessions()` | 332 | Fetch user's chat sessions for this agent |
 | `selectSession()` | 359 | Select a session and load its messages (includes timestamps) |
 | `startNewChat()` | 398 | Clear current session, start fresh, close SSE |
-| `buildContextPrompt()` | 421 | Build conversation context from last 20 messages |
-| `updateLoadingText()` | 441 | Update status label with 500ms min display time (THINK-001) |
-| `resetHeartbeat()` | 464 | Reset 10s heartbeat timer for "Working..." fallback (THINK-001) |
-| `closeSSE()` | 476 | Close SSE stream reader + cleanup timers (THINK-001) |
-| `subscribeToStream()` | 488 | Subscribe to execution SSE stream via fetch ReadableStream (THINK-001) |
-| `pollExecution()` | 562 | Poll execution status every 5s until complete (THINK-001) |
-| `sendMessage()` | 589 | Send message via async `/task` endpoint with `chat_session_id` (THINK-001 refactor) |
+| `buildContextPrompt()` | 412 | Build conversation context from the last 20 messages before the one being sent (no history block when there are none) |
+| `updateLoadingText()` | 434 | Update status label with 500ms min display time (THINK-001) |
+| `resetHeartbeat()` | 457 | Reset 10s heartbeat timer for "Working..." fallback (THINK-001) |
+| `closeSSE()` | 469 | Close SSE stream reader + cleanup timers (THINK-001) |
+| `subscribeToStream()` | 481 | Subscribe to execution SSE stream via fetch ReadableStream (THINK-001) |
+| `pollExecution()` | 555 | Poll execution status every 5s until complete (THINK-001) |
+| `sendMessage()` | 582 | Send message via async `/task` endpoint with `chat_session_id` (THINK-001 refactor) |
 
 ### API Calls
 
@@ -319,7 +319,7 @@ Labels change rapidly during fast tool sequences. Two mechanisms prevent flicker
    - `lastLabelTime` tracks when the current label was set
 
    ```javascript
-   // ChatPanel.vue:441-461
+   // ChatPanel.vue:434-454
    const updateLoadingText = (newText) => {
      const elapsed = Date.now() - lastLabelTime
      if (elapsed < MIN_LABEL_DISPLAY_MS) {
@@ -342,7 +342,7 @@ Labels change rapidly during fast tool sequences. Two mechanisms prevent flicker
    - Timer is reset on every new event via `resetHeartbeat()`
 
    ```javascript
-   // ChatPanel.vue:464-471
+   // ChatPanel.vue:457-464
    const resetHeartbeat = () => {
      clearTimeout(heartbeatTimer)
      heartbeatTimer = setTimeout(() => {
@@ -351,7 +351,7 @@ Labels change rapidly during fast tool sequences. Two mechanisms prevent flicker
    }
    ```
 
-### SSE Stream Processing (`ChatPanel.vue:488-558`)
+### SSE Stream Processing (`ChatPanel.vue:481-552`)
 
 The SSE connection uses `fetch` with `ReadableStream` (not `EventSource`) because `EventSource` does not support custom authorization headers.
 
@@ -393,7 +393,7 @@ const subscribeToStream = (executionId) => {
 }
 ```
 
-### Execution Polling (`ChatPanel.vue:562-586`)
+### Execution Polling (`ChatPanel.vue:555-579`)
 
 Parallel to the SSE subscription, the frontend polls for execution completion:
 
@@ -443,10 +443,11 @@ The `:key` binding is critical -- it forces Vue to destroy and recreate the `<sp
 User types message
     |
     v
-ChatPanel pushes { role, content, timestamp: new Date().toISOString() } to messages[]
+ChatPanel builds the context from the messages so far (buildContextPrompt, #3163):
+the last 20 messages before this one, or the bare text when there are none
     |
     v
-ChatPanel prepends session history to message (buildContextPrompt)
+ChatPanel pushes { role, content, timestamp: new Date().toISOString() } to messages[]
     |
     v
 POST /api/agents/{name}/task (async_mode=true, save_to_session=true, chat_session_id=...)

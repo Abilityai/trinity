@@ -4,7 +4,7 @@
 
 ## How do I start chatting with an agent?
 
-Two places. The **Workspace** (`/workspace`, opened from the nav in its own browser tab) is the main one: click an agent in the sidebar and you land in the chat you were last in with it — its pinned **Main** chat the first time — and the conversation keeps its memory from turn to turn. The **Chat** tab on the agent's detail page is a quick stateless surface — fine for one-off questions, but each message starts fresh. Either way the agent must be running. See [Workspace](../sharing-and-access/workspace.md) and [Agent Chat](../agents/agent-chat.md).
+Two places. The **Workspace** (`/workspace`, opened from the nav in its own browser tab) is the main one: click an agent in the sidebar and you land in the chat you were last in with it — its pinned **Main** chat the first time — and the conversation keeps its memory from turn to turn. The **Chat** tab on the agent's detail page is a quick surface for one-off questions: each message runs as a new agent session, with the last 20 messages included for context. Either way the agent must be running. See [Workspace](../sharing-and-access/workspace.md) and [Agent Chat](../agents/agent-chat.md).
 
 ## What's the difference between the Workspace and the Chat tab?
 
@@ -44,7 +44,7 @@ A short list computed for you and the agent in front of you: questions it is wai
 
 ## How do I make the agent forget the conversation and start fresh?
 
-Start a new chat (**New chat** or **⌘J** / **Ctrl+J**): it has no memory of the previous one. If you're in the agent's **Main**, use **Reset** in the header instead — it archives the current Main and starts the agent cold, keeping the old conversation in your list as an ordinary chat. Reach for either when the agent is going in circles, when you're switching topic and don't want bleed-over, or when repeated auto-compaction has degraded its answers. On the Chat tab every message already starts fresh, so there is nothing to clear. See [Continuous Conversations](../agents/agent-session.md#clearing-working-memory).
+Start a new chat (**New chat** or **⌘J** / **Ctrl+J**): it has no memory of the previous one. If you're in the agent's **Main**, use **Reset** in the header instead — it archives the current Main and starts the agent cold, keeping the old conversation in your list as an ordinary chat. Reach for either when the agent is going in circles, when you're switching topic and don't want bleed-over, or when repeated auto-compaction has degraded its answers. On the Chat tab each message already runs as a new agent session, with only the last 20 messages sent along as context, so there is no working memory to clear. See [Continuous Conversations](../agents/agent-session.md#clearing-working-memory).
 
 ## What do `/` and `@` do in the Workspace composer?
 

@@ -17,6 +17,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 logger = logging.getLogger(__name__)
 
 from models import (
+    A2ATrustedNetworksUpdate,
     A2AOutboundEndpointUpsert,
     AgentDefaultAccessPolicyUpdate,
     AgentDefaultResourcesUpdate,
@@ -698,6 +699,76 @@ async def upsert_a2a_outbound_endpoint(
             "call the remote will refuse it, and a fresh token must be stored."
         )
     return response
+
+
+def _trusted_networks_state() -> Dict[str, Any]:
+    from services import a2a_trusted_networks as tn
+
+    return {
+        "entries": tn.get_entries(),
+        "internal_base_url": tn.internal_base_url(),
+    }
+
+
+@router.get("/a2a-trusted-networks")
+async def get_a2a_trusted_networks(
+    current_user: User = Depends(get_current_user)
+):
+    """The trusted internal networks for A2A (trinity-enterprise#838).
+
+    Admin and human only, like the endpoint registry: declaring a network
+    "ours" relaxes the outbound address rule for it and lets an internal-scope
+    agent answer it without a key, so reading the list is part of the grant.
+    """
+    assert_admin(current_user)
+    from dependencies import reject_agent_principal
+    reject_agent_principal(current_user)
+    return _trusted_networks_state()
+
+
+@router.put("/a2a-trusted-networks")
+async def set_a2a_trusted_networks(
+    body: A2ATrustedNetworksUpdate,
+    request: Request,
+    current_user: User = Depends(get_current_user)
+):
+    """Replace the trusted networks list; optionally set the internal card origin.
+
+    Refused (422, naming the entry and the rule): a CIDR overlapping the
+    platform's own Docker networks, loopback / link-local / reserved ranges,
+    anything broader than /8 (IPv4) or /32 (IPv6), and a one-label wildcard.
+    Audited with the list itself — it holds addresses and names, never a secret.
+    """
+    assert_admin(current_user)
+    from dependencies import reject_agent_principal
+    reject_agent_principal(current_user)
+
+    from services import a2a_trusted_networks as tn
+
+    try:
+        base = (tn.validate_internal_base_url(body.internal_base_url)
+                if body.internal_base_url is not None else None)
+        entries = tn.set_entries(body.entries)
+    except tn.TrustedNetworkError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+    if base is not None:
+        db.set_setting(tn.INTERNAL_BASE_URL_KEY, base)
+
+    await platform_audit_service.log(
+        event_type=AuditEventType.CONFIGURATION,
+        event_action="settings_change",
+        source="api",
+        actor_user=current_user,
+        actor_ip=request.client.host if request.client else None,
+        endpoint=request.scope["path"],
+        request_id=getattr(request.state, "request_id", None),
+        details={
+            "setting": tn.SETTING_KEY,
+            "entries": entries,
+            "internal_base_url": base,
+        },
+    )
+    return {"success": True, **_trusted_networks_state()}
 
 
 @router.delete("/a2a-endpoints/{ref}")

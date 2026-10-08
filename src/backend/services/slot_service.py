@@ -32,6 +32,19 @@ logger = logging.getLogger(__name__)
 # Configuration
 SLOT_TTL_BUFFER = 300  # 5 minute buffer added to agent timeout for slot TTL
 DEFAULT_SLOT_TTL_SECONDS = 1200  # 20 minutes - fallback if no agent timeout known
+# Bound on WATCH/MULTI/EXEC attempts for one admission. A conflict means another
+# worker changed the slot set, so real contention settles in a few rounds; a
+# connection that keeps dying at EXEC also surfaces as WatchError and would
+# otherwise retry forever, synchronously, on the event loop.
+MAX_ADMISSION_ATTEMPTS = 32
+
+
+class SlotAdmissionError(redis.RedisError):
+    """Admission could not be decided within MAX_ADMISSION_ATTEMPTS.
+
+    Never an authorization: the caller must not dispatch. A RedisError, so it
+    travels the same paths as the connection error it usually stands for.
+    """
 
 
 @dataclass
@@ -117,11 +130,14 @@ class SlotService:
             timeout_seconds: Agent's execution timeout (TIMEOUT-001). Slot TTL = timeout + 5min buffer.
 
         Returns:
-            True if slot acquired, False if at capacity
+            True if the execution holds a slot (new admission, or a re-acquire
+            of an id already held under the cap, which refreshes its lease);
+            False if at capacity
+
+        Raises:
+            SlotAdmissionError: no decision within MAX_ADMISSION_ATTEMPTS.
         """
         slots_key = self._slots_key(agent_name)
-        now = time.time()
-
         # TIMEOUT-001: Dynamic slot TTL based on agent timeout + buffer
         slot_ttl = timeout_seconds + SLOT_TTL_BUFFER
 
@@ -129,28 +145,57 @@ class SlotService:
         # default fallback; per-slot metadata TTL takes precedence for each slot.
         await self._cleanup_stale_slots_for_agent(agent_name, default_slot_ttl=slot_ttl)
 
-        # Check current count
-        current_count = self.redis.zcard(slots_key)
-        if current_count >= max_parallel_tasks:
-            logger.info(
-                f"[Slots] Agent '{agent_name}' at capacity ({current_count}/{max_parallel_tasks}), "
-                f"rejecting execution {execution_id}"
-            )
-            return False
-
-        # Add slot (ZADD with timestamp score)
-        self.redis.zadd(slots_key, {execution_id: now})
-
-        # Store metadata with dynamic TTL
         metadata_key = self._metadata_key(agent_name, execution_id)
-        slot_number = current_count + 1  # Assign next available slot number
-        self.redis.hset(metadata_key, mapping={
-            "started_at": utc_now_iso(),
-            "message_preview": message_preview[:100] if message_preview else "",
-            "slot_number": str(slot_number),
-            "timeout_seconds": str(timeout_seconds)
-        })
-        self.redis.expire(metadata_key, slot_ttl)
+        # A count followed by ZADD races across backend workers. WATCH makes
+        # count + insert + metadata one admission decision. Retrying a
+        # conflicted transaction does not dispatch work. Re-acquiring an id that
+        # is already held under the cap takes the same write as a new admission:
+        # ZADD re-anchors its score to now and the metadata + TTL are rewritten
+        # (a ZSET member is counted once), so a re-dispatch never runs on the
+        # lease of the original admission. At the cap a held id counts itself
+        # and is refused, like any other.
+        last_conflict: Optional[redis.WatchError] = None
+        for _attempt in range(MAX_ADMISSION_ATTEMPTS):
+            with self.redis.pipeline() as pipe:
+                try:
+                    pipe.watch(slots_key, metadata_key)
+                    # EXEC isolates commands but does not roll back a command
+                    # error. Reject malformed metadata before queuing ZADD;
+                    # watching this key prevents a type change before EXEC.
+                    if pipe.type(metadata_key) not in ("none", "hash"):
+                        raise redis.ResponseError("Slot metadata must be a Redis hash")
+                    current_count = pipe.zcard(slots_key)
+                    if current_count >= max_parallel_tasks:
+                        logger.info(
+                            f"[Slots] Agent '{agent_name}' at capacity "
+                            f"({current_count}/{max_parallel_tasks}), "
+                            f"rejecting execution {execution_id}"
+                        )
+                        return False
+                    slot_number = current_count + 1
+                    pipe.multi()
+                    pipe.zadd(slots_key, {execution_id: time.time()})
+                    pipe.hset(metadata_key, mapping={
+                        "started_at": utc_now_iso(),
+                        "message_preview": message_preview[:100] if message_preview else "",
+                        "slot_number": str(slot_number),
+                        "timeout_seconds": str(timeout_seconds)
+                    })
+                    pipe.expire(metadata_key, slot_ttl)
+                    pipe.execute()
+                    break
+                except redis.WatchError as conflict:
+                    # Another admission/release/renewal changed the count gate,
+                    # or the connection died while watching (redis-py reports
+                    # that as WatchError too). Re-read instead of committing an
+                    # obsolete capacity check.
+                    last_conflict = conflict
+        else:
+            raise SlotAdmissionError(
+                f"Slot admission for execution {execution_id} on agent "
+                f"'{agent_name}' undecided after {MAX_ADMISSION_ATTEMPTS} "
+                f"attempts: {last_conflict}"
+            ) from last_conflict
 
         logger.info(
             f"[Slots] Agent '{agent_name}' acquired slot {slot_number}/{max_parallel_tasks} "

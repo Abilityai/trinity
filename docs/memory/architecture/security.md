@@ -78,6 +78,17 @@ Enforced at the **MCP server layer** (`src/mcp-server/src/tools/`), not the back
 - **Stated limits**: an agent writing its own `~/.claude/skills` from its shell; git pull into a sibling; the other owner-equivalent routes of ent#629.
 - **ent#164 extends the seam** to `schedules.manage`, `instructions.manage` and `agents.manage` ([self-change-grants.md](../feature-flows/self-change-grants.md)). One place it LOOSENS rather than narrows: the five reconfigure routes were person-only under #2996 and now admit an `agents.manage` holder (`require_person_or_capability`). Those handlers authorise through `assert_agent_owner` → `can_user_share_agent`, which admits any admin — so the dependency itself bounds the holder to agents its owner **owns** (`owner_username` equality, 404 otherwise), and keeps `read-only` and `guardrails` person-only when the holder targets itself. The same bound (`_refuse_unless_owners_agent`) runs inside `capability_fence` for every fenced route that names a target, since those handlers go through `can_user_access_agent`, which has the same admin short-circuit. The out-of-scope routes are listed in the flow doc.
 
+### 5b. Trusted internal networks for A2A (trinity-enterprise#838)
+
+The one admin-declared relaxation of the A2A address rules (`services/a2a_trusted_networks.py`, requirements `mcp.md` §32.7):
+- **Outbound:** `validate_a2a_endpoint_url` falls back to `_validate_trusted_a2a_url` only after the public-HTTPS rule refuses for scheme or address. Metadata, loopback and the platform's own networks stay refused.
+- **Inbound:** an internal-scope agent answers only a source address inside a trusted CIDR, keyless when its switch is on.
+- **Load-bearing guards:**
+  - The list can never include `172.28/16` or `172.29/16`. Agents and cloudflared reach the backend from there.
+  - `X-Real-IP` is read only from the proxy container resolved by name (`A2A_PROXY_HOSTS`), never from any bridge peer. An agent calls `backend:8000` directly and could otherwise claim a source.
+  - cloudflared's headers mark a request public.
+  - The generic settings PUT refuses the key.
+
 ### 6. System Agent
 
 `trinity-system` has `scope='system'`: bypasses all permission checks, can call any agent/tool, cannot be deleted via API. Purpose: platform operations (health, costs, fleet management).

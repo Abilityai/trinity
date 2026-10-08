@@ -1459,6 +1459,9 @@ class TaskExecutionService:
         # splats straight into this signature — an unaccepted keyword here is a
         # TypeError on every Workspace turn, not a silently-dropped column.
         source_channel_client: Optional[str] = None,
+        # trinity-enterprise#838: a keyless trusted-network A2A caller's address,
+        # stamped on the row as its attribution.
+        source_host: Optional[str] = None,
         # ent#555 — which canvas the user had open when they sent this turn.
         open_canvas_id: Optional[str] = None,
         # #3114: the conversation this turn continues, e.g. "session:<key>".
@@ -1576,6 +1579,7 @@ class TaskExecutionService:
                     # persisting it would leave `_resolve_portal` failing closed on
                     # every row this branch creates — the sync Workspace turn.
                     source_channel_client=source_channel_client,
+                    source_host=source_host,
                     chain_depth=chain_depth,
                 ),
             )
@@ -1653,6 +1657,7 @@ class TaskExecutionService:
                         source_channel_chat_id=source_channel_chat_id,
                         source_channel_thread=source_channel_thread,
                         source_channel_client=source_channel_client,
+                        source_host=source_host,
                     ),
                 )
 
