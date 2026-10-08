@@ -151,7 +151,7 @@
             <div v-show="activeTab === 'chat'" class="flex-1 overflow-hidden flex flex-col">
               <div class="flex items-center justify-end gap-2 px-3 py-1.5 border-b border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-900/40">
                 <span class="text-xs text-gray-500 dark:text-gray-400">
-                  Stateless chat — each message starts fresh.
+                  Each message runs as a new agent session; the last 20 messages are included for context.
                 </span>
                 <!-- ent#456: opens a new tab, so the agent page you were on is
                      still here when you come back. The ?tab=session REDIRECT
