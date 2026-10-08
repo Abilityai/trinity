@@ -25,7 +25,7 @@
     "dompurify": "^3.4.11",
     "js-yaml": "^5.4.2",
     "marked": "^18.0.14",
-    "mermaid": "^11.17.2",
+    "mermaid": "^12.1.0",
     "monaco-editor": "^0.57.0",
     "pinia": "^4.0.3",
     "qrcode": "^1.5.4",
