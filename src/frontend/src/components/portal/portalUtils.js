@@ -6,6 +6,7 @@
 // imports THIS file, so an import of `portalInbox` from either of these two
 // would close one.
 import { draftedLandingFor } from './portalDrafts'
+import { capCount } from '@/utils/tabTitle'
 
 // ent#621: the key map is the single declaration of every Workspace chord, so
 // the two hotkey helpers below delegate to it rather than keeping a second
@@ -382,21 +383,32 @@ export const MAIN_TAB_LABEL = 'Main'
 // unsaved chat with a `new:<agent>` draft is listed as the provisional tab
 // even while another chat is open, so the place the person left their words
 // stays reachable: the agent row lands on Main, and this tab is the only door.
+// The unread fields one chat tab carries (see `agentChatTabs`).
+function tabUnread(t, activeId) {
+  const id = t.id || t.session_id
+  const n = id === activeId ? 0 : Number(t.unread) || 0
+  return {
+    badge: n > 0 ? capCount(n) : null,
+    badgeVariant: 'primary',
+    badgeLabel: n > 0 ? `${t.is_main ? MAIN_TAB_LABEL : threadTitle(t)}, ${n} unread` : '',
+  }
+}
+
 export function agentChatTabs(threads, agentName, { activeId = null, draft = false, draftKeys = null } = {}) {
   if (!agentName) return []
   const holds = (key) => !!(key && draftKeys && typeof draftKeys.has === 'function' && draftKeys.has(key))
   const mine = (Array.isArray(threads) ? threads : [])
     .filter((t) => t && !t.is_room && t.agent_name === agentName)
-    // ent#523: an archived chat IS a tab. The operator ruled it explicitly —
-    // "one system line in Main names the archived chat, which becomes the
-    // newest tab" (2026-09-06) — and it is right: an archive is an ordinary
-    // past chat, and hiding the thing the system line just pointed at is the
-    // one place the person is most likely to look next.
+    // ent#841 (operator ruling 2026-10-08): an archived chat is NOT a tab. Closing
+    // a chat with its × archives it, and a tab that came straight back would be
+    // a close that did nothing. One rule covers both ways a chat gets archived:
+    // Reset's retired Main leaves the strip too (this reverses the ent#523
+    // 2026-09-06 ruling that it "becomes the newest tab"), and is found, with
+    // every other closed chat, in the sidebar's Archived group.
     //
-    // An earlier draft filtered these out, reasoning that Reset would grow the
-    // strip by one permanent entry per use. That was solving a problem
-    // `OverflowTabs` already solves: the strip renders what fits and counts the
-    // rest under "N more", so growth costs nothing visually.
+    // The one exception is the chat ON SCREEN: a deep link to an archived chat
+    // still draws its tab, so the strip never has a selection it cannot show.
+    .filter((t) => !t.archived_at || (activeId && (t.id || t.session_id) === activeId))
   const ts = (t) => {
     const iso = t.last_message_at || t.created_at
     const n = iso ? new Date(iso).getTime() : 0
@@ -420,6 +432,16 @@ export function agentChatTabs(threads, agentName, { activeId = null, draft = fal
       pinned: !!t.is_main,
       thread: t,
       hasDraft: holds(`thread:${t.id || t.session_id}`),
+      // ent#841: every chat but Main closes from its tab (Reset is Main's
+      // retire action), and so does nothing already archived.
+      closable: !t.is_main && !t.archived_at,
+      // Unread replies in a chat that is not on screen — the sidebar row's own
+      // count, in the same solid blue (`primary`), so the tab says WHERE the
+      // new message is. The strip is `fixed-width`, so the count appearing
+      // shortens this tab's label and moves nothing beside it — no reserved
+      // slot needed, which would cost every label its room. The open chat is
+      // read by definition and never carries one.
+      ...tabUnread(t, activeId),
     }))
   // #2579: the provisional tab. Only on an explicit draft, and only while no
   // real row already carries the active id — once the list catches up with the
@@ -2199,4 +2221,72 @@ export function optimisticRead(state, key) {
 export function rollbackRead(state, key, written) {
   if (!written || !state || state[key] !== written.entry) return state
   return { ...state, [key]: written.before }
+}
+
+// abilityai/trinity#3356 — a star click must survive a chat-state read that was
+// already in flight when it happened.
+//
+// The defect: `refreshThreads` replaces the whole chat-state map with what
+// `GET /chat-state` returned. A read that LEFT before the star's PUT landed (the
+// 20 s poll, a turn finishing, a thread opening) answers with the pre-click
+// state and overwrites the optimistic star — the server has the star, the
+// screen does not, and the second click "works" only because it re-sends the
+// same PUT after the stale read has gone by.
+//
+// The guard keeps each local write as an override until a read that STARTED
+// after the write SETTLED has come back — only that read is evidence of the
+// server's state. One logical clock orders the three events; a later write to
+// the same key replaces the earlier one, so a stale settle or failure from a
+// double click cannot touch the newer intent. Generic over the value, because
+// ent#841's tab close (an `archived_at` on the thread list) has the same race
+// against the same refresh.
+export function createWriteGuard() {
+  let clock = 0
+  const pending = new Map() // key → { value, settledAt }
+  return {
+    begin(key, value) {
+      const w = { value, settledAt: null }
+      clock += 1
+      pending.set(key, w)
+      return w
+    },
+    // `ok` false drops the override (the caller reverts the screen). Returns
+    // whether `w` was still the live write for `key` — a superseded write's
+    // outcome changes nothing.
+    settle(key, w, ok) {
+      if (pending.get(key) !== w) return false
+      if (ok) { clock += 1; w.settledAt = clock } else pending.delete(key)
+      return true
+    },
+    // Call when a read is ISSUED; pass the token to `live` with its result.
+    readStarted() {
+      clock += 1
+      return clock
+    },
+    // The overrides a read issued at `token` cannot have seen, as key → value.
+    // Overrides that read DID see are retired here: the server has spoken.
+    live(token) {
+      const out = new Map()
+      for (const [key, w] of [...pending]) {
+        if (w.settledAt !== null && token > w.settledAt) pending.delete(key)
+        else out.set(key, w.value)
+      }
+      return out
+    },
+    get size() { return pending.size },
+  }
+}
+
+// The chat-state map with the live star overrides laid over it. Returns the
+// same object when nothing differs, so an idle refresh costs no copy.
+export function applyStarOverrides(state, live) {
+  let out = state || {}
+  for (const [key, starred] of live) {
+    const cur = out[key]
+    if (!!cur?.starred === starred) continue
+    if (out === state) out = { ...state }
+    const i = key.indexOf(':')
+    out[key] = { ...(cur || { kind: key.slice(0, i), id: key.slice(i + 1) }), starred }
+  }
+  return out
 }

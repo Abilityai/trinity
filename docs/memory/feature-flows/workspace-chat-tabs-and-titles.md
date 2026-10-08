@@ -308,14 +308,15 @@ no routing at all: once the agent page IS the conversation, a recent-chat row's
 existing `/workspace/c/:sid` push is already "the agent page with that chat
 active". `agentChatTabs` gained the Main pin.
 
-**An archived chat IS a tab.** An earlier draft filtered them out, reasoning
-that Reset would grow the strip by one permanent entry per use; the operator
-ruled the other way — "one system line in Main names the archived chat, which
-becomes the newest tab" — and that draft was reverted. It was solving a problem
-`OverflowTabs` already solves: the strip renders what fits and counts the rest.
-You simply never LAND in an archived chat by default. (A stale line here said
-the opposite until #2579; the code never did.) See
-[workspace-agents-at-the-centre.md](workspace-agents-at-the-centre.md).
+**An archived chat is NOT a tab (ent#841, 2026-10-08).** ent#523 ruled that
+Reset's archive "becomes the newest tab". ent#841 added a close × to every tab
+(archive, never delete), and a tab that came straight back would be a close that
+did nothing — so the operator ruled ONE archive rule: any archived chat, a
+retired Main included, leaves the strip and the sidebar's active groups and is
+found under the sidebar's **Archived** group; opening it there reopens it. The
+chat on screen keeps its tab even when archived. The strip also carries each
+background chat's unread count (primary blue, the sidebar row's badge). See
+requirements §5.41.
 
 ## The four defects #2579 fixed
 

@@ -75,6 +75,14 @@ const props = defineProps({
   // overflows one tab too late); the dropdown keeps its badge/signal chain
   // untouched (#2794) — a menu row's count moves nothing beside it. A tab
   // without it renders exactly what it did.
+  // `closable` (ent#841) draws an × on the tab — and on its overflow-menu row
+  // — that emits `close` with the tab id. It is a SIBLING button laid over the
+  // tab's right edge (a button nested in a button is invalid HTML), named by
+  // `closeLabel`; `closeDisabled` + `closeTitle` make it inert and say why.
+  // Hidden until hover/focus from `sm:` up, always drawn below it (no hover on
+  // touch — the PortalStarButton rule). The tab reserves the ×'s room in its
+  // own padding in BOTH rows, so the measured width is the drawn one. A strip
+  // with no closable tab renders exactly what it did.
   tabs: { type: Array, required: true },
   // active tab id
   modelValue: { type: [String, null], required: true },
@@ -100,7 +108,7 @@ const props = defineProps({
   // it renders exactly what it did (flipping the default is #3056).
   tablistLabel: { type: String, default: '' },
 })
-const emit = defineEmits(['update:modelValue'])
+const emit = defineEmits(['update:modelValue', 'close'])
 
 const rootEl = ref(null)        // width-driven container (RO target)
 const measureNav = ref(null)    // hidden mirror row
@@ -151,6 +159,38 @@ const TablistWrap = (p, { slots }) => (p.label
   ? h('div', { role: 'tablist', 'aria-label': p.label, class: ['flex', p.clip ? 'min-w-0 overflow-hidden' : ''] }, slots.default?.())
   : slots.default?.())
 TablistWrap.props = ['label', 'clip']
+
+// ent#841: a closable tab is the tab button plus its × in one positioned box;
+// any other tab is the bare button, so a strip with no closable tab keeps its
+// DOM byte-for-byte.
+const CLOSE_PAD = 'pr-7'
+// The × takes the tab's own ink (`text-current`), so it reads as part of the
+// tab in every state and theme without a colour of its own. Disabled is its
+// own ARM, never a `disabled:` override of the hover ground (#2662).
+const CLOSE_BTN = 'absolute right-1 top-1/2 -translate-y-1/2 p-1 rounded text-current transition opacity-100 sm:opacity-0 sm:group-hover/tab:opacity-100 sm:group-focus-within/tab:opacity-100 focus-visible:opacity-100'
+const CLOSE_LIVE = 'hover:bg-gray-100 dark:hover:bg-gray-750'
+const CLOSE_INERT = 'cursor-not-allowed'
+const CloseX = (p) => h('svg', { class: ['w-3 h-3', p.dim ? 'opacity-40' : ''], fill: 'none', viewBox: '0 0 24 24', stroke: 'currentColor', 'aria-hidden': 'true' },
+  [h('path', { 'stroke-linecap': 'round', 'stroke-linejoin': 'round', 'stroke-width': '2.5', d: 'M6 18L18 6M6 6l12 12' })])
+const CloseWrap = (p, { slots }) => {
+  if (!p.tab?.closable) return slots.default?.()
+  return h('span', { class: ['relative group/tab', p.shrink ? 'inline-flex shrink-0' : 'flex'] }, [
+    ...(slots.default?.() || []),
+    h('button', {
+      type: 'button',
+      class: [CLOSE_BTN, p.tab.closeDisabled ? CLOSE_INERT : CLOSE_LIVE],
+      'aria-label': p.tab.closeLabel || 'Close',
+      title: p.tab.closeTitle || p.tab.closeLabel || 'Close',
+      disabled: !!p.tab.closeDisabled,
+      'data-tab-close': p.tab.id,
+      onClick: (e) => { e.stopPropagation(); if (!p.tab.closeDisabled) p.onClose?.(p.tab.id) },
+    }, [h(CloseX, { dim: !!p.tab.closeDisabled })]),
+  ])
+}
+CloseX.props = ['dim']
+// `onClose` is a declared prop (what `@close` compiles to), not an emit: a
+// functional component's attrs fallthrough would otherwise bind it twice.
+CloseWrap.props = { tab: Object, shrink: Boolean, onClose: Function }
 // The one tab stop: the selected tab when it is inline, else the first.
 const rovingId = computed(() => {
   const inline = inlineTabs.value
@@ -186,7 +226,7 @@ const activeInOverflow = computed(() =>
 // Re-measure when the tab set OR any label/badge changes (widths shift).
 // `flush: 'post'` runs after the mirror row has rendered the new content.
 const tabsSignature = computed(() =>
-  props.tabs.map((t) => `${t.id}:${t.label}:${t.badge ?? ''}:${t.signal ?? ''}:${t.pinned ? 'p' : ''}:${t.hasDraft ? 'd' : ''}`).join('|')
+  props.tabs.map((t) => `${t.id}:${t.label}:${t.badge ?? ''}:${t.signal ?? ''}:${t.pinned ? 'p' : ''}:${t.hasDraft ? 'd' : ''}:${t.closable ? 'c' : ''}`).join('|')
   + `#${moreMeasureText.value}`
 )
 watch(tabsSignature, () => measure(), { flush: 'post' })
@@ -299,9 +339,8 @@ onUnmounted(() => {
     <!-- Visible row: inline tabs + right-pushed More trigger -->
     <nav class="-mb-px flex" :class="fixedWidth ? 'overflow-hidden' : ''">
       <TablistWrap :label="tablistLabel" :clip="fixedWidth">
+      <CloseWrap v-for="(tab, i) in inlineTabs" :key="tab.id" :tab="tab" shrink @close="(id) => emit('close', id)">
       <button
-        v-for="(tab, i) in inlineTabs"
-        :key="tab.id"
         type="button"
         :title="tab.signalTitle || (fixedWidth ? tab.label : undefined)"
         :aria-keyshortcuts="tab.ariaKeyshortcuts || undefined"
@@ -313,6 +352,7 @@ onUnmounted(() => {
         @keydown="onTabKeydown($event, i)"
         :class="[
           tabPad,
+          tab.closable ? CLOSE_PAD : '',
           fixedWidth ? `${FIXED_TAB_WIDTH} shrink-0` : '',
           'border-b-2 font-medium transition-colors whitespace-nowrap inline-flex items-center',
           modelValue === tab.id
@@ -340,6 +380,7 @@ onUnmounted(() => {
           aria-hidden="true"
         ></span>
       </button>
+      </CloseWrap>
       </TablistWrap>
 
       <!-- More trigger (kept fixed-width "More ▾"; reflects active state when
@@ -393,9 +434,8 @@ onUnmounted(() => {
       class="absolute right-0 top-full z-20 mt-px min-w-[12rem] max-h-[70vh] overflow-y-auto py-1 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-md shadow-lg dark:shadow-gray-900"
       @keydown="onTriggerKeydown"
     >
+      <CloseWrap v-for="tab in overflowTabs" :key="tab.id" :tab="tab" @close="(id) => emit('close', id)">
       <button
-        v-for="tab in overflowTabs"
-        :key="tab.id"
         data-menu-item
         type="button"
         :aria-label="tab.badgeLabel || undefined"
@@ -404,6 +444,7 @@ onUnmounted(() => {
         @click="select(tab.id)"
         :class="[
           'w-full px-4 py-2 text-left text-sm transition-colors flex items-center justify-between gap-2',
+          tab.closable ? CLOSE_PAD : '',
           modelValue === tab.id
             ? 'bg-action-primary-50 dark:bg-action-primary-900/30 text-action-primary-700 dark:text-action-primary-300 font-medium'
             : 'text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700'
@@ -429,6 +470,7 @@ onUnmounted(() => {
           aria-hidden="true"
         ></span>
       </button>
+      </CloseWrap>
     </div>
 
     <!-- Hidden zero-layout mirror row: measures every tab's width (incl. badge)
@@ -452,7 +494,7 @@ onUnmounted(() => {
           data-measure-tab
           type="button"
           tabindex="-1"
-          :class="[tabPad, fixedWidth ? FIXED_TAB_WIDTH : '']"
+          :class="[tabPad, tab.closable ? CLOSE_PAD : '', fixedWidth ? FIXED_TAB_WIDTH : '']"
           class="border-b-2 font-medium whitespace-nowrap inline-flex items-center"
         >
           <svg v-if="tab.pinned" class="w-3.5 h-3.5 mr-1 shrink-0 opacity-70" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 5a2 2 0 012-2h10a2 2 0 012 2v16l-7-3.5L5 21V5z" /></svg>

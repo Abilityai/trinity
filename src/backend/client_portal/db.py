@@ -637,6 +637,39 @@ def rename_portal_session(session_id: str, agent_name: str, client_email: str,
         }).rowcount or 0) > 0
 
 
+def set_portal_session_archived(session_id: str, agent_name: str, client_email: str,
+                                archived: bool, now: str) -> bool:
+    """Close (archive) or reopen one thread (ent#841). Nothing is deleted:
+    ``archived_at`` is the same flag Reset's retired Main carries, and every
+    message, file and star stays where it was.
+
+    Scoped to (agent, client) in the UPDATE itself, like `rename_portal_session`,
+    so an unowned id is a miss and the router's uniform 404 (Invariant #8).
+    ``is_main = 0`` is part of the predicate: the live Main is never closed this
+    way (Reset is its retire action), and a retired Main is reopened as an
+    ordinary chat because ``is_main`` stays 0 — the pair already has a new Main.
+    Archiving an already-archived row keeps its first ``archived_at``.
+    """
+    if archived:
+        stmt = text(
+            "UPDATE enterprise_portal_sessions "
+            "SET archived_at = COALESCE(archived_at, :now) "
+            "WHERE id = :id AND agent_name = :agent AND client_email = :email "
+            "  AND is_main = 0"
+        )
+    else:
+        stmt = text(
+            "UPDATE enterprise_portal_sessions SET archived_at = NULL "
+            "WHERE id = :id AND agent_name = :agent AND client_email = :email "
+            "  AND is_main = 0"
+        )
+    with get_engine().begin() as conn:
+        return (conn.execute(stmt, {
+            "id": session_id, "agent": agent_name, "now": now,
+            "email": (client_email or "").lower(),
+        }).rowcount or 0) > 0
+
+
 def touch_portal_session(session_id: str, now: str, added: int = 2,
                          title_if_empty: Optional[str] = None) -> None:
     """After a turn: advance ``last_message_at``, add ``added`` to the count, and
