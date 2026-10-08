@@ -203,13 +203,16 @@ already dropped (the #2258 ordering above is unchanged, so the token is captured
 revoking anything).
 
 **One verdict.** `sessionLostVerdict()` is a pure function returning
-`ignore | stale | logout`, and it replaced a predicate that had been hand-copied
+`ignore | stale | logout | logout-in-place`, and it replaced a predicate that had been hand-copied
 into `api.js`, `main.js` and `portalHttp` and drifted three ways:
 
 | situation | verdict |
 |---|---|
-| already on `/login`, `/setup`, `/m` | `ignore` |
+| on `/m`, the stored token failed **and** the 401 carries a Bearer challenge (#3406) | `logout-in-place` — the PWA opens at `/m`, which shows its own sign-in once no session is held; ignoring would leave the ws-ticket retry 401ing every 5 s |
+| already on `/login`, `/setup`, `/m` (anything else) | `ignore` — `/login` gets no such arm: a wrong password is challenged too, and a sibling tab's fresh token rides that request |
 | the failed token is **not** the stored one | `stale` — adopt the current session, never destroy it |
+| on a public token page (`/chat/:token`, `/canvas/s/:token`, #3406), the stored token failed **and** it was the platform credential's 401 — a Bearer challenge on `/chat/`, any 401 on the canvas | `logout-in-place` — end the dead session, never navigate |
+| on a public token page, anything else (the link's own expired session, nothing stored, a request that carried no token) | `ignore` |
 | no stored token, on the Workspace | `ignore` (an ordinary external client) |
 | no stored token, anywhere else | `logout` |
 | on the Workspace **and** a portal token is live | `ignore` — **AC #5**: a client whose browser holds a dead operator JWT is no longer thrown onto the operator login by `initializeAuth`'s `fetchUserProfile` |
@@ -219,6 +222,32 @@ The `stale` arm is the fix for the reported symptom. The Workspace veto is scope
 by path *as well as* by portal token deliberately: off the Workspace the surface
 is an operator one, so an expired operator JWT still bounces there even with a
 stray portal token — this change does not widen that.
+
+**The public token pages (#3406).** `/chat/:token` and `/canvas/s/:token` are
+opened by people with no account, and each shows its own sign-in (the verify
+card, the canvas's "Sign in"), so a 401 there never navigates. Before #3406 they
+fell through to `logout`: a returning visitor whose 24 h link session had
+expired landed on the operator `/login`, and an operator previewing their own
+link was signed out of the platform, because `applyRequestCredential` attaches
+their JWT to every bare-axios call and the link's 401 looked like theirs. What
+tells the two apart is the server: every `get_current_user` rejection carries
+`WWW-Authenticate: Bearer` (`isBearerChallenge`), and a link's own session check
+answers a bare 401 — pinned by `tests/unit/test_3406_bearer_challenge_contract.py`.
+A blanket `ignore` would not do: `App.vue` mints a ws ticket whenever a token is
+stored and retries every 5 s, so a dead token on `/chat/` would 401 forever. On
+the canvas every 401 is the platform credential's (`get_optional_user` reads a
+bad token as anonymous), so the dead session ends there too and the card's Sign
+in reaches the login form instead of the `/login → /` guard.
+`tests/unit/publicSurfaceRoutes.spec.js` walks the real route table and fails
+any route reachable without `requiresAuth` that the verdict does not classify.
+
+**The path it is judged against.** `main.js` passes
+`pathForVerdict(router, START_LOCATION, window.location.pathname)`.
+`router.currentRoute` is START_LOCATION — path `/` — until the first navigation
+completes, and the guard holds that navigation open across `checkSetupStatus()`,
+so a dead token's `/api/users/me` or ws-ticket 401 used to be judged as the
+dashboard: a `/chat/` visitor was pushed to `/login`, and a Workspace client lost
+the AC #5 veto the same way. Until the router settles, the address bar is used.
 
 **One handler.** `setPlatformUnauthorizedHandler` / `notifyPlatformUnauthorized`
 in `utils/platformSession.js`. The reaction is `reactToPlatformUnauthorized(error,
@@ -274,7 +303,7 @@ request, both of which read the state these set.
 ## Files
 
 - `src/frontend/src/stores/clientPortal.js` — `signOutEverywhere()`, `PLATFORM_LOGIN_ROUTE`
-- `src/frontend/src/utils/platformSession.js` — #2791: the one reader, the one verdict, the one handler registry
+- `src/frontend/src/utils/platformSession.js` — #2791: the one reader, the one verdict, the one handler registry; #3406: the public token page arms, `isBearerChallenge`, `pathForVerdict`
 - `src/frontend/src/stores/auth.js` — `logout()` local-clear-before-revoke ordering; `adoptStoredSession` / `applySessionEndedElsewhere`
 - `src/frontend/src/main.js` — global request interceptor, the registered reaction, the `storage` listener
 - `src/frontend/src/api.js` — reports to the shared handler (no private predicate, no hard reload)
@@ -282,4 +311,5 @@ request, both of which read the state these set.
 - `src/frontend/src/components/portal/PortalSidebar.vue` — footer button + caption
 - `src/frontend/src/components/portal/portalUtils.js` — `signOutLabelFor`
 - `src/frontend/tests/unit/workspaceSession.spec.js`, `workspaceSignOut.spec.js`,
-  `platformSessionVerdict.spec.js`, `platformSessionSync.spec.js`
+  `platformSessionVerdict.spec.js`, `platformSessionSync.spec.js`,
+  `publicSurfaceRoutes.spec.js` (#3406)

@@ -51,6 +51,9 @@ narrower option is preselected:
 
 - **People who already have access** (the default) — opening the link requires
   signing in, and only people who can already see the agent will see the canvas.
+  Someone who is not signed in sees **Sign in to view this canvas**; signing in
+  from there brings them back to the canvas (single sign-on still lands on the
+  dashboard, so open the link again afterwards).
 - **Anyone with the link** — no sign-in at all. The dialog says so plainly,
   because it is the option that reaches further than the canvas did before.
 

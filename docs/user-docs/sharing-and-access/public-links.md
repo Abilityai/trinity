@@ -15,7 +15,7 @@ Shareable URLs that let unauthenticated users chat with agents. Supports optiona
 1. Open the agent detail page and go to the **Sharing** tab. Public links live under **Distribution → Public links**.
 2. Click **Create Link**. The **Create Public Link** dialog asks for a **Name (optional)** and an **Expiration (optional)**. Email verification and the allow-list come from the agent's access policy on the same tab, and apply across web, Telegram and Slack alike.
 3. Copy the URL from the link's card (the copy icon) and share it. Editing a link later adds a **Link enabled** checkbox to switch it off without deleting it.
-4. Recipients open the URL. If the agent requires a verified email, they enter their email, receive a code and verify; then they chat.
+4. Recipients open the URL. If the agent requires a verified email, they enter their email, receive a code and verify; then they chat. A verification lasts 24 hours in that browser. After that, the link shows the email form again with **Session expired. Please verify your email again.** If a message was being sent when the session ran out, its text comes back in the input after the visitor verifies. Visitors are never sent to the Trinity sign-in page, and a logged-in Trinity user who opens their own link stays signed in.
 5. Conversations persist -- the user can return later and continue where they left off.
 6. **New** in the chat header starts a fresh session.
 

@@ -89,12 +89,14 @@ const handleAdminLogin = async () => {
 
   const success = await authStore.loginWithCredentials('admin', password.value)
   if (success) {
-    router.push('/')
+    afterLogin()
   }
 
   loginLoading.value = false
 }
 ```
+
+`afterLogin()` (#3406) is `router.push(safeRedirect(route.query.redirect))`, shared by every non-SSO success path (password, email code, both second-factor steps, and the already-signed-in check on mount). A page with its own sign-in, such as an `authorized` shared canvas, links to `/login?redirect=<itself>`, and `utils/safeRedirect.js` honours that only when it is an in-app path. With no redirect, or an unsafe one, the destination is `/` as before. SSO still lands on `/`.
 
 ### State Management
 

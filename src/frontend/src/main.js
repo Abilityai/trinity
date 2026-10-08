@@ -1,14 +1,15 @@
 import { createApp } from 'vue'
 import { createPinia } from 'pinia'
 import axios from 'axios'
+import { START_LOCATION } from 'vue-router'
 import router from './router'
 import App from './App.vue'
 import './style.css'
 import { useAuthStore } from './stores/auth'
 import { useClientPortalStore } from './stores/clientPortal'
 import {
-  applyRequestCredential, notifyPlatformUnauthorized, reactToPlatformUnauthorized,
-  reactToStorageEvent, setPlatformUnauthorizedHandler,
+  applyRequestCredential, notifyPlatformUnauthorized, pathForVerdict,
+  reactToPlatformUnauthorized, reactToStorageEvent, setPlatformUnauthorizedHandler,
 } from './utils/platformSession'
 import { installConsoleBuffer } from './utils/consoleBuffer'
 
@@ -64,7 +65,9 @@ function handlePlatformUnauthorized(error) {
     /* Pinia not active yet — no client session can own a tab that has no store */
   }
   const { navigation } = reactToPlatformUnauthorized(error, {
-    path: router.currentRoute.value?.path || window.location.pathname,
+    // #3406 — the address being loaded until the first navigation settles;
+    // `currentRoute` reads "/" (START_LOCATION) until then.
+    path: pathForVerdict(router, START_LOCATION, window.location.pathname),
     portalTokenPresent,
     adoptStoredSession: () => authStore.adoptStoredSession(),
     logout: () => authStore.logout(),
