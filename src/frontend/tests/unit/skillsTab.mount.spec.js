@@ -328,6 +328,8 @@ describe('an agent switch (AgentDetail is KeepAlive\'d: the tab stays open)', ()
     const { w } = await mountTab()
     await tid(w, 'skill-unassign-shared-one').trigger('click')
     await flush()
+    await tid(w, 'confirm-dialog-confirm').trigger('click')
+    await flush()
     await tid(w, 'skill-run-daily-report').trigger('click')
     await flush()
     expect(tid(w, 'skills-saved-note').text()).toBe('Unassigned shared-one.')
@@ -538,5 +540,51 @@ describe('in-agent enforcement warning wording', () => {
       expect(text.length, hook).toBeGreaterThan(20)
       expect(text, hook).not.toContain(hook)
     }
+  })
+})
+
+
+describe('destructive verbs restate the consequence and focus the safe action (principle 19)', () => {
+  it('Unassign asks first, and says the approval requirement goes with it', async () => {
+    respond({ map: MAP({ gates: [{ skill_name: 'shared-one', approver: 'primary', approver_reachable: true, origin: 'set' }] }) })
+    api.put.mockResolvedValue({ data: { delivery: null } })
+    const { w } = await mountTab()
+
+    await tid(w, 'skill-unassign-shared-one').trigger('click')
+    await flush()
+    expect(api.put).not.toHaveBeenCalled()
+    const dialog = tid(w, 'confirm-dialog')
+    expect(dialog.text()).toContain('Unassign /shared-one?')
+    expect(dialog.text()).toContain('approval requirement goes with it')
+    expect(document.activeElement?.dataset?.testid).toBe('confirm-dialog-cancel')
+
+    await tid(w, 'confirm-dialog-cancel').trigger('click')
+    await flush()
+    expect(api.put).not.toHaveBeenCalled()
+
+    await tid(w, 'skill-unassign-shared-one').trigger('click')
+    await flush()
+    await tid(w, 'confirm-dialog-confirm').trigger('click')
+    await flush()
+    expect(api.put).toHaveBeenCalledTimes(1)
+    expect(api.put.mock.calls[0][1]).toEqual({ skills: [] })
+  })
+
+  it("the details dialog opens on Close, not on 'Unassign library skill'", async () => {
+    respond({ rows: { data: [{ skill_name: 'shared-one', individual: true, via_sets: [], delivery_status: 'conflict' }] } })
+    const { w } = await mountTab()
+    await tid(w, 'skill-conflict-note').trigger('click')
+    await flush()
+    expect(tid(w, 'skill-conflict-unassign').exists()).toBe(true)
+    expect(document.activeElement?.dataset?.testid).not.toBe('skill-conflict-unassign')
+  })
+
+  it("the sets dialog opens on a safe control, not on 'Unassign set'", async () => {
+    respond({ sets: { data: [{ name: 'dev-kit', status: 'ok', members: [], prerequisites: null }] } })
+    const { w } = await mountTab()
+    await tid(w, 'skills-sets-open').trigger('click')
+    await flush()
+    expect(tid(w, 'set-unassign-dev-kit').exists()).toBe(true)
+    expect(document.activeElement?.dataset?.testid).not.toBe('set-unassign-dev-kit')
   })
 })

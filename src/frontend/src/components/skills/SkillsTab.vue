@@ -253,7 +253,7 @@
             @edit-run="onEditRun(card)"
             @set-gate="(kind) => onSetGate(card, kind)"
             @clear-gate="onClearGate(card)"
-            @unassign="onUnassign(card)"
+            @unassign="unassignCard = card"
             @details="detailsCard = card"
             @dismiss-error="dismissCardError(card)"
           />
@@ -278,6 +278,18 @@
       @update:model-value="(open) => { if (!open) detailsCard = null }"
       @unassign="onUnassign(detailsCard, { fromConflict: true })"
     />
+
+    <!-- Principle 19: a one-click verb on a card restates its consequence
+         (the gate goes too) and opens on Cancel. -->
+    <ConfirmDialog
+      :visible="!!unassignCard"
+      :title="unassignCard ? `Unassign /${unassignCard.name}?` : ''"
+      :message="unassignMessage"
+      confirm-text="Unassign"
+      variant="warning"
+      @confirm="confirmUnassign"
+      @cancel="unassignCard = null"
+    />
   </div>
 </template>
 
@@ -287,6 +299,7 @@ import BaseBadge from '../base/BaseBadge.vue'
 import BaseButton from '../base/BaseButton.vue'
 import BaseInput from '../base/BaseInput.vue'
 import BaseModal from '../base/BaseModal.vue'
+import ConfirmDialog from '../ConfirmDialog.vue'
 import LoadFailed from '../LoadFailed.vue'
 import SkeletonLoader from '../SkeletonLoader.vue'
 import AgentSkillSets from './AgentSkillSets.vue'
@@ -327,6 +340,7 @@ const pendingSync = ref(false)    // #2703: a save that did not deliver — Sync
 const assignOpen = ref(false)
 const setsOpen = ref(false)
 const detailsCard = ref(null)
+const unassignCard = ref(null)     // the card whose Unassign awaits its confirm
 
 const running = computed(() => props.agentStatus === 'running')
 // The approval row: owner or admin, never on a ghost or the system agent.
@@ -541,6 +555,19 @@ async function onUnassign(card, { fromConflict = false } = {}) {
   }
 }
 
+const unassignMessage = computed(() => {
+  const c = unassignCard.value
+  if (!c) return ''
+  const gate = c.gate ? ' Its approval requirement goes with it.' : ''
+  return `The library skill is removed from this agent.${gate} You can assign it again from Assign skills.`
+})
+
+function confirmUnassign() {
+  const c = unassignCard.value
+  unassignCard.value = null
+  onUnassign(c)
+}
+
 function onSaved(verdict) {
   notice.value = verdict
   pendingSync.value = Boolean(verdict.needsSync)
@@ -584,6 +611,7 @@ function resetView() {
   assignOpen.value = false
   setsOpen.value = false
   detailsCard.value = null
+  unassignCard.value = null
 }
 
 onMounted(loadAll)

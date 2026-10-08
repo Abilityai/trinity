@@ -34,6 +34,7 @@
           size="sm"
           class="mt-2"
           data-testid="skill-conflict-unassign"
+          data-destructive
           :loading="busy"
           loading-label="Unassigning…"
           @click="$emit('unassign')"
