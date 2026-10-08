@@ -3874,15 +3874,32 @@ class SkillGateEntry(BaseModel):
     approver_reachable: Optional[bool] = None
 
 
+class SkillGateApproverStatus(BaseModel):
+    """One approver kind as the caller sees it (trinity-enterprise#754): does it
+    reach anyone now, and is the caller one of its people. Booleans only — the
+    map is readable by every viewer and by agent keys, so it names no person."""
+    kind: str
+    reachable: bool
+    viewer_fills: bool
+
+
 class SkillGateMapResponse(BaseModel):
     """`GET /api/agents/{agent_name}/skill-gates`. `approver_kinds` is what this
     install can resolve — `primary` only on OSS. `cleared_defaults` are library
-    defaults the owner cleared; they gate nothing while the skill stays assigned."""
+    defaults the owner cleared; they gate nothing while the skill stays assigned.
+
+    trinity-enterprise#754: `approvers` is `approver_kinds` with each kind's
+    reach and whether the caller fills it. `hook` is the in-agent gate check's
+    state (`ok`, `missing`, `not_root_owned`, `writable`, `unsupported_runtime`,
+    `predates` or `unknown`), read only on `?probe=true` by a person who may
+    manage the agent's skills; null otherwise."""
     agent_name: str
     gates: List[SkillGateEntry]
     cleared_defaults: List[str] = Field(default_factory=list)
     approver_kinds: List[str]
     default_deadline_hours: int
+    approvers: List[SkillGateApproverStatus] = Field(default_factory=list)
+    hook: Optional[str] = None
 
 
 class SkillGateWriteResponse(BaseModel):

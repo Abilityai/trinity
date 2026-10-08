@@ -46,6 +46,7 @@ from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Set, 
 from database import db
 from db.skill_gates import ORIGIN_CLEARED, ORIGIN_LIBRARY_DEFAULT, ORIGIN_SET
 from services import role_addressing, skill_gate_service
+from services.agent_auth import agent_httpx_client
 from services.skill_gate_service import SkillGate  # noqa: F401 — re-exported for callers
 from services.skill_packaging import SKILL_NAME_RE
 
@@ -148,6 +149,65 @@ def list_gates(agent_name: str) -> Dict[str, Any]:
         "approver_kinds": approver_kinds(),
         "default_deadline_hours": skill_gate_service.DEFAULT_DEADLINE_HOURS,
     }
+
+
+def approver_status(agent_name: str, principal) -> List[Dict[str, Any]]:
+    """trinity-enterprise#754: every approver kind this install resolves, as
+    the caller sees it — does it reach anyone now (the picker disables a kind
+    nobody fills), and is the caller one of its people (the card's "you
+    approve this")?
+
+    `viewer_fills` is decided exactly as `skill_gate_service.enforce` decides
+    self-approval — the same requester (`requester_from_principal`, so an
+    agent key, a connector or the event loopback never fills a kind) and the
+    same casefolded people list — so the card cannot say "you approve this"
+    for a run the gate would hold, or the reverse. Booleans only: no person
+    data leaves the server."""
+    requester = skill_gate_service.requester_from_principal(principal)
+    me = requester.email.strip().casefold() if requester.is_person and requester.email else ""
+    out = []
+    for kind in approver_kinds():
+        try:
+            people = skill_gate_service.approver_people(agent_name, kind)
+        except Exception:  # noqa: BLE001 — a read never fails on one kind's lookup
+            logger.warning("[skill_gate_map] approver lookup failed for %s/%s", agent_name, kind,
+                           exc_info=True)
+            people = []
+        out.append({"kind": kind, "reachable": bool(people), "viewer_fills": bool(me) and me in people})
+    return out
+
+
+# trinity-enterprise#754: the in-agent gate check's states, as the agent's
+# `/health → skill_gate_hook` reports them (ent#752, `agent_server/routers/
+# info.py::_skill_gate_hook`), plus two of the platform's own: `predates` — a
+# 200 /health without the field, i.e. an image built before the hook, the
+# common case the owner's warning exists for — and `unknown` — no usable
+# answer at all, which is NOT "not ok" and warns nobody.
+HOOK_STATES = frozenset({"ok", "missing", "not_root_owned", "writable", "unsupported_runtime"})
+HOOK_PREDATES = "predates"
+HOOK_UNKNOWN = "unknown"
+HOOK_PROBE_TIMEOUT_SECONDS = 3.0
+
+
+async def hook_status(agent_name: str) -> str:
+    """Is the gate enforced inside the agent? One direct `GET /health` with a
+    short timeout and NO circuit-breaker bookkeeping — a probe from the Skills
+    tab must never mark an agent unhealthy (the `gitignore_clone` pattern).
+    Never raises."""
+    try:
+        async with agent_httpx_client(agent_name, timeout=HOOK_PROBE_TIMEOUT_SECONDS) as client:
+            response = await client.get(f"http://agent-{agent_name}:8000/health")
+        if response.status_code != 200:
+            return HOOK_UNKNOWN
+        data = response.json()
+    except Exception:  # noqa: BLE001 — stopped, slow, unreachable or not JSON: no answer
+        return HOOK_UNKNOWN
+    if not isinstance(data, dict):
+        return HOOK_UNKNOWN
+    if "skill_gate_hook" not in data:
+        return HOOK_PREDATES
+    value = data["skill_gate_hook"]
+    return value if isinstance(value, str) and value in HOOK_STATES else HOOK_UNKNOWN
 
 
 def explicit_gate_names(agent_name: str, names: Iterable[str]) -> List[str]:
