@@ -5108,6 +5108,17 @@
       "description": "trinity-enterprise#754, MOUNTED (eyeball round): a skill's Run opens the Tasks tab while it is still running, and the row settles without a Refresh — the poll re-reads the list while a row is queued / running / pending_retry and stops when none is, never stacks a read, holds off while a typed task is awaited (no duplicate row), applies only the latest read, opens the highlighted row once, and shows a settled row's result. Mutation-proven."
     },
     {
+      "file": "frontend/tests/unit/baseSelectSize.spec.js",
+      "feature": "abilityai/trinity-enterprise#754",
+      "added": "2026-10-08",
+      "categories": [
+        "frontend",
+        "unit",
+        "mount"
+      ],
+      "description": "trinity-enterprise#754, MOUNTED: BaseSelect size=\"sm\" gives the field recipe BaseButton sm's box and the 12px chevron; md stays the default and the shared field recipe stays byte-identical; ghost takes no size. Mutation-proven."
+    },
+    {
       "file": "frontend/tests/unit/portalSelfApprovedTurn.spec.js",
       "feature": "abilityai/trinity-enterprise#754",
       "added": "2026-10-08",
