@@ -12,6 +12,7 @@ gate and map errors. Only a person ends an ask (`reject_non_person_principal`).
 """
 
 import json
+import logging
 from typing import Any, Dict, List, Optional, Set
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, Response
 from models import (
@@ -34,6 +35,8 @@ from db_models import User
 from services.platform_audit_service import platform_audit_service, AuditEventType
 from services.operator_queue_choices import ReservedAnswerError, ResponseNotOfferedError
 from services import ask_service, operator_queue_service
+
+logger = logging.getLogger(__name__)
 
 
 router = APIRouter(prefix="/api/operator-queue", tags=["operator-queue"])
@@ -70,10 +73,29 @@ def _accessible_set(current_user: User) -> Optional[Set[str]]:
     if current_user.role == "admin" and not is_agent:
         return None
     user_email = current_user.email or ""
-    names = db.get_accessible_agent_names(user_email, is_admin=current_user.role == "admin")
+    is_admin = current_user.role == "admin"
+    names = set(db.get_accessible_agent_names(user_email, is_admin=is_admin))
     if is_agent:
-        return {n for n in names if agent_may_reach(current_user, n)}
-    return set(names)
+        return _agent_reach_set(current_user, names, is_admin=is_admin)
+    return names
+
+
+def _agent_reach_set(current_user: User, owner_names: Set[str], *, is_admin: bool) -> Set[str]:
+    """An agent key's queue scope (trinity-enterprise#629): itself and its
+    edges directly — the same `{self} ∪ permitted` the MCP layer reads — and,
+    of the rest of its owner's agents, the ones it spawned. A non-admin owner's
+    accessible set still bounds it; an admin owner can access every agent, so
+    an edge needs no ownership row to count. The edge read fails closed."""
+    me = current_user.agent_name
+    try:
+        permitted = set(db.get_permitted_agents(me) or [])
+    except Exception:
+        logger.warning("[ent#629] edge list for %s failed; treating as no edges", me)
+        permitted = set()
+    reach = {me} | permitted
+    if not is_admin:
+        reach &= owner_names | {me}
+    return reach | {n for n in owner_names - reach if agent_may_reach(current_user, n)}
 
 
 def _assert_agent_accessible(agent_name: str, accessible: Optional[Set[str]]) -> None:

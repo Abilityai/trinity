@@ -259,6 +259,9 @@ class TestPlatformRowsAboutAPerson:
         monkeypatch.setattr(r, "_websocket_manager", None)
         tag = uuid.uuid4().hex[:10]
         agent = f"agent-715-hu-{tag}"      # its own agent: the #1677 budget counts per agent
+        # The agent key reaches this agent through an edge (trinity-enterprise#629),
+        # so what is withheld below is the person rows, not the whole queue.
+        real_db.add_agent_permission(AGENT, agent, "op-715")
         cps._alert_collided_inbox(agent, f"legacy_{tag}",
                                   [f"a-{tag}@example.com", f"b-{tag}@example.com"])
         assert asyncio.run(cps.raise_problem_report(
