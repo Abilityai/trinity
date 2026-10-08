@@ -5231,6 +5231,8 @@ class ObjectiveRead(BaseModel):
     path: str
     schema_version: Optional[str] = None
     statement: Optional[str] = None
+    # ent#843: optional plain-language heading for client screens.
+    client_heading: Optional[str] = None
     horizon: Optional[str] = None
     status: str = "active"
     owner: Optional[str] = None

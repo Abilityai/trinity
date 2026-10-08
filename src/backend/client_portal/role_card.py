@@ -161,6 +161,36 @@ def _value(v: Any) -> Any:
     return _text(v, MAX_VALUE_TEXT) if isinstance(v, str) else None
 
 
+# Words that read better in capitals, and code-name suffixes that are units.
+_ACRONYMS = {"ar", "ap", "arr", "mrr", "kpi", "nps", "csat", "ltv", "cac", "roi",
+             "sla", "api", "ui", "seo", "crm", "gmv", "aov", "cpc", "cpa", "ctr",
+             "q1", "q2", "q3", "q4", "id", "url"}
+_UNIT_SUFFIXES = {
+    "usd": "USD", "eur": "EUR", "gbp": "GBP", "pct": "%", "percent": "%",
+    "months": "months", "days": "days", "hours": "hours", "weeks": "weeks",
+    "count": "count", "ms": "ms", "seconds": "seconds",
+}
+
+
+def readable_metric_name(name: Any) -> str:
+    """A metric code name as words (ent#843): ``runway_months`` → "Runway
+    (months)", ``finance_ar_overdue_usd`` → "Finance AR overdue (USD)".
+
+    The last resort when no declared label exists — a raw snake_case name never
+    reaches the Workspace card."""
+    words = [w for w in str(name or "").replace("-", "_").replace(".", "_").split("_") if w]
+    if not words:
+        return "Metric"
+    unit = None
+    if len(words) > 1 and words[-1].lower() in _UNIT_SUFFIXES:
+        unit = _UNIT_SUFFIXES[words.pop().lower()]
+    out = [w.upper() if w.lower() in _ACRONYMS else w.lower() for w in words]
+    if out[0].islower():
+        out[0] = out[0][:1].upper() + out[0][1:]
+    text = " ".join(out)
+    return f"{text} ({unit})" if unit else text
+
+
 def portal_metric(row: dict) -> dict:
     """One joined metric as a Workspace client may see it.
 
@@ -172,8 +202,12 @@ def portal_metric(row: dict) -> dict:
     gap = row.get("gap") if isinstance(row.get("gap"), dict) else {}
     finding = row.get("finding") if isinstance(row.get("finding"), dict) else None
     target = row.get("target")
+    label = _text(row.get("label"), 120)
+    if label and label == row.get("name"):
+        label = None          # the join's own fallback IS the code name
     return {
         "name": row.get("name"),
+        "label": label or "",
         "type": _text(row.get("type"), 32),
         "unit": _text(row.get("unit"), 32),
         "target": _value(target if target is not None else row.get("target_text")),
@@ -191,14 +225,42 @@ def portal_objective(obj: dict) -> dict:
     canon `path`, no `review_by`: those describe a canon the client does not
     own."""
     metrics = obj.get("metrics") if isinstance(obj.get("metrics"), list) else []
+    rows = [m for m in metrics if isinstance(m, dict)]
+    owned = obj.get("owned") is True
+    served = sorted({m["served_by"] for m in rows if m.get("served_by")})
+    elsewhere = (not owned) and any(m.get("declared_elsewhere") or m.get("served_by") for m in rows)
     return {
         "id": obj.get("id"),
         "statement": obj.get("statement"),
+        "client_heading": _text(obj.get("client_heading"), 160),
         "horizon": obj.get("horizon"),
         "status": obj.get("status"),
-        "owned": obj.get("owned") is True,
-        "metrics": [portal_metric(m) for m in metrics if isinstance(m, dict)],
+        "owned": owned,
+        # ent#843: said ONCE per objective. Named only when one agent serves
+        # every number this agent reads for it.
+        "tracked_elsewhere": elsewhere,
+        "tracked_by": served[0] if elsewhere and len(served) == 1 else None,
+        "metrics": [portal_metric(m) for m in rows],
     }
+
+
+def fill_metric_labels(objectives: list, lookup: Callable[[list], dict]) -> None:
+    """Give every metric a readable label in place (ent#843): the label every
+    active declaration agrees on — so a metric another agent tracks shows by
+    THAT agent's label — else the code name in words. Fail-soft: a lookup
+    error falls through to words, never to a raw code name."""
+    missing = sorted({m["name"] for o in objectives for m in o["metrics"]
+                      if not m.get("label") and m.get("name")})
+    agreed: dict = {}
+    if missing:
+        try:
+            agreed = lookup(missing) or {}
+        except Exception:  # noqa: BLE001 — a label is presentation, never a failure
+            logger.warning("role card: metric label lookup failed", exc_info=True)
+    for o in objectives:
+        for m in o["metrics"]:
+            if not m.get("label"):
+                m["label"] = _text(agreed.get(m["name"]), 120) or readable_metric_name(m["name"])
 
 
 def finding_codes(join: dict) -> list[str]:
@@ -396,6 +458,7 @@ async def build_role_card(agent_name: str, email: str, *, is_platform: bool,
         return card
     card["objectives"] = [portal_objective(o) for o in join.get("objectives") or []
                           if isinstance(o, dict)]
+    fill_metric_labels(card["objectives"], db.agreed_metric_labels)
     card["objectives_error"] = objectives_error(join)
     card["objectives_partial"] = objectives_partial(join)
     card["finding_codes"] = finding_codes(join)

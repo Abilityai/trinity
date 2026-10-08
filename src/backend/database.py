@@ -4211,6 +4211,10 @@ class DatabaseManager:
             agent_name, include_retired=include_retired
         )
 
+    def agreed_metric_labels(self, names):
+        """Labels every active declaration of a metric name agrees on (ent#843)."""
+        return self._metric_definition_ops.agreed_labels(list(names))
+
     def reconcile_metric_definitions(self, agent_name: str, declared, source: str):
         """Set-diff the declared metrics into the registry; returns a summary dict."""
         return self._metric_definition_ops.reconcile(agent_name, declared, source)

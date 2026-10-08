@@ -93,6 +93,28 @@ class MetricDefinitionOperations:
         with get_engine().connect() as conn:
             return [self._row_to_dict(r) for r in conn.execute(stmt).mappings()]
 
+    def agreed_labels(self, names: List[str]) -> Dict[str, str]:
+        """``{name: label}`` for metric names whose ACTIVE declarations, across
+        every agent, all carry the same non-blank label (trinity-enterprise#843).
+
+        The Workspace role card shows a metric another agent tracks by that
+        agent's label rather than its code name. Two agents labelling one name
+        differently is no answer (the card falls back to readable words); a
+        name nobody labels is absent. Labels only — never which agent declared.
+        """
+        wanted = sorted({n for n in names if isinstance(n, str) and n})
+        if not wanted:
+            return {}
+        t = metric_definitions
+        stmt = select(t.c.name, t.c.label).where(
+            t.c.name.in_(wanted), t.c.status == STATUS_ACTIVE)
+        seen: Dict[str, set] = {}
+        with get_engine().connect() as conn:
+            for row in conn.execute(stmt).mappings():
+                label = (row["label"] or "").strip()
+                seen.setdefault(row["name"], set()).add(label)
+        return {n: next(iter(ls)) for n, ls in seen.items() if len(ls) == 1 and "" not in ls}
+
     # ---------------------------------------------------------------------
     # Write
     # ---------------------------------------------------------------------

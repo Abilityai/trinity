@@ -57,10 +57,13 @@ const fresh = new Date(Date.now() - 3600_000).toISOString()
 const hoursAgo = new Date(Date.now() - 3 * 3600_000).toISOString()
 const longAgo = new Date(Date.now() - 40 * 86400_000).toISOString()
 
+/** The readable label the backend sends (ent#843): "close_rate" → "Close rate". */
+const labelOf = (name) => name.charAt(0).toUpperCase() + name.slice(1).replace(/_/g, ' ')
+
 /** One projected metric row (the `PortalRoleMetric` shape). */
 function metric(name, over = {}) {
   return {
-    name, type: 'gauge', unit: null, target: null, actual: null, last_point_at: null,
+    name, label: labelOf(name), type: 'gauge', unit: null, target: null, actual: null, last_point_at: null,
     stale: false, freshness: null, gap: { status: 'not_computable' }, finding: null,
     ...over,
   }
@@ -119,7 +122,7 @@ describe('PortalAgentRole (mounted)', () => {
     expect(w.findAll('[data-testid="portal-role-objective"]')).toHaveLength(1)
     expect(w.findAll('[data-testid="portal-role-metric"]')).toHaveLength(5)          // everything not stale
     expect(w.findAll('[data-testid="portal-role-metric-stale"]')).toHaveLength(1)    // reply_rate
-    expect(w.get('[data-testid="portal-role-metric-stale"]').text()).toContain('stale')
+    expect(w.get('[data-testid="portal-role-metric-stale"]').text()).toContain('not updated recently')
     expect(w.get('[data-testid="portal-role-relationship"]').text()).toContain('no assignment recorded')
     expect(w.get('[data-testid="portal-role-walkthrough"]').text()).toContain('4 of 10 asks')
     expect(w.get('[data-testid="portal-role-walkthrough"]').text()).toContain('1 rated down')
@@ -128,14 +131,15 @@ describe('PortalAgentRole (mounted)', () => {
   // --- ent#676: the projection of the objective ↔ metric join ---------------
 
   const row = (w, name) => w.findAll('[data-testid^="portal-role-metric"]')
-    .find((el) => el.element.tagName === 'LI' && el.text().startsWith(name))
+    .find((el) => el.element.tagName === 'LI' && el.text().startsWith(`${labelOf(name)}:`))
 
   it('shows actual against target, formatted by the declared type', async () => {
     const w = await mountWith(card())
-    expect(row(w, 'close_rate').text()).toContain('30% / 35%')
-    expect(row(w, 'cycle_time').text()).toContain('1h 30m / 1h 0m')    // seconds, never "5400 / 3600"
-    expect(row(w, 'deal_size').text()).toContain('12 k / 10 k')
-    expect(row(w, 'demo_count').text()).toContain('— / 8')             // no number yet is a dash, never a zero
+    expect(row(w, 'close_rate').text()).toContain('Close rate: 30% (target 35%)')
+    expect(row(w, 'cycle_time').text()).toContain('1h 30m (target 1h 0m)')    // seconds, never "5400 / 3600"
+    expect(row(w, 'deal_size').text()).toContain('12 k (target 10 k)')
+    // No number yet reads as words, never "— / 8" and never a zero (ent#843).
+    expect(row(w, 'demo_count').text()).toContain('Demo count: not measured yet (target 8)')
   })
 
   it('a text target reads as the author wrote it, and no target shows none', async () => {
@@ -143,9 +147,9 @@ describe('PortalAgentRole (mounted)', () => {
       metric('stage', { type: 'status', target: 'won', actual: 'negotiating', last_point_at: fresh, freshness: 'fresh' }),
       metric('bare', { actual: 3, last_point_at: fresh, freshness: 'fresh' }),
     ] }] }))
-    expect(row(w, 'stage').text()).toContain('negotiating / won')
-    expect(row(w, 'bare').text()).toContain('3')
-    expect(row(w, 'bare').text()).not.toContain('/')
+    expect(row(w, 'stage').text()).toContain('Stage: negotiating (target won)')
+    expect(row(w, 'bare').text()).toContain('Bare: 3')
+    expect(row(w, 'bare').text()).not.toContain('target')
   })
 
   it.each([
@@ -172,24 +176,22 @@ describe('PortalAgentRole (mounted)', () => {
     const w = await mountWith(card())
     // Stale is orthogonal to the gap: both show, and the last value stays.
     const stale = row(w, 'reply_rate')
-    expect(stale.text()).toContain('25% / 20%')
+    expect(stale.text()).toContain('25% (target 20%)')
     expect(stale.text()).toContain('ahead')
-    expect(stale.text()).toContain('stale')
-    expect(stale.text()).not.toContain('as of')
+    expect(stale.text()).toContain('not updated recently')
+    expect(stale.text()).not.toContain('· updated')          // the badge says it; no contradicting time
     // Declared, never recorded: not late, not started.
-    expect(row(w, 'demo_count').text()).toContain('no points yet')
+    expect(row(w, 'demo_count').text()).toContain('not measured yet')
     // Fresh shows when the point landed.
-    expect(row(w, 'close_rate').text()).toContain('as of 1h ago')
+    expect(row(w, 'close_rate').text()).toContain('updated 1h ago')
     // No cadence declared is never stale, however old — the age still shows.
     const noCadence = row(w, 'deal_size')
     expect(noCadence.attributes('data-testid')).toBe('portal-role-metric')
-    expect(noCadence.text()).toContain('as of')
-    expect(noCadence.text()).not.toContain('stale')
+    expect(noCadence.text()).toContain('updated')
+    expect(noCadence.text()).not.toContain('not updated recently')
   })
 
   it.each([
-    ['metric_undeclared', "isn't being measured yet"],
-    ['metric_not_declared_here', 'Another agent measures this one'],
     ['metric_retired', 'no longer measured'],
     ['direction_mismatch', 'disagree on which way is good'],
     ['direction_undeclared', 'whether higher or lower is better'],
@@ -200,14 +202,26 @@ describe('PortalAgentRole (mounted)', () => {
     ] }] }))
     const line = w.get('[data-testid="portal-role-metric-finding"]')
     expect(line.text()).toContain(copy)
-    // A row with no point has no time to show — never a dangling "as of".
-    expect(row(w, 'm').text()).not.toContain('as of')
+    // ent#843: a finding is a neutral note, never warning colour.
+    expect(line.classes().join(' ')).not.toContain('status-warning')
+    // A row with no point has no time to show — never a dangling "updated".
+    expect(row(w, 'm').text()).not.toContain('· updated')
   })
+
+  it.each(['metric_undeclared', 'metric_not_declared_here'])(
+    'finding %s adds no line under the metric — the line already says it (ent#843)', async (code) => {
+      const w = await mountWith(card({ objectives: [{ id: 'o', statement: 'S', owned: true, metrics: [
+        metric('m', { target: 1, finding: { code } }),
+      ] }] }))
+      expect(w.find('[data-testid="portal-role-metric-finding"]').exists()).toBe(false)
+      expect(row(w, 'm').text()).toContain('not measured yet')
+    })
 
   it('a row with no finding shows no finding line', async () => {
     const w = await mountWith(card())
     expect(row(w, 'close_rate').find('[data-testid="portal-role-metric-finding"]').exists()).toBe(false)
-    expect(w.findAll('[data-testid="portal-role-metric-finding"]')).toHaveLength(1)   // ghost_metric only
+    // ghost_metric's "not measured" is its line, not a second sentence (ent#843).
+    expect(w.findAll('[data-testid="portal-role-metric-finding"]')).toHaveLength(0)
   })
 
   it.each([
@@ -325,5 +339,91 @@ describe('PortalAgentRole (mounted)', () => {
     await flushPromises()
     expect(w.text()).toContain("Only the agent's owner can change its readiness")
     expect(store.roleFlipping).toBe(false)
+  })
+})
+
+describe('PortalAgentRole — objectives in plain words (ent#843)', () => {
+  const owned = (over = {}) => ({
+    id: 'own-1', statement: 'H10: lift close rate (ADR-0042)', client_heading: null, horizon: 'quarter',
+    status: 'active', owned: true, tracked_elsewhere: false, tracked_by: null,
+    metrics: [metric('close_rate', { type: 'percentage', unit: '%', target: 35, actual: 30, last_point_at: fresh, freshness: 'fresh' })],
+    ...over,
+  })
+  const supported = (id, over = {}) => ({
+    id, statement: `Support ${id}`, client_heading: null, horizon: 'year', status: 'active', owned: false,
+    tracked_elsewhere: true, tracked_by: null,
+    metrics: [
+      metric('finance_ar_overdue_usd', { label: 'Finance AR overdue (USD)', finding: { code: 'metric_not_declared_here' } }),
+      metric('runway_months', { label: 'Runway (months)', finding: { code: 'metric_not_declared_here' } }),
+    ],
+    ...over,
+  })
+
+  it('owned objectives come first under a plain heading; supported ones are folded away with a count', async () => {
+    const w = await mountWith(card({ objectives: [supported('s1'), owned(), supported('s2')] }))
+    const owned_ = w.get('[data-testid="portal-role-owned"]')
+    expect(w.text()).toContain('What this agent is responsible for')
+    expect(owned_.findAll('[data-testid="portal-role-objective"]')).toHaveLength(1)
+    const toggle = w.get('[data-testid="portal-role-supported-toggle"]')
+    expect(toggle.text()).toContain('Also contributes to · 2')
+    expect(toggle.attributes('aria-expanded')).toBe('false')
+    expect(w.find('[data-testid="portal-role-supported-list"]').exists()).toBe(false)
+    // Owned renders before the supported group in the DOM.
+    const html = w.html()
+    expect(html.indexOf('portal-role-owned')).toBeLessThan(html.indexOf('portal-role-supported'))
+  })
+
+  it('a supported objective shows its heading and ONE neutral "tracked" note — no metric rows, no per-metric warning', async () => {
+    const w = await mountWith(card({ objectives: [owned(), supported('s1', { tracked_by: 'finance-agent' }), supported('s2')] }))
+    await w.get('[data-testid="portal-role-supported-toggle"]').trigger('click')
+    const items = w.findAll('[data-testid="portal-role-supported-objective"]')
+    expect(items).toHaveLength(2)
+    expect(items[0].text()).toContain('Support s1')
+    expect(items[0].get('[data-testid="portal-role-tracked-by"]').text()).toBe('Tracked by finance-agent')
+    expect(items[1].get('[data-testid="portal-role-tracked-by"]').text()).toBe('Tracked by another agent')
+    for (const it_ of items) {
+      expect(it_.findAll('[data-testid^="portal-role-metric"]')).toHaveLength(0)
+      expect(it_.findAll('[data-testid="portal-role-tracked-by"]')).toHaveLength(1)
+      expect(it_.html()).not.toContain('status-warning')
+    }
+    expect(w.text()).not.toContain('Another agent measures this one')
+  })
+
+  it('an agent that only supports objectives still shows the folded group, never a dead empty state', async () => {
+    const w = await mountWith(card({ objectives: [supported('s1')] }))
+    expect(w.find('[data-testid="portal-role-owned"]').exists()).toBe(false)
+    expect(w.get('[data-testid="portal-role-supported-toggle"]').text()).toContain('Also contributes to · 1')
+  })
+
+  it('uses the plain client heading when canon gives one, else the statement', async () => {
+    const w = await mountWith(card({ objectives: [owned({ client_heading: 'Win more of the deals we pitch' })] }))
+    expect(w.get('[data-testid="portal-role-objective"]').text()).toContain('Win more of the deals we pitch')
+    expect(w.text()).not.toContain('ADR-0042')
+    const w2 = await mountWith(card({ objectives: [owned()] }))
+    expect(w2.get('[data-testid="portal-role-objective"]').text()).toContain('H10: lift close rate')
+  })
+
+  it('the horizon reads "this quarter", not "quarter"', async () => {
+    const w = await mountWith(card({ objectives: [owned()] }))
+    expect(w.get('[data-testid="portal-role-objective"]').text()).toContain('this quarter')
+  })
+
+  it('a metric shows by its readable label — a raw snake_case name never appears', async () => {
+    const w = await mountWith(card({ objectives: [owned({ metrics: [
+      metric('finance_ar_overdue_usd', { label: 'Finance AR overdue (USD)', target: 0, actual: 1200, last_point_at: fresh, freshness: 'fresh' }),
+    ] }), supported('s1')] }))
+    await w.get('[data-testid="portal-role-supported-toggle"]').trigger('click')
+    expect(w.text()).toContain('Finance AR overdue (USD): 1,200')
+    expect(w.text()).not.toMatch(/\b[a-z]+(?:_[a-z0-9]+)+\b/)
+  })
+
+  it('switching agents folds the supported group again', async () => {
+    const w = await mountWith(card({ objectives: [supported('s1')] }))
+    await w.get('[data-testid="portal-role-supported-toggle"]').trigger('click')
+    expect(w.find('[data-testid="portal-role-supported-list"]').exists()).toBe(true)
+    axios.get.mockResolvedValueOnce({ data: { ...card({ objectives: [supported('s9')] }), agent_name: 'other' } })
+    await w.setProps({ agentName: 'other' })
+    await flushPromises()
+    expect(w.find('[data-testid="portal-role-supported-list"]').exists()).toBe(false)
   })
 })
