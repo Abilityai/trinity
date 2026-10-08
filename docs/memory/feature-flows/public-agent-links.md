@@ -273,8 +273,8 @@ import { getStatusFromStreamEvent, MIN_LABEL_DISPLAY_MS, HEARTBEAT_TIMEOUT_MS } 
 | `POST /api/public/chat/{token}` | `public.py:215` | `public_chat()` (supports `async_mode` for THINK-001) |
 | `GET /api/public/intro/{token}` | `public.py:374` | `get_agent_intro()` |
 | `GET /api/public/playbooks/{token}` | `public.py:403` | `get_public_playbooks()` — the agent's live skills for the chat's `/` menu (placeholder "Type your message or / for skills..."), read through `services/agent_skills_listing.py::fetch_live`. `public_view` keeps each skill to the pre-#754 fields (`name`, `description`, `path`, `user_invocable`, `automation`, `allowed_tools`, `argument_hint`, `has_schedule`), so `source` / `dir` / `approval` never reach a visitor; never the last-known list; stopped → 503 "Agent is not running" (trinity-enterprise#754, [skills-tab.md](skills-tab.md)) |
-| `GET /api/public/executions/{token}/{execution_id}/stream` | `public.py:676` | `public_stream_execution()` (THINK-001 SSE proxy) |
-| `GET /api/public/executions/{token}/{execution_id}/status` | `public.py:735` | `public_execution_status()` (THINK-001 polling) |
+| `GET /api/public/executions/{token}/{execution_id}/stream` | `public.py:674` | `public_stream_execution()` (THINK-001 SSE proxy) |
+| `GET /api/public/executions/{token}/{execution_id}/status` | `public.py:733` | `public_execution_status()` (THINK-001 polling) |
 | `GET /api/public/sessions/{token}` | `public.py` | `list_public_sessions()` — JWT required; returns caller's last 20 sessions for this agent link with `preview` field (#587) |
 | `GET /api/public/sessions/{token}/{session_id}` | `public.py` | `get_public_session()` — JWT required; returns session detail with messages; validates session belongs to caller and correct agent (#587) |
 
@@ -782,7 +782,7 @@ Second paragraph: Your purpose and how you can help the user.
 Be concise, welcoming, and conversational. Do not use headers, bullet points, or markdown formatting."""
 ```
 
-**Endpoint** (`public.py:374-455`):
+**Endpoint** (`public.py:374-453`):
 - Validates link token and session (if email required)
 - Sends intro prompt to agent via direct `httpx` call to `/api/task` (not routed through TaskExecutionService -- intros are lightweight and do not need execution tracking)
 - Returns `{"intro": "..."}`
@@ -1066,8 +1066,8 @@ Return {response, session_id (for anonymous), message_count}
 | Endpoint | Method | File:Line | Description |
 |----------|--------|-----------|-------------|
 | `/api/public/chat/{token}` | POST | `public.py:214` | Chat with persistence (updated) |
-| `/api/public/history/{token}` | GET | `public.py:465` | Get chat history |
-| `/api/public/session/{token}` | DELETE | `public.py:541` | Clear session (New Conversation) |
+| `/api/public/history/{token}` | GET | `public.py:463` | Get chat history |
+| `/api/public/session/{token}` | DELETE | `public.py:539` | Clear session (New Conversation) |
 
 ### Request/Response Models
 
@@ -1179,7 +1179,7 @@ class PublicChatMessage(BaseModel):
 12. Get updated message count (lines 353-355)
 13. Return with session_id for anonymous links (lines 357-362)
 
-**History Endpoint** (`routers/public.py:465-538`):
+**History Endpoint** (`routers/public.py:463-536`):
 1. Validate link token (line 480)
 2. Determine session identifier based on link type (lines 484-509)
 3. Look up session (lines 512-515)
@@ -1187,7 +1187,7 @@ class PublicChatMessage(BaseModel):
 5. Get messages (oldest first, limit 100) (line 525)
 6. Return formatted response (lines 527-538)
 
-**Clear Session Endpoint** (`routers/public.py:541-602`):
+**Clear Session Endpoint** (`routers/public.py:539-600`):
 1. Validate link token (line 556)
 2. Determine session identifier (lines 560-583)
 3. Look up and delete session (lines 586-592)
@@ -1322,7 +1322,7 @@ db.add_public_chat_message(
 | Agent unavailable | 503 | `public.py:275-279` |
 | Agent timeout | 504 | `public.py:331-335` |
 | Agent error | 502 | `public.py:336-341` |
-| Missing session_id for clear | 400 | `public.py:570-574` |
+| Missing session_id for clear | 400 | `public.py:568-572` |
 
 ### Testing
 
@@ -1604,19 +1604,19 @@ PublicChat.vue                         Backend (public.py)              Agent Co
 - Spawns `_execute_public_chat_background()` via `asyncio.create_task()`
 - Returns `{status: "accepted", execution_id, agent_name, session_id, async_mode: true}` immediately
 
-**`_execute_public_chat_background()`** (`public.py:636-673`):
+**`_execute_public_chat_background()`** (`public.py:634-671`):
 - Runs task via `TaskExecutionService.execute_task()` with pre-created `execution_id`
 - Stores assistant response in `public_chat_messages` on success
 - Logs errors without raising (background task)
 
-**SSE stream proxy** (`public.py:676-732`):
+**SSE stream proxy** (`public.py:674-730`):
 - `GET /api/public/executions/{token}/{execution_id}/stream`
 - Validates public link token (no JWT required)
 - Verifies execution belongs to the agent associated with the link
 - Proxies SSE stream from `http://agent-{name}:8000/api/executions/{id}/stream`
 - Returns `StreamingResponse` with `text/event-stream` media type
 
-**Execution status polling** (`public.py:735-764`):
+**Execution status polling** (`public.py:733-762`):
 - `GET /api/public/executions/{token}/{execution_id}/status`
 - Validates public link token
 - Returns `{execution_id, status, response, error}`
@@ -2052,9 +2052,9 @@ const viewingHistorySession = ref(null)   // non-null = read-only history mode
 | 2026-02-17 | **Updated for PUB-003**: Refreshed PublicChat.vue method line numbers (276, 314, 337, 376, 411), added `fetchIntro()` to methods table, updated file line count (508 lines), corrected PUB-003 section line number (376-408). |
 | 2026-02-17 | **Implemented PUB-004 Public Chat Header Metadata**: `GET /api/public/link/{token}` now returns `agent_display_name`, `agent_description`, `is_autonomous`, `is_read_only`. PublicChat.vue header displays agent name, description, and status badges (AUTO amber, READ-ONLY rose with lock). Updated PublicLinkInfo model (db_models.py:336-346), public.py endpoint (lines 44-103), PublicChat.vue header (lines 4-46). Refreshed method line numbers (306, 344, 367, 406, 441). File now 538 lines. |
 | 2026-02-17 | **Implemented PUB-005 Public Chat Session Persistence**: Multi-turn conversation persistence with `public_chat_sessions` and `public_chat_messages` tables. New `db/public_chat.py` with operations class. Updated `POST /api/public/chat/{token}` to persist messages and build context prompt. New `GET /api/public/history/{token}` and `DELETE /api/public/session/{token}` endpoints. Frontend session management with localStorage for anonymous links, history loading on mount, "New Conversation" button. |
-| 2026-02-17 | **PUB-005 documentation refresh**: Added exact line numbers for all backend endpoints (chat:214, history:465, session:541), db operations (public_chat.py methods with lines), database schema locations (660-687, 781-783), delegation methods (1404-1432), and frontend methods (loadHistory:429, sendMessage:544, confirmNewConversation:503). Added response model documentation, error handling table, cost tracking details, and expanded test scenarios. Updated file line counts (public.py:603, PublicChat.vue:658, db_models.py:483). |
+| 2026-02-17 | **PUB-005 documentation refresh**: Added exact line numbers for all backend endpoints (chat:214, history:465, session:541), db operations (public_chat.py methods with lines), database schema locations (660-687, 781-783), delegation methods (1404-1432), and frontend methods (loadHistory:429, sendMessage:544, confirmNewConversation:503). Added response model documentation, error handling table, cost tracking details, and expanded test scenarios. Updated file line counts (public.py:601, PublicChat.vue:658, db_models.py:483). |
 | 2026-02-17 | **Implemented PUB-006 Public Client Mode Awareness**: Agents now receive `PUBLIC_LINK_MODE_HEADER` constant ("### Trinity: Public Link Access Mode") prepended to all public chat prompts via `build_context_prompt()` in `db/public_chat.py:17-18,265-266`. **UI: Bottom-aligned messages**: Chat messages now stack from bottom up (like iMessage/Slack) using flexbox with spacer div (lines 191-193), new `messagesContainer` ref for scroll handling (line 334). File line count: PublicChat.vue now 684 lines. |
 | 2026-02-25 | **SLACK-001 Slack Integration**: Added Slack as delivery channel for public links. New section documenting Slack integration, updated Related Flows to include slack-integration.md. See [slack-integration.md](slack-integration.md) for full implementation details. |
 | 2026-03-04 | **EXEC-024 TaskExecutionService refactor**: `POST /api/public/chat/{token}` now routes through `TaskExecutionService.execute_task(triggered_by="public")` instead of raw `httpx` call. Public executions now create `schedule_executions` records, appear in Tasks tab and Dashboard timeline, count toward capacity slots (429 when full), and have credential-sanitized logs. Updated architecture diagram, data flow sections, chat endpoint steps, cost tracking, error handling, and file references. Added `task_execution_service.py` to files list. |
-| 2026-03-19 | **MEM-001 Per-User Persistent Memory** (#147): Added `public_user_memory` table (schema.py:360-371, migration #28). Email-verified sessions inject per-user memory via `format_user_memory_block()` (platform_prompt_service.py:97) as `system_prompt` kwarg to `execute_task()` — both sync (public.py:368) and async paths (public.py:685). Background summarization via `_summarize_user_memory()` (public.py:727-784) fires every 5th message using `claude-haiku-4-5-20251001`. New DB methods on `PublicLinkOperations` (public_links.py:439-522). Architecture diagram updated to include `public_user_memory`. Anonymous sessions unaffected. |
+| 2026-03-19 | **MEM-001 Per-User Persistent Memory** (#147): Added `public_user_memory` table (schema.py:360-371, migration #28). Email-verified sessions inject per-user memory via `format_user_memory_block()` (platform_prompt_service.py:97) as `system_prompt` kwarg to `execute_task()` — both sync (public.py:368) and async paths (public.py:683). Background summarization via `_summarize_user_memory()` (public.py:725-782) fires every 5th message using `claude-haiku-4-5-20251001`. New DB methods on `PublicLinkOperations` (public_links.py:439-522). Architecture diagram updated to include `public_user_memory`. Anonymous sessions unaffected. |
 | 2026-03-04 | **THINK-001 Dynamic Thinking Status for Public Chat**: Added async mode (`async_mode` field in `PublicChatRequest`), SSE stream proxy (`GET /api/public/executions/{token}/{id}/stream`), execution status polling (`GET /api/public/executions/{token}/{id}/status`), and background task function (`_execute_public_chat_background`). Frontend updated: `sendMessage()` uses async mode, `subscribeToStream()` for SSE, `pollExecution()` for completion, `updateLoadingText()` with anti-flicker timing, `resetHeartbeat()` fallback. Updated endpoints table, data flow, methods table, components, files. public.py now 764 lines, PublicChat.vue now 786 lines. |

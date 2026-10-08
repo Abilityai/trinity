@@ -67,7 +67,7 @@ request → entry point
   │      existing record → still waiting: replay (202) · decided: 409 request_<state>
   ├─ caps (:313): rate 10/min/requester, 10 pending/requester/agent, 50/agent → 429
   ├─ fingerprints (:521; docker exec as root, python3 -I -S) → 409 unreadable/missing/ambiguous
-  ├─ create skill_gate_requests row (pending)  ← BEFORE the ask   (db/skill_gate_requests.py:84)
+  ├─ create skill_gate_requests row (pending)  ← BEFORE the ask   (db/skill_gate_requests.py:85)
   ├─ ask_service.raise_ask(raised_by="gate", approval, Approve/Reject, to=role)   (_ask_body :362)
   │      the card carries the WHOLE request (what Approve runs) + a 500-char preview
   │      raise failed → record refused, 503 approval_unavailable (no pending record left)
@@ -127,7 +127,7 @@ ask ended
   ├─ approved by someone not addressed → denied (approver_not_addressed)
   └─ approved
        ├─ claim: UPDATE … state pending→dispatching, dispatched_execution_id = new id
-       │     (CAS, db/skill_gate_requests.py:154)
+       │     (CAS, db/skill_gate_requests.py:155)
        ├─ agent gone / requesting agent gone / unreachable → not_run → notify
        ├─ fingerprint changed → stale → notify
        ├─ create row under the claimed id; capacity.acquire(queue_persistent)
@@ -229,7 +229,7 @@ Then the audit (best-effort, after the lock). A failed re-sync on a running agen
 
 `agent_skill_gates` (trinity-enterprise#753): SQLite `agent_skill_gates`, Alembic `0094_agent_skill_gates` on top of `0093_platform_alert_responded_heal`. See §6. `agent_name` is in `AGENT_REFS` (CASCADE); `set_by_agent` is not.
 
-`state` moves `pending → dispatching → dispatched | stale | not_run | unknown`, or `pending → denied | expired | cancelled | refused`. A `self_approved` row (trinity-enterprise#752, no migration — a new value in the same column) is inserted in that state by `record_self_approved_run` and never moves; it is never pending work, so no cap, sweep or ask reads it. The "ran without approval" marker reads it (trinity-enterprise#754, no new column): `db.get_self_approved_runs(agent, execution_ids)` (`db/skill_gate_requests.py:168`) is one batch read by `dispatched_execution_id`, for the Tasks row, the execution page and the Workspace turn ([skills-tab.md](skills-tab.md)). Both agent columns are in `AGENT_REFS` (CASCADE).
+`state` moves `pending → dispatching → dispatched | stale | not_run | unknown`, or `pending → denied | expired | cancelled | refused`. A `self_approved` row (trinity-enterprise#752, no migration — a new value in the same column) is inserted in that state by `record_self_approved_run` and never moves; it is never pending work, so no cap, sweep or ask reads it. The "ran without approval" marker reads it (trinity-enterprise#754, no new column): `db.get_self_approved_runs(agent, execution_ids)` (`db/skill_gate_requests.py:169`) is one batch read by `dispatched_execution_id`, for the Tasks row, the execution page and the Workspace turn ([skills-tab.md](skills-tab.md)). Both agent columns are in `AGENT_REFS` (CASCADE).
 
 ## Side Effects
 
