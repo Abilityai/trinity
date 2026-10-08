@@ -165,6 +165,22 @@ class SkillGateRequestOperations:
             r = conn.execute(stmt).first()
         return _row(r) if r else None
 
+    def get_self_approved_runs(self, agent_name: str, execution_ids: List[str]) -> Dict[str, str]:
+        """`{execution id: requester_key}` for the runs among `execution_ids`
+        that went through self-approved on `agent_name` (trinity-enterprise#754:
+        the "ran without approval" marker). One read per page of executions,
+        served by the UNIQUE `dispatched_execution_id` index."""
+        ids = [e for e in (execution_ids or []) if e]
+        if not ids:
+            return {}
+        stmt = (select(skill_gate_requests.c.dispatched_execution_id,
+                       skill_gate_requests.c.requester_key)
+                .where(and_(skill_gate_requests.c.agent_name == agent_name,
+                            skill_gate_requests.c.state == SELF_APPROVED,
+                            skill_gate_requests.c.dispatched_execution_id.in_(ids))))
+        with get_engine().connect() as conn:
+            return {r.dispatched_execution_id: r.requester_key for r in conn.execute(stmt)}
+
     def get_gate_requests_by_origin_executions(self, execution_ids: List[str]) -> Dict[str, Dict]:
         """`{origin execution id: record}` — which SKIPPED rows the gate closed
         (a gated scheduled / loop / fan-out run), read structurally rather than

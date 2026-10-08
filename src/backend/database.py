@@ -2312,6 +2312,9 @@ class DatabaseManager:
     def get_gate_request_by_dispatched_execution(self, execution_id: str):
         return self._skill_gate_request_ops.get_gate_request_by_dispatched_execution(execution_id)
 
+    def get_self_approved_runs(self, agent_name: str, execution_ids):
+        return self._skill_gate_request_ops.get_self_approved_runs(agent_name, execution_ids)
+
     def get_gate_requests_by_origin_executions(self, execution_ids):
         return self._skill_gate_request_ops.get_gate_requests_by_origin_executions(execution_ids)
 

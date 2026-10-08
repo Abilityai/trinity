@@ -177,6 +177,30 @@ def approver_status(agent_name: str, principal) -> List[Dict[str, Any]]:
     return out
 
 
+def self_approved_flags(agent_name: str, execution_ids: Iterable[str],
+                        principal) -> Dict[str, Tuple[bool, bool]]:
+    """trinity-enterprise#754: `{execution id: (self_approved, by_viewer)}` for
+    the runs among `execution_ids` that went through without approval because
+    their requester is the approver — read from ent#752's `self_approved`
+    records, never from today's gate config (a run is marked by what happened
+    to it). `by_viewer` is true only for a person whose casefolded email is
+    the record's requester key, so the email itself never leaves the server.
+    Runs with no record are absent (false). Never raises: a marker is a hint,
+    never a reason to fail the executions read."""
+    ids = [e for e in execution_ids if e]
+    if not ids:
+        return {}
+    try:
+        runs = db.get_self_approved_runs(agent_name, ids)
+    except Exception:  # noqa: BLE001
+        logger.warning("[skill_gate_map] self-approved read failed for %s", agent_name, exc_info=True)
+        return {}
+    requester = skill_gate_service.requester_from_principal(principal)
+    mine = (f"person:{requester.email.strip().casefold()}"
+            if requester.is_person and requester.email else None)
+    return {eid: (True, mine is not None and key == mine) for eid, key in runs.items()}
+
+
 # trinity-enterprise#754: the in-agent gate check's states, as the agent's
 # `/health → skill_gate_hook` reports them (ent#752, `agent_server/routers/
 # info.py::_skill_gate_hook`), plus two of the platform's own: `predates` — a

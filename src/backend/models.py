@@ -4115,6 +4115,11 @@ class ExecutionSummary(BaseModel):
     compact_metadata: Optional[str] = None
     # Turn-integrity flags (#2467) - small JSON object; NULL = no evidence
     turn_integrity: Optional[str] = None
+    # trinity-enterprise#754: the run went through without approval because its
+    # requester is the approver (ent#752's `self_approved` record); and the caller
+    # is that person. Booleans only — the email stays on the server.
+    gate_self_approved: bool = False
+    gate_self_approved_by_viewer: bool = False
 
     # EXCLUDED (large fields - fetch via /executions/{id}):
     # - response: Optional[str]      # Full response text
@@ -4169,6 +4174,9 @@ class ExecutionResponse(BaseModel):
     compact_metadata: Optional[str] = None
     # Turn-integrity flags (#2467) - small JSON object; NULL = no evidence
     turn_integrity: Optional[str] = None
+    # trinity-enterprise#754 — as on ExecutionSummary.
+    gate_self_approved: bool = False
+    gate_self_approved_by_viewer: bool = False
 
     class Config:
         from_attributes = True
