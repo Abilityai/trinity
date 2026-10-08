@@ -252,16 +252,7 @@ def claim_next_task(agent_name: str, worker_id: str) -> Optional[Dict[str, Any]]
     )
     if not row:
         return None
-    claim = _build_claim_response(row)
-    overrides = claim["envelope"]["payload"]["task_overrides"]
-    limit, shortened_from = _turn_limit(overrides.get("timeout_seconds"), cap)
-    overrides["timeout_seconds"] = limit
-    if shortened_from is not None:
-        logger.warning(
-            "[#2846] %s: turn limit shortened from %ss to %ss (agent %s timeout)",
-            row["id"], shortened_from, limit, agent_name,
-        )
-    return claim
+    return _build_claim_response(row, cap=cap)
 
 
 def _turn_limit(requested: Any, cap: int) -> Tuple[int, Optional[int]]:
@@ -303,9 +294,13 @@ def _shortened_note(execution: Any) -> str:
     )
 
 
-def _build_claim_response(row: Dict[str, Any]) -> Dict[str, Any]:
+def _build_claim_response(row: Dict[str, Any], cap: Optional[int] = None) -> Dict[str, Any]:
     """Reconstruct the §3.1 claim response from a claimed ``schedule_executions``
     row + its ``backlog_metadata`` JSON.
+
+    ``cap`` is the agent timeout: when given, the turn limit is clamped to it
+    (#2846) BEFORE the platform prompt is composed, so the prompt states the
+    limit the turn actually runs under (#3321).
 
     Per the schema's honest-scope caveat, the pilot "rides the existing
     ``backlog_metadata`` reconstruction shape" — the coordination frame fields
@@ -381,6 +376,14 @@ def _build_claim_response(row: Dict[str, Any]) -> Dict[str, Any]:
     nested = meta.get("task_overrides")
     if isinstance(nested, dict):
         overrides.update({k: v for k, v in nested.items() if v is not None})
+    if cap is not None:
+        limit, shortened_from = _turn_limit(overrides.get("timeout_seconds"), cap)
+        overrides["timeout_seconds"] = limit
+        if shortened_from is not None:
+            logger.warning(
+                "[#2846] %s: turn limit shortened from %ss to %ss (agent %s timeout)",
+                row["id"], shortened_from, limit, row.get("agent_name"),
+            )
     # ent#243: a caller override is what the worker will actually run, so it wins
     # over the row's recorded model_used; either may be absent → VERBOSE.
     overrides["system_prompt"] = _compose_pull_system_prompt(

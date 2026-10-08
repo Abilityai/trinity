@@ -347,11 +347,6 @@ class TestTurnLimit:
                 pure_pcs.claim_next_task("alpha", "w")
         poll.assert_called_once_with("alpha")
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason="BUG: platform prompt advertises the row's stale unclamped timeout, "
-               "not the #2846-clamped turn limit — #3321",
-    )
     def test_T14_prompt_timeout_equals_the_enforced_limit(self, ops, pcs, monkeypatch):
         """#3114 says the pulled prompt's timeout matches push; push tells the
         model the limit it actually runs under. A row enqueued under a 1800s
@@ -376,6 +371,40 @@ class TestTurnLimit:
         prompt = claim["envelope"]["payload"]["task_overrides"]["system_prompt"] or ""
         assert "1800s" not in prompt, "model is told a budget it will not get"
         assert seen["timeout"] == enforced
+
+    def _claim_with_spy(self, pcs, monkeypatch):
+        seen = {}
+        real = pcs._compose_pull_system_prompt
+
+        def spy(*a, **kw):
+            seen["timeout"] = kw.get("timeout_seconds")
+            return real(*a, **kw)
+
+        monkeypatch.setattr(pcs, "_compose_pull_system_prompt", spy)
+        monkeypatch.setattr(pcs, "_resolve_agent_runtime", lambda _n: "claude-code")
+        return pcs.claim_next_task("alpha", "w1"), seen
+
+    def test_T15_prompt_timeout_without_recorded_timeout_is_the_agent_cap(
+        self, ops, pcs, monkeypatch
+    ):
+        """#3321: a row with no recorded timeout runs under the agent timeout,
+        so the prompt states that limit — as push does."""
+        _seed_agent(timeout=600)
+        _enqueue(trigger="schedule")
+        claim, seen = self._claim_with_spy(pcs, monkeypatch)
+        assert seen["timeout"] == 600
+        prompt = claim["envelope"]["payload"]["task_overrides"]["system_prompt"] or ""
+        assert "600s" in prompt
+
+    def test_T16_prompt_timeout_under_cap_is_unchanged(self, ops, pcs, monkeypatch):
+        """#3321: a recorded timeout under the cap is stated as recorded."""
+        _seed_agent(timeout=600)
+        _enqueue(trigger="schedule", meta={"timeout_seconds": 300})
+        claim, seen = self._claim_with_spy(pcs, monkeypatch)
+        assert seen["timeout"] == 300
+        assert claim["envelope"]["payload"]["task_overrides"]["timeout_seconds"] == 300
+        prompt = claim["envelope"]["payload"]["task_overrides"]["system_prompt"] or ""
+        assert "300s" in prompt
 
 
 class TestBuildClaimResponse:
