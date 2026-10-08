@@ -497,6 +497,58 @@ def test_the_public_link_never_hears_dockers_error_text(env, monkeypatch):
     assert r.json()["detail"] == "Agent is not running"
 
 
+_DAEMON_TEXT = "500 Server Error for http+docker://localhost/v1.47/containers/0123abcd/json: Internal Server Error"
+
+
+def _daemon_fault(monkeypatch):
+    """The Docker daemon answers the reload with a 500 (or drops the socket)."""
+    import docker
+
+    async def _fault(_c):
+        raise docker.errors.APIError(_DAEMON_TEXT)
+
+    monkeypatch.setattr(listing, "container_reload", _fault)
+
+
+def test_a_daemon_fault_mid_read_is_unreachable_without_dockers_words(env, monkeypatch):
+    """cso-diff 2026-10-08 finding 1: only NotFound was mapped, so any other
+    Docker error reached the caller's catch-all with the daemon URL, its API
+    version and the container id in the 500's text."""
+    _get(env)                                   # a live read keeps a copy
+    _daemon_fault(monkeypatch)
+
+    r = _get(env)
+    kept = _get(env, last_known="true")
+
+    assert r.status_code == 503
+    assert "0123abcd" not in r.text and "docker" not in r.text.lower()
+    assert kept.status_code == 200 and kept.json()["last_known"]["reason"] == "unreachable"
+
+
+def test_the_public_link_never_hears_a_daemon_fault(env, monkeypatch):
+    _daemon_fault(monkeypatch)
+    client = _public_client(monkeypatch)
+
+    r = client.get("/api/public/playbooks/tok")
+
+    assert r.status_code == 503
+    assert "0123abcd" not in r.text and "docker" not in r.text.lower()
+
+
+def test_the_public_link_names_no_exception_text(env, monkeypatch):
+    """Defense in depth on the one unauthenticated reader: whatever else goes
+    wrong (here an agent answering a non-JSON 200), the anonymous caller gets a
+    fixed sentence, never the exception's own text."""
+    env.agent.answer = FakeResponse(200, None)
+    env.agent.answer.json = lambda: (_ for _ in ()).throw(ValueError("Expecting value: line 1 column 1 (char 0)"))
+    client = _public_client(monkeypatch)
+
+    r = client.get("/api/public/playbooks/tok")
+
+    assert r.status_code == 500
+    assert r.json()["detail"] == "Failed to fetch playbooks"
+
+
 @pytest.mark.parametrize("exc", [httpx.ReadError("connection reset"), httpx.RemoteProtocolError("peer closed")],
                          ids=["read_error", "remote_protocol_error"])
 def test_a_connection_dropped_mid_answer_is_unreachable(env, exc):

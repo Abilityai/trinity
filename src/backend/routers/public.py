@@ -424,8 +424,11 @@ async def get_public_playbooks(token: str, request: Request):
         if e.reason in ("not_found", "not_running"):
             raise HTTPException(status_code=503, detail="Agent is not running")
         raise HTTPException(status_code=e.status_code, detail=e.detail)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to fetch playbooks: {str(e)}")
+    except Exception:
+        # An anonymous caller gets a fixed sentence, never an exception's own
+        # text (it can carry internals); the cause is in the log.
+        logger.warning("[public] playbooks for %s failed", agent_name, exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to fetch playbooks")
     return agent_skills_listing.public_view(body)
 
 

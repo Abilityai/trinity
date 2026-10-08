@@ -106,6 +106,12 @@ async def fetch_live(agent_name: str) -> Any:
         # says — never Docker's own text (its URL and container id), which a
         # caller's catch-all would otherwise hand on, to the public link too.
         raise SkillsListUnavailable("not_found", 404, "Agent not found")
+    except Exception:  # noqa: BLE001 — a daemon fault: the agent's state is unknown
+        # Any other Docker failure (a daemon 500, a dropped socket) carries the
+        # same text, so it is named, never echoed (cso-diff 2026-10-08 #1); a
+        # kept copy is served for it as for an agent that is not answering.
+        logger.warning("[skills_list] reading %s's container state failed", agent_name, exc_info=True)
+        raise SkillsListUnavailable("unreachable", 503, "Could not read the agent's state")
     if container.status != "running":
         raise SkillsListUnavailable(
             "not_running", 503, "Agent is not running. Start the agent to view its skills.")
