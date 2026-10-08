@@ -239,6 +239,12 @@
                 >
                   compacted{{ taskCompactCount(task) > 1 ? ` ×${taskCompactCount(task)}` : '' }}
                 </span>
+                <!-- trinity-enterprise#754: went through without approval because
+                     its requester is the approver (server-decided booleans). -->
+                <ExecutionGateMarker
+                  :self-approved="!!task.gate_self_approved"
+                  :by-viewer="!!task.gate_self_approved_by_viewer"
+                />
                 <!-- Time -->
                 <span class="text-xs text-gray-500 dark:text-gray-400">
                   {{ formatRelativeTime(task.started_at) }}
@@ -556,6 +562,7 @@ import { useAuthStore } from '../stores/auth'
 import { formatCost, formatCostCompact } from '../composables/useFormatters'
 import ModelSelector from './ModelSelector.vue'
 import LoadFailed from './LoadFailed.vue'
+import ExecutionGateMarker from './skills/ExecutionGateMarker.vue'  // trinity-enterprise#754
 import { apiErrorMessage } from '../utils/apiError'
 import { isGateRefusal, pendingApprovalMessage } from '../utils/skillGate'
 

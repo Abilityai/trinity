@@ -17,7 +17,7 @@
  *      a delivery outcome that never ran an injection (a stopped agent);
  *   4. the note belongs to the save it describes — it goes when that note goes.
  *
- * Mount harness per the #2918 precedent (skillsPanelDraftSurvivesSync.spec.js).
+ * Mount harness per the #2918 precedent (skillAssignDraftSurvivesSync.spec.js).
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { mount, flushPromises } from '@vue/test-utils'
@@ -31,7 +31,7 @@ vi.mock('@/stores/auth', () => ({
   useAuthStore: () => ({ role: 'admin', isAuthenticated: true }),
 }))
 
-import SkillsPanel from '../../src/components/SkillsPanel.vue'
+import SkillsTab from '../../src/components/skills/SkillsTab.vue'
 import LibrarySkillsSection from '../../src/components/LibrarySkillsSection.vue'
 import { deprecationText } from '../../src/utils/skillDelivery'
 
@@ -190,11 +190,14 @@ describe('Library → Skills card', () => {
 describe('Agent → Skills tab', () => {
   async function mountPanel(assigned) {
     respond({ assigned })
-    const wrapper = mount(SkillsPanel, {
-      props: { agentName: AGENT, canManage: true, agentRunning: true },
+    // trinity-enterprise#754: the picker opens as a dialog (inline here).
+    const wrapper = mount(SkillsTab, {
+      props: { agentName: AGENT, agentStatus: 'running', canManage: true },
       attachTo: document.body,
-      global: { stubs: { AgentSkillSets: true } },
+      global: { stubs: { AgentSkillSets: true, teleport: true, 'router-link': true } },
     })
+    await flushPromises()
+    await wrapper.find('[data-testid="skills-assign-open"]').trigger('click')
     await flushPromises()
     return wrapper
   }
@@ -281,6 +284,8 @@ describe('Agent → Skills tab', () => {
     expect(tid(wrapper, 'skills-saved-deprecation').exists()).toBe(true)
 
     api.put.mockResolvedValue({ data: { delivery: null } })
+    // #754: the conflict's way out lives in the card's details dialog.
+    await tid(wrapper, 'skill-conflict-note').trigger('click')
     await tid(wrapper, 'skill-conflict-unassign').trigger('click')
     await flushPromises()
 

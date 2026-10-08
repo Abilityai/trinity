@@ -265,11 +265,15 @@
               <LoopsPanel :agent-name="agent.name" :agent-status="agent.status" />
             </div>
 
-            <!-- Playbooks Tab Content -->
-            <div v-if="activeTab === 'playbooks'" class="p-6">
-              <PlaybooksPanel
+            <!-- Skills Tab Content (trinity-enterprise#754: own + shared skills,
+                 Run, Requires approval — it absorbed the Playbooks tab) -->
+            <div v-if="activeTab === 'skills'" class="p-6">
+              <SkillsTab
                 :agent-name="agent.name"
                 :agent-status="agent.status"
+                :can-manage="!!agent.can_share"
+                :is-system="!!agent.is_system"
+                :is-ephemeral="!!agent.ephemeral"
                 :notify="showNotification"
                 @run-with-instructions="handlePlaybookRunWithInstructions"
               />
@@ -283,15 +287,6 @@
             <!-- Files Tab Content -->
             <div v-if="activeTab === 'files'">
               <FilesPanel :agent-name="agent.name" :agent-status="agent.status" />
-            </div>
-
-            <!-- Skills Tab Content -->
-            <div v-if="activeTab === 'skills'" class="p-6">
-              <SkillsPanel
-                :agent-name="agent.name"
-                :can-manage="!!agent.can_share"
-                :agent-running="agent.status === 'running'"
-              />
             </div>
 
             <!-- Shared Folders Tab Content -->
@@ -365,7 +360,7 @@ import { useAgentsStore } from '../stores/agents'
 import { useAuthStore } from '../stores/auth'
 import { useSessionsStore } from '../stores/sessions'  // SESSION_TAB_2026-04 Phase 3
 import { emotionCacheVersion, emotionAvatarUrl as buildEmotionUrl } from '../utils/avatarEmotion'
-import { buildTabs } from '../utils/agentTabs'
+import { buildTabs, TAB_ALIASES } from '../utils/agentTabs'
 import NavBar from '../components/NavBar.vue'
 
 // Component name for KeepAlive matching
@@ -404,8 +399,7 @@ import AccessPanel from '../components/AccessPanel.vue'
 import PermissionsPanel from '../components/PermissionsPanel.vue'
 import FilesPanel from '../components/FilesPanel.vue'
 import TerminalPanelContent from '../components/TerminalPanelContent.vue'
-import SkillsPanel from '../components/SkillsPanel.vue'
-import PlaybooksPanel from '../components/PlaybooksPanel.vue'
+import SkillsTab from '../components/skills/SkillsTab.vue'  // trinity-enterprise#754
 import ChatPanel from '../components/ChatPanel.vue'
 import NeverminedPanel from '../components/NeverminedPanel.vue'
 import A2aPanel from '../components/A2aPanel.vue'  // trinity-enterprise#158: A2A config tab
@@ -438,12 +432,12 @@ const activeTab = ref('overview')  // #1107: Overview is the default landing tab
 // #2153: resolved against every id the page can render (see ALL_TAB_IDS, which
 // the tab builder derives), not a hand-maintained subset. The old list omitted
 // a2a, loops, playbooks, access and nevermined, so those links died silently.
-// Legacy ?tab= ids that moved/renamed — keep old deep-links working (#1108).
-// ent#358: `session` is no longer an alias — it REDIRECTS (see below). The
-// surface it named lives in the Workspace now, so resolving it to a local tab
-// would silently land the user on stateless chat while their link asked for a
-// continuous conversation.
-const TAB_ALIASES = { guardrails: 'settings' }
+// Legacy ?tab= ids that moved/renamed — keep old deep-links working (#1108):
+// `TAB_ALIASES` (utils/agentTabs.js; trinity-enterprise#754 added
+// `playbooks → skills`). ent#358: `session` is no longer an alias — it
+// REDIRECTS (see below). The surface it named lives in the Workspace now, so
+// resolving it to a local tab would silently land the user on stateless chat
+// while their link asked for a continuous conversation.
 // Resolve a ?tab= value to a live tab id (applying aliases), or null if unknown.
 function resolveDeepLinkTab(requested) {
   const resolved = TAB_ALIASES[requested] || requested
@@ -1570,7 +1564,7 @@ const handleCreateSchedule = (message) => {
   })
 }
 
-// Handle run-with-instructions from Playbooks tab
+// Handle run-with-instructions from the Skills tab (Run / Edit & Run)
 const handlePlaybookRunWithInstructions = (prefillText) => {
   // Check if this is a navigation request (one-click run completed)
   if (prefillText.startsWith('__NAVIGATE_TASKS__:')) {

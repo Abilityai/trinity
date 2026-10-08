@@ -17,6 +17,7 @@
 import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
 import api from '../api'
+import { pendingApprovalMessage } from '../utils/skillGate'
 
 // #2703 — a bulk PUT that delivers several skills fires ONE `agent_skills_changed`,
 // but a Library click storm fires many; consumers refetch once per burst.
@@ -76,6 +77,21 @@ export const useSkillsStore = defineStore('skills', () => {
     return librarySets.value.filter(x => !held.has(x.name))
   })
 
+  // trinity-enterprise#754 — the agent's OWN listing (its `.claude/skills/`),
+  // from `GET /playbooks?last_known=true`: live when the agent answers, else the
+  // last successful listing the platform kept. It describes the container, not
+  // the platform's assignments, so it is held apart from `assigned`.
+  //   agentListState: idle | live | last_known | none (stopped/unreachable, no
+  //   copy kept — a known state, not a failure) | failed (the read itself failed)
+  const agentList = ref([])
+  const agentListPaths = ref([])
+  const agentListState = ref('idle')
+  const agentListAt = ref(null)        // captured_at of a last-known list
+  const agentListReason = ref(null)    // stopped | unreachable, for a last-known list
+  const agentListError = ref(null)
+  const agentListLoaded = ref(false)   // a read has SUCCEEDED (live, last-known or none)
+  let agentListSeq = 0
+
   // #2703 — the delivery report of the LAST save: {status, reason?, skills:{...}}
   // — see `utils/skillDelivery.js` for the wording. Kept beside
   // `injectionResults` for the same reason that one is separate from
@@ -84,7 +100,7 @@ export const useSkillsStore = defineStore('skills', () => {
 
   // #2703 — per-agent "the listing changed" ticks, driven by the thin
   // `agent_skills_changed` WS trigger. Consumers that own a `loadPlaybooks()`
-  // (ChatPanel, PlaybooksPanel, usePlaybookAutocomplete) watch their agent's
+  // (ChatPanel, SkillsTab, usePlaybookAutocomplete) watch their agent's
   // entry and refetch through the access-controlled route; the payload carries
   // no skill names (the #918 / ent#305 rule). Debounced per agent here so the
   // consumers stay dumb.
@@ -133,7 +149,73 @@ export const useSkillsStore = defineStore('skills', () => {
       lastSetResult.value = null
       injectionResults.value = {}
       lastInjectionAt.value = null
+      resetAgentList()
     }
+  }
+
+  function resetAgentList() {
+    agentList.value = []
+    agentListPaths.value = []
+    agentListState.value = 'idle'
+    agentListAt.value = null
+    agentListReason.value = null
+    agentListError.value = null
+    agentListLoaded.value = false
+  }
+
+  /**
+   * #754: the agent's own listing. A stopped or unreachable agent answers its
+   * last-known list (labelled with when and why); with no kept copy the
+   * answer is a 503/504/404, which is "none", a KNOWN state. Only any other
+   * failure is `failed`, and a failed refresh keeps what is on screen (the
+   * design system's stale rule: never overwrite data with an empty payload).
+   */
+  async function loadAgentList(name = agentName.value) {
+    if (!name) return
+    const seq = ++agentListSeq
+    try {
+      const { data } = await api.get(`/api/agents/${name}/playbooks`, { params: { last_known: true } })
+      if (seq !== agentListSeq || name !== agentName.value) return
+      agentList.value = Array.isArray(data?.skills) ? data.skills : []
+      agentListPaths.value = Array.isArray(data?.skill_paths) ? data.skill_paths : []
+      agentListState.value = data?.last_known ? 'last_known' : 'live'
+      agentListAt.value = data?.last_known?.captured_at || null
+      agentListReason.value = data?.last_known?.reason || null
+      agentListError.value = null
+      agentListLoaded.value = true
+    } catch (e) {
+      if (seq !== agentListSeq || name !== agentName.value) return
+      if ([404, 503, 504].includes(e?.response?.status)) {
+        agentList.value = []
+        agentListPaths.value = []
+        agentListState.value = 'none'
+        agentListAt.value = null
+        agentListReason.value = null
+        agentListError.value = null
+        agentListLoaded.value = true
+        return
+      }
+      agentListError.value = detailText(e, "Could not load this agent's skills")
+      if (!agentListLoaded.value) agentListState.value = 'failed'
+    }
+  }
+
+  /**
+   * #754: run a skill now. `async_mode` — the shared client times out at 30 s
+   * and a run can take far longer, so the run is accepted and opened on the
+   * Tasks tab rather than awaited here. A 202 is a raised approval (nothing
+   * ran, trinity#3274); a refusal or any other failure throws to the caller.
+   * @returns {Promise<{held: string} | {executionId: string|null}>}
+   */
+  async function runSkill(skillName) {
+    const response = await api.post(`/api/agents/${agentName.value}/task`, {
+      message: `/${skillName}`,
+      async_mode: true,
+    })
+    const held = pendingApprovalMessage(response)
+    if (held) return { held }
+    const data = response?.data || {}
+    return { executionId: data.execution_id ?? data.task_execution_id ?? null }
   }
 
   async function load(name) {
@@ -311,6 +393,7 @@ export const useSkillsStore = defineStore('skills', () => {
     lastInjectionAt.value = null
     lastDelivery.value = null
     error.value = null
+    resetAgentList()
   }
 
   return {
@@ -323,6 +406,8 @@ export const useSkillsStore = defineStore('skills', () => {
     sets, librarySets, setsError, setsLoaded, setBusy, setWriteError, lastSetResult, removalDeferred,
     setOnlyNames, individualNames, assignableSets, viaSets,
     loadSets, assignSet, unassignSet,
+    agentList, agentListPaths, agentListState, agentListAt, agentListReason, agentListError, agentListLoaded,
+    loadAgentList, runSkill,
   }
 })
 
