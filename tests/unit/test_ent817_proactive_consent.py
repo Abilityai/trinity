@@ -94,7 +94,6 @@ def test_only_consent_lets_an_agent_send(owner):
 
 def test_the_migration_moves_legacy_zeros_to_not_asked_and_is_idempotent(owner):
     from database import db
-    from db.connection import get_db_connection
     from db.engine import get_engine
     from db.migrations import _migrate_proactive_consent_not_asked
     from sqlalchemy import text
@@ -107,9 +106,15 @@ def test_the_migration_moves_legacy_zeros_to_not_asked_and_is_idempotent(owner):
                      {"a": agent})
     db.set_allow_proactive(agent, "yes@example.com", True, name)
 
+    # The engine's own DBAPI connection, not `get_db_connection()`: the rows
+    # above went through the engine, and under some test orders the two point
+    # at different files ("no such table: agent_sharing", seed 12345).
     for _ in range(2):
-        with get_db_connection() as conn:
-            _migrate_proactive_consent_not_asked(conn.cursor(), conn)
+        raw = get_engine().raw_connection()
+        try:
+            _migrate_proactive_consent_not_asked(raw.cursor(), raw)
+        finally:
+            raw.close()
     assert _stored(agent, "legacy@example.com") is None
     assert _stored(agent, "yes@example.com") == 1
 
