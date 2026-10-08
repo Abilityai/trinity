@@ -82,6 +82,13 @@ DEFAULT_MAX_BYTES = 256 * 1024
 # alias were written out — exactly the quantity that explodes.
 DEFAULT_MAX_EXPANDED_NODES = 100_000
 
+# Bounds NESTING DEPTH (#3324). PyYAML's composer recurses ~3 Python frames per
+# level, so 6 KB of `[` (~330 levels) exhausted the default 1000-frame stack
+# well under the byte cap and escaped as a bare RecursionError. The deepest
+# document Trinity actually loads is ~9 levels (`dashboard.yaml`); 64 is ~6x
+# that while leaving ~800 frames for the caller's own stack.
+DEFAULT_MAX_DEPTH = 64
+
 
 class AliasPolicy(enum.Enum):
     """How a document is allowed to use YAML anchors/aliases."""
@@ -111,6 +118,7 @@ def _make_loader(
     kind: str,
     alias_policy: AliasPolicy,
     max_expanded_nodes: int,
+    max_depth: int = DEFAULT_MAX_DEPTH,
     error_cls: type,
 ):
     """Build a one-shot SafeLoader subclass carrying this call's policy.
@@ -124,6 +132,7 @@ def _make_loader(
             super().__init__(stream)
             self._expanded_nodes = 0
             self._anchor_cost: dict = {}
+            self._depth = 0
 
         def fetch_alias(self):
             # Second, earlier gate for REJECT: refuse at the SCANNER, before an
@@ -138,6 +147,20 @@ def _make_loader(
             return super().fetch_alias()
 
         def compose_node(self, parent, index):
+            # Checked BEFORE recursing, so the refusal is named rather than a
+            # stack exhaustion inside the composer.
+            self._depth += 1
+            try:
+                if self._depth > max_depth:
+                    raise error_cls(
+                        f"{kind}_too_deep",
+                        f"{kind} nests deeper than {max_depth} levels.",
+                    )
+                return self._compose_node_budgeted(parent, index)
+            finally:
+                self._depth -= 1
+
+        def _compose_node_budgeted(self, parent, index):
             if self.check_event(yaml.events.AliasEvent):
                 if alias_policy is AliasPolicy.REJECT:
                     raise error_cls(
@@ -204,6 +227,7 @@ def load_hardened_yaml(
     alias_policy: AliasPolicy,
     max_bytes: int = DEFAULT_MAX_BYTES,
     max_expanded_nodes: int = DEFAULT_MAX_EXPANDED_NODES,
+    max_depth: int = DEFAULT_MAX_DEPTH,
     error_cls: Optional[type] = None,
 ) -> Any:
     """Parse author-controlled YAML with size, alias and duplicate-key guards.
@@ -214,14 +238,14 @@ def load_hardened_yaml(
             ``manifest_duplicate_key``). Callers that already publish codes MUST
             pass the prefix they published.
         alias_policy: see `AliasPolicy` — required, never defaulted.
-        max_bytes / max_expanded_nodes: the two budgets.
+        max_bytes / max_expanded_nodes / max_depth: the three budgets.
         error_cls: raise this instead of `HardenedYamlError` (a subclass, so an
             existing consumer's `except` keeps working during migration).
 
     Raises:
         `error_cls` (default `HardenedYamlError`) with a `code` of
-        ``{kind}_too_large`` / ``_alias_not_permitted`` / ``_alias_budget_exceeded``
-        / ``_duplicate_key`` / ``_yaml_invalid``. Rejects rather than truncates,
+        ``{kind}_too_large`` / ``_too_deep`` / ``_alias_not_permitted`` /
+        ``_alias_budget_exceeded`` / ``_duplicate_key`` / ``_yaml_invalid``. Rejects rather than truncates,
         so a hostile document fails loudly instead of being silently reinterpreted.
     """
     err = error_cls or HardenedYamlError
@@ -236,6 +260,7 @@ def load_hardened_yaml(
         kind=kind,
         alias_policy=alias_policy,
         max_expanded_nodes=max_expanded_nodes,
+        max_depth=max_depth,
         error_cls=err,
     )
     # Drive the loader directly instead of `yaml.load(text, Loader=loader)`.
@@ -248,15 +273,28 @@ def load_hardened_yaml(
     # dismiss a critical alert on a security PR, take the analyzable path: no
     # `yaml.load` call exists here, and the SafeLoader ancestry is still pinned
     # by test (test_the_hardened_loader_is_a_safeloader_not_a_full_loader).
-    instance = loader(text)
+    #
+    # Construction sits INSIDE the try (#3324): PyYAML's Reader checks
+    # printability eagerly in `__init__`, so a NUL raises `ReaderError` (a
+    # `YAMLError`) from here, and must map to `_yaml_invalid` like any other.
+    instance = None
     try:
+        instance = loader(text)
         return instance.get_single_data()
     except err:
         raise
     except yaml.YAMLError as e:
         raise err(f"{kind}_yaml_invalid", f"YAML parse error: {e}")
+    except RecursionError:
+        # Backstop for recursion the compose-depth gate cannot see — e.g. a
+        # `<<` merge chain walked by `flatten_mapping` at compose depth 2.
+        raise err(
+            f"{kind}_too_deep",
+            f"{kind} nests or merges too deeply to parse.",
+        )
     finally:
-        instance.dispose()
+        if instance is not None:
+            instance.dispose()
 
 
 # --- Per-document policies -------------------------------------------------

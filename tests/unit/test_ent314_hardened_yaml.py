@@ -409,3 +409,105 @@ def test_the_named_consumers_are_actually_on_the_shared_loader():
         # Either the raw loader or a policy wrapper from the same module — the
         # property is "parses through utils/safe_yaml", not one symbol name.
         assert "utils.safe_yaml" in text, f"{rel} is not on the shared loader"
+
+
+# ---------------------------------------------------------------------------
+# #3324 — deep nesting and control characters are NAMED refusals
+# ---------------------------------------------------------------------------
+
+def _flow_nest(depth: int) -> str:
+    """`depth` nested flow sequences, innermost empty: `[[...]]`."""
+    return "[" * depth + "]" * depth
+
+
+def _block_nest(depth: int) -> str:
+    """`depth` nested block mappings at a 1-space indent, ending in a scalar."""
+    lines = [" " * i + "a:" for i in range(depth - 1)]
+    lines.append(" " * (depth - 1) + "a: 1")
+    return "\n".join(lines) + "\n"
+
+
+def _merge_chain(links: int) -> str:
+    """A `<<` merge chain the ROOT merges last, so `flatten_mapping` walks the
+    whole chain recursively before anything is flattened — at a compose depth
+    of 2. Distinct keys, so the duplicate-key guard stays out of the way."""
+    lines = ["a0: &a0 {k0: 0}"]
+    for i in range(1, links):
+        lines.append(f"a{i}: &a{i} {{<<: *a{i - 1}, k{i}: {i}}}")
+    lines.append(f"<<: *a{links - 1}")
+    return "\n".join(lines) + "\n"
+
+
+def test_depth_at_the_limit_parses_and_one_more_is_refused():
+    from utils.safe_yaml import DEFAULT_MAX_DEPTH, load_template_yaml
+
+    assert DEFAULT_MAX_DEPTH == 64
+    out = load_template_yaml(_flow_nest(DEFAULT_MAX_DEPTH))
+    for _ in range(DEFAULT_MAX_DEPTH - 1):
+        assert isinstance(out, list) and len(out) == 1
+        out = out[0]
+    assert out == []
+
+    with pytest.raises(HardenedYamlError) as exc:
+        load_template_yaml(_flow_nest(DEFAULT_MAX_DEPTH + 1))
+    assert exc.value.code == "template_too_deep"
+
+
+def test_deep_block_nesting_under_the_byte_cap_is_a_named_refusal():
+    """Block form, not only flow: 500 levels at a 1-space indent is ~125 KB —
+    under the 256 KiB cap — and exhausted the stack before #3324."""
+    doc = _block_nest(500)
+    assert len(doc.encode()) < 256 * 1024
+    with pytest.raises(HardenedYamlError) as exc:
+        load_hardened_yaml(doc, kind="template", alias_policy=AliasPolicy.BUDGET)
+    assert exc.value.code == "template_too_deep"
+
+
+def test_max_depth_is_a_per_call_bound():
+    doc = _flow_nest(10)
+    load_hardened_yaml(doc, kind="k", alias_policy=AliasPolicy.REJECT, max_depth=10)
+    with pytest.raises(HardenedYamlError) as exc:
+        load_hardened_yaml(doc, kind="k", alias_policy=AliasPolicy.REJECT, max_depth=9)
+    assert exc.value.code == "k_too_deep"
+
+
+def test_deep_manifest_is_a_named_manifest_error():
+    """`deploy_system` catches only ManifestError/ValueError around
+    `parse_manifest`; anything else was an unnamed 500 (#3324)."""
+    from services.system_service import ManifestError, parse_manifest
+
+    with pytest.raises(ManifestError) as exc:
+        parse_manifest("name: s\nagents: " + _flow_nest(3000) + "\n")
+    assert exc.value.code == "manifest_too_deep"
+
+
+def test_control_character_in_a_manifest_is_a_named_manifest_error():
+    from services.system_service import ManifestError, parse_manifest
+
+    with pytest.raises(ManifestError) as exc:
+        parse_manifest("name: s\x00\nagents: {}\n")
+    assert exc.value.code == "manifest_yaml_invalid"
+
+
+def test_merge_chain_is_refused_by_the_default_budget_before_recursion():
+    """`flatten_mapping` recurses down a `<<` chain outside compose depth. At
+    every caller's budget today the expansion gate refuses it first."""
+    with pytest.raises(HardenedYamlError) as exc:
+        load_hardened_yaml(
+            _merge_chain(1500), kind="template", alias_policy=AliasPolicy.BUDGET
+        )
+    assert exc.value.code == "template_alias_budget_exceeded"
+
+
+def test_recursion_the_depth_gate_cannot_see_is_still_a_named_refusal():
+    """The backstop: lift the budget so the merge chain reaches
+    `flatten_mapping`'s recursion; it must surface as `_too_deep`, never as a
+    bare RecursionError."""
+    with pytest.raises(HardenedYamlError) as exc:
+        load_hardened_yaml(
+            _merge_chain(1500),
+            kind="template",
+            alias_policy=AliasPolicy.BUDGET,
+            max_expanded_nodes=10**9,
+        )
+    assert exc.value.code == "template_too_deep"

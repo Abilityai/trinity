@@ -175,10 +175,6 @@ class TestDocumentShape:
         first key (`'\\ufeffname'` would make `data["name"]` a KeyError)."""
         assert _load_yaml("\ufeffname: x\n") == {"name": "x"}
 
-    @pytest.mark.xfail(strict=True, reason=(
-        "BUG: NUL / C0 control chars raise yaml.ReaderError from the loader's "
-        "constructor, OUTSIDE the try that maps YAMLError to `_yaml_invalid` — "
-        "#3324"))
     @pytest.mark.parametrize("ch", ["\x00", "\x07", "\x1b", "\x7f", "\ufffe"],
                              ids=["Y8-nul", "Y9-bel", "Y9-esc", "Y9-del", "Y9-fffe"])
     def test_control_characters_are_a_named_parse_error(self, ch):
@@ -211,9 +207,6 @@ class TestDocumentShape:
                else _load_yaml('a: 1\nb: "x\ty"\n'))
         assert isinstance(out, dict) and out["a"] == 1
 
-    @pytest.mark.xfail(strict=True, reason=(
-        "BUG: deep flow nesting raises RecursionError (not HardenedYamlError) "
-        "well under the byte cap — #3324"))
     def test_deep_nesting_is_a_named_refusal(self):
         """Y10. 6 KB of `[` — 2.3% of the 256 KiB cap — exhausts the Python
         stack inside PyYAML's recursive composer. The loader bounds bytes and
@@ -226,8 +219,9 @@ class TestDocumentShape:
         1483, ent#128) — i.e. callers are compensating for the loader."""
         doc = "[" * 3000 + "]" * 3000
         assert len(doc.encode()) < SY.DEFAULT_MAX_BYTES
-        with pytest.raises(HYE):
+        with pytest.raises(HYE) as exc:
             _load_yaml(doc)
+        assert exc.value.code == "k_too_deep"
 
     def test_moderate_nesting_parses(self):
         """Y11 — the depth gap must not be 'fixed' by a cap that breaks real
