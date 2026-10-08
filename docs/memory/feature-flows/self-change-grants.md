@@ -12,10 +12,11 @@ the same seam to the rest of an agent's shape.
 The 2026-10-02 re-scope ruled out per-action approval and pause-and-resume. An
 agent either holds the grant and the call goes through, or it does not and the
 call is **refused**. The refusal says which permission is missing and how to ask
-for it (an ask of `type: question` whose title names the permission). Approving
-that ask does not grant anything: an instance admin grants it from a signed-in
-session — `PUT /api/agents/{agent}/capability-grants/{capability}` until the
-Settings toggles (ent#756) ship.
+for it (an ask of `type: question` whose title includes the permission id, e.g.
+`schedules.manage`). Approving that ask does not grant anything: an instance
+admin grants it from a signed-in session — in the agent's Settings →
+**Permissions to change itself** (ent#756), or with
+`PUT /api/agents/{agent}/capability-grants/{capability}`.
 
 People (JWT, their own `user` key) and the system agent are never fenced.
 
@@ -50,7 +51,11 @@ which stay with a person.
 
 ```
 ── the grant (a person at a screen) ───────────────────────────────────────────
-admin → agent Settings (ent#756)
+admin → Agent Settings → Permissions to change itself (ent#756)
+  │  components/settings/SelfChangePermissionsPanel.vue  over  stores/capabilityGrants.js
+  │  copy + the permission-request title match: utils/capabilityGrants.js (pure)
+  │  also reads GET /{agent}/autonomy (shown, never granted) and
+  │  GET /api/operator-queue?agent_name=&status=pending (open permission requests)
   │  GET  /api/agents/{agent_name}/capability-grants          OwnedAgentByName
   │  PUT  /api/agents/{agent_name}/capability-grants/{cap} {granted}
   │        require_admin + reject_non_interactive_principal   ← a key never grants
@@ -86,8 +91,8 @@ file routes   services/agent_service/files._require_skill_capability
 enforce_agent_capability → capability_refusal(user, cap)
   holder / human → pass
   else           → 403 {code: <class>_management_not_permitted, capability,
-                   message: "... raise an ask (type 'question') whose title names the
-                   permission ... PUT /api/agents/{agent}/capability-grants/{capability}"}
+                   message: "... raise an ask (type 'question') whose title includes
+                   '<capability>' ... Settings → Permissions to change itself"}
                                                   audit: capability_refused
 ```
 
@@ -121,3 +126,4 @@ The fence covers the platform routes listed above, and nothing else:
 - `tests/unit/test_ent164_self_change_grants.py`: the fences, read off FastAPI's dependant graph; behavior for each capability class; the ghost and own-schedule exemptions; the calibrating refusal.
 - `tests/unit/test_2996_owner_config_person_only.py`: real keys against the real grant table, plus the grant route.
 - `tests/unit/test_2996_human_only_routes.py`: the `person_or_grant` census class.
+- `src/frontend/tests/unit/selfChangePermissionsPanel.spec.js` (mounted, ent#756): all-off fresh agent, an admin's grant reaching the PUT, the owner's disabled view, a refusal on its own toggle, LoadFailed, nothing for a non-owner, autonomy beside the four, the permission-request list and its title match.
