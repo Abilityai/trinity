@@ -69,8 +69,10 @@ export function skillDir(skill) {
   return at > 0 ? parts[at - 1] : ''
 }
 
-/** The key a gate on this skill is stored under: the name when it can carry
- *  one, else the directory, lower-cased (the backend lower-cases too). */
+/** The key a NEW gate on this skill is written under: the name when it can
+ *  carry one (what a request types, so the request-time check sees it), else
+ *  the directory, lower-cased (the backend lower-cases too). A gate that
+ *  already exists is always written under its own key — see `gateKey` below. */
 export function gateKeyFor({ name, dir }) {
   if (typeof name === 'string' && SKILL_NAME_RE.test(name)) return name.toLowerCase()
   if (typeof dir === 'string' && SKILL_NAME_RE.test(dir)) return dir.toLowerCase()
@@ -182,13 +184,18 @@ export function buildSkillCards({
     const recommended = entry?.approval === 'recommended' || liveEntry?.approval === 'recommended'
 
     const badges = []
-    if (viaSets.length) badges.push({ label: `via ${viaSets.join(', ')}`, variant: 'purple', testid: `skill-via-${name}` })
     if (entry?.deprecated) {
       badges.push({ label: 'deprecated', variant: 'warning', title: DEPRECATED_TITLE, testid: `skill-deprecated-assigned-${name}` })
     }
     if (conflict) badges.push({ label: 'name conflict', variant: 'warning', dot: true, testid: `skill-conflict-${name}` })
     else if (result && INJECTION_BADGES[result.status]) badges.push({ ...INJECTION_BADGES[result.status] })
     if (!userInvocable) badges.push({ label: 'not user-invocable', variant: 'neutral' })
+    // Last: the one badge that can grow long (whole on hover), so it never
+    // pushes a fact to act on out of the fixed badge area.
+    if (viaSets.length) {
+      badges.push({ label: `via ${viaSets.join(', ')}`, variant: 'purple', title: `Assigned via ${viaSets.join(', ')}`,
+        testid: `skill-via-${name}` })
+    }
 
     let note = null
     if (conflict) {
@@ -218,7 +225,9 @@ export function buildSkillCards({
       badges, note, conflict, setOnly, viaSets, warnings, injection: result,
       deprecated: Boolean(entry?.deprecated), supersededBy: entry?.superseded_by || null,
       orphan: !entry,
-      gateKey: gateKeyFor({ name, dir: liveEntry ? skillDir(liveEntry) : name }),
+      // An existing gate is changed or cleared under the key it is stored on
+      // (it may be the directory, matched above); only a new one takes the name.
+      gateKey: gate ? low(gate.skill_name) : gateKeyFor({ name, dir: liveEntry ? skillDir(liveEntry) : name }),
       gate, gateLine: gateLineFor({ gate, kinds, recommended, showApproval }),
       run: runVerdict({ running, inLive: Boolean(liveEntry), liveState, userInvocable, ownCopyRuns, gated: Boolean(gate) }),
       canEditRun: userInvocable,
@@ -256,7 +265,7 @@ export function buildSkillCards({
         title: 'Delivered by the library but no longer assigned; the next sync removes it' })
     }
     if (!userInvocable) badges.push({ label: 'not user-invocable', variant: 'neutral' })
-    const gateKey = gateKeyFor({ name: s.name, dir: skillDir(s) })
+    const gateKey = gate ? low(gate.skill_name) : gateKeyFor({ name: s.name, dir: skillDir(s) })
     own.push({
       id: `own:${s.name}`, section: 'own', name: s.name, dir: skillDir(s),
       description: s.description ?? null, argumentHint: s.argument_hint ?? null,

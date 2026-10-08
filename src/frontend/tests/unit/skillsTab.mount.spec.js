@@ -468,3 +468,75 @@ describe('honest loading: nothing is drawn from a read that has not answered', (
     expect(w.find('[data-testid="skills-own"] [data-testid="load-failed"]').exists()).toBe(true)
   })
 })
+
+describe('approval writes go to the gate the card shows', () => {
+  // A skill whose frontmatter name differs from its directory: the gate is
+  // kept under the directory, and the card found it there.
+  const REPORT = { ...LIVE, skills: [...LIVE.skills, live('report', { dir: 'weekly-report', path: '.claude/skills/weekly-report/SKILL.md' })] }
+  const DIR_GATE = MAP({
+    gates: [{ skill_name: 'weekly-report', approver: 'primary', approver_reachable: true, origin: 'set' }],
+    approvers: [{ kind: 'primary', reachable: true, viewer_fills: false }, { kind: 'approver', reachable: true, viewer_fills: false }],
+  })
+
+  it('turning it off clears the gate under the key it is stored on', async () => {
+    respond({ playbooks: { data: REPORT }, map: DIR_GATE })
+    api.delete.mockResolvedValue({ data: { changed: true } })
+    const { w } = await mountTab()
+    expect(tid(w, 'skill-gate-report').text()).toBe('Needs approval from the primary contact')
+    await tid(w, 'skill-approval-report').trigger('click')
+    await flush()
+    expect(api.delete).toHaveBeenCalledWith(`/api/agents/${A}/skill-gates/weekly-report`)
+  })
+
+  it('changing its approver rewrites that gate, never a second one under the name', async () => {
+    respond({ playbooks: { data: REPORT }, map: DIR_GATE })
+    api.put.mockResolvedValue({ data: { warnings: [] } })
+    const { w } = await mountTab()
+    await tid(w, 'skill-approver-report').setValue('approver')
+    await flush()
+    expect(api.put).toHaveBeenCalledWith(`/api/agents/${A}/skill-gates/weekly-report`, { approver: 'approver' })
+  })
+
+  it('turning it on sends the first kind someone fills — not a constant', async () => {
+    respond({ map: MAP({ gates: [], approvers: [{ kind: 'primary', reachable: false, viewer_fills: false },
+      { kind: 'approver', reachable: true, viewer_fills: false }] }) })
+    api.put.mockResolvedValue({ data: { warnings: [] } })
+    const { w } = await mountTab()
+    await tid(w, 'skill-approval-daily-report').trigger('click')
+    await flush()
+    expect(api.put).toHaveBeenCalledWith(`/api/agents/${A}/skill-gates/daily-report`, { approver: 'approver' })
+  })
+
+  it('the default follows the map when it is re-read after the card was drawn', async () => {
+    respond()                                             // primary reaches someone
+    api.delete.mockResolvedValue({ data: { changed: true } })
+    api.put.mockResolvedValue({ data: { warnings: [] } })
+    const { w } = await mountTab()
+    // A write elsewhere re-reads the map; by now nobody fills primary.
+    state.map = MAP({ gates: [], approvers: [{ kind: 'primary', reachable: false, viewer_fills: false },
+      { kind: 'approver', reachable: true, viewer_fills: false }] })
+    await tid(w, 'skill-approval-pay-invoice').trigger('click')
+    await flush()
+    await tid(w, 'skill-approval-daily-report').trigger('click')
+    await flush()
+    expect(api.put).toHaveBeenCalledWith(`/api/agents/${A}/skill-gates/daily-report`, { approver: 'approver' })
+  })
+
+  it("each switch is named for its skill (one per card)", async () => {
+    const { w } = await mountTab()
+    expect(tid(w, 'skill-approval-daily-report').attributes('aria-label')).toBe('Requires approval for /daily-report')
+  })
+})
+
+describe('in-agent enforcement warning wording', () => {
+  it('names every hook state in words, never its code', async () => {
+    // (`predates` is an English word its own sentence uses; pinned above.)
+    for (const hook of ['missing', 'not_root_owned', 'writable', 'unsupported_runtime', 'some_new_state']) {
+      respond({ probe: MAP({ hook }) })
+      const { w } = await mountTab()
+      const text = tid(w, 'skills-hook-warning').text()
+      expect(text.length, hook).toBeGreaterThan(20)
+      expect(text, hook).not.toContain(hook)
+    }
+  })
+})

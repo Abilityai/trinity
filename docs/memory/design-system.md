@@ -182,6 +182,7 @@ Both recipes live in `base/fieldClasses.js` (`FIELD_CLASS` / `FIELD_GHOST_CLASS`
 
 **Recipe:** 36×20 pill track; 16px white knob inset 2px, travels left 2→18; track border-strong when off, action-primary accent when on; 150ms ease; label 13.5 alongside.
 **Rules:** toggles are for **instant-apply binary settings**. Keyboard: focusable, Space toggles, visible focus ring.
+When the same visible label repeats (one switch per card), pass `aria-label` to name the item; it overrides the label for assistive tech and must contain the label's words (WCAG 2.5.3, label in name), e.g. "Requires approval for /daily-report".
 
 - **Do:** "Schedule enabled" — flips immediately, state is the feedback.
 - **Don't:** use a toggle for something that requires a Save button — that's a checkbox in a form.

@@ -35,7 +35,7 @@
       <p
         v-if="enforcementSlot"
         class="mt-2 h-5 text-[12.5px] leading-5 truncate text-status-warning-700 dark:text-status-warning-400"
-        :title="hookWarning || undefined"
+        :title="hookWarning ? `${hookWarning} (${gatesStore.hook})` : undefined"
         data-testid="skills-hook-warning"
       >{{ hookWarning }}</p>
       <!-- The gate map could not be read: said to everyone (every card's gate
@@ -427,7 +427,11 @@ const sharedLineTitle = computed(() => (notice.value?.text
   : syncMeta.value))
 
 // ---- In-agent enforcement (ent#752 hook) ---------------------------------
+// Every state the agent reports, in words (the raw code is on hover only).
 const HOOK_WARNINGS = {
+  missing: "This agent's image has no in-agent gate check; rebuild the base image and recreate the agent to enforce gates inside it.",
+  not_root_owned: "The in-agent gate check on this agent isn't protected; recreate the agent to restore it.",
+  writable: 'The in-agent gate check on this agent can be changed from inside it; recreate the agent to restore it.',
   unsupported_runtime: "This agent's runtime can't enforce gates inside the agent; requests that name a gated skill still wait for approval.",
   predates: "This agent's image predates the in-agent gate check; recreate the agent to enforce gates inside it.",
 }
@@ -436,7 +440,7 @@ const hookWarning = computed(() => {
   const h = gatesStore.hook
   if (!enforcementSlot.value || !h || h === 'ok' || h === 'unknown') return ''
   return HOOK_WARNINGS[h]
-    || `The in-agent gate check isn't intact on this agent (${h}); recreate the agent to restore it.`
+    || "The in-agent gate check isn't intact on this agent; recreate the agent to restore it."
 })
 
 // ---- Sets chips -----------------------------------------------------------

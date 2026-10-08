@@ -51,7 +51,7 @@ describe('load and probe', () => {
     expect(api.get.mock.calls[0]).toEqual(['/api/agents/a1/skill-gates'])
     expect(api.get.mock.calls[1]).toEqual(['/api/agents/a1/skill-gates', { params: { probe: true } }])
     expect(s.hasLoaded).toBe(true)
-    expect(s.gateByKey.get('pay').approver).toBe('primary')
+    expect(s.gates.find((g) => g.skill_name === 'pay').approver).toBe('primary')
     expect(s.approvers).toEqual([{ kind: 'primary', reachable: true, viewer_fills: true }])
     expect(s.hook).toBe('predates')
   })
@@ -107,7 +107,7 @@ describe('writes', () => {
 
     expect(ok).toBe(true)
     expect(api.put).toHaveBeenCalledWith('/api/agents/a1/skill-gates/pay', { approver: 'approver' })
-    expect(s.gateByKey.has('pay')).toBe(true)
+    expect(s.gates.map((g) => g.skill_name)).toEqual(['pay'])
     expect(s.busy.pay).toBe(false)
   })
 
@@ -121,7 +121,7 @@ describe('writes', () => {
     expect(await s.clearGate('pay')).toBe(true)
 
     expect(api.delete).toHaveBeenCalledWith('/api/agents/a1/skill-gates/pay')
-    expect(s.gateByKey.has('pay')).toBe(false)
+    expect(s.gates).toEqual([])
   })
 
   it('a refused write names its reason on that skill only', async () => {

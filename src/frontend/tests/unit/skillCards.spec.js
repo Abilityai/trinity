@@ -151,6 +151,17 @@ describe('gate line — everyone sees it, it names a kind, never a person', () =
     expect(r.unmatchedGates).toEqual([])
   })
 
+  it('an existing gate is written under its own key; only a new one takes the name', () => {
+    const named = live('report', { dir: 'weekly-report' })
+    const gated = cards({ agentList: [named], gates: [gate('weekly-report')] })
+    expect(gated.own[0].gateKey).toBe('weekly-report')     // clear / re-point the gate that exists
+    const fresh = cards({ agentList: [named] })
+    expect(fresh.own[0].gateKey).toBe('report')            // a new gate: the name a request types
+    const shared = cards({ agentList: [live('shared-one', { source: 'platform', dir: 'shared-pkg' })],
+      assigned: [row('shared-one')], library: [lib('shared-one')], gates: [gate('Shared-Pkg')] })
+    expect(shared.shared[0].gateKey).toBe('shared-pkg')
+  })
+
   it('"approval: recommended" and not gated warns the owner only', () => {
     const own = live('pay', { approval: 'recommended' })
     expect(cards({ agentList: [own] }).own[0].gateLine).toEqual(
@@ -223,7 +234,11 @@ describe('shared badges and the note line', () => {
       injectionResults: { a: { status: 'injected', warnings: [] } },
     })
     const labels = r.shared[0].badges.map((b) => b.label)
-    expect(labels).toEqual(['via kit', 'deprecated', 'synced'])
+    // The facts that need acting on come first; the set provenance — the one
+    // badge that can grow long — comes last, whole on hover, so it can never
+    // push "name conflict" or "failed" out of the fixed badge area.
+    expect(labels).toEqual(['deprecated', 'synced', 'via kit'])
+    expect(r.shared[0].badges.at(-1).title).toBe('Assigned via kit')
     expect(r.shared[0].note).toMatchObject({ text: 'Superseded by b', testid: 'skill-superseded-assigned-a' })
   })
 

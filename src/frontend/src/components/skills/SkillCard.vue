@@ -163,6 +163,7 @@
         <BaseToggle
           :model-value="!!card.gate"
           label="Requires approval"
+          :aria-label="`Requires approval for /${card.name}`"
           :disabled="busy || !!card.controls.toggleDisabled"
           :title="card.controls.toggleDisabled || undefined"
           :data-testid="`skill-approval-${card.name}`"
@@ -226,10 +227,13 @@ const kindOptions = computed(() => {
 })
 
 // Turning approval on sends the kind shown here: the gate's own, else the
-// first kind that reaches someone (never a bodiless reset to `primary`).
+// first kind that reaches someone NOW (never a bodiless reset to `primary`,
+// and never a default fixed when the card was drawn — the map is re-read
+// after every write). A pick holds the select until its write settles.
 const defaultKind = () => kindOptions.value.find((k) => k.reachable)?.kind || 'primary'
-const selectedKind = ref(props.card.gate?.approver || defaultKind())
-watch(() => props.card.gate?.approver, (kind) => { selectedKind.value = kind || defaultKind() })
+const pickedKind = ref(null)
+const selectedKind = computed(() => pickedKind.value || props.card.gate?.approver || defaultKind())
+watch(() => props.busy, (now, was) => { if (was && !now) pickedKind.value = null })
 
 function onToggle(on) {
   if (on) emit('set-gate', selectedKind.value)
@@ -237,8 +241,9 @@ function onToggle(on) {
 }
 
 function onApprover(kind) {
-  selectedKind.value = kind
-  if (props.card.gate && kind !== props.card.gate.approver) emit('set-gate', kind)
+  if (!props.card.gate || kind === props.card.gate.approver) return
+  pickedKind.value = kind
+  emit('set-gate', kind)
 }
 
 function toneClass(tone) {

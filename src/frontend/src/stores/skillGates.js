@@ -17,20 +17,16 @@
  * All HTTP goes through the shared `api` client (Invariant #7).
  */
 import { defineStore } from 'pinia'
-import { ref, computed } from 'vue'
+import { ref } from 'vue'
 import api from '../api'
 import { detailText } from './skills'
 
 export const useSkillGatesStore = defineStore('skillGates', () => {
   const agentName = ref(null)
   const gates = ref([])
-  const clearedDefaults = ref([])
-  const approverKinds = ref([])
   const approvers = ref([])
-  const defaultDeadlineHours = ref(24)
   const hook = ref(null)
 
-  const loading = ref(false)
   const hasLoaded = ref(false)
   const error = ref(null)
 
@@ -39,12 +35,8 @@ export const useSkillGatesStore = defineStore('skillGates', () => {
 
   let readSeq = 0
 
-  const gateByKey = computed(() => new Map(gates.value.map((g) => [String(g.skill_name).toLowerCase(), g])))
-
   function reset() {
     gates.value = []
-    clearedDefaults.value = []
-    approverKinds.value = []
     approvers.value = []
     hook.value = null
     hasLoaded.value = false
@@ -62,15 +54,11 @@ export const useSkillGatesStore = defineStore('skillGates', () => {
 
   function apply(data) {
     gates.value = Array.isArray(data?.gates) ? data.gates : []
-    clearedDefaults.value = Array.isArray(data?.cleared_defaults) ? data.cleared_defaults : []
-    approverKinds.value = Array.isArray(data?.approver_kinds) ? data.approver_kinds : []
     approvers.value = Array.isArray(data?.approvers) ? data.approvers : []
-    if (Number.isInteger(data?.default_deadline_hours)) defaultDeadlineHours.value = data.default_deadline_hours
   }
 
   async function read(name) {
     const seq = ++readSeq
-    loading.value = true
     try {
       const { data } = await api.get(`/api/agents/${name}/skill-gates`)
       if (seq !== readSeq || name !== agentName.value) return false
@@ -82,8 +70,6 @@ export const useSkillGatesStore = defineStore('skillGates', () => {
       if (seq !== readSeq || name !== agentName.value) return false
       error.value = detailText(e, 'Could not load the approval settings')
       return false
-    } finally {
-      if (seq === readSeq) loading.value = false
     }
   }
 
@@ -148,8 +134,8 @@ export const useSkillGatesStore = defineStore('skillGates', () => {
   }
 
   return {
-    agentName, gates, clearedDefaults, approverKinds, approvers, defaultDeadlineHours, hook,
-    loading, hasLoaded, error, busy, errors, gateByKey,
+    agentName, gates, approvers, hook,
+    hasLoaded, error, busy, errors,
     load, probeHook, setGate, clearGate, dismissError, clear,
   }
 })
