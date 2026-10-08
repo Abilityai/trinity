@@ -202,7 +202,7 @@ rule is a plain function (the ent#392 precedent):
 
 | Function | Rule |
 |---|---|
-| `agentChatTabs` | Main first, then recency; an archive stays a tab (ruled “becomes the newest tab”); Main is labelled by its **role** |
+| `agentChatTabs` | Main first, then recency; an archived chat is not a tab unless it is on screen (ent#841 — it lives in the sidebar's Archived group); every chat but Main is `closable`; Main is labelled by its **role** |
 | `agentLanding` | a **precedence** (ent#784, replacing ent#523's `landingThread`; operator ruling 2026-10-05): a validated `lastOpenSessionId` (live, unarchived, this agent's), then the chat holding an unsent **draft** (newest `updatedAt`; a `new:<agent>` winner = a new chat), then the agent's existing **empty** chat, then a new, empty chat |
 | `resolveAgentLanding` | the `?agent=` deep link, delegating to `agentLanding` so there is one answer |
 | `agentEmptyChat` | arm 4's "empty": unarchived, non-room, no `last_message_at` and `message_count` 0/absent; Main first, then newest `created_at` |
@@ -215,10 +215,10 @@ rule is a plain function (the ent#392 precedent):
 - **Main is not renameable.** It is the same thread for the life of the pair;
   a derived or typed title would make the pinned tab and the header disagree
   about which chat you are in.
-- **A tab is not a landing.** An archived chat stays in the strip — the operator
-  ruled it "becomes the newest tab", and hiding what the system line just pointed
-  at is exactly where the person looks next — but `agentLanding` never puts you
-  in one without asking. Two rules, two questions: where can I go, and where am
+- **A tab is not a landing.** `agentLanding` never puts you in an archived chat
+  without asking — and since ent#841 an archived chat is not in the strip either
+  (one archive rule for a closed chat and a Reset archive; both are found in the
+  sidebar's Archived group, superseding the ent#523 "becomes the newest tab" ruling). Two rules, two questions: where can I go, and where am
   I put. Since ent#784 the landing answer is a new chat unless something of the
   person's own is waiting (a draft, or an empty chat already open), so the strip
   is the ONLY way back into a USED one — which is the point: continuity is one

@@ -1455,6 +1455,12 @@ class DatabaseManager:
     def get_a2a_exposed_agents(self):
         return self._agent_ops.get_a2a_exposed_agents()
 
+    def get_a2a_scope(self, agent_name: str):
+        return self._agent_ops.get_a2a_scope(agent_name)
+
+    def set_a2a_scope(self, agent_name: str, *, scope: str, keyless: bool) -> bool:
+        return self._agent_ops.set_a2a_scope(agent_name, scope=scope, keyless=keyless)
+
     # =========================================================================
     # Per-agent MCP connector (ent#46; OSS-core since #118)
     # =========================================================================

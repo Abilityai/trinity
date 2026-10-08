@@ -51,8 +51,13 @@ const threadId = (t) => t?.id || t?.session_id || null
 // inline; it is mirrored here so the parity property ("every thread with an
 // arrival survives the sidebar filter") has something pure to run against.
 // Keep the two identical.
+//
+// abilityai/trinity#3356: a STARRED unused Main is listed. Starring is the
+// person saying "pin this", and the header star on a fresh agent's Main is
+// exactly where they do it — filtering the row out left a filled header star
+// with nothing in the Starred section, which read as a lost click.
 export function inSidebar(t) {
-  return !!t && !(t.is_main && !t.last_message_at)
+  return !!t && !(t.is_main && !t.last_message_at && !t.starred)
 }
 
 export function sidebarThreadsOf(threads) {

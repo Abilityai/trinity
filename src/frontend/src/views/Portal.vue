@@ -431,6 +431,7 @@
           :starred="isStarred('thread', activeSessionId || pendingSession)"
           :threads="threads"
           :rename="renameChat"
+          :close-error="closeError"
           @switch-agent="switchAgent"
           @reply="setReplyTarget"
           @reply-done="replyTarget = null"
@@ -441,6 +442,8 @@
           @open-menu="mobileNav = true"
           @escalate-to-room="onEscalateToRoom"
           @toggle-star="toggleStar"
+          @close-chat="closeChat"
+          @dismiss-close-error="closeError = ''"
           @open-thread="openNewThread"
           @work-state="onWorkState"
           @open-work="openRailOn('work')"
@@ -875,10 +878,18 @@
       @confirm="onPickerConfirm"
       @cancel="() => { pickerOpen = false; pickerError = null }"
     />
+    <!-- ent#841: Undo for the chat just closed from its tab. -->
+    <PortalUndoToast
+      :message="undoClose ? 'Chat archived' : ''"
+      :close-key="undoClose ? undoClose.seq : 0"
+      @undo="undoLastClose"
+      @dismiss="undoClose = null"
+    />
   </div>
 </template>
 
 <script setup>
+import PortalUndoToast from '@/components/portal/PortalUndoToast.vue'
 import { ref, computed, watch, onMounted, onBeforeUnmount, onUnmounted, nextTick, toRaw } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useClientPortalStore, MULTI_AGENT_UNAVAILABLE, PLATFORM_LOGIN_ROUTE } from '@/stores/clientPortal'
@@ -956,7 +967,7 @@ import {
   // disagree about the number.
   totalUnread,
   // trinity-enterprise#610 §3g S4: the read's optimistic zero and its rollback.
-  optimisticRead, rollbackRead,
+  optimisticRead, rollbackRead, createWriteGuard, applyStarOverrides, agentChatTabs,
   asksHomeRoute,
   // ent#836: the per-agent ask counts the sidebar's mark reads — handed to the
   // rail's door gate (the Asks tab's presence) and its signal, so the tab and
@@ -2057,6 +2068,10 @@ function openThread(t) {
   // ent#361: a room row in the merged sidebar opens the room, not a thread.
   if (t.is_room) { openRoom(t.id); return }
   const sid = t.id || t.session_id
+  // ent#841: opening a closed chat reopens it — the Archived group is where
+  // closed chats are found, and opening one there means "I want it back".
+  const listed = threads.value.find((x) => !x.is_room && (x.id || x.session_id) === sid)
+  if (listed?.archived_at) reopenChat(listed)
   markRead('thread', sid)
   activeAgentName.value = t.agent_name || activeAgentName.value
   pendingSession.value = sid; prefill.value = ''; convGen.value++
@@ -2116,6 +2131,10 @@ const chatState = ref({})
 const chatKey = (t) => `${t.is_room ? 'room' : 'thread'}:${t.id || t.session_id}`
 
 const isStarred = (kind, id) => !!(id && chatState.value[`${kind}:${id}`]?.starred)
+// #3356: star clicks outlive any chat-state read already in flight; ent#841's
+// tab close outlives any thread-list read the same way.
+const starGuard = createWriteGuard()
+const archiveGuard = createWriteGuard()
 
 // ent#523: what the SIDEBAR lists, which is not what the tab strip lists.
 //
@@ -2173,15 +2192,19 @@ async function refreshThreads() {
   // so a row's "N new" and its excerpt come from one response.
   const withPreviews = isInboxRoute.value
   let listOk = true
+  // #3356: stamped when the read LEAVES, so a star clicked while it is out
+  // survives its (pre-click) answer — see `createStarGuard`.
+  const readToken = starGuard.readStarted()
+  const archiveToken = archiveGuard.readStarted()
   const [list, state] = await Promise.all([
     store.fetchAllSessions().catch(() => { listOk = false; return store.lastSessions }),
     (withPreviews ? store.fetchChatState({ previews: true }) : store.fetchChatState()).catch(() => null),
   ])
   if (withPreviews) previewsFailed.value = !state
-  if (state && withPreviews) { chatState.value = state.state || {}; chatPreviews.value = state.previews || {} }
-  else if (state) chatState.value = state
+  if (state && withPreviews) { chatState.value = applyStarOverrides(state.state || {}, starGuard.live(readToken)); chatPreviews.value = state.previews || {} }
+  else if (state) chatState.value = applyStarOverrides(state, starGuard.live(readToken))
   if (listOk && !store.sessionsFailed && !(withPreviews && !state)) threadsLoaded.value = true
-  threads.value = decorate(list || [])
+  threads.value = decorate(applyArchiveOverrides(list || [], archiveGuard.live(archiveToken)))
   // ent#491: rank any agent this session has not ranked yet. Fills only missing
   // keys, so a refresh triggered by an incoming reply cannot walk back a send's
   // bump and re-sort the sidebar under the cursor.
@@ -2270,9 +2293,10 @@ async function settleTick(sessionId, last) {
   // List only. `fetchAllSessions` NEVER rejects — it flags `sessionsFailed` and
   // hands back the last good list — so without asking it, a flaky network reads
   // as "the title never changed" and would report a working generator broken.
+  const archiveToken = archiveGuard.readStarted()
   const list = await store.fetchAllSessions().catch(() => null)
   if (list === null || store.sessionsFailed) { clearTitleSettle(); return }
-  threads.value = decorate(list)
+  threads.value = decorate(applyArchiveOverrides(list, archiveGuard.live(archiveToken)))
   // /review: this replaces `threads` exactly as `refreshThreads` does, so it
   // owes the same ent#491 seeding — otherwise an agent this session has not
   // ranked stays unranked for as long as the cycle keeps overwriting the list.
@@ -2313,24 +2337,118 @@ const titleNotice = computed(() =>
 // Optimistic: a star is a personal bookmark, and waiting on a round trip to
 // redraw it makes the control feel broken. Reverted in place on failure so the
 // list never claims a star the server rejected.
+// #3356: the write is also registered with `starGuard`, so a chat-state read
+// that left before it landed cannot overwrite it — that overwrite is what made
+// the first click look lost and the second one "work".
 async function toggleStar(t) {
   const key = chatKey(t)
   const next = !t.starred
   const before = chatState.value[key]
   chatState.value = {
     ...chatState.value,
-    [key]: { ...(before || { kind: t.is_room ? 'room' : 'thread', id: t.id }), starred: next },
+    [key]: { ...(before || { kind: t.is_room ? 'room' : 'thread', id: t.id || t.session_id }), starred: next },
   }
   threads.value = decorate(threads.value)
+  const write = starGuard.begin(key, next)
   try {
     await store.setChatStar(t.is_room ? 'room' : 'thread', t.id || t.session_id, next)
+    starGuard.settle(key, write, true)
   } catch {
+    // A newer click on the same chat owns the screen now; this failure is moot.
+    if (!starGuard.settle(key, write, false)) return
     const reverted = { ...chatState.value }
     if (before) reverted[key] = before
     else delete reverted[key]
     chatState.value = reverted
     threads.value = decorate(threads.value)
   }
+}
+
+// ent#841: close a chat from its tab — ARCHIVE it, never delete it. One click,
+// no confirmation (nothing is lost), an Undo straight after.
+//
+// Optimistic like the star: the tab and the sidebar row leave at once, and if
+// the closed chat was on screen the strip moves to its neighbour — the tab to
+// the right, else the left (Main is always first, so there is one while the
+// pair has a Main; with none at all, the agent's own page). The write goes
+// through `archiveGuard` so a thread-list read already in flight cannot put the
+// tab back. A refusal reverts the move, returns the person to the chat if it
+// was open, and names the reason under the strip.
+const closeError = ref('')
+const undoClose = ref(null)   // { thread, wasActive, seq } for the toast's Undo
+let closeSeq = 0               // one per completed close: restarts the toast's clock
+
+function applyArchiveOverrides(list, live) {
+  if (!live.size) return list
+  return list.map((t) => (live.has(chatKey(t)) ? { ...t, archived_at: live.get(chatKey(t)) } : t))
+}
+
+function setArchivedLocally(key, value) {
+  threads.value = threads.value.map((x) => (chatKey(x) === key ? { ...x, archived_at: value } : x))
+}
+
+function refusalText(err, fallback) {
+  const d = err?.response?.data?.detail
+  return (typeof d === 'string' && d) || fallback
+}
+
+async function closeChat(t) {
+  if (!t || t.is_room || t.is_main || t.archived_at) return
+  const sid = t.id || t.session_id
+  const key = chatKey(t)
+  closeError.value = ''
+  const wasActive = (activeSessionId.value || pendingSession.value) === sid
+  let next = null
+  if (wasActive) {
+    const tabs = agentChatTabs(threads.value, t.agent_name, { activeId: sid }).filter((x) => x.thread)
+    const i = tabs.findIndex((x) => x.id === sid)
+    next = (tabs[i + 1] || tabs[i - 1] || null)?.thread || null
+  }
+  const archivedAt = new Date().toISOString()
+  const write = archiveGuard.begin(key, archivedAt)
+  setArchivedLocally(key, archivedAt)
+  if (wasActive) {
+    if (next) openThread(next)
+    else openAgentPage(t.agent_name)
+  }
+  try {
+    await store.setThreadArchived(t.agent_name, sid, true)
+    archiveGuard.settle(key, write, true)
+    undoClose.value = { thread: { ...t, archived_at: null }, wasActive, seq: ++closeSeq }
+  } catch (err) {
+    if (!archiveGuard.settle(key, write, false)) return
+    setArchivedLocally(key, t.archived_at || null)
+    if (wasActive) openThread(t)
+    closeError.value = refusalText(err, "Couldn't archive this chat. Try again.")
+  }
+}
+
+// Reopen: the Undo, and opening a closed chat from the Archived group (or any
+// other place that lists it). Restores it as an active chat, star included —
+// the per-viewer star is never touched by a close.
+async function reopenChat(t) {
+  const sid = t.id || t.session_id
+  const key = chatKey(t)
+  const row = threads.value.find((x) => chatKey(x) === key)
+  const before = row ? row.archived_at : t.archived_at
+  const write = archiveGuard.begin(key, null)
+  setArchivedLocally(key, null)
+  try {
+    await store.setThreadArchived(t.agent_name, sid, false)
+    archiveGuard.settle(key, write, true)
+  } catch (err) {
+    if (!archiveGuard.settle(key, write, false)) return
+    setArchivedLocally(key, before || null)
+    closeError.value = refusalText(err, "Couldn't reopen this chat. Try again.")
+  }
+}
+
+function undoLastClose() {
+  const u = undoClose.value
+  undoClose.value = null
+  if (!u) return
+  reopenChat(u.thread)
+  if (u.wasActive) openThread(u.thread)
 }
 
 // ent#473: a person renames a chat. Optimistic like the star — the row and

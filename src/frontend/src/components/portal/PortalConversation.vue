@@ -208,8 +208,12 @@
       :disabled="voiceCallActive"
       :draft="newChat || bornHere"
       :draft-keys="drafts.keys"
+      :busy="sending"
+      :close-error="closeError"
       @select="(t) => emit('open-thread', t)"
       @new-chat="emit('new-chat')"
+      @close="(t) => emit('close-chat', t)"
+      @dismiss-close-error="emit('dismiss-close-error')"
     />
 
     <!-- #2579: the shell's line under the strip (today: the admin-only notice
@@ -1027,6 +1031,9 @@ const props = defineProps({
   // ent#451: the shell's thread list — the tab strip above the thread is this
   // agent's slice of it, and the header's title is the active thread's.
   threads: { type: Array, default: () => [] },
+  // ent#841: why the shell's last tab close failed ('' when none) — rendered
+  // under the strip that owns the ×.
+  closeError: { type: String, default: '' },
   // ent#473: async (thread, title) => void, or null when renaming is unavailable.
   rename: { type: Function, default: null },
 })
@@ -1034,7 +1041,7 @@ const props = defineProps({
 // controls that raised them — the rail strip is the door to both now.
 // Declared emits are the component's contract, so a name left here after
 // its only `$emit` is deleted is a promise nothing keeps.
-const emit = defineEmits(['reply', 'reply-done', 'switch-agent', 'session-adopted', 'sessions-changed', 'open-menu', 'toggle-star', 'escalate-to-room', 'open-thread', 'work-state', 'open-work', 'new-chat', 'main-reset', 'voice-call', 'voice-panel', 'open-project', 'thread-missing'])
+const emit = defineEmits(['reply', 'reply-done', 'switch-agent', 'session-adopted', 'sessions-changed', 'open-menu', 'toggle-star', 'escalate-to-room', 'open-thread', 'work-state', 'open-work', 'new-chat', 'main-reset', 'voice-call', 'voice-panel', 'open-project', 'thread-missing', 'close-chat', 'dismiss-close-error'])
 
 // ent#451/#473: the active thread as the shell's list knows it. Null until the
 // list carries the thread (a just-adopted session lands on the next refresh),

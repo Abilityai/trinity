@@ -1033,7 +1033,7 @@ the row of the agent whose new chat is **already on stage** is a no-op in `openA
 first message without `new_thread`, i.e. into Main. And a landing that **reuses a chat**
 (the empty one, a remembered one) mounts as a thread, which focuses nothing, so the shell
 hands the caret over under the same pointer rule (`focusLandedComposer`). Main is named by its role in both the tab strip and the header and is
-not renameable; an archived chat stays a tab (ruled “becomes the newest tab”), though you never LAND in one by default;
+not renameable; an archived chat is NOT a tab and is not in the sidebar's active groups — one rule for a chat closed from its tab × and for Reset's retired Main (ent#841, reversing the ent#523 ruling) — it is listed under the sidebar's **Archived** group and opening it reopens it (`PUT`/`DELETE …/sessions/{id}/archive`; the live Main is a named 409). Local star and close writes are held over any list read issued before they settled (`portalUtils.createWriteGuard`, #3356), because `refreshThreads` replaces whole maps and a stale read otherwise undoes the click;
 an unused Main is filtered from the **sidebar** only (a projection, not a filter on
 `threads`, because the strip must show Main from the first visit).
 

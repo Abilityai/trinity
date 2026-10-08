@@ -1669,6 +1669,15 @@ export const useClientPortalStore = defineStore('clientPortal', {
       return data
     },
 
+    // ent#841 — close a chat from its tab (archive, never delete), or reopen
+    // it. Rethrows: the shell reverts its optimistic move and names the refusal.
+    async setThreadArchived(agentName, sessionId, archived) {
+      const url = `/api/enterprise/client-portal/agents/${agentName}/sessions/${encodeURIComponent(sessionId)}/archive`
+      const cfg = { headers: this.authHeader }
+      const { data } = archived ? await portalHttp.put(url, null, cfg) : await portalHttp.delete(url, cfg)
+      return data
+    },
+
     // ent#473 — the room twin. Membership-scoped server-side; a coded refusal
     // passes through `_noteRoomsRefusal` untouched (#2128).
     async renameRoom(roomId, name) {

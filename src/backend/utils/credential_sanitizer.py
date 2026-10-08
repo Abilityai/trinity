@@ -84,7 +84,31 @@ _secret_value_re = [re.compile(p) for p in SECRET_VALUE_PATTERNS]
 # cases it names (`!`*n, `!=`+`!=!`*n) are pinned as tests in
 # tests/unit/test_1661_sanitizer_linear.py and run in ~1ms at 64 KB. Do not
 # "simplify" the lookbehind away.
-_KV_LINE_RE = re.compile(r'(?<![^\s"\'=])([^\s"\'=]+)=(["\']?)([^\s"\']+)\2')
+_KV_LINE_RE = re.compile(r'(?<![^\s"\'=&;,])([^\s"\'=&;,]+)=')
+
+# --- #3311: a harmless pair must not swallow a sensitive one ------------------
+# #1670 matched the whole PAIR in one regex — key up to the first `=`, value up
+# to whitespace — and `.sub` never re-examines consumed text. So in
+# `user=a&password=X` the key was `user` (harmless) and `a&password=X` was
+# consumed as its value and returned verbatim: the sensitive pair was never
+# looked at. Same for `?client=me&access_token=X` and `--env=GITHUB_TOKEN=X`.
+# The pre-#1661 composed regex redacted all of these.
+#
+# Now `_KV_LINE_RE` above finds only `KEY=` (the key stops at `&`, `;`, `,` as
+# well as whitespace/quotes/`=`, and the lookbehind lets a key start after any
+# of them), and `_redact_kv_pairs` walks those keys: a harmless key consumes
+# NOTHING, so the next key in the chain is still examined; only a sensitive
+# key takes its value — and that value keeps the old shape (`_KV_PAIR_RE`, up
+# to whitespace), so a secret containing `&`/`;`/`,` is redacted whole, never
+# split and partly leaked. The cost of that choice is over-redaction of pairs
+# chained AFTER a sensitive one, which is the safe direction (and what keeps
+# the Google-consent exemption seeing the whole URL).
+#
+# Still linear: the key search only ever moves forward, a failed value match
+# backtracks at most to the next quote/whitespace, and the lookbehind still
+# pins each key to the start of its run. Cases in
+# tests/unit/test_1661_sanitizer_linear.py::TestChainedPairs.
+_KV_PAIR_RE = re.compile(r'([^\s"\'=&;,]+)=(["\']?)([^\s"\']+)\2')
 
 # A name pattern must match a SUFFIX of the key, not the whole key: the old
 # composed regex could start matching mid-token, so `DB_.*` redacted
@@ -105,7 +129,7 @@ _KV_LINE_RE = re.compile(r'(?<![^\s"\'=])([^\s"\'=]+)=(["\']?)([^\s"\']+)\2')
 #     sanitize_subprocess_line  ->  read_stdout  (headless_executor)
 #
 # The old docstring called `key` "a short KEY= name". It is not: the key is
-# whatever preceded an `=` in `_KV_LINE_RE`'s `([^\s"\'=]+)`, which is
+# whatever preceded an `=` in `_KV_LINE_RE`'s `([^\s"\'=&;,]+)`, which is
 # UNBOUNDED — and the stack above reaches here from stream-json tool RESULTS
 # via recursive `sanitize_dict`, so multi-KB "keys" are the normal case rather
 # than an adversarial one. That wrong assumption is what made a quadratic test
@@ -182,6 +206,60 @@ def _is_sensitive_kv_key(key: str) -> bool:
     return any(lit in upper for lit in _SENSITIVE_KEY_LITERALS)
 
 
+# --- #3311 (merge-train finding): harmless words in a CHAINED key ------------
+# Walking the chain put keys under the containment test above that `dev` never
+# examined at all (they sat inside a harmless pair's value). Containment is
+# deliberately broad, so everyday query parameters that merely CONTAIN a
+# sensitive word were redacted — `&author=bob` (AUTH), `&tokens_used=10`
+# (TOKEN), `&passwordless=true` (PASSWORD) — and since a sensitive value runs
+# to whitespace, each took the rest of the URL with it. AC1: harmless pairs
+# are kept.
+#
+# The narrowing is a CLOSED LIST OF WORDS, not a word-boundary rule. A boundary
+# rule ("the literal must end the word") is the obvious shape and leaks an open
+# class: `secretkey`, `authkey`, `tokenvalue`, `passwords`, `credentials`,
+# `authorization` are all a literal plus more letters. Here every key keeps the
+# containment verdict unless the ONLY thing that made it sensitive is one of
+# the words below — they are blanked out and the remainder is tested as before,
+# so `author_token` and `max_tokens_secret` still redact. What this can let
+# through is exactly what is listed, nothing adjacent to it.
+#
+#   AUTHOR…      author(s), authored, authority, coauthor — but NOT
+#                authoriz…/authoris… (`authorization` carries credentials)
+#   PASSWORDLESS, SECRETARY/-IES/-IAT, TOKENIZ…/TOKENIS… (tokenizer, tokenized)
+#   token COUNTS  max/total/input/output/prompt/completion_tokens and
+#                token(s)_used/_count/_limit/_usage — numbers, never secrets
+#
+# Applies ONLY to a key that sits inside what #1670 consumed as a harmless
+# pair's VALUE: glued after `=`, `&`, `;` or `,`, with nothing but value
+# characters back to the previous `KEY=` (`_KV_CHAIN_GAP_RE`, scanned over
+# exactly the gap between two keys, so the gaps are disjoint and the walk stays
+# linear). Every other key — one that starts its run (`author=bob`,
+# `page=2 tokens_used=10`), follows a bare word (`x,author=bob`) or follows a
+# redacted pair — was already under plain containment on `dev` and still is:
+# this restores AC1 for the keys this fix newly reaches, it does not
+# re-litigate the key rule. No quantifier beyond `S?` in the word list.
+_KV_CHAIN_SEPARATORS = "=&;,"
+_KV_CHAIN_GAP_RE = re.compile(r'["\']?[^\s"\']*')
+_CHAINED_HARMLESS_WORD_RE = re.compile(
+    r'AUTHOR(?!I[SZ])'
+    r'|PASSWORDLESS'
+    r'|SECRETAR(?:Y|IES|IAT)'
+    r'|TOKENI[SZ]'
+    r'|(?<![A-Z0-9])(?:MAX|TOTAL|INPUT|OUTPUT|PROMPT|COMPLETION)_TOKENS(?![A-Z0-9])'
+    r'|TOKENS?_(?:USED|COUNT|LIMIT|USAGE)(?![A-Z0-9])'
+)
+
+
+def _is_sensitive_chained_key(key: str) -> bool:
+    """`_is_sensitive_kv_key` for a key chained after another pair (#3311).
+
+    Same containment test, with the known-harmless words blanked out first.
+    """
+    upper = _CHAINED_HARMLESS_WORD_RE.sub(" ", key.upper())
+    return any(lit in upper for lit in _SENSITIVE_KEY_LITERALS)
+
+
 def _is_public_google_consent_match(match: "re.Match", credential_values=()) -> bool:
     """Recognize supported consent links, never OAuth callbacks or tokens.
 
@@ -247,6 +325,45 @@ def _redact_kv_match(match: "re.Match") -> str:
     if _is_sensitive_kv_key(key):
         return f"{key}={REDACTION_PLACEHOLDER}"
     return match.group(0)
+
+
+def _redact_kv_pairs(text: str) -> str:
+    """Redact every sensitive `key=value` in `text`, wherever it sits in a chain.
+
+    A harmless key consumes nothing, so a sensitive key glued after it
+    (`a=1&token=X`, `--env=GH_TOKEN=X`) is still found (#3311). See the note
+    at `_KV_PAIR_RE`.
+    """
+    out = []
+    kept = 0  # end of the text already copied to `out`
+    pos = 0   # where the next key search starts; only ever moves forward
+    prev = -1  # end of the previous harmless `KEY=`; -1 = none in this chain
+    while True:
+        key = _KV_LINE_RE.search(text, pos)
+        if key is None:
+            break
+        pos = key.end()
+        start = key.start()
+        # Chained = inside the value of the harmless pair before it (see
+        # `_CHAINED_HARMLESS_WORD_RE`). Anything else keeps the full rule.
+        chained = (
+            prev >= 0
+            and text[start - 1] in _KV_CHAIN_SEPARATORS
+            and _KV_CHAIN_GAP_RE.match(text, prev, start).end() == start
+        )
+        prev = pos
+        is_sensitive = _is_sensitive_chained_key if chained else _is_sensitive_kv_key
+        if not is_sensitive(key.group(1)):
+            continue
+        pair = _KV_PAIR_RE.match(text, key.start())
+        if pair is None:
+            continue
+        out.append(text[kept:pair.start()])
+        out.append(_redact_kv_match(pair))
+        kept = pos = pair.end()
+        prev = -1
+    out.append(text[kept:])
+    return "".join(out)
 
 
 
@@ -323,7 +440,7 @@ def sanitize_text(text: str) -> str:
     # Redact key=value pairs where key is sensitive.
     # #1661: ONE linear pass (see _KV_LINE_RE) — this used to compile a
     # line-scanning regex per key pattern, costing CPU-minutes on a large line.
-    result = _KV_LINE_RE.sub(_redact_kv_match, result)
+    result = _redact_kv_pairs(result)
 
     return result
 

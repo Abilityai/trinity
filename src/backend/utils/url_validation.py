@@ -11,7 +11,7 @@ import ipaddress
 import re
 import socket
 from dataclasses import dataclass
-from typing import Callable, List, Optional, Tuple
+from typing import Callable, List, Optional, Sequence, Tuple
 from urllib.parse import urlparse
 
 # Allowed hostnames for skills library URLs
@@ -733,7 +733,86 @@ class A2AEndpointUrlError(ValueError):
         self.reason = reason
 
 
-def validate_a2a_endpoint_url(url: str) -> ValidatedPublicUrl:
+def _validate_trusted_a2a_url(
+    url: str,
+    entries: Sequence[str],
+    *,
+    resolver: Optional[Callable[..., list]] = None,
+) -> Optional[ValidatedPublicUrl]:
+    """The trusted-internal-network path (trinity-enterprise#838), or ``None``.
+
+    Reached only after the public-HTTPS rule refused a URL for its scheme or
+    for an internal address. ``None`` means "not trusted": the caller then
+    raises the ORIGINAL refusal, so an untrusted endpoint is answered exactly
+    as before. The URL is trusted when:
+
+    * its scheme is ``http`` or ``https`` and it carries no credentials;
+    * its host matches a name entry (``host`` or ``*.suffix``) **or** every
+      address it resolves to is public or inside a CIDR entry;
+    * when CIDR entries exist, every non-public address is inside one of them —
+      a trusted NAME that resolves outside the declared addresses is refused;
+    * no address is loopback, link-local (cloud metadata), reserved or one of
+      the platform's own Docker networks, whatever the entries say.
+
+    Runs on every call (it is part of ``validate_a2a_endpoint_url``), so a DNS
+    move is caught at use, and returns the addresses for the caller to pin to.
+    """
+    from services import a2a_trusted_networks as tn
+
+    if not entries:
+        return None
+    try:
+        parsed = urlparse(url.strip())
+    except Exception:
+        return None
+    if parsed.scheme not in ("http", "https"):
+        return None
+    if parsed.username or parsed.password or "@" in (parsed.netloc or ""):
+        return None
+    hostname = canonical_host(parsed.hostname or "")
+    if not hostname:
+        return None
+    try:
+        port = effective_port(parsed.port, parsed.scheme)
+    except ValueError:
+        return None
+    resolve = resolver or socket.getaddrinfo
+    try:
+        resolved = resolve(hostname, port)
+    except socket.gaierror:
+        return None
+    cidrs = [e for e in entries if tn._parse_cidr(e) is not None]
+    name_trusted = tn.host_is_trusted(hostname, entries)
+    addresses: List[str] = []
+    in_a_cidr = False
+    for entry in resolved:
+        try:
+            ip = ipaddress.ip_address(entry[4][0])
+        except ValueError:
+            return None
+        plain = ip.ipv4_mapped if getattr(ip, "ipv4_mapped", None) else ip
+        if any(plain.version == bad.version and plain in bad for bad in tn._FORBIDDEN):
+            return None
+        inside = tn.address_is_trusted(str(plain), cidrs)
+        in_a_cidr = in_a_cidr or inside
+        if _is_internal_address(ip) and not inside and (cidrs or not name_trusted):
+            # Internal and outside every declared CIDR. With no CIDR declared, a
+            # trusted name is the whole declaration and its private address is
+            # accepted; with CIDRs declared, the addresses must be inside them.
+            return None
+        addresses.append(str(ip))
+    if not addresses or not (name_trusted or in_a_cidr):
+        return None
+    return ValidatedPublicUrl(url=url.strip(), hostname=hostname, port=port,
+                              addresses=tuple(addresses))
+
+
+def validate_a2a_endpoint_url(
+    url: str,
+    *,
+    trusted_entries: Optional[Sequence[str]] = None,
+    resolver: Optional[Callable[..., list]] = None,
+) -> ValidatedPublicUrl:
     """Validate an outbound A2A endpoint URL at CALL time (#736 FR-3).
 
     Runs on **every** call, on a URL that came out of the endpoint registry —
@@ -759,6 +838,7 @@ def validate_a2a_endpoint_url(url: str) -> ValidatedPublicUrl:
     try:
         return _validate_public_https_url(
             url,
+            resolver=resolver,
             label="A2A endpoint URL",
             host_label="A2A endpoint hostname",
             credential_advice=(
@@ -772,6 +852,16 @@ def validate_a2a_endpoint_url(url: str) -> ValidatedPublicUrl:
             ),
         )
     except PublicUrlRefusal as exc:
+        # trinity-enterprise#838: a scheme or internal-address refusal may still
+        # be an endpoint on a network the admin declared ours. Anything the
+        # trusted path does not accept falls through to the original refusal.
+        if exc.kind in ("not_https", "private_address"):
+            if trusted_entries is None:
+                from services.a2a_trusted_networks import get_entries
+                trusted_entries = get_entries()
+            trusted = _validate_trusted_a2a_url(url, trusted_entries, resolver=resolver)
+            if trusted is not None:
+                return trusted
         # ent#397: the reason comes from WHERE the refusal was raised, never from
         # what its message says. This block used to substring-match its own prose
         # — the exact fragility `A2AEndpointUrlError`'s docstring warns against —

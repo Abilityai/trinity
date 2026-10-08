@@ -1695,14 +1695,30 @@ async def execute_headless_task(
         # its wait on the subprocess; the outer wait_for is a safety net
         # with a small grace period for drain/cleanup.
         loop = asyncio.get_event_loop()
+        waiter_abandoned = threading.Event()
+
+        def run_owned_subprocess():
+            try:
+                return _run_headless_subprocess(ctx)
+            finally:
+                # Cancelling run_in_executor cannot stop an already-running
+                # thread. Its waiter has already used its finally, so the
+                # worker must release ownership when it actually finishes.
+                if waiter_abandoned.is_set():
+                    loop.call_soon_threadsafe(lambda: registry.unregister(ctx.task_session_id))
+
         try:
             try:
                 await asyncio.wait_for(
                     # #2433: the dedicated pool — never the CPU-sized default.
-                    loop.run_in_executor(_HEADLESS_EXECUTOR, _run_headless_subprocess, ctx),
+                    loop.run_in_executor(_HEADLESS_EXECUTOR, run_owned_subprocess),
                     timeout=ctx.effective_timeout + 60
                 )
+            except asyncio.CancelledError:
+                waiter_abandoned.set()
+                raise
             except asyncio.TimeoutError:
+                waiter_abandoned.set()
                 # Inner machinery should have raised first; safety net.
                 logger.error(
                     f"[Headless Task] Outer timeout on task {ctx.task_session_id} "

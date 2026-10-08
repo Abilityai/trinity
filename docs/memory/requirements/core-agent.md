@@ -2481,10 +2481,11 @@ issue if it's ever wanted. Also deferred: `data.json` caching/streaming.
   names the two properties the tab form had to answer for (participant scoping,
   and dismissal vs switching) — §5.30 answers both.
 - Main is named by its **role** in the tab strip and the header and is not
-  renameable. An archived chat stays a tab — the operator ruled it “becomes the
-  newest tab” — and growth is bounded by `OverflowTabs`' counted “N more” rather
-  than by hiding rows; you simply never LAND in one by default. An unused Main is
-  filtered from the **sidebar** only.
+  renameable. ~~An archived chat stays a tab — the operator ruled it “becomes the
+  newest tab”.~~ ⚠️ **Superseded 2026-10-08 by §5.41** (ent#841): an archived
+  chat — Reset's retired Main included — leaves the strip and the sidebar's
+  active groups and is listed under **Archived**. An unused Main is filtered
+  from the **sidebar** only (unless it is starred, #3356).
 - The sidebar orders agents by most recent collaboration then name, applied
   before the collapse. This is **not** ent#491 (incubating): `orderRosterAgents`
   ships the order this AC states and leaves `primaryName` as its seam.
@@ -3912,3 +3913,52 @@ to localStorage in the clear.
 - **Not in scope**: the editable "What would be sent" (09-20 ruling); #609; the `people_for`
   provider; `may_end` (rides #164); run pills with step labels (need a message→execution link).
 - **Flow**: `docs/memory/feature-flows/workspace-inbox.md`
+
+### 5.41 Workspace — close a chat from its tab, the tab's unread count, and a star that sticks (trinity-enterprise#841, abilityai/trinity#3356)
+- **Status**: ✅ Implemented (2026-10-08)
+- **Requirement ID**: WORKSPACE_CLOSE_CHAT
+- **GitHub Issue**: abilityai/trinity-enterprise#841, abilityai/trinity#3356
+- **Description**: Closing a chat takes one click: an **×** on its tab.
+  Closing **archives** the chat and never deletes it.
+- **Key Features**:
+  - Every chat tab but Main carries an × ("Archive chat"): revealed on
+    hover/focus from `sm:` up, always drawn on touch, a real button reachable by
+    keyboard, also on the rows of the strip's "N more" menu. One click, no
+    confirmation — nothing is lost. **Main cannot be closed** (no ×; the server
+    answers a named 409) — Reset is its retire action.
+  - **One archive rule (operator, 2026-10-08).** Closing sets the same
+    `archived_at` Reset's retired Main carries, and *every* archived chat leaves
+    the tab strip and the sidebar's active groups (Starred and the date groups).
+    This reverses §5.23's ent#523 ruling that a Reset archive "becomes the newest
+    tab". The chat on screen is the one exception — a deep link to an archived
+    chat still draws its tab.
+  - **Found and reopened.** The sidebar lists archived chats in a collapsed
+    **Archived · N** group. Opening one reopens it (clears `archived_at`) as an
+    ordinary active chat; a retired Main reopens with `is_main = 0`.
+  - **Undo.** A "Chat archived · Undo" toast follows a successful close (8 s);
+    Undo reopens the chat and returns to it if it was the open one. A refused
+    close reverts the tab and names the reason in an `InlineError` under the strip.
+  - **Neighbour on close.** Closing the open chat moves to the tab on its
+    right, else its left (Main is first, so there is one), else the agent page.
+  - **Starred chats** can be closed: the star (per-viewer chat state) is not
+    touched, the chat leaves Starred while archived, and reopening restores its
+    pinned place.
+  - **A reply in flight.** The × of the OPEN chat is inert while its reply is in
+    flight, with a tooltip saying why. A background chat can be closed mid-turn:
+    the reply still lands in the archived chat and is there on reopen.
+  - **Rooms are excluded**: the strip lists one agent's 1:1 chats, so a room has
+    no tab to close; a room keeps its own lifecycle.
+  - **Unread on the tab.** A chat with unread replies that is not on screen
+    shows the sidebar row's count on its tab, in the same solid blue
+    (`badgeVariant: 'primary'`), and in the "N more" menu. The strip is
+    fixed-width, so the count shortens that tab's label and moves nothing.
+  - **The star on the tab.** A starred chat's tab draws a filled star before its
+    label (the tab's own ink), in the strip and in the "N more" menu. Tabs are
+    192px (`w-48`, was 160) to carry the star, the count and the ×.
+  - **A star sticks on the first click (#3356).** A chat-state read already in
+    flight when the star is clicked used to answer with the pre-click state and
+    overwrite it. Local star writes (and tab closes) are now held over any read
+    issued before they settled (`createWriteGuard`). A starred, never-used Main
+    is listed in the sidebar so the header star has somewhere to show.
+- **API**: `PUT` / `DELETE /api/enterprise/client-portal/agents/{name}/sessions/{id}/archive`
+  (roster- then session-scoped, uniform 404, idempotent, 60/min per viewer). No schema change.

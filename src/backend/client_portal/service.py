@@ -4433,6 +4433,37 @@ def rename_session(agent_name: str, email: str, session_id: str, title,
     }
 
 
+def set_session_archived(agent_name: str, email: str, session_id: str,
+                         archived: bool, include_owned: bool = False) -> dict:
+    """Close a chat from its tab (ent#841), or reopen it. Archive, never delete.
+
+    Roster-scoped (miss → 404), then the UPDATE is scoped to (agent, client) so
+    an unowned or unknown id is the same uniform 404 (Invariant #8). The live
+    Main is refused with a named 409 rather than a 404: it exists and is
+    theirs, and the person needs to be told that Reset is its retire action.
+    The star (per-viewer chat state) is untouched, so a starred chat that is
+    closed and reopened comes back starred.
+    """
+    if not agent_on_roster(agent_name, email, include_owned):
+        raise ClientPortalError(404, "Agent not found")
+    row = db.get_portal_session(session_id, agent_name, email)
+    if not row:
+        raise ClientPortalError(404, "Conversation not found")
+    if row.get("is_main"):
+        raise ClientPortalError(409, "Main can't be closed — use Reset to start it fresh")
+    db.set_portal_session_archived(session_id, agent_name, email, archived, utc_now_iso())
+    row = db.get_portal_session(session_id, agent_name, email) or row
+    return {
+        "id": session_id,
+        "title": row.get("title"),
+        "created_at": row.get("created_at"),
+        "last_message_at": row.get("last_message_at"),
+        "message_count": int(row.get("message_count") or 0),
+        "is_main": bool(row.get("is_main")),
+        "archived_at": row.get("archived_at"),
+    }
+
+
 _SEARCH_MIN_LEN = 2       # a 1-char query is too noisy to be useful
 _SNIPPET_RADIUS = 60      # chars of context on each side of the match
 

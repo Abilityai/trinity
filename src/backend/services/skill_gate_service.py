@@ -1140,6 +1140,10 @@ DISPATCH_FIELDS: Dict[str, str] = {
     "source_channel_chat_id": FREEZE,
     "source_channel_thread": FREEZE,
     "source_channel_client": FREEZE,
+    # trinity-enterprise#838: a keyless trusted-network caller's address — the
+    # run's attribution when there is no user or key, so an approved replay
+    # stays attributed to the same host.
+    "source_host": FREEZE,
     "system_prompt": DROP,
     "resume_session_id": DROP,
     "persist_session": DROP,

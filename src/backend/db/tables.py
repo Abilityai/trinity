@@ -120,6 +120,8 @@ agent_ownership = Table(
     Column("circuit_breaker_enabled", Integer),
     Column("mcp_exposed", Integer),
     Column("a2a_exposed", Integer),                # ent#157: A2A inbound-server exposure opt-in (default OFF)
+    Column("a2a_scope", Text, server_default="public"),          # ent#838: public | internal (trusted networks only)
+    Column("a2a_keyless_internal", Integer, server_default="1"),  # ent#838: trusted callers need no key (internal scope)
     # ent#329: owner opt-in — an operator answer re-triggers the agent. Default OFF:
     # a dispatch on respond spends money, so it is never unconditional. Per-AGENT and
     # not per-request, so hosting asks cannot hand a client a spend button (ent#430 AC #3).
@@ -301,6 +303,7 @@ schedule_executions = Table(
     # ent#457 review: WHICH human the channel context belongs to. Only the
     # portal leg reads it today — see `_resolve_portal`'s recipient check.
     Column("source_channel_client", Text),
+    Column("source_host", Text),                   # ent#838: a keyless trusted-network A2A caller's address
     # ent#555 — the canvas the user had open for this turn (context, not authority).
     Column("open_canvas_id", Text),
     # #2806 — agent-to-agent hops from a non-agent root; NULL = root (0).

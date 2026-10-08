@@ -1620,6 +1620,36 @@ def portal_rename_session(agent_name: str, session_id: str, body: PortalSessionR
         raise HTTPException(status_code=e.status_code, detail=e.detail)
 
 
+@router.put("/agents/{agent_name}/sessions/{session_id}/archive",
+            response_model=PortalSessionSummary)
+def portal_archive_session(agent_name: str, session_id: str,
+                           principal: PortalPrincipal = Depends(get_portal_principal)):
+    """Close a chat (ent#841): archive it, never delete it. Idempotent."""
+    return _set_session_archived(agent_name, session_id, principal, True)
+
+
+@router.delete("/agents/{agent_name}/sessions/{session_id}/archive",
+               response_model=PortalSessionSummary)
+def portal_unarchive_session(agent_name: str, session_id: str,
+                             principal: PortalPrincipal = Depends(get_portal_principal)):
+    """Reopen a closed chat (ent#841) — the Undo, and opening it from Archived."""
+    return _set_session_archived(agent_name, session_id, principal, False)
+
+
+def _set_session_archived(agent_name: str, session_id: str,
+                          principal: PortalPrincipal, archived: bool):
+    from services import rate_limiter
+
+    # A write, bounded per viewer like rename (one request per click).
+    rate_limiter.enforce(f"portal_archive:{principal.email}", 60, 60)
+    try:
+        return service.set_session_archived(
+            agent_name, principal.email, session_id, archived,
+            include_owned=principal.is_platform)
+    except ClientPortalError as e:
+        raise HTTPException(status_code=e.status_code, detail=e.detail)
+
+
 @router.get("/agents/{agent_name}/history", response_model=PortalHistory)
 def portal_history(agent_name: str, session_id: str | None = None,
                    limit: int | None = Query(None, ge=1, le=50),
