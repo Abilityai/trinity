@@ -135,6 +135,7 @@ export function createScheduleTools(
       name: "create_agent_schedule",
       description:
         "Create a new cron-based schedule for an agent. " +
+        "With an agent key, changing ANOTHER agent's schedule needs the schedule-management permission an instance admin grants; without it the call is refused with `schedule_management_not_permitted`. " +
         "The schedule will automatically trigger the agent with the specified message at the configured times. " +
         "Cron format: minute hour day-of-month month day-of-week (5 fields). " +
         "Examples: '0 9 * * *' (daily 9am), '0 9 * * 1-5' (weekdays 9am), '*/30 * * * *' (every 30 min). " +
@@ -346,6 +347,7 @@ export function createScheduleTools(
       name: "update_agent_schedule",
       description:
         "Update an existing schedule's configuration. Only specified fields will be updated. " +
+        "With an agent key, changing ANOTHER agent's schedule needs the schedule-management permission an instance admin grants; without it the call is refused with `schedule_management_not_permitted`. " +
         "Access control: agents can only update their own schedules.",
       parameters: z.object({
         agent_name: z.string().describe("Agent name"),
@@ -508,6 +510,7 @@ export function createScheduleTools(
       name: "delete_agent_schedule",
       description:
         "Permanently delete a schedule and its execution history. This action cannot be undone. " +
+        "With an agent key, changing ANOTHER agent's schedule needs the schedule-management permission an instance admin grants; without it the call is refused with `schedule_management_not_permitted`. " +
         "Access control: agents can only delete their own schedules.",
       parameters: z.object({
         agent_name: z.string().describe("Agent name"),
@@ -559,6 +562,7 @@ export function createScheduleTools(
       name: "toggle_agent_schedule",
       description:
         "Enable or disable a schedule without deleting it. Disabled schedules won't run but preserve their configuration. " +
+        "With an agent key, changing ANOTHER agent's schedule needs the schedule-management permission an instance admin grants; without it the call is refused with `schedule_management_not_permitted`. " +
         "Access control: agents can toggle schedules on self or permitted agents.",
       parameters: z.object({
         agent_name: z.string().describe("Agent name"),

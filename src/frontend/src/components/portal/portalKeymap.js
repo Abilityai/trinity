@@ -79,13 +79,28 @@ export const WORKSPACE_KEYMAP = Object.freeze([
     chord: chord({ key: '.', code: 'Period', primary: true }),
   }),
   Object.freeze({
+    id: 'search-focus',
+    action: 'search-focus',
+    surface: 'workspace',
+    owner: OWNER_SHELL,
+    scope: SCOPE_DOING,
+    // The Dashboard's `/` filter key, with the modifier a key needs to work
+    // from INSIDE a text field. It focuses the sidebar search that exists —
+    // it is not the reserved `⌘K` surface above, and adds no second search.
+    label: 'Search agents and chats',
+    note: 'Press again to return to the message field.',
+    chord: chord({ key: '/', code: 'Slash', primary: true, shiftOnKey: true }),
+  }),
+  Object.freeze({
     id: 'key-list',
     action: 'key-list',
     surface: 'workspace',
     owner: OWNER_SHELL,
     scope: SCOPE_DOING,
     label: 'Keyboard shortcuts',
-    chord: chord({ key: '/', code: 'Slash', primary: true, shiftOnKey: true }),
+    // ⌥/ since `⌘/` went to search: the same pairing as `⌘.` / `⌥.`. On a US
+    // Mac it types `÷`, so the physical `Slash` arm is the one that answers.
+    chord: chord({ key: '/', code: 'Slash', alt: true, shiftOnKey: true }),
   }),
   Object.freeze({
     id: 'agent-next',
@@ -339,11 +354,11 @@ export function keymapCollisions(map = WORKSPACE_KEYMAP) {
  * drawer — suppresses EVERY shell key, ⌘J included (today it remounts the
  * conversation under an open file preview). A voice call suppresses the keys
  * that would change what is on stage, plus the rail toggle; ⌘J keeps its own
- * "leave the call?" ask (ent#534/551) and ⌘/ is allowed, because opening a
+ * "leave the call?" ask (ent#534/551) and ⌥/ is allowed, because opening a
  * dialog leaves nothing.
  *
  * Per-action exemptions are the CALLER's: it passes `hasModalOpen`'s `ignore`
- * so rail keys do not see the rail's own sheet and ⌘/ can close its own list,
+ * so rail keys do not see the rail's own sheet and ⌥/ can close its own list,
  * `railAvailable` for the two entries marked `needsRail`, and `resumed` for the
  * pass that re-runs a parked ⌘J after the leave-call confirm.
  */
@@ -537,7 +552,81 @@ export function keyHint(actions, platform, map = WORKSPACE_KEYMAP) {
   return bindingsFor(actions, map).map((c) => chordLabel(c, platform)).join(' / ')
 }
 
+/**
+ * The same hint, PACKED: chords that share every modifier and differ only in a
+ * one-glyph key print the modifiers once — `⌥↑↓` for `⌥↑ / ⌥↓`,
+ * `Alt+Shift+↑↓` for the Windows pair. For a place too small for the long form
+ * (the rail's two-row tips); anything that cannot be packed without losing
+ * something — different modifiers, a key that is a word — falls back to
+ * `keyHint`, so the packed form is never a guess.
+ */
+export function keyHintCompact(actions, platform, map = WORKSPACE_KEYMAP) {
+  const chords = bindingsFor(actions, map)
+  if (chords.length < 2) return keyHint(actions, platform, map)
+  const [first] = chords
+  const glyphs = chords.map((c) => keyGlyph(c.key))
+  const packable = glyphs.every((g) => g.length === 1) && chords.every((c) =>
+    !!c.alt === !!first.alt && !!c.shift === !!first.shift && !!c.primary === !!first.primary)
+  if (!packable) return keyHint(actions, platform, map)
+  // `chordLabel` owns the modifier spelling and order; hand it the packed key.
+  return chordLabel({ ...first, key: null }, platform) + glyphs.join('')
+}
+
 /** The same binding as `aria-keyshortcuts` — ARIA's spelling, space-separated. */
 export function keyShortcutsFor(actions, platform, map = WORKSPACE_KEYMAP) {
   return ariaKeyshortcuts(bindingsFor(actions, map), platform)
+}
+
+/**
+ * The rail's tips panel — the handful of chords worth learning first.
+ *
+ * Declared as ACTIONS, never as glyphs: `keyTipRows` reads each row's keys
+ * from the map, so a chord that moves there moves on the panel in the same
+ * commit. Four on purpose — the panel is a nudge, and the full list is one
+ * button away.
+ */
+export const KEY_TIPS = Object.freeze([
+  Object.freeze({ id: 'agent', label: 'Switch agent', actions: Object.freeze(['agent-prev', 'agent-next']) }),
+  Object.freeze({ id: 'chat', label: 'Switch chat', actions: Object.freeze(['chat-prev', 'chat-next']) }),
+  Object.freeze({ id: 'search', label: 'Search', actions: Object.freeze(['search-focus']) }),
+  Object.freeze({ id: 'new-chat', label: 'New chat', actions: Object.freeze(['new-chat']) }),
+])
+
+/** The panel's rows. A tip whose actions the map no longer binds is dropped. */
+export function keyTipRows(platform, map = WORKSPACE_KEYMAP, tips = KEY_TIPS) {
+  return (Array.isArray(tips) ? tips : []).filter(Boolean).map((t) => ({
+    id: t.id,
+    label: t.label,
+    // Packed for the key cap (the panel is two rows of two); the long form is
+    // kept for the hover, where there is room to spell it out.
+    keys: keyHintCompact(t.actions, platform, map),
+    fullKeys: keyHint(t.actions, platform, map),
+  })).filter((r) => r.keys)
+}
+
+/**
+ * Whether this browser closed the tips panel. A per-viewer convenience, so it
+ * lives in `localStorage` and nowhere else; a storage that refuses (private
+ * mode, blocked site data) simply shows the panel again next load.
+ */
+export const KEY_TIPS_STORAGE_KEY = 'trinity-workspace-key-tips'
+
+export function loadKeyTipsDismissed(storage) {
+  try {
+    return !!storage && typeof storage.getItem === 'function'
+      && storage.getItem(KEY_TIPS_STORAGE_KEY) === 'dismissed'
+  } catch {
+    return false
+  }
+}
+
+export function saveKeyTipsDismissed(storage, dismissed) {
+  try {
+    if (!storage || typeof storage.setItem !== 'function') return false
+    if (dismissed) storage.setItem(KEY_TIPS_STORAGE_KEY, 'dismissed')
+    else storage.removeItem(KEY_TIPS_STORAGE_KEY)
+    return true
+  } catch {
+    return false
+  }
 }

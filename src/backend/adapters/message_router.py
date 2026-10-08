@@ -118,6 +118,25 @@ def _session_count(session) -> int:
     return count if isinstance(count, int) else 0
 
 
+def _reply_quote(message: NormalizedMessage) -> Optional[str]:
+    """The `[Replying to …: "…"]` line a group turn carries (ent#600), or None.
+    One helper for the prompt (`_format_group_sender`) and the skill gate's scan
+    (`_run_agent_task`), so the gate reads the line the agent reads (#3274)."""
+    raw_message = message.metadata.get("raw_message", {})
+    return reply_quote_line(raw_message if isinstance(raw_message, dict) else {},
+                            message.metadata.get("bot_id", ""))
+
+
+def _gate_request_text(message: NormalizedMessage, is_group: bool) -> Optional[str]:
+    """What the skill gate reads of a channel turn: the sender's text, after the
+    quote line in a group. Never the history block or the sender/group labels."""
+    text = getattr(message, "text", None)
+    quote = _reply_quote(message) if is_group else None
+    if quote and text:
+        return f"{quote}\n{text}"
+    return quote or text
+
+
 def _format_group_sender(message: NormalizedMessage) -> str:
     """
     Format sender identity for group chat context.
@@ -156,7 +175,7 @@ def _format_group_sender(message: NormalizedMessage) -> str:
     # ent#600: a tagged reply to someone else's message carries the quoted
     # text — Telegram delivers it with every reply, Privacy Mode or not, so
     # this slice needs no BotFather setup.
-    quote = reply_quote_line(raw_message, message.metadata.get("bot_id", ""))
+    quote = _reply_quote(message)
     if quote:
         parts.append(quote)
 
@@ -866,8 +885,10 @@ class ChannelMessageRouter:
                 message=context_prompt,
                 # trinity-enterprise#751: the skill gate reads what THIS sender
                 # wrote, never the sender context + history `context_prompt` wraps
-                # it in — one past mention would gate every later turn.
-                request_text=getattr(message, "text", None),
+                # it in — one past mention would gate every later turn. #3274:
+                # plus, in a group, the message they reply to — the quote line
+                # is part of their request (the Workspace twin scans its quote).
+                request_text=_gate_request_text(message, is_group),
                 triggered_by=channel,
                 conversation_key=f"channel:{session_id}" if session_id else None,
                 source_user_email=source_email,

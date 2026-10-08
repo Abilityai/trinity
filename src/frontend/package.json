@@ -45,11 +45,11 @@
     "postcss": "^8.5.26",
     "tailwindcss": "^3.4.19",
     "vite": "^8.3.1",
-    "vitest": "^5.0.0"
+    "vitest": "^5.0.3"
   },
   "optionalDependencies": {
-    "@rollup/rollup-darwin-arm64": "^4.63.5",
-    "@rollup/rollup-linux-arm64-musl": "^4.63.5"
+    "@rollup/rollup-darwin-arm64": "^4.64.0",
+    "@rollup/rollup-linux-arm64-musl": "^4.64.0"
   },
   "overrides": {
     "dompurify": "^3.4.11"

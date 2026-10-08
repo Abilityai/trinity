@@ -396,6 +396,17 @@ an ask that ends while selected; a deep-linked `?item=`; previews read failing m
 | `src/frontend/e2e/workspace-inbox.spec.js` (`@smoke`) | landing, the pinned row, explicit targets still win |
 | `src/frontend/e2e/workspace-rail-reserved.spec.js`, `e2e/contrast-ratchet.spec.js` | retargeted to `?agent=` / `?new=1`; `/workspace/inbox` held at zero contrast failures |
 
+## A door from the agent page, and a calmer mark (trinity-enterprise#836)
+
+The agent row's "needs you" mark is an **unfilled orange ring** with the count
+(urgent ink at the AA tier, no ground), keeping its hover words and its spoken
+name; the unread pill beside it, the pinned Inbox row's and the Action tab's
+counters stay filled. Each agent's rail carries an **Asks** tab — present only
+while that agent has an open ask — whose rows are this tab's Action list
+narrowed to the agent (`actionItems`, the same builder) and whose click lands
+here on `?tab=action&from=<agent>&item=ask:<id>`. Flow:
+[workspace-rail.md](workspace-rail.md) → *The Asks tab*.
+
 ## Related Flows
 
 - Upstream: [workspace-deliverables.md](workspace-deliverables.md) (addressed reports and the

@@ -110,3 +110,26 @@ describe("access policy (ent#628 rows)", () => {
     }
   });
 });
+
+describe("an agent key names only itself (trinity-enterprise#839)", () => {
+  const session = (agentName: string) => ({ session: { scope: "agent", agentName, mcpApiKey: "trinity_mcp_test" } });
+
+  for (const [tool, args] of [
+    ["recordDecision", { ...RECORD, agent_name: "victim" }],
+    ["listSeatDecisions", { execution_id: "exec-1", agent_name: "victim" }],
+  ] as const) {
+    it(`${tool} refuses another agent's name before any call`, async () => {
+      const calls: Recorded[] = [];
+      const fake = {
+        getBaseUrl: () => "http://backend:8000",
+        async recordSeatDecision() { calls.push({ method: "record", agent: "?" }); return {}; },
+        async listSeatDecisions() { calls.push({ method: "list", agent: "?" }); return {}; },
+      } as unknown as TrinityClient;
+      const tools = createDecisionTools(fake, true) as any;
+      const out = JSON.parse(await tools[tool].execute(args, session("sibling")));
+      assert.equal(out.success, false);
+      assert.match(out.error, /its own agent's seat decisions/);
+      assert.equal(calls.length, 0);
+    });
+  }
+});

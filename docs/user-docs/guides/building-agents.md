@@ -1,6 +1,8 @@
 # Building Agents with Claude Code
 
-Use the **abilities** plugins to create, develop, and deploy agents to Trinity — all from your terminal.
+Trinity is the operating system for the AI-native company — open source, self-hosted, that you own. It deploys, orchestrates, and governs fleets of AI agents on your own hardware, and it is model-agnostic: each agent runs on Claude Code, Gemini CLI, or OpenAI Codex (see [Agent Runtimes](../agents/agent-runtimes.md)).
+
+This guide covers the Claude Code path. The **abilities** plugins are Claude Code tooling: you run them in a Claude Code session to create, develop, and deploy Claude Code agents to Trinity — all from your terminal. For a Gemini CLI or Codex agent, declare the runtime in `template.yaml` and create it as described in [Creating Agents](../agents/creating-agents.md).
 
 > 📺 **Watch:** [Build an AI Recruiter Agent](https://youtu.be/K7hFWyFIf-Y) *(Jun 2026)* · [Build and Deploy Agents in Cursor](https://youtu.be/amqiysdlEWY) *(Apr 2026)* · [From Zero to Deployed](https://youtu.be/-TSZyekDS6o) *(Apr 2026)* · [all videos](../videos.md)
 
@@ -23,7 +25,7 @@ Add the abilities marketplace and install the core plugins:
 /plugin install trinity@abilityai
 ```
 
-Or from the terminal: `claude plugin add abilityai/abilities`
+Or from the terminal: `claude plugin marketplace add abilityai/abilities`
 
 ## Path A: Creating a New Agent
 
@@ -39,7 +41,7 @@ Start from scratch with the interview-driven wizard.
 /create-agent:website       # A website scaffold (no agent)
 ```
 
-The `custom` wizard asks about your domain and scaffolds a complete agent. It covers every shape the retired domain wizards used to — describe the role and the interview builds it.
+The `custom` wizard asks about your domain and scaffolds a complete agent. It covers every shape the retired domain wizards used to — describe the role and the interview builds it. It can also run inside a deployed Trinity agent with no one at the keyboard — see [headless mode](../abilities/create-agent-plugin.md#headless-mode-inside-a-deployed-agent).
 
 ### Step 2: Connect to Trinity (one-time)
 
@@ -51,7 +53,7 @@ Authenticates and saves your MCP connection config. Only needed once per machine
 
 ### Step 3: Add your GitHub token (one-time)
 
-Deployment is repository-first — Trinity clones the agent from its GitHub repo and tracks the branch. In the Trinity UI, go to **Settings → GitHub token** and add a fine-grained PAT with *Contents: Read* on the repos your agents live in. Public repos work without one.
+Deployment is repository-first — Trinity clones the agent from its GitHub repo. In the Trinity UI, go to **Settings → MCP Keys → Personal GitHub Token** and add your own fine-grained PAT with *Contents: Read and write* on the repos your agents live in. With your own write token on a repo your account owns, the agent gets a working branch with auto-sync, so its work lands back in git. A read-only token, or the instance-wide token an admin set, gives a pull-only agent that tracks the branch. Public repos clone pull-only without any token. See [GitHub Sync](../integrations/github-sync.md).
 
 ### Step 4: Push, then deploy to Trinity
 

@@ -60,7 +60,7 @@
 
 **Symptoms:**
 - Agent A calls `mcp__trinity__chat_with_agent(agent_name="B", message="...", timeout_seconds=900)` and B works longer than the client's ceiling
-- Before the mitigation, the call failed with a timeout error and the result was lost. Now the MCP server stops waiting at `MCP_CHAT_TIMEOUT_MS` (25 seconds by default) and answers with `{status: "queued_timeout", execution_id, …}` while B keeps working; read the outcome with `get_execution_result` and never re-send
+- Before the mitigation, the call failed with a timeout error and the result was lost. Now the MCP server stops waiting at `MCP_CHAT_TIMEOUT_MS` (25 seconds by default) and answers with `{status: "queued_timeout", execution_id, …}` while B keeps working; read the outcome with `get_execution_result` and never re-send — unless that outcome is a confirmed `failed` or `cancelled`, which a word-for-word re-send retries (#3245)
 - The `timeout_seconds` parameter has no effect on either limit
 
 **Cause:**

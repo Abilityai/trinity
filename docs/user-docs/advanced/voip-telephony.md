@@ -17,7 +17,7 @@ This release is **outbound only** — agents place calls; they do not answer inc
 ## Requirements
 
 1. **Platform flags** — `VOIP_ENABLED=true` in `.env` (restart the backend after changing it) and a valid Gemini key — saved in **Settings → Integrations** ([Platform Keys](../credentials/platform-keys.md#gemini)), which applies without a restart, or `GEMINI_API_KEY` in `.env`.
-2. **Public URL** — **Settings → Public URL** must be set to your instance's public domain (e.g. `https://your-domain.com`). Trinity builds the audio WebSocket URL from it.
+2. **Public URL** — **Settings → General → Public URL** must be set to your instance's public domain (e.g. `https://your-domain.com`). Trinity builds the audio WebSocket URL from it.
 3. **Public reachability** — Twilio must be able to open a WebSocket to `wss://your-domain.com/api/voip/voice/...`. This works on publicly reachable deployments, e.g. with a Cloudflare Tunnel set up per [Public Access](../guides/deploying/public-access.md). A catch-all tunnel route to the frontend needs nothing extra; a tunnel that routes specific paths directly to the backend must also route `api/voip/*`.
 4. **Per-agent Twilio binding** — A Twilio account with a voice-capable phone number, configured on the agent (below). Without a binding, calls fail with 400 even when the flag is on.
 
@@ -66,7 +66,7 @@ mcp__trinity__call_user({
 // → { success: true, call_id: "voip_...", status: "ringing", twilio_call_sid: "CA..." }
 ```
 
-The optional `context` (up to 2,000 characters) becomes the call's purpose in the agent's voice prompt — the agent greets the person, says who it is and why it's calling.
+The optional `context` (up to 2,000 characters; the REST route truncates anything longer) becomes the call's purpose in the agent's voice prompt — the agent greets the person, says who it is and why it's calling.
 
 ### 3. During the Call
 
@@ -87,7 +87,7 @@ The optional `context` (up to 2,000 characters) becomes the call's purpose in th
 
 | Tool | Description |
 |------|-------------|
-| `call_user` | Place an outbound call. Params: `to_number` (E.164, required), `context` (≤2000 chars, optional), `process_transcript` (default `true`), `agent_name` (required for user-scoped keys; agent-scoped keys default to the bound agent) |
+| `call_user` | Place an outbound call. Params: `to_number` (E.164, required), `context` (≤2000 chars, optional), `process_transcript` (default `true`), `agent_name` (required for user-scoped keys; agent-scoped keys default to the bound agent), `execution_id` (usually supplied by the platform), `dedup_label`, `idempotency_key` and `idempotency_ttl` (see below) |
 
 ### API Endpoints
 
@@ -103,7 +103,11 @@ The optional `context` (up to 2,000 characters) becomes the call's purpose in th
 
 **API Endpoints**: See [Backend API Docs](http://localhost:8000/docs) for full schemas.
 
-The call endpoint accepts an optional `Idempotency-Key` header, so a retried trigger never dials the same number twice.
+Three layers stop duplicate calls:
+
+- **`Idempotency-Key` header** — a retried trigger with the same key never dials twice.
+- **Per turn** — with an `execution_id`, a re-delivered turn replays the first call instead of placing a second one: at most one call per number per turn. Pass a different `dedup_label` to place two distinct calls to the same number in one turn.
+- **Across runs** — `idempotency_key` names what the call is about (for example `q3-budget-followup`; letters, digits and `_ . : / -`, up to 200 characters). A second call with the same key to the same number within `idempotency_ttl` seconds (60–86400, default 86400) — from any run — is not placed: the result has `sent: false`, `status: "suppressed"`, `suppressed_by`, and when and from which execution the first call went out. The key counts as spent once Twilio accepts the dial, answered or not. Use a new key when the information changes.
 
 ```bash
 curl -X POST http://localhost:8000/api/agents/my-agent/voip/call \
@@ -119,6 +123,8 @@ curl -X POST http://localhost:8000/api/agents/my-agent/voip/call \
 |--------|---------|
 | 404 | VoIP is not enabled on the platform |
 | 400 | No active binding, invalid phone number (must be E.164, e.g. `+15551234567`), or Public URL not configured |
+| 409 | The same call is already being placed (a duplicate trigger or idempotency key in flight) — retry later |
+| 422 | `effect_unguarded`: the agent runs on the durable pull queue and the call carried no usable execution id, so nothing was dialed |
 | 429 | Rate limit (default 5 calls per owner+destination per 60s) or daily call cap reached |
 | 502 | Twilio rejected the call (e.g. unverified destination on a trial account) |
 
@@ -128,7 +134,7 @@ curl -X POST http://localhost:8000/api/agents/my-agent/voip/call \
 |----------|-------------|---------|
 | `VOIP_ENABLED` | Master switch | `false` |
 | `VOIP_MAX_CALL_DURATION` | Hard per-call cap in seconds | `600` (10 min) |
-| `VOIP_DEFAULT_DAILY_CALL_CAP` | Per-agent calls/day (overridable per binding) | `50` |
+| `VOIP_DEFAULT_DAILY_CALL_CAP` | Per-agent calls in any rolling 24 hours (overridable per binding) | `50` |
 | `VOIP_CALL_RATE_LIMIT` / `VOIP_CALL_RATE_WINDOW` | Calls per owner+destination per window (seconds) | `5` / `60` |
 
 A Gemini key (shared with voice chat — **Settings → Integrations** or `GEMINI_API_KEY`) must also be present.

@@ -1,6 +1,6 @@
 # dev-methodology Plugin
 
-Documentation-driven development methodology for any codebase. Enforces a structured cycle: context loading, development, testing, documentation, and PR validation.
+Documentation-driven development methodology for any codebase (dev-methodology v1.2.1, 24 skills). Enforces a structured cycle: context loading, development, testing, documentation, and PR validation.
 
 > 📺 **Watch:** [3 AI Agents Run My Entire Software Development Pipeline](https://youtu.be/zCDFDhewFkk) *(Apr 2026)* · [all videos](../videos.md)
 
@@ -25,10 +25,10 @@ Documentation-driven development methodology for any codebase. Enforces a struct
 | `/dev-methodology:release` | Cut a release — pre-release checklist, version bump, release notes, tagged release PR |
 | `/dev-methodology:groom` | Backlog grooming — label coverage, priority ordering, stale-work detection |
 | `/dev-methodology:roadmap` | Query issues for roadmap priorities |
-| `/dev-methodology:add-testing` | Add tests to existing code |
-| `/dev-methodology:tidy` | Clean up code |
-| `/dev-methodology:refactor-audit` | Review changed code for reuse, quality, and efficiency |
-| `/dev-methodology:security-check` | Quick security scan |
+| `/dev-methodology:add-testing` | Add a Testing section to a feature flow document, from the standard template |
+| `/dev-methodology:tidy` | Audit and clean up repository structure — outdated docs, misplaced files, orphan configs, test artifacts; reports first (`--report-only` stops there) |
+| `/dev-methodology:refactor-audit` | Audit the codebase for refactoring candidates — complexity, large files and functions, duplication (`--quick` for a fast pass) |
+| `/dev-methodology:security-check` | Pre-commit scan of staged or modified files for secrets, API keys, credentials, and PII |
 | `/dev-methodology:security-analysis` | Deep OWASP-based security analysis |
 | `/dev-methodology:cso` | Security audit in CSO mode — branch-diff or comprehensive full-codebase scan |
 | `/dev-methodology:feature-flow-analysis` | Create or update a feature flow document |
@@ -106,17 +106,17 @@ read-docs      understand     write code      update-docs    validate-pr
 
 ## Security Tools
 
-### Quick Scan
+### Pre-Commit Check
 
 ```bash
 /dev-methodology:security-check
 ```
 
-Fast checks for common issues:
+Scans what you are about to commit — staged files, or all modified files when nothing is staged — for:
 
-- Hardcoded secrets
-- SQL injection patterns
-- XSS vulnerabilities
+- API keys and tokens
+- Credentials and private keys
+- PII and other sensitive data
 
 ### Deep Analysis
 

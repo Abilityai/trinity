@@ -31,6 +31,10 @@ and not redefined in the file):
   ``assert_admin`` without ``allow_scopes=``. Counted and printed, not listed:
   the admin tier's own policy (which admits `trinity-system` by #2323 design) is
   guarded by test_293 / test_2323.
+* ``person_or_grant`` — ``Depends(require_person_or_capability(cap))``
+  (trinity-enterprise#164): a person, or an agent holding the named
+  self-change grant; every other machine principal is refused as by
+  ``require_person``. The grant itself is admin-and-interactive only.
 * ``admin_widened`` — ``Depends(require_admin_allowing(...))`` or
   ``assert_admin(..., allow_scopes=...)``. Each needs an ``ADMIN_WIDENED`` entry:
   a widening grants a scope and is reviewed per route.
@@ -38,7 +42,7 @@ and not redefined in the file):
   policy (#2198) owns it.
 
 A route carrying several recognised gates takes the strictest
-(``interactive > person > admin_widened > admin_tier > portal``).
+(``interactive > person > person_or_grant > admin_widened > admin_tier > portal``).
 
 Listed here, per route, with the registered ``"METHOD /full/path"`` pinned and
 checked against the live app by the runtime test:
@@ -92,6 +96,7 @@ HTTP_DECORATORS = {
 CODE_CLASSES = (
     "interactive",
     "person",
+    "person_or_grant",
     "admin_widened",
     "admin_tier",
     "portal",
@@ -105,7 +110,10 @@ _DEPENDS_GATES = {
     ("dependencies", "require_admin"): "admin_tier",
     ("client_portal.portal_auth", "get_portal_principal"): "portal",
 }
-_DEPENDS_FACTORIES = {("dependencies", "require_admin_allowing"): "admin_widened"}
+_DEPENDS_FACTORIES = {
+    ("dependencies", "require_admin_allowing"): "admin_widened",
+    ("dependencies", "require_person_or_capability"): "person_or_grant",
+}
 _IMPERATIVE_GATES = {
     ("dependencies", "reject_non_interactive_principal"): "interactive",
     ("dependencies", "assert_person"): "person",
@@ -539,6 +547,7 @@ AGENT_CALLABLE: Dict[str, Tuple[str, str]] = {
     "routers/agent_config.py::get_agent_timeout": ("GET /api/agents/{agent_name}/timeout", "a non-sensitive read of this agent's own setting (access-level)"),
     "routers/agent_config.py::get_public_channel_model": ("GET /api/agents/{agent_name}/public-channel-model", "a non-sensitive read of this agent's own setting (access-level)"),
     "routers/agent_config.py::get_agent_guardrails": ("GET /api/agents/{agent_name}/guardrails", "a non-sensitive read of this agent's own setting (access-level)"),
+    "routers/agent_config.py::list_agent_capability_grants": ("GET /api/agents/{agent_name}/capability-grants", "trinity-enterprise#164: an agent reads which self-change permissions it holds, so it knows when to raise a permission-request (owner-level; granting is interactive-admin)"),
     "routers/users.py::get_my_github_pat_status": (
         "GET /api/users/me/github-pat", "configured flags only, never the token (ent#162)"),
     # Skill sets (ent#530). The writes are the USE of the skills-manage capability, fenced like
@@ -560,6 +569,16 @@ AGENT_CALLABLE: Dict[str, Tuple[str, str]] = {
     # run's clearance; the agent comes from the key (get_self_agent), every person is refused.
     "routers/skill_gate.py::check_skill_invocation": (
         "POST /api/skill-gate/check", "the in-container hook's check: own gates and own run only, agent from the key (get_self_agent)"),
+    # trinity-enterprise#753: the per-agent skill gate map. The writes take the #3236 shape
+    # (require_person_or_capability("skills.manage", self_person_only=True)): a person, or a
+    # skills.manage holder on an agent its owner owns — never itself; then the owner fence.
+    # The read: an agent key reads its own gates (the hook pulls), a holder an agent its owner owns.
+    "routers/skill_gate.py::list_agent_skill_gates": (
+        "GET /api/agents/{agent_name}/skill-gates", "ent#753 read: anyone with access; an agent key its own gates, a skills.manage holder an agent its owner owns"),
+    "routers/skill_gate.py::set_agent_skill_gate": (
+        "PUT /api/agents/{agent_name}/skill-gates/{skill_name}", "ent#753 skills.manage USE on an owner-owned agent, never itself; persons pass assert_person + owner fence"),
+    "routers/skill_gate.py::clear_agent_skill_gate": (
+        "DELETE /api/agents/{agent_name}/skill-gates/{skill_name}", "ent#753 skills.manage USE on an owner-owned agent, never itself; persons pass assert_person + owner fence"),
     # ent#703: the agent's pull loop reads its own switch every cycle with its own key.
     # The write (PUT .../git/pull-sync) is a setting, so it is person-only.
     "routers/git.py::get_pull_sync_config": (

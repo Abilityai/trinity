@@ -742,7 +742,9 @@ const pollExecution = async (executionId) => {
       )
 
       const execution = response.data
-      if (execution.status === 'success' || execution.status === 'failed' || execution.status === 'cancelled') {
+      // `skipped` (trinity#3274): the skill gate held the turn — it will not
+      // run now, so waiting longer only ends in "timed out".
+      if (['success', 'failed', 'cancelled', 'skipped'].includes(execution.status)) {
         return execution
       }
     } catch (err) {
@@ -823,6 +825,13 @@ const sendMessage = async (userMessage, files = []) => {
         chatError.value = execution.error || 'Failed to process your request. Please try again.'
       } else if (execution.status === 'cancelled') {
         chatError.value = 'Request was cancelled.'
+      } else if (execution.status === 'skipped' && execution.gate === 'held' && execution.error) {
+        // Waiting for an approval: the gate's notice (the server stores it as
+        // this turn's reply too).
+        messages.value.push({ role: 'system', content: execution.error })
+      } else if (execution.status === 'skipped') {
+        // Refused by the gate: an error, never a waiting notice.
+        chatError.value = execution.error || 'Failed to process your request. Please try again.'
       }
     } else {
       chatError.value = 'Request timed out. Please try again.'

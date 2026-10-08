@@ -22,7 +22,8 @@ companion (execution e1, seat run or user-facing turn)
   │  Idempotency-Key = mcp:sha256(record_decision agent execution_id decided)
   ▼
 POST /api/agents/{name}/decisions            routers/seat_decisions.py  (# mcp: decisions.ts)
-  │  assert_agent_access · rate limit · seat = _seat_for(execution)   ← the MEM-001 rule:
+  │  _self_gate (an agent key names only its own agent, ent#839) · assert_agent_access
+  │  · rate limit · seat = _seat_for(execution)   ← the MEM-001 rule:
   │      schedule_seat_memory.seat_for_execution (ent#498 stamp) | source_user_email (public/slack/…) | 422 no_seat
   │  idempotency_service.begin(scope="seat_decision:{agent}:{seat}") → replay → snapshot
   │  decided_by_role = body.decided_by_role | assignment_provider.resolve_assignment().role_id | None
@@ -61,6 +62,8 @@ every turn ──► platform_prompt_service.format_user_memory_block(record)
 ```
 
 ## Why it is shaped this way
+
+- **An agent key reads and writes only its own agent's records (ent#839, CWE-863).** An agent-scoped key resolves to its owner carrying the owner's role, so `assert_agent_access` alone let a sibling agent (and, under an admin owner, any agent on the instance) name another agent and one of its seat runs. A forged `active` row then became standing instruction text in that agent's system prompt, and the GET returned a person's criteria and notes. Both handlers self-gate first, before any lookup, like `reminders._self_gate` and `public_memory`. The MCP tools refuse an `agent_name` that is not the key's own agent before calling; the override remains for a user-scoped key. Tests: `tests/unit/test_ent839_seat_decisions_self_gate.py`, `decisions.test.ts`.
 
 - **A note is not a decision.** tandem-07 §7a: a record with no alternatives is a note.
   The grammar refuses it (`decision_is_a_note`) rather than storing a weaker row —

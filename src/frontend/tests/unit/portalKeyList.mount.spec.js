@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 /**
- * ent#621 [C] — the `⌘/` key list, mounted.
+ * ent#621 [C] — the `⌥/` key list, mounted.
  *
  * Two things can only be proven by mounting it. First, that every row comes
  * from the MAP: a hand-typed list passes any test written against the same
@@ -90,7 +90,7 @@ describe('ent#621 — the key list is the map, rendered', () => {
 })
 
 describe('ent#621 — the key list keeps BaseModal\'s keyboard contract', () => {
-  it('is a real modal dialog, marked so ⌘/ can close its own list', async () => {
+  it('is a real modal dialog, marked so ⌥/ can close its own list', async () => {
     const w = open()
     const dialog = document.querySelector('[role="dialog"]')
     expect(dialog.getAttribute('aria-modal')).toBe('true')
@@ -133,7 +133,7 @@ describe('ent#621 — the key list keeps BaseModal\'s keyboard contract', () => 
     w.unmount()
   })
 
-  it('the close button asks the shell to close, so ⌘/ and the X agree', async () => {
+  it('the close button asks the shell to close, so ⌥/ and the X agree', async () => {
     const w = open()
     document.querySelector('[data-testid="ws-key-list-close"]').click()
     await w.vm.$nextTick()
