@@ -26,7 +26,8 @@ credential_sanitizer
   * IDEMPOTENCE — ``sanitize_text(sanitize_text(x)) == sanitize_text(x)``.
   * NO SECRET SURVIVES — every token family, embedded at arbitrary boundaries
     in arbitrary unicode text, is absent from the output; the same for
-    ``sanitize_dict`` within ``max_depth`` and for ``scrub_secret``.
+    ``sanitize_dict`` at any depth (past ``max_depth`` the subtree is
+    replaced, #3312) and for ``scrub_secret``.
 """
 
 from __future__ import annotations
@@ -323,14 +324,6 @@ _kids = st.recursive(
 )
 
 
-def _depth(x) -> int:
-    if isinstance(x, dict):
-        return 1 + max((_depth(v) for v in x.values()), default=0)
-    if isinstance(x, list):
-        return 1 + max((_depth(v) for v in x), default=0)
-    return 0
-
-
 def _strings(x):
     if isinstance(x, str):
         yield x
@@ -344,8 +337,7 @@ def _strings(x):
 
 @PROPS
 @given(st.dictionaries(st.sampled_from(["x", "y", "z"]), _kids, max_size=3))
-def test_no_token_survives_sanitize_dict_within_max_depth(data):
-    assume(_depth(data) <= 11)  # the >max_depth fail-open is the edges S12 xfail
+def test_no_token_survives_sanitize_dict_at_any_depth(data):
     out = json.dumps(CS.sanitize_dict(data))
     for s in _strings(data):
         if any(p.fullmatch(s) for p in CS._secret_value_re):
