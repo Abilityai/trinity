@@ -31,6 +31,7 @@ Trinity is the operating system for the AI-native company — open source, self-
 - [Trinity Ops Agent](guides/deploying/ops-agent.md) — A Claude Code agent that operates your instance locally or over SSH
 - [Using Trinity](guides/using-trinity.md) — UI tour: dashboard, agents, monitoring
 - [Building Agents](guides/building-agents.md) — Create, develop, deploy with Claude Code + abilities
+- [How Trinity Keeps Agents in Bounds](guides/keeping-agents-in-bounds.md) — The guardrails approach for operators, security reviewers and buyers: keys not rules, sign-off before the work, what is available now and what is planned
 
 ## Getting Started
 

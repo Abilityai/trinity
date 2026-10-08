@@ -38,6 +38,22 @@ _USER_FACING_TRIGGERS = {"public", "slack", "telegram", "whatsapp"}
 _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 
+def _self_gate(current_user: User, agent_name: str) -> None:
+    """An agent-scoped key records and reads only its OWN agent's seat decisions
+    (trinity-enterprise#839, CWE-863). The key resolves to its owner carrying
+    the owner's role, so `assert_agent_access` alone lets a sibling agent — and,
+    under an admin owner, any agent on the instance — name this agent and one of
+    its seat runs: a forged `active` row becomes standing instruction text in
+    this agent's system prompt, and the GET returns a person's criteria and
+    notes. Runs before any lookup, so the refusal says nothing about the target
+    (mirrors `reminders._self_gate`, `public_memory`)."""
+    if current_user.agent_name and current_user.agent_name != agent_name:
+        raise HTTPException(
+            status_code=403,
+            detail="Agent-scoped key may only record and read its own agent's seat decisions",
+        )
+
+
 def _seat_for(agent_name: str, execution_id: str) -> tuple[str, object]:
     """The seat an execution serves, or a named HTTP error. Mirrors
     `public_memory.write_user_memory` — one rule for "which person"."""
@@ -74,6 +90,7 @@ async def record_seat_decision(
     idempotency_key: Optional[str] = Header(default=None, alias="Idempotency-Key"),
 ):
     """Record a decision for the seat this execution serves."""
+    _self_gate(current_user, agent_name)
     assert_agent_access(current_user, agent_name, detail="Not authorized")
     rate_limiter.enforce(f"seat_decision_record:{agent_name}", 60, 60)
     seat_email, execution = _seat_for(agent_name, body.execution_id)
@@ -122,6 +139,7 @@ async def list_seat_decisions(
 ):
     """The seat's standing decisions (criterion first), for reuse and citing.
     `include_history` adds superseded / closed / reversed / expired rows."""
+    _self_gate(current_user, agent_name)
     assert_agent_access(current_user, agent_name, detail="Not authorized")
     seat_email, _ = _seat_for(agent_name, execution_id)
     rows = db.list_seat_decisions(agent_name, seat_email, limit=seat_decision_service.MAX_ROWS_PER_SEAT)

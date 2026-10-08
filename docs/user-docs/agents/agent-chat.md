@@ -2,7 +2,7 @@
 
 The Chat tab in Agent Detail provides a bubble UI for conversing with agents, with persistent history and real-time status updates.
 
-This tab is **stateless**: each message starts fresh, replaying the last 20 messages of the visible transcript as text. It is labelled as such — *Stateless chat — each message starts fresh.* — with a **Continue in Workspace →** link beside it that opens the Workspace in its own browser tab.
+Each message on this tab runs as a new agent session, and the last 20 messages of the visible transcript are included as text for context. The tab says so in a banner (*Each message runs as a new agent session; the last 20 messages are included for context.*), with a **Continue in Workspace →** link beside it that opens the Workspace in its own browser tab.
 
 For a conversation where the agent keeps its working memory between turns — tool results, mid-task state, reasoning — use the [Workspace](../sharing-and-access/workspace.md) instead. The Session-mode toggle that used to live here has been retired in its favour, and `?tab=session` links now redirect there.
 

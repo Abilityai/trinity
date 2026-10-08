@@ -3002,7 +3002,7 @@ def _migrate_a2a_internal_scope(cursor, conn):
     ``schedule_executions.source_host``, the address a keyless trusted caller's
     run is attributed to. Edition-agnostic OSS primitives the A2A server reads;
     the scope WRITE is the entitled enterprise setter, like ``a2a_exposed``.
-    Mirrored by the Alembic revision 0095_a2a_internal_scope.
+    Mirrored by the Alembic revision 0096_a2a_internal_scope.
     """
     _safe_add_column(
         cursor, "agent_ownership", "a2a_scope",
@@ -4416,6 +4416,25 @@ def _migrate_portal_messages_attachments(cursor, conn):
     )
     conn.commit()
 
+
+def _migrate_portal_messages_execution_id(cursor, conn):
+    """#3166 — each Workspace message names the turn that wrote it.
+
+    One nullable column on `enterprise_portal_messages`. Two turns on one thread
+    (the chat open in two tabs) wrote replies the client could not tell apart,
+    so a tab could show the other turn's answer as its own. Additive, no
+    backfill: old rows stay NULL and the client keeps its old matching for them.
+    Mirrored by the Alembic revision 0095_portal_messages_execution_id.
+    """
+    _safe_add_column(
+        cursor,
+        "enterprise_portal_messages",
+        "execution_id",
+        "ALTER TABLE enterprise_portal_messages ADD COLUMN execution_id TEXT",
+    )
+    conn.commit()
+
+
 def _migrate_portal_session_main_chat(cursor, conn):
     """ent#523 — the pinned Main chat, and the tombstone Reset leaves behind.
 
@@ -5644,5 +5663,6 @@ MIGRATIONS = [
     ("portal_messages_attachments", _migrate_portal_messages_attachments),
     ("platform_alert_responded_heal", _migrate_platform_alert_responded_heal),
     ("agent_skill_gates", _migrate_agent_skill_gates),
+    ("portal_messages_execution_id", _migrate_portal_messages_execution_id),
     ("a2a_internal_scope", _migrate_a2a_internal_scope),
 ]

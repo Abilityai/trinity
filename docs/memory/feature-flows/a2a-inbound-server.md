@@ -387,7 +387,7 @@ caller instance (agent → call_a2a_agent)                 provider instance
 - **Storage**: `system_settings['a2a_trusted_networks']` (JSON list, typed
   admin route only), `['a2a_internal_base_url']`; `agent_ownership.a2a_scope`
   and `a2a_keyless_internal`; `schedule_executions.source_host`. SQLite
-  migration `a2a_internal_scope`, Alembic `0095_a2a_internal_scope`.
+  migration `a2a_internal_scope`, Alembic `0096_a2a_internal_scope`.
 - **Setter**: `PUT /api/enterprise/a2a/{agent}/exposure {enabled, scope?,
   keyless?}` (entitled, owner, human only); `A2aPanel.vue` "Who can reach it".
 - **Why the proxy is named, not ranged**: agents share the Docker bridge with

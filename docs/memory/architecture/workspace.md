@@ -1315,6 +1315,27 @@ threw it away — so it returns `message_id`, **declared on `PortalChatResponse`
 response model strips undeclared keys in silence. The `v-if="item.message.id"` gate stays:
 carry the identifier with the flag and let the consumer still refuse an empty one.
 
+**A reply names its turn (#3166).** `enterprise_portal_messages.execution_id` holds the
+execution that wrote the row: the dispatched id the client watches (never a cold retry's
+second row), on the reply, on the skill-approval notice and on the user row (stamped after
+the fact on the synchronous path, and moved to the retrying turn when a retry reuses the
+failed turn's row). Once history rows carry the key, `replyFromHistory` accepts only the row
+with the caller's own execution id. A row with NULL (a completion report) is never this
+turn's reply; rows without the key (an older backend) keep the identity/count rule. On load,
+`pairRepliesWithQuestions` places each reply under its own question, except across a voice
+call's rows or when the question is outside the window. A second message on a thread
+queues behind the first: `portal_chat` runs the turn with `wait_for_lock=True`, so the resume
+lock is waited for up to its TTL instead of `LOCK_WAIT_TOTAL_SECONDS` (30s, still the rule
+for the Session surface), and `portal_wait_budget_seconds` adds that TTL to the marker and
+the client's wait budget. A first turn over 30s no longer turns the second into a 429.
+Every `portal_chat` caller waits this way: the synchronous `POST .../chat` and the voice
+path hold their request open for up to the lock TTL (about agent timeout + 30s) where they
+held 30s. The queued turn's row is already `running`, so the wait is registered with
+`track_inflight_dispatch` (the watchdog's proof of life; without it a turn queued behind a
+first turn over 60s is orphaned), `started_at` is re-anchored once the lock is held (the
+#2433 rule, so the wait does not spend the run's timeout), and a cancel that lands during
+the wait finalizes the row without dispatching.
+
 **Flow**: [workspace-agents-at-the-centre.md](../feature-flows/workspace-agents-at-the-centre.md) ·
 **Requirements**: `requirements/core-agent.md` §5.23, §5.30
 

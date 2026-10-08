@@ -675,7 +675,10 @@ TABLES = {
             -- #3265: what a user turn carried, as a JSON list of
             -- {filename, size_bytes, mime_type} (or {filename, failed, error}
             -- for an upload that did not land). NULL for every other row.
-            attachments TEXT
+            attachments TEXT,
+            -- #3166: the execution (turn) that wrote the row. NULL on rows from
+            -- before the column and on rows no turn wrote (completion reports).
+            execution_id TEXT
         )
     """,
 

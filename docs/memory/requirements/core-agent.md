@@ -1845,7 +1845,8 @@ bounding the table. OSS-core (Workspace rule above). Flow:
 - **AC-1 — the keys**: `⌘J`/`Ctrl+J` new chat with this agent (§5.21,
   unchanged); `⌥↓`/`⌥↑` next / previous **agent**; `⌥⇧↓`/`⌥⇧↑` next /
   previous **chat with this agent**; `⌘.`/`Ctrl+.` show or hide the rail;
-  `⌥.` next rail tab; `⌘/`/`Ctrl+/` the keyboard-shortcuts list.
+  `⌥.` next rail tab; `⌘/`/`Ctrl+/` the cursor into the sidebar's search
+  field (AC-11); `⌥/` the keyboard-shortcuts list.
 - **AC-2 — one declaration**: every chord lives in
   `src/frontend/src/components/portal/portalKeymap.js` (pure — no DOM, no
   store), with its scope, its owner, and its label. `keymapCollisions(map)`
@@ -1873,10 +1874,10 @@ bounding the table. OSS-core (Workspace rule above). Flow:
   through `defaultPrevented` (the Esc protocol, the composer typeahead's bare
   arrows, which claim bare arrows only).
 - **AC-5 — suppression**: anything modal (`[aria-modal="true"]`, with a
-  per-action exemption so `⌘/` can close its own dialog and the rail sheet
+  per-action exemption so `⌥/` can close its own dialog and the rail sheet
   does not count as modal over the rail), the mobile drawer, and a live voice
   call suppress the moving and rail keys **silently**; `⌘J` keeps its own ask
-  during a call, and `⌘/` stays available. A held key does not walk the list
+  during a call, and `⌘/` and `⌥/` stay available. A held key does not walk the list
   (`e.repeat` resolves to nothing) and an IME composition is never a chord.
   The auto-repeat of a press the shell **claimed** is still swallowed
   (`heldKey` + `workspaceChord`), so a held `⌥.` cannot type `≥` into the
@@ -1903,7 +1904,7 @@ bounding the table. OSS-core (Workspace rule above). Flow:
   that agent. An unsent new chat records nothing, so its draft is reached
   through the landing rule's own arms rather than a second rule. Every moving
   key focuses the composer afterwards.
-- **AC-9 — discoverable**: `⌘/` opens a shortcuts dialog built **from the
+- **AC-9 — discoverable**: `⌥/` opens a shortcuts dialog built **from the
   map**, so a key cannot ship without a row (the reserved chord is excluded —
   nothing binds it, and a dead row in a help dialog is worse than an
   undocumented key). The sidebar footer offers the same dialog, and every
@@ -1912,6 +1913,31 @@ bounding the table. OSS-core (Workspace rule above). Flow:
 - **AC-10 — reserved, not bound**: `⌘K`/`Ctrl+K` is declared and
   **unhandled** — no `preventDefault`, no row in the list — so the browser's
   own behaviour stands until the search surface ships.
+- **AC-11 — the search key**: `⌘/`/`Ctrl+/` puts the cursor in the sidebar's
+  "Search agents and chats" field and selects what is in it — the Dashboard's
+  `/` filter key (§ fleet filter), with the modifier a key needs to work from
+  inside a text field. Pressed again while the field has focus it hands the
+  caret back to the message field. Below `sm` the sidebar is the drawer, so the
+  key opens it and focuses that instance's field. The field shows the chord
+  (a key cap while it is empty and unfocused, plus `title` and
+  `aria-keyshortcuts`). It is NOT the reserved `⌘K` surface: it focuses the
+  search that exists and adds none. The shortcuts list moved to `⌥/` to free
+  the chord, keeping the `⌘.` / `⌥.` pairing (the primary key acts, the Option
+  key steps to its neighbour).
+- **AC-12 — the tips panel**: the open rail carries a small panel pinned to its
+  bottom edge listing four headline chords (switch agent, switch chat, search,
+  new chat) and a button that opens the shortcuts dialog. It is **two rows of
+  two** and nothing else — no heading line, no footer: the close and the
+  open-the-list controls stack beside the rows. A pair of chords prints its
+  modifiers once (`⌥↑↓`, `Alt+Shift+↑↓` — `keyHintCompact`), and when the rail
+  is dragged narrow a label shortens (full text on hover) while a key cap never
+  wraps and a row never becomes two. Rows are derived from the map (`KEY_TIPS`
+  → `keyTipRows`), never typed. The collapsed strip carries
+  the same door as one icon button at its foot; the mobile sheet carries
+  neither. The panel is dismissible, and the dismissal is remembered per
+  browser (`localStorage['trinity-workspace-key-tips']`, a per-viewer
+  convenience — nothing is stored server-side); the sidebar footer button stays
+  as the way back to the full list.
 - **Not this slice**: a search/spotlight surface behind `⌘K`; remapping or
   disabling the chords in settings (they are modifier chords; nothing conflicts
   with typing); the mobile drawer's own Esc/focus-trap contract (#1923).
@@ -1924,6 +1950,7 @@ bounding the table. OSS-core (Workspace rule above). Flow:
   `workspaceKeymap.mount.spec.js` (the shell: dispatch, the walk, the memory,
   the bails and suppression), `portalChatCycle.mount.spec.js`,
   `portalKeyList.mount.spec.js`, `portalKeyHints.mount.spec.js`,
+  `portalKeyTips.mount.spec.js` (the tips panel, both rail forms),
   `portalRosterRow.spec.js` (the bound and the handed-down order, mounted).
 - **Flow**: `docs/memory/feature-flows/workspace-chat-tabs-and-titles.md`
   (→ The key map); the landing rule it calls is

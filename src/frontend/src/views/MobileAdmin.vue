@@ -1128,6 +1128,11 @@ async function sendChatMessage() {
     chatInputEl.value.style.height = 'auto'
   }
 
+  // trinity#3163: the context is built from the conversation as it stands, so
+  // the message being sent reaches the agent once, and a first message carries
+  // no history.
+  const contextPrompt = buildContextPrompt(message)
+
   // Add user message immediately
   chatMessages.value.push({
     role: 'user',
@@ -1140,7 +1145,6 @@ async function sendChatMessage() {
   chatExecutionStatus.value = 'running'
 
   try {
-    const contextPrompt = buildContextPrompt(message)
     const payload = {
       message: contextPrompt,
       save_to_session: true,

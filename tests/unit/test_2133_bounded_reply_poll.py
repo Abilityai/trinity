@@ -331,7 +331,8 @@ def test_the_marker_ttl_is_that_bound(portal):
 
     out = _run(_drain(svc.start_portal_turn(AGENT, "hello", EMAIL, SESSION)))
 
-    expected = svc.portal_max_turn_seconds(STUBBED_TIMEOUT)
+    # #3166: the budget also covers the wait for the thread's lock.
+    expected = svc.portal_wait_budget_seconds(AGENT, STUBBED_TIMEOUT)
     marker_sets = {k: ex for (k, v, ex) in state.redis.set_calls}
     assert marker_sets[f"portal_inflight:{SESSION}"] == expected
     assert marker_sets[f"portal_inflight_exec:{EXEC_ID}"] == expected
@@ -368,7 +369,7 @@ def test_resolver_fails_open_to_the_platform_default(portal, monkeypatch):
 
     out = _run(_drain(svc.start_portal_turn(AGENT, "hello", EMAIL, SESSION)))
 
-    assert out["wait_budget_seconds"] == svc.portal_max_turn_seconds(3600)
+    assert out["wait_budget_seconds"] == svc.portal_wait_budget_seconds(AGENT, 3600)
     assert state.chat_calls[0]["turn_timeout_seconds"] == 3600
 
 
@@ -436,7 +437,7 @@ def test_reattach_budget_rides_the_history_response(monkeypatch, redis_stub):
     redis_stub.ttl_answers[key] = -1
     out = svc.get_history(AGENT, EMAIL, session_id=SESSION)
     assert out["in_flight_execution_id"] == EXEC_ID
-    assert out["in_flight_wait_budget_seconds"] == svc.portal_max_turn_seconds(STUBBED_TIMEOUT)
+    assert out["in_flight_wait_budget_seconds"] == svc.portal_wait_budget_seconds(AGENT, STUBBED_TIMEOUT)
 
     # TTL read raises → keep today's id behavior, budget None → the client
     # falls back to its frozen literal.
