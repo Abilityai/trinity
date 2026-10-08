@@ -55,6 +55,9 @@ class SlotInfo:
     started_at: str
     message_preview: str
     duration_seconds: int
+    # ZSET score: admission time, re-anchored by renew_slot (#3319). Required —
+    # a defaulted 0.0 would silently win CapacityManager.get_status's min().
+    start_score: float
 
 
 @dataclass
@@ -270,6 +273,10 @@ class SlotService:
 
         Synchronous on purpose: it is called from the refresher's worker
         thread (``asyncio.to_thread``), never on the event loop.
+
+        ``CapacityManager.get_status`` picks the smallest score as the current
+        execution (#3319), so it relies on a RUNNING slot not being re-anchored
+        after grant — renewing running slots would make it pick the wrong one.
         """
         slots_key = self._slots_key(agent_name)
         metadata_key = self._metadata_key(agent_name, execution_id)
@@ -348,7 +355,8 @@ class SlotService:
                 slot_number=slot_number,
                 started_at=metadata.get("started_at", ""),
                 message_preview=metadata.get("message_preview", ""),
-                duration_seconds=duration_seconds
+                duration_seconds=duration_seconds,
+                start_score=start_timestamp,
             ))
 
         # Sort by slot number
