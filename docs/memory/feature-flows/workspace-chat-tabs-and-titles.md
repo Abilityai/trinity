@@ -86,7 +86,8 @@ surface rather than only within one owner's share:
 | ⌥⇧↓ / ⌥⇧↑ (Alt+Shift+↓ / ↑) | Next / previous chat with this agent | shell |
 | ⌘. / Ctrl+. | Show or hide the rail | shell |
 | ⌥. (Alt+.) | Next rail tab | shell |
-| ⌘/ / Ctrl+/ | The keyboard-shortcuts list | shell |
+| ⌘/ / Ctrl+/ | Cursor into the sidebar's search field; again from the field, back to the message field | shell |
+| ⌥/ (Alt+/) | The keyboard-shortcuts list | shell |
 | Esc, the call's `M`, the preview's ←/→, tab roving, a dialog's Tab cycle, the composer typeahead's bare arrows | — | the component that owns the overlay |
 | ⌘K / Ctrl+K | nothing — **reserved** for search (ent#577) | nobody |
 
@@ -139,7 +140,7 @@ protocol entry the map declares, not a second dispatcher), armed above `bootstra
 6. `keymapSuppressed`: a nearer owner already claimed the event
    (`defaultPrevented`, which is how the Esc protocol and the typeahead's bare
    arrows win), anything modal (`[aria-modal="true"]`, with a per-action
-   exemption so ⌘/ can close its own dialog and the rail sheet does not count
+   exemption so ⌥/ can close its own dialog and the rail sheet does not count
    as something modal over the rail), the mobile drawer, or a voice call —
    which suppresses the moving and rail keys silently.
 
@@ -164,7 +165,23 @@ inverted here, since the hands that want the next chat are already typing.
   rule's own arms rather than a second rule. Memory is in-memory and
   session-scoped, as the acceptance criteria asked: a reload starts fresh.
 
-**Discoverability.** ⌘/ opens `PortalKeyList` — a `BaseModal` dialog built
+**Search key.** ⌘/ runs `Portal.vue::focusSearch`: at and above `sm` it calls
+the desktop `PortalSidebar`'s exposed `focusSearch()` (focus + select), or —
+when that field already has focus (`searchHasFocus()`) — hands the caret back
+through `focusConversationComposer`; below `sm` it opens the drawer and focuses
+that instance's field on the next tick. The field shows the chord in a
+`PortalKeyCap` while it is empty and unfocused.
+
+**Tips panel.** `PortalKeyTips.vue` is pinned to the bottom of the OPEN rail
+(`PortalRail`'s `keyTips` prop; an icon button at the foot of the collapsed
+strip is the same door; the sheet has neither). Its rows are
+`keyTipRows(platform)` over `KEY_TIPS`, laid out as two rows of two with the
+two controls stacked beside them (`keyHintCompact` packs a chord pair into one
+cap; labels truncate, caps never wrap). Its keyboard button emits `open-keys`, and its
+close emits `dismiss-key-tips`, which the shell persists with
+`saveKeyTipsDismissed` (`localStorage['trinity-workspace-key-tips']`).
+
+**Discoverability.** ⌥/ opens `PortalKeyList` — a `BaseModal` dialog built
 from `keyListRows(WORKSPACE_KEYMAP, platform)`, so a key cannot exist without
 appearing in the list (minus the reserved row). The sidebar footer has a
 "Keyboard shortcuts" button carrying the same chord, and the surfaces a key

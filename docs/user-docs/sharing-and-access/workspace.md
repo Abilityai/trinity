@@ -51,11 +51,11 @@ Top to bottom:
 - **Trinity Workspace** — the wordmark. It links to the Inbox.
 - **Inbox** — a pinned row with two badges: the number of asks agents are waiting on you to answer, and the number of chats with something you haven't read. See [The Inbox](#the-inbox).
 - **New chat** — opens the agent picker.
-- **Search agents and chats…** — two characters or more. Agents filter in place; chat results replace the chat list below, and each half says separately when it matched nothing.
+- **Search agents and chats…** — two characters or more. **⌘/** / **Ctrl+/** puts the cursor there from anywhere; pressed again from the field, it returns you to the message field. Agents filter in place; chat results replace the chat list below, and each half says separately when it matched nothing.
 - **Agents** — your roster, ordered by the agents you worked with most recently, then by name. Five rows show, with **Show all** to expand. A row carries the agent's display name, the title of your newest chat with it (or its slug when the name is a label), when you last heard from it, an availability chip when the agent is stopped or unreachable, and its own ask and unread badges. **Clicking an agent opens a new, empty chat with it**, with the cursor in the message field — or returns you to a chat with that agent where you left unsent text. Your earlier chats are its tabs, one click away.
 - **Starred** — chats you've starred, lifted out of the date groups so each chat appears exactly once.
 - **Today / Yesterday / Previous 7 days / Older** — everything else. A Main you have never used is not listed here; the agent's row is the way into it.
-- **Keyboard shortcuts** — at the bottom, beside sign-out. It opens the list of keys (also **⌘/** / **Ctrl+/**).
+- **Keyboard shortcuts** — at the bottom, beside sign-out. It opens the list of keys (also **⌥/** / **Alt+/**).
 
 ### The Inbox
 
@@ -236,6 +236,8 @@ Inside a room, **+ Add agent** recruits another, and only a person can do that. 
 
 ### Keyboard shortcuts
 
+The open rail carries a small **shortcut tips** panel at its foot with the most-used keys; close it with its **×** and this browser remembers. The collapsed rail shows a single keyboard icon instead, which opens the full list.
+
 | Keys | Where | Does |
 |------|-------|------|
 | **⌘J** / **Ctrl+J** | Anywhere in the Workspace | New chat with the agent in front of you (the picker when there is none) |
@@ -243,7 +245,8 @@ Inside a room, **+ Add agent** recruits another, and only a person can do that. 
 | **⌥⇧↓** / **⌥⇧↑** (**Alt+Shift+↓** / **↑**) | Anywhere | Next / previous chat with this agent |
 | **⌘.** / **Ctrl+.** | Anywhere | Show or hide the rail |
 | **⌥.** (**Alt+.**) | Anywhere | Next rail tab |
-| **⌘/** / **Ctrl+/** | Anywhere | The keyboard-shortcuts list |
+| **⌘/** / **Ctrl+/** | Anywhere | Cursor to the sidebar search; again, back to the message field. On a narrow screen it opens the sidebar first |
+| **⌥/** (**Alt+/**) | Anywhere | The keyboard-shortcuts list |
 | **Enter** / **Shift+Enter** | Composer | Send / new line |
 | **↓ ↑**, **Enter**, **Tab**, **Esc** | Composer, with the `/` or `@` list open | Move, insert the selected row, insert the top row, dismiss |
 | **Esc** | Composer, with a *Replying to* chip | Drop the reply |
