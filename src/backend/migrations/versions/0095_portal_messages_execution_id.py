@@ -9,14 +9,14 @@ for them.
 
 Mirrors the SQLite ``portal_messages_execution_id`` migration.
 
-Revision ID: 0093_portal_messages_execution_id
-Revises: 0092_portal_messages_attachments
+Revision ID: 0095_portal_messages_execution_id
+Revises: 0094_agent_skill_gates
 """
 from alembic import op
 
 
-revision = "0093_portal_messages_execution_id"
-down_revision = "0092_portal_messages_attachments"
+revision = "0095_portal_messages_execution_id"
+down_revision = "0094_agent_skill_gates"
 branch_labels = None
 depends_on = None
 

@@ -37,6 +37,10 @@ from utils.safe_yaml import (
 # traversal-shaped name reaching path math or an exec argument.
 SKILL_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 
+# trinity-enterprise#753: the values `approval:` may take. `recommended` gates a
+# library skill by default where it is assigned.
+APPROVAL_VALUES = frozenset({"recommended"})
+
 # Dep names are interpolation-gated BEFORE any probe runs: a name failing these
 # is reported as frontmatter_invalid and never reaches the agent container.
 BINARY_NAME_RE = re.compile(r"^[A-Za-z0-9._+-]{1,64}$")
@@ -179,7 +183,7 @@ def extract_contract(frontmatter: Optional[Dict[str, Any]]) -> Tuple[Dict[str, A
     Returns ``(contract, warnings)`` where contract is::
 
         {description, automation, user_invocable, allowed_tools,
-         requires: {packages, binaries, env}, deprecated, superseded_by}
+         requires: {packages, binaries, env}, deprecated, superseded_by, approval}
 
     ``deprecated`` / ``superseded-by`` (trinity-enterprise#672) are the two
     lifecycle keys a library uses to retire a skill. ``superseded_by`` is the
@@ -246,6 +250,17 @@ def extract_contract(frontmatter: Optional[Dict[str, Any]]) -> Tuple[Dict[str, A
     elif superseded_raw is not None:
         warnings.append("frontmatter_invalid:superseded-by")
 
+    # trinity-enterprise#753: `approval: recommended` gates the skill by default
+    # on every agent it is assigned to (the owner can clear it). A closed set; a
+    # non-string (YAML hands `yes` as a bool, an unquoted date as a date) or an
+    # unknown word is named, read as no recommendation, and never raises.
+    approval_raw = _first_present(sources, ("approval",))
+    approval = None
+    if isinstance(approval_raw, str) and approval_raw.strip().lower() in APPROVAL_VALUES:
+        approval = approval_raw.strip().lower()
+    elif approval_raw is not None:
+        warnings.append("frontmatter_invalid:approval")
+
     contract = {
         "description": description,
         "automation": automation,
@@ -254,6 +269,7 @@ def extract_contract(frontmatter: Optional[Dict[str, Any]]) -> Tuple[Dict[str, A
         "requires": requires,
         "deprecated": deprecated,
         "superseded_by": superseded_by,
+        "approval": approval,
     }
     return contract, warnings
 

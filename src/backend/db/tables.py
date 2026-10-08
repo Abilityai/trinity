@@ -1559,6 +1559,21 @@ skill_gate_requests = Table(
     UniqueConstraint("dispatched_execution_id"),
 )
 
+# trinity-enterprise#753 — the per-agent skill gate map. See the DDL comment in
+# db/schema.py. The primary key is the ON CONFLICT target of every write.
+agent_skill_gates = Table(
+    "agent_skill_gates",
+    metadata,
+    Column("agent_name", Text, primary_key=True),
+    Column("skill_name", Text, primary_key=True),      # lowercased
+    Column("approver", Text, nullable=False),          # primary | approver
+    Column("deadline_hours", _Integer),                # 1..168; NULL → the 24h default
+    Column("origin", Text, nullable=False),            # set | library_default | cleared
+    Column("set_by", Text, nullable=False),
+    Column("set_by_agent", Text),
+    Column("set_at", Text, nullable=False),
+)
+
 nevermined_agent_config = Table(
     "nevermined_agent_config",
     metadata,

@@ -130,3 +130,74 @@ describe("#751 parseGateResult", () => {
     assert.equal(parseGateResult(202, null, "<html>", "a"), undefined);
   });
 });
+
+describe("#3233 the pending answer promises only the delivery the backend makes", () => {
+  const body = (delivery?: string) =>
+    JSON.stringify({ ...PENDING, ...(delivery ? { outcome_delivery: delivery } : {}) });
+
+  for (const delivery of ["agent_task", "inbox"]) {
+    it(`${delivery}: the outcome will be sent`, () => {
+      const out = parseGateResult(202, "approval_pending", body(delivery), "target")!;
+      assert.match(out.message, /the outcome will be sent to you\.$/);
+      assert.equal(out.outcome_delivery, delivery);
+    });
+  }
+
+  for (const delivery of ["none", undefined]) {
+    it(`${delivery ?? "absent"}: no promise, and where to look`, () => {
+      const out = parseGateResult(202, "approval_pending", body(delivery), "target")!;
+      assert.doesNotMatch(out.message, /sent to you/);
+      assert.match(out.message, /Do not retry or route it through another agent\./);
+      assert.match(out.message, /list_recent_executions\(agent_name="target"\)/);
+    });
+  }
+});
+
+describe("#3274 the inline connector tier reads the gate result like the other tiers", () => {
+  const secret = process.env.INTERNAL_API_SECRET;
+  beforeEach(() => {
+    globalThis.fetch = realFetch;
+    process.env.INTERNAL_API_SECRET = "test-internal-secret";   // as inline-auth-transport.test.ts
+  });
+  afterEach(() => {
+    globalThis.fetch = realFetch;
+    if (secret === undefined) delete process.env.INTERNAL_API_SECRET;
+    else process.env.INTERNAL_API_SECRET = secret;
+  });
+
+  function stubInline(respond: () => Response) {
+    globalThis.fetch = (async (input: unknown) => {
+      const url = String(input);
+      if (!url.endsWith("/api/internal/mcp-auth/chat")) throw new Error(`unstubbed fetch: ${url}`);
+      return respond();
+    }) as typeof fetch;
+  }
+
+  it("a 202 pending_approval is the structured result, not a reply", async () => {
+    stubInline(() => json({ ...PENDING, outcome_delivery: "inbox" }, 202, "approval_pending"));
+    const out = (await realClient().inlineConnectorChat("v@example.com", "target", "/pay-invoice 1")) as any;
+    assert.equal(out.status, "pending_approval");
+    assert.equal(out.request_id, "gate-abc");
+    assert.equal(out.retryable, false);
+  });
+
+  it("a named refusal keeps its code instead of a bare status", async () => {
+    stubInline(() => json({ detail: { status: "refused", code: "gated_skill_not_installed",
+                                      message: "The skill pay-invoice is not installed on target." } },
+                          409, "gated_skill_not_installed"));
+    const out = (await realClient().inlineConnectorChat("v@example.com", "target", "/pay-invoice 1")) as any;
+    assert.equal(out.status, "refused");
+    assert.equal(out.code, "gated_skill_not_installed");
+  });
+
+  it("a gate 403 is a refusal; an access 403 is still 'no access'", async () => {
+    stubInline(() => json({ detail: { status: "refused", code: "approval_not_available_here",
+                                      message: "Ask in chat instead." } }, 403, "approval_not_available_here"));
+    const out = (await realClient().inlineConnectorChat("v@example.com", "target", "/pay-invoice 1")) as any;
+    assert.equal(out.code, "approval_not_available_here");
+
+    stubInline(() => json({ detail: "Forbidden" }, 403));
+    await assert.rejects(realClient().inlineConnectorChat("v@example.com", "target", "hi"),
+                         /You do not have access/);
+  });
+});

@@ -102,7 +102,9 @@ backend re-gates EVERY call: email_has_agent_access(agent, email) AND connector 
 `run_playbook` sends `/<name> <input>` (trinity-enterprise#751; it used to send the prose
 `Please run the "<name>" playbook.`), so a playbook marked "requires approval" is
 recognised by the skill gate and the call answers `pending_approval` or a named refusal
-instead of running ([skill-gate.md](skill-gate.md)).
+instead of running ([skill-gate.md](skill-gate.md)). Both caller tiers read that answer the
+same way: the inline (email) tier's `inlineConnectorChat` checks the gate result before its
+own 403 / non-2xx handling, so a refusal keeps its named code (trinity#3274).
 
 **Keyless setup (AC6).** With the flag on, the owner shares the agent WITHOUT minting
 a key — the collaborator drops in a keyless config and signs in by email. The connector

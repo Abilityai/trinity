@@ -26,6 +26,8 @@ As a platform administrator, I want to configure and sync a GitHub repository co
 
 Both default OFF; a zero-config install behaves exactly as before.
 
+`_reinject_agent` also reconciles each agent's skill-gate library defaults (trinity-enterprise#753): before the re-inject (a newly `approval: recommended` skill is gated on every holder) and, when the set reconcile dropped members, after the prune (`drop_after_prune`). See [skill-gate.md](skill-gate.md) §6.
+
 ```
 skills_sync_service loop (every worker, self-gating, config re-read per cycle)
    │  skills:sync:leader  (SET NX, TTL 3×interval, own-lease refresh, fail-open)

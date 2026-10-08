@@ -916,7 +916,9 @@ def _clamp_ingested_item(req: dict, agent_name: str = "") -> dict:
         if opt_bytes is None or opt_bytes > OPERATOR_QUEUE_OPTIONS_MAX_BYTES:
             out["options"] = [_OPTIONS_DROPPED_MARKER]
 
-    if out.get("priority") not in _VALID_PRIORITIES:
+    # #3313: isinstance first — a list/object priority is unhashable, and the
+    # set membership test raised out of this never-raises clamp.
+    if not isinstance(out.get("priority"), str) or out["priority"] not in _VALID_PRIORITIES:
         out["priority"] = "medium"
 
     # Ignore the agent-supplied created_at (a future date pins the item atop the
@@ -1080,7 +1082,8 @@ def _comparable_type(value) -> str:
 
 
 def _comparable_priority(value) -> str:
-    return value if value in _VALID_PRIORITIES else "medium"   # the clamp's default
+    # #3313: isinstance first, as in the clamp — an unhashable value raised here.
+    return value if isinstance(value, str) and value in _VALID_PRIORITIES else "medium"
 
 
 def _comparable_addressee(value) -> Optional[str]:
@@ -1771,7 +1774,15 @@ class OperatorQueueSyncService:
         if running_agents:
             # Sync each agent concurrently (with a reasonable limit)
             tasks = [self._sync_agent(name) for name in running_agents]
-            await asyncio.gather(*tasks, return_exceptions=True)
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            # #3313: `return_exceptions=True` keeps one agent's failure from
+            # cancelling the others, but it also dropped the error unlogged.
+            for name, result in zip(running_agents, results):
+                if isinstance(result, Exception):
+                    logger.error(
+                        f"Operator queue sync failed for '{name}': "
+                        f"{type(result).__name__}: {result}"
+                    )
 
         if self._changed_this_cycle:
             await self._broadcast_sync()
@@ -2013,6 +2024,19 @@ class OperatorQueueSyncService:
             req_id = req.get("id")
             if not req_id:
                 continue
+            if not isinstance(req_id, str):
+                # #3313: only a string id can name a row. A list or object id
+                # reached the unguarded `in open_by_rid` below and raised out of
+                # the whole sync, so none of this agent's answers were written
+                # back. A pending one is held as `invalid_id`, as the create-side
+                # shape check would hold it; any other status names nothing.
+                if req.get("status", "pending") == "pending":
+                    logger.warning(
+                        f"Rejecting malformed operator-queue id from {agent_name}: {req_id!r}"
+                    )
+                    held += 1
+                    hold_reason = _stronger_hold(hold_reason, HOLD_INVALID_ID)
+                continue
 
             # #1631: reject an agent-authored id that impersonates a platform id
             # prefix (hijack/suppress guard). Log once per (agent, id) so it
@@ -2025,6 +2049,14 @@ class OperatorQueueSyncService:
                 _RESERVED_ID_PREFIXES
             ):
                 key = (agent_name, req_id)
+                # #2372: only a PENDING entry can pre-create (and so suppress)
+                # a platform row. A non-pending one is what the pre-ent#499
+                # write-back left in the file — the platform's own entry, not
+                # the agent's — and nothing removes it, so the row may already
+                # be pruned. Skipped quietly; the WARNING stays for the
+                # impersonation case.
+                if req.get("status", "pending") != "pending":
+                    continue
                 if key not in self._rejected_reserved:
                     if len(self._rejected_reserved) >= _MAX_QUARANTINE_ENTRIES:
                         self._rejected_reserved.clear()  # safety valve
@@ -2473,6 +2505,11 @@ class OperatorQueueSyncService:
             if not isinstance(req, dict):
                 continue
             req_id = req.get("id")
+            if not isinstance(req_id, str):
+                # #3313: every map here is keyed on a row's string request_id,
+                # so a non-string id names no row — and a list/object one made
+                # the lookup below raise, aborting the whole write-back.
+                continue
             if req_id in response_map:
                 resp = response_map[req_id]
                 # #2989 review: "send again to answer anyway" must reach the file.

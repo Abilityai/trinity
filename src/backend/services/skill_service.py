@@ -1143,6 +1143,8 @@ class SkillService:
             # #672 lifecycle: derived on every parse, never persisted.
             "deprecated": False,
             "superseded_by": None,
+            # trinity-enterprise#753: `recommended` gates it by default where assigned.
+            "approval": None,
         }
 
         try:
@@ -1160,6 +1162,7 @@ class SkillService:
                 "contract_warnings": warnings,
                 "deprecated": contract["deprecated"],
                 "superseded_by": contract["superseded_by"],
+                "approval": contract["approval"],
             })
 
             # Fallback: first non-header paragraph
