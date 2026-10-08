@@ -17,14 +17,14 @@ real router) with only the container, the agent's HTTP answer and Redis faked:
 3. Redis is fail-open: down or raising, the live read still answers.
 4. An oversized listing is not kept, and drops an older copy rather than
    leaving it to be served as current.
-5. The copy is cleared on the teardown paths (`clear_agent_runtime_state`)
-   and on the create path, never by a stop.
+5. The copy is cleared on the teardown paths (`clear_agent_runtime_state`),
+   never by the breaker sweep a start runs. (The create path drops it too:
+   driven in `test_1484_create_agent_characterization.py`.)
 6. The public link strips the three new per-skill fields; the connector read
    refreshes the copy too.
 """
 from __future__ import annotations
 
-import ast
 import json
 import sys
 from pathlib import Path
@@ -377,29 +377,29 @@ async def test_clear_agent_runtime_state_drops_the_copy(env, monkeypatch):
     assert "agent:skills_list:other-agent" in env.redis.store   # only its own
 
 
-def test_a_stop_does_not_clear_the_copy():
+def test_a_start_does_not_clear_the_copy(env, monkeypatch):
     """`clear_agent_breakers` runs on every real START (lifecycle.py) and on
     create; the copy is exactly what a stopped-then-started agent still needs,
-    so it must not be wired there."""
-    src = (_BACKEND / "services" / "agent_runtime_state.py").read_text()
-    tree = ast.parse(src)
-    fn = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "clear_agent_breakers")
-    assert "skills_list" not in ast.unparse(fn) and "agent_skills_listing" not in ast.unparse(fn)
+    so running it leaves the copy in place. (The create path drops it on its
+    own, beside that call: `test_1484_create_agent_characterization.py`.)"""
+    from services import agent_client, agent_runtime_state, dispatch_breaker, heartbeat_service, slot_service
 
+    ran = []
+    monkeypatch.setattr(heartbeat_service, "clear_heartbeat", lambda _n: ran.append("heartbeat"))
+    monkeypatch.setattr(agent_client, "reset_circuit", lambda _n: ran.append("circuit"))
+    monkeypatch.setattr(dispatch_breaker, "reset_dispatch", lambda _n: ran.append("dispatch"))
 
-def test_the_create_path_clears_the_copy_beside_the_breakers():
-    """Call-site guard (the behaviour of `forget` is proved above): the create
-    path clears a predecessor's copy where it clears the breakers, so a read
-    that was in flight during a delete cannot hand a recycled name its
-    predecessor's list (#1560 class)."""
-    src = (_BACKEND / "services" / "agent_service" / "crud.py").read_text()
-    tree = ast.parse(src)
-    calls = []
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Call):
-            calls.append(ast.unparse(node.func) + "(" + ", ".join(ast.unparse(a) for a in node.args) + ")")
-    assert "clear_agent_breakers(config.name)" in calls
-    assert "agent_skills_listing.forget(config.name)" in calls
+    class _Slots:
+        redis = env.redis
+
+    monkeypatch.setattr(slot_service, "get_slot_service", lambda: _Slots())
+    _get(env)
+    assert KEY in env.redis.store
+
+    agent_runtime_state.clear_agent_breakers(AGENT)
+
+    assert ran == ["heartbeat", "circuit", "dispatch"]   # the real sweep ran
+    assert KEY in env.redis.store
 
 
 # ---------------------------------------------------------------------------
