@@ -9,8 +9,10 @@
  *   reset to `primary`), then re-reads the map FOR THE AGENT IT WROTE TO —
  *   AgentDetail is KeepAlive'd, so the page can move to another agent while a
  *   write is in flight (the 10-07 write-then-reload learning).
- * - Busy / error / warning state is per skill, keyed by the lower-cased gate
- *   key (the backend lower-cases the names it stores).
+ * - Busy / error state is per skill, keyed by the lower-cased gate key (the
+ *   backend lower-cases the names it stores). A PUT's `approver_unassigned`
+ *   warning needs no state of its own: the map re-read after every write
+ *   carries the same fact as `reachable: false`, which the gate line says.
  *
  * All HTTP goes through the shared `api` client (Invariant #7).
  */
@@ -34,7 +36,6 @@ export const useSkillGatesStore = defineStore('skillGates', () => {
 
   const busy = ref({})
   const errors = ref({})
-  const warnings = ref({})
 
   let readSeq = 0
 
@@ -50,7 +51,6 @@ export const useSkillGatesStore = defineStore('skillGates', () => {
     error.value = null
     busy.value = {}
     errors.value = {}
-    warnings.value = {}
   }
 
   function setAgent(name) {
@@ -113,9 +113,8 @@ export const useSkillGatesStore = defineStore('skillGates', () => {
     busy.value = setFor(busy.value, key, true)
     errors.value = setFor(errors.value, key, null)
     try {
-      const { data } = await send(name, key)
+      await send(name, key)
       if (name !== agentName.value) return false
-      warnings.value = setFor(warnings.value, key, Array.isArray(data?.warnings) ? data.warnings : [])
       await read(name)
       return true
     } catch (e) {
@@ -150,7 +149,7 @@ export const useSkillGatesStore = defineStore('skillGates', () => {
 
   return {
     agentName, gates, clearedDefaults, approverKinds, approvers, defaultDeadlineHours, hook,
-    loading, hasLoaded, error, busy, errors, warnings, gateByKey,
+    loading, hasLoaded, error, busy, errors, gateByKey,
     load, probeHook, setGate, clearGate, dismissError, clear,
   }
 })

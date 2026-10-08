@@ -41,7 +41,7 @@ const MAP = (over = {}) => ({
 
 let state
 function respond(over = {}) {
-  state = { playbooks: { data: LIVE }, map: MAP(), probe: MAP({ hook: 'ok' }), ...over }
+  state = { playbooks: { data: LIVE }, map: MAP(), probe: MAP({ hook: 'ok' }), sets: { data: [] }, ...over }
   api.get.mockImplementation((url, cfg) => {
     if (url === '/api/skills/library/status') return Promise.resolve({ data: { configured: true, skill_count: 1 } })
     if (url === '/api/skills/library') return Promise.resolve({ data: [{ name: 'shared-one', description: 'from the library' }] })
@@ -52,6 +52,9 @@ function respond(over = {}) {
     }
     if (url === `/api/agents/${A}/skill-gates`) {
       return Promise.resolve({ data: cfg?.params?.probe ? state.probe : state.map })
+    }
+    if (url === `/api/agents/${A}/skill-sets`) {
+      return state.sets?.response ? Promise.reject(state.sets) : Promise.resolve(state.sets)
     }
     return Promise.resolve({ data: [] })
   })
@@ -266,5 +269,23 @@ describe('filter', () => {
     expect(card(w, 'own', 'daily-report').exists()).toBe(true)
     expect(card(w, 'own', 'pay-invoice').exists()).toBe(false)
     expect(card(w, 'shared', 'shared-one').exists()).toBe(false)
+  })
+})
+
+describe('sets on the Shared head', () => {
+  it('a failed sets read is named on the head with a retry — never a silently missing line', async () => {
+    respond({ sets: { response: { status: 500, data: { detail: 'boom' } } } })
+    const { w } = await mountTab({ canManage: false })
+    expect(tid(w, 'skills-sets-error').text()).toContain("Couldn't read this agent's sets")
+    const before = api.get.mock.calls.filter(([u]) => u === `/api/agents/${A}/skill-sets`).length
+    await tid(w, 'skills-sets-retry').trigger('click')
+    await flush()
+    expect(api.get.mock.calls.filter(([u]) => u === `/api/agents/${A}/skill-sets`).length).toBe(before + 1)
+  })
+
+  it('a set that needs credentials says so on the head', async () => {
+    respond({ sets: { data: [{ name: 'dev-kit', status: 'ok', members: [], prerequisites: { state: 'missing', missing_env: ['GH_TOKEN'] } }] } })
+    const { w } = await mountTab()
+    expect(tid(w, 'skills-sets-credentials').text()).toBe('Some sets need credentials')
   })
 })

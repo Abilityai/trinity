@@ -111,8 +111,20 @@
 
       <!-- Sets, one line: what the agent holds as a family, each coloured by
            its honest status; the details and the set verbs are in the dialog. -->
-      <div v-if="store.sets.length" class="mt-1 h-6 flex items-center gap-1.5 overflow-hidden" data-testid="skills-set-chips">
+      <div v-if="store.sets.length || store.setsError" class="mt-1 h-6 flex items-center gap-1.5 overflow-hidden" data-testid="skills-set-chips">
         <span class="flex-none text-[12.5px] text-gray-500 dark:text-gray-400">Sets</span>
+        <!-- A failed read is named here, with its retry — the line must not
+             simply vanish for a viewer who can't open the sets dialog's error. -->
+        <template v-if="store.setsError">
+          <span class="truncate text-[12.5px] text-status-warning-700 dark:text-status-warning-400" :title="store.setsError" data-testid="skills-sets-error">Couldn't read this agent's sets</span>
+          <button
+            type="button"
+            class="flex-none text-[12.5px] text-action-primary-600 dark:text-action-primary-400 hover:underline"
+            data-testid="skills-sets-retry"
+            @click="store.loadSets()"
+          >Retry</button>
+        </template>
+        <template v-else>
         <button
           v-for="set in visibleSets"
           :key="set.name"
@@ -129,6 +141,12 @@
           class="flex-none text-[12.5px] text-gray-600 dark:text-gray-300 hover:underline"
           @click="setsOpen = true"
         >+{{ hiddenSetCount }} more</button>
+        <span
+          v-if="setsNeedCredentials"
+          class="truncate text-[12.5px] text-status-warning-700 dark:text-status-warning-400"
+          data-testid="skills-sets-credentials"
+        >Some sets need credentials</span>
+        </template>
       </div>
 
       <!-- One line: the last verb's outcome, else when skills were last synced. -->
@@ -380,6 +398,7 @@ const hiddenSetCount = computed(() => Math.max(0, store.sets.length - MAX_SET_CH
 function setNeedsCredentials(set) {
   return set?.prerequisites?.state === 'missing'
 }
+const setsNeedCredentials = computed(() => store.sets.some(setNeedsCredentials))
 function setVariant(set) {
   if (set.status === 'ok' && !setNeedsCredentials(set)) return 'purple'
   return 'warning'

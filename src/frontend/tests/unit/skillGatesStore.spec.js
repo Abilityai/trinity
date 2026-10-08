@@ -4,8 +4,8 @@
  * Load the map first, probe the in-agent hook after (the probe never holds the
  * toggles back); a write sends the selected approver kind and re-reads the map
  * for the agent it was written for — never for whichever agent the cached page
- * moved to meanwhile (the 10-07 write-then-reload learning); per-skill busy,
- * error and warning state, keyed by the lower-cased gate key.
+ * moved to meanwhile (the 10-07 write-then-reload learning); per-skill busy
+ * and error state, keyed by the lower-cased gate key.
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { setActivePinia, createPinia } from 'pinia'
@@ -107,7 +107,6 @@ describe('writes', () => {
 
     expect(ok).toBe(true)
     expect(api.put).toHaveBeenCalledWith('/api/agents/a1/skill-gates/pay', { approver: 'approver' })
-    expect(s.warnings.pay).toEqual(['approver_unassigned'])
     expect(s.gateByKey.has('pay')).toBe(true)
     expect(s.busy.pay).toBe(false)
   })
@@ -155,6 +154,6 @@ describe('writes', () => {
 
     expect(api.get.mock.calls.length).toBe(reads)     // nothing re-read for b2
     expect(s.agentName).toBe('b2')
-    expect(s.warnings.pay).toBeUndefined()
+    expect(s.gates).toEqual([])                       // b2's map, untouched by a1's write
   })
 })
